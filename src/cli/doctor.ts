@@ -3348,7 +3348,10 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
     resolveOpenClawEvidence(
       {
         config: readJsonProbe(ocPath),
-        scHookInstalled: probePath(path.join(home, '.openclaw', 'hooks', 'cortex-memory')).kind === 'present',
+        scHook: (() => {
+          const hook = probePath(path.join(home, '.openclaw', 'hooks', 'cortex-memory'));
+          return hook.kind === 'present' ? 'installed' : hook.kind === 'absent' ? 'absent' : 'unreadable';
+        })(),
         scAutoMemory: cfg.openclawAuto,
         agentsMd: readTextProbe(path.join(home, '.openclaw', 'workspace', 'AGENTS.md')),
         memoryMd: artifactProbe(path.join(home, '.openclaw', 'workspace', 'MEMORY.md')),

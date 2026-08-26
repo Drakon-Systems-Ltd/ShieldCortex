@@ -31,7 +31,7 @@ function file(p: string, ageDays: number, size = 512): ArtifactProbe {
 function ocProbe(over: Partial<OpenClawProbe> = {}): OpenClawProbe {
   return {
     config: { kind: 'absent' },
-    scHookInstalled: false,
+    scHook: 'absent',
     scAutoMemory: false,
     agentsMd: { kind: 'absent' },
     memoryMd: { kind: 'absent', path: '/home/x/.openclaw/workspace/MEMORY.md' },
@@ -126,9 +126,18 @@ describe('OpenClaw evidence', () => {
   });
 
   it('reports unknown (never off) when openclaw.json is absent but SC is integrated', () => {
-    const e = resolveOpenClawEvidence(ocProbe({ scHookInstalled: true, scAutoMemory: true }), CTX);
+    const e = resolveOpenClawEvidence(ocProbe({ scHook: 'installed', scAutoMemory: true }), CTX);
     expect(e.bound).toBe(true);
     expect(e.nativeBus).toBe('unknown');
+  });
+
+  it('resolves the SC bus from the hook tri-state: installed=wired, absent=not_wired, unreadable=unknown', () => {
+    const config = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
+    expect(resolveOpenClawEvidence(ocProbe({ config, scHook: 'installed' }), CTX).scBus).toBe('wired');
+    expect(resolveOpenClawEvidence(ocProbe({ config, scHook: 'absent' }), CTX).scBus).toBe('not_wired');
+    const unreadable = resolveOpenClawEvidence(ocProbe({ config, scHook: 'unreadable' }), CTX);
+    expect(unreadable.scBus).toBe('unknown');
+    expect(unreadable.proof.join(' ')).toMatch(/pack delivery cannot be proven/);
   });
 
   it('reports unknown when openclaw.json is unreadable', () => {
@@ -406,6 +415,41 @@ describe('contract verdict', () => {
     const v = verdictFor([hermesOnlyOff, unbound]);
     expect(v.status).toBe('fail');
     expect(v.message).toMatch(/no bound runtime has a ShieldCortex inject surface/);
+  });
+
+  it('fails sc_only while Hermes is bound, even with Hermes native off and another runtime wired', () => {
+    // H4/C1: a bound Hermes row can never satisfy a bus-law contract until an
+    // SC Hermes inject surface exists — another runtime carrying the pack does
+    // not put SC on the Hermes bus.
+    const hermesOff: HostRuntimeEvidence = { ...liveHermes, nativeBus: 'off_proven', remediation: '' };
+    const v = verdictFor([provenOc, hermesOff]);
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/not proven delivered/);
+    expect(v.message).toMatch(/no automatic inject surface/);
+    expect(v.fix).toMatch(new RegExp(SIDECAR_POSTURE));
+  });
+
+  it('fails sc_only when a capable runtime never had the pack wired — native off is only half the contract', () => {
+    const offUnwiredCc: HostRuntimeEvidence = { ...unknownCc, nativeBus: 'off_proven', scBus: 'not_wired', remediation: '' };
+    const v = verdictFor([offUnwiredCc]);
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/SC session-start pack not wired/);
+    expect(v.fix).toMatch(/shieldcortex install/);
+  });
+
+  it('treats unproven pack delivery as cannot determine, never PASS', () => {
+    const offScUnknown: HostRuntimeEvidence = { ...provenOc, scBus: 'unknown' };
+    const dual = verdictFor([offScUnknown]);
+    expect(dual.status).toBe('warn');
+    expect(dual.message).toMatch(/SC pack delivery unknown/);
+    expect(verdictFor([offScUnknown], { plane: 'sc_canonical' }).status).toBe('fail');
+  });
+
+  it('requires pack proof for sc_only in every mode, for disable_native_inject only on the start bus', () => {
+    const offScUnknown: HostRuntimeEvidence = { ...provenOc, scBus: 'unknown' };
+    expect(verdictFor([offScUnknown], { nativeContract: 'disable_native_inject', injectMode: 'turn' }).status).toBe('pass');
+    expect(verdictFor([offScUnknown], { nativeContract: 'disable_native_inject', injectMode: 'start' }).status).toBe('warn');
+    expect(verdictFor([offScUnknown], { injectMode: 'turn' }).status).toBe('warn');
   });
 
   it('fails inject-on without a legal contract', () => {

@@ -122,8 +122,12 @@ function shortPath(p: string): string {
 export interface OpenClawProbe {
   /** `~/.openclaw/openclaw.json` (or OPENCLAW_CONFIG_PATH). */
   config: ProbeRead<Record<string, unknown>>;
-  /** SC's cortex-memory hook installed under ~/.openclaw/hooks. */
-  scHookInstalled: boolean;
+  /**
+   * SC's cortex-memory hook under ~/.openclaw/hooks. Tri-state because pack
+   * delivery is contract evidence (H4): absent is a positive "not delivered"
+   * reading, while a hook dir doctor could not stat proves nothing either way.
+   */
+  scHook: 'installed' | 'absent' | 'unreadable';
   /** SC config `openclawAutoMemory` — intent only; adds scrutiny, never proof. */
   scAutoMemory: boolean;
   /** Workspace AGENTS.md text (sc_only: native MD must not be the session brain). */
@@ -154,7 +158,8 @@ export function resolveOpenClawEvidence(
   const boundSignals: string[] = [];
   if (probe.config.kind === 'present') boundSignals.push('openclaw.json present');
   if (probe.config.kind === 'unreadable') boundSignals.push('openclaw.json present but unreadable');
-  if (probe.scHookInstalled) boundSignals.push('SC cortex-memory hook installed');
+  if (probe.scHook === 'installed') boundSignals.push('SC cortex-memory hook installed');
+  if (probe.scHook === 'unreadable') boundSignals.push('SC cortex-memory hook dir present but unreadable');
   if (probe.scAutoMemory) boundSignals.push('openclawAutoMemory=true');
   if (probe.declared) boundSignals.push('declared in memory.hostContract.runtimes');
 
@@ -244,12 +249,16 @@ export function resolveOpenClawEvidence(
     }
   }
 
+  if (probe.scHook === 'unreadable') {
+    proof.push('SC cortex-memory hook dir unreadable — pack delivery cannot be proven');
+  }
+
   return {
     runtime: 'openclaw',
     bound: true,
     boundReason: boundSignals.join(', '),
     nativeBus,
-    scBus: probe.scHookInstalled ? 'wired' : 'unknown',
+    scBus: probe.scHook === 'installed' ? 'wired' : probe.scHook === 'absent' ? 'not_wired' : 'unknown',
     proof,
     remediation,
   };
@@ -638,7 +647,7 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
 
   // No SC inject surface anywhere on a box whose contract says the SC pack is the
   // only automatic memory: the claim is unenforceable, not merely unproven.
-  if (bound.every((r) => r.scBus === 'not_wired')) {
+  if (bound.every((r) => !RUNTIME_CAPABILITY[r.runtime].scInjectSurface)) {
     return {
       status: 'fail',
       message:
@@ -650,11 +659,50 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
     };
   }
 
-  if (unknownBus.length > 0) {
+  // H4: sc_only claims the SC start-pack IS the automatic durable context, so
+  // delivery must be proven per bound runtime — native-off alone is only half
+  // the contract. disable_native_inject makes the same demand whenever the
+  // configured mode puts the pack on the session-start bus.
+  const scProofRequired = input.nativeContract === 'sc_only'
+    || input.injectMode === 'start' || input.injectMode === 'both';
+  const scMissing = scProofRequired ? bound.filter((r) => r.scBus === 'not_wired') : [];
+
+  if (scMissing.length > 0) {
+    const describeGap = (r: HostRuntimeEvidence): string => {
+      const label = RUNTIME_CAPABILITY[r.runtime].label;
+      return RUNTIME_CAPABILITY[r.runtime].scInjectSurface
+        ? `${label}: SC session-start pack not wired`
+        : `${label}: ShieldCortex has no automatic inject surface on this runtime`;
+    };
+    const fixGap = (r: HostRuntimeEvidence): string => {
+      const label = RUNTIME_CAPABILITY[r.runtime].label;
+      return RUNTIME_CAPABILITY[r.runtime].scInjectSurface
+        ? `${label}: wire the SC session-start pack (\`shieldcortex install\`)`
+        : `${label}: ${input.nativeContract} cannot be enforced here — turn inject off and run ` +
+          `\`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` (honest sidecar)`;
+    };
+    return {
+      status: 'fail',
+      message:
+        `paper contract${suffix}: the SC start-pack is not proven delivered on every bound runtime — ` +
+        `${scMissing.map(describeGap).join(' | ')}`,
+      fix: [...scMissing.map(fixGap), ...unknownBus.map((r) => r.remediation).filter(Boolean)].join(' · '),
+    };
+  }
+
+  const scUnknown = scProofRequired
+    ? bound.filter((r) => r.scBus === 'unknown' && r.nativeBus !== 'unknown')
+    : [];
+
+  if (unknownBus.length > 0 || scUnknown.length > 0) {
+    const parts = [
+      ...unknownBus.map(describe),
+      ...scUnknown.map((r) => `${RUNTIME_CAPABILITY[r.runtime].label}: native off (proven) but SC pack delivery unknown`),
+    ];
     return {
       status: cannotDetermineStatus(input.plane),
-      message: `cannot determine host contract${suffix}: ${unknownBus.map(describe).join(' | ')}`,
-      fix: remediations(unknownBus) || 'Make the host evidence readable so the contract can be proven (#393)',
+      message: `cannot determine host contract${suffix}: ${parts.join(' | ')}`,
+      fix: remediations([...unknownBus, ...scUnknown]) || 'Make the host evidence readable so the contract can be proven (#393)',
     };
   }
 

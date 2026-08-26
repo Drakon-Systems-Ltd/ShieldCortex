@@ -144,7 +144,7 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/default-on|not proven off|Memory Search/i);
   });
 
-  it('host contract passes only when memorySearch.enabled === false', async () => {
+  it('host contract needs memorySearch.enabled === false AND the SC pack wired — the switch alone is half a contract', async () => {
     writeConfig({
       memory: {
         plane: 'dual_legacy',
@@ -157,8 +157,15 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
       path.join(ocDir, 'openclaw.json'),
       JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
     );
-    const r = await runHost();
-    expect(r.status).toBe('pass');
+    // H1: native-off with no SC delivery proof used to be the certified green.
+    const half = await runHost();
+    expect(half.status).toBe('fail');
+    expect(half.message).toMatch(/not proven delivered/);
+    expect(half.fix).toMatch(/shieldcortex install/);
+
+    fs.mkdirSync(path.join(ocDir, 'hooks', 'cortex-memory'), { recursive: true });
+    const full = await runHost();
+    expect(full.status).toBe('pass');
   });
 
   // ── T1 host runtime matrix (#393) ──
@@ -234,17 +241,18 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     // A directory at the config path is present-but-unreadable, deterministically
     // (chmod 000 proves nothing when the test runner is root).
     fs.mkdirSync(path.join(tmpHome, '.openclaw', 'openclaw.json'), { recursive: true });
+    // Pack wired, so the verdict isolates the unreadable native evidence.
+    fs.mkdirSync(path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
     const r = await runHost();
     expect(r.status).not.toBe('pass');
     expect(r.message).toMatch(/cannot determine/);
     expect(r.fix).toMatch(/readable/);
   });
 
-  it('host contract passes when every bound runtime proves native off', async () => {
+  it('host contract passes when every bound runtime proves native off and carries the SC pack', async () => {
     writeConfig(busContract());
-    writeHermes({ memoryEnabled: false, userProfile: false });
     const ocDir = path.join(tmpHome, '.openclaw');
-    fs.mkdirSync(ocDir, { recursive: true });
+    fs.mkdirSync(path.join(ocDir, 'hooks', 'cortex-memory'), { recursive: true });
     fs.writeFileSync(
       path.join(ocDir, 'openclaw.json'),
       JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
@@ -252,6 +260,25 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const r = await runHost();
     expect(r.status).toBe('pass');
     expect(r.message).toMatch(/sc_only enforced/);
+  });
+
+  it('host contract fails sc_only on a Hermes-bound box even with the native switches off — sidecar is the honest posture', async () => {
+    // The TARS shape after flipping Hermes' own switches: native proven off,
+    // OpenClaw proven off and wired — still FAIL, because nothing delivers the
+    // SC pack on the Hermes bus (no SC inject surface until Phase-2 ships).
+    writeConfig(busContract());
+    writeHermes({ memoryEnabled: false, userProfile: false });
+    const ocDir = path.join(tmpHome, '.openclaw');
+    fs.mkdirSync(path.join(ocDir, 'hooks', 'cortex-memory'), { recursive: true });
+    fs.writeFileSync(
+      path.join(ocDir, 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/not proven delivered/);
+    expect(r.message).toMatch(/no automatic inject surface/);
+    expect(r.fix).toMatch(/mcp_sidecar_no_inject/);
   });
 
   it('host contract passes an honest sidecar and rejects sidecar-plus-contract', async () => {
