@@ -122,7 +122,14 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     // DEFAULT (trust 1.0 / INTERNAL). The INSERT used to omit these columns, so
     // every hook-captured memory was over-trusted at 1.0, undercutting the
     // recall shim's trust filter.
-    insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, result.sensitivity?.level);
+    // #402: stamp content_form via the SAME compiled classifier store.ts uses
+    // (loaded from dist alongside the pipeline) so hook-captured facts are
+    // injectable while hook-captured directives land inert (fail-closed to
+    // NULL if the classifier isn't available → not injectable unless pinned).
+    const contentForm = typeof defence.classifyContentForm === 'function'
+      ? defence.classifyContentForm(memory.content)
+      : null;
+    insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, result.sensitivity?.level, contentForm);
     return;
   }
 
@@ -141,7 +148,7 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
 
 // ==================== Internal: writes ====================
 
-function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel) {
+function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel, contentForm) {
   const timestamp = new Date().toISOString();
 
   // Cross-call, CROSS-PATH exact-title dedup: the hook fires repeatedly (per
@@ -200,10 +207,10 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
         uuid, title, content, type, category, salience, tags, project,
         memory_purpose, source, source_kind, capture_method,
         trust_score, sensitivity_level,
-        host_id, agent_id, capture_layer,
+        host_id, agent_id, capture_layer, content_form,
         created_at, last_accessed
       )
-      VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, 'short_term', ?, ?, ?, ?, ?, ?, 'hook', 'auto', ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       randomUUID(),
       memory.title,
@@ -219,6 +226,7 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
       scope.hostId,
       scope.agentId,
       captureLayer,
+      contentForm ?? null,
       timestamp,
       timestamp,
     );
@@ -334,11 +342,15 @@ async function loadDefenceModules(db) {
     const pipelineUrl = pathToFileURL(resolve(distRoot, 'defence', 'pipeline.js')).href;
     const initUrl = pathToFileURL(resolve(distRoot, 'database', 'init.js')).href;
     const dispositionUrl = pathToFileURL(resolve(distRoot, 'defence', 'disposition.js')).href;
+    const formUrl = pathToFileURL(resolve(distRoot, 'defence', 'form-classifier.js')).href;
 
-    const [pipelineMod, initMod, dispositionMod] = await Promise.all([
+    const [pipelineMod, initMod, dispositionMod, formMod] = await Promise.all([
       import(pipelineUrl),
       import(initUrl),
       import(dispositionUrl),
+      // #402 classifier; tolerate its absence on an older dist (falls back to
+      // NULL content_form → fail-closed non-injectable, never a hard failure).
+      import(formUrl).catch(() => ({})),
     ]);
 
     if (typeof pipelineMod.runDefencePipeline !== 'function') return null;
@@ -348,6 +360,7 @@ async function loadDefenceModules(db) {
     _defenceCache = {
       runDefencePipeline: pipelineMod.runDefencePipeline,
       resolveDisposition: dispositionMod.resolveDisposition,
+      classifyContentForm: typeof formMod.classifyContentForm === 'function' ? formMod.classifyContentForm : null,
       initDatabase: initMod.initDatabase,
       isDatabaseInitialized: initMod.isDatabaseInitialized,
       getDatabase: initMod.getDatabase,
