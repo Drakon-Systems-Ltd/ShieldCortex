@@ -26,7 +26,7 @@ import { deriveProjectKey } from './lib/project-key.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
 import { orderByEffectiveSalience } from './lib/session-context.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
-import { buildStartPack, readInjectConfig } from './lib/inject-pack.mjs';
+import { buildStartPack, readInjectConfig, PACK_HEADER } from './lib/inject-pack.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -129,10 +129,10 @@ function getProjectContext(db, project) {
   return memories;
 }
 
-function formatContext(memories, project) {
+function formatContext(memories, project, heading = `# Project Context: ${project}`) {
   if (memories.length === 0) return null;
 
-  const lines = [`# Project Context: ${project}`, ''];
+  const lines = [heading, ''];
   const byCategory = {};
   for (const mem of memories) {
     const cat = mem.category || 'note';
@@ -310,9 +310,20 @@ process.stdin.on('end', async () => {
         }
       }
 
-      // Inject v2 (Memory SOTA B): preferred when native contract is set.
-      // Without contract, fall back to legacy formatContext (doctor will fail empty-brain / missing contract when inject mode on).
-      if (injectCfg.nativeContract && injectCfg.mode !== 'off' && injectCfg.mode !== 'turn') {
+      // #393 T1 bus law. Three cases, in order:
+      //   1. mode off/turn — SC puts NOTHING on the automatic session-start bus.
+      //      This is what honest sidecar posture means; the legacy formatter used
+      //      to fire here anyway, which was inject-on by another name.
+      //   2. contract set — the budgeted v2 pack, headed as the memory plane.
+      //   3. no contract — legacy recall, headed as advisory sidecar recall.
+      //      Native host memory still owns the bus, so the pack must not claim
+      //      canonicity (T1 acceptance: contract off → no SC canonicity claim).
+      const startCapable = injectCfg.mode === 'start' || injectCfg.mode === 'both';
+      if (!startCapable) {
+        context = null;
+        memories = [];
+        console.error(`[shieldcortex] inject mode=${injectCfg.mode} — no automatic session-start memory emitted`);
+      } else if (injectCfg.nativeContract) {
         const source = typeof hookData.source === 'string' ? hookData.source : 'startup';
         const rehydrate = source === 'compact' || hookData.compact === true || hookData.prompt_reset === true;
         let sessionState = loadInjectState();
@@ -344,7 +355,7 @@ process.stdin.on('end', async () => {
           console.error(`[shieldcortex] inject-pack: ${pack.skipped}`);
         }
       } else {
-        context = formatContext(memories, project);
+        context = formatContext(memories, project, PACK_HEADER.SIDECAR);
       }
     }
 
