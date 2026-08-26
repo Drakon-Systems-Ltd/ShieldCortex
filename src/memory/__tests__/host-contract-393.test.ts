@@ -815,6 +815,16 @@ describe('contract verdict', () => {
     expect(v.message).toMatch(/mutually exclusive/);
   });
 
+  it('rejects junk hostContract.runtimes declarations instead of silently filtering them (SOL r2 nit)', () => {
+    const v = verdictFor([provenOc], { declaredRuntimesIllegal: ['grok'] });
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/illegal memory\.hostContract\.runtimes entry "grok"/);
+    expect(v.fix).toMatch(/--memory-host-runtime/);
+    const many = verdictFor([provenOc], { declaredRuntimesIllegal: ['grok', '[object Object]'] });
+    expect(many.status).toBe('fail');
+    expect(many.message).toMatch(/entries "grok", "\[object Object\]"/);
+  });
+
   it('rejects a junk posture instead of ignoring it', () => {
     const v = verdictFor([provenOc], { postureRaw: 'coexist_dedup', injectConfigured: false, injectMode: 'off' });
     expect(v.status).toBe('fail');

@@ -691,6 +691,34 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/illegal memory\.hostContract\.posture/);
   });
 
+  it('host contract fails junk hostContract.runtimes entries instead of silently filtering them (SOL r2 nit)', async () => {
+    // 'grok' used to vanish, leaving 'hermes' as the only declared runtime —
+    // an unsupported declaration must be a loud failure, not a smaller net.
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { runtimes: ['hermes', 'grok'] },
+        inject: { mode: 'start', nativeContract: 'sc_only' },
+      },
+    });
+    const junkEntry = await runHost();
+    expect(junkEntry.status).toBe('fail');
+    expect(junkEntry.message).toMatch(/illegal memory\.hostContract\.runtimes entry "grok"/);
+    expect(junkEntry.fix).toMatch(/--memory-host-runtime/);
+
+    // A non-array value for the whole key is the same class of junk.
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { runtimes: 'hermes' },
+        inject: { mode: 'start', nativeContract: 'sc_only' },
+      },
+    });
+    const nonArray = await runHost();
+    expect(nonArray.status).toBe('fail');
+    expect(nonArray.message).toMatch(/illegal memory\.hostContract\.runtimes/);
+  });
+
   it('host contract fails when a declared runtime cannot be proven (intent is not enforcement)', async () => {
     writeConfig({
       memory: {

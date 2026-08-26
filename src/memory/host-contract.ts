@@ -792,6 +792,13 @@ export interface HostContractInput {
   nativeContract: 'sc_only' | 'disable_native_inject' | null;
   /** Raw `memory.hostContract.posture`, so junk values fail instead of vanishing. */
   postureRaw: string | null;
+  /**
+   * `memory.hostContract.runtimes` entries that are not a legal runtime id —
+   * including a non-array value for the whole key (#393 SOL r2 nit). A junk
+   * declaration is a claim doctor cannot scope, so it fails instead of being
+   * silently filtered into a smaller scrutiny set.
+   */
+  declaredRuntimesIllegal?: string[];
   runtimes: HostRuntimeEvidence[];
   nowMs: number;
 }
@@ -831,6 +838,17 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
       status: 'fail',
       message: `illegal memory.hostContract.posture "${posture}" (only ${SIDECAR_POSTURE} is legal)`,
       fix: `Run \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` (or \`--memory-host-posture bus_contract\`) — signed write; do not hand-edit config.json`,
+    };
+  }
+
+  if (input.declaredRuntimesIllegal && input.declaredRuntimesIllegal.length > 0) {
+    return {
+      status: 'fail',
+      message:
+        `illegal memory.hostContract.runtimes entr${input.declaredRuntimesIllegal.length === 1 ? 'y' : 'ies'} ` +
+        `${input.declaredRuntimesIllegal.map((r) => `"${r}"`).join(', ')} ` +
+        `(legal: ${HOST_RUNTIMES.join('|')}) — a declaration doctor cannot scope must not shrink the scrutiny set`,
+      fix: 'Run `shieldcortex config --memory-host-runtime <openclaw|claude_code|hermes>` — signed write; do not hand-edit config.json',
     };
   }
 

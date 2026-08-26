@@ -2938,6 +2938,8 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
   posture: string | null;
   /** Operator-declared bound runtimes. Intent only: adds scrutiny, never proof. */
   declaredRuntimes: HostRuntimeId[];
+  /** Unsupported runtimes entries (or a non-array key) — junk fails, never filters (#393 SOL r2 nit). */
+  declaredRuntimesIllegal: string[];
 } {
   const mem = (raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory))
     ? raw.memory as Record<string, unknown>
@@ -2984,8 +2986,18 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     : {};
   const postureRaw = hostContract.posture;
   const posture = typeof postureRaw === 'string' && postureRaw.trim() !== '' ? postureRaw.trim() : null;
-  const declaredRuntimes = (Array.isArray(hostContract.runtimes) ? hostContract.runtimes : [])
-    .filter((r): r is HostRuntimeId => r === 'openclaw' || r === 'claude_code' || r === 'hermes');
+  const declaredRuntimes: HostRuntimeId[] = [];
+  const declaredRuntimesIllegal: string[] = [];
+  if (hostContract.runtimes !== undefined) {
+    if (!Array.isArray(hostContract.runtimes)) {
+      declaredRuntimesIllegal.push(String(hostContract.runtimes));
+    } else {
+      for (const r of hostContract.runtimes) {
+        if (r === 'openclaw' || r === 'claude_code' || r === 'hermes') declaredRuntimes.push(r);
+        else declaredRuntimesIllegal.push(String(r));
+      }
+    }
+  }
   return {
     plane,
     planeSetAt,
@@ -2998,6 +3010,7 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     injectConfigured,
     posture,
     declaredRuntimes,
+    declaredRuntimesIllegal,
   };
 }
 
@@ -3592,6 +3605,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
       ? cfg.nativeContract
       : null,
     postureRaw: cfg.posture,
+    declaredRuntimesIllegal: cfg.declaredRuntimesIllegal,
     runtimes,
     nowMs,
   });
