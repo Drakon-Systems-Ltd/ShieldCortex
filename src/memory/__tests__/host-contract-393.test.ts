@@ -166,6 +166,11 @@ describe('OpenClaw evidence', () => {
     const unreadable = resolveOpenClawEvidence(ocProbe({ config, scHook: 'unreadable' }), CTX);
     expect(unreadable.scBus).toBe('unknown');
     expect(unreadable.proof.join(' ')).toMatch(/pack delivery cannot be proven/);
+    // r2 B6: missing packaged source means currency is unattestable — unknown,
+    // never wired_proven by default.
+    const unverifiable = resolveOpenClawEvidence(ocProbe({ config, scHook: 'unverifiable' }), CTX);
+    expect(unverifiable.scBus).toBe('unknown');
+    expect(unverifiable.proof.join(' ')).toMatch(/cannot be attested byte-current/);
   });
 
   it('treats hooks.internal.entries.cortex-memory.enabled=false as not wired, and an unreadable config as unknown', () => {

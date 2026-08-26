@@ -3102,11 +3102,14 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
       activity += countOf(`SELECT COUNT(*) AS c FROM hook_invocations WHERE invoked_at >= datetime('now', '-7 days')`);
     } catch { /* optional */ }
 
-    // Native artifact growth (OpenClaw MEMORY.md / memory dir)
+    // Native artifact growth (OpenClaw MEMORY.md / memory.md / memory dir),
+    // under the same state root the host contract reads (#393 SOL r2 B6/B1).
     const home = os.homedir();
+    const ocWorkspace = path.join(openClawStateRoot(home), 'workspace');
     const nativeCandidates = [
-      path.join(home, '.openclaw', 'workspace', 'MEMORY.md'),
-      path.join(home, '.openclaw', 'workspace', 'memory'),
+      path.join(ocWorkspace, 'MEMORY.md'),
+      path.join(ocWorkspace, 'memory.md'),
+      path.join(ocWorkspace, 'memory'),
       path.join(home, 'MEMORY.md'),
     ];
     let nativeTouched7d = false;
@@ -3405,17 +3408,18 @@ function scanHermesProfiles(home: string): {
 }
 
 /**
- * Workspace roots doctor must inspect: the stock ~/.openclaw/workspace PLUS
- * every configured defaults/per-agent workspace (#393 SOL H4). Bounded by
- * OPENCLAW_WORKSPACE_CAP; overflow or an unreadable config marks the
- * enumeration incomplete so the evidence model refuses to prove off.
+ * Workspace roots doctor must inspect: the stock workspace under the OpenClaw
+ * state root PLUS every configured defaults/per-agent workspace (#393 SOL
+ * H4). Bounded by OPENCLAW_WORKSPACE_CAP; overflow or an unreadable config
+ * marks the enumeration incomplete so the evidence model refuses to prove off.
  */
 const OPENCLAW_WORKSPACE_CAP = 16;
 function openClawWorkspacePaths(
   home: string,
+  stateRoot: string,
   config: ProbeRead<Record<string, unknown>>,
 ): { paths: string[]; complete: boolean } {
-  const paths = [path.join(home, '.openclaw', 'workspace')];
+  const paths = [path.join(stateRoot, 'workspace')];
   let complete = true;
   const asObj = (v: unknown): Record<string, unknown> =>
     v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -3443,15 +3447,34 @@ function openClawWorkspacePaths(
 }
 
 /**
+ * OpenClaw state root (#393 SOL r2 B6): OPENCLAW_STATE_DIR relocates the whole
+ * tree, falling back to ~/.openclaw. Config, hook, and workspace evidence must
+ * all honour it — otherwise old complete artifacts under the default root
+ * prove delivery for a runtime that actually lives (unwired) somewhere else.
+ */
+function openClawStateRoot(home: string): string {
+  return process.env.OPENCLAW_STATE_DIR?.trim() || path.join(home, '.openclaw');
+}
+
+/**
  * SC hook artifact probe (#393 SOL H1): a bare directory is not wiring. The
  * required file set and byte-currency come from the installer's own
  * authorities (HOOK_FILES / hookFilesStale in src/setup/openclaw.ts) — the
  * same ones `shieldcortex openclaw install` and the installer doctor use.
+ *
+ * `sourceAvailable=false` (#393 SOL r2 B6): `hookFilesStale` answers `false`
+ * when the packaged HOOK_SOURCE is missing — right for the installer ("cannot
+ * claim a refresh is needed"), fatal for a proof caller that would read it as
+ * byte-current. With no source to compare against, a complete-looking install
+ * is `unverifiable`, never `complete`.
+ *
+ * Exported for direct unit testing of the fail-closed mapping.
  */
-function probeOpenClawScHookArtifacts(
+export function probeOpenClawScHookArtifacts(
   dir: string,
   hookFiles: readonly string[],
   stale: (destDir?: string) => boolean,
+  sourceAvailable: boolean,
 ): OpenClawHookArtifacts {
   const dirProbe = probePath(dir);
   if (dirProbe.kind === 'absent') return 'absent';
@@ -3464,6 +3487,7 @@ function probeOpenClawScHookArtifacts(
     else if (p.stat.isFile() && p.stat.size === 0) incomplete = true;
   }
   if (incomplete) return 'incomplete';
+  if (!sourceAvailable) return 'unverifiable';
   try {
     return stale(dir) ? 'stale' : 'complete';
   } catch {
@@ -3488,19 +3512,21 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   // The installer's own authorities for what a wired hook IS (#393 SOL H1).
   // Dynamic import mirrors checkOpenClawHookFreshness — setup/openclaw.js is
   // heavy and only needed here.
-  const { HOOK_FILES, hookFilesStale } = await import('../setup/openclaw.js');
+  const { HOOK_FILES, hookFilesStale, hookSourceAvailable } = await import('../setup/openclaw.js');
 
-  const ocPath = process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(home, '.openclaw', 'openclaw.json');
+  const ocRoot = openClawStateRoot(home);
+  const ocPath = process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(ocRoot, 'openclaw.json');
   const ocConfig = readJsonProbe(ocPath);
-  const ocWorkspaces = openClawWorkspacePaths(home, ocConfig);
+  const ocWorkspaces = openClawWorkspacePaths(home, ocRoot, ocConfig);
   const runtimes: HostRuntimeEvidence[] = [
     resolveOpenClawEvidence(
       {
         config: ocConfig,
         scHook: probeOpenClawScHookArtifacts(
-          path.join(home, '.openclaw', 'hooks', 'cortex-memory'),
+          path.join(ocRoot, 'hooks', 'cortex-memory'),
           HOOK_FILES,
           hookFilesStale,
+          hookSourceAvailable(),
         ),
         scAutoMemory: cfg.openclawAuto,
         workspaces: ocWorkspaces.paths.map((ws) => ({

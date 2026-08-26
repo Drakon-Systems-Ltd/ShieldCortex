@@ -25,6 +25,10 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     originalEnv = { ...process.env };
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    // Hermeticity: a developer box with these set would silently relocate
+    // every fixture's evidence root.
+    delete process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_CONFIG_PATH;
     jest.resetModules();
   });
 
@@ -240,6 +244,47 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const r = await runHost();
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/SC pack delivery unknown/);
+  });
+
+  it('hook artifacts are unverifiable when the packaged source is missing — never byte-current by default (SOL r2 B6)', async () => {
+    installRealHookArtifacts();
+    const mod = await import('../doctor.js');
+    const dir = path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory');
+    const files = ['HOOK.md', 'handler.ts', 'runtime.mjs'];
+    expect(mod.probeOpenClawScHookArtifacts(dir, files, () => false, true)).toBe('complete');
+    expect(mod.probeOpenClawScHookArtifacts(dir, files, () => false, false)).toBe('unverifiable');
+    // With no source, the stale comparator must not even be consulted.
+    expect(mod.probeOpenClawScHookArtifacts(dir, files, () => { throw new Error('never'); }, false)).toBe('unverifiable');
+  });
+
+  it('host contract honours OPENCLAW_STATE_DIR for config, hook, and workspace evidence (SOL r2 B6)', async () => {
+    writeConfig(busContract());
+    // Old, fully green artifacts under the DEFAULT root...
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    // ...must not certify a runtime that actually lives under a custom root
+    // with no hook artifacts of its own.
+    const customRoot = path.join(tmpHome, 'oc-state');
+    fs.mkdirSync(customRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(customRoot, 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+    );
+    process.env.OPENCLAW_STATE_DIR = customRoot;
+    const unwired = await runHost();
+    expect(unwired.status).toBe('fail');
+    expect(unwired.message).toMatch(/not proven delivered/);
+
+    // Workspace evidence is read from the custom root too.
+    const ws = path.join(customRoot, 'workspace');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(ws, 'memory.md'), '# custom-root brain\n'.repeat(10));
+    const brainy = await runHost();
+    expect(brainy.status).toBe('fail');
+    expect(brainy.message).toMatch(/memory\.md written within 7d/);
   });
 
   // ── T1 host runtime matrix (#393) ──

@@ -167,14 +167,17 @@ export function readInjectModeStrict(raw: unknown): InjectModeReading {
 // ── OpenClaw ────────────────────────────────────────────────────────────────
 
 /**
- * State of the SC cortex-memory hook artifact set under ~/.openclaw/hooks.
- * A bare directory is NOT wiring (SOL #393 H1): `complete` requires every
- * installer-authoritative file (HOOK_FILES: HOOK.md, handler.ts, runtime.mjs)
- * present, non-empty, and byte-current against the packaged source. `stale`
- * means files exist but differ from the packaged source, so what would run
- * cannot be proven to be the SC pack emitter.
+ * State of the SC cortex-memory hook artifact set under the OpenClaw state
+ * root's hooks dir. A bare directory is NOT wiring (SOL #393 H1): `complete`
+ * requires every installer-authoritative file (HOOK_FILES: HOOK.md,
+ * handler.ts, runtime.mjs) present, non-empty, and byte-current against the
+ * packaged source. `stale` means files exist but differ from the packaged
+ * source, so what would run cannot be proven to be the SC pack emitter.
+ * `unverifiable` means the packaged source itself is missing (#393 SOL r2
+ * B6): byte-currency cannot be attested, so delivery is unknown — never
+ * "current by default".
  */
-export type OpenClawHookArtifacts = 'complete' | 'stale' | 'incomplete' | 'absent' | 'unreadable';
+export type OpenClawHookArtifacts = 'complete' | 'stale' | 'incomplete' | 'absent' | 'unreadable' | 'unverifiable';
 
 export interface OpenClawWorkspaceProbe {
   /** Workspace root this evidence was read from. */
@@ -190,7 +193,7 @@ export interface OpenClawWorkspaceProbe {
 }
 
 export interface OpenClawProbe {
-  /** `~/.openclaw/openclaw.json` (or OPENCLAW_CONFIG_PATH). */
+  /** `<state root>/openclaw.json` (OPENCLAW_CONFIG_PATH > OPENCLAW_STATE_DIR > ~/.openclaw). */
   config: ProbeRead<Record<string, unknown>>;
   /** SC's cortex-memory hook artifact state — see OpenClawHookArtifacts. */
   scHook: OpenClawHookArtifacts;
@@ -380,6 +383,10 @@ export function resolveOpenClawEvidence(
     case 'stale':
       scBus = 'unknown';
       proof.push('installed SC hook differs from the packaged source — what runs cannot be proven to deliver the pack');
+      break;
+    case 'unverifiable':
+      scBus = 'unknown';
+      proof.push('packaged hook source missing from this install — the installed hook cannot be attested byte-current, so pack delivery cannot be proven');
       break;
     default:
       if (hookEnabled === false) {
