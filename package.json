@@ -183,6 +183,7 @@
     "scripts/lib/inject-pack.mjs",
     "scripts/lib/capture-distill.mjs",
     "scripts/lib/openclaw-distill-auth.mjs",
-    "scripts/lib/openclaw-extract.mjs"
+    "scripts/lib/openclaw-extract.mjs",
+    "templates/work-lanes"
   ]
 }

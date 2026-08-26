@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **#401:** work-lane pack v1 — pin-able `lan-diag` template (`templates/work-lanes/lan-diag.sh`: read-mostly status, private-only bounded ping/GET, fails closed on public destinations), `lan-diag` lane in the work-lane hint catalog (after vita-ci/jotform; pin + external-egress + lan-shaped cwd or network tool), and a denial→door matrix test (`denial-doors-401.test.ts`) locking "no deny without a door": catastrophic stays a hard stop, DNP digests always carry `shieldcortex approve --denial`, no siren-only class. Runbook: `docs/runbooks/work-lane-pack-v1.md`.
+
 ## [4.54.13] - 2026-08-25
 
 **Cloud sync durability patch.** Ships the last two Athena HIGHs that sit on the host engine: atomic retry claim/lease and a transactional outbox so local memory mutations cannot commit without a durable outbound event (and vice versa).
