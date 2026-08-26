@@ -81,6 +81,21 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(['PUBLIC', 'INTERNAL']).toContain(row!.sensitivity_level);
   });
 
+  it('#402: stamps content_form=fact for a hook-captured work fact (injectable via two-key)', async () => {
+    await saveAutoExtractedMemory(
+      db,
+      makeMemory({ title: 'Deploy state note', content: 'The staging deploy shipped v4.28.1 on 2026-08-12.' }),
+      'p',
+      { source: 'session-end-hook' },
+    );
+    const row = db.prepare("SELECT content_form FROM memories WHERE title = 'Deploy state note'")
+      .get() as { content_form: string | null } | undefined;
+    expect(row).toBeDefined();
+    // Requires the compiled classifier (dist/defence/form-classifier.js from
+    // `npm run build:ts`). Fail-closed to NULL only if dist is missing.
+    expect(row!.content_form).toBe('fact');
+  });
+
   it('generates a unique UUID per insert (no collision on bulk auto-extract)', async () => {
     // Five genuinely distinct findings (distinct titles AND content) so the
     // T8 near-dup gate doesn't fold them — this test asserts UUID uniqueness

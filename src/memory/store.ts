@@ -58,7 +58,9 @@ import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
 import type { TripleProvenance } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
-import { resolveDisposition } from '../defence/disposition.js';
+import { resolveDispositionV2 } from '../defence/disposition.js';
+import { classifyContentForm } from '../defence/form-classifier.js';
+import { sweepClusterQuarantine } from '../defence/cluster-quarantine.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import {
   syncGraphDeleteForMemoryToCloud,
@@ -571,11 +573,18 @@ export function addMemory(
   // P1/WS4: the ONE verdict→disposition mapping, shared with the hook path
   // (save-memory.mjs) so the runtimes cannot drift. It folds in the sub-agent
   // trust-band hold (0.5–0.7) and the block/quarantine hold policy.
-  const disposition = resolveDisposition({
+  // #402: the 6-way valve refines it (admit / admit-low-trust / inert /
+  // quarantine / reject / escalate) on the structural content form —
+  // classification failure is fail-closed to 'unknown' inside the classifier.
+  const disposition = resolveDispositionV2({
     allowed: defenceResult.allowed,
     firewallResult: defenceResult.firewall.result,
     trustScore: defenceResult.trust.score,
     reason: defenceResult.firewall.reason,
+    contentForm: classifyContentForm(input.content),
+    threatIndicators: defenceResult.firewall.threatIndicators,
+    anomalyScore: defenceResult.firewall.anomalyScore,
+    sourceAttested: options?.sourceAttested,
   });
 
   if (disposition.action === 'quarantine') {
@@ -680,9 +689,9 @@ export function addMemory(
     INSERT INTO memories (
       uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable,
       status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, defence_verdict, cloud_excluded, memory_purpose, memory_scope,
-      host_id, agent_id, capture_layer, updated_at
+      host_id, agent_id, capture_layer, content_form, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -726,6 +735,10 @@ export function addMemory(
       input.hostId ?? resolveDefaultHostId(),
       input.agentId ?? resolveDefaultAgentId(),
       input.captureLayer ?? null,
+      // #402: write-time form stamp — the form key half of the two-key inject
+      // gate. Auto-released rows stamp their real form too (a directive-form
+      // release stays non-injectable).
+      disposition.contentForm,
     );
 
     // defenceResult is always set now (every write is scanned), so always stamp
@@ -735,7 +748,9 @@ export function addMemory(
       // content_hash = SHA-256 of the SUBMITTED content (a write-time provenance
       // snapshot), matching the write-audit row in pipeline.ts. Consistent for
       // >10KB memories too (where the STORED content is truncated).
-      .run(defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
+      // #402 admit-low-trust: clamp the stamped trust below the inject floor
+      // (trustClamp is already min(trust, LOW_TRUST_CLAMP) — it never raises).
+      .run(disposition.trustClamp ?? defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
 
     const id = result.lastInsertRowid as number;
     if (isFeatureEnabled('cloud_sync')) {
@@ -748,6 +763,26 @@ export function addMemory(
   })();
 
   const memory = getMemoryById(insertedId)!;
+
+  // #402 Class-B cross-row cluster quarantine. This row stored INERT
+  // (directive/mixed form) — mild on its own, but if >= 3 such fragments from
+  // the same source landed within the window, the whole cluster is a slow
+  // fragmentation-poison assembly and is pulled into quarantine (not just the
+  // newest row). SQL-simple sweep; failure is a no-op (never breaks the write).
+  if (disposition.action === 'store' && (disposition.contentForm === 'directive' || disposition.contentForm === 'mixed')) {
+    try {
+      const cluster = sweepClusterQuarantine(db, { source: sourceDetails.sourceValue ?? '' });
+      if (cluster.quarantined > 0) {
+        dispatchWebhook('memory_quarantined', {
+          id: null,
+          title: input.title,
+          reason: `class_b_cluster (${cluster.quarantined} rows)`,
+        });
+      }
+    } catch (e) {
+      console.error('[shieldcortex] Class-B cluster sweep failed:', e);
+    }
+  }
 
   // ONTOLOGY: Extract entities and triples FIRST so the memory_created
   // payload can carry entity_ids. The pulse layer (Living Constellation
@@ -1095,6 +1130,11 @@ export function updateMemory(
   if (updates.content !== undefined) {
     fields.push('content_hash = ?');
     values.push(createContentHash(updates.content));
+    // #402 SOL review: content_form is a write-time stamp. A content replace
+    // that leaves a stale 'fact' stamp lets a directive ride into the inject
+    // pack. Recompute in the SAME UPDATE.
+    fields.push('content_form = ?');
+    values.push(classifyContentForm(updates.content));
   }
 
   if (fields.length === 0) return existing;
@@ -1284,6 +1324,7 @@ export function mergeMemories(
       UPDATE memories
       SET content = ?,
           content_hash = ?,
+          content_form = ?,
           tags = ?,
           salience = ?,
           project = ?,
@@ -1305,6 +1346,7 @@ export function mergeMemories(
     `).run(
       mergedContent,
       createContentHash(mergedContent),
+      classifyContentForm(mergedContent),
       JSON.stringify(mergedTags),
       mergedSalience,
       mergedProject,

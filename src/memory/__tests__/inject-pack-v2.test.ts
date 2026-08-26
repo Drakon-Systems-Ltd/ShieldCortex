@@ -32,6 +32,11 @@ function row(partial) {
     project: 'ShieldCortex',
     source: 'test',
     pinned: false,
+    // #402: a properly-stamped modern fact row. The two-key inject gate now
+    // requires the form key too; these provenance-key tests supply a clean
+    // 'fact' stamp so they exercise the trust/scope key in isolation. The form
+    // key itself is covered by inject-two-key-402.test.ts.
+    content_form: 'fact',
     ...partial,
   };
 }
@@ -233,7 +238,9 @@ describe('inject-pack v2', () => {
   it('toPackItem never includes why', () => {
     const item = toPackItem(row({ title: 'x', content: 'y' }), { perRowTokens: 50 });
     expect(Object.keys(item).sort()).toEqual(
-      ['age', 'content_hash', 'fact', 'id', 'salience', 'source_ids', 'title', 'tokens', 'trust'].sort(),
+      // #402: + content_form (fact-frame label). Still no why/rationale field.
+      ['age', 'content_form', 'content_hash', 'fact', 'id', 'salience', 'source_ids', 'title', 'tokens', 'trust'].sort(),
     );
+    expect(item).not.toHaveProperty('why');
   });
 });
