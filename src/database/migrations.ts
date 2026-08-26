@@ -993,4 +993,17 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     logIfUnexpectedDdlError(err, 'sync_queue lease/outbox columns (#408/#409)');
   }
+
+  // Migration: #402 — content_form stamp for the two-key inject gate
+  // ('fact'|'directive'|'mixed'|'unknown'). DELIBERATELY no backfill: legacy
+  // rows stay NULL, which the read-time form key treats as NOT injectable
+  // unless pinned (fail-closed, Opus B1). No index: the queries that filter on
+  // content_form (cluster quarantine) are already served by idx_memories_source.
+  try {
+    if (!columnNames.has('content_form')) {
+      database.exec('ALTER TABLE memories ADD COLUMN content_form TEXT');
+    }
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'memories content_form (#402)');
+  }
 }

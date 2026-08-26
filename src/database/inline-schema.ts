@@ -52,7 +52,8 @@ export function getInlineSchema(): string {
       last_downvoted_at TIMESTAMP,
       host_id TEXT,
       agent_id TEXT,
-      capture_layer TEXT
+      capture_layer TEXT,
+      content_form TEXT
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

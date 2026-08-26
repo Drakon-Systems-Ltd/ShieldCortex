@@ -150,8 +150,16 @@ export function resolveDispositionV2(input: DispositionInputV2): DispositionV2 {
       kind = 'quarantine'; // parent-approval flow, not operator escalation
     } else if (contentForm === 'fact') {
       // Fact-shaped content the firewall still flagged: boundary case —
-      // hold it flagged for a human, don't let it auto-expire unseen.
+      // hold it flagged for a human, don't let it auto-expire unseen. The
+      // reason prefix is the operator-review flag recorded on the held row.
       kind = 'escalate';
+      return {
+        ...base,
+        kind,
+        contentForm,
+        injectable: false,
+        reason: `escalate: operator review required — ${base.reason}`,
+      };
     } else {
       kind = 'quarantine';
     }

@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS memories (
   host_id TEXT,
   agent_id TEXT,
   capture_layer TEXT,
+  -- #402 two-key inject: write-time form stamp ('fact'|'directive'|'mixed'|
+  -- 'unknown'). NULL = legacy/unstamped = NOT injectable unless pinned
+  -- (fail-closed, Opus B1). Stamped by store.ts via classifyContentForm.
+  content_form TEXT,
 
   -- Index for common queries
   CONSTRAINT valid_category CHECK(category IN (

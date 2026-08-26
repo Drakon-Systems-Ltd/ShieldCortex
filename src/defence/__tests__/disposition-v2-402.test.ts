@@ -65,6 +65,7 @@ describe('resolveDispositionV2 (#402)', () => {
   it('ESCALATE: fact-shaped content the firewall flagged is held for operator review', () => {
     const d = v2({ allowed: false, firewallResult: 'QUARANTINE', contentForm: 'fact' });
     expect(d).toMatchObject({ kind: 'escalate', action: 'quarantine', firewallResult: 'QUARANTINE', injectable: false });
+    expect(d.reason).toMatch(/^escalate: operator review required/);
   });
 
   it('sub-agent trust band stays a parent-approval quarantine, not escalate', () => {
