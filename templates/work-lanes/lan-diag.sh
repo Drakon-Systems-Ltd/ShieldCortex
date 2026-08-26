@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
 # ShieldCortex work-lane template — lan-diag v1 (#401)
 #
@@ -17,10 +17,23 @@
 #   lan-diag.sh status           same
 #   lan-diag.sh help             usage
 #   lan-diag.sh <host-or-ip>     ping -c 2 -W 2 — loopback / link-local / RFC1918 only
-#   lan-diag.sh GET <url>        http(s) GET, 3s cap, same private-only destination rule
+#   lan-diag.sh GET <url>        http(s) GET, 3s cap, private-only; link-local/IMDS refused
 #
 # Never: nmap, tcpdump, ssh, sudo, file writes, packet capture, public-internet
 # probes, request bodies, redirects. A hostname with ANY public address refuses.
+
+# SOL review hardening: a pinned hash does not pin the interpreter or its
+# startup environment. Re-exec once under /bin/bash with a scrubbed env so
+# BASH_ENV/ENV/PATH/curl/proxy config inherited from the caller cannot alter
+# behaviour before set -euo pipefail takes effect.
+if [[ -z "${LAN_DIAG_REEXEC:-}" ]]; then
+  exec /usr/bin/env -i \
+    LAN_DIAG_REEXEC=1 \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME="${HOME:-/root}" \
+    LANG=C LC_ALL=C \
+    /bin/bash "$0" "$@"
+fi
 
 set -euo pipefail
 
@@ -32,7 +45,7 @@ lan-diag.sh — ShieldCortex lan-diag work lane (read-mostly, private-only)
   lan-diag.sh status          same
   lan-diag.sh help            this text
   lan-diag.sh <host-or-ip>    ping -c 2 -W 2; loopback / link-local / RFC1918 only
-  lan-diag.sh GET <url>       http(s) GET, 3s cap, same private-only destination rule
+  lan-diag.sh GET <url>       http(s) GET, 3s cap, private-only; link-local/IMDS refused
 
 Refuses everything else: public or global-IPv6 destinations, hostnames with any
 public address, redirects, request bodies, scans, captures.
@@ -49,6 +62,10 @@ is_private_ipv4() {
   [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
   a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
   for o in "$a" "$b" "$c" "$d"; do
+    # Reject leading-zero octets outright: "010.0.0.1" is decimal 10 here but
+    # octal 8 to many network stacks — ambiguous literals are refused, not
+    # normalised (SOL review).
+    [[ "$o" =~ ^0[0-9]+$ ]] && return 1
     (( 10#$o <= 255 )) || return 1
   done
   a=$((10#$a)) b=$((10#$b))
@@ -115,6 +132,24 @@ do_ping() {
   fi
 }
 
+# GET-path destination rule is stricter than ping: link-local (169.254/16,
+# fe80::/10) is REFUSED because an allowlisted HTTP client to link-local is an
+# IMDS credential grab (169.254.169.254, [fd00:ec2::254], [fe80::a9fe:a9fe])
+# with a TTY pin on it (Grok review). Ping keeps link-local for LAN diagnosis.
+is_get_dest_allowed() {
+  local ip="$1" a b
+  if [[ "$ip" == *:* ]]; then
+    # IPv6: loopback only for GET. fe80::/10 refused (IMDS aliases live there);
+    # ULA/global were never allowed.
+    [[ "$(printf '%s' "$ip" | tr '[:upper:]' '[:lower:]')" == "::1" ]]
+    return
+  fi
+  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\. ]] || return 1
+  a=$((10#${BASH_REMATCH[1]})) b=$((10#${BASH_REMATCH[2]}))
+  (( a == 169 && b == 254 )) && return 1         # IMDS / link-local refused on GET
+  return 0
+}
+
 do_get() {
   local url="$1" rest hostport host port="" addr resolve_args=()
   case "$url" in
@@ -139,12 +174,16 @@ do_get() {
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) || refuse "bad port '$port'"
   addr="$(resolve_private "$host")" \
     || refuse "'$host' is not loopback, link-local, or RFC1918 (or resolves to a public address)"
+  is_get_dest_allowed "$addr" \
+    || refuse "GET to link-local/IMDS ranges (169.254/16, fe80::/10) is not allowed — use the ping form for reachability"
   if ! is_private_literal "$host"; then
     # Pin the vetted DNS answer so check-time and connect-time agree.
     [[ "$addr" == *:* ]] && addr="[$addr]"
     resolve_args=(--resolve "${host}:${port}:${addr}")
   fi
-  curl --silent --fail --max-time 3 --proto '=http,https' --max-redirs 0 \
+  # -q ignores ~/.curlrc; --noproxy '*' + scrubbed env stop proxy routing;
+  # --disable is the long form of -q kept explicit for readability on review.
+  curl -q --noproxy '*' --silent --fail --max-time 3 --proto '=http,https' --max-redirs 0 \
     "${resolve_args[@]}" \
     --output /dev/null --write-out "GET ${url} -> HTTP %{http_code} (%{time_total}s)\n" \
     "$url"

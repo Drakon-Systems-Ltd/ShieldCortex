@@ -31,7 +31,17 @@ function norm(s: unknown): string {
 }
 
 function findPin(paths: string[], frag: string): string | undefined {
-  return paths.find((p) => p.includes(frag));
+  return paths.find((p) => {
+    // Exact basename match ("lan-diag.sh") or a full directory segment
+    // ("/lan-diag/"). Substring inclusion would let "not-lan-diag.sh.backup"
+    // masquerade as the lane (SOL review).
+    const norm = p.replace(/\\/g, '/');
+    if (frag.startsWith('/') && frag.endsWith('/')) {
+      return norm.includes(frag);
+    }
+    const base = norm.slice(norm.lastIndexOf('/') + 1);
+    return base === frag;
+  });
 }
 
 /** cwd tokens that read as LAN/connectivity work (lowercased input).
