@@ -112,4 +112,25 @@ describe('lan-diag.sh script-level refusal contract (#401)', () => {
     const r = run(['help'], { PATH: '/nonexistent-bin' });
     expect(r.code).toBe(0);
   });
+
+  test('spoofed scrub sentinel with hostile PATH still gets scrubbed (SOL round 2)', () => {
+    const r = run(['help'], { LAN_DIAG_REEXEC: '1', PATH: '/nonexistent-bin' });
+    expect(r.code).toBe(0);
+  });
+
+  test('octal-form IPv4 literal refuses instead of canonicalising (SOL round 2)', () => {
+    const r = run(['0177.0.0.1']);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('refused');
+  });
+
+  test('decimal-int IPv4 literal refuses (2130706433 = 127.0.0.1)', () => {
+    const r = run(['2130706433']);
+    expect(r.code).toBe(2);
+  });
+
+  test('hex-form IPv4 literal refuses', () => {
+    const r = run(['0x7f.0.0.1']);
+    expect(r.code).toBe(2);
+  });
 });

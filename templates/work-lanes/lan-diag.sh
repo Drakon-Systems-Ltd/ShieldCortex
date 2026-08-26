@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 #
 # ShieldCortex work-lane template — lan-diag v1 (#401)
 #
@@ -22,17 +22,24 @@
 # Never: nmap, tcpdump, ssh, sudo, file writes, packet capture, public-internet
 # probes, request bodies, redirects. A hostname with ANY public address refuses.
 
-# SOL review hardening: a pinned hash does not pin the interpreter or its
-# startup environment. Re-exec once under /bin/bash with a scrubbed env so
-# BASH_ENV/ENV/PATH/curl/proxy config inherited from the caller cannot alter
-# behaviour before set -euo pipefail takes effect.
-if [[ -z "${LAN_DIAG_REEXEC:-}" ]]; then
+# SOL review hardening (round 2): a pinned hash does not pin the interpreter
+# or its startup environment.
+#  - The shebang runs bash in privileged mode (-p): BASH_ENV/ENV are NOT
+#    processed and functions imported from the environment are ignored, so a
+#    hostile startup payload cannot run before this line.
+#  - PATH/proxy/locale scrub is verified, not sentinel-trusted: a caller who
+#    fakes the sentinel but keeps a hostile environment still fails the check
+#    below and gets re-exec'd into the scrubbed state. Termination is
+#    guaranteed because the re-exec constructs exactly the state the check
+#    requires.
+LAN_DIAG_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+if [[ "${PATH:-}" != "$LAN_DIAG_PATH" || -n "${BASH_ENV:-}" || -n "${ENV:-}" \
+      || -n "${http_proxy:-}${https_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}${all_proxy:-}${NO_PROXY:-}${no_proxy:-}${CURL_HOME:-}${XDG_CONFIG_HOME:-}" ]]; then
   exec /usr/bin/env -i \
-    LAN_DIAG_REEXEC=1 \
-    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    PATH="$LAN_DIAG_PATH" \
     HOME="${HOME:-/root}" \
     LANG=C LC_ALL=C \
-    /bin/bash "$0" "$@"
+    /bin/bash -p "$0" "$@"
 fi
 
 set -euo pipefail
@@ -99,7 +106,20 @@ resolve_private() {
     printf '%s\n' "$host"
     return 0
   fi
+  # inet_aton-style numeric literals ("0177.0.0.1", "2130706433", "0x7f.0.0.1")
+  # must not fall through to getent where the OS canonicalises them. A token
+  # whose every dot-label is decimal/octal/hex-numeric is an ADDRESS LITERAL:
+  # it already failed the strict dotted-quad decimal parser — refuse it
+  # (SOL review round 2).
+  local __label __all_numeric=1
+  IFS='.' read -ra __labels <<< "$host"
+  for __label in "${__labels[@]}"; do
+    [[ "$__label" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]] || { __all_numeric=0; break; }
+  done
+  (( __all_numeric )) && return 1
+  [[ "$host" == *:* ]] && return 1
   [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,252})$ ]] || return 1
+  [[ "$host" =~ [A-Za-z] ]] || return 1
   addrs="$(getent ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u)" || return 1
   [[ -n "$addrs" ]] || return 1
   while IFS= read -r addr; do
