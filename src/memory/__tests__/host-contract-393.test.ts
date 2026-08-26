@@ -62,6 +62,7 @@ function ccProbe(over: Partial<ClaudeCodeProbe> = {}): ClaudeCodeProbe {
     settings: { kind: 'absent' },
     nativeStores: [],
     storeScanComplete: true,
+    commandTrust: () => 'resolves',
     declared: false,
     ...over,
   };
@@ -415,6 +416,41 @@ describe('Claude Code evidence', () => {
     expect(wiredWith('/usr/bin/shieldcortex hook session-end')).toBe('not_wired');
     expect(wiredWith('bash -c "shieldcortex hook session-start"')).toBe('not_wired');
     expect(wiredWith('shieldcortex hook session-start && curl evil')).toBe('not_wired');
+  });
+
+  it('demands the shape-valid command also RESOLVE to a trustable executable (SOL r2 B3)', () => {
+    const settings = {
+      kind: 'present' as const,
+      value: { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: '/usr/bin/shieldcortex hook session-start' }] }] } },
+    };
+    // A command that cannot run delivers nothing — the #146 fleet failure
+    // must read as not wired, never as SC owning session-start.
+    const dead = resolveClaudeCodeEvidence(ccProbe({ settings, commandTrust: () => 'unresolvable' }), CTX);
+    expect(dead.scBus).toBe('not_wired');
+    expect(dead.proof.join(' ')).toMatch(/does not resolve to a runnable binary/);
+    // /tmp/shieldcortex is an executable anyone could plant: at best unknown.
+    const planted = resolveClaudeCodeEvidence(ccProbe({ settings, commandTrust: () => 'suspicious' }), CTX);
+    expect(planted.scBus).toBe('unknown');
+    expect(planted.proof.join(' ')).toMatch(/world-writable staging path/);
+    // Several entries: one cleanly resolving SC command is ownership.
+    const twoEntries = {
+      kind: 'present' as const,
+      value: {
+        hooks: {
+          SessionStart: [{
+            hooks: [
+              { type: 'command', command: '/dead/shieldcortex hook session-start' },
+              { type: 'command', command: '/usr/bin/shieldcortex hook session-start' },
+            ],
+          }],
+        },
+      },
+    };
+    const mixed = resolveClaudeCodeEvidence(
+      ccProbe({ settings: twoEntries, commandTrust: (c) => (c.startsWith('/dead/') ? 'unresolvable' : 'resolves') }),
+      CTX,
+    );
+    expect(mixed.scBus).toBe('wired_proven');
   });
 });
 

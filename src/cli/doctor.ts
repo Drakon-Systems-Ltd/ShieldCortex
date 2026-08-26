@@ -11,7 +11,7 @@ import { execFileSync } from 'child_process';
 import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
 import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
-import { hookCommandResolves } from '../setup/hook-command-resolution.js';
+import { hookCommandResolves, hookCommandTrust } from '../setup/hook-command-resolution.js';
 import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
@@ -3520,6 +3520,8 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
           settings: readJsonProbe(path.join(home, '.claude', 'settings.json')),
           nativeStores: scan.stores,
           storeScanComplete: scan.scanComplete,
+          // Shape-valid commands must also RESOLVE cleanly (#393 SOL r2 B3).
+          commandTrust: hookCommandTrust,
           declared: declared('claude_code'),
         };
       })(),

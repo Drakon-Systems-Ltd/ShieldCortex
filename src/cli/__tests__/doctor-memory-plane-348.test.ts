@@ -12,10 +12,16 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
   let scDir: string;
   let originalEnv: NodeJS.ProcessEnv;
 
+  let trustedBinDir: string;
+
   beforeEach(() => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-348-home-'));
     scDir = path.join(tmpHome, '.shieldcortex');
     fs.mkdirSync(scDir, { recursive: true, mode: 0o700 });
+    // hookCommandTrust treats /tmp as a world-writable staging root, so a
+    // wired-Claude fixture needs its binary OUTSIDE tmpHome — the repo tree
+    // qualifies and is cleaned up below.
+    trustedBinDir = fs.mkdtempSync(path.join(process.cwd(), '.jest-scbin-'));
     originalEnv = { ...process.env };
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
@@ -25,7 +31,16 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
   afterEach(() => {
     process.env = originalEnv;
     try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.rmSync(trustedBinDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
+
+  /** A real executable at a non-staging path, so trust classification is deterministic. */
+  function trustedShieldcortexCommand(): string {
+    const bin = path.join(trustedBinDir, 'shieldcortex');
+    fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(bin, 0o755);
+    return `${bin} hook session-start`;
+  }
 
   function writeConfig(cfg: Record<string, unknown>): void {
     fs.writeFileSync(path.join(scDir, 'config.json'), `${JSON.stringify(cfg, null, 2)}\n`);
@@ -360,7 +375,7 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     fs.writeFileSync(
       path.join(claudeDir, 'settings.json'),
       JSON.stringify({
-        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'shieldcortex hook session-start' }] }] },
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
       }),
     );
     // 55 entries exceed the 50-file scan cap; pre-fix the slice left
@@ -371,6 +386,51 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const r = await runHost();
     expect(r.status).toBe('warn');
     expect(r.message).toMatch(/scan could not complete/);
+  });
+
+  it('host contract: SessionStart ownership needs a resolvable, trustable executable (SOL r2 B3)', async () => {
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    // A command whose binary does not exist owned session-start before r2
+    // while every hook died silently (#146 worn as a PASS).
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `${path.join(tmpHome, 'ghost', 'shieldcortex')} hook session-start` }] }] },
+      }),
+    );
+    const dead = await runHost();
+    expect(dead.status).toBe('fail');
+    expect(dead.message).toMatch(/not proven delivered/);
+
+    // An executable planted under /tmp (tmpHome lives there) is at best
+    // unknown — doctor cannot attest it is the ShieldCortex binary.
+    const plantedBin = path.join(tmpHome, 'bin', 'shieldcortex');
+    fs.mkdirSync(path.dirname(plantedBin), { recursive: true });
+    fs.writeFileSync(plantedBin, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(plantedBin, 0o755);
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `${plantedBin} hook session-start` }] }] },
+      }),
+    );
+    const planted = await runHost();
+    expect(planted.status).toBe('warn');
+    expect(planted.message).toMatch(/cannot determine/);
+    expect(planted.message).toMatch(/SC pack delivery unknown/);
+
+    // The same box with a clean, resolvable binary is the legitimate PASS.
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    const clean = await runHost();
+    expect(clean.status).toBe('pass');
+    expect(clean.message).toMatch(/executable resolves/);
   });
 
   it('host contract inspects configured custom/per-agent OpenClaw workspaces (SOL H4)', async () => {

@@ -26,7 +26,7 @@
  * (T1, residual lock 9 — Hermes honest sidecar vs contract).
  */
 
-import { isShieldCortexHookCommand } from '../setup/hook-command-resolution.js';
+import { isShieldCortexHookCommand, type HookCommandTrust } from '../setup/hook-command-resolution.js';
 
 export const HOST_RUNTIMES = ['openclaw', 'claude_code', 'hermes'] as const;
 export type HostRuntimeId = (typeof HOST_RUNTIMES)[number];
@@ -409,32 +409,44 @@ export function resolveOpenClawEvidence(
 export interface ClaudeCodeProbe {
   /** `~/.claude/settings.json`. */
   settings: ProbeRead<Record<string, unknown>>;
-  /** Native memory-tool stores (`~/.claude/memory`, `~/.claude/projects/<key>/memory`). */
+  /** Native memory artifacts: memory-tool stores AND CLAUDE.md preambles. */
   nativeStores: ArtifactProbe[];
   /** False when the store scan itself could not complete (never read as "none"). */
   storeScanComplete: boolean;
+  /**
+   * Classifies where a shape-valid hook command's executable lands (#393 SOL
+   * r2 B3). Doctor injects the real `hookCommandTrust`; injected rather than
+   * called directly so this module stays pure and the classifier stays
+   * fakeable under test.
+   */
+  commandTrust: (command: string) => HookCommandTrust;
   declared: boolean;
 }
 
-function claudeSessionStartWired(settings: Record<string, unknown>): boolean {
+/** Every SessionStart command matching the one supported SC shape (SOL H3). */
+function claudeSessionStartCommands(settings: Record<string, unknown>): string[] {
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? (settings.hooks as Record<string, unknown>)
     : {};
   const entries = Array.isArray(hooks.SessionStart) ? (hooks.SessionStart as unknown[]) : [];
-  return entries.some((entry) => {
-    if (!entry || typeof entry !== 'object') return false;
+  const commands: string[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
     const inner = (entry as { hooks?: unknown }).hooks;
-    if (!Array.isArray(inner)) return false;
-    return inner.some((h) => {
-      if (!h || typeof h !== 'object') return false;
+    if (!Array.isArray(inner)) continue;
+    for (const h of inner) {
+      if (!h || typeof h !== 'object') continue;
       const hook = h as { type?: unknown; command?: unknown };
       // Exact supported command shape only (SOL H3): a substring match let
       // `echo shieldcortex`, stale wrappers, and lookalike binaries count as
       // SC owning session-start.
-      if (hook.type !== undefined && hook.type !== 'command') return false;
-      return isShieldCortexHookCommand(hook.command, 'session-start');
-    });
-  });
+      if (hook.type !== undefined && hook.type !== 'command') continue;
+      if (isShieldCortexHookCommand(hook.command, 'session-start')) {
+        commands.push(hook.command as string);
+      }
+    }
+  }
+  return commands;
 }
 
 export function resolveClaudeCodeEvidence(
@@ -475,10 +487,25 @@ export function resolveClaudeCodeEvidence(
     scBus = 'not_wired';
     proof.push('no settings.json — the SC session-start pack is not on this host bus');
   } else {
-    scBus = claudeSessionStartWired(probe.settings.value) ? 'wired_proven' : 'not_wired';
-    proof.push(scBus === 'wired_proven'
-      ? 'SC SessionStart hook statically wired in settings.json (supported shieldcortex command shape; runtime delivery not attested)'
-      : 'no supported SC SessionStart hook command in settings.json');
+    // Shape first (SOL H3), then the executable itself (SOL r2 B3): a hook
+    // entry whose command cannot run delivers nothing (#146), and one that
+    // resolves under a world-writable staging root cannot be attested to BE
+    // shieldcortex — wired_proven requires shape AND a clean resolution.
+    const commands = claudeSessionStartCommands(probe.settings.value);
+    const trust = commands.map((c) => probe.commandTrust(c));
+    if (commands.length === 0) {
+      scBus = 'not_wired';
+      proof.push('no supported SC SessionStart hook command in settings.json');
+    } else if (trust.includes('resolves')) {
+      scBus = 'wired_proven';
+      proof.push('SC SessionStart hook statically wired in settings.json (supported shieldcortex command shape, executable resolves; runtime delivery not attested)');
+    } else if (trust.includes('suspicious')) {
+      scBus = 'unknown';
+      proof.push('SC SessionStart hook command resolves under a world-writable staging path — cannot attest the executable is ShieldCortex');
+    } else {
+      scBus = 'not_wired';
+      proof.push('SC SessionStart hook command does not resolve to a runnable binary — the hook dies silently in a non-interactive shell (#146)');
+    }
   }
 
   let nativeBus: NativeBusState;
