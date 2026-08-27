@@ -524,10 +524,13 @@ Dream Mode runs three passes:
 2. **Archive** — identifies stale memories that haven't been accessed or reinforced, and moves them out of active recall
 3. **Contradict** — surfaces memory pairs that conflict so you can resolve them before they cause confusion
 
-Also available as an API call for programmatic use:
+Also available as an API call for programmatic use. Every `/api/*` endpoint except `/api/health` requires a Bearer token — the server writes one to `~/.shieldcortex/.api-token` on start (from the same machine you can also fetch it from the loopback-only `GET /api/auth/session-token`):
 
 ```bash
-curl -X POST http://localhost:3001/api/consolidate
+TOKEN=$(cat ~/.shieldcortex/.api-token)
+
+curl -X POST http://localhost:3001/api/consolidate \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 Schedule it nightly, run it before important sessions, or let the auto-consolidation timer handle it. Either way, your memory store stays lean and contradiction-free.

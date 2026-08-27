@@ -40,35 +40,93 @@ runs:
     - name: Run ShieldCortex Audit
       id: audit
       shell: bash
+      env:
+        FAIL_ON_HIGH: ${{ inputs.fail-on-high }}
       run: |
-        # Run audit in JSON mode
-        REPORT=$(npx -y shieldcortex@latest audit --json 2>/dev/null || true)
+        # Run the audit through the CLI's real CI gate: --ci prints the JSON
+        # report on stdout and exits 1 when critical/high findings exist,
+        # 0 otherwise. A scanner failure also exits non-zero but produces no
+        # parseable report — that distinction drives the fail-closed handling
+        # below. stderr is left alone so scanner errors reach the job log.
+        set +e
+        npx -y shieldcortex@latest audit --ci > shieldcortex-report.json
+        AUDIT_EXIT=$?
+        set -e
 
-        # Extract grade and findings count
-        GRADE=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.grade)" 2>/dev/null || echo "?")
-        FINDINGS=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.totalFindings)" 2>/dev/null || echo "0")
-        CRITICAL=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.bySeverity.critical||0)" 2>/dev/null || echo "0")
-        HIGH=$(echo "$REPORT" | node -e "const d=require('fs').readFileSync('/dev/stdin','utf8');const r=JSON.parse(d);console.log(r.bySeverity.high||0)" 2>/dev/null || echo "0")
+        # Grade and counts only ever come from a report that parses as JSON
+        # with the expected fields — never from a fallback value.
+        if PARSED=$(node -e '
+          const r = JSON.parse(require("fs").readFileSync("shieldcortex-report.json", "utf8"));
+          const num = (v, name) => {
+            if (typeof v !== "number" || !Number.isFinite(v)) throw new Error("report missing numeric " + name);
+            return v;
+          };
+          if (typeof r.grade !== "string" || r.grade.length === 0) throw new Error("report missing grade");
+          if (typeof r.bySeverity !== "object" || r.bySeverity === null) throw new Error("report missing bySeverity");
+          console.log("grade=" + r.grade);
+          console.log("findings=" + num(r.totalFindings, "totalFindings"));
+          console.log("critical=" + num(r.bySeverity.critical, "bySeverity.critical"));
+          console.log("high=" + num(r.bySeverity.high, "bySeverity.high"));
+        '); then
+          echo "$PARSED" >> "$GITHUB_OUTPUT"
+          echo "gate=$AUDIT_EXIT" >> "$GITHUB_OUTPUT"
+          echo "scan_ok=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "report<<SHIELDCORTEX_REPORT_EOF"
+            cat shieldcortex-report.json
+            echo "SHIELDCORTEX_REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+        else
+          echo "scan_ok=false" >> "$GITHUB_OUTPUT"
+          if [ "$FAIL_ON_HIGH" = "true" ]; then
+            echo "::error::ShieldCortex audit did not produce a valid JSON report (scanner exit code: $AUDIT_EXIT) — failing closed. See the log above for scanner output."
+            exit 1
+          fi
+          echo "::warning::ShieldCortex audit did not produce a valid JSON report (scanner exit code: $AUDIT_EXIT). fail-on-high is disabled, so the job continues WITHOUT a security verdict."
+        fi
 
-        echo "grade=$GRADE" >> $GITHUB_OUTPUT
-        echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
-        echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
-        echo "high=$HIGH" >> $GITHUB_OUTPUT
-        echo "report=$REPORT" >> $GITHUB_OUTPUT
-
-        # Generate markdown for PR comment
-        MARKDOWN=$(npx -y shieldcortex@latest audit --markdown 2>/dev/null || echo "ShieldCortex scan failed")
-        echo "$MARKDOWN" >> $GITHUB_STEP_SUMMARY
+        # Markdown step summary — cosmetic, never gates the job. The CLI exits
+        # non-zero on poor grades even when output is fine, so presence of
+        # output is the success signal here, not the exit code.
+        set +e
+        MARKDOWN=$(npx -y shieldcortex@latest audit --markdown)
+        MD_EXIT=$?
+        set -e
+        if [ -n "$MARKDOWN" ]; then
+          echo "$MARKDOWN" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "::warning::ShieldCortex markdown summary generation failed (exit code: $MD_EXIT)"
+          echo "ShieldCortex scan summary unavailable — see the job log." >> "$GITHUB_STEP_SUMMARY"
+        fi
 
     - name: Generate SARIF
+      id: sarif
       if: ${{ inputs.upload-sarif == 'true' }}
       shell: bash
+      env:
+        FAIL_ON_HIGH: ${{ inputs.fail-on-high }}
       run: |
-        # Pure SARIF on stdout — write it to a file for upload.
-        npx -y shieldcortex@latest audit --sarif > shieldcortex.sarif 2>/dev/null || echo '{}' > shieldcortex.sarif
+        # --ci --sarif keeps SARIF output with CI exit semantics (exit 1 on
+        # critical/high), so a non-zero exit alongside a valid document is not
+        # a scanner failure. Never upload a fabricated/empty document.
+        set +e
+        npx -y shieldcortex@latest audit --ci --sarif > shieldcortex.sarif
+        SARIF_EXIT=$?
+        set -e
+
+        if node -e 'JSON.parse(require("fs").readFileSync("shieldcortex.sarif", "utf8"))'; then
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ "$FAIL_ON_HIGH" = "true" ]; then
+            echo "::error::ShieldCortex SARIF generation did not produce valid JSON (scanner exit code: $SARIF_EXIT) — failing closed."
+            exit 1
+          fi
+          echo "::warning::ShieldCortex SARIF generation did not produce valid JSON (scanner exit code: $SARIF_EXIT); skipping the Code Scanning upload."
+        fi
 
     - name: Upload SARIF to GitHub Code Scanning
-      if: ${{ inputs.upload-sarif == 'true' && github.repository != '' }}
+      if: ${{ inputs.upload-sarif == 'true' && github.repository != '' && steps.sarif.outputs.ok == 'true' }}
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: shieldcortex.sarif
@@ -78,12 +136,21 @@ runs:
       if: ${{ always() && inputs.fail-on-high == 'true' }}
       shell: bash
       env:
+        SCAN_OK: ${{ steps.audit.outputs.scan_ok }}
+        GATE: ${{ steps.audit.outputs.gate }}
         CRITICAL: ${{ steps.audit.outputs.critical }}
         HIGH: ${{ steps.audit.outputs.high }}
       run: |
-        # Fail the check if critical/high findings exist. Runs after SARIF
-        # upload so findings still reach the Security tab when the gate fails.
-        if [ "${CRITICAL:-0}" -gt 0 ] || [ "${HIGH:-0}" -gt 0 ]; then
-          echo "::error::ShieldCortex found ${CRITICAL:-0} critical and ${HIGH:-0} high severity findings"
+        # Runs after SARIF upload so findings still reach the Security tab when
+        # the gate fails. Fail closed: no verified report means no green check.
+        if [ "$SCAN_OK" != "true" ]; then
+          echo "::error::ShieldCortex gate: the audit did not produce a verified report — failing closed."
+          exit 1
+        fi
+        # Belt and braces: both the CLI's own --ci gate (exit 1 on critical or
+        # high findings) and the counts parsed from the verified JSON must be
+        # clean. A non-numeric count aborts this step, which also fails closed.
+        if [ "$GATE" != "0" ] || [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+          echo "::error::ShieldCortex found $CRITICAL critical and $HIGH high severity findings (audit --ci exit code: $GATE)"
           exit 1
         fi
