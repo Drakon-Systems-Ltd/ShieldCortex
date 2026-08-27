@@ -452,6 +452,48 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(absolute.message).toMatch(/sc_only enforced/);
   });
 
+  it('host contract: byte-current artifacts cannot wire the bus when npx is missing — runtime eligibility is part of the proof (SOL r4 B4)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    // Sanity: with npx resolvable (any dev/CI PATH) this is the r3 green.
+    const wired = await runHost();
+    expect(wired.status).toBe('pass');
+
+    // PATH scrubbed to an empty dir: HOOK.md requires npx and OpenClaw drops
+    // runtime-ineligible hooks at load, so the same artifact set caps at
+    // unknown — doctor cannot attest the hook would ever register.
+    const emptyBin = path.join(tmpHome, 'empty-bin');
+    fs.mkdirSync(emptyBin, { recursive: true });
+    process.env.PATH = emptyBin;
+    const scrubbed = await runHost();
+    expect(scrubbed.status).toBe('warn');
+    expect(scrubbed.message).toMatch(/SC pack delivery unknown/);
+    expect(scrubbed.fix).toMatch(/required binaries/);
+  });
+
+  it("doctor's required-bins pin matches the packaged HOOK.md requires (SOL r4 B4 drift guard)", async () => {
+    const mod = await import('../doctor.js');
+    const raw = fs.readFileSync(path.join(HOOK_SOURCE_DIR, 'HOOK.md'), 'utf-8');
+    const meta = raw.match(/^metadata:\s*\n\s*(\{.*\})\s*$/m);
+    expect(meta).not.toBeNull();
+    const parsed = JSON.parse(meta![1]) as {
+      openclaw?: { os?: unknown; always?: unknown; requires?: Record<string, unknown> };
+    };
+    // The whole requires block is pinned — a new bins/anyBins/env/config
+    // requirement (or an os restriction) added to the hook without teaching
+    // doctor must fail here, not green-wash at runtime.
+    expect(parsed.openclaw?.requires).toEqual({ bins: [...mod.OPENCLAW_HOOK_REQUIRED_BINS] });
+    expect(parsed.openclaw?.os).toBeUndefined();
+    expect(parsed.openclaw?.always).toBeUndefined();
+  });
+
   // ── T1 host runtime matrix (#393) ──
   // The live TARS shape: Hermes primary, no OpenClaw binary, contract sc_only.
   // The pre-#393 check reported PASS here ("no paper-contract signals on disk")

@@ -3732,6 +3732,60 @@ function openClawStateRoot(ocHome: string): { root: string; detail?: undefined }
 }
 
 /**
+ * Binaries the packaged HOOK.md requires (metadata.openclaw.requires.bins) —
+ * #393 SOL r4 B4. Pinned against hooks/openclaw/cortex-memory/HOOK.md by a
+ * drift-guard test, so a requirement added to the hook without teaching doctor
+ * fails CI instead of silently green-washing.
+ */
+export const OPENCLAW_HOOK_REQUIRED_BINS = ['npx'] as const;
+
+/**
+ * Mirror of OpenClaw's hasBinary (openclaw/src/shared/config-eval.ts): scan
+ * each PATH entry for an X_OK candidate, with PATHEXT extensions on Windows.
+ * No cache — doctor asks once per run.
+ */
+function openClawHasBinary(bin: string): boolean {
+  const pathEnv = process.env.PATH ?? '';
+  const parts = pathEnv.split(path.delimiter).filter(Boolean);
+  const rawExt = process.env.PATHEXT;
+  const extensions = process.platform === 'win32'
+    ? ['', ...(rawExt !== undefined ? rawExt.split(';').map((v) => v.trim()) : ['.EXE', '.CMD', '.BAT', '.COM']).filter(Boolean)]
+    : [''];
+  for (const part of parts) {
+    for (const ext of extensions) {
+      try {
+        fs.accessSync(path.join(part, bin + ext), fs.constants.X_OK);
+        return true;
+      } catch {
+        // keep scanning
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Runtime-eligibility reading for the SC hook (#393 SOL r4 B4): OpenClaw
+ * evaluates HOOK.md `requires.bins` the same way at load (shouldIncludeHook →
+ * evaluateRuntimeRequires) and silently excludes the hook when a binary is
+ * missing. Doctor checks its OWN PATH — the gateway process may run under a
+ * different one, so "missing" caps at unknown (registration unattestable)
+ * rather than proving not_wired, and "available" stays static attestation.
+ * Exported for direct unit testing.
+ */
+export function openClawRequiredBinsProbe(
+  bins: readonly string[] = OPENCLAW_HOOK_REQUIRED_BINS,
+): { kind: 'available' } | { kind: 'missing'; detail: string } {
+  const missing = bins.filter((bin) => !openClawHasBinary(bin));
+  if (missing.length === 0) return { kind: 'available' };
+  return {
+    kind: 'missing',
+    detail: `required binar${missing.length === 1 ? 'y' : 'ies'} ${missing.join(', ')} not resolvable on PATH — ` +
+      'OpenClaw excludes hooks whose HOOK.md requires.bins are unavailable, so the installed hook may never register',
+  };
+}
+
+/**
  * SC hook artifact probe (#393 SOL H1): a bare directory is not wiring. The
  * required file set and byte-currency come from the installer's own
  * authorities (HOOK_FILES / hookFilesStale in src/setup/openclaw.ts) — the
@@ -3848,6 +3902,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
         })),
         workspaceScanComplete: ocWorkspaces.complete,
         declared: declared('openclaw'),
+        requiredBins: openClawRequiredBinsProbe(),
         ...(ocUnresolvable ? { pathOverrideUnresolvable: ocUnresolvable } : {}),
       },
       ctx,

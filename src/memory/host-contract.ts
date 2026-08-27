@@ -214,6 +214,17 @@ export interface OpenClawProbe {
    * another runtime carries the box to PASS.
    */
   pathOverrideUnresolvable?: string;
+  /**
+   * Whether every binary the packaged HOOK.md `requires.bins` names resolves
+   * on doctor's PATH (#393 SOL r4 B4). OpenClaw refuses to register a hook
+   * whose required binaries are unavailable (hooks/config.ts shouldIncludeHook
+   * → evaluateRuntimeRequires), so byte-current artifacts behind an open gate
+   * still deliver nothing without them. Doctor sees ITS OWN PATH, not the
+   * gateway process's, so a missing binary caps at unknown — it cannot attest
+   * registration — rather than proving not_wired; an available binary is
+   * equally only static attestation and never upgrades the wording.
+   */
+  requiredBins: { kind: 'available' } | { kind: 'missing'; detail: string };
 }
 
 /**
@@ -442,6 +453,14 @@ export function resolveOpenClawEvidence(
         if (hookEnabled === 'unknown') {
           scBus = 'unknown';
           proof.push('openclaw.json not readable — cannot confirm the host enables internal hooks (hooks.internal.enabled) or the SC entry');
+        } else if (probe.requiredBins.kind === 'missing') {
+          // #393 SOL r4 B4: OpenClaw evaluates HOOK.md requires.bins at load
+          // (shouldIncludeHook) and silently drops the hook when a binary is
+          // missing — byte-current artifacts prove nothing past that gate.
+          scBus = 'unknown';
+          proof.push(probe.requiredBins.detail);
+          remediation = remediation
+            || `${cap.label}: make the hook's required binaries resolvable on PATH for the gateway process so registration can be attested`;
         } else {
           scBus = 'wired_proven';
         }

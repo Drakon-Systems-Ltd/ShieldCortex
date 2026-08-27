@@ -53,6 +53,7 @@ function ocProbe(over: Partial<OpenClawProbe> = {}): OpenClawProbe {
     workspaces: [ws()],
     workspaceScanComplete: true,
     declared: false,
+    requiredBins: { kind: 'available' },
     ...over,
   };
 }
@@ -237,6 +238,36 @@ describe('OpenClaw evidence', () => {
       CTX,
     );
     expect(staleBehindGate.scBus).toBe('not_wired');
+  });
+
+  it('never wires the SC bus when a required binary is missing — OpenClaw drops runtime-ineligible hooks at load (SOL r4 B4)', () => {
+    const config = {
+      kind: 'present' as const,
+      value: {
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      },
+    };
+    // The r4 false PASS: byte-current artifacts behind an open gate, but
+    // HOOK.md requires npx and OpenClaw excludes the hook when it cannot
+    // resolve (shouldIncludeHook → evaluateRuntimeRequires). Doctor checks
+    // its OWN PATH, not the gateway's, so the cap is unknown, never a
+    // positive not_wired.
+    const missing = resolveOpenClawEvidence(
+      ocProbe({
+        config,
+        scHook: 'complete',
+        requiredBins: { kind: 'missing', detail: 'required binary npx not resolvable on PATH — OpenClaw excludes hooks whose HOOK.md requires.bins are unavailable, so the installed hook may never register' },
+      }),
+      CTX,
+    );
+    expect(missing.scBus).toBe('unknown');
+    expect(missing.proof.join(' ')).toMatch(/npx/);
+    expect(missing.proof.join(' ')).toMatch(/may never register/);
+    expect(missing.remediation).toMatch(/required binaries/);
+    // Available bins change nothing about the claim's strength: still static.
+    const available = resolveOpenClawEvidence(ocProbe({ config, scHook: 'complete' }), CTX);
+    expect(available.scBus).toBe('wired_proven');
   });
 
   it('reports unknown when openclaw.json is unreadable', () => {
