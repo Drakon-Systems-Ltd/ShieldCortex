@@ -3551,6 +3551,33 @@ function normalizeOpenClawAgentId(value: unknown): string {
 }
 
 /**
+ * Mirror of OpenClaw's listAgentEntries + resolveDefaultAgentId
+ * (openclaw/src/agents/agent-scope.ts). agents.list keeps every truthy
+ * `typeof === 'object'` member — ARRAYS INCLUDED (an array's fields read as
+ * undefined, so it occupies the `main` id slot with no workspace and no
+ * default flag; the old non-array filter could make doctor elect a different
+ * default agent than the host, #393 SOL r4 B3). Default id: first entry with
+ * a truthy `default`, else the first entry, else `main`.
+ */
+function openClawAgentEntries(config: ProbeRead<Record<string, unknown>>): {
+  entries: Array<Record<string, unknown>>;
+  defaultAgentId: string;
+} {
+  if (config.kind !== 'present') return { entries: [], defaultAgentId: OPENCLAW_DEFAULT_AGENT_ID };
+  const agents = config.value.agents;
+  const list = agents && typeof agents === 'object' && !Array.isArray(agents)
+    ? (agents as Record<string, unknown>).list
+    : undefined;
+  const rawList = Array.isArray(list) ? list : [];
+  const entries = rawList.filter((e): e is Record<string, unknown> => Boolean(e && typeof e === 'object'));
+  const flagged = entries.filter((e) => e.default);
+  const defaultAgentId = entries.length === 0
+    ? OPENCLAW_DEFAULT_AGENT_ID
+    : normalizeOpenClawAgentId((flagged[0] ?? entries[0]).id);
+  return { entries, defaultAgentId };
+}
+
+/**
  * Workspace roots doctor must inspect (#393 SOL H4 + r3 B3), mirroring
  * resolveAgentWorkspaceDir in openclaw/src/agents/agent-scope.ts:
  *
@@ -3601,15 +3628,10 @@ export function openClawWorkspacePaths(
   if (config.kind === 'present') {
     const agents = asObj(config.value.agents);
     add(asObj(agents.defaults).workspace);
-    const list = Array.isArray(agents.list) ? agents.list : [];
-    const entries = list.filter((e): e is Record<string, unknown> => Boolean(e && typeof e === 'object' && !Array.isArray(e)));
     // resolveDefaultAgentId: first entry marked default (truthy), else the
     // first entry. The default agent's implicit workspace is the home default
     // pushed above, never workspace-<id>.
-    const flagged = entries.filter((e) => e.default);
-    const defaultAgentId = entries.length === 0
-      ? OPENCLAW_DEFAULT_AGENT_ID
-      : normalizeOpenClawAgentId((flagged[0] ?? entries[0]).id);
+    const { entries, defaultAgentId } = openClawAgentEntries(config);
     const seen = new Set<string>();
     for (const entry of entries) {
       const id = normalizeOpenClawAgentId(entry.id);
@@ -3632,6 +3654,146 @@ export function openClawWorkspacePaths(
     complete = false;
   }
   return { paths, complete };
+}
+
+/**
+ * The ONE workspace OpenClaw's gateway loads internal hooks from — mirror of
+ * resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg)) exactly as server
+ * startup calls it (openclaw/src/gateway/server.impl.ts →
+ * loadInternalHooks(cfg, defaultWorkspaceDir)): the default agent entry's
+ * explicit `workspace`, else `agents.defaults.workspace`, else
+ * `<effective home>/.openclaw/workspace[-<OPENCLAW_PROFILE>]`. Configured
+ * values resolve with host resolveUserPath semantics (#393 SOL r3 B6) — a
+ * value doctor cannot resolve makes the default workspace, and any hook
+ * shadowing inside it, unknowable. Exported for direct unit testing.
+ */
+export function openClawDefaultWorkspace(
+  ocHome: string,
+  config: ProbeRead<Record<string, unknown>>,
+): { path: string } | { unresolvable: string } {
+  const obj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const { entries, defaultAgentId } = openClawAgentEntries(config);
+  const entry = entries.find((e) => normalizeOpenClawAgentId(e.id) === defaultAgentId);
+  const explicit = entry && typeof entry.workspace === 'string' ? entry.workspace.trim() : '';
+  if (explicit) return resolveOpenClawUserPath(explicit, ocHome);
+  const fallback = config.kind === 'present' ? obj(obj(config.value.agents).defaults).workspace : undefined;
+  const fallbackStr = typeof fallback === 'string' ? fallback.trim() : '';
+  if (fallbackStr) return resolveOpenClawUserPath(fallbackStr, ocHome);
+  const profile = process.env.OPENCLAW_PROFILE?.trim();
+  return {
+    path: path.join(
+      ocHome,
+      '.openclaw',
+      profile && profile.toLowerCase() !== 'default' ? `workspace-${profile}` : 'workspace',
+    ),
+  };
+}
+
+/**
+ * Hook-precedence shadow probe (#393 SOL r4 B3). OpenClaw merges hook sources
+ * extra < bundled < managed < WORKSPACE (openclaw/src/hooks/workspace.ts
+ * loadHookEntries — workspace wins by hook NAME), and the gateway loads from
+ * the default agent workspace — so a workspace hook named cortex-memory
+ * silently replaces the managed handler no matter how byte-current the
+ * managed artifacts are. The name is not bound to the directory: HOOK.md
+ * frontmatter `name:` rebrands any dir, and a package.json manifest redirects
+ * hook definitions to arbitrary nested dirs. Doctor clears the workspace
+ * hooks dir only when every subdir provably CANNOT shadow cortex-memory:
+ *  - no package.json manifest (redirection is unprovable without running the
+ *    host's loader);
+ *  - a dir named cortex-memory only when byte-current with the packaged
+ *    source (an identical shadow still delivers the pack);
+ *  - any other dir only when its HOOK.md is readable, never mentions
+ *    cortex-memory, and carries no `name:` value doctor cannot evaluate
+ *    plainly (YAML quoting/escapes could smuggle the name past a text scan);
+ *    a dir with no HOOK.md and no manifest loads nothing.
+ * Anything else — differing content, unreadable evidence, cap overflow — is
+ * an unproven shadow: what actually runs is unattested, so wired_proven must
+ * not stand. Exported for direct unit testing.
+ */
+const OPENCLAW_WORKSPACE_HOOK_CAP = 50;
+export function probeOpenClawWorkspaceHookShadow(
+  workspaceDir: string,
+  hookFiles: readonly string[],
+  stale: (destDir?: string) => boolean,
+  sourceAvailable: boolean,
+): { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string } {
+  const hooksDir = path.join(workspaceDir, 'hooks');
+  const dirProbe = probePath(hooksDir);
+  if (dirProbe.kind === 'absent') return { kind: 'none' };
+  if (dirProbe.kind !== 'present') {
+    return {
+      kind: 'unproven',
+      detail: `${hooksDir} is unreadable (${dirProbe.code}) — a hook there could shadow the managed cortex-memory hook by name`,
+    };
+  }
+  // loadHooksFromDir bails on a non-directory, and skips non-directory
+  // entries (symlinked dirs included — Dirent.isDirectory() is false for
+  // symlinks, so OpenClaw never follows them here).
+  if (!dirProbe.stat.isDirectory()) return { kind: 'none' };
+  let dirents: fs.Dirent[];
+  try {
+    dirents = fs.readdirSync(hooksDir, { withFileTypes: true });
+  } catch (err: unknown) {
+    return {
+      kind: 'unproven',
+      detail: `${hooksDir} cannot be listed (${err instanceof Error ? err.message : String(err)}) — workspace hook shadowing cannot be ruled out`,
+    };
+  }
+  const subdirs = dirents.filter((d) => d.isDirectory());
+  if (subdirs.length > OPENCLAW_WORKSPACE_HOOK_CAP) {
+    return {
+      kind: 'unproven',
+      detail: `${hooksDir} holds more than ${OPENCLAW_WORKSPACE_HOOK_CAP} hook dirs — the shadow scan is incomplete, so workspace hook shadowing cannot be ruled out`,
+    };
+  }
+  let identical = false;
+  for (const d of subdirs) {
+    const sub = path.join(hooksDir, d.name);
+    if (probePath(path.join(sub, 'package.json')).kind !== 'absent') {
+      return {
+        kind: 'unproven',
+        detail: `${sub} carries a package.json manifest — OpenClaw loads redirected hook definitions from manifests, so the handler that runs as cortex-memory cannot be attested`,
+      };
+    }
+    if (d.name === 'cortex-memory') {
+      const art = probeOpenClawScHookArtifacts(sub, hookFiles, stale, sourceAvailable);
+      if (art === 'complete') {
+        identical = true;
+        continue;
+      }
+      return {
+        kind: 'unproven',
+        detail: `${sub} shadows the managed cortex-memory hook (workspace hooks win by name) and is not byte-current with the packaged source (${art}) — what actually runs cannot be proven to deliver the pack`,
+      };
+    }
+    const hookMd = readTextProbe(path.join(sub, 'HOOK.md'));
+    if (hookMd.kind === 'absent') continue;
+    if (hookMd.kind === 'unreadable') {
+      return {
+        kind: 'unproven',
+        detail: `${sub}/HOOK.md is unreadable — a frontmatter name could rebrand it as cortex-memory and shadow the managed hook`,
+      };
+    }
+    if (/cortex-memory/i.test(hookMd.value)) {
+      return {
+        kind: 'unproven',
+        detail: `${sub}/HOOK.md mentions cortex-memory — frontmatter \`name:\` rebrands a hook dir, so it may shadow the managed hook`,
+      };
+    }
+    const nameLines = hookMd.value.match(/^\s*name\s*:.*$/gm) ?? [];
+    for (const line of nameLines) {
+      const value = line.slice(line.indexOf(':') + 1).trim().replace(/^(["'])(.*)\1$/, '$2');
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value)) {
+        return {
+          kind: 'unproven',
+          detail: `${sub}/HOOK.md carries a \`name:\` value doctor cannot evaluate plainly — YAML quoting/escapes could rebrand it as cortex-memory and shadow the managed hook`,
+        };
+      }
+    }
+  }
+  return identical ? { kind: 'identical' } : { kind: 'none' };
 }
 
 /**
@@ -3876,6 +4038,22 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   const ocWorkspaces = stateRoot.root === null || ocHome === null
     ? { paths: [], complete: false }
     : openClawWorkspacePaths(ocHome, stateRoot.root, ocConfig);
+  // #393 SOL r4 B3: hook precedence — a hook in the DEFAULT agent workspace
+  // overwrites the managed cortex-memory hook by name at gateway load, so the
+  // managed artifact proof only stands when that workspace provably carries
+  // no shadow (or an identical one).
+  const ocDefaultWs = ocHome === null ? null : openClawDefaultWorkspace(ocHome, ocConfig);
+  const ocWorkspaceHookShadow = ocDefaultWs === null
+    ? {
+      kind: 'unproven' as const,
+      detail: 'OpenClaw paths are unresolvable — the default agent workspace, and any hook shadowing inside it, cannot be probed',
+    }
+    : 'unresolvable' in ocDefaultWs
+      ? {
+        kind: 'unproven' as const,
+        detail: `the default agent workspace is unresolvable (${ocDefaultWs.unresolvable}) — a workspace hook there could shadow the managed cortex-memory hook and cannot be ruled out`,
+      }
+      : probeOpenClawWorkspaceHookShadow(ocDefaultWs.path, HOOK_FILES, hookFilesStale, hookSourceAvailable());
   const runtimes: HostRuntimeEvidence[] = [
     resolveOpenClawEvidence(
       {
@@ -3903,6 +4081,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
         workspaceScanComplete: ocWorkspaces.complete,
         declared: declared('openclaw'),
         requiredBins: openClawRequiredBinsProbe(),
+        workspaceHookShadow: ocWorkspaceHookShadow,
         ...(ocUnresolvable ? { pathOverrideUnresolvable: ocUnresolvable } : {}),
       },
       ctx,

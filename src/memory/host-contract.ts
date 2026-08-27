@@ -225,6 +225,19 @@ export interface OpenClawProbe {
    * equally only static attestation and never upgrades the wording.
    */
   requiredBins: { kind: 'available' } | { kind: 'missing'; detail: string };
+  /**
+   * Shadow state of the DEFAULT agent workspace's hooks dir (#393 SOL r4 B3).
+   * OpenClaw merges hook sources with workspace hooks WINNING BY NAME
+   * (openclaw/src/hooks/workspace.ts loadHookEntries) and the gateway loads
+   * them from the default agent workspace — a workspace hook named
+   * cortex-memory silently replaces the managed handler however byte-current
+   * the managed artifacts are. 'identical' = the only shadow is a byte-current
+   * copy of the packaged set (the same pack runs either way); 'unproven' = a
+   * shadow exists or cannot be ruled out (differing content, unreadable
+   * evidence, manifest redirection, unresolvable default workspace), so the
+   * handler that actually runs is unattested and wired_proven must not stand.
+   */
+  workspaceHookShadow: { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string };
 }
 
 /**
@@ -449,22 +462,38 @@ export function resolveOpenClawEvidence(
         scBus = 'unknown';
         proof.push('packaged hook source missing from this install — the installed hook cannot be attested byte-current, so pack delivery cannot be proven');
         break;
-      default:
+      default: {
         if (hookEnabled === 'unknown') {
           scBus = 'unknown';
           proof.push('openclaw.json not readable — cannot confirm the host enables internal hooks (hooks.internal.enabled) or the SC entry');
-        } else if (probe.requiredBins.kind === 'missing') {
-          // #393 SOL r4 B4: OpenClaw evaluates HOOK.md requires.bins at load
-          // (shouldIncludeHook) and silently drops the hook when a binary is
-          // missing — byte-current artifacts prove nothing past that gate.
+          break;
+        }
+        // Even byte-current managed artifacts behind an open gate are only
+        // proof of WHAT WOULD LOAD if nothing outranks or excludes them:
+        // a default-workspace hook shadows the managed handler by name (#393
+        // SOL r4 B3), and OpenClaw drops the hook entirely when a HOOK.md
+        // required binary is missing (r4 B4, shouldIncludeHook). Either gap
+        // caps at unknown — never a positive not_wired, because doctor can
+        // prove neither the shadow's handler nor the gateway's PATH.
+        const staticGaps: string[] = [];
+        const staticFixes: string[] = [];
+        if (probe.workspaceHookShadow.kind === 'unproven') {
+          staticGaps.push(probe.workspaceHookShadow.detail);
+          staticFixes.push(`${cap.label}: remove (or byte-align with the packaged source) the default-workspace cortex-memory hook so the managed pack is what actually loads`);
+        }
+        if (probe.requiredBins.kind === 'missing') {
+          staticGaps.push(probe.requiredBins.detail);
+          staticFixes.push(`${cap.label}: make the hook's required binaries resolvable on PATH for the gateway process so registration can be attested`);
+        }
+        if (staticGaps.length > 0) {
           scBus = 'unknown';
-          proof.push(probe.requiredBins.detail);
-          remediation = remediation
-            || `${cap.label}: make the hook's required binaries resolvable on PATH for the gateway process so registration can be attested`;
+          proof.push(...staticGaps);
+          remediation = remediation || staticFixes.join(' · ');
         } else {
           scBus = 'wired_proven';
         }
         break;
+      }
     }
   }
 

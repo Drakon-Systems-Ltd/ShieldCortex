@@ -494,6 +494,155 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(parsed.openclaw?.always).toBeUndefined();
   });
 
+  it('host contract: a default-workspace hook that shadows cortex-memory defeats pristine managed artifacts (SOL r4 B3)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    const wsHooks = path.join(tmpHome, '.openclaw', 'workspace', 'hooks');
+
+    // The r4 false PASS: managed artifacts pristine, gate open — but the
+    // default workspace shadows cortex-memory with a drifted handler, and
+    // OpenClaw loads THAT one (workspace hooks win by name at merge).
+    const shadow = path.join(wsHooks, 'cortex-memory');
+    fs.mkdirSync(shadow, { recursive: true });
+    for (const f of ['HOOK.md', 'handler.ts', 'runtime.mjs']) {
+      fs.copyFileSync(path.join(HOOK_SOURCE_DIR, f), path.join(shadow, f));
+    }
+    fs.appendFileSync(path.join(shadow, 'handler.ts'), '\n// drifted shadow\n');
+    const shadowed = await runHost();
+    expect(shadowed.status).toBe('warn');
+    expect(shadowed.message).toMatch(/SC pack delivery unknown/);
+    expect(shadowed.fix).toMatch(/default-workspace cortex-memory hook/);
+
+    // A byte-identical shadow delivers the same pack — still statically wired.
+    fs.copyFileSync(path.join(HOOK_SOURCE_DIR, 'handler.ts'), path.join(shadow, 'handler.ts'));
+    const identical = await runHost();
+    expect(identical.status).toBe('pass');
+    expect(identical.message).toMatch(/runtime delivery not attested/);
+
+    // frontmatter `name:` rebrands ANY dir — a differently-named workspace
+    // hook that declares cortex-memory cannot be cleared.
+    fs.rmSync(shadow, { recursive: true, force: true });
+    const rebrand = path.join(wsHooks, 'innocent-hook');
+    fs.mkdirSync(rebrand, { recursive: true });
+    fs.writeFileSync(path.join(rebrand, 'HOOK.md'), '---\nname: cortex-memory\n---\n# not the pack\n');
+    fs.writeFileSync(path.join(rebrand, 'handler.ts'), 'export default async () => {};\n');
+    const rebranded = await runHost();
+    expect(rebranded.status).toBe('warn');
+    expect(rebranded.message).toMatch(/SC pack delivery unknown/);
+
+    // An unrelated workspace hook with a plainly different name is cleared —
+    // custom hooks must not tax the verdict.
+    fs.rmSync(rebrand, { recursive: true, force: true });
+    const other = path.join(wsHooks, 'other-hook');
+    fs.mkdirSync(other, { recursive: true });
+    fs.writeFileSync(path.join(other, 'HOOK.md'), '---\nname: other-hook\ndescription: unrelated\n---\n# other\n');
+    fs.writeFileSync(path.join(other, 'handler.ts'), 'export default async () => {};\n');
+    const cleared = await runHost();
+    expect(cleared.status).toBe('pass');
+  });
+
+  it('host contract: the shadow probe follows the CONFIGURED default workspace — exactly where the gateway loads hooks (SOL r4 B3)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    const customWs = path.join(tmpHome, 'custom-ws');
+    fs.mkdirSync(path.join(customWs, 'hooks', 'cortex-memory'), { recursive: true });
+    fs.writeFileSync(path.join(customWs, 'hooks', 'cortex-memory', 'HOOK.md'), '---\nname: cortex-memory\n---\nnot the pack\n');
+    fs.writeFileSync(path.join(customWs, 'hooks', 'cortex-memory', 'handler.ts'), 'export default async () => {};\n');
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false }, workspace: '~/custom-ws' } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    const shadowed = await runHost();
+    expect(shadowed.status).toBe('warn');
+    expect(shadowed.message).toMatch(/SC pack delivery unknown/);
+
+    // A stray cortex-memory dir in the STOCK workspace is inert once the
+    // default workspace lives elsewhere — the gateway loads hooks from ONE
+    // workspace, so precision here keeps honest installs green.
+    fs.rmSync(path.join(customWs, 'hooks'), { recursive: true, force: true });
+    const strayDir = path.join(tmpHome, '.openclaw', 'workspace', 'hooks', 'cortex-memory');
+    fs.mkdirSync(strayDir, { recursive: true });
+    fs.writeFileSync(path.join(strayDir, 'HOOK.md'), '---\nname: cortex-memory\n---\nstray\n');
+    fs.writeFileSync(path.join(strayDir, 'handler.ts'), 'export default async () => {};\n');
+    const inert = await runHost();
+    expect(inert.status).toBe('pass');
+  });
+
+  it('openClawDefaultWorkspace mirrors resolveAgentWorkspaceDir for the default agent (SOL r4 B3)', async () => {
+    const mod = await import('../doctor.js');
+    const home = tmpHome;
+    const cfg = (value: Record<string, unknown>) => ({ kind: 'present' as const, value });
+    // No config: the stock home workspace.
+    expect(mod.openClawDefaultWorkspace(home, { kind: 'absent' })).toEqual({ path: path.join(home, '.openclaw', 'workspace') });
+    // agents.defaults.workspace wins for the default agent…
+    expect(mod.openClawDefaultWorkspace(home, cfg({ agents: { defaults: { workspace: '~/ws-a' } } })))
+      .toEqual({ path: path.join(home, 'ws-a') });
+    // …but the default agent's own entry outranks it (ids normalize).
+    expect(mod.openClawDefaultWorkspace(home, cfg({
+      agents: { defaults: { workspace: '~/ws-a' }, list: [{ id: 'Main', workspace: '~/ws-b' }] },
+    }))).toEqual({ path: path.join(home, 'ws-b') });
+    // The default flag elects the entry.
+    expect(mod.openClawDefaultWorkspace(home, cfg({
+      agents: { list: [{ id: 'a' }, { id: 'B', default: true, workspace: '~/ws-c' }] },
+    }))).toEqual({ path: path.join(home, 'ws-c') });
+    // A relative configured workspace resolves against the OpenClaw process
+    // cwd — unresolvable for doctor, never guessed.
+    expect('unresolvable' in mod.openClawDefaultWorkspace(home, cfg({
+      agents: { defaults: { workspace: 'rel/ws' } },
+    }))).toBe(true);
+    // OPENCLAW_PROFILE suffixes the stock default, exactly like
+    // resolveDefaultAgentWorkspaceDir.
+    process.env.OPENCLAW_PROFILE = 'work';
+    expect(mod.openClawDefaultWorkspace(home, { kind: 'absent' })).toEqual({ path: path.join(home, '.openclaw', 'workspace-work') });
+    delete process.env.OPENCLAW_PROFILE;
+  });
+
+  it('probeOpenClawWorkspaceHookShadow: manifests, unevaluable names, and cap overflow can never be cleared (SOL r4 B3)', async () => {
+    const mod = await import('../doctor.js');
+    const files = ['HOOK.md', 'handler.ts', 'runtime.mjs'];
+    const ws = path.join(tmpHome, 'shadow-ws');
+    const mk = (rel: string, content = ''): void => {
+      const p = path.join(ws, rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, content);
+    };
+    // No hooks dir at all → nothing can shadow.
+    fs.mkdirSync(ws, { recursive: true });
+    expect(mod.probeOpenClawWorkspaceHookShadow(ws, files, () => false, true)).toEqual({ kind: 'none' });
+    // A dir with no HOOK.md and no manifest loads nothing (loadHookFromDir
+    // returns null without HOOK.md).
+    fs.mkdirSync(path.join(ws, 'hooks', 'empty-dir'), { recursive: true });
+    expect(mod.probeOpenClawWorkspaceHookShadow(ws, files, () => false, true)).toEqual({ kind: 'none' });
+    // package.json redirects hook definitions — unprovable without the loader.
+    mk('hooks/pkg-hook/package.json', '{}');
+    const viaManifest = mod.probeOpenClawWorkspaceHookShadow(ws, files, () => false, true);
+    expect(viaManifest.kind).toBe('unproven');
+    expect((viaManifest as { detail: string }).detail).toMatch(/package\.json/);
+    fs.rmSync(path.join(ws, 'hooks', 'pkg-hook'), { recursive: true, force: true });
+    // A `name:` doctor cannot evaluate plainly (YAML escapes could spell
+    // cortex-memory without the literal appearing) is never cleared.
+    mk('hooks/sneaky/HOOK.md', '---\nname: "cortex-memor\\x79"\n---\nhi\n');
+    mk('hooks/sneaky/handler.ts', 'export default 1;\n');
+    const sneaky = mod.probeOpenClawWorkspaceHookShadow(ws, files, () => false, true);
+    expect(sneaky.kind).toBe('unproven');
+    fs.rmSync(path.join(ws, 'hooks', 'sneaky'), { recursive: true, force: true });
+    // More hook dirs than the scan bounds — incomplete, never silently cleared.
+    for (let i = 0; i < 51; i++) fs.mkdirSync(path.join(ws, 'hooks', `h-${i}`), { recursive: true });
+    const overflow = mod.probeOpenClawWorkspaceHookShadow(ws, files, () => false, true);
+    expect(overflow.kind).toBe('unproven');
+    expect((overflow as { detail: string }).detail).toMatch(/incomplete/);
+  });
+
   // ── T1 host runtime matrix (#393) ──
   // The live TARS shape: Hermes primary, no OpenClaw binary, contract sc_only.
   // The pre-#393 check reported PASS here ("no paper-contract signals on disk")

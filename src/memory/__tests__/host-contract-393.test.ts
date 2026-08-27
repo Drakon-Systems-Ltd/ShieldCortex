@@ -54,6 +54,7 @@ function ocProbe(over: Partial<OpenClawProbe> = {}): OpenClawProbe {
     workspaceScanComplete: true,
     declared: false,
     requiredBins: { kind: 'available' },
+    workspaceHookShadow: { kind: 'none' },
     ...over,
   };
 }
@@ -268,6 +269,49 @@ describe('OpenClaw evidence', () => {
     // Available bins change nothing about the claim's strength: still static.
     const available = resolveOpenClawEvidence(ocProbe({ config, scHook: 'complete' }), CTX);
     expect(available.scBus).toBe('wired_proven');
+  });
+
+  it('never wires the SC bus past an unproven default-workspace hook shadow — workspace hooks overwrite managed hooks by name (SOL r4 B3)', () => {
+    const config = {
+      kind: 'present' as const,
+      value: {
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      },
+    };
+    // The r4 false PASS: pristine managed artifacts + open gate, but a
+    // default-workspace hook shadows cortex-memory with a handler doctor
+    // cannot attest — what actually runs is unproven, so unknown, not PASS.
+    const shadowed = resolveOpenClawEvidence(
+      ocProbe({
+        config,
+        scHook: 'complete',
+        workspaceHookShadow: { kind: 'unproven', detail: '~/.openclaw/workspace/hooks/cortex-memory shadows the managed cortex-memory hook (workspace hooks win by name) and is not byte-current with the packaged source (stale)' },
+      }),
+      CTX,
+    );
+    expect(shadowed.scBus).toBe('unknown');
+    expect(shadowed.proof.join(' ')).toMatch(/shadows the managed cortex-memory hook/);
+    expect(shadowed.remediation).toMatch(/default-workspace cortex-memory hook/);
+    // A byte-identical shadow is the same pack either way.
+    const identical = resolveOpenClawEvidence(
+      ocProbe({ config, scHook: 'complete', workspaceHookShadow: { kind: 'identical' } }),
+      CTX,
+    );
+    expect(identical.scBus).toBe('wired_proven');
+    // Shadow + missing bins: both gaps surface, still unknown.
+    const both = resolveOpenClawEvidence(
+      ocProbe({
+        config,
+        scHook: 'complete',
+        workspaceHookShadow: { kind: 'unproven', detail: 'shadow unproven' },
+        requiredBins: { kind: 'missing', detail: 'npx not resolvable' },
+      }),
+      CTX,
+    );
+    expect(both.scBus).toBe('unknown');
+    expect(both.proof.join(' ')).toMatch(/shadow unproven/);
+    expect(both.proof.join(' ')).toMatch(/npx not resolvable/);
   });
 
   it('reports unknown when openclaw.json is unreadable', () => {
