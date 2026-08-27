@@ -12,17 +12,23 @@
  * state, and offers a single surgical clean-up pass.
  *
  * Scope: read/write of JSON config files + directory removal under the user's
- * home directory. No network, no sudo, no shell invocation.
+ * home directory. No network, no sudo escalation. Subprocesses are limited to
+ * an argv-array `getent` lookup (sudo-home resolution) and the fixed
+ * gateway-restart command from gateway-restart-command.ts.
  */
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { gatewayRestartCommand } from './gateway-restart-command.js';
 
 const PLUGIN_ID = 'shieldcortex-realtime';
 const HOOK_NAME = 'cortex-memory';
+
+/** Same conservative shape as openclaw.ts's SAFE_USERNAME (#429): SUDO_USER
+ *  is environment-controlled, so anything outside it is ignored, not looked up. */
+const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 
 /**
  * Resolve the real user's home directory (mirrors openclaw.ts behaviour so the
@@ -30,9 +36,9 @@ const HOOK_NAME = 'cortex-memory';
  */
 function resolveHome(): string {
   const sudoUser = process.env.SUDO_USER;
-  if (sudoUser) {
+  if (sudoUser && SAFE_USERNAME.test(sudoUser)) {
     try {
-      const entry = execSync(`getent passwd ${sudoUser}`, {
+      const entry = execFileSync('getent', ['passwd', sudoUser], {
         encoding: 'utf-8',
         timeout: 5000,
       }).trim();
