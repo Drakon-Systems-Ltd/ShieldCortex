@@ -289,12 +289,15 @@ describe('OpenClaw evidence', () => {
     );
     expect(dualLower.nativeBus).toBe('on');
     expect(dualLower.proof.join(' ')).toMatch(/memory\.md written within 7d/);
-    // A quiet stale file is not a live brain — off-proof survives it.
+    // SOL r3 B2: OpenClaw loads bootstrap files on PRESENCE (fs.access, no
+    // mtime/size gate) — a quiet stale file is STILL injected every session,
+    // so off-proof must not survive it.
     const stale = resolveOpenClawEvidence(
       ocProbe({ config: off, workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/memory.md', 40, 2048)] })] }),
       CTX,
     );
-    expect(stale.nativeBus).toBe('off_proven');
+    expect(stale.nativeBus).toBe('on');
+    expect(stale.proof.join(' ')).toMatch(/PRESENCE/);
     // Unreadable bootstrap evidence caps the proof at unknown under any plane.
     const unreadable = resolveOpenClawEvidence(
       ocProbe({
@@ -304,6 +307,32 @@ describe('OpenClaw evidence', () => {
       CTX,
     );
     expect(unreadable.nativeBus).toBe('unknown');
+  });
+
+  it('turns native ON from ANY non-empty bootstrap file regardless of age or size — presence is the load trigger (SOL r3 B2)', () => {
+    const off = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
+    // The exact r3 false PASS: 8 days old and 40 bytes defeats BOTH old gates
+    // (7d recency, 64B floor) while OpenClaw still bootstraps it every session.
+    const smallStale = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/MEMORY.md', 8, 40)] })] }),
+      CTX,
+    );
+    expect(smallStale.nativeBus).toBe('on');
+    expect(smallStale.proof.join(' ')).toMatch(/present but not written in 7d/);
+    expect(smallStale.remediation).toMatch(/archive\/remove/);
+    // A fresh tiny file is equally ON.
+    const smallFresh = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/memory.md', 1, 8)] })] }),
+      { ...CTX, contract: 'disable_native_inject' },
+    );
+    expect(smallFresh.nativeBus).toBe('on');
+    // A zero-byte file bootstraps nothing — the only presence that may still
+    // prove off.
+    const empty = resolveOpenClawEvidence(
+      ocProbe({ config: off, workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/MEMORY.md', 1, 0)] })] }),
+      CTX,
+    );
+    expect(empty.nativeBus).toBe('off_proven');
   });
 
   it('inspects configured custom and per-agent workspaces, not just the stock one (SOL H4)', () => {

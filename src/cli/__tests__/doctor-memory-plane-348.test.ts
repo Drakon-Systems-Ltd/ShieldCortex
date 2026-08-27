@@ -628,6 +628,31 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/bootstraps workspace memory files/);
   });
 
+  it('host contract fails a stale workspace bootstrap file — OpenClaw loads it on presence, so age proves nothing (SOL r3 B2)', async () => {
+    // The r3 false PASS: an otherwise fully green box (memorySearch off, gate
+    // open, byte-current hook) with an 8-day-old MEMORY.md certified PASS
+    // while OpenClaw bootstrapped that file into every normal session.
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    const ws = path.join(tmpHome, '.openclaw', 'workspace');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(ws, 'MEMORY.md'), '# quiet brain\n');
+    const old = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(path.join(ws, 'MEMORY.md'), old, old);
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/present but not written in 7d/);
+    expect(r.message).toMatch(/PRESENCE/);
+    expect(r.fix).toMatch(/archive\/remove/);
+  });
+
   it('host contract: a profile-only Hermes tree binds and is judged — it cannot ride another runtime to PASS (SOL r2 B2)', async () => {
     // Green OpenClaw everywhere; the ONLY Hermes evidence is a live profile
     // config. Root config.yaml, SC plugin, and declaration all absent.

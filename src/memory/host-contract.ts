@@ -339,20 +339,25 @@ export function resolveOpenClawEvidence(
         unreadableEvidence.push(`${shortPath(ws.path)}/AGENTS.md (${ws.agentsMd.detail})`);
       }
     }
-    // #393 SOL r2 B1: OpenClaw bootstraps MEMORY.md / memory.md into session
-    // context natively, regardless of AGENTS.md wording and regardless of
-    // plane — a live one IS native automatic memory on the bus under
-    // dual_legacy just as under the canonical planes. AGENTS.md wording is
-    // corroboration, never a precondition.
+    // #393 SOL r2 B1 + r3 B2: OpenClaw bootstraps MEMORY.md / memory.md into
+    // session context on PRESENCE alone — resolveMemoryBootstrapEntries in
+    // openclaw/src/agents/workspace.ts discovers them with fs.access and loads
+    // them with no mtime or size threshold. Any non-empty file is therefore
+    // native automatic memory on the bus, on every plane and under both
+    // contracts; the old 7d/64B gate let an eight-day-old or short brain PASS
+    // while still injected every session. Recency is corroboration in the
+    // proof text, never a precondition; AGENTS.md wording likewise.
     for (const md of ws.memoryFiles) {
       if (md.kind === 'present') {
-        if (md.size > 64 && md.mtimeMs >= ctx.nowMs - WEEK_MS) {
+        if (md.size > 0) {
           nativeBus = 'on';
           proof.push(
-            `${shortPath(md.path)} written within 7d (${md.size}B) — OpenClaw bootstraps workspace memory files into session context natively`,
+            md.mtimeMs >= ctx.nowMs - WEEK_MS
+              ? `${shortPath(md.path)} written within 7d (${md.size}B) — OpenClaw bootstraps workspace memory files into session context on presence`
+              : `${shortPath(md.path)} present but not written in 7d (${md.size}B) — OpenClaw bootstraps workspace memory files into session context on PRESENCE, so a quiet file is still the session brain`,
           );
           remediation = remediation
-            || `${cap.label}: a live workspace memory file is still the session brain — archive it or import via the defended path`;
+            || `${cap.label}: a workspace memory file is still bootstrapped as the session brain — archive/remove it, or import via the defended path`;
         }
       } else if (md.kind === 'unreadable') {
         unreadableEvidence.push(`${shortPath(md.path)} (${md.detail})`);
