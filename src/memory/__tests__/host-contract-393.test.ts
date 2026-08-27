@@ -355,6 +355,26 @@ describe('OpenClaw evidence', () => {
     expect(perAgentMemory.nativeBus).toBe('on');
   });
 
+  it('caps every reading at unknown when a path override is unresolvable — OpenClaw must never vanish from the verdict (SOL r3 B6)', () => {
+    // Even alongside readings that would otherwise prove off-and-wired, an
+    // unresolvable OPENCLAW_STATE_DIR means those readings came from a
+    // guessed tree.
+    const e = resolveOpenClawEvidence(
+      ocProbe({
+        config: { kind: 'present', value: { agents: { defaults: { memorySearch: { enabled: false } } } } },
+        scHook: 'complete',
+        pathOverrideUnresolvable: 'OPENCLAW_STATE_DIR="oc-state" is unresolvable: a relative path resolves against the OpenClaw process cwd, which doctor cannot know',
+      }),
+      CTX,
+    );
+    expect(e.bound).toBe(true);
+    expect(e.nativeBus).toBe('unknown');
+    expect(e.scBus).toBe('unknown');
+    expect(e.proof.join(' ')).toMatch(/OPENCLAW_STATE_DIR/);
+    expect(e.proof.join(' ')).toMatch(/guessed tree/);
+    expect(e.remediation).toMatch(/absolute path/);
+  });
+
   it('demotes off_proven to unknown on unreadable workspace evidence — never PASS past a file it could not read', () => {
     const off = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
     const unreadableAgents = resolveOpenClawEvidence(

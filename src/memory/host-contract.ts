@@ -204,6 +204,16 @@ export interface OpenClawProbe {
   /** False when configured workspaces could not all be enumerated. */
   workspaceScanComplete: boolean;
   declared: boolean;
+  /**
+   * Set when OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH (or CLAWDBOT_*) carry a
+   * value doctor cannot resolve with the host's resolveUserPath semantics —
+   * relative or `~user` paths resolve against the OpenClaw PROCESS cwd (#393
+   * SOL r3 B6). Every OpenClaw reading is then a guess: the runtime stays
+   * bound (the override is itself evidence OpenClaw is configured here) and
+   * both buses cap at unknown, so it can never vanish from the verdict while
+   * another runtime carries the box to PASS.
+   */
+  pathOverrideUnresolvable?: string;
 }
 
 /**
@@ -246,6 +256,25 @@ export function resolveOpenClawEvidence(
   ctx: { contract: string; plane: string; nowMs: number },
 ): HostRuntimeEvidence {
   const cap = RUNTIME_CAPABILITY.openclaw;
+
+  // #393 SOL r3 B6: an unresolvable path override outranks every other
+  // reading — whatever was probed (or skipped) may be the wrong tree, so no
+  // reading below could be trusted anyway.
+  if (probe.pathOverrideUnresolvable) {
+    const boundSignals = ['OpenClaw path override set but unresolvable'];
+    if (probe.scAutoMemory) boundSignals.push('openclawAutoMemory=true');
+    if (probe.declared) boundSignals.push('declared in memory.hostContract.runtimes');
+    return {
+      runtime: 'openclaw',
+      bound: true,
+      boundReason: boundSignals.join(', '),
+      nativeBus: 'unknown',
+      scBus: 'unknown',
+      proof: [`${probe.pathOverrideUnresolvable} — doctor refuses to probe a guessed tree, so no OpenClaw reading can be proven`],
+      remediation: `${cap.label}: point the override at an absolute path (or ~/…) so doctor can probe the same tree OpenClaw resolves`,
+    };
+  }
+
   const proof: string[] = [];
   const boundSignals: string[] = [];
   if (probe.config.kind === 'present') boundSignals.push('openclaw.json present');

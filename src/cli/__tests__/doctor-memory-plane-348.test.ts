@@ -169,8 +169,8 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
   // copied byte-identical from the packaged source so hookFilesStale agrees.
   // Jest runs from the repo root, so cwd-relative reaches the packaged source.
   const HOOK_SOURCE_DIR = path.resolve('hooks', 'openclaw', 'cortex-memory');
-  function installRealHookArtifacts(): void {
-    const dest = path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory');
+  function installRealHookArtifacts(stateRoot = path.join(tmpHome, '.openclaw')): void {
+    const dest = path.join(stateRoot, 'hooks', 'cortex-memory');
     fs.mkdirSync(dest, { recursive: true });
     for (const f of ['HOOK.md', 'handler.ts', 'runtime.mjs']) {
       fs.copyFileSync(path.join(HOOK_SOURCE_DIR, f), path.join(dest, f));
@@ -305,6 +305,97 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const brainy = await runHost();
     expect(brainy.status).toBe('fail');
     expect(brainy.message).toMatch(/memory\.md written within 7d/);
+  });
+
+  it('host contract expands ~ in OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH the way resolveUserPath does (SOL r3 B6)', async () => {
+    // The r3 defect: "~/oc-alt" was probed as a LITERAL relative path, so the
+    // real tree under $HOME/oc-alt vanished and its readings with it.
+    writeConfig(busContract());
+    const altRoot = path.join(tmpHome, 'oc-alt');
+    installRealHookArtifacts(altRoot);
+    fs.writeFileSync(
+      path.join(altRoot, 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    process.env.OPENCLAW_STATE_DIR = '~/oc-alt';
+    const viaTilde = await runHost();
+    expect(viaTilde.status).toBe('pass');
+    expect(viaTilde.message).toMatch(/sc_only enforced/);
+
+    // A live brain under the tilde root must equally be found.
+    const ws = path.join(altRoot, 'workspace');
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(path.join(ws, 'MEMORY.md'), '# alt brain\n'.repeat(5));
+    const brainy = await runHost();
+    expect(brainy.status).toBe('fail');
+    expect(brainy.message).toMatch(/MEMORY\.md written within 7d/);
+
+    // OPENCLAW_CONFIG_PATH expands the same way — a tilde config that leaves
+    // Memory Search default-ON must be read and failed.
+    delete process.env.OPENCLAW_STATE_DIR;
+    fs.writeFileSync(path.join(tmpHome, 'oc.json'), JSON.stringify({ agents: { defaults: {} } }, null, 2));
+    process.env.OPENCLAW_CONFIG_PATH = '~/oc.json';
+    const viaConfig = await runHost();
+    expect(viaConfig.status).toBe('fail');
+    expect(viaConfig.message).toMatch(/default-ON/);
+  });
+
+  it('host contract treats relative or ~user path overrides as unresolvable — OpenClaw cannot vanish while another runtime carries the PASS (SOL r3 B6)', async () => {
+    // Fully green Claude Code, so the old behavior (relative override probed
+    // against the DOCTOR cwd, found nothing, OpenClaw unbound) certified an
+    // overall PASS on the back of the other runtime.
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    process.env.OPENCLAW_STATE_DIR = 'oc-state';
+    const relative = await runHost();
+    expect(relative.status).toBe('warn');
+    expect(relative.message).toMatch(/cannot determine/);
+    expect(relative.message).toMatch(/OPENCLAW_STATE_DIR/);
+    expect(relative.message).toMatch(/cannot know/);
+    expect(relative.fix).toMatch(/absolute path/);
+
+    // ~user is NOT expanded by the host (expandHomePrefix rewrites only the
+    // bare ~ prefix) — it resolves against OpenClaw's cwd and is equally
+    // unresolvable for doctor.
+    process.env.OPENCLAW_STATE_DIR = '~ubuntu/.openclaw';
+    const tildeUser = await runHost();
+    expect(tildeUser.status).toBe('warn');
+    expect(tildeUser.message).toMatch(/~user/);
+
+    // Same law for the config-path override.
+    delete process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_CONFIG_PATH = 'configs/openclaw.json';
+    const relConfig = await runHost();
+    expect(relConfig.status).toBe('warn');
+    expect(relConfig.message).toMatch(/OPENCLAW_CONFIG_PATH/);
+  });
+
+  it('host contract marks an explicit relative agent workspace as an incomplete enumeration, never probing the doctor cwd (SOL r3 B6)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: {
+          defaults: { memorySearch: { enabled: false } },
+          list: [{ id: 'main', default: true }, { id: 'case', workspace: 'agents/case-ws' }],
+        },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    const r = await runHost();
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/could not all be enumerated/);
   });
 
   // ── T1 host runtime matrix (#393) ──
