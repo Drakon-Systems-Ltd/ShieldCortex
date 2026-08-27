@@ -4,7 +4,7 @@
  * Handles version checking, updates, and server restart functionality.
  */
 
-import { execSync, exec } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -115,7 +115,7 @@ export async function checkForUpdates(forceRefresh = false): Promise<VersionInfo
 
   // Query npm registry
   try {
-    const result = execSync('npm view shieldcortex version', {
+    const result = execFileSync('npm', ['view', 'shieldcortex', 'version'], {
       encoding: 'utf-8',
       timeout: 10000, // 10 second timeout
     }).trim();
@@ -155,8 +155,9 @@ export function performUpdate(): Promise<UpdateResult> {
   const previousVersion = STARTUP_VERSION;
 
   return new Promise(resolve => {
-    exec(
-      'npm update -g shieldcortex',
+    execFile(
+      'npm',
+      ['update', '-g', 'shieldcortex'],
       {
         timeout: 120000, // 2 minute timeout
       },
@@ -217,8 +218,12 @@ export function performUpdate(): Promise<UpdateResult> {
 export function restartMcpServers(): number {
   let killed = 0;
   try {
-    const output = execSync(
-      'pgrep -f "shieldcortex" 2>/dev/null || true',
+    // pgrep exits non-zero when nothing matches; execFileSync then throws
+    // and the outer catch returns 0 — same "nothing to restart" semantics
+    // the old shell `|| true` provided, without spawning a shell.
+    const output = execFileSync(
+      'pgrep',
+      ['-f', 'shieldcortex'],
       { encoding: 'utf-8', timeout: 5000 },
     ).trim();
 

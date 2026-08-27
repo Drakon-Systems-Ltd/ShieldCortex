@@ -33,9 +33,13 @@ permissions:
   justification: >
     Filesystem read: scans agent instruction files for prompt injection threats
     (same files the agent already reads). Filesystem write: stores memory DB
-    and config in ~/.shieldcortex/. Network: off by default, only used when
-    Cloud sync is explicitly enabled by the user. Credentials: optional Cloud
-    API key for team sync (not required for local use).
+    and config in ~/.shieldcortex/. Network: local-first — outbound only for
+    the embedding-model download when it is not cached (huggingface.co;
+    disable with SHIELDCORTEX_SKIP_EMBEDDINGS=1), Cloud sync (opt-in),
+    licence-key validation when a key is activated, explicit update
+    checks/updates and X-Ray package lookups (npm registry), URLs you ask
+    `env scan` to fetch, and webhooks you configure. Credentials: optional
+    Cloud API key for team sync (not required for local use).
   paths_read:
     - ~/.shieldcortex/ (own config and memory database)
     - ~/.claude/ (project memory files, MCP config)
@@ -50,10 +54,15 @@ permissions:
     - $CWD/.env (env-scanner checks for leaked secrets — reads, never writes)
   paths_write:
     - ~/.shieldcortex/ (memory DB, config, cortex log, licence, audit cache)
+    - ~/.cache/shieldcortex/models (embedding model download cache)
     - ~/.openclaw/extensions/shieldcortex-realtime/ (OpenClaw plugin via the wrapper install only; native `openclaw plugins install` uses OpenClaw's managed npm tree instead)
     - ~/.claude/mcp.json, ~/.cursor/mcp.json (MCP server registration, when user runs setup)
   network_endpoints:
-    - https://api.shieldcortex.ai (Cloud sync, licence validation — only when Cloud is enabled by user)
+    - https://api.shieldcortex.ai (Cloud sync + audit telemetry — only when Cloud sync is enabled; licence validation — only when a licence key is activated, fired at CLI `license activate` and the dashboard's activation call (POST /api/license/activate), with no periodic or background re-check; sends the subscription id, works with Cloud sync off; never called when no key is configured)
+    - https://huggingface.co (embedding-model download — Xenova/all-MiniLM-L6-v2, ~90 MB, fetched into ~/.cache/shieldcortex/models by the MCP server's background preload at startup or the first operation needing an embedding, whenever the model is not already cached, plus one re-download if a cached copy is detected corrupt; SHIELDCORTEX_SKIP_EMBEDDINGS=1 prevents it. The optional Local AI Explainer model downloads from the same host only on explicit, consent-prompted `review-copilot enable`/`download-model` — its review runs use the local cache only)
+    - https://registry.npmjs.org (three paths — explicit update actions via npm subprocess, dashboard "Check for updates"/"Update" or `shieldcortex update`; X-Ray package inspection, `shieldcortex xray <package>` or the dashboard X-Ray page, which queries package metadata directly over HTTPS and with `--deep` also downloads the package tarball from whatever URL that metadata names — normally registry.npmjs.org, size- and redirect-capped, but with no separate host allowlist; and the OpenClaw hook's `npx -y shieldcortex` fallback, which downloads the package on first use when ShieldCortex is not installed locally)
+    - User-configured webhook URLs (two POST paths — memory-event notifications to webhooks you add to ~/.shieldcortex/config.json, and Iron Dome operator-notify messages for action-guard holds/denies to the `actionGuard.notify` webhook you configure; both off until you configure them)
+    - The URL you pass to `shieldcortex env scan <url>` (fetched once for analysis)
     - http://localhost:3001 (local REST API + WebSocket — loopback only)
     - http://localhost:3030 (local dashboard UI; also the worker health check — loopback only)
   env:
@@ -83,7 +92,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 | **Downloads** | 11,000+/month (July 2026) |
 | **CI/CD** | CI lint/test on every push; the maintainer manually tags each release, and the tag push triggers an automated CI publish to npm |
 | **Postinstall script** | Declared and bounded: prints setup instructions; on **global** installs it also smoke-tests the native SQLite binding, seeds default config on first install, and refreshes an OpenClaw hook/plugin that a previous setup already installed. It never adds integrations to a machine that had none, and it is a no-op for CI and local dependency installs. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` skips the refresh. |
-| **Dependencies** | 8 runtime deps: `better-sqlite3`, `zod`, `@modelcontextprotocol/sdk`, `express`, `ws`, `cors`, `safe-regex2`, `semver`. `express`/`ws`/`cors` serve the bundled localhost-only dashboard/API; nothing dials out unless Cloud sync is explicitly enabled. |
+| **Dependencies** | 8 runtime deps: `better-sqlite3`, `zod`, `@modelcontextprotocol/sdk`, `express`, `ws`, `cors`, `safe-regex2`, `semver`. `express`/`ws`/`cors` serve the bundled localhost-only dashboard/API. One optional dep, `@huggingface/transformers`, runs the local embedding model and fetches it from huggingface.co when it is not cached (see `network_endpoints`). Nothing else dials out except the cases listed under `network_endpoints` (Cloud sync opt-in, licence-key validation, update checks, X-Ray package lookups, env-scan URLs, configured webhooks). |
 
 ## Safety & Scope
 
@@ -96,8 +105,9 @@ This section explains every privileged operation the tool performs and why.
 - **The bundled dashboard never renders RESTRICTED content.** The local visualization API and its WebSocket feed redact credential-class (`RESTRICTED`) memory content before it reaches the browser — the row stays visible (title/metadata) so you can manage it, but the secret is withheld (view full content via the CLI). Credential patterns in titles/metadata are masked too. This is a display-surface safeguard on top of the on-disk store; it does not weaken the firewall.
 - **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync is opt-in and requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
 - **File access is declared and scoped.** Security scans read agent config directories listed in the permissions block above — the same directories the agent itself already has access to. They do not traverse arbitrary directories.
-- **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.
-- **Network is off by default.** No outbound connections unless Cloud sync is explicitly enabled by the user. The dashboard and worker bind to localhost only.
+- **Writes are contained.** All data goes to `~/.shieldcortex/` (plus the embedding-model cache at `~/.cache/shieldcortex/models`). MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.
+- **First-use model download (huggingface.co).** Semantic memory runs a local embedding model (Xenova/all-MiniLM-L6-v2, ~90 MB ONNX) that is **not bundled** with the package. Whenever it is missing from `~/.cache/shieldcortex/models`, the MCP server downloads it from huggingface.co — triggered by the background preload at server start, or by the first operation that needs an embedding, plus a single re-download if a cached copy is detected corrupt. This is the one network call that is not user-initiated. Avoid it with `SHIELDCORTEX_SKIP_EMBEDDINGS=1` (memory falls back to full-text search) or by pre-seeding the model cache. The optional Local AI Explainer (`review-copilot`) downloads its model from the same host only on an explicit, consent-prompted `enable`/`download-model` command; its review runs never fetch remotely.
+- **Network is off by default, with the first-run exception above.** With no licence key activated, no Cloud sync enabled, and no webhooks configured, ShieldCortex's only outbound connections are the embedding-model download just described (fires on server start when the model is not cached) and one further caveat: the OpenClaw hook's `npx -y shieldcortex` fallback downloads the package on first use when ShieldCortex is not installed locally — see `network_endpoints`. Every other entry in `network_endpoints` is user-initiated: Cloud sync (opt-in), licence-key validation when you activate a key (at CLI or dashboard activation only, no background re-check — works even with Cloud sync off), npm-registry update checks/updates (dashboard buttons or `shieldcortex update`), X-Ray package lookups (`shieldcortex xray` or the dashboard X-Ray page, tarball download with `--deep`), URLs you pass to `env scan`, and webhooks you configure (memory events and Iron Dome operator notifications). The dashboard binds to localhost by default but may be explicitly exposed with `SHIELDCORTEX_HOST`; when exposed, the loopback session-token endpoint stays disabled. The worker binds to localhost.
 - **Bundled source code.** The OpenClaw plugin and cortex-memory handler are shipped in the package for inspection before use.
 - **Lifecycle event handlers.** ShieldCortex registers lifecycle handlers that auto-extract important context from conversations. These are registered in `~/.claude/settings.json` during setup and can be removed at any time. They run locally, never phone home.
 - **Proactive recall.** The UserPromptSubmit handler queries local memory on each prompt (<100ms) and surfaces relevant context. Fully local, configurable: `shieldcortex config --proactive-recall false`.
@@ -153,7 +163,7 @@ disables the self-heal entirely, since it only runs inside the hook.
 
 ## Data handling, privacy & consent
 
-ShieldCortex is **local-first**: memory, scanning, and audit run entirely on your machine — no account, no network, no telemetry by default. Because the tool can auto-capture conversation content, here is exactly what it reads, stores, and (only if you opt in) transmits.
+ShieldCortex is **local-first**: memory, scanning, and audit run entirely on your machine — no account, no telemetry by default, and no network use beyond fetching the embedding model on first use when it is not cached (see **First-use model download** above). Because the tool can auto-capture conversation content, here is exactly what it reads, stores, and (only if you opt in) transmits.
 
 - **What it reads.** With the lifecycle handlers enabled (opt-in at setup), ShieldCortex reads your agent **session transcripts — both your prompts and the assistant's replies** — to auto-extract memorable context. PreCompact (before context compaction) reads the recent transcript; the SessionEnd and Stop handlers are **off by default**; the OpenClaw integration extracts from assistant output and explicit keyword triggers. SessionStart does **not** read transcripts (it only loads existing local memory and scans project rule files).
 - **What it stores, and for how long.** Saved and auto-extracted memories are written to a **local SQLite database at `~/.shieldcortex/memories.db`** — title and content verbatim — and **persist across sessions** until you remove them (decay/consolidation prune low-value entries over time). Nothing is stored remotely unless you enable Cloud sync. Delete a memory with the `forget` tool, or remove the database to wipe everything.
@@ -171,9 +181,10 @@ ShieldCortex is **local-first**: memory, scanning, and audit run entirely on you
 ## What it does NOT do
 
 - Does **not** read SSH keys, AWS credentials, GPG keys, or /etc/ files
-- Does **not** send data to external servers (unless Cloud sync is explicitly enabled)
+- Does **not** send your data to external servers, with three narrow, user-initiated exceptions: Cloud sync when you enable it, the subscription id sent to the licence endpoint when you activate a licence key, and event payloads to webhooks you configure (memory-event and Iron Dome operator notifications). Its remaining outbound calls are downloads/fetches that carry only the request itself — never memory or conversation content: npm-registry update checks and X-Ray package lookups (the package name appears in the URL), the huggingface.co embedding-model download, and URLs you explicitly pass to `env scan`
 - Does **not** modify .bashrc, .zshrc, .profile, or shell configs
-- Does **not** use eval(), child_process.exec(), or dynamic code execution
+- Does **not** use `eval` or dynamic code execution of any kind
+- Does **not** build subprocess commands from agent, memory, or network content. The update flow and the OpenClaw MCP bridge never spawn a shell — argv-array `execFile`/`spawn` only (`npm view` update check, `npm update`/`npm install`, `pgrep`, `npx mcporter`). The dashboard X-Ray surface adds two more argv-array, local-only children: `osascript` with fixed script lines (macOS folder picker) and ShieldCortex's own Node binary re-spawned for `xray --watch` background scans (hook and server helpers re-spawn `process.execPath` the same way, always with fixed local script paths). Sudo-aware home resolution validates the username, then runs `getent passwd <user>` as an argv-array — never through a shell, no tilde-eval. User-run CLI commands (setup, service, migrate, uninstall, audit, doctor, the npx-staleness warning) and corrupt-database recovery run fixed local admin tools (`npm`, `launchctl`, `systemctl`, `sqlite3`), some through a shell, parameterised only by local paths and usernames
 - Does **not** bypass, disable, or override any agent safety mechanisms
 - Does **not** auto-approve actions or skip verification prompts
 - Does **not** mine cryptocurrency, trade tokens, manage wallets, or initiate purchases
@@ -278,7 +289,7 @@ Cloud sync is **off by default**. Audit metadata sync is included on the cloud f
 - **Uploaded when Cloud sync is enabled by the user:** selected memory records, related embeddings/metadata, and knowledge-graph entities/relationships required for sync.
 - **Not uploaded by default:** local agent configs, MCP configs, raw rules files, shell configs, SSH keys, secrets, `.env` contents, or arbitrary project files.
 - **Security scan results stay local** unless the user explicitly exports or syncs data through a Cloud-enabled workflow.
-- **No cloud traffic at all** occurs unless the user explicitly enables Cloud sync and provides a valid API key.
+- **No sync traffic** occurs unless the user explicitly enables Cloud sync and provides a valid API key. Outside sync, the only api.shieldcortex.ai call is licence-key validation when a key is activated (subscription id only, never memory content) — see `network_endpoints`.
 
 ## Licence Tiers
 

@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execSync, spawnSync } from 'child_process';
+import { execFileSync, execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
 import {
@@ -86,6 +86,15 @@ export function isDockerEnvironment(): boolean {
 }
 
 /**
+ * A conservative POSIX-portable username. SUDO_USER is environment-controlled
+ * and, in some sudo setups, attacker-influenceable — anything outside this
+ * shape is ignored entirely rather than looked up (#429). Also excludes
+ * leading dashes (argv option injection) and slashes/dots that could turn the
+ * direct home-directory probes below into path traversal.
+ */
+const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
+
+/**
  * Resolve the real user's home directory.
  *
  * When run under sudo, os.homedir() returns /root/.
@@ -93,10 +102,10 @@ export function isDockerEnvironment(): boolean {
  */
 function resolveUserHome(): string {
   const sudoUser = process.env.SUDO_USER;
-  if (sudoUser) {
-    // Try getent passwd (reliable on Linux)
+  if (sudoUser && SAFE_USERNAME.test(sudoUser)) {
+    // Try getent passwd (reliable on Linux) — argv-array, no shell.
     try {
-      const entry = execSync(`getent passwd ${sudoUser}`, {
+      const entry = execFileSync('getent', ['passwd', sudoUser], {
         encoding: 'utf-8',
         timeout: 5000,
       }).trim();
@@ -105,20 +114,16 @@ function resolveUserHome(): string {
         return homeDir;
       }
     } catch {
-      // getent not available (macOS) — try tilde expansion
+      // getent not available (macOS) — probe the standard locations
     }
 
-    // Fallback: tilde expansion
-    try {
-      const homeDir = execSync(`eval echo ~${sudoUser}`, {
-        encoding: 'utf-8',
-        timeout: 5000,
-      }).trim();
-      if (homeDir && fs.existsSync(homeDir)) {
+    // Fallback: the standard home locations, probed directly. Replaces a
+    // `eval echo ~${sudoUser}` shell eval (#429) — same answer on any box
+    // where that expansion would have worked, with no shell involved.
+    for (const homeDir of [`/Users/${sudoUser}`, `/home/${sudoUser}`]) {
+      if (fs.existsSync(homeDir)) {
         return homeDir;
       }
-    } catch {
-      // Fall through to os.homedir()
     }
   }
 
