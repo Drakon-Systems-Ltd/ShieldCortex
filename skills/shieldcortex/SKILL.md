@@ -33,8 +33,10 @@ permissions:
   justification: >
     Filesystem read: scans agent instruction files for prompt injection threats
     (same files the agent already reads). Filesystem write: stores memory DB
-    and config in ~/.shieldcortex/. Network: off by default, only used when
-    Cloud sync is explicitly enabled by the user. Credentials: optional Cloud
+    and config in ~/.shieldcortex/. Network: off by default — outbound only
+    for Cloud sync (opt-in), licence-key validation when a key is activated,
+    explicit update checks/updates (npm registry), URLs you ask `env scan`
+    to fetch, and webhooks you configure. Credentials: optional Cloud
     API key for team sync (not required for local use).
   paths_read:
     - ~/.shieldcortex/ (own config and memory database)
@@ -53,7 +55,10 @@ permissions:
     - ~/.openclaw/extensions/shieldcortex-realtime/ (OpenClaw plugin via the wrapper install only; native `openclaw plugins install` uses OpenClaw's managed npm tree instead)
     - ~/.claude/mcp.json, ~/.cursor/mcp.json (MCP server registration, when user runs setup)
   network_endpoints:
-    - https://api.shieldcortex.ai (Cloud sync, licence validation — only when Cloud is enabled by user)
+    - https://api.shieldcortex.ai (Cloud sync + audit telemetry — only when Cloud sync is enabled; licence validation — only when a licence key is activated, at `license activate` and on explicit dashboard re-check, sends the subscription id, works with Cloud sync off; never called when no key is configured)
+    - https://registry.npmjs.org (via npm subprocess — only on explicit update actions, dashboard "Check for updates"/"Update" or `shieldcortex update`; plus the OpenClaw hook's `npx -y shieldcortex` fallback, which downloads the package on first use when ShieldCortex is not installed locally)
+    - User-configured webhook URLs (memory-event POST notifications — only when you add webhooks to ~/.shieldcortex/config.json)
+    - The URL you pass to `shieldcortex env scan <url>` (fetched once for analysis)
     - http://localhost:3001 (local REST API + WebSocket — loopback only)
     - http://localhost:3030 (local dashboard UI; also the worker health check — loopback only)
   env:
@@ -83,7 +88,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 | **Downloads** | 11,000+/month (July 2026) |
 | **CI/CD** | CI lint/test on every push; the maintainer manually tags each release, and the tag push triggers an automated CI publish to npm |
 | **Postinstall script** | Declared and bounded: prints setup instructions; on **global** installs it also smoke-tests the native SQLite binding, seeds default config on first install, and refreshes an OpenClaw hook/plugin that a previous setup already installed. It never adds integrations to a machine that had none, and it is a no-op for CI and local dependency installs. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` skips the refresh. |
-| **Dependencies** | 8 runtime deps: `better-sqlite3`, `zod`, `@modelcontextprotocol/sdk`, `express`, `ws`, `cors`, `safe-regex2`, `semver`. `express`/`ws`/`cors` serve the bundled localhost-only dashboard/API; nothing dials out unless Cloud sync is explicitly enabled. |
+| **Dependencies** | 8 runtime deps: `better-sqlite3`, `zod`, `@modelcontextprotocol/sdk`, `express`, `ws`, `cors`, `safe-regex2`, `semver`. `express`/`ws`/`cors` serve the bundled localhost-only dashboard/API; nothing dials out except the explicit, user-initiated cases listed under `network_endpoints` (Cloud sync opt-in, licence-key validation, update checks, configured webhooks). |
 
 ## Safety & Scope
 
@@ -97,7 +102,7 @@ This section explains every privileged operation the tool performs and why.
 - **No credentials required for local use.** Memory, scanning, and audit work fully offline. Cloud sync is opt-in and requires a user-provided API key via `shieldcortex config --cloud-enable --cloud-api-key <key>`.
 - **File access is declared and scoped.** Security scans read agent config directories listed in the permissions block above — the same directories the agent itself already has access to. They do not traverse arbitrary directories.
 - **Writes are contained.** All data goes to `~/.shieldcortex/`. MCP config edits (`setup`, `copilot`, `codex` commands) modify specific JSON files and confirm before writing.
-- **Network is off by default.** No outbound connections unless Cloud sync is explicitly enabled by the user. The dashboard and worker bind to localhost only.
+- **Network is off by default.** With no licence key activated, no Cloud sync enabled, and no webhooks configured, ShieldCortex makes no outbound connections, and nothing fires implicitly on server start (one caveat: the OpenClaw hook's `npx -y shieldcortex` fallback downloads the package on first use when ShieldCortex is not installed locally — see `network_endpoints`). The complete exception list, each user-initiated, is in `network_endpoints`: Cloud sync (opt-in), licence-key validation when you activate a key (at activation and on explicit dashboard re-check — this works even with Cloud sync off), npm-registry update checks/updates (dashboard buttons or `shieldcortex update`), URLs you pass to `env scan`, and webhooks you configure. The dashboard and worker bind to localhost only.
 - **Bundled source code.** The OpenClaw plugin and cortex-memory handler are shipped in the package for inspection before use.
 - **Lifecycle event handlers.** ShieldCortex registers lifecycle handlers that auto-extract important context from conversations. These are registered in `~/.claude/settings.json` during setup and can be removed at any time. They run locally, never phone home.
 - **Proactive recall.** The UserPromptSubmit handler queries local memory on each prompt (<100ms) and surfaces relevant context. Fully local, configurable: `shieldcortex config --proactive-recall false`.
@@ -171,7 +176,7 @@ ShieldCortex is **local-first**: memory, scanning, and audit run entirely on you
 ## What it does NOT do
 
 - Does **not** read SSH keys, AWS credentials, GPG keys, or /etc/ files
-- Does **not** send data to external servers (unless Cloud sync is explicitly enabled)
+- Does **not** send data to external servers, with three narrow, user-initiated exceptions: Cloud sync when you enable it, the subscription id sent to the licence endpoint when you activate or re-check a licence key, and event payloads to webhooks you configure (update checks contact the npm registry via standard npm queries, carrying no ShieldCortex data)
 - Does **not** modify .bashrc, .zshrc, .profile, or shell configs
 - Does **not** use `eval` or dynamic code execution of any kind
 - Does **not** build subprocess commands from agent, memory, or network content. The update flow and the OpenClaw MCP bridge never spawn a shell — argv-array `execFile`/`spawn` only (`npm view` update check, `npm update`/`npm install`, `pgrep`, `npx mcporter`). User-run CLI commands (setup, service, migrate, uninstall, audit, doctor, the npx-staleness warning) and corrupt-database recovery run fixed local admin tools (`npm`, `launchctl`, `systemctl`, `getent`, `sqlite3`), some through a shell, parameterised only by local paths and usernames
@@ -279,7 +284,7 @@ Cloud sync is **off by default**. Audit metadata sync is included on the cloud f
 - **Uploaded when Cloud sync is enabled by the user:** selected memory records, related embeddings/metadata, and knowledge-graph entities/relationships required for sync.
 - **Not uploaded by default:** local agent configs, MCP configs, raw rules files, shell configs, SSH keys, secrets, `.env` contents, or arbitrary project files.
 - **Security scan results stay local** unless the user explicitly exports or syncs data through a Cloud-enabled workflow.
-- **No cloud traffic at all** occurs unless the user explicitly enables Cloud sync and provides a valid API key.
+- **No sync traffic** occurs unless the user explicitly enables Cloud sync and provides a valid API key. Outside sync, the only api.shieldcortex.ai call is licence-key validation when a key is activated (subscription id only, never memory content) — see `network_endpoints`.
 
 ## Licence Tiers
 
