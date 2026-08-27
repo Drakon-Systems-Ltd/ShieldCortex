@@ -1199,7 +1199,7 @@ describe('contract verdict', () => {
   });
 
   it('rejects sidecar posture and a bus contract together (never both)', () => {
-    const v = verdictFor([provenOc], { postureRaw: SIDECAR_POSTURE });
+    const v = verdictFor([provenOc], { postureRaw: SIDECAR_POSTURE, postureTrusted: true });
     expect(v.status).toBe('fail');
     expect(v.message).toMatch(/mutually exclusive/);
   });
@@ -1241,6 +1241,7 @@ describe('contract verdict', () => {
       injectMode: 'off',
       nativeContract: null,
       postureRaw: SIDECAR_POSTURE,
+      postureTrusted: true,
     });
     expect(v.status).toBe('pass');
     expect(v.message).toMatch(/honest sidecar/);
@@ -1254,6 +1255,7 @@ describe('contract verdict', () => {
       injectMode: 'off',
       nativeContract: null,
       postureRaw: SIDECAR_POSTURE,
+      postureTrusted: true,
     });
     expect(v.status).toBe('fail');
     expect(v.message).toMatch(/contradicts posture/);
@@ -1269,6 +1271,7 @@ describe('contract verdict', () => {
       injectModeExplicit: false,
       nativeContract: null,
       postureRaw: SIDECAR_POSTURE,
+      postureTrusted: true,
     });
     expect(blob.status).toBe('fail');
     expect(blob.message).toMatch(/not explicitly off/);
@@ -1281,9 +1284,22 @@ describe('contract verdict', () => {
       injectModeExplicit: true,
       nativeContract: null,
       postureRaw: SIDECAR_POSTURE,
+      postureTrusted: true,
     });
     expect(legit.status).toBe('pass');
     expect(legit.message).toMatch(/explicitly off/);
+  });
+
+  it('fails closed when a declared sidecar posture omits trust', () => {
+    const v = verdictFor([liveHermes], {
+      injectConfigured: true,
+      injectMode: 'off',
+      nativeContract: null,
+      postureRaw: SIDECAR_POSTURE,
+    });
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/untrusted/);
+    expect(v.fix).toMatch(/signed write/);
   });
 
   it('stays info when inject is simply off with no posture declared', () => {

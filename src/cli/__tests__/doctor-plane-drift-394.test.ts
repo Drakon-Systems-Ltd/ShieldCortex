@@ -279,6 +279,36 @@ describe('checkMemoryPlaneDrift — #394 T2 teeth', () => {
     expect(openClawPack.items.map((r: { id: unknown }) => r.id)).toEqual(eligibleIds);
   });
 
+  it('includes only strict integer-1 transferable cross-project rows in a legacy project window', () => {
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE memories (
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        content TEXT,
+        content_form TEXT,
+        status TEXT,
+        trust_score REAL,
+        defence_verdict TEXT,
+        project TEXT,
+        transferable,
+        pinned INTEGER,
+        salience REAL
+      );
+      INSERT INTO memories
+        (id, title, content, content_form, status, trust_score, defence_verdict, project, transferable, pinned, salience)
+      VALUES
+        (1, 'current', 'current project fact', 'fact', 'active', 0.9, 'allow', 'project-a', 0, 0, 0.9),
+        (2, 'global', 'projectless fact', 'fact', 'active', 0.9, 'allow', NULL, 0, 0, 0.8),
+        (3, 'transferable', 'cross project fact', 'fact', 'active', 0.9, 'allow', 'project-b', 1, 0, 0.7),
+        (4, 'private', 'private cross project fact', 'fact', 'active', 0.9, 'allow', 'project-b', 0, 0, 0.6),
+        (5, 'loose', 'loosely truthy cross project fact', 'fact', 'active', 0.9, 'allow', 'project-b', '1', 0, 0.5);
+    `);
+    const rows = selectInjectCandidates(db, { project: 'project-a' }) as Array<{ id: number }>;
+    db.close();
+    expect(rows.map((row) => row.id)).toEqual([1, 2, 3]);
+  });
+
   it('grades the real top-64 window — an eligible row at rank 65 is not on the bus', async () => {
     writeConfig(planeConfig('import_only'));
     const db = openDb();

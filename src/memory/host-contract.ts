@@ -1033,6 +1033,8 @@ export interface HostContractInput {
   nativeContract: 'sc_only' | 'disable_native_inject' | null;
   /** Raw `memory.hostContract.posture`, so junk values fail instead of vanishing. */
   postureRaw: string | null;
+  /** True only when the exact effective config carries a valid signed sidecar posture. */
+  postureTrusted?: boolean;
   /**
    * Printable description of a PRESENT non-string `memory.hostContract.posture`
    * (#393 SOL r3 nit). Kept separate from postureRaw on purpose: coercing junk
@@ -1174,6 +1176,13 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
             'the emitter defaults to mode=start and still emits legacy sidecar recall on the session-start bus, ' +
             'so the sidecar promise is not proven',
           fix: `Run \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` — the signed setter forces memory.inject.mode=off; do not hand-edit config.json`,
+        };
+      }
+      if (input.postureTrusted !== true) {
+        return {
+          status: 'fail',
+          message: `posture=${SIDECAR_POSTURE} is untrusted — the declaration is unsigned, forged, tampered, or not from the effective config path`,
+          fix: `Run \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` — signed write; do not hand-edit config.json`,
         };
       }
       return {

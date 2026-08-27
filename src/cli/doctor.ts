@@ -80,7 +80,12 @@ import {
 // transport (cli-invoker.js) and the explainer (doctor-explainer.js) are
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
-import { getConfigDir, readRawConfig, isConfigTampered, migrateInterceptorActionGuardAlias } from '../cloud/config.js';
+import {
+  getConfigDir,
+  hasTrustedMemorySidecarPosture,
+  readRawConfig,
+  migrateInterceptorActionGuardAlias,
+} from '../cloud/config.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
@@ -3058,8 +3063,9 @@ export function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
 export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   const label = 'Memory plane (dual-plane drift)';
   let raw: Record<string, unknown> = {};
+  const configPath = path.join(getConfigDir(), 'config.json');
   try {
-    raw = JSON.parse(fs.readFileSync(path.join(getShieldCortexDir(), 'config.json'), 'utf-8')) as Record<string, unknown>;
+    raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
   } catch {
     return { label, status: 'info', message: 'no config yet' };
   }
@@ -3105,18 +3111,9 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   // The sidecar exemption is intentionally narrower than string equality. The
   // signed setter writes an embedded signature and explicit mode=off; a bare,
   // copied, malformed, or legacy posture blob does not get to suppress drift.
-  let trustedSidecar = false;
-  if (cfg.posture === SIDECAR_POSTURE && cfg.postureIllegal === undefined) {
-    const hasEmbeddedSignature = typeof raw._sig === 'string';
-    const trusted = readRawConfig();
-    trustedSidecar = hasEmbeddedSignature
-      && path.resolve(getConfigDir()) === path.resolve(getShieldCortexDir())
-      && !isConfigTampered()
-      && readMemoryPlaneFromConfig(trusted).posture === SIDECAR_POSTURE
-      && cfg.injectConfigured
-      && cfg.injectModeExplicit
-      && cfg.injectMode === 'off';
-  }
+  const trustedSidecar = cfg.posture === SIDECAR_POSTURE
+    && cfg.postureIllegal === undefined
+    && hasTrustedMemorySidecarPosture(raw, configPath);
   if (trustedSidecar) {
     if (cfg.plane === 'import_only' || cfg.plane === 'sc_canonical') {
       return {
@@ -4590,8 +4587,9 @@ function resolveOpenClawBinding(): OpenClawBinding {
 export async function checkMemoryHostContract(): Promise<CheckResult> {
   const label = 'Memory plane (host contract)';
   let raw: Record<string, unknown> = {};
+  const configPath = path.join(getConfigDir(), 'config.json');
   try {
-    raw = JSON.parse(fs.readFileSync(path.join(getShieldCortexDir(), 'config.json'), 'utf-8')) as Record<string, unknown>;
+    raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
   } catch {
     return { label, status: 'info', message: 'no config yet' };
   }
@@ -4726,6 +4724,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
       ? cfg.nativeContract
       : null,
     postureRaw: cfg.posture,
+    postureTrusted: hasTrustedMemorySidecarPosture(raw, configPath),
     postureIllegal: cfg.postureIllegal,
     declaredRuntimesIllegal: cfg.declaredRuntimesIllegal,
     runtimes,
