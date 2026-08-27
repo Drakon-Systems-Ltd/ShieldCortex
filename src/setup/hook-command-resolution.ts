@@ -22,6 +22,7 @@
  *      existing broken box broken forever, which is the quiet half of this bug.
  */
 import { accessSync, constants, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -152,8 +153,23 @@ export function hookCommandResolves(command: string): boolean {
  */
 export type HookCommandTrust = 'resolves' | 'unresolvable' | 'suspicious';
 
-/** World-writable staging roots where anyone can plant an executable. */
-const WORLD_WRITABLE_ROOTS = ['/tmp', '/var/tmp', '/dev/shm'];
+/** World-writable staging roots where anyone can plant an executable. On
+ * macOS `/tmp` and `/var/tmp` are symlinks into `/private`, and the platform
+ * temp dir (`os.tmpdir()`) lives under `/var/folders/...` — all of them are
+ * attacker-stageable, so the realpath'd platform tmpdir joins the fixed
+ * roots. */
+const WORLD_WRITABLE_ROOTS: string[] = (() => {
+  const roots = ['/tmp', '/var/tmp', '/dev/shm', '/private/tmp', '/private/var/tmp'];
+  for (const t of [tmpdir()]) {
+    try {
+      const real = realpathSync(t);
+      for (const r of [t, real]) if (r && r !== '/' && !roots.includes(r)) roots.push(r);
+    } catch {
+      if (t && t !== '/' && !roots.includes(t)) roots.push(t);
+    }
+  }
+  return roots;
+})();
 
 function underWorldWritableRoot(p: string): boolean {
   const hit = (q: string): boolean =>
