@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **#428:** bump the bundled dashboard `next` / `eslint-config-next` from 16.1.4 to **16.2.12** (latest 16.2 patch). 16.1.4 sat inside published GHSA ranges, including HIGH [GHSA-p9j2-gv94-2wf4](https://github.com/advisories/GHSA-p9j2-gv94-2wf4) (rewrite SSRF, patched 16.2.11). Medium CSRF/DoS/smuggling GHSAs already patched at 16.1.7. Dashboard `next.config.ts` has no `rewrites`, so the HIGH is defense-in-depth, not a proven local exploit. Did not jump to 16.3.3 (current `latest`) to keep the Frontend/QA surface a single minor.
+
 ### Added
 - **#393 (Phase 1 — T1 host contract enforcement):** `sc_only` / `disable_native_inject` become bus laws doctor can prove, not labels it takes on trust.
   - **Per-runtime evidence model** (`src/memory/host-contract.ts`): OpenClaw / Claude Code / Hermes each resolve to a tri-state `native_bus` (`off_proven` | `on` | `unknown`) from that host's own settings and artifacts, plus an `sc_bus` state for whether ShieldCortex's pack is actually wired there. Absent, unreadable, or silent evidence resolves to `unknown` — **never** `off_proven`. Native-off is only half the contract: `sc_only` (and `disable_native_inject` with the pack on the start bus) also requires the SC start-pack **proven delivered on every bound runtime** — a proven-unwired runtime is FAIL, unproven delivery is "cannot determine". A bound Hermes runtime can therefore never satisfy a bus-law contract until an SC Hermes inject surface ships; the honest posture there is the sidecar.
