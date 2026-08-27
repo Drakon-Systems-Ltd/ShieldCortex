@@ -3435,20 +3435,58 @@ function scanHermesProfiles(home: string): {
   return out;
 }
 
+/** Mirror of OpenClaw's normalizeAgentId (openclaw/src/routing/session-key.ts):
+ * trim, empty => "main", valid ids lowercase, everything else lowercased with
+ * invalid runs collapsed to "-", edge dashes stripped, capped at 64 chars. */
+const OPENCLAW_DEFAULT_AGENT_ID = 'main';
+function normalizeOpenClawAgentId(value: unknown): string {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return OPENCLAW_DEFAULT_AGENT_ID;
+  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(trimmed)) return trimmed.toLowerCase();
+  return trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .slice(0, 64) || OPENCLAW_DEFAULT_AGENT_ID;
+}
+
 /**
- * Workspace roots doctor must inspect: the stock workspace under the OpenClaw
- * state root PLUS every configured defaults/per-agent workspace (#393 SOL
- * H4). Bounded by OPENCLAW_WORKSPACE_CAP; overflow or an unreadable config
- * marks the enumeration incomplete so the evidence model refuses to prove off.
+ * Workspace roots doctor must inspect (#393 SOL H4 + r3 B3), mirroring
+ * resolveAgentWorkspaceDir in openclaw/src/agents/agent-scope.ts:
+ *
+ *  - the stock workspace under the state root (r2 B6) AND the host's true
+ *    default-agent workspace — resolveDefaultAgentWorkspaceDir anchors it at
+ *    ~/.openclaw/workspace[-<OPENCLAW_PROFILE>] under HOME even when
+ *    OPENCLAW_STATE_DIR relocates the state tree;
+ *  - every explicit defaults/per-agent workspace value;
+ *  - IMPLICIT per-agent workspaces (r3 B3): a configured non-default agent
+ *    with no explicit workspace still resolves one at
+ *    `<stateDir>/workspace-<normalizedId>` — a live MEMORY.md there used to
+ *    vanish from the verdict entirely.
+ *
+ * Bounded by OPENCLAW_WORKSPACE_CAP (the agents list bounds the implicit set);
+ * overflow or an unreadable config marks the enumeration incomplete so the
+ * evidence model refuses to prove off. Exported for direct unit testing.
  */
 const OPENCLAW_WORKSPACE_CAP = 16;
-function openClawWorkspacePaths(
+export function openClawWorkspacePaths(
   home: string,
   stateRoot: string,
   config: ProbeRead<Record<string, unknown>>,
 ): { paths: string[]; complete: boolean } {
-  const paths = [path.join(stateRoot, 'workspace')];
+  const paths: string[] = [];
   let complete = true;
+  const push = (p: string): void => {
+    if (!paths.includes(p)) paths.push(p);
+  };
+  push(path.join(stateRoot, 'workspace'));
+  const profile = process.env.OPENCLAW_PROFILE?.trim();
+  push(path.join(
+    home,
+    '.openclaw',
+    profile && profile.toLowerCase() !== 'default' ? `workspace-${profile}` : 'workspace',
+  ));
   const asObj = (v: unknown): Record<string, unknown> =>
     v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
   const add = (v: unknown): void => {
@@ -3456,13 +3494,33 @@ function openClawWorkspacePaths(
     let p = v.trim();
     if (p === '~') p = home;
     else if (p.startsWith('~/')) p = path.join(home, p.slice(2));
-    if (!paths.includes(p)) paths.push(p);
+    push(p);
   };
   if (config.kind === 'present') {
     const agents = asObj(config.value.agents);
     add(asObj(agents.defaults).workspace);
     const list = Array.isArray(agents.list) ? agents.list : [];
-    for (const entry of list) add(asObj(entry).workspace);
+    const entries = list.filter((e): e is Record<string, unknown> => Boolean(e && typeof e === 'object' && !Array.isArray(e)));
+    // resolveDefaultAgentId: first entry marked default (truthy), else the
+    // first entry. The default agent's implicit workspace is the home default
+    // pushed above, never workspace-<id>.
+    const flagged = entries.filter((e) => e.default);
+    const defaultAgentId = entries.length === 0
+      ? OPENCLAW_DEFAULT_AGENT_ID
+      : normalizeOpenClawAgentId((flagged[0] ?? entries[0]).id);
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const id = normalizeOpenClawAgentId(entry.id);
+      // Duplicate ids resolve to the FIRST entry (resolveAgentEntry.find).
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const explicit = typeof entry.workspace === 'string' ? entry.workspace.trim() : '';
+      if (explicit) {
+        add(explicit);
+      } else if (id !== defaultAgentId) {
+        push(path.join(stateRoot, `workspace-${id}`));
+      }
+    }
   } else if (config.kind === 'unreadable') {
     // Cannot enumerate configured workspaces at all — never claim we did.
     complete = false;

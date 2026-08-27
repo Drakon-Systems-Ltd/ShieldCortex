@@ -29,6 +29,8 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     // every fixture's evidence root.
     delete process.env.OPENCLAW_STATE_DIR;
     delete process.env.OPENCLAW_CONFIG_PATH;
+    delete process.env.OPENCLAW_PROFILE;
+    delete process.env.OPENCLAW_HOME;
     jest.resetModules();
   });
 
@@ -582,6 +584,76 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const r = await runHost();
     expect(r.status).toBe('fail');
     expect(r.message).toMatch(/case-ws\/AGENTS\.md/);
+  });
+
+  it('host contract probes IMPLICIT per-agent workspaces — a workspace-<agentId> brain cannot ride defaults-off to PASS (SOL r3 B3)', async () => {
+    // The r3 false PASS: agent "case" has no explicit workspace, so OpenClaw
+    // resolves <stateDir>/workspace-case (agent-scope.ts) and bootstraps a
+    // live MEMORY.md there — while doctor only probed the stock and explicit
+    // workspaces and certified green.
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: {
+          defaults: { memorySearch: { enabled: false } },
+          list: [{ id: 'main', default: true }, { id: 'case' }],
+        },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    const implicitWs = path.join(tmpHome, '.openclaw', 'workspace-case');
+    fs.mkdirSync(implicitWs, { recursive: true });
+    fs.writeFileSync(path.join(implicitWs, 'MEMORY.md'), '# implicit brain\n'.repeat(5));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/workspace-case\/MEMORY\.md/);
+  });
+
+  it('openClawWorkspacePaths mirrors resolveAgentWorkspaceDir: default agent, id normalization, duplicates, explicit overrides (SOL r3 B3)', async () => {
+    const mod = await import('../doctor.js');
+    const cfg = (agents: Record<string, unknown>) =>
+      ({ kind: 'present' as const, value: { agents } });
+    const home = '/home/x';
+    const root = '/srv/oc-state';
+
+    // A single-entry list makes that agent the DEFAULT: its implicit
+    // workspace is the home default, never workspace-<id>.
+    const solo = mod.openClawWorkspacePaths(home, root, cfg({ list: [{ id: 'solo' }] }));
+    expect(solo.paths).toContain('/home/x/.openclaw/workspace');
+    expect(solo.paths).not.toContain('/srv/oc-state/workspace-solo');
+
+    // Non-default agents without explicit workspaces resolve implicitly under
+    // the state root, with host id normalization ("Case Agent!" -> case-agent).
+    const multi = mod.openClawWorkspacePaths(home, root, cfg({
+      list: [{ id: 'hermes', default: true }, { id: 'case' }, { id: 'Case Agent!' }],
+    }));
+    expect(multi.paths).toContain('/srv/oc-state/workspace-case');
+    expect(multi.paths).toContain('/srv/oc-state/workspace-case-agent');
+    expect(multi.paths).not.toContain('/srv/oc-state/workspace-hermes');
+
+    // An explicit workspace suppresses the implicit one, and duplicate ids
+    // resolve to the first entry (a second "case" with no workspace must not
+    // resurrect workspace-case).
+    const explicit = mod.openClawWorkspacePaths(home, root, cfg({
+      list: [{ id: 'hermes', default: true }, { id: 'case', workspace: '/srv/agents/case-ws' }, { id: 'case' }],
+    }));
+    expect(explicit.paths).toContain('/srv/agents/case-ws');
+    expect(explicit.paths).not.toContain('/srv/oc-state/workspace-case');
+
+    // OPENCLAW_PROFILE relocates the home default (resolveDefaultAgentWorkspaceDir).
+    process.env.OPENCLAW_PROFILE = 'tars';
+    const profiled = mod.openClawWorkspacePaths(home, root, cfg({}));
+    expect(profiled.paths).toContain('/home/x/.openclaw/workspace-tars');
+    delete process.env.OPENCLAW_PROFILE;
+
+    // The implicit set is bounded by the cap and overflow is never silent.
+    const crowd = mod.openClawWorkspacePaths(home, root, cfg({
+      list: [{ id: 'boss', default: true }, ...Array.from({ length: 30 }, (_, i) => ({ id: `agent-${i}` }))],
+    }));
+    expect(crowd.paths.length).toBeLessThanOrEqual(16);
+    expect(crowd.complete).toBe(false);
   });
 
   it('host contract demotes unreadable workspace evidence to cannot determine (SOL H4)', async () => {
