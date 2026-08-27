@@ -3395,9 +3395,12 @@ export function decodeClaudeProjectKey(key: string): { roots: string[]; complete
  * Claude Code's native plane is the memory-tool store PLUS the automatic
  * preambles: `~/.claude/memory`, per-project `~/.claude/projects/<key>/memory`
  * directories, `~/.claude/CLAUDE.md`, and — via decodeClaudeProjectKey — the
- * real project roots' CLAUDE.md / .claude/CLAUDE.md (#393 SOL r2 B5 + r3 B4;
- * a preamble loaded into every session is native automatic durable context;
- * the normative host law demands it stop under a bus contract). Doctor cannot
+ * real project roots' CLAUDE.md / .claude/CLAUDE.md AND their ancestors'
+ * (#393 SOL r2 B5 + r3 B4 + r4 B1; Claude loads parent-directory preambles
+ * for nested sessions, so a clean leaf under a live ancestor is still on the
+ * native bus; a preamble loaded into every session is native automatic
+ * durable context; the normative host law demands it stop under a bus
+ * contract). Doctor cannot
  * enumerate every project on the box — only those Claude has recorded a key
  * for — which stays an accepted attestation limit; what it must never do is
  * scan the WRONG location and call the silence off_proven. Scans are bounded,
@@ -3409,9 +3412,20 @@ export function decodeClaudeProjectKey(key: string): { roots: string[]; complete
  */
 const CLAUDE_STORE_FILE_CAP = 50;
 const CLAUDE_PROJECT_CAP = 200;
+const CLAUDE_ANCESTOR_CAP = 10;
 function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanComplete: boolean } {
   const stores: ArtifactProbe[] = [];
   let scanComplete = true;
+  // Preamble probes dedupe across projects (#393 SOL r4 B1): nested projects
+  // share ancestors, and every ancestor chain ends at the same $HOME.
+  const preambleSeen = new Set<string>();
+  const probePreambles = (dir: string): void => {
+    for (const p of [path.join(dir, 'CLAUDE.md'), path.join(dir, '.claude', 'CLAUDE.md')]) {
+      if (preambleSeen.has(p)) continue;
+      preambleSeen.add(p);
+      stores.push(artifactProbe(p));
+    }
+  };
   const collectDir = (dir: string): void => {
     const dirProbe = probePath(dir);
     if (dirProbe.kind === 'absent') return;
@@ -3434,6 +3448,7 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
 
   collectDir(path.join(home, '.claude', 'memory'));
   // The global automatic preamble (#393 SOL r2 B5).
+  preambleSeen.add(path.join(home, '.claude', 'CLAUDE.md'));
   stores.push(artifactProbe(path.join(home, '.claude', 'CLAUDE.md')));
 
   const projectsDir = path.join(home, '.claude', 'projects');
@@ -3469,8 +3484,25 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
           });
         }
         for (const root of decoded.roots) {
-          stores.push(artifactProbe(path.join(root, 'CLAUDE.md')));
-          stores.push(artifactProbe(path.join(root, '.claude', 'CLAUDE.md')));
+          probePreambles(root);
+          // #393 SOL r4 B1: Claude also loads ancestor CLAUDE.md preambles
+          // for a session in a nested directory — a clean leaf with a live
+          // ancestor preamble used to prove off. Walk parents up to (and
+          // including) $HOME — or the filesystem root for projects outside
+          // it — bounded; a walk the cap truncates before reaching its
+          // terminal is an incomplete scan, never silence.
+          let dir = root;
+          let depth = 0;
+          while (dir !== home) {
+            const parent = path.dirname(dir);
+            if (parent === dir) break;
+            if (depth++ >= CLAUDE_ANCESTOR_CAP) {
+              scanComplete = false;
+              break;
+            }
+            dir = parent;
+            probePreambles(dir);
+          }
         }
       }
     } catch {

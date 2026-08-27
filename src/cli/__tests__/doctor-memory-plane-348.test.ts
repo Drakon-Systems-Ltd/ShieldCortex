@@ -893,6 +893,58 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(mod.decodeClaudeProjectKey('proj')).toEqual({ roots: [], complete: false });
   });
 
+  it('host contract: a live ANCESTOR CLAUDE.md defeats a clean nested project (SOL r4 B1)', async () => {
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    // The r4 false PASS: the recorded project is a NESTED directory with
+    // clean leaf files, while an ancestor CLAUDE.md still rides into every
+    // session Claude starts there.
+    const nested = path.join(tmpHome, 'repos', 'app', 'packages', 'web');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.mkdirSync(path.join(claudeDir, 'projects', claudeProjectKey(nested)), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, 'repos', 'app', 'CLAUDE.md'), '# monorepo preamble\n'.repeat(10));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/Claude Code: native ON/);
+    expect(r.message).toMatch(/app\/CLAUDE\.md/);
+
+    // Ancestor evidence doctor cannot read caps at unknown, never off_proven
+    // (a FILE where .claude should be a directory probes as ENOTDIR).
+    fs.rmSync(path.join(tmpHome, 'repos', 'app', 'CLAUDE.md'));
+    fs.writeFileSync(path.join(tmpHome, 'repos', '.claude'), 'not a dir');
+    const unreadable = await runHost();
+    expect(unreadable.status).toBe('warn');
+    expect(unreadable.message).toMatch(/unreadable/);
+  });
+
+  it('host contract: an ancestor walk the cap truncates is an incomplete scan, never off_proven (SOL r4 B1)', async () => {
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    // 12 nesting levels: the bounded walk stops before reaching $HOME, so a
+    // preamble could sit above the truncation point — that is an attestation
+    // gap, not silence.
+    const deep = path.join(tmpHome, ...Array.from({ length: 12 }, (_, i) => `d${i}`));
+    fs.mkdirSync(deep, { recursive: true });
+    fs.mkdirSync(path.join(claudeDir, 'projects', claudeProjectKey(deep)), { recursive: true });
+    const r = await runHost();
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/scan could not complete/);
+  });
+
   it('host contract: a truncated Claude store scan can never prove off (SOL H2)', async () => {
     writeConfig(busContract());
     const claudeDir = path.join(tmpHome, '.claude');
