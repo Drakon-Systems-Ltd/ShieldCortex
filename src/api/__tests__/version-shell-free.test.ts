@@ -1,11 +1,11 @@
 /**
  * #429 — version helpers must never spawn a shell.
  *
- * SKILL.md promises the package performs no shell-string command execution.
- * These tests pin version.ts to execFile/execFileSync argv-arrays: the
- * command and every argument are separate array elements, so shell
- * metacharacters can never be interpreted, and the shell-string APIs are
- * never called.
+ * SKILL.md promises the update flow never spawns a shell (user-run admin
+ * commands are the documented, separately-listed exception). These tests pin
+ * version.ts to execFile/execFileSync argv-arrays: the command and every
+ * argument are separate array elements, so shell metacharacters can never be
+ * interpreted, and the shell-string APIs are never called.
  */
 
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';

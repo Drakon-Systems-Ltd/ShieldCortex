@@ -109,6 +109,38 @@ describe('licence network gate (#430)', () => {
     expect(stored.validationStatus).toBe('valid');
   });
 
+  it('validateOnceNow with a key hits the licence endpoint exactly once, URI-encodes the sid, and persists the result', async () => {
+    // The production activation path — CLI `license activate` and the
+    // dashboard's POST /api/license/activate both call validateOnceNow.
+    writeLicenseFile({ key: craftKey('sub test/430+x'), validationStatus: 'unvalidated' });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'active' }),
+    });
+
+    expect(await validateOnceNow()).toBe('valid');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toBe(
+      `https://api.shieldcortex.ai/v1/license/validate?sid=${encodeURIComponent('sub test/430+x')}`,
+    );
+
+    const stored = JSON.parse(readFileSync(join(configDir, 'license.json'), 'utf-8'));
+    expect(stored.validationStatus).toBe('valid');
+  });
+
+  it('validateOnceNow returns unvalidated and leaves status unchanged when the server is unreachable', async () => {
+    writeLicenseFile({ key: craftKey('sub_test_430'), validationStatus: 'unvalidated' });
+    fetchMock.mockRejectedValue(new Error('ENOTFOUND api.shieldcortex.ai'));
+
+    expect(await validateOnceNow()).toBe('unvalidated');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const stored = JSON.parse(readFileSync(join(configDir, 'license.json'), 'utf-8'));
+    expect(stored.validationStatus).toBe('unvalidated');
+  });
+
   it('leaves validation status unchanged when the licence server is unreachable', async () => {
     writeLicenseFile({ key: craftKey('sub_test_430'), validationStatus: 'unvalidated' });
     fetchMock.mockRejectedValue(new Error('ENOTFOUND api.shieldcortex.ai'));
