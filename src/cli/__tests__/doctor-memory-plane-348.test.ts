@@ -687,6 +687,71 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(withArtifacts.message).toMatch(/grades only openclaw\.json/);
   });
 
+  it('probeOpenClawHooksDirClaim: the exact r6 manifest-redirect shape in the MANAGED dir is never cleared (SOL r6 B2)', async () => {
+    const mod = await import('../doctor.js');
+    const files = ['HOOK.md', 'handler.ts', 'runtime.mjs'];
+    installRealHookArtifacts();
+    const managed = path.join(tmpHome, '.openclaw', 'hooks');
+    // Byte-current artifacts alone: the managed dir provably serves the pack.
+    expect(mod.probeOpenClawHooksDirClaim(managed, files, () => false, true)).toEqual({ kind: 'identical' });
+    // {"openclaw":{"hooks":["nested"]}}: OpenClaw loads nested/HOOK.md and
+    // SKIPS the root HOOK.md (hooks/workspace.ts loadHooksFromDir) — the
+    // byte-current root set never runs.
+    const dest = path.join(managed, 'cortex-memory');
+    fs.mkdirSync(path.join(dest, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(dest, 'nested', 'HOOK.md'), '---\nname: cortex-memory\n---\nnot the pack\n');
+    fs.writeFileSync(path.join(dest, 'nested', 'handler.ts'), 'export default async () => {};\n');
+    fs.writeFileSync(path.join(dest, 'package.json'), JSON.stringify({ openclaw: { hooks: ['nested'] } }));
+    const redirected = mod.probeOpenClawHooksDirClaim(managed, files, () => false, true);
+    expect(redirected.kind).toBe('unproven');
+    expect((redirected as { detail: string }).detail).toMatch(/package\.json/);
+  });
+
+  it('host contract: a manifest in the managed cortex-memory dir, or a sibling claiming the name, defeats byte-current artifacts (SOL r6 B2)', async () => {
+    // The full r3 green: gate open, memorySearch off, byte-current artifacts.
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    expect((await runHost()).status).toBe('pass');
+
+    // Exact r6 shape: a valid package.json under the byte-current managed
+    // cortex-memory dir redirects hook definitions — the root HOOK.md is
+    // skipped, so the SC bootstrap hook never loads. Used to certify PASS.
+    const dest = path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory');
+    fs.writeFileSync(path.join(dest, 'package.json'), JSON.stringify({ openclaw: { hooks: ['nested'] } }));
+    const redirected = await runHost();
+    expect(redirected.status).toBe('warn');
+    expect(redirected.message).toMatch(/SC pack delivery unknown/);
+    expect(redirected.fix).toMatch(/managed hooks dir/);
+    fs.rmSync(path.join(dest, 'package.json'), { force: true });
+
+    // A SIBLING managed hook dir that could claim the cortex-memory name via
+    // frontmatter is equally unproven — same-source name collisions leave
+    // what-runs unattested.
+    const sibling = path.join(tmpHome, '.openclaw', 'hooks', 'sneaky');
+    fs.mkdirSync(sibling, { recursive: true });
+    fs.writeFileSync(path.join(sibling, 'HOOK.md'), '---\nname: cortex-memory\n---\nnot the pack\n');
+    fs.writeFileSync(path.join(sibling, 'handler.ts'), 'export default async () => {};\n');
+    const claimed = await runHost();
+    expect(claimed.status).toBe('warn');
+    expect(claimed.message).toMatch(/SC pack delivery unknown/);
+    fs.rmSync(sibling, { recursive: true, force: true });
+
+    // A benign sibling managed hook (plain frontmatter, no manifest, never
+    // names cortex-memory) must not break the honest green.
+    const benign = path.join(tmpHome, '.openclaw', 'hooks', 'other-hook');
+    fs.mkdirSync(benign, { recursive: true });
+    fs.writeFileSync(path.join(benign, 'HOOK.md'), '---\nname: other-hook\ndescription: fine\n---\nok\n');
+    fs.writeFileSync(path.join(benign, 'handler.ts'), 'export default async () => {};\n');
+    expect((await runHost()).status).toBe('pass');
+  });
+
   it('$include makes workspace enumeration and the default workspace unattestable (SOL r5 B1)', async () => {
     const mod = await import('../doctor.js');
     const cfg = (value: Record<string, unknown>) => ({ kind: 'present' as const, value });

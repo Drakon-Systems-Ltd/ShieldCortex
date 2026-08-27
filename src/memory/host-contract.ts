@@ -251,6 +251,18 @@ export interface OpenClawProbe {
    * handler that actually runs is unattested and wired_proven must not stand.
    */
   workspaceHookShadow: { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string };
+  /**
+   * Claim state of the MANAGED hooks dir itself (#393 SOL r6 B2). OpenClaw's
+   * loader applies the same manifest rules to every hooks source
+   * (openclaw/src/hooks/workspace.ts loadHooksFromDir): a package.json inside
+   * the managed cortex-memory dir redirects the hook definitions to nested
+   * dirs and SKIPS the root HOOK.md — so byte-current artifacts stop being
+   * what loads — and a sibling managed dir can claim the cortex-memory name
+   * via manifest or frontmatter, leaving what-runs unattested even inside the
+   * managed source. 'unproven' caps the SC bus at unknown; wired_proven must
+   * not stand.
+   */
+  managedHookDirClaim: { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string };
 }
 
 /**
@@ -547,6 +559,14 @@ export function resolveOpenClawEvidence(
         if (probe.workspaceHookShadow.kind === 'unproven') {
           staticGaps.push(probe.workspaceHookShadow.detail);
           staticFixes.push(`${cap.label}: remove (or byte-align with the packaged source) the default-workspace cortex-memory hook so the managed pack is what actually loads`);
+        }
+        // #393 SOL r6 B2: a manifest inside the managed cortex-memory dir
+        // redirects the definitions away from the byte-current root set, and
+        // a sibling managed dir can claim the name — either way the handler
+        // that would run as cortex-memory is unattested.
+        if (probe.managedHookDirClaim.kind === 'unproven') {
+          staticGaps.push(probe.managedHookDirClaim.detail);
+          staticFixes.push(`${cap.label}: remove the package.json manifest (and any sibling hook claiming the cortex-memory name) from the managed hooks dir so the root cortex-memory HOOK.md is what OpenClaw actually loads`);
         }
         if (probe.requiredBins.kind === 'missing') {
           staticGaps.push(probe.requiredBins.detail);

@@ -3842,7 +3842,29 @@ export function probeOpenClawWorkspaceHookShadow(
   stale: (destDir?: string) => boolean,
   sourceAvailable: boolean,
 ): { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string } {
-  const hooksDir = path.join(workspaceDir, 'hooks');
+  return probeOpenClawHooksDirClaim(path.join(workspaceDir, 'hooks'), hookFiles, stale, sourceAvailable);
+}
+
+/**
+ * Who can serve the cortex-memory name out of ONE hooks source dir (#393 SOL
+ * r4 B3 + r6 B2). loadHooksFromDir applies the same rules to every source —
+ * the default workspace's hooks dir AND the managed <stateRoot>/hooks dir:
+ * a package.json manifest redirects hook definitions to nested dirs and
+ * SKIPS the root HOOK.md (openclaw/src/hooks/workspace.ts loadHooksFromDir),
+ * and frontmatter `name:` rebrands any dir. So even the managed dir can stop
+ * serving the byte-current pack (manifest redirect) or serve a rival
+ * definition of the name (sibling rebrand) — same-source collisions leave
+ * what-runs unattested. Clears only when every subdir provably CANNOT claim
+ * cortex-memory away from the packaged set; `identical` = a byte-current
+ * cortex-memory dir with no manifest is present. Exported for direct unit
+ * testing.
+ */
+export function probeOpenClawHooksDirClaim(
+  hooksDir: string,
+  hookFiles: readonly string[],
+  stale: (destDir?: string) => boolean,
+  sourceAvailable: boolean,
+): { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string } {
   const dirProbe = probePath(hooksDir);
   if (dirProbe.kind === 'absent') return { kind: 'none' };
   if (dirProbe.kind !== 'present') {
@@ -4221,6 +4243,16 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
         detail: `the default agent workspace is unresolvable (${ocDefaultWs.unresolvable}) — a workspace hook there could shadow the managed cortex-memory hook and cannot be ruled out`,
       }
       : probeOpenClawWorkspaceHookShadow(ocDefaultWs.path, HOOK_FILES, hookFilesStale, hookSourceAvailable());
+  // #393 SOL r6 B2: the MANAGED hooks dir obeys the same loader rules as a
+  // workspace source — a package.json inside cortex-memory redirects the
+  // definitions away from the byte-current root set, and a sibling dir can
+  // claim the name via manifest or frontmatter.
+  const ocManagedHookClaim = stateRoot.root === null
+    ? {
+      kind: 'unproven' as const,
+      detail: 'OpenClaw paths are unresolvable — the managed hooks dir cannot be probed for manifest redirects or name claims',
+    }
+    : probeOpenClawHooksDirClaim(path.join(stateRoot.root, 'hooks'), HOOK_FILES, hookFilesStale, hookSourceAvailable());
   const runtimes: HostRuntimeEvidence[] = [
     resolveOpenClawEvidence(
       {
@@ -4249,6 +4281,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
         declared: declared('openclaw'),
         requiredBins: openClawRequiredBinsProbe(),
         workspaceHookShadow: ocWorkspaceHookShadow,
+        managedHookDirClaim: ocManagedHookClaim,
         ...(ocLegacyConfig ? { legacyConfig: ocLegacyConfig } : {}),
         ...(ocUnresolvable ? { pathOverrideUnresolvable: ocUnresolvable } : {}),
       },

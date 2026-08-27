@@ -55,6 +55,7 @@ function ocProbe(over: Partial<OpenClawProbe> = {}): OpenClawProbe {
     declared: false,
     requiredBins: { kind: 'available' },
     workspaceHookShadow: { kind: 'none' },
+    managedHookDirClaim: { kind: 'identical' },
     ...over,
   };
 }
@@ -566,6 +567,38 @@ describe('OpenClaw evidence', () => {
     );
     expect(unreadable.bound).toBe(true);
     expect(unreadable.nativeBus).toBe('unknown');
+  });
+
+  it('never wires the SC bus past an unproven managed hooks dir — a manifest redirects definitions and skips the root HOOK.md (SOL r6 B2)', () => {
+    const config = {
+      kind: 'present' as const,
+      value: {
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      },
+    };
+    // The r6 false PASS: byte-current artifacts + open gate, but a
+    // package.json inside the MANAGED cortex-memory dir makes OpenClaw load
+    // only the redirected definitions (openclaw/src/hooks/workspace.ts
+    // loadHooksFromDir) — the SC bootstrap hook never loads.
+    const redirected = resolveOpenClawEvidence(
+      ocProbe({
+        config,
+        scHook: 'complete',
+        managedHookDirClaim: { kind: 'unproven', detail: '~/.openclaw/hooks/cortex-memory carries a package.json manifest — OpenClaw loads redirected hook definitions from manifests, so the handler that runs as cortex-memory cannot be attested' },
+      }),
+      CTX,
+    );
+    expect(redirected.scBus).toBe('unknown');
+    expect(redirected.proof.join(' ')).toMatch(/package\.json manifest/);
+    expect(redirected.remediation).toMatch(/managed hooks dir/);
+    // A clean managed dir (cortex-memory byte-current, no manifests, no
+    // sibling claiming the name) keeps the static proof standing.
+    const clean = resolveOpenClawEvidence(
+      ocProbe({ config, scHook: 'complete', managedHookDirClaim: { kind: 'identical' } }),
+      CTX,
+    );
+    expect(clean.scBus).toBe('wired_proven');
   });
 
   it('regression: clawdbot.json + live workspace MEMORY.md + clean other runtimes is FAIL, never PASS (SOL r6 B1)', () => {
