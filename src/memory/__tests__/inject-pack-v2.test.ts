@@ -17,6 +17,7 @@ import {
   normalizeNativeContract,
   packHeaderFor,
   readInjectConfig,
+  stableRank,
   toPackItem,
 } from '../../../scripts/lib/inject-pack.mjs';
 
@@ -79,6 +80,16 @@ describe('inject-pack v2', () => {
     expect(isInjectEligible(row({ quarantined: true }), scope)).toBe(false);
     expect(isInjectEligible(row({ trust_score: 0.1, source_attested: false }), scope)).toBe(false);
     expect(isInjectEligible(row(), scope)).toBe(true);
+  });
+
+  it('uses strict SQLite boolean semantics (only true/1 are on)', () => {
+    expect(isInjectEligible(row({ quarantined: 1 }), scope)).toBe(false);
+    expect(isInjectEligible(row({ in_quarantine: 1 }), scope)).toBe(false);
+    expect(isInjectEligible(row({ quarantined: '1' }), scope)).toBe(true);
+    expect(isInjectEligible(row({ project: 'other', transferable: 1 }), scope)).toBe(true);
+    expect(isInjectEligible(row({ project: 'other', transferable: '1' }), scope)).toBe(false);
+    expect(stableRank([row({ id: 2, pinned: '1' }), row({ id: 1, pinned: 1 })]).map((r: { id: number }) => r.id))
+      .toEqual([1, 2]);
   });
 
   it('attestation alone does not bypass trust floor (Opus B1 / #348)', () => {

@@ -26,7 +26,7 @@ import { deriveProjectKey } from './lib/project-key.mjs';
 import { truncatePreservingWords } from './lib/truncate.mjs';
 import { orderByEffectiveSalience } from './lib/session-context.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
-import { buildStartPack, readInjectConfig, PACK_HEADER } from './lib/inject-pack.mjs';
+import { buildStartPack, readInjectConfig, selectInjectCandidates, PACK_HEADER } from './lib/inject-pack.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -254,35 +254,13 @@ process.stdin.on('end', async () => {
       const db = new Database(DB_PATH, { readonly: true, timeout: 5000 });
       // Over-fetch candidates for inject pack / legacy formatter
       memories = getProjectContext(db, project);
-      // Wider pool for inject v2 when host/agent scope columns exist
-      let injectCandidates = memories;
+      // The shared helper is also used by OpenClaw and doctor: one row shape,
+      // one deterministic pre-eligibility window, no SQL parity theatre.
+      let injectCandidates = [];
       try {
-        const cols = db.prepare('PRAGMA table_info(memories)').all().map((c) => c.name);
-        if (cols.includes('host_id') || cols.includes('agent_id')) {
-          injectCandidates = db.prepare(`
-            SELECT id, title, content, category, type, salience, tags, created_at,
-                   pinned, access_count, last_accessed, trust_score, sensitivity_level,
-                   metadata, reviewed_at, status, source, defence_verdict,
-                   host_id, agent_id, project, transferable, source_attested
-            FROM memories
-            WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
-            ORDER BY pinned DESC, salience DESC
-            LIMIT 64
-          `).all();
-        } else {
-          injectCandidates = db.prepare(`
-            SELECT id, title, content, category, type, salience, tags, created_at,
-                   pinned, trust_score, sensitivity_level, metadata, reviewed_at,
-                   status, source, defence_verdict, project
-            FROM memories
-            WHERE (project = ? OR project IS NULL)
-              AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
-            ORDER BY pinned DESC, salience DESC
-            LIMIT 64
-          `).all(project);
-        }
+        injectCandidates = selectInjectCandidates(db, { project });
       } catch {
-        injectCandidates = memories;
+        injectCandidates = [];
       }
       db.close();
 

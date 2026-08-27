@@ -4,7 +4,8 @@
  * Pure helpers for budgeted, fact-only, scoped session-start packs.
  * Normative law: docs/design/2026-08-17-memory-sota-program-r2-appendix.md
  *
- * No network. No DB. Callers supply candidate rows + session state.
+ * No network. The selector is the one read-only DB seam; pack builders remain
+ * pure over caller-supplied candidate rows + session state.
  */
 
 export const INJECT_MODE = Object.freeze({
@@ -19,6 +20,65 @@ export const NATIVE_INJECT_CONTRACT = Object.freeze({
   DISABLE_NATIVE: 'disable_native_inject',
   SC_ONLY: 'sc_only',
 });
+
+/** The runtime candidate window. Selection happens before eligibility. */
+export const INJECT_CANDIDATE_LIMIT = 64;
+
+/**
+ * One DB row shape for every automatic-start consumer and doctor. Missing
+ * legacy columns are projected as NULL so `isInjectEligible` always sees the
+ * same keys instead of changing semantics with each caller's SELECT list.
+ */
+export const INJECT_CANDIDATE_FIELDS = Object.freeze([
+  'id', 'title', 'content', 'fact', 'status', 'quarantined', 'in_quarantine',
+  'sensitivity_level', 'sensitivity', 'content_form', 'trust_score', 'trust',
+  'defence_verdict', 'source_attested', 'pinned', 'host_id', 'agent_id',
+  'project', 'transferable', 'salience', 'source', 'created_at',
+]);
+
+/** Strict SQLite boolean semantics: only the JSON boolean or integer 1 is on. */
+function dbBooleanTrue(value) {
+  return value === true || value === 1;
+}
+
+/**
+ * Select the exact pre-eligibility window used by the real start emitters.
+ *
+ * Project semantics intentionally preserve the two runtime shapes:
+ * - modern scoped schemas select the global top-64 and let eligibility apply
+ *   host/agent/project rules;
+ * - legacy schemas have no host/agent scope, so the session hook retains its
+ *   historical `(project = ? OR project IS NULL)` candidate restriction;
+ * - consumers without a project (OpenClaw bootstrap) do not invent one.
+ *
+ * @param {{ prepare(sql: string): { all(...params: unknown[]): object[] } }} db
+ * @param {{ project?: string|null }} [options]
+ * @returns {object[]}
+ */
+export function selectInjectCandidates(db, options = {}) {
+  const cols = new Set(db.prepare('PRAGMA table_info(memories)').all().map((c) => String(c.name)));
+  if (!cols.has('id')) throw new Error('memories table has no id column');
+
+  const projection = INJECT_CANDIDATE_FIELDS
+    .map((field) => cols.has(field) ? `"${field}"` : `NULL AS "${field}"`)
+    .join(', ');
+  const statusClause = cols.has('status')
+    ? `COALESCE("status", 'active') NOT IN ('archived', 'suppressed')`
+    : '1=1';
+  const hasScopeColumns = cols.has('host_id') || cols.has('agent_id');
+  const params = [];
+  let projectClause = '';
+  if (!hasScopeColumns && cols.has('project') && options.project != null && options.project !== '') {
+    projectClause = ' AND ("project" = ? OR "project" IS NULL)';
+    params.push(String(options.project));
+  }
+  const pinnedOrder = cols.has('pinned') ? `CASE WHEN "pinned" = 1 THEN 1 ELSE 0 END` : 'CASE WHEN 1 THEN 0 END';
+  const salienceOrder = cols.has('salience') ? `COALESCE("salience", 0)` : 'CASE WHEN 1 THEN 0 END';
+  return db.prepare(
+    `SELECT ${projection} FROM memories WHERE ${statusClause}${projectClause} `
+    + `ORDER BY ${pinnedOrder} DESC, ${salienceOrder} DESC, "id" ASC LIMIT ${INJECT_CANDIDATE_LIMIT}`,
+  ).all(...params);
+}
 
 /**
  * Pack wording law (#393 T1). The header states what the pack IS on this box:
@@ -252,7 +312,7 @@ export function isInjectEligible(row, scope = {}) {
   if (status === 'archived' || status === 'suppressed' || status === 'deleted' || status === 'forgotten') {
     return false;
   }
-  if (row.quarantined === true || row.in_quarantine === true) return false;
+  if (dbBooleanTrue(row.quarantined) || dbBooleanTrue(row.in_quarantine)) return false;
   const sens = String(row.sensitivity_level || row.sensitivity || 'INTERNAL').toUpperCase();
   if (sens === 'RESTRICTED') return false;
 
@@ -264,8 +324,8 @@ export function isInjectEligible(row, scope = {}) {
   // Trust floor (Opus B1 / #348): attestation is channel identity, NOT trust.
   // source_attested alone must not bypass the floor for non-pin rows.
   // Escape: source_attested AND pinned AND trust_score >= 0.5 (or missing trust with allow verdict).
-  const attested = row.source_attested === true || row.sourceAttested === true;
-  const pinned = row.pinned === true || row.pinned === 1;
+  const attested = dbBooleanTrue(row.source_attested) || dbBooleanTrue(row.sourceAttested);
+  const pinned = dbBooleanTrue(row.pinned);
   let trustOk = false;
   if (typeof row.trust_score === 'number') {
     trustOk = row.trust_score >= 0.5;
@@ -310,7 +370,7 @@ export function isInjectEligible(row, scope = {}) {
     if (scope.agentId != null && String(agent) !== String(scope.agentId)) return false;
     if (scope.project != null && scope.project !== '' && project != null && String(project) !== String(scope.project)) {
       // allow project-null rows as transferable only if row.transferable
-      if (!row.transferable) return false;
+      if (!dbBooleanTrue(row.transferable)) return false;
     }
   }
   return true;
@@ -461,12 +521,13 @@ export function serializeItem(item) {
  */
 export function stableRank(rows) {
   return [...rows].sort((a, b) => {
-    const pa = a.pinned ? 1 : 0;
-    const pb = b.pinned ? 1 : 0;
+    const pa = dbBooleanTrue(a.pinned) ? 1 : 0;
+    const pb = dbBooleanTrue(b.pinned) ? 1 : 0;
     if (pb !== pa) return pb - pa;
     const sa = typeof a.salience === 'number' ? a.salience : 0;
     const sb = typeof b.salience === 'number' ? b.salience : 0;
     if (sb !== sa) return sb - sa;
+    if (typeof a.id === 'number' && typeof b.id === 'number' && a.id !== b.id) return a.id - b.id;
     const ia = String(a.id);
     const ib = String(b.id);
     return ia < ib ? -1 : ia > ib ? 1 : 0;

@@ -618,18 +618,20 @@ async function maybeInjectBootstrapPack(context, wsDir, event) {
 
   let buildStartPack;
   let readInjectConfig;
+  let selectInjectCandidates;
   for (const c of candidates) {
     try {
       if (!fsSync.existsSync(c)) continue;
       const mod = await import(pathToFileURL(c).href);
       buildStartPack = mod.buildStartPack;
       readInjectConfig = mod.readInjectConfig;
-      if (buildStartPack && readInjectConfig) break;
+      selectInjectCandidates = mod.selectInjectCandidates;
+      if (buildStartPack && readInjectConfig && selectInjectCandidates) break;
     } catch {
       /* try next */
     }
   }
-  if (!buildStartPack || !readInjectConfig) return;
+  if (!buildStartPack || !readInjectConfig || !selectInjectCandidates) return;
 
   const injectCfg = readInjectConfig(raw);
   if (!injectCfg.nativeContract || injectCfg.mode === "off" || injectCfg.mode === "turn") {
@@ -642,26 +644,7 @@ async function maybeInjectBootstrapPack(context, wsDir, event) {
   const db = new Database(dbPath, { readonly: true, timeout: 3000 });
   let rows = [];
   try {
-    const cols = db.prepare("PRAGMA table_info(memories)").all().map((c) => c.name);
-    if (cols.includes("host_id")) {
-      rows = db.prepare(`
-        SELECT id, title, content, salience, pinned, trust_score, sensitivity_level, status,
-               source, defence_verdict, host_id, agent_id, project, transferable, created_at
-        FROM memories
-        WHERE COALESCE(status,'active') NOT IN ('archived','suppressed')
-        ORDER BY pinned DESC, salience DESC
-        LIMIT 64
-      `).all();
-    } else {
-      rows = db.prepare(`
-        SELECT id, title, content, salience, pinned, trust_score, sensitivity_level, status,
-               source, defence_verdict, project, created_at
-        FROM memories
-        WHERE COALESCE(status,'active') NOT IN ('archived','suppressed')
-        ORDER BY pinned DESC, salience DESC
-        LIMIT 64
-      `).all();
-    }
+    rows = selectInjectCandidates(db);
   } finally {
     db.close();
   }
