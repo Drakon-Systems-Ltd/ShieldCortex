@@ -398,6 +398,60 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/could not all be enumerated/);
   });
 
+  it('host contract: a relative OPENCLAW_HOME is unresolvable — never probed against the doctor cwd (SOL r4 B2)', async () => {
+    // The r4 defect: OPENCLAW_HOME was path.resolve()d against the DOCTOR cwd,
+    // while the host resolves it against the OPENCLAW process cwd
+    // (openclaw/src/infra/home-dir.ts). Different working directories meant
+    // doctor could certify green artifacts from one tree while OpenClaw ran
+    // unwired from another. Fully green fixtures under the default root make
+    // the old behavior reach PASS, so any regression trips this test.
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    process.env.OPENCLAW_HOME = 'oc-home';
+    const relative = await runHost();
+    expect(relative.status).toBe('warn');
+    expect(relative.message).toMatch(/OPENCLAW_HOME/);
+    expect(relative.message).toMatch(/cannot know/);
+    expect(relative.fix).toMatch(/absolute path/);
+
+    // ~user never expands in the host either — it rides the same cwd fallback.
+    process.env.OPENCLAW_HOME = '~ubuntu/oc';
+    const tildeUser = await runHost();
+    expect(tildeUser.status).toBe('warn');
+    expect(tildeUser.message).toMatch(/OPENCLAW_HOME/);
+
+    // An ABSOLUTE OPENCLAW_HOME relocates the whole effective-home tree; the
+    // evidence must be read from there, not from $HOME.
+    const ocHomeDir = path.join(tmpHome, 'oc-home');
+    installRealHookArtifacts(path.join(ocHomeDir, '.openclaw'));
+    fs.writeFileSync(
+      path.join(ocHomeDir, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    process.env.OPENCLAW_HOME = ocHomeDir;
+    const absolute = await runHost();
+    expect(absolute.status).toBe('pass');
+    expect(absolute.message).toMatch(/sc_only enforced/);
+  });
+
   // ── T1 host runtime matrix (#393) ──
   // The live TARS shape: Hermes primary, no OpenClaw binary, contract sc_only.
   // The pre-#393 check reported PASS here ("no paper-contract signals on disk")

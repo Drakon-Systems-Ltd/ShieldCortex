@@ -3638,10 +3638,17 @@ export function openClawWorkspacePaths(
  * OpenClaw-effective home for expanding `~` in OpenClaw paths — mirror of
  * resolveRawHomeDir (openclaw/src/infra/home-dir.ts): OPENCLAW_HOME (itself
  * `~`-expandable against HOME/USERPROFILE) > HOME > USERPROFILE >
- * os.homedir(). Returns null when nothing resolves; OpenClaw would then fall
- * back to ITS process cwd, which doctor cannot know.
+ * os.homedir().
+ *
+ * #393 SOL r4 B2: a non-`~`, non-absolute OPENCLAW_HOME is returned verbatim
+ * by resolveRawHomeDir and then path.resolve()d against the OPENCLAW PROCESS
+ * cwd (home-dir.ts resolveEffectiveHomeDir) — doctor resolving it against its
+ * OWN cwd probed a decoy tree while OpenClaw ran from another. The same
+ * cwd-fallback fires when nothing resolves at all (resolveRequiredHomeDir).
+ * Both shapes are unresolvable for doctor: OpenClaw stays bound with buses
+ * unknown, never probed against a guessed root.
  */
-function openClawEffectiveHome(): string | null {
+function openClawEffectiveHome(): { home: string } | { unresolvable: string } {
   const norm = (v: string | undefined): string | undefined => {
     const t = v?.trim();
     return t ? t : undefined;
@@ -3657,12 +3664,17 @@ function openClawEffectiveHome(): string | null {
   if (explicit) {
     if (/^~($|[\\/])/.test(explicit)) {
       const fallback = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
-      return fallback ? path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback)) : null;
+      if (fallback) return { home: path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback)) };
+      return { unresolvable: `OPENCLAW_HOME="${explicit}" has no HOME/USERPROFILE/homedir to expand ~ against — OpenClaw falls back to its own process cwd, which doctor cannot know` };
     }
-    return path.resolve(explicit);
+    if (!path.isAbsolute(explicit)) {
+      return { unresolvable: `OPENCLAW_HOME="${explicit}" is relative (\`~user\` included) — OpenClaw resolves it against its own process cwd, which doctor cannot know` };
+    }
+    return { home: path.resolve(explicit) };
   }
   const home = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
-  return home ? path.resolve(home) : null;
+  if (home) return { home: path.resolve(home) };
+  return { unresolvable: 'no OPENCLAW_HOME/HOME/USERPROFILE and os.homedir() unavailable — OpenClaw falls back to its own process cwd, which doctor cannot know' };
 }
 
 /**
@@ -3705,10 +3717,9 @@ function resolveOpenClawUserPath(
  * root — otherwise old complete artifacts under the default root prove
  * delivery for a runtime that actually lives (unwired) somewhere else.
  */
-function openClawStateRoot(home: string): { root: string; detail?: undefined } | { root: null; detail: string } {
+function openClawStateRoot(ocHome: string): { root: string; detail?: undefined } | { root: null; detail: string } {
   const primary = process.env.OPENCLAW_STATE_DIR?.trim();
   const override = primary || process.env.CLAWDBOT_STATE_DIR?.trim();
-  const ocHome = openClawEffectiveHome() ?? home;
   if (override) {
     const resolved = resolveOpenClawUserPath(override, ocHome);
     if ('path' in resolved) return { root: resolved.path };
@@ -3778,13 +3789,17 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   // heavy and only needed here.
   const { HOOK_FILES, hookFilesStale, hookSourceAvailable } = await import('../setup/openclaw.js');
 
-  // #393 SOL r3 B6: state-dir and config-path overrides resolve with the
-  // host's own resolveUserPath semantics. An override doctor cannot resolve
-  // (relative, ~user) makes EVERY OpenClaw reading a guess — the probe is
-  // marked unresolvable and the evidence model caps OpenClaw at unknown
-  // instead of probing a wrong tree it could vanish from.
-  const ocHome = openClawEffectiveHome() ?? home;
-  const stateRoot = openClawStateRoot(home);
+  // #393 SOL r3 B6 + r4 B2: the OpenClaw-effective home and the state-dir /
+  // config-path overrides all resolve with the host's own semantics. A value
+  // doctor cannot resolve (relative OPENCLAW_HOME, relative or ~user
+  // overrides) makes EVERY OpenClaw reading a guess — the probe is marked
+  // unresolvable and the evidence model caps OpenClaw at unknown instead of
+  // probing a wrong tree it could vanish from.
+  const ocHomeRes = openClawEffectiveHome();
+  const ocHome = 'home' in ocHomeRes ? ocHomeRes.home : null;
+  const stateRoot: { root: string | null; detail?: string } = 'unresolvable' in ocHomeRes
+    ? { root: null, detail: ocHomeRes.unresolvable }
+    : openClawStateRoot(ocHomeRes.home);
   let ocUnresolvable = stateRoot.detail;
   let ocPath: string | null = null;
   if (!ocUnresolvable) {
@@ -3804,7 +3819,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   const ocConfig: ProbeRead<Record<string, unknown>> = ocPath === null
     ? { kind: 'absent' }
     : readJsonProbe(ocPath);
-  const ocWorkspaces = stateRoot.root === null
+  const ocWorkspaces = stateRoot.root === null || ocHome === null
     ? { paths: [], complete: false }
     : openClawWorkspacePaths(ocHome, stateRoot.root, ocConfig);
   const runtimes: HostRuntimeEvidence[] = [
