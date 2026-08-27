@@ -1365,6 +1365,33 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(`${r.message} ${r.fix ?? ''}`).toMatch(/workspace-case\/MEMORY\.md|clawdbot/);
   });
 
+  it('OPENCLAW_TEST_FAST=1 skips the legacy fallback exactly like the host — a decoy .clawdbot hook tree cannot be attested (SOL r8)', async () => {
+    // The exact r8 false PASS: OPENCLAW_TEST_FAST=1 makes the host pin
+    // ~/.openclaw (paths.ts resolveStateDir) even when it is absent; a doctor
+    // still walking the legacy fallback would attest byte-current SC hook
+    // artifacts in .clawdbot/hooks that the host never loads.
+    writeConfig(busContract());
+    const cfgPath = path.join(tmpHome, 'oc-config', 'openclaw.json');
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      agents: { defaults: { memorySearch: { enabled: false } } },
+      hooks: { internal: { enabled: true } },
+    }, null, 2));
+    process.env.OPENCLAW_CONFIG_PATH = cfgPath;
+    process.env.OPENCLAW_TEST_FAST = '1';
+    try {
+      fs.rmSync(path.join(tmpHome, '.openclaw'), { recursive: true, force: true });
+      // Byte-current decoy artifacts live ONLY in the legacy tree.
+      installRealHookArtifacts(path.join(tmpHome, '.clawdbot'));
+      const r = await runHost();
+      // Host uses absent ~/.openclaw: no SC hook exists there, so sc_only
+      // must not PASS off the decoy legacy hook.
+      expect(r.status).not.toBe('pass');
+    } finally {
+      delete process.env.OPENCLAW_TEST_FAST;
+    }
+  });
+
   it('openClawWorkspacePaths mirrors resolveAgentWorkspaceDir: default agent, id normalization, duplicates, explicit overrides (SOL r3 B3)', async () => {
     const mod = await import('../doctor.js');
     const cfg = (agents: Record<string, unknown>) =>

@@ -4041,6 +4041,10 @@ function openClawStateRoot(ocHome: string): { root: string; detail?: undefined }
   // else the first existing legacy dir (host order). A dir doctor cannot
   // stat is fail-closed: the root is unresolvable, evidence goes unknown.
   const newDir = path.join(ocHome, '.openclaw');
+  // OPENCLAW_TEST_FAST=1 makes the host skip the legacy fallback entirely
+  // (paths.ts resolveStateDir) — mirror it, or a decoy legacy tree gets
+  // attested while the host runs from ~/.openclaw.
+  if (process.env.OPENCLAW_TEST_FAST === '1') return { root: newDir };
   const probeDir = (dir: string): 'present' | 'absent' | 'error' => {
     const p = probePath(dir);
     return p.kind === 'present' ? 'present' : p.kind === 'absent' ? 'absent' : 'error';
