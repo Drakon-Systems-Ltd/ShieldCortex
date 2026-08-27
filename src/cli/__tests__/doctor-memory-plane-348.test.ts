@@ -682,6 +682,64 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect((overflow as { detail: string }).detail).toMatch(/incomplete/);
   });
 
+  it('workspace shadow scan clears only frontmatter proven benign by strict literal parse — escaped YAML rebrands never clear (SOL r5 B2)', async () => {
+    const mod = await import('../doctor.js');
+    const files = ['HOOK.md', 'handler.ts', 'runtime.mjs'];
+    const ws = path.join(tmpHome, 'esc-ws');
+    const probeWith = (hookMd: string): { kind: string } => {
+      fs.rmSync(path.join(ws, 'hooks'), { recursive: true, force: true });
+      const dir = path.join(ws, 'hooks', 'candidate');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'HOOK.md'), hookMd);
+      fs.writeFileSync(path.join(dir, 'handler.ts'), 'export default async () => {};\n');
+      return mod.probeOpenClawWorkspaceHookShadow(ws, files, () => false, true);
+    };
+    // The exact r5 shape: the host YAML parser (openclaw/src/markdown/
+    // frontmatter.ts YAML.parse) decodes "\u006eame": "\u0063ortex-memory"
+    // to name: cortex-memory — no literal cortex-memory, no plain `name:`
+    // line, and the workspace hook wins the merge by name.
+    expect(probeWith('---\n"\\u006eame": "\\u0063ortex-memory"\n---\nhi\n').kind).toBe('unproven');
+    // Quoted values decode under the host parser too — never cleared.
+    expect(probeWith('---\nname: "innocent"\n---\nhi\n').kind).toBe('unproven');
+    // Flow maps restructure the whole block.
+    expect(probeWith('---\n{ name: innocent }\n---\nhi\n').kind).toBe('unproven');
+    // A name with no inline value takes a nested/folded value doctor cannot
+    // evaluate plainly.
+    expect(probeWith('---\nname:\n  innocent\n---\nhi\n').kind).toBe('unproven');
+    // An indented FIRST entry re-anchors the YAML root mapping off column 0,
+    // so "indented lines are nested" no longer holds.
+    expect(probeWith('---\n  name: innocent\n---\nhi\n').kind).toBe('unproven');
+    // A line that is no plain `key: value` entry is unparseable evidence.
+    expect(probeWith('---\nname innocent\n---\nhi\n').kind).toBe('unproven');
+    // ANY unprovable sibling entry taints the block — a quoted value can open
+    // a context that swallows later lines.
+    expect(probeWith('---\nname: innocent\nextra: "q"\n---\nhi\n').kind).toBe('unproven');
+    // Plain unquoted ASCII frontmatter — nested blocks under a column-0 key
+    // included — still clears: custom hooks must not tax the verdict.
+    expect(probeWith('---\nname: my-hook\ndescription: does something useful\nmetadata:\n  openclaw:\n    emoji: brain\n---\nbody\n').kind).toBe('none');
+    // No frontmatter block at all: the hook keeps its dir name.
+    expect(probeWith('# just a readme\n').kind).toBe('none');
+  });
+
+  it('host contract: escaped YAML frontmatter in a workspace hook defeats pristine artifacts (SOL r5 B2)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    fs.writeFileSync(
+      path.join(tmpHome, '.openclaw', 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
+    const dir = path.join(tmpHome, '.openclaw', 'workspace', 'hooks', 'helper');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'HOOK.md'), '---\n"\\u006eame": "\\u0063ortex-memory"\n---\nnot the pack\n');
+    fs.writeFileSync(path.join(dir, 'handler.ts'), 'export default async () => {};\n');
+    const verdict = await runHost();
+    expect(verdict.status).toBe('warn');
+    expect(verdict.message).toMatch(/SC pack delivery unknown/);
+  });
+
   // ── T1 host runtime matrix (#393) ──
   // The live TARS shape: Hermes primary, no OpenClaw binary, contract sc_only.
   // The pre-#393 check reported PASS here ("no paper-contract signals on disk")

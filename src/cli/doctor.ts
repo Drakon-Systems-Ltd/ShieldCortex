@@ -3736,6 +3736,84 @@ export function openClawDefaultWorkspace(
 }
 
 /**
+ * Strict literal frontmatter proof (#393 SOL r5 B2). OpenClaw's frontmatter
+ * parser (openclaw/src/markdown/frontmatter.ts) YAML-parses the block —
+ * double-quoted scalars DECODE escapes ("\u006eame" → name), quoted keys are
+ * trimmed, flow maps restructure the document, and a failed YAML parse falls
+ * back to a per-line parser whose extra keys are merged in. Doctor cannot run
+ * the host's YAML stack from this repo (drift trap), so a HOOK.md clears only
+ * when it is provably inert under BOTH parsers:
+ *  - no frontmatter block at all (the hook keeps its dir name), or
+ *  - every block line blank, a comment, an indented continuation UNDER a
+ *    column-0 entry, or a column-0 `key: value` entry whose key and value are
+ *    plain unquoted ASCII (no quotes, escapes, flow/tag/anchor/alias
+ *    indicators, block scalars, or other YAML-active punctuation).
+ * With every column-0 entry plain there is nothing for YAML to decode at the
+ * top level and the line parser reads the same literal values; a folded
+ * continuation always joins with whitespace, so no `name` can become
+ * cortex-memory without the literal appearing (the caller's literal scan —
+ * re-checked here for standalone use). Everything else — quoted keys or
+ * values, escapes, flow maps, indented roots, unparseable lines — is an
+ * unproven rebrand. Exported for direct unit testing.
+ */
+export function probeOpenClawHookMdRebrand(
+  raw: string,
+): { kind: 'clear' } | { kind: 'unproven'; detail: string } {
+  // Mirror of the host's extractFrontmatterBlock: normalize newlines, take
+  // the block between the leading `---` and the first `\n---` (no block, no
+  // frontmatter — parseFrontmatterBlock returns {} and nothing rebrands).
+  const normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!normalized.startsWith('---')) return { kind: 'clear' };
+  const end = normalized.indexOf('\n---', 3);
+  if (end === -1) return { kind: 'clear' };
+  const block = normalized.slice(4, end);
+  let anchored = false;
+  for (const line of block.split('\n')) {
+    if (/^[ \t]*$/.test(line)) continue;
+    // Comment lines define keys in neither parser.
+    if (/^[ \t]*#/.test(line)) continue;
+    if (/^[ \t]/.test(line)) {
+      // Indented content is nested/continuation — inert for top-level keys —
+      // but ONLY once a column-0 entry anchored the root mapping at column 0.
+      // An indented FIRST entry re-anchors the whole root map at that indent,
+      // and a quoted key there decodes like any other.
+      if (anchored) continue;
+      return {
+        kind: 'unproven',
+        detail: 'frontmatter starts with an indented entry — the YAML root mapping is not anchored at column 0, so its keys cannot be evaluated plainly',
+      };
+    }
+    const entry = line.match(/^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$/);
+    if (!entry) {
+      return {
+        kind: 'unproven',
+        detail: 'frontmatter carries a line that is not a plain `key: value` entry — quoted keys, flow maps, and YAML escapes decode under the host parser and could rebrand the hook as cortex-memory',
+      };
+    }
+    anchored = true;
+    const value = (entry[2] ?? '').trim();
+    if (value !== '' && !/^[A-Za-z0-9][A-Za-z0-9 ._/-]*$/.test(value)) {
+      return {
+        kind: 'unproven',
+        detail: `frontmatter \`${entry[1]}:\` carries a value doctor cannot evaluate plainly — quotes, escapes, and YAML indicators decode under the host parser`,
+      };
+    }
+    if (entry[1] === 'name') {
+      if (value === '') {
+        return {
+          kind: 'unproven',
+          detail: 'frontmatter `name:` has no inline value — a nested or folded name cannot be evaluated plainly',
+        };
+      }
+      if (/^cortex-memory$/i.test(value)) {
+        return { kind: 'unproven', detail: 'frontmatter names cortex-memory' };
+      }
+    }
+  }
+  return { kind: 'clear' };
+}
+
+/**
  * Hook-precedence shadow probe (#393 SOL r4 B3). OpenClaw merges hook sources
  * extra < bundled < managed < WORKSPACE (openclaw/src/hooks/workspace.ts
  * loadHookEntries — workspace wins by hook NAME), and the gateway loads from
@@ -3750,9 +3828,9 @@ export function openClawDefaultWorkspace(
  *  - a dir named cortex-memory only when byte-current with the packaged
  *    source (an identical shadow still delivers the pack);
  *  - any other dir only when its HOOK.md is readable, never mentions
- *    cortex-memory, and carries no `name:` value doctor cannot evaluate
- *    plainly (YAML quoting/escapes could smuggle the name past a text scan);
- *    a dir with no HOOK.md and no manifest loads nothing.
+ *    cortex-memory, and passes the strict literal frontmatter proof above
+ *    (#393 SOL r5 B2 — the host's YAML parser decodes quoting/escapes a text
+ *    scan cannot see); a dir with no HOOK.md and no manifest loads nothing.
  * Anything else — differing content, unreadable evidence, cap overflow — is
  * an unproven shadow: what actually runs is unattested, so wired_proven must
  * not stand. Exported for direct unit testing.
@@ -3827,15 +3905,12 @@ export function probeOpenClawWorkspaceHookShadow(
         detail: `${sub}/HOOK.md mentions cortex-memory — frontmatter \`name:\` rebrands a hook dir, so it may shadow the managed hook`,
       };
     }
-    const nameLines = hookMd.value.match(/^\s*name\s*:.*$/gm) ?? [];
-    for (const line of nameLines) {
-      const value = line.slice(line.indexOf(':') + 1).trim().replace(/^(["'])(.*)\1$/, '$2');
-      if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value)) {
-        return {
-          kind: 'unproven',
-          detail: `${sub}/HOOK.md carries a \`name:\` value doctor cannot evaluate plainly — YAML quoting/escapes could rebrand it as cortex-memory and shadow the managed hook`,
-        };
-      }
+    const rebrand = probeOpenClawHookMdRebrand(hookMd.value);
+    if (rebrand.kind === 'unproven') {
+      return {
+        kind: 'unproven',
+        detail: `${sub}/HOOK.md ${rebrand.detail} — it could rebrand the dir as cortex-memory and shadow the managed hook`,
+      };
     }
   }
   return identical ? { kind: 'identical' } : { kind: 'none' };
