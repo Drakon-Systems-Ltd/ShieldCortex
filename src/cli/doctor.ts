@@ -40,6 +40,7 @@ import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-proc
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
   evaluateHostContract,
+  openClawConfigUsesInclude,
   parseHermesMemoryBlock,
   readInjectModeStrict,
   resolveClaudeCodeEvidence,
@@ -3658,6 +3659,11 @@ export function openClawWorkspacePaths(
     else complete = false;
   };
   if (config.kind === 'present') {
+    // #393 SOL r5 B1: $include'd files deep-merge into agents/defaults before
+    // the host resolves workspaces — the raw root JSON cannot enumerate them.
+    // Raw-visible workspaces still get probed (extra probes only ADD
+    // native-ON evidence), but the scan must never claim completeness.
+    if (openClawConfigUsesInclude(config.value)) complete = false;
     const agents = asObj(config.value.agents);
     add(asObj(agents.defaults).workspace);
     // resolveDefaultAgentId: first entry marked default (truthy), else the
@@ -3703,6 +3709,13 @@ export function openClawDefaultWorkspace(
   ocHome: string,
   config: ProbeRead<Record<string, unknown>>,
 ): { path: string } | { unresolvable: string } {
+  // #393 SOL r5 B1: the host resolves the default agent and its workspace
+  // from the DEEP-MERGED config — an $include can elect a different default
+  // agent or redirect its workspace, so the raw root JSON cannot name the one
+  // workspace the gateway loads hooks from.
+  if (config.kind === 'present' && openClawConfigUsesInclude(config.value)) {
+    return { unresolvable: 'openclaw.json uses $include — the merged agents/defaults doctor cannot attest decide the default agent workspace' };
+  }
   const obj = (v: unknown): Record<string, unknown> =>
     v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
   const { entries, defaultAgentId } = openClawAgentEntries(config);

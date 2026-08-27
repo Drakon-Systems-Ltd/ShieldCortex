@@ -578,6 +578,45 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(inert.status).toBe('pass');
   });
 
+  it('host contract: $include in openclaw.json defeats pristine artifacts — doctor cannot attest the merged config (SOL r5 B1)', async () => {
+    writeConfig(busContract());
+    installRealHookArtifacts();
+    const ocDir = path.join(tmpHome, '.openclaw');
+    // The exact r5 shape: raw root reads gate-open + memorySearch-off (the r3
+    // green), but OpenClaw deep-merges the included file BEFORE evaluating —
+    // and that file disables the cortex-memory entry.
+    fs.writeFileSync(
+      path.join(ocDir, 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true, entries: { $include: './entries.json5' } } },
+      }, null, 2),
+    );
+    fs.writeFileSync(
+      path.join(ocDir, 'entries.json5'),
+      JSON.stringify({ 'cortex-memory': { enabled: false } }, null, 2),
+    );
+    const verdict = await runHost();
+    expect(verdict.status).toBe('warn');
+    expect(verdict.message).toMatch(/cannot determine host contract/);
+    expect(verdict.fix).toMatch(/\$include/);
+  });
+
+  it('$include makes workspace enumeration and the default workspace unattestable (SOL r5 B1)', async () => {
+    const mod = await import('../doctor.js');
+    const cfg = (value: Record<string, unknown>) => ({ kind: 'present' as const, value });
+    const inc = cfg({ agents: { $include: './agents.json5' } });
+    // Included content can add defaults/per-agent workspaces doctor never
+    // enumerates — the scan must refuse to claim completeness…
+    expect(mod.openClawWorkspacePaths(tmpHome, path.join(tmpHome, '.openclaw'), inc).complete).toBe(false);
+    // …and can redirect the ONE workspace the gateway loads hooks from.
+    expect('unresolvable' in mod.openClawDefaultWorkspace(tmpHome, inc)).toBe(true);
+    // Without the directive both readings stand as before.
+    const plain = cfg({ agents: { defaults: {} } });
+    expect(mod.openClawWorkspacePaths(tmpHome, path.join(tmpHome, '.openclaw'), plain).complete).toBe(true);
+    expect(mod.openClawDefaultWorkspace(tmpHome, plain)).toEqual({ path: path.join(tmpHome, '.openclaw', 'workspace') });
+  });
+
   it('openClawDefaultWorkspace mirrors resolveAgentWorkspaceDir for the default agent (SOL r4 B3)', async () => {
     const mod = await import('../doctor.js');
     const home = tmpHome;

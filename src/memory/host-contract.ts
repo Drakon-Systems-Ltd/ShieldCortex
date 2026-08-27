@@ -253,6 +253,26 @@ function resolveMemorySearchFlag(value: unknown): boolean {
 }
 
 /**
+ * OpenClaw's `$include` directive (#393 SOL r5 B1): the host resolves and
+ * DEEP-MERGES included files into the config BEFORE anything evaluates it
+ * (openclaw/src/config/io.ts resolveConfigIncludesForRead →
+ * config/includes.ts IncludeProcessor/deepMerge — objects merge recursively,
+ * arrays CONCATENATE, and the directive is honoured anywhere in the tree,
+ * array members included). Doctor reads only the raw root JSON and must not
+ * reimplement the host's resolver (path guards, JSON5, depth caps — a drift
+ * trap), so ANY `$include` in the tree makes every config-derived reading —
+ * hook gates, agents defaults, memorySearch, workspaces — unattestable:
+ * the affected evidence caps at unknown, never a raw-file verdict.
+ */
+const OPENCLAW_INCLUDE_KEY = '$include';
+export function openClawConfigUsesInclude(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(openClawConfigUsesInclude);
+  if (!value || typeof value !== 'object') return false;
+  const rec = value as Record<string, unknown>;
+  return Object.keys(rec).some((k) => k === OPENCLAW_INCLUDE_KEY || openClawConfigUsesInclude(rec[k]));
+}
+
+/**
  * Host-side switches that decide whether the installed SC hook can run at all
  * (#393 SOL H1 + r3 B1). OpenClaw loads ZERO internal hooks unless the GLOBAL
  * gate `hooks.internal.enabled` resolves truthy (openclaw/src/hooks/loader.ts
@@ -262,11 +282,14 @@ function resolveMemorySearchFlag(value: unknown): boolean {
  * still disables the one entry. A config that cannot be read proves nothing
  * either way — and an ABSENT openclaw.json stays unknown rather than gate_off,
  * because OpenClaw also reads legacy config filenames doctor does not probe.
+ * A config using $include proves nothing either (SOL r5 B1): the merged
+ * result can flip the gate or the entry in both directions.
  */
 function openClawHookConfigEnabled(
   config: ProbeRead<Record<string, unknown>>,
 ): 'enabled' | 'gate_off' | 'entry_off' | 'unknown' {
   if (config.kind !== 'present') return 'unknown';
+  if (openClawConfigUsesInclude(config.value)) return 'unknown';
   const obj = (v: unknown): Record<string, unknown> =>
     v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
   const internal = obj(obj(config.value.hooks).internal);
@@ -330,6 +353,14 @@ export function resolveOpenClawEvidence(
     nativeBus = 'unknown';
     proof.push('openclaw.json absent while OpenClaw looks bound — Memory Search defaults ON and cannot be proven off');
     remediation = `${cap.label}: no host config to read — set ${cap.nativeOffSetting}, or remove the OpenClaw integration if this host is retired`;
+  } else if (openClawConfigUsesInclude(probe.config.value)) {
+    // #393 SOL r5 B1: OpenClaw deep-merges $include'd files into the config
+    // before evaluating it — included agents.list entries can re-enable
+    // memorySearch (arrays concatenate), so the raw root file proves nothing
+    // off. Doctor cannot resolve includes without reimplementing the host.
+    nativeBus = 'unknown';
+    proof.push('openclaw.json uses $include — OpenClaw evaluates the deep-merged config, which doctor cannot attest from the raw file, so Memory Search cannot be proven off');
+    remediation = `${cap.label}: inline the $include'd config into openclaw.json (or retire the includes) so doctor can attest the merged result, then prove ${cap.nativeOffSetting}`;
   } else {
     const oc = probe.config.value;
     const agents = oc.agents && typeof oc.agents === 'object' && !Array.isArray(oc.agents)
@@ -465,7 +496,9 @@ export function resolveOpenClawEvidence(
       default: {
         if (hookEnabled === 'unknown') {
           scBus = 'unknown';
-          proof.push('openclaw.json not readable — cannot confirm the host enables internal hooks (hooks.internal.enabled) or the SC entry');
+          proof.push(probe.config.kind === 'present' && openClawConfigUsesInclude(probe.config.value)
+            ? 'openclaw.json uses $include — the merged config decides hooks.internal.enabled and the cortex-memory entry, and doctor cannot attest the merged result from the raw file'
+            : 'openclaw.json not readable — cannot confirm the host enables internal hooks (hooks.internal.enabled) or the SC entry');
           break;
         }
         // Even byte-current managed artifacts behind an open gate are only

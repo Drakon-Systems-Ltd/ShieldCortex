@@ -314,6 +314,52 @@ describe('OpenClaw evidence', () => {
     expect(both.proof.join(' ')).toMatch(/npx not resolvable/);
   });
 
+  it('never grades a config carrying $include — OpenClaw deep-merges included files before evaluating it (SOL r5 B1)', () => {
+    const graded = (value: Record<string, unknown>) =>
+      resolveOpenClawEvidence(ocProbe({ config: { kind: 'present', value }, scHook: 'complete' }), CTX);
+    // The r5 false PASS: root gate open + memorySearch off, but OpenClaw
+    // resolves $include and deep-merges the included file BEFORE validation
+    // (openclaw/src/config/io.ts resolveConfigIncludesForRead →
+    // includes.ts deepMerge) — the include can carry
+    // entries.cortex-memory.enabled=false, so doctor grading the raw root
+    // JSON would report wired_proven while the host disables the hook.
+    const nested = graded({
+      agents: { defaults: { memorySearch: { enabled: false } } },
+      hooks: { internal: { enabled: true, entries: { $include: './entries.json5' } } },
+    });
+    expect(nested.scBus).toBe('unknown');
+    // Included agents.list entries can re-enable memorySearch (deepMerge
+    // CONCATENATES arrays), so a raw off_proven cannot stand either.
+    expect(nested.nativeBus).toBe('unknown');
+    expect(nested.proof.join(' ')).toMatch(/\$include/);
+    expect(nested.remediation).toMatch(/\$include/);
+    // A raw closed gate beside an include is NOT a provably closed gate —
+    // the included file could open it, so unknown, never not_wired.
+    const gateBehindInclude = graded({
+      agents: { defaults: { memorySearch: { enabled: false } } },
+      hooks: { $include: './hooks.json5' },
+    });
+    expect(gateBehindInclude.scBus).toBe('unknown');
+    // $include inside an ARRAY member is still resolved by the host
+    // (IncludeProcessor.process maps arrays).
+    const inArray = graded({
+      agents: { defaults: { memorySearch: { enabled: false } }, list: [{ id: 'a', $include: './agent.json5' }] },
+      hooks: { internal: { enabled: true } },
+    });
+    expect(inArray.scBus).toBe('unknown');
+    // A root-level include replaces the whole document.
+    expect(graded({ $include: './base.json5' }).scBus).toBe('unknown');
+    // Keys that merely LOOK like the directive must not tax the verdict.
+    const lookalike = graded({
+      agents: { defaults: { memorySearch: { enabled: false } }, include: './x', $includes: './y' },
+      hooks: { internal: { enabled: true } },
+    });
+    expect(lookalike.scBus).toBe('wired_proven');
+    expect(lookalike.nativeBus).toBe('off_proven');
+    // sc_only can never PASS past an include.
+    expect(verdictFor([nested]).status).not.toBe('pass');
+  });
+
   it('reports unknown when openclaw.json is unreadable', () => {
     const e = resolveOpenClawEvidence(
       ocProbe({ config: { kind: 'unreadable', detail: 'EACCES: permission denied' } }),
