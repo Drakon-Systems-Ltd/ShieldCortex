@@ -215,6 +215,25 @@ describe('config --memory-plane (signed Track A / #348)', () => {
     expect(fs.existsSync(configFile())).toBe(false);
   });
 
+  it('re-setting the plane advances planeSetAt — the drift time-box must not read a stale stamp (#394)', () => {
+    handleCloudConfig(['--memory-plane', 'dual_legacy']);
+    const first = readOnDisk().memory.planeSetAt as string;
+    // Rewind the stamp on disk the way an aged install looks, then re-sign by
+    // going back through the signed setter.
+    const rewound = new Date(Date.parse(first) - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const rawCfg = readOnDisk();
+    rawCfg.memory.planeSetAt = rewound;
+    fs.writeFileSync(configFile(), `${JSON.stringify(rawCfg, null, 2)}\n`);
+    clearCloudConfigCache();
+    handleCloudConfig(['--memory-plane', 'import_only']);
+    const after = readOnDisk();
+    expect(after.memory.plane).toBe('import_only');
+    expect(Date.parse(after.memory.planeSetAt as string)).toBeGreaterThan(Date.parse(rewound));
+    expect(after._sig).toMatch(/^[0-9a-f]{64}$/);
+    clearCloudConfigCache();
+    expect(isConfigTampered()).toBe(false);
+  });
+
   it('preserves inject sibling keys when setting plane', () => {
     fs.writeFileSync(configFile(), JSON.stringify({
       memory: {

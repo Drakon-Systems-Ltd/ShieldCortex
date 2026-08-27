@@ -46,7 +46,9 @@ import {
   resolveClaudeCodeEvidence,
   resolveHermesEvidence,
   resolveOpenClawEvidence,
+  resolveOpenClawMemorySearchState,
   INJECT_MODES,
+  SIDECAR_POSTURE,
   type ArtifactProbe,
   type HermesProfileProbe,
   type HostRuntimeEvidence,
@@ -54,6 +56,12 @@ import {
   type OpenClawHookArtifacts,
   type ProbeRead,
 } from '../memory/host-contract.js';
+import {
+  evaluatePlaneDrift,
+  type MemoryPlane,
+  type NativeSotEvidence,
+  type PlaneDriftCounts,
+} from '../memory/plane-drift.js';
 import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
@@ -72,7 +80,7 @@ import {
 // transport (cli-invoker.js) and the explainer (doctor-explainer.js) are
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
-import { getConfigDir, readRawConfig, migrateInterceptorActionGuardAlias } from '../cloud/config.js';
+import { getConfigDir, readRawConfig, isConfigTampered, migrateInterceptorActionGuardAlias } from '../cloud/config.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
@@ -2923,7 +2931,7 @@ export async function checkMemoryPlaneEmptyBrain(): Promise<CheckResult> {
 
 const MEMORY_PLANE_LEGAL = new Set(['dual_legacy', 'import_only', 'sc_canonical']);
 
-function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
+export function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
   plane: string;
   planeSetAt: string | null;
   illegal: boolean;
@@ -3031,9 +3039,21 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
 }
 
 /**
- * Dual-plane drift (#348 T2 / Opus B3).
- * Distinct from empty-brain: catches "SC has rows but native is still the brain"
- * and illegal plane values. Telemetry missing → warn cannot determine, never PASS.
+ * Dual-plane drift (#348 T2 / #394, Opus B3).
+ *
+ * Distinct from empty-brain: this catches "SC has rows but native is still the
+ * brain", and — the #394 residual — "SC has rows the REAL inject gate admits
+ * none of", which is a bus that delivers nothing while every row count looks
+ * healthy. Doctor gathers evidence here; `src/memory/plane-drift.ts` decides.
+ *
+ * Three laws this must not break:
+ *  - the injectable count uses `isInjectEligible` from
+ *    scripts/lib/inject-pack.mjs — the SAME predicate the session-start hook
+ *    injects with, not a weaker SQL approximation that grades itself green;
+ *  - only artifacts a host actually loads as its agent brain are drift (an
+ *    operator scratchpad is not, a project preamble is host-contract's business);
+ *  - `requireScope` is deny-by-default CONFIG. Nothing about the data may turn
+ *    it off, and an unscoped store must report what it excluded, never PASS.
  */
 export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   const label = 'Memory plane (dual-plane drift)';
@@ -3075,17 +3095,61 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
     };
   }
 
-  // sc_canonical + inject off on bound auto-memory host claiming product use
-  if (cfg.plane === 'sc_canonical' && cfg.openclawAuto && (cfg.injectMode === 'off' || !cfg.injectConfigured)) {
+  const startBusOn = Boolean(cfg.nativeContract)
+    && (cfg.injectMode === 'start' || cfg.injectMode === 'both');
+
+  const dbPath = getDbPath();
+  const nowMs = Date.now();
+  const native = scanNativeAgentSot(os.homedir(), nowMs);
+
+  // The sidecar exemption is intentionally narrower than string equality. The
+  // signed setter writes an embedded signature and explicit mode=off; a bare,
+  // copied, malformed, or legacy posture blob does not get to suppress drift.
+  let trustedSidecar = false;
+  if (cfg.posture === SIDECAR_POSTURE && cfg.postureIllegal === undefined) {
+    const hasEmbeddedSignature = typeof raw._sig === 'string';
+    const trusted = readRawConfig();
+    trustedSidecar = hasEmbeddedSignature
+      && path.resolve(getConfigDir()) === path.resolve(getShieldCortexDir())
+      && !isConfigTampered()
+      && readMemoryPlaneFromConfig(trusted).posture === SIDECAR_POSTURE
+      && cfg.injectConfigured
+      && cfg.injectModeExplicit
+      && cfg.injectMode === 'off';
+  }
+  if (trustedSidecar) {
+    if (cfg.plane === 'import_only' || cfg.plane === 'sc_canonical') {
+      return {
+        label,
+        status: 'fail',
+        message: `plane=${cfg.plane} contradicts posture=${SIDECAR_POSTURE} — sidecar leaves native memory authoritative and claims no SC canonicity/import ownership`,
+        fix: 'Use plane=dual_legacy for the honest sidecar, or remove sidecar posture and establish a legal automatic start bus',
+      };
+    }
     return {
       label,
-      status: 'fail',
-      message: 'plane=sc_canonical with openclawAutoMemory on but inject off — fake canonicity (no SC bus)',
-      fix: 'Enable inject with a legal nativeContract, or set plane to dual_legacy / honest sidecar posture',
+      status: 'pass',
+      message:
+        `honest sidecar (${SIDECAR_POSTURE}): signed posture, SC inject explicitly off; native memory is expected `
+        + `(native_sot_touched_7d=${native.touched7d} native_sot_bytes=${native.bytes} `
+        + `native_bus_active=${native.busActive.length > 0}${native.unattestable.length > 0 ? ` native_scan_notes=${native.unattestable.length}` : ''})`,
     };
   }
 
-  const dbPath = getDbPath();
+  // sc_canonical requires a REAL automatic start bus. mode=turn is not one.
+  // Keep this after the trusted-sidecar contradiction so signed posture/plane
+  // conflicts get the precise diagnosis rather than a generic missing-bus one.
+  if (cfg.plane === 'sc_canonical' && !startBusOn) {
+    return {
+      label,
+      status: 'fail',
+      message:
+        `plane=sc_canonical with SC inject mode=${cfg.injectMode} — canonicity claimed without an automatic start bus`
+        + `${cfg.openclawAuto ? ' while openclawAutoMemory is on' : ''}`,
+      fix: 'Enable inject with a legal nativeContract, or set plane to dual_legacy / declare the honest sidecar posture',
+    };
+  }
+
   if (!fs.existsSync(dbPath)) {
     return {
       label,
@@ -3094,190 +3158,446 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
     };
   }
 
+  // The REAL inject law, loaded from the module the hook injects with. A
+  // failure to load leaves `injectable` unknown — which surfaces as
+  // "cannot determine", never as a passing zero.
+  let injectPack: InjectPackModule | null = null;
+  try {
+    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
+    injectPack = await import('../../scripts/lib/inject-pack.mjs') as InjectPackModule;
+  } catch {
+    injectPack = null;
+  }
+  const injectCfg = injectPack ? injectPack.readInjectConfig(raw) : null;
+  // Deny-by-default when the config reader is unavailable: the gate's absence
+  // must never read as the gate being off (Opus B3).
+  const scope: DriftScope = {
+    hostId: injectCfg?.hostId ?? null,
+    agentId: injectCfg?.agentId ?? null,
+    requireScope: injectCfg ? injectCfg.requireScope !== false : true,
+  };
+
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const Database = (await import('better-sqlite3')).default;
   let db: InstanceType<typeof Database> | null = null;
   try {
     db = new Database(dbPath, { readonly: true, timeout: 3000, fileMustExist: true });
-    const countOf = (sql: string, params: unknown[] = []): number => {
-      const row = db!.prepare(sql).get(...params) as { c?: number } | undefined;
-      return Number(row?.c ?? 0);
-    };
-
-    let durableAdmits7d = 0;
-    let telemetryOk = true;
-    try {
-      // Prefer source_kind / created_at when present
-      const cols = (db.prepare(`PRAGMA table_info(memories)`).all() as Array<{ name: string }>).map((c) => c.name);
-      if (cols.includes('created_at')) {
-        durableAdmits7d = countOf(
-          `SELECT COUNT(*) AS c FROM memories
-           WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')
-             AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'
-             AND created_at >= datetime('now', '-7 days')`,
-        );
-      } else {
-        telemetryOk = false;
-      }
-    } catch {
-      telemetryOk = false;
-    }
-
-    let activity = 0;
-    try {
-      activity += countOf(`SELECT COUNT(*) AS c FROM session_events WHERE created_at >= datetime('now', '-7 days')`);
-    } catch { /* optional */ }
-    try {
-      activity += countOf(`SELECT COUNT(*) AS c FROM hook_invocations WHERE invoked_at >= datetime('now', '-7 days')`);
-    } catch { /* optional */ }
-
-    // Native artifact growth (OpenClaw MEMORY.md / memory.md / memory dir),
-    // under the same state root the host contract reads (#393 SOL r2 B6). An
-    // unresolvable override (r3 B6) yields no root: skip the OpenClaw
-    // candidates rather than probing a guessed tree — the weak-telemetry
-    // guard below already refuses to PASS a quiet box.
-    const home = os.homedir();
-    const ocRoot = openClawStateRoot(home).root;
-    const ocWorkspace = ocRoot === null ? null : path.join(ocRoot, 'workspace');
-    const nativeCandidates = [
-      ...(ocWorkspace === null ? [] : [
-        path.join(ocWorkspace, 'MEMORY.md'),
-        path.join(ocWorkspace, 'memory.md'),
-        path.join(ocWorkspace, 'memory'),
-      ]),
-      path.join(home, 'MEMORY.md'),
-    ];
-    let nativeTouched7d = false;
-    let nativeBytes = 0;
-    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    for (const pth of nativeCandidates) {
-      try {
-        const st = fs.statSync(pth);
-        if (st.isFile()) {
-          nativeBytes += st.size;
-          if (st.mtimeMs >= weekAgo) nativeTouched7d = true;
-        } else if (st.isDirectory()) {
-          // shallow: any file mtime in dir
-          for (const name of fs.readdirSync(pth).slice(0, 50)) {
-            try {
-              const cst = fs.statSync(path.join(pth, name));
-              if (cst.isFile()) {
-                nativeBytes += cst.size;
-                if (cst.mtimeMs >= weekAgo) nativeTouched7d = true;
-              }
-            } catch { /* skip */ }
-          }
-        }
-      } catch { /* absent */ }
-    }
-
-    // Unscoped / injectable counts (best-effort; columns may be absent)
-    let unscoped = 0;
-    let injectableApprox = 0;
-    try {
-      const cols = (db.prepare(`PRAGMA table_info(memories)`).all() as Array<{ name: string }>).map((c) => c.name);
-      if (cols.includes('host_id') && cols.includes('agent_id')) {
-        unscoped = countOf(
-          `SELECT COUNT(*) AS c FROM memories
-           WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')
-             AND (host_id IS NULL OR host_id = '' OR agent_id IS NULL OR agent_id = '')`,
-        );
-        // Approx inject-eligible: scoped + not restricted + trust floor when column exists
-        if (cols.includes('trust_score')) {
-          injectableApprox = countOf(
-            `SELECT COUNT(*) AS c FROM memories
-             WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')
-               AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'
-               AND host_id IS NOT NULL AND host_id != ''
-               AND agent_id IS NOT NULL AND agent_id != ''
-               AND COALESCE(trust_score, 0) >= 0.5`,
-          );
-        } else {
-          injectableApprox = countOf(
-            `SELECT COUNT(*) AS c FROM memories
-             WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')
-               AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'
-               AND host_id IS NOT NULL AND host_id != ''
-               AND agent_id IS NOT NULL AND agent_id != ''`,
-          );
-        }
-      } else {
-        telemetryOk = false;
-      }
-    } catch {
-      telemetryOk = false;
-    }
-
-    const detail =
-      `native_touched_7d=${nativeTouched7d} native_bytes≈${nativeBytes} ` +
-      `sc_durable_admits_7d=${durableAdmits7d} activity_7d=${activity} ` +
-      `injectable≈${injectableApprox} unscoped=${unscoped}`;
-
-    // Quiet host with no native signal and weak telemetry → cannot determine (never PASS)
-    if (!telemetryOk && activity === 0 && !nativeTouched7d) {
-      return {
-        label,
-        status: 'warn',
-        message: `plane=${cfg.plane}: cannot determine drift — insufficient telemetry (${detail})`,
-      };
-    }
-
-    // Canonical planes: native SoT growth/touch is FAIL even if SC also has admits
-    // (that is dual-brain, not "healthy because SC has rows").
-    if ((cfg.plane === 'import_only' || cfg.plane === 'sc_canonical') && nativeTouched7d) {
-      return {
-        label,
-        status: 'fail',
-        message: `dual-plane drift under plane=${cfg.plane}: native memory artifact touched while plane forbids native SoT (${detail})`,
-        fix: 'Stop native MEMORY.md / memory-dir growth as agent brain; import via defended path or archive — docs/design/2026-08-22-memory-sota-track-a-residual.md',
-      };
-    }
-
-    // Empty-SC-under-activity (all planes)
-    const emptyScUnderActivity = (activity > 0 || nativeTouched7d) && durableAdmits7d === 0;
-    if (emptyScUnderActivity) {
-      if (cfg.plane === 'import_only' || cfg.plane === 'sc_canonical') {
-        return {
-          label,
-          status: 'fail',
-          message: `dual-plane drift under plane=${cfg.plane}: ${detail}`,
-          fix: 'Capture/import into SC or stop claiming canonicity; see residual plan',
-        };
-      }
-      let aged = false;
-      if (cfg.planeSetAt) {
-        const setMs = Date.parse(cfg.planeSetAt);
-        if (!Number.isNaN(setMs) && Date.now() - setMs > 14 * 24 * 60 * 60 * 1000) aged = true;
-      }
-      return {
-        label,
-        status: 'warn',
-        message: `dual_legacy defect: activity bypasses SC (${detail})${aged ? ' — planeSetAt older than 14d' : ''}`,
-        fix: 'Run T1–T3 then `shieldcortex config --memory-plane import_only` — dual_legacy is not steady state',
-      };
-    }
-
-    // dual_legacy + native touch + SC admits still WARN (defect mode, not PASS green-wash)
-    if (cfg.plane === 'dual_legacy' && nativeTouched7d && activity > 0) {
-      return {
-        label,
-        status: 'warn',
-        message: `dual_legacy: native still active alongside SC (${detail})`,
-        fix: 'Time-box dual_legacy; move to import_only after host contract + import',
-      };
-    }
-
+    const counts = readPlaneDriftCounts(
+      db,
+      scope,
+      injectPack?.isInjectEligible ?? null,
+      injectPack?.selectInjectCandidates ?? null,
+    );
+    const verdict = evaluatePlaneDrift({
+      plane: cfg.plane as MemoryPlane,
+      planeSetAt: cfg.planeSetAt,
+      // Eligibility only decides delivery when the v2 pack IS the automatic
+      // session-start payload: a legal contract plus a start-capable mode.
+      injectOn: startBusOn,
+      requireScope: scope.requireScope,
+      counts,
+      native,
+      nowMs,
+    });
     return {
       label,
-      status: 'pass',
-      message: `plane=${cfg.plane}: no dual-plane drift signal (${detail})`,
+      status: verdict.status,
+      message: verdict.message,
+      ...(verdict.fix ? { fix: verdict.fix } : {}),
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { label, status: 'warn', message: `cannot determine drift — ${msg}` };
+    return { label, status: 'warn', message: `plane=${cfg.plane}: cannot determine drift — ${msg}` };
   } finally {
     try { db?.close(); } catch { /* ignore */ }
   }
+}
+
+/** The two helpers doctor borrows from the runtime inject module. */
+interface InjectPackModule {
+  isInjectEligible(row: unknown, scope: unknown): boolean;
+  selectInjectCandidates(db: unknown, options?: { project?: string | null }): unknown[];
+  readInjectConfig(config: Record<string, unknown>): {
+    hostId: string | null;
+    agentId: string | null;
+    requireScope: boolean;
+  };
+}
+
+interface DriftScope {
+  hostId: string | null;
+  agentId: string | null;
+  requireScope: boolean;
+}
+
+/** Structural view of the readonly handle — keeps the counter unit-testable. */
+interface DriftDb {
+  prepare(sql: string): {
+    get(...params: unknown[]): unknown;
+    all(...params: unknown[]): unknown[];
+  };
+}
+
+/**
+ * SC-side counts for the drift model. Every count is honest-or-null: a zero
+ * that means "could not count" is exactly how absence becomes proof.
+ *
+ * Doctor runs outside any session, so project-dependent eligibility remains
+ * null rather than being presented as an exact positive upper bound.
+ */
+export function readPlaneDriftCounts(
+  db: DriftDb,
+  scope: DriftScope,
+  isInjectEligible: ((row: unknown, scope: unknown) => boolean) | null,
+  selectInjectCandidates: ((db: unknown, options?: { project?: string | null }) => unknown[]) | null = null,
+): PlaneDriftCounts {
+  const counts: PlaneDriftCounts = {
+    durableAdmits7d: null,
+    durableRows: null,
+    injectable: null,
+    unscopedExcluded: null,
+    activity7d: null,
+  };
+
+  // Activity telemetry: null when NEITHER source exists on this store, so
+  // "quiet box" and "no telemetry" stop looking identical.
+  let activity: number | null = null;
+  for (const sql of [
+    `SELECT COUNT(*) AS c FROM session_events WHERE created_at >= datetime('now', '-7 days')`,
+    `SELECT COUNT(*) AS c FROM hook_invocations WHERE invoked_at >= datetime('now', '-7 days')`,
+  ]) {
+    try {
+      const row = db.prepare(sql).get() as { c?: number } | undefined;
+      activity = (activity ?? 0) + Number(row?.c ?? 0);
+    } catch { /* table absent on this store */ }
+  }
+  counts.activity7d = activity;
+
+  let cols: Set<string>;
+  try {
+    cols = new Set((db.prepare('PRAGMA table_info(memories)').all() as Array<{ name: string }>).map((c) => c.name));
+  } catch {
+    cols = new Set();
+  }
+  // No memories table (or unreadable): every SC count stays unknown.
+  if (cols.size === 0) return counts;
+
+  const statusClause = cols.has('status')
+    ? `COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')`
+    : '1=1';
+  const sensClause = cols.has('sensitivity_level')
+    ? `COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'`
+    : '1=1';
+  const hasScopeCols = cols.has('host_id') && cols.has('agent_id');
+
+  // Scope predicate mirrors isInjectEligible's: both keys present, and equal to
+  // the configured value when one is configured. With the gate on and no scope
+  // columns, NO row can be in scope — that is the honest answer, not a reason
+  // to relax the gate.
+  const scopeParams: unknown[] = [];
+  let scopeClause = '1=1';
+  if (scope.requireScope) {
+    if (!hasScopeCols) {
+      scopeClause = '1=0';
+    } else {
+      const parts = [`host_id IS NOT NULL AND host_id != ''`, `agent_id IS NOT NULL AND agent_id != ''`];
+      if (scope.hostId != null) {
+        parts.push('host_id = ?');
+        scopeParams.push(scope.hostId);
+      }
+      if (scope.agentId != null) {
+        parts.push('agent_id = ?');
+        scopeParams.push(scope.agentId);
+      }
+      scopeClause = parts.join(' AND ');
+    }
+  }
+
+  const countOf = (sql: string, params: unknown[] = []): number | null => {
+    try {
+      const row = db.prepare(sql).get(...params) as { c?: number } | undefined;
+      return Number(row?.c ?? 0);
+    } catch {
+      return null;
+    }
+  };
+
+  counts.durableRows = countOf(
+    `SELECT COUNT(*) AS c FROM memories WHERE ${statusClause} AND ${sensClause} AND ${scopeClause}`,
+    scopeParams,
+  );
+  counts.durableAdmits7d = cols.has('created_at')
+    ? countOf(
+      `SELECT COUNT(*) AS c FROM memories
+       WHERE ${statusClause} AND ${sensClause} AND ${scopeClause}
+         AND created_at >= datetime('now', '-7 days')`,
+      scopeParams,
+    )
+    : null;
+  counts.unscopedExcluded = hasScopeCols
+    ? countOf(
+      `SELECT COUNT(*) AS c FROM memories
+       WHERE ${statusClause}
+         AND (host_id IS NULL OR host_id = '' OR agent_id IS NULL OR agent_id = '')`,
+    )
+    // Without the columns every active row is unscoped by construction.
+    : countOf(`SELECT COUNT(*) AS c FROM memories WHERE ${statusClause}`);
+
+  if (!isInjectEligible || !selectInjectCandidates) return counts;
+  let rows: Array<Record<string, unknown>>;
+  try {
+    rows = selectInjectCandidates(db) as Array<Record<string, unknown>>;
+  } catch {
+    return counts;
+  }
+  // Doctor has no session project. If project changes eligibility for any row
+  // in the real top-64 window, an exact result is unknowable; never present an
+  // upper-bound positive as PASS.
+  if (rows.some((row) => row.project != null && row.project !== ''
+    && row.transferable !== true && row.transferable !== 1)) {
+    return counts;
+  }
+  let injectable = 0;
+  for (const row of rows) {
+    if (isInjectEligible(row, {
+      hostId: scope.hostId,
+      agentId: scope.agentId,
+      requireScope: scope.requireScope,
+    })) {
+      injectable++;
+    }
+  }
+  counts.injectable = injectable;
+  return counts;
+}
+
+/**
+ * Native agent-SoT scan for #394 drift.
+ *
+ * FP law — what counts and what deliberately does not:
+ *
+ *  | Artifact                                        | Drift? | Why |
+ *  |---|---|---|
+ *  | `<oc workspace>/MEMORY.md`, `memory.md`         | non-empty | OpenClaw bootstraps non-empty content; a zero-byte placeholder is not memory |
+ *  | `<oc workspace>/memory/*`                       | yes | the workspace memory store |
+ *  | `~/.claude/memory/*`, `~/.claude/projects/<key>/memory/*` | yes | Claude's memory-tool store |
+ *  | `~/.hermes/{MEMORY.md,memories/*}`, profile stores | yes | Hermes native store |
+ *  | `~/MEMORY.md`, `~/notes/…`, a stray workspace `.md` | **no** | operator scratchpad — no host loads it as a brain |
+ *  | `CLAUDE.md` / `AGENTS.md` preambles             | **no** | project instructions, graded by the host-contract check (#393); developers edit them constantly |
+ *
+ * Every reading distinguishes absent from unreadable: a tree doctor could not
+ * probe goes on `unattestable`, and the model turns that into "cannot
+ * determine" rather than the silence reading as "native is quiet".
+ *
+ * Native bus state is only reported when PROVEN on — unknown belongs to the
+ * host-contract check, which already caps at unknown and fails there. Drift is
+ * not a second host-contract parser.
+ */
+const NATIVE_SOT_DIR_ENTRY_CAP = 200;
+const NATIVE_SOT_DIR_DEPTH_CAP = 8;
+const NATIVE_SOT_PROJECT_CAP = 200;
+
+function scanNativeAgentSot(home: string, nowMs: number): NativeSotEvidence {
+  const weekAgo = nowMs - 7 * 24 * 60 * 60 * 1000;
+  const touched: Array<{ path: string; mtimeMs: number }> = [];
+  const unattestable: string[] = [];
+  const busActive: string[] = [];
+  const seen = new Set<string>();
+  const seenDirs = new Set<string>();
+  const directoryBudget = { visited: 0, overflowed: false };
+  let bytes = 0;
+
+  const considerFile = (target: string): void => {
+    if (seen.has(target)) return;
+    seen.add(target);
+    const probe = probePath(target);
+    if (probe.kind === 'absent') return;
+    if (probe.kind !== 'present') {
+      unattestable.push(
+        `${tildify(target)} cannot be read (${probe.code}: ${probe.message}) — native growth there cannot be ruled out`,
+      );
+      return;
+    }
+    if (!probe.stat.isFile()) return;
+    bytes += probe.stat.size;
+    // Match the host load rule: a zero-byte bootstrap contains no memory and
+    // therefore cannot prove native SoT growth merely by having a fresh mtime.
+    if (probe.stat.size > 0 && probe.stat.mtimeMs >= weekAgo) {
+      touched.push({ path: tildify(target), mtimeMs: probe.stat.mtimeMs });
+    }
+  };
+
+  /** Probe already gathered by a #393 scanner (per-profile Hermes stores). */
+  const considerProbe = (probe: ArtifactProbe): void => {
+    if (probe.kind === 'absent' || seen.has(probe.path)) return;
+    seen.add(probe.path);
+    if (probe.kind === 'unreadable') {
+      unattestable.push(`${tildify(probe.path)} cannot be read (${probe.detail}) — native growth there cannot be ruled out`);
+      return;
+    }
+    bytes += probe.size;
+    if (probe.size > 0 && probe.mtimeMs >= weekAgo) touched.push({ path: tildify(probe.path), mtimeMs: probe.mtimeMs });
+  };
+
+  const considerDir = (
+    dir: string,
+    depth = 0,
+    budget: { visited: number; overflowed: boolean } = directoryBudget,
+  ): void => {
+    if (seenDirs.has(dir)) return;
+    seenDirs.add(dir);
+    if (depth > NATIVE_SOT_DIR_DEPTH_CAP) {
+      unattestable.push(`${tildify(dir)} exceeds native store recursion depth ${NATIVE_SOT_DIR_DEPTH_CAP}`);
+      return;
+    }
+    const probe = probePath(dir);
+    if (probe.kind === 'absent') return;
+    if (probe.kind !== 'present') {
+      unattestable.push(`${tildify(dir)} cannot be inspected (${probe.code}: ${probe.message})`);
+      return;
+    }
+    if (!probe.stat.isDirectory()) {
+      considerFile(dir);
+      return;
+    }
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch (err: unknown) {
+      unattestable.push(`${tildify(dir)} cannot be listed (${err instanceof Error ? err.message : String(err)})`);
+      return;
+    }
+    names.sort();
+    for (const name of names) {
+      if (budget.visited++ >= NATIVE_SOT_DIR_ENTRY_CAP) {
+        if (!budget.overflowed) {
+          budget.overflowed = true;
+          unattestable.push(
+            `${tildify(dir)} exceeds ${NATIVE_SOT_DIR_ENTRY_CAP} recursive entries — the native store scan is truncated`,
+          );
+        }
+        return;
+      }
+      const child = path.join(dir, name);
+      const childProbe = probePath(child);
+      if (childProbe.kind === 'present' && childProbe.stat.isDirectory()) {
+        considerDir(child, depth + 1, budget);
+      } else {
+        considerFile(child);
+      }
+    }
+  };
+
+  // ── OpenClaw: every workspace the host could resolve, same binding the
+  //    host-contract proof grades.
+  const binding = resolveOpenClawBinding();
+  if (binding.unresolvable) {
+    unattestable.push(
+      `OpenClaw: ${binding.unresolvable} — doctor will not probe a guessed tree for native memory growth`,
+    );
+  } else if (binding.stateRoot.root !== null && binding.ocHome !== null) {
+    const ws = openClawWorkspacePaths(binding.ocHome, binding.stateRoot.root, binding.config);
+    if (!ws.complete) {
+      unattestable.push(
+        'OpenClaw agent workspaces could not be fully enumerated — a workspace brain outside the scan cannot be ruled out',
+      );
+    }
+    for (const dir of ws.paths) {
+      // Both spellings: OpenClaw bootstraps MEMORY.md AND memory.md.
+      considerFile(path.join(dir, 'MEMORY.md'));
+      considerFile(path.join(dir, 'memory.md'));
+      considerDir(path.join(dir, 'memory'));
+    }
+    // Bus state: only a PROVEN-on switch is drift evidence here. A legacy-bound
+    // or unreadable config leaves it unknown, which the host-contract check
+    // owns — drift must not grow a second verdict for it.
+    if (!binding.legacyConfig) {
+      const ms = resolveOpenClawMemorySearchState(binding.config);
+      if (ms.state === 'on') busActive.push(`OpenClaw Memory Search is on (${ms.proof.join('; ')})`);
+    }
+  }
+
+  // ── Claude Code: the memory-tool stores ONLY. CLAUDE.md preambles are
+  //    host-contract evidence, not memory growth (the FP law above).
+  considerDir(path.join(home, '.claude', 'memory'));
+  const projectsDir = path.join(home, '.claude', 'projects');
+  const projectsProbe = probePath(projectsDir);
+  if (projectsProbe.kind === 'present' && projectsProbe.stat.isDirectory()) {
+    let entries: string[] = [];
+    try {
+      entries = fs.readdirSync(projectsDir);
+    } catch (err: unknown) {
+      unattestable.push(`${tildify(projectsDir)} cannot be listed (${err instanceof Error ? err.message : String(err)})`);
+    }
+    if (entries.length > NATIVE_SOT_PROJECT_CAP) {
+      unattestable.push(`${tildify(projectsDir)} holds more than ${NATIVE_SOT_PROJECT_CAP} project keys — the scan is truncated`);
+    }
+    for (const entry of entries.slice(0, NATIVE_SOT_PROJECT_CAP)) {
+      considerDir(path.join(projectsDir, entry, 'memory'));
+    }
+  } else if (projectsProbe.kind === 'denied' || projectsProbe.kind === 'error') {
+    unattestable.push(`${tildify(projectsDir)} cannot be inspected (${projectsProbe.code}: ${projectsProbe.message})`);
+  }
+
+  // ── Hermes: root store, root MEMORY.md, and every per-profile store.
+  considerDir(path.join(home, '.hermes', 'memories'));
+  considerFile(path.join(home, '.hermes', 'MEMORY.md'));
+  const profileScan = scanHermesProfiles(home);
+  for (const probe of profileScan.artifacts) considerProbe(probe);
+  for (const profile of profileScan.profiles) {
+    considerDir(path.join(home, '.hermes', 'profiles', profile.name, 'memories'));
+  }
+  if (!profileScan.scanComplete) {
+    unattestable.push(
+      'Hermes profiles could not be fully enumerated — a per-profile native store outside the scan cannot be ruled out',
+    );
+  }
+  const reportHermesSwitches = (label: string, config: ProbeRead<ReturnType<typeof parseHermesMemoryBlock>>): void => {
+    if (config.kind === 'unreadable') {
+      unattestable.push(`${label} config.yaml cannot be read (${config.detail}) — native bus state cannot be determined`);
+      return;
+    }
+    if (config.kind === 'absent') {
+      unattestable.push(`${label} has no config.yaml — native memory defaults cannot be proven off`);
+      return;
+    }
+    const switches = config.value;
+    if (!switches.blockFound) {
+      unattestable.push(`${label} config.yaml has no memory block — native memory defaults cannot be proven off`);
+      return;
+    }
+    const on: string[] = [];
+    if (switches.memoryEnabled !== false) {
+      on.push(`memory_enabled=${switches.memoryEnabled === null ? 'unset (default ON)' : 'true'}`);
+    }
+    if (switches.userProfileEnabled !== false) {
+      on.push(`user_profile_enabled=${switches.userProfileEnabled === null ? 'unset (default ON)' : 'true'}`);
+    }
+    if (on.length > 0) busActive.push(`${label}: ${on.join(', ')}`);
+  };
+  const hermesCfg = readTextProbe(path.join(home, '.hermes', 'config.yaml'));
+  const hermesNativePresent = probePath(path.join(home, '.hermes', 'memories')).kind !== 'absent'
+    || probePath(path.join(home, '.hermes', 'MEMORY.md')).kind !== 'absent';
+  if (hermesCfg.kind !== 'absent' || hermesNativePresent || profileScan.profiles.length > 0 || !profileScan.scanComplete) {
+    reportHermesSwitches(
+      'Hermes root',
+      hermesCfg.kind === 'present'
+        ? { kind: 'present', value: parseHermesMemoryBlock(hermesCfg.value) }
+        : hermesCfg,
+    );
+  }
+  for (const profile of profileScan.profiles) {
+    reportHermesSwitches(`Hermes profile ${profile.name}`, profile.config);
+  }
+
+  touched.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return {
+    touched7d: touched.length > 0,
+    touchedPaths: touched.map((t) => t.path),
+    bytes,
+    unattestable,
+    busActive,
+  };
 }
 
 /**
@@ -3544,21 +3864,26 @@ function scanHermesProfiles(home: string): {
       const dir = path.join(profilesDir, entry);
       const dirProbe = probePath(dir);
       if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
+        out.scanComplete = false;
         out.profiles.push({
           name: entry,
           config: { kind: 'unreadable', detail: `${dirProbe.code}: ${dirProbe.message}` },
         });
+        out.artifacts.push({ kind: 'unreadable', path: dir, detail: `${dirProbe.code}: ${dirProbe.message}` });
         continue;
       }
       if (dirProbe.kind !== 'present' || !dirProbe.stat.isDirectory()) continue; // stray file, not a profile
       const text = readTextProbe(path.join(dir, 'config.yaml'));
+      if (text.kind === 'unreadable') out.scanComplete = false;
       out.profiles.push({
         name: entry,
         config: text.kind === 'present'
           ? { kind: 'present', value: parseHermesMemoryBlock(text.value) }
           : text,
       });
-      out.artifacts.push(artifactProbe(path.join(dir, 'memories', 'MEMORY.md')));
+      const artifact = artifactProbe(path.join(dir, 'memories', 'MEMORY.md'));
+      if (artifact.kind === 'unreadable') out.scanComplete = false;
+      out.artifacts.push(artifact);
     }
   } catch (err: unknown) {
     out.scanComplete = false;
@@ -4196,6 +4521,72 @@ export function probeOpenClawScHookArtifacts(
   }
 }
 
+/**
+ * Where OpenClaw's config actually lives on this box, and what reading it
+ * yields — the single resolution of that precedence chain (#393 SOL r3 B6 /
+ * r6 B1), shared by the host-contract proof and the #394 plane-drift scan so
+ * the two checks can never disagree about which tree they are grading.
+ *
+ * `unresolvable` set means every OpenClaw reading below is a guess: the caller
+ * must cap its evidence at unknown rather than probe a tree the host may not
+ * be using.
+ */
+interface OpenClawBinding {
+  /** OpenClaw-effective home, or null when it cannot be resolved. */
+  ocHome: string | null;
+  stateRoot: { root: string | null; detail?: string };
+  /** The config file doctor grades, or null when there is none to grade. */
+  configPath: string | null;
+  config: ProbeRead<Record<string, unknown>>;
+  unresolvable?: string;
+  /** Set when OpenClaw binds a config candidate doctor deliberately does not grade. */
+  legacyConfig?: string;
+}
+
+function resolveOpenClawBinding(): OpenClawBinding {
+  const ocHomeRes = openClawEffectiveHome();
+  const ocHome = 'home' in ocHomeRes ? ocHomeRes.home : null;
+  const stateRoot: { root: string | null; detail?: string } = 'unresolvable' in ocHomeRes
+    ? { root: null, detail: ocHomeRes.unresolvable }
+    : openClawStateRoot(ocHomeRes.home);
+  let unresolvable = stateRoot.detail;
+  let configPath: string | null = null;
+  let legacyConfig: string | undefined;
+  if (!unresolvable) {
+    const cfgPrimary = process.env.OPENCLAW_CONFIG_PATH?.trim();
+    const cfgOverride = cfgPrimary || process.env.CLAWDBOT_CONFIG_PATH?.trim();
+    if (cfgOverride) {
+      const resolved = resolveOpenClawUserPath(cfgOverride, ocHome);
+      if ('path' in resolved) configPath = resolved.path;
+      else {
+        unresolvable =
+          `${cfgPrimary ? 'OPENCLAW_CONFIG_PATH' : 'CLAWDBOT_CONFIG_PATH'}="${cfgOverride}" is unresolvable: ${resolved.unresolvable}`;
+      }
+    } else {
+      configPath = path.join(stateRoot.root as string, 'openclaw.json');
+      // #393 SOL r6 B1: the host binds the FIRST existing candidate across
+      // current and legacy filenames/state dirs — a clawdbot-era config is a
+      // live OpenClaw whose graded openclaw.json is absent.
+      const hasStateOverride = Boolean(
+        process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim(),
+      );
+      const candidate = openClawBoundConfigCandidate(ocHome as string, stateRoot.root as string, hasStateOverride);
+      if (candidate.kind === 'ungraded') legacyConfig = candidate.path;
+    }
+  }
+  const config: ProbeRead<Record<string, unknown>> = configPath === null
+    ? { kind: 'absent' }
+    : readJsonProbe(configPath);
+  return {
+    ocHome,
+    stateRoot,
+    configPath,
+    config,
+    ...(unresolvable ? { unresolvable } : {}),
+    ...(legacyConfig ? { legacyConfig } : {}),
+  };
+}
+
 export async function checkMemoryHostContract(): Promise<CheckResult> {
   const label = 'Memory plane (host contract)';
   let raw: Record<string, unknown> = {};
@@ -4221,39 +4612,10 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
   // overrides) makes EVERY OpenClaw reading a guess — the probe is marked
   // unresolvable and the evidence model caps OpenClaw at unknown instead of
   // probing a wrong tree it could vanish from.
-  const ocHomeRes = openClawEffectiveHome();
-  const ocHome = 'home' in ocHomeRes ? ocHomeRes.home : null;
-  const stateRoot: { root: string | null; detail?: string } = 'unresolvable' in ocHomeRes
-    ? { root: null, detail: ocHomeRes.unresolvable }
-    : openClawStateRoot(ocHomeRes.home);
-  let ocUnresolvable = stateRoot.detail;
-  let ocPath: string | null = null;
-  let ocLegacyConfig: string | undefined;
-  if (!ocUnresolvable) {
-    const cfgPrimary = process.env.OPENCLAW_CONFIG_PATH?.trim();
-    const cfgOverride = cfgPrimary || process.env.CLAWDBOT_CONFIG_PATH?.trim();
-    if (cfgOverride) {
-      const resolved = resolveOpenClawUserPath(cfgOverride, ocHome);
-      if ('path' in resolved) ocPath = resolved.path;
-      else {
-        ocUnresolvable =
-          `${cfgPrimary ? 'OPENCLAW_CONFIG_PATH' : 'CLAWDBOT_CONFIG_PATH'}="${cfgOverride}" is unresolvable: ${resolved.unresolvable}`;
-      }
-    } else {
-      ocPath = path.join(stateRoot.root as string, 'openclaw.json');
-      // #393 SOL r6 B1: the host binds the FIRST existing candidate across
-      // current and legacy filenames/state dirs — a clawdbot-era config is a
-      // live OpenClaw whose graded openclaw.json is absent.
-      const hasStateOverride = Boolean(
-        process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim(),
-      );
-      const candidate = openClawBoundConfigCandidate(ocHome as string, stateRoot.root as string, hasStateOverride);
-      if (candidate.kind === 'ungraded') ocLegacyConfig = candidate.path;
-    }
-  }
-  const ocConfig: ProbeRead<Record<string, unknown>> = ocPath === null
-    ? { kind: 'absent' }
-    : readJsonProbe(ocPath);
+  const binding = resolveOpenClawBinding();
+  const { ocHome, stateRoot, config: ocConfig } = binding;
+  const ocUnresolvable = binding.unresolvable;
+  const ocLegacyConfig = binding.legacyConfig;
   const ocWorkspaces = stateRoot.root === null || ocHome === null
     ? { paths: [], complete: false }
     : openClawWorkspacePaths(ocHome, stateRoot.root, ocConfig);

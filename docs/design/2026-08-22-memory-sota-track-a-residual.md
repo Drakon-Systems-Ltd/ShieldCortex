@@ -191,10 +191,10 @@ Until then: **keep #348 open. No false close.**
 |---|---|
 | B1 attestation≠trust + salience + unverified | **Landed** (this PR) |
 | B2 signed `--memory-plane` + planeSetAt | **Landed** (this PR) |
-| B3 drift doctor + scope not data-derived | **Landed** (this PR) — drift signals heuristic; deepen with host telemetry as available |
+| B3 drift doctor + scope not data-derived | **Landed**; deepened by #394 — real `isInjectEligible` counting, runtime-aware native SoT scan, gaps say cannot-determine |
 | B4 side-car API position | **Deferred** — no dedicated doctor check yet; do not claim doctor-fail for GuardedMemoryBridge |
 | T1 #393 host contract enforcement | **Initial** doctor proof (`checkMemoryHostContract`) — deepen per-host disable of Memory Search |
-| T2 #394 | Partially overlapped by B2/B3; keep open until fail/warn matrix + FP fixtures complete |
+| T2 #394 | **Landed** — fail/warn matrix, FP fixtures (`doctor-plane-drift-394.test.ts`), real inject-eligibility counting, illegal plane × bus combos, telemetry cannot-determine. Residual: no `dual_legacy`-after-import escalation (needs T3), no export-back-to-native flag check (no such flag exists yet) |
 | T3 #395 | **Not started** (blocked) |
 
 ---

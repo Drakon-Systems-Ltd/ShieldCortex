@@ -1186,6 +1186,12 @@ describe('contract verdict', () => {
     expect(verdictFor([offScUnknown], { injectMode: 'turn' }).status).toBe('warn');
   });
 
+  it('rejects turn-only sc_canonical because turn is not an automatic start bus', () => {
+    const v = verdictFor([provenOc], { plane: 'sc_canonical', injectMode: 'turn' });
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/without an automatic start bus/);
+  });
+
   it('fails inject-on without a legal contract', () => {
     const v = verdictFor([provenOc], { nativeContract: null });
     expect(v.status).toBe('fail');
@@ -1239,6 +1245,18 @@ describe('contract verdict', () => {
     expect(v.status).toBe('pass');
     expect(v.message).toMatch(/honest sidecar/);
     expect(v.message).toMatch(/no canonicity claimed/);
+  });
+
+  it('rejects honest-sidecar posture with import ownership', () => {
+    const v = verdictFor([liveHermes], {
+      plane: 'import_only',
+      injectConfigured: true,
+      injectMode: 'off',
+      nativeContract: null,
+      postureRaw: SIDECAR_POSTURE,
+    });
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/contradicts posture/);
   });
 
   it('fails sidecar posture unless inject mode is EXPLICITLY off — a posture-only blob is not a sidecar (SOL r2 B4)', () => {

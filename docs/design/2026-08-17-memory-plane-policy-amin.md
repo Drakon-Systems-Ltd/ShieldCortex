@@ -70,7 +70,7 @@ If config claims `sc_only` / `disable_native_inject` but native Memory Search / 
 
 - `inject.mode ≠ off` without legal `nativeContract`
 - `plane=sc_canonical` + native automatic memory still on the bus
-- `plane=sc_canonical` + inject off on a bound host claiming SOTA canonicity without honest sidecar posture
+- `plane=sc_canonical` + inject off or turn-only (no automatic start bus); honest sidecar posture is valid only with `dual_legacy`
 - `plane=import_only` or `sc_canonical` + bidirectional/export-back-to-native-as-SoT flags
 - `plane=dual_legacy` after import-once completed **and** grace elapsed on that host (warn first, then fail next release window)
 - Any plane + SC library path that writes durable agent truth **only** to native MD under `import_only`/`sc_canonical` without SC store admit
@@ -105,6 +105,51 @@ Distinct check from empty-brain. Signals (normative intent):
 | `dual_legacy` | WARN (time-boxed defect) |
 | `import_only` / `sc_canonical` | FAIL |
 
+### Shipped shape (#394 T2)
+
+`checkMemoryPlaneDrift` (evidence) → `evaluatePlaneDrift`
+(`src/memory/plane-drift.ts`, pure decision), same split as the host-contract
+proof. Signal order is **positive evidence before gaps**: a native brain doctor
+can see growing is a decided defect even when the SC side is only partly
+countable; only when no signal fires do the gaps speak, and a gap is
+`cannot determine` (WARN on every plane), never PASS.
+
+Signal 3 uses the shared `selectInjectCandidates` + `isInjectEligible` path from
+`scripts/lib/inject-pack.mjs` — the exact deterministic top-64 window, row
+shape, and predicate both start emitters use. Doctor reports eligibility
+unknown when a session project is required but unavailable; it never presents
+a project-agnostic upper bound as an exact positive. A bound SC bus (legal
+`nativeContract` + start-capable mode) holding durable rows that the real gate
+admits **none** of is drift: the store looks healthy by row count and delivers
+nothing. With a signed honest `mcp_sidecar_no_inject` posture and inject explicitly off,
+native bus/SoT/activity are expected and the drift check reports that posture
+as healthy. `import_only`/`sc_canonical` plus sidecar is contradictory and
+fails; a copied/unsigned posture string gets no exemption.
+
+`requireScope` is read from the same config keys the runtime reads and defaults
+to deny. It is never derived from the data; an unscoped store reports
+`unscoped_excluded=N` and refuses to PASS.
+
+### FP fixtures — operator scratchpad vs agent SoT
+
+Drift counts only what a host actually loads as its agent brain. The FP column
+is the reason each acceptance test exists (`doctor-plane-drift-394.test.ts`).
+
+| Artifact | Drift? | Why |
+|---|---|---|
+| `<oc workspace>/MEMORY.md`, `memory.md` | **yes when non-empty** | OpenClaw loads non-empty bootstrap memory; a zero-byte bootstrap contains no memory and is ignored as drift |
+| `<oc workspace>/memory/*` | **yes** | the workspace memory store |
+| `<oc workspace-\<agentId\>>/…` | **yes** | per-agent brains, enumerated with the host contract's own workspace resolver |
+| `~/.claude/memory/*`, `~/.claude/projects/<key>/memory/*` | **yes** | Claude's memory-tool store |
+| `~/.hermes/MEMORY.md`, `~/.hermes/memories/*`, profile stores | **yes** | Hermes native store |
+| `~/MEMORY.md`, `~/notes/…`, a stray `.md` in a workspace | **no** | operator scratchpad — no host loads it as a brain |
+| `CLAUDE.md` / `AGENTS.md` preambles | **no** | project instructions, graded by the host-contract check (#393). Developers edit them constantly; drift is memory growth, not instruction edits |
+
+Native **bus** state is reported only when PROVEN on (shared reader:
+`resolveOpenClawMemorySearchState`, `parseHermesMemoryBlock`). Unknown bus
+belongs to the host-contract check, which already caps at unknown and fails
+there — drift is not a second host-contract parser.
+
 ## Import law (A3 — when T3 lands)
 
 - Single chokepoint: parse → **full** defence pipeline → admit only on allow  
@@ -136,6 +181,13 @@ Position until rewire: **deprecate + doctor-fail when used as agent SoT path**; 
 **Cut default:** native files may remain writable as **untrusted I/O**, not competing SoT.  
 SC wins on trust for durable agent facts once `import_only` / `sc_canonical`.  
 Hand-edits to projection/archive files are non-authoritative.
+
+## Staged rollout and backout
+
+1. Ship the shared candidate selector and doctor first; run doctor while the host remains `dual_legacy` and inspect candidate/native evidence without claiming canonicity.
+2. Prove the bound runtime's automatic start bus and native-memory switches, then move that host to `import_only` with a signed CLI write. Soak before any canonical claim.
+3. Move to `sc_canonical` only after start-pack delivery, recursive native-store scans, profile switches, and telemetry are all attestable and green.
+4. Back out with a signed `--memory-plane dual_legacy` write. If the host cannot support automatic inject, declare the signed `mcp_sidecar_no_inject` posture instead; never hand-edit the posture string or signature.
 
 ## Related
 
