@@ -771,6 +771,34 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/illegal memory\.hostContract\.posture/);
   });
 
+  it('host contract fails non-string posture values as illegal, mirroring runtime-declaration junk (SOL r3 nit)', async () => {
+    // Before r3 these became posture=null and escaped the illegal-posture
+    // failure entirely.
+    for (const junk of [123, true, { posture: 'x' }, null]) {
+      writeConfig({
+        memory: { plane: 'dual_legacy', hostContract: { posture: junk }, inject: { mode: 'off' } },
+      });
+      const r = await runHost();
+      expect(r.status).toBe('fail');
+      expect(r.message).toMatch(/illegal memory\.hostContract\.posture/);
+      expect(r.fix).toMatch(/--memory-host-posture/);
+    }
+    // The String()-coercion trap: a one-element array stringifies to the legal
+    // posture and would otherwise mint an honest-sidecar PASS out of junk.
+    writeHermes({ memoryEnabled: true, userProfile: true });
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { posture: ['mcp_sidecar_no_inject'], runtimes: ['hermes'] },
+        inject: { mode: 'off', hostId: 'tars', agentId: 'hermes-primary' },
+      },
+    });
+    const arrayJunk = await runHost();
+    expect(arrayJunk.status).toBe('fail');
+    expect(arrayJunk.message).toMatch(/illegal memory\.hostContract\.posture/);
+    expect(arrayJunk.message).not.toMatch(/honest sidecar/);
+  });
+
   it('host contract fails junk hostContract.runtimes entries instead of silently filtering them (SOL r2 nit)', async () => {
     // 'grok' used to vanish, leaving 'hermes' as the only declared runtime —
     // an unsupported declaration must be a loud failure, not a smaller net.

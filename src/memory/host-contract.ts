@@ -851,6 +851,13 @@ export interface HostContractInput {
   /** Raw `memory.hostContract.posture`, so junk values fail instead of vanishing. */
   postureRaw: string | null;
   /**
+   * Printable description of a PRESENT non-string `memory.hostContract.posture`
+   * (#393 SOL r3 nit). Kept separate from postureRaw on purpose: coercing junk
+   * through String() lets `["mcp_sidecar_no_inject"]` stringify to the legal
+   * posture and mint a sidecar PASS from a value the signed setter cannot write.
+   */
+  postureIllegal?: string;
+  /**
    * `memory.hostContract.runtimes` entries that are not a legal runtime id —
    * including a non-array value for the whole key (#393 SOL r2 nit). A junk
    * declaration is a claim doctor cannot scope, so it fails instead of being
@@ -890,6 +897,17 @@ function describe(evidence: HostRuntimeEvidence): string {
 
 export function evaluateHostContract(input: HostContractInput): HostContractVerdict {
   const posture = input.postureRaw === null ? null : input.postureRaw.trim();
+
+  // #393 SOL r3 nit: a present non-string posture is illegal, mirroring the
+  // runtime-declaration handling — junk must fail loud, never dissolve to
+  // "no posture declared".
+  if (input.postureIllegal !== undefined) {
+    return {
+      status: 'fail',
+      message: `illegal memory.hostContract.posture ${input.postureIllegal} — non-string junk doctor cannot grade (only "${SIDECAR_POSTURE}" is legal)`,
+      fix: `Run \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` (or \`--memory-host-posture bus_contract\`) — signed write; do not hand-edit config.json`,
+    };
+  }
 
   if (posture !== null && posture !== SIDECAR_POSTURE) {
     return {

@@ -975,6 +975,21 @@ describe('contract verdict', () => {
     expect(v.message).toMatch(/illegal memory\.hostContract\.posture/);
   });
 
+  it('fails a present non-string posture as illegal — junk never dissolves to "no posture" (SOL r3 nit)', () => {
+    // postureIllegal outranks everything, including a shape that would
+    // otherwise be the honest-sidecar PASS.
+    const v = verdictFor([liveHermes], {
+      injectConfigured: true,
+      injectMode: 'off',
+      nativeContract: null,
+      postureRaw: null,
+      postureIllegal: '["mcp_sidecar_no_inject"]',
+    });
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/illegal memory\.hostContract\.posture \["mcp_sidecar_no_inject"\]/);
+    expect(v.fix).toMatch(/--memory-host-posture/);
+  });
+
   it('passes an honest sidecar: inject off with the posture declared', () => {
     const v = verdictFor([liveHermes], {
       injectConfigured: true,

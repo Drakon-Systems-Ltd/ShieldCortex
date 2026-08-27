@@ -2936,6 +2936,8 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
   injectConfigured: boolean;
   /** Raw `memory.hostContract.posture` — kept raw so junk fails instead of vanishing. */
   posture: string | null;
+  /** Printable description of a present non-string posture (#393 SOL r3 nit). */
+  postureIllegal?: string;
   /** Operator-declared bound runtimes. Intent only: adds scrutiny, never proof. */
   declaredRuntimes: HostRuntimeId[];
   /** Unsupported runtimes entries (or a non-array key) — junk fails, never filters (#393 SOL r2 nit). */
@@ -2984,8 +2986,20 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
   const hostContract = (mem.hostContract && typeof mem.hostContract === 'object' && !Array.isArray(mem.hostContract))
     ? mem.hostContract as Record<string, unknown>
     : {};
+  // #393 SOL r3 nit: a present non-string posture must FAIL as illegal, like
+  // junk runtime declarations — String() coercion is banned here because a
+  // one-element array stringifies to its element and could mint the legal
+  // sidecar posture out of junk.
   const postureRaw = hostContract.posture;
   const posture = typeof postureRaw === 'string' && postureRaw.trim() !== '' ? postureRaw.trim() : null;
+  let postureIllegal: string | undefined;
+  if (postureRaw !== undefined && typeof postureRaw !== 'string') {
+    try {
+      postureIllegal = JSON.stringify(postureRaw) ?? String(postureRaw);
+    } catch {
+      postureIllegal = String(postureRaw);
+    }
+  }
   const declaredRuntimes: HostRuntimeId[] = [];
   const declaredRuntimesIllegal: string[] = [];
   if (hostContract.runtimes !== undefined) {
@@ -3009,6 +3023,7 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     openclawAuto: raw.openclawAutoMemory === true,
     injectConfigured,
     posture,
+    postureIllegal,
     declaredRuntimes,
     declaredRuntimesIllegal,
   };
@@ -3605,6 +3620,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
       ? cfg.nativeContract
       : null,
     postureRaw: cfg.posture,
+    postureIllegal: cfg.postureIllegal,
     declaredRuntimesIllegal: cfg.declaredRuntimesIllegal,
     runtimes,
     nowMs,
