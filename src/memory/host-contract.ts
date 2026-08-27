@@ -219,17 +219,26 @@ function resolveMemorySearchFlag(value: unknown): boolean {
 }
 
 /**
- * `hooks.internal.entries.cortex-memory.enabled` — the host-side switch that
- * disables an installed hook without deleting it (#393 SOL H1). Absent key =
- * default enabled (installed hooks load); explicit false = positively
- * disabled; a config that cannot be read proves nothing either way.
+ * Host-side switches that decide whether the installed SC hook can run at all
+ * (#393 SOL H1 + r3 B1). OpenClaw loads ZERO internal hooks unless the GLOBAL
+ * gate `hooks.internal.enabled` resolves truthy (openclaw/src/hooks/loader.ts
+ * `if (!cfg.hooks?.internal?.enabled) return 0`) — an absent or false gate
+ * means the installed artifact set never runs, no matter how byte-current it
+ * is. With the gate open, `hooks.internal.entries.cortex-memory.enabled=false`
+ * still disables the one entry. A config that cannot be read proves nothing
+ * either way — and an ABSENT openclaw.json stays unknown rather than gate_off,
+ * because OpenClaw also reads legacy config filenames doctor does not probe.
  */
-function openClawHookConfigEnabled(config: ProbeRead<Record<string, unknown>>): boolean | 'unknown' {
+function openClawHookConfigEnabled(
+  config: ProbeRead<Record<string, unknown>>,
+): 'enabled' | 'gate_off' | 'entry_off' | 'unknown' {
   if (config.kind !== 'present') return 'unknown';
   const obj = (v: unknown): Record<string, unknown> =>
     v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
-  const entry = obj(obj(obj(config.value.hooks).internal).entries)['cortex-memory'];
-  return obj(entry).enabled === false ? false : true;
+  const internal = obj(obj(config.value.hooks).internal);
+  if (!internal.enabled) return 'gate_off';
+  const entry = obj(internal.entries)['cortex-memory'];
+  return obj(entry).enabled === false ? 'entry_off' : 'enabled';
 }
 
 export function resolveOpenClawEvidence(
@@ -364,41 +373,46 @@ export function resolveOpenClawEvidence(
 
   // SC bus: a bare directory is not delivery (SOL H1). Static wiring proof
   // needs the full installer artifact set, byte-current content, and a host
-  // config that does not disable the hook — and even then the strongest claim
-  // is `wired_proven` (static), never a delivered receipt.
+  // config whose GLOBAL internal-hook gate is open with the entry not disabled
+  // (#393 SOL r3 B1) — and even then the strongest claim is `wired_proven`
+  // (static), never a delivered receipt. A provably closed gate outranks
+  // artifact staleness: nothing loads, so the bus is positively not wired.
   let scBus: ScBusState;
   const hookEnabled = openClawHookConfigEnabled(probe.config);
-  switch (probe.scHook) {
-    case 'absent':
-      scBus = 'not_wired';
-      break;
-    case 'incomplete':
-      scBus = 'not_wired';
-      proof.push('SC cortex-memory hook dir present but required files (HOOK.md/handler.ts/runtime.mjs) missing or empty — a directory is not delivery');
-      break;
-    case 'unreadable':
-      scBus = 'unknown';
-      proof.push('SC cortex-memory hook artifacts unreadable — pack delivery cannot be proven');
-      break;
-    case 'stale':
-      scBus = 'unknown';
-      proof.push('installed SC hook differs from the packaged source — what runs cannot be proven to deliver the pack');
-      break;
-    case 'unverifiable':
-      scBus = 'unknown';
-      proof.push('packaged hook source missing from this install — the installed hook cannot be attested byte-current, so pack delivery cannot be proven');
-      break;
-    default:
-      if (hookEnabled === false) {
-        scBus = 'not_wired';
-        proof.push('hooks.internal.entries.cortex-memory.enabled=false — the host disables the installed hook');
-      } else if (hookEnabled === 'unknown') {
+  if (probe.scHook === 'absent') {
+    scBus = 'not_wired';
+  } else if (probe.scHook === 'incomplete') {
+    scBus = 'not_wired';
+    proof.push('SC cortex-memory hook dir present but required files (HOOK.md/handler.ts/runtime.mjs) missing or empty — a directory is not delivery');
+  } else if (hookEnabled === 'gate_off') {
+    scBus = 'not_wired';
+    proof.push('hooks.internal.enabled is not set in openclaw.json — OpenClaw loads zero internal hooks behind a closed global gate, so the installed SC hook never runs');
+  } else if (hookEnabled === 'entry_off') {
+    scBus = 'not_wired';
+    proof.push('hooks.internal.entries.cortex-memory.enabled=false — the host disables the installed hook');
+  } else {
+    switch (probe.scHook) {
+      case 'unreadable':
         scBus = 'unknown';
-        proof.push('openclaw.json not readable — cannot confirm the host has the SC hook enabled');
-      } else {
-        scBus = 'wired_proven';
-      }
-      break;
+        proof.push('SC cortex-memory hook artifacts unreadable — pack delivery cannot be proven');
+        break;
+      case 'stale':
+        scBus = 'unknown';
+        proof.push('installed SC hook differs from the packaged source — what runs cannot be proven to deliver the pack');
+        break;
+      case 'unverifiable':
+        scBus = 'unknown';
+        proof.push('packaged hook source missing from this install — the installed hook cannot be attested byte-current, so pack delivery cannot be proven');
+        break;
+      default:
+        if (hookEnabled === 'unknown') {
+          scBus = 'unknown';
+          proof.push('openclaw.json not readable — cannot confirm the host enables internal hooks (hooks.internal.enabled) or the SC entry');
+        } else {
+          scBus = 'wired_proven';
+        }
+        break;
+    }
   }
 
   return {
@@ -1000,10 +1014,15 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
     };
     const fixGap = (r: HostRuntimeEvidence): string => {
       const label = RUNTIME_CAPABILITY[r.runtime].label;
-      return RUNTIME_CAPABILITY[r.runtime].scInjectSurface
-        ? `${label}: wire the SC session-start pack (\`shieldcortex install\`)`
-        : `${label}: ${input.nativeContract} cannot be enforced here — turn inject off and run ` +
+      if (!RUNTIME_CAPABILITY[r.runtime].scInjectSurface) {
+        return `${label}: ${input.nativeContract} cannot be enforced here — turn inject off and run ` +
           `\`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` (honest sidecar)`;
+      }
+      // OpenClaw's global gate is host-side config the installer does not own
+      // (#393 SOL r3 B1) — `shieldcortex install` alone cannot open it.
+      return r.runtime === 'openclaw'
+        ? `${label}: wire the SC session-start pack (\`shieldcortex install\`) and set hooks.internal.enabled=true in openclaw.json — OpenClaw loads no internal hooks without the global gate`
+        : `${label}: wire the SC session-start pack (\`shieldcortex install\`)`;
     };
     return {
       status: 'fail',

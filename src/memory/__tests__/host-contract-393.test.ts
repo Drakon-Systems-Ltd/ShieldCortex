@@ -152,7 +152,14 @@ describe('OpenClaw evidence', () => {
   });
 
   it('proves the SC bus only from a complete, current artifact set: never from a bare directory', () => {
-    const config = { kind: 'present' as const, value: { agents: { defaults: { memorySearch: { enabled: false } } } } };
+    // Gate open (SOL r3 B1) so this test isolates the ARTIFACT states.
+    const config = {
+      kind: 'present' as const,
+      value: {
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      },
+    };
     expect(resolveOpenClawEvidence(ocProbe({ config, scHook: 'complete' }), CTX).scBus).toBe('wired_proven');
     expect(resolveOpenClawEvidence(ocProbe({ config, scHook: 'absent' }), CTX).scBus).toBe('not_wired');
     // H1: an empty/partial hook dir is a positive "not delivered", not wiring.
@@ -180,7 +187,7 @@ describe('OpenClaw evidence', () => {
           kind: 'present',
           value: {
             agents: { defaults: { memorySearch: { enabled: false } } },
-            hooks: { internal: { entries: { 'cortex-memory': { enabled: false } } } },
+            hooks: { internal: { enabled: true, entries: { 'cortex-memory': { enabled: false } } } },
           },
         },
         scHook: 'complete',
@@ -188,7 +195,7 @@ describe('OpenClaw evidence', () => {
       CTX,
     );
     expect(disabled.scBus).toBe('not_wired');
-    expect(disabled.proof.join(' ')).toMatch(/enabled=false/);
+    expect(disabled.proof.join(' ')).toMatch(/cortex-memory.*enabled=false/);
     // Config unreadable: full artifacts on disk still cannot prove the host
     // has the hook enabled — unknown, never wired.
     const unreadableCfg = resolveOpenClawEvidence(
@@ -196,8 +203,40 @@ describe('OpenClaw evidence', () => {
       CTX,
     );
     expect(unreadableCfg.scBus).toBe('unknown');
-    // Config absent: nothing confirms the host loads hooks at all.
+    // Config absent: nothing confirms the host loads hooks at all — and
+    // OpenClaw reads legacy config filenames doctor does not probe, so
+    // absence is unknown, not a provably closed gate.
     expect(resolveOpenClawEvidence(ocProbe({ scHook: 'complete' }), CTX).scBus).toBe('unknown');
+  });
+
+  it('never wires the SC bus behind a closed global internal-hook gate — hooks.internal.enabled gates ALL internal hooks (SOL r3 B1)', () => {
+    const off = { agents: { defaults: { memorySearch: { enabled: false } } } };
+    // The r3 false PASS: byte-current artifacts + memorySearch off, but no
+    // hooks.internal.enabled — OpenClaw loads zero internal hooks
+    // (openclaw/src/hooks/loader.ts) and the SC pack never runs.
+    const absentGate = resolveOpenClawEvidence(
+      ocProbe({ config: { kind: 'present', value: off }, scHook: 'complete' }),
+      CTX,
+    );
+    expect(absentGate.scBus).toBe('not_wired');
+    expect(absentGate.proof.join(' ')).toMatch(/hooks\.internal\.enabled/);
+    expect(absentGate.proof.join(' ')).toMatch(/zero internal hooks/);
+    // Explicit false is the same closed gate.
+    const falseGate = resolveOpenClawEvidence(
+      ocProbe({
+        config: { kind: 'present', value: { ...off, hooks: { internal: { enabled: false } } } },
+        scHook: 'complete',
+      }),
+      CTX,
+    );
+    expect(falseGate.scBus).toBe('not_wired');
+    // A provably closed gate outranks artifact staleness: nothing loads, so
+    // the bus is positively not wired rather than unknown.
+    const staleBehindGate = resolveOpenClawEvidence(
+      ocProbe({ config: { kind: 'present', value: off }, scHook: 'stale' }),
+      CTX,
+    );
+    expect(staleBehindGate.scBus).toBe('not_wired');
   });
 
   it('reports unknown when openclaw.json is unreadable', () => {

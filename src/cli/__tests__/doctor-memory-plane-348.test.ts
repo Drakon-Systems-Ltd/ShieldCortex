@@ -201,7 +201,22 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(bareDir.status).toBe('fail');
     expect(bareDir.message).toMatch(/not proven delivered/);
 
+    // SOL r3 B1: byte-current artifacts WITHOUT hooks.internal.enabled was the
+    // r2 "legitimate PASS" fixture — but OpenClaw loads zero internal hooks
+    // behind the closed global gate, so the pack never runs.
     installRealHookArtifacts();
+    const gateClosed = await runHost();
+    expect(gateClosed.status).toBe('fail');
+    expect(gateClosed.message).toMatch(/not proven delivered/);
+    expect(gateClosed.fix).toMatch(/hooks\.internal\.enabled=true/);
+
+    fs.writeFileSync(
+      path.join(ocDir, 'openclaw.json'),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
+    );
     const full = await runHost();
     expect(full.status).toBe('pass');
     // Static proof only — the pass message must never read as a delivered receipt.
@@ -220,7 +235,7 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
       path.join(tmpHome, '.openclaw', 'openclaw.json'),
       JSON.stringify({
         agents: { defaults: { memorySearch: { enabled: false } } },
-        hooks: { internal: { entries: { 'cortex-memory': { enabled: false } } } },
+        hooks: { internal: { enabled: true, entries: { 'cortex-memory': { enabled: false } } } },
       }, null, 2),
     );
     const r = await runHost();
@@ -239,7 +254,10 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     fs.appendFileSync(path.join(tmpHome, '.openclaw', 'hooks', 'cortex-memory', 'handler.ts'), '\n// drift\n');
     fs.writeFileSync(
       path.join(tmpHome, '.openclaw', 'openclaw.json'),
-      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
     );
     const r = await runHost();
     expect(r.status).toBe('warn');
@@ -375,7 +393,10 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const ocDir = path.join(tmpHome, '.openclaw');
     fs.writeFileSync(
       path.join(ocDir, 'openclaw.json'),
-      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
     );
     const r = await runHost();
     expect(r.status).toBe('pass');
@@ -542,7 +563,10 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     fs.mkdirSync(path.join(tmpHome, '.openclaw', 'workspace', 'AGENTS.md'), { recursive: true });
     fs.writeFileSync(
       path.join(tmpHome, '.openclaw', 'openclaw.json'),
-      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
     );
     const r = await runHost();
     expect(r.status).toBe('warn');
@@ -632,7 +656,10 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const ocDir = path.join(tmpHome, '.openclaw');
     fs.writeFileSync(
       path.join(ocDir, 'openclaw.json'),
-      JSON.stringify({ agents: { defaults: { memorySearch: { enabled: false } } } }, null, 2),
+      JSON.stringify({
+        agents: { defaults: { memorySearch: { enabled: false } } },
+        hooks: { internal: { enabled: true } },
+      }, null, 2),
     );
     const r = await runHost();
     expect(r.status).toBe('fail');
