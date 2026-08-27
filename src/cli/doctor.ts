@@ -4032,7 +4032,33 @@ function openClawStateRoot(ocHome: string): { root: string; detail?: undefined }
       detail: `${primary ? 'OPENCLAW_STATE_DIR' : 'CLAWDBOT_STATE_DIR'}="${override}" is unresolvable: ${resolved.unresolvable}`,
     };
   }
-  return { root: path.join(ocHome, '.openclaw') };
+  // #393 SOL r7: OpenClaw's resolveStateDir falls back to the historical
+  // .clawdbot/.moldbot/.moltbot state dirs when ~/.openclaw is absent
+  // (openclaw/src/config/paths.ts resolveStateDir). A doctor that defaults to
+  // ~/.openclaw unconditionally probes a tree the host is not using —
+  // workspace-<agentId>, hooks/, everything — and can prove native off in the
+  // wrong universe. Mirror the fallback: prefer .openclaw when it exists,
+  // else the first existing legacy dir (host order). A dir doctor cannot
+  // stat is fail-closed: the root is unresolvable, evidence goes unknown.
+  const newDir = path.join(ocHome, '.openclaw');
+  const probeDir = (dir: string): 'present' | 'absent' | 'error' => {
+    const p = probePath(dir);
+    return p.kind === 'present' ? 'present' : p.kind === 'absent' ? 'absent' : 'error';
+  };
+  const newState = probeDir(newDir);
+  if (newState === 'present') return { root: newDir };
+  if (newState === 'error') {
+    return { root: null, detail: `~/.openclaw exists but cannot be inspected — the state root (and any legacy fallback) cannot be attested` };
+  }
+  for (const legacyName of OPENCLAW_LEGACY_STATE_DIRNAMES) {
+    const legacyDir = path.join(ocHome, legacyName);
+    const legacyState = probeDir(legacyDir);
+    if (legacyState === 'present') return { root: legacyDir };
+    if (legacyState === 'error') {
+      return { root: null, detail: `${legacyName} cannot be inspected — OpenClaw's legacy state-dir fallback cannot be ruled out` };
+    }
+  }
+  return { root: newDir };
 }
 
 /**

@@ -1330,6 +1330,41 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.message).toMatch(/workspace-case\/MEMORY\.md/);
   });
 
+  it('host contract follows the legacy state-dir fallback — a .clawdbot workspace-<agentId> brain cannot hide behind an absent ~/.openclaw (SOL r7)', async () => {
+    // The exact r7 false PASS: absolute OPENCLAW_CONFIG_PATH with
+    // memorySearch off, disable_native_inject + turn mode (no start-pack
+    // proof required), ~/.openclaw ABSENT, and a live
+    // ~/.clawdbot/workspace-case/MEMORY.md. OpenClaw's resolveStateDir falls
+    // back to .clawdbot when .openclaw is missing (config/paths.ts), resolves
+    // agent "case" to <stateDir>/workspace-case (agent-scope.ts), and
+    // bootstraps that brain — while a doctor pinned to ~/.openclaw scanned an
+    // empty universe and certified native off.
+    writeConfig({
+      ...busContract(),
+      memory: {
+        ...(busContract().memory as Record<string, unknown>),
+        inject: { mode: 'turn', nativeContract: 'disable_native_inject' },
+      },
+    });
+    const cfgPath = path.join(tmpHome, 'oc-config', 'openclaw.json');
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      agents: {
+        defaults: { memorySearch: { enabled: false } },
+        list: [{ id: 'main', default: true }, { id: 'case' }],
+      },
+    }, null, 2));
+    process.env.OPENCLAW_CONFIG_PATH = cfgPath;
+    // No ~/.openclaw at all — only the legacy state dir exists.
+    fs.rmSync(path.join(tmpHome, '.openclaw'), { recursive: true, force: true });
+    const legacyWs = path.join(tmpHome, '.clawdbot', 'workspace-case');
+    fs.mkdirSync(legacyWs, { recursive: true });
+    fs.writeFileSync(path.join(legacyWs, 'MEMORY.md'), '# legacy implicit brain\n'.repeat(5));
+    const r = await runHost();
+    expect(r.status).not.toBe('pass');
+    expect(`${r.message} ${r.fix ?? ''}`).toMatch(/workspace-case\/MEMORY\.md|clawdbot/);
+  });
+
   it('openClawWorkspacePaths mirrors resolveAgentWorkspaceDir: default agent, id normalization, duplicates, explicit overrides (SOL r3 B3)', async () => {
     const mod = await import('../doctor.js');
     const cfg = (agents: Record<string, unknown>) =>
