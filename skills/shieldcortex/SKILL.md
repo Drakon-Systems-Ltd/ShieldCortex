@@ -173,7 +173,8 @@ ShieldCortex is **local-first**: memory, scanning, and audit run entirely on you
 - Does **not** read SSH keys, AWS credentials, GPG keys, or /etc/ files
 - Does **not** send data to external servers (unless Cloud sync is explicitly enabled)
 - Does **not** modify .bashrc, .zshrc, .profile, or shell configs
-- Does **not** use eval(), child_process.exec(), or dynamic code execution
+- Does **not** use `eval` or dynamic code execution of any kind
+- Does **not** build subprocess commands from agent, memory, or network content. The update flow and the OpenClaw MCP bridge never spawn a shell — argv-array `execFile`/`spawn` only (`npm view` update check, `npm update`/`npm install`, `pgrep`, `npx mcporter`). User-run CLI commands (setup, service, migrate, uninstall, audit, doctor, the npx-staleness warning) and corrupt-database recovery run fixed local admin tools (`npm`, `launchctl`, `systemctl`, `getent`, `sqlite3`), some through a shell, parameterised only by local paths and usernames
 - Does **not** bypass, disable, or override any agent safety mechanisms
 - Does **not** auto-approve actions or skip verification prompts
 - Does **not** mine cryptocurrency, trade tokens, manage wallets, or initiate purchases
