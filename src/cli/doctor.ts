@@ -4014,6 +4014,44 @@ function openClawStateRoot(ocHome: string): { root: string; detail?: undefined }
 }
 
 /**
+ * Legacy config binding (#393 SOL r6 B1). OpenClaw selects its config from a
+ * candidate LIST, not one path (openclaw/src/config/paths.ts
+ * resolveDefaultConfigCandidates → resolveConfigPathCandidate): with no
+ * explicit config-path override, every candidate dir — the state-dir override
+ * when set, then <home>/.openclaw and the historical
+ * .clawdbot/.moldbot/.moltbot dirs — is probed for openclaw.json AND the
+ * legacy filenames clawdbot.json/moldbot.json/moltbot.json, dir-major, first
+ * existing file wins. Doctor fully grades only <stateRoot>/openclaw.json
+ * (always candidate #1): when any OTHER candidate is what OpenClaw binds, the
+ * runtime is LIVE here with a config doctor does not grade — it must stay
+ * bound with config-derived evidence capped at unknown, never vanish from the
+ * verdict. A candidate doctor cannot stat counts as existing (fail-closed);
+ * OpenClaw's own existsSync would skip it, but doctor cannot prove that from
+ * a stat error in its own process. Bounded: ≤20 stats. Exported for direct
+ * unit testing.
+ */
+const OPENCLAW_LEGACY_CONFIG_FILENAMES = ['clawdbot.json', 'moldbot.json', 'moltbot.json'] as const;
+const OPENCLAW_LEGACY_STATE_DIRNAMES = ['.clawdbot', '.moldbot', '.moltbot'] as const;
+export function openClawBoundConfigCandidate(
+  ocHome: string,
+  stateRoot: string,
+  stateRootIsOverride: boolean,
+): { kind: 'graded' } | { kind: 'none' } | { kind: 'ungraded'; path: string } {
+  const graded = path.resolve(path.join(stateRoot, 'openclaw.json'));
+  const names = ['openclaw.json', ...OPENCLAW_LEGACY_CONFIG_FILENAMES];
+  const dirs = stateRootIsOverride ? [stateRoot] : [];
+  dirs.push(path.join(ocHome, '.openclaw'), ...OPENCLAW_LEGACY_STATE_DIRNAMES.map((d) => path.join(ocHome, d)));
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (probePath(candidate).kind === 'absent') continue;
+      return path.resolve(candidate) === graded ? { kind: 'graded' } : { kind: 'ungraded', path: candidate };
+    }
+  }
+  return { kind: 'none' };
+}
+
+/**
  * Binaries the packaged HOOK.md requires (metadata.openclaw.requires.bins) —
  * #393 SOL r4 B4. Pinned against hooks/openclaw/cortex-memory/HOOK.md by a
  * drift-guard test, so a requirement added to the hook without teaching doctor
@@ -4138,6 +4176,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
     : openClawStateRoot(ocHomeRes.home);
   let ocUnresolvable = stateRoot.detail;
   let ocPath: string | null = null;
+  let ocLegacyConfig: string | undefined;
   if (!ocUnresolvable) {
     const cfgPrimary = process.env.OPENCLAW_CONFIG_PATH?.trim();
     const cfgOverride = cfgPrimary || process.env.CLAWDBOT_CONFIG_PATH?.trim();
@@ -4150,6 +4189,14 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
       }
     } else {
       ocPath = path.join(stateRoot.root as string, 'openclaw.json');
+      // #393 SOL r6 B1: the host binds the FIRST existing candidate across
+      // current and legacy filenames/state dirs — a clawdbot-era config is a
+      // live OpenClaw whose graded openclaw.json is absent.
+      const hasStateOverride = Boolean(
+        process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim(),
+      );
+      const candidate = openClawBoundConfigCandidate(ocHome as string, stateRoot.root as string, hasStateOverride);
+      if (candidate.kind === 'ungraded') ocLegacyConfig = candidate.path;
     }
   }
   const ocConfig: ProbeRead<Record<string, unknown>> = ocPath === null
@@ -4202,6 +4249,7 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
         declared: declared('openclaw'),
         requiredBins: openClawRequiredBinsProbe(),
         workspaceHookShadow: ocWorkspaceHookShadow,
+        ...(ocLegacyConfig ? { legacyConfig: ocLegacyConfig } : {}),
         ...(ocUnresolvable ? { pathOverrideUnresolvable: ocUnresolvable } : {}),
       },
       ctx,

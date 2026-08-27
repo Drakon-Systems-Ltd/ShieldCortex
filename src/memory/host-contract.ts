@@ -215,6 +215,19 @@ export interface OpenClawProbe {
    */
   pathOverrideUnresolvable?: string;
   /**
+   * Path of the config file OpenClaw actually binds when it is NOT the graded
+   * `<stateRoot>/openclaw.json` (#393 SOL r6 B1). The host selects its config
+   * from a candidate list spanning legacy filenames
+   * (clawdbot/moldbot/moltbot.json) and legacy state dirs
+   * (.clawdbot/.moldbot/.moltbot) — plus the home defaults even under a
+   * state-dir override (openclaw/src/config/paths.ts
+   * resolveDefaultConfigCandidates). A legacy-bound OpenClaw is LIVE here
+   * with a config doctor deliberately does not grade (legacy-era schema and
+   * compat mappings are a drift trap): it stays bound and every
+   * config-derived reading caps at unknown, never a raw-file verdict.
+   */
+  legacyConfig?: string;
+  /**
    * Whether every binary the packaged HOOK.md `requires.bins` names resolves
    * on doctor's PATH (#393 SOL r4 B4). OpenClaw refuses to register a hook
    * whose required binaries are unavailable (hooks/config.ts shouldIncludeHook
@@ -326,8 +339,18 @@ export function resolveOpenClawEvidence(
   const boundSignals: string[] = [];
   if (probe.config.kind === 'present') boundSignals.push('openclaw.json present');
   if (probe.config.kind === 'unreadable') boundSignals.push('openclaw.json present but unreadable');
+  if (probe.legacyConfig) boundSignals.push(`legacy OpenClaw config detected (${shortPath(probe.legacyConfig)})`);
   if (probe.scHook !== 'absent') boundSignals.push(`SC cortex-memory hook dir present (${probe.scHook})`);
   if (probe.scAutoMemory) boundSignals.push('openclawAutoMemory=true');
+  // #393 SOL r6 B1: OpenClaw bootstraps MEMORY.md/memory.md into session
+  // context on PRESENCE, so a workspace memory artifact IS OpenClaw on this
+  // box — it binds by itself (mirror of the Claude store-presence binding),
+  // and an unreadable file is still presence evidence. Otherwise a
+  // memory-owning OpenClaw vanishes from the verdict while another proven
+  // runtime carries the box to PASS.
+  if (probe.workspaces.some((w) => w.memoryFiles.some((md) => md.kind !== 'absent'))) {
+    boundSignals.push('workspace memory artifact evidence on disk');
+  }
   if (probe.declared) boundSignals.push('declared in memory.hostContract.runtimes');
 
   if (boundSignals.length === 0) {
@@ -349,6 +372,15 @@ export function resolveOpenClawEvidence(
     nativeBus = 'unknown';
     proof.push(`openclaw.json unreadable (${probe.config.detail}) — Memory Search cannot be proven off`);
     remediation = `${cap.label}: make openclaw.json readable, then prove ${cap.nativeOffSetting}`;
+  } else if (probe.legacyConfig) {
+    // #393 SOL r6 B1: the graded openclaw.json is absent but OpenClaw binds a
+    // legacy candidate by its own precedence — the runtime is live with a
+    // config doctor does not grade, so no config-derived reading can stand.
+    nativeBus = 'unknown';
+    proof.push(
+      `legacy OpenClaw config detected (${shortPath(probe.legacyConfig)}) — OpenClaw binds legacy filenames/state dirs by precedence and doctor grades only openclaw.json, so Memory Search cannot be proven off`,
+    );
+    remediation = `${cap.label}: migrate the legacy config to openclaw.json under the OpenClaw state dir (and retire the legacy file), then prove ${cap.nativeOffSetting}`;
   } else if (probe.config.kind === 'absent') {
     nativeBus = 'unknown';
     proof.push('openclaw.json absent while OpenClaw looks bound — Memory Search defaults ON and cannot be proven off');
@@ -496,9 +528,11 @@ export function resolveOpenClawEvidence(
       default: {
         if (hookEnabled === 'unknown') {
           scBus = 'unknown';
-          proof.push(probe.config.kind === 'present' && openClawConfigUsesInclude(probe.config.value)
-            ? 'openclaw.json uses $include — the merged config decides hooks.internal.enabled and the cortex-memory entry, and doctor cannot attest the merged result from the raw file'
-            : 'openclaw.json not readable — cannot confirm the host enables internal hooks (hooks.internal.enabled) or the SC entry');
+          proof.push(probe.legacyConfig
+            ? `legacy OpenClaw config detected (${shortPath(probe.legacyConfig)}) — the hooks.internal gate lives in a config doctor does not grade, so the installed hook cannot be attested enabled`
+            : probe.config.kind === 'present' && openClawConfigUsesInclude(probe.config.value)
+              ? 'openclaw.json uses $include — the merged config decides hooks.internal.enabled and the cortex-memory entry, and doctor cannot attest the merged result from the raw file'
+              : 'openclaw.json not readable — cannot confirm the host enables internal hooks (hooks.internal.enabled) or the SC entry');
           break;
         }
         // Even byte-current managed artifacts behind an open gate are only

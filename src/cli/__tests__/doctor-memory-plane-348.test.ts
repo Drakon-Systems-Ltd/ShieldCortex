@@ -31,6 +31,8 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     delete process.env.OPENCLAW_CONFIG_PATH;
     delete process.env.OPENCLAW_PROFILE;
     delete process.env.OPENCLAW_HOME;
+    delete process.env.CLAWDBOT_STATE_DIR;
+    delete process.env.CLAWDBOT_CONFIG_PATH;
     jest.resetModules();
   });
 
@@ -600,6 +602,89 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(verdict.status).toBe('warn');
     expect(verdict.message).toMatch(/cannot determine host contract/);
     expect(verdict.fix).toMatch(/\$include/);
+  });
+
+  it('openClawBoundConfigCandidate mirrors resolveDefaultConfigCandidates precedence (SOL r6 B1)', async () => {
+    const mod = await import('../doctor.js');
+    const defaultRoot = path.join(tmpHome, '.openclaw');
+    // Nothing anywhere: no candidate binds.
+    expect(mod.openClawBoundConfigCandidate(tmpHome, defaultRoot, false)).toEqual({ kind: 'none' });
+    // A legacy filename in a legacy state dir binds (clawdbot era).
+    fs.mkdirSync(path.join(tmpHome, '.clawdbot'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.clawdbot', 'clawdbot.json'), '{}');
+    expect(mod.openClawBoundConfigCandidate(tmpHome, defaultRoot, false)).toEqual({
+      kind: 'ungraded',
+      path: path.join(tmpHome, '.clawdbot', 'clawdbot.json'),
+    });
+    // A legacy filename in the CURRENT state dir outranks it (dir-major order,
+    // exactly resolveDefaultConfigCandidates).
+    fs.mkdirSync(defaultRoot, { recursive: true });
+    fs.writeFileSync(path.join(defaultRoot, 'moltbot.json'), '{}');
+    expect(mod.openClawBoundConfigCandidate(tmpHome, defaultRoot, false)).toEqual({
+      kind: 'ungraded',
+      path: path.join(defaultRoot, 'moltbot.json'),
+    });
+    // The graded openclaw.json is candidate #1 and wins outright.
+    fs.writeFileSync(path.join(defaultRoot, 'openclaw.json'), '{}');
+    expect(mod.openClawBoundConfigCandidate(tmpHome, defaultRoot, false)).toEqual({ kind: 'graded' });
+    // With OPENCLAW_STATE_DIR, the override dir's candidates come first — but
+    // the HOME default dirs are still on OpenClaw's list, so a config there
+    // binds even when the override dir is empty.
+    const custom = path.join(tmpHome, 'oc-state');
+    fs.mkdirSync(custom, { recursive: true });
+    expect(mod.openClawBoundConfigCandidate(tmpHome, custom, true)).toEqual({
+      kind: 'ungraded',
+      path: path.join(defaultRoot, 'openclaw.json'),
+    });
+    fs.writeFileSync(path.join(custom, 'clawdbot.json'), '{}');
+    expect(mod.openClawBoundConfigCandidate(tmpHome, custom, true)).toEqual({
+      kind: 'ungraded',
+      path: path.join(custom, 'clawdbot.json'),
+    });
+    fs.writeFileSync(path.join(custom, 'openclaw.json'), '{}');
+    expect(mod.openClawBoundConfigCandidate(tmpHome, custom, true)).toEqual({ kind: 'graded' });
+  });
+
+  it('host contract: a clawdbot-era config plus a live workspace MEMORY.md binds OpenClaw — never PASS on the back of a clean runtime (SOL r6 B1)', async () => {
+    // Fully green Claude Code: before the fix, OpenClaw saw no binding signal
+    // (graded openclaw.json absent, no hook, nothing declared) and dropped
+    // from the verdict while Claude carried the box to PASS — despite
+    // OpenClaw loading clawdbot.json and bootstrapping the memory file.
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    fs.mkdirSync(path.join(tmpHome, '.clawdbot'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.clawdbot', 'clawdbot.json'), '{}');
+    const wsDir = path.join(tmpHome, '.openclaw', 'workspace');
+    fs.mkdirSync(wsDir, { recursive: true });
+    fs.writeFileSync(path.join(wsDir, 'MEMORY.md'), '# session brain\n'.repeat(8));
+    const r = await runHost();
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/OpenClaw/);
+    expect(r.message).toMatch(/native automatic memory still owns the bus|native ON/);
+
+    // Even without the memory file, the legacy candidate alone binds — with
+    // no SC hook the pack is not delivered on a bound runtime: fail, never
+    // the old PASS.
+    fs.rmSync(path.join(wsDir, 'MEMORY.md'), { force: true });
+    const legacyOnly = await runHost();
+    expect(legacyOnly.status).toBe('fail');
+    expect(legacyOnly.message).toMatch(/not proven delivered/);
+    expect(legacyOnly.message).toMatch(/OpenClaw/);
+
+    // Byte-current artifacts do not rescue it either: the hooks.internal gate
+    // lives in a config doctor does not grade, so delivery caps at unknown.
+    installRealHookArtifacts();
+    const withArtifacts = await runHost();
+    expect(withArtifacts.status).toBe('warn');
+    expect(withArtifacts.message).toMatch(/legacy OpenClaw config/);
+    expect(withArtifacts.message).toMatch(/grades only openclaw\.json/);
   });
 
   it('$include makes workspace enumeration and the default workspace unattestable (SOL r5 B1)', async () => {

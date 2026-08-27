@@ -522,6 +522,71 @@ describe('OpenClaw evidence', () => {
     expect(incompleteScan.nativeBus).toBe('unknown');
     expect(incompleteScan.proof.join(' ')).toMatch(/could not all be enumerated/);
   });
+
+  it('binds on a legacy config candidate and caps every reading at unknown — doctor grades only openclaw.json (SOL r6 B1)', () => {
+    // The r6 false PASS: OpenClaw selects legacy config filenames and legacy
+    // state dirs by precedence (openclaw/src/config/paths.ts
+    // resolveDefaultConfigCandidates), so a clawdbot.json-era box is a LIVE
+    // OpenClaw whose graded openclaw.json is absent — it used to drop from
+    // the bound set entirely.
+    const e = resolveOpenClawEvidence(
+      ocProbe({ legacyConfig: '/home/x/.clawdbot/clawdbot.json', scHook: 'complete' }),
+      CTX,
+    );
+    expect(e.bound).toBe(true);
+    expect(e.boundReason).toMatch(/legacy OpenClaw config/);
+    expect(e.nativeBus).toBe('unknown');
+    // Complete artifacts prove nothing behind a gate that lives in a config
+    // doctor does not grade — unknown, never wired_proven or not_wired.
+    expect(e.scBus).toBe('unknown');
+    expect(e.proof.join(' ')).toMatch(/doctor grades only openclaw\.json/);
+    expect(e.remediation).toMatch(/openclaw\.json/);
+  });
+
+  it('binds on workspace memory artifact evidence alone — a memory-owning OpenClaw can never vanish from the verdict (SOL r6 B1)', () => {
+    // Live MEMORY.md, no config, no hook, nothing declared: OpenClaw
+    // bootstraps that file into session context on presence, so it IS
+    // OpenClaw on this box (mirror of the Claude store-presence binding).
+    const live = resolveOpenClawEvidence(
+      ocProbe({
+        workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/MEMORY.md', 1)] })],
+      }),
+      CTX,
+    );
+    expect(live.bound).toBe(true);
+    expect(live.boundReason).toMatch(/workspace memory artifact/);
+    expect(live.nativeBus).toBe('on');
+    expect(live.scBus).toBe('not_wired');
+    // An unreadable memory file is still presence evidence — bound, unknown.
+    const unreadable = resolveOpenClawEvidence(
+      ocProbe({
+        workspaces: [ws({ memoryFiles: [{ kind: 'unreadable', path: '/home/x/.openclaw/workspace/MEMORY.md', detail: 'EACCES' }] })],
+      }),
+      CTX,
+    );
+    expect(unreadable.bound).toBe(true);
+    expect(unreadable.nativeBus).toBe('unknown');
+  });
+
+  it('regression: clawdbot.json + live workspace MEMORY.md + clean other runtimes is FAIL, never PASS (SOL r6 B1)', () => {
+    const oc = resolveOpenClawEvidence(
+      ocProbe({
+        legacyConfig: '/home/x/.clawdbot/clawdbot.json',
+        workspaces: [ws({ memoryFiles: [file('/home/x/.openclaw/workspace/MEMORY.md', 1)] })],
+      }),
+      CTX,
+    );
+    expect(oc.bound).toBe(true);
+    const cc = resolveClaudeCodeEvidence(
+      ccProbe({ settings: { kind: 'present', value: WIRED_SETTINGS } }),
+      CTX,
+    );
+    expect(cc.scBus).toBe('wired_proven');
+    const v = verdictFor([oc, cc, resolveHermesEvidence(hermesProbe(), CTX)]);
+    expect(v.status).toBe('fail');
+    expect(v.message).toMatch(/native automatic memory still owns the bus/);
+    expect(v.message).toMatch(/OpenClaw/);
+  });
 });
 
 describe('Claude Code evidence', () => {
