@@ -462,15 +462,99 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(stale.message).toMatch(/cannot determine/);
   });
 
-  it('host contract: a live per-project CLAUDE.md within the bounded projects scan is native ON (SOL r2 B5)', async () => {
+  /** Claude Code's project-key encoding: cwd with non-alphanumerics as '-'. */
+  function claudeProjectKey(projectRoot: string): string {
+    return projectRoot.replace(/[^A-Za-z0-9]/g, '-');
+  }
+
+  it('host contract: a live CLAUDE.md at the REAL project root is native ON — decoded from the projects key (SOL r3 B4)', async () => {
+    // The r3 false PASS: doctor probed ~/.claude/projects/<key>/CLAUDE.md — a
+    // location Claude never loads — found nothing, and certified off_proven
+    // while the real <root>/CLAUDE.md rode into every session.
     writeConfig(busContract());
-    const projDir = path.join(tmpHome, '.claude', 'projects', 'proj');
-    fs.mkdirSync(projDir, { recursive: true });
-    fs.writeFileSync(path.join(projDir, 'CLAUDE.md'), '# project preamble\n'.repeat(20));
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    const projectRoot = path.join(tmpHome, 'proj');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.mkdirSync(path.join(claudeDir, 'projects', claudeProjectKey(projectRoot)), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, 'CLAUDE.md'), '# project preamble\n'.repeat(20));
     const r = await runHost();
     expect(r.status).toBe('fail');
     expect(r.message).toMatch(/Claude Code: native ON/);
     expect(r.message).toMatch(/proj\/CLAUDE\.md/);
+
+    // <root>/.claude/CLAUDE.md is the same automatic surface.
+    fs.rmSync(path.join(projectRoot, 'CLAUDE.md'));
+    fs.mkdirSync(path.join(projectRoot, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, '.claude', 'CLAUDE.md'), '# nested preamble\n'.repeat(20));
+    const nested = await runHost();
+    expect(nested.status).toBe('fail');
+    expect(nested.message).toMatch(/Claude Code: native ON/);
+  });
+
+  it('host contract: a CLAUDE.md inside the key dir itself is inert, and an undecodable key is an attestation gap, never off_proven (SOL r3 B4)', async () => {
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    // The old (wrong) location: projects/<key>/CLAUDE.md. Claude never loads
+    // it, so it is transcript-dir clutter, not native evidence — the box still
+    // PASSes on a real off-proof.
+    const projectRoot = path.join(tmpHome, 'proj');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    const keyDir = path.join(claudeDir, 'projects', claudeProjectKey(projectRoot));
+    fs.mkdirSync(keyDir, { recursive: true });
+    fs.writeFileSync(path.join(keyDir, 'CLAUDE.md'), '# clutter, not a preamble\n');
+    const inert = await runHost();
+    expect(inert.status).toBe('pass');
+
+    // A key doctor cannot decode back to a real root caps the proof at
+    // unknown with honest wording — never silence, never off_proven.
+    fs.mkdirSync(path.join(claudeDir, 'projects', 'proj'), { recursive: true });
+    const gap = await runHost();
+    expect(gap.status).toBe('warn');
+    expect(gap.message).toMatch(/cannot determine/);
+    expect(gap.message).toMatch(/cannot be fully decoded/);
+
+    // A key whose project was deleted decodes to zero roots on a complete
+    // walk: nothing exists for Claude to load, so it does not block the proof.
+    fs.rmSync(path.join(claudeDir, 'projects', 'proj'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(claudeDir, 'projects', claudeProjectKey(path.join(tmpHome, 'gone'))), { recursive: true });
+    const gone = await runHost();
+    expect(gone.status).toBe('pass');
+  });
+
+  it('decodeClaudeProjectKey walks the real tree: hyphenated names decode, ambiguity yields every candidate root (SOL r3 B4)', async () => {
+    const mod = await import('../doctor.js');
+    // Hyphens in real directory names survive the lossy encoding.
+    const hyphenated = path.join(tmpHome, 'worktrees', 'sc-393-host');
+    fs.mkdirSync(hyphenated, { recursive: true });
+    const decoded = mod.decodeClaudeProjectKey(claudeProjectKey(hyphenated));
+    expect(decoded.complete).toBe(true);
+    expect(decoded.roots).toContain(hyphenated);
+    // Ambiguity: /base/my-app and /base/my/app encode identically — both are
+    // candidate roots and both get probed.
+    fs.mkdirSync(path.join(tmpHome, 'my-app'), { recursive: true });
+    fs.mkdirSync(path.join(tmpHome, 'my', 'app'), { recursive: true });
+    const ambiguous = mod.decodeClaudeProjectKey(claudeProjectKey(path.join(tmpHome, 'my-app')));
+    expect(ambiguous.complete).toBe(true);
+    expect(ambiguous.roots).toEqual(expect.arrayContaining([
+      path.join(tmpHome, 'my-app'),
+      path.join(tmpHome, 'my', 'app'),
+    ]));
+    // A key that is not an absolute-path encoding cannot be attested.
+    expect(mod.decodeClaudeProjectKey('proj')).toEqual({ roots: [], complete: false });
   });
 
   it('host contract: a truncated Claude store scan can never prove off (SOL H2)', async () => {

@@ -3324,16 +3324,82 @@ function artifactProbe(target: string): ArtifactProbe {
 }
 
 /**
+ * Claude Code encodes a project's cwd as a directory key under
+ * `~/.claude/projects` by replacing every non-alphanumeric character with `-`
+ * (`/home/u/my-app` → `-home-u-my-app`). The automatic project instructions
+ * live in the REAL project hierarchy — `<root>/CLAUDE.md` and
+ * `<root>/.claude/CLAUDE.md` — NOT under the key directory, which holds
+ * transcripts and the per-project memory store (#393 SOL r3 B4).
+ *
+ * The encoding is lossy (`-`, `/`, `.`, `_` all become `-`), so the key is
+ * decoded by walking the real filesystem: from `/`, a child matches when
+ * encoding its name yields the next chunk of the key. Every existing
+ * directory whose full path encodes to the key is a candidate root; ambiguity
+ * probes them all (extra probes can only ADD native-ON evidence, never mint a
+ * PASS). A walk that cannot finish — unreadable directory, cap hit, a key not
+ * shaped like an absolute-path encoding, a matching child it cannot stat — is
+ * an attestation gap the caller surfaces as unknown, never as "no preamble".
+ * Zero roots from a COMPLETE walk means no such directory exists today, so no
+ * session can start there and Claude loads nothing from it.
+ *
+ * Exported for direct unit testing.
+ */
+const CLAUDE_KEY_WALK_CAP = 128;
+export function decodeClaudeProjectKey(key: string): { roots: string[]; complete: boolean } {
+  if (!key.startsWith('-') || key.length < 2) return { roots: [], complete: false };
+  const encode = (s: string): string => s.replace(/[^A-Za-z0-9]/g, '-');
+  const roots: string[] = [];
+  let complete = true;
+  let visited = 0;
+  const walk = (dir: string, rest: string): void => {
+    if (visited++ >= CLAUDE_KEY_WALK_CAP) {
+      complete = false;
+      return;
+    }
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      complete = false;
+      return;
+    }
+    for (const name of names) {
+      const enc = encode(name);
+      const matchFull = rest === enc;
+      const matchPrefix = !matchFull && rest.startsWith(`${enc}-`);
+      if (!matchFull && !matchPrefix) continue;
+      const child = path.join(dir, name);
+      let isDir: boolean;
+      try {
+        isDir = fs.statSync(child).isDirectory();
+      } catch {
+        complete = false;
+        continue;
+      }
+      if (!isDir) continue;
+      if (matchFull) roots.push(child);
+      else walk(child, rest.slice(enc.length + 1));
+    }
+  };
+  walk('/', key.slice(1));
+  return { roots, complete };
+}
+
+/**
  * Claude Code's native plane is the memory-tool store PLUS the automatic
  * preambles: `~/.claude/memory`, per-project `~/.claude/projects/<key>/memory`
- * directories, `~/.claude/CLAUDE.md`, and per-project CLAUDE.md within the
- * same bounded projects scan (#393 SOL r2 B5 — a preamble loaded into every
- * session is native automatic durable context; the normative host law demands
- * it stop under a bus contract). Scans are bounded, and BOTH failure shapes
- * surface as scanComplete=false — a directory we cannot list, and a listing
- * that exceeds the cap (#393 SOL H2: a truncated scan used to keep
- * scanComplete=true, so a live store past the slice could vanish from the
- * verdict). "Could not look everywhere" must never read as "nothing there".
+ * directories, `~/.claude/CLAUDE.md`, and — via decodeClaudeProjectKey — the
+ * real project roots' CLAUDE.md / .claude/CLAUDE.md (#393 SOL r2 B5 + r3 B4;
+ * a preamble loaded into every session is native automatic durable context;
+ * the normative host law demands it stop under a bus contract). Doctor cannot
+ * enumerate every project on the box — only those Claude has recorded a key
+ * for — which stays an accepted attestation limit; what it must never do is
+ * scan the WRONG location and call the silence off_proven. Scans are bounded,
+ * and BOTH failure shapes surface as scanComplete=false — a directory we
+ * cannot list, and a listing that exceeds the cap (#393 SOL H2: a truncated
+ * scan used to keep scanComplete=true, so a live store past the slice could
+ * vanish from the verdict). "Could not look everywhere" must never read as
+ * "nothing there".
  */
 const CLAUDE_STORE_FILE_CAP = 50;
 const CLAUDE_PROJECT_CAP = 200;
@@ -3371,8 +3437,35 @@ function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanCo
       const entries = fs.readdirSync(projectsDir);
       if (entries.length > CLAUDE_PROJECT_CAP) scanComplete = false;
       for (const entry of entries.slice(0, CLAUDE_PROJECT_CAP)) {
-        collectDir(path.join(projectsDir, entry, 'memory'));
-        stores.push(artifactProbe(path.join(projectsDir, entry, 'CLAUDE.md')));
+        const keyDir = path.join(projectsDir, entry);
+        const keyProbe = probePath(keyDir);
+        if (keyProbe.kind === 'absent') continue;
+        if (keyProbe.kind !== 'present') {
+          scanComplete = false;
+          continue;
+        }
+        // Stray files under projects/ are not keys and hold no store.
+        if (!keyProbe.stat.isDirectory()) continue;
+        // The per-project memory store genuinely lives under the key dir.
+        collectDir(path.join(keyDir, 'memory'));
+        // #393 SOL r3 B4: the automatic project preamble does NOT — decode the
+        // key back to real project roots and probe there. An undecodable key
+        // is an attestation gap surfaced as unreadable evidence, never
+        // silence (the old probe read projects/<key>/CLAUDE.md, a location
+        // Claude never loads, and its absence green-washed off_proven).
+        const decoded = decodeClaudeProjectKey(entry);
+        if (!decoded.complete) {
+          scanComplete = false;
+          stores.push({
+            kind: 'unreadable',
+            path: keyDir,
+            detail: 'project key cannot be fully decoded to a real project root — its automatic CLAUDE.md cannot be attested',
+          });
+        }
+        for (const root of decoded.roots) {
+          stores.push(artifactProbe(path.join(root, 'CLAUDE.md')));
+          stores.push(artifactProbe(path.join(root, '.claude', 'CLAUDE.md')));
+        }
       }
     } catch {
       scanComplete = false;
