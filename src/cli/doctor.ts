@@ -11,7 +11,7 @@ import { execFileSync } from 'child_process';
 import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
 import { REQUIRED_HOOK_NAMES } from '../setup/settings-hooks.js';
-import { hookCommandResolves } from '../setup/hook-command-resolution.js';
+import { hookCommandResolves, hookCommandTrust } from '../setup/hook-command-resolution.js';
 import {
   resolveRealtimePluginInstallPath,
   readInstalledRealtimePluginVersion,
@@ -38,6 +38,22 @@ import {
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { resolveSelfInstallDir } from '../setup/native-binding.js';
+import {
+  evaluateHostContract,
+  openClawConfigUsesInclude,
+  parseHermesMemoryBlock,
+  readInjectModeStrict,
+  resolveClaudeCodeEvidence,
+  resolveHermesEvidence,
+  resolveOpenClawEvidence,
+  INJECT_MODES,
+  type ArtifactProbe,
+  type HermesProfileProbe,
+  type HostRuntimeEvidence,
+  type HostRuntimeId,
+  type OpenClawHookArtifacts,
+  type ProbeRead,
+} from '../memory/host-contract.js';
 import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
@@ -2912,9 +2928,21 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
   planeSetAt: string | null;
   illegal: boolean;
   injectMode: string;
+  /** False when the raw mode is junk the runtime would fail-open to `start` (#393 SOL H5). */
+  injectModeLegal: boolean;
+  /** False when no mode was written and the emitter default (`start`) applies. */
+  injectModeExplicit: boolean;
   nativeContract: string | null;
   openclawAuto: boolean;
   injectConfigured: boolean;
+  /** Raw `memory.hostContract.posture` — kept raw so junk fails instead of vanishing. */
+  posture: string | null;
+  /** Printable description of a present non-string posture (#393 SOL r3 nit). */
+  postureIllegal?: string;
+  /** Operator-declared bound runtimes. Intent only: adds scrutiny, never proof. */
+  declaredRuntimes: HostRuntimeId[];
+  /** Unsupported runtimes entries (or a non-array key) — junk fails, never filters (#393 SOL r2 nit). */
+  declaredRuntimesIllegal: string[];
 } {
   const mem = (raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory))
     ? raw.memory as Record<string, unknown>
@@ -2934,26 +2962,71 @@ function readMemoryPlaneFromConfig(raw: Record<string, unknown>): {
     plane = String(pRaw);
   }
   const planeSetAt = typeof mem.planeSetAt === 'string' ? mem.planeSetAt : null;
-  let injectMode = 'off';
+  // #393 SOL H5: mode semantics mirror the runtime emitter
+  // (scripts/lib/inject-pack.mjs readInjectConfig) — same key precedence, same
+  // normalization — except junk is surfaced as illegal instead of silently
+  // kept ('bogus' used to dodge the start-bus delivery requirement while the
+  // runtime injected).
+  const rawMode = inject.mode != null
+    ? inject.mode
+    : (raw.memoryInjectMode != null ? raw.memoryInjectMode : undefined);
+  const modeReading = readInjectModeStrict(rawMode);
   const injectConfigured = Object.keys(inject).length > 0
     || raw.memoryInjectMode != null
-    || raw.memoryNativeInjectContract != null;
-  if (typeof inject.mode === 'string') injectMode = inject.mode;
-  else if (typeof raw.memoryInjectMode === 'string') injectMode = raw.memoryInjectMode as string;
-  else if (injectConfigured) injectMode = 'start';
+    || raw.memoryNativeInjectContract != null
+    // The emitter also reads a contract from memory.nativeInjectContract — a
+    // contract alone puts the default-start pack on the bus, so it counts as
+    // configured (the old reading called this state "inject off").
+    || mem.nativeInjectContract != null;
+  const injectMode = modeReading.legal ? (modeReading.mode as string) : modeReading.raw;
   const nc = inject.nativeContract ?? raw.memoryNativeInjectContract ?? mem.nativeInjectContract;
   const nativeContract = typeof nc === 'string'
     && (nc === 'sc_only' || nc === 'disable_native_inject')
     ? nc
     : null;
+  const hostContract = (mem.hostContract && typeof mem.hostContract === 'object' && !Array.isArray(mem.hostContract))
+    ? mem.hostContract as Record<string, unknown>
+    : {};
+  // #393 SOL r3 nit: a present non-string posture must FAIL as illegal, like
+  // junk runtime declarations — String() coercion is banned here because a
+  // one-element array stringifies to its element and could mint the legal
+  // sidecar posture out of junk.
+  const postureRaw = hostContract.posture;
+  const posture = typeof postureRaw === 'string' && postureRaw.trim() !== '' ? postureRaw.trim() : null;
+  let postureIllegal: string | undefined;
+  if (postureRaw !== undefined && typeof postureRaw !== 'string') {
+    try {
+      postureIllegal = JSON.stringify(postureRaw) ?? String(postureRaw);
+    } catch {
+      postureIllegal = String(postureRaw);
+    }
+  }
+  const declaredRuntimes: HostRuntimeId[] = [];
+  const declaredRuntimesIllegal: string[] = [];
+  if (hostContract.runtimes !== undefined) {
+    if (!Array.isArray(hostContract.runtimes)) {
+      declaredRuntimesIllegal.push(String(hostContract.runtimes));
+    } else {
+      for (const r of hostContract.runtimes) {
+        if (r === 'openclaw' || r === 'claude_code' || r === 'hermes') declaredRuntimes.push(r);
+        else declaredRuntimesIllegal.push(String(r));
+      }
+    }
+  }
   return {
     plane,
     planeSetAt,
     illegal,
     injectMode,
+    injectModeLegal: modeReading.legal,
+    injectModeExplicit: modeReading.explicit,
     nativeContract,
     openclawAuto: raw.openclawAutoMemory === true,
     injectConfigured,
+    posture,
+    postureIllegal,
+    declaredRuntimes,
+    declaredRuntimesIllegal,
   };
 }
 
@@ -2978,6 +3051,17 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
       status: 'fail',
       message: `illegal memory.plane value "${cfg.plane}" (need dual_legacy|import_only|sc_canonical)`,
       fix: 'Run `shieldcortex config --memory-plane dual_legacy` (or import_only|sc_canonical) — signed write; do not hand-edit config.json',
+    };
+  }
+
+  // Illegal inject mode (#393 SOL H5): the runtime would fail-open junk to
+  // `start` and inject — doctor fails it here rather than grading around it.
+  if (!cfg.injectModeLegal) {
+    return {
+      label,
+      status: 'fail',
+      message: `illegal memory.inject.mode "${cfg.injectMode}" (need ${INJECT_MODES.join('|')}) — the runtime emitter would treat this as start`,
+      fix: 'Set memory.inject.mode to a legal value (or remove it to accept the default start) — signed write; do not hand-edit config.json',
     };
   }
 
@@ -3047,11 +3131,20 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
       activity += countOf(`SELECT COUNT(*) AS c FROM hook_invocations WHERE invoked_at >= datetime('now', '-7 days')`);
     } catch { /* optional */ }
 
-    // Native artifact growth (OpenClaw MEMORY.md / memory dir)
+    // Native artifact growth (OpenClaw MEMORY.md / memory.md / memory dir),
+    // under the same state root the host contract reads (#393 SOL r2 B6). An
+    // unresolvable override (r3 B6) yields no root: skip the OpenClaw
+    // candidates rather than probing a guessed tree — the weak-telemetry
+    // guard below already refuses to PASS a quiet box.
     const home = os.homedir();
+    const ocRoot = openClawStateRoot(home).root;
+    const ocWorkspace = ocRoot === null ? null : path.join(ocRoot, 'workspace');
     const nativeCandidates = [
-      path.join(home, '.openclaw', 'workspace', 'MEMORY.md'),
-      path.join(home, '.openclaw', 'workspace', 'memory'),
+      ...(ocWorkspace === null ? [] : [
+        path.join(ocWorkspace, 'MEMORY.md'),
+        path.join(ocWorkspace, 'memory.md'),
+        path.join(ocWorkspace, 'memory'),
+      ]),
       path.join(home, 'MEMORY.md'),
     ];
     let nativeTouched7d = false;
@@ -3189,9 +3282,920 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
 
 /**
  * Host contract enforcement proof (#348 T1 / #393).
- * Paper contract: config claims sc_only|disable_native_inject but native
- * automatic memory still looks enabled on disk.
+ *
+ * The disk-reading half: gather per-runtime evidence, then let the pure model in
+ * `src/memory/host-contract.ts` decide. Every read distinguishes absent from
+ * unreadable — the previous version returned PASS ("no paper-contract signals on
+ * disk") whenever it found nothing, which is exactly how a Hermes-primary box
+ * with a live native MEMORY plane green-washed an `sc_only` paper contract while
+ * being handed OpenClaw remediation it could not act on.
  */
+function readJsonProbe(target: string): ProbeRead<Record<string, unknown>> {
+  const probe = probePath(target);
+  if (probe.kind === 'absent') return { kind: 'absent' };
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    return { kind: 'unreadable', detail: `${probe.code}: ${probe.message}` };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(target, 'utf-8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { kind: 'unreadable', detail: 'not a JSON object' };
+    }
+    return { kind: 'present', value: parsed as Record<string, unknown> };
+  } catch (err: unknown) {
+    return { kind: 'unreadable', detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function readTextProbe(target: string): ProbeRead<string> {
+  const probe = probePath(target);
+  if (probe.kind === 'absent') return { kind: 'absent' };
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    return { kind: 'unreadable', detail: `${probe.code}: ${probe.message}` };
+  }
+  try {
+    return { kind: 'present', value: fs.readFileSync(target, 'utf-8') };
+  } catch (err: unknown) {
+    return { kind: 'unreadable', detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** stat-only: doctor proves a native store is live without reading its contents. */
+function artifactProbe(target: string): ArtifactProbe {
+  const probe = probePath(target);
+  if (probe.kind === 'absent') return { kind: 'absent', path: target };
+  if (probe.kind === 'denied' || probe.kind === 'error') {
+    return { kind: 'unreadable', path: target, detail: `${probe.code}: ${probe.message}` };
+  }
+  return { kind: 'present', path: target, mtimeMs: probe.stat.mtimeMs, size: probe.stat.isFile() ? probe.stat.size : 1 };
+}
+
+/**
+ * Claude Code encodes a project's cwd as a directory key under
+ * `~/.claude/projects` by replacing every non-alphanumeric character with `-`
+ * (`/home/u/my-app` → `-home-u-my-app`). The automatic project instructions
+ * live in the REAL project hierarchy — `<root>/CLAUDE.md` and
+ * `<root>/.claude/CLAUDE.md` — NOT under the key directory, which holds
+ * transcripts and the per-project memory store (#393 SOL r3 B4).
+ *
+ * The encoding is lossy (`-`, `/`, `.`, `_` all become `-`), so the key is
+ * decoded by walking the real filesystem: from `/`, a child matches when
+ * encoding its name yields the next chunk of the key. Every existing
+ * directory whose full path encodes to the key is a candidate root; ambiguity
+ * probes them all (extra probes can only ADD native-ON evidence, never mint a
+ * PASS). A walk that cannot finish — unreadable directory, cap hit, a key not
+ * shaped like an absolute-path encoding, a matching child it cannot stat — is
+ * an attestation gap the caller surfaces as unknown, never as "no preamble".
+ * Zero roots from a COMPLETE walk means no such directory exists today, so no
+ * session can start there and Claude loads nothing from it.
+ *
+ * Exported for direct unit testing.
+ */
+const CLAUDE_KEY_WALK_CAP = 128;
+export function decodeClaudeProjectKey(key: string): { roots: string[]; complete: boolean } {
+  if (!key.startsWith('-') || key.length < 2) return { roots: [], complete: false };
+  const encode = (s: string): string => s.replace(/[^A-Za-z0-9]/g, '-');
+  const roots: string[] = [];
+  let complete = true;
+  let visited = 0;
+  const walk = (dir: string, rest: string): void => {
+    if (visited++ >= CLAUDE_KEY_WALK_CAP) {
+      complete = false;
+      return;
+    }
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      complete = false;
+      return;
+    }
+    for (const name of names) {
+      const enc = encode(name);
+      const matchFull = rest === enc;
+      const matchPrefix = !matchFull && rest.startsWith(`${enc}-`);
+      if (!matchFull && !matchPrefix) continue;
+      const child = path.join(dir, name);
+      let isDir: boolean;
+      try {
+        isDir = fs.statSync(child).isDirectory();
+      } catch {
+        complete = false;
+        continue;
+      }
+      if (!isDir) continue;
+      if (matchFull) roots.push(child);
+      else walk(child, rest.slice(enc.length + 1));
+    }
+  };
+  walk('/', key.slice(1));
+  return { roots, complete };
+}
+
+/**
+ * Claude Code's native plane is the memory-tool store PLUS the automatic
+ * preambles: `~/.claude/memory`, per-project `~/.claude/projects/<key>/memory`
+ * directories, `~/.claude/CLAUDE.md`, and — via decodeClaudeProjectKey — the
+ * real project roots' CLAUDE.md / .claude/CLAUDE.md AND their ancestors'
+ * (#393 SOL r2 B5 + r3 B4 + r4 B1; Claude loads parent-directory preambles
+ * for nested sessions, so a clean leaf under a live ancestor is still on the
+ * native bus; a preamble loaded into every session is native automatic
+ * durable context; the normative host law demands it stop under a bus
+ * contract). Doctor cannot
+ * enumerate every project on the box — only those Claude has recorded a key
+ * for — which stays an accepted attestation limit; what it must never do is
+ * scan the WRONG location and call the silence off_proven. Scans are bounded,
+ * and BOTH failure shapes surface as scanComplete=false — a directory we
+ * cannot list, and a listing that exceeds the cap (#393 SOL H2: a truncated
+ * scan used to keep scanComplete=true, so a live store past the slice could
+ * vanish from the verdict). "Could not look everywhere" must never read as
+ * "nothing there".
+ */
+const CLAUDE_STORE_FILE_CAP = 50;
+const CLAUDE_PROJECT_CAP = 200;
+const CLAUDE_ANCESTOR_CAP = 10;
+function scanClaudeNativeStores(home: string): { stores: ArtifactProbe[]; scanComplete: boolean } {
+  const stores: ArtifactProbe[] = [];
+  let scanComplete = true;
+  // Preamble probes dedupe across projects (#393 SOL r4 B1): nested projects
+  // share ancestors, and every ancestor chain ends at the same $HOME.
+  const preambleSeen = new Set<string>();
+  const probePreambles = (dir: string): void => {
+    for (const p of [path.join(dir, 'CLAUDE.md'), path.join(dir, '.claude', 'CLAUDE.md')]) {
+      if (preambleSeen.has(p)) continue;
+      preambleSeen.add(p);
+      stores.push(artifactProbe(p));
+    }
+  };
+  const collectDir = (dir: string): void => {
+    const dirProbe = probePath(dir);
+    if (dirProbe.kind === 'absent') return;
+    if (dirProbe.kind !== 'present') {
+      stores.push({ kind: 'unreadable', path: dir, detail: `${dirProbe.code}: ${dirProbe.message}` });
+      return;
+    }
+    try {
+      const names = fs.readdirSync(dir);
+      if (names.length > CLAUDE_STORE_FILE_CAP) scanComplete = false;
+      for (const name of names.slice(0, CLAUDE_STORE_FILE_CAP)) {
+        if (!name.endsWith('.md')) continue;
+        stores.push(artifactProbe(path.join(dir, name)));
+      }
+    } catch (err: unknown) {
+      scanComplete = false;
+      stores.push({ kind: 'unreadable', path: dir, detail: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  collectDir(path.join(home, '.claude', 'memory'));
+  // The global automatic preamble (#393 SOL r2 B5).
+  preambleSeen.add(path.join(home, '.claude', 'CLAUDE.md'));
+  stores.push(artifactProbe(path.join(home, '.claude', 'CLAUDE.md')));
+
+  const projectsDir = path.join(home, '.claude', 'projects');
+  const projectsProbe = probePath(projectsDir);
+  if (projectsProbe.kind === 'present') {
+    try {
+      const entries = fs.readdirSync(projectsDir);
+      if (entries.length > CLAUDE_PROJECT_CAP) scanComplete = false;
+      for (const entry of entries.slice(0, CLAUDE_PROJECT_CAP)) {
+        const keyDir = path.join(projectsDir, entry);
+        const keyProbe = probePath(keyDir);
+        if (keyProbe.kind === 'absent') continue;
+        if (keyProbe.kind !== 'present') {
+          scanComplete = false;
+          continue;
+        }
+        // Stray files under projects/ are not keys and hold no store.
+        if (!keyProbe.stat.isDirectory()) continue;
+        // The per-project memory store genuinely lives under the key dir.
+        collectDir(path.join(keyDir, 'memory'));
+        // #393 SOL r3 B4: the automatic project preamble does NOT — decode the
+        // key back to real project roots and probe there. An undecodable key
+        // is an attestation gap surfaced as unreadable evidence, never
+        // silence (the old probe read projects/<key>/CLAUDE.md, a location
+        // Claude never loads, and its absence green-washed off_proven).
+        const decoded = decodeClaudeProjectKey(entry);
+        if (!decoded.complete) {
+          scanComplete = false;
+          stores.push({
+            kind: 'unreadable',
+            path: keyDir,
+            detail: 'project key cannot be fully decoded to a real project root — its automatic CLAUDE.md cannot be attested',
+          });
+        }
+        for (const root of decoded.roots) {
+          probePreambles(root);
+          // #393 SOL r4 B1: Claude also loads ancestor CLAUDE.md preambles
+          // for a session in a nested directory — a clean leaf with a live
+          // ancestor preamble used to prove off. Walk parents up to (and
+          // including) $HOME — or the filesystem root for projects outside
+          // it — bounded; a walk the cap truncates before reaching its
+          // terminal is an incomplete scan, never silence.
+          let dir = root;
+          let depth = 0;
+          while (dir !== home) {
+            const parent = path.dirname(dir);
+            if (parent === dir) break;
+            if (depth++ >= CLAUDE_ANCESTOR_CAP) {
+              scanComplete = false;
+              break;
+            }
+            dir = parent;
+            probePreambles(dir);
+          }
+        }
+      }
+    } catch {
+      scanComplete = false;
+    }
+  } else if (projectsProbe.kind === 'denied' || projectsProbe.kind === 'error') {
+    scanComplete = false;
+  }
+
+  return { stores, scanComplete };
+}
+
+/**
+ * Hermes profile surface (#393 SOL H6): per-profile config.yaml switches plus
+ * per-profile native stores. Bounded by HERMES_PROFILE_CAP; exceeding the cap
+ * or failing to list marks the scan incomplete so the evidence model refuses
+ * to prove off from a partial look.
+ */
+const HERMES_PROFILE_CAP = 20;
+function scanHermesProfiles(home: string): {
+  profiles: HermesProfileProbe[];
+  artifacts: ArtifactProbe[];
+  scanComplete: boolean;
+} {
+  const profilesDir = path.join(home, '.hermes', 'profiles');
+  const out = { profiles: [] as HermesProfileProbe[], artifacts: [] as ArtifactProbe[], scanComplete: true };
+  const probe = probePath(profilesDir);
+  if (probe.kind === 'absent') return out;
+  if (probe.kind !== 'present') {
+    out.scanComplete = false;
+    out.artifacts.push({ kind: 'unreadable', path: profilesDir, detail: `${probe.code}: ${probe.message}` });
+    return out;
+  }
+  try {
+    const entries = fs.readdirSync(profilesDir);
+    if (entries.length > HERMES_PROFILE_CAP) out.scanComplete = false;
+    for (const entry of entries.slice(0, HERMES_PROFILE_CAP)) {
+      const dir = path.join(profilesDir, entry);
+      const dirProbe = probePath(dir);
+      if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
+        out.profiles.push({
+          name: entry,
+          config: { kind: 'unreadable', detail: `${dirProbe.code}: ${dirProbe.message}` },
+        });
+        continue;
+      }
+      if (dirProbe.kind !== 'present' || !dirProbe.stat.isDirectory()) continue; // stray file, not a profile
+      const text = readTextProbe(path.join(dir, 'config.yaml'));
+      out.profiles.push({
+        name: entry,
+        config: text.kind === 'present'
+          ? { kind: 'present', value: parseHermesMemoryBlock(text.value) }
+          : text,
+      });
+      out.artifacts.push(artifactProbe(path.join(dir, 'memories', 'MEMORY.md')));
+    }
+  } catch (err: unknown) {
+    out.scanComplete = false;
+    out.artifacts.push({ kind: 'unreadable', path: profilesDir, detail: err instanceof Error ? err.message : String(err) });
+  }
+  return out;
+}
+
+/** Mirror of OpenClaw's normalizeAgentId (openclaw/src/routing/session-key.ts):
+ * trim, empty => "main", valid ids lowercase, everything else lowercased with
+ * invalid runs collapsed to "-", edge dashes stripped, capped at 64 chars. */
+const OPENCLAW_DEFAULT_AGENT_ID = 'main';
+function normalizeOpenClawAgentId(value: unknown): string {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return OPENCLAW_DEFAULT_AGENT_ID;
+  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(trimmed)) return trimmed.toLowerCase();
+  return trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .slice(0, 64) || OPENCLAW_DEFAULT_AGENT_ID;
+}
+
+/**
+ * Mirror of OpenClaw's listAgentEntries + resolveDefaultAgentId
+ * (openclaw/src/agents/agent-scope.ts). agents.list keeps every truthy
+ * `typeof === 'object'` member — ARRAYS INCLUDED (an array's fields read as
+ * undefined, so it occupies the `main` id slot with no workspace and no
+ * default flag; the old non-array filter could make doctor elect a different
+ * default agent than the host, #393 SOL r4 B3). Default id: first entry with
+ * a truthy `default`, else the first entry, else `main`.
+ */
+function openClawAgentEntries(config: ProbeRead<Record<string, unknown>>): {
+  entries: Array<Record<string, unknown>>;
+  defaultAgentId: string;
+} {
+  if (config.kind !== 'present') return { entries: [], defaultAgentId: OPENCLAW_DEFAULT_AGENT_ID };
+  const agents = config.value.agents;
+  const list = agents && typeof agents === 'object' && !Array.isArray(agents)
+    ? (agents as Record<string, unknown>).list
+    : undefined;
+  const rawList = Array.isArray(list) ? list : [];
+  const entries = rawList.filter((e): e is Record<string, unknown> => Boolean(e && typeof e === 'object'));
+  const flagged = entries.filter((e) => e.default);
+  const defaultAgentId = entries.length === 0
+    ? OPENCLAW_DEFAULT_AGENT_ID
+    : normalizeOpenClawAgentId((flagged[0] ?? entries[0]).id);
+  return { entries, defaultAgentId };
+}
+
+/**
+ * Workspace roots doctor must inspect (#393 SOL H4 + r3 B3), mirroring
+ * resolveAgentWorkspaceDir in openclaw/src/agents/agent-scope.ts:
+ *
+ *  - the stock workspace under the state root (r2 B6) AND the host's true
+ *    default-agent workspace — resolveDefaultAgentWorkspaceDir anchors it at
+ *    ~/.openclaw/workspace[-<OPENCLAW_PROFILE>] under HOME even when
+ *    OPENCLAW_STATE_DIR relocates the state tree;
+ *  - every explicit defaults/per-agent workspace value;
+ *  - IMPLICIT per-agent workspaces (r3 B3): a configured non-default agent
+ *    with no explicit workspace still resolves one at
+ *    `<stateDir>/workspace-<normalizedId>` — a live MEMORY.md there used to
+ *    vanish from the verdict entirely.
+ *
+ * Bounded by OPENCLAW_WORKSPACE_CAP (the agents list bounds the implicit set);
+ * overflow or an unreadable config marks the enumeration incomplete so the
+ * evidence model refuses to prove off. Exported for direct unit testing.
+ */
+const OPENCLAW_WORKSPACE_CAP = 16;
+export function openClawWorkspacePaths(
+  home: string,
+  stateRoot: string,
+  config: ProbeRead<Record<string, unknown>>,
+): { paths: string[]; complete: boolean } {
+  const paths: string[] = [];
+  let complete = true;
+  const push = (p: string): void => {
+    if (!paths.includes(p)) paths.push(p);
+  };
+  push(path.join(stateRoot, 'workspace'));
+  const profile = process.env.OPENCLAW_PROFILE?.trim();
+  push(path.join(
+    home,
+    '.openclaw',
+    profile && profile.toLowerCase() !== 'default' ? `workspace-${profile}` : 'workspace',
+  ));
+  const asObj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const add = (v: unknown): void => {
+    if (typeof v !== 'string' || v.trim() === '') return;
+    // Host resolveUserPath semantics (#393 SOL r3 B6): a workspace value
+    // doctor cannot resolve (relative, ~user) would otherwise be probed in a
+    // guessed tree — mark the enumeration incomplete instead, so the evidence
+    // model refuses to prove off past it.
+    const resolved = resolveOpenClawUserPath(v, home);
+    if ('path' in resolved) push(resolved.path);
+    else complete = false;
+  };
+  if (config.kind === 'present') {
+    // #393 SOL r5 B1: $include'd files deep-merge into agents/defaults before
+    // the host resolves workspaces — the raw root JSON cannot enumerate them.
+    // Raw-visible workspaces still get probed (extra probes only ADD
+    // native-ON evidence), but the scan must never claim completeness.
+    if (openClawConfigUsesInclude(config.value)) complete = false;
+    const agents = asObj(config.value.agents);
+    add(asObj(agents.defaults).workspace);
+    // resolveDefaultAgentId: first entry marked default (truthy), else the
+    // first entry. The default agent's implicit workspace is the home default
+    // pushed above, never workspace-<id>.
+    const { entries, defaultAgentId } = openClawAgentEntries(config);
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const id = normalizeOpenClawAgentId(entry.id);
+      // Duplicate ids resolve to the FIRST entry (resolveAgentEntry.find).
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const explicit = typeof entry.workspace === 'string' ? entry.workspace.trim() : '';
+      if (explicit) {
+        add(explicit);
+      } else if (id !== defaultAgentId) {
+        push(path.join(stateRoot, `workspace-${id}`));
+      }
+    }
+  } else if (config.kind === 'unreadable') {
+    // Cannot enumerate configured workspaces at all — never claim we did.
+    complete = false;
+  }
+  if (paths.length > OPENCLAW_WORKSPACE_CAP) {
+    paths.length = OPENCLAW_WORKSPACE_CAP;
+    complete = false;
+  }
+  return { paths, complete };
+}
+
+/**
+ * The ONE workspace OpenClaw's gateway loads internal hooks from — mirror of
+ * resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg)) exactly as server
+ * startup calls it (openclaw/src/gateway/server.impl.ts →
+ * loadInternalHooks(cfg, defaultWorkspaceDir)): the default agent entry's
+ * explicit `workspace`, else `agents.defaults.workspace`, else
+ * `<effective home>/.openclaw/workspace[-<OPENCLAW_PROFILE>]`. Configured
+ * values resolve with host resolveUserPath semantics (#393 SOL r3 B6) — a
+ * value doctor cannot resolve makes the default workspace, and any hook
+ * shadowing inside it, unknowable. Exported for direct unit testing.
+ */
+export function openClawDefaultWorkspace(
+  ocHome: string,
+  config: ProbeRead<Record<string, unknown>>,
+): { path: string } | { unresolvable: string } {
+  // #393 SOL r5 B1: the host resolves the default agent and its workspace
+  // from the DEEP-MERGED config — an $include can elect a different default
+  // agent or redirect its workspace, so the raw root JSON cannot name the one
+  // workspace the gateway loads hooks from.
+  if (config.kind === 'present' && openClawConfigUsesInclude(config.value)) {
+    return { unresolvable: 'openclaw.json uses $include — the merged agents/defaults doctor cannot attest decide the default agent workspace' };
+  }
+  const obj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const { entries, defaultAgentId } = openClawAgentEntries(config);
+  const entry = entries.find((e) => normalizeOpenClawAgentId(e.id) === defaultAgentId);
+  const explicit = entry && typeof entry.workspace === 'string' ? entry.workspace.trim() : '';
+  if (explicit) return resolveOpenClawUserPath(explicit, ocHome);
+  const fallback = config.kind === 'present' ? obj(obj(config.value.agents).defaults).workspace : undefined;
+  const fallbackStr = typeof fallback === 'string' ? fallback.trim() : '';
+  if (fallbackStr) return resolveOpenClawUserPath(fallbackStr, ocHome);
+  const profile = process.env.OPENCLAW_PROFILE?.trim();
+  return {
+    path: path.join(
+      ocHome,
+      '.openclaw',
+      profile && profile.toLowerCase() !== 'default' ? `workspace-${profile}` : 'workspace',
+    ),
+  };
+}
+
+/**
+ * Strict literal frontmatter proof (#393 SOL r5 B2). OpenClaw's frontmatter
+ * parser (openclaw/src/markdown/frontmatter.ts) YAML-parses the block —
+ * double-quoted scalars DECODE escapes ("\u006eame" → name), quoted keys are
+ * trimmed, flow maps restructure the document, and a failed YAML parse falls
+ * back to a per-line parser whose extra keys are merged in. Doctor cannot run
+ * the host's YAML stack from this repo (drift trap), so a HOOK.md clears only
+ * when it is provably inert under BOTH parsers:
+ *  - no frontmatter block at all (the hook keeps its dir name), or
+ *  - every block line blank, a comment, an indented continuation UNDER a
+ *    column-0 entry, or a column-0 `key: value` entry whose key and value are
+ *    plain unquoted ASCII (no quotes, escapes, flow/tag/anchor/alias
+ *    indicators, block scalars, or other YAML-active punctuation).
+ * With every column-0 entry plain there is nothing for YAML to decode at the
+ * top level and the line parser reads the same literal values; a folded
+ * continuation always joins with whitespace, so no `name` can become
+ * cortex-memory without the literal appearing (the caller's literal scan —
+ * re-checked here for standalone use). Everything else — quoted keys or
+ * values, escapes, flow maps, indented roots, unparseable lines — is an
+ * unproven rebrand. Exported for direct unit testing.
+ */
+export function probeOpenClawHookMdRebrand(
+  raw: string,
+): { kind: 'clear' } | { kind: 'unproven'; detail: string } {
+  // Mirror of the host's extractFrontmatterBlock: normalize newlines, take
+  // the block between the leading `---` and the first `\n---` (no block, no
+  // frontmatter — parseFrontmatterBlock returns {} and nothing rebrands).
+  const normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!normalized.startsWith('---')) return { kind: 'clear' };
+  const end = normalized.indexOf('\n---', 3);
+  if (end === -1) return { kind: 'clear' };
+  const block = normalized.slice(4, end);
+  let anchored = false;
+  for (const line of block.split('\n')) {
+    if (/^[ \t]*$/.test(line)) continue;
+    // Comment lines define keys in neither parser.
+    if (/^[ \t]*#/.test(line)) continue;
+    if (/^[ \t]/.test(line)) {
+      // Indented content is nested/continuation — inert for top-level keys —
+      // but ONLY once a column-0 entry anchored the root mapping at column 0.
+      // An indented FIRST entry re-anchors the whole root map at that indent,
+      // and a quoted key there decodes like any other.
+      if (anchored) continue;
+      return {
+        kind: 'unproven',
+        detail: 'frontmatter starts with an indented entry — the YAML root mapping is not anchored at column 0, so its keys cannot be evaluated plainly',
+      };
+    }
+    const entry = line.match(/^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$/);
+    if (!entry) {
+      return {
+        kind: 'unproven',
+        detail: 'frontmatter carries a line that is not a plain `key: value` entry — quoted keys, flow maps, and YAML escapes decode under the host parser and could rebrand the hook as cortex-memory',
+      };
+    }
+    anchored = true;
+    const value = (entry[2] ?? '').trim();
+    if (value !== '' && !/^[A-Za-z0-9][A-Za-z0-9 ._/-]*$/.test(value)) {
+      return {
+        kind: 'unproven',
+        detail: `frontmatter \`${entry[1]}:\` carries a value doctor cannot evaluate plainly — quotes, escapes, and YAML indicators decode under the host parser`,
+      };
+    }
+    if (entry[1] === 'name') {
+      if (value === '') {
+        return {
+          kind: 'unproven',
+          detail: 'frontmatter `name:` has no inline value — a nested or folded name cannot be evaluated plainly',
+        };
+      }
+      if (/^cortex-memory$/i.test(value)) {
+        return { kind: 'unproven', detail: 'frontmatter names cortex-memory' };
+      }
+    }
+  }
+  return { kind: 'clear' };
+}
+
+/**
+ * Hook-precedence shadow probe (#393 SOL r4 B3). OpenClaw merges hook sources
+ * extra < bundled < managed < WORKSPACE (openclaw/src/hooks/workspace.ts
+ * loadHookEntries — workspace wins by hook NAME), and the gateway loads from
+ * the default agent workspace — so a workspace hook named cortex-memory
+ * silently replaces the managed handler no matter how byte-current the
+ * managed artifacts are. The name is not bound to the directory: HOOK.md
+ * frontmatter `name:` rebrands any dir, and a package.json manifest redirects
+ * hook definitions to arbitrary nested dirs. Doctor clears the workspace
+ * hooks dir only when every subdir provably CANNOT shadow cortex-memory:
+ *  - no package.json manifest (redirection is unprovable without running the
+ *    host's loader);
+ *  - a dir named cortex-memory only when byte-current with the packaged
+ *    source (an identical shadow still delivers the pack);
+ *  - any other dir only when its HOOK.md is readable, never mentions
+ *    cortex-memory, and passes the strict literal frontmatter proof above
+ *    (#393 SOL r5 B2 — the host's YAML parser decodes quoting/escapes a text
+ *    scan cannot see); a dir with no HOOK.md and no manifest loads nothing.
+ * Anything else — differing content, unreadable evidence, cap overflow — is
+ * an unproven shadow: what actually runs is unattested, so wired_proven must
+ * not stand. Exported for direct unit testing.
+ */
+const OPENCLAW_WORKSPACE_HOOK_CAP = 50;
+export function probeOpenClawWorkspaceHookShadow(
+  workspaceDir: string,
+  hookFiles: readonly string[],
+  stale: (destDir?: string) => boolean,
+  sourceAvailable: boolean,
+): { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string } {
+  return probeOpenClawHooksDirClaim(path.join(workspaceDir, 'hooks'), hookFiles, stale, sourceAvailable);
+}
+
+/**
+ * Who can serve the cortex-memory name out of ONE hooks source dir (#393 SOL
+ * r4 B3 + r6 B2). loadHooksFromDir applies the same rules to every source —
+ * the default workspace's hooks dir AND the managed <stateRoot>/hooks dir:
+ * a package.json manifest redirects hook definitions to nested dirs and
+ * SKIPS the root HOOK.md (openclaw/src/hooks/workspace.ts loadHooksFromDir),
+ * and frontmatter `name:` rebrands any dir. So even the managed dir can stop
+ * serving the byte-current pack (manifest redirect) or serve a rival
+ * definition of the name (sibling rebrand) — same-source collisions leave
+ * what-runs unattested. Clears only when every subdir provably CANNOT claim
+ * cortex-memory away from the packaged set; `identical` = a byte-current
+ * cortex-memory dir with no manifest is present. Exported for direct unit
+ * testing.
+ */
+export function probeOpenClawHooksDirClaim(
+  hooksDir: string,
+  hookFiles: readonly string[],
+  stale: (destDir?: string) => boolean,
+  sourceAvailable: boolean,
+): { kind: 'none' | 'identical' } | { kind: 'unproven'; detail: string } {
+  const dirProbe = probePath(hooksDir);
+  if (dirProbe.kind === 'absent') return { kind: 'none' };
+  if (dirProbe.kind !== 'present') {
+    return {
+      kind: 'unproven',
+      detail: `${hooksDir} is unreadable (${dirProbe.code}) — a hook there could shadow the managed cortex-memory hook by name`,
+    };
+  }
+  // loadHooksFromDir bails on a non-directory, and skips non-directory
+  // entries (symlinked dirs included — Dirent.isDirectory() is false for
+  // symlinks, so OpenClaw never follows them here).
+  if (!dirProbe.stat.isDirectory()) return { kind: 'none' };
+  let dirents: fs.Dirent[];
+  try {
+    dirents = fs.readdirSync(hooksDir, { withFileTypes: true });
+  } catch (err: unknown) {
+    return {
+      kind: 'unproven',
+      detail: `${hooksDir} cannot be listed (${err instanceof Error ? err.message : String(err)}) — workspace hook shadowing cannot be ruled out`,
+    };
+  }
+  const subdirs = dirents.filter((d) => d.isDirectory());
+  if (subdirs.length > OPENCLAW_WORKSPACE_HOOK_CAP) {
+    return {
+      kind: 'unproven',
+      detail: `${hooksDir} holds more than ${OPENCLAW_WORKSPACE_HOOK_CAP} hook dirs — the shadow scan is incomplete, so workspace hook shadowing cannot be ruled out`,
+    };
+  }
+  let identical = false;
+  for (const d of subdirs) {
+    const sub = path.join(hooksDir, d.name);
+    if (probePath(path.join(sub, 'package.json')).kind !== 'absent') {
+      return {
+        kind: 'unproven',
+        detail: `${sub} carries a package.json manifest — OpenClaw loads redirected hook definitions from manifests, so the handler that runs as cortex-memory cannot be attested`,
+      };
+    }
+    if (d.name === 'cortex-memory') {
+      const art = probeOpenClawScHookArtifacts(sub, hookFiles, stale, sourceAvailable);
+      if (art === 'complete') {
+        identical = true;
+        continue;
+      }
+      return {
+        kind: 'unproven',
+        detail: `${sub} shadows the managed cortex-memory hook (workspace hooks win by name) and is not byte-current with the packaged source (${art}) — what actually runs cannot be proven to deliver the pack`,
+      };
+    }
+    const hookMd = readTextProbe(path.join(sub, 'HOOK.md'));
+    if (hookMd.kind === 'absent') continue;
+    if (hookMd.kind === 'unreadable') {
+      return {
+        kind: 'unproven',
+        detail: `${sub}/HOOK.md is unreadable — a frontmatter name could rebrand it as cortex-memory and shadow the managed hook`,
+      };
+    }
+    if (/cortex-memory/i.test(hookMd.value)) {
+      return {
+        kind: 'unproven',
+        detail: `${sub}/HOOK.md mentions cortex-memory — frontmatter \`name:\` rebrands a hook dir, so it may shadow the managed hook`,
+      };
+    }
+    const rebrand = probeOpenClawHookMdRebrand(hookMd.value);
+    if (rebrand.kind === 'unproven') {
+      return {
+        kind: 'unproven',
+        detail: `${sub}/HOOK.md ${rebrand.detail} — it could rebrand the dir as cortex-memory and shadow the managed hook`,
+      };
+    }
+  }
+  return identical ? { kind: 'identical' } : { kind: 'none' };
+}
+
+/**
+ * OpenClaw-effective home for expanding `~` in OpenClaw paths — mirror of
+ * resolveRawHomeDir (openclaw/src/infra/home-dir.ts): OPENCLAW_HOME (itself
+ * `~`-expandable against HOME/USERPROFILE) > HOME > USERPROFILE >
+ * os.homedir().
+ *
+ * #393 SOL r4 B2: a non-`~`, non-absolute OPENCLAW_HOME is returned verbatim
+ * by resolveRawHomeDir and then path.resolve()d against the OPENCLAW PROCESS
+ * cwd (home-dir.ts resolveEffectiveHomeDir) — doctor resolving it against its
+ * OWN cwd probed a decoy tree while OpenClaw ran from another. The same
+ * cwd-fallback fires when nothing resolves at all (resolveRequiredHomeDir).
+ * Both shapes are unresolvable for doctor: OpenClaw stays bound with buses
+ * unknown, never probed against a guessed root.
+ */
+function openClawEffectiveHome(): { home: string } | { unresolvable: string } {
+  const norm = (v: string | undefined): string | undefined => {
+    const t = v?.trim();
+    return t ? t : undefined;
+  };
+  const safeHomedir = (): string | undefined => {
+    try {
+      return norm(os.homedir());
+    } catch {
+      return undefined;
+    }
+  };
+  const explicit = norm(process.env.OPENCLAW_HOME);
+  if (explicit) {
+    if (/^~($|[\\/])/.test(explicit)) {
+      const fallback = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
+      if (fallback) return { home: path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback)) };
+      return { unresolvable: `OPENCLAW_HOME="${explicit}" has no HOME/USERPROFILE/homedir to expand ~ against — OpenClaw falls back to its own process cwd, which doctor cannot know` };
+    }
+    if (!path.isAbsolute(explicit)) {
+      return { unresolvable: `OPENCLAW_HOME="${explicit}" is relative (\`~user\` included) — OpenClaw resolves it against its own process cwd, which doctor cannot know` };
+    }
+    return { home: path.resolve(explicit) };
+  }
+  const home = norm(process.env.HOME) ?? norm(process.env.USERPROFILE) ?? safeHomedir();
+  if (home) return { home: path.resolve(home) };
+  return { unresolvable: 'no OPENCLAW_HOME/HOME/USERPROFILE and os.homedir() unavailable — OpenClaw falls back to its own process cwd, which doctor cannot know' };
+}
+
+/**
+ * Mirror of OpenClaw's resolveUserPath (openclaw/src/utils.ts, #393 SOL r3
+ * B6): a leading `~` followed by `/`, `\`, or end-of-string expands against
+ * the OpenClaw-effective home; EVERY other shape — `~user/...` included
+ * (expandHomePrefix rewrites only the bare `~` prefix) and plain relative
+ * paths — goes through path.resolve against the OpenClaw PROCESS cwd. Doctor
+ * cannot know that cwd, so those values are unresolvable here: probing a
+ * guessed tree could let OpenClaw vanish from the verdict while another
+ * runtime carries the box to PASS.
+ */
+function resolveOpenClawUserPath(
+  raw: string,
+  home: string | null,
+): { path: string } | { unresolvable: string } {
+  const trimmed = raw.trim();
+  if (/^~($|[\\/])/.test(trimmed)) {
+    if (!home) {
+      return { unresolvable: 'no home directory to expand ~ against — OpenClaw would fall back to its own process cwd, which doctor cannot know' };
+    }
+    return { path: path.resolve(trimmed.replace(/^~(?=$|[\\/])/, home)) };
+  }
+  if (trimmed.startsWith('~')) {
+    return { unresolvable: 'OpenClaw does not expand ~user paths — resolveUserPath sends them through path.resolve against its own process cwd, which doctor cannot know' };
+  }
+  if (path.isAbsolute(trimmed)) return { path: path.resolve(trimmed) };
+  return { unresolvable: 'a relative path resolves against the OpenClaw process cwd, which doctor cannot know' };
+}
+
+/**
+ * OpenClaw state root (#393 SOL r2 B6 + r3 B6): OPENCLAW_STATE_DIR (or legacy
+ * CLAWDBOT_STATE_DIR) relocates the whole tree and is resolved with the
+ * host's own resolveUserPath semantics — `~` expands against the
+ * OpenClaw-effective home; relative and `~user` forms are unresolvable and
+ * must cap OpenClaw evidence at unknown rather than silently probing a wrong
+ * tree. Default: `<effective home>/.openclaw` (the historical
+ * .clawdbot/.moldbot/.moltbot fallback dirs stay unprobed — documented
+ * residual). Config, hook, and workspace evidence must all honour the same
+ * root — otherwise old complete artifacts under the default root prove
+ * delivery for a runtime that actually lives (unwired) somewhere else.
+ */
+function openClawStateRoot(ocHome: string): { root: string; detail?: undefined } | { root: null; detail: string } {
+  const primary = process.env.OPENCLAW_STATE_DIR?.trim();
+  const override = primary || process.env.CLAWDBOT_STATE_DIR?.trim();
+  if (override) {
+    const resolved = resolveOpenClawUserPath(override, ocHome);
+    if ('path' in resolved) return { root: resolved.path };
+    return {
+      root: null,
+      detail: `${primary ? 'OPENCLAW_STATE_DIR' : 'CLAWDBOT_STATE_DIR'}="${override}" is unresolvable: ${resolved.unresolvable}`,
+    };
+  }
+  // #393 SOL r7: OpenClaw's resolveStateDir falls back to the historical
+  // .clawdbot/.moldbot/.moltbot state dirs when ~/.openclaw is absent
+  // (openclaw/src/config/paths.ts resolveStateDir). A doctor that defaults to
+  // ~/.openclaw unconditionally probes a tree the host is not using —
+  // workspace-<agentId>, hooks/, everything — and can prove native off in the
+  // wrong universe. Mirror the fallback: prefer .openclaw when it exists,
+  // else the first existing legacy dir (host order). A dir doctor cannot
+  // stat is fail-closed: the root is unresolvable, evidence goes unknown.
+  const newDir = path.join(ocHome, '.openclaw');
+  // OPENCLAW_TEST_FAST=1 makes the host skip the legacy fallback entirely
+  // (paths.ts resolveStateDir) — mirror it, or a decoy legacy tree gets
+  // attested while the host runs from ~/.openclaw.
+  if (process.env.OPENCLAW_TEST_FAST === '1') return { root: newDir };
+  const probeDir = (dir: string): 'present' | 'absent' | 'error' => {
+    const p = probePath(dir);
+    return p.kind === 'present' ? 'present' : p.kind === 'absent' ? 'absent' : 'error';
+  };
+  const newState = probeDir(newDir);
+  if (newState === 'present') return { root: newDir };
+  if (newState === 'error') {
+    return { root: null, detail: `~/.openclaw exists but cannot be inspected — the state root (and any legacy fallback) cannot be attested` };
+  }
+  for (const legacyName of OPENCLAW_LEGACY_STATE_DIRNAMES) {
+    const legacyDir = path.join(ocHome, legacyName);
+    const legacyState = probeDir(legacyDir);
+    if (legacyState === 'present') return { root: legacyDir };
+    if (legacyState === 'error') {
+      return { root: null, detail: `${legacyName} cannot be inspected — OpenClaw's legacy state-dir fallback cannot be ruled out` };
+    }
+  }
+  return { root: newDir };
+}
+
+/**
+ * Legacy config binding (#393 SOL r6 B1). OpenClaw selects its config from a
+ * candidate LIST, not one path (openclaw/src/config/paths.ts
+ * resolveDefaultConfigCandidates → resolveConfigPathCandidate): with no
+ * explicit config-path override, every candidate dir — the state-dir override
+ * when set, then <home>/.openclaw and the historical
+ * .clawdbot/.moldbot/.moltbot dirs — is probed for openclaw.json AND the
+ * legacy filenames clawdbot.json/moldbot.json/moltbot.json, dir-major, first
+ * existing file wins. Doctor fully grades only <stateRoot>/openclaw.json
+ * (always candidate #1): when any OTHER candidate is what OpenClaw binds, the
+ * runtime is LIVE here with a config doctor does not grade — it must stay
+ * bound with config-derived evidence capped at unknown, never vanish from the
+ * verdict. A candidate doctor cannot stat counts as existing (fail-closed);
+ * OpenClaw's own existsSync would skip it, but doctor cannot prove that from
+ * a stat error in its own process. Bounded: ≤20 stats. Exported for direct
+ * unit testing.
+ */
+const OPENCLAW_LEGACY_CONFIG_FILENAMES = ['clawdbot.json', 'moldbot.json', 'moltbot.json'] as const;
+const OPENCLAW_LEGACY_STATE_DIRNAMES = ['.clawdbot', '.moldbot', '.moltbot'] as const;
+export function openClawBoundConfigCandidate(
+  ocHome: string,
+  stateRoot: string,
+  stateRootIsOverride: boolean,
+): { kind: 'graded' } | { kind: 'none' } | { kind: 'ungraded'; path: string } {
+  const graded = path.resolve(path.join(stateRoot, 'openclaw.json'));
+  const names = ['openclaw.json', ...OPENCLAW_LEGACY_CONFIG_FILENAMES];
+  const dirs = stateRootIsOverride ? [stateRoot] : [];
+  dirs.push(path.join(ocHome, '.openclaw'), ...OPENCLAW_LEGACY_STATE_DIRNAMES.map((d) => path.join(ocHome, d)));
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (probePath(candidate).kind === 'absent') continue;
+      return path.resolve(candidate) === graded ? { kind: 'graded' } : { kind: 'ungraded', path: candidate };
+    }
+  }
+  return { kind: 'none' };
+}
+
+/**
+ * Binaries the packaged HOOK.md requires (metadata.openclaw.requires.bins) —
+ * #393 SOL r4 B4. Pinned against hooks/openclaw/cortex-memory/HOOK.md by a
+ * drift-guard test, so a requirement added to the hook without teaching doctor
+ * fails CI instead of silently green-washing.
+ */
+export const OPENCLAW_HOOK_REQUIRED_BINS = ['npx'] as const;
+
+/**
+ * Mirror of OpenClaw's hasBinary (openclaw/src/shared/config-eval.ts): scan
+ * each PATH entry for an X_OK candidate, with PATHEXT extensions on Windows.
+ * No cache — doctor asks once per run.
+ */
+function openClawHasBinary(bin: string): boolean {
+  const pathEnv = process.env.PATH ?? '';
+  const parts = pathEnv.split(path.delimiter).filter(Boolean);
+  const rawExt = process.env.PATHEXT;
+  const extensions = process.platform === 'win32'
+    ? ['', ...(rawExt !== undefined ? rawExt.split(';').map((v) => v.trim()) : ['.EXE', '.CMD', '.BAT', '.COM']).filter(Boolean)]
+    : [''];
+  for (const part of parts) {
+    for (const ext of extensions) {
+      try {
+        fs.accessSync(path.join(part, bin + ext), fs.constants.X_OK);
+        return true;
+      } catch {
+        // keep scanning
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Runtime-eligibility reading for the SC hook (#393 SOL r4 B4): OpenClaw
+ * evaluates HOOK.md `requires.bins` the same way at load (shouldIncludeHook →
+ * evaluateRuntimeRequires) and silently excludes the hook when a binary is
+ * missing. Doctor checks its OWN PATH — the gateway process may run under a
+ * different one, so "missing" caps at unknown (registration unattestable)
+ * rather than proving not_wired, and "available" stays static attestation.
+ * Exported for direct unit testing.
+ */
+export function openClawRequiredBinsProbe(
+  bins: readonly string[] = OPENCLAW_HOOK_REQUIRED_BINS,
+): { kind: 'available' } | { kind: 'missing'; detail: string } {
+  const missing = bins.filter((bin) => !openClawHasBinary(bin));
+  if (missing.length === 0) return { kind: 'available' };
+  return {
+    kind: 'missing',
+    detail: `required binar${missing.length === 1 ? 'y' : 'ies'} ${missing.join(', ')} not resolvable on PATH — ` +
+      'OpenClaw excludes hooks whose HOOK.md requires.bins are unavailable, so the installed hook may never register',
+  };
+}
+
+/**
+ * SC hook artifact probe (#393 SOL H1): a bare directory is not wiring. The
+ * required file set and byte-currency come from the installer's own
+ * authorities (HOOK_FILES / hookFilesStale in src/setup/openclaw.ts) — the
+ * same ones `shieldcortex openclaw install` and the installer doctor use.
+ *
+ * `sourceAvailable=false` (#393 SOL r2 B6): `hookFilesStale` answers `false`
+ * when the packaged HOOK_SOURCE is missing — right for the installer ("cannot
+ * claim a refresh is needed"), fatal for a proof caller that would read it as
+ * byte-current. With no source to compare against, a complete-looking install
+ * is `unverifiable`, never `complete`.
+ *
+ * Exported for direct unit testing of the fail-closed mapping.
+ */
+export function probeOpenClawScHookArtifacts(
+  dir: string,
+  hookFiles: readonly string[],
+  stale: (destDir?: string) => boolean,
+  sourceAvailable: boolean,
+): OpenClawHookArtifacts {
+  const dirProbe = probePath(dir);
+  if (dirProbe.kind === 'absent') return 'absent';
+  if (dirProbe.kind !== 'present') return 'unreadable';
+  let incomplete = false;
+  for (const file of hookFiles) {
+    const p = probePath(path.join(dir, file));
+    if (p.kind === 'absent') incomplete = true;
+    else if (p.kind !== 'present') return 'unreadable';
+    else if (p.stat.isFile() && p.stat.size === 0) incomplete = true;
+  }
+  if (incomplete) return 'incomplete';
+  if (!sourceAvailable) return 'unverifiable';
+  try {
+    return stale(dir) ? 'stale' : 'complete';
+  } catch {
+    return 'unreadable';
+  }
+}
+
 export async function checkMemoryHostContract(): Promise<CheckResult> {
   const label = 'Memory plane (host contract)';
   let raw: Record<string, unknown> = {};
@@ -3201,116 +4205,176 @@ export async function checkMemoryHostContract(): Promise<CheckResult> {
     return { label, status: 'info', message: 'no config yet' };
   }
   const cfg = readMemoryPlaneFromConfig(raw);
-  if (!cfg.injectConfigured || cfg.injectMode === 'off') {
-    return { label, status: 'info', message: 'inject off — host contract not required' };
-  }
-  if (!cfg.nativeContract) {
-    return {
-      label,
-      status: 'fail',
-      message: 'inject on without legal nativeContract (paper contract impossible)',
-      fix: 'Run `shieldcortex config --memory-inject-contract sc_only` (or disable_native_inject)',
-    };
-  }
-
   const home = os.homedir();
-  const findings: string[] = [];
+  const nowMs = Date.now();
+  const ctx = { contract: cfg.nativeContract ?? '', plane: cfg.plane, nowMs };
+  const declared = (id: HostRuntimeId): boolean => cfg.declaredRuntimes.includes(id);
 
-  // OpenClaw: memory search / bootstrap markers that still own the bus
-  const ocPath = process.env.OPENCLAW_CONFIG_PATH?.trim()
-    || path.join(home, '.openclaw', 'openclaw.json');
-  // OpenClaw Memory Search defaults ON when the key is absent (host default-on).
-  // Under sc_only / disable_native_inject we only PASS when native is proven OFF.
-  let ocPresent = fs.existsSync(ocPath);
-  if (!ocPresent && (cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject')) {
-    // Bound inject hosts without openclaw.json: cannot prove — not PASS
-    if (cfg.openclawAuto || cfg.plane === 'sc_canonical' || cfg.plane === 'import_only') {
-      findings.push('openclaw.json absent — cannot prove native Memory Search is off');
+  // The installer's own authorities for what a wired hook IS (#393 SOL H1).
+  // Dynamic import mirrors checkOpenClawHookFreshness — setup/openclaw.js is
+  // heavy and only needed here.
+  const { HOOK_FILES, hookFilesStale, hookSourceAvailable } = await import('../setup/openclaw.js');
+
+  // #393 SOL r3 B6 + r4 B2: the OpenClaw-effective home and the state-dir /
+  // config-path overrides all resolve with the host's own semantics. A value
+  // doctor cannot resolve (relative OPENCLAW_HOME, relative or ~user
+  // overrides) makes EVERY OpenClaw reading a guess — the probe is marked
+  // unresolvable and the evidence model caps OpenClaw at unknown instead of
+  // probing a wrong tree it could vanish from.
+  const ocHomeRes = openClawEffectiveHome();
+  const ocHome = 'home' in ocHomeRes ? ocHomeRes.home : null;
+  const stateRoot: { root: string | null; detail?: string } = 'unresolvable' in ocHomeRes
+    ? { root: null, detail: ocHomeRes.unresolvable }
+    : openClawStateRoot(ocHomeRes.home);
+  let ocUnresolvable = stateRoot.detail;
+  let ocPath: string | null = null;
+  let ocLegacyConfig: string | undefined;
+  if (!ocUnresolvable) {
+    const cfgPrimary = process.env.OPENCLAW_CONFIG_PATH?.trim();
+    const cfgOverride = cfgPrimary || process.env.CLAWDBOT_CONFIG_PATH?.trim();
+    if (cfgOverride) {
+      const resolved = resolveOpenClawUserPath(cfgOverride, ocHome);
+      if ('path' in resolved) ocPath = resolved.path;
+      else {
+        ocUnresolvable =
+          `${cfgPrimary ? 'OPENCLAW_CONFIG_PATH' : 'CLAWDBOT_CONFIG_PATH'}="${cfgOverride}" is unresolvable: ${resolved.unresolvable}`;
+      }
+    } else {
+      ocPath = path.join(stateRoot.root as string, 'openclaw.json');
+      // #393 SOL r6 B1: the host binds the FIRST existing candidate across
+      // current and legacy filenames/state dirs — a clawdbot-era config is a
+      // live OpenClaw whose graded openclaw.json is absent.
+      const hasStateOverride = Boolean(
+        process.env.OPENCLAW_STATE_DIR?.trim() || process.env.CLAWDBOT_STATE_DIR?.trim(),
+      );
+      const candidate = openClawBoundConfigCandidate(ocHome as string, stateRoot.root as string, hasStateOverride);
+      if (candidate.kind === 'ungraded') ocLegacyConfig = candidate.path;
     }
   }
-  if (ocPresent) {
-    try {
-      const oc = JSON.parse(fs.readFileSync(ocPath, 'utf-8')) as Record<string, unknown>;
-      const agents = (oc.agents && typeof oc.agents === 'object') ? oc.agents as Record<string, unknown> : {};
-      const defaults = (agents.defaults && typeof agents.defaults === 'object')
-        ? agents.defaults as Record<string, unknown>
-        : {};
-      if (cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject') {
-        const ms = defaults.memorySearch;
-        // Resolve like OC: undefined → default ON
-        let enabled: boolean | 'unknown' = true;
-        if (ms === false) enabled = false;
-        else if (ms === true) enabled = true;
-        else if (ms && typeof ms === 'object' && !Array.isArray(ms)) {
-          const mse = (ms as Record<string, unknown>).enabled;
-          if (mse === false) enabled = false;
-          else if (mse === true) enabled = true;
-          else enabled = true; // absent .enabled → default on
-        } else if (ms === undefined || ms === null) {
-          enabled = true; // key absent → default on
-        }
-        // Per-agent overrides that re-enable
-        const list = Array.isArray(agents.list) ? agents.list as unknown[] : [];
-        for (const entry of list) {
-          if (!entry || typeof entry !== 'object') continue;
-          const e = entry as Record<string, unknown>;
-          const ems = e.memorySearch;
-          if (ems === true) {
-            findings.push('per-agent memorySearch enabled while SC contract claims native off-bus');
-          } else if (ems && typeof ems === 'object' && !Array.isArray(ems)
-            && (ems as Record<string, unknown>).enabled === true) {
-            findings.push('per-agent memorySearch.enabled while SC contract claims native off-bus');
-          }
-        }
-        if (enabled === true) {
-          findings.push(
-            'openclaw Memory Search not proven off (default-on unless agents.defaults.memorySearch.enabled===false) while SC contract claims native off-bus',
-          );
-        }
-      }
-    } catch {
-      findings.push('openclaw.json unreadable — cannot prove host contract');
+  const ocConfig: ProbeRead<Record<string, unknown>> = ocPath === null
+    ? { kind: 'absent' }
+    : readJsonProbe(ocPath);
+  const ocWorkspaces = stateRoot.root === null || ocHome === null
+    ? { paths: [], complete: false }
+    : openClawWorkspacePaths(ocHome, stateRoot.root, ocConfig);
+  // #393 SOL r4 B3: hook precedence — a hook in the DEFAULT agent workspace
+  // overwrites the managed cortex-memory hook by name at gateway load, so the
+  // managed artifact proof only stands when that workspace provably carries
+  // no shadow (or an identical one).
+  const ocDefaultWs = ocHome === null ? null : openClawDefaultWorkspace(ocHome, ocConfig);
+  const ocWorkspaceHookShadow = ocDefaultWs === null
+    ? {
+      kind: 'unproven' as const,
+      detail: 'OpenClaw paths are unresolvable — the default agent workspace, and any hook shadowing inside it, cannot be probed',
     }
-  }
-
-  // AGENTS.md / workspace instructions still ordering Read MEMORY.md as brain
-  const agentsMd = path.join(home, '.openclaw', 'workspace', 'AGENTS.md');
-  const memoryMd = path.join(home, '.openclaw', 'workspace', 'MEMORY.md');
-  try {
-    if (fs.existsSync(agentsMd)) {
-      const text = fs.readFileSync(agentsMd, 'utf-8');
-      if (/memory\.md/i.test(text) && /read\s+|every\s+session|always|soul\.md|user\.md/i.test(text)) {
-        findings.push('workspace AGENTS.md still references MEMORY.md as session brain under SC nativeContract');
+    : 'unresolvable' in ocDefaultWs
+      ? {
+        kind: 'unproven' as const,
+        detail: `the default agent workspace is unresolvable (${ocDefaultWs.unresolvable}) — a workspace hook there could shadow the managed cortex-memory hook and cannot be ruled out`,
       }
+      : probeOpenClawWorkspaceHookShadow(ocDefaultWs.path, HOOK_FILES, hookFilesStale, hookSourceAvailable());
+  // #393 SOL r6 B2: the MANAGED hooks dir obeys the same loader rules as a
+  // workspace source — a package.json inside cortex-memory redirects the
+  // definitions away from the byte-current root set, and a sibling dir can
+  // claim the name via manifest or frontmatter.
+  const ocManagedHookClaim = stateRoot.root === null
+    ? {
+      kind: 'unproven' as const,
+      detail: 'OpenClaw paths are unresolvable — the managed hooks dir cannot be probed for manifest redirects or name claims',
     }
-  } catch { /* ignore */ }
+    : probeOpenClawHooksDirClaim(path.join(stateRoot.root, 'hooks'), HOOK_FILES, hookFilesStale, hookSourceAvailable());
+  const runtimes: HostRuntimeEvidence[] = [
+    resolveOpenClawEvidence(
+      {
+        config: ocConfig,
+        scHook: stateRoot.root === null
+          ? 'unreadable'
+          : probeOpenClawScHookArtifacts(
+            path.join(stateRoot.root, 'hooks', 'cortex-memory'),
+            HOOK_FILES,
+            hookFilesStale,
+            hookSourceAvailable(),
+          ),
+        scAutoMemory: cfg.openclawAuto,
+        workspaces: ocWorkspaces.paths.map((ws) => ({
+          path: ws,
+          agentsMd: readTextProbe(path.join(ws, 'AGENTS.md')),
+          // Both spellings: OpenClaw bootstraps MEMORY.md AND memory.md
+          // (#393 SOL r2 B1). On a case-insensitive filesystem these stat the
+          // same file twice, which is harmless duplicate proof, not error.
+          memoryFiles: [
+            artifactProbe(path.join(ws, 'MEMORY.md')),
+            artifactProbe(path.join(ws, 'memory.md')),
+          ],
+        })),
+        workspaceScanComplete: ocWorkspaces.complete,
+        declared: declared('openclaw'),
+        requiredBins: openClawRequiredBinsProbe(),
+        workspaceHookShadow: ocWorkspaceHookShadow,
+        managedHookDirClaim: ocManagedHookClaim,
+        ...(ocLegacyConfig ? { legacyConfig: ocLegacyConfig } : {}),
+        ...(ocUnresolvable ? { pathOverrideUnresolvable: ocUnresolvable } : {}),
+      },
+      ctx,
+    ),
+    resolveClaudeCodeEvidence(
+      (() => {
+        const scan = scanClaudeNativeStores(home);
+        return {
+          settings: readJsonProbe(path.join(home, '.claude', 'settings.json')),
+          nativeStores: scan.stores,
+          storeScanComplete: scan.scanComplete,
+          // Shape-valid commands must also RESOLVE cleanly (#393 SOL r2 B3).
+          commandTrust: hookCommandTrust,
+          declared: declared('claude_code'),
+        };
+      })(),
+      ctx,
+    ),
+    resolveHermesEvidence(
+      (() => {
+        const text = readTextProbe(path.join(home, '.hermes', 'config.yaml'));
+        const profileScan = scanHermesProfiles(home);
+        return {
+          config: text.kind === 'present'
+            ? { kind: 'present' as const, value: parseHermesMemoryBlock(text.value) }
+            : text,
+          profiles: profileScan.profiles,
+          profileScanComplete: profileScan.scanComplete,
+          scPluginInstalled: probePath(path.join(home, '.hermes', 'plugins', 'shieldcortex')).kind === 'present',
+          nativeArtifacts: [
+            artifactProbe(path.join(home, '.hermes', 'memories', 'MEMORY.md')),
+            artifactProbe(path.join(home, '.hermes', 'MEMORY.md')),
+            ...profileScan.artifacts,
+          ],
+          declared: declared('hermes'),
+        };
+      })(),
+      ctx,
+    ),
+  ];
 
-  // sc_canonical / import_only: native MEMORY.md recent write is FAIL (bus law)
-  if (cfg.plane === 'sc_canonical' || cfg.plane === 'import_only') {
-    try {
-      if (fs.existsSync(memoryMd)) {
-        const st = fs.statSync(memoryMd);
-        if (st.mtimeMs >= Date.now() - 7 * 24 * 60 * 60 * 1000 && st.size > 64) {
-          findings.push(`MEMORY.md touched in 7d (${st.size}B) under plane=${cfg.plane} + contract=${cfg.nativeContract}`);
-        }
-      }
-    } catch { /* ignore */ }
-  }
-
-  if (findings.length > 0) {
-    // Paper contract is always FAIL when inject contract is set — never warn-wash.
-    return {
-      label,
-      status: 'fail',
-      message: `host contract ${cfg.nativeContract} not fully enforced: ${findings.join('; ')}`,
-      fix: 'Set agents.defaults.memorySearch.enabled=false (OC default is ON when absent), stop MEMORY.md as SoT; prove SC start-pack is the only automatic bus — see #393',
-    };
-  }
+  const verdict = evaluateHostContract({
+    plane: cfg.plane,
+    injectConfigured: cfg.injectConfigured,
+    injectMode: cfg.injectMode,
+    injectModeLegal: cfg.injectModeLegal,
+    injectModeExplicit: cfg.injectModeExplicit,
+    nativeContract: cfg.nativeContract === 'sc_only' || cfg.nativeContract === 'disable_native_inject'
+      ? cfg.nativeContract
+      : null,
+    postureRaw: cfg.posture,
+    postureIllegal: cfg.postureIllegal,
+    declaredRuntimesIllegal: cfg.declaredRuntimesIllegal,
+    runtimes,
+    nowMs,
+  });
 
   return {
     label,
-    status: 'pass',
-    message: `nativeContract=${cfg.nativeContract} plane=${cfg.plane}: no paper-contract signals on disk`,
+    status: verdict.status,
+    message: verdict.message,
+    ...(verdict.fix ? { fix: verdict.fix } : {}),
   };
 }
 

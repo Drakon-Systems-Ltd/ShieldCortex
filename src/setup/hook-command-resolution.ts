@@ -21,7 +21,8 @@
  *      that are already wrong. Fixing the installer alone would leave every
  *      existing broken box broken forever, which is the quiet half of this bug.
  */
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -137,6 +138,109 @@ export function hookCommandResolves(command: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Where a shape-valid command actually lands (#393 SOL r2 B3).
+ *
+ * The shape check alone still trusted two things it never verified: that the
+ * token RESOLVES to something runnable (a missing bare binary "owned"
+ * session-start while every hook died silently — the #146 fleet failure worn
+ * as a PASS), and that what it resolves to is plausibly OUR binary (any
+ * executable named `/tmp/shieldcortex` qualified). Doctor cannot attest binary
+ * identity, so a hit under a world-writable staging root is capped at
+ * `suspicious` — never proof.
+ */
+export type HookCommandTrust = 'resolves' | 'unresolvable' | 'suspicious';
+
+/** World-writable staging roots where anyone can plant an executable. On
+ * macOS `/tmp` and `/var/tmp` are symlinks into `/private`, and the platform
+ * temp dir (`os.tmpdir()`) lives under `/var/folders/...` — all of them are
+ * attacker-stageable, so the realpath'd platform tmpdir joins the fixed
+ * roots. */
+const WORLD_WRITABLE_ROOTS: string[] = (() => {
+  const roots = ['/tmp', '/var/tmp', '/dev/shm', '/private/tmp', '/private/var/tmp'];
+  for (const t of [tmpdir()]) {
+    try {
+      const real = realpathSync(t);
+      for (const r of [t, real]) if (r && r !== '/' && !roots.includes(r)) roots.push(r);
+    } catch {
+      if (t && t !== '/' && !roots.includes(t)) roots.push(t);
+    }
+  }
+  return roots;
+})();
+
+function underWorldWritableRoot(p: string): boolean {
+  const hit = (q: string): boolean =>
+    WORLD_WRITABLE_ROOTS.some((root) => q === root || q.startsWith(`${root}/`));
+  if (hit(p)) return true;
+  // A symlink out of a "clean" prefix into /tmp is the same plant, one hop
+  // removed. Unresolvable links fall through to the direct check above.
+  try {
+    return hit(realpathSync(p));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify where a hook command's executable lands. Bare names are resolved
+ * the way the hook's own `sh -c` subprocess would, and the RESOLVED path is
+ * classified — a bare name whose PATH hit lands in /tmp is just as planted as
+ * a literal `/tmp/shieldcortex`.
+ *
+ * `searchPath` overrides the subprocess PATH for the bare-name lookup. Tests
+ * need it because jest's `process.env` is a sandboxed copy that never reaches
+ * a spawned child (same quirk documented on `openClawConfigPath`).
+ */
+export function hookCommandTrust(command: string, opts: { searchPath?: string } = {}): HookCommandTrust {
+  const exe = executableToken(command);
+  if (!exe) return 'unresolvable';
+  if (exe.includes('/')) {
+    if (!isExecutable(exe)) return 'unresolvable';
+    return underWorldWritableRoot(exe) ? 'suspicious' : 'resolves';
+  }
+  // Only interpolate tokens that cannot smuggle shell syntax; anything odder
+  // than a plain program name is not a shape we ever write.
+  if (!/^[A-Za-z0-9._-]+$/.test(exe)) return 'unresolvable';
+  try {
+    // Absolute /bin/sh: with a PATH override in force, a bare `sh` would be
+    // looked up in that same override and never be found.
+    const resolved = execFileSync('/bin/sh', ['-c', `command -v ${exe}`], {
+      encoding: 'utf-8',
+      timeout: 5_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      ...(opts.searchPath !== undefined ? { env: { ...process.env, PATH: opts.searchPath } } : {}),
+    }).trim();
+    if (!resolved) return 'unresolvable';
+    return underWorldWritableRoot(resolved) ? 'suspicious' : 'resolves';
+  } catch {
+    return 'unresolvable';
+  }
+}
+
+/**
+ * Strict shape check for a ShieldCortex hook command (#393 SOL H3).
+ *
+ * `command.includes('shieldcortex')` proves ownership of nothing: `echo
+ * shieldcortex`, a stale wrapper, or `shieldcortex-evil hook session-start`
+ * all match it. A command counts as ours only when the executable token itself
+ * is the shieldcortex binary — bare, or any path whose basename is exactly
+ * `shieldcortex` (a `.cmd`/`.exe`/`.bat` wrapper of that name on Windows) —
+ * and the arguments are exactly `hook <subcommand>`: the one shape
+ * `buildHookCommand` writes and the hook dispatcher supports. Env-assignment
+ * prefixes are allowed because our own installer emits them.
+ */
+export function isShieldCortexHookCommand(command: unknown, subcommand: string): boolean {
+  if (typeof command !== 'string') return false;
+  const withoutEnv = command.trim().replace(ENV_PREFIX, '');
+  const m = withoutEnv.match(/^("([^"]+)"|'([^']+)'|\S+)([\s\S]*)$/);
+  if (!m) return false;
+  const exe = m[2] ?? m[3] ?? m[1];
+  const base = exe.replace(/\\/g, '/').split('/').pop() ?? '';
+  if (base !== BARE && base.replace(/\.(cmd|exe|bat)$/i, '') !== BARE) return false;
+  return (m[4] ?? '').trim().replace(/\s+/g, ' ') === `hook ${subcommand}`;
 }
 
 /** Is this one of OUR commands, written in the fragile bare form? */

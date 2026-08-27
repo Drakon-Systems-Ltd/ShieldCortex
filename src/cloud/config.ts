@@ -1346,6 +1346,90 @@ export function setMemoryInjectContract(value: string): void {
   });
 }
 
+/** Host postures a box can declare (#393 T1 / residual lock 9). */
+export const MEMORY_HOST_POSTURES = ['mcp_sidecar_no_inject', 'bus_contract'] as const;
+export type MemoryHostPosture = (typeof MEMORY_HOST_POSTURES)[number];
+
+/** Host runtimes whose native-memory state doctor knows how to prove (#393). */
+export const MEMORY_HOST_RUNTIMES = ['openclaw', 'claude_code', 'hermes'] as const;
+export type MemoryHostRuntime = (typeof MEMORY_HOST_RUNTIMES)[number];
+
+/**
+ * SIGNED write path for the T1 host posture — `shieldcortex config
+ * --memory-host-posture`. Same #275 discipline as setMemoryInjectContract.
+ *
+ * The two postures are mutually exclusive by construction, so this writes both
+ * halves in one signed mutation rather than trusting an operator to keep them
+ * consistent (residual lock 9: honest sidecar OR bus contract, never both):
+ *
+ *  - `mcp_sidecar_no_inject` records the sidecar posture AND forces
+ *    `memory.inject.mode = 'off'`. Native host memory keeps the automatic bus;
+ *    SC claims nothing. `nativeContract` is left alone so flipping back does not
+ *    lose it.
+ *  - `bus_contract` clears the posture, leaving the inject contract to govern.
+ *    It does NOT turn inject on — that stays an explicit operator act.
+ */
+export function setMemoryHostPosture(value: string): void {
+  if (!(MEMORY_HOST_POSTURES as readonly string[]).includes(value)) {
+    throw new Error(
+      `Invalid memory host posture "${value}". Legal values: ${MEMORY_HOST_POSTURES.join(', ')}.`,
+    );
+  }
+  mutateRawConfig((raw) => {
+    const memory = raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory)
+      ? raw.memory as Record<string, unknown>
+      : {};
+    const hostContract = memory.hostContract && typeof memory.hostContract === 'object'
+      && !Array.isArray(memory.hostContract)
+      ? memory.hostContract as Record<string, unknown>
+      : {};
+    if (value === 'bus_contract') {
+      delete hostContract.posture;
+      // A stale postureSetAt with no posture reads as "sidecar was set at T"
+      // to any forensic pass — the stamp travels with the posture (#393 SOL nit).
+      delete hostContract.postureSetAt;
+    } else {
+      hostContract.posture = value;
+      hostContract.postureSetAt = new Date().toISOString();
+      const inject = memory.inject && typeof memory.inject === 'object' && !Array.isArray(memory.inject)
+        ? memory.inject as Record<string, unknown>
+        : {};
+      inject.mode = 'off';
+      memory.inject = inject;
+    }
+    memory.hostContract = hostContract;
+    raw.memory = memory;
+  });
+}
+
+/**
+ * SIGNED write path for `memory.hostContract.runtimes` — the operator declaring
+ * which host runtimes this box is bound to. Declaration only ADDS a runtime to
+ * the set doctor must prove: it can never supply the off-proof, so this is safe
+ * to accept from config while remaining useless as a green-wash.
+ */
+export function setMemoryHostRuntimes(values: string[]): void {
+  const illegal = values.filter((v) => !(MEMORY_HOST_RUNTIMES as readonly string[]).includes(v));
+  if (values.length === 0 || illegal.length > 0) {
+    throw new Error(
+      `Invalid memory host runtime(s) "${illegal.join(', ') || '(none given)'}". ` +
+      `Legal values: ${MEMORY_HOST_RUNTIMES.join(', ')}.`,
+    );
+  }
+  mutateRawConfig((raw) => {
+    const memory = raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory)
+      ? raw.memory as Record<string, unknown>
+      : {};
+    const hostContract = memory.hostContract && typeof memory.hostContract === 'object'
+      && !Array.isArray(memory.hostContract)
+      ? memory.hostContract as Record<string, unknown>
+      : {};
+    hostContract.runtimes = [...new Set(values)];
+    memory.hostContract = hostContract;
+    raw.memory = memory;
+  });
+}
+
 /** Legal memory.plane values (Track A / #348). dual_legacy is deprecated defect mode. */
 export const MEMORY_PLANE_VALUES = ['dual_legacy', 'import_only', 'sc_canonical'] as const;
 export type MemoryPlaneValue = (typeof MEMORY_PLANE_VALUES)[number];

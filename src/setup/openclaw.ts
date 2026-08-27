@@ -43,7 +43,7 @@ function resolvePluginSource(): string {
 }
 const PLUGIN_PACKAGE_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw');
 const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
-const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
+export const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
 const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL';
 
 // REFACTOR (May 2026 audit): consolidate to 'native' | 'local' (with trusted boolean) | 'skipped'.
@@ -272,6 +272,20 @@ export function defaultHookDestDir(): string {
  * comparison is impossible, so this returns `false` — we can't claim the
  * install is stale relative to a source we can't read.
  */
+/**
+ * Whether the packaged hook source exists on this install (#393 SOL r2 B6).
+ *
+ * `hookFilesStale` deliberately returns `false` when HOOK_SOURCE is missing —
+ * the INSTALLER cannot claim staleness against a source it cannot read, and
+ * "refresh needed" would be unactionable. But a PROOF caller (doctor's host
+ * contract) must not read that same `false` as "byte-current": with no source
+ * to compare against, currency is unattestable and the verdict is unknown.
+ * This predicate lets proof callers tell the two apart.
+ */
+export function hookSourceAvailable(): boolean {
+  return fs.existsSync(HOOK_SOURCE);
+}
+
 export function hookFilesStale(destDir: string = defaultHookDestDir()): boolean {
   // No installed copy at all → definitely needs (re)install.
   if (!fs.existsSync(destDir)) return true;

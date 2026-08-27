@@ -343,6 +343,8 @@ describe('config atomicity + integrity hardening', () => {
       { name: 'setToolResponseScanConfig', policy: 'throw', invoke: (c) => c.setToolResponseScanConfig({ scanToolResponses: false }) },
       { name: 'setReviewCopilotConfig', policy: 'throw', invoke: (c) => c.setReviewCopilotConfig({ enabled: true }) },
       { name: 'setAutoMemoryEnableConfig', policy: 'throw', invoke: (c) => c.setAutoMemoryEnableConfig({ enableStop: true }) },
+      { name: 'setMemoryHostPosture', policy: 'throw', invoke: (c) => c.setMemoryHostPosture('mcp_sidecar_no_inject') },
+      { name: 'setMemoryHostRuntimes', policy: 'throw', invoke: (c) => c.setMemoryHostRuntimes(['hermes']) },
       // Skip-policy: automatic / hot-path writers that must NEVER throw.
       { name: 'getCloudSyncControls (migration write)', policy: 'skip', invoke: (c) => { c.getCloudSyncControls(); } },
       { name: 'getDeviceId (lazy persist)', policy: 'skip', invoke: (c) => { c.getDeviceId(); } },

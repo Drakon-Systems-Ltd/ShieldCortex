@@ -11,7 +11,7 @@
  * inspect. These tests pin the three halves of the fix.
  */
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,13 +19,23 @@ import {
   resolveHookBinary,
   buildHookCommand,
   hookCommandResolves,
+  hookCommandTrust,
   needsAbsolutePathRepair,
   repairHookCommand,
 } from '../hook-command-resolution.js';
 
 let dir: string;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'sc-hookres-')); });
-afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+let trustedDir: string;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'sc-hookres-'));
+  // hookCommandTrust treats /tmp as a world-writable staging root, so trust
+  // fixtures need a bin OUTSIDE it — the repo tree qualifies.
+  trustedDir = mkdtempSync(join(process.cwd(), '.jest-scbin-'));
+});
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(trustedDir, { recursive: true, force: true });
+});
 
 function fakeBin(name = 'shieldcortex'): string {
   const binDir = join(dir, 'bin');
@@ -107,6 +117,55 @@ describe('#146 — a hook command is verified by RUNNING it', () => {
   it('treats an empty or malformed command as not resolving', () => {
     expect(hookCommandResolves('')).toBe(false);
     expect(hookCommandResolves('   ')).toBe(false);
+  });
+});
+
+// ── 2b. #393 SOL r2 B3 — where the command lands matters, not just whether ──
+
+describe('#393 — hookCommandTrust classifies the resolved executable', () => {
+  function trustedBin(name = 'shieldcortex'): string {
+    const p = join(trustedDir, name);
+    writeFileSync(p, '#!/bin/sh\nexit 0\n');
+    chmodSync(p, 0o755);
+    return p;
+  }
+
+  it('reports a clean absolute executable as resolves', () => {
+    expect(hookCommandTrust(`${trustedBin()} hook session-start`)).toBe('resolves');
+  });
+
+  it('reports a missing absolute path and a dead bare name as unresolvable', () => {
+    expect(hookCommandTrust(`${join(trustedDir, 'ghost')} hook session-start`)).toBe('unresolvable');
+    expect(hookCommandTrust('definitely-not-a-real-binary-xyz hook session-start')).toBe('unresolvable');
+    expect(hookCommandTrust('')).toBe('unresolvable');
+  });
+
+  it('caps an executable under a world-writable staging root at suspicious — /tmp/shieldcortex is not proof (SOL r2 B3)', () => {
+    const planted = join(dir, 'shieldcortex'); // dir lives under os.tmpdir()
+    writeFileSync(planted, '#!/bin/sh\nexit 0\n');
+    chmodSync(planted, 0o755);
+    expect(hookCommandTrust(`${planted} hook session-start`)).toBe('suspicious');
+  });
+
+  it('classifies where a bare name RESOLVES — a PATH hit inside /tmp is the same plant', () => {
+    // searchPath injection, not process.env.PATH mutation: jest's process.env
+    // is a copy that never reaches a spawned child.
+    const planted = join(dir, 'shieldcortex');
+    writeFileSync(planted, '#!/bin/sh\nexit 0\n');
+    chmodSync(planted, 0o755);
+    expect(hookCommandTrust('shieldcortex hook session-start', { searchPath: dir })).toBe('suspicious');
+    trustedBin();
+    expect(hookCommandTrust('shieldcortex hook session-start', { searchPath: trustedDir })).toBe('resolves');
+    expect(hookCommandTrust('shieldcortex hook session-start', { searchPath: join(dir, 'empty') })).toBe('unresolvable');
+  });
+
+  it('follows a symlink out of a clean prefix into /tmp — one hop does not launder the plant', () => {
+    const planted = join(dir, 'shieldcortex');
+    writeFileSync(planted, '#!/bin/sh\nexit 0\n');
+    chmodSync(planted, 0o755);
+    const link = join(trustedDir, 'shieldcortex');
+    symlinkSync(planted, link);
+    expect(hookCommandTrust(`${link} hook session-start`)).toBe('suspicious');
   });
 });
 
