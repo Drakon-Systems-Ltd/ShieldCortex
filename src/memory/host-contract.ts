@@ -450,15 +450,46 @@ export interface ClaudeCodeProbe {
   declared: boolean;
 }
 
-/** Every SessionStart command matching the one supported SC shape (SOL H3). */
-function claudeSessionStartCommands(settings: Record<string, unknown>): string[] {
+/**
+ * SessionStart matcher coverage (#393 SOL r3 B5). Claude Code fires a
+ * SessionStart entry only when its matcher covers the session source
+ * (startup | resume | clear | compact): an absent/empty matcher (or `*`)
+ * matches every source, and a string matcher is a regex tested against the
+ * source. A command restricted to e.g. matcher:"compact" never runs on a
+ * normal start, so it cannot own the start bus; a matcher doctor cannot
+ * evaluate (non-string, invalid regex) proves nothing either way.
+ */
+function sessionStartMatcherCoversStartup(matcher: unknown): 'covers' | 'excludes' | 'unevaluable' {
+  if (matcher === undefined || matcher === null) return 'covers';
+  if (typeof matcher !== 'string') return 'unevaluable';
+  const m = matcher.trim();
+  if (m === '' || m === '*') return 'covers';
+  try {
+    return new RegExp(m).test('startup') ? 'covers' : 'excludes';
+  } catch {
+    return 'unevaluable';
+  }
+}
+
+/**
+ * Every SessionStart command matching the one supported SC shape (SOL H3),
+ * bucketed by whether its entry's matcher covers normal startup (r3 B5) —
+ * a valid command under a compact-only matcher is real wiring for the wrong
+ * bus, and must not read as SC owning session-start.
+ */
+function claudeSessionStartCommands(settings: Record<string, unknown>): {
+  covering: string[];
+  excluded: string[];
+  unevaluable: string[];
+} {
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? (settings.hooks as Record<string, unknown>)
     : {};
   const entries = Array.isArray(hooks.SessionStart) ? (hooks.SessionStart as unknown[]) : [];
-  const commands: string[] = [];
+  const out = { covering: [] as string[], excluded: [] as string[], unevaluable: [] as string[] };
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
+    const coverage = sessionStartMatcherCoversStartup((entry as { matcher?: unknown }).matcher);
     const inner = (entry as { hooks?: unknown }).hooks;
     if (!Array.isArray(inner)) continue;
     for (const h of inner) {
@@ -469,11 +500,12 @@ function claudeSessionStartCommands(settings: Record<string, unknown>): string[]
       // SC owning session-start.
       if (hook.type !== undefined && hook.type !== 'command') continue;
       if (isShieldCortexHookCommand(hook.command, 'session-start')) {
-        commands.push(hook.command as string);
+        out[coverage === 'covers' ? 'covering' : coverage === 'excludes' ? 'excluded' : 'unevaluable']
+          .push(hook.command as string);
       }
     }
   }
-  return commands;
+  return out;
 }
 
 export function resolveClaudeCodeEvidence(
@@ -515,24 +547,31 @@ export function resolveClaudeCodeEvidence(
     scBus = 'not_wired';
     proof.push('no settings.json — the SC session-start pack is not on this host bus');
   } else {
-    // Shape first (SOL H3), then the executable itself (SOL r2 B3): a hook
-    // entry whose command cannot run delivers nothing (#146), and one that
-    // resolves under a world-writable staging root cannot be attested to BE
-    // shieldcortex — wired_proven requires shape AND a clean resolution.
+    // Shape first (SOL H3), then matcher coverage of the start bus (r3 B5),
+    // then the executable itself (SOL r2 B3): a hook entry whose command
+    // cannot run delivers nothing (#146), and one that resolves under a
+    // world-writable staging root cannot be attested to BE shieldcortex —
+    // wired_proven requires shape AND startup coverage AND clean resolution.
     const commands = claudeSessionStartCommands(probe.settings.value);
-    const trust = commands.map((c) => probe.commandTrust(c));
-    if (commands.length === 0) {
-      scBus = 'not_wired';
-      proof.push('no supported SC SessionStart hook command in settings.json');
-    } else if (trust.includes('resolves')) {
+    const trust = commands.covering.map((c) => probe.commandTrust(c));
+    if (trust.includes('resolves')) {
       scBus = 'wired_proven';
-      proof.push('SC SessionStart hook statically wired in settings.json (supported shieldcortex command shape, executable resolves; runtime delivery not attested)');
+      proof.push('SC SessionStart hook statically wired in settings.json (supported shieldcortex command shape, matcher covers startup, executable resolves; runtime delivery not attested)');
     } else if (trust.includes('suspicious')) {
       scBus = 'unknown';
       proof.push('SC SessionStart hook command resolves under a world-writable staging path — cannot attest the executable is ShieldCortex');
-    } else {
+    } else if (commands.unevaluable.length > 0) {
+      scBus = 'unknown';
+      proof.push('SC SessionStart hook sits under a matcher doctor cannot evaluate — coverage of normal startup cannot be proven');
+    } else if (commands.covering.length > 0) {
       scBus = 'not_wired';
       proof.push('SC SessionStart hook command does not resolve to a runnable binary — the hook dies silently in a non-interactive shell (#146)');
+    } else if (commands.excluded.length > 0) {
+      scBus = 'not_wired';
+      proof.push('SC SessionStart hook is matcher-restricted to sources that do not include startup — normal sessions receive no pack, so SC does not own the start bus');
+    } else {
+      scBus = 'not_wired';
+      proof.push('no supported SC SessionStart hook command in settings.json');
     }
   }
 

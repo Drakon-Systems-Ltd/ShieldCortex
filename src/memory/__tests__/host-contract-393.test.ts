@@ -538,6 +538,82 @@ describe('Claude Code evidence', () => {
     );
     expect(mixed.scBus).toBe('wired_proven');
   });
+
+  it('requires the SessionStart matcher to cover normal startup — a compact-only hook does not own the start bus (SOL r3 B5)', () => {
+    const withMatcher = (matcher: unknown) =>
+      resolveClaudeCodeEvidence(
+        ccProbe({
+          settings: {
+            kind: 'present',
+            value: {
+              hooks: {
+                SessionStart: [{
+                  ...(matcher === undefined ? {} : { matcher }),
+                  hooks: [{ type: 'command', command: '/usr/bin/shieldcortex hook session-start' }],
+                }],
+              },
+            },
+          },
+        }),
+        CTX,
+      );
+    // The r3 false PASS: a valid, resolving SC command that only ever fires on
+    // compaction was graded wired_proven while normal startups got no pack.
+    const compactOnly = withMatcher('compact');
+    expect(compactOnly.scBus).toBe('not_wired');
+    expect(compactOnly.proof.join(' ')).toMatch(/matcher-restricted/);
+    expect(withMatcher('resume').scBus).toBe('not_wired');
+    expect(withMatcher('clear|compact').scBus).toBe('not_wired');
+    // Startup coverage in any form is wiring: explicit, alternated, absent,
+    // empty, or the match-all glob.
+    expect(withMatcher('startup').scBus).toBe('wired_proven');
+    expect(withMatcher('startup|compact').scBus).toBe('wired_proven');
+    expect(withMatcher(undefined).scBus).toBe('wired_proven');
+    expect(withMatcher('').scBus).toBe('wired_proven');
+    expect(withMatcher('*').scBus).toBe('wired_proven');
+    expect(withMatcher(null).scBus).toBe('wired_proven');
+    // A matcher doctor cannot evaluate proves nothing — unknown, never wired.
+    const invalidRegex = withMatcher('[');
+    expect(invalidRegex.scBus).toBe('unknown');
+    expect(invalidRegex.proof.join(' ')).toMatch(/matcher doctor cannot evaluate/);
+    expect(withMatcher(5).scBus).toBe('unknown');
+    // Split entries: a covering entry wires the bus even next to a restricted
+    // one; a restricted entry plus an unevaluable one is at best unknown.
+    const split = resolveClaudeCodeEvidence(
+      ccProbe({
+        settings: {
+          kind: 'present',
+          value: {
+            hooks: {
+              SessionStart: [
+                { matcher: 'compact', hooks: [{ type: 'command', command: '/usr/bin/shieldcortex hook session-start' }] },
+                { hooks: [{ type: 'command', command: '/usr/bin/shieldcortex hook session-start' }] },
+              ],
+            },
+          },
+        },
+      }),
+      CTX,
+    );
+    expect(split.scBus).toBe('wired_proven');
+    const restrictedPlusJunk = resolveClaudeCodeEvidence(
+      ccProbe({
+        settings: {
+          kind: 'present',
+          value: {
+            hooks: {
+              SessionStart: [
+                { matcher: 'compact', hooks: [{ type: 'command', command: '/usr/bin/shieldcortex hook session-start' }] },
+                { matcher: '[', hooks: [{ type: 'command', command: '/usr/bin/shieldcortex hook session-start' }] },
+              ],
+            },
+          },
+        },
+      }),
+      CTX,
+    );
+    expect(restrictedPlusJunk.scBus).toBe('unknown');
+  });
 });
 
 describe('Hermes evidence', () => {

@@ -536,6 +536,34 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(clean.message).toMatch(/executable resolves/);
   });
 
+  it('host contract: a SessionStart matcher that skips startup is not wiring — compact-only hooks feed the wrong bus (SOL r3 B5)', async () => {
+    writeConfig(busContract());
+    const claudeDir = path.join(tmpHome, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    // The r3 false PASS: a resolving SC command whose matcher only covers
+    // compaction owned session-start while every normal startup got no pack.
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ matcher: 'compact', hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    const restricted = await runHost();
+    expect(restricted.status).toBe('fail');
+    expect(restricted.message).toMatch(/not proven delivered/);
+
+    // The same command under a startup-covering matcher is the legitimate PASS.
+    fs.writeFileSync(
+      path.join(claudeDir, 'settings.json'),
+      JSON.stringify({
+        hooks: { SessionStart: [{ matcher: 'startup|resume', hooks: [{ type: 'command', command: trustedShieldcortexCommand() }] }] },
+      }),
+    );
+    const covering = await runHost();
+    expect(covering.status).toBe('pass');
+    expect(covering.message).toMatch(/matcher covers startup/);
+  });
+
   it('host contract inspects configured custom/per-agent OpenClaw workspaces (SOL H4)', async () => {
     writeConfig(busContract());
     installRealHookArtifacts();
