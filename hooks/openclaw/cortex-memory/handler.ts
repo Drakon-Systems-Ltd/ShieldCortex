@@ -597,9 +597,10 @@ async function onSessionStop(event) {
  * Budgeted SC start pack for OpenClaw bootstrap (inject v2).
  * Requires memory.inject.nativeContract = sc_only | disable_native_inject.
  */
-async function maybeInjectBootstrapPack(context, wsDir, event) {
+async function maybeInjectBootstrapPack(context: any, wsDir: string, event: any) {
   const fsSync = await import("node:fs");
-  const cfgPath = path.join(homedir(), ".shieldcortex", "config.json");
+  const scDir = process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex");
+  const cfgPath = path.join(scDir, "config.json");
   let raw = {};
   try {
     if (fsSync.existsSync(cfgPath)) {
@@ -610,8 +611,10 @@ async function maybeInjectBootstrapPack(context, wsDir, event) {
   }
 
   const hookDir = path.dirname(fileURLToPath(import.meta.url));
+  const packageRoot = await resolvePackageRoot();
   const candidates = [
     path.join(hookDir, "inject-pack.mjs"),
+    ...(packageRoot ? [path.join(packageRoot, "scripts", "lib", "inject-pack.mjs")] : []),
     path.join(hookDir, "..", "..", "..", "scripts", "lib", "inject-pack.mjs"),
     path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex", "scripts", "lib", "inject-pack.mjs"),
   ];
@@ -639,7 +642,7 @@ async function maybeInjectBootstrapPack(context, wsDir, event) {
   }
 
   const Database = (await import("better-sqlite3")).default;
-  const dbPath = path.join(homedir(), ".shieldcortex", "memories.db");
+  const dbPath = path.join(scDir, "memories.db");
   if (!fsSync.existsSync(dbPath)) return;
   const db = new Database(dbPath, { readonly: true, timeout: 3000 });
   let rows = [];
@@ -650,7 +653,7 @@ async function maybeInjectBootstrapPack(context, wsDir, event) {
   }
 
   const sessionKey = String(event?.sessionKey || event?.sessionId || context?.sessionId || "bootstrap");
-  const stateDir = path.join(homedir(), ".shieldcortex", "state");
+  const stateDir = path.join(scDir, "state");
   const statePath = path.join(
     stateDir,
     `inject-oc-${sessionKey.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100)}.json`,

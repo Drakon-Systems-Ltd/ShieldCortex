@@ -25,7 +25,7 @@ export function isSelfHealEnabled(config, env = process.env) {
 
 export function createOpenClawRuntime({
   logPrefix = "[shieldcortex]",
-  configPath = path.join(homedir(), ".shieldcortex", "config.json"),
+  configPath = path.join(process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex"), "config.json"),
 } = {}) {
   let shieldConfig = null;
   let shieldConfigMtime = 0;

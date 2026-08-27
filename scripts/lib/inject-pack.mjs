@@ -48,7 +48,7 @@ function dbBooleanTrue(value) {
  * - modern scoped schemas select the global top-64 and let eligibility apply
  *   host/agent/project rules;
  * - legacy schemas have no host/agent scope, so the session hook retains its
- *   historical `(project = ? OR project IS NULL)` candidate restriction;
+ *   project restriction while admitting strict integer-1 transferable rows;
  * - consumers without a project (OpenClaw bootstrap) do not invent one.
  *
  * @param {{ prepare(sql: string): { all(...params: unknown[]): object[] } }} db
@@ -69,7 +69,8 @@ export function selectInjectCandidates(db, options = {}) {
   const params = [];
   let projectClause = '';
   if (!hasScopeColumns && cols.has('project') && options.project != null && options.project !== '') {
-    projectClause = ' AND ("project" = ? OR "project" IS NULL)';
+    const transferableClause = cols.has('transferable') ? ' OR "transferable" = 1' : '';
+    projectClause = ` AND ("project" = ? OR "project" IS NULL${transferableClause})`;
     params.push(String(options.project));
   }
   const pinnedOrder = cols.has('pinned') ? `CASE WHEN "pinned" = 1 THEN 1 ELSE 0 END` : 'CASE WHEN 1 THEN 0 END';
