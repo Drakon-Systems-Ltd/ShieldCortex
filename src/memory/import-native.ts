@@ -297,6 +297,44 @@ function defaultArchiveRoot(): string {
   return path.join(configDir, 'native-import-archive');
 }
 
+/**
+ * macOS hands out `/var/folders/...` from `os.tmpdir()`, where `/var` is the
+ * platform's own symlink to `/private/var`. That alias belongs to the OS
+ * layout, so tripping the archive-root guard on it is a false positive — but
+ * realpath'ing a whole caller-supplied archive root would launder away exactly
+ * the attacker-planted symlinks the guard exists to catch.
+ *
+ * So only the temp *anchor* is canonicalised. The suffix below it is joined
+ * lexically and never resolved, which leaves every component under the temp
+ * directory for `ensureNoSymlinkDirectoryChain` to walk and reject. Roots
+ * outside the temp tree are returned untouched.
+ *
+ * The anchor is trusted because `os.tmpdir()` comes from the process
+ * environment, which is already inside this code's trust boundary: a caller who
+ * can set `TMPDIR` can set `SHIELDCORTEX_CONFIG_DIR` and pick the archive root
+ * outright. Markdown content and the filesystem *below* the anchor are not
+ * trusted, and are still walked.
+ */
+function canonicalTempAliasRoot(resolvedRoot: string): string {
+  let anchor: string;
+  try {
+    anchor = path.resolve(os.tmpdir());
+  } catch {
+    return resolvedRoot;
+  }
+  const suffix = path.relative(anchor, resolvedRoot);
+  // Robust containment, not a string prefix: `/tmpfoo` must not read as
+  // "inside /tmp", and an escaping `..` suffix must not be re-anchored.
+  if (path.isAbsolute(suffix) || suffix === '..' || suffix.startsWith(`..${path.sep}`)) return resolvedRoot;
+  let canonicalAnchor: string;
+  try {
+    canonicalAnchor = fs.realpathSync(anchor);
+  } catch {
+    return resolvedRoot;
+  }
+  return suffix ? path.join(canonicalAnchor, suffix) : canonicalAnchor;
+}
+
 function archivePathFor(root: string, batchId: string, sourcePath: string): string {
   return path.join(root, batchId, sha256(sourcePath).slice(0, 16), path.basename(sourcePath));
 }
@@ -359,7 +397,12 @@ function prepareFiles(
   options: NativeImportOptions,
   batchId: string,
   salience: number,
-): { files: PreparedFile[]; fileResults: NativeImportFileResult[]; invalidRows: NativeImportRowResult[] } {
+): {
+  archiveRoot: string;
+  files: PreparedFile[];
+  fileResults: NativeImportFileResult[];
+  invalidRows: NativeImportRowResult[];
+} {
   if (!Array.isArray(options.paths) || options.paths.length === 0) {
     throw new Error('at least one Markdown source path is required');
   }
@@ -367,7 +410,7 @@ function prepareFiles(
     throw new Error(`at most ${MAX_NATIVE_FILES} source files may be imported at once`);
   }
 
-  const archiveRoot = path.resolve(options.archiveRoot ?? defaultArchiveRoot());
+  const archiveRoot = canonicalTempAliasRoot(path.resolve(options.archiveRoot ?? defaultArchiveRoot()));
   ensureNoSymlinkDirectoryChain(archiveRoot, false);
   const seen = new Set<string>();
   const files: PreparedFile[] = [];
@@ -448,7 +491,7 @@ function prepareFiles(
     throw error;
   }
   if (files.length === 0 && invalidRows.length === 0) throw new Error('no unique Markdown source files remain after validation');
-  return { files, fileResults, invalidRows };
+  return { archiveRoot, files, fileResults, invalidRows };
 }
 
 /** Deepest existing ancestor of `target` (the target itself if it exists). */
@@ -971,7 +1014,7 @@ export function importNativeMemoriesInternal(
     return errorResult(options, batchId, hostId, agentId, error);
   }
 
-  const { files, fileResults, invalidRows } = prepared;
+  const { archiveRoot, files, fileResults, invalidRows } = prepared;
   try {
     if (invalidRows.length > 0) {
       const message = 'batch validation failed; valid sources were not processed';
@@ -1006,10 +1049,7 @@ export function importNativeMemoriesInternal(
         const rows = prepareRows(files, session, true, db, batchId, hostId, agentId, project, salience);
         const denied = deniedRows(rows);
         session.discard();
-        const crossDevice = crossDeviceArchiveReason(
-          files,
-          path.resolve(options.archiveRoot ?? defaultArchiveRoot()),
-        );
+        const crossDevice = crossDeviceArchiveReason(files, archiveRoot);
         return {
           success: denied.length === 0,
           applied: false,

@@ -51,7 +51,11 @@ describe('A3 defended native import-once (#395)', () => {
     previousEnv = { ...process.env };
     process.env.NODE_ENV = 'test';
     process.env.SHIELDCORTEX_SKIP_EMBEDDINGS = '1';
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-395-'));
+    // realpath, not the raw mkdtemp spelling: macOS hands out `/var/folders/...`
+    // via the platform's `/var` -> `/private/var` symlink, and the import records
+    // canonical source paths. Without this the sandbox and the recorded truth
+    // disagree on every path assertion in this file.
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-395-')));
     process.env.HOME = path.join(root, 'home');
     fs.mkdirSync(process.env.HOME, { mode: 0o700 });
     dbPath = path.join(root, 'memories.db');
@@ -978,6 +982,62 @@ describe('A3 defended native import-once (#395)', () => {
     expect(result.error).toContain('symlink');
     expect(fs.existsSync(file)).toBe(true);
     expect(count('memories')).toBe(0);
+  });
+
+  it('canonicalises the platform temp alias so an aliased archive root still applies', () => {
+    // The macOS shape, reproduced on any platform: `os.tmpdir()` is spelled
+    // through a symlink alias (`/var/folders/...`) whose target is the real
+    // directory (`/private/var/folders/...`). The archive-root guard must walk
+    // the canonical anchor instead of rejecting the platform's own alias, while
+    // still rejecting anything symlinked BELOW it — see the test above.
+    const platformTemp = path.join(root, 'platform-temp');
+    fs.mkdirSync(platformTemp, { mode: 0o700 });
+    const aliasTemp = path.join(root, 'alias-temp');
+    fs.symlinkSync(platformTemp, aliasTemp);
+    const aliasedArchiveRoot = path.join(aliasTemp, 'archive');
+    const canonicalArchiveRoot = path.join(platformTemp, 'archive');
+    const file = source('aliased-temp.md');
+
+    // Jest's sandboxed `process.env` is a copy, so setting TMPDIR never reaches
+    // libuv and `os.tmpdir()` keeps returning the real one. Moving the accessor
+    // is the only way to reproduce an aliased temp anchor here; afterEach's
+    // restoreAllMocks puts it back.
+    const tmpdir = jest.spyOn(os, 'tmpdir').mockReturnValue(aliasTemp);
+    try {
+      expect(path.resolve(os.tmpdir())).toBe(aliasTemp);
+
+      const dry = run(file, { archiveRoot: aliasedArchiveRoot });
+
+      expect(dry.success).toBe(true);
+      expect(dry.applied).toBe(false);
+      expect(dry.applyPossible).toBe(true);
+      // Dry run stays non-mutating: no archive tree on either spelling, source
+      // in place, nothing in the database.
+      expect(fs.existsSync(canonicalArchiveRoot)).toBe(false);
+      expect(fs.readFileSync(file, 'utf-8')).toBe(SAFE);
+      expect(count('memories')).toBe(0);
+
+      const applied = run(file, { apply: true, archiveRoot: aliasedArchiveRoot });
+
+      expect(applied.success).toBe(true);
+      expect(applied.applied).toBe(true);
+      // The archive is addressed through the canonical anchor, not the alias.
+      expect(applied.archived).toHaveLength(1);
+      expect(applied.archived[0].startsWith(`${canonicalArchiveRoot}${path.sep}`)).toBe(true);
+      expect(applied.archived[0].startsWith(`${aliasTemp}${path.sep}`)).toBe(false);
+      expect(applied.files[0].archivePath).toBe(applied.archived[0]);
+      // Disk truth: the source moved into the canonical archive, hardened.
+      expect(fs.existsSync(file)).toBe(false);
+      expect(fs.readFileSync(applied.archived[0], 'utf-8')).toBe(SAFE);
+      expect(fs.lstatSync(applied.archived[0]).mode & 0o777).toBe(0o600);
+      expect(archivedFiles(canonicalArchiveRoot)).toEqual([applied.archived[0]]);
+      // DB truth: one admitted row, recorded against the real source path.
+      expect(count('memories')).toBe(1);
+      expect(applied.rows).toHaveLength(1);
+      expect(applied.rows[0]).toMatchObject({ sourcePath: file, disposition: 'admitted' });
+    } finally {
+      tmpdir.mockRestore();
+    }
   });
 
   it('attributes invalidity per path and marks valid siblings unprocessed', () => {
