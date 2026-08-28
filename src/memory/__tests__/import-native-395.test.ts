@@ -241,6 +241,21 @@ describe('A3 defended native import-once (#395)', () => {
     expect(admit).not.toHaveBeenCalled();
   });
 
+  it('rejects host/agent/project identifiers longer than 128 characters instead of collapsing them', () => {
+    const file = source('long-scope.md');
+    const result = importNativeMemories({
+      paths: [file],
+      apply: true,
+      hostId: 'h'.repeat(129),
+      agentId: 'agent-a',
+      archiveRoot,
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/hostId exceeds 128 characters/);
+    expect((getDatabase().prepare('SELECT COUNT(*) c FROM memories').get() as { c: number }).c).toBe(0);
+    expect(fs.existsSync(file)).toBe(true);
+  });
+
   it('rejects non-Markdown input with stable invalid dispositions', () => {
     const file = source('not-markdown.txt');
     const result = run(file, { apply: true });
@@ -255,6 +270,25 @@ describe('A3 defended native import-once (#395)', () => {
     });
     expect(fs.existsSync(file)).toBe(true);
     expect((getDatabase().prepare('SELECT COUNT(*) c FROM memories').get() as { c: number }).c).toBe(0);
+  });
+
+  it('denied apply never calls admit', () => {
+    const file = source('poison-no-admit.md', POISON);
+    const admit = jest.fn();
+    const result = importNativeMemories({
+      paths: [file],
+      apply: true,
+      hostId: 'host-a',
+      agentId: 'agent-a',
+      project: 'project-a',
+      archiveRoot,
+    }, { db: getDatabase(), admit: admit as never });
+
+    expect(result.success).toBe(false);
+    expect(admit).not.toHaveBeenCalled();
+    expect(result.rows.some((row) => row.disposition === 'admitted')).toBe(false);
+    expect((getDatabase().prepare('SELECT COUNT(*) c FROM memories').get() as { c: number }).c).toBe(0);
+    expect(fs.existsSync(file)).toBe(true);
   });
 
   it('addMemory cannot attest or inflate a native_import row past the A3 ceiling', () => {

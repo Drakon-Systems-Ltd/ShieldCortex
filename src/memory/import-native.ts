@@ -8,6 +8,7 @@ import type { Memory, MemoryInput } from './types.js';
 import {
   addMemory,
   assessMemoryAdmission,
+  persistDeniedMemoryAdmission,
   type MemoryAdmissionAssessment,
 } from './store.js';
 import { getDatabase } from '../database/init.js';
@@ -128,10 +129,14 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf-8').digest('hex');
 }
 
-function nonEmptyScope(value: string | null | undefined): string | null {
+function nonEmptyScope(value: string | null | undefined, label = 'scope'): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  return trimmed ? trimmed.slice(0, 128) : null;
+  if (!trimmed) return null;
+  if (trimmed.length > 128) {
+    throw new Error(`${label} exceeds 128 characters`);
+  }
+  return trimmed;
 }
 
 function validateBatchId(value: string): string {
@@ -393,7 +398,9 @@ function resultFromError(
     batchId,
     hostId,
     agentId,
-    project: nonEmptyScope(options.project),
+    project: (() => {
+      try { return nonEmptyScope(options.project, 'project'); } catch { return null; }
+    })(),
     files: sourcePaths.map((sourcePath) => ({ sourcePath, archivePath: null, chunks: 0, error: reason })),
     rows: sourcePaths.map((sourcePath) => ({
       sourcePath,
@@ -421,12 +428,19 @@ export function importNativeMemories(
   dependencies: NativeImportDependencies = {},
 ): NativeImportResult {
   const batchId = validateBatchId(options.batchId ?? dependencies.batchId?.() ?? randomUUID());
-  const hostId = nonEmptyScope(options.hostId);
-  const agentId = nonEmptyScope(options.agentId);
+  let hostId: string | null;
+  let agentId: string | null;
+  let project: string | null;
+  try {
+    hostId = nonEmptyScope(options.hostId, 'hostId');
+    agentId = nonEmptyScope(options.agentId, 'agentId');
+    project = nonEmptyScope(options.project, 'project');
+  } catch (error) {
+    return resultFromError(options, batchId, '', '', error);
+  }
   if (!hostId || !agentId) {
     return resultFromError(options, batchId, hostId ?? '', agentId ?? '', 'native import requires explicit nonempty hostId and agentId');
   }
-  const project = nonEmptyScope(options.project);
   const requestedSalience = Number.isFinite(options.salience) ? Number(options.salience) : 0.5;
   const salience = Math.max(0, Math.min(requestedSalience, NATIVE_IMPORT_SALIENCE_CEILING));
   const db = dependencies.db ?? getDatabase();
@@ -614,19 +628,18 @@ export function importNativeMemories(
         'SELECT COUNT(*) AS count FROM quarantine WHERE source_type = ? AND source_identifier = ?',
       ).get(row.source.type, row.source.identifier) as { count: number }).count;
       try {
-        const unexpected = admit(row.input, undefined, row.source, { sourceAttested: false });
-        deleteNativeImportBatch(db, batchId, [unexpected.id]);
-        row.result.disposition = 'failed';
-        row.result.reason = 'preflight denial unexpectedly admitted during apply; rolled back; source not archived';
-        delete row.result.memoryId;
-      } catch (error) {
+        persistDeniedMemoryAdmission(row.input, row.source);
         const after = (db.prepare(
           'SELECT COUNT(*) AS count FROM quarantine WHERE source_type = ? AND source_identifier = ?',
         ).get(row.source.type, row.source.identifier) as { count: number }).count;
-        if (after <= before) {
+        if (after <= before && row.result.disposition === 'quarantined') {
           row.result.disposition = 'failed';
-          row.result.reason = `denial could not be persisted: ${error instanceof Error ? error.message : String(error)}`;
+          row.result.reason = 'denial could not be persisted';
         }
+      } catch (error) {
+        row.result.disposition = 'failed';
+        row.result.reason = `denial persist failed closed: ${error instanceof Error ? error.message : String(error)}`;
+        delete row.result.memoryId;
       }
     }
     return {

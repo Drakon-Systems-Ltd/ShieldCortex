@@ -561,6 +561,31 @@ export function assessMemoryAdmission(
   return { source: effectiveSource, result, disposition };
 }
 
+/**
+ * Persist a preflight denial without any admission path. Never INSERTs memories.
+ * If the live pipeline now wants to store, fail closed instead of admitting.
+ */
+export function persistDeniedMemoryAdmission(
+  input: MemoryInput,
+  source: DefenceSource,
+): MemoryAdmissionAssessment {
+  const assessment = assessMemoryAdmission(input, source, {
+    sourceAttested: false,
+    recordSideEffects: true,
+  });
+  if (assessment.disposition.action === 'store') {
+    throw new Error('preflight denial unexpectedly became admissible');
+  }
+  if (assessment.disposition.action === 'quarantine') {
+    const result = assessment.result;
+    result.allowed = false;
+    result.firewall.result = assessment.disposition.firewallResult;
+    result.firewall.reason = assessment.disposition.reason;
+    quarantineMemory(input, assessment.source, result);
+  }
+  return assessment;
+}
+
 /** Add a new memory through the full defended admission seam. */
 export function addMemory(
   input: MemoryInput,
