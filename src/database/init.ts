@@ -504,8 +504,15 @@ export function getCanonicalSchema(): string {
  * Initialize the database connection
  */
 export function initDatabase(dbPath?: string): Database.Database {
-  // Use auto-detected path if not specified
-  const resolvedPath = dbPath || getDefaultDbPath();
+  // CLAUDE_MEMORY_DB is the supported sandbox/CLI override used throughout the
+  // command surface. Keep an explicit argument highest priority and preserve
+  // the existing live default when neither override is present.
+  const envDbPath = process.env.CLAUDE_MEMORY_DB?.trim();
+  const resolvedPath = dbPath || envDbPath || getDefaultDbPath();
+  // Only a REAL caller argument counts as "the operator explicitly chose this
+  // database" for the safe-runtime guard. An environment variable is ambient:
+  // a redundant CLAUDE_MEMORY_DB pointing at the live default must NOT let an
+  // npx cache / project checkout open (and migrate) the production DB.
   const explicitDbPath = Boolean(dbPath);
   if (db) {
     return db;

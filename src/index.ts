@@ -636,6 +636,8 @@ ${bold}USAGE${reset}
 ${bold}COMMANDS${reset}
   ${cyan}remember${reset} <title>       Write a memory (via the defence pipeline)
                         --content <text> or pipe via stdin; --importance, --tags
+  ${cyan}memories${reset} import-native Import native Markdown once through full defence
+                        (dry-run by default; --apply admits then archives)
   ${cyan}scan${reset} <text>           Scan text through the defence pipeline
   ${cyan}scan-skill${reset} <path>     Scan an agent instruction file for threats
                         (--accept to suppress a reviewed file; --forget to undo)

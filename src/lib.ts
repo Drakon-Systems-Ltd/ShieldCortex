@@ -168,6 +168,18 @@ export {
   MemoryBlockedError,
 } from './memory/store.js';
 
+export {
+  importNativeMemories,
+  chunkNativeMarkdown,
+  resolveConfiguredNativeImportScope,
+} from './memory/import-native.js';
+export type {
+  NativeImportOptions,
+  NativeImportResult,
+  NativeImportDisposition,
+  NativeImportRowResult,
+} from './memory/import-native.js';
+
 export type { Memory, MemoryType, MemoryCategory } from './memory/types.js';
 
 // ── Memory Intelligence ────────────────────────────────────

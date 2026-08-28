@@ -57,10 +57,16 @@ import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
 import type { TripleProvenance } from '../graph/resolve.js';
-import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
-import { resolveDispositionV2 } from '../defence/disposition.js';
+import { storeFragmentationData } from '../defence/index.js';
+import {
+  runDefencePipeline,
+  runDefencePipelinePreviewInternal,
+  runDefencePipelineTransactionalInternal,
+} from '../defence/pipeline.js';
+import { resolveDispositionV2, type DispositionV2 } from '../defence/disposition.js';
 import { classifyContentForm } from '../defence/form-classifier.js';
 import { sweepClusterQuarantine } from '../defence/cluster-quarantine.js';
+import type { SanitisationResult } from '../defence/input-sanitisation/index.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
 import {
   syncGraphDeleteForMemoryToCloud,
@@ -136,6 +142,36 @@ export async function awaitPendingEmbeddings(): Promise<void> {
   while (pendingEmbeddingWrites.size > 0) {
     await Promise.allSettled([...pendingEmbeddingWrites]);
   }
+}
+
+function scheduleMemoryEmbedding(db: ReturnType<typeof getDatabase>, memoryId: number, text: string): void {
+  const embedJob = generateEmbedding(text)
+    .then(embedding => {
+      try {
+        if (embedding && embedding.buffer) {
+          db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
+            .run(Buffer.from(embedding.buffer), memoryId);
+        } else {
+          console.warn('[shieldcortex] Embedding generation returned invalid result for memory', memoryId);
+        }
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        if (/database connection is not open/i.test(errMsg)) return;
+        console.error('[shieldcortex] Failed to store embedding:', e);
+      }
+    })
+    .catch(e => {
+      if (
+        e instanceof Error
+        && (
+          e.message.includes('Embedding worker unavailable')
+          || e.message.includes('Embeddings disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1')
+        )
+      ) return;
+      console.error('[shieldcortex] Failed to generate embedding:', e);
+    })
+    .finally(() => pendingEmbeddingWrites.delete(embedJob));
+  pendingEmbeddingWrites.add(embedJob);
 }
 
 // Track truncation info globally for the last addMemory call
@@ -261,6 +297,7 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
     hostId: (row.host_id as string | null | undefined) ?? null,
     agentId: (row.agent_id as string | null | undefined) ?? null,
     captureLayer: (row.capture_layer as string | null | undefined) ?? null,
+    sourceAttested: row.source_attested == null ? null : Number(row.source_attested) === 1,
     trustScore: Number(row.trust_score ?? 1),
     sensitivityLevel: (row.sensitivity_level as string | undefined) ?? 'INTERNAL',
     source: (row.source as string | null) ?? null,
@@ -498,9 +535,46 @@ export class MemoryBlockedError extends Error {
 }
 
 /**
+ * #402 Class-B assembly abort inside a transactional admission session (#395).
+ *
+ * The sweep's own quarantine moves live inside the caller's transaction, so an
+ * abort rolls THEM back too — the strongest detection the importer can make
+ * would otherwise leave no trace at all. This error carries the detection
+ * forward so the caller can persist sanctioned forensic evidence AFTER the
+ * rollback. It never carries content: the caller re-derives that from the
+ * assessments it already holds.
+ */
+export class MemoryClusterAssemblyError extends MemoryBlockedError {
+  readonly clusterReason: string;
+  readonly quarantined: number;
+  readonly sourceValue: string;
+
+  constructor(quarantined: number, clusterReason: string, sourceValue: string) {
+    super(`class_b_cluster quarantined ${quarantined} native-import rows`);
+    this.name = 'MemoryClusterAssemblyError';
+    this.clusterReason = clusterReason;
+    this.quarantined = quarantined;
+    this.sourceValue = sourceValue;
+  }
+}
+
+/**
  * Store a blocked memory in quarantine for later review
  */
-function quarantineMemory(input: MemoryInput, source: DefenceSource, result: DefencePipelineResult): void {
+type DeferredMemoryEffect = () => void;
+
+function runMemoryEffect(deferredEffects: DeferredMemoryEffect[] | undefined, effect: DeferredMemoryEffect): void {
+  if (deferredEffects) deferredEffects.push(effect);
+  else effect();
+}
+
+function quarantineMemory(
+  input: MemoryInput,
+  source: DefenceSource,
+  result: DefencePipelineResult,
+  deferredEffects?: DeferredMemoryEffect[],
+  strict = false,
+): void {
   try {
     const db = getDatabase();
     // Defensive: coerce firewall_result if content was blocked but result is still ALLOW
@@ -509,32 +583,144 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
       .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, firewallResult, result.auditId);
 
     // Webhook notification (fire-and-forget)
-    dispatchWebhook('memory_quarantined', { id: null, title: input.title, reason: result.firewall.reason });
+    runMemoryEffect(deferredEffects, () => {
+      dispatchWebhook('memory_quarantined', { id: null, title: input.title, reason: result.firewall.reason });
+    });
 
     // Cloud quarantine sync is handled upstream:
     // - Pipeline QUARANTINE → synced by pipeline.ts step 9
     // - Post-pipeline override (sub-agent trust) → synced by addMemory() override block
   } catch (e) {
+    if (strict) throw e;
     console.error('[shieldcortex] Failed to quarantine memory:', e);
   }
 }
 
+export interface MemoryAdmissionAssessment {
+  source: DefenceSource;
+  result: DefencePipelineResult;
+  disposition: DispositionV2;
+  contentHash: string;
+  title: string;
+  project: string | null;
+}
+
+type AdmissionSideEffects = 'record' | 'preview' | 'transactional';
+
+function assessMemoryAdmissionInternal(
+  input: MemoryInput,
+  source: DefenceSource | undefined,
+  sourceAttested: boolean | undefined,
+  sideEffects: AdmissionSideEffects,
+  deferredEffects?: DeferredMemoryEffect[],
+  sanitiseInputForTest?: (content: string) => SanitisationResult,
+): MemoryAdmissionAssessment {
+  const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
+  const result = sideEffects === 'preview'
+    ? runDefencePipelinePreviewInternal(
+      input.content,
+      input.title,
+      effectiveSource,
+      undefined,
+      input.project,
+      { sourceAttested },
+      sanitiseInputForTest,
+    )
+    : sideEffects === 'transactional'
+      ? runDefencePipelineTransactionalInternal(
+        input.content,
+        input.title,
+        effectiveSource,
+        deferredEffects ?? [],
+        undefined,
+        input.project,
+        { sourceAttested },
+        sanitiseInputForTest,
+      )
+      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested });
+  const disposition = resolveDispositionV2({
+    allowed: result.allowed,
+    firewallResult: result.firewall.result,
+    trustScore: result.trust.score,
+    reason: result.firewall.reason,
+    contentForm: classifyContentForm(input.content),
+    threatIndicators: result.firewall.threatIndicators,
+    anomalyScore: result.firewall.anomalyScore,
+    sourceAttested,
+  });
+  return {
+    source: effectiveSource,
+    result,
+    disposition,
+    contentHash: createContentHash(input.content),
+    title: input.title,
+    project: input.project ?? null,
+  };
+}
+
 /**
- * Add a new memory
+ * The sanctioned scan/admit decision seam. Preview products use the same full
+ * pipeline and disposition law as addMemory, with only persistence side effects
+ * disabled; addMemory calls it with side effects enabled before every INSERT.
  */
+function assessMemoryAdmission(
+  input: MemoryInput,
+  source?: DefenceSource,
+  options?: { sourceAttested?: boolean },
+): MemoryAdmissionAssessment {
+  return assessMemoryAdmissionInternal(input, source, options?.sourceAttested, 'record');
+}
+
+const NATIVE_IMPORT_ADMISSION_TOKEN = Symbol('native-import-admission');
+
+interface InternalAddMemoryOptions {
+  token: typeof NATIVE_IMPORT_ADMISSION_TOKEN;
+  assessment: MemoryAdmissionAssessment;
+  deferredEffects: DeferredMemoryEffect[];
+  trustCeiling: number;
+}
+
+function assertAssessmentMatches(
+  input: MemoryInput,
+  source: DefenceSource | undefined,
+  assessment: MemoryAdmissionAssessment,
+): void {
+  const effectiveSource = source ?? UNATTRIBUTED_SOURCE;
+  if (
+    assessment.contentHash !== createContentHash(input.content)
+    || assessment.title !== input.title
+    || assessment.project !== (input.project ?? null)
+    || assessment.source.type !== effectiveSource.type
+    || assessment.source.identifier !== effectiveSource.identifier
+  ) {
+    throw new MemoryBlockedError('admission assessment does not match the memory input/source');
+  }
+}
+
+/** Add a new memory through the full defended admission seam. */
+export function addMemory(
+  input: MemoryInput,
+  config?: MemoryConfig,
+  source?: DefenceSource,
+  options?: { sourceAttested?: boolean },
+): Memory;
 export function addMemory(
   input: MemoryInput,
   config: MemoryConfig = resolveMemoryConfig(),
   source?: DefenceSource,
   options?: { sourceAttested?: boolean },
+  internal?: InternalAddMemoryOptions,
 ): Memory {
+  if (internal && internal.token !== NATIVE_IMPORT_ADMISSION_TOKEN) {
+    throw new MemoryBlockedError('invalid internal admission capability');
+  }
   // Check if memory creation is paused
   if (isPaused()) {
     throw new MemoryPausedError();
   }
 
   // RATE LIMITING: Block sources that exceed write rate
-  if (source && !checkRateLimit(source)) {
+  if (source && !internal && !checkRateLimit(source)) {
     logAudit({
       memory_id: null,
       project: input.project ?? null,
@@ -564,28 +750,18 @@ export function addMemory(
   // trust 1.0 — closing the old `if (source)` bypass. Rate-limiting stays gated
   // on an explicit source (above) so bulk source-less/import writes aren't
   // throttled by the shared synthetic key.
-  const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
-  const defenceResult: DefencePipelineResult = runDefencePipeline(
-    input.content, input.title, effectiveSource, undefined, input.project,
-    { sourceAttested: options?.sourceAttested },
-  );
-
-  // P1/WS4: the ONE verdict→disposition mapping, shared with the hook path
-  // (save-memory.mjs) so the runtimes cannot drift. It folds in the sub-agent
-  // trust-band hold (0.5–0.7) and the block/quarantine hold policy.
-  // #402: the 6-way valve refines it (admit / admit-low-trust / inert /
-  // quarantine / reject / escalate) on the structural content form —
-  // classification failure is fail-closed to 'unknown' inside the classifier.
-  const disposition = resolveDispositionV2({
-    allowed: defenceResult.allowed,
-    firewallResult: defenceResult.firewall.result,
-    trustScore: defenceResult.trust.score,
-    reason: defenceResult.firewall.reason,
-    contentForm: classifyContentForm(input.content),
-    threatIndicators: defenceResult.firewall.threatIndicators,
-    anomalyScore: defenceResult.firewall.anomalyScore,
+  const assessment = internal?.assessment ?? assessMemoryAdmission(input, source, {
     sourceAttested: options?.sourceAttested,
   });
+  if (internal) {
+    assertAssessmentMatches(input, source, assessment);
+    if (!assessment.result.allowed || assessment.disposition.action !== 'store') {
+      throw new MemoryBlockedError('native import cannot admit a denied assessment');
+    }
+  }
+  const effectiveSource = assessment.source;
+  const defenceResult = assessment.result;
+  const disposition = assessment.disposition;
 
   if (disposition.action === 'quarantine') {
     // Auto-release (threat-graph Loop 3): if this detector firing is a
@@ -645,7 +821,7 @@ export function addMemory(
       // Cloud sync must never affect local quarantine flow
     }
 
-    quarantineMemory(input, effectiveSource, defenceResult);
+    quarantineMemory(input, effectiveSource, defenceResult, internal?.deferredEffects);
     throw new MemoryBlockedError(defenceResult.firewall.reason);
     }
     // auto-released → fall through to normal storage. Stamp the verdict ALLOW
@@ -689,9 +865,9 @@ export function addMemory(
     INSERT INTO memories (
       uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable,
       status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, defence_verdict, cloud_excluded, memory_purpose, memory_scope,
-      host_id, agent_id, capture_layer, content_form, updated_at
+      host_id, agent_id, capture_layer, source_attested, content_form, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -735,6 +911,7 @@ export function addMemory(
       input.hostId ?? resolveDefaultHostId(),
       input.agentId ?? resolveDefaultAgentId(),
       input.captureLayer ?? null,
+      attestedFlag(options?.sourceAttested),
       // #402: write-time form stamp — the form key half of the two-key inject
       // gate. Auto-released rows stamp their real form too (a directive-form
       // release stays non-injectable).
@@ -744,13 +921,17 @@ export function addMemory(
     // defenceResult is always set now (every write is scanned), so always stamp
     // the pipeline's real trust + sensitivity alongside the resolved source —
     // no source-less branch can default to trust 1.0 / unscanned INTERNAL.
+    const stampedTrust = Math.min(
+      disposition.trustClamp ?? defenceResult.trust.score,
+      internal?.trustCeiling ?? 1,
+    );
     db.prepare(`UPDATE memories SET trust_score = ?, sensitivity_level = ?, source = ?, content_hash = ? WHERE id = ?`)
       // content_hash = SHA-256 of the SUBMITTED content (a write-time provenance
       // snapshot), matching the write-audit row in pipeline.ts. Consistent for
       // >10KB memories too (where the STORED content is truncated).
       // #402 admit-low-trust: clamp the stamped trust below the inject floor
       // (trustClamp is already min(trust, LOW_TRUST_CLAMP) — it never raises).
-      .run(disposition.trustClamp ?? defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
+      .run(stampedTrust, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
 
     const id = result.lastInsertRowid as number;
     if (isFeatureEnabled('cloud_sync')) {
@@ -773,13 +954,24 @@ export function addMemory(
     try {
       const cluster = sweepClusterQuarantine(db, { source: sourceDetails.sourceValue ?? '' });
       if (cluster.quarantined > 0) {
-        dispatchWebhook('memory_quarantined', {
-          id: null,
-          title: input.title,
-          reason: `class_b_cluster (${cluster.quarantined} rows)`,
+        runMemoryEffect(internal?.deferredEffects, () => {
+          dispatchWebhook('memory_quarantined', {
+            id: null,
+            title: input.title,
+            reason: `class_b_cluster (${cluster.quarantined} rows)`,
+          });
         });
+        if (internal) {
+          throw new MemoryClusterAssemblyError(
+            cluster.quarantined,
+            `class_b_cluster: ${cluster.quarantined} directive-form fragments from `
+            + `${sourceDetails.sourceValue ?? ''} assembled inside one native-import batch`,
+            sourceDetails.sourceValue ?? '',
+          );
+        }
       }
     } catch (e) {
+      if (internal && e instanceof MemoryBlockedError) throw e;
       console.error('[shieldcortex] Class-B cluster sweep failed:', e);
     }
   }
@@ -803,7 +995,7 @@ export function addMemory(
         attested: options?.sourceAttested ?? false,
       });
       if (isFeatureEnabled('cloud_sync')) {
-        syncGraphForMemoryToCloud(memory.id);
+        runMemoryEffect(internal?.deferredEffects, () => syncGraphForMemoryToCloud(memory.id));
       }
     }
     entityIds = (
@@ -816,21 +1008,25 @@ export function addMemory(
   }
 
   // Emit event for real-time dashboard (in-process)
-  emitMemoryCreated(memory, entityIds);
+  runMemoryEffect(internal?.deferredEffects, () => emitMemoryCreated(memory, entityIds));
   // Persist event for cross-process IPC (MCP → Dashboard)
   persistEvent('memory_created', { memory, entity_ids: entityIds });
 
   // Webhook notification (fire-and-forget)
-  dispatchWebhook('memory_created', { id: memory.id, title: memory.title, category: memory.category });
+  runMemoryEffect(internal?.deferredEffects, () => {
+    dispatchWebhook('memory_created', { id: memory.id, title: memory.title, category: memory.category });
+  });
 
   if (isFeatureEnabled('cloud_sync')) {
     // #409 — outbox row committed with the INSERT; dispatch best-effort now.
-    if (createOutboxRecord) {
-      cloudMemorySync().dispatchMemoryOutboxBestEffort(createOutboxRecord, createOutboxKey ?? undefined);
-    } else {
-      // Policy excluded or cloud off mid-flight — legacy path is a no-op then.
-      syncMemoryUpsertToCloud(memory);
-    }
+    runMemoryEffect(internal?.deferredEffects, () => {
+      if (createOutboxRecord) {
+        cloudMemorySync().dispatchMemoryOutboxBestEffort(createOutboxRecord, createOutboxKey ?? undefined);
+      } else {
+        // Policy excluded or cloud off mid-flight — legacy path is a no-op then.
+        syncMemoryUpsertToCloud(memory);
+      }
+    });
   }
 
   // ORGANIC FEATURE: Auto-link to related memories
@@ -855,73 +1051,289 @@ export function addMemory(
   }
 
   // SEMANTIC SEARCH: Generate embedding asynchronously (don't block INSERT)
-  const memoryId = memory.id;
-  const embedJob = generateEmbedding(input.title + ' ' + truncationResult.content)
-    .then(embedding => {
-      try {
-        // Validate embedding exists and has expected structure
-        if (embedding && embedding.buffer) {
-          db.prepare('UPDATE memories SET embedding = ? WHERE id = ?')
-            .run(Buffer.from(embedding.buffer), memoryId);
-        } else {
-          console.warn('[shieldcortex] Embedding generation returned invalid result for memory', memoryId);
-        }
-      } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        if (/database connection is not open/i.test(errMsg)) {
-          return;
-        }
-        console.error('[shieldcortex] Failed to store embedding:', e);
-      }
-    })
-    .catch(e => {
-      if (
-        e instanceof Error &&
-        (
-          e.message.includes('Embedding worker unavailable') ||
-          e.message.includes('Embeddings disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1')
-        )
-      ) {
-        return;
-      }
-      console.error('[shieldcortex] Failed to generate embedding:', e);
-    })
-    .finally(() => {
-      pendingEmbeddingWrites.delete(embedJob);
-    });
-  pendingEmbeddingWrites.add(embedJob);
+  runMemoryEffect(internal?.deferredEffects, () => {
+    scheduleMemoryEmbedding(db, memory.id, input.title + ' ' + truncationResult.content);
+  });
 
-  // Anti-bloat: Check if limits exceeded and trigger async cleanup
-  // We use setImmediate to not block the insert response
-  if (process.env.NODE_ENV !== 'test') {
-    setImmediate(() => {
-      try {
-        if (!isDatabaseInitialized()) {
-          return;
-        }
-        const stats = getMemoryStats();
-        if (
-          stats.shortTerm > config.maxShortTermMemories ||
-          stats.longTerm > config.maxLongTermMemories
-        ) {
-          // Import dynamically to avoid circular dependency
-          import('./consolidate.js').then(({ enforceMemoryLimits }) => {
-            if (typeof enforceMemoryLimits === 'function') {
-              enforceMemoryLimits(config);
-            }
-          }).catch((e) => {
-            // Log but don't fail - consolidation will happen on next scheduled run
-            console.warn('[shieldcortex] Async cleanup import failed:', e instanceof Error ? e.message : e);
-          });
-        }
-      } catch (e) {
-        // Log unexpected errors in async cleanup
-        console.warn('[shieldcortex] Async cleanup check failed:', e instanceof Error ? e.message : e);
-      }
-    });
-  }
+  // Anti-bloat: check limits and trigger async cleanup. Queued like every other
+  // post-add effect so a transactional admission that later ROLLS BACK never
+  // schedules a consolidation pass for rows the database does not contain —
+  // discard() drops it, finalize() runs it once after COMMIT.
+  runMemoryEffect(internal?.deferredEffects, () => scheduleMemoryLimitCheck(config));
 
   return memory;
+}
+
+/**
+ * How many anti-bloat limit checks have been scheduled this process.
+ *
+ * The check itself is a `setImmediate` that unit runs deliberately suppress, so
+ * the counter — not the timer — is what makes "a rolled-back prefix schedules
+ * none, a commit schedules one per stored row" observable. Read-only seam: it
+ * hands out no capability and is not exported from the package barrel.
+ */
+let memoryLimitChecksScheduled = 0;
+
+/** Repository-internal observability seam (#395). Deliberately read-only. */
+export function memoryLimitChecksScheduledInternal(): number {
+  return memoryLimitChecksScheduled;
+}
+
+function scheduleMemoryLimitCheck(config: MemoryConfig): void {
+  memoryLimitChecksScheduled++;
+  // Unit runs still skip the timer itself: a pending immediate outliving the
+  // test that caused it is how workers end up force-exited.
+  if (process.env.NODE_ENV === 'test') return;
+  // setImmediate so the cleanup never blocks the insert response.
+  setImmediate(() => {
+    try {
+      if (!isDatabaseInitialized()) {
+        return;
+      }
+      const stats = getMemoryStats();
+      if (
+        stats.shortTerm > config.maxShortTermMemories ||
+        stats.longTerm > config.maxLongTermMemories
+      ) {
+        // Import dynamically to avoid circular dependency
+        import('./consolidate.js').then(({ enforceMemoryLimits }) => {
+          if (typeof enforceMemoryLimits === 'function') {
+            enforceMemoryLimits(config);
+          }
+        }).catch((e) => {
+          // Log but don't fail - consolidation will happen on next scheduled run
+          console.warn('[shieldcortex] Async cleanup import failed:', e instanceof Error ? e.message : e);
+        });
+      }
+    } catch (e) {
+      // Log unexpected errors in async cleanup
+      console.warn('[shieldcortex] Async cleanup check failed:', e instanceof Error ? e.message : e);
+    }
+  });
+}
+
+/** One fragment of a detected cross-chunk assembly, as the caller prepared it. */
+export interface NativeImportAssemblyFragment {
+  input: MemoryInput;
+  source: DefenceSource;
+  assessment: MemoryAdmissionAssessment;
+}
+
+export interface NativeImportAdmissionSession {
+  assess(input: MemoryInput, source: DefenceSource, dryRun: boolean): MemoryAdmissionAssessment;
+  persistRejection(input: MemoryInput, source: DefenceSource, assessment: MemoryAdmissionAssessment): void;
+  /**
+   * Post-rollback forensic truth for a Class-B assembly abort. Writes audit +
+   * quarantine + `defence_event` evidence only — it can never create a memory
+   * row, and it refuses fragments whose assessment this session did not produce
+   * transactionally or whose source is not the one that triggered the sweep.
+   */
+  persistAssemblyRejection(
+    fragments: ReadonlyArray<NativeImportAssemblyFragment>,
+    detail: { reason: string; quarantined: number; sourceValue: string },
+  ): number;
+  admit(
+    input: MemoryInput,
+    source: DefenceSource,
+    assessment: MemoryAdmissionAssessment,
+    trustCeiling: number,
+  ): Memory;
+  finalize(): void;
+  discard(): void;
+}
+
+/**
+ * Narrow internal A3 seam. It can bypass the ordinary per-source rate bucket
+ * only for a bounded native-import session; every row must carry a matching
+ * full-pipeline assessment produced by this session.
+ */
+export function createNativeImportAdmissionSession(batchId: string): NativeImportAdmissionSession {
+  return createNativeImportAdmissionSessionInternal(batchId);
+}
+
+/** Repository-internal constructor; not exported from the package barrel. */
+export function createNativeImportAdmissionSessionInternal(
+  batchId: string,
+  sanitiseInputForTest?: (content: string) => SanitisationResult,
+): NativeImportAdmissionSession {
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(batchId)) throw new Error('invalid native-import batch id');
+  const deferredEffects: DeferredMemoryEffect[] = [];
+  // Durable assessments (full side-effectful pipeline, real audit row) are the
+  // ONLY ones that may become a memory or a quarantine record. Preview
+  // assessments are tracked separately so a repository-internal caller cannot
+  // promote an unaudited dry-run verdict into a durable row.
+  const assessments = new WeakSet<MemoryAdmissionAssessment>();
+  const previewAssessments = new WeakSet<MemoryAdmissionAssessment>();
+  let admitted = 0;
+
+  const sourcePrefix = `native-import:${batchId}:file:`;
+  const assertNativeShape = (input: MemoryInput, source: DefenceSource): void => {
+    // Full internal identity, not a prefix: `native-import:<batchId>:file:<24 hex>`
+    // — the same shape source-scorer.ts pins the thin 0.4 trust to.
+    const fileSegment = source.identifier.startsWith(sourcePrefix)
+      ? source.identifier.slice(sourcePrefix.length)
+      : null;
+    if (
+      source.type !== 'file'
+      || fileSegment === null
+      || !/^[0-9a-f]{24}$/.test(fileSegment)
+      || input.sourceKind !== 'native_import'
+      || input.captureMethod !== 'native_import'
+      || input.captureLayer !== 'native_import'
+      || Buffer.byteLength(input.content, 'utf-8') > 8 * 1024
+    ) {
+      throw new MemoryBlockedError('invalid native-import admission shape');
+    }
+  };
+
+  /** A durable write may only ever be keyed to a real, audited assessment. */
+  const assertDurableAssessment = (assessment: MemoryAdmissionAssessment): void => {
+    if (previewAssessments.has(assessment) || assessment.result.auditId === -1) {
+      throw new MemoryBlockedError('native import cannot persist a preview assessment');
+    }
+    if (!assessments.has(assessment)) throw new MemoryBlockedError('foreign native-import assessment');
+  };
+
+  return {
+    assess(input, source, dryRun) {
+      assertNativeShape(input, source);
+      const assessment = assessMemoryAdmissionInternal(
+        input,
+        source,
+        false,
+        dryRun ? 'preview' : 'transactional',
+        deferredEffects,
+        sanitiseInputForTest,
+      );
+      if (dryRun) previewAssessments.add(assessment);
+      else assessments.add(assessment);
+      return assessment;
+    },
+    persistRejection(input, source, assessment) {
+      assertNativeShape(input, source);
+      assertAssessmentMatches(input, source, assessment);
+      assertDurableAssessment(assessment);
+      if (assessment.result.allowed && assessment.disposition.action === 'store') {
+        throw new MemoryBlockedError('cannot persist an allowed assessment as a rejection');
+      }
+      quarantineMemory(input, source, assessment.result, deferredEffects, true);
+    },
+    persistAssemblyRejection(fragments, detail) {
+      if (fragments.length === 0) return 0;
+      for (const fragment of fragments) {
+        assertNativeShape(fragment.input, fragment.source);
+        assertAssessmentMatches(fragment.input, fragment.source, fragment.assessment);
+        assertDurableAssessment(fragment.assessment);
+        // Attribution is the whole value of this record. The sweep is keyed to
+        // ONE `memories.source`; a fragment from any other source file in the
+        // batch was not part of the detected assembly and must never be filed
+        // as its evidence. Enforced here as well as at the caller's filter so
+        // the seam itself cannot mis-attribute.
+        if (`${fragment.source.type}:${fragment.source.identifier}` !== detail.sourceValue) {
+          throw new MemoryBlockedError(
+            'class_b_cluster evidence must be attributed to the triggering source only',
+          );
+        }
+      }
+      const db = getDatabase();
+      const quarantineInsert = db.prepare(`
+        INSERT INTO quarantine (
+          original_title, original_content, project, source_type, source_identifier,
+          reason, threat_indicators, anomaly_score, firewall_result, audit_id, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'QUARANTINE', ?, 'pending')
+      `);
+      // One durable audit + quarantine row per detected fragment, attributed to
+      // the stable per-file source key so the record survives the rollback that
+      // erased the sweep's own moves. No memory row is created or re-admitted.
+      const write = db.transaction(() => {
+        for (const fragment of fragments) {
+          const { input, source, assessment } = fragment;
+          const auditId = logAudit({
+            memory_id: null,
+            project: input.project ?? null,
+            timestamp: new Date().toISOString(),
+            source_type: source.type,
+            source_identifier: source.identifier,
+            trust_score: assessment.result.trust.score,
+            sensitivity_level: assessment.result.sensitivity.level,
+            firewall_result: 'QUARANTINE',
+            operation: 'write',
+            content_hash: assessment.contentHash,
+            anomaly_score: 0.9,
+            threat_indicators: JSON.stringify(['class_b_cluster']),
+            blocked_patterns: '[]',
+            reason: detail.reason,
+            fragmentation_score: assessment.result.fragmentation?.score ?? null,
+            pipeline_duration_ms: 0,
+            source_attested: 0,
+          });
+          quarantineInsert.run(
+            input.title,
+            input.content,
+            input.project ?? null,
+            source.type,
+            source.identifier,
+            detail.reason,
+            JSON.stringify(['class_b_cluster']),
+            0.9,
+            auditId === -1 ? null : auditId,
+          );
+        }
+        // Dashboard/IPC truth for the same detection. The rolled-back
+        // transaction took the sweep's own rows with it, and an ALLOW chunk
+        // never emitted a defence_event of its own, so without this the
+        // strongest verdict the importer produces is invisible to every event
+        // consumer. Local DB row only — persistEvent writes `events`; no
+        // webhook, no cloud dispatch, and no memory-created effect.
+        persistEvent('defence_event', {
+          source_type: fragments[0].source.type,
+          source_identifier: fragments[0].source.identifier,
+          firewall_result: 'QUARANTINE',
+          trust_score: fragments[0].assessment.result.trust.score,
+          anomaly_score: 0.9,
+          reason: detail.reason,
+          threat_indicators: JSON.stringify(['class_b_cluster']),
+          fragments: fragments.length,
+          quarantined: detail.quarantined,
+          timestamp: new Date().toISOString(),
+        });
+      });
+      write();
+      return fragments.length;
+    },
+    admit(input, source, assessment, trustCeiling) {
+      assertNativeShape(input, source);
+      assertDurableAssessment(assessment);
+      if (++admitted > 512) throw new MemoryBlockedError('native-import session exceeds 512 admitted chunks');
+      const loweringCeiling = Math.max(0, Math.min(Number(trustCeiling), 1));
+      const internalAdd = addMemory as unknown as (
+        value: MemoryInput,
+        config: MemoryConfig | undefined,
+        valueSource: DefenceSource,
+        options: { sourceAttested: false },
+        internalOptions: InternalAddMemoryOptions,
+      ) => Memory;
+      return internalAdd(input, undefined, source, { sourceAttested: false }, {
+        token: NATIVE_IMPORT_ADMISSION_TOKEN,
+        assessment,
+        deferredEffects,
+        trustCeiling: loweringCeiling,
+      });
+    },
+    finalize() {
+      const effects = deferredEffects.splice(0);
+      for (const effect of effects) {
+        try {
+          effect();
+        } catch (error) {
+          console.error('[shieldcortex] Deferred native-import effect failed:', error);
+        }
+      }
+    },
+    discard() {
+      deferredEffects.length = 0;
+    },
+  };
 }
 
 /**
