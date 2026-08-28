@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import type { RankerConfig, RankerEngine, RankerWeights } from '../memory/types.js';
@@ -445,6 +445,52 @@ function readRawConfigState(): RawConfigState {
 
 export function readRawConfig(): Record<string, unknown> {
   return readRawConfigState().data;
+}
+
+/**
+ * Whether this exact raw config is the signed honest-sidecar posture.
+ *
+ * This is the single trust decision used by both memory-plane doctor rows. It
+ * deliberately requires a valid EMBEDDED `_sig`: readRawConfig() may adopt a
+ * previously unsigned legacy config by minting `.config-sig`, which is correct
+ * compatibility trust for ordinary config reads but is not proof that the
+ * signed posture setter created this operator-intent declaration. External
+ * legacy signatures therefore never certify the sidecar exemption.
+ */
+export function hasTrustedMemorySidecarPosture(
+  raw: Record<string, unknown>,
+  configPath: string = getConfigFile(),
+): boolean {
+  try {
+    const effectivePath = getConfigFile();
+    if (resolve(configPath) !== resolve(effectivePath)) return false;
+
+    const content = readFileSync(effectivePath, 'utf-8');
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    // The caller must be grading the same bytes whose signature is checked.
+    if (JSON.stringify(parsed) !== JSON.stringify(raw)) return false;
+
+    // Only a currently valid embedded signature can carry operator intent.
+    // `self-heal` means the embedded signature is invalid even if a legacy
+    // external signature authenticates the general config bytes, so it is not
+    // sufficient here either.
+    if (typeof parsed._sig !== 'string' || checkConfigIntegrity(parsed, content) !== 'valid') return false;
+
+    const memory = parsed.memory && typeof parsed.memory === 'object' && !Array.isArray(parsed.memory)
+      ? parsed.memory as Record<string, unknown>
+      : null;
+    if (!memory) return false;
+    const hostContract = memory.hostContract && typeof memory.hostContract === 'object'
+      && !Array.isArray(memory.hostContract)
+      ? memory.hostContract as Record<string, unknown>
+      : null;
+    const inject = memory.inject && typeof memory.inject === 'object' && !Array.isArray(memory.inject)
+      ? memory.inject as Record<string, unknown>
+      : null;
+    return hostContract?.posture === 'mcp_sidecar_no_inject' && inject?.mode === 'off';
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -8,6 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -597,9 +598,10 @@ async function onSessionStop(event) {
  * Budgeted SC start pack for OpenClaw bootstrap (inject v2).
  * Requires memory.inject.nativeContract = sc_only | disable_native_inject.
  */
-async function maybeInjectBootstrapPack(context, wsDir, event) {
+async function maybeInjectBootstrapPack(context: any, wsDir: string, event: any) {
   const fsSync = await import("node:fs");
-  const cfgPath = path.join(homedir(), ".shieldcortex", "config.json");
+  const scDir = process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex");
+  const cfgPath = path.join(scDir, "config.json");
   let raw = {};
   try {
     if (fsSync.existsSync(cfgPath)) {
@@ -610,64 +612,65 @@ async function maybeInjectBootstrapPack(context, wsDir, event) {
   }
 
   const hookDir = path.dirname(fileURLToPath(import.meta.url));
+  const resolvedPackageRoot = await resolvePackageRoot();
   const candidates = [
     path.join(hookDir, "inject-pack.mjs"),
+    ...(resolvedPackageRoot ? [path.join(resolvedPackageRoot, "scripts", "lib", "inject-pack.mjs")] : []),
     path.join(hookDir, "..", "..", "..", "scripts", "lib", "inject-pack.mjs"),
     path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex", "scripts", "lib", "inject-pack.mjs"),
   ];
 
   let buildStartPack;
   let readInjectConfig;
+  let selectInjectCandidates;
+  let selectedInjectHelperPath = null;
   for (const c of candidates) {
     try {
-      if (!fsSync.existsSync(c)) continue;
-      const mod = await import(pathToFileURL(c).href);
+      const helperPath = path.resolve(c);
+      if (!fsSync.existsSync(helperPath)) continue;
+      const mod = await import(pathToFileURL(helperPath).href);
+      if (!mod.buildStartPack || !mod.readInjectConfig || !mod.selectInjectCandidates) continue;
       buildStartPack = mod.buildStartPack;
       readInjectConfig = mod.readInjectConfig;
-      if (buildStartPack && readInjectConfig) break;
+      selectInjectCandidates = mod.selectInjectCandidates;
+      selectedInjectHelperPath = helperPath;
+      break;
     } catch {
       /* try next */
     }
   }
-  if (!buildStartPack || !readInjectConfig) return;
+  if (!buildStartPack || !readInjectConfig || !selectInjectCandidates || !selectedInjectHelperPath) return;
 
   const injectCfg = readInjectConfig(raw);
   if (!injectCfg.nativeContract || injectCfg.mode === "off" || injectCfg.mode === "turn") {
     return;
   }
 
-  const Database = (await import("better-sqlite3")).default;
-  const dbPath = path.join(homedir(), ".shieldcortex", "memories.db");
+  // The hook normally lives outside ShieldCortex's dependency tree. Resolve
+  // the native driver from the package that supplied inject-pack.mjs, never
+  // relative to this copied/self-healed handler. Prefer package.json as the
+  // package-root anchor; the selected helper remains a correct ancestry anchor
+  // for global/legacy layouts where package.json cannot be resolved.
+  const packageJsonPath = resolvedPackageRoot
+    ? path.join(resolvedPackageRoot, "package.json")
+    : null;
+  const dependencyAnchor = packageJsonPath && fsSync.existsSync(packageJsonPath)
+    ? packageJsonPath
+    : selectedInjectHelperPath;
+  const packageRequire = createRequire(pathToFileURL(dependencyAnchor).href);
+  const Database = packageRequire("better-sqlite3");
+  const dbPath = path.join(scDir, "memories.db");
   if (!fsSync.existsSync(dbPath)) return;
   const db = new Database(dbPath, { readonly: true, timeout: 3000 });
   let rows = [];
   try {
-    const cols = db.prepare("PRAGMA table_info(memories)").all().map((c) => c.name);
-    if (cols.includes("host_id")) {
-      rows = db.prepare(`
-        SELECT id, title, content, salience, pinned, trust_score, sensitivity_level, status,
-               source, defence_verdict, host_id, agent_id, project, transferable, created_at
-        FROM memories
-        WHERE COALESCE(status,'active') NOT IN ('archived','suppressed')
-        ORDER BY pinned DESC, salience DESC
-        LIMIT 64
-      `).all();
-    } else {
-      rows = db.prepare(`
-        SELECT id, title, content, salience, pinned, trust_score, sensitivity_level, status,
-               source, defence_verdict, project, created_at
-        FROM memories
-        WHERE COALESCE(status,'active') NOT IN ('archived','suppressed')
-        ORDER BY pinned DESC, salience DESC
-        LIMIT 64
-      `).all();
-    }
+    rows = selectInjectCandidates(db);
   } finally {
     db.close();
   }
 
   const sessionKey = String(event?.sessionKey || event?.sessionId || context?.sessionId || "bootstrap");
-  const stateDir = path.join(homedir(), ".shieldcortex", "state");
+  const stateDir = path.join(scDir, "state");
   const statePath = path.join(
     stateDir,
     `inject-oc-${sessionKey.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100)}.json`,

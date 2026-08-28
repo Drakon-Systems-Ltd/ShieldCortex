@@ -4,6 +4,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { createHmac } from 'crypto';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 
@@ -25,6 +26,10 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     originalEnv = { ...process.env };
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    // cloud/config imports homedir as a stable binding while doctor probes via
+    // os.homedir(); pin the product-supported override so both rows and signed
+    // setters grade the same sandboxed bytes.
+    process.env.SHIELDCORTEX_CONFIG_DIR = scDir;
     // Hermeticity: a developer box with these set would silently relocate
     // every fixture's evidence root.
     delete process.env.OPENCLAW_STATE_DIR;
@@ -52,6 +57,13 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
 
   function writeConfig(cfg: Record<string, unknown>): void {
     fs.writeFileSync(path.join(scDir, 'config.json'), `${JSON.stringify(cfg, null, 2)}\n`);
+  }
+
+  function writeSignedConfig(cfg: Record<string, unknown>): void {
+    const key = fs.readFileSync(path.join(scDir, '.integrity-key'), 'utf-8').trim();
+    const body = JSON.stringify(cfg, null, 2);
+    const sig = createHmac('sha256', key).update(body, 'utf-8').digest('hex');
+    writeConfig({ ...cfg, _sig: sig });
   }
 
   function openDb(): Database.Database {
@@ -1574,20 +1586,21 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     expect(r.fix).toMatch(/mcp_sidecar_no_inject/);
   });
 
-  it('host contract passes an honest sidecar and rejects sidecar-plus-contract', async () => {
+  it('host contract passes a signed honest sidecar and rejects sidecar-plus-contract', async () => {
     writeHermes({ memoryEnabled: true, userProfile: true });
-    writeConfig({
-      memory: {
-        plane: 'dual_legacy',
-        hostContract: { posture: 'mcp_sidecar_no_inject', runtimes: ['hermes'] },
-        inject: { mode: 'off', hostId: 'tars', agentId: 'hermes-primary' },
-      },
-    });
+    const cloud = await import('../../cloud/config.js');
+    cloud.setMemoryHostRuntimes(['hermes']);
+    cloud.setMemoryHostPosture('mcp_sidecar_no_inject');
+    const signedRaw = JSON.parse(fs.readFileSync(path.join(scDir, 'config.json'), 'utf-8'));
+    expect(cloud.hasTrustedMemorySidecarPosture(
+      signedRaw,
+      path.join(scDir, 'wrong-config.json'),
+    )).toBe(false);
     const sidecar = await runHost();
     expect(sidecar.status).toBe('pass');
     expect(sidecar.message).toMatch(/honest sidecar/);
 
-    writeConfig({
+    writeSignedConfig({
       memory: {
         plane: 'dual_legacy',
         hostContract: { posture: 'mcp_sidecar_no_inject' },
@@ -1597,6 +1610,59 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const both = await runHost();
     expect(both.status).toBe('fail');
     expect(both.message).toMatch(/mutually exclusive/);
+  });
+
+  it('legacy first-read adoption cannot mint sidecar trust for either doctor row', async () => {
+    writeHermes({ memoryEnabled: true, userProfile: true });
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { posture: 'mcp_sidecar_no_inject', runtimes: ['hermes'] },
+        inject: { mode: 'off', hostId: 'tars', agentId: 'hermes-primary' },
+      },
+    });
+
+    // Match full runDoctor ordering: checkAutoMemoryHooks reaches this exact
+    // reader before the drift and host-contract rows. General config migration
+    // may adopt the unsigned legacy bytes by writing an external signature,
+    // but that compatibility artefact must not become operator-intent proof.
+    const cloud = await import('../../cloud/config.js');
+    const legacySigPath = path.join(scDir, '.config-sig');
+    expect(fs.existsSync(legacySigPath)).toBe(false);
+    cloud.readRawConfig();
+    expect(fs.existsSync(legacySigPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(scDir, 'config.json'), 'utf-8'))._sig).toBeUndefined();
+
+    const drift = await runDrift();
+    expect(drift.status).toBe('fail');
+    expect(drift.message).toMatch(/untrusted sidecar posture/i);
+
+    const host = await runHost();
+    expect(host.status).toBe('fail');
+    expect(host.message).toMatch(/untrusted/i);
+    expect(host.message).not.toMatch(/honest sidecar/);
+  });
+
+  it('host contract rejects unsigned and forged sidecar posture declarations', async () => {
+    writeHermes({ memoryEnabled: true, userProfile: true });
+    const sidecar = {
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { posture: 'mcp_sidecar_no_inject', runtimes: ['hermes'] },
+        inject: { mode: 'off', hostId: 'tars', agentId: 'hermes-primary' },
+      },
+    };
+    writeConfig(sidecar);
+    const unsigned = await runHost();
+    expect(unsigned.status).toBe('fail');
+    expect(unsigned.message).toMatch(/untrusted/);
+    expect(unsigned.message).not.toMatch(/honest sidecar/);
+
+    writeConfig({ ...sidecar, _sig: 'forged' });
+    const forged = await runHost();
+    expect(forged.status).toBe('fail');
+    expect(forged.message).toMatch(/untrusted/);
+    expect(forged.message).not.toMatch(/honest sidecar/);
   });
 
   it('host contract fails a hand-crafted posture-only blob — sidecar needs inject.mode explicitly off (SOL r2 B4)', async () => {

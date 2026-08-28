@@ -8,9 +8,10 @@
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createOpenClawRuntime, SELF_HEAL_SKIP_ENV } from "./runtime.mjs";
 
 // ==================== SERVER COMMAND RESOLUTION ====================
@@ -485,19 +486,148 @@ async function onSessionStop(event) {
 /**
  * Handle agent:bootstrap — inject past context into agent
  *
- * NOTE: Context injection disabled as of v2026.2.26.
- * OpenClaw's native Memory Search now handles context recall at bootstrap.
- * The old get_context injection caused ~40x duplication of CORTEX_MEMORY.md
- * in the system prompt, eating the entire context window.
+ * NOTE: Unbounded CORTEX_MEMORY dump remains disabled (v2026.2.26 40x class).
+ * Memory SOTA B: budgeted inject pack may run when memory.inject.nativeContract
+ * is set (sc_only | disable_native_inject). Without contract, no bus reclaim.
  * Hook remains active for keyword triggers + session-end auto-save.
  */
+
+/**
+ * Budgeted SC start pack for OpenClaw bootstrap (inject v2).
+ * Requires memory.inject.nativeContract = sc_only | disable_native_inject.
+ */
+async function maybeInjectBootstrapPack(context: any, wsDir: string, event: any) {
+  const fsSync = await import("node:fs");
+  const scDir = process.env.SHIELDCORTEX_CONFIG_DIR?.trim() || path.join(homedir(), ".shieldcortex");
+  const cfgPath = path.join(scDir, "config.json");
+  let raw = {};
+  try {
+    if (fsSync.existsSync(cfgPath)) {
+      raw = JSON.parse(fsSync.readFileSync(cfgPath, "utf-8"));
+    }
+  } catch {
+    return;
+  }
+
+  const hookDir = path.dirname(fileURLToPath(import.meta.url));
+  const resolvedPackageRoot = await resolvePackageRoot();
+  const candidates = [
+    path.join(hookDir, "inject-pack.mjs"),
+    ...(resolvedPackageRoot ? [path.join(resolvedPackageRoot, "scripts", "lib", "inject-pack.mjs")] : []),
+    path.join(hookDir, "..", "..", "..", "scripts", "lib", "inject-pack.mjs"),
+    path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex", "scripts", "lib", "inject-pack.mjs"),
+  ];
+
+  let buildStartPack;
+  let readInjectConfig;
+  let selectInjectCandidates;
+  let selectedInjectHelperPath = null;
+  for (const c of candidates) {
+    try {
+      const helperPath = path.resolve(c);
+      if (!fsSync.existsSync(helperPath)) continue;
+      const mod = await import(pathToFileURL(helperPath).href);
+      if (!mod.buildStartPack || !mod.readInjectConfig || !mod.selectInjectCandidates) continue;
+      buildStartPack = mod.buildStartPack;
+      readInjectConfig = mod.readInjectConfig;
+      selectInjectCandidates = mod.selectInjectCandidates;
+      selectedInjectHelperPath = helperPath;
+      break;
+    } catch {
+      /* try next */
+    }
+  }
+  if (!buildStartPack || !readInjectConfig || !selectInjectCandidates || !selectedInjectHelperPath) return;
+
+  const injectCfg = readInjectConfig(raw);
+  if (!injectCfg.nativeContract || injectCfg.mode === "off" || injectCfg.mode === "turn") {
+    return;
+  }
+
+  // The hook normally lives outside ShieldCortex's dependency tree. Resolve
+  // the native driver from the package that supplied inject-pack.mjs, never
+  // relative to this copied/self-healed handler. Prefer package.json as the
+  // package-root anchor; the selected helper remains a correct ancestry anchor
+  // for global/legacy layouts where package.json cannot be resolved.
+  const packageJsonPath = resolvedPackageRoot
+    ? path.join(resolvedPackageRoot, "package.json")
+    : null;
+  const dependencyAnchor = packageJsonPath && fsSync.existsSync(packageJsonPath)
+    ? packageJsonPath
+    : selectedInjectHelperPath;
+  const packageRequire = createRequire(pathToFileURL(dependencyAnchor).href);
+  const Database = packageRequire("better-sqlite3");
+  const dbPath = path.join(scDir, "memories.db");
+  if (!fsSync.existsSync(dbPath)) return;
+  const db = new Database(dbPath, { readonly: true, timeout: 3000 });
+  let rows = [];
+  try {
+    rows = selectInjectCandidates(db);
+  } finally {
+    db.close();
+  }
+
+  const sessionKey = String(event?.sessionKey || event?.sessionId || context?.sessionId || "bootstrap");
+  const stateDir = path.join(scDir, "state");
+  const statePath = path.join(
+    stateDir,
+    `inject-oc-${sessionKey.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 100)}.json`,
+  );
+  let sessionState = null;
+  try {
+    if (fsSync.existsSync(statePath)) {
+      sessionState = JSON.parse(fsSync.readFileSync(statePath, "utf-8"));
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const pack = buildStartPack(rows, {
+    mode: injectCfg.mode,
+    nativeContract: injectCfg.nativeContract,
+    scope: {
+      hostId: injectCfg.hostId,
+      agentId: injectCfg.agentId,
+      // #348 B3: config default-true — never data-derive from unscoped rows
+      requireScope: injectCfg.requireScope !== false,
+    },
+    budgets: injectCfg.budgets,
+    sessionState,
+    rehydrate: false,
+    compactSignaled: false,
+  });
+  try {
+    if (!fsSync.existsSync(stateDir)) fsSync.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    fsSync.writeFileSync(statePath, JSON.stringify(pack.sessionState), { mode: 0o600 });
+  } catch {
+    /* ignore */
+  }
+
+  if (!pack.text || !Array.isArray(context.bootstrapFiles)) return;
+
+  context.bootstrapFiles.push({
+    name: "SHIELDCORTEX_INJECT_PACK.md",
+    path: path.join(wsDir, "SHIELDCORTEX_INJECT_PACK.md"),
+    content: `${pack.text}\n`,
+  });
+  console.log(
+    `[cortex-memory] inject pack: ${pack.items.length} rows, ~${pack.tokens} tokens (${injectCfg.nativeContract})`,
+  );
+}
+
 async function onBootstrap(event) {
   const context = event.context || {};
   if (!Array.isArray(context.bootstrapFiles)) return;
 
   const wsDir = context.workspaceDir || event?.workspaceDir || "/tmp";
 
-  // Context injection removed — native OpenClaw Memory Search handles this now.
+  // Memory SOTA B: budgeted inject pack only when host nativeContract is set.
+  // Without contract, do not reclaim the bus (freeze law). No unbounded dump.
+  try {
+    await maybeInjectBootstrapPack(context, wsDir, event);
+  } catch (injErr) {
+    console.warn("[cortex-memory] inject pack skipped:", (injErr as Error)?.message ?? injErr);
+  }
 
   // Scan installed hooks for threats (still useful)
   try {

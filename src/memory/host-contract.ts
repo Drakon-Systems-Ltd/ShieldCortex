@@ -323,6 +323,57 @@ function openClawHookConfigEnabled(
   return obj(entry).enabled === false ? 'entry_off' : 'enabled';
 }
 
+/**
+ * OpenClaw's Memory Search state as decided from its config alone — the ONE
+ * reading of that switch precedence in the codebase (#394: the plane-drift
+ * doctor must not grow a second, disagreeing parser). `agents.defaults`
+ * resolves default-ON, any per-agent `memorySearch: true` re-enables past a
+ * defaults-off entry, and anything doctor cannot attest from the raw file (no
+ * config, unreadable, `$include` deep-merge) is `unknown` — never off_proven.
+ */
+export function resolveOpenClawMemorySearchState(
+  config: ProbeRead<Record<string, unknown>>,
+): { state: NativeBusState; proof: string[] } {
+  if (config.kind !== 'present') return { state: 'unknown', proof: [] };
+  if (openClawConfigUsesInclude(config.value)) return { state: 'unknown', proof: [] };
+  const oc = config.value;
+  const agents = oc.agents && typeof oc.agents === 'object' && !Array.isArray(oc.agents)
+    ? (oc.agents as Record<string, unknown>)
+    : {};
+  const defaults = agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+    ? (agents.defaults as Record<string, unknown>)
+    : {};
+  const defaultOn = resolveMemorySearchFlag(defaults.memorySearch);
+  const reEnabled: string[] = [];
+  const list = Array.isArray(agents.list) ? (agents.list as unknown[]) : [];
+  list.forEach((entry, i) => {
+    if (!entry || typeof entry !== 'object') return;
+    const e = entry as Record<string, unknown>;
+    const ms = e.memorySearch;
+    if (ms === true || (ms && typeof ms === 'object' && !Array.isArray(ms)
+      && (ms as Record<string, unknown>).enabled === true)) {
+      reEnabled.push(typeof e.name === 'string' ? e.name : `agents.list[${i}]`);
+    }
+  });
+
+  const proof: string[] = [];
+  if (reEnabled.length > 0) {
+    proof.push(`per-agent memorySearch re-enabled for ${reEnabled.join(', ')} — a defaults-off entry does not cover them`);
+    if (defaultOn) proof.push('agents.defaults.memorySearch also resolves ON');
+    return { state: 'on', proof };
+  }
+  if (defaultOn) {
+    proof.push(
+      defaults.memorySearch === undefined
+        ? 'agents.defaults.memorySearch unset — OpenClaw Memory Search runs default-ON'
+        : 'agents.defaults.memorySearch resolves ON',
+    );
+    return { state: 'on', proof };
+  }
+  proof.push('agents.defaults.memorySearch.enabled=false and no per-agent re-enable');
+  return { state: 'off_proven', proof };
+}
+
 export function resolveOpenClawEvidence(
   probe: OpenClawProbe,
   ctx: { contract: string; plane: string; nowMs: number },
@@ -406,41 +457,9 @@ export function resolveOpenClawEvidence(
     proof.push('openclaw.json uses $include — OpenClaw evaluates the deep-merged config, which doctor cannot attest from the raw file, so Memory Search cannot be proven off');
     remediation = `${cap.label}: inline the $include'd config into openclaw.json (or retire the includes) so doctor can attest the merged result, then prove ${cap.nativeOffSetting}`;
   } else {
-    const oc = probe.config.value;
-    const agents = oc.agents && typeof oc.agents === 'object' && !Array.isArray(oc.agents)
-      ? (oc.agents as Record<string, unknown>)
-      : {};
-    const defaults = agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
-      ? (agents.defaults as Record<string, unknown>)
-      : {};
-    const defaultOn = resolveMemorySearchFlag(defaults.memorySearch);
-    const reEnabled: string[] = [];
-    const list = Array.isArray(agents.list) ? (agents.list as unknown[]) : [];
-    list.forEach((entry, i) => {
-      if (!entry || typeof entry !== 'object') return;
-      const e = entry as Record<string, unknown>;
-      const ms = e.memorySearch;
-      if (ms === true || (ms && typeof ms === 'object' && !Array.isArray(ms)
-        && (ms as Record<string, unknown>).enabled === true)) {
-        reEnabled.push(typeof e.name === 'string' ? e.name : `agents.list[${i}]`);
-      }
-    });
-
-    if (reEnabled.length > 0) {
-      nativeBus = 'on';
-      proof.push(`per-agent memorySearch re-enabled for ${reEnabled.join(', ')} — a defaults-off entry does not cover them`);
-      if (defaultOn) proof.push('agents.defaults.memorySearch also resolves ON');
-    } else if (defaultOn) {
-      nativeBus = 'on';
-      proof.push(
-        defaults.memorySearch === undefined
-          ? 'agents.defaults.memorySearch unset — OpenClaw Memory Search runs default-ON'
-          : 'agents.defaults.memorySearch resolves ON',
-      );
-    } else {
-      nativeBus = 'off_proven';
-      proof.push('agents.defaults.memorySearch.enabled=false and no per-agent re-enable');
-    }
+    const ms = resolveOpenClawMemorySearchState(probe.config);
+    nativeBus = ms.state;
+    proof.push(...ms.proof);
     if (nativeBus === 'on') {
       remediation = `${cap.label}: set ${cap.nativeOffSetting} and clear per-agent memorySearch overrides`;
     }
@@ -1014,6 +1033,8 @@ export interface HostContractInput {
   nativeContract: 'sc_only' | 'disable_native_inject' | null;
   /** Raw `memory.hostContract.posture`, so junk values fail instead of vanishing. */
   postureRaw: string | null;
+  /** True only when the exact effective config carries a valid signed sidecar posture. */
+  postureTrusted?: boolean;
   /**
    * Printable description of a PRESENT non-string `memory.hostContract.posture`
    * (#393 SOL r3 nit). Kept separate from postureRaw on purpose: coercing junk
@@ -1106,6 +1127,8 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
   }
 
   const injectOn = input.injectConfigured && input.injectMode !== 'off';
+  const startBusOn = input.injectConfigured
+    && (input.injectMode === 'start' || input.injectMode === 'both');
   const modeLabel = input.injectModeExplicit === false
     ? `${input.injectMode} (emitter default)`
     : input.injectMode;
@@ -1122,6 +1145,15 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
   }
 
   if (!injectOn) {
+    if (posture === SIDECAR_POSTURE && input.plane !== 'dual_legacy') {
+      return {
+        status: 'fail',
+        message:
+          `plane=${input.plane} contradicts posture=${SIDECAR_POSTURE} — honest sidecar leaves native memory authoritative `
+          + 'and claims no SC canonicity/import ownership',
+        fix: 'Use plane=dual_legacy for the honest sidecar, or remove sidecar posture and establish a legal automatic start bus',
+      };
+    }
     if (input.plane === 'sc_canonical') {
       return {
         status: 'fail',
@@ -1144,6 +1176,13 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
             'the emitter defaults to mode=start and still emits legacy sidecar recall on the session-start bus, ' +
             'so the sidecar promise is not proven',
           fix: `Run \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` — the signed setter forces memory.inject.mode=off; do not hand-edit config.json`,
+        };
+      }
+      if (input.postureTrusted !== true) {
+        return {
+          status: 'fail',
+          message: `posture=${SIDECAR_POSTURE} is untrusted — the declaration is unsigned, forged, tampered, or not from the effective config path`,
+          fix: `Run \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` — signed write; do not hand-edit config.json`,
         };
       }
       return {
@@ -1169,6 +1208,17 @@ export function evaluateHostContract(input: HostContractInput): HostContractVerd
       status: 'info',
       message: 'inject mode=off — SC is not on the automatic bus, so no host contract is claimed',
       fix: `Declare it explicitly with \`shieldcortex config --memory-host-posture ${SIDECAR_POSTURE}\` if this box runs SC as a sidecar`,
+    };
+  }
+
+  // `turn` is injection, but it is not the automatic session-start memory bus.
+  // Preserve #393 handling for non-canonical planes; canonicity specifically
+  // cannot be established by a turn-only path.
+  if (input.plane === 'sc_canonical' && !startBusOn) {
+    return {
+      status: 'fail',
+      message: `plane=sc_canonical with SC inject mode=${modeLabel} — canonicity claimed without an automatic start bus`,
+      fix: 'Set memory.inject.mode=start|both with a legal nativeContract, or stop claiming sc_canonical',
     };
   }
 

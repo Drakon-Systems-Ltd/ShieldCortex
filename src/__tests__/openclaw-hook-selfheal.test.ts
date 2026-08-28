@@ -53,6 +53,15 @@ function selfHealSource(dir: string): string {
   return source.slice(start, end);
 }
 
+function bootstrapEmitterSource(dir: string): string {
+  const source = fs.readFileSync(path.join(dir, 'handler.ts'), 'utf-8');
+  const start = source.indexOf('async function maybeInjectBootstrapPack');
+  const end = source.indexOf('\n\nasync function onBootstrap', start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end).trimEnd();
+}
+
 describe('cortex-memory self-heal — copied file set is complete (#109)', () => {
   const manifest = manifestOf(HOOK_DIR);
 
@@ -75,6 +84,15 @@ describe('cortex-memory self-heal — copied file set is complete (#109)', () =>
     // The bundled copy is the one that most often runs from an unexpected path
     // (skills-only installs), i.e. the copy that actually performs a migration.
     expect(manifestOf(BUNDLED_HOOK_DIR)).toEqual(manifest);
+  });
+
+  it('the bundled self-heal source carries the exact managed start-pack emitter', () => {
+    const managed = bootstrapEmitterSource(HOOK_DIR);
+    const bundled = bootstrapEmitterSource(BUNDLED_HOOK_DIR);
+    expect(bundled).toBe(managed);
+    expect(bundled).toMatch(/buildStartPack/);
+    expect(bundled).toMatch(/readInjectConfig/);
+    expect(bundled).toMatch(/selectInjectCandidates/);
   });
 
   it('the installer copies the same set the hook expects', () => {
