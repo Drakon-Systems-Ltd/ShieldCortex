@@ -8,6 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -611,10 +612,10 @@ async function maybeInjectBootstrapPack(context: any, wsDir: string, event: any)
   }
 
   const hookDir = path.dirname(fileURLToPath(import.meta.url));
-  const packageRoot = await resolvePackageRoot();
+  const resolvedPackageRoot = await resolvePackageRoot();
   const candidates = [
     path.join(hookDir, "inject-pack.mjs"),
-    ...(packageRoot ? [path.join(packageRoot, "scripts", "lib", "inject-pack.mjs")] : []),
+    ...(resolvedPackageRoot ? [path.join(resolvedPackageRoot, "scripts", "lib", "inject-pack.mjs")] : []),
     path.join(hookDir, "..", "..", "..", "scripts", "lib", "inject-pack.mjs"),
     path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex", "scripts", "lib", "inject-pack.mjs"),
   ];
@@ -622,26 +623,42 @@ async function maybeInjectBootstrapPack(context: any, wsDir: string, event: any)
   let buildStartPack;
   let readInjectConfig;
   let selectInjectCandidates;
+  let selectedInjectHelperPath = null;
   for (const c of candidates) {
     try {
-      if (!fsSync.existsSync(c)) continue;
-      const mod = await import(pathToFileURL(c).href);
+      const helperPath = path.resolve(c);
+      if (!fsSync.existsSync(helperPath)) continue;
+      const mod = await import(pathToFileURL(helperPath).href);
+      if (!mod.buildStartPack || !mod.readInjectConfig || !mod.selectInjectCandidates) continue;
       buildStartPack = mod.buildStartPack;
       readInjectConfig = mod.readInjectConfig;
       selectInjectCandidates = mod.selectInjectCandidates;
-      if (buildStartPack && readInjectConfig && selectInjectCandidates) break;
+      selectedInjectHelperPath = helperPath;
+      break;
     } catch {
       /* try next */
     }
   }
-  if (!buildStartPack || !readInjectConfig || !selectInjectCandidates) return;
+  if (!buildStartPack || !readInjectConfig || !selectInjectCandidates || !selectedInjectHelperPath) return;
 
   const injectCfg = readInjectConfig(raw);
   if (!injectCfg.nativeContract || injectCfg.mode === "off" || injectCfg.mode === "turn") {
     return;
   }
 
-  const Database = (await import("better-sqlite3")).default;
+  // The hook normally lives outside ShieldCortex's dependency tree. Resolve
+  // the native driver from the package that supplied inject-pack.mjs, never
+  // relative to this copied/self-healed handler. Prefer package.json as the
+  // package-root anchor; the selected helper remains a correct ancestry anchor
+  // for global/legacy layouts where package.json cannot be resolved.
+  const packageJsonPath = resolvedPackageRoot
+    ? path.join(resolvedPackageRoot, "package.json")
+    : null;
+  const dependencyAnchor = packageJsonPath && fsSync.existsSync(packageJsonPath)
+    ? packageJsonPath
+    : selectedInjectHelperPath;
+  const packageRequire = createRequire(pathToFileURL(dependencyAnchor).href);
+  const Database = packageRequire("better-sqlite3");
   const dbPath = path.join(scDir, "memories.db");
   if (!fsSync.existsSync(dbPath)) return;
   const db = new Database(dbPath, { readonly: true, timeout: 3000 });

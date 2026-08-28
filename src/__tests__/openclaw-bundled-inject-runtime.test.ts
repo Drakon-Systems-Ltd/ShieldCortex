@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { createRequire } from 'module';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -33,11 +34,20 @@ describe('bundled OpenClaw hook — start-pack runtime', () => {
     const fakePackage = path.join(tmpHome, 'shieldcortex-package');
     fs.mkdirSync(path.join(fakePackage, 'dist'), { recursive: true });
     fs.mkdirSync(path.join(fakePackage, 'scripts', 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(fakePackage, 'node_modules'), { recursive: true });
     fs.mkdirSync(scDir, { recursive: true });
+    fs.writeFileSync(path.join(fakePackage, 'package.json'), JSON.stringify({ name: 'shieldcortex-test-package' }));
     fs.writeFileSync(path.join(fakePackage, 'dist', 'index.js'), '#!/usr/bin/env node\n');
     fs.copyFileSync(
       path.join(repoRoot, 'scripts', 'lib', 'inject-pack.mjs'),
       path.join(fakePackage, 'scripts', 'lib', 'inject-pack.mjs'),
+    );
+    const testRequire = createRequire(import.meta.url);
+    const realBetterSqlite3 = path.resolve(path.dirname(testRequire.resolve('better-sqlite3')), '..');
+    fs.symlinkSync(
+      realBetterSqlite3,
+      path.join(fakePackage, 'node_modules', 'better-sqlite3'),
+      process.platform === 'win32' ? 'junction' : 'dir',
     );
 
     const db = new Database(path.join(scDir, 'memories.db'));
@@ -84,11 +94,10 @@ describe('bundled OpenClaw hook — start-pack runtime', () => {
     writeConfig({ mode: 'start', nativeContract: 'sc_only', hostId: 'host-a', agentId: 'agent-a' });
 
     // OpenClaw jiti-loads handler.ts. Transpile that exact bundled source into
-    // this isolated skills-only directory, preserving its runtime.mjs sibling,
+    // an isolated skills-only directory OUTSIDE the repository (and therefore
+    // outside its node_modules ancestry), preserving its runtime.mjs sibling,
     // then execute the resulting module rather than a test double.
-    // Keep the transient module under the repo so its bare better-sqlite3
-    // import resolves exactly as the packaged hook's does.
-    tmpSourceDir = fs.mkdtempSync(path.join(repoRoot, '.jest-bundled-hook-'));
+    tmpSourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-isolated-bundled-hook-'));
     const skillsDir = tmpSourceDir;
     const bundledDir = path.join(repoRoot, 'skills', 'shieldcortex', 'bundled', 'cortex-memory-hook');
     const transpiled = ts.transpileModule(
@@ -97,6 +106,14 @@ describe('bundled OpenClaw hook — start-pack runtime', () => {
     ).outputText;
     fs.writeFileSync(path.join(skillsDir, 'handler.mjs'), transpiled);
     fs.copyFileSync(path.join(bundledDir, 'runtime.mjs'), path.join(skillsDir, 'runtime.mjs'));
+
+    // Guard the regression instrument itself: a bare import from this handler
+    // location cannot resolve, while the fake ShieldCortex package anchor can.
+    // Reverting the emitter to import("better-sqlite3") therefore fails here.
+    const isolatedRequire = createRequire(pathToFileURL(path.join(skillsDir, 'handler.mjs')));
+    expect(() => isolatedRequire.resolve('better-sqlite3')).toThrow();
+    const packageRequire = createRequire(pathToFileURL(path.join(fakePackage, 'package.json')));
+    expect(() => packageRequire.resolve('better-sqlite3')).not.toThrow();
 
     jest.resetModules();
     const handlerUrl = pathToFileURL(path.join(skillsDir, 'handler.mjs')).href;
