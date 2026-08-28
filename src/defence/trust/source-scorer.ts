@@ -103,6 +103,13 @@ const HIERARCHY_DISPLAY = [
   'web:* = 0.3',
 ];
 
+/**
+ * The exact internal native-import source identity (#395). Batch segment is the
+ * validated batchId charset, bounded to 128; the file segment is the first 24
+ * hex characters of the SHA-256 of the resolved source path.
+ */
+const NATIVE_IMPORT_SOURCE_SHAPE = /^native-import:[A-Za-z0-9._-]{1,128}:file:[0-9a-f]{24}$/;
+
 export function scoreSource(source: DefenceSource): TrustScore {
   const key = `${source.type}:${source.identifier}`;
   // Score off the BARE identifier: the ownership stamp separates a self-declared
@@ -111,10 +118,32 @@ export function scoreSource(source: DefenceSource): TrustScore {
   // a stamped identifier is barred from claiming a privileged origin.
   const bareKey = `${source.type}:${stripUnattestedStamp(source.identifier)}`;
 
-  // A3 import-once assigns a per-chunk identifier so bulk imports do not share
-  // one rate-limit bucket. Keep every such file at the same thin 0.4 trust as
-  // file:import; the prefix can only lower generic file trust, never raise it.
-  if (source.type === 'file' && stripUnattestedStamp(source.identifier).startsWith('native-import:')) {
+  // A3 import-once assigns one stable identifier per source file so Class-B and
+  // threat-graph accrual span every chunk. Its private bounded store seam owns
+  // bulk rate handling, and the importer stamps thin `file:import` trust (0.4).
+  //
+  // Two conditions, and the second is the one that carries the security weight:
+  //
+  // 1. The FULL internal shape — `native-import:<batchId>:file:<24 hex>` exactly
+  //    as import-native.ts mints it. A bare `native-import:` prefix would be a
+  //    caller-spendable namespace on the MCP `source`/`sourceIdentifier` surface.
+  // 2. The RAW, UNSTAMPED identifier must match. Exact syntax is a naming
+  //    convention, not a capability: an MCP caller can type a well-formed
+  //    `native-import:<batch>:file:<24 hex>` just as easily as a malformed one.
+  //    What it cannot do is arrive unstamped — resolveToolSource stamps every
+  //    identity the environment did not confirm (`unattested>`), and the env
+  //    detector never mints this shape. The genuine importer never goes through
+  //    that resolver: it calls createNativeImportAdmissionSession directly with
+  //    the bare key it minted itself. So "unstamped AND exactly shaped" is
+  //    internal provenance, whereas the stripped form is forgeable syntax.
+  //
+  // Scoring the stripped identifier here would hand a caller the sub-quarantine
+  // band: 0.4 sits below SUBAGENT_QUARANTINE_MIN, so any agent could turn its
+  // own held 0.6 `file:*` write into a stored one and forge native-import
+  // provenance in `memories.source` / `defence_audit.source_identifier`.
+  // A stamped, malformed, or otherwise caller-resolved identifier therefore
+  // falls through to ordinary `file:*` trust and disposition.
+  if (source.type === 'file' && NATIVE_IMPORT_SOURCE_SHAPE.test(source.identifier)) {
     const score = BASE_SCORES['file:import'];
     return { score, source, hierarchy: [...HIERARCHY_DISPLAY, `>> ${key} = ${score}`] };
   }

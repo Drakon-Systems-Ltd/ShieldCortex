@@ -56,12 +56,38 @@ export interface PipelineRunOptions {
    * config-file `threatGraph.trustModifier` (advisory). Test seam.
    */
   trustModifierMode?: TrustModifierMode;
-  /**
-   * Run every decision layer without writing audit/events or scheduling cloud
-   * sync. Used only for mutation-free previews; defaults to true so existing
-   * callers retain the full provenance ledger and notification behaviour.
-   */
-  recordSideEffects?: boolean;
+}
+
+type DeferredPipelineEffect = () => void;
+
+interface InternalPipelineRunOptions extends PipelineRunOptions {
+  sideEffects: 'record' | 'preview' | 'transactional';
+  deferredEffects?: DeferredPipelineEffect[];
+  sanitiseInputForTest?: typeof sanitiseInput;
+}
+
+function runExternalEffect(options: InternalPipelineRunOptions, effect: DeferredPipelineEffect): void {
+  if (options.sideEffects === 'preview') return;
+  if (options.sideEffects === 'transactional') {
+    options.deferredEffects?.push(effect);
+    return;
+  }
+  effect();
+}
+
+/**
+ * Copy ONLY the documented public option fields into the internal option bag.
+ *
+ * `PipelineRunOptions` is caller-supplied and untyped at runtime: spreading it
+ * would let a JS caller smuggle internal keys (`sanitiseInputForTest`,
+ * `sideEffects`, `deferredEffects`) past the type system and replace a real
+ * decision layer or silence persistence. Public callers get exactly two knobs.
+ */
+function publicPipelineOptions(options?: PipelineRunOptions): PipelineRunOptions {
+  return {
+    sourceAttested: options?.sourceAttested,
+    trustModifierMode: options?.trustModifierMode,
+  };
 }
 
 export function runDefencePipeline(
@@ -72,12 +98,64 @@ export function runDefencePipeline(
   project?: string,
   options?: PipelineRunOptions,
 ): DefencePipelineResult {
+  return runDefencePipelineInternal(content, title, source, config, project, {
+    ...publicPipelineOptions(options),
+    sideEffects: 'record',
+  });
+}
+
+/** Internal bounded-preview seam; not re-exported from package barrels. */
+export function runDefencePipelinePreviewInternal(
+  content: string,
+  title: string,
+  source: DefenceSource,
+  config?: DefenceConfig,
+  project?: string,
+  options?: PipelineRunOptions,
+  sanitiseInputForTest?: typeof sanitiseInput,
+): DefencePipelineResult {
+  return runDefencePipelineInternal(content, title, source, config, project, {
+    ...publicPipelineOptions(options),
+    sideEffects: 'preview',
+    sanitiseInputForTest,
+  });
+}
+
+/** Internal transaction seam; external effects are queued until DB commit. */
+export function runDefencePipelineTransactionalInternal(
+  content: string,
+  title: string,
+  source: DefenceSource,
+  deferredEffects: DeferredPipelineEffect[],
+  config?: DefenceConfig,
+  project?: string,
+  options?: PipelineRunOptions,
+  sanitiseInputForTest?: typeof sanitiseInput,
+): DefencePipelineResult {
+  return runDefencePipelineInternal(content, title, source, config, project, {
+    ...publicPipelineOptions(options),
+    sideEffects: 'transactional',
+    deferredEffects,
+    sanitiseInputForTest,
+  });
+}
+
+function runDefencePipelineInternal(
+  content: string,
+  title: string,
+  source: DefenceSource,
+  config: DefenceConfig | undefined,
+  project: string | undefined,
+  options: InternalPipelineRunOptions,
+): DefencePipelineResult {
   const cfg = config ?? { ...DEFAULT_DEFENCE_CONFIG, mode: getDefenceMode() };
   const startTime = performance.now();
 
   try {
     // 1. Input sanitisation (Layer 1) — strip dangerous bytes before analysis
-    const sanitisation = sanitiseInput(content);
+    // The override is a repository-only seam for faulting this actual decision
+    // layer; it is only reachable through the non-barrel transactional path.
+    const sanitisation = (options.sanitiseInputForTest ?? sanitiseInput)(content);
     const cleanContent = sanitisation.sanitised;
 
     // 2. Score trust, then apply the threat-graph risk modifier (Loop 2).
@@ -258,7 +336,7 @@ export function runDefencePipeline(
 
     // 6. Log audit. Preview callers still run every decision layer but leave
     // the DB and external queues untouched.
-    const auditId = options?.recordSideEffects === false ? -1 : logAudit({
+    const auditId = options.sideEffects === 'preview' ? -1 : logAudit({
       memory_id: null,
       project: project ?? null,
       timestamp: new Date().toISOString(),
@@ -275,12 +353,12 @@ export function runDefencePipeline(
       reason,
       fragmentation_score: fragmentation?.score ?? null,
       pipeline_duration_ms: durationMs,
-      source_attested: options?.sourceAttested === undefined ? null : (options.sourceAttested ? 1 : 0),
+      source_attested: options.sourceAttested === undefined ? null : (options.sourceAttested ? 1 : 0),
       risk_modifier: modMode === 'off' ? null : riskMod.modifier,
     });
 
     // 7. Emit defence event for real-time dashboard alerts (BLOCK/QUARANTINE only)
-    if (options?.recordSideEffects !== false && firewall.result !== 'ALLOW') {
+    if (options.sideEffects !== 'preview' && firewall.result !== 'ALLOW') {
       try {
         persistEvent('defence_event', {
           source_type: source.type,
@@ -309,36 +387,40 @@ export function runDefencePipeline(
 
     // 8. Sync audit data to cloud (fire-and-forget, never blocks).
     // Gated on `cloud_audit_sync` (Free tier) — metadata only, no content.
-    if (options?.recordSideEffects !== false && isFeatureEnabled('cloud_audit_sync')) {
-      try {
-        syncToCloud(pipelineResult, source, durationMs);
-      } catch {
-        // Cloud sync must never affect local pipeline
-      }
+    if (isFeatureEnabled('cloud_audit_sync')) {
+      runExternalEffect(options, () => {
+        try {
+          syncToCloud(pipelineResult, source, durationMs);
+        } catch {
+          // Cloud sync must never affect local pipeline
+        }
+      });
     }
 
     // 9. Sync quarantine *content* to cloud (fire-and-forget). Gated on
     // `cloud_sync` (Team tier) because this sends original content + title.
-    if (options?.recordSideEffects !== false && isFeatureEnabled('cloud_sync') && firewall.result === 'QUARANTINE') {
-      try {
-        const indicators = firewall.threatIndicators.map(t =>
-          typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
-        );
-        syncQuarantineToCloud({
-          original_content: content,
-          original_title: title,
-          source_type: source.type,
-          source_identifier: source.identifier,
-          reason,
-          threat_indicators: indicators,
-          anomaly_score: firewall.anomalyScore,
-          firewall_result: firewall.result,
-          project: project ?? null,
-          sensitivity_level: sensitivity.level,
-        });
-      } catch {
-        // Quarantine sync must never affect local pipeline
-      }
+    if (isFeatureEnabled('cloud_sync') && firewall.result === 'QUARANTINE') {
+      runExternalEffect(options, () => {
+        try {
+          const indicators = firewall.threatIndicators.map(t =>
+            typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
+          );
+          syncQuarantineToCloud({
+            original_content: content,
+            original_title: title,
+            source_type: source.type,
+            source_identifier: source.identifier,
+            reason,
+            threat_indicators: indicators,
+            anomaly_score: firewall.anomalyScore,
+            firewall_result: firewall.result,
+            project: project ?? null,
+            sensitivity_level: sensitivity.level,
+          });
+        } catch {
+          // Quarantine sync must never affect local pipeline
+        }
+      });
     }
 
     return pipelineResult;
@@ -347,7 +429,7 @@ export function runDefencePipeline(
     const durationMs = Math.round(performance.now() - startTime);
     console.error('[defence] Pipeline error, failing closed:', err);
 
-    const auditId = options?.recordSideEffects === false ? -1 : logAudit({
+    const auditId = options.sideEffects === 'preview' ? -1 : logAudit({
       memory_id: null,
       project: project ?? null,
       timestamp: new Date().toISOString(),
@@ -363,8 +445,25 @@ export function runDefencePipeline(
       reason: `Pipeline error (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
       fragmentation_score: null,
       pipeline_duration_ms: durationMs,
-      source_attested: options?.sourceAttested === undefined ? null : (options.sourceAttested ? 1 : 0),
+      source_attested: options.sourceAttested === undefined ? null : (options.sourceAttested ? 1 : 0),
     });
+
+    if (options.sideEffects !== 'preview') {
+      try {
+        persistEvent('defence_event', {
+          source_type: source.type,
+          source_identifier: source.identifier,
+          firewall_result: 'BLOCK',
+          trust_score: 0,
+          anomaly_score: 1,
+          reason: `Pipeline error (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+          threat_indicators: '["pipeline_error"]',
+          timestamp: new Date().toISOString(),
+        });
+      } catch {
+        // Event persistence is best-effort; the audit verdict remains canonical.
+      }
+    }
 
     return {
       allowed: false,

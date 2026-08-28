@@ -159,7 +159,6 @@ export {
 // ── Memory ─────────────────────────────────────────────────
 export {
   addMemory,
-  assessMemoryAdmission,
   getMemoryById,
   updateMemory,
   deleteMemory,
@@ -176,7 +175,6 @@ export {
 } from './memory/import-native.js';
 export type {
   NativeImportOptions,
-  NativeImportDependencies,
   NativeImportResult,
   NativeImportDisposition,
   NativeImportRowResult,

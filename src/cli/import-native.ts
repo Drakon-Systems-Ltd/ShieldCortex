@@ -1,7 +1,6 @@
 import { closeDatabase, initDatabase } from '../database/init.js';
-import os from 'os';
-import fs from 'fs';
-import path from 'path';
+import { flushPendingCloudSync } from '../cloud/sync.js';
+import { awaitPendingEmbeddings } from '../memory/store.js';
 import {
   importNativeMemories,
   resolveConfiguredNativeImportScope,
@@ -23,11 +22,16 @@ export function parseNativeImportArgs(args: string[]): ParsedNativeImportArgs {
   const paths: string[] = [];
   let apply = false;
   let json = false;
+  let positionalOnly = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (!arg.startsWith('-')) {
+    if (positionalOnly || !arg.startsWith('-')) {
       paths.push(arg);
+      continue;
+    }
+    if (arg === '--') {
+      positionalOnly = true;
       continue;
     }
     if (VALUE_FLAGS.has(arg)) {
@@ -72,8 +76,14 @@ function printUsage(): void {
   console.error('  --agent-id <id>     Required agent scope (or configured memory scope)');
   console.error('  --project <project> Optional project scope');
   console.error('  --json              Emit stable machine-readable dispositions');
+  console.error('  --                  Treat all remaining arguments as paths');
   console.error('');
   console.error('Dry-run is the default. Directories, globs, symlinks, and non-Markdown files are rejected.');
+  console.error('Archiving is a hard link, so every source must live on the same filesystem as the');
+  console.error('archive root (~/.shieldcortex/native-import-archive by default); a cross-filesystem');
+  console.error('apply fails EXDEV and rolls the whole batch back.');
+  console.error('A dry-run is not a prediction: --apply re-runs the full defence pipeline WITH side');
+  console.error('effects, so cross-chunk signals can deny a batch that dry-ran clean.');
 }
 
 function printHuman(result: NativeImportResult): void {
@@ -85,28 +95,54 @@ function printHuman(result: NativeImportResult): void {
       : row.preservedMemoryId !== undefined
         ? ` preserved=#${row.preservedMemoryId}`
         : '';
-    console.log(`${row.disposition}\t${row.sourcePath}#${row.chunkIndex}\t${row.contentHash}\t${row.defenceVerdict ?? '-'}${id}\t${row.reason}`);
+    console.log(`${row.disposition}/${row.admissionKind ?? '-'}\t${row.sourcePath}#${row.chunkIndex}\t${row.contentHash}\t${row.defenceVerdict ?? '-'}${id}\t${row.reason}`);
   }
   for (const file of result.files) {
     if (file.archivePath) console.log(`archived\t${file.sourcePath}\t${file.archivePath}`);
   }
+  if (result.applyPossible === false && result.applyBlockedReason) {
+    console.error(`apply-impossible\t${result.applyBlockedReason}`);
+  }
   if (result.error) console.error(`Import failed: ${result.error}`);
-  else if (result.dryRun) console.log('No sources archived and no memories admitted. Re-run with --apply to admit and archive.');
+  else if (result.dryRun) {
+    console.log(
+      'No files or database rows changed. Re-run with --apply to admit and archive: apply re-runs the '
+      + 'full defence pipeline with side effects, so this dry-run does not guarantee admission, and '
+      + 'archival can still fail (the batch then rolls back).',
+    );
+  }
 }
 
-function configuredMemoriesDbPath(): string | null {
-  if (!process.env.SHIELDCORTEX_CONFIG_DIR) return null;
-  return path.join(path.resolve(process.env.SHIELDCORTEX_CONFIG_DIR), 'memories.db');
+/**
+ * Usage/parse failures still owe `--json` callers a parseable envelope. Read the
+ * flag straight off the raw argv (stopping at `--`, where it would be a path),
+ * because the parser that would have told us never got to run.
+ */
+function rawArgsRequestJson(args: string[]): boolean {
+  for (const arg of args) {
+    if (arg === '--') return false;
+    if (arg === '--json') return true;
+  }
+  return false;
 }
 
-function liveMemoriesDbPath(): string | null {
-  const configured = configuredMemoriesDbPath();
-  if (configured) return fs.existsSync(configured) ? configured : null;
-  const candidates = [
-    path.join(os.homedir(), '.shieldcortex', 'memories.db'),
-    path.join(os.homedir(), '.claude-memory', 'memories.db'),
-  ];
-  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+function envelope(
+  options: { apply?: boolean; hostId?: string | null; agentId?: string | null; project?: string; batchId?: string },
+  error: string,
+): NativeImportResult {
+  return {
+    success: false,
+    applied: false,
+    dryRun: options.apply !== true,
+    batchId: options.batchId ?? '',
+    hostId: options.hostId ?? '',
+    agentId: options.agentId ?? '',
+    project: options.project ?? null,
+    files: [],
+    rows: [],
+    archived: [],
+    error,
+  };
 }
 
 export async function runNativeImportCli(args: string[]): Promise<number> {
@@ -114,51 +150,67 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
   try {
     parsed = parseNativeImportArgs(args);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    if (rawArgsRequestJson(args)) {
+      console.log(JSON.stringify(envelope({ apply: args.includes('--apply') }, message)));
+      return 2;
+    }
+    console.error(message);
     printUsage();
     return 2;
   }
 
   // Scope is rejected before database initialisation or any defence scan.
   if (!parsed.options.hostId || !parsed.options.agentId) {
-    const result: NativeImportResult = {
-      success: false,
-      applied: false,
-      dryRun: parsed.options.apply !== true,
-      batchId: '',
-      hostId: parsed.options.hostId ?? '',
-      agentId: parsed.options.agentId ?? '',
-      project: parsed.options.project ?? null,
-      files: [],
-      rows: [],
-      archived: [],
-      error: 'native import requires --host-id and --agent-id (or configured memory scope)',
-    };
+    const result = envelope(
+      parsed.options,
+      'native import requires --host-id and --agent-id (or configured memory scope)',
+    );
     if (parsed.json) console.log(JSON.stringify(result));
     else printHuman(result);
     return 2;
   }
 
-  let previewDir: string | undefined;
-  const configuredDb = configuredMemoriesDbPath();
-  const liveDb = liveMemoriesDbPath();
-  if (parsed.options.apply === true) {
-    initDatabase(configuredDb ?? liveDb ?? undefined);
-  } else if (liveDb) {
-    initDatabase(liveDb);
-  } else {
-    previewDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-395-preview-'));
-    initDatabase(path.join(previewDir, 'preview.db'));
-  }
+  let initialized = false;
+  let result: NativeImportResult;
   try {
-    const result = importNativeMemories(parsed.options);
-    if (parsed.json) console.log(JSON.stringify(result));
-    else printHuman(result);
-    return result.success ? 0 : 1;
-  } finally {
-    closeDatabase();
-    if (previewDir) fs.rmSync(previewDir, { recursive: true, force: true });
+    initDatabase();
+    initialized = true;
+    result = importNativeMemories(parsed.options);
+  } catch (error) {
+    result = envelope(parsed.options, error instanceof Error ? error.message : String(error));
   }
+
+  if (initialized) {
+    try {
+      await awaitPendingEmbeddings();
+      await flushPendingCloudSync(8000);
+    } catch (error) {
+      result = {
+        ...result,
+        success: false,
+        error: [result.error, `post-import drain failed: ${error instanceof Error ? error.message : String(error)}`]
+          .filter(Boolean)
+          .join('; '),
+      };
+    } finally {
+      try {
+        closeDatabase();
+      } catch (error) {
+        result = {
+          ...result,
+          success: false,
+          error: [result.error, `database close failed: ${error instanceof Error ? error.message : String(error)}`]
+            .filter(Boolean)
+            .join('; '),
+        };
+      }
+    }
+  }
+
+  if (parsed.json) console.log(JSON.stringify(result));
+  else printHuman(result);
+  return result.success ? 0 : 1;
 }
 
 export async function handleNativeImportCommand(args: string[]): Promise<void> {
