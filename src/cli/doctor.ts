@@ -3111,9 +3111,19 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   // The sidecar exemption is intentionally narrower than string equality. The
   // signed setter writes an embedded signature and explicit mode=off; a bare,
   // copied, malformed, or legacy posture blob does not get to suppress drift.
-  const trustedSidecar = cfg.posture === SIDECAR_POSTURE
-    && cfg.postureIllegal === undefined
+  const sidecarDeclared = cfg.posture === SIDECAR_POSTURE
+    && cfg.postureIllegal === undefined;
+  const trustedSidecar = sidecarDeclared
     && hasTrustedMemorySidecarPosture(raw, configPath);
+  if (sidecarDeclared && !trustedSidecar) {
+    return {
+      label,
+      status: 'fail',
+      message:
+        `untrusted sidecar posture (${SIDECAR_POSTURE}) — the declaration is not covered by a valid embedded config signature`,
+      fix: 'Run `shieldcortex config --memory-host-posture mcp_sidecar_no_inject` so the signed setter records the declaration; a legacy .config-sig is not operator-intent proof',
+    };
+  }
   if (trustedSidecar) {
     if (cfg.plane === 'import_only' || cfg.plane === 'sc_canonical') {
       return {

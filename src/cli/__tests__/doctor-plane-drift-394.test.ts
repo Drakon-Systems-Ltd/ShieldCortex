@@ -757,7 +757,8 @@ describe('checkMemoryPlaneDrift — #394 T2 teeth', () => {
     fs.mkdirSync(store, { recursive: true });
     fs.writeFileSync(path.join(store, 'MEMORY.md'), '# native remains live\n');
     const r = await runDrift();
-    expect(r.status).toBe('warn');
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/untrusted sidecar posture/i);
     expect(r.message).not.toMatch(/honest sidecar/);
   });
 
@@ -777,7 +778,8 @@ describe('checkMemoryPlaneDrift — #394 T2 teeth', () => {
     fs.mkdirSync(store, { recursive: true });
     fs.writeFileSync(path.join(store, 'MEMORY.md'), '# native remains live\n');
     const r = await runDrift();
-    expect(r.status).toBe('warn');
+    expect(r.status).toBe('fail');
+    expect(r.message).toMatch(/untrusted sidecar posture/i);
     expect(r.message).not.toMatch(/honest sidecar/);
   });
 });

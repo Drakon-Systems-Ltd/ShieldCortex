@@ -1591,6 +1591,11 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const cloud = await import('../../cloud/config.js');
     cloud.setMemoryHostRuntimes(['hermes']);
     cloud.setMemoryHostPosture('mcp_sidecar_no_inject');
+    const signedRaw = JSON.parse(fs.readFileSync(path.join(scDir, 'config.json'), 'utf-8'));
+    expect(cloud.hasTrustedMemorySidecarPosture(
+      signedRaw,
+      path.join(scDir, 'wrong-config.json'),
+    )).toBe(false);
     const sidecar = await runHost();
     expect(sidecar.status).toBe('pass');
     expect(sidecar.message).toMatch(/honest sidecar/);
@@ -1605,6 +1610,37 @@ describe('checkMemoryPlaneDrift + checkMemoryHostContract', () => {
     const both = await runHost();
     expect(both.status).toBe('fail');
     expect(both.message).toMatch(/mutually exclusive/);
+  });
+
+  it('legacy first-read adoption cannot mint sidecar trust for either doctor row', async () => {
+    writeHermes({ memoryEnabled: true, userProfile: true });
+    writeConfig({
+      memory: {
+        plane: 'dual_legacy',
+        hostContract: { posture: 'mcp_sidecar_no_inject', runtimes: ['hermes'] },
+        inject: { mode: 'off', hostId: 'tars', agentId: 'hermes-primary' },
+      },
+    });
+
+    // Match full runDoctor ordering: checkAutoMemoryHooks reaches this exact
+    // reader before the drift and host-contract rows. General config migration
+    // may adopt the unsigned legacy bytes by writing an external signature,
+    // but that compatibility artefact must not become operator-intent proof.
+    const cloud = await import('../../cloud/config.js');
+    const legacySigPath = path.join(scDir, '.config-sig');
+    expect(fs.existsSync(legacySigPath)).toBe(false);
+    cloud.readRawConfig();
+    expect(fs.existsSync(legacySigPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(scDir, 'config.json'), 'utf-8'))._sig).toBeUndefined();
+
+    const drift = await runDrift();
+    expect(drift.status).toBe('fail');
+    expect(drift.message).toMatch(/untrusted sidecar posture/i);
+
+    const host = await runHost();
+    expect(host.status).toBe('fail');
+    expect(host.message).toMatch(/untrusted/i);
+    expect(host.message).not.toMatch(/honest sidecar/);
   });
 
   it('host contract rejects unsigned and forged sidecar posture declarations', async () => {

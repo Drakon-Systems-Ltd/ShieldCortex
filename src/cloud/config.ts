@@ -451,10 +451,11 @@ export function readRawConfig(): Record<string, unknown> {
  * Whether this exact raw config is the signed honest-sidecar posture.
  *
  * This is the single trust decision used by both memory-plane doctor rows. It
- * deliberately does not route through readRawConfig(): that reader adopts a
- * previously unsigned legacy config on first read, which is correct for
- * backwards compatibility but is not proof that the signed posture setter
- * created this declaration.
+ * deliberately requires a valid EMBEDDED `_sig`: readRawConfig() may adopt a
+ * previously unsigned legacy config by minting `.config-sig`, which is correct
+ * compatibility trust for ordinary config reads but is not proof that the
+ * signed posture setter created this operator-intent declaration. External
+ * legacy signatures therefore never certify the sidecar exemption.
  */
 export function hasTrustedMemorySidecarPosture(
   raw: Record<string, unknown>,
@@ -469,10 +470,11 @@ export function hasTrustedMemorySidecarPosture(
     // The caller must be grading the same bytes whose signature is checked.
     if (JSON.stringify(parsed) !== JSON.stringify(raw)) return false;
 
-    // Unsigned legacy adoption is not strong enough for the sidecar exemption.
-    // Accept either product-supported signature format when it already exists.
-    const signaturePresent = typeof parsed._sig === 'string' || existsSync(getSigFile());
-    if (!signaturePresent || checkConfigIntegrity(parsed, content) === 'tampered') return false;
+    // Only a currently valid embedded signature can carry operator intent.
+    // `self-heal` means the embedded signature is invalid even if a legacy
+    // external signature authenticates the general config bytes, so it is not
+    // sufficient here either.
+    if (typeof parsed._sig !== 'string' || checkConfigIntegrity(parsed, content) !== 'valid') return false;
 
     const memory = parsed.memory && typeof parsed.memory === 'object' && !Array.isArray(parsed.memory)
       ? parsed.memory as Record<string, unknown>
