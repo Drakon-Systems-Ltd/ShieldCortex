@@ -257,11 +257,16 @@ function findExistingDisposition(
   project: string | null,
   importTrust: number,
 ): { disposition: NativeImportDisposition; memoryId: number; reason: string } | null {
-  const exact = db.prepare(
-    'SELECT id FROM memories WHERE content_hash = ? ORDER BY trust_score DESC, id ASC LIMIT 1',
-  ).get(chunk.contentHash) as { id: number } | undefined;
+  const exact = db.prepare(`
+    SELECT id FROM memories
+    WHERE content_hash = ?
+      AND host_id = ? AND agent_id = ?
+      AND ((project IS NULL AND ? IS NULL) OR project = ?)
+      AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
+    ORDER BY trust_score DESC, id ASC LIMIT 1
+  `).get(chunk.contentHash, hostId, agentId, project, project) as { id: number } | undefined;
   if (exact) {
-    return { disposition: 'exact_duplicate', memoryId: exact.id, reason: 'exact content hash already exists' };
+    return { disposition: 'exact_duplicate', memoryId: exact.id, reason: 'exact content hash already exists in this scope' };
   }
 
   const candidates = db.prepare(`
@@ -314,6 +319,17 @@ function archiveSources(files: PreparedFile[]): string[] {
       }
     }
     throw error;
+  }
+}
+
+function deleteMemoriesById(db: Database.Database, ids: number[]): void {
+  const stmt = db.prepare('DELETE FROM memories WHERE id = ?');
+  for (const id of ids) {
+    try {
+      stmt.run(id);
+    } catch {
+      // Best-effort rollback; the caller still reports failure.
+    }
   }
 }
 
@@ -574,9 +590,10 @@ export function importNativeMemories(
       ).get(row.source.type, row.source.identifier) as { count: number }).count;
       try {
         const unexpected = admit(row.input, undefined, row.source, { sourceAttested: false });
+        deleteMemoriesById(db, [unexpected.id]);
         row.result.disposition = 'failed';
-        row.result.memoryId = unexpected.id;
-        row.result.reason = 'preflight denial unexpectedly admitted during apply; source not archived';
+        row.result.reason = 'preflight denial unexpectedly admitted during apply; rolled back; source not archived';
+        delete row.result.memoryId;
       } catch (error) {
         const after = (db.prepare(
           'SELECT COUNT(*) AS count FROM quarantine WHERE source_type = ? AND source_identifier = ?',
@@ -602,16 +619,26 @@ export function importNativeMemories(
     };
   }
 
+  const admittedIds: number[] = [];
   for (const row of preparedRows) {
     if (row.result.disposition !== 'would_admit') continue;
     try {
       const memory = admit(row.input, undefined, row.source, { sourceAttested: false });
+      admittedIds.push(memory.id);
       row.result.disposition = 'admitted';
       row.result.memoryId = memory.id;
       row.result.defenceVerdict = 'ALLOW';
       row.result.trustScore = Math.min(memory.trustScore, NATIVE_IMPORT_TRUST_CEILING);
       row.result.salience = Math.min(memory.salience, NATIVE_IMPORT_SALIENCE_CEILING);
     } catch (error) {
+      deleteMemoriesById(db, admittedIds);
+      for (const previous of preparedRows) {
+        if (previous.result.disposition === 'admitted') {
+          previous.result.disposition = 'failed';
+          previous.result.reason = 'batch rolled back after a later admission failure';
+          delete previous.result.memoryId;
+        }
+      }
       row.result.disposition = 'failed';
       row.result.reason = error instanceof Error ? error.message : String(error);
       return {
@@ -647,6 +674,14 @@ export function importNativeMemories(
       archived,
     };
   } catch (error) {
+    deleteMemoriesById(db, admittedIds);
+    for (const previous of preparedRows) {
+      if (previous.result.disposition === 'admitted') {
+        previous.result.disposition = 'failed';
+        previous.result.reason = 'batch rolled back after source archive failed';
+        delete previous.result.memoryId;
+      }
+    }
     return {
       success: false,
       applied: false,
@@ -657,8 +692,8 @@ export function importNativeMemories(
       project,
       files: fileResults,
       rows: preparedRows.map((item) => item.result),
-      archived: files.filter((file) => fs.existsSync(file.archivePath)).map((file) => file.archivePath),
-      error: `all rows resolved, but source archive failed: ${error instanceof Error ? error.message : String(error)}`,
+      archived: [],
+      error: `source archive failed; admitted rows rolled back: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }

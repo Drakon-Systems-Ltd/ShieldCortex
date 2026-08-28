@@ -1,4 +1,7 @@
 import { closeDatabase, initDatabase } from '../database/init.js';
+import os from 'os';
+import fs from 'fs';
+import path from 'path';
 import {
   importNativeMemories,
   resolveConfiguredNativeImportScope,
@@ -88,7 +91,13 @@ function printHuman(result: NativeImportResult): void {
     if (file.archivePath) console.log(`archived\t${file.sourcePath}\t${file.archivePath}`);
   }
   if (result.error) console.error(`Import failed: ${result.error}`);
-  else if (result.dryRun) console.log('No files or database rows changed. Re-run with --apply to admit and archive.');
+  else if (result.dryRun) console.log('No sources archived and no memories admitted. Re-run with --apply to admit and archive.');
+}
+
+function liveMemoriesDbExists(): boolean {
+  const home = os.homedir();
+  return fs.existsSync(path.join(home, '.shieldcortex', 'memories.db'))
+    || fs.existsSync(path.join(home, '.claude-memory', 'memories.db'));
 }
 
 export async function runNativeImportCli(args: string[]): Promise<number> {
@@ -121,7 +130,13 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
     return 2;
   }
 
-  initDatabase();
+  let previewDir: string | undefined;
+  if (parsed.options.apply === true || liveMemoriesDbExists()) {
+    initDatabase();
+  } else {
+    previewDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-395-preview-'));
+    initDatabase(path.join(previewDir, 'preview.db'));
+  }
   try {
     const result = importNativeMemories(parsed.options);
     if (parsed.json) console.log(JSON.stringify(result));
@@ -129,6 +144,7 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
     return result.success ? 0 : 1;
   } finally {
     closeDatabase();
+    if (previewDir) fs.rmSync(previewDir, { recursive: true, force: true });
   }
 }
 
