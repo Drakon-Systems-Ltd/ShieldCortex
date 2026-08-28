@@ -430,6 +430,12 @@ export function importNativeMemories(
   const requestedSalience = Number.isFinite(options.salience) ? Number(options.salience) : 0.5;
   const salience = Math.max(0, Math.min(requestedSalience, NATIVE_IMPORT_SALIENCE_CEILING));
   const db = dependencies.db ?? getDatabase();
+  const existingBatch = db.prepare(
+    `SELECT COUNT(*) AS count FROM memories WHERE json_extract(metadata, '$.batch_id') = ?`,
+  ).get(batchId) as { count: number };
+  if (existingBatch.count > 0) {
+    return resultFromError(options, batchId, hostId, agentId, `batchId already used by ${existingBatch.count} existing memor${existingBatch.count === 1 ? 'y' : 'ies'}`);
+  }
   const assess = dependencies.assess ?? assessMemoryAdmission;
   const admit = dependencies.admit ?? addMemory;
 

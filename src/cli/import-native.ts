@@ -94,13 +94,18 @@ function printHuman(result: NativeImportResult): void {
   else if (result.dryRun) console.log('No sources archived and no memories admitted. Re-run with --apply to admit and archive.');
 }
 
+function configuredMemoriesDbPath(): string | null {
+  if (!process.env.SHIELDCORTEX_CONFIG_DIR) return null;
+  return path.join(path.resolve(process.env.SHIELDCORTEX_CONFIG_DIR), 'memories.db');
+}
+
 function liveMemoriesDbPath(): string | null {
-  const candidates: string[] = [];
-  if (process.env.SHIELDCORTEX_CONFIG_DIR) {
-    candidates.push(path.join(path.resolve(process.env.SHIELDCORTEX_CONFIG_DIR), 'memories.db'));
-  }
-  candidates.push(path.join(os.homedir(), '.shieldcortex', 'memories.db'));
-  candidates.push(path.join(os.homedir(), '.claude-memory', 'memories.db'));
+  const configured = configuredMemoriesDbPath();
+  if (configured) return fs.existsSync(configured) ? configured : null;
+  const candidates = [
+    path.join(os.homedir(), '.shieldcortex', 'memories.db'),
+    path.join(os.homedir(), '.claude-memory', 'memories.db'),
+  ];
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
 }
 
@@ -135,9 +140,10 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
   }
 
   let previewDir: string | undefined;
+  const configuredDb = configuredMemoriesDbPath();
   const liveDb = liveMemoriesDbPath();
   if (parsed.options.apply === true) {
-    initDatabase(liveDb ?? undefined);
+    initDatabase(configuredDb ?? liveDb ?? undefined);
   } else if (liveDb) {
     initDatabase(liveDb);
   } else {
