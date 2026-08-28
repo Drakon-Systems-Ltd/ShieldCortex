@@ -302,21 +302,35 @@ function findExistingDisposition(
 }
 
 function archiveSources(files: PreparedFile[]): string[] {
-  const moved: Array<{ from: string; to: string }> = [];
+  const copied: PreparedFile[] = [];
   try {
     for (const file of files) {
       fs.mkdirSync(path.dirname(file.archivePath), { recursive: true, mode: 0o700 });
-      fs.renameSync(file.sourcePath, file.archivePath);
-      moved.push({ from: file.sourcePath, to: file.archivePath });
+      fs.copyFileSync(file.sourcePath, file.archivePath);
+      copied.push(file);
     }
-    return moved.map((item) => item.to);
   } catch (error) {
-    for (const item of [...moved].reverse()) {
-      try {
-        fs.renameSync(item.to, item.from);
-      } catch {
-        // The result remains failed and names every successfully moved path.
+    for (const file of copied) {
+      try { fs.unlinkSync(file.archivePath); } catch { /* preview copies are disposable */ }
+    }
+    throw error;
+  }
+
+  const unlinked: PreparedFile[] = [];
+  try {
+    for (const file of files) {
+      fs.unlinkSync(file.sourcePath);
+      unlinked.push(file);
+    }
+    return files.map((file) => file.archivePath);
+  } catch (error) {
+    for (const file of [...unlinked].reverse()) {
+      if (!fs.existsSync(file.sourcePath)) {
+        try { fs.copyFileSync(file.archivePath, file.sourcePath); } catch { /* restore best-effort */ }
       }
+    }
+    for (const file of copied) {
+      try { fs.unlinkSync(file.archivePath); } catch { /* */ }
     }
     throw error;
   }
@@ -324,12 +338,17 @@ function archiveSources(files: PreparedFile[]): string[] {
 
 function deleteMemoriesById(db: Database.Database, ids: number[]): void {
   const stmt = db.prepare('DELETE FROM memories WHERE id = ?');
-  for (const id of ids) {
-    try {
-      stmt.run(id);
-    } catch {
-      // Best-effort rollback; the caller still reports failure.
-    }
+  for (const id of ids) stmt.run(id);
+}
+
+function deleteNativeImportBatch(db: Database.Database, batchId: string, ids: number[]): void {
+  deleteMemoriesById(db, ids);
+  db.prepare(`DELETE FROM memories WHERE json_extract(metadata, '$.batch_id') = ?`).run(batchId);
+  const leftover = db.prepare(
+    `SELECT COUNT(*) AS count FROM memories WHERE json_extract(metadata, '$.batch_id') = ?`,
+  ).get(batchId) as { count: number };
+  if (leftover.count > 0) {
+    throw new Error(`failed to roll back ${leftover.count} native-import row(s) for batch ${batchId}`);
   }
 }
 
@@ -590,7 +609,7 @@ export function importNativeMemories(
       ).get(row.source.type, row.source.identifier) as { count: number }).count;
       try {
         const unexpected = admit(row.input, undefined, row.source, { sourceAttested: false });
-        deleteMemoriesById(db, [unexpected.id]);
+        deleteNativeImportBatch(db, batchId, [unexpected.id]);
         row.result.disposition = 'failed';
         row.result.reason = 'preflight denial unexpectedly admitted during apply; rolled back; source not archived';
         delete row.result.memoryId;
@@ -631,7 +650,7 @@ export function importNativeMemories(
       row.result.trustScore = Math.min(memory.trustScore, NATIVE_IMPORT_TRUST_CEILING);
       row.result.salience = Math.min(memory.salience, NATIVE_IMPORT_SALIENCE_CEILING);
     } catch (error) {
-      deleteMemoriesById(db, admittedIds);
+      deleteNativeImportBatch(db, batchId, admittedIds);
       for (const previous of preparedRows) {
         if (previous.result.disposition === 'admitted') {
           previous.result.disposition = 'failed';
@@ -674,7 +693,7 @@ export function importNativeMemories(
       archived,
     };
   } catch (error) {
-    deleteMemoriesById(db, admittedIds);
+    deleteNativeImportBatch(db, batchId, admittedIds);
     for (const previous of preparedRows) {
       if (previous.result.disposition === 'admitted') {
         previous.result.disposition = 'failed';

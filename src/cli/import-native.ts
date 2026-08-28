@@ -94,10 +94,14 @@ function printHuman(result: NativeImportResult): void {
   else if (result.dryRun) console.log('No sources archived and no memories admitted. Re-run with --apply to admit and archive.');
 }
 
-function liveMemoriesDbExists(): boolean {
-  const home = os.homedir();
-  return fs.existsSync(path.join(home, '.shieldcortex', 'memories.db'))
-    || fs.existsSync(path.join(home, '.claude-memory', 'memories.db'));
+function liveMemoriesDbPath(): string | null {
+  const candidates: string[] = [];
+  if (process.env.SHIELDCORTEX_CONFIG_DIR) {
+    candidates.push(path.join(path.resolve(process.env.SHIELDCORTEX_CONFIG_DIR), 'memories.db'));
+  }
+  candidates.push(path.join(os.homedir(), '.shieldcortex', 'memories.db'));
+  candidates.push(path.join(os.homedir(), '.claude-memory', 'memories.db'));
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
 }
 
 export async function runNativeImportCli(args: string[]): Promise<number> {
@@ -131,8 +135,11 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
   }
 
   let previewDir: string | undefined;
-  if (parsed.options.apply === true || liveMemoriesDbExists()) {
-    initDatabase();
+  const liveDb = liveMemoriesDbPath();
+  if (parsed.options.apply === true) {
+    initDatabase(liveDb ?? undefined);
+  } else if (liveDb) {
+    initDatabase(liveDb);
   } else {
     previewDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-395-preview-'));
     initDatabase(path.join(previewDir, 'preview.db'));
