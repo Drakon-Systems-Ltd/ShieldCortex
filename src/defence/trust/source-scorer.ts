@@ -111,6 +111,14 @@ export function scoreSource(source: DefenceSource): TrustScore {
   // a stamped identifier is barred from claiming a privileged origin.
   const bareKey = `${source.type}:${stripUnattestedStamp(source.identifier)}`;
 
+  // A3 import-once assigns a per-chunk identifier so bulk imports do not share
+  // one rate-limit bucket. Keep every such file at the same thin 0.4 trust as
+  // file:import; the prefix can only lower generic file trust, never raise it.
+  if (source.type === 'file' && stripUnattestedStamp(source.identifier).startsWith('native-import:')) {
+    const score = BASE_SCORES['file:import'];
+    return { score, source, hierarchy: [...HIERARCHY_DISPLAY, `>> ${key} = ${score}`] };
+  }
+
   // Exact match overrides
   const baseScore = BASE_SCORES[bareKey];
   if (baseScore !== undefined) {

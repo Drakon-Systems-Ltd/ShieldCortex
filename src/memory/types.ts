@@ -4,8 +4,8 @@
 
 export type MemoryType = 'short_term' | 'long_term' | 'episodic';
 export type MemoryStatus = 'active' | 'archived' | 'suppressed' | 'canonical';
-export type MemorySourceKind = 'user' | 'cli' | 'hook' | 'plugin' | 'agent' | 'import' | 'cloud' | 'api' | 'system';
-export type MemoryCaptureMethod = 'manual' | 'hook' | 'plugin' | 'import' | 'cloud' | 'api' | 'auto' | 'review';
+export type MemorySourceKind = 'user' | 'cli' | 'hook' | 'plugin' | 'agent' | 'import' | 'native_import' | 'cloud' | 'api' | 'system';
+export type MemoryCaptureMethod = 'manual' | 'hook' | 'plugin' | 'import' | 'native_import' | 'cloud' | 'api' | 'auto' | 'review';
 export type MemoryPurpose = 'user' | 'feedback' | 'project' | 'reference';
 export type MemoryScope = 'private' | 'team';
 
@@ -56,6 +56,7 @@ export interface Memory {
   hostId: string | null;
   agentId: string | null;
   captureLayer: string | null;
+  sourceAttested: boolean | null;
 }
 
 export interface MemoryInput {

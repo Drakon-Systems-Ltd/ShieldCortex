@@ -53,6 +53,7 @@ export function getInlineSchema(): string {
       host_id TEXT,
       agent_id TEXT,
       capture_layer TEXT,
+      source_attested INTEGER,
       content_form TEXT
     );
 

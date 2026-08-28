@@ -56,6 +56,12 @@ export interface PipelineRunOptions {
    * config-file `threatGraph.trustModifier` (advisory). Test seam.
    */
   trustModifierMode?: TrustModifierMode;
+  /**
+   * Run every decision layer without writing audit/events or scheduling cloud
+   * sync. Used only for mutation-free previews; defaults to true so existing
+   * callers retain the full provenance ledger and notification behaviour.
+   */
+  recordSideEffects?: boolean;
 }
 
 export function runDefencePipeline(
@@ -250,8 +256,9 @@ export function runDefencePipeline(
 
     const durationMs = Math.round(performance.now() - startTime);
 
-    // 6. Log audit
-    const auditId = logAudit({
+    // 6. Log audit. Preview callers still run every decision layer but leave
+    // the DB and external queues untouched.
+    const auditId = options?.recordSideEffects === false ? -1 : logAudit({
       memory_id: null,
       project: project ?? null,
       timestamp: new Date().toISOString(),
@@ -273,7 +280,7 @@ export function runDefencePipeline(
     });
 
     // 7. Emit defence event for real-time dashboard alerts (BLOCK/QUARANTINE only)
-    if (firewall.result !== 'ALLOW') {
+    if (options?.recordSideEffects !== false && firewall.result !== 'ALLOW') {
       try {
         persistEvent('defence_event', {
           source_type: source.type,
@@ -302,7 +309,7 @@ export function runDefencePipeline(
 
     // 8. Sync audit data to cloud (fire-and-forget, never blocks).
     // Gated on `cloud_audit_sync` (Free tier) — metadata only, no content.
-    if (isFeatureEnabled('cloud_audit_sync')) {
+    if (options?.recordSideEffects !== false && isFeatureEnabled('cloud_audit_sync')) {
       try {
         syncToCloud(pipelineResult, source, durationMs);
       } catch {
@@ -312,7 +319,7 @@ export function runDefencePipeline(
 
     // 9. Sync quarantine *content* to cloud (fire-and-forget). Gated on
     // `cloud_sync` (Team tier) because this sends original content + title.
-    if (isFeatureEnabled('cloud_sync') && firewall.result === 'QUARANTINE') {
+    if (options?.recordSideEffects !== false && isFeatureEnabled('cloud_sync') && firewall.result === 'QUARANTINE') {
       try {
         const indicators = firewall.threatIndicators.map(t =>
           typeof t === 'string' ? t : (t as { pattern?: string }).pattern ?? String(t)
@@ -340,7 +347,7 @@ export function runDefencePipeline(
     const durationMs = Math.round(performance.now() - startTime);
     console.error('[defence] Pipeline error, failing closed:', err);
 
-    const auditId = logAudit({
+    const auditId = options?.recordSideEffects === false ? -1 : logAudit({
       memory_id: null,
       project: project ?? null,
       timestamp: new Date().toISOString(),

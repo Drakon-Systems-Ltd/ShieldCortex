@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS memories (
   host_id TEXT,
   agent_id TEXT,
   capture_layer TEXT,
+  -- Channel identity provenance. NULL = legacy/unplumbed, 0 = explicitly
+  -- un-attested, 1 = system-derived. Attestation never raises trust by itself.
+  source_attested INTEGER,
   -- #402 two-key inject: write-time form stamp ('fact'|'directive'|'mixed'|
   -- 'unknown'). NULL = legacy/unstamped = NOT injectable unless pinned
   -- (fail-closed, Opus B1). Stamped by store.ts via classifyContentForm.

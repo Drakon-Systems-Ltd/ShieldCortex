@@ -58,7 +58,7 @@ import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
 import type { TripleProvenance } from '../graph/resolve.js';
 import { runDefencePipeline, storeFragmentationData } from '../defence/index.js';
-import { resolveDispositionV2 } from '../defence/disposition.js';
+import { resolveDispositionV2, type DispositionV2 } from '../defence/disposition.js';
 import { classifyContentForm } from '../defence/form-classifier.js';
 import { sweepClusterQuarantine } from '../defence/cluster-quarantine.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
@@ -261,6 +261,7 @@ export function rowToMemory(row: Record<string, unknown>): Memory {
     hostId: (row.host_id as string | null | undefined) ?? null,
     agentId: (row.agent_id as string | null | undefined) ?? null,
     captureLayer: (row.capture_layer as string | null | undefined) ?? null,
+    sourceAttested: row.source_attested == null ? null : Number(row.source_attested) === 1,
     trustScore: Number(row.trust_score ?? 1),
     sensitivityLevel: (row.sensitivity_level as string | undefined) ?? 'INTERNAL',
     source: (row.source as string | null) ?? null,
@@ -519,9 +520,48 @@ function quarantineMemory(input: MemoryInput, source: DefenceSource, result: Def
   }
 }
 
+export interface MemoryAdmissionAssessment {
+  source: DefenceSource;
+  result: DefencePipelineResult;
+  disposition: DispositionV2;
+}
+
 /**
- * Add a new memory
+ * The sanctioned scan/admit decision seam. Preview products use the same full
+ * pipeline and disposition law as addMemory, with only persistence side effects
+ * disabled; addMemory calls it with side effects enabled before every INSERT.
  */
+export function assessMemoryAdmission(
+  input: MemoryInput,
+  source?: DefenceSource,
+  options?: { sourceAttested?: boolean; recordSideEffects?: boolean },
+): MemoryAdmissionAssessment {
+  const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
+  const result = runDefencePipeline(
+    input.content,
+    input.title,
+    effectiveSource,
+    undefined,
+    input.project,
+    {
+      sourceAttested: options?.sourceAttested,
+      recordSideEffects: options?.recordSideEffects,
+    },
+  );
+  const disposition = resolveDispositionV2({
+    allowed: result.allowed,
+    firewallResult: result.firewall.result,
+    trustScore: result.trust.score,
+    reason: result.firewall.reason,
+    contentForm: classifyContentForm(input.content),
+    threatIndicators: result.firewall.threatIndicators,
+    anomalyScore: result.firewall.anomalyScore,
+    sourceAttested: options?.sourceAttested,
+  });
+  return { source: effectiveSource, result, disposition };
+}
+
+/** Add a new memory through the full defended admission seam. */
 export function addMemory(
   input: MemoryInput,
   config: MemoryConfig = resolveMemoryConfig(),
@@ -531,6 +571,17 @@ export function addMemory(
   // Check if memory creation is paused
   if (isPaused()) {
     throw new MemoryPausedError();
+  }
+
+  // #395 A3: native import never becomes attested or high-salience just because
+  // a caller set the flags. Attestation is not trust; file presence is not a pin.
+  const nativeImport =
+    input.sourceKind === 'native_import' || input.captureMethod === 'native_import';
+  if (nativeImport) {
+    options = { ...options, sourceAttested: false };
+    if (typeof input.salience === 'number') {
+      input = { ...input, salience: Math.min(input.salience, 0.7) };
+    }
   }
 
   // RATE LIMITING: Block sources that exceed write rate
@@ -564,28 +615,13 @@ export function addMemory(
   // trust 1.0 — closing the old `if (source)` bypass. Rate-limiting stays gated
   // on an explicit source (above) so bulk source-less/import writes aren't
   // throttled by the shared synthetic key.
-  const effectiveSource: DefenceSource = source ?? UNATTRIBUTED_SOURCE;
-  const defenceResult: DefencePipelineResult = runDefencePipeline(
-    input.content, input.title, effectiveSource, undefined, input.project,
-    { sourceAttested: options?.sourceAttested },
-  );
-
-  // P1/WS4: the ONE verdict→disposition mapping, shared with the hook path
-  // (save-memory.mjs) so the runtimes cannot drift. It folds in the sub-agent
-  // trust-band hold (0.5–0.7) and the block/quarantine hold policy.
-  // #402: the 6-way valve refines it (admit / admit-low-trust / inert /
-  // quarantine / reject / escalate) on the structural content form —
-  // classification failure is fail-closed to 'unknown' inside the classifier.
-  const disposition = resolveDispositionV2({
-    allowed: defenceResult.allowed,
-    firewallResult: defenceResult.firewall.result,
-    trustScore: defenceResult.trust.score,
-    reason: defenceResult.firewall.reason,
-    contentForm: classifyContentForm(input.content),
-    threatIndicators: defenceResult.firewall.threatIndicators,
-    anomalyScore: defenceResult.firewall.anomalyScore,
+  const assessment = assessMemoryAdmission(input, source, {
     sourceAttested: options?.sourceAttested,
+    recordSideEffects: true,
   });
+  const effectiveSource = assessment.source;
+  const defenceResult = assessment.result;
+  const disposition = assessment.disposition;
 
   if (disposition.action === 'quarantine') {
     // Auto-release (threat-graph Loop 3): if this detector firing is a
@@ -660,8 +696,8 @@ export function addMemory(
 
   const db = getDatabase();
 
-  // Calculate salience if not provided
-  const salience = input.salience ?? calculateSalience(input);
+  // Calculate salience if not provided. Native import has an absolute 0.7 ceiling.
+  const salience = Math.min(input.salience ?? calculateSalience(input), nativeImport ? 0.7 : 1);
 
   // Suggest category if not provided
   const category = input.category ?? suggestCategory(input);
@@ -689,9 +725,9 @@ export function addMemory(
     INSERT INTO memories (
       uuid, type, category, title, content, project, tags, salience, metadata, scope, transferable,
       status, pinned, reviewed_at, reviewed_by, source_kind, capture_method, defence_verdict, cloud_excluded, memory_purpose, memory_scope,
-      host_id, agent_id, capture_layer, content_form, updated_at
+      host_id, agent_id, capture_layer, source_attested, content_form, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `);
 
   // Anti-bloat: Truncate content if too large
@@ -735,6 +771,7 @@ export function addMemory(
       input.hostId ?? resolveDefaultHostId(),
       input.agentId ?? resolveDefaultAgentId(),
       input.captureLayer ?? null,
+      attestedFlag(options?.sourceAttested),
       // #402: write-time form stamp — the form key half of the two-key inject
       // gate. Auto-released rows stamp their real form too (a directive-form
       // release stays non-injectable).
@@ -750,7 +787,13 @@ export function addMemory(
       // >10KB memories too (where the STORED content is truncated).
       // #402 admit-low-trust: clamp the stamped trust below the inject floor
       // (trustClamp is already min(trust, LOW_TRUST_CLAMP) — it never raises).
-      .run(disposition.trustClamp ?? defenceResult.trust.score, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
+      .run(
+        Math.min(disposition.trustClamp ?? defenceResult.trust.score, nativeImport ? 0.7 : 1),
+        defenceResult.sensitivity.level,
+        sourceDetails.sourceValue,
+        createContentHash(input.content),
+        result.lastInsertRowid,
+      );
 
     const id = result.lastInsertRowid as number;
     if (isFeatureEnabled('cloud_sync')) {

@@ -159,6 +159,7 @@ export {
 // ── Memory ─────────────────────────────────────────────────
 export {
   addMemory,
+  assessMemoryAdmission,
   getMemoryById,
   updateMemory,
   deleteMemory,
@@ -167,6 +168,19 @@ export {
   MemoryPausedError,
   MemoryBlockedError,
 } from './memory/store.js';
+
+export {
+  importNativeMemories,
+  chunkNativeMarkdown,
+  resolveConfiguredNativeImportScope,
+} from './memory/import-native.js';
+export type {
+  NativeImportOptions,
+  NativeImportDependencies,
+  NativeImportResult,
+  NativeImportDisposition,
+  NativeImportRowResult,
+} from './memory/import-native.js';
 
 export type { Memory, MemoryType, MemoryCategory } from './memory/types.js';
 
