@@ -965,6 +965,11 @@ export function runMigrations(database: Database.Database): void {
     if (!columnNames.has('capture_layer')) {
       database.exec('ALTER TABLE memories ADD COLUMN capture_layer TEXT');
     }
+    // Do not backfill: historic rows did not carry a verifiable attestation
+    // decision. Native import writes an explicit 0 through addMemory.
+    if (!columnNames.has('source_attested')) {
+      database.exec('ALTER TABLE memories ADD COLUMN source_attested INTEGER');
+    }
     database.exec('CREATE INDEX IF NOT EXISTS idx_memories_host_agent ON memories(host_id, agent_id)');
   } catch (err) {
     logIfUnexpectedDdlError(err, 'memories host_id/agent_id/capture_layer');

@@ -345,6 +345,11 @@ function printUsage(): void {
   console.log('Usage: shieldcortex memories <subcommand> [options]');
   console.log('');
   console.log('Subcommands:');
+  console.log('  import-native <path...> [--apply] [--host-id X] [--agent-id Y]');
+  console.log('                [--project P] [--json]');
+  console.log('      Import native Markdown through full defence exactly once.');
+  console.log('      DRY-RUN BY DEFAULT — pass --apply to admit and archive sources.');
+  console.log('');
   console.log('  migrate-legacy [--dry-run] [--source <path>]');
   console.log('      Import memories from ~/.claude-memory/ and ~/.claude-cortex/');
   console.log('      into the current ~/.shieldcortex/memories.db.');
@@ -388,6 +393,11 @@ function printUsage(): void {
 
 export async function handleMemoriesCommand(args: string[]): Promise<void> {
   const sub = args[0];
+  if (sub === 'import-native') {
+    const { handleNativeImportCommand } = await import('./import-native.js');
+    await handleNativeImportCommand(args.slice(1));
+    return;
+  }
   if (sub === 'migrate-legacy') {
     const dryRun = args.includes('--dry-run');
     const sourceIdx = args.indexOf('--source');

@@ -32,16 +32,25 @@ export function tokenize(text: string): Set<string> {
  * @returns Similarity score between 0 and 1
  */
 export function jaccardSimilarity(textA: string, textB: string): number {
-  const setA = tokenize(textA);
-  const setB = tokenize(textB);
+  return jaccardSets(tokenize(textA), tokenize(textB));
+}
 
+/**
+ * Jaccard over already-tokenized sets. Callers that compare one text against
+ * many pre-tokenized candidates (e.g. the #395 native importer's bounded
+ * near-duplicate scan) use this so tokenization is paid once per candidate
+ * instead of once per comparison. Identical result to jaccardSimilarity.
+ */
+export function jaccardSets(setA: Set<string>, setB: Set<string>): number {
   if (setA.size === 0 && setB.size === 0) return 1.0;
   if (setA.size === 0 || setB.size === 0) return 0.0;
 
-  // Calculate intersection
+  // Iterate the smaller set — the intersection is symmetric and this bounds
+  // the work by min(|A|,|B|) rather than by whichever side was passed first.
+  const [small, large] = setA.size <= setB.size ? [setA, setB] : [setB, setA];
   let intersection = 0;
-  for (const word of setA) {
-    if (setB.has(word)) intersection++;
+  for (const word of small) {
+    if (large.has(word)) intersection++;
   }
 
   // Calculate union: |A| + |B| - |A ∩ B|
