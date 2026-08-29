@@ -25,7 +25,7 @@ export interface ToolInputValidationOk {
 export interface ToolInputValidationErr {
   ok: false;
   reason: string;
-  code: 'NOT_OBJECT' | 'UNKNOWN_KEYS' | 'NESTED_INVALID' | 'TYPE_COERCION';
+  code: 'NOT_OBJECT' | 'UNKNOWN_KEYS' | 'NESTED_INVALID' | 'TYPE_COERCION' | 'MISSING_HANDLE';
   unknownKeys?: string[];
 }
 
@@ -92,6 +92,52 @@ const UNKNOWN_FAMILY_KEYS = new Set([
   'path', 'file_path', 'filePath', 'file', 'url', 'uri',
 ]);
 
+/**
+ * #436 — Claude Code's own background-shell CONTROL plane. `BashOutput` reads
+ * an already-running shell's buffered output; `KillShell`/`KillBash` stop it.
+ * Neither starts an OS process: the originating `Bash` call was scanned when it
+ * was made. Their handle keys (`bash_id`/`shell_id`/`task_id`) are absent from
+ * EXEC_KEYS, so the substring `bash`/`shell` match sent every live control call
+ * to `invalid_tool_input` — a hard block on the guard's own read-and-stop path.
+ *
+ * The schema stays CLOSED and deliberately omits every exec key: a control tool
+ * must not be able to smuggle a command through this bag. Nothing here is added
+ * to EXEC_KEYS, so real `Bash` enforcement is untouched.
+ */
+interface ShellControlSchema {
+  /** Closed allowed-key set. */
+  allowed: Set<string>;
+  /** At least one of these must carry a non-empty string, else fail closed. */
+  handles: string[];
+}
+
+/** Claude 2.1.233's TaskOutput reads `task_id ?? agentId ?? bash_id`; `filter` is an output regex — data, not a command. */
+const SHELL_CONTROL_OUTPUT: ShellControlSchema = {
+  allowed: new Set(['bash_id', 'task_id', 'agentId', 'filter']),
+  handles: ['bash_id', 'task_id', 'agentId'],
+};
+
+/** TaskStop reads `task_id ?? shell_id`. */
+const SHELL_CONTROL_STOP: ShellControlSchema = {
+  allowed: new Set(['shell_id', 'task_id']),
+  handles: ['shell_id', 'task_id'],
+};
+
+/**
+ * EXACT native tool names only — the WHOLE name, case-insensitively. A
+ * namespaced `mcp__thirdparty__BashOutput` is a third-party tool that merely
+ * borrowed the name, so it keeps EXEC_KEYS and still fails closed on `bash_id`.
+ * That is stricter than the last-segment matching used elsewhere, on purpose.
+ */
+function shellControlSchemaFor(toolName: string): ShellControlSchema | null {
+  switch (String(toolName ?? '').trim().toLowerCase()) {
+    case 'bashoutput': return SHELL_CONTROL_OUTPUT;
+    case 'killshell':
+    case 'killbash': return SHELL_CONTROL_STOP;
+    default: return null;
+  }
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 }
@@ -123,6 +169,9 @@ export function schemaFamilyForTool(
 }
 
 function allowedKeysFor(toolName: string): Set<string> {
+  // #436: the native control plane is narrower than its exec family, not wider.
+  const control = shellControlSchemaFor(toolName);
+  if (control) return control.allowed;
   const fam = schemaFamilyForTool(toolName);
   switch (fam) {
     case 'exec':
@@ -211,6 +260,7 @@ export function validateToolInput(
     }
   }
 
+  const control = shellControlSchemaFor(toolName);
   const allowed = allowedKeysFor(toolName);
   const strippedKeys: string[] = [];
   const out: Record<string, unknown> = {};
@@ -240,7 +290,10 @@ export function validateToolInput(
     // Command/path/url scanners only accept strings. Object/array/number/boolean
     // cannot be scanned (extractors are pickString) so they must not fail open.
     // `content`/`body`/`text` stay out of STRING_SCAN_KEYS (structured messages).
-    if (STRING_SCAN_KEYS.has(key) && typeof value !== 'string') {
+    // #436: every field a control tool is allowed to carry is a handle or an
+    // output `filter` — both strings. A number/object here is not a shape the
+    // host ever sends, so it fails closed rather than reaching the extractors.
+    if ((STRING_SCAN_KEYS.has(key) || control) && typeof value !== 'string') {
       return {
         ok: false,
         code: typeof value === 'object' ? 'NESTED_INVALID' : 'TYPE_COERCION',
@@ -260,6 +313,16 @@ export function validateToolInput(
       code: 'UNKNOWN_KEYS',
       reason: `Unknown tool input field "${unknown[0]}" rejected`,
       unknownKeys: unknown,
+    };
+  }
+
+  // #436: a control call that names no shell is not a control call. Fail closed
+  // rather than let an empty bag through on a tool whose whole job is a handle.
+  if (control && !control.handles.some((k) => typeof out[k] === 'string' && out[k].trim() !== '')) {
+    return {
+      ok: false,
+      code: 'MISSING_HANDLE',
+      reason: `Tool input must name a shell (${control.handles.join(' | ')})`,
     };
   }
 

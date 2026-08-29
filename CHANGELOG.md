@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Security
+- **#436:** Claude Code `BashOutput` / `KillShell` / `KillBash` no longer hard-block as invalid exec input. They get a native closed schema (handle keys only — not `EXEC_KEYS`), so unknown fields still fail closed and a control tool cannot smuggle a command. Non-catastrophic `block` (schema rejection) falls through the existing one-shot retry / approval door; schema failure still scans known extractor fields so a catastrophic command plus an unknown key stays terminal with no grant. Schema/effect signals and the three tool names survive denial sanitisation instead of collapsing to `tool` / `redacted-signal`.
 - **#428:** bump the bundled dashboard `next` / `eslint-config-next` from 16.1.4 to **16.2.12** (latest 16.2 patch). 16.1.4 sat inside published GHSA ranges, including HIGH [GHSA-p9j2-gv94-2wf4](https://github.com/advisories/GHSA-p9j2-gv94-2wf4) (rewrite SSRF, patched 16.2.11). Medium CSRF/DoS/smuggling GHSAs already patched at 16.1.7. Dashboard `next.config.ts` has no `rewrites`, so the HIGH is defense-in-depth, not a proven local exploit. Did not jump to 16.3.3 (current `latest`) to keep the Frontend/QA surface a single minor.
 
 ### Added

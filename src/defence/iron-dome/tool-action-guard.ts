@@ -4159,6 +4159,18 @@ export function evaluateToolCall(
       : 'annotate';
     const validated = validateToolInput(toolName, args, mode);
     if (!validated.ok) {
+      // #436: schema rejection must not mask a catastrophic payload. Annotate
+      // the RAW bag (strip unknown keys, keep extractor fields) and reuse the
+      // full evaluator. If that is catastrophic, keep it terminal. Otherwise
+      // the original schema failure stands — dangerous, with a door.
+      const annotated = validateToolInput(toolName, args, 'annotate');
+      const inner = evaluateToolCall(
+        toolName,
+        annotated.ok ? annotated.args : {},
+        config,
+        options,
+      );
+      if (inner.severity === 'catastrophic') return inner;
       return verdict(
         'block',
         'dangerous',
