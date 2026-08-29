@@ -572,6 +572,9 @@ async function pingOperator(notify, { toolName, toolInput, verdict, hash, noProm
 const SAFE_TOOL_NAMES = new Set([
   'Bash', 'Edit', 'MultiEdit', 'Write', 'Read', 'Glob', 'Grep', 'LS', 'Task',
   'TodoWrite', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Workflow',
+  // #436: the native background-shell control plane. Without these, every
+  // control-tool row collapsed to a nameless "tool" in the forensic record.
+  'BashOutput', 'KillShell', 'KillBash', 'TaskOutput', 'TaskStop',
 ]);
 const SAFE_SIGNALS = new Set([
   // Generic / legacy summary names kept for older rows and broker payloads.
@@ -595,7 +598,21 @@ const SAFE_SIGNALS = new Set([
   'recursive-find-delete', 'external-egress', 'oversized-command',
   'opaque-script-invocation', 'opaque-script', 'secret-egress-fold',
   'force-push', 'force-push-invocation',
+  // #436: schema-rejection (#412) and the other verdicts that were reaching
+  // denials.jsonl as "redacted-signal" — none of these carry operator data,
+  // they are the guard's own reason codes and are the whole content of the row.
+  'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
+  'type-coercion', 'missing-handle', 'write-content-catastrophic',
+  'write-content-dangerous', 'delete-critical-path', 'session-lease',
 ]);
+/**
+ * #436 — the only tiers that deny with no operator affordance. Everything the
+ * guard rates below this is refusable, but must leave a door (ask, or DNP plus
+ * a one-shot #310 retry fingerprint) rather than dead-ending the operator.
+ * `critical` is carried for hosts that normalise the severity name before the
+ * verdict reaches this hook; the guard's own union emits `catastrophic`.
+ */
+const TERMINAL_BLOCK_SEVERITIES = new Set(['catastrophic', 'critical']);
 const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
 const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
 const SAFE_BROKER_OUTCOMES = new Set(['harden', 'pre_clear', 'hold', 'unavailable', 'not_brokerable']);
@@ -2085,7 +2102,16 @@ process.stdin.on('end', async () => {
     }
 
     // Catastrophic — hard deny, always enforced while the guard is enabled.
-    if (verdict.decision === 'block') {
+    //
+    // #436: the door-less deny is for THAT tier only. A `block` the guard rates
+    // below catastrophic (today: `invalid_tool_input`, severity `dangerous`)
+    // used to land here too, which left an operator with a refusal and no
+    // affordance — `approve --denial` listed nothing, because nothing was
+    // minted. Those fall through to the require_approval path below and get
+    // the ordinary door: `ask` where a prompt can be raised, DNP plus the
+    // #310/#378 one-shot exact-call fingerprint where it cannot. Catastrophic
+    // still returns here, so it can never mint or consume a retry grant.
+    if (verdict.decision === 'block' && TERMINAL_BLOCK_SEVERITIES.has(verdict.severity)) {
       // #227: the action is refused, so release any lease this call minted
       // early — a blocked action must not leave a hold on that scope. (A
       // frozen scope was already refused above and acquired nothing.)
@@ -2110,11 +2136,21 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
+    // #436: a sub-catastrophic `block` reaching here is NOT an ordinary
+    // dangerous verdict — schema rejection means the guard never got to SCAN
+    // the call. So it takes the DOOR below (one-shot approval, retry grant,
+    // broker, ask/DNP) but skips the two operator WIDENINGS immediately
+    // following: `autoApprove` and `enforce:false` advisory mode. Neither may
+    // turn "could not look" into "allowed" — otherwise `{command:'…', evil:'…'}`
+    // would run unscanned on an advisory host, and allowlisting the signal
+    // `unknown-keys` would become a blanket bypass of the #412 closed schema.
+    const unscannedBlock = verdict.decision === 'block';
+
     // require_approval — the dangerous tier.
     // Per-operator autoApprove allowlist (family / action / signal match, same
     // matching as the plugin). Never applies to catastrophic — that returned above.
     const autoApprove = cfg.autoApprove ?? [];
-    if (autoApprove.length > 0) {
+    if (autoApprove.length > 0 && !unscannedBlock) {
       const hay = [verdict.family, verdict.action, ...verdict.signals].map((s) => String(s).toLowerCase());
       const matched = autoApprove.some((a) => {
         const n = a.toLowerCase();
@@ -2126,7 +2162,7 @@ process.stdin.on('end', async () => {
       }
     }
 
-    if (!cfg.enforce) {
+    if (!cfg.enforce && !unscannedBlock) {
       const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
@@ -2244,7 +2280,7 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    if (brokered?.outcome === 'pre_clear') {
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock) {
       const brokerAudit = safeBrokerAudit(brokered.audit);
       writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
       console.error(`[shieldcortex] approval broker PRE-CLEARED ${safeToolName(toolName)}: ${safeDiagnosticReason(brokered.reason)} [${safeSignalList(verdict.signals).join(', ')}]`);

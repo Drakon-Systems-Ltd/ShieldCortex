@@ -400,6 +400,9 @@ export interface ActionGuardOutcomeInput {
 const SAFE_ACTION_GUARD_TOOLS = new Set([
   'Bash', 'Edit', 'MultiEdit', 'Write', 'Read', 'Glob', 'Grep', 'LS', 'Task',
   'TodoWrite', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Workflow',
+  // #436: keep parity with the hook's SAFE_TOOL_NAMES — the native
+  // background-shell control plane must be nameable on a notify/denial row.
+  'BashOutput', 'KillShell', 'KillBash', 'TaskOutput', 'TaskStop',
 ]);
 const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'secret-egress', 'approval-required', 'fallback-scan', 'privilege-escalation',
@@ -420,6 +423,11 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'recursive-find-delete', 'external-egress', 'oversized-command',
   'opaque-script-invocation', 'opaque-script', 'secret-egress-fold',
   'force-push', 'force-push-invocation',
+  // #436: parity with the hook's SAFE_SIGNALS. Guard reason codes, not
+  // operator data — redacting them left the row with nothing to act on.
+  'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
+  'type-coercion', 'missing-handle', 'write-content-catastrophic',
+  'write-content-dangerous', 'delete-critical-path', 'session-lease',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',

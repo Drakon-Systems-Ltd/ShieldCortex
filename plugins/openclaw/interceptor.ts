@@ -1322,7 +1322,14 @@ export function createInterceptor(
     const severity: Severity = v.severity === 'catastrophic' ? 'critical' : 'high';
 
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
-    if (v.decision === 'block') {
+    // #436: the door-less throw is for that tier only. A sub-catastrophic `block`
+    // (schema rejection) falls through to requireApproval so the operator can
+    // still say yes. autoApprove and enforce:false must not widen an unscanned
+    // call — they skip below.
+    const terminalBlock = v.decision === 'block'
+      && (v.severity === 'catastrophic' || v.severity === 'critical');
+    const unscannedBlock = v.decision === 'block' && !terminalBlock;
+    if (terminalBlock) {
       // #227: release any lease this call minted early — a blocked action must
       // not leave a hold on that scope (self-heals at TTL if release fails).
       if (leaseGate?.acquired) {
@@ -1342,7 +1349,7 @@ export function createInterceptor(
     // legitimate dangerous work. It NEVER applies to catastrophic ops — those
     // hard-block above, before this branch is reached.
     const autoApprove = actionGuardCfg.autoApprove ?? [];
-    if (autoApprove.length > 0) {
+    if (autoApprove.length > 0 && !unscannedBlock) {
       const hay = [v.family, v.action, ...v.signals].map(s => String(s).toLowerCase());
       const matched = autoApprove.some(a => {
         const n = a.toLowerCase();
@@ -1356,7 +1363,8 @@ export function createInterceptor(
 
     // require_approval — ENFORCED by default (P1/WS1). `enforce:false` opts back
     // down to warn-and-allow (advisory) for operators who want the old behaviour.
-    if (!actionGuardCfg.enforce) {
+    // #436: an unscanned schema rejection must not become an advisory allow.
+    if (!actionGuardCfg.enforce && !unscannedBlock) {
       log.warn(`[shieldcortex] ⚠️ Action Guard: ${context.toolName} — ${v.reason}`);
       emitAudit({ ...base, action: 'warn', outcome: 'warned' });
       return;
@@ -1380,7 +1388,7 @@ export function createInterceptor(
       throw new Error(`ShieldCortex: tool call blocked — ${brokered.reason}`);
     }
 
-    if (brokered?.outcome === 'pre_clear') {
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock) {
       // Reversible, on-host, in-context, judge-confident: proceed without
       // waiting. Loud on purpose — a release nobody approved must never be a
       // silent one, because the audit row is the only thing that will ever tell
