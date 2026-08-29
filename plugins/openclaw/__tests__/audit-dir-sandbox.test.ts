@@ -33,14 +33,21 @@ describe('global audit-dir sandbox', () => {
     expect(dir).not.toBe(realAuditDir);
   });
 
-  it('re-asserts the sandbox after a suite deletes the variable in teardown', () => {
+  // These two run in declaration order and are a PAIR: the first establishes
+  // that the variable is genuinely unset, so the second passing is proof the
+  // setup file's beforeEach restored it — not proof it was never removed.
+  // Ten suites `delete process.env.SHIELDCORTEX_AUDIT_DIR` in teardown; without
+  // the re-assert, the next suite would silently fall back to the real
+  // ~/.shieldcortex/audit.
+  it('a teardown-style delete really does unset the variable', () => {
     delete process.env.SHIELDCORTEX_AUDIT_DIR;
-    // The setup file's beforeEach restores it before the next test body runs.
-    expect(true).toBe(true);
+    expect(process.env.SHIELDCORTEX_AUDIT_DIR).toBeUndefined();
   });
 
-  it('has the variable back after the previous test deleted it', () => {
-    expect(process.env.SHIELDCORTEX_AUDIT_DIR).toBeTruthy();
-    expect((process.env.SHIELDCORTEX_AUDIT_DIR as string).startsWith(tmpdir())).toBe(true);
+  it('restores the sandbox before the next test, after that delete', () => {
+    const dir = process.env.SHIELDCORTEX_AUDIT_DIR;
+    expect(dir).toBeTruthy();
+    expect((dir as string).startsWith(tmpdir())).toBe(true);
+    expect(dir).not.toBe(realAuditDir);
   });
 });
