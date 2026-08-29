@@ -24,7 +24,7 @@
   ],
   "scripts": {
     "pack:verify": "npm pack --dry-run",
-    "prepublishOnly": "node -e \"if(!require('fs').existsSync('dist/index.js'))throw new Error('plugin dist/index.js missing — run `npm run build:ts` from the repo root before publishing')\""
+    "prepublishOnly": "node -e \"if(!require('fs').existsSync('dist/index.js'))throw new Error('plugin dist/index.js missing \u2014 run `npm run build:ts` from the repo root before publishing')\""
   },
   "peerDependencies": {
     "shieldcortex": "^4.54.8",
