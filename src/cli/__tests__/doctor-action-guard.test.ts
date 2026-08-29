@@ -205,10 +205,15 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     expect(results.find((r) => /webhookUrl|notify channel/i.test(r.message))).toBeUndefined();
   });
 
-  it('warns when notify.openclaw alone is set — not a DNP denial sink (#354)', async () => {
+  it('FAILS when armed with notify.openclaw alone — not a DNP denial sink (#354)', async () => {
+    // Severity is the point: `notify.enabled: true` + `openclaw: true` reads as
+    // configured to every operator who checks it, and delivers no unattended
+    // denial at all. Doctor emitted a WARN on this exact shape while 312
+    // denials went undelivered on one host — the product said it and the
+    // outcome did not change. Armed-and-lying is a failure, not advice.
     writeConfig({ actionGuard: { notify: { enabled: true, openclaw: true } } });
     const results = await checkActionGuard();
-    const warn = results.find((r) => r.status === 'warn' && /notify/i.test(r.label));
+    const warn = results.find((r) => r.status === 'fail' && /notify/i.test(r.label));
     expect(warn).toBeDefined();
     expect(warn!.message).toMatch(/openclaw only|denial-capable|webhookUrl/i);
     expect(warn!.message).not.toMatch(/native OpenClaw approval card reaches a human/i);
@@ -228,10 +233,30 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     expect(results.find((r) => r.status === 'warn' && /notify/i.test(r.label))).toBeUndefined();
   });
 
-  it('does not warn about notify when the guard is not enforcing', async () => {
+  // #354 P3 (29 Aug 2026) — REVERSED DELIBERATELY. This used to assert that a
+  // non-enforcing host hears nothing about a missing denial sink. That gate is
+  // precisely how clawdbot1 went quiet the moment Action Guard was switched off:
+  // the operator deciding whether it is safe to switch back ON is exactly the
+  // person who needs to know there is no sink to deliver denials to. Measured
+  // across three hosts that day: 0 delivered out of 312 / 89 / 26.
+  it('still reports a missing denial sink when the guard is NOT enforcing', async () => {
     writeConfig({ actionGuard: { enforce: false } });
     const results = await checkActionGuard();
-    expect(results.find((r) => /webhookUrl/i.test(r.message))).toBeUndefined();
+    const notify = results.find((r) => /webhookUrl/i.test(r.message));
+    expect(notify).toBeDefined();
+    // Not currently lying to anyone, so it is a warning rather than a failure —
+    // but it is said, which is the whole point of un-gating.
+    expect(notify!.status).toBe('warn');
+    expect(notify!.message).toMatch(/warn-mode/i);
+  });
+
+  it('tells a DISABLED host it would have no denial sink once re-enabled', async () => {
+    writeConfig({ actionGuard: { enabled: false } });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /webhookUrl/i.test(r.message));
+    expect(notify).toBeDefined();
+    expect(notify!.status).toBe('warn');
+    expect(notify!.message).toMatch(/re-enabled/i);
   });
 });
 
@@ -242,9 +267,12 @@ describe('doctor — Action Guard notify channel (#242)', () => {
  * config.json, invalidated the `_sig` HMAC, and got forced into strict mode.
  */
 describe('doctor — Action Guard notify fix is a signed CLI command (#275)', () => {
+  // #354 P3: the armed openclaw-only shape is now a FAIL, not a WARN, so this
+  // helper matches either severity — the tests below assert the severity they
+  // expect explicitly rather than relying on the finder to filter it.
   const findNotifyWarn = async () => {
     const results = await checkActionGuard();
-    return results.find((r) => r.status === 'warn' && /notify/.test(r.label));
+    return results.find((r) => (r.status === 'warn' || r.status === 'fail') && /notify/.test(r.label));
   };
 
   it('prescribes `shieldcortex config` with a real flag, not bare key paths', async () => {
@@ -276,6 +304,10 @@ describe('doctor — Action Guard notify fix is a signed CLI command (#275)', ()
     handleCloudConfig(['--action-guard-notify-openclaw']);
     const warn = await findNotifyWarn();
     expect(warn).toBeDefined();
+    // #354 P3: armed + openclaw-only reads as configured to any operator who
+    // checks, and delivers no unattended denial at all. A WARN was emitted on
+    // this exact shape while 312 denials vanished — the severity was the defect.
+    expect(warn!.status).toBe('fail');
     expect(warn!.message).toMatch(/openclaw only|denial-capable|webhookUrl/i);
     const onDisk = JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
     expect(typeof onDisk._sig).toBe('string');
