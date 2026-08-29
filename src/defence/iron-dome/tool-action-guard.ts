@@ -4143,12 +4143,13 @@ export function evaluateToolCall(
   args: Record<string, unknown> = {},
   config?: IronDomeConfig,
   options?: ToolGuardOptions,
+  skipSchema = false,
 ): ToolGuardVerdict {
   // #412 — close the tool-input bag before extractors run.
   // Exec/git: enforce (unknown keys fail closed — smuggled payloads cannot hide).
   // Other families: annotate (strip unknowns) so messaging/read tools with
   // free-form fields are not false-positive blocked; extractors never see junk keys.
-  {
+  if (!skipSchema) {
     // Enforce iff the SCHEMA family is exec/git, or the guard family is exec.
     // Do NOT use classifyFamily==='git': that regex includes substring `github`,
     // which would fail-closed GitHub-API tools under EXEC_KEYS (title/labels).
@@ -4161,14 +4162,15 @@ export function evaluateToolCall(
     if (!validated.ok) {
       // #436: schema rejection must not mask a catastrophic payload. Annotate
       // the RAW bag (strip unknown keys, keep extractor fields) and reuse the
-      // full evaluator. If that is catastrophic, keep it terminal. Otherwise
-      // the original schema failure stands — dangerous, with a door.
+      // full evaluator with the schema gate skipped. If that is catastrophic,
+      // keep it terminal. Otherwise the original schema failure stands.
       const annotated = validateToolInput(toolName, args, 'annotate');
       const inner = evaluateToolCall(
         toolName,
         annotated.ok ? annotated.args : {},
         config,
         options,
+        true,
       );
       if (inner.severity === 'catastrophic') return inner;
       return verdict(

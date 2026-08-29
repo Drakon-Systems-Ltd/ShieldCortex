@@ -88,12 +88,27 @@ describe('#436 acceptance 2 — schema stays CLOSED', () => {
     const r = enforceToolInput('BashOutput', {});
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('MISSING_HANDLE');
+    const v = evaluateToolCall('BashOutput', {});
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('dangerous');
+    expect(v.action).toBe('invalid_tool_input');
   });
 
   it('filter-only BashOutput fails closed (no handle)', () => {
     const r = enforceToolInput('BashOutput', { filter: 'ready' });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('MISSING_HANDLE');
+    const v = evaluateToolCall('BashOutput', { filter: 'ready' });
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('dangerous');
+    expect(v.action).toBe('invalid_tool_input');
+  });
+
+  it('non-string handle fails closed without throwing', () => {
+    const v = evaluateToolCall('BashOutput', { bash_id: 1 });
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('dangerous');
+    expect(v.action).toBe('invalid_tool_input');
   });
 
   it('filter must be a string', () => {
