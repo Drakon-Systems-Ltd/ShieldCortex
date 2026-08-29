@@ -122,6 +122,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Skip root publish (already exists)
+        if: steps.version_check.outputs.already_published == 'true'
+        run: echo "⚠️ Skipping root npm publish - shieldcortex version already exists on npm"
+
       # Plugin is a second npm package (`@drakon-systems/shieldcortex-realtime`)
       # under `plugins/openclaw/`. Historically published manually, which meant
       # the plugin repeatedly drifted behind the main package — v4.11.0 shipped
@@ -129,9 +133,13 @@ jobs:
       # Assumes plugin version has been bumped in lockstep with the main package
       # (memory 2080: bump root, plugin package, openclaw.plugin.json, SKILL.md
       # together on every release).
+      #
+      # Recovery is per-package. Root already_published must NOT skip plugin
+      # check/publish, both-package verification, or GitHub Release: if root
+      # landed and plugin failed, a rerun has to finish the missing plugin and
+      # still create/update the release. ClawHub stays independent below.
       - name: Check plugin version
         id: plugin_version_check
-        if: steps.version_check.outputs.already_published == 'false'
         run: |
           PLUGIN_VERSION=$(node -p "require('./plugins/openclaw/package.json').version")
           MAIN_VERSION=$(node -p "require('./package.json').version")
@@ -148,10 +156,14 @@ jobs:
           fi
 
       - name: Publish plugin to npm
-        if: steps.version_check.outputs.already_published == 'false' && steps.plugin_version_check.outputs.plugin_already_published == 'false'
+        if: steps.plugin_version_check.outputs.plugin_already_published == 'false'
         run: cd plugins/openclaw && npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Skip plugin publish (already exists)
+        if: steps.plugin_version_check.outputs.plugin_already_published == 'true'
+        run: echo "⚠️ Skipping plugin npm publish - @drakon-systems/shieldcortex-realtime version already exists on npm"
 
       # Verify both packages actually landed on npm at the expected version,
       # AND that the plugin tarball has the shape OpenClaw 2026.5.4+ requires
@@ -163,7 +175,6 @@ jobs:
       # bug where the plugin technically published but couldn't be installed.
       # Registry propagation lags metadata by up to 3 min after publish; poll.
       - name: Verify both packages landed on npm at the expected version
-        if: steps.version_check.outputs.already_published == 'false'
         env:
           MAIN_VERSION: ${{ steps.tag.outputs.version }}
         run: |
@@ -226,11 +237,12 @@ jobs:
           fi
           echo "Plugin tarball shape OK: dist/index.js present, openclaw.extensions=${PLUGIN_PKG_EXT}"
 
-      # Create the GitHub Release immediately after npm publish so a later
+      # Create or update the GitHub Release after npm publish so a later
       # ClawHub auth failure can't skip it. (Hit this on v4.10.0 — CLAWHUB_TOKEN
       # was stale, Release step was skipped, had to be created manually.)
+      # Always runs: a rerun after partial npm success must still create the
+      # missing release; the action updates an existing one in place.
       - name: Create GitHub Release
-        if: steps.version_check.outputs.already_published == 'false'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
@@ -275,7 +287,3 @@ jobs:
       - name: Skip ClawHub sync (missing token)
         if: env.HAS_CLAWHUB_TOKEN != 'true'
         run: echo "⚠️ CLAWHUB_TOKEN secret missing, skipping ClawHub auto-sync"
-
-      - name: Skip publish (already exists)
-        if: steps.version_check.outputs.already_published == 'true'
-        run: echo "⚠️ Skipping publish - version already exists on npm"
