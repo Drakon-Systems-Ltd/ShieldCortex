@@ -1,5 +1,13 @@
 import { homedir, tmpdir } from 'os';
-import { join } from 'path';
+import { join, relative, isAbsolute } from 'path';
+
+/** True containment, not a string prefix: `/tmp/x` must not "contain" `/tmp/xy`.
+ *  A prefix test would pass for a sibling directory whose name merely starts
+ *  with the tmpdir path, which is exactly the false green a guard must not have. */
+function isInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
 
 /**
  * Guards the global audit-dir sandbox in `scripts/jest-config-sandbox.mjs`.
@@ -29,25 +37,34 @@ describe('global audit-dir sandbox', () => {
 
   it('points the audit dir inside tmpdir, never at the real ~/.shieldcortex/audit', () => {
     const dir = process.env.SHIELDCORTEX_AUDIT_DIR as string;
-    expect(dir.startsWith(tmpdir())).toBe(true);
+    expect(isInside(tmpdir(), dir)).toBe(true);
     expect(dir).not.toBe(realAuditDir);
+    expect(isInside(join(homedir(), '.shieldcortex'), dir)).toBe(false);
   });
 
-  // These two run in declaration order and are a PAIR: the first establishes
-  // that the variable is genuinely unset, so the second passing is proof the
-  // setup file's beforeEach restored it — not proof it was never removed.
-  // Ten suites `delete process.env.SHIELDCORTEX_AUDIT_DIR` in teardown; without
-  // the re-assert, the next suite would silently fall back to the real
+  // These two are a PAIR and depend on declaration order: the first unsets the
+  // variable, the second proves the setup file's beforeEach put it back. Ten
+  // suites `delete process.env.SHIELDCORTEX_AUDIT_DIR` in teardown; without the
+  // re-assert the next suite silently falls back to the real
   // ~/.shieldcortex/audit.
+  //
+  // The dependency is made EXPLICIT rather than assumed. Jest runs in
+  // declaration order by default, but if that is ever randomized this guard must
+  // fail loudly instead of passing vacuously — a test that quietly stops testing
+  // is the same class of defect as the leak it guards.
+  let deleteCaseRan = false;
+
   it('a teardown-style delete really does unset the variable', () => {
     delete process.env.SHIELDCORTEX_AUDIT_DIR;
     expect(process.env.SHIELDCORTEX_AUDIT_DIR).toBeUndefined();
+    deleteCaseRan = true;
   });
 
   it('restores the sandbox before the next test, after that delete', () => {
+    expect(deleteCaseRan).toBe(true); // ordering precondition, not an assumption
     const dir = process.env.SHIELDCORTEX_AUDIT_DIR;
     expect(dir).toBeTruthy();
-    expect((dir as string).startsWith(tmpdir())).toBe(true);
+    expect(isInside(tmpdir(), dir as string)).toBe(true);
     expect(dir).not.toBe(realAuditDir);
   });
 });
