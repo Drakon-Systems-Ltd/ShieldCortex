@@ -16,6 +16,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { readMemoryPlane } from '../../cloud/config.js';
 import { readMemoryPlaneFromConfig } from '../../cli/doctor.js';
+import { extractFixCommands } from '../../cli/doctor-report.js';
 import {
   evaluatePlaneDrift,
   DUAL_LEGACY_GRACE_MS,
@@ -179,5 +180,40 @@ describe('evaluatePlaneDrift precedence', () => {
     expect(v.message).toMatch(/injectable=unknown/);
     expect(v.message).toMatch(/unscoped_excluded=unknown/);
     expect(v.message).toMatch(/activity_7d=unknown/);
+  });
+});
+
+describe('#441 plane-remedy commands must not loop WARN -> FAIL -> WARN', () => {
+  it('does not offer a copy-paste plane flip while native SoT is still growing', () => {
+    const native = {
+      touched7d: true,
+      bytes: 7834955,
+      touchedPaths: ['~/clawd/memory/2026-08-29.md'],
+      unattestable: [],
+      busActive: [],
+    };
+    const counts = {
+      durableAdmits7d: 271, durableRows: 400, injectable: null, unscopedExcluded: 42, activity7d: 7652,
+    };
+    const base = {
+      planeSetAt: null as string | null,
+      injectOn: false,
+      requireScope: true,
+      counts,
+      native,
+      nowMs: Date.parse('2026-08-30T12:00:00.000Z'),
+    };
+
+    const warn = evaluatePlaneDrift({ ...base, plane: 'dual_legacy' });
+    const fail = evaluatePlaneDrift({ ...base, plane: 'import_only' });
+    expect(warn.status).toBe('warn');
+    expect(fail.status).toBe('fail');
+
+    const warnCmds = extractFixCommands(warn.fix);
+    const failCmds = extractFixCommands(fail.fix);
+    expect(warnCmds.join(' ')).not.toMatch(/--memory-plane\s+import_only/);
+    expect(failCmds.join(' ')).not.toMatch(/--memory-plane\s+dual_legacy/);
+    expect(warnCmds).toEqual(['shieldcortex memories import-native']);
+    expect(failCmds).toEqual(['shieldcortex memories import-native']);
   });
 });
