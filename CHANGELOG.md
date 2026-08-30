@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#441:** doctor no longer copy-pastes `--memory-plane import_only` / `--memory-plane dual_legacy` as `$` remedies while native SoT is still growing. That looped WARN → FAIL → WARN. The rendered command is now `shieldcortex memories import-native`; flipping the plane flag does not stop native writes.
+
 ## [4.54.14] - 2026-08-29
 
 ### Security

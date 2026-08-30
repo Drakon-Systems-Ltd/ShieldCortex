@@ -83,11 +83,11 @@ export const DUAL_LEGACY_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 
 const RESIDUAL_DOC = 'docs/design/2026-08-22-memory-sota-track-a-residual.md';
 const DUAL_LEGACY_FIX =
-  'Time-box dual_legacy: land the host contract + defended import, then '
-  + '`shieldcortex config --memory-plane import_only` — dual_legacy is a migration escape, not steady state';
+  'Time-box dual_legacy: land the host contract and run `shieldcortex memories import-native` while native SoT is still growing. '
+  + 'Do not flip memory.plane to import_only until that growth has stopped — dual_legacy is a migration escape, not steady state';
 const NATIVE_SOT_FIX =
-  'Stop native MEMORY.md / memory-store growth as the agent brain — import it through the defended path or '
-  + `archive it, or drop back to \`shieldcortex config --memory-plane dual_legacy\` and be honest (${RESIDUAL_DOC})`;
+  'Stop native MEMORY.md / memory-store growth as the agent brain — import it through the defended path '
+  + `(\`shieldcortex memories import-native\`) or archive it. Flipping memory.plane does not stop native writes (${RESIDUAL_DOC})`;
 const NATIVE_BUS_FIX =
   'Turn the host native memory bus off (OpenClaw agents.defaults.memorySearch.enabled=false, '
   + 'Hermes memory.memory_enabled=false) — see the `Memory plane (host contract)` check for the per-runtime proof';
