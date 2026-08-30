@@ -101,7 +101,7 @@ describe('#454 — genuine exec names still enforce', () => {
   const REAL_EXEC = [
     'Bash', 'bash', 'sh', 'zsh', 'shell_exec', 'run_command', 'execute_command',
     'powershell', 'terminal_run', 'spawn_process', 'eval_code', 'script_run',
-    'mcp__vendor__bash', 'code_exec',
+    'code_exec',
   ] as const;
 
   it.each(REAL_EXEC)('%s still fails closed on an unknown key', (tool) => {

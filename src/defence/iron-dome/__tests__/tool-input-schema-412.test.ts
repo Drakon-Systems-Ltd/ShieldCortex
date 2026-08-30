@@ -117,32 +117,32 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
   });
 
   /**
-   * The `mcp__*` spellings used to be trusted here. They were caller-supplied
-   * authority: any MCP server that squatted the name inherited a reviewed
-   * contract. Removed — these names now fail closed on the exec family, the
-   * same answer `mcp__evil__sessions_spawn` has always got. Pinned so a later
-   * "helpful" re-add has to delete an explicit test to land.
+   * MCP-fronted spellings carry no trusted native identity. Runtime evaluation
+   * therefore uses the generic unknown-family annotate path: harmless host bags
+   * are stripped from the guard view instead of inheriting a reviewed contract
+   * or minting an invalid-input card. Direct enforce remains closed, and the
+   * shared raw-evidence tests below pin command-bearing payloads separately.
    */
   it.each([
     ['mcp__web__run', webFields],
     ['mcp__openclaw__sessions_spawn', openClawFields],
     ['mcp__collaboration__spawn_agent', collaborationFields],
-  ] as const)('denies the MCP name-squat spelling %s — a server does not certify its own contract', (tool, fields) => {
+    ['mcp__evil__sessions_spawn', openClawFields],
+  ] as const)('handles harmless MCP-fronted bag %s generically, with no card or deny', (tool, fields) => {
     expect(enforceToolInput(tool, fields)).toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
-    expect(evaluateToolCall(tool, fields)).toMatchObject({
-      decision: 'require_approval', action: 'invalid_tool_input',
-    });
+    expect(validateToolInput(tool, fields, 'annotate')).toMatchObject({ ok: true });
+    expect(evaluateToolCall(tool, fields)).toMatchObject({ decision: 'allow', severity: 'benign' });
+    expect(evaluateToolCall(tool, fields).action).not.toBe('invalid_tool_input');
   });
 
-  it('keeps unknown third-party SPAWN names on the old fail-closed path', () => {
+  it('keeps unknown non-MCP SPAWN names on the old fail-closed path', () => {
     expect(evaluateToolCall('vendor_spawn_agent', { task: 'work' }).action).toBe('invalid_tool_input');
     // `spawn` is exec vocabulary wherever it lands; a trailing `_run` word is
     // not (`get_workflow_run`, `list_workflow_runs`), so a vendor `_run` name
-    // annotates its inert bag instead of denying it. The name still gets no
-    // reviewed contract, and its command evidence is still scanned — see
-    // native-contract-drift.test.ts for both halves.
+    // annotates its inert bag instead of denying it. Syntactically MCP-fronted
+    // names take that same generic annotate route regardless of their suffix.
     expect(evaluateToolCall('thirdparty_run', { search_query: [{ q: 'x' }] }).decision).toBe('allow');
-    expect(evaluateToolCall('mcp__web__run', { search_query: [{ q: 'x' }] }).action).toBe('invalid_tool_input');
+    expect(evaluateToolCall('mcp__web__run', { search_query: [{ q: 'x' }] }).decision).toBe('allow');
   });
 
   const BIN = String.fromCharCode(114, 109);
@@ -316,9 +316,15 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
     });
   });
 
-  it('keeps near-collision names off the reviewed allow path', () => {
-    expect(evaluateToolCall('mcp__evil__sessions_spawn', { task: 'work' }).action).toBe('invalid_tool_input');
-    expect(evaluateToolCall('mcp__evil__web__run', { search_query: [{ q: 'x' }] }).action).toBe('invalid_tool_input');
+  it('keeps MCP near-collisions generic rather than granting or denying by suffix', () => {
+    for (const [tool, args] of [
+      ['mcp__evil__sessions_spawn', { task: 'work' }],
+      ['mcp__evil__web__run', { search_query: [{ q: 'x' }] }],
+    ] as const) {
+      const v = evaluateToolCall(tool, args);
+      expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(v.action).not.toBe('invalid_tool_input');
+    }
   });
 
   const okPipeline = () => ({

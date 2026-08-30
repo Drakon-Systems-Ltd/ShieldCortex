@@ -29,6 +29,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
 import {
   hasExactSpecialToolSchema, validateToolInput, schemaFamilyForTool, isNativeShellControlTool,
+  isMcpFrontedToolName,
   contractDriftFor,
   COMMAND_KEYS, PATH_KEYS, URL_KEYS, WRITE_CONTENT_KEYS, COMMAND_EVIDENCE_KEYS,
   OUTBOUND_DATA_KEYS, OUTBOUND_METHOD_KEYS,
@@ -4474,13 +4475,23 @@ function commandEvidencePass(
   // question — and it is the same call the rejection path makes, not a new
   // policy this pass invents.
   const annotated = validateToolInput(toolName, bag, 'annotate');
-  const surfaces = commandEvidenceSurfaces(bag, budget, annotated.ok);
+  const mcpFronted = isMcpFrontedToolName(toolName);
+  // For MCP calls the downstream family comes from an untrusted final segment
+  // and may short-circuit as read/memory before scanning a retained `command`.
+  // Force every raw command alias into this exec-semantics pass; duplication is
+  // preferable to letting caller-chosen spelling suppress evidence.
+  const surfaces = commandEvidenceSurfaces(bag, budget, annotated.ok && !mcpFronted);
   if (surfaces.length === 0 && !budget.exhausted) return null;
 
   const extras = pathUrlFromRaw(bag);
   let best: ToolGuardVerdict | null = null;
+  // MCP provenance is unavailable here, so its final name segment cannot decide
+  // that command evidence is read-only or memory-only. Scan the raw command
+  // surfaces with exec semantics; the outer/core verdict still uses the real
+  // tool name and the schema family remains unknown.
+  const evidenceToolName = mcpFronted ? 'Bash' : toolName;
   for (const text of surfaces) {
-    const inner = evaluateToolCallCore(toolName, { ...extras, command: text }, config, options, true);
+    const inner = evaluateToolCallCore(evidenceToolName, { ...extras, command: text }, config, options, true);
     if (outranks(inner, best)) best = inner;
     // Catastrophic dominance is terminal: nothing later can outrank it, and
     // the remaining surfaces cannot make a wipe less true.

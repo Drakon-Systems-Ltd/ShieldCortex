@@ -302,57 +302,73 @@ describe('the split does not soften catastrophic evidence', () => {
   });
 });
 
-describe('exact native spellings only — no MCP name-squat', () => {
-  const SQUATS = [
+describe('MCP-fronted names get no native contract and no guessed schema family', () => {
+  const MCP_NAMES = [
     'mcp__web__run',
     'mcp__openclaw__sessions_spawn',
     'mcp__collaboration__spawn_agent',
     'mcp__evil__sessions_spawn',
     'mcp__evil__web__run',
-    'vendor_sessions_spawn',
-    'thirdparty_run',
+    'mcp__evil__read_file',
+    'mcp__evil__remember',
+    'MCP__OpenClaw__Sessions_Spawn',
   ] as const;
+  const DANGER_TOKENS = [String.fromCharCode(115, 117, 100, 111), 'id'];
+  const MCP_WIPE_TOKENS = [String.fromCharCode(114, 109), ['-', 'r', 'f'].join(''), '/'];
 
-  it.each(SQUATS)('%s gets no reviewed contract', (tool) => {
+  it.each(MCP_NAMES)('%s resolves generically to unknown, never a reviewed contract', (tool) => {
     expect(hasExactSpecialToolSchema(tool)).toBe(false);
     expect(exactSpecialContractName(tool)).toBeNull();
+    expect(schemaFamilyForTool(tool)).toBe('unknown');
     expect(contractDriftFor(tool, { task: 'work', futureField: 'x' })).toBeNull();
   });
 
-  /**
-   * `thirdparty_run` is absent here on purpose. A name whose only exec evidence
-   * is a trailing `_run` word is the `get_workflow_run` / `list_workflow_runs`
-   * shape, not an exec contract, so it no longer picks EXEC_KEYS and no longer
-   * denies an inert host bag. It gets no reviewed contract either (above), and
-   * its command evidence is still scanned (below) — the deny is what left, not
-   * the scan.
-   */
-  it.each(SQUATS.filter((t) => t !== 'thirdparty_run'))(
-    '%s still fails closed on a spawn-shaped bag',
+  it.each(['mcp__openclaw__sessions_spawn', 'mcp__evil__sessions_spawn'])(
+    '%s allows the harmless live 28-field structured bag without a card',
     (tool) => {
-      expect(evaluateToolCall(tool, { task: 'work' })).toMatchObject({
-        decision: 'require_approval', action: 'invalid_tool_input',
-      });
+      const v = evaluateToolCall(tool, LIVE_SPAWN_FIELDS);
+      expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(v.action).not.toBe('invalid_tool_input');
+      expect(v.signals).not.toContain('invalid-tool-input');
+      expect(v.contractDrift).toBeUndefined();
     },
   );
 
-  it('a bare _run suffix costs nothing on an inert bag but keeps its teeth', () => {
-    const wipeTokens = [String.fromCharCode(114, 109), ['-', 'r', 'f'].join(''), '/'];
-    expect(evaluateToolCall('thirdparty_run', { task: 'work' })).toMatchObject({
-      decision: 'allow', severity: 'benign',
-    });
-    expect(evaluateToolCall('thirdparty_run', { argv: wipeTokens })).toMatchObject({
-      decision: 'block', severity: 'catastrophic',
-    });
+  it.each(MCP_NAMES)('%s strips inert fields from its guard view', (tool) => {
+    const r = enforceToolInput(tool, { task: 'work', structured: { nested: ['data'] } });
+    // Direct enforce remains closed; runtime evaluation deliberately selects
+    // annotate for the unknown family and therefore does not forward this bag.
+    expect(r).toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
+    expect(evaluateToolCall(tool, { task: 'work', structured: { nested: ['data'] } }))
+      .toMatchObject({ decision: 'allow', severity: 'benign' });
   });
 
-  it('the squat spellings fall to the exec family, not a softer one', () => {
-    expect(schemaFamilyForTool('mcp__openclaw__sessions_spawn')).toBe('exec');
-    expect(schemaFamilyForTool('mcp__web__run')).toBe('exec');
-    expect(schemaFamilyForTool('mcp__collaboration__spawn_agent')).toBe('exec');
+  it.each(MCP_NAMES)('%s keeps dangerous and catastrophic raw command evidence', (tool) => {
+    expect(evaluateToolCall(tool, { task: 'work', argv: DANGER_TOKENS }))
+      .toMatchObject({ decision: 'require_approval', severity: 'dangerous' });
+    expect(evaluateToolCall(tool, { task: 'work', command: 'echo safe', argv: MCP_WIPE_TOKENS }))
+      .toMatchObject({ decision: 'block', severity: 'catastrophic' });
   });
 
-  it('the native spellings are still reviewed', () => {
+  it('MCP read/memory suffixes cannot short-circuit raw command evidence', () => {
+    for (const tool of ['mcp__evil__read_file', 'mcp__evil__remember']) {
+      expect(evaluateToolCall(tool, { command: MCP_WIPE_TOKENS.join(' ') }))
+        .toMatchObject({ decision: 'block', severity: 'catastrophic' });
+      expect(evaluateToolCall(tool, { command: DANGER_TOKENS.join(' ') }))
+        .toMatchObject({ decision: 'require_approval', severity: 'dangerous' });
+    }
+  });
+
+  it('non-MCP lookalikes keep their existing schema inference', () => {
+    expect(schemaFamilyForTool('vendor_sessions_spawn')).toBe('exec');
+    expect(evaluateToolCall('vendor_sessions_spawn', { task: 'work' })).toMatchObject({
+      decision: 'require_approval', action: 'invalid_tool_input',
+    });
+    expect(evaluateToolCall('thirdparty_run', { task: 'work' }))
+      .toMatchObject({ decision: 'allow', severity: 'benign' });
+  });
+
+  it('canonical native spellings remain reviewed', () => {
     for (const tool of [...SPAWN_ALIASES, 'webrun', 'web.run', 'web__run',
       'collaborationspawn_agent', 'collaboration.spawn_agent', 'collaboration__spawn_agent']) {
       expect(hasExactSpecialToolSchema(tool)).toBe(true);

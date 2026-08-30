@@ -262,11 +262,53 @@ describe('interceptor — native contract drift', () => {
     expect(h.audits).toEqual([]);
   });
 
-  it('an MCP name-squat of the same contract is DENIED unattended', async () => {
+  const MCP_SPAWN_NAMES = [
+    'mcp__openclaw__sessions_spawn',
+    'mcp__evil__sessions_spawn',
+  ] as const;
+  const MCP_DANGER = [String.fromCharCode(115, 117, 100, 111), 'id'];
+  const MCP_DELETE = String.fromCharCode(114, 109);
+  const MCP_RECURSIVE_FORCE = ['-', 'r', 'f'].join('');
+
+  it.each(MCP_SPAWN_NAMES)('ATTENDED: generic %s accepts the full 28-field bag with zero cards', async (toolName) => {
     const h = harness();
     await expect(h.i.handleToolCall({
-      toolName: 'mcp__openclaw__sessions_spawn', arguments: LIVE_SPAWN,
+      toolName, arguments: LIVE_SPAWN, requireApproval: h.approve,
+    })).resolves.toBeUndefined();
+    expect(h.prompts()).toBe(0);
+    expect(h.audits).toEqual([]);
+  });
+
+  it.each(MCP_SPAWN_NAMES)('UNATTENDED: generic %s accepts the full 28-field bag without denial', async (toolName) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({ toolName, arguments: LIVE_SPAWN }))
+      .resolves.toBeUndefined();
+    expect(h.audits).toEqual([]);
+  });
+
+  it.each(MCP_SPAWN_NAMES)('%s keeps dangerous raw argv on the approval path', async (toolName) => {
+    const attended = harness();
+    await expect(attended.i.handleToolCall({
+      toolName,
+      arguments: { ...LIVE_SPAWN, argv: MCP_DANGER },
+      requireApproval: attended.approve,
+    })).resolves.toBeUndefined();
+    expect(attended.prompts()).toBe(1);
+
+    const unattended = harness();
+    await expect(unattended.i.handleToolCall({
+      toolName, arguments: { ...LIVE_SPAWN, argv: MCP_DANGER },
     })).rejects.toThrow(/blocked|denied|approval/i);
+  });
+
+  it.each(MCP_SPAWN_NAMES)('%s keeps a split command/argv wipe doorless', async (toolName) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName,
+      arguments: { ...LIVE_SPAWN, command: MCP_DELETE, argv: [MCP_RECURSIVE_FORCE, '/'] },
+      requireApproval: h.approve,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+    expect(h.prompts()).toBe(0);
   });
 
   it('an argv wipe on the drifted contract is still a hard, doorless block', async () => {

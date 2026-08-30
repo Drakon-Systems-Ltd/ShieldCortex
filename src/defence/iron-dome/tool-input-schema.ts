@@ -234,12 +234,12 @@ interface ShellControlSchema {
  *
  * NATIVE SPELLINGS ONLY. The `mcp__web__run` / `mcp__openclaw__sessions_spawn`
  * / `mcp__collaboration__spawn_agent` spellings used to sit here, which handed
- * any MCP server that squatted one of those names a reviewed contract on the
- * strength of its own chosen tool name — caller-supplied authority, and the one
- * thing this module must never take. They are gone: those names now fall
- * through `schemaFamilyForTool` to the `exec` family and fail closed exactly
- * like `mcp__evil__sessions_spawn` always has. An operator genuinely fronting
- * OpenClaw over MCP is blocked, deliberately and without an escape hatch.
+ * any MCP server that chose one of those names a reviewed contract on the
+ * strength of caller-supplied identity. They are gone. After this exact lookup,
+ * every syntactically MCP-fronted name resolves to the `unknown` schema family:
+ * harmless structured host fields are stripped from the guard view, while the
+ * shared raw-evidence pass still scans command/cmd/script/run/args/argv before
+ * schema handling. That is neither trusted identity nor an open schema.
  */
 interface ExactSpecialSchema {
   /** Closed set of DECLARED host fields. */
@@ -395,9 +395,10 @@ const SHELL_CONTROL_STOP: ShellControlSchema = {
 
 /**
  * EXACT native tool names only — the WHOLE name, case-insensitively. A
- * namespaced `mcp__thirdparty__BashOutput` is a third-party tool that merely
- * borrowed the name, so it keeps EXEC_KEYS and still fails closed on `bash_id`.
- * That is stricter than the last-segment matching used elsewhere, on purpose.
+ * namespaced `mcp__thirdparty__BashOutput` merely borrowed the name and gets no
+ * native shell-control contract: like every syntactically MCP-fronted tool it
+ * uses the generic unknown schema family, while raw command evidence is scanned
+ * independently with execution semantics.
  */
 function shellControlSchemaFor(toolName: string): ShellControlSchema | null {
   switch (String(toolName ?? '').trim().toLowerCase()) {
@@ -491,7 +492,17 @@ function isAllExecWords(segment: string): boolean {
   return words.every((w) => EXEC_WORDS.has(w));
 }
 
-/** Align with classifyFamily so exec-class tools never use the unknown bag. */
+/**
+ * True only for the host spelling `mcp__<server>__<tool>` (case-insensitive).
+ * Server names may contain single underscores; an empty server or tool is not
+ * syntactically MCP-fronted. This is a routing boundary, not provenance.
+ */
+export function isMcpFrontedToolName(toolName: string): boolean {
+  const raw = String(toolName || '').trim();
+  return /^mcp__(?!_)(?:(?!__).)+__(?=.)[\s\S]+$/i.test(raw);
+}
+
+/** Pick the closed schema family, with exact native and MCP routing first. */
 export function schemaFamilyForTool(
   toolName: string,
 ): 'exec' | 'write' | 'read' | 'network' | 'memory' | 'git' | 'unknown' {
@@ -499,6 +510,11 @@ export function schemaFamilyForTool(
   const n = raw.toLowerCase();
   const special = exactSpecialSchemaFor(n);
   if (special) return special.family;
+  // MCP spelling carries no trustworthy native identity. Keep its guard view
+  // on the closed annotate path instead of guessing a contract from the final
+  // segment (`sessions_spawn`, `bash`, etc.). Raw command evidence was already
+  // scanned before schema handling by commandEvidencePass.
+  if (isMcpFrontedToolName(raw)) return 'unknown';
   // Keep the ORIGINAL case of the segment: camelCase is a word boundary.
   const rawSeg = raw.split(/__|\.|:|\//).filter(Boolean).pop() ?? raw;
   const seg = n.split(/__|\.|:|\//).filter(Boolean).pop() ?? n;

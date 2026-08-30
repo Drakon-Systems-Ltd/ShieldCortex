@@ -29,6 +29,7 @@ import { enforceToolInput, schemaFamilyForTool } from '../tool-input-schema.js';
 const BIN = String.fromCharCode(114, 109);
 const RF = ['-', 'r', 'f'].join('');
 const WIPE_TOKENS = [BIN, RF, '/'];
+const DANGER_TOKENS = [String.fromCharCode(115, 117, 100, 111), 'id'];
 
 /** Genuine exec names. Every one keeps the closed bag. */
 const EXEC_NAMES = [
@@ -41,10 +42,14 @@ const EXEC_NAMES = [
   'shell_command', 'command_run', 'exec_command', 'runShell', 'runCmd',
   // a strong word at a segment boundary, whatever the rest is
   'shell_exec', 'spawn_process', 'eval_code', 'script_run', 'code_exec',
-  'terminal_run', 'vendor_bash', 'sessions_spawn_agent', 'mcp__vendor__bash',
-  // the MCP name-squat spellings keep failing closed (no reviewed contract)
-  'mcp__web__run', 'mcp__openclaw__sessions_spawn', 'mcp__collaboration__spawn_agent',
-  'mcp__evil__sessions_spawn', 'vendor_sessions_spawn',
+  'terminal_run', 'vendor_bash', 'sessions_spawn_agent', 'vendor_sessions_spawn',
+] as const;
+
+/** MCP spelling is a routing boundary, never trusted identity or suffix inference. */
+const MCP_FRONTED_NAMES = [
+  'mcp__vendor__bash', 'mcp__web__run', 'mcp__openclaw__sessions_spawn',
+  'mcp__collaboration__spawn_agent', 'mcp__evil__sessions_spawn',
+  'MCP__OpenClaw__Sessions_Spawn',
 ] as const;
 
 /**
@@ -91,6 +96,24 @@ describe('schema family — weak exec words need the whole name', () => {
 
   it.each(EXEC_NAMES)('%s still allows its own declared shape', (tool) => {
     expect(evaluateToolCall(tool, { command: 'printf ok' }).decision).toBe('allow');
+  });
+});
+
+describe('schema family — MCP-fronted names never infer from the final segment', () => {
+  it.each(MCP_FRONTED_NAMES)('%s uses the generic unknown schema family', (tool) => {
+    expect(schemaFamilyForTool(tool)).toBe('unknown');
+  });
+
+  it.each(MCP_FRONTED_NAMES)('%s allows harmless structured fields after annotation', (tool) => {
+    const v = evaluateToolCall(tool, { task: 'work', structured: { nested: ['data'] } });
+    expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+    expect(v.action).not.toBe('invalid_tool_input');
+  });
+
+  it.each(MCP_FRONTED_NAMES)('%s still scans raw command and argv evidence', (tool) => {
+    expect(evaluateToolCall(tool, { argv: DANGER_TOKENS }).decision).not.toBe('allow');
+    expect(evaluateToolCall(tool, { command: BIN, argv: [RF, '/'] }))
+      .toMatchObject({ decision: 'block', severity: 'catastrophic' });
   });
 });
 
