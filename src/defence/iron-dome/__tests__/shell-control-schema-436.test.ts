@@ -176,13 +176,26 @@ describe('#439 — TaskOutput/TaskStop use the native control schemas', () => {
     expect(v.signals).toEqual(expect.arrayContaining(['invalid-tool-input', 'unknown-keys']));
   });
 
+  it('non-string TaskStop handle fails closed without throwing', () => {
+    const v = evaluateToolCall('TaskStop', { shell_id: 1 });
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('dangerous');
+    expect(v.action).toBe('invalid_tool_input');
+  });
+
   it('does not leak the narrow schema to a namespaced TaskOutput look-alike', () => {
     const r = enforceToolInput('mcp__thirdparty__TaskOutput', { task_id: 'task_1' });
     expect(r.ok).toBe(false);
+    // If the native control bag leaked, evil_payload would be invalid_tool_input.
+    // Unknown-family annotate strips it and allows — that is the intended split.
+    const v = evaluateToolCall('mcp__thirdparty__TaskOutput', { task_id: 'task_1', evil_payload: 'x' });
+    expect(v.action).not.toBe('invalid_tool_input');
   });
 
   it('does not leak the narrow schema to a namespaced TaskStop look-alike', () => {
     const r = enforceToolInput('mcp__thirdparty__TaskStop', { shell_id: 'shell_1' });
     expect(r.ok).toBe(false);
+    const v = evaluateToolCall('mcp__thirdparty__TaskStop', { shell_id: 'shell_1', evil_payload: 'x' });
+    expect(v.action).not.toBe('invalid_tool_input');
   });
 });
