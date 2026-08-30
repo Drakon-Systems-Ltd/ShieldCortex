@@ -121,6 +121,7 @@ describe('TaskOutput live contract — arrays/objects/coercions fail closed', ()
     ['timeout as array', { task_id: 't', timeout: [1] }, 'NESTED_INVALID'],
     ['timeout as NaN', { task_id: 't', timeout: Number.NaN }, 'TYPE_COERCION'],
     ['timeout as Infinity', { task_id: 't', timeout: Number.POSITIVE_INFINITY }, 'TYPE_COERCION'],
+    ['timeout as -Infinity', { task_id: 't', timeout: Number.NEGATIVE_INFINITY }, 'TYPE_COERCION'],
     ['handle as boolean', { task_id: true, block: true, timeout: 1 }, 'TYPE_COERCION'],
     ['handle as array', { task_id: ['t'], block: true, timeout: 1 }, 'NESTED_INVALID'],
     ['filter as object', { task_id: 't', filter: { re: 'x' }, block: true }, 'NESTED_INVALID'],
@@ -131,6 +132,58 @@ describe('TaskOutput live contract — arrays/objects/coercions fail closed', ()
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe(code);
     expectHardBlock('TaskOutput', args);
+  });
+
+  /**
+   * The host declares `timeout` as
+   * `{"type":"number","minimum":0,"maximum":600000,"default":30000}`.
+   * `Number.isFinite` alone accepted `-1` and `600001` — values the host will
+   * reject, so forwarding them only turns a schema error into a confusing
+   * runtime one. The contract is the RANGE, and a bag that claims to be the
+   * live contract enforces the whole of it.
+   */
+  const TIMEOUT_MIN = 0;
+  const TIMEOUT_MAX = 600_000;
+
+  it.each([TIMEOUT_MIN, 1, 30_000, 599_999, TIMEOUT_MAX])(
+    'an in-range timeout %d is accepted',
+    (timeout) => {
+      const r = enforceToolInput('TaskOutput', { task_id: 't', block: true, timeout });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.args.timeout).toBe(timeout);
+      expect(evaluateToolCall('TaskOutput', { task_id: 't', block: true, timeout }).action)
+        .not.toBe('invalid_tool_input');
+    },
+  );
+
+  it.each([-1, -0.5, TIMEOUT_MAX + 1, 3_600_000, Number.MAX_SAFE_INTEGER])(
+    'an out-of-range timeout %d fails closed',
+    (timeout) => {
+      const args = { task_id: 't', block: true, timeout };
+      const r = enforceToolInput('TaskOutput', args);
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe('TYPE_COERCION');
+        expect(r.reason).toContain('between 0 and 600000');
+      }
+      expectHardBlock('TaskOutput', args);
+    },
+  );
+
+  it('-0 is 0, not a negative timeout', () => {
+    expect(enforceToolInput('TaskOutput', { task_id: 't', timeout: -0 }).ok).toBe(true);
+  });
+
+  it('the range gate does not mask a catastrophic sibling', () => {
+    const v = evaluateToolCall('TaskOutput', {
+      task_id: 't', timeout: -1, command: ['r', 'm', ' ', '-', 'r', 'f', ' ', '/'].join(''),
+    });
+    expect(v).toMatchObject({ decision: 'block', severity: 'catastrophic' });
+  });
+
+  it('BashOutput has no numeric field to bound, and gains none', () => {
+    const r = enforceToolInput('BashOutput', { bash_id: 'b', timeout: 30_000 });
+    expect(r).toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
   });
 
   it('a rejected TaskOutput field never reaches the extractors as a value', () => {

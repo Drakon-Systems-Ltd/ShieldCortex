@@ -1,0 +1,367 @@
+/**
+ * Native contract drift — the closed exact-special bag stops being a staleness
+ * alarm wired to the deny path.
+ *
+ * The bag was doing two jobs. Evidence discipline (a command-bearing key on a
+ * delegation tool must be SCANNED, not read-short-circuited) is load-bearing.
+ * Novelty rejection (deny any key not enumerated when the contract was last
+ * measured) is not: every downstream reader in the guard is a FIXED-KEY lookup,
+ * so a key outside `GUARD_EVIDENCE_KEYS` is provably unreachable by every
+ * scanner. Denying it bought nothing and cost a card storm on ordinary work —
+ * 13 of `sessions_spawn`'s 28 live fields hard-denied, and three hand-widenings
+ * in a row (#436 BashOutput, #445 TaskOutput, this).
+ *
+ * The fold splits the unknown-key verdict by SCANNABILITY, not by membership:
+ *   - unknown key IN  GUARD_EVIDENCE_KEYS → unchanged fail-closed + raw rescan
+ *   - unknown key OUT of it → dropped before nested validation and before any
+ *     extractor, call proceeds, key NAME reported as a drift observation
+ *
+ * This file is table-driven against the canonical sources on purpose: the field
+ * list is derived from the live host schema and the evidence list from
+ * ShieldCortex's own reader lists, so a migration cannot be forgotten (the
+ * lesson `doctor-schema-drift.test.ts` already paid for, on a different plane).
+ */
+import { describe, expect, it } from '@jest/globals';
+import {
+  enforceToolInput,
+  contractDriftFor,
+  hasExactSpecialToolSchema,
+  exactSpecialContractName,
+  schemaFamilyForTool,
+  GUARD_EVIDENCE_KEYS,
+  COMMAND_KEYS,
+  PATH_KEYS,
+  URL_KEYS,
+  WRITE_CONTENT_KEYS,
+  COMMAND_EVIDENCE_KEYS,
+  OUTBOUND_DATA_KEYS,
+  OUTBOUND_METHOD_KEYS,
+  CONTRACT_DRIFT_MAX_KEYS,
+} from '../tool-input-schema.js';
+import {
+  evaluateToolCall,
+  extractCommand,
+  extractPath,
+  extractUrl,
+  extractWriteContent,
+} from '../tool-action-guard.js';
+
+/**
+ * Every top-level field of the LIVE `createSessionsSpawnToolSchema`
+ * (`openclaw/src/agents/tools/sessions-spawn-tool.ts`) with every capability
+ * flag on — the base block, the swarm block, `VISIBLE_SESSIONS_SPAWN_SCHEMA`
+ * (`sessions-spawn-visible.ts`), the attachment block and the ACP block.
+ * Measured against the host source, not guessed.
+ */
+const LIVE_SPAWN_FIELDS: Record<string, unknown> = {
+  task: 'inspect the failing tests',
+  taskName: 'review_tests',
+  label: 'review',
+  runtime: 'subagent',
+  agentId: 'edith',
+  model: 'default',
+  runTimeoutSeconds: 600,
+  thinking: 'medium',
+  cwd: '/workspace/repo',
+  thread: true,
+  mode: 'run',
+  cleanup: 'delete',
+  sandbox: 'inherit',
+  context: 'bounded',
+  lightContext: true,
+  collect: true,
+  outputSchema: {
+    type: 'object',
+    properties: { verdict: { type: 'string' }, findings: { type: 'array' } },
+    required: ['verdict'],
+  },
+  fastMode: 'auto',
+  groupId: 'swarm-1',
+  visible: true,
+  category: 'Review',
+  worktree: true,
+  worktreeName: 'wt-review',
+  worktreeBaseRef: 'main',
+  attachments: [{ name: 'notes.txt', content: 'hello', encoding: 'utf8', mimeType: 'text/plain' }],
+  attachAs: { mountPath: '/mnt/attachments' },
+  resumeSessionId: 'sess-01HX',
+  streamTo: 'parent',
+};
+
+const SPAWN_ALIASES = [
+  'sessions_spawn',
+  'openclawsessions_spawn',
+  'openclaw.sessions_spawn',
+  'openclaw__sessions_spawn',
+] as const;
+
+describe('live sessions_spawn contract — 28-field coverage', () => {
+  it('the fixture IS the live contract: exactly 28 declared top-level fields', () => {
+    expect(Object.keys(LIVE_SPAWN_FIELDS)).toHaveLength(28);
+  });
+
+  it.each(Object.keys(LIVE_SPAWN_FIELDS))(
+    'declared field %s is accepted alone, with no card and no drift',
+    (field) => {
+      const args = { task: 'work', [field]: LIVE_SPAWN_FIELDS[field] };
+      expect(enforceToolInput('sessions_spawn', args)).toMatchObject({ ok: true });
+      const v = evaluateToolCall('sessions_spawn', args);
+      expect(v.decision).toBe('allow');
+      expect(v.action).not.toBe('invalid_tool_input');
+      expect(v.contractDrift).toBeUndefined();
+    },
+  );
+
+  it.each(SPAWN_ALIASES)('%s accepts all 28 fields at once, forward and reversed', (tool) => {
+    for (const args of [
+      LIVE_SPAWN_FIELDS,
+      Object.fromEntries(Object.entries(LIVE_SPAWN_FIELDS).reverse()),
+    ]) {
+      expect(enforceToolInput(tool, args)).toMatchObject({ ok: true });
+      expect(evaluateToolCall(tool, args)).toMatchObject({ decision: 'allow', severity: 'benign' });
+    }
+  });
+
+  it('the minimal modern spawn that used to block on `visible` is clean', () => {
+    const v = evaluateToolCall('sessions_spawn', {
+      task: 'inspect tests', runtime: 'subagent', visible: true, worktree: true,
+    });
+    expect(v).toMatchObject({ decision: 'allow', severity: 'benign' });
+  });
+
+  it('nested outputSchema passes: an inert declared field is deleted, not judged', () => {
+    const args = { task: 'work', collect: true, outputSchema: LIVE_SPAWN_FIELDS.outputSchema };
+    const r = enforceToolInput('sessions_spawn', args);
+    expect(r).toMatchObject({ ok: true });
+    // Deleted before validateNested AND before the extractors — never forwarded.
+    if (r.ok) {
+      expect(r.args).not.toHaveProperty('outputSchema');
+      expect(r.strippedKeys).not.toContain('outputSchema');
+    }
+    expect(evaluateToolCall('sessions_spawn', args)).toMatchObject({ decision: 'allow' });
+    // A JSON Schema three levels deep still does not reach validateNested.
+    const deep = {
+      task: 'work',
+      outputSchema: { properties: { a: { properties: { b: { type: 'string' } } } } },
+    };
+    expect(enforceToolInput('sessions_spawn', deep)).toMatchObject({ ok: true });
+  });
+});
+
+describe('the scannability split', () => {
+  const EVIDENCE = [...new Set([
+    ...COMMAND_KEYS, ...PATH_KEYS, ...URL_KEYS, ...WRITE_CONTENT_KEYS,
+    ...COMMAND_EVIDENCE_KEYS, ...OUTBOUND_DATA_KEYS, ...OUTBOUND_METHOD_KEYS,
+  ])];
+
+  it('GUARD_EVIDENCE_KEYS covers every list the guard actually reads', () => {
+    for (const k of EVIDENCE) expect(GUARD_EVIDENCE_KEYS.has(k)).toBe(true);
+    // args/argv are the recovery-scan surfaces; losing them would make a wipe
+    // in a token array inert, which is the exact smuggle this file guards.
+    expect(GUARD_EVIDENCE_KEYS.has('args')).toBe(true);
+    expect(GUARD_EVIDENCE_KEYS.has('argv')).toBe(true);
+  });
+
+  it('every evidence key is genuinely read by an extractor or evidence pass', () => {
+    // Not a tautology over the constant: drive the real extractors. A key that
+    // no reader consults must not be claimed as evidence, and vice versa.
+    for (const k of [...COMMAND_KEYS]) expect(extractCommand({ [k]: 'probe' })).toBe('probe');
+    for (const k of [...PATH_KEYS]) expect(extractPath({ [k]: 'probe' })).toBe('probe');
+    for (const k of [...URL_KEYS]) expect(extractUrl({ [k]: 'probe' })).toBe('probe');
+    for (const k of [...WRITE_CONTENT_KEYS]) expect(extractWriteContent({ [k]: 'probe' })).toBe('probe');
+  });
+
+  it('no declared field of a reviewed contract is an evidence key', () => {
+    // The invariant the whole fold rests on: a contract may not hand a caller a
+    // scanner-visible field under a reviewed name.
+    for (const field of Object.keys(LIVE_SPAWN_FIELDS)) {
+      expect(GUARD_EVIDENCE_KEYS.has(field)).toBe(false);
+    }
+    for (const field of ['search_query', 'open', 'click', 'find', 'image_query',
+      'calculator', 'weather', 'finance', 'sports', 'time', 'response_length']) {
+      expect(GUARD_EVIDENCE_KEYS.has(field)).toBe(false);
+    }
+  });
+
+  it.each(EVIDENCE)(
+    'an UNDECLARED evidence key %s on a spawn still fails closed — no drop, no drift',
+    (key) => {
+      const args = { task: 'work', [key]: 'echo hello' };
+      const r = enforceToolInput('sessions_spawn', args);
+      expect(r).toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
+      if (!r.ok) expect(r.unknownKeys).toContain(key);
+      expect(contractDriftFor('sessions_spawn', args)).toBeNull();
+      expect(evaluateToolCall('sessions_spawn', args)).toMatchObject({
+        decision: 'block', action: 'invalid_tool_input',
+      });
+    },
+  );
+
+  it('an undeclared INERT key is dropped and reported, never denied', () => {
+    const args = { task: 'work', brandNewHostField: 'anything at all', another_one: 42 };
+    const r = enforceToolInput('sessions_spawn', args);
+    expect(r).toMatchObject({ ok: true });
+    if (r.ok) {
+      expect(r.args).toEqual({ task: 'work' });
+      expect(r.strippedKeys).toEqual(['brandNewHostField', 'another_one']);
+    }
+    expect(evaluateToolCall('sessions_spawn', args)).toMatchObject({
+      decision: 'allow',
+      severity: 'benign',
+      contractDrift: {
+        contract: 'openclaw.sessions_spawn',
+        droppedKeys: ['brandNewHostField', 'another_one'],
+      },
+    });
+  });
+
+  it('a dropped key never reaches validateNested, whatever its shape', () => {
+    for (const value of [
+      { deeply: { nested: { object: 1 } } },
+      [[['a'], ['b']], [['c']]],
+      { a: { b: { c: { d: { e: 'f' } } } } },
+    ]) {
+      expect(enforceToolInput('sessions_spawn', { task: 'work', futureField: value }))
+        .toMatchObject({ ok: true });
+    }
+  });
+
+  it('an empty-valued undeclared key is still dropped, not silently skipped', () => {
+    const drift = contractDriftFor('sessions_spawn', { task: 'work', futureField: '' });
+    expect(drift?.droppedKeys).toEqual(['futureField']);
+  });
+
+  it('prototype pollution is rejected before the split can look at it', () => {
+    for (const bad of ['__proto__', 'constructor', 'prototype']) {
+      const args = JSON.parse(`{"task":"work","${bad}":{"polluted":true}}`);
+      expect(enforceToolInput('sessions_spawn', args)).toMatchObject({ ok: false });
+    }
+  });
+
+  it('the drift observation is bounded and carries names only, never values', () => {
+    const args: Record<string, unknown> = { task: 'work' };
+    for (let i = 0; i < CONTRACT_DRIFT_MAX_KEYS + 5; i++) args[`f${i}`] = `secret-value-${i}`;
+    args['x'.repeat(300)] = 'sk-LIVE-SECRET';
+    const drift = contractDriftFor('sessions_spawn', args)!;
+    expect(drift.droppedKeys).toHaveLength(CONTRACT_DRIFT_MAX_KEYS);
+    expect(drift.truncated).toBe(true);
+    for (const k of drift.droppedKeys) expect(k.length).toBeLessThanOrEqual(64);
+    expect(JSON.stringify(drift)).not.toContain('secret-value');
+    expect(JSON.stringify(drift)).not.toContain('sk-LIVE-SECRET');
+  });
+
+  it('non-special tools keep the old behaviour: no drop, no drift', () => {
+    expect(contractDriftFor('Bash', { command: 'ls', evil: 'x' })).toBeNull();
+    expect(enforceToolInput('Bash', { command: 'ls', evil: 'x' }))
+      .toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
+    expect(evaluateToolCall('Bash', { command: 'ls', evil: 'x' }).contractDrift).toBeUndefined();
+  });
+});
+
+describe('the split does not soften catastrophic evidence', () => {
+  const BIN = String.fromCharCode(114, 109);
+  const WIPE_TOKENS = [BIN, ['-', 'r', 'f'].join(''), '/'];
+  const WIPE = WIPE_TOKENS.join(' ');
+
+  it.each(SPAWN_ALIASES)('%s: an argv wipe is still catastrophic and doorless', (tool) => {
+    for (const payload of [WIPE, WIPE_TOKENS, { a: [BIN, ['-', 'r', 'f'].join('')], b: '/' }]) {
+      expect(evaluateToolCall(tool, { task: 'work', argv: payload })).toMatchObject({
+        decision: 'block', severity: 'catastrophic',
+      });
+    }
+  });
+
+  it('an argv wipe alongside 20 drifted inert keys is still catastrophic', () => {
+    const args: Record<string, unknown> = { task: 'work', argv: WIPE_TOKENS };
+    for (let i = 0; i < 20; i++) args[`futureField${i}`] = { nested: { deep: i } };
+    expect(evaluateToolCall('sessions_spawn', args)).toMatchObject({
+      decision: 'block', severity: 'catastrophic',
+    });
+  });
+
+  it('a wipe buried mid-payload in a long argv still scans', () => {
+    const mid = 'x'.repeat(140000) + ' ' + WIPE + ' ' + 'y'.repeat(20000);
+    expect(evaluateToolCall('sessions_spawn', { task: 'work', newField: 'inert', argv: mid }))
+      .toMatchObject({ decision: 'block', severity: 'catastrophic' });
+  });
+
+  it('an unknown command-bearing field is denied even when it scans clean', () => {
+    const v = evaluateToolCall('sessions_spawn', { task: 'work', command: 'npm test' });
+    expect(v).toMatchObject({ decision: 'block', action: 'invalid_tool_input' });
+    expect(v.signals).toContain('invalid-tool-input');
+  });
+
+  it('web.run keeps the same discipline', () => {
+    expect(evaluateToolCall('web.run', { search_query: [{ q: 'x' }], argv: WIPE_TOKENS }))
+      .toMatchObject({ decision: 'block', severity: 'catastrophic' });
+    expect(evaluateToolCall('web.run', { search_query: [{ q: 'x' }], safesearch: 'off' }))
+      .toMatchObject({
+        decision: 'allow',
+        contractDrift: { contract: 'web.run', droppedKeys: ['safesearch'] },
+      });
+  });
+});
+
+describe('exact native spellings only — no MCP name-squat', () => {
+  const SQUATS = [
+    'mcp__web__run',
+    'mcp__openclaw__sessions_spawn',
+    'mcp__collaboration__spawn_agent',
+    'mcp__evil__sessions_spawn',
+    'mcp__evil__web__run',
+    'vendor_sessions_spawn',
+    'thirdparty_run',
+  ] as const;
+
+  it.each(SQUATS)('%s gets no reviewed contract', (tool) => {
+    expect(hasExactSpecialToolSchema(tool)).toBe(false);
+    expect(exactSpecialContractName(tool)).toBeNull();
+    expect(contractDriftFor(tool, { task: 'work', futureField: 'x' })).toBeNull();
+  });
+
+  it.each(SQUATS)('%s still fails closed on a spawn-shaped bag', (tool) => {
+    expect(evaluateToolCall(tool, { task: 'work' })).toMatchObject({
+      decision: 'block', action: 'invalid_tool_input',
+    });
+  });
+
+  it('the squat spellings fall to the exec family, not a softer one', () => {
+    expect(schemaFamilyForTool('mcp__openclaw__sessions_spawn')).toBe('exec');
+    expect(schemaFamilyForTool('mcp__web__run')).toBe('exec');
+    expect(schemaFamilyForTool('mcp__collaboration__spawn_agent')).toBe('exec');
+  });
+
+  it('the native spellings are still reviewed', () => {
+    for (const tool of [...SPAWN_ALIASES, 'webrun', 'web.run', 'web__run',
+      'collaborationspawn_agent', 'collaboration.spawn_agent', 'collaboration__spawn_agent']) {
+      expect(hasExactSpecialToolSchema(tool)).toBe(true);
+    }
+  });
+});
+
+describe('OpenClaw and collaboration are separate contracts', () => {
+  it('each names itself in the drift observation', () => {
+    expect(contractDriftFor('sessions_spawn', { task: 'x', novel: 1 })?.contract)
+      .toBe('openclaw.sessions_spawn');
+    expect(contractDriftFor('collaborationspawn_agent', { task_name: 'x', novel: 1 })?.contract)
+      .toBe('collaboration.spawn_agent');
+    expect(contractDriftFor('web.run', { search_query: [], novel: 1 })?.contract)
+      .toBe('web.run');
+  });
+
+  it('neither host is granted the other’s fields on no evidence', () => {
+    // `visible` is measured on OpenClaw only; `fork_turns` on collaboration only.
+    expect(contractDriftFor('sessions_spawn', { task: 'x', visible: true })).toBeNull();
+    expect(contractDriftFor('collaborationspawn_agent', { task_name: 'x', visible: true })
+      ?.droppedKeys).toEqual(['visible']);
+    expect(contractDriftFor('collaborationspawn_agent', { task_name: 'x', fork_turns: 'all' }))
+      .toBeNull();
+    expect(contractDriftFor('sessions_spawn', { task: 'x', fork_turns: 'all' })?.droppedKeys)
+      .toEqual(['fork_turns']);
+  });
+
+  it('borrowing across contracts is a drop, never a deny', () => {
+    expect(evaluateToolCall('collaborationspawn_agent', { task_name: 'x', visible: true }))
+      .toMatchObject({ decision: 'allow', severity: 'benign' });
+  });
+});

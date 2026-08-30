@@ -168,3 +168,197 @@ describe('interceptor — Action Guard wiring', () => {
     ).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Native contract drift on the real interceptor plane.
+ *
+ * The guard verdict being `allow/benign` is necessary but not sufficient: the
+ * UX failure this fold exists to close is a CARD (attended) or a DENY
+ * (unattended) on measured host work. Both are asserted end-to-end here, with
+ * the same harness shape the #412 unattended test uses.
+ */
+describe('interceptor — native contract drift', () => {
+  /** All 28 declared fields of the live OpenClaw sessions_spawn contract. */
+  const LIVE_SPAWN: Record<string, unknown> = {
+    task: 'inspect the failing tests', taskName: 'review_tests', label: 'review',
+    runtime: 'subagent', agentId: 'edith', model: 'default', runTimeoutSeconds: 600,
+    thinking: 'medium', cwd: '/workspace/repo', thread: true, mode: 'run',
+    cleanup: 'delete', sandbox: 'inherit', context: 'bounded', lightContext: true,
+    collect: true,
+    outputSchema: { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'] },
+    fastMode: 'auto', groupId: 'swarm-1', visible: true, category: 'Review',
+    worktree: true, worktreeName: 'wt-review', worktreeBaseRef: 'main',
+    attachments: [{ name: 'notes.txt', content: 'hello', encoding: 'utf8' }],
+    attachAs: { mountPath: '/mnt/attachments' },
+    resumeSessionId: 'sess-01HX', streamTo: 'parent',
+  };
+
+  function harness(overrides: Record<string, unknown> = {}) {
+    const audits: any[] = [];
+    let prompts = 0;
+    const i = createInterceptor(
+      { ...DEFAULT_CONFIG, ...overrides } as any,
+      okPipeline as any,
+      { evaluateToolCall: evaluateToolCall as any, onAuditEntry: (e: any) => audits.push(e) },
+    );
+    return { i, audits, prompts: () => prompts, approve: async () => { prompts++; return true; } };
+  }
+
+  it('ATTENDED: the live 28-field contract mints zero approval cards', async () => {
+    const h = harness();
+    for (const tool of ['sessions_spawn', 'openclaw__sessions_spawn']) {
+      await expect(h.i.handleToolCall({
+        toolName: tool, arguments: LIVE_SPAWN, requireApproval: h.approve,
+      })).resolves.toBeUndefined();
+    }
+    expect(h.prompts()).toBe(0);
+    expect(h.audits).toEqual([]);
+  });
+
+  it('UNATTENDED: the live 28-field contract is not denied and not audited', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'sessions_spawn', arguments: LIVE_SPAWN,
+    })).resolves.toBeUndefined();
+    expect(h.audits).toEqual([]);
+  });
+
+  it('UNATTENDED: a drifted field passes and leaves ONE bounded observation row', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'sessions_spawn',
+      arguments: { ...LIVE_SPAWN, hostFieldShippedNextMonth: 'sk-NOT-A-SECRET-BUT-STILL-A-VALUE' },
+    })).resolves.toBeUndefined();
+    expect(h.audits).toHaveLength(1);
+    expect(h.audits[0]).toMatchObject({
+      type: 'intercept',
+      tool: 'sessions_spawn',
+      action: 'allow',
+      outcome: 'allowed',
+      contractDrift: {
+        contract: 'openclaw.sessions_spawn',
+        droppedKeys: ['hostFieldShippedNextMonth'],
+      },
+    });
+    // Names only. The row must never carry the dropped field's value.
+    expect(JSON.stringify(h.audits[0])).not.toContain('sk-NOT-A-SECRET');
+  });
+
+  it('ATTENDED: a drifted field still mints zero cards', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'sessions_spawn',
+      arguments: { ...LIVE_SPAWN, hostFieldShippedNextMonth: 'x' },
+      requireApproval: h.approve,
+    })).resolves.toBeUndefined();
+    expect(h.prompts()).toBe(0);
+  });
+
+  it('auditAllows:false opts the observation out with the rest of the allow stream', async () => {
+    const h = harness({ actionGuard: { ...DEFAULT_CONFIG.actionGuard, auditAllows: false } });
+    await expect(h.i.handleToolCall({
+      toolName: 'sessions_spawn', arguments: { task: 'work', hostFieldShippedNextMonth: 'x' },
+    })).resolves.toBeUndefined();
+    expect(h.audits).toEqual([]);
+  });
+
+  it('an MCP name-squat of the same contract is DENIED unattended', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'mcp__openclaw__sessions_spawn', arguments: LIVE_SPAWN,
+    })).rejects.toThrow(/blocked|denied|approval/i);
+  });
+
+  it('an argv wipe on the drifted contract is still a hard, doorless block', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'sessions_spawn',
+      arguments: { ...LIVE_SPAWN, hostFieldShippedNextMonth: 'x', argv: ['rm', '-rf', '/'] },
+      // Even an approver that says yes cannot open this door.
+      requireApproval: async () => true,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+  });
+
+  it('an unknown command-bearing field is denied unattended, not dropped', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'sessions_spawn', arguments: { task: 'work', command: 'npm test' },
+    })).rejects.toThrow(/blocked|denied|approval/i);
+  });
+});
+
+/**
+ * #454 — exec-substring misclassification on the OpenClaw interceptor plane.
+ *
+ * `classifyFamily` matches `sh` as a bare substring, so `Pu(sh)Notification`
+ * and `Google_Drive__(sh)are_file` were forced onto EXEC_KEYS for their SCHEMA
+ * and every live call became `invalid_tool_input`. Attended that is an approval
+ * card on a notification; unattended it is a failure-policy denial on a tool
+ * that cannot execute anything. Both are asserted here end to end.
+ */
+describe('interceptor — exec-substring false positives', () => {
+  const WIPE = ['r', 'm', ' ', '-', 'r', 'f', ' ', '/'].join('');
+
+  const LIVE: Array<[string, Record<string, unknown>]> = [
+    ['PushNotification', { message: 'build finished: 2 auth tests failed', status: 'proactive' }],
+    ['mcp__claude_ai_Google_Drive__share_file', { fileId: '1a2B3c', emailAddress: 'colleague@example.com', role: 'reader' }],
+  ];
+
+  function harness() {
+    const audits: any[] = [];
+    let prompts = 0;
+    const i = createInterceptor(
+      { ...DEFAULT_CONFIG } as any,
+      okPipeline as any,
+      { evaluateToolCall: evaluateToolCall as any, onAuditEntry: (e: any) => audits.push(e) },
+    );
+    return { i, audits, prompts: () => prompts, approve: async () => { prompts++; return true; } };
+  }
+
+  it.each(LIVE)('ATTENDED: %s mints zero approval cards', async (toolName, args) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({ toolName, arguments: args, requireApproval: h.approve }))
+      .resolves.toBeUndefined();
+    expect(h.prompts()).toBe(0);
+    expect(h.audits).toEqual([]);
+  });
+
+  it.each(LIVE)('UNATTENDED: %s is not denied and not audited', async (toolName, args) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({ toolName, arguments: args })).resolves.toBeUndefined();
+    expect(h.audits).toEqual([]);
+  });
+
+  it.each(LIVE)('%s with a smuggled command wipe is a doorless block', async (toolName, args) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName,
+      arguments: { ...args, command: WIPE },
+      // Even an approver that says yes cannot open this door.
+      requireApproval: async () => true,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+  });
+
+  it.each(LIVE)('%s with a smuggled script wipe is a doorless block', async (toolName, args) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName, arguments: { ...args, script: WIPE }, requireApproval: async () => true,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+  });
+
+  it('a wipe in a STRIPPED argv is rescanned, not lost with the strip', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'PushNotification',
+      arguments: { message: 'ok', argv: [['r', 'm'].join(''), '-rf', '/'] },
+      requireApproval: async () => true,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+  });
+
+  it('a genuine exec name keeps its closed bag on this plane', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'Bash', arguments: { command: 'printf ok', evil_payload: 'x' },
+    })).rejects.toThrow(/blocked|denied|approval/i);
+  });
+});

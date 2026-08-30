@@ -228,4 +228,77 @@ describe('#436 — shell control through the real Claude Code hook', () => {
     expect(r.decision).toBe('deny');
     expect(store()?.rows ?? []).toHaveLength(0);
   });
+
+  /**
+   * #454 — the same plane, for the exec-SUBSTRING misclassification. The guard
+   * family regex matches `sh` inside `Pu(sh)Notification` and
+   * `(sh)are_file`, which used to pick EXEC_KEYS for their schemas and deny
+   * every live call. Unit tests prove the verdict; these prove the hook a real
+   * operator runs actually lets the call through, and still stops a wipe
+   * smuggled onto the same name.
+   */
+  describe('#454 — exec-substring names through the real hook', () => {
+    it('the live PushNotification call is allowed', () => {
+      const r = runHook(
+        { message: 'build finished: 2 auth tests failed', status: 'proactive' },
+        { tool: 'PushNotification' },
+      );
+      expect(r.decision).toBeUndefined();
+      expect(store()?.rows ?? []).toHaveLength(0);
+      expect(denialRows()).toHaveLength(0);
+    });
+
+    it('the live Drive share_file call is allowed', () => {
+      const r = runHook(
+        { fileId: '1a2B3c', emailAddress: 'colleague@example.com', role: 'reader' },
+        { tool: 'mcp__claude_ai_Google_Drive__share_file' },
+      );
+      expect(r.decision).toBeUndefined();
+      expect(store()?.rows ?? []).toHaveLength(0);
+      expect(denialRows()).toHaveLength(0);
+    });
+
+    it('a wipe smuggled into PushNotification.command still denies', () => {
+      const r = runHook({ message: 'ok', status: 'proactive', ...CATASTROPHIC }, { tool: 'PushNotification' });
+      expect(r.decision).toBe('deny');
+      // Catastrophic is doorless: no retry fingerprint is minted.
+      expect(store()?.rows ?? []).toHaveLength(0);
+    });
+
+    it('a wipe in a STRIPPED argv on share_file still denies', () => {
+      const r = runHook(
+        { fileId: '1a2B3c', argv: [['r', 'm'].join(''), '-rf', '/'] },
+        { tool: 'mcp__claude_ai_Google_Drive__share_file' },
+      );
+      expect(r.decision).toBe('deny');
+      expect(store()?.rows ?? []).toHaveLength(0);
+    });
+
+    it('a wipe in script on a substring-exec name still denies', () => {
+      const r = runHook(
+        { message: 'ok', script: CATASTROPHIC.command },
+        { tool: 'PushNotification' },
+      );
+      expect(r.decision).toBe('deny');
+    });
+
+    it('real Bash keeps its closed bag through the hook', () => {
+      expect(runHook({ command: 'printf ok', evil_payload: 'x' }, { tool: 'Bash' }).decision).toBe('deny');
+    });
+  });
+
+  /** #454 — TaskOutput.timeout carries the host's own 0..600000 bounds. */
+  describe('#454 — TaskOutput timeout range through the real hook', () => {
+    it.each([0, 30_000, 600_000])('an in-range timeout %d is allowed', (timeout) => {
+      const r = runHook({ task_id: 'task_1', block: true, timeout }, { tool: 'TaskOutput' });
+      expect(r.decision).toBeUndefined();
+      expect(store()?.rows ?? []).toHaveLength(0);
+    });
+
+    it.each([-1, 600_001])('an out-of-range timeout %d denies', (timeout) => {
+      const r = runHook({ task_id: 'task_1', block: true, timeout }, { tool: 'TaskOutput' });
+      expect(r.decision).toBe('deny');
+      expect(JSON.stringify(denialRows())).toMatch(/invalid-tool-input|type-coercion/);
+    });
+  });
 });

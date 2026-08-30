@@ -12,6 +12,31 @@
  *      unknown keys but never invents values — EXCEPT the extractor keys
  *      (see EXTRACTOR_KEYS), which always survive so annotate cannot blind
  *      the guard on non-exec surfaces such as `Workflow.script`
+ *
+ * ── Native contract drift ──────────────────────────────────────────────────
+ *
+ * The closed bag was doing two jobs at once. Job A — evidence discipline: make
+ * sure a command-bearing key on a delegation tool gets SCANNED rather than
+ * read-short-circuited. Load-bearing, kept. Job B — novelty rejection: deny any
+ * key not enumerated when the contract was last measured. Job B is a staleness
+ * alarm wired to the deny path, and it caused a card storm on ordinary work
+ * every time a host shipped a field (13 of `sessions_spawn`'s 28 live fields
+ * denied; three hand-widenings in a row: #436, #445, and this one).
+ *
+ * For EXACT-SPECIAL native contracts only, the unknown-key verdict is now split
+ * by SCANNABILITY rather than by membership:
+ *
+ *   - unknown key IN `GUARD_EVIDENCE_KEYS` → unchanged. `UNKNOWN_KEYS`, fail
+ *     closed, raw-evidence rescan; a spawn that grows a `command` or `argv` is
+ *     precisely the smuggle this module exists to catch, and an `argv` wipe
+ *     stays catastrophic and doorless.
+ *   - unknown key OUTSIDE it → dropped BEFORE nested validation and before any
+ *     extractor, the call proceeds, and the key NAME (never its value) is
+ *     returned in `strippedKeys` as a bounded contract-drift observation.
+ *
+ * Inertness is decided by ShieldCortex's OWN reader lists, so a caller cannot
+ * nominate its key as inert. A dropped key is never forwarded, never granted
+ * semantics, and can never widen a verdict — it just stops minting cards.
  */
 
 export type ToolInputMode = 'enforce' | 'annotate';
@@ -31,27 +56,87 @@ export interface ToolInputValidationErr {
 
 export type ToolInputValidation = ToolInputValidationOk | ToolInputValidationErr;
 
-const EXEC_KEYS = new Set([
+/**
+ * ── Canonical extractor/evidence key lists ─────────────────────────────────
+ *
+ * ShieldCortex's OWN readers, in one place. `tool-action-guard.ts` imports
+ * these arrays rather than restating them, so "which keys does a scanner
+ * actually read?" has exactly one answer and a contract fold cannot be built
+ * against a stale copy. ORDER IS LOAD-BEARING: `pickString` is first-wins.
+ *
+ * Nothing here is caller-supplied. A tool cannot nominate its key into (or out
+ * of) these lists — that is what keeps the drift fold below from becoming
+ * "trust the payload's own idea of what is inert".
+ */
+export const COMMAND_KEYS = [
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+] as const;
+
+export const PATH_KEYS = [
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+] as const;
+
+export const URL_KEYS = ['url', 'uri', 'endpoint', 'href', 'host', 'to'] as const;
+
+export const WRITE_CONTENT_KEYS = [
+  'new_string', 'content', 'contents', 'file_text', 'body', 'text',
+] as const;
+
+/** Command-bearing aliases the schema-failure recovery pass must union-scan. */
+export const COMMAND_EVIDENCE_KEYS = [...COMMAND_KEYS, 'args', 'argv'] as const;
+
+/** Keys `hasOutboundData` consults to decide a network call carries a payload. */
+export const OUTBOUND_DATA_KEYS = [
+  'body', 'data', 'json', 'form', 'payload', 'formData', 'files',
+] as const;
+
+/** Keys `hasOutboundData` consults for the HTTP verb. */
+export const OUTBOUND_METHOD_KEYS = ['method', 'httpMethod', 'verb'] as const;
+
+/** Process-stream keys carried into the exec bag and scanned as strings. */
+export const STREAM_KEYS = ['stdin', 'stdout', 'stderr', 'env'] as const;
+
+/**
+ * EVERY key any ShieldCortex reader consults by name — the union of the lists
+ * above. This is the fail-closed floor for the exact-special contract fold:
+ * an UNDECLARED key in this set is never inert, because a scanner would have
+ * read it. `command`/`cmd`/`script`/`run`/`args`/`argv`/`path`/`url` and every
+ * other extractor alias therefore keep the pre-fold behaviour byte for byte —
+ * `UNKNOWN_KEYS`, raw-evidence rescan, catastrophic stays terminal.
+ */
+export const GUARD_EVIDENCE_KEYS: ReadonlySet<string> = new Set<string>([
+  ...COMMAND_KEYS,
+  ...PATH_KEYS,
+  ...URL_KEYS,
+  ...WRITE_CONTENT_KEYS,
+  ...COMMAND_EVIDENCE_KEYS,
+  ...OUTBOUND_DATA_KEYS,
+  ...OUTBOUND_METHOD_KEYS,
+  ...STREAM_KEYS,
+  'old_string',
+]);
+
+const EXEC_KEYS = new Set<string>([
+  ...COMMAND_KEYS,
   'description', 'timeout', 'run_in_background', 'dangerouslyDisableSandbox',
   'cwd', 'working_directory', 'env',
   'stdin', 'stdout', 'stderr', 'args', 'argv',
 ]);
 
-const WRITE_KEYS = new Set([
-  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
-  'new_string', 'old_string', 'content', 'contents', 'file_text', 'body', 'text',
+const WRITE_KEYS = new Set<string>([
+  ...PATH_KEYS,
+  'old_string', ...WRITE_CONTENT_KEYS,
   'description',
   // Non-exec tools may still carry these keys; extractors + field discipline decide weight.
-  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  ...COMMAND_KEYS,
 ]);
 
 const READ_KEYS = new Set([
   'path', 'file_path', 'filePath', 'file', 'target', 'offset', 'limit', 'description',
 ]);
 
-const NETWORK_KEYS = new Set([
-  'url', 'uri', 'endpoint', 'href', 'host', 'to', 'method', 'headers', 'body',
+const NETWORK_KEYS = new Set<string>([
+  ...URL_KEYS, 'method', 'headers', 'body',
   'query', 'description', 'timeout',
 ]);
 
@@ -69,26 +154,22 @@ const MEMORY_KEYS = new Set([
  * returned `allow`. These survive annotate for EVERY family, and must be
  * strings — a smuggled object/array here is fail-closed, not silently ignored.
  */
-const EXTRACTOR_KEYS = new Set([
-  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
-  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
-  'url', 'uri', 'endpoint', 'href', 'host', 'to',
-  'stdin', 'new_string', 'old_string', 'content', 'contents', 'file_text', 'body', 'text',
+const EXTRACTOR_KEYS = new Set<string>([
+  ...COMMAND_KEYS, ...PATH_KEYS, ...URL_KEYS,
+  'stdin', 'old_string', ...WRITE_CONTENT_KEYS,
 ]);
 
 /** Command/path/url keys the scanners actually read as strings. Object/array here is fail-closed. Messaging `content`/`body`/`text` are NOT in this set — Block Kit payloads must not trip the guard. */
-const STRING_SCAN_KEYS = new Set([
-  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run', 'stdin',
-  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
-  'url', 'uri', 'endpoint', 'href', 'host', 'to',
+const STRING_SCAN_KEYS = new Set<string>([
+  ...COMMAND_KEYS, 'stdin', ...PATH_KEYS, ...URL_KEYS,
 ]);
 
-const UNKNOWN_FAMILY_KEYS = new Set([
+const UNKNOWN_FAMILY_KEYS = new Set<string>([
   'description', 'timeout', 'title', 'name', 'id',
   // Messaging / notification tools: free-form body is data, not shell (field discipline).
   'content', 'message', 'text', 'body', 'channel', 'to', 'subject',
   // Extractor keys may appear on unknown tools; keep for scan, do not invent semantics.
-  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  ...COMMAND_KEYS,
   'path', 'file_path', 'filePath', 'file', 'url', 'uri',
 ]);
 
@@ -117,46 +198,133 @@ interface ShellControlSchema {
    * these fields fails closed exactly as a non-string handle does.
    */
   fieldTypes?: Record<string, 'string' | 'boolean' | 'number'>;
+  /**
+   * Inclusive numeric bounds for a `'number'` field, copied from the host's own
+   * JSON Schema. `Number.isFinite` alone accepted `-1` and `600001`, neither of
+   * which the host will ever send: the contract is a RANGE, and a bag that
+   * claims to be the live contract has to enforce the whole of it. Out of range
+   * fails closed like any other shape the host cannot produce.
+   */
+  numericRanges?: Record<string, { min: number; max: number }>;
 }
 
 /**
  * P0 reviewed host contracts. These are exact spellings, not suffix/pattern
  * matches: an unrelated third-party `*_spawn` / `*run*` tool must retain the
  * old fail-closed family behaviour.
+ *
+ * NATIVE SPELLINGS ONLY. The `mcp__web__run` / `mcp__openclaw__sessions_spawn`
+ * / `mcp__collaboration__spawn_agent` spellings used to sit here, which handed
+ * any MCP server that squatted one of those names a reviewed contract on the
+ * strength of its own chosen tool name — caller-supplied authority, and the one
+ * thing this module must never take. They are gone: those names now fall
+ * through `schemaFamilyForTool` to the `exec` family and fail closed exactly
+ * like `mcp__evil__sessions_spawn` always has. An operator genuinely fronting
+ * OpenClaw over MCP is blocked, deliberately and without an escape hatch.
  */
 interface ExactSpecialSchema {
+  /** Closed set of DECLARED host fields. */
   allowed: Set<string>;
+  /**
+   * Declared fields whose VALUE no ShieldCortex reader ever consults, and whose
+   * live shape `validateNested` cannot express. `sessions_spawn.outputSchema`
+   * is an arbitrary caller-authored JSON Schema (`Type.Record(String, Unknown)`)
+   * — nested two deep, so it tripped `NESTED_INVALID` even once its key was
+   * allowed. These are DROPPED before nested validation and before any
+   * extractor: deleted, not judged. Declared, so this is not drift.
+   */
+  inert?: Set<string>;
   family: 'read' | 'network';
+  /** Stable label for the contract-drift observation. Never a payload value. */
+  contract: string;
 }
 
-const WEB_RUN_KEYS = new Set([
+const WEB_RUN_KEYS = new Set<string>([
   'search_query', 'open', 'click', 'find', 'image_query', 'calculator',
   'weather', 'finance', 'sports', 'time', 'response_length',
 ]);
 
-const DELEGATION_KEYS = new Set([
-  'task', 'label', 'runtime', 'agentId', 'model', 'thinking', 'cwd',
-  'runTimeoutSeconds', 'timeoutSeconds', 'thread', 'mode', 'cleanup',
-  'sandbox', 'attachments', 'context', 'taskName',
-  'task_name', 'fork_turns', 'reasoning_effort', 'message',
+/**
+ * The LIVE OpenClaw `sessions_spawn` contract — all 28 declared top-level
+ * fields of `createSessionsSpawnToolSchema` (`sessions-spawn-tool.ts`) with
+ * every capability flag on, including the swarm block
+ * (`collect`/`outputSchema`/`fastMode`/`groupId`), the visible-session family
+ * (`VISIBLE_SESSIONS_SPAWN_SCHEMA`: `visible`/`category`/`worktree`/
+ * `worktreeName`/`worktreeBaseRef`) and the ACP block
+ * (`resumeSessionId`/`streamTo`).
+ *
+ * The February bag carried 16 of these; the other 13 hard-denied every modern
+ * spawn — `{task, runtime, visible, worktree}` blocked on `visible`. Measured,
+ * not guessed. Not one of these keys is a GUARD_EVIDENCE_KEY, which is the
+ * invariant that makes the whole contract inert to the scanners
+ * (`native-contract-drift.test.ts` pins it).
+ */
+const OPENCLAW_SPAWN_KEYS = new Set<string>([
+  'task', 'taskName', 'label', 'runtime', 'agentId', 'model',
+  'runTimeoutSeconds', 'thinking', 'cwd', 'thread', 'mode', 'cleanup',
+  'sandbox', 'context', 'lightContext',
+  // swarm block (config-gated upstream)
+  'collect', 'outputSchema', 'fastMode', 'groupId',
+  // visible-session family
+  'visible', 'category', 'worktree', 'worktreeName', 'worktreeBaseRef',
+  'attachments', 'attachAs',
+  // ACP block (config-gated upstream)
+  'resumeSessionId', 'streamTo',
+  // Back-compat: the shipped pre-visible schema still accepts timeoutSeconds.
+  'timeoutSeconds',
 ]);
 
-const WEB_RUN_ALIASES = new Set([
-  'webrun', 'web.run', 'web__run', 'mcp__web__run',
+/**
+ * Collaboration `spawn_agent` is a SEPARATE contract, not a synonym. No
+ * upstream schema source is reachable from here, so this is exactly the
+ * measured live field set and nothing invented alongside it — folding it into
+ * the OpenClaw bag would have granted each host the other's fields on no
+ * evidence. Anything beyond these is undeclared: inert-dropped and reported as
+ * drift, never denied.
+ */
+const COLLABORATION_SPAWN_KEYS = new Set<string>([
+  'task_name', 'fork_turns', 'model', 'reasoning_effort', 'message',
 ]);
 
-const DELEGATION_ALIASES = new Set([
+const WEB_RUN_ALIASES = new Set(['webrun', 'web.run', 'web__run']);
+
+const OPENCLAW_SPAWN_ALIASES = new Set([
   'sessions_spawn', 'openclawsessions_spawn',
-  'openclaw.sessions_spawn', 'openclaw__sessions_spawn', 'mcp__openclaw__sessions_spawn',
-  'collaborationspawn_agent', 'collaboration.spawn_agent', 'collaboration__spawn_agent',
-  'mcp__collaboration__spawn_agent',
+  'openclaw.sessions_spawn', 'openclaw__sessions_spawn',
 ]);
+
+const COLLABORATION_SPAWN_ALIASES = new Set([
+  'collaborationspawn_agent', 'collaboration.spawn_agent', 'collaboration__spawn_agent',
+]);
+
+const OPENCLAW_SPAWN_INERT = new Set<string>(['outputSchema']);
 
 function exactSpecialSchemaFor(toolName: string): ExactSpecialSchema | null {
   const exact = String(toolName ?? '').trim().toLowerCase();
-  if (WEB_RUN_ALIASES.has(exact)) return { allowed: WEB_RUN_KEYS, family: 'network' };
-  if (DELEGATION_ALIASES.has(exact)) return { allowed: DELEGATION_KEYS, family: 'read' };
+  if (WEB_RUN_ALIASES.has(exact)) {
+    return { allowed: WEB_RUN_KEYS, family: 'network', contract: 'web.run' };
+  }
+  if (OPENCLAW_SPAWN_ALIASES.has(exact)) {
+    return {
+      allowed: OPENCLAW_SPAWN_KEYS,
+      inert: OPENCLAW_SPAWN_INERT,
+      family: 'read',
+      contract: 'openclaw.sessions_spawn',
+    };
+  }
+  if (COLLABORATION_SPAWN_ALIASES.has(exact)) {
+    return {
+      allowed: COLLABORATION_SPAWN_KEYS,
+      family: 'read',
+      contract: 'collaboration.spawn_agent',
+    };
+  }
   return null;
+}
+
+/** The contract label an exact-special tool name resolves to, or null. */
+export function exactSpecialContractName(toolName: string): string | null {
+  return exactSpecialSchemaFor(toolName)?.contract ?? null;
 }
 
 /** Special contracts are enforced closed even though their effects are read/network. */
@@ -183,13 +351,21 @@ const SHELL_CONTROL_BASH_OUTPUT: ShellControlSchema = {
  * unattended operator runs — was denied.
  *
  * The legacy handle/`filter` keys stay allowed so a host still on the older
- * shape keeps working. The bag is still CLOSED and still carries no exec key:
- * a control tool cannot smuggle a command through it.
+ * shape keeps working, so what this bag accepts is the UNION of the live shape
+ * and those older spellings rather than the live required triple alone. The bag
+ * is still CLOSED and still carries no exec key: a control tool cannot smuggle
+ * a command through it.
+ *
+ * `timeout` carries the host's own bounds — `{"type":"number","minimum":0,
+ * "maximum":600000}` — not merely `Number.isFinite`. A negative or
+ * over-maximum wait is a value the host rejects, so ShieldCortex rejects it
+ * too instead of forwarding a call that cannot succeed.
  */
 const SHELL_CONTROL_TASK_OUTPUT: ShellControlSchema = {
   allowed: new Set(['bash_id', 'task_id', 'agentId', 'filter', 'block', 'timeout']),
   handles: ['bash_id', 'task_id', 'agentId'],
   fieldTypes: { block: 'boolean', timeout: 'number' },
+  numericRanges: { timeout: { min: 0, max: 600_000 } },
 };
 
 /** TaskStop reads `task_id ?? shell_id` — the live contract adds nothing, so neither does this. */
@@ -235,8 +411,16 @@ export function schemaFamilyForTool(
   if (/(remember|recall|forget|memory|get_context|getcontext)/.test(seg) || /(remember|recall|forget|memory)/.test(n)) {
     return 'memory';
   }
+  // #454: `run` and `command` join this list as SEGMENT-ANCHORED tokens. They
+  // were previously reached only through `classifyFamily`'s substring net,
+  // which the schema gate no longer consults — and a bare `_run`/`_command`
+  // segment IS exec vocabulary (`thirdparty_run`, `slash_command`), so it must
+  // keep the closed EXEC bag. Anchored, they cannot reach inside a word:
+  // `runbook_lookup`, `prerun`, `command_center` and `PushNotification` are
+  // untouched, which is the whole point of asking this question at segment
+  // boundaries instead of by substring.
   if (
-    /(^|_)(bash|shell|exec|terminal|run_terminal|powershell|cmd|run_command|script|eval|spawn|process|system|sh|zsh)(_|$)/.test(seg)
+    /(^|_)(bash|shell|exec|terminal|run_terminal|powershell|cmd|run_command|run|command|script|eval|spawn|process|system|sh|zsh)(_|$)/.test(seg)
     || /^(bash|shell|sh|zsh|exec|cmd|powershell|run|command)$/.test(seg)
     || /(bash|shell|exec|terminal)/.test(n)
   ) {
@@ -347,6 +531,7 @@ export function validateToolInput(
   }
 
   const control = shellControlSchemaFor(toolName);
+  const special = exactSpecialSchemaFor(toolName);
   const allowed = allowedKeysFor(toolName);
   const strippedKeys: string[] = [];
   const out: Record<string, unknown> = {};
@@ -355,10 +540,24 @@ export function validateToolInput(
   for (const [key, value] of Object.entries(raw)) {
     const isAbsent = value === '' || value === null || value === undefined;
 
+    // A DECLARED field the guard never reads and cannot shape-check
+    // (`sessions_spawn.outputSchema` is caller-authored JSON Schema). Deleted
+    // before nested validation, so its nesting never reaches validateNested.
+    // Declared → not drift, so it is not reported in strippedKeys.
+    if (special?.inert?.has(key)) continue;
+
     if (!allowed.has(key)) {
       // An empty value does NOT excuse an unknown key: skipping it here would
       // let `{command:'ok', evil:''}` fail open on the enforcement path.
       if (mode === 'enforce') {
+        // Contract drift on a reviewed native contract: the host grew a field
+        // no ShieldCortex reader consults. Drop it before nested validation
+        // and before the extractors, and record the NAME for the observation.
+        // Anything a scanner WOULD have read stays fail-closed below.
+        if (special && !GUARD_EVIDENCE_KEYS.has(key)) {
+          strippedKeys.push(key);
+          continue;
+        }
         unknown.push(key);
         continue;
       }
@@ -395,6 +594,14 @@ export function validateToolInput(
         ok: false,
         code: 'TYPE_COERCION',
         reason: `Field "${key}" must be a finite number`,
+      };
+    }
+    const range = control?.numericRanges?.[key];
+    if (range && typeof value === 'number' && (value < range.min || value > range.max)) {
+      return {
+        ok: false,
+        code: 'TYPE_COERCION',
+        reason: `Field "${key}" must be between ${range.min} and ${range.max}`,
       };
     }
     if (expected === null && STRING_SCAN_KEYS.has(key) && typeof value !== 'string') {
@@ -436,4 +643,42 @@ export function validateToolInput(
 /** Convenience: enforce mode, throw-free. */
 export function enforceToolInput(toolName: string, raw: unknown): ToolInputValidation {
   return validateToolInput(toolName, raw, 'enforce');
+}
+
+/** Most drifted key NAMES one observation carries. Names only — never values. */
+export const CONTRACT_DRIFT_MAX_KEYS = 12;
+/** Longest reported key name. A key name is attacker-chosen text; bound it. */
+export const CONTRACT_DRIFT_MAX_KEY_LEN = 64;
+
+export interface ContractDriftObservation {
+  /** Reviewed contract the tool name resolved to, e.g. `openclaw.sessions_spawn`. */
+  contract: string;
+  /** Undeclared, provably unscanned field NAMES that were dropped. Bounded. */
+  droppedKeys: string[];
+  /** True when more keys drifted than `CONTRACT_DRIFT_MAX_KEYS` reports. */
+  truncated?: boolean;
+}
+
+/**
+ * The contract-drift observation for a call, or null when nothing drifted.
+ *
+ * Derived from `validateToolInput` itself rather than restating the strip rule,
+ * so the observation can never disagree with what enforcement actually did.
+ * Carries key NAMES only: no value, no length, no shape — a drifted field may
+ * hold a prompt, a token, or a whole JSON Schema, and none of that belongs in
+ * an audit row.
+ */
+export function contractDriftFor(toolName: string, raw: unknown): ContractDriftObservation | null {
+  const contract = exactSpecialContractName(toolName);
+  if (!contract) return null;
+  const validated = validateToolInput(toolName, raw, 'enforce');
+  if (!validated.ok || validated.strippedKeys.length === 0) return null;
+  const droppedKeys = validated.strippedKeys
+    .slice(0, CONTRACT_DRIFT_MAX_KEYS)
+    .map((k) => k.slice(0, CONTRACT_DRIFT_MAX_KEY_LEN));
+  return {
+    contract,
+    droppedKeys,
+    ...(validated.strippedKeys.length > CONTRACT_DRIFT_MAX_KEYS ? { truncated: true } : {}),
+  };
 }

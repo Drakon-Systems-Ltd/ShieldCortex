@@ -46,6 +46,14 @@ export interface ActionGuardConfig {
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
  * compile-time dependency on the main package across the plugin build boundary;
  * the real `evaluateToolCall` from `shieldcortex/defence` is compatible). */
+/** A reviewed native contract grew fields ShieldCortex does not read. Names
+ *  only — the guard drops the values before any scanner sees them. */
+export interface ContractDriftLike {
+  contract: string;
+  droppedKeys: string[];
+  truncated?: boolean;
+}
+
 export interface ToolGuardVerdictLike {
   decision: 'allow' | 'require_approval' | 'block';
   severity: 'benign' | 'sensitive' | 'dangerous' | 'catastrophic' | string;
@@ -53,6 +61,8 @@ export interface ToolGuardVerdictLike {
   action: string;
   reason: string;
   signals: string[];
+  /** Present only when a reviewed contract drifted. Never a verdict input. */
+  contractDrift?: ContractDriftLike;
   /** Rule → matched-span evidence behind `signals` (issue #192).
    *  #184: optional source/line/chain when the match came from folded script. */
   matches?: Array<{
@@ -277,6 +287,15 @@ export interface InterceptAuditEntry {
   escalated?: { by: 'session-taint'; from: string; to: string; reason: string };
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
+  /**
+   * Native contract drift: a reviewed exact-name host contract carried fields
+   * ShieldCortex does not read, which the guard dropped before validation and
+   * before any extractor. Key NAMES only, bounded — an operator can see THAT a
+   * host schema moved and which fields moved, without the row ever carrying a
+   * value from them. Advisory: this rides on the call's own outcome and never
+   * gates, denies, or mints a card.
+   */
+  contractDrift?: ContractDriftLike;
   /** #260 — plane origin so the session-guard summariser can find this row. */
   origin?: 'openclaw-interceptor';
   sessionKey?: string;
@@ -1304,21 +1323,55 @@ export function createInterceptor(
       }
     }
 
+    // ── Native contract drift observation ────────────────────────────────
+    // A reviewed host contract grew fields ShieldCortex does not read. The
+    // guard already dropped them before nested validation and before any
+    // extractor, so nothing here can change the verdict — this is the record
+    // that the drop HAPPENED, which is the only way an operator learns a host
+    // schema moved without a card storm telling them. It rides on the call's
+    // own outcome rather than minting a row of its own, so a drifted benign
+    // allow stays a single row and volume discipline holds. `auditAllows:false`
+    // opts out with the rest of the recognised-allow stream.
+    const drift = v.contractDrift && v.contractDrift.droppedKeys.length > 0
+      ? { contractDrift: v.contractDrift }
+      : undefined;
+    if (v.decision === 'allow' && drift && actionGuardCfg.auditAllows !== false) {
+      const d = drift.contractDrift;
+      log.warn(
+        `[shieldcortex] action-guard CONTRACT DRIFT ${context.toolName} (${d.contract}): dropped unread field(s) ${d.droppedKeys.join(', ')}${d.truncated ? ', …' : ''}`,
+      );
+    }
+
     if (v.decision === 'allow') {
       // Issue #95: a RECOGNISED allow (the guard evaluated a known operation
       // family and let it through — severity above benign) leaves an audit
       // entry, so forensics can distinguish "scanned & allowed" from "never
       // scanned". Benign allows stay unaudited by design (volume discipline);
       // `actionGuard.auditAllows: false` opts the recognised entries off too.
-      if (v.severity !== 'benign' && actionGuardCfg.auditAllows !== false) {
-        const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-        emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), action: 'allow', outcome: 'allowed' });
+      if (actionGuardCfg.auditAllows !== false) {
+        if (v.severity !== 'benign') {
+          const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
+          emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...(drift ?? {}), action: 'allow', outcome: 'allowed' });
+        } else if (drift) {
+          // A benign allow is normally unaudited — but drift is the one thing
+          // about it worth keeping, so it rides on ONE row of its own rather
+          // than doubling the recognised-allow row above. The preview is the
+          // tool name and nothing else: a drifted field may hold a prompt or a
+          // token, and unlike `summariseToolArgs` this row must never be a
+          // channel for a value the guard just refused to read.
+          emitAudit({
+            ...guardAuditBase(context.toolName, v, `${context.toolName} :: contract-drift`),
+            ...drift,
+            action: 'allow',
+            outcome: 'allowed',
+          });
+        }
       }
       return;
     }
 
     const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-    const base = { ...guardAuditBase(context.toolName, v, preview), ...(escalation ? { escalated: escalation } : {}) };
+    const base = { ...guardAuditBase(context.toolName, v, preview), ...(escalation ? { escalated: escalation } : {}), ...(drift ?? {}) };
     const severity: Severity = v.severity === 'catastrophic' ? 'critical' : 'high';
 
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.

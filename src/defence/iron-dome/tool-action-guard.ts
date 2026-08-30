@@ -27,7 +27,13 @@
 
 import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
-import { hasExactSpecialToolSchema, validateToolInput, schemaFamilyForTool, isNativeShellControlTool } from './tool-input-schema.js';
+import {
+  hasExactSpecialToolSchema, validateToolInput, schemaFamilyForTool, isNativeShellControlTool,
+  contractDriftFor,
+  COMMAND_KEYS, PATH_KEYS, URL_KEYS, WRITE_CONTENT_KEYS, COMMAND_EVIDENCE_KEYS,
+  OUTBOUND_DATA_KEYS, OUTBOUND_METHOD_KEYS,
+} from './tool-input-schema.js';
+import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
@@ -80,6 +86,17 @@ export interface ToolGuardVerdict {
    * writers persist it: a verdict that leaned on review must say so.
    */
   reviewedScripts?: string[];
+  /**
+   * A reviewed native contract grew a field ShieldCortex does not read. The
+   * field was DROPPED before nested validation and before any extractor, and
+   * the call was evaluated without it — this is an observation, never a
+   * verdict input. Key NAMES only, bounded; no value ever reaches this record.
+   *
+   * Absent means "no drift", never "nobody looked": it is populated on the
+   * reviewed exact-special contracts, which are the only place the drop
+   * happens.
+   */
+  contractDrift?: ContractDriftObservation;
 }
 
 // ── Tool-name recognition ───────────────────────────────────────────────────
@@ -128,13 +145,8 @@ function pickString(args: Record<string, unknown>, keys: string[]): string {
 }
 
 export function extractCommand(args: Record<string, unknown>): string {
-  return pickString(args, ['command', 'cmd', 'script', 'code', 'input', 'shell', 'run']);
+  return pickString(args, [...COMMAND_KEYS]);
 }
-
-/** Command-bearing aliases the schema-failure recovery pass must union-scan. */
-const COMMAND_EVIDENCE_KEYS = [
-  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run', 'args', 'argv',
-] as const;
 
 const EXTRACTOR_EVIDENCE_CAP = 8192;
 
@@ -188,10 +200,7 @@ function flattenScanWindows(value: unknown, cap = EXTRACTOR_EVIDENCE_CAP): strin
 
 function pathUrlFromRaw(raw: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const k of ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory']) {
-    if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k];
-  }
-  for (const k of ['url', 'uri', 'endpoint', 'href', 'host', 'to']) {
+  for (const k of [...PATH_KEYS, ...URL_KEYS]) {
     if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k];
   }
   return out;
@@ -223,10 +232,10 @@ function commandEvidenceSurfaces(raw: Record<string, unknown>): string[] {
 const IFS_OBFUSCATION = /\$\{IFS[^}]*\}|\$IFS\b/gi;
 export function deobfuscateIfs(s: string): string { return s.replace(IFS_OBFUSCATION, ' '); }
 export function extractPath(args: Record<string, unknown>): string {
-  return pickString(args, ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory']);
+  return pickString(args, [...PATH_KEYS]);
 }
 export function extractUrl(args: Record<string, unknown>): string {
-  return pickString(args, ['url', 'uri', 'endpoint', 'href', 'host', 'to']);
+  return pickString(args, [...URL_KEYS]);
 }
 
 // ── Write-content extraction + target recognition (issue #93) ────────────────
@@ -240,7 +249,7 @@ export function extractUrl(args: Record<string, unknown>): string {
 
 /** The content-bearing string of a write-family tool call, first present key wins. */
 export function extractWriteContent(args: Record<string, unknown>): string {
-  return pickString(args, ['new_string', 'content', 'contents', 'file_text', 'body', 'text']);
+  return pickString(args, [...WRITE_CONTENT_KEYS]);
 }
 
 const SCRIPT_WRITE_EXT_RE = /\.(?:sh|bash|zsh|py|pyw|js|mjs|cjs|ts|tsx|rb|pl|php|ps1|bat|cmd|fish)$/i;
@@ -2017,9 +2026,14 @@ const OUTBOUND_DATA_FLAGS =
 
 function hasOutboundData(args: Record<string, unknown>, execSurface: string): boolean {
   if (OUTBOUND_DATA_FLAGS.test(execSurface)) return true;
-  const method = String((args?.method ?? args?.httpMethod ?? args?.verb) ?? '').toUpperCase();
+  let methodRaw: unknown;
+  for (const k of OUTBOUND_METHOD_KEYS) {
+    const v = args?.[k];
+    if (v !== undefined && v !== null) { methodRaw = v; break; }
+  }
+  const method = String(methodRaw ?? '').toUpperCase();
   if (method && method !== 'GET' && method !== 'HEAD') return true;
-  for (const k of ['body', 'data', 'json', 'form', 'payload', 'formData', 'files']) {
+  for (const k of OUTBOUND_DATA_KEYS) {
     const v = args?.[k];
     if (typeof v === 'string' && v.length > 0) return true;
     if (v && typeof v === 'object') return true;
@@ -4233,21 +4247,53 @@ export function evaluateToolCall(
   options?: ToolGuardOptions,
   skipSchema = false,
 ): ToolGuardVerdict {
+  const v = evaluateToolCallCore(toolName, args, config, options, skipSchema);
+  // Contract drift rides ALONGSIDE the verdict and cannot change it. The
+  // recursive rescan passes (`skipSchema`) never re-observe: the outer call
+  // already did, and a doubled row would double-count in every summary.
+  if (skipSchema) return v;
+  const drift = contractDriftFor(toolName, args);
+  return drift ? { ...v, contractDrift: drift } : v;
+}
+
+function evaluateToolCallCore(
+  toolName: string,
+  args: Record<string, unknown> = {},
+  config?: IronDomeConfig,
+  options?: ToolGuardOptions,
+  skipSchema = false,
+): ToolGuardVerdict {
   // #412 — close the tool-input bag before extractors run.
   // Exec/git: enforce (unknown keys fail closed — smuggled payloads cannot hide).
   // Other families: annotate (strip unknowns) so messaging/read tools with
   // free-form fields are not false-positive blocked; extractors never see junk keys.
   if (!skipSchema) {
-    // Enforce iff the SCHEMA family is exec/git, or the guard family is exec.
-    // Do NOT use classifyFamily==='git': that regex includes substring `github`,
-    // which would fail-closed GitHub-API tools under EXEC_KEYS (title/labels).
+    // Enforce iff the SCHEMA family is exec/git. `schemaFamilyForTool` matches
+    // exec vocabulary at SEGMENT boundaries (`(^|_)sh(_|$)`); `classifyFamily`
+    // matches it as a bare SUBSTRING (`/…|sh|…/`) because a tool whose name
+    // merely contains `sh` should still have its *arguments* weighed as exec.
+    // Those are different questions, and the substring answer must not pick the
+    // schema.
+    //
+    // Do NOT use classifyFamily==='git' either: that regex includes substring
+    // `github`, which would fail-closed GitHub-API tools under EXEC_KEYS.
+    //
+    // #454 — using classifyFamily here denied ordinary first-party work. `sh`
+    // is a substring of `Pu·sh·Notification` and of `Google_Drive__·sh·are_file`,
+    // so both were forced into EXEC_KEYS: the live `PushNotification.status`
+    // and `share_file.{fileId,emailAddress,role}` became UNKNOWN_KEYS and every
+    // real call hard-blocked as `invalid_tool_input` — a card attended, a
+    // failure-policy denial unattended. Neither tool can execute anything.
+    // Annotate strips those inert fields instead, and the extractor keys still
+    // survive annotate, so a `command`/`script`/`code` payload smuggled onto
+    // either name is scanned exactly as before.
     const schemaFam = schemaFamilyForTool(toolName);
     const guardFam = classifyFamily(toolName);
     // #439: TaskOutput/TaskStop are not exec-family by name (no bash/shell
     // substring). Without this, validateToolInput annotates and strips unknown
     // keys instead of failing closed — so mapping them in shellControlSchemaFor
     // alone would not survive evaluateToolCall.
-    const mode = (hasExactSpecialToolSchema(toolName) || schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec' || isNativeShellControlTool(toolName))
+    const mode = (hasExactSpecialToolSchema(toolName) || schemaFam === 'exec' || schemaFam === 'git' || isNativeShellControlTool(toolName))
       ? 'enforce'
       : 'annotate';
     const validated = validateToolInput(toolName, args, mode);
@@ -4281,6 +4327,24 @@ export function evaluateToolCall(
         `tool input rejected: ${validated.reason}`,
         ['invalid-tool-input', validated.code.toLowerCase().replace(/_/g, '-')],
       );
+    }
+    // #454 — the fold above moves substring-exec names from enforce to
+    // annotate, and annotate STRIPS `args`/`argv` (they are command evidence
+    // but not extractor keys). On the old enforce path those keys were unknown,
+    // so the rejection branch rescanned them; dropping enforcement without this
+    // would have made a recursive-wipe argv on a name like `runCommand` inert.
+    // Rescan exactly what annotate threw away — nothing else — and keep a
+    // catastrophic answer terminal. Only tools this fold changed reach here.
+    if (mode === 'annotate' && guardFam === 'exec' && validated.strippedKeys.length > 0) {
+      const droppedEvidence: Record<string, unknown> = {};
+      for (const key of validated.strippedKeys) {
+        if ((COMMAND_EVIDENCE_KEYS as readonly string[]).includes(key)) droppedEvidence[key] = args[key];
+      }
+      const extras = pathUrlFromRaw(args);
+      for (const text of commandEvidenceSurfaces(droppedEvidence)) {
+        const inner = evaluateToolCall(toolName, { ...extras, command: text }, config, options, true);
+        if (inner.severity === 'catastrophic') return inner;
+      }
     }
     args = validated.args;
   }

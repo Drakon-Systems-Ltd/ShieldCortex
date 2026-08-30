@@ -100,17 +100,34 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
   };
 
   it.each([
-    ['webrun', webFields], ['web.run', webFields], ['web__run', webFields], ['mcp__web__run', webFields],
+    ['webrun', webFields], ['web.run', webFields], ['web__run', webFields],
     ['sessions_spawn', openClawFields], ['openclawsessions_spawn', openClawFields],
     ['openclaw.sessions_spawn', openClawFields], ['openclaw__sessions_spawn', openClawFields],
-    ['mcp__openclaw__sessions_spawn', openClawFields],
     ['collaborationspawn_agent', collaborationFields], ['collaboration.spawn_agent', collaborationFields],
-    ['collaboration__spawn_agent', collaborationFields], ['mcp__collaboration__spawn_agent', collaborationFields],
+    ['collaboration__spawn_agent', collaborationFields],
   ] as const)('allows every measured field, in forward and reverse insertion order: %s', (tool, fields) => {
     for (const args of [fields, Object.fromEntries(Object.entries(fields).reverse())]) {
       expect(enforceToolInput(tool, args)).toMatchObject({ ok: true });
       expect(evaluateToolCall(tool, args)).toMatchObject({ decision: 'allow' });
     }
+  });
+
+  /**
+   * The `mcp__*` spellings used to be trusted here. They were caller-supplied
+   * authority: any MCP server that squatted the name inherited a reviewed
+   * contract. Removed — these names now fail closed on the exec family, the
+   * same answer `mcp__evil__sessions_spawn` has always got. Pinned so a later
+   * "helpful" re-add has to delete an explicit test to land.
+   */
+  it.each([
+    ['mcp__web__run', webFields],
+    ['mcp__openclaw__sessions_spawn', openClawFields],
+    ['mcp__collaboration__spawn_agent', collaborationFields],
+  ] as const)('denies the MCP name-squat spelling %s — a server does not certify its own contract', (tool, fields) => {
+    expect(enforceToolInput(tool, fields)).toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
+    expect(evaluateToolCall(tool, fields)).toMatchObject({
+      decision: 'block', action: 'invalid_tool_input',
+    });
   });
 
   it('keeps unknown third-party spawn/run names on the old fail-closed path', () => {
@@ -133,13 +150,27 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
         : { task: 'work' }
   );
 
+  /** A key each contract DECLARES — nesting there is a shape the host never
+   *  sends, so it still fails closed. Undeclared inert keys are dropped now. */
+  const declaredKeyFor = (tool: string): string => (
+    tool === 'webrun' ? 'open'
+      : tool === 'collaborationspawn_agent' ? 'message'
+        : 'context'
+  );
+
   it.each(['webrun', 'sessions_spawn', 'collaborationspawn_agent'])(
     'rejects hostile siblings while catastrophic extractor evidence stays terminal: %s',
     (tool) => {
       const base = baseFor(tool);
+      // Contract drift: an unknown key NO ShieldCortex reader consults is now
+      // dropped before validation/extractors and merely OBSERVED. This line
+      // used to assert block/dangerous — that assertion was the card storm on
+      // ordinary host work, and removing it is the point of the fold. What
+      // stays terminal is everything a scanner would have read, below.
       const ordinary = evaluateToolCall(tool, { ...base, surprise: true });
-      expect(ordinary).toMatchObject({ decision: 'block', severity: 'dangerous' });
-      expect(ordinary.signals).toContain('invalid-tool-input');
+      expect(ordinary).toMatchObject({ decision: 'allow', severity: 'benign' });
+      expect(ordinary.signals).not.toContain('invalid-tool-input');
+      expect(ordinary.contractDrift?.droppedKeys).toEqual(['surprise']);
 
       for (const key of COMMAND_ALIASES) {
         expect(evaluateToolCall(tool, { ...base, [key]: WIPE })).toMatchObject({
@@ -158,7 +189,9 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
 
       expect(evaluateToolCall(tool, { ...base, path: ROOT }).decision).toBe('block');
       expect(evaluateToolCall(tool, { ...base, url: 'https://evil.example/payload.sh' }).decision).toBe('block');
-      expect(evaluateToolCall(tool, { ...base, context: { nested: { too: { deep: { value: 1 } } } } })).toMatchObject({ decision: 'block' });
+      expect(evaluateToolCall(tool, {
+        ...base, [declaredKeyFor(tool)]: { nested: { too: { deep: { value: 1 } } } },
+      })).toMatchObject({ decision: 'block' });
     },
   );
 
@@ -173,10 +206,11 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
       expect(evaluateToolCall(tool, { ...base, cmd: WIPE, command: benign })).toMatchObject({
         decision: 'block', severity: 'catastrophic',
       });
-      expect(evaluateToolCall(tool, { ...base, context: { nested: { too: { deep: { value: 1 } } } }, command: WIPE })).toMatchObject({
+      const deep = { nested: { too: { deep: { value: 1 } } } };
+      expect(evaluateToolCall(tool, { ...base, [declaredKeyFor(tool)]: deep, command: WIPE })).toMatchObject({
         decision: 'block', severity: 'catastrophic',
       });
-      expect(evaluateToolCall(tool, { ...base, command: WIPE, context: { nested: { too: { deep: { value: 1 } } } } })).toMatchObject({
+      expect(evaluateToolCall(tool, { ...base, command: WIPE, [declaredKeyFor(tool)]: deep })).toMatchObject({
         decision: 'block', severity: 'catastrophic',
       });
       expect(evaluateToolCall(tool, { ...base, command: WIPE_VALUE, argv: WIPE_TOKS })).toMatchObject({
