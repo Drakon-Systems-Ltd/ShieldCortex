@@ -109,7 +109,7 @@ describe('#454 — genuine exec names still enforce', () => {
     const r = enforceToolInput(tool, { command: 'ls -la', evil_payload: 'x' });
     expect(r).toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
     const v = evaluateToolCall(tool, { command: 'ls -la', evil_payload: 'x' });
-    expect(v).toMatchObject({ decision: 'block', action: 'invalid_tool_input' });
+    expect(v).toMatchObject({ decision: 'require_approval', action: 'invalid_tool_input' });
     expect(v.signals).toContain('invalid-tool-input');
   });
 
@@ -120,12 +120,12 @@ describe('#454 — genuine exec names still enforce', () => {
   it('git and the native control plane are unaffected by the fold', () => {
     for (const tool of ['git', 'git_commit', 'BashOutput', 'TaskOutput', 'TaskStop', 'KillShell']) {
       expect(evaluateToolCall(tool, { surprise: 'x' })).toMatchObject({
-        decision: 'block', action: 'invalid_tool_input',
+        decision: 'require_approval', action: 'invalid_tool_input',
       });
     }
     // The reviewed exact-special contracts keep their own (drift-aware) path.
     expect(evaluateToolCall('sessions_spawn', { task: 'work', command: 'ls' })).toMatchObject({
-      decision: 'block', action: 'invalid_tool_input',
+      decision: 'require_approval', action: 'invalid_tool_input',
     });
   });
 });

@@ -211,10 +211,22 @@ function decide(input: BrokerInput): { outcome: BrokerOutcome; reason: string } 
   const { verdict, judge } = input;
 
   // (1) Catastrophic is not ours. No judge verdict and no config reaches this.
-  if (verdict.severity === 'catastrophic' || verdict.decision === 'block') {
+  //
+  // A bag the #412 schema rejected, or one whose command evidence exceeded the
+  // scan budget, is out of remit for the same reason even though the core now
+  // answers it `require_approval` so every plane says one word about it: the
+  // guard never read the call, so there is nothing for a judge to assess and
+  // nothing its confidence could be about. Keyed off the guard's own reason
+  // code, not the decision tier — the same derivation the two enforcement
+  // planes use for `unscannedBlock`.
+  const schemaInvalid = verdict.action === 'invalid_tool_input'
+    || (Array.isArray(verdict.signals) && verdict.signals.includes('invalid-tool-input'));
+  if (verdict.severity === 'catastrophic' || verdict.decision === 'block' || schemaInvalid) {
     return {
       outcome: 'not_brokerable',
-      reason: 'catastrophic-tier action — blocked by rule, never brokered',
+      reason: schemaInvalid && verdict.severity !== 'catastrophic'
+        ? 'tool input the guard could not read in full — never brokered'
+        : 'catastrophic-tier action — blocked by rule, never brokered',
     };
   }
 

@@ -485,6 +485,23 @@ export function formatApprovalPrompt(input: ApprovalPromptInput): string {
   ].join('\n');
 }
 
+/**
+ * The guard could not CLOSE this bag: the #412 tool-input schema rejected it,
+ * or the command-evidence walk ran out of budget before it had read all of it.
+ * Either way the call was never fully scanned, so no operator widening may
+ * apply to it — see `unscannedBlock` at the enforcement site.
+ *
+ * Read off the guard's own reason codes (`invalid_tool_input` /
+ * `invalid-tool-input`) rather than the decision tier, so it stays true
+ * whichever door the core decides this class deserves. Mirrored in
+ * `scripts/pre-tool-hook.mjs` (`isSchemaInvalid`) — the two enforcement
+ * surfaces must agree, and parity is asserted by the plane gate.
+ */
+function isSchemaInvalid(v: ToolGuardVerdictLike): boolean {
+  return v.action === 'invalid_tool_input'
+    || (Array.isArray(v.signals) && v.signals.includes('invalid-tool-input'));
+}
+
 // --- WS2 fail-closed fallback (guard load/eval failure) ---
 // Deliberately DUPLICATED from tool-action-guard.ts's CATASTROPHIC list, not
 // imported — this file already avoids a compile-time dependency on the main
@@ -1375,13 +1392,21 @@ export function createInterceptor(
     const severity: Severity = v.severity === 'catastrophic' ? 'critical' : 'high';
 
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
-    // #436: the door-less throw is for that tier only. A sub-catastrophic `block`
-    // (schema rejection) falls through to requireApproval so the operator can
-    // still say yes. autoApprove and enforce:false must not widen an unscanned
-    // call — they skip below.
+    // #436: the door-less throw is for that tier only. A schema rejection falls
+    // through to requireApproval so the operator can still say yes. autoApprove
+    // and enforce:false must not widen an unscanned call — they skip below.
     const terminalBlock = v.decision === 'block'
       && (v.severity === 'catastrophic' || v.severity === 'critical');
-    const unscannedBlock = v.decision === 'block' && !terminalBlock;
+    // Derived from the guard's OWN schema signal, not from `decision`. The core
+    // answers a scanned-clean schema rejection with `require_approval` (so all
+    // three planes say the same word about the same call), which means
+    // `decision === 'block'` no longer identifies the class. Keying off the
+    // decision here would silently re-open exactly what #436 closed:
+    // `{command:'…', evil:'…'}` running unscanned on an `enforce:false` host,
+    // and `autoApprove: ['unknown-keys']` becoming a blanket bypass of the #412
+    // closed schema. The residual `decision === 'block' && !terminalBlock` arm
+    // is kept for any sub-catastrophic block a future rule mints.
+    const unscannedBlock = isSchemaInvalid(v) || (v.decision === 'block' && !terminalBlock);
     if (terminalBlock) {
       // #227: release any lease this call minted early — a blocked action must
       // not leave a hold on that scope (self-heals at TTL if release fails).

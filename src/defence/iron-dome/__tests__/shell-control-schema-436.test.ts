@@ -57,7 +57,7 @@ describe('#436 acceptance 2 — schema stays CLOSED', () => {
     ['KillBash', { shell_id: 'shell_1', evil_payload: 'x' }],
   ])('rejects an unknown field on %s via evaluateToolCall', (tool, args) => {
     const v = evaluateToolCall(tool, args);
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
     expect(v.signals).toEqual(expect.arrayContaining(['invalid-tool-input', 'unknown-keys']));
@@ -86,7 +86,7 @@ describe('#436 acceptance 2 — schema stays CLOSED', () => {
   it('real Bash unknown-field enforcement is unchanged', () => {
     expect(evaluateToolCall('Bash', { command: 'printf ok' }).decision).toBe('allow');
     const v = evaluateToolCall('Bash', { command: 'printf ok', evil_payload: 'x' });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.action).toBe('invalid_tool_input');
   });
 
@@ -95,7 +95,7 @@ describe('#436 acceptance 2 — schema stays CLOSED', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('MISSING_HANDLE');
     const v = evaluateToolCall('BashOutput', {});
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
   });
@@ -105,14 +105,14 @@ describe('#436 acceptance 2 — schema stays CLOSED', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('MISSING_HANDLE');
     const v = evaluateToolCall('BashOutput', { filter: 'ready' });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
   });
 
   it('non-string handle fails closed without throwing', () => {
     const v = evaluateToolCall('BashOutput', { bash_id: 1 });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
   });
@@ -145,7 +145,7 @@ describe('#439 — TaskOutput/TaskStop use the native control schemas', () => {
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.code).toBe('MISSING_HANDLE');
       const v = evaluateToolCall(tool, {});
-      expect(v.decision).toBe('block');
+      expect(v.decision).toBe('require_approval');
       expect(v.severity).toBe('dangerous');
       expect(v.action).toBe('invalid_tool_input');
     },
@@ -153,14 +153,14 @@ describe('#439 — TaskOutput/TaskStop use the native control schemas', () => {
 
   it('filter-only TaskOutput fails closed (no handle)', () => {
     const v = evaluateToolCall('TaskOutput', { filter: 'ready' });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
   });
 
   it('non-string TaskOutput handle fails closed without throwing', () => {
     const v = evaluateToolCall('TaskOutput', { task_id: 1 });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
   });
@@ -170,7 +170,7 @@ describe('#439 — TaskOutput/TaskStop use the native control schemas', () => {
     ['TaskStop', { shell_id: 'shell_1', evil_payload: 'x' }],
   ])('rejects an unknown field on %s via evaluateToolCall', (tool, args) => {
     const v = evaluateToolCall(tool, args);
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
     expect(v.signals).toEqual(expect.arrayContaining(['invalid-tool-input', 'unknown-keys']));
@@ -178,7 +178,7 @@ describe('#439 — TaskOutput/TaskStop use the native control schemas', () => {
 
   it('non-string TaskStop handle fails closed without throwing', () => {
     const v = evaluateToolCall('TaskStop', { shell_id: 1 });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.action).toBe('invalid_tool_input');
   });

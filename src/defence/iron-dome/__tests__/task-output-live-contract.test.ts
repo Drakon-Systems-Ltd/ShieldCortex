@@ -22,9 +22,15 @@ import { evaluateToolCall } from '../tool-action-guard.js';
 
 const LIVE = { task_id: 'task_1', block: true, timeout: 30_000 };
 
-function expectHardBlock(tool: string, args: Record<string, unknown>): void {
+/**
+ * The bag failed the closed schema and the scan came back clean: the guard's
+ * answer is the operator's door, at the `dangerous` tier, carrying
+ * `invalid_tool_input`. That signal — not the decision — is what keeps
+ * `autoApprove` and `enforce:false` off the call on every enforcement plane.
+ */
+function expectSchemaGate(tool: string, args: Record<string, unknown>): void {
   const v = evaluateToolCall(tool, args);
-  expect(v.decision).toBe('block');
+  expect(v.decision).toBe('require_approval');
   expect(v.severity).toBe('dangerous');
   expect(v.action).toBe('invalid_tool_input');
 }
@@ -76,7 +82,7 @@ describe('TaskOutput live contract — the bag stays CLOSED', () => {
       expect(r.unknownKeys).toContain('evil_payload');
     }
     const v = evaluateToolCall('TaskOutput', { ...LIVE, evil_payload: 'x' });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.signals).toEqual(expect.arrayContaining(['invalid-tool-input', 'unknown-keys']));
   });
 
@@ -93,7 +99,7 @@ describe('TaskOutput live contract — the bag stays CLOSED', () => {
     const r = enforceToolInput('TaskOutput', { block: true, timeout: 30_000 });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('MISSING_HANDLE');
-    expectHardBlock('TaskOutput', { block: true, timeout: 30_000 });
+    expectSchemaGate('TaskOutput', { block: true, timeout: 30_000 });
   });
 
   it('still rejects prototype pollution on the live shape', () => {
@@ -131,7 +137,7 @@ describe('TaskOutput live contract — arrays/objects/coercions fail closed', ()
     const r = enforceToolInput('TaskOutput', args);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe(code);
-    expectHardBlock('TaskOutput', args);
+    expectSchemaGate('TaskOutput', args);
   });
 
   /**
@@ -166,7 +172,7 @@ describe('TaskOutput live contract — arrays/objects/coercions fail closed', ()
         expect(r.code).toBe('TYPE_COERCION');
         expect(r.reason).toContain('between 0 and 600000');
       }
-      expectHardBlock('TaskOutput', args);
+      expectSchemaGate('TaskOutput', args);
     },
   );
 
@@ -223,7 +229,7 @@ describe('TaskOutput live contract — siblings are untouched', () => {
       expect(r.code).toBe('UNKNOWN_KEYS');
       expect(r.unknownKeys).toContain(key);
     }
-    expectHardBlock('TaskStop', args);
+    expectSchemaGate('TaskStop', args);
   });
 
   it('TaskStop live shape still passes', () => {
@@ -237,7 +243,7 @@ describe('TaskOutput live contract — siblings are untouched', () => {
   it('real Bash enforcement is unchanged by the typed control fields', () => {
     expect(evaluateToolCall('Bash', { command: 'printf ok' }).decision).toBe('allow');
     const v = evaluateToolCall('Bash', { command: 'printf ok', block: true });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.action).toBe('invalid_tool_input');
   });
 });
