@@ -176,11 +176,18 @@ const SHELL_CONTROL_STOP: ShellControlSchema = {
  */
 function shellControlSchemaFor(toolName: string): ShellControlSchema | null {
   switch (String(toolName ?? '').trim().toLowerCase()) {
-    case 'bashoutput': return SHELL_CONTROL_OUTPUT;
+    case 'bashoutput':
+    case 'taskoutput': return SHELL_CONTROL_OUTPUT;
     case 'killshell':
-    case 'killbash': return SHELL_CONTROL_STOP;
+    case 'killbash':
+    case 'taskstop': return SHELL_CONTROL_STOP;
     default: return null;
   }
+}
+
+/** #439: native control tools are not exec-family by name, but their bag is still closed. */
+export function isNativeShellControlTool(toolName: string): boolean {
+  return shellControlSchemaFor(toolName) != null;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
