@@ -158,6 +158,23 @@ describe('#436 — shell control through the real Claude Code hook', () => {
     expect(store()?.rows ?? []).toHaveLength(0);
   });
 
+  it('TaskOutput live shape {task_id,block,timeout} is allowed under bypassPermissions', () => {
+    const r = runHook({ task_id: 'task_1', block: true, timeout: 30_000 }, { tool: 'TaskOutput' });
+    expect(r.decision).toBeUndefined();
+    expect(store()?.rows ?? []).toHaveLength(0);
+  });
+
+  it('TaskOutput non-blocking poll {block:false,timeout:0} is allowed', () => {
+    const r = runHook({ task_id: 'task_1', block: false, timeout: 0 }, { tool: 'TaskOutput' });
+    expect(r.decision).toBeUndefined();
+    expect(store()?.rows ?? []).toHaveLength(0);
+  });
+
+  it('TaskOutput with a non-boolean block still denies', () => {
+    const r = runHook({ task_id: 'task_1', block: 'true', timeout: 30_000 }, { tool: 'TaskOutput' });
+    expect(r.decision).toBe('deny');
+  });
+
   it('KillShell {shell_id} is allowed', () => {
     const r = runHook({ shell_id: 'shell_1' }, { tool: 'KillShell' });
     expect(r.decision).toBeUndefined();

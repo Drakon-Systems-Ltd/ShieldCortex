@@ -109,6 +109,14 @@ interface ShellControlSchema {
   allowed: Set<string>;
   /** At least one of these must carry a non-empty string, else fail closed. */
   handles: string[];
+  /**
+   * Per-field primitive type; absent means `'string'`. The live host
+   * contract for `TaskOutput` requires `block: boolean` and `timeout: number`
+   * beside `task_id`, so the blanket string rule below denied every real call.
+   * Types stay EXACT: an array, an object, or a coerced `'true'` in one of
+   * these fields fails closed exactly as a non-string handle does.
+   */
+  fieldTypes?: Record<string, 'string' | 'boolean' | 'number'>;
 }
 
 /**
@@ -156,13 +164,35 @@ export function hasExactSpecialToolSchema(toolName: string): boolean {
   return exactSpecialSchemaFor(toolName) !== null;
 }
 
-/** Claude 2.1.233's TaskOutput reads `task_id ?? agentId ?? bash_id`; `filter` is an output regex — data, not a command. */
-const SHELL_CONTROL_OUTPUT: ShellControlSchema = {
+/**
+ * `BashOutput` reads `bash_id ?? task_id ?? agentId`; `filter` is an output
+ * regex — data, not a command. All four are strings. Legacy shape, unchanged.
+ */
+const SHELL_CONTROL_BASH_OUTPUT: ShellControlSchema = {
   allowed: new Set(['bash_id', 'task_id', 'agentId', 'filter']),
   handles: ['bash_id', 'task_id', 'agentId'],
 };
 
-/** TaskStop reads `task_id ?? shell_id`. */
+/**
+ * TaskOutput live-contract fix (regression from #445). The LIVE native
+ * `TaskOutput` contract is
+ * `{task_id: string, block: boolean, timeout: number}`: all three REQUIRED,
+ * `additionalProperties: false`. #445 pointed `TaskOutput` at the BashOutput
+ * bag, so `block` and `timeout` were UNKNOWN_KEYS and every real call — the
+ * host's own background read path, one of the highest-frequency tools an
+ * unattended operator runs — was denied.
+ *
+ * The legacy handle/`filter` keys stay allowed so a host still on the older
+ * shape keeps working. The bag is still CLOSED and still carries no exec key:
+ * a control tool cannot smuggle a command through it.
+ */
+const SHELL_CONTROL_TASK_OUTPUT: ShellControlSchema = {
+  allowed: new Set(['bash_id', 'task_id', 'agentId', 'filter', 'block', 'timeout']),
+  handles: ['bash_id', 'task_id', 'agentId'],
+  fieldTypes: { block: 'boolean', timeout: 'number' },
+};
+
+/** TaskStop reads `task_id ?? shell_id` — the live contract adds nothing, so neither does this. */
 const SHELL_CONTROL_STOP: ShellControlSchema = {
   allowed: new Set(['shell_id', 'task_id']),
   handles: ['shell_id', 'task_id'],
@@ -176,8 +206,8 @@ const SHELL_CONTROL_STOP: ShellControlSchema = {
  */
 function shellControlSchemaFor(toolName: string): ShellControlSchema | null {
   switch (String(toolName ?? '').trim().toLowerCase()) {
-    case 'bashoutput':
-    case 'taskoutput': return SHELL_CONTROL_OUTPUT;
+    case 'bashoutput': return SHELL_CONTROL_BASH_OUTPUT;
+    case 'taskoutput': return SHELL_CONTROL_TASK_OUTPUT;
     case 'killshell':
     case 'killbash':
     case 'taskstop': return SHELL_CONTROL_STOP;
@@ -347,10 +377,27 @@ export function validateToolInput(
     // Command/path/url scanners only accept strings. Object/array/number/boolean
     // cannot be scanned (extractors are pickString) so they must not fail open.
     // `content`/`body`/`text` stay out of STRING_SCAN_KEYS (structured messages).
-    // #436: every field a control tool is allowed to carry is a handle or an
-    // output `filter` — both strings. A number/object here is not a shape the
-    // host ever sends, so it fails closed rather than reaching the extractors.
-    if ((STRING_SCAN_KEYS.has(key) || control) && typeof value !== 'string') {
+    // #436: a control tool's fields are typed by its live host contract —
+    // handles and `filter` are strings, TaskOutput's `block` is a boolean and
+    // its `timeout` a number. Anything else is not a shape the host ever sends,
+    // so it fails closed rather than reaching the extractors. Widening the bag
+    // must never widen the shapes it accepts.
+    const expected = control ? (control.fieldTypes?.[key] ?? 'string') : null;
+    if (expected !== null && typeof value !== expected) {
+      return {
+        ok: false,
+        code: typeof value === 'object' ? 'NESTED_INVALID' : 'TYPE_COERCION',
+        reason: `Field "${key}" must be a ${expected}, got ${Array.isArray(value) ? 'array' : typeof value}`,
+      };
+    }
+    if (expected === 'number' && !Number.isFinite(value)) {
+      return {
+        ok: false,
+        code: 'TYPE_COERCION',
+        reason: `Field "${key}" must be a finite number`,
+      };
+    }
+    if (expected === null && STRING_SCAN_KEYS.has(key) && typeof value !== 'string') {
       return {
         ok: false,
         code: typeof value === 'object' ? 'NESTED_INVALID' : 'TYPE_COERCION',
