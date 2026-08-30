@@ -76,7 +76,26 @@ export const PATH_KEYS = [
   'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
 ] as const;
 
-export const URL_KEYS = ['url', 'uri', 'endpoint', 'href', 'host', 'to'] as const;
+export const URL_KEYS = ['url', 'uri', 'endpoint', 'href', 'host', 'to', 'cc', 'bcc'] as const;
+
+/**
+ * Recipient keys whose LIVE contract is `string | string[]`. Gmail's
+ * `send_message`/`reply`/`forward` all declare `to`/`cc`/`bcc` as arrays of
+ * addresses, and `to` sits in `URL_KEYS` (it is an egress destination), so the
+ * blanket "a scanned key must be a string" rule below denied every real
+ * multi-recipient send as `NESTED_INVALID`.
+ *
+ * This is a per-KEY relaxation, not a per-TYPE one: `url`/`uri`/`endpoint`/
+ * `href`/`host` stay string-only, so "URL evidence may be an array" remains
+ * false everywhere except the three recipient spellings. The array itself is
+ * still shape-checked — every element must be a string and the list is bounded
+ * — and the elements are still read by `extractUrl`, so a smuggled exfil
+ * destination is weighed exactly as the single-string spelling is.
+ */
+export const RECIPIENT_LIST_KEYS: ReadonlySet<string> = new Set(['to', 'cc', 'bcc']);
+
+/** Longest recipient list accepted. Beyond this the shape is not a live send. */
+export const RECIPIENT_LIST_MAX = 256;
 
 export const WRITE_CONTENT_KEYS = [
   'new_string', 'content', 'contents', 'file_text', 'body', 'text',
@@ -167,7 +186,7 @@ const STRING_SCAN_KEYS = new Set<string>([
 const UNKNOWN_FAMILY_KEYS = new Set<string>([
   'description', 'timeout', 'title', 'name', 'id',
   // Messaging / notification tools: free-form body is data, not shell (field discipline).
-  'content', 'message', 'text', 'body', 'channel', 'to', 'subject',
+  'content', 'message', 'text', 'body', 'channel', 'to', 'cc', 'bcc', 'subject',
   // Extractor keys may appear on unknown tools; keep for scan, do not invent semantics.
   ...COMMAND_KEYS,
   'path', 'file_path', 'filePath', 'file', 'url', 'uri',
@@ -400,28 +419,112 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 }
 
+/**
+ * Exec vocabulary as WORDS. A name built entirely out of these — in any
+ * separator style — is an exec tool: `run_command`, `runCommand`, `RunCmd`,
+ * `execute_command`, `shell`, `run`. A name that merely CONTAINS one of the
+ * weak words is not: `workflow_run` runs nothing, `get_command` reads one,
+ * `slash_command` names one, `command_center` is a noun.
+ *
+ * The strong words below keep their own segment-anchored rule as well, because
+ * `vendor_bash` / `sessions_spawn` are exec whatever the other words are.
+ */
+const EXEC_WORDS: ReadonlySet<string> = new Set([
+  'bash', 'shell', 'sh', 'zsh', 'powershell', 'cmd', 'command', 'commands',
+  'exec', 'execute', 'run', 'runs', 'terminal', 'script', 'eval', 'spawn',
+  'process', 'system',
+]);
+
+/**
+ * Words strong enough to pick the closed EXEC bag from ANY segment position.
+ * `run` and `command` are deliberately ABSENT: as a bare segment token they
+ * matched `workflow_run`, `get_command`, `slash_command` and `command_center`,
+ * and forced the live GitHub-Actions / slash-command bags into EXEC_KEYS where
+ * every real field was an UNKNOWN_KEY — a hard deny on tools that execute
+ * nothing. They are reachable only through the whole-name word rule above.
+ */
+const EXEC_ANCHORED_WORD =
+  /(^|_)(bash|shell|exec|terminal|powershell|cmd|script|eval|spawn|process|system|sh|zsh)(_|$)/;
+
+/** Longest single token this module will try to split into glued exec words. */
+const EXEC_GLUE_MAX_LEN = 32;
+/** Most words a glued token may decompose into (`runcommand` = 2). */
+const EXEC_GLUE_MAX_WORDS = 3;
+
+/**
+ * Split a tool-name segment into lowercase words. camelCase IS a separator:
+ * `runCommand` is the same name as `run_command`, and lowercasing the whole
+ * segment first (which this module used to do before asking) destroyed the
+ * only boundary that made them the same — so `runCommand` fell to the unknown
+ * bag while `run_command` stayed closed.
+ */
+function nameWords(segment: string): string[] {
+  return String(segment || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+}
+
+/**
+ * A single token that is a run of exec words glued together with no separator
+ * at all (`runcommand`, `shellexec`). Bounded in both length and word count so
+ * this stays a lookup, not a search. `runbook` does not decompose (`book` is
+ * not exec vocabulary) and neither do `preprocess`, `systemctl`, `evaluate` or
+ * `subscription` — the substring false positives this whole fold is about.
+ */
+function isGluedExecWords(word: string, budget = EXEC_GLUE_MAX_WORDS): boolean {
+  if (EXEC_WORDS.has(word)) return true;
+  if (budget <= 1 || word.length > EXEC_GLUE_MAX_LEN) return false;
+  for (let i = 2; i < word.length; i++) {
+    if (EXEC_WORDS.has(word.slice(0, i)) && isGluedExecWords(word.slice(i), budget - 1)) return true;
+  }
+  return false;
+}
+
+/** Every word of the name is exec vocabulary — the whole name IS the verb. */
+function isAllExecWords(segment: string): boolean {
+  const words = nameWords(segment);
+  if (words.length === 0) return false;
+  if (words.length === 1) return isGluedExecWords(words[0]);
+  return words.every((w) => EXEC_WORDS.has(w));
+}
+
 /** Align with classifyFamily so exec-class tools never use the unknown bag. */
 export function schemaFamilyForTool(
   toolName: string,
 ): 'exec' | 'write' | 'read' | 'network' | 'memory' | 'git' | 'unknown' {
-  const n = String(toolName || '').toLowerCase().trim();
+  const raw = String(toolName || '').trim();
+  const n = raw.toLowerCase();
   const special = exactSpecialSchemaFor(n);
   if (special) return special.family;
+  // Keep the ORIGINAL case of the segment: camelCase is a word boundary.
+  const rawSeg = raw.split(/__|\.|:|\//).filter(Boolean).pop() ?? raw;
   const seg = n.split(/__|\.|:|\//).filter(Boolean).pop() ?? n;
   if (/(remember|recall|forget|memory|get_context|getcontext)/.test(seg) || /(remember|recall|forget|memory)/.test(n)) {
     return 'memory';
   }
-  // #454: `run` and `command` join this list as SEGMENT-ANCHORED tokens. They
-  // were previously reached only through `classifyFamily`'s substring net,
-  // which the schema gate no longer consults — and a bare `_run`/`_command`
-  // segment IS exec vocabulary (`thirdparty_run`, `slash_command`), so it must
-  // keep the closed EXEC bag. Anchored, they cannot reach inside a word:
-  // `runbook_lookup`, `prerun`, `command_center` and `PushNotification` are
-  // untouched, which is the whole point of asking this question at segment
-  // boundaries instead of by substring.
+  // Three questions, narrowest first:
+  //   1. does a STRONG exec word occupy a whole segment token (`vendor_bash`,
+  //      `sessions_spawn`)?
+  //   2. is the name built ENTIRELY out of exec words, in any separator style
+  //      (`run_command`, `runCommand`, `runcommand`, `execute_command`, `run`)?
+  //   3. does the name contain an unambiguous exec substring anywhere?
+  //
+  // #454 anchored `run`/`command` at segment boundaries, which was still too
+  // wide: `(^|_)run(_|$)` matched the live `get_workflow_run` /
+  // `list_workflow_runs` GitHub bags and `(^|_)command(_|$)` matched
+  // `get_command` / `slash_command` / `command_center`, forcing all of them
+  // into EXEC_KEYS where every declared field is an UNKNOWN_KEY — a hard deny
+  // on read-only host tools. Both weak words now need the WHOLE name to be
+  // exec vocabulary, which is exactly the class that can actually run
+  // something. Nothing here removes a SCAN: a command payload on any of these
+  // names is still weighed by `classifyFamily`'s substring net and by the
+  // shared command-evidence pass in `evaluateToolCall`.
   if (
-    /(^|_)(bash|shell|exec|terminal|run_terminal|powershell|cmd|run_command|run|command|script|eval|spawn|process|system|sh|zsh)(_|$)/.test(seg)
-    || /^(bash|shell|sh|zsh|exec|cmd|powershell|run|command)$/.test(seg)
+    EXEC_ANCHORED_WORD.test(seg)
+    || isAllExecWords(rawSeg)
     || /(bash|shell|exec|terminal)/.test(n)
   ) {
     return 'exec';
@@ -605,11 +708,39 @@ export function validateToolInput(
       };
     }
     if (expected === null && STRING_SCAN_KEYS.has(key) && typeof value !== 'string') {
-      return {
-        ok: false,
-        code: typeof value === 'object' ? 'NESTED_INVALID' : 'TYPE_COERCION',
-        reason: `Field "${key}" must be a string, got ${Array.isArray(value) ? 'array' : typeof value}`,
-      };
+      // The recipient exception: `to`/`cc`/`bcc` may be a LIST of addresses,
+      // because that is the live Gmail contract. Everything else about the
+      // rule holds — the list must be flat strings, non-empty, and bounded.
+      // A nested/typed element is the shape a scanner cannot read, so it fails
+      // closed exactly as a smuggled object in `url` does.
+      const list = RECIPIENT_LIST_KEYS.has(key) && Array.isArray(value) ? value : null;
+      if (!list) {
+        return {
+          ok: false,
+          code: typeof value === 'object' ? 'NESTED_INVALID' : 'TYPE_COERCION',
+          reason: `Field "${key}" must be a string, got ${Array.isArray(value) ? 'array' : typeof value}`,
+        };
+      }
+      if (list.length > RECIPIENT_LIST_MAX) {
+        return {
+          ok: false,
+          code: 'NESTED_INVALID',
+          reason: `Field "${key}" list exceeds ${RECIPIENT_LIST_MAX} entries`,
+        };
+      }
+      for (const el of list) {
+        // An empty element is ABSENT, not invalid — the same rule the top-level
+        // keys use (`command: ''` beside the field the host actually filled).
+        // A non-string element is a shape no reader can consult: fail closed.
+        if (el === '' || el === null || el === undefined) continue;
+        if (typeof el !== 'string') {
+          return {
+            ok: false,
+            code: typeof el === 'object' ? 'NESTED_INVALID' : 'TYPE_COERCION',
+            reason: `Field "${key}" list entries must be strings, got ${Array.isArray(el) ? 'array' : typeof el}`,
+          };
+        }
+      }
     }
 
     const nestedErr = validateNested(value, key);

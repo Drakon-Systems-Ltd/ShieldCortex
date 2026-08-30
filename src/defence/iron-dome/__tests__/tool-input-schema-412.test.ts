@@ -64,12 +64,16 @@ describe('#412 tool input schema', () => {
     expect(r.ok).toBe(false);
   });
 
-  it('evaluateToolCall denies unknown-key Bash input', () => {
+  it('evaluateToolCall gates unknown-key Bash input', () => {
     const v = evaluateToolCall('Bash', {
       command: 'echo safe',
       hidden_script: 'not-allowed',
     } as Record<string, unknown>);
-    expect(v.decision).toBe('block');
+    // The scan came back clean and only the contract is wrong, so the answer is
+    // the operator's door — the same word core, hook, interceptor and Hermes
+    // all use for it. The `invalid-tool-input` signal is what keeps the two
+    // widenings (autoApprove, enforce:false) off it, not the decision tier.
+    expect(v.decision).toBe('require_approval');
     expect(v.signals.join(' ')).toMatch(/invalid-tool-input|unknown/);
   });
 
@@ -126,13 +130,19 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
   ] as const)('denies the MCP name-squat spelling %s — a server does not certify its own contract', (tool, fields) => {
     expect(enforceToolInput(tool, fields)).toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
     expect(evaluateToolCall(tool, fields)).toMatchObject({
-      decision: 'block', action: 'invalid_tool_input',
+      decision: 'require_approval', action: 'invalid_tool_input',
     });
   });
 
-  it('keeps unknown third-party spawn/run names on the old fail-closed path', () => {
-    expect(evaluateToolCall('vendor_spawn_agent', { task: 'work' }).decision).toBe('block');
-    expect(evaluateToolCall('thirdparty_run', { search_query: [{ q: 'x' }] }).decision).toBe('block');
+  it('keeps unknown third-party SPAWN names on the old fail-closed path', () => {
+    expect(evaluateToolCall('vendor_spawn_agent', { task: 'work' }).action).toBe('invalid_tool_input');
+    // `spawn` is exec vocabulary wherever it lands; a trailing `_run` word is
+    // not (`get_workflow_run`, `list_workflow_runs`), so a vendor `_run` name
+    // annotates its inert bag instead of denying it. The name still gets no
+    // reviewed contract, and its command evidence is still scanned — see
+    // native-contract-drift.test.ts for both halves.
+    expect(evaluateToolCall('thirdparty_run', { search_query: [{ q: 'x' }] }).decision).toBe('allow');
+    expect(evaluateToolCall('mcp__web__run', { search_query: [{ q: 'x' }] }).action).toBe('invalid_tool_input');
   });
 
   const BIN = String.fromCharCode(114, 109);
@@ -187,11 +197,16 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
         });
       }
 
-      expect(evaluateToolCall(tool, { ...base, path: ROOT }).decision).toBe('block');
-      expect(evaluateToolCall(tool, { ...base, url: 'https://evil.example/payload.sh' }).decision).toBe('block');
+      // `path`/`url` are EVIDENCE keys, so the drift fold does not drop them —
+      // they are undeclared on these contracts and the bag fails the schema.
+      // Scanned clean, that is the operator's door carrying the schema reason.
+      expect(evaluateToolCall(tool, { ...base, path: ROOT }))
+        .toMatchObject({ decision: 'require_approval', action: 'invalid_tool_input' });
+      expect(evaluateToolCall(tool, { ...base, url: 'https://evil.example/payload.sh' }))
+        .toMatchObject({ decision: 'require_approval', action: 'invalid_tool_input' });
       expect(evaluateToolCall(tool, {
         ...base, [declaredKeyFor(tool)]: { nested: { too: { deep: { value: 1 } } } },
-      })).toMatchObject({ decision: 'block' });
+      })).toMatchObject({ decision: 'require_approval', action: 'invalid_tool_input' });
     },
   );
 
@@ -257,7 +272,7 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
 
   it('a long scanned-clean command with an unknown key keeps a door — not a terminal wall', () => {
     const v = evaluateToolCall('Bash', { command: 'z'.repeat(9000), extra: true });
-    expect(v.decision).toBe('block');
+    expect(v.decision).toBe('require_approval');
     expect(v.severity).toBe('dangerous');
     expect(v.severity).not.toBe('catastrophic');
   });
@@ -302,8 +317,8 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
   });
 
   it('keeps near-collision names off the reviewed allow path', () => {
-    expect(evaluateToolCall('mcp__evil__sessions_spawn', { task: 'work' }).decision).toBe('block');
-    expect(evaluateToolCall('mcp__evil__web__run', { search_query: [{ q: 'x' }] }).decision).toBe('block');
+    expect(evaluateToolCall('mcp__evil__sessions_spawn', { task: 'work' }).action).toBe('invalid_tool_input');
+    expect(evaluateToolCall('mcp__evil__web__run', { search_query: [{ q: 'x' }] }).action).toBe('invalid_tool_input');
   });
 
   const okPipeline = () => ({

@@ -32,6 +32,7 @@ import {
   contractDriftFor,
   COMMAND_KEYS, PATH_KEYS, URL_KEYS, WRITE_CONTENT_KEYS, COMMAND_EVIDENCE_KEYS,
   OUTBOUND_DATA_KEYS, OUTBOUND_METHOD_KEYS,
+  RECIPIENT_LIST_KEYS, RECIPIENT_LIST_MAX,
 } from './tool-input-schema.js';
 import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
@@ -154,23 +155,66 @@ const EXTRACTOR_WINDOW_STEP = 4096;
 const EXTRACTOR_MAX_DEPTH = 8;
 const EXTRACTOR_MAX_LEAVES = 16384;
 
-function stringElements(value: unknown, depth = 0, acc: string[] = []): string[] {
-  if (depth > EXTRACTOR_MAX_DEPTH || acc.length >= EXTRACTOR_MAX_LEAVES) return acc;
+/** Total surface text one evidence pass will window. Beyond it: fail closed. */
+const EVIDENCE_MAX_TEXT_BYTES = 4_194_304;
+
+/**
+ * What the walk could NOT read. A truncated walk is not a clean walk: the
+ * unread remainder may be the wipe, so exhaustion is a verdict input (a
+ * non-widenable block), never a silent shrug. Recorded per pass, not per key,
+ * because the caps are per pass.
+ */
+interface EvidenceBudget {
+  leaves: number;
+  bytes: number;
+  /** A depth / leaf / byte cap stopped the walk before it ran out of input. */
+  exhausted: boolean;
+}
+
+function newEvidenceBudget(): EvidenceBudget {
+  return { leaves: 0, bytes: 0, exhausted: false };
+}
+
+function stringElements(
+  value: unknown,
+  budget: EvidenceBudget,
+  depth = 0,
+  acc: string[] = [],
+): string[] {
+  if (value === null || value === undefined) return acc;
+  if (depth > EXTRACTOR_MAX_DEPTH) {
+    budget.exhausted = true;
+    return acc;
+  }
+  if (budget.leaves >= EXTRACTOR_MAX_LEAVES || budget.bytes >= EVIDENCE_MAX_TEXT_BYTES) {
+    budget.exhausted = true;
+    return acc;
+  }
   if (typeof value === 'string') {
-    if (value) acc.push(value);
+    if (value) {
+      acc.push(value);
+      budget.leaves += 1;
+      budget.bytes += value.length;
+    }
     return acc;
   }
   if (Array.isArray(value)) {
     for (const el of value) {
-      stringElements(el, depth + 1, acc);
-      if (acc.length >= EXTRACTOR_MAX_LEAVES) break;
+      stringElements(el, budget, depth + 1, acc);
+      if (budget.leaves >= EXTRACTOR_MAX_LEAVES || budget.bytes >= EVIDENCE_MAX_TEXT_BYTES) {
+        budget.exhausted = true;
+        break;
+      }
     }
     return acc;
   }
-  if (value !== null && typeof value === 'object') {
+  if (typeof value === 'object') {
     for (const el of Object.values(value as Record<string, unknown>)) {
-      stringElements(el, depth + 1, acc);
-      if (acc.length >= EXTRACTOR_MAX_LEAVES) break;
+      stringElements(el, budget, depth + 1, acc);
+      if (budget.leaves >= EXTRACTOR_MAX_LEAVES || budget.bytes >= EVIDENCE_MAX_TEXT_BYTES) {
+        budget.exhausted = true;
+        break;
+      }
     }
   }
   return acc;
@@ -192,33 +236,105 @@ function slidingWindows(text: string, cap = EXTRACTOR_EVIDENCE_CAP): string[] {
  * Overlapping windows over the full leaf join — not head+tail only.
  * A wipe in the middle of a long string or a 600-token argv must still scan.
  */
-function flattenScanWindows(value: unknown, cap = EXTRACTOR_EVIDENCE_CAP): string[] {
-  const parts = stringElements(value);
-  if (parts.length === 0) return [];
-  return slidingWindows(parts.join(' '), cap);
+function flattenScanText(value: unknown, budget: EvidenceBudget): string {
+  const parts = stringElements(value, budget);
+  return parts.length === 0 ? '' : parts.join(' ');
 }
 
 function pathUrlFromRaw(raw: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const k of [...PATH_KEYS, ...URL_KEYS]) {
     if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k];
+    // A recipient list is a destination like any other: carried, then read by
+    // `extractUrl` below. Dropping it here would blind egress rules on the
+    // exact shape (`to: [address, ...]`) the live mail contracts send.
+    else if (RECIPIENT_LIST_KEYS.has(k) && recipientListText(raw[k])) out[k] = raw[k];
   }
   return out;
 }
 
+/** The argument-vector aliases. A host splits the verb from these, so must we. */
+const ARGV_EVIDENCE_KEYS = ['args', 'argv'] as const;
+
+/** The command alias `extractCommand` would pick from this bag, or null. */
+function firstCommandKey(raw: Record<string, unknown>): string | null {
+  for (const k of COMMAND_KEYS) {
+    const v = raw?.[k];
+    if (typeof v === 'string' && v.length > 0) return k;
+  }
+  return null;
+}
+
 /**
- * Schema rejection used to scan a single first-wins string (or `{}` when
- * annotate failed). Each command-bearing alias is its own surface: joining
- * `echo safe` with a later wipe makes the tokeniser treat `echo` as the verb.
+ * Every text an OS-level reading of this bag could produce, INDIVIDUAL and
+ * COMBINED.
+ *
+ * Individual, because each command-bearing alias is its own statement: joining
+ * `echo safe` with a later wipe makes the tokeniser treat `echo` as the verb
+ * and the wipe as its data.
+ *
+ * Combined, because the host does the opposite too. `spawn(command, argv)`
+ * executes `command` WITH `argv`, so a delete binary in `command` and its
+ * recursive-force flags plus a root target in `argv` are one root wipe that
+ * neither half spells alone — the binary by itself is an ordinary delete, and
+ * the flag vector by itself is not a command at all. Scanning only the halves
+ * downgraded a doorless block to an approval card. Each verb alias is paired
+ * with each argv alias, and one union surface catches the N-way split across
+ * `command` + `args` + `argv` together.
+ *
+ * Both directions are needed and neither is a superset of the other, so both
+ * are scanned. Deduped by text, so the ordinary single-key call costs one.
  */
-function commandEvidenceSurfaces(raw: Record<string, unknown>): string[] {
+function commandEvidenceSurfaces(
+  raw: Record<string, unknown>,
+  budget: EvidenceBudget,
+  primaryScannedDownstream: boolean,
+): string[] {
+  // The first-wins command string is what `extractCommand` hands the normal
+  // path. When the annotated bag is valid, that path DOES scan it — directly
+  // when the schema accepts, and through the annotated re-evaluation when it
+  // rejects — so emitting it here as its own surface would evaluate the same
+  // text twice. That is not merely wasted work: the per-call budgets that
+  // bound script folding are per evaluation, so a doubled scan doubles how
+  // many files one call may fold. When the annotated bag is INVALID (a
+  // bad-typed control field fails in both modes) nothing downstream reaches an
+  // extractor, and the surface is carried here instead. Either way it is still
+  // joined into the COMBINED surfaces below, which nothing else scans.
+  const primary = primaryScannedDownstream ? firstCommandKey(raw) : null;
+  const texts: string[] = [];
+  const byKey = new Map<string, string>();
+  for (const k of COMMAND_EVIDENCE_KEYS) {
+    const text = flattenScanText(raw[k], budget);
+    if (!text) continue;
+    byKey.set(k, text);
+    if (k !== primary) texts.push(text);
+  }
+  if (byKey.size > 1) {
+    for (const verb of COMMAND_KEYS) {
+      const head = byKey.get(verb);
+      if (!head) continue;
+      for (const list of ARGV_EVIDENCE_KEYS) {
+        const tail = byKey.get(list);
+        if (tail) texts.push(`${head} ${tail}`);
+      }
+    }
+    // The whole bag read as one statement — the N-way split.
+    texts.push([...byKey.values()].join(' '));
+  }
+
   const surfaces: string[] = [];
   const seen = new Set<string>();
-  for (const k of COMMAND_EVIDENCE_KEYS) {
-    for (const text of flattenScanWindows(raw[k])) {
-      if (!text || seen.has(text)) continue;
-      seen.add(text);
-      surfaces.push(text);
+  let bytes = 0;
+  for (const text of texts) {
+    if (bytes + text.length > EVIDENCE_MAX_TEXT_BYTES) {
+      budget.exhausted = true;
+      break;
+    }
+    bytes += text.length;
+    for (const window of slidingWindows(text)) {
+      if (!window || seen.has(window)) continue;
+      seen.add(window);
+      surfaces.push(window);
     }
   }
   return surfaces;
@@ -234,8 +350,38 @@ export function deobfuscateIfs(s: string): string { return s.replace(IFS_OBFUSCA
 export function extractPath(args: Record<string, unknown>): string {
   return pickString(args, [...PATH_KEYS]);
 }
+/**
+ * A `to`/`cc`/`bcc` list flattened into one scannable destination string.
+ * Bounded twice — element count and total length — because this text is
+ * caller-supplied and feeds the egress scanners.
+ */
+function recipientListText(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  const parts: string[] = [];
+  for (const el of value) {
+    if (typeof el !== 'string' || !el) continue;
+    parts.push(el);
+    if (parts.length >= RECIPIENT_LIST_MAX) break;
+  }
+  return parts.join(' ').slice(0, EXTRACTOR_EVIDENCE_CAP);
+}
+
+/**
+ * First-wins over `URL_KEYS`, with the recipient exception: `to`/`cc`/`bcc`
+ * may arrive as a LIST of addresses (the live Gmail contract), and a list read
+ * as "no url" would have made every multi-recipient send invisible to the
+ * egress rules that gate the single-string spelling.
+ */
 export function extractUrl(args: Record<string, unknown>): string {
-  return pickString(args, [...URL_KEYS]);
+  for (const k of URL_KEYS) {
+    const v = args?.[k];
+    if (typeof v === 'string' && v.length > 0) return v;
+    if (RECIPIENT_LIST_KEYS.has(k)) {
+      const text = recipientListText(v);
+      if (text) return text;
+    }
+  }
+  return '';
 }
 
 // ── Write-content extraction + target recognition (issue #93) ────────────────
@@ -4240,6 +4386,113 @@ const ACTION_BY_FAMILY: Record<ToolFamily, string> = {
  * a command points at (issue #4) therefore comes in through the caller-supplied
  * `options.resolveScriptSource` seam — no `fs` here, ever.
  */
+const SEVERITY_RANK: Record<ToolGuardSeverity, number> = {
+  benign: 0, sensitive: 1, dangerous: 2, catastrophic: 3,
+};
+const DECISION_RANK: Record<ToolGuardDecision, number> = {
+  allow: 0, require_approval: 1, block: 2,
+};
+
+/**
+ * Strictly stronger, severity first and decision as the tie-break. Used to
+ * merge two independently-derived verdicts about the same call so the merge is
+ * MONOTONE: the answer is never weaker than either input, whichever way the
+ * two disagree. The decision tie-break covers the same-severity case, where a
+ * `block` and a `require_approval` are indistinguishable by tier alone and the
+ * merge would otherwise be free to pick the door.
+ */
+function outranks(a: ToolGuardVerdict, b: ToolGuardVerdict | null): boolean {
+  if (!b) return true;
+  if (SEVERITY_RANK[a.severity] !== SEVERITY_RANK[b.severity]) {
+    return SEVERITY_RANK[a.severity] > SEVERITY_RANK[b.severity];
+  }
+  return DECISION_RANK[a.decision] > DECISION_RANK[b.decision];
+}
+
+/**
+ * The walk could not read all of the command evidence, so the guard cannot say
+ * the call is clean. This is TERMINAL: `block` at the `catastrophic` tier —
+ * the one tier every plane refuses without a door (interceptor throws, the
+ * Claude hook emits `deny`, Hermes returns `block`), and the one tier no
+ * operator widening reaches. `autoApprove`, `enforce:false` advisory mode, the
+ * approval broker's `pre_clear` and the #310 retry grant all sit BELOW it.
+ *
+ * It was `dangerous` until the plane audit: at that tier the Claude hook turned
+ * an unread giant payload into an `ask`, so a single tap ran a bag the guard
+ * had explicitly failed to read — the exact "could not look" → "allowed" path
+ * the tier is supposed to close. Fail-closed means closed on every runtime, and
+ * the terminal branch is the only severity all three agree on.
+ *
+ * It keeps `invalid-tool-input` so it lands on the schema-rejection side of
+ * every audit allowlist and operator-facing summary, alongside the specific
+ * `command-evidence-unscannable` reason code.
+ */
+function unscannableEvidenceVerdict(toolName: string): ToolGuardVerdict {
+  return verdict(
+    'block',
+    'catastrophic',
+    classifyFamily(toolName),
+    'invalid_tool_input',
+    'tool input rejected: command evidence exceeded the scan budget (depth/leaf/byte) and could not be read in full',
+    ['invalid-tool-input', 'command-evidence-unscannable'],
+  );
+}
+
+/**
+ * ── The one command-evidence pass ─────────────────────────────────────────
+ *
+ * Runs on the RAW bag, BEFORE the schema-mode branch, for every tool. It
+ * replaces the two partial rescans this module used to carry — one on the
+ * schema-REJECTION path, one on the annotate-STRIP path — which between them
+ * left three holes, all of them uninstall-class in the wrong direction (a real
+ * root wipe answered `allow`/`benign`):
+ *
+ *   1. a VALID exec bag was never rescanned at all, so `argv` was inert on
+ *      exactly the tools whose declared contract carries one;
+ *   2. both rescans propagated only `catastrophic`, so a dangerous-tier
+ *      `argv` (`sudo`, service stop, force-push) was discarded outright;
+ *   3. neither noticed a truncated walk, so a wipe past the leaf cap read as
+ *      a clean scan.
+ *
+ * Being pre-branch is what makes it exhaustive: the schema has not yet
+ * accepted, rejected, or stripped anything, so the same surfaces are scanned
+ * whatever the mode decides. The pass never widens — it only ever returns a
+ * verdict the caller merges with `outranks` — and it never re-enters itself,
+ * because every inner evaluation is made with the schema gate skipped.
+ */
+function commandEvidencePass(
+  toolName: string,
+  raw: unknown,
+  config?: IronDomeConfig,
+  options?: ToolGuardOptions,
+): ToolGuardVerdict | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const bag = raw as Record<string, unknown>;
+  const budget = newEvidenceBudget();
+  // Does anything downstream still reach an extractor with this bag? Annotate
+  // keeps every extractor key for every family, so its verdict is exactly that
+  // question — and it is the same call the rejection path makes, not a new
+  // policy this pass invents.
+  const annotated = validateToolInput(toolName, bag, 'annotate');
+  const surfaces = commandEvidenceSurfaces(bag, budget, annotated.ok);
+  if (surfaces.length === 0 && !budget.exhausted) return null;
+
+  const extras = pathUrlFromRaw(bag);
+  let best: ToolGuardVerdict | null = null;
+  for (const text of surfaces) {
+    const inner = evaluateToolCallCore(toolName, { ...extras, command: text }, config, options, true);
+    if (outranks(inner, best)) best = inner;
+    // Catastrophic dominance is terminal: nothing later can outrank it, and
+    // the remaining surfaces cannot make a wipe less true.
+    if (inner.severity === 'catastrophic') return inner;
+  }
+  if (budget.exhausted) {
+    const unscannable = unscannableEvidenceVerdict(toolName);
+    if (outranks(unscannable, best)) return unscannable;
+  }
+  return best;
+}
+
 export function evaluateToolCall(
   toolName: string,
   args: Record<string, unknown> = {},
@@ -4247,11 +4500,20 @@ export function evaluateToolCall(
   options?: ToolGuardOptions,
   skipSchema = false,
 ): ToolGuardVerdict {
-  const v = evaluateToolCallCore(toolName, args, config, options, skipSchema);
+  // A rescan pass: no evidence pass (the outer call already ran it, and
+  // re-running it here would recurse), no drift observation.
+  if (skipSchema) return evaluateToolCallCore(toolName, args, config, options, true);
+
+  const evidence = commandEvidencePass(toolName, args, config, options);
+  // A catastrophic reading of the evidence is terminal and doorless, so the
+  // normal path cannot change the answer and is not run.
+  const core = evidence?.severity === 'catastrophic'
+    ? evidence
+    : evaluateToolCallCore(toolName, args, config, options, false);
+  const v = evidence && outranks(evidence, core) ? evidence : core;
   // Contract drift rides ALONGSIDE the verdict and cannot change it. The
   // recursive rescan passes (`skipSchema`) never re-observe: the outer call
   // already did, and a doubled row would double-count in every summary.
-  if (skipSchema) return v;
   const drift = contractDriftFor(toolName, args);
   return drift ? { ...v, contractDrift: drift } : v;
 }
@@ -4288,7 +4550,6 @@ function evaluateToolCallCore(
     // survive annotate, so a `command`/`script`/`code` payload smuggled onto
     // either name is scanned exactly as before.
     const schemaFam = schemaFamilyForTool(toolName);
-    const guardFam = classifyFamily(toolName);
     // #439: TaskOutput/TaskStop are not exec-family by name (no bash/shell
     // substring). Without this, validateToolInput annotates and strips unknown
     // keys instead of failing closed — so mapping them in shellControlSchemaFor
@@ -4298,53 +4559,49 @@ function evaluateToolCallCore(
       : 'annotate';
     const validated = validateToolInput(toolName, args, mode);
     if (!validated.ok) {
-      // #436: schema rejection must not mask a catastrophic payload. Annotate
-      // the RAW bag (strip unknown keys, keep extractor fields) and reuse the
-      // full evaluator with the schema gate skipped. If that is catastrophic,
-      // keep it terminal. Otherwise the original schema failure stands.
+      // #436: schema rejection must not mask a catastrophic payload. Every
+      // command/args/argv surface of the RAW bag was already scanned by the
+      // shared evidence pass in `evaluateToolCall`, so what is left to cover
+      // here is the catastrophic that needs the WHOLE bag at once — a path, a
+      // url and a body read together (secret egress) rather than a command
+      // string. Annotate the raw bag (strip unknown keys, keep extractor
+      // fields) and reuse the full evaluator with the schema gate skipped. If
+      // that is catastrophic, keep it terminal. Otherwise the schema failure
+      // stands.
       const annotated = validateToolInput(toolName, args, 'annotate');
-      const extras = pathUrlFromRaw(args);
-      const surfaces = commandEvidenceSurfaces(args);
-      if (surfaces.length === 0 && annotated.ok) {
-        const inner = evaluateToolCall(toolName, { ...annotated.args, ...extras }, config, options, true);
-        if (inner.severity === 'catastrophic') return inner;
-      }
-      for (const text of surfaces) {
-        const inner = evaluateToolCall(
+      if (annotated.ok) {
+        const inner = evaluateToolCallCore(
           toolName,
-          { ...extras, command: text },
+          { ...annotated.args, ...pathUrlFromRaw(args) },
           config,
           options,
           true,
         );
         if (inner.severity === 'catastrophic') return inner;
       }
+      // The scan came back clean and only the CONTRACT is wrong. That is a
+      // question for the operator, not a refusal: `require_approval` at the
+      // `dangerous` tier, which is what all three planes already do with it —
+      // the interceptor falls through to `requireApproval`, the Claude hook
+      // emits `ask`, and Hermes hands the caller the same door. Saying `block`
+      // here and then opening a door on two runtimes out of three was a plane
+      // lie: the core's own word for the answer must be the answer.
+      //
+      // What must NOT follow from the softer decision is a wider one. The
+      // `invalid_tool_input` action and the `invalid-tool-input` signal are
+      // carried unchanged, and every plane keys its non-widenable
+      // "unscanned" property off THAT rather than off `decision === 'block'`,
+      // so `autoApprove`, `enforce:false` advisory mode and broker pre-clear
+      // stay inert on a bag the guard could not close. See `unscannedBlock` in
+      // `plugins/openclaw/interceptor.ts` and `scripts/pre-tool-hook.mjs`.
       return verdict(
-        'block',
+        'require_approval',
         'dangerous',
         classifyFamily(toolName),
         'invalid_tool_input',
         `tool input rejected: ${validated.reason}`,
         ['invalid-tool-input', validated.code.toLowerCase().replace(/_/g, '-')],
       );
-    }
-    // #454 — the fold above moves substring-exec names from enforce to
-    // annotate, and annotate STRIPS `args`/`argv` (they are command evidence
-    // but not extractor keys). On the old enforce path those keys were unknown,
-    // so the rejection branch rescanned them; dropping enforcement without this
-    // would have made a recursive-wipe argv on a name like `runCommand` inert.
-    // Rescan exactly what annotate threw away — nothing else — and keep a
-    // catastrophic answer terminal. Only tools this fold changed reach here.
-    if (mode === 'annotate' && guardFam === 'exec' && validated.strippedKeys.length > 0) {
-      const droppedEvidence: Record<string, unknown> = {};
-      for (const key of validated.strippedKeys) {
-        if ((COMMAND_EVIDENCE_KEYS as readonly string[]).includes(key)) droppedEvidence[key] = args[key];
-      }
-      const extras = pathUrlFromRaw(args);
-      for (const text of commandEvidenceSurfaces(droppedEvidence)) {
-        const inner = evaluateToolCall(toolName, { ...extras, command: text }, config, options, true);
-        if (inner.severity === 'catastrophic') return inner;
-      }
     }
     args = validated.args;
   }

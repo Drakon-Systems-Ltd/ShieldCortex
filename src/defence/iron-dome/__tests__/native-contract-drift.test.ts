@@ -192,7 +192,7 @@ describe('the scannability split', () => {
       if (!r.ok) expect(r.unknownKeys).toContain(key);
       expect(contractDriftFor('sessions_spawn', args)).toBeNull();
       expect(evaluateToolCall('sessions_spawn', args)).toMatchObject({
-        decision: 'block', action: 'invalid_tool_input',
+        decision: 'require_approval', action: 'invalid_tool_input',
       });
     },
   );
@@ -287,7 +287,7 @@ describe('the split does not soften catastrophic evidence', () => {
 
   it('an unknown command-bearing field is denied even when it scans clean', () => {
     const v = evaluateToolCall('sessions_spawn', { task: 'work', command: 'npm test' });
-    expect(v).toMatchObject({ decision: 'block', action: 'invalid_tool_input' });
+    expect(v).toMatchObject({ decision: 'require_approval', action: 'invalid_tool_input' });
     expect(v.signals).toContain('invalid-tool-input');
   });
 
@@ -319,9 +319,30 @@ describe('exact native spellings only — no MCP name-squat', () => {
     expect(contractDriftFor(tool, { task: 'work', futureField: 'x' })).toBeNull();
   });
 
-  it.each(SQUATS)('%s still fails closed on a spawn-shaped bag', (tool) => {
-    expect(evaluateToolCall(tool, { task: 'work' })).toMatchObject({
-      decision: 'block', action: 'invalid_tool_input',
+  /**
+   * `thirdparty_run` is absent here on purpose. A name whose only exec evidence
+   * is a trailing `_run` word is the `get_workflow_run` / `list_workflow_runs`
+   * shape, not an exec contract, so it no longer picks EXEC_KEYS and no longer
+   * denies an inert host bag. It gets no reviewed contract either (above), and
+   * its command evidence is still scanned (below) — the deny is what left, not
+   * the scan.
+   */
+  it.each(SQUATS.filter((t) => t !== 'thirdparty_run'))(
+    '%s still fails closed on a spawn-shaped bag',
+    (tool) => {
+      expect(evaluateToolCall(tool, { task: 'work' })).toMatchObject({
+        decision: 'require_approval', action: 'invalid_tool_input',
+      });
+    },
+  );
+
+  it('a bare _run suffix costs nothing on an inert bag but keeps its teeth', () => {
+    const wipeTokens = [String.fromCharCode(114, 109), ['-', 'r', 'f'].join(''), '/'];
+    expect(evaluateToolCall('thirdparty_run', { task: 'work' })).toMatchObject({
+      decision: 'allow', severity: 'benign',
+    });
+    expect(evaluateToolCall('thirdparty_run', { argv: wipeTokens })).toMatchObject({
+      decision: 'block', severity: 'catastrophic',
     });
   });
 

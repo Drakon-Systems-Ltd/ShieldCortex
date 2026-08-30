@@ -362,3 +362,169 @@ describe('interceptor — exec-substring false positives', () => {
     })).rejects.toThrow(/blocked|denied|approval/i);
   });
 });
+
+/**
+ * The shared command-evidence pass, on the interceptor plane.
+ *
+ * The unit tests prove `evaluateToolCall` returns the right verdict. These
+ * prove the plane an operator actually runs behaves accordingly: a split
+ * command/argv wipe is doorless, a dangerous argv denies unattended and cards
+ * attended, an unreadable argv cannot be widened back to an allow, and the
+ * host tool names the narrowing released cost zero cards.
+ */
+describe('interceptor — one command-evidence pass', () => {
+  const BIN = String.fromCharCode(114, 109);
+  const RF = ['-', 'r', 'f'].join('');
+  const WIPE_TOKENS = [BIN, RF, '/'];
+
+  function harness(overrides: Record<string, unknown> = {}) {
+    const audits: any[] = [];
+    let prompts = 0;
+    const i = createInterceptor(
+      { ...DEFAULT_CONFIG, ...overrides } as any,
+      okPipeline as any,
+      { evaluateToolCall: evaluateToolCall as any, onAuditEntry: (e: any) => audits.push(e) },
+    );
+    return { i, audits, prompts: () => prompts, approve: async () => { prompts++; return true; } };
+  }
+
+  it('a wipe SPLIT across command and argv is a doorless block', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'spawn_process',
+      arguments: { command: BIN, argv: [RF, '/'] },
+      // Even an approver that says yes cannot open this door.
+      requireApproval: async () => true,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+  });
+
+  it('the same split through `args` on a camelCase exec name is doorless', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'runCommand',
+      arguments: { command: BIN, args: [RF, '/'] },
+      requireApproval: async () => true,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+  });
+
+  it('UNATTENDED: a dangerous argv is denied, not allowed', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'spawn_process', arguments: { argv: ['sudo', 'systemctl', 'stop', 'ssh'] },
+    })).rejects.toThrow(/blocked|denied|approval/i);
+  });
+
+  it('ATTENDED: a dangerous argv mints a card the operator can answer', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'spawn_process',
+      arguments: { argv: ['sudo', 'systemctl', 'stop', 'ssh'] },
+      requireApproval: h.approve,
+    })).resolves.toBeUndefined();
+    expect(h.prompts()).toBe(1);
+  });
+
+  it('an UNREADABLE argv is denied and cannot be widened by autoApprove', async () => {
+    // A truncated walk is not a clean walk. `autoApprove` and `enforce:false`
+    // widen recognised-dangerous work, never an unscanned call.
+    for (const overrides of [
+      { actionGuard: { enabled: true, enforce: true, autoApprove: ['exec', 'execute_command'] } },
+      { actionGuard: { enabled: true, enforce: false } },
+    ]) {
+      const h = harness(overrides);
+      await expect(h.i.handleToolCall({
+        toolName: 'runCommand',
+        arguments: { argv: [...Array(20_000).fill('x'), ...WIPE_TOKENS] },
+      })).rejects.toThrow(/blocked|denied|approval/i);
+    }
+  });
+
+  it('a benign argv beside a benign command costs nothing', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'spawn_process',
+      arguments: { command: 'npm', argv: ['test', '--silent'] },
+      requireApproval: h.approve,
+    })).resolves.toBeUndefined();
+    expect(h.prompts()).toBe(0);
+    expect(h.audits).toEqual([]);
+  });
+});
+
+/**
+ * The names the schema-family narrowing released, and the recipient lists the
+ * mail contracts actually send. Both classes used to be `invalid_tool_input`
+ * on every live call — a card attended, a failure-policy denial unattended.
+ */
+describe('interceptor — weak-word names and recipient lists', () => {
+  const LIVE: Array<[string, Record<string, unknown>]> = [
+    ['mcp__github__get_workflow_run', { owner: 'o', repo: 'r', run_id: 42 }],
+    ['mcp__github__list_workflow_runs', { owner: 'o', repo: 'r', workflow_id: 'ci.yml' }],
+    ['workflow_run', { id: 42, status: 'completed', conclusion: 'success' }],
+    ['get_command', { name: 'deploy' }],
+    ['slash_command', { command_name: 'review', arguments: 'src/' }],
+    ['command_center', { panel: 'main', refresh: true }],
+  ];
+
+  function harness(overrides: Record<string, unknown> = {}) {
+    const audits: any[] = [];
+    let prompts = 0;
+    const i = createInterceptor(
+      { ...DEFAULT_CONFIG, ...overrides } as any,
+      okPipeline as any,
+      { evaluateToolCall: evaluateToolCall as any, onAuditEntry: (e: any) => audits.push(e) },
+    );
+    return { i, audits, prompts: () => prompts, approve: async () => { prompts++; return true; } };
+  }
+
+  it.each(LIVE)('ATTENDED: %s mints zero approval cards', async (toolName, args) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({ toolName, arguments: args, requireApproval: h.approve }))
+      .resolves.toBeUndefined();
+    expect(h.prompts()).toBe(0);
+    expect(h.audits).toEqual([]);
+  });
+
+  it.each(LIVE)('UNATTENDED: %s is not denied and not audited', async (toolName, args) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({ toolName, arguments: args })).resolves.toBeUndefined();
+    expect(h.audits).toEqual([]);
+  });
+
+  it.each(LIVE)('%s with a smuggled argv wipe is still a doorless block', async (toolName, args) => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName,
+      arguments: { ...args, argv: [String.fromCharCode(114, 109), ['-', 'r', 'f'].join(''), '/'] },
+      requireApproval: async () => true,
+    })).rejects.toThrow(/ShieldCortex: tool call blocked/);
+  });
+
+  it('a multi-recipient send is an EGRESS card, not an invalid-input denial', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'mcp__claude_ai_Gmail__send_message',
+      arguments: {
+        to: ['a@example.com', 'b@example.com'],
+        cc: ['c@example.com'],
+        subject: 'build finished',
+        body: 'two auth tests failed',
+      },
+      requireApproval: h.approve,
+    })).resolves.toBeUndefined();
+    expect(h.prompts()).toBe(1);
+    expect(h.audits).toHaveLength(1);
+    // The card is the egress gate the string spelling has always minted — not
+    // the schema rejection the list spelling used to produce.
+    expect(h.audits[0].threats).toContain('external-egress');
+    expect(h.audits[0].threats).not.toContain('invalid-tool-input');
+  });
+
+  it('a malformed recipient list still fails closed on this plane', async () => {
+    const h = harness();
+    await expect(h.i.handleToolCall({
+      toolName: 'mcp__claude_ai_Gmail__send_message',
+      arguments: { to: [{ address: 'a@example.com' }], body: 'x' },
+    })).rejects.toThrow(/blocked|denied|approval/i);
+  });
+});

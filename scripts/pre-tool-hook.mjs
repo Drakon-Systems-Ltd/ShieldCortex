@@ -613,6 +613,22 @@ const SAFE_SIGNALS = new Set([
  * verdict reaches this hook; the guard's own union emits `catastrophic`.
  */
 const TERMINAL_BLOCK_SEVERITIES = new Set(['catastrophic', 'critical']);
+/**
+ * The guard could not CLOSE this bag: the #412 tool-input schema rejected it,
+ * or the command-evidence walk ran out of budget before it had read all of it.
+ * Either way the call was never fully scanned, so no operator widening may
+ * apply to it — see `unscannedBlock` at the enforcement site below.
+ *
+ * Read off the guard's own reason codes (`invalid_tool_input` /
+ * `invalid-tool-input`) rather than the decision tier, so it stays true
+ * whichever door the core decides this class deserves. Mirrored in
+ * `plugins/openclaw/interceptor.ts` (`isSchemaInvalid`) — the two enforcement
+ * surfaces must agree, and the plane gate asserts they do.
+ */
+function isSchemaInvalid(verdict) {
+  return verdict?.action === 'invalid_tool_input'
+    || (Array.isArray(verdict?.signals) && verdict.signals.includes('invalid-tool-input'));
+}
 const MAX_SESSION_SALT_RECOVERY_ATTEMPTS = 256;
 const GUARD_DEGRADED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed']);
 const SAFE_BROKER_OUTCOMES = new Set(['harden', 'pre_clear', 'hold', 'unavailable', 'not_brokerable']);
@@ -2103,14 +2119,16 @@ process.stdin.on('end', async () => {
 
     // Catastrophic — hard deny, always enforced while the guard is enabled.
     //
-    // #436: the door-less deny is for THAT tier only. A `block` the guard rates
-    // below catastrophic (today: `invalid_tool_input`, severity `dangerous`)
-    // used to land here too, which left an operator with a refusal and no
-    // affordance — `approve --denial` listed nothing, because nothing was
-    // minted. Those fall through to the require_approval path below and get
-    // the ordinary door: `ask` where a prompt can be raised, DNP plus the
-    // #310/#378 one-shot exact-call fingerprint where it cannot. Catastrophic
-    // still returns here, so it can never mint or consume a retry grant.
+    // #436: the door-less deny is for THAT tier only. A schema rejection
+    // (`invalid_tool_input`, severity `dangerous`) used to land here too, which
+    // left an operator with a refusal and no affordance — `approve --denial`
+    // listed nothing, because nothing was minted. Those fall through to the
+    // require_approval path below and get the ordinary door: `ask` where a
+    // prompt can be raised, DNP plus the #310/#378 one-shot exact-call
+    // fingerprint where it cannot. Catastrophic still returns here, so it can
+    // never mint or consume a retry grant — and the unreadable-evidence verdict
+    // is rated at that tier precisely so it lands on this branch on every
+    // runtime rather than becoming a one-tap `ask` here.
     if (verdict.decision === 'block' && TERMINAL_BLOCK_SEVERITIES.has(verdict.severity)) {
       // #227: the action is refused, so release any lease this call minted
       // early — a blocked action must not leave a hold on that scope. (A
@@ -2136,15 +2154,24 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    // #436: a sub-catastrophic `block` reaching here is NOT an ordinary
-    // dangerous verdict — schema rejection means the guard never got to SCAN
-    // the call. So it takes the DOOR below (one-shot approval, retry grant,
-    // broker, ask/DNP) but skips the two operator WIDENINGS immediately
-    // following: `autoApprove` and `enforce:false` advisory mode. Neither may
-    // turn "could not look" into "allowed" — otherwise `{command:'…', evil:'…'}`
-    // would run unscanned on an advisory host, and allowlisting the signal
-    // `unknown-keys` would become a blanket bypass of the #412 closed schema.
-    const unscannedBlock = verdict.decision === 'block';
+    // A schema rejection reaching here is NOT an ordinary dangerous verdict —
+    // it means the guard never got to SCAN the call. So it takes the DOOR below
+    // (one-shot approval, retry grant, broker, ask/DNP) but skips the two
+    // operator WIDENINGS immediately following: `autoApprove` and
+    // `enforce:false` advisory mode. Neither may turn "could not look" into
+    // "allowed" — otherwise `{command:'…', evil:'…'}` would run unscanned on an
+    // advisory host, and allowlisting the signal `unknown-keys` would become a
+    // blanket bypass of the #412 closed schema.
+    //
+    // Derived from the guard's own schema reason code, not from
+    // `decision === 'block'`: the core answers a scanned-clean schema rejection
+    // with `require_approval` so that core, this hook, the OpenClaw interceptor
+    // and Hermes all say the same word about the same call. The decision no
+    // longer identifies the class; the signal does. The residual `block` arm is
+    // kept for any sub-catastrophic block a future rule mints — the terminal
+    // tiers exited above, so anything still a `block` here is by definition a
+    // refusal the guard did not reach a scanned conclusion about.
+    const unscannedBlock = isSchemaInvalid(verdict) || verdict.decision === 'block';
 
     // require_approval — the dangerous tier.
     // Per-operator autoApprove allowlist (family / action / signal match, same
