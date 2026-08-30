@@ -27,7 +27,7 @@
 
 import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
-import { validateToolInput, schemaFamilyForTool } from './tool-input-schema.js';
+import { validateToolInput, schemaFamilyForTool, isNativeShellControlTool } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
@@ -4155,7 +4155,11 @@ export function evaluateToolCall(
     // which would fail-closed GitHub-API tools under EXEC_KEYS (title/labels).
     const schemaFam = schemaFamilyForTool(toolName);
     const guardFam = classifyFamily(toolName);
-    const mode = (schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec')
+    // #439: TaskOutput/TaskStop are not exec-family by name (no bash/shell
+    // substring). Without this, validateToolInput annotates and strips unknown
+    // keys instead of failing closed — so mapping them in shellControlSchemaFor
+    // alone would not survive evaluateToolCall.
+    const mode = (schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec' || isNativeShellControlTool(toolName))
       ? 'enforce'
       : 'annotate';
     const validated = validateToolInput(toolName, args, mode);

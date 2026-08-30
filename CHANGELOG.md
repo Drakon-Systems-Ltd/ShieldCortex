@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **#439:** Claude Code `TaskOutput` / `TaskStop` now use the same closed shell-control schemas as `BashOutput` / `KillShell` / `KillBash`, and `evaluateToolCall` enforces that bag even though those names are not exec-family. Exact native names only — namespaced look-alikes still fail closed on `EXEC_KEYS`. Pins the #436 residual so a later Claude rename cannot reopen invalid-tool-input on legitimate control bags.
+
 ## [4.54.14] - 2026-08-29
 
 ### Security
