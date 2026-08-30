@@ -121,6 +121,16 @@ export interface CheckResult {
   message: string;
   fix?: string;
   /**
+   * #441 — a precondition on `fix`, kept OUT of the fix prose on purpose.
+   *
+   * The report renderer recovers copy-pasteable commands from `fix` with a
+   * backtick regex. Anything the sentence said about WHEN to run the command is
+   * dropped on the floor, so a conditional remedy reaches the operator as an
+   * unconditional one. Any check whose fix is only safe in some states must put
+   * that condition here, not in the sentence.
+   */
+  fixWhen?: string;
+  /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
    * dim note instead of printing a line per dependent check — the cascade of
@@ -3211,6 +3221,7 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
       status: verdict.status,
       message: verdict.message,
       ...(verdict.fix ? { fix: verdict.fix } : {}),
+      ...(verdict.fixWhen ? { fixWhen: verdict.fixWhen } : {}),
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

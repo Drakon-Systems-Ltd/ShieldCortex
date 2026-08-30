@@ -15,6 +15,8 @@ export interface DoctorReportItem {
   status: DoctorStatus;
   message: string;
   fix?: string;
+  /** #441 — precondition for `fix`; rendered above the command, never inferred. */
+  fixWhen?: string;
 }
 
 export interface FormatDoctorReportOpts {
@@ -272,6 +274,8 @@ interface ThemeGroup {
   what: string;
   why: string;
   fixCommands: string[];
+  /** #441 — printed before the commands so the condition is read first. */
+  fixWhen?: string;
   count: number;
   labels: string[];
 }
@@ -284,6 +288,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       what: shortWhat(it),
       why: it.message.replace(/\s+/g, ' ').trim(),
       fixCommands: extractFixCommands(it.fix),
+      ...(it.fixWhen ? { fixWhen: it.fixWhen } : {}),
       count: 1,
       labels: [it.label],
     }));
@@ -301,6 +306,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
         what: shortWhat(it),
         why: it.message.replace(/\s+/g, ' ').trim(),
         fixCommands: extractFixCommands(it.fix),
+        ...(it.fixWhen ? { fixWhen: it.fixWhen } : {}),
         count: 1,
         labels: [it.label],
       };
@@ -314,6 +320,10 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       // Prefer a non-empty fix
       const cmds = extractFixCommands(it.fix);
       for (const c of cmds) if (!existing.fixCommands.includes(c)) existing.fixCommands.push(c);
+      // #441: collapsing must never drop a precondition. If either member of a
+      // collapsed group carries one, the group keeps it — dropping it here would
+      // reintroduce the unconditional-command bug through the grouping path.
+      if (!existing.fixWhen && it.fixWhen) existing.fixWhen = it.fixWhen;
       // Prefer the dedicated conversation-scanning label over plugin-loaded note
       if (/conversation scanning/i.test(it.label) && !/conversation scanning/i.test(existing.what)) {
         existing.what = shortWhat(it);
@@ -362,6 +372,17 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
   // Why: full text, wrapped. Ellipsis here is what made full-screen doctor look "cut off".
   const why = cleanWhy(g.why);
   lines.push(...wrapLine(why, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
+  // #441 — the precondition goes ABOVE the command, not after it. An operator
+  // scanning for the bold `$` line copies the first runnable thing they see; a
+  // caveat printed underneath is read only by someone who already doubted it.
+  // `only when:` is a fixed prefix rather than prose so it cannot be mistaken
+  // for part of the command.
+  if (g.fixWhen) {
+    lines.push(
+      ...wrapLine(`only when: ${g.fixWhen}`, width, 4, 6)
+        .map((l) => `${style.yellow}${l}${style.reset}`),
+    );
+  }
   // Fix commands — all of them. `$` only on a real binary. English notes stay notes.
   if (g.fixCommands.length === 0) {
     lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);

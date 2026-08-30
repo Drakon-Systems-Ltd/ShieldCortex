@@ -76,6 +76,20 @@ export interface PlaneDriftVerdict {
   status: 'pass' | 'warn' | 'fail';
   message: string;
   fix?: string;
+  /**
+   * #441 — the precondition a remedy must not lose on its way to the terminal.
+   *
+   * `fix` used to carry this as prose ("land the host contract + defended
+   * import, then `...`"), and the renderer extracts backticked commands out of
+   * `fix` with a regex. The command survived that trip; the clause saying WHEN
+   * to run it did not, so doctor printed an unconditional instruction where the
+   * source wrote a conditional one — and on a dual_legacy host, following it
+   * turned the WARN into a FAIL whose own remedy pointed back to dual_legacy.
+   *
+   * Keeping it as a separate field means the renderer never has to infer intent
+   * from a sentence, which is the thing it cannot reliably do.
+   */
+  fixWhen?: string;
 }
 
 /** dual_legacy is time-boxed: past this, the defect warning names the age. */
@@ -83,8 +97,23 @@ export const DUAL_LEGACY_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 
 const RESIDUAL_DOC = 'docs/design/2026-08-22-memory-sota-track-a-residual.md';
 const DUAL_LEGACY_FIX =
-  'Time-box dual_legacy: land the host contract + defended import, then '
-  + '`shieldcortex config --memory-plane import_only` — dual_legacy is a migration escape, not steady state';
+  'Time-box dual_legacy: `shieldcortex config --memory-plane import_only` — '
+  + 'dual_legacy is a migration escape, not steady state';
+/**
+ * #441 — the `then` in the old one-sentence form. Setting the plane flag does
+ * not stop the agent writing its native memory dir, so running this before the
+ * host contract and defended import have landed just re-raises the same
+ * evidence at `fail` severity (`severityFor()` returns fail for every non-
+ * dual_legacy plane while `native.touched7d` is still true).
+ */
+const DUAL_LEGACY_FIX_WHEN =
+  // Phrasing note: this is rendered after a fixed `only when: ` prefix, so it
+  // must NOT start with "only"/"when" itself. Observing the built CLI is what
+  // caught "only when: only once the host contract..." — every unit test passed
+  // straight over it, because they assert content, not readability.
+  'the host contract and defended import have landed — until then this command '
+  + 'raises the same finding to FAIL, because setting the plane does not stop '
+  + 'native memory writes';
 const NATIVE_SOT_FIX =
   'Stop native MEMORY.md / memory-store growth as the agent brain — import it through the defended path or '
   + `archive it, or drop back to \`shieldcortex config --memory-plane dual_legacy\` and be honest (${RESIDUAL_DOC})`;
@@ -102,6 +131,25 @@ const UNSCOPED_STORE_FIX =
 /** `warn` for the deprecated-but-tolerated plane, `fail` where canonicity is claimed. */
 function severityFor(plane: MemoryPlane): 'warn' | 'fail' {
   return plane === 'dual_legacy' ? 'warn' : 'fail';
+}
+
+/**
+ * The remedy pair for a drift signal. Every signal offers the SAME advice to a
+ * dual_legacy host — move off the escape hatch — and its own advice to any
+ * other plane, so this is one helper rather than four ternaries.
+ *
+ * #441: it exists to make the precondition unmissable. When the fix and its
+ * `fixWhen` were assembled per-signal, two of the four call sites were updated
+ * and two were not; a caller that forgets `fixWhen` emits a bare, unconditional
+ * `$ shieldcortex config --memory-plane import_only`, which is the whole bug.
+ * Returning both together means a new signal cannot half-adopt it.
+ */
+function remedyFor(
+  plane: MemoryPlane,
+  otherPlaneFix: string,
+): { fix: string; fixWhen?: string } {
+  if (plane !== 'dual_legacy') return { fix: otherPlaneFix };
+  return { fix: DUAL_LEGACY_FIX, fixWhen: DUAL_LEGACY_FIX_WHEN };
 }
 
 function headlineFor(plane: MemoryPlane): string {
@@ -162,7 +210,7 @@ export function evaluatePlaneDrift(input: PlaneDriftInput): PlaneDriftVerdict {
       message:
         `${headlineFor(plane)}: native agent SoT written inside the window — `
         + `${listPaths(native.touchedPaths)} (${detail})${aged}`,
-      fix: plane === 'dual_legacy' ? DUAL_LEGACY_FIX : NATIVE_SOT_FIX,
+      ...remedyFor(plane, NATIVE_SOT_FIX),
     };
   }
 
@@ -173,7 +221,7 @@ export function evaluatePlaneDrift(input: PlaneDriftInput): PlaneDriftVerdict {
       message:
         `${headlineFor(plane)}: native memory bus still switched on — `
         + `${native.busActive.join('; ')} (${detail})${aged}`,
-      fix: plane === 'dual_legacy' ? DUAL_LEGACY_FIX : NATIVE_BUS_FIX,
+      ...remedyFor(plane, NATIVE_BUS_FIX),
     };
   }
 
@@ -184,7 +232,7 @@ export function evaluatePlaneDrift(input: PlaneDriftInput): PlaneDriftVerdict {
       message:
         `${headlineFor(plane)}: activity bypasses SC — zero durable admits in the last 7d `
         + `for this host/agent scope (${detail})${aged}`,
-      fix: plane === 'dual_legacy' ? DUAL_LEGACY_FIX : EMPTY_SC_FIX,
+      ...remedyFor(plane, EMPTY_SC_FIX),
     };
   }
 
@@ -209,7 +257,7 @@ export function evaluatePlaneDrift(input: PlaneDriftInput): PlaneDriftVerdict {
       message:
         `${headlineFor(plane)}: scope gate excluded ${counts.unscopedExcluded} unscoped row(s) — `
         + `an unscoped/quiet store cannot prove this plane (${detail})${aged}`,
-      fix: plane === 'dual_legacy' ? DUAL_LEGACY_FIX : UNSCOPED_STORE_FIX,
+      ...remedyFor(plane, UNSCOPED_STORE_FIX),
     };
   }
 
