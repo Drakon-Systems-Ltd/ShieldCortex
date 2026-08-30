@@ -1,4 +1,5 @@
-// Jest setupFilesAfterEnv: sandbox the ShieldCortex config directory per worker.
+// Jest setupFilesAfterEnv: sandbox the ShieldCortex config AND audit directories
+// per worker.
 //
 // Why this exists
 // ---------------
@@ -31,9 +32,34 @@ const workerId = process.env.JEST_WORKER_ID || '1';
 const sandboxDir = join(tmpdir(), 'shieldcortex-jest-config', `worker-${workerId}`);
 mkdirSync(sandboxDir, { recursive: true });
 
+// The same hazard, one directory over — and this one writes rather than reads.
+//
+// `plugins/openclaw/interceptor.ts:auditDir()` defaults to
+// `~/.shieldcortex/audit` when `SHIELDCORTEX_AUDIT_DIR` is unset, and
+// `writeAuditEntry()` appends an intercept row on every guarded call. The
+// override has been honoured since d5fa817 (v4.47.39) — but honouring a
+// variable nobody sets is not isolation. Ten suites set it in their own
+// beforeEach; every other suite that reaches the interceptor appended
+// FABRICATED intercept rows to the host operator's real security audit.
+//
+// Measured on a live host, 29 Aug 2026: 182 of 228 approval rows in
+// `~/.shieldcortex/audit/realtime-2026-08-29.jsonl` landed in two minutes
+// (09:41, 09:49) carrying the fixture command `npm install lodash` and session
+// ids `sc-sess-A` / `sc-sess-B` / `sc-sess-approve`. That is 80% of a day's
+// approvals, and it corrupted the very rate an operator reads when deciding
+// whether the Action Guard is paging too often — a synthetic burst is
+// indistinguishable from a real storm once it is in the file.
+//
+// Audit isolation must therefore be default-on, exactly like the config dir:
+// opt-in isolation for a WRITE path is a footgun, because the cost of
+// forgetting lands on the operator's forensics rather than on the test.
+const auditSandboxDir = join(tmpdir(), 'shieldcortex-jest-audit', `worker-${workerId}`);
+mkdirSync(auditSandboxDir, { recursive: true });
+
 // Establish the sandbox immediately so any config read at test-file load time
 // (a few suites capture the dir at module scope) sees it, not the real dir.
 process.env.SHIELDCORTEX_CONFIG_DIR = sandboxDir;
+process.env.SHIELDCORTEX_AUDIT_DIR = auditSandboxDir;
 
 // Re-assert before every test. Several suites `delete process.env
 // .SHIELDCORTEX_CONFIG_DIR` in their teardown — that pattern was written when
@@ -43,5 +69,8 @@ process.env.SHIELDCORTEX_CONFIG_DIR = sandboxDir;
 beforeEach(() => {
   if (!process.env.SHIELDCORTEX_CONFIG_DIR) {
     process.env.SHIELDCORTEX_CONFIG_DIR = sandboxDir;
+  }
+  if (!process.env.SHIELDCORTEX_AUDIT_DIR) {
+    process.env.SHIELDCORTEX_AUDIT_DIR = auditSandboxDir;
   }
 });
