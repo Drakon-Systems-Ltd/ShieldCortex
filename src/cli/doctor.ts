@@ -2309,9 +2309,18 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     }
 
     // #242 Defect B: enforce-on + no notify channel is how unattended denials
-    // vanished for eight days while lastRunStatus stayed ok. WARN, never fail
-    // — a missing webhook is a misconfiguration, not a broken evaluator.
+    // vanished for eight days while lastRunStatus stayed ok.
     // OpenClaw lastRunStatus is not ours to write (#242 Defect A / #260).
+    //
+    // NOTE (#354, 30 Aug 2026): this comment used to end "WARN, never fail — a
+    // missing webhook is a misconfiguration, not a broken evaluator." That rule
+    // is DEAD and must not be restored. It was the reason doctor emitted advice
+    // instead of a failure while 312 denials went undelivered on one host over
+    // seven days. The distinction that survives is not misconfig-vs-evaluator,
+    // it is honest-vs-lying: notify that says `enabled: true` while holding no
+    // denial-capable sink claims a delivery path it does not have, and it makes
+    // that claim to the operator who is deciding whether the host is safe. That
+    // is a failure. Notify that is simply off is not lying, and stays a warning.
     //
     // #354 / #310: `notify.openclaw` is NOT a DNP denial sink. It arms interactive
     // held-approval cards only. Headless denials are `denied_no_prompt_surface`
@@ -2334,14 +2343,23 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       const armed = effective.enabled && effective.enforce;
       if (!denialSink) {
         const openclawOnly = notifyOn && openclaw && !webhook;
-        // FAIL, not WARN, for the armed-looking no-sink. `notify.enabled: true`
-        // + `openclaw: true` reads as configured to every operator who checks —
-        // and delivers no unattended denial at all. A WARN was emitted on this
-        // exact shape while 312 denials vanished; the product said it and the
-        // outcome did not change, so the severity was the defect. A host that is
-        // off or in warn-mode is not currently lying to anyone, so it stays WARN
-        // — but it is still told, which is the whole point of un-gating.
-        const status: CheckResult['status'] = armed && openclawOnly ? 'fail' : 'warn';
+        // FAIL, not WARN, for the armed no-sink that CLAIMS to be configured.
+        // The discriminator is `notify.enabled: true` without a webhook — that
+        // config asserts a delivery path it does not have, to the one operator
+        // who is deciding whether the host is safe. Both shapes measured on
+        // 29 Aug 2026 delivered nothing while enforcing:
+        //   notify.enabled + openclaw, no webhook  → clawdbot1, 0 of 312
+        //   notify.enabled alone,      no webhook  → tars,      0 of 89
+        // The second is not the milder case — `notify_not_configured` rows are
+        // just a different label on the same zero. Doctor WARNed on both and the
+        // outcome did not change, so severity was the defect, not coverage.
+        //
+        // `notify.enabled` false/absent stays WARN: a host that says notify is
+        // off and has it off is not lying, it is under-configured. Same for any
+        // host that is disabled or in warn-mode — not currently lying to anyone,
+        // but still told, which is the whole point of un-gating.
+        const claimsASink = notifyOn && !webhook;
+        const status: CheckResult['status'] = armed && claimsASink ? 'fail' : 'warn';
         const prefix = armed
           ? 'Action Guard is enforcing with'
           : effective.enabled

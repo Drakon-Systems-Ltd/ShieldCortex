@@ -181,8 +181,13 @@ describe('doctor — Action Guard #209 alias resolution and migration', () => {
 
 /**
  * #242 Defect B / #260 — unattended enforcement with no notify channel is how
- * eight days of backups vanished while lastRunStatus stayed ok. Doctor must
- * WARN (not fail) when enforce is on and nothing can reach a human.
+ * eight days of backups vanished while lastRunStatus stayed ok.
+ *
+ * #354 (30 Aug 2026): the old rule here was "WARN, not fail". It is gone. The
+ * line is now honest-vs-lying, not misconfig-vs-evaluator — while armed,
+ * `notify.enabled: true` with no webhook FAILS, because it claims a delivery
+ * path it does not have. Notify that is off, or a host that is disabled or in
+ * warn-mode, still WARNs: under-configured is not the same as untruthful.
  */
 describe('doctor — Action Guard notify channel (#242)', () => {
   it('warns when enforce is on and notify.webhookUrl is unset (the default)', async () => {
@@ -217,6 +222,33 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     expect(warn).toBeDefined();
     expect(warn!.message).toMatch(/openclaw only|denial-capable|webhookUrl/i);
     expect(warn!.message).not.toMatch(/native OpenClaw approval card reaches a human/i);
+  });
+
+  it('FAILS when armed with notify.enabled alone — no openclaw, no webhook (#354)', async () => {
+    // The sibling of the openclaw-only shape, and NOT the milder one. This is
+    // the `tars` host: notify says enabled, nothing can carry a headless denial,
+    // 0 delivered out of 89. Its rows are labelled `notify_not_configured`
+    // rather than `no_channel` — a different label on the same zero. Severity
+    // must not follow the label.
+    writeConfig({ actionGuard: { notify: { enabled: true } } });
+    const results = await checkActionGuard();
+    const found = results.find((r) => r.status === 'fail' && /notify/i.test(r.label));
+    expect(found).toBeDefined();
+    expect(found!.message).toMatch(/denial-capable|webhookUrl/i);
+    // It must NOT be described as the openclaw-card case — that is a different
+    // misconfiguration with a different fix.
+    expect(found!.message).not.toMatch(/openclaw only/i);
+  });
+
+  it('only WARNS when notify is off entirely — under-configured, not lying (#354)', async () => {
+    // The boundary of the FAIL rule. `notify.enabled` absent makes no claim, so
+    // doctor advises rather than fails; if this ever flips to `fail`, a stock
+    // host with no notify stanza starts exiting 1 on plain `doctor`.
+    writeConfig({ actionGuard: { notify: { enabled: false } } });
+    const results = await checkActionGuard();
+    const found = results.find((r) => /webhookUrl/i.test(r.message));
+    expect(found).toBeDefined();
+    expect(found!.status).toBe('warn');
   });
 
   it('does not warn when webhook denial sink is configured even if openclaw is also on', async () => {
