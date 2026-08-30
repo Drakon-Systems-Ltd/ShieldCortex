@@ -111,6 +111,51 @@ interface ShellControlSchema {
   handles: string[];
 }
 
+/**
+ * P0 reviewed host contracts. These are exact spellings, not suffix/pattern
+ * matches: an unrelated third-party `*_spawn` / `*run*` tool must retain the
+ * old fail-closed family behaviour.
+ */
+interface ExactSpecialSchema {
+  allowed: Set<string>;
+  family: 'read' | 'network';
+}
+
+const WEB_RUN_KEYS = new Set([
+  'search_query', 'open', 'click', 'find', 'image_query', 'calculator',
+  'weather', 'finance', 'sports', 'time', 'response_length',
+]);
+
+const DELEGATION_KEYS = new Set([
+  'task', 'label', 'runtime', 'agentId', 'model', 'thinking', 'cwd',
+  'runTimeoutSeconds', 'timeoutSeconds', 'thread', 'mode', 'cleanup',
+  'sandbox', 'attachments', 'context', 'taskName',
+  'task_name', 'fork_turns', 'reasoning_effort', 'message',
+]);
+
+const WEB_RUN_ALIASES = new Set([
+  'webrun', 'web.run', 'web__run', 'mcp__web__run',
+]);
+
+const DELEGATION_ALIASES = new Set([
+  'sessions_spawn', 'openclawsessions_spawn',
+  'openclaw.sessions_spawn', 'openclaw__sessions_spawn', 'mcp__openclaw__sessions_spawn',
+  'collaborationspawn_agent', 'collaboration.spawn_agent', 'collaboration__spawn_agent',
+  'mcp__collaboration__spawn_agent',
+]);
+
+function exactSpecialSchemaFor(toolName: string): ExactSpecialSchema | null {
+  const exact = String(toolName ?? '').trim().toLowerCase();
+  if (WEB_RUN_ALIASES.has(exact)) return { allowed: WEB_RUN_KEYS, family: 'network' };
+  if (DELEGATION_ALIASES.has(exact)) return { allowed: DELEGATION_KEYS, family: 'read' };
+  return null;
+}
+
+/** Special contracts are enforced closed even though their effects are read/network. */
+export function hasExactSpecialToolSchema(toolName: string): boolean {
+  return exactSpecialSchemaFor(toolName) !== null;
+}
+
 /** Claude 2.1.233's TaskOutput reads `task_id ?? agentId ?? bash_id`; `filter` is an output regex — data, not a command. */
 const SHELL_CONTROL_OUTPUT: ShellControlSchema = {
   allowed: new Set(['bash_id', 'task_id', 'agentId', 'filter']),
@@ -154,6 +199,8 @@ export function schemaFamilyForTool(
   toolName: string,
 ): 'exec' | 'write' | 'read' | 'network' | 'memory' | 'git' | 'unknown' {
   const n = String(toolName || '').toLowerCase().trim();
+  const special = exactSpecialSchemaFor(n);
+  if (special) return special.family;
   const seg = n.split(/__|\.|:|\//).filter(Boolean).pop() ?? n;
   if (/(remember|recall|forget|memory|get_context|getcontext)/.test(seg) || /(remember|recall|forget|memory)/.test(n)) {
     return 'memory';
@@ -176,6 +223,8 @@ export function schemaFamilyForTool(
 }
 
 function allowedKeysFor(toolName: string): Set<string> {
+  const special = exactSpecialSchemaFor(toolName);
+  if (special) return special.allowed;
   // #436: the native control plane is narrower than its exec family, not wider.
   const control = shellControlSchemaFor(toolName);
   if (control) return control.allowed;
@@ -284,7 +333,8 @@ export function validateToolInput(
         continue;
       }
       // annotate: keep extractor-critical keys so unknown tool names are not blinded
-      if (!EXTRACTOR_KEYS.has(key)) {
+      const specialArgvEvidence = exactSpecialSchemaFor(toolName) && (key === 'args' || key === 'argv');
+      if (!EXTRACTOR_KEYS.has(key) && !specialArgvEvidence) {
         strippedKeys.push(key);
         continue;
       }
