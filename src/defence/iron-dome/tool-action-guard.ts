@@ -27,7 +27,7 @@
 
 import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
-import { validateToolInput, schemaFamilyForTool } from './tool-input-schema.js';
+import { hasExactSpecialToolSchema, validateToolInput, schemaFamilyForTool } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
@@ -101,6 +101,10 @@ const EXEC_TOOLS = /(bash|shell|exec|run|run_command|runcommand|command|terminal
 const GIT_TOOLS = /(^git$|git_|_git|github)/;
 
 export function classifyFamily(toolName: string): ToolFamily {
+  const specialFamily = schemaFamilyForTool(toolName);
+  if (hasExactSpecialToolSchema(toolName) && (specialFamily === 'read' || specialFamily === 'network')) {
+    return specialFamily;
+  }
   const n = normaliseToolName(toolName);
   if (MEMORY_TOOLS.test(n)) return 'memory';
   // Exec is checked early: a "Bash" tool can do anything, so its args drive risk.
@@ -125,6 +129,90 @@ function pickString(args: Record<string, unknown>, keys: string[]): string {
 
 export function extractCommand(args: Record<string, unknown>): string {
   return pickString(args, ['command', 'cmd', 'script', 'code', 'input', 'shell', 'run']);
+}
+
+/** Command-bearing aliases the schema-failure recovery pass must union-scan. */
+const COMMAND_EVIDENCE_KEYS = [
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run', 'args', 'argv',
+] as const;
+
+const EXTRACTOR_EVIDENCE_CAP = 8192;
+
+const EXTRACTOR_WINDOW_STEP = 4096;
+const EXTRACTOR_MAX_DEPTH = 8;
+const EXTRACTOR_MAX_LEAVES = 16384;
+
+function stringElements(value: unknown, depth = 0, acc: string[] = []): string[] {
+  if (depth > EXTRACTOR_MAX_DEPTH || acc.length >= EXTRACTOR_MAX_LEAVES) return acc;
+  if (typeof value === 'string') {
+    if (value) acc.push(value);
+    return acc;
+  }
+  if (Array.isArray(value)) {
+    for (const el of value) {
+      stringElements(el, depth + 1, acc);
+      if (acc.length >= EXTRACTOR_MAX_LEAVES) break;
+    }
+    return acc;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const el of Object.values(value as Record<string, unknown>)) {
+      stringElements(el, depth + 1, acc);
+      if (acc.length >= EXTRACTOR_MAX_LEAVES) break;
+    }
+  }
+  return acc;
+}
+
+function slidingWindows(text: string, cap = EXTRACTOR_EVIDENCE_CAP): string[] {
+  if (!text) return [];
+  if (text.length <= cap) return [text];
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += EXTRACTOR_WINDOW_STEP) {
+    out.push(text.slice(i, i + cap));
+  }
+  const tail = text.slice(-cap);
+  if (!out.includes(tail)) out.push(tail);
+  return out;
+}
+
+/**
+ * Overlapping windows over the full leaf join — not head+tail only.
+ * A wipe in the middle of a long string or a 600-token argv must still scan.
+ */
+function flattenScanWindows(value: unknown, cap = EXTRACTOR_EVIDENCE_CAP): string[] {
+  const parts = stringElements(value);
+  if (parts.length === 0) return [];
+  return slidingWindows(parts.join(' '), cap);
+}
+
+function pathUrlFromRaw(raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory']) {
+    if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k];
+  }
+  for (const k of ['url', 'uri', 'endpoint', 'href', 'host', 'to']) {
+    if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k];
+  }
+  return out;
+}
+
+/**
+ * Schema rejection used to scan a single first-wins string (or `{}` when
+ * annotate failed). Each command-bearing alias is its own surface: joining
+ * `echo safe` with a later wipe makes the tokeniser treat `echo` as the verb.
+ */
+function commandEvidenceSurfaces(raw: Record<string, unknown>): string[] {
+  const surfaces: string[] = [];
+  const seen = new Set<string>();
+  for (const k of COMMAND_EVIDENCE_KEYS) {
+    for (const text of flattenScanWindows(raw[k])) {
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      surfaces.push(text);
+    }
+  }
+  return surfaces;
 }
 
 // `${IFS}`, `${IFS:0:1}`, `$IFS` all expand to whitespace at runtime and are used
@@ -4155,7 +4243,7 @@ export function evaluateToolCall(
     // which would fail-closed GitHub-API tools under EXEC_KEYS (title/labels).
     const schemaFam = schemaFamilyForTool(toolName);
     const guardFam = classifyFamily(toolName);
-    const mode = (schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec')
+    const mode = (hasExactSpecialToolSchema(toolName) || schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec')
       ? 'enforce'
       : 'annotate';
     const validated = validateToolInput(toolName, args, mode);
@@ -4165,14 +4253,22 @@ export function evaluateToolCall(
       // full evaluator with the schema gate skipped. If that is catastrophic,
       // keep it terminal. Otherwise the original schema failure stands.
       const annotated = validateToolInput(toolName, args, 'annotate');
-      const inner = evaluateToolCall(
-        toolName,
-        annotated.ok ? annotated.args : {},
-        config,
-        options,
-        true,
-      );
-      if (inner.severity === 'catastrophic') return inner;
+      const extras = pathUrlFromRaw(args);
+      const surfaces = commandEvidenceSurfaces(args);
+      if (surfaces.length === 0 && annotated.ok) {
+        const inner = evaluateToolCall(toolName, { ...annotated.args, ...extras }, config, options, true);
+        if (inner.severity === 'catastrophic') return inner;
+      }
+      for (const text of surfaces) {
+        const inner = evaluateToolCall(
+          toolName,
+          { ...extras, command: text },
+          config,
+          options,
+          true,
+        );
+        if (inner.severity === 'catastrophic') return inner;
+      }
       return verdict(
         'block',
         'dangerous',
@@ -4196,7 +4292,9 @@ export function evaluateToolCall(
   }
   // Read-only tools never execute their args — a search query or path that
   // merely *mentions* "rm -rf" is not an action. Short-circuit before scanning.
-  if (family === 'read') {
+  // A rejected exact special bag is rescanned with extractor evidence retained.
+  // Do not let its normal read-only classification hide a hostile sibling.
+  if (family === 'read' && !(skipSchema && hasExactSpecialToolSchema(toolName))) {
     return verdict('allow', 'benign', family, 'read_file', 'read-only operation', []);
   }
 
