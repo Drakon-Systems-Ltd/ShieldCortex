@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **#449:** `shieldcortex scan` no longer uses exit 1 for usage errors or tool failures. Exit **0** = allowed verdict, **1** = caught/denied verdict (stdout carries `Result:`), **2** = usage (no text), **3** = tool/init/uncaught failure (control absent). A dead scanner or a missing argument is no longer indistinguishable from a catch. Health checks must parse a verdict on stdout — never the return code alone. ABI-shaped native-module failures name `shieldcortex repair`.
 - **Action Guard P0 exact tool contracts:** reviewed `web.run`, OpenClaw `sessions_spawn`, and collaboration `spawn_agent` aliases now use closed schemas for their measured live fields before legacy run/spawn family inference, eliminating false approval cards without opening unknown payload bags. Schema rejection union-scans RAW command evidence (string, nested token arrays/objects, overlapping 8k windows over the full payload). A matched wipe is terminal; a scanned-clean oversize unknown-key call stays `dangerous` with a door — not an unappealable wall. Not Action Guard 2.0.
 - **#441:** doctor no longer copy-pastes `--memory-plane import_only` / `--memory-plane dual_legacy` as `$` remedies while native SoT is still growing. That looped WARN → FAIL → WARN. The rendered command is now `shieldcortex memories import-native`; flipping the plane flag does not stop native writes.
 

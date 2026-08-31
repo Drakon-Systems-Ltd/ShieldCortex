@@ -214,7 +214,7 @@ shieldcortex stats               # Memory statistics
 
 ### Security Scanning
 ```bash
-shieldcortex scan "text"                    # Scan text through defence pipeline
+shieldcortex scan "text"                    # Scan text (exit 0=allow, 1=caught, 2=usage, 3=tool-fail; parse stdout)
 shieldcortex scan-skill path/to/SKILL.md    # Scan one instruction file for threats
 shieldcortex scan-skills                    # Scan all discovered agent instruction files
 shieldcortex audit                          # Full security audit (memory, env, MCP configs, rules files)

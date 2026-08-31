@@ -871,7 +871,7 @@ shieldcortex doctor               # Health check + OpenClaw residue scan
 shieldcortex uninstall            # Full uninstall (requires TTY)
 shieldcortex uninstall --deep     # Also purge OpenClaw residue (v4.12.0)
 shieldcortex status               # Database and hook status
-shieldcortex scan "text"          # Scan content for threats
+shieldcortex scan "text"          # Scan content for threats (exit 0=allow, 1=caught, 2=usage, 3=tool-fail; parse stdout)
 shieldcortex scan-skills          # Scan installed agent skills for threats
 shieldcortex env scan <url>       # Environment Firewall — score URL provenance + hidden content
 shieldcortex dashboard            # Launch the visual dashboard
