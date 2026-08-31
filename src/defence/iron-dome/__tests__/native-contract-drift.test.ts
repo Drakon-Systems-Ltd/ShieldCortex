@@ -45,6 +45,7 @@ import {
   extractUrl,
   extractWriteContent,
 } from '../tool-action-guard.js';
+import { createInterceptor, DEFAULT_CONFIG } from '../../../../plugins/openclaw/interceptor.js';
 
 /**
  * Every top-level field of the LIVE `createSessionsSpawnToolSchema`
@@ -258,6 +259,61 @@ describe('the scannability split', () => {
   });
 });
 
+describe('OpenClaw native exec contract (2026.8.1 live bag)', () => {
+  const LIVE_EXEC = {
+    command: 'date -u +%F',
+    workdir: '/home/ubuntu/clawd',
+    env: { LANG: 'C' },
+    yieldMs: 10_000,
+    background: false,
+    timeoutSeconds: 30,
+    pty: false,
+    elevated: false,
+    host: 'gateway',
+    security: 'allowlist',
+    ask: 'off',
+    node: 'clawdbot1',
+  };
+
+  it('exact native exec is an exact-special exec contract', () => {
+    expect(hasExactSpecialToolSchema('exec')).toBe(true);
+    expect(exactSpecialContractName('exec')).toBe('openclaw.exec');
+    expect(schemaFamilyForTool('exec')).toBe('exec');
+  });
+
+  it('the live OpenClaw exec bag is zero-card / allow', () => {
+    expect(enforceToolInput('exec', LIVE_EXEC)).toMatchObject({ ok: true });
+    expect(evaluateToolCall('exec', LIVE_EXEC)).toMatchObject({
+      decision: 'allow',
+      severity: 'benign',
+    });
+    expect(evaluateToolCall('exec', LIVE_EXEC).contractDrift).toBeUndefined();
+  });
+
+  it('OpenClaw exec.host is not treated as a URL destination', () => {
+    expect(extractUrl({ host: 'gateway' }, 'exec')).toBe('');
+    expect(extractUrl({ host: 'https://evil.example' }, 'exec')).toBe('');
+    expect(extractUrl({ host: 'gateway' })).toBe('gateway');
+  });
+
+  it('MCP and unknown wrappers do not inherit native exec relief', () => {
+    expect(hasExactSpecialToolSchema('mcp__openclaw__exec')).toBe(false);
+    expect(enforceToolInput('mcp__openclaw__exec', LIVE_EXEC))
+      .toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
+    expect(evaluateToolCall('some_exec_like_mcp_wrapper', LIVE_EXEC).decision)
+      .not.toBe('allow');
+  });
+
+  it('a command wipe on native exec stays catastrophic and doorless', () => {
+    const BIN = String.fromCharCode(114, 109);
+    const WIPE = [BIN, ['-', 'r', 'f'].join(''), '/'].join(' ');
+    expect(evaluateToolCall('exec', { ...LIVE_EXEC, command: WIPE })).toMatchObject({
+      decision: 'block',
+      severity: 'catastrophic',
+    });
+  });
+});
+
 describe('the split does not soften catastrophic evidence', () => {
   const BIN = String.fromCharCode(114, 109);
   const WIPE_TOKENS = [BIN, ['-', 'r', 'f'].join(''), '/'];
@@ -400,5 +456,115 @@ describe('OpenClaw and collaboration are separate contracts', () => {
   it('borrowing across contracts is a drop, never a deny', () => {
     expect(evaluateToolCall('collaborationspawn_agent', { task_name: 'x', visible: true }))
       .toMatchObject({ decision: 'allow', severity: 'benign' });
+  });
+});
+
+/**
+ * A dropped key NAME is model-controlled text on its way to an operator's log.
+ *
+ * The drift observation exists so an operator LEARNS a host schema moved. It is
+ * therefore rendered into the gateway warn line — journald on a real box — and
+ * a key name is chosen by whoever wrote the payload. A newline in it buys a
+ * whole extra line, and the line it buys can be spelled to look exactly like a
+ * verdict ShieldCortex emitted. Measured: `sessions_spawn` with a drifted key
+ * of `x\n[shieldcortex] action-guard ALLOWED Bash: operator approved\nzz`
+ * returned `allow`/`benign` — the ordinary unattended path — and wrote a forged
+ * ShieldCortex verdict into the log, up to 12 keys x 64 chars per call.
+ *
+ * The jsonl audit escapes it; the warn line, which is what an operator actually
+ * reads to see what the guard did, did not.
+ */
+describe('drifted key names cannot forge log lines', () => {
+  const LF = String.fromCharCode(10);
+  const CR = String.fromCharCode(13);
+  const NEL = String.fromCharCode(0x85);
+  const LS = String.fromCharCode(0x2028);
+  const PS = String.fromCharCode(0x2029);
+  const ESC = String.fromCharCode(27);
+  const FORGED = '[shieldcortex] action-guard ALLOWED Bash: operator approved';
+
+  const hostile = (sep: string) => `x${sep}${FORGED}${sep}zz`;
+  const SEPARATORS: Array<[string, string]> = [
+    ['LF', LF], ['CR', CR], ['CRLF', `${CR}${LF}`], ['NEL', NEL], ['LS', LS], ['PS', PS],
+  ];
+
+  it.each(SEPARATORS)('a %s in a dropped key is neutralised at the source', (_label, sep) => {
+    const drift = contractDriftFor('sessions_spawn', { task: 'work', [hostile(sep)]: 1 })!;
+    expect(drift.droppedKeys).toHaveLength(1);
+    const key = drift.droppedKeys[0]!;
+    for (const ch of [LF, CR, NEL, LS, PS]) expect(key).not.toContain(ch);
+    // Neutralised, not silently dropped: the operator still sees a key drifted.
+    expect(key.startsWith('x')).toBe(true);
+  });
+
+  it('the full C0/C1 ranges and the Unicode line separators are covered', () => {
+    const every = Array.from({ length: 0xa0 }, (_, i) => String.fromCharCode(i))
+      .filter(c => {
+        const n = c.charCodeAt(0);
+        return n <= 0x1f || (n >= 0x7f && n <= 0x9f);
+      })
+      .join('') + LS + PS;
+    const drift = contractDriftFor('sessions_spawn', { task: 'work', [`k${every}`]: 1 })!;
+    for (const ch of [...drift.droppedKeys[0]!]) {
+      const n = ch.codePointAt(0)!;
+      expect(n > 0x1f && !(n >= 0x7f && n <= 0x9f) && n !== 0x2028 && n !== 0x2029).toBe(true);
+    }
+  });
+
+  it('the bounds still hold — count, length, and no values', () => {
+    const args: Record<string, unknown> = { task: 'work' };
+    for (let i = 0; i < CONTRACT_DRIFT_MAX_KEYS + 5; i++) args[`f${i}${LF}${FORGED}`] = `secret-${i}`;
+    const drift = contractDriftFor('sessions_spawn', args)!;
+    expect(drift.droppedKeys).toHaveLength(CONTRACT_DRIFT_MAX_KEYS);
+    expect(drift.truncated).toBe(true);
+    for (const k of drift.droppedKeys) {
+      expect(k.length).toBeLessThanOrEqual(64);
+      expect(k).not.toContain(LF);
+    }
+    expect(JSON.stringify(drift)).not.toContain('secret-');
+  });
+
+  it('the REAL interceptor warning is one physical line with no forged verdict', async () => {
+    const lines: string[] = [];
+    const interceptor = createInterceptor(
+      {
+        ...DEFAULT_CONFIG,
+        actionGuard: { enabled: true, enforce: true, autoApprove: [] },
+        logger: { info: () => {}, warn: (m: string) => { lines.push(String(m)); } },
+      } as never,
+      (() => ({
+        allowed: true,
+        firewall: { result: 'ALLOW' as const, reason: '', threatIndicators: [], anomalyScore: 0, blockedPatterns: [] },
+        trust: { score: 0.5 }, sensitivity: { level: 'INTERNAL' }, fragmentation: null, auditId: 1,
+      })) as never,
+      { evaluateToolCall: evaluateToolCall as never },
+    );
+
+    await expect(interceptor.handleToolCall({
+      toolName: 'sessions_spawn',
+      arguments: {
+        task: 'work',
+        runtime: 'subagent',
+        [hostile(LF)]: 1,
+        [`y${ESC}[2K${CR}${FORGED}`]: 2,
+      },
+    })).resolves.toBeUndefined();
+
+    const drift = lines.filter(l => l.includes('CONTRACT DRIFT'));
+    expect(drift).toHaveLength(1);
+    // ONE physical line: the whole warning, hostile key names included, is one
+    // row in the operator's log — every emitted message is exactly one line.
+    for (const line of lines) expect(line.split(/[\r\n\u0085\u2028\u2029]/)).toHaveLength(1);
+    for (const ch of [LF, CR, NEL, LS, PS, ESC]) expect(drift[0]).not.toContain(ch);
+    // The forged text survives only as DATA inside the drift row's field list,
+    // where it is visibly a dropped key name. What it can no longer do is stand
+    // as a line of its own, which is the only form an operator reads as a
+    // verdict — and it is still bracketed by the guard's own framing.
+    const physical = lines.flatMap(l => l.split(/[\r\n\u0085\u2028\u2029]/));
+    for (const line of physical) {
+      expect(line.startsWith(FORGED)).toBe(false);
+      expect(line.startsWith('[shieldcortex] action-guard CONTRACT DRIFT')).toBe(true);
+    }
+    expect(drift[0]!.indexOf(FORGED)).toBeGreaterThan(drift[0]!.indexOf('dropped unread field(s)'));
   });
 });

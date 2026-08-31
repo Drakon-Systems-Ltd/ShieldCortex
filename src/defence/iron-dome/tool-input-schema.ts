@@ -253,7 +253,7 @@ interface ExactSpecialSchema {
    * extractor: deleted, not judged. Declared, so this is not drift.
    */
   inert?: Set<string>;
-  family: 'read' | 'network';
+  family: 'read' | 'network' | 'exec';
   /** Stable label for the contract-drift observation. Never a payload value. */
   contract: string;
 }
@@ -316,6 +316,21 @@ const COLLABORATION_SPAWN_ALIASES = new Set([
   'collaborationspawn_agent', 'collaboration.spawn_agent', 'collaboration__spawn_agent',
 ]);
 
+/**
+ * Live OpenClaw 2026.8.1 `exec` bag (`bash-tools.schemas.ts` `execSchema`).
+ * Extra host fields are typed control, not Claude `cwd`/`timeout` spellings.
+ * `host` here is auto|sandbox|gateway|node — not a URL.
+ */
+const OPENCLAW_EXEC_KEYS = new Set<string>([
+  ...COMMAND_KEYS,
+  'workdir', 'env', 'yieldMs', 'background', 'timeoutSeconds',
+  'pty', 'elevated', 'host', 'security', 'ask', 'node',
+  'description', 'timeout', 'run_in_background', 'cwd', 'working_directory',
+  'stdin', 'stdout', 'stderr', 'args', 'argv',
+]);
+
+const OPENCLAW_EXEC_ALIASES = new Set(['exec']);
+
 const OPENCLAW_SPAWN_INERT = new Set<string>(['outputSchema']);
 
 function exactSpecialSchemaFor(toolName: string): ExactSpecialSchema | null {
@@ -336,6 +351,13 @@ function exactSpecialSchemaFor(toolName: string): ExactSpecialSchema | null {
       allowed: COLLABORATION_SPAWN_KEYS,
       family: 'read',
       contract: 'collaboration.spawn_agent',
+    };
+  }
+  if (OPENCLAW_EXEC_ALIASES.has(exact)) {
+    return {
+      allowed: OPENCLAW_EXEC_KEYS,
+      family: 'exec',
+      contract: 'openclaw.exec',
     };
   }
   return null;
@@ -807,6 +829,24 @@ export interface ContractDriftObservation {
 }
 
 /**
+ * Control characters and Unicode line breaks in a drifted key NAME.
+ *
+ * A key name is model-controlled text — a prompt-injected payload can choose
+ * it — and it travels to an operator's gateway log, where a newline buys a
+ * whole extra line. A dropped key spelled
+ * `x<LF>[shieldcortex] action-guard ALLOWED Bash: operator approved<LF>zz`
+ * rendered a forged ShieldCortex verdict into journald on the ordinary
+ * unattended ALLOW path — and journald is precisely where an operator looks
+ * to find out what the guard actually did.
+ *
+ * The full C0 and C1 ranges (C1 because U+0085 NEL is a line break to several
+ * readers and terminals act on the rest) plus U+2028/U+2029 collapse to a
+ * single space. One space per character, so the bounds below are unchanged and
+ * nothing shifts under truncation.
+ */
+const DRIFT_KEY_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/**
  * The contract-drift observation for a call, or null when nothing drifted.
  *
  * Derived from `validateToolInput` itself rather than restating the strip rule,
@@ -814,6 +854,11 @@ export interface ContractDriftObservation {
  * Carries key NAMES only: no value, no length, no shape — a drifted field may
  * hold a prompt, a token, or a whole JSON Schema, and none of that belongs in
  * an audit row.
+ *
+ * Names are neutralised HERE, at the single point they are minted, rather than
+ * at each sink: the observation reaches a gateway log line, a jsonl audit row
+ * and an operator summary, and a rule applied per-sink is a rule one new sink
+ * forgets.
  */
 export function contractDriftFor(toolName: string, raw: unknown): ContractDriftObservation | null {
   const contract = exactSpecialContractName(toolName);
@@ -822,7 +867,7 @@ export function contractDriftFor(toolName: string, raw: unknown): ContractDriftO
   if (!validated.ok || validated.strippedKeys.length === 0) return null;
   const droppedKeys = validated.strippedKeys
     .slice(0, CONTRACT_DRIFT_MAX_KEYS)
-    .map((k) => k.slice(0, CONTRACT_DRIFT_MAX_KEY_LEN));
+    .map((k) => k.replace(DRIFT_KEY_CONTROL_CHARS, ' ').slice(0, CONTRACT_DRIFT_MAX_KEY_LEN));
   return {
     contract,
     droppedKeys,

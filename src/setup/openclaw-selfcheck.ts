@@ -551,7 +551,7 @@ export function resolveBoxInterceptorConfig(home: string, defaults: unknown): un
       enabled: overrides.enabled ?? (base.enabled as boolean | undefined),
       severityActions: { ...(base.severityActions as object | undefined), ...(overrides.severityActions ?? {}) },
       failurePolicy: { ...(base.failurePolicy as object | undefined), ...(overrides.failurePolicy ?? {}) },
-      actionGuard: { ...(base.actionGuard as object | undefined ?? { enabled: true, enforce: true, autoApprove: [] }), ...(overrides.actionGuard ?? {}) },
+      actionGuard: { ...(base.actionGuard as object | undefined ?? { enabled: false, enforce: true, autoApprove: [] }), ...(overrides.actionGuard ?? {}) },
     };
   } catch {
     return { ...base };

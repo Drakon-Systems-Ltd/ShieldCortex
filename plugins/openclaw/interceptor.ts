@@ -335,13 +335,11 @@ const DEFAULT_CONFIG: InterceptorConfig = {
     high: 'deny',
     critical: 'deny',
   },
-  // Action Guard on by default: catastrophic ops are blocked out of the box;
-  // recognised-dangerous ops are ENFORCED by default (P1/WS1) — attended → prompt,
-  // unattended → fail closed on failurePolicy. Populate `autoApprove` per agent to
-  // pre-approve the dangerous ops it legitimately needs unattended; set
-  // `enforce:false` to opt back down to warn-and-allow.
+  // Action Guard OFF by default: false-card storms on live OpenClaw exec
+  // bags made default-on an uninstall risk. Catastrophic gating is also off
+  // until the operator signs `shieldcortex config --action-guard-enable`.
   actionGuard: {
-    enabled: true,
+    enabled: false,
     enforce: true,
     autoApprove: [],
     auditAllows: true,
@@ -982,7 +980,7 @@ export function createInterceptor(
   const bindAudit = options?.bindAudit;
   /** Args of the in-flight tool call — used only to mint #224 actionKey. */
   let lastCallArgs: Record<string, unknown> | undefined;
-  const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] };
+  const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
   // The judge rides the operator's own model pool, so its calls are their cost

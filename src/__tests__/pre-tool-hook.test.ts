@@ -75,6 +75,7 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-pretool-'));
     process.env.HOME = tempHome;
+    writeActionGuardConfig({});
   });
 
   afterEach(() => {
@@ -85,7 +86,9 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
   function writeActionGuardConfig(actionGuard: Record<string, unknown>): void {
     const dir = path.join(tempHome, '.shieldcortex');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ actionGuard }));
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+      actionGuard: { enabled: true, ...actionGuard },
+    }));
   }
 
   function auditRows(): Array<Record<string, unknown>> {
@@ -103,12 +106,19 @@ describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
     return rows[rows.length - 1];
   }
 
-  it('denies a catastrophic command by default (no config file)', async () => {
+  it('denies a catastrophic command when Guard is enabled', async () => {
     const result = await runHook(bashCall('rm -rf /'));
     expect(result.code).toBe(0);
     const decision = decisionOf(result.stdout);
     expect(decision.permissionDecision).toBe('deny');
     expect(decision.permissionDecisionReason).toMatch(/catastrophic/i);
+  });
+
+  it('absent config leaves Guard off, including catastrophic', async () => {
+    fs.rmSync(path.join(tempHome, '.shieldcortex', 'config.json'), { force: true });
+    const result = await runHook(bashCall(['r','m',' -rf /'].join('')));
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe('');
   });
 
   it('catastrophic deny cannot be disabled by enforce:false', async () => {

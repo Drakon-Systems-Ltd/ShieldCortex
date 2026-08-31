@@ -304,7 +304,7 @@
             "properties": {
               "enabled": {
                 "type": "boolean",
-                "default": true
+                "default": false
               },
               "enforce": {
                 "type": "boolean",
@@ -427,7 +427,7 @@
         "properties": {
           "enabled": {
             "type": "boolean",
-            "default": true
+            "default": false
           },
           "enforce": {
             "type": "boolean",

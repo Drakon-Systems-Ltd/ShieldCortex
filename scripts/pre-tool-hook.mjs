@@ -60,7 +60,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // ==================== CONFIG ====================
 
-const DEFAULT_ACTION_GUARD = { enabled: true, enforce: true, autoApprove: [], auditAllows: true };
+const DEFAULT_ACTION_GUARD = { enabled: false, enforce: true, autoApprove: [], auditAllows: true };
 
 /** #224 binding module, loaded once in main. Null when dist predates it. */
 let bindingMod = null;
@@ -95,7 +95,7 @@ function loadActionGuardConfig() {
     const raw = top || alias ? { ...(alias ?? {}), ...(top ?? {}) } : null;
     if (!raw) return { ...DEFAULT_ACTION_GUARD };
     return {
-      enabled: raw.enabled !== false,
+      enabled: raw.enabled === true,
       enforce: raw.enforce !== false,
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
       auditAllows: raw.auditAllows !== false,

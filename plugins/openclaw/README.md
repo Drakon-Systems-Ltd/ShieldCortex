@@ -136,8 +136,8 @@ are read by the parser; on a conflicting key the top-level value wins, per key,
 and anything the top-level block does not mention is filled in from the alias.
 Everything below is relative to whichever of the two you use:
 
-- `actionGuard.enabled`: turn the before-tool-call Action Guard on or off (default `true`)
-- `actionGuard.enforce`: enforce dangerous-operation gating (default `true`); `false` opts down to warn-and-allow. Catastrophic operations are blocked regardless.
+- `actionGuard.enabled`: turn the before-tool-call Action Guard on or off (default `false`; unsigned configs leave Guard off)
+- `actionGuard.enforce`: enforce dangerous-operation gating (default `true` when Guard is on); `false` opts down to warn-and-allow. Catastrophic operations are blocked only while Guard is enabled.
 - `actionGuard.autoApprove`: array of operation allowlist entries for unattended agents that legitimately need specific dangerous operations
 - `actionGuard.auditAllows`: audit recognised (sensitive-tier) allow-decisions so "scanned & allowed" is distinguishable from "never scanned" (default `true`; benign allows are never audited)
 - `actionGuard.notify`: operator-notification transport (`enabled`, `webhookUrl`, `webhookSecret`, `openclaw`, `timeoutMs`). Off unless `enabled` is exactly `true`. Used both for held tool calls and for conversation-firewall detections.
