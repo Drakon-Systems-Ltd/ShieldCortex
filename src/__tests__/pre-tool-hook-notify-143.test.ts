@@ -161,7 +161,8 @@ describe('#143 — the operator-notify transport through the real Claude Code ho
   // ── OFF by default ────────────────────────────────────────────────────────
 
   it('does not exist until switched on — no config, no channel call, same refusal as before #143', () => {
-    // No notify config at all.
+    // Guard on, notify off: still asked, still no channel call.
+    writeConfig();
     const r = runHook(IRREVERSIBLE);
     expect(r.decision).toBe('ask');
     expect(r.reason).toMatch(/shieldcortex approve [0-9a-f]{12}/);

@@ -51,7 +51,7 @@ describe('#59 — OpenClaw interceptor: dangerous degraded op fails closed (unat
   it.each(BATTERY)('$tier: $command', async ({ command, tier }) => {
     const entries: InterceptAuditEntry[] = [];
     // No evaluateToolCall wired = guard unavailable. No requireApproval = unattended.
-    const i = createInterceptor({ ...DEFAULT_CONFIG } as never, okPipeline as never, { onAuditEntry: (e) => entries.push(e) });
+    const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, { onAuditEntry: (e) => entries.push(e) });
     const run = i.handleToolCall({ toolName: 'Bash', arguments: { command } });
 
     if (tier === 'benign') {
@@ -77,6 +77,8 @@ describe('#59 — Claude Code hook: dangerous degraded op is gated (ask), never 
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ws2-int-'));
     emptyDist = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ws2-dist-'));
     process.env.HOME = tempHome;
+    fs.mkdirSync(path.join(tempHome, '.shieldcortex'), { recursive: true });
+    fs.writeFileSync(path.join(tempHome, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
   });
   afterEach(() => {
     process.env.HOME = originalHome;
@@ -201,7 +203,7 @@ describe('#59 — the 7 newly-ported dangerous shapes gate during an outage (int
   ];
   it.each(newlyDangerous)('gates (fail-closed): %s', async (_name, command) => {
     const entries: InterceptAuditEntry[] = [];
-    const i = createInterceptor({ ...DEFAULT_CONFIG } as never, okPipeline as never, { onAuditEntry: (e) => entries.push(e) });
+    const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, { onAuditEntry: (e) => entries.push(e) });
     await expect(i.handleToolCall({ toolName: 'Bash', arguments: { command } })).rejects.toThrow(/blocked|fallback|policy/i);
     expect(entries.some((e) => e.outcome === 'failure_denied' || e.outcome === 'auto_denied')).toBe(true);
   });

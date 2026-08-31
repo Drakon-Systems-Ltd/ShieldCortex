@@ -29,7 +29,7 @@ function run(taintedSessions: string[] = []) {
   const store = createSessionTaintStore();
   for (const s of taintedSessions) store.mark(s, { reason: 'conversation scan: HIGH (2 detections)' });
 
-  const i = createInterceptor(DEFAULT_CONFIG, okPipeline as never, {
+  const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, {
     evaluateToolCall: evaluateToolCall as never,
     onAuditEntry: (e) => captured.push(e),
     sessionTaint: (sessionId) => {
@@ -122,7 +122,7 @@ describe('#233 — a broken taint lookup can never create denials', () => {
     // Fail-soft by construction: taint is an ESCALATION input, so a broken
     // scanner must degrade to today's behaviour, never to new blocks.
     const captured: InterceptAuditEntry[] = [];
-    const i = createInterceptor(DEFAULT_CONFIG, okPipeline as never, {
+    const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, {
       evaluateToolCall: evaluateToolCall as never,
       onAuditEntry: (e) => captured.push(e),
       sessionTaint: () => { throw new Error('taint store exploded'); },
@@ -135,7 +135,7 @@ describe('#233 — a broken taint lookup can never create denials', () => {
 
   it('no taint lookup wired at all is simply the old behaviour', async () => {
     const captured: InterceptAuditEntry[] = [];
-    const i = createInterceptor(DEFAULT_CONFIG, okPipeline as never, {
+    const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, {
       evaluateToolCall: evaluateToolCall as never,
       onAuditEntry: (e) => captured.push(e),
     });

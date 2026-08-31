@@ -1155,7 +1155,7 @@ describe('#226 a host override of one notify key does not disarm the transport',
     // resurrect entries an operator removed, which is the wrong direction for a
     // security control; only the object-valued keys deep-merge.
     __setRuntimeForTest(
-      makeRuntime({ interceptor: { actionGuard: { autoApprove: ['base-a', 'base-b'] } } }) as never,
+      makeRuntime({ interceptor: { actionGuard: { enabled: true, autoApprove: ['base-a', 'base-b'] } } }) as never,
     );
     __setDefenceModuleForTest(makeDefenceModule().mod);
 
@@ -1173,7 +1173,7 @@ describe('#226 a host override of one notify key does not disarm the transport',
           entries: {
             'shieldcortex-realtime': {
               enabled: true,
-              config: { interceptor: { actionGuard: { autoApprove: ['host-only'] } } },
+              config: { interceptor: { actionGuard: { enabled: true, autoApprove: ['host-only'] } } },
             },
           },
         },
