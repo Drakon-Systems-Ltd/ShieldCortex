@@ -97,6 +97,11 @@ def action_guard_decision(
     block when enforcing (same unattended fail-closed the OpenClaw interceptor
     already applies). ``allow`` is None. Scanner-down uses the same fallback
     contract as :func:`tool_call_decision`.
+
+    Issue #63 — name ``shieldcortex approve --denial <actionId>`` ONLY when
+    the API recorded a DNP fingerprint (``verdict.denial_action_id``). Bare
+    ``shieldcortex approve`` lists held cards that this plane never creates.
+    Catastrophic ``block`` never carries an id.
     """
     if not verdict.available:
         return tool_call_decision(
@@ -110,5 +115,12 @@ def action_guard_decision(
         return {"action": "block", "message": f"ShieldCortex blocked this action — {detail}"}
     if verdict.decision == "require_approval" and enforce:
         detail = verdict.reason or "requires approval"
-        return {"action": "block", "message": f"ShieldCortex blocked this action — {detail}"}
+        message = f"ShieldCortex blocked this action — {detail}"
+        action_id = getattr(verdict, "denial_action_id", "")
+        if action_id:
+            message += (
+                " — to allow this exact command once, run in YOUR terminal on this host: "
+                f"shieldcortex approve --denial {action_id}"
+            )
+        return {"action": "block", "message": message}
     return None

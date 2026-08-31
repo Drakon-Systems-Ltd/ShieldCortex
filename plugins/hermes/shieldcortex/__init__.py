@@ -93,7 +93,8 @@ def register(ctx):
 
     def pre_tool_call(tool_name, args, task_id=None, **_kw):
         tool_args = args if isinstance(args, dict) else {}
-        verdict = evaluate_tool_call(tool_name, tool_args)
+        # #63: Hermes task id + this process cwd, never agent-authored args.
+        verdict = evaluate_tool_call(tool_name, tool_args, session_id=task_id, cwd=os.getcwd())
         # Issue #59/WS2: scanner unreachable no longer means blanket fail-open.
         # The dependency-free fallback scan (raw exec surface, not the JSON blob)
         # denies catastrophic shapes always and dangerous shapes when enforcing;

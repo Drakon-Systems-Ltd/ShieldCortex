@@ -2849,7 +2849,11 @@ const REMEDIATION: Record<string, string> = {
   'install-package-global': 'human authorisation required — run it yourself in a real terminal, or after a headless deny: shieldcortex approve --denial <actionId> (one-shot retry). Workspace-local install needs no global flag.',
   'install-package': 'human authorisation required — run the install yourself if intended, or shieldcortex approve --denial <actionId> after a headless deny',
   'registry-code-exec': 'review the package + source on the registry before running (npx/bunx/uvx/dlx fetch and execute immediately)',
-  'privilege-escalation': 'run the specific privileged step yourself, or approve this exact command from your own terminal with `shieldcortex approve`',
+  // #63 — evaluateToolCall does not know whether a surface recorded a DNP
+  // fingerprint. Never name bare `shieldcortex approve` here (that lists #118
+  // held cards and is empty on Hermes/REST). The surface that mints an
+  // actionId appends the exact `shieldcortex approve --denial <id>` command.
+  'privilege-escalation': 'run the specific privileged step yourself in your own terminal',
   'external-egress': 'confirm the destination and payload before data leaves the host',
   'git-force-push': 'confirm the branch and remote; a force-push can overwrite others’ work',
   'file-delete': 'confirm the target path before deleting',

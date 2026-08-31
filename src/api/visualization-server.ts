@@ -8,6 +8,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
+import { randomBytes } from 'crypto';
 import { existsSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
 import { resolve, join } from 'path';
@@ -38,6 +39,11 @@ import { isPaused, isKillSwitchActive, getKillSwitchMeta, activateKillSwitch, de
 import { getRunningVersion } from './version.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { evaluateToolCall } from '../defence/iron-dome/tool-action-guard.js';
+import {
+  consumeRetryGrant,
+  hashToolCall,
+  recordDenialFingerprint,
+} from '../defence/iron-dome/retry-control.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type { DefenceSource, DefenceConfig } from '../defence/types.js';
 import { queryAgentOperations } from '../defence/audit/queries.js';
@@ -314,11 +320,34 @@ export function handleV1ScanBatch(req: Request, res: Response): void {
  * name + args in, the same decision + signal set the Claude hook and OpenClaw
  * interceptor already share. Content scanning stays on `/api/v1/scan`.
  *
- * Exported for unit tests.
+ * #63 — Hermes has no approval prompt. `require_approval` is a headless
+ * denial. Record a #310 fingerprint (not a #118 pending card) and name the
+ * exact spendable command `shieldcortex approve --denial <actionId>`. Bind
+ * cwd + sessionId from TOP-LEVEL request fields (host/Hermes), never from
+ * agent-authored args. Catastrophic `block` stays a hard stop with no door.
+ *
+ * Exported for unit tests. Optional `deps` injects home/now so tests never
+ * touch the operator live store.
  */
-export function handleV1ActionGuard(req: Request, res: Response): void {
+export interface ActionGuardDeps {
+  home?: string;
+  now?: number;
+}
+
+function topLevelToken(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+export function handleV1ActionGuard(
+  req: Request,
+  res: Response,
+  deps: ActionGuardDeps = {},
+): void {
   try {
-    const { tool, args } = req.body ?? {};
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const { tool, args } = body;
     if (!tool || typeof tool !== 'string') {
       res.status(400).json({ error: 'tool (string) is required' });
       return;
@@ -327,15 +356,64 @@ export function handleV1ActionGuard(req: Request, res: Response): void {
       res.status(400).json({ error: 'args must be an object' });
       return;
     }
-    const verdict = evaluateToolCall(tool, (args ?? {}) as Record<string, unknown>);
-    res.json({
+    const toolArgs = (args ?? {}) as Record<string, unknown>;
+    const verdict = evaluateToolCall(tool, toolArgs);
+    const payload: Record<string, unknown> = {
       decision: verdict.decision,
       signals: verdict.signals,
       severity: verdict.severity,
       family: verdict.family,
       action: verdict.action,
       reason: verdict.reason,
-    });
+    };
+
+    if (verdict.decision === 'require_approval') {
+      try {
+        const home = deps.home ?? homedir();
+        const now = deps.now ?? Date.now();
+        const sessionId = topLevelToken(body.sessionId, 200);
+        const cwd = topLevelToken(body.cwd, 4096);
+        const hash = hashToolCall(tool, toolArgs);
+        if (cwd) {
+          const spent = consumeRetryGrant({ hash, origin: { cwd, tool } }, { home, now });
+          if (spent) {
+            payload.decision = 'allow';
+            payload.approved = true;
+            payload.reason = spent.actionId
+              ? `one-shot denial retry granted (${spent.actionId})`
+              : 'one-shot denial retry granted';
+            res.json(payload);
+            return;
+          }
+        }
+        if (sessionId && cwd) {
+          const actionId = `act-${randomBytes(8).toString('hex')}`;
+          const recorded = recordDenialFingerprint(
+            {
+              hash,
+              tool,
+              actionId,
+              signals: Array.isArray(verdict.signals) ? verdict.signals : [],
+              redactedSurface: `${tool}: [redacted action surface]`,
+              cwd,
+              sessionKey: sessionId,
+            },
+            { home, now },
+          );
+          if (recorded.ok) {
+            payload.denial = { actionId };
+            payload.reason =
+              `${verdict.reason} — to allow this exact command once, run in YOUR terminal on this host: ` +
+              `shieldcortex approve --denial ${actionId}`;
+          }
+        }
+      } catch {
+        // A retry plane that cannot record must never change the refusal and
+        // must never advertise an id the CLI could not honour.
+      }
+    }
+
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
   }
@@ -901,7 +979,7 @@ export function startVisualizationServer(dbPath?: string): void {
 
   app.post('/api/v1/scan', handleV1Scan);
   app.post('/api/v1/scan/batch', handleV1ScanBatch);
-  app.post('/api/v1/action-guard', handleV1ActionGuard);
+  app.post('/api/v1/action-guard', (req: Request, res: Response) => handleV1ActionGuard(req, res));
 
   const brainWorker = new BrainWorker();
   registerIncidentRoutes(app);

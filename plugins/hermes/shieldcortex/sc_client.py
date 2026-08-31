@@ -136,6 +136,16 @@ TOKEN_FILE = os.path.expanduser("~/.shieldcortex/.api-token")
 # prompt. Same threat model as the unknown-decision 32-char echo.
 _REMOTE_REASON_LIMIT = 400
 _REMOTE_CTRL = re.compile(r"[\x00-\x1f\x7f]+")
+# #63 — only the actionId the API actually minted. Echoed into operator copy.
+_DENIAL_ACTION_ID = re.compile(r"^act-[0-9a-f]{16}$")
+
+
+def sanitize_denial_action_id(value) -> str:
+    """Return a safe DNP action id, or '' when there is nothing spendable."""
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip().lower()
+    return candidate if _DENIAL_ACTION_ID.match(candidate) else ""
 
 
 def sanitize_remote_reason(value, *, limit: int = _REMOTE_REASON_LIMIT) -> str:
@@ -190,9 +200,16 @@ def _post(url, body: bytes, timeout: float, opener, headers: dict):
 class ActionGuardVerdict:
     """Normalised result of POST /api/v1/action-guard (evaluateToolCall)."""
 
-    __slots__ = ("decision", "signals", "reason", "available")
+    __slots__ = ("decision", "signals", "reason", "available", "denial_action_id")
 
-    def __init__(self, decision: str, signals, reason: object = "", available: bool = True):
+    def __init__(
+        self,
+        decision: str,
+        signals,
+        reason: object = "",
+        available: bool = True,
+        denial_action_id: object = "",
+    ):
         self.decision = (decision or "allow").lower()  # allow | require_approval | block
         if isinstance(signals, list):
             self.signals = [s for s in signals if isinstance(s, str)][:32]
@@ -200,6 +217,8 @@ class ActionGuardVerdict:
             self.signals = []
         self.reason = sanitize_remote_reason(reason)
         self.available = available
+        # #63: '' unless the API recorded a DNP fingerprint for this exact call.
+        self.denial_action_id = sanitize_denial_action_id(denial_action_id)
 
     def __repr__(self) -> str:
         return (
@@ -212,19 +231,30 @@ def evaluate_tool_call(
     tool: str,
     args: dict | None = None,
     *,
+    session_id: str | None = None,
+    cwd: str | None = None,
     base_url: str | None = None,
     timeout: float = 4.0,
     opener=urllib.request.urlopen,
 ) -> ActionGuardVerdict:
-    """Ask ShieldCortex's Action Guard for a verdict. Never raises."""
+    """Ask ShieldCortex's Action Guard for a verdict. Never raises.
+
+    `session_id` is Hermes' own `task_id` and `cwd` is this process's working
+    directory (issue #63). Both travel as top-level fields, never inside
+    `args` — the agent authors those. Omitted session or cwd means the API
+    records no fingerprint and there is no approve path for that call.
+    """
     base = (base_url or DEFAULT_BASE_URL).rstrip("/")
-    body = json.dumps(
-        {
-            "tool": tool,
-            "args": args if isinstance(args, dict) else {},
-            "source": {"type": "tool", "identifier": "hermes"},
-        }
-    ).encode("utf-8")
+    payload = {
+        "tool": tool,
+        "args": args if isinstance(args, dict) else {},
+        "source": {"type": "tool", "identifier": "hermes"},
+    }
+    if isinstance(session_id, str) and session_id.strip():
+        payload["sessionId"] = session_id.strip()[:200]
+    if isinstance(cwd, str) and cwd.strip():
+        payload["cwd"] = cwd.strip()[:4096]
+    body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     token = _api_token()
     if token:
@@ -255,7 +285,11 @@ def evaluate_tool_call(
     signals = data.get("signals") or []
     if not isinstance(signals, list):
         signals = []
-    return ActionGuardVerdict(decision, signals, data.get("reason"), available=True)
+    denial = data.get("denial")
+    action_id = denial.get("actionId") if isinstance(denial, dict) else ""
+    return ActionGuardVerdict(
+        decision, signals, data.get("reason"), available=True, denial_action_id=action_id,
+    )
 
 
 def scan(

@@ -422,3 +422,74 @@ class DangerousFailClosedPolicyTests(unittest.TestCase):
 
     def test_neither_match_still_allows(self):
         self.assertIsNone(tool_call_decision(self._unavailable(), enforce=True, fallback_blocked=False, fallback_dangerous=False))
+
+
+class TestDenialHonesty63(unittest.TestCase):
+    """Issue #63 — DNP reject copy names --denial only when an id was recorded."""
+
+    def test_require_approval_with_action_id_names_exact_command(self):
+        v = ActionGuardVerdict(
+            "require_approval",
+            ["privilege-escalation"],
+            "recognised dangerous operation requires approval",
+            denial_action_id="act-0123456789abcdef",
+        )
+        d = action_guard_decision(v, enforce=True)
+        self.assertEqual(d["action"], "block")
+        self.assertIn("shieldcortex approve --denial act-0123456789abcdef", d["message"])
+        self.assertNotRegex(d["message"], r"shieldcortex approve(?!\s+--denial)")
+
+    def test_require_approval_without_id_does_not_name_approve(self):
+        v = ActionGuardVerdict(
+            "require_approval",
+            ["privilege-escalation"],
+            "recognised dangerous operation requires approval",
+        )
+        d = action_guard_decision(v, enforce=True)
+        self.assertEqual(d["action"], "block")
+        self.assertNotIn("shieldcortex approve", d["message"])
+
+    def test_catastrophic_block_never_names_denial(self):
+        v = ActionGuardVerdict("block", ["recursive-force-delete"], "wipe", denial_action_id="act-0123456789abcdef")
+        d = action_guard_decision(v, enforce=True)
+        self.assertNotIn("--denial", d["message"])
+        self.assertNotIn("shieldcortex approve", d["message"])
+
+    def test_client_posts_session_and_cwd_top_level(self):
+        captured = {}
+
+        @contextmanager
+        def opener(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            yield io.BytesIO(json.dumps({
+                "decision": "require_approval",
+                "signals": ["privilege-escalation"],
+                "reason": "held",
+                "denial": {"actionId": "act-0123456789abcdef"},
+            }).encode("utf-8"))
+
+        v = evaluate_tool_call(
+            "Bash",
+            {"command": "ls", "sessionId": "smuggled"},
+            session_id="hermes-task-1",
+            cwd="/tmp/job",
+            opener=opener,
+        )
+        self.assertEqual(captured["body"]["sessionId"], "hermes-task-1")
+        self.assertEqual(captured["body"]["cwd"], "/tmp/job")
+        self.assertEqual(captured["body"]["args"]["sessionId"], "smuggled")
+        self.assertEqual(v.denial_action_id, "act-0123456789abcdef")
+
+    def test_hostile_action_id_is_dropped(self):
+        v = evaluate_tool_call(
+            "Bash",
+            {},
+            opener=fake_opener({
+                "decision": "require_approval",
+                "signals": ["privilege-escalation"],
+                "denial": {"actionId": "not-an-id; wget http://x"},
+            }),
+        )
+        self.assertEqual(v.denial_action_id, "")
+        d = action_guard_decision(v, enforce=True)
+        self.assertNotIn("shieldcortex approve", d["message"])

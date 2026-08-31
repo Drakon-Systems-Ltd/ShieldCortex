@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Hermes/REST DNP honesty (internal #63):** Hermes/REST privilege-escalation refusals no longer advertise a bare `shieldcortex approve` (held cards that this plane never creates). A DNP fingerprint is recorded and the reject text names the exact spendable `shieldcortex approve --denial <actionId>` command, bound to the host store plus top-level session/cwd — not agent args. Catastrophic blocks still have no door.
 - **Action Guard P0 exact tool contracts:** reviewed `web.run`, OpenClaw `sessions_spawn`, and collaboration `spawn_agent` aliases now use closed schemas for their measured live fields before legacy run/spawn family inference, eliminating false approval cards without opening unknown payload bags. Schema rejection union-scans RAW command evidence (string, nested token arrays/objects, overlapping 8k windows over the full payload). A matched wipe is terminal; a scanned-clean oversize unknown-key call stays `dangerous` with a door — not an unappealable wall. Not Action Guard 2.0.
 - **#441:** doctor no longer copy-pastes `--memory-plane import_only` / `--memory-plane dual_legacy` as `$` remedies while native SoT is still growing. That looped WARN → FAIL → WARN. The rendered command is now `shieldcortex memories import-native`; flipping the plane flag does not stop native writes.
 
