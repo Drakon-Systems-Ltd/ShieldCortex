@@ -116,7 +116,7 @@ describe('#112 follow-up — unattended Codex: interceptor disabled in host plug
   });
 
   it('CONTROL (harness validity): without the disable, the hook IS registered and still gates dangerous ops', async () => {
-    const { api, hooks } = makeApi(rootConfigWith({}));
+    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enabled: true } } }));
     plugin.register(api);
     expect(typeof hooks['before_tool_call']).toBe('function');
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });

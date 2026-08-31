@@ -102,7 +102,7 @@ export function actionKeyForToolCall(tool: string, args: Record<string, unknown>
   if (command) return shapeCommand(command);
   const path = extractPath(args);
   if (path) return `${normaliseToolName(tool)}:${pathClass(path)}`;
-  const url = extractUrl(args);
+  const url = extractUrl(args, tool);
   if (url) return `${normaliseToolName(tool)}:${urlClass(url)}`;
   return normaliseToolName(tool);
 }

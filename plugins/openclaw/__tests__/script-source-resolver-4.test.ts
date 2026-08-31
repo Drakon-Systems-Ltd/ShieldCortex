@@ -28,7 +28,7 @@ const okPipeline = () => ({
 });
 
 function makeInterceptor(overrides: Record<string, unknown> = {}) {
-  const config = { ...DEFAULT_CONFIG, ...overrides } as any;
+  const config = { ...DEFAULT_CONFIG, ...overrides, actionGuard: { enabled: true, enforce: true, autoApprove: [], ...(overrides.actionGuard || {}) } } as any;
   return createInterceptor(config, okPipeline as any, { evaluateToolCall: evaluateToolCall as any });
 }
 
@@ -113,7 +113,7 @@ describe('#4 — end-to-end: a dangerous script on disk is gated like the inline
 
   it('an unreadable script is allowed, not denied — the gap is recorded, not enforced', async () => {
     const entries: Array<Record<string, unknown>> = [];
-    const i = createInterceptor(DEFAULT_CONFIG as any, okPipeline as any, {
+    const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as any, okPipeline as any, {
       evaluateToolCall: evaluateToolCall as any,
       onAuditEntry: (e) => entries.push(e as unknown as Record<string, unknown>),
     });

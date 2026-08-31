@@ -67,7 +67,7 @@ describe('doctor — Action Guard check (#94)', () => {
   });
 
   it('warns when the Claude Code hook surface disables enforcement (actionGuard.enforce)', async () => {
-    writeConfig({ actionGuard: { enforce: false } });
+    writeConfig({ actionGuard: { enabled: true, enforce: false } });
     const results = await checkActionGuard();
     const warn = results.find((r) => r.status === 'warn' && /enforce/i.test(r.message));
     expect(warn).toBeDefined();
@@ -216,7 +216,7 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     // denial at all. Doctor emitted a WARN on this exact shape while 312
     // denials went undelivered on one host — the product said it and the
     // outcome did not change. Armed-and-lying is a failure, not advice.
-    writeConfig({ actionGuard: { notify: { enabled: true, openclaw: true } } });
+    writeConfig({ actionGuard: { enabled: true, notify: { enabled: true, openclaw: true } } });
     const results = await checkActionGuard();
     const warn = results.find((r) => r.status === 'fail' && /notify/i.test(r.label));
     expect(warn).toBeDefined();
@@ -230,7 +230,7 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     // 0 delivered out of 89. Its rows are labelled `notify_not_configured`
     // rather than `no_channel` — a different label on the same zero. Severity
     // must not follow the label.
-    writeConfig({ actionGuard: { notify: { enabled: true } } });
+    writeConfig({ actionGuard: { enabled: true, notify: { enabled: true } } });
     const results = await checkActionGuard();
     const found = results.find((r) => r.status === 'fail' && /notify/i.test(r.label));
     expect(found).toBeDefined();
@@ -272,7 +272,7 @@ describe('doctor — Action Guard notify channel (#242)', () => {
   // person who needs to know there is no sink to deliver denials to. Measured
   // across three hosts that day: 0 delivered out of 312 / 89 / 26.
   it('still reports a missing denial sink when the guard is NOT enforcing', async () => {
-    writeConfig({ actionGuard: { enforce: false } });
+    writeConfig({ actionGuard: { enabled: true, enforce: false } });
     const results = await checkActionGuard();
     const notify = results.find((r) => /webhookUrl/i.test(r.message));
     expect(notify).toBeDefined();
@@ -333,6 +333,7 @@ describe('doctor — Action Guard notify fix is a signed CLI command (#275)', ()
     fs.rmSync(legacySigPath(), { force: true });
     clearCloudConfigCache();
     jest.spyOn(console, 'log').mockImplementation(() => {});
+    handleCloudConfig(['--action-guard-enable']);
     handleCloudConfig(['--action-guard-notify-openclaw']);
     const warn = await findNotifyWarn();
     expect(warn).toBeDefined();

@@ -113,7 +113,7 @@ describe('#224 InterceptAuditEntry is bound when bindAudit is injected', () => {
     process.env.SHIELDCORTEX_AUDIT_DIR = join(home, '.shieldcortex', 'audit');
     const captured: InterceptAuditEntry[] = [];
     const { handleToolCall } = createInterceptor(
-      DEFAULT_CONFIG,
+      { ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never,
       makeStubPipeline() as never,
       {
         evaluateToolCall: () => ({

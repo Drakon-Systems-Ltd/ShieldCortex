@@ -346,7 +346,7 @@ describe('#372 plugin — the host decision reaches the audit stream', () => {
     ['timeout', 'card_timeout'],
     ['cancelled', 'card_cancelled'],
   ])('resolving a card with %s writes outcome %s', async (decision, outcome) => {
-    const { api, hooks } = makeApi();
+    const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true } } });
     plugin.register(api);
     const request = await holdCard(hooks);
 
@@ -366,7 +366,7 @@ describe('#372 plugin — the host decision reaches the audit stream', () => {
   });
 
   it('a card the host resolves twice still yields one row', async () => {
-    const { api, hooks } = makeApi();
+    const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true } } });
     plugin.register(api);
     const request = await holdCard(hooks);
 
@@ -378,7 +378,7 @@ describe('#372 plugin — the host decision reaches the audit stream', () => {
   });
 
   it('a decision this build does not know writes nothing and says so', async () => {
-    const { api, hooks } = makeApi();
+    const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true } } });
     plugin.register(api);
     const request = await holdCard(hooks);
 
@@ -391,7 +391,7 @@ describe('#372 plugin — the host decision reaches the audit stream', () => {
   });
 
   it('an unknown decision reaches the gateway log as a label, not as free text', async () => {
-    const { api, hooks } = makeApi();
+    const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true } } });
     plugin.register(api);
     const request = await holdCard(hooks);
 
@@ -410,7 +410,7 @@ describe('#372 plugin — the host decision reaches the audit stream', () => {
     stubDefence({
       attachEnforcementBinding: () => { throw new Error('binding ledger unwritable'); },
     });
-    const { api, hooks } = makeApi();
+    const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true } } });
     plugin.register(api);
     const request = await holdCard(hooks);
 

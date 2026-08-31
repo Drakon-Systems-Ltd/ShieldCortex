@@ -69,7 +69,7 @@ function sameSignals(a: string[], b: string[]): boolean {
 async function interceptorPlane(entry: GuardCorpusEntry): Promise<PlaneVerdict> {
   let seen: { decision: string; signals: string[] } | undefined;
   const interceptor = createInterceptor(
-    { ...DEFAULT_CONFIG, logger: { info: () => {}, warn: () => {} } } as never,
+    { ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] }, logger: { info: () => {}, warn: () => {} } } as never,
     okPipeline as never,
     {
       evaluateToolCall: (tool, args, config, options) => {
@@ -110,6 +110,11 @@ async function hookPlane(entry: GuardCorpusEntry, homesRoot: string, distRoot: s
   // pending-approval / session-guard state from an earlier row change a later
   // verdict (observed: `npm install -g` flipped ask → deny).
   const home = fs.mkdtempSync(path.join(homesRoot, 'h-'));
+  fs.mkdirSync(path.join(home, '.shieldcortex'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.shieldcortex', 'config.json'),
+    JSON.stringify({ actionGuard: { enabled: true, enforce: true } }),
+  );
 
   const { stdout, code } = await runHook(
     {

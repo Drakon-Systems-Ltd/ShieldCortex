@@ -22,6 +22,8 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     home = mkdtempCompat('sc-stop-242-');
     const db = new Database(dbFile());
     db.close();
+    mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
   });
 
   afterEach(() => {
@@ -202,6 +204,7 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       try {
         const dir = join(home, '.shieldcortex');
         mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
         const primary = join(dir, 'action-guard-session-salt');
         setup(primary);
         const db = new Database(dbFile());

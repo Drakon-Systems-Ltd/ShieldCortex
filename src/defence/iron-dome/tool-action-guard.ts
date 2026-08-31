@@ -27,7 +27,16 @@
 
 import { lstatSync, realpathSync } from 'node:fs';
 import type { IronDomeConfig } from './config.js';
-import { hasExactSpecialToolSchema, validateToolInput, schemaFamilyForTool, isNativeShellControlTool } from './tool-input-schema.js';
+import {
+  hasExactSpecialToolSchema, validateToolInput, schemaFamilyForTool, isNativeShellControlTool,
+  isMcpFrontedToolName,
+  exactSpecialContractName,
+  contractDriftFor,
+  COMMAND_KEYS, PATH_KEYS, URL_KEYS, WRITE_CONTENT_KEYS, COMMAND_EVIDENCE_KEYS,
+  OUTBOUND_DATA_KEYS, OUTBOUND_METHOD_KEYS,
+  RECIPIENT_LIST_KEYS, RECIPIENT_LIST_MAX,
+} from './tool-input-schema.js';
+import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
@@ -80,6 +89,17 @@ export interface ToolGuardVerdict {
    * writers persist it: a verdict that leaned on review must say so.
    */
   reviewedScripts?: string[];
+  /**
+   * A reviewed native contract grew a field ShieldCortex does not read. The
+   * field was DROPPED before nested validation and before any extractor, and
+   * the call was evaluated without it — this is an observation, never a
+   * verdict input. Key NAMES only, bounded; no value ever reaches this record.
+   *
+   * Absent means "no drift", never "nobody looked": it is populated on the
+   * reviewed exact-special contracts, which are the only place the drop
+   * happens.
+   */
+  contractDrift?: ContractDriftObservation;
 }
 
 // ── Tool-name recognition ───────────────────────────────────────────────────
@@ -128,13 +148,8 @@ function pickString(args: Record<string, unknown>, keys: string[]): string {
 }
 
 export function extractCommand(args: Record<string, unknown>): string {
-  return pickString(args, ['command', 'cmd', 'script', 'code', 'input', 'shell', 'run']);
+  return pickString(args, [...COMMAND_KEYS]);
 }
-
-/** Command-bearing aliases the schema-failure recovery pass must union-scan. */
-const COMMAND_EVIDENCE_KEYS = [
-  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run', 'args', 'argv',
-] as const;
 
 const EXTRACTOR_EVIDENCE_CAP = 8192;
 
@@ -142,23 +157,66 @@ const EXTRACTOR_WINDOW_STEP = 4096;
 const EXTRACTOR_MAX_DEPTH = 8;
 const EXTRACTOR_MAX_LEAVES = 16384;
 
-function stringElements(value: unknown, depth = 0, acc: string[] = []): string[] {
-  if (depth > EXTRACTOR_MAX_DEPTH || acc.length >= EXTRACTOR_MAX_LEAVES) return acc;
+/** Total surface text one evidence pass will window. Beyond it: fail closed. */
+const EVIDENCE_MAX_TEXT_BYTES = 4_194_304;
+
+/**
+ * What the walk could NOT read. A truncated walk is not a clean walk: the
+ * unread remainder may be the wipe, so exhaustion is a verdict input (the
+ * non-widenable schema-invalid door — see `unscannableEvidenceVerdict`), never
+ * a silent shrug. Recorded per pass, not per key, because the caps are per pass.
+ */
+interface EvidenceBudget {
+  leaves: number;
+  bytes: number;
+  /** A depth / leaf / byte cap stopped the walk before it ran out of input. */
+  exhausted: boolean;
+}
+
+function newEvidenceBudget(): EvidenceBudget {
+  return { leaves: 0, bytes: 0, exhausted: false };
+}
+
+function stringElements(
+  value: unknown,
+  budget: EvidenceBudget,
+  depth = 0,
+  acc: string[] = [],
+): string[] {
+  if (value === null || value === undefined) return acc;
+  if (depth > EXTRACTOR_MAX_DEPTH) {
+    budget.exhausted = true;
+    return acc;
+  }
+  if (budget.leaves >= EXTRACTOR_MAX_LEAVES || budget.bytes >= EVIDENCE_MAX_TEXT_BYTES) {
+    budget.exhausted = true;
+    return acc;
+  }
   if (typeof value === 'string') {
-    if (value) acc.push(value);
+    if (value) {
+      acc.push(value);
+      budget.leaves += 1;
+      budget.bytes += value.length;
+    }
     return acc;
   }
   if (Array.isArray(value)) {
     for (const el of value) {
-      stringElements(el, depth + 1, acc);
-      if (acc.length >= EXTRACTOR_MAX_LEAVES) break;
+      stringElements(el, budget, depth + 1, acc);
+      if (budget.leaves >= EXTRACTOR_MAX_LEAVES || budget.bytes >= EVIDENCE_MAX_TEXT_BYTES) {
+        budget.exhausted = true;
+        break;
+      }
     }
     return acc;
   }
-  if (value !== null && typeof value === 'object') {
+  if (typeof value === 'object') {
     for (const el of Object.values(value as Record<string, unknown>)) {
-      stringElements(el, depth + 1, acc);
-      if (acc.length >= EXTRACTOR_MAX_LEAVES) break;
+      stringElements(el, budget, depth + 1, acc);
+      if (budget.leaves >= EXTRACTOR_MAX_LEAVES || budget.bytes >= EVIDENCE_MAX_TEXT_BYTES) {
+        budget.exhausted = true;
+        break;
+      }
     }
   }
   return acc;
@@ -180,36 +238,221 @@ function slidingWindows(text: string, cap = EXTRACTOR_EVIDENCE_CAP): string[] {
  * Overlapping windows over the full leaf join — not head+tail only.
  * A wipe in the middle of a long string or a 600-token argv must still scan.
  */
-function flattenScanWindows(value: unknown, cap = EXTRACTOR_EVIDENCE_CAP): string[] {
-  const parts = stringElements(value);
-  if (parts.length === 0) return [];
-  return slidingWindows(parts.join(' '), cap);
+function flattenScanText(value: unknown, budget: EvidenceBudget): string {
+  const parts = stringElements(value, budget);
+  return parts.length === 0 ? '' : parts.join(' ');
 }
 
 function pathUrlFromRaw(raw: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const k of ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory']) {
+  for (const k of [...PATH_KEYS, ...URL_KEYS]) {
     if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k];
-  }
-  for (const k of ['url', 'uri', 'endpoint', 'href', 'host', 'to']) {
-    if (typeof raw[k] === 'string' && raw[k]) out[k] = raw[k];
+    // A recipient list is a destination like any other: carried, then read by
+    // `extractUrl` below. Dropping it here would blind egress rules on the
+    // exact shape (`to: [address, ...]`) the live mail contracts send.
+    else if (RECIPIENT_LIST_KEYS.has(k) && recipientListText(raw[k])) out[k] = raw[k];
   }
   return out;
 }
 
 /**
- * Schema rejection used to scan a single first-wins string (or `{}` when
- * annotate failed). Each command-bearing alias is its own surface: joining
- * `echo safe` with a later wipe makes the tokeniser treat `echo` as the verb.
+ * The argument-vector aliases. A host splits the verb from these, so must we.
+ *
+ * Derived from the canonical evidence list rather than restated: these are
+ * exactly the evidence keys that are not command aliases, so a key added to
+ * `COMMAND_EVIDENCE_KEYS` cannot quietly go unscanned here.
  */
-function commandEvidenceSurfaces(raw: Record<string, unknown>): string[] {
+const ARGV_EVIDENCE_KEYS: readonly string[] = COMMAND_EVIDENCE_KEYS
+  .filter(k => !(COMMAND_KEYS as readonly string[]).includes(k));
+
+/** The command alias `extractCommand` would pick from this bag, or null. */
+function firstCommandKey(raw: Record<string, unknown>): string | null {
+  for (const k of COMMAND_KEYS) {
+    const v = raw?.[k];
+    if (typeof v === 'string' && v.length > 0) return k;
+  }
+  return null;
+}
+
+/**
+ * An argv element that shell text can represent verbatim as one literal word.
+ * Positive allowlist: missing one metacharacter from a "needs quoting" list
+ * would let literal vector data manufacture shell syntax in the scan surface.
+ */
+const SHELL_SAFE_ARGV_ELEMENT = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/**
+ * One argv element spelled the way a shell would have to spell it.
+ *
+ * Quoted ONLY when it has to be. An ordinary flag vector therefore still reads
+ * as the plain command line the host runs — the recursive-force flag and the
+ * root target stay adjacent words, and every danger rule still matches straight
+ * across the element seam — while shell metacharacters and a whole statement
+ * packed into ONE argument stay ONE literal word, which is what such a call
+ * actually does.
+ */
+function shellQuoteArgvElement(el: string): string {
+  if (SHELL_SAFE_ARGV_ELEMENT.test(el)) return el;
+  return `'${el.split("'").join("'\\''")}'`;
+}
+
+/**
+ * An `args`/`argv` value as one scannable command-line fragment.
+ *
+ * A STRING in an argv slot is already a spelled fragment with no element
+ * boundaries to preserve, so it is carried raw — quoting it would invent a
+ * seam the caller never wrote. A real VECTOR is rendered with its boundaries
+ * intact, which is what lets the use/mention discipline that already governs
+ * inline shell text govern a split call identically.
+ */
+function vectorScanText(value: unknown, budget: EvidenceBudget): string {
+  if (typeof value === 'string') return flattenScanText(value, budget);
+  const parts = stringElements(value, budget);
+  return parts.length === 0 ? '' : parts.map(shellQuoteArgvElement).join(' ');
+}
+
+interface VectorEvidence {
+  text: string;
+  /** A real native exec vector: one flat list of literal argv elements. */
+  literal: boolean;
+}
+
+/** Only native names selecting the closed exec bag have reviewed vector semantics. */
+function hasReviewedNativeExecVector(toolName: string): boolean {
+  if (isMcpFrontedToolName(toolName) || isNativeShellControlTool(toolName)) return false;
+  const family = schemaFamilyForTool(toolName);
+  return family === 'exec' || family === 'git';
+}
+
+/** The first literal argv word across the canonical vector-key order. */
+function firstVectorWord(raw: Record<string, unknown>): string | null {
+  for (const key of ARGV_EVIDENCE_KEYS) {
+    const value = raw[key];
+    if (!Array.isArray(value) || value.length === 0) continue;
+    return typeof value[0] === 'string' ? value[0] : null;
+  }
+  return null;
+}
+
+/**
+ * Match an exact reviewed data invocation. Git receives its subcommand from the
+ * vector; requiring a whole match keeps lookalike executable names conservative.
+ */
+function isDataVectorInvocation(executable: string, raw: Record<string, unknown>): boolean {
+  const head = executable.trim();
+  if (!head || /\s/.test(head)) return false;
+  const first = firstVectorWord(raw);
+  const invocation = /^git$/i.test(head) && first !== null ? `${head} ${first}` : head;
+  const match = DATA_COMMAND.exec(invocation);
+  return match !== null && match.index === 0 && match[0].length === invocation.length;
+}
+
+/**
+ * Every text an OS-level reading of this bag could produce.
+ *
+ * A command ALIAS and an argument VECTOR are different kinds of evidence and
+ * are built differently, because the host reads them differently.
+ *
+ * Each command alias is its own statement. `extractCommand` is first-wins, so
+ * without this a destructive `script` sitting beside a benign `command` would
+ * never be read at all.
+ *
+ * A vector is not a statement — it is the arguments OF one. `spawn(command,
+ * argv)` executes `command` WITH `argv`, so a delete binary in `command` and
+ * its recursive-force flags plus a root target in `argv` are one wipe that
+ * neither half spells alone; each verb alias is therefore paired with each argv
+ * alias, and one union surface catches the N-way split across `command` +
+ * `args` + `argv` together. But the converse is NOT true, and treating it as
+ * true is what turned a printed string into a terminal DENY: a call that prints
+ * its argument was execute-classified on that argument alone, so the printed
+ * text was read as a second command. When an EXECUTABLE is present the vector
+ * is therefore scanned only in executable-plus-vector form, with its argument
+ * boundaries preserved. A print/format/search verb carrying dangerous-looking
+ * text as ONE argument now decides exactly as the identical inline spelling
+ * decides, and interpreter execution (an `-c` program) still gates, because an
+ * interpreter is not a data command and its quoted argument stays executed.
+ *
+ * With no executable in the bag the vector IS the operation — a bare `argv` of
+ * binary + flags + target is a wipe — and is read as one.
+ *
+ * Deduped by text, so the ordinary single-key call costs one scan.
+ */
+function commandEvidenceSurfaces(
+  toolName: string,
+  raw: Record<string, unknown>,
+  budget: EvidenceBudget,
+  primaryScannedDownstream: boolean,
+): string[] {
+  // The first-wins command string is what `extractCommand` hands the normal
+  // path. When the annotated bag is valid, that path DOES scan it — directly
+  // when the schema accepts, and through the annotated re-evaluation when it
+  // rejects — so emitting it here as its own surface would evaluate the same
+  // text twice. That is not merely wasted work: the per-call budgets that
+  // bound script folding are per evaluation, so a doubled scan doubles how
+  // many files one call may fold. When the annotated bag is INVALID (a
+  // bad-typed control field fails in both modes) nothing downstream reaches an
+  // extractor, and the surface is carried here instead. Either way it is still
+  // joined into the COMBINED surfaces below, which nothing else scans.
+  const primary = primaryScannedDownstream ? firstCommandKey(raw) : null;
+  const texts: string[] = [];
+  const verbs = new Map<string, string>();
+  for (const k of COMMAND_KEYS) {
+    const text = flattenScanText(raw[k], budget);
+    if (!text) continue;
+    verbs.set(k, text);
+    if (k !== primary) texts.push(text);
+  }
+  const vectors = new Map<string, VectorEvidence>();
+  for (const k of ARGV_EVIDENCE_KEYS) {
+    const value = raw[k];
+    const text = vectorScanText(value, budget);
+    if (text) {
+      vectors.set(k, {
+        text,
+        literal: Array.isArray(value) && value.every(el => typeof el === 'string'),
+      });
+    }
+  }
+
+  const reviewedVector = hasReviewedNativeExecVector(toolName);
+  const allVectorsLiteral = vectors.size > 0 && [...vectors.values()].every(v => v.literal);
+  const hasExecutableVerb = [...verbs.values()].some(v => !/\s/.test(v.trim()));
+
+  // Without a reviewed contract, even a harmless-looking executable cannot
+  // turn arbitrary bag contents into process data. No executable is the bare-
+  // vector case, which is likewise an operation in its own right.
+  if (!reviewedVector || !hasExecutableVerb) {
+    for (const vector of vectors.values()) texts.push(vector.text);
+    if (vectors.size > 1) texts.push([...vectors.values()].map(v => v.text).join(' '));
+  }
+
+  for (const head of verbs.values()) {
+    const dataVector = reviewedVector
+      && allVectorsLiteral
+      && isDataVectorInvocation(head, raw);
+    if (dataVector) continue;
+
+    for (const vector of vectors.values()) texts.push(`${head} ${vector.text}`);
+    // Build the N-way split per verb. Joining alternate aliases to one another
+    // invents a statement and lets a benign alias change a malicious one's role.
+    if (vectors.size > 1) {
+      texts.push(`${head} ${[...vectors.values()].map(v => v.text).join(' ')}`);
+    }
+  }
+
   const surfaces: string[] = [];
   const seen = new Set<string>();
-  for (const k of COMMAND_EVIDENCE_KEYS) {
-    for (const text of flattenScanWindows(raw[k])) {
-      if (!text || seen.has(text)) continue;
-      seen.add(text);
-      surfaces.push(text);
+  let bytes = 0;
+  for (const text of texts) {
+    if (bytes + text.length > EVIDENCE_MAX_TEXT_BYTES) {
+      budget.exhausted = true;
+      break;
+    }
+    bytes += text.length;
+    for (const window of slidingWindows(text)) {
+      if (!window || seen.has(window)) continue;
+      seen.add(window);
+      surfaces.push(window);
     }
   }
   return surfaces;
@@ -223,10 +466,75 @@ function commandEvidenceSurfaces(raw: Record<string, unknown>): string[] {
 const IFS_OBFUSCATION = /\$\{IFS[^}]*\}|\$IFS\b/gi;
 export function deobfuscateIfs(s: string): string { return s.replace(IFS_OBFUSCATION, ' '); }
 export function extractPath(args: Record<string, unknown>): string {
-  return pickString(args, ['path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory']);
+  return pickString(args, [...PATH_KEYS]);
 }
-export function extractUrl(args: Record<string, unknown>): string {
-  return pickString(args, ['url', 'uri', 'endpoint', 'href', 'host', 'to']);
+/**
+ * A `to`/`cc`/`bcc` list flattened into one scannable destination string.
+ * Bounded twice — element count and total length — because this text is
+ * caller-supplied and feeds the egress scanners.
+ */
+function recipientListText(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  const parts: string[] = [];
+  for (const el of value) {
+    if (typeof el !== 'string' || !el) continue;
+    parts.push(el);
+    if (parts.length >= RECIPIENT_LIST_MAX) break;
+  }
+  return parts.join(' ').slice(0, EXTRACTOR_EVIDENCE_CAP);
+}
+
+/**
+ * First-wins over `URL_KEYS`, with the recipient exception: `to`/`cc`/`bcc`
+ * may arrive as a LIST of addresses (the live Gmail contract), and a list read
+ * as "no url" would have made every multi-recipient send invisible to the
+ * egress rules that gate the single-string spelling.
+ */
+export function extractUrl(args: Record<string, unknown>, toolName?: string): string {
+  const skipHost = exactSpecialContractName(toolName ?? '') === 'openclaw.exec';
+  for (const k of URL_KEYS) {
+    if (skipHost && k === 'host') continue;
+    const v = args?.[k];
+    if (typeof v === 'string' && v.length > 0) return v;
+    if (RECIPIENT_LIST_KEYS.has(k)) {
+      const text = recipientListText(v);
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+/**
+ * EVERY populated recipient in the bag, one entry per address, across all three
+ * of `to`/`cc`/`bcc` — not the first-wins destination `extractUrl` returns.
+ *
+ * `extractUrl` answers "what is this call's destination?", which is the right
+ * question for a URL and the wrong one for a mail: a send has as many
+ * destinations as it has recipients, and the egress and exfiltration rules must
+ * weigh all of them. Reading only the first meant an internal `to` hid an
+ * external `cc`/`bcc` — and hid it twice over, because the locality test also
+ * reads the surrounding text, and only the first-wins destination reaches that
+ * text. Bounded exactly as `recipientListText` is: the elements are
+ * caller-supplied and feed the egress scanners.
+ */
+function recipientDestinations(args: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const k of URL_KEYS) {
+    if (!RECIPIENT_LIST_KEYS.has(k)) continue;
+    const v = args?.[k];
+    if (typeof v === 'string' && v) {
+      out.push(v.slice(0, EXTRACTOR_EVIDENCE_CAP));
+      continue;
+    }
+    if (!Array.isArray(v)) continue;
+    let taken = 0;
+    for (const el of v) {
+      if (typeof el !== 'string' || !el) continue;
+      out.push(el.slice(0, EXTRACTOR_EVIDENCE_CAP));
+      if (++taken >= RECIPIENT_LIST_MAX) break;
+    }
+  }
+  return out;
 }
 
 // ── Write-content extraction + target recognition (issue #93) ────────────────
@@ -240,7 +548,7 @@ export function extractUrl(args: Record<string, unknown>): string {
 
 /** The content-bearing string of a write-family tool call, first present key wins. */
 export function extractWriteContent(args: Record<string, unknown>): string {
-  return pickString(args, ['new_string', 'content', 'contents', 'file_text', 'body', 'text']);
+  return pickString(args, [...WRITE_CONTENT_KEYS]);
 }
 
 const SCRIPT_WRITE_EXT_RE = /\.(?:sh|bash|zsh|py|pyw|js|mjs|cjs|ts|tsx|rb|pl|php|ps1|bat|cmd|fish)$/i;
@@ -2017,9 +2325,14 @@ const OUTBOUND_DATA_FLAGS =
 
 function hasOutboundData(args: Record<string, unknown>, execSurface: string): boolean {
   if (OUTBOUND_DATA_FLAGS.test(execSurface)) return true;
-  const method = String((args?.method ?? args?.httpMethod ?? args?.verb) ?? '').toUpperCase();
+  let methodRaw: unknown;
+  for (const k of OUTBOUND_METHOD_KEYS) {
+    const v = args?.[k];
+    if (v !== undefined && v !== null) { methodRaw = v; break; }
+  }
+  const method = String(methodRaw ?? '').toUpperCase();
   if (method && method !== 'GET' && method !== 'HEAD') return true;
-  for (const k of ['body', 'data', 'json', 'form', 'payload', 'formData', 'files']) {
+  for (const k of OUTBOUND_DATA_KEYS) {
     const v = args?.[k];
     if (typeof v === 'string' && v.length > 0) return true;
     if (v && typeof v === 'object') return true;
@@ -2426,6 +2739,43 @@ function isShellAnchorChar(text: string, at: number): boolean {
 }
 
 /**
+ * A pattern may bridge adjacent quoted argv words. Treat the whole match as
+ * quoted data only when every non-glue byte remains inside a recognised data
+ * quote. Anything shell-active or merely unquoted fails closed.
+ */
+function coveredByDataQuotes(
+  ranges: ReadonlyArray<[number, number]>,
+  start: number,
+  end: number,
+  text: string,
+): boolean {
+  if (start < 0 || end <= start || end > text.length) return false;
+
+  const gapIsGlue = (from: number, to: number): boolean => {
+    for (let i = from; i < to; i++) {
+      if (isShellAnchorChar(text, i)) return false;
+      const c = text[i]!;
+      if (c !== '"' && c !== "'" && c !== '\\' && !/\s/.test(c)) return false;
+    }
+    return true;
+  };
+
+  let cursor = start;
+  let coveredRanges = 0;
+  for (const [rangeStart, rangeEnd] of ranges) {
+    if (rangeEnd <= cursor) continue;
+    if (rangeStart >= end) break;
+    const overlapStart = Math.max(start, rangeStart);
+    const overlapEnd = Math.min(end, rangeEnd);
+    if (overlapStart >= overlapEnd) continue;
+    if (!gapIsGlue(cursor, overlapStart)) return false;
+    cursor = overlapEnd;
+    coveredRanges++;
+  }
+  return coveredRanges > 0 && gapIsGlue(cursor, end);
+}
+
+/**
  * True when the match at `at` sits in a shell redirect destination
  * (`> path`, `>>"path"`, `>"$HOME/…"`, `1> path`, `2>> path`).
  * Used so path-target signals are not demoted to 'mention' merely because the
@@ -2479,12 +2829,13 @@ function classifyWithCtx(
   //     touch-approval-store at the quoted-data step below (#89 dual-review).
   if (pathTarget && pathTargetIsRedirectDestination(text, start)) return 'executed';
 
-  // 2) Quoted DATA — the span sits fully inside a data-argument quote. A span
-  //    crossing a quote boundary (`"rm" -rf /`) is contained in no quote range,
-  //    and a span touching a command substitution INSIDE that quote is executed
-  //    (`echo "$(rm -rf /)"`). Path-target names inside a pure echo/printf
-  //    string stay mentions (reference, not open).
-  if (contains(ctx.dataQuotes, start, end) && !intersects(ctx.substitutions, start, end)) return 'mention';
+  // 2) Quoted DATA — the substantive span sits inside one or more recognised
+  //    data-argument quotes. Multiple adjacent quoted argv words are still data
+  //    when only quote/backslash glue or whitespace bridges them. Unquoted flags,
+  //    paths, operators and substitutions remain executed. Path-target names
+  //    inside a pure echo/printf string stay mentions (reference, not open).
+  if (coveredByDataQuotes(ctx.dataQuotes, start, end, text)
+      && !intersects(ctx.substitutions, start, end)) return 'mention';
 
   // 3) Interpreter source (issue #89). Shell regions never reach here.
   //    Path-target rules stop here: naming the path IS the access, whether the
@@ -4226,7 +4577,186 @@ const ACTION_BY_FAMILY: Record<ToolFamily, string> = {
  * a command points at (issue #4) therefore comes in through the caller-supplied
  * `options.resolveScriptSource` seam — no `fs` here, ever.
  */
+const SEVERITY_RANK: Record<ToolGuardSeverity, number> = {
+  benign: 0, sensitive: 1, dangerous: 2, catastrophic: 3,
+};
+const DECISION_RANK: Record<ToolGuardDecision, number> = {
+  allow: 0, require_approval: 1, block: 2,
+};
+
+/**
+ * Strictly stronger, severity first and decision as the tie-break. Used to
+ * merge two independently-derived verdicts about the same call so the merge is
+ * MONOTONE: the answer is never weaker than either input, whichever way the
+ * two disagree. The decision tie-break covers the same-severity case, where a
+ * `block` and a `require_approval` are indistinguishable by tier alone and the
+ * merge would otherwise be free to pick the door.
+ */
+function outranks(a: ToolGuardVerdict, b: ToolGuardVerdict | null): boolean {
+  if (!b) return true;
+  if (SEVERITY_RANK[a.severity] !== SEVERITY_RANK[b.severity]) {
+    return SEVERITY_RANK[a.severity] > SEVERITY_RANK[b.severity];
+  }
+  return DECISION_RANK[a.decision] > DECISION_RANK[b.decision];
+}
+
+/**
+ * The walk could not read all of the command evidence, so the guard cannot say
+ * the call is clean. It goes through the SCHEMA-INVALID door: `require_approval`
+ * at the `dangerous` tier, carrying both `invalid-tool-input` and the specific
+ * `command-evidence-unscannable` reason code.
+ *
+ * Non-widenable, and that is derived from the reason codes rather than from the
+ * tier. Every plane already asks `isSchemaInvalid` — `plugins/openclaw/
+ * interceptor.ts` and `scripts/pre-tool-hook.mjs` both fold it into
+ * `unscannedBlock` before consulting `autoApprove`, `enforce:false` advisory
+ * mode or a brokered `pre_clear`, and `approval-broker.ts` refuses to broker it
+ * at all. So `autoApprove: ['invalid-tool-input']`, advisory mode and the #310
+ * retry grant cannot widen it here either. What the tier change buys is the
+ * affordance: an attended operator gets a real card and a retry row instead of
+ * a wall, and an unattended run still obeys the deny policy.
+ *
+ * It was `catastrophic` until the budget audit, on the reasoning that only the
+ * terminal tier was refused by every runtime. That was true, and it was also a
+ * catastrophic answer to a BENIGN shape: the trigger is structure alone — an
+ * object nested past the depth cap under any evidence key — so an ordinary JSON
+ * Schema or Kubernetes manifest passed as `args`/`input` was terminally denied
+ * on every plane with no card, no retry and no override, while containing no
+ * command at all. "The guard could not read it" is a reason to stop and ask,
+ * not a reason to declare a wipe.
+ */
+function unscannableEvidenceVerdict(toolName: string): ToolGuardVerdict {
+  return verdict(
+    'require_approval',
+    'dangerous',
+    classifyFamily(toolName),
+    'invalid_tool_input',
+    'tool input rejected: command evidence exceeded the scan budget (depth/leaf/byte) and could not be read in full',
+    ['invalid-tool-input', 'command-evidence-unscannable'],
+  );
+}
+
+/** Reason codes that mark a bag the evidence walk never finished reading. */
+const UNSCANNABLE_SIGNALS = ['invalid-tool-input', 'command-evidence-unscannable'] as const;
+
+/**
+ * Carry the unscannable reason codes onto a verdict that outranks (or ties) the
+ * unscannable one.
+ *
+ * At the terminal tier this was free: the unscannable verdict outranked
+ * everything, so it simply replaced the other answer. At the schema-invalid
+ * door it no longer does — an equal-rank `require_approval`/`dangerous` finding
+ * wins the merge — and dropping the codes with it would drop the very thing
+ * every plane reads to know the bag is non-widenable. The stronger verdict is
+ * kept intact, because it names the danger the operator has to act on; only the
+ * signals are unioned, which can never widen anything.
+ */
+function withUnscannableSignals(v: ToolGuardVerdict): ToolGuardVerdict {
+  if (UNSCANNABLE_SIGNALS.every(s => v.signals.includes(s))) return v;
+  return { ...v, signals: [...new Set([...v.signals, ...UNSCANNABLE_SIGNALS])] };
+}
+
+/**
+ * ── The one command-evidence pass ─────────────────────────────────────────
+ *
+ * Runs on the RAW bag, BEFORE the schema-mode branch, for every tool. It
+ * replaces the two partial rescans this module used to carry — one on the
+ * schema-REJECTION path, one on the annotate-STRIP path — which between them
+ * left three holes, all of them uninstall-class in the wrong direction (a real
+ * root wipe answered `allow`/`benign`):
+ *
+ *   1. a VALID exec bag was never rescanned at all, so `argv` was inert on
+ *      exactly the tools whose declared contract carries one;
+ *   2. both rescans propagated only `catastrophic`, so a dangerous-tier
+ *      `argv` (`sudo`, service stop, force-push) was discarded outright;
+ *   3. neither noticed a truncated walk, so a wipe past the leaf cap read as
+ *      a clean scan.
+ *
+ * Being pre-branch is what makes it exhaustive: the schema has not yet
+ * accepted, rejected, or stripped anything, so the same surfaces are scanned
+ * whatever the mode decides. The pass never widens — it only ever returns a
+ * verdict the caller merges with `outranks` — and it never re-enters itself,
+ * because every inner evaluation is made with the schema gate skipped.
+ */
+function commandEvidencePass(
+  toolName: string,
+  raw: unknown,
+  config?: IronDomeConfig,
+  options?: ToolGuardOptions,
+): ToolGuardVerdict | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const bag = raw as Record<string, unknown>;
+  const budget = newEvidenceBudget();
+  // Does anything downstream still reach an extractor with this bag? Annotate
+  // keeps every extractor key for every family, so its verdict is exactly that
+  // question — and it is the same call the rejection path makes, not a new
+  // policy this pass invents.
+  const annotated = validateToolInput(toolName, bag, 'annotate');
+  const mcpFronted = isMcpFrontedToolName(toolName);
+  // For MCP calls the downstream family comes from an untrusted final segment
+  // and may short-circuit as read/memory before scanning a retained `command`.
+  // Force every raw command alias into this exec-semantics pass; duplication is
+  // preferable to letting caller-chosen spelling suppress evidence.
+  const surfaces = commandEvidenceSurfaces(toolName, bag, budget, annotated.ok && !mcpFronted);
+  if (surfaces.length === 0 && !budget.exhausted) return null;
+
+  const extras = pathUrlFromRaw(bag);
+  let best: ToolGuardVerdict | null = null;
+  // MCP provenance is unavailable here, so its final name segment cannot decide
+  // that command evidence is read-only or memory-only. Scan the raw command
+  // surfaces with exec semantics; the outer/core verdict still uses the real
+  // tool name and the schema family remains unknown.
+  const evidenceToolName = mcpFronted ? 'Bash' : toolName;
+  for (const text of surfaces) {
+    const inner = evaluateToolCallCore(evidenceToolName, { ...extras, command: text }, config, options, true);
+    if (outranks(inner, best)) best = inner;
+    // Catastrophic dominance is terminal: nothing later can outrank it, and
+    // the remaining surfaces cannot make a wipe less true.
+    if (inner.severity === 'catastrophic') return inner;
+  }
+  if (budget.exhausted) {
+    const unscannable = unscannableEvidenceVerdict(toolName);
+    if (outranks(unscannable, best) || !best) return unscannable;
+    // Something the walk DID read already gates at least as hard. Keep that
+    // answer — it names a real danger — but stamp it unscannable, so the bag
+    // stays non-widenable on every plane.
+    return withUnscannableSignals(best);
+  }
+  return best;
+}
+
 export function evaluateToolCall(
+  toolName: string,
+  args: Record<string, unknown> = {},
+  config?: IronDomeConfig,
+  options?: ToolGuardOptions,
+  skipSchema = false,
+): ToolGuardVerdict {
+  // A rescan pass: no evidence pass (the outer call already ran it, and
+  // re-running it here would recurse), no drift observation.
+  if (skipSchema) return evaluateToolCallCore(toolName, args, config, options, true);
+
+  const evidence = commandEvidencePass(toolName, args, config, options);
+  // A catastrophic reading of the evidence is terminal and doorless, so the
+  // normal path cannot change the answer and is not run.
+  const core = evidence?.severity === 'catastrophic'
+    ? evidence
+    : evaluateToolCallCore(toolName, args, config, options, false);
+  let v = evidence && outranks(evidence, core) ? evidence : core;
+  // The evidence walk ran out of budget. Whichever verdict won the merge, the
+  // bag was never read in full, so the reason codes that make it non-widenable
+  // on every plane have to survive the merge — an equal-rank `core` answer
+  // (a schema rejection, a `sudo` the walk did reach) would otherwise carry the
+  // call through `autoApprove` or advisory mode as if the guard had read it.
+  if (evidence?.signals.includes('command-evidence-unscannable')) v = withUnscannableSignals(v);
+  // Contract drift rides ALONGSIDE the verdict and cannot change it. The
+  // recursive rescan passes (`skipSchema`) never re-observe: the outer call
+  // already did, and a doubled row would double-count in every summary.
+  const drift = contractDriftFor(toolName, args);
+  return drift ? { ...v, contractDrift: drift } : v;
+}
+
+function evaluateToolCallCore(
   toolName: string,
   args: Record<string, unknown> = {},
   config?: IronDomeConfig,
@@ -4238,43 +4768,72 @@ export function evaluateToolCall(
   // Other families: annotate (strip unknowns) so messaging/read tools with
   // free-form fields are not false-positive blocked; extractors never see junk keys.
   if (!skipSchema) {
-    // Enforce iff the SCHEMA family is exec/git, or the guard family is exec.
-    // Do NOT use classifyFamily==='git': that regex includes substring `github`,
-    // which would fail-closed GitHub-API tools under EXEC_KEYS (title/labels).
+    // Enforce iff the SCHEMA family is exec/git. `schemaFamilyForTool` matches
+    // exec vocabulary at SEGMENT boundaries (`(^|_)sh(_|$)`); `classifyFamily`
+    // matches it as a bare SUBSTRING (`/…|sh|…/`) because a tool whose name
+    // merely contains `sh` should still have its *arguments* weighed as exec.
+    // Those are different questions, and the substring answer must not pick the
+    // schema.
+    //
+    // Do NOT use classifyFamily==='git' either: that regex includes substring
+    // `github`, which would fail-closed GitHub-API tools under EXEC_KEYS.
+    //
+    // #454 — using classifyFamily here denied ordinary first-party work. `sh`
+    // is a substring of `Pu·sh·Notification` and of `Google_Drive__·sh·are_file`,
+    // so both were forced into EXEC_KEYS: the live `PushNotification.status`
+    // and `share_file.{fileId,emailAddress,role}` became UNKNOWN_KEYS and every
+    // real call hard-blocked as `invalid_tool_input` — a card attended, a
+    // failure-policy denial unattended. Neither tool can execute anything.
+    // Annotate strips those inert fields instead, and the extractor keys still
+    // survive annotate, so a `command`/`script`/`code` payload smuggled onto
+    // either name is scanned exactly as before.
     const schemaFam = schemaFamilyForTool(toolName);
-    const guardFam = classifyFamily(toolName);
     // #439: TaskOutput/TaskStop are not exec-family by name (no bash/shell
     // substring). Without this, validateToolInput annotates and strips unknown
     // keys instead of failing closed — so mapping them in shellControlSchemaFor
     // alone would not survive evaluateToolCall.
-    const mode = (hasExactSpecialToolSchema(toolName) || schemaFam === 'exec' || schemaFam === 'git' || guardFam === 'exec' || isNativeShellControlTool(toolName))
+    const mode = (hasExactSpecialToolSchema(toolName) || schemaFam === 'exec' || schemaFam === 'git' || isNativeShellControlTool(toolName))
       ? 'enforce'
       : 'annotate';
     const validated = validateToolInput(toolName, args, mode);
     if (!validated.ok) {
-      // #436: schema rejection must not mask a catastrophic payload. Annotate
-      // the RAW bag (strip unknown keys, keep extractor fields) and reuse the
-      // full evaluator with the schema gate skipped. If that is catastrophic,
-      // keep it terminal. Otherwise the original schema failure stands.
+      // #436: schema rejection must not mask a catastrophic payload. Every
+      // command/args/argv surface of the RAW bag was already scanned by the
+      // shared evidence pass in `evaluateToolCall`, so what is left to cover
+      // here is the catastrophic that needs the WHOLE bag at once — a path, a
+      // url and a body read together (secret egress) rather than a command
+      // string. Annotate the raw bag (strip unknown keys, keep extractor
+      // fields) and reuse the full evaluator with the schema gate skipped. If
+      // that is catastrophic, keep it terminal. Otherwise the schema failure
+      // stands.
       const annotated = validateToolInput(toolName, args, 'annotate');
-      const extras = pathUrlFromRaw(args);
-      const surfaces = commandEvidenceSurfaces(args);
-      if (surfaces.length === 0 && annotated.ok) {
-        const inner = evaluateToolCall(toolName, { ...annotated.args, ...extras }, config, options, true);
-        if (inner.severity === 'catastrophic') return inner;
-      }
-      for (const text of surfaces) {
-        const inner = evaluateToolCall(
+      if (annotated.ok) {
+        const inner = evaluateToolCallCore(
           toolName,
-          { ...extras, command: text },
+          { ...annotated.args, ...pathUrlFromRaw(args) },
           config,
           options,
           true,
         );
         if (inner.severity === 'catastrophic') return inner;
       }
+      // The scan came back clean and only the CONTRACT is wrong. That is a
+      // question for the operator, not a refusal: `require_approval` at the
+      // `dangerous` tier, which is what all three planes already do with it —
+      // the interceptor falls through to `requireApproval`, the Claude hook
+      // emits `ask`, and Hermes hands the caller the same door. Saying `block`
+      // here and then opening a door on two runtimes out of three was a plane
+      // lie: the core's own word for the answer must be the answer.
+      //
+      // What must NOT follow from the softer decision is a wider one. The
+      // `invalid_tool_input` action and the `invalid-tool-input` signal are
+      // carried unchanged, and every plane keys its non-widenable
+      // "unscanned" property off THAT rather than off `decision === 'block'`,
+      // so `autoApprove`, `enforce:false` advisory mode and broker pre-clear
+      // stay inert on a bag the guard could not close. See `unscannedBlock` in
+      // `plugins/openclaw/interceptor.ts` and `scripts/pre-tool-hook.mjs`.
       return verdict(
-        'block',
+        'require_approval',
         'dangerous',
         classifyFamily(toolName),
         'invalid_tool_input',
@@ -4288,7 +4847,7 @@ export function evaluateToolCall(
   const family = classifyFamily(toolName);
   const command = deobfuscateIfs(extractCommand(args));
   const path = extractPath(args);
-  const url = extractUrl(args);
+  const url = extractUrl(args, toolName);
 
   // Memory tools are handled by the dedicated memory-defence pipeline elsewhere.
   if (family === 'memory') {
@@ -4471,6 +5030,20 @@ export function evaluateToolCall(
   // 1c) Secret exfiltration: external egress carrying a credential/secret.
   const egressCommand = fold.content ? `${execCommand}\n${fold.content}` : execCommand;
   const egress = family === 'network' || EXTERNAL_EGRESS.test(egressCommand) || EXTERNAL_EGRESS.test(url);
+  // Destination locality is a UNION over every recipient, not a first-wins
+  // read. `looksExternal` weighs its destination together with the surrounding
+  // command text, and only the FIRST destination reaches that text (via
+  // `execSurface`), so a local `to` used to veto every later `cc`/`bcc`: one
+  // internal recipient made an external blind copy invisible to both the
+  // exfiltration rule below and the egress rule further down. The primary keeps
+  // its command context — nothing about the single-destination call changes —
+  // and each remaining recipient is judged on its own text, which is the only
+  // reading under which one external address makes the send external.
+  const externalPrimary = looksExternal(url, scanSurface);
+  const externalRecipient = externalPrimary
+    ? null
+    : recipientDestinations(args).find(r => looksExternal(r, '')) ?? null;
+  const externalDestination = externalPrimary || externalRecipient !== null;
   // #175 / #173: hint is surface-aware AND value-gated. Shell regions use
   // SECRET_HINT (literal values + key-material shapes). Interpreter source
   // uses FOLDED_SOURCE_SECRET_HINT (quoted literals / key material only).
@@ -4483,7 +5056,7 @@ export function evaluateToolCall(
       : [{ start: 0, end: scanSurface.length, lang: 'sh' as const, hasSink: false, folded: false }];
     secretSighted = slices.some((r) => secretHintExecutedIn(scanSurface, r));
   }
-  if (egress && secretSighted && looksExternal(url, scanSurface)) {
+  if (egress && secretSighted && externalDestination) {
     return withReview(verdict('block', 'catastrophic', family, 'data_exfiltration',
       'blocked likely secret exfiltration (credential bound for an external host)', ['secret-egress', ...opaqueSignals]));
   }
@@ -4587,12 +5160,16 @@ export function evaluateToolCall(
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
   // behind and is not egress (issue #73.2). Secret-bearing egress already hard
   // blocked at step 1b above regardless of method.
-  if (egress && looksExternal(url, scanSurface) && hasOutboundData(args, scanSurface)) {
+  if (egress && externalDestination && hasOutboundData(args, scanSurface)) {
+    // Name the destination that actually made this external, so an operator
+    // reading the card sees the external `cc` rather than the internal `to`
+    // that happens to sort first.
+    const externalSpanText = externalRecipient ?? url ?? '';
     dangerSignals.push('external-egress');
-    dangerSpan = dangerSpan ?? (url || 'external host');
+    dangerSpan = dangerSpan ?? (externalSpanText || 'external host');
     dangerEvidence.set('external-egress', {
       signal: 'external-egress',
-      span: fmtSpan(url || 'external host'),
+      span: fmtSpan(externalSpanText || 'external host'),
       tier: 'executed',
     });
   }

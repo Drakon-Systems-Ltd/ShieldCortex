@@ -22,7 +22,7 @@ const okPipeline = () => ({
 
 function run() {
   const captured: InterceptAuditEntry[] = [];
-  const i = createInterceptor(DEFAULT_CONFIG, okPipeline as never, {
+  const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, {
     evaluateToolCall: evaluateToolCall as never,
     onAuditEntry: (e) => captured.push(e),
   });

@@ -1164,7 +1164,7 @@ const PLUGIN_CONFIG_UI_HINTS = {
   },
   "interceptor.actionGuard.enabled": {
     label: "Action Guard",
-    help: "Gate dangerous shell/file/network/git tool calls before they execute. Catastrophic operations are always blocked while enabled.",
+    help: "Gate dangerous shell/file/network/git tool calls before they execute. Off by default. Catastrophic operations are blocked only while this is enabled.",
   },
   "interceptor.actionGuard.enforce": {
     label: "Enforce Action Guard",
@@ -3565,7 +3565,7 @@ export default {
           // so the status line reflects what before_tool_call will actually do.
           const rawInterceptor = cfg.interceptor;
           const guardCfg = {
-            ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] }),
+            ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] }),
             ...(rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.actionGuard ?? {} : {}),
           };
           const interceptorOn = (rawInterceptor && typeof rawInterceptor === 'object' ? rawInterceptor.enabled : undefined) ?? DEFAULT_INTERCEPTOR_CONFIG.enabled;
@@ -3643,7 +3643,7 @@ export default {
             enabled: rawInterceptorConfig.enabled ?? DEFAULT_INTERCEPTOR_CONFIG.enabled,
             severityActions: { ...DEFAULT_INTERCEPTOR_CONFIG.severityActions, ...rawInterceptorConfig.severityActions },
             failurePolicy: { ...DEFAULT_INTERCEPTOR_CONFIG.failurePolicy, ...rawInterceptorConfig.failurePolicy },
-            actionGuard: { ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] }), ...(rawInterceptorConfig.actionGuard ?? {}) },
+            actionGuard: { ...(DEFAULT_INTERCEPTOR_CONFIG.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] }), ...(rawInterceptorConfig.actionGuard ?? {}) },
           } : {}),
           logger: { info: api.logger?.info ?? console.log, warn: (api.logger as any)?.warn ?? console.warn },
         };
