@@ -135,6 +135,11 @@ describe('active canary end-to-end through the REAL interceptor (hermetic, no ga
     // rather than inheriting a suite-wide override aimed somewhere else.
     previousAuditDir = process.env.SHIELDCORTEX_AUDIT_DIR;
     process.env.SHIELDCORTEX_AUDIT_DIR = path.join(home, '.shieldcortex', 'audit');
+    fs.mkdirSync(path.join(home, '.shieldcortex'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.shieldcortex', 'config.json'),
+      JSON.stringify({ interceptor: { actionGuard: { enabled: true, enforce: true } } }),
+    );
   });
   afterEach(() => {
     if (previousAuditDir === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;

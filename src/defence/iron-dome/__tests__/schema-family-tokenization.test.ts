@@ -24,7 +24,7 @@
  */
 import { describe, expect, it } from '@jest/globals';
 import { evaluateToolCall } from '../tool-action-guard.js';
-import { enforceToolInput, schemaFamilyForTool } from '../tool-input-schema.js';
+import { enforceToolInput, hasExactSpecialToolSchema, schemaFamilyForTool } from '../tool-input-schema.js';
 
 const BIN = String.fromCharCode(114, 109);
 const RF = ['-', 'r', 'f'].join('');
@@ -88,9 +88,17 @@ describe('schema family — weak exec words need the whole name', () => {
   });
 
   it.each(EXEC_NAMES)('%s still fails closed on an unknown key', (tool) => {
-    expect(enforceToolInput(tool, { command: 'ls -la', evil_payload: 'x' }))
+    const raw = { command: 'ls -la', evil_payload: 'x' };
+    if (hasExactSpecialToolSchema(tool)) {
+      // Reviewed native contracts drop non-evidence extras as drift, not cards.
+      expect(enforceToolInput(tool, raw)).toMatchObject({ ok: true, strippedKeys: ['evil_payload'] });
+      expect(evaluateToolCall(tool, raw)).toMatchObject({ decision: 'allow' });
+      expect(evaluateToolCall(tool, raw).action).not.toBe('invalid_tool_input');
+      return;
+    }
+    expect(enforceToolInput(tool, raw))
       .toMatchObject({ ok: false, code: 'UNKNOWN_KEYS' });
-    expect(evaluateToolCall(tool, { command: 'ls -la', evil_payload: 'x' }))
+    expect(evaluateToolCall(tool, raw))
       .toMatchObject({ decision: 'require_approval', action: 'invalid_tool_input' });
   });
 
