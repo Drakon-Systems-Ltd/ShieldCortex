@@ -155,4 +155,27 @@ describe('Codex setup', () => {
     expect(content).toContain('[mcp_servers.other]');
     expect(content).toContain('model = "gpt-5.4"');
   });
+
+  it('is a no-op when the Codex config file does not exist', async () => {
+    await expect(uninstallCodex()).resolves.toBeUndefined();
+    expect(fs.existsSync(configPath())).toBe(false);
+  });
+
+  it('is a no-op when the shieldcortex-memory block is already absent', async () => {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    const before = [
+      '# keep this comment',
+      'model = "gpt-5.4"',
+      '',
+      '[mcp_servers.other]',
+      'command = "node"',
+      'args = ["/tmp/other.js"]',
+      '',
+    ].join('\n');
+    fs.writeFileSync(configPath(), before, 'utf-8');
+
+    await uninstallCodex();
+
+    expect(fs.readFileSync(configPath(), 'utf-8')).toBe(before);
+  });
 });

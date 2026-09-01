@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **#452:** `shieldcortex uninstall` now removes the Codex MCP block (`[mcp_servers.shieldcortex-memory]`) from `~/.codex/config.toml`. Unrelated Codex config stays. The standalone `shieldcortex codex uninstall` verb already did this; full uninstall did not.
+
 ## [4.54.15] - 2026-09-01
 
 **OpenClaw 2 exec storm + Action Guard off by default.** Shop hosts pick this up with `shieldcortex update`. Existing signed `enabled: true` stays on. Guard re-enable is not this cut.
