@@ -364,9 +364,9 @@ export function handleCloudConfig(args: string[]): void {
   // ── Action Guard core switches (enable/enforce) ──
   // The SIGNED path for actionGuard.enabled / actionGuard.enforce, same reason
   // the notify flags exist: hand-editing config.json for these keys invalidates
-  // the `_sig` HMAC and forces defenceMode strict. Both keys default ON when
-  // absent (`!== false` semantics on read), so disable/advisory write an
-  // explicit false.
+  // the `_sig` HMAC and forces defenceMode strict. Guard is OFF unless
+  // `enabled` is explicitly true. `enforce` still defaults ON when absent,
+  // so advisory writes an explicit false.
 
   if (args.includes('--action-guard-enable')) {
     setActionGuardCoreConfig({ enabled: true });

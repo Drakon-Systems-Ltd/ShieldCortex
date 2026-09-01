@@ -46,6 +46,14 @@ export interface ActionGuardConfig {
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
  * compile-time dependency on the main package across the plugin build boundary;
  * the real `evaluateToolCall` from `shieldcortex/defence` is compatible). */
+/** A reviewed native contract grew fields ShieldCortex does not read. Names
+ *  only — the guard drops the values before any scanner sees them. */
+export interface ContractDriftLike {
+  contract: string;
+  droppedKeys: string[];
+  truncated?: boolean;
+}
+
 export interface ToolGuardVerdictLike {
   decision: 'allow' | 'require_approval' | 'block';
   severity: 'benign' | 'sensitive' | 'dangerous' | 'catastrophic' | string;
@@ -53,6 +61,8 @@ export interface ToolGuardVerdictLike {
   action: string;
   reason: string;
   signals: string[];
+  /** Present only when a reviewed contract drifted. Never a verdict input. */
+  contractDrift?: ContractDriftLike;
   /** Rule → matched-span evidence behind `signals` (issue #192).
    *  #184: optional source/line/chain when the match came from folded script. */
   matches?: Array<{
@@ -277,6 +287,15 @@ export interface InterceptAuditEntry {
   escalated?: { by: 'session-taint'; from: string; to: string; reason: string };
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
+  /**
+   * Native contract drift: a reviewed exact-name host contract carried fields
+   * ShieldCortex does not read, which the guard dropped before validation and
+   * before any extractor. Key NAMES only, bounded — an operator can see THAT a
+   * host schema moved and which fields moved, without the row ever carrying a
+   * value from them. Advisory: this rides on the call's own outcome and never
+   * gates, denies, or mints a card.
+   */
+  contractDrift?: ContractDriftLike;
   /** #260 — plane origin so the session-guard summariser can find this row. */
   origin?: 'openclaw-interceptor';
   sessionKey?: string;
@@ -316,13 +335,11 @@ const DEFAULT_CONFIG: InterceptorConfig = {
     high: 'deny',
     critical: 'deny',
   },
-  // Action Guard on by default: catastrophic ops are blocked out of the box;
-  // recognised-dangerous ops are ENFORCED by default (P1/WS1) — attended → prompt,
-  // unattended → fail closed on failurePolicy. Populate `autoApprove` per agent to
-  // pre-approve the dangerous ops it legitimately needs unattended; set
-  // `enforce:false` to opt back down to warn-and-allow.
+  // Action Guard OFF by default: false-card storms on live OpenClaw exec
+  // bags made default-on an uninstall risk. Catastrophic gating is also off
+  // until the operator signs `shieldcortex config --action-guard-enable`.
   actionGuard: {
-    enabled: true,
+    enabled: false,
     enforce: true,
     autoApprove: [],
     auditAllows: true,
@@ -464,6 +481,23 @@ export function formatApprovalPrompt(input: ApprovalPromptInput): string {
     '',
     '[Approve]  [Deny]',
   ].join('\n');
+}
+
+/**
+ * The guard could not CLOSE this bag: the #412 tool-input schema rejected it,
+ * or the command-evidence walk ran out of budget before it had read all of it.
+ * Either way the call was never fully scanned, so no operator widening may
+ * apply to it — see `unscannedBlock` at the enforcement site.
+ *
+ * Read off the guard's own reason codes (`invalid_tool_input` /
+ * `invalid-tool-input`) rather than the decision tier, so it stays true
+ * whichever door the core decides this class deserves. Mirrored in
+ * `scripts/pre-tool-hook.mjs` (`isSchemaInvalid`) — the two enforcement
+ * surfaces must agree, and parity is asserted by the plane gate.
+ */
+function isSchemaInvalid(v: ToolGuardVerdictLike): boolean {
+  return v.action === 'invalid_tool_input'
+    || (Array.isArray(v.signals) && v.signals.includes('invalid-tool-input'));
 }
 
 // --- WS2 fail-closed fallback (guard load/eval failure) ---
@@ -946,7 +980,7 @@ export function createInterceptor(
   const bindAudit = options?.bindAudit;
   /** Args of the in-flight tool call — used only to mint #224 actionKey. */
   let lastCallArgs: Record<string, unknown> | undefined;
-  const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: true, enforce: true, autoApprove: [] };
+  const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
   // The judge rides the operator's own model pool, so its calls are their cost
@@ -1304,31 +1338,73 @@ export function createInterceptor(
       }
     }
 
+    // ── Native contract drift observation ────────────────────────────────
+    // A reviewed host contract grew fields ShieldCortex does not read. The
+    // guard already dropped them before nested validation and before any
+    // extractor, so nothing here can change the verdict — this is the record
+    // that the drop HAPPENED, which is the only way an operator learns a host
+    // schema moved without a card storm telling them. It rides on the call's
+    // own outcome rather than minting a row of its own, so a drifted benign
+    // allow stays a single row and volume discipline holds. `auditAllows:false`
+    // opts out with the rest of the recognised-allow stream.
+    const drift = v.contractDrift && v.contractDrift.droppedKeys.length > 0
+      ? { contractDrift: v.contractDrift }
+      : undefined;
+    if (v.decision === 'allow' && drift && actionGuardCfg.auditAllows !== false) {
+      const d = drift.contractDrift;
+      log.warn(
+        `[shieldcortex] action-guard CONTRACT DRIFT ${context.toolName} (${d.contract}): dropped unread field(s) ${d.droppedKeys.join(', ')}${d.truncated ? ', …' : ''}`,
+      );
+    }
+
     if (v.decision === 'allow') {
       // Issue #95: a RECOGNISED allow (the guard evaluated a known operation
       // family and let it through — severity above benign) leaves an audit
       // entry, so forensics can distinguish "scanned & allowed" from "never
       // scanned". Benign allows stay unaudited by design (volume discipline);
       // `actionGuard.auditAllows: false` opts the recognised entries off too.
-      if (v.severity !== 'benign' && actionGuardCfg.auditAllows !== false) {
-        const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-        emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), action: 'allow', outcome: 'allowed' });
+      if (actionGuardCfg.auditAllows !== false) {
+        if (v.severity !== 'benign') {
+          const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
+          emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...(drift ?? {}), action: 'allow', outcome: 'allowed' });
+        } else if (drift) {
+          // A benign allow is normally unaudited — but drift is the one thing
+          // about it worth keeping, so it rides on ONE row of its own rather
+          // than doubling the recognised-allow row above. The preview is the
+          // tool name and nothing else: a drifted field may hold a prompt or a
+          // token, and unlike `summariseToolArgs` this row must never be a
+          // channel for a value the guard just refused to read.
+          emitAudit({
+            ...guardAuditBase(context.toolName, v, `${context.toolName} :: contract-drift`),
+            ...drift,
+            action: 'allow',
+            outcome: 'allowed',
+          });
+        }
       }
       return;
     }
 
     const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-    const base = { ...guardAuditBase(context.toolName, v, preview), ...(escalation ? { escalated: escalation } : {}) };
+    const base = { ...guardAuditBase(context.toolName, v, preview), ...(escalation ? { escalated: escalation } : {}), ...(drift ?? {}) };
     const severity: Severity = v.severity === 'catastrophic' ? 'critical' : 'high';
 
     // Catastrophic / exfil — hard block, always enforced when the guard is enabled.
-    // #436: the door-less throw is for that tier only. A sub-catastrophic `block`
-    // (schema rejection) falls through to requireApproval so the operator can
-    // still say yes. autoApprove and enforce:false must not widen an unscanned
-    // call — they skip below.
+    // #436: the door-less throw is for that tier only. A schema rejection falls
+    // through to requireApproval so the operator can still say yes. autoApprove
+    // and enforce:false must not widen an unscanned call — they skip below.
     const terminalBlock = v.decision === 'block'
       && (v.severity === 'catastrophic' || v.severity === 'critical');
-    const unscannedBlock = v.decision === 'block' && !terminalBlock;
+    // Derived from the guard's OWN schema signal, not from `decision`. The core
+    // answers a scanned-clean schema rejection with `require_approval` (so all
+    // three planes say the same word about the same call), which means
+    // `decision === 'block'` no longer identifies the class. Keying off the
+    // decision here would silently re-open exactly what #436 closed:
+    // `{command:'…', evil:'…'}` running unscanned on an `enforce:false` host,
+    // and `autoApprove: ['unknown-keys']` becoming a blanket bypass of the #412
+    // closed schema. The residual `decision === 'block' && !terminalBlock` arm
+    // is kept for any sub-catastrophic block a future rule mints.
+    const unscannedBlock = isSchemaInvalid(v) || (v.decision === 'block' && !terminalBlock);
     if (terminalBlock) {
       // #227: release any lease this call minted early — a blocked action must
       // not leave a hold on that scope (self-heals at TTL if release fails).

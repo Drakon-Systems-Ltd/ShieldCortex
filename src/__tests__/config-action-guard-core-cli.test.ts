@@ -5,9 +5,9 @@
  * ~/.shieldcortex/config.json — which invalidated the embedded `_sig` HMAC and
  * forced defenceMode strict. These flags write through
  * mutateRawConfig/writeRawConfig, so the config is re-signed and the integrity
- * check stays green. Both keys default ON when absent (`!== false` read
- * semantics, mirroring doctor's effective-config merge), so disable/advisory
- * must write an explicit false.
+ * check stays green. Guard is OFF unless `enabled` is explicitly true.
+ * `enforce` still defaults ON when absent, so advisory writes an explicit
+ * false.
  */
 
 import fs from 'fs';
@@ -46,9 +46,9 @@ afterEach(() => {
 });
 
 describe('config --action-guard-* core flags', () => {
-  it('defaults ON for both keys when the config has no actionGuard block', () => {
+  it('defaults OFF for enabled when the config has no actionGuard block', () => {
     const cfg = getActionGuardCoreConfig();
-    expect(cfg.enabled).toBe(true);
+    expect(cfg.enabled).toBe(false);
     expect(cfg.enforce).toBe(true);
   });
 

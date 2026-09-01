@@ -30,6 +30,11 @@ describe('action-guard hook install (PreToolUse)', () => {
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
     process.env.SHIELDCORTEX_CONFIG_DIR = tmpScDir;
+    fs.mkdirSync(path.join(tmpHome, '.shieldcortex'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpHome, '.shieldcortex', 'config.json'),
+      JSON.stringify({ actionGuard: { enabled: true, enforce: true } }),
+    );
     jest.resetModules();
     jest.spyOn(console, 'log').mockImplementation(() => {});
   });

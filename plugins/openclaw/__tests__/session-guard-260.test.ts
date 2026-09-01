@@ -45,7 +45,7 @@ function makeApi() {
     logger: { info: () => {}, warn: () => {} },
     on: (name: string, handler: (...args: any[]) => any) => { hooks[name] = handler; },
     registerCommand: () => {},
-    runtime: { config: { current: () => ({ plugins: { entries: { 'shieldcortex-realtime': { enabled: true, config: {} } } } }) } },
+    runtime: { config: { current: () => ({ plugins: { entries: { 'shieldcortex-realtime': { enabled: true, config: { interceptor: { actionGuard: { enabled: true } } } } } } }) } },
   };
   return { api, hooks };
 }
@@ -73,7 +73,7 @@ describe('#260 interceptor stamps origin + sessionKey and indexes a deny', () =>
     const captured: InterceptAuditEntry[] = [];
     const indexed: InterceptAuditEntry[] = [];
     const sessionId = 'agent:main:cron:backup';
-    const { handleToolCall } = createInterceptor(DEFAULT_CONFIG, okPipeline as never, {
+    const { handleToolCall } = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, {
       evaluateToolCall: evaluateToolCall as never,
       onAuditEntry: (e) => captured.push(e),
       sessionGuard: {
@@ -98,7 +98,7 @@ describe('#260 interceptor stamps origin + sessionKey and indexes a deny', () =>
   it('a row without a session id still stamps origin, and is not indexed under a forged key', async () => {
     const indexed: InterceptAuditEntry[] = [];
     const captured: InterceptAuditEntry[] = [];
-    const { handleToolCall } = createInterceptor(DEFAULT_CONFIG, okPipeline as never, {
+    const { handleToolCall } = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, {
       evaluateToolCall: evaluateToolCall as never,
       onAuditEntry: (e) => captured.push(e),
       sessionGuard: {

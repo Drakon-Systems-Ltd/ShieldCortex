@@ -658,6 +658,16 @@ function maybePrint411Notice(currentVersion: string, mainUpdated: boolean): void
   process.stdout.write(`     ${paint('gray', 'changelog: ')}${paint('cyan', 'https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md')}\n\n`);
 }
 
+function maybePrintActionGuardDefaultOffNotice(mainUpdated: boolean): void {
+  if (!mainUpdated) return;
+  process.stdout.write('\n');
+  process.stdout.write(`  ${paint('yellow', '!')}  ${paint('bold', 'Action Guard is now OFF by default')}\n`);
+  process.stdout.write('     False approval cards on ordinary OpenClaw exec calls were going nowhere.\n');
+  process.stdout.write('     Catastrophic tool gating is off until you turn Guard back on.\n');
+  process.stdout.write(`     ${paint('gray', 'enable: ')}${paint('cyan', 'shieldcortex config --action-guard-enable')}\n`);
+  process.stdout.write(`     ${paint('gray', 'status: ')}${paint('cyan', 'shieldcortex config --cloud-status')}\n\n`);
+}
+
 // ── #171: the two install-path fixes update was missing ─────
 
 /**
@@ -819,6 +829,7 @@ export async function runUpdate(): Promise<void> {
   }
 
   maybePrint411Notice(currentVersion, mainUpdated);
+  maybePrintActionGuardDefaultOffNotice(mainUpdated);
   await maybePrintDashboardHint();
 
   // Closing panel — last write (design lock v3).

@@ -32,7 +32,7 @@ const okPipeline = () => ({
 
 function makeCapturingInterceptor(overrides: Record<string, unknown> = {}) {
   const entries: InterceptAuditEntry[] = [];
-  const config = { ...DEFAULT_CONFIG, ...overrides } as any;
+  const config = { ...DEFAULT_CONFIG, ...overrides, actionGuard: { enabled: true, enforce: true, autoApprove: [], ...(overrides.actionGuard || {}) } } as any;
   const i = createInterceptor(config, okPipeline as any, {
     evaluateToolCall: evaluateToolCall as any,
     onAuditEntry: (e) => entries.push(e),

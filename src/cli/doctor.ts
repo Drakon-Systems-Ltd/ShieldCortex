@@ -2287,7 +2287,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       ? (raw.interceptor.actionGuard as Record<string, unknown>)
       : null;
     const merged = { ...(alias ?? {}), ...(top ?? {}) };
-    const effective = { enabled: merged.enabled !== false, enforce: merged.enforce !== false };
+    const effective = { enabled: merged.enabled === true, enforce: merged.enforce !== false };
     // Which key set this value — top-level when it has the key, else the alias.
     const provenance = (k: string) =>
       top && k in top ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;

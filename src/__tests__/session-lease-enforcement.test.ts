@@ -67,6 +67,10 @@ let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'sc-lease-e2e-'));
   mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+  writeFileSync(
+    join(home, '.shieldcortex', 'config.json'),
+    JSON.stringify({ actionGuard: { enabled: true, enforce: true } }),
+  );
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 

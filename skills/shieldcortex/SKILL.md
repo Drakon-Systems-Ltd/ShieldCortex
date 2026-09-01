@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 4.54.14
+  version: 4.54.15
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -214,7 +214,7 @@ shieldcortex stats               # Memory statistics
 
 ### Security Scanning
 ```bash
-shieldcortex scan "text"                    # Scan text through defence pipeline
+shieldcortex scan "text"                    # Scan text (exit 0=allow, 1=caught, 2=usage, 3=tool-fail; parse stdout)
 shieldcortex scan-skill path/to/SKILL.md    # Scan one instruction file for threats
 shieldcortex scan-skills                    # Scan all discovered agent instruction files
 shieldcortex audit                          # Full security audit (memory, env, MCP configs, rules files)

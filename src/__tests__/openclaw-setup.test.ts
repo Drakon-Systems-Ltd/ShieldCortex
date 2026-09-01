@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 describe('OpenClaw setup', () => {
   const originalHome = process.env.HOME;
@@ -14,9 +14,24 @@ describe('OpenClaw setup', () => {
   let logSpy: jest.SpiedFunction<typeof console.log>;
   let warnSpy: jest.SpiedFunction<typeof console.warn>;
   let errorSpy: jest.SpiedFunction<typeof console.error>;
+  let previousExitCode: string | number | null | undefined;
+  let suiteEntryExitCode: string | number | null | undefined;
+
+  beforeAll(() => {
+    suiteEntryExitCode = process.exitCode;
+  });
+
+  // Regression guard (#exit-code-leak): installOpenClawHook() sets
+  // process.exitCode = 1 whenever it cannot prove the plugin loaded — which is
+  // always true under a hermetic temp HOME. Without the per-test restore below
+  // this suite passes every assertion and still exits 1 when run alone.
+  afterAll(() => {
+    expect(process.exitCode).toBe(suiteEntryExitCode);
+  });
 
   beforeEach(() => {
     jest.resetModules();
+    previousExitCode = process.exitCode;
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-openclaw-'));
     process.env.HOME = tempHome;
     process.env.USERPROFILE = tempHome;
@@ -82,6 +97,7 @@ describe('OpenClaw setup', () => {
     } else {
       process.env.SHIELDCORTEX_PLUGIN_SOURCE = originalPluginSource;
     }
+    process.exitCode = previousExitCode;
     fs.rmSync(tempHome, { recursive: true, force: true });
     fs.rmSync(tempPluginSource, { recursive: true, force: true });
   });

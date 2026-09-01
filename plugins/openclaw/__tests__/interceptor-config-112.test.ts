@@ -150,7 +150,7 @@ describe('#112 — end-to-end: plugin config controls the before_tool_call gate'
   const intercepted = (result: any): boolean => Boolean(result && (result.requireApproval || result.block));
 
   it('CONTROL (harness validity): default config arms the gate — dangerous op is a native card', async () => {
-    const { api, hooks } = makeApi(rootConfigWith({}));
+    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enabled: true } } }));
     plugin.register(api);
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });
     expect(result?.requireApproval).toBeTruthy();
@@ -177,21 +177,21 @@ describe('#112 — end-to-end: plugin config controls the before_tool_call gate'
   });
 
   it('actionGuard.enforce:false → advisory mode: dangerous op allowed without approval', async () => {
-    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enforce: false } } }));
+    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enabled: true, enforce: false } } }));
     plugin.register(api);
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });
     expect(result).toBeUndefined();
   });
 
   it('actionGuard.enforce:false still hard-blocks catastrophic ops (safety floor preserved)', async () => {
-    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enforce: false } } }));
+    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enabled: true, enforce: false } } }));
     plugin.register(api);
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'rm -rf /' } });
     expect(result?.block).toBe(true);
   });
 
   it('defaults only fill gaps: partial interceptor config keeps the secure defaults for unspecified sections', async () => {
-    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { severityActions: { high: 'require_approval' } } }));
+    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enabled: true }, severityActions: { high: 'require_approval' } } }));
     plugin.register(api);
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });
     expect(intercepted(result)).toBe(true);
@@ -204,8 +204,8 @@ describe('#112 — deep-merge semantics: shield config + plugin override, per-ke
   it('plugin config deep-merges over shield config instead of wholesale-replacing the interceptor object', async () => {
     // Shield config file contributes autoApprove; plugin config contributes
     // enforce:false. BOTH must survive into the effective config.
-    stubRuntime({ interceptor: { actionGuard: { autoApprove: ['file-delete'] } } });
-    const { api, commands } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enforce: false } } }));
+    stubRuntime({ interceptor: { actionGuard: { enabled: true, autoApprove: ['file-delete'] } } });
+    const { api, commands } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enabled: true, enforce: false } } }));
     plugin.register(api);
     const status = await commands['shieldcortex-status'].handler();
     expect(status.text).toContain('Action guard: warn (1 auto-approved)');
@@ -229,7 +229,7 @@ describe('#112 — deep-merge semantics: shield config + plugin override, per-ke
 
 describe('#310 — OpenClaw native approval cards', () => {
   it('cron/heartbeat sessions fail closed immediately — no card', async () => {
-    const { api, hooks } = makeApi(rootConfigWith({}));
+    const { api, hooks } = makeApi(rootConfigWith({ interceptor: { actionGuard: { enabled: true } } }));
     plugin.register(api);
     const event = { toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } };
     const cron = await hooks['before_tool_call'](event, { sessionKey: 'agent:main:cron:abc' });

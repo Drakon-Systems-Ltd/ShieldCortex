@@ -76,7 +76,10 @@ describe('pre-tool hook — #209 interceptor.actionGuard alias resolution', () =
   }
 
   it('honours the deprecated alias when no top-level block exists (back-compat)', async () => {
-    writeConfig({ interceptor: { actionGuard: { enforce: false } } });
+    writeConfig({
+      actionGuard: { enabled: true, enforce: false },
+      interceptor: { actionGuard: { enforce: false } },
+    });
     const result = await runHook(bashCall('sudo systemctl stop nginx'));
     expect(result.code).toBe(0);
     // enforce:false via the alias → warn-mode: stderr warning, no decision.
@@ -86,7 +89,7 @@ describe('pre-tool hook — #209 interceptor.actionGuard alias resolution', () =
 
   it('top-level actionGuard wins over a conflicting alias value', async () => {
     writeConfig({
-      actionGuard: { enforce: true },
+      actionGuard: { enabled: true, enforce: true },
       interceptor: { actionGuard: { enforce: false } },
     });
     const result = await runHook(bashCall('sudo systemctl stop nginx'));
@@ -99,7 +102,7 @@ describe('pre-tool hook — #209 interceptor.actionGuard alias resolution', () =
   it('alias fills per-key gaps the top-level block does not set', async () => {
     // Top-level sets only enforce; the alias's autoApprove must still apply.
     writeConfig({
-      actionGuard: { enforce: true },
+      actionGuard: { enabled: true, enforce: true },
       interceptor: { actionGuard: { autoApprove: ['sudo_command'] } },
     });
     const result = await runHook(bashCall('sudo systemctl stop nginx'));
@@ -110,7 +113,7 @@ describe('pre-tool hook — #209 interceptor.actionGuard alias resolution', () =
 
   it('reports a conflict on stderr and points at the doctor migration', async () => {
     writeConfig({
-      actionGuard: { enforce: true },
+      actionGuard: { enabled: true, enforce: true },
       interceptor: { actionGuard: { enforce: false } },
     });
     const result = await runHook(bashCall('sudo systemctl stop nginx'));
@@ -121,7 +124,7 @@ describe('pre-tool hook — #209 interceptor.actionGuard alias resolution', () =
 
   it('catastrophic deny survives every alias combination', async () => {
     writeConfig({
-      actionGuard: { enforce: false },
+      actionGuard: { enabled: true, enforce: false },
       interceptor: { actionGuard: { enforce: false, enabled: true } },
     });
     const result = await runHook(bashCall('rm -rf /'));

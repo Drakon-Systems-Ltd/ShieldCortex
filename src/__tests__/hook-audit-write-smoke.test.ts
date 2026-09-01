@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,7 +85,14 @@ function auditFiles(home: string): Array<{ name: string; bytes: number; body: st
 
 let home: string;
 
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'sc-audit-smoke-')); });
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), 'sc-audit-smoke-'));
+  mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+  writeFileSync(
+    join(home, '.shieldcortex', 'config.json'),
+    JSON.stringify({ actionGuard: { enabled: true, enforce: true } }),
+  );
+});
 afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
 describe('the action guard writes a real audit row on this platform', () => {

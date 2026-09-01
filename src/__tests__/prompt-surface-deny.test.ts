@@ -74,6 +74,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-prompt-surface-'));
     process.env.HOME = tempHome;
+    writeActionGuardConfig({});
   });
   afterEach(() => {
     process.env.HOME = originalHome;
@@ -83,7 +84,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
   function writeActionGuardConfig(actionGuard: Record<string, unknown>): void {
     const dir = path.join(tempHome, '.shieldcortex');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ actionGuard }));
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, ...actionGuard } }));
   }
 
   function lastAudit(): Record<string, unknown> {
@@ -197,7 +198,9 @@ describe('Action Guard hook — prompt-surface rule', () => {
     it('does not write local denials through a symlinked .shieldcortex directory', async () => {
       const outside = path.join(tempHome, 'outside-shieldcortex');
       fs.mkdirSync(outside);
+      fs.rmSync(path.join(tempHome, '.shieldcortex'), { recursive: true, force: true });
       fs.symlinkSync(outside, path.join(tempHome, '.shieldcortex'));
+      fs.writeFileSync(path.join(outside, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true } }));
 
       const result = await runHook(call(DANGEROUS_COMMAND, 'bypassPermissions'));
 

@@ -784,7 +784,7 @@ export function setActionGuardNotifyConfig(updates: Partial<ActionGuardNotifyCon
 // ── Action Guard core switches (enable/enforce) ───────
 
 export interface ActionGuardCoreConfig {
-  /** Master switch. Default ON when the key is absent (`enabled !== false`). */
+  /** Master switch. Default OFF when the key is absent (`enabled === true` only). */
   enabled: boolean;
   /** When true, gate dangerous ops. When false, warn-mode — dangerous ops log
    *  but are not gated (catastrophic may still block). Default ON when absent. */
@@ -795,7 +795,8 @@ export interface ActionGuardCoreConfig {
  * EFFECTIVE core config, resolved the same way both runtime surfaces and
  * doctor's posture check resolve it (#209): top-level `actionGuard` merged
  * over the deprecated `interceptor.actionGuard` alias (top-level wins per
- * key), with default-ON semantics — a key is only off when explicitly false.
+ * key). Guard is OFF unless `enabled` is explicitly true — default-on
+ * minted false cards on ordinary OpenClaw exec bags.
  */
 export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
   const raw = readRawConfig();
@@ -807,7 +808,7 @@ export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
     : {};
   const merged = { ...alias, ...actionGuardBlock(raw) };
   return {
-    enabled: merged.enabled !== false,
+    enabled: merged.enabled === true,
     enforce: merged.enforce !== false,
   };
 }
