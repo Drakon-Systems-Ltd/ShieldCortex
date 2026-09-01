@@ -80,7 +80,9 @@ describe('#197 — the manifest rule: exactly one fate per artifact', () => {
     const src = fs.readFileSync(path.join(repoRoot, 'src', 'setup', 'uninstall.ts'), 'utf-8');
     const start = src.indexOf('export async function uninstallAll');
     expect(start).toBeGreaterThan(-1);
-    expect(src.slice(start)).toContain('await uninstallCodex();');
+    const next = src.indexOf('\nexport ', start + 1);
+    const body = next === -1 ? src.slice(start) : src.slice(start, next);
+    expect(body).toContain('await uninstallCodex();');
   });
 });
 
