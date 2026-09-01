@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [4.54.15] - 2026-09-01
+
+**OpenClaw 2 exec storm + Action Guard off by default.** Shop hosts pick this up with `shieldcortex update`. Existing signed `enabled: true` stays on. Guard re-enable is not this cut.
+
 ### Changed
 - **Action Guard is OFF by default.** Absent `actionGuard.enabled` no longer means on. Fresh installs and upgrades without an explicit signed enable leave tool calls ungated, including catastrophic checks. `shieldcortex update` prints that notice and the enable command. Existing hosts with `enabled: true` stay on.
 
