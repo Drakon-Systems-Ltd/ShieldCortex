@@ -2491,7 +2491,8 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
  * loud — and it is deliberately harder to satisfy than most:
  *
  *   - It WARNs when denials landed inside runs that reported ok.
- *   - It WARNs when it could not look (denial log unreadable, `cron_run_logs`
+ *   - It WARNs when it could not look (denial log unreadable, the store's
+ *     run table — `cron_run_logs` gen1 / `cron_run_receipts` gen2 —
  *     missing/unreadable). Never `info`, never a pass with a zeroed count: a
  *     "0 silent denials" derived from a table we could not read is the same
  *     green lie in different handwriting.

@@ -541,9 +541,11 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
   // binary cancelled), skipped silently when no copy existed, and reported
   // "@latest installed" off the exit code without reading what landed. The
   // measured result: a box carrying a skill 21 releases stale with every
-  // surface green. Now: resolved binary, acknowledge flag, verify-by-reading,
+  // surface green. Now: resolved binary, feature-detected acknowledge flag
+  // (#456 — OpenClaw 2026.8.1 removed `--acknowledge-clawhub-risk`, so a
+  // hardcoded flag is a bet against the installed binary), verify-by-reading,
   // and the skip names the command that installs.
-  const { resolveOpenClawBinary, findInstalledSkillDirs, readInstalledSkillVersion } =
+  const { resolveOpenClawBinary, resolveSkillInstallArgs, findInstalledSkillDirs, readInstalledSkillVersion } =
     await import('../setup/openclaw.js');
   if (findInstalledSkillDirs(home).length === 0) {
     return await step('OpenClaw skill', async () => ({
@@ -555,7 +557,7 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
     const bin = resolveOpenClawBinary(home);
     if (!bin) return { status: 'warn' as const, summary: 'openclaw binary not found — run `shieldcortex openclaw skill install`' };
     try {
-      await runQuiet(bin, ['skills', 'install', 'shieldcortex', '--force', '--acknowledge-clawhub-risk'], {
+      await runQuiet(bin, resolveSkillInstallArgs(bin, { home }), {
         timeout: 120000,
         env: { ...process.env, HOME: home },
       });
