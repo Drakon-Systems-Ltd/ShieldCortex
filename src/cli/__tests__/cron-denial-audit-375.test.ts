@@ -87,6 +87,75 @@ function buildStore(
   }
 }
 
+interface Gen2JobSeed {
+  job_id: string;
+  name?: string;
+  enabled?: unknown;
+  job_json?: string | null;
+}
+interface ReceiptSeed {
+  job_id: string;
+  status: string;
+  started_at_ms: number;
+  finished_at_ms?: number | null;
+}
+
+/**
+ * Writable ONLY here — the OC2 (gen2, #456) fixture. The full measured
+ * 2026.8.1 column sets: cron_jobs has no payload_message/trigger_script, run
+ * outcomes live in cron_run_receipts (no session_key, no run_at_ms, and
+ * request_run_id NULL as sampled live).
+ */
+function buildGen2Store(
+  dbPath: string,
+  shape: { jobs?: Gen2JobSeed[]; receipts?: ReceiptSeed[]; omitReceipts?: boolean } = {},
+): void {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  try {
+    db.prepare(
+      `CREATE TABLE cron_jobs (store_key TEXT, job_id TEXT, declaration_key TEXT,
+        owner_agent_id TEXT, name TEXT, description TEXT, enabled INTEGER, agent_id TEXT,
+        payload_kind TEXT, job_json TEXT, state_json TEXT, runtime_updated_at_ms INTEGER,
+        schedule_identity TEXT, sort_order INTEGER, updated_at INTEGER)`,
+    ).run();
+    for (const j of shape.jobs ?? []) {
+      db.prepare(
+        `INSERT INTO cron_jobs (store_key, job_id, owner_agent_id, name, enabled, agent_id,
+          payload_kind, job_json, state_json, runtime_updated_at_ms, sort_order, updated_at)
+         VALUES ('default', ?, 'main', ?, ?, 'main', 'agentTurn', ?, '{}', 0, 0, 0)`,
+      ).run(j.job_id, j.name ?? j.job_id, (j.enabled ?? 1) as never, j.job_json ?? null);
+    }
+    if (!shape.omitReceipts) {
+      db.prepare(
+        `CREATE TABLE cron_run_receipts (receipt_id TEXT, store_key TEXT, job_id TEXT,
+          config_revision INTEGER, agent_id TEXT, request_run_id TEXT, status TEXT,
+          owner_pid INTEGER, owner_start_time INTEGER, started_at_ms INTEGER,
+          finished_at_ms INTEGER, error_text TEXT)`,
+      ).run();
+      let n = 0;
+      for (const r of shape.receipts ?? []) {
+        db.prepare(
+          `INSERT INTO cron_run_receipts (receipt_id, store_key, job_id, config_revision,
+            agent_id, request_run_id, status, owner_pid, owner_start_time, started_at_ms,
+            finished_at_ms, error_text)
+           VALUES (?, 'default', ?, 1, 'main', NULL, ?, 4242, ?, ?, ?, NULL)`,
+        ).run(`receipt-${(n += 1)}`, r.job_id, r.status, r.started_at_ms, r.started_at_ms, r.finished_at_ms ?? null);
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+/** The live gen2 payload shape: the message is a string leaf in job_json. */
+function gen2JobJson(message: string): string {
+  return JSON.stringify({
+    schedule: { kind: 'cron', expr: '0 9 * * *' },
+    payload: { kind: 'agentTurn', message },
+  });
+}
+
 describe('cron denial correlation (#375 P2)', () => {
   const NOW = 1_760_000_000_000;
   let home: string;
@@ -377,6 +446,150 @@ describe('cron denial correlation (#375 P2)', () => {
     });
     writeDenials([denial()]);
     expect([...deniedScriptPaths(correlate())]).toEqual([[scriptA, 'sweep']]);
+  });
+
+  // -- OC2 store (gen2, #456) -----------------------------------
+  // cron_run_receipts has no session_key, so the join is containment in the
+  // SAME job's run window — exact in time, never nearest-run.
+
+  describe('gen2 containment join', () => {
+    test('a denial inside a receipt window with status ok is silent', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep', job_json: gen2JobJson(`python3 ${scriptA}`) }],
+        receipts: [
+          { job_id: JOB_A, status: 'ok', started_at_ms: NOW - 90_000, finished_at_ms: NOW - 30_000 },
+        ],
+      });
+      writeDenials([denial()]); // detectedAt NOW - 60s — inside the window
+
+      const report = correlate();
+      expect(report.cannotCorrelate).toBeNull();
+      expect(report.attributedCount).toBe(1);
+      expect(report.unconfirmedCount).toBe(0);
+      expect(report.silentCount).toBe(1);
+      expect(report.jobs[0]).toMatchObject({
+        jobId: JOB_A,
+        name: 'oc2 sweep',
+        denialCount: 1,
+        silentCount: 1,
+        pinnablePaths: [scriptA],
+      });
+    });
+
+    test('a containing receipt that reported its failure is not silent', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
+        receipts: [
+          { job_id: JOB_A, status: 'error', started_at_ms: NOW - 90_000, finished_at_ms: NOW - 30_000 },
+        ],
+      });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      expect(report.jobs[0].denialCount).toBe(1);
+      expect(report.jobs[0].silentCount).toBe(0);
+      // The run demonstrably failed, so the denial is not silent — but a
+      // non-ok containment is not a clean ruling either: unconfirmed.
+      expect(report.unconfirmedCount).toBe(1);
+    });
+
+    test('a still-running receipt (finished_at_ms NULL) is never a silent claim', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
+        receipts: [{ job_id: JOB_A, status: 'running', started_at_ms: NOW - 90_000, finished_at_ms: null }],
+      });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      // An open window is a run still in flight: unconfirmed, never silent.
+      expect(report.unconfirmedCount).toBe(1);
+      expect(report.silentCount).toBe(0);
+    });
+
+    test('an ok receipt with finished_at_ms NULL is an open window, never an infinite silent claim', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
+        // Status already stamped ok but finish never recorded — a crashed
+        // writer could leave this forever. It must not become a permanent
+        // "every future denial is silent" verdict.
+        receipts: [{ job_id: JOB_A, status: 'ok', started_at_ms: NOW - 90_000, finished_at_ms: null }],
+      });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      expect(report.silentCount).toBe(0);
+      expect(report.unconfirmedCount).toBe(1);
+    });
+
+    test('overlapping same-job receipts must be unanimously ok before silence is ruled', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
+        receipts: [
+          // An earlier containing run errored…
+          { job_id: JOB_A, status: 'error', started_at_ms: NOW - 120_000, finished_at_ms: NOW - 30_000 },
+          // …and a later containing run reported ok. The ok must not outvote
+          // the failure: unconfirmed, not silent.
+          { job_id: JOB_A, status: 'ok', started_at_ms: NOW - 90_000, finished_at_ms: NOW - 20_000 },
+        ],
+      });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      expect(report.silentCount).toBe(0);
+      expect(report.unconfirmedCount).toBe(1);
+      expect(report.jobs[0].denialCount).toBe(1);
+    });
+
+    test('a denial outside every run window of its job is unconfirmed, never silent', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }, { job_id: JOB_B, name: 'other' }],
+        receipts: [
+          // This job's run finished before the denial fired…
+          { job_id: JOB_A, status: 'ok', started_at_ms: NOW - 300_000, finished_at_ms: NOW - 200_000 },
+          // …and ANOTHER job's run containing the timestamp must not match.
+          { job_id: JOB_B, status: 'ok', started_at_ms: NOW - 90_000, finished_at_ms: NOW - 30_000 },
+        ],
+      });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      expect(report.attributedCount).toBe(1);
+      expect(report.unconfirmedCount).toBe(1);
+      expect(report.silentCount).toBe(0);
+      expect(report.jobs[0].denialCount).toBe(1);
+    });
+
+    test('gen2 cron_jobs with no cron_run_receipts is cannot-correlate naming the receipts table', () => {
+      buildGen2Store(dbPath, { jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }], omitReceipts: true });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      expect(report.cannotCorrelate).toContain('cron_run_receipts');
+      expect(report.silentCount).toBe(0);
+      expect(report.jobs[0].denialCount).toBe(1);
+      expect(report.jobs[0].silentCount).toBe(0);
+    });
+
+    test('a receipts query that dies mid-correlation drops every silence claim', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
+        receipts: [
+          { job_id: JOB_A, status: 'ok', started_at_ms: NOW - 90_000, finished_at_ms: NOW - 30_000 },
+        ],
+      });
+      writeDenials([denial()]);
+      expect(correlate().silentCount).toBe(1); // sanity: clean without the injected failure
+
+      const report = correlate({
+        openStore: () => {
+          throw new Error('database disk image is malformed');
+        },
+      });
+      expect(report.cannotCorrelate).toContain('cron_run_receipts');
+      expect(report.storeStatus).toBe('unreadable');
+      expect(report.silentCount).toBe(0);
+      expect(report.jobs[0].silentCount).toBe(0);
+    });
   });
 
   // -- Tail cap -------------------------------------------------
