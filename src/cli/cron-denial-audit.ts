@@ -386,15 +386,23 @@ export function correlateCronDenials(opts: CorrelateCronDenialsOptions = {}): Cr
   let db: SqliteDatabase | null = null;
   try {
     db = (opts.openStore ?? openCronStore)(dbPath);
-    // gen1: exact session_key match. gen2: containment — the receipt of the
+    // gen1: exact session_key match. gen2: containment — receipts of the
     // same job whose run window contains the denial timestamp (see module
     // header). Both are exact joins; neither is nearest-run.
+    //
+    // gen2 reads EVERY containing receipt, not the latest, and rules silent
+    // only when they unanimously finished `ok`:
+    //   - overlapping receipts where any containing row errored → not
+    //     silent (a later `ok` window must not outvote the failure), and
+    //   - a receipt with `finished_at_ms` NULL is a run still in flight —
+    //     an open window is never an infinite silent claim.
+    // Anything short of unanimous finished-ok is unconfirmed: fail toward
+    // the warning, never toward the green.
     const findRun = gen2
       ? db.prepare(
-          `SELECT status FROM ${CRON_RUN_RECEIPTS_TABLE}
+          `SELECT status, finished_at_ms FROM ${CRON_RUN_RECEIPTS_TABLE}
             WHERE job_id = ? AND started_at_ms <= ?
-              AND (finished_at_ms IS NULL OR finished_at_ms >= ?)
-            ORDER BY started_at_ms DESC LIMIT 1`,
+              AND (finished_at_ms IS NULL OR finished_at_ms >= ?)`,
         )
       : db.prepare(
           `SELECT status FROM ${CRON_RUN_LOGS_TABLE}
@@ -403,9 +411,31 @@ export function correlateCronDenials(opts: CorrelateCronDenialsOptions = {}): Cr
         );
     for (const a of attributed) {
       const agg = aggregates.get(a.jobId);
-      const row = (
-        gen2 ? findRun.get(a.jobId, a.ts, a.ts) : findRun.get(a.jobId, windowStart, now, a.sessionKey)
-      ) as { status?: unknown } | undefined;
+      if (gen2) {
+        const rows = findRun.all(a.jobId, a.ts, a.ts) as Array<{
+          status?: unknown;
+          finished_at_ms?: unknown;
+        }>;
+        if (rows.length === 0) {
+          // No containing receipt. Not silent, not clean — unconfirmed.
+          base.unconfirmedCount += 1;
+          continue;
+        }
+        const unanimousOk = rows.every(
+          (r) =>
+            String(r.status ?? '').toLowerCase() === 'ok' &&
+            r.finished_at_ms !== null &&
+            r.finished_at_ms !== undefined,
+        );
+        if (agg && unanimousOk) {
+          agg.silentCount += 1;
+          base.silentCount += 1;
+        } else if (!unanimousOk) {
+          base.unconfirmedCount += 1;
+        }
+        continue;
+      }
+      const row = findRun.get(a.jobId, windowStart, now, a.sessionKey) as { status?: unknown } | undefined;
       if (!row) {
         // No exactly-matched run row. Not silent, not clean — unconfirmed.
         base.unconfirmedCount += 1;

@@ -155,6 +155,17 @@ describe('#456 — skills install args are feature-detected, never a bet on a ve
     expect(args('Options:\n  --force\n  --global\n')).toEqual(BASE);
   });
 
+  it('a PROSE mention of the removed flag must not resurrect it', () => {
+    // 2026.8.1-style help that only names the legacy flag in a sentence.
+    const help = `Options:\n  ${INSTALL_POLICY_ACK_FLAG}  Acknowledge warnings\n  --force\nNote: ${LEGACY_CLAWHUB_ACK_FLAG} was removed; use ${INSTALL_POLICY_ACK_FLAG}.\n`;
+    expect(args(help)).toEqual([...BASE, INSTALL_POLICY_ACK_FLAG]);
+  });
+
+  it('a transitional help offering BOTH acks prefers the new one', () => {
+    const help = `Options:\n  ${LEGACY_CLAWHUB_ACK_FLAG}  deprecated\n  ${INSTALL_POLICY_ACK_FLAG}  acknowledge\n`;
+    expect(args(help)).toEqual([...BASE, INSTALL_POLICY_ACK_FLAG]);
+  });
+
   it('probe failure → the 2026.8.1 args, never the dead legacy flag', () => {
     const resolved = args(null);
     expect(resolved).toEqual([...BASE, INSTALL_POLICY_ACK_FLAG]);

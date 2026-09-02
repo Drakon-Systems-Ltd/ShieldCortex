@@ -488,10 +488,12 @@ describe('cron denial correlation (#375 P2)', () => {
       const report = correlate();
       expect(report.jobs[0].denialCount).toBe(1);
       expect(report.jobs[0].silentCount).toBe(0);
-      expect(report.unconfirmedCount).toBe(0);
+      // The run demonstrably failed, so the denial is not silent — but a
+      // non-ok containment is not a clean ruling either: unconfirmed.
+      expect(report.unconfirmedCount).toBe(1);
     });
 
-    test('a still-running receipt (finished_at_ms NULL) contains the denial', () => {
+    test('a still-running receipt (finished_at_ms NULL) is never a silent claim', () => {
       buildGen2Store(dbPath, {
         jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
         receipts: [{ job_id: JOB_A, status: 'running', started_at_ms: NOW - 90_000, finished_at_ms: null }],
@@ -499,9 +501,43 @@ describe('cron denial correlation (#375 P2)', () => {
       writeDenials([denial()]);
 
       const report = correlate();
-      // Row found (not unconfirmed); status is not ok (not silent).
-      expect(report.unconfirmedCount).toBe(0);
+      // An open window is a run still in flight: unconfirmed, never silent.
+      expect(report.unconfirmedCount).toBe(1);
       expect(report.silentCount).toBe(0);
+    });
+
+    test('an ok receipt with finished_at_ms NULL is an open window, never an infinite silent claim', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
+        // Status already stamped ok but finish never recorded — a crashed
+        // writer could leave this forever. It must not become a permanent
+        // "every future denial is silent" verdict.
+        receipts: [{ job_id: JOB_A, status: 'ok', started_at_ms: NOW - 90_000, finished_at_ms: null }],
+      });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      expect(report.silentCount).toBe(0);
+      expect(report.unconfirmedCount).toBe(1);
+    });
+
+    test('overlapping same-job receipts must be unanimously ok before silence is ruled', () => {
+      buildGen2Store(dbPath, {
+        jobs: [{ job_id: JOB_A, name: 'oc2 sweep' }],
+        receipts: [
+          // An earlier containing run errored…
+          { job_id: JOB_A, status: 'error', started_at_ms: NOW - 120_000, finished_at_ms: NOW - 30_000 },
+          // …and a later containing run reported ok. The ok must not outvote
+          // the failure: unconfirmed, not silent.
+          { job_id: JOB_A, status: 'ok', started_at_ms: NOW - 90_000, finished_at_ms: NOW - 20_000 },
+        ],
+      });
+      writeDenials([denial()]);
+
+      const report = correlate();
+      expect(report.silentCount).toBe(0);
+      expect(report.unconfirmedCount).toBe(1);
+      expect(report.jobs[0].denialCount).toBe(1);
     });
 
     test('a denial outside every run window of its job is unconfirmed, never silent', () => {

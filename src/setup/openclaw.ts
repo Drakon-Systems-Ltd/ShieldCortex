@@ -2435,12 +2435,25 @@ function probeSkillInstallHelp(bin: string, home: string): string | null {
  * detect against the installed binary's own help instead of betting on a
  * version:
  *
- *   - help lists the legacy flag        → legacy args (OpenClaw 1 gen).
- *   - help lists the policy-warning ack → new args + that ack.
- *   - help lists neither                → bare `--force`.
+ *   - help OFFERS the legacy flag       → legacy args (OpenClaw 1 gen).
+ *   - help offers the policy-warning ack → new args + that ack.
+ *   - help offers neither               → bare `--force`.
  *   - the probe itself fails            → the 2026.8.1 args. New OpenClaw is
  *     the present; a probe we could not run must not resurrect a dead flag.
+ *
+ * "Offers" is an option-shaped match (the flag at the start of a help line),
+ * not a substring: 2026.8.1's help mentioning the removed flag in prose
+ * ("--acknowledge-clawhub-risk was removed") must not resurrect it. And when
+ * a transitional help lists BOTH flags, the new ack wins — the legacy flag is
+ * the one with a known removal date.
  */
+function helpOffersFlag(help: string, flag: string): boolean {
+  // Option rows in commander-style help start with optional short aliases
+  // then the long flag: `  --force  Overwrite ...`. Prose mentions sit
+  // mid-sentence and fail the line-start anchor.
+  return new RegExp(`^\\s*(?:-\\w,\\s*)?${flag}(?:\\s|=|$)`, 'm').test(help);
+}
+
 export function resolveSkillInstallArgs(
   bin: string,
   opts: { home?: string; probe?: (bin: string, home: string) => string | null } = {},
@@ -2449,8 +2462,8 @@ export function resolveSkillInstallArgs(
   const help = (opts.probe ?? probeSkillInstallHelp)(bin, home);
   const base = ['skills', 'install', 'shieldcortex', '--force'];
   if (help === null) return [...base, INSTALL_POLICY_ACK_FLAG];
-  if (help.includes(LEGACY_CLAWHUB_ACK_FLAG)) return [...base, LEGACY_CLAWHUB_ACK_FLAG];
-  if (help.includes(INSTALL_POLICY_ACK_FLAG)) return [...base, INSTALL_POLICY_ACK_FLAG];
+  if (helpOffersFlag(help, INSTALL_POLICY_ACK_FLAG)) return [...base, INSTALL_POLICY_ACK_FLAG];
+  if (helpOffersFlag(help, LEGACY_CLAWHUB_ACK_FLAG)) return [...base, LEGACY_CLAWHUB_ACK_FLAG];
   return base;
 }
 
