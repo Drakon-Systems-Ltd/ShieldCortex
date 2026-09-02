@@ -371,11 +371,14 @@ export function handleV1ActionGuard(
       try {
         const home = deps.home ?? homedir();
         const now = deps.now ?? Date.now();
-        const sessionId = topLevelToken(body.sessionId, 200);
+        const sessionId = topLevelToken(body.sessionId, 64);
         const cwd = topLevelToken(body.cwd, 4096);
         const hash = hashToolCall(tool, toolArgs);
-        if (cwd) {
-          const spent = consumeRetryGrant({ hash, origin: { cwd, tool } }, { home, now });
+        if (sessionId && cwd) {
+          const spent = consumeRetryGrant(
+            { hash, origin: { cwd, tool, sessionKey: sessionId } },
+            { home, now },
+          );
           if (spent) {
             payload.decision = 'allow';
             payload.approved = true;
@@ -397,6 +400,7 @@ export function handleV1ActionGuard(
               redactedSurface: `${tool}: [redacted action surface]`,
               cwd,
               sessionKey: sessionId,
+              bindSession: true,
             },
             { home, now },
           );

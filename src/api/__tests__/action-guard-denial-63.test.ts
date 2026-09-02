@@ -155,13 +155,23 @@ describe('#63 — action-guard REST DNP honesty', () => {
       expect(ask(privileged(), { now: T0 + 2_100 }).body.decision).toBe('allow');
     });
 
-    it('records sessionKey on the fingerprint; ungranted other session cannot allow', () => {
-      const a = ask(privileged());
-      expect(listRetryRows({ home, now: T0 })[0].originScope.sessionKey).toBe(SESSION);
-      const b = ask(privileged({ sessionId: OTHER_SESSION }));
-      expect(b.body.decision).toBe('require_approval');
-      expect(b.body.approved).toBeUndefined();
-      expect(a.body.denial?.actionId).not.toBe(b.body.denial?.actionId);
+    it('a granted retry cannot cross sessions and remains spendable once by its session', () => {
+      const actionId = grantOnce();
+
+      const stolen = ask(privileged({ sessionId: OTHER_SESSION }), { now: T0 + 2_000 });
+      expect(stolen.body.decision).toBe('require_approval');
+      expect(stolen.body.approved).toBeUndefined();
+      expect(stolen.body.denial?.actionId).not.toBe(actionId);
+
+      const original = ask(privileged(), { now: T0 + 2_100 });
+      expect(original.body.decision).toBe('allow');
+      expect(original.body.approved).toBe(true);
+      expect(original.body.reason).toContain(actionId);
+
+      const rows = listRetryRows({ home, now: T0 + 2_100 });
+      expect(rows.map((row) => row.originScope.sessionKey)).toEqual(
+        expect.arrayContaining([SESSION, OTHER_SESSION]),
+      );
     });
   });
 

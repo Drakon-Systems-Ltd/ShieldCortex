@@ -413,11 +413,54 @@ describe('#310 retry control — the one lock plane', () => {
     const c = claim();
     grantRetry({ hash: HASH, cwd }, { nonce: c.ok ? c.nonce : '' }, { home, now: t0 + 1_000 });
 
-    // The next cron tick is a NEW Claude session — different sessionKey, same
-    // cwd and tool. It must spend.
+    // A session-aware lane cannot accidentally consume an ordinary unbound
+    // cron grant.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey: 'sc-2222222222222222' } },
+      { home, now: t0 + 1_500 },
+    )).toBeNull();
+    // The next cron tick is a NEW Claude session, but this legacy lane does not
+    // put diagnostic session metadata in its predicate. Same cwd/tool spends.
     const spent = consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: t0 + 2_000 });
     expect(spent).not.toBeNull();
     expect(getRetryRow({ hash: HASH, cwd }, { home })?.originScope.sessionKey).toBe('sc-1111111111111111');
+  });
+
+  it('an explicitly session-bound fingerprint spends only in its captured session', () => {
+    const sessionKey = 'hermes-task-1111';
+    const actionId = 'act-6000000000000001';
+    recordDenialFingerprint(
+      {
+        hash: HASH,
+        tool: 'Bash',
+        actionId,
+        signals: ['privilege-escalation'],
+        redactedSurface: 's',
+        cwd,
+        sessionKey,
+        bindSession: true,
+      },
+      { home, now: t0 },
+    );
+    const granted = grantRetry(
+      { actionId },
+      { isInteractive: true },
+      { home, now: t0 + 1_000, tool: 'Bash' },
+    );
+    expect(granted.ok).toBe(true);
+
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash' } },
+      { home, now: t0 + 1_500 },
+    )).toBeNull();
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey: 'hermes-task-2222' } },
+      { home, now: t0 + 2_000 },
+    )).toBeNull();
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey } },
+      { home, now: t0 + 2_100 },
+    )).not.toBeNull();
   });
 
   it('canonicalises cwd before matching (realpath + trailing slash)', () => {

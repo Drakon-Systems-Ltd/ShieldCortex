@@ -110,10 +110,12 @@ export interface RetryOriginScope {
   /** Canonicalised cwd (realpath, no trailing separator). Absent ⇒ the row is
    *  UNSCOPEABLE and can never be granted from a card. */
   cwd?: string;
-  /** Diagnostic telemetry ONLY. Never AND-matched on spend (R3 rule 3): the
-   *  next cron tick spawns a new Claude session with a fresh sessionKey, and
-   *  fail-closing on that would break the primary use case. */
+  /** Diagnostic telemetry by default. A caller can set `sessionBound` for a
+   *  host contract whose retry must stay in the same session; the ordinary
+   *  cron path deliberately leaves it unset because the next tick gets a new
+   *  sessionKey. */
   sessionKey?: string;
+  sessionBound?: true;
 }
 
 export interface RetryClaim {
@@ -139,8 +141,9 @@ export interface RetryGrant {
   ttlMs: number;
   epoch: number;
   via: 'card' | 'tty';
-  /** The spend predicate: `{cwd, tool}` AND-matched (R3 rule 3). */
-  origin: { cwd?: string; tool: string; anyOrigin?: boolean };
+  /** The spend predicate. Session-bound lanes add `sessionKey`; ordinary cron
+   *  retries remain `{cwd, tool}` (R3 rule 3). */
+  origin: { cwd?: string; tool: string; sessionKey?: string; anyOrigin?: boolean };
   consumedAt?: number;
   /** Set when the unspent-expiry sweeper has already told the operator. */
   expiryNotifiedAt?: number;
@@ -153,9 +156,9 @@ export interface RetrySuppression {
 }
 
 export interface RetryRow {
-  /** Canonical identity: sha256(hash, canonical cwd). Rows upsert by
-   *  (hash, originScope); `actionIds` is the secondary alias index, so one
-   *  identity never splits its epoch across the actionIds of its remints. */
+  /** Canonical identity: sha256(hash, canonical cwd[, bound sessionKey]).
+   * `actionIds` is the secondary alias index, so one identity never splits
+   * its epoch across the actionIds of its remints. */
   id: string;
   hash: string;
   tool: string;
@@ -286,9 +289,14 @@ export function canonicaliseCwd(raw: unknown): string | undefined {
   return stripped.length > 0 ? stripped : '/';
 }
 
-/** Canonical row identity — (hash, originScope). */
-export function fingerprintId(hash: string, cwd?: string): string {
-  return createHash('sha256').update(`${String(hash)}\u0000${cwd ?? ''}`).digest('hex').slice(0, 32);
+/** Canonical row identity. The optional session leg is used only by lanes
+ * that explicitly bind retries to one host-provided session. */
+export function fingerprintId(hash: string, cwd?: string, sessionKey?: string): string {
+  const base = `${String(hash)}\u0000${cwd ?? ''}`;
+  return createHash('sha256')
+    .update(sessionKey === undefined ? base : `${base}\u0000${sessionKey}`)
+    .digest('hex')
+    .slice(0, 32);
 }
 
 function shortHashOf(hash: string): string {
@@ -632,6 +640,9 @@ export interface DenialFingerprintEntry {
   /** From the harness payload (same trust as sessionKey), NEVER from tool input. */
   cwd?: string;
   sessionKey?: string;
+  /** Opt-in for lanes where a retry grant must remain in this exact session.
+   * Ordinary cron fingerprints leave this false so a later tick can spend. */
+  bindSession?: boolean;
 }
 
 export interface DenialFingerprintResult {
@@ -662,7 +673,9 @@ export function recordDenialFingerprint(
   const hash = String(entry.hash ?? '').trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(hash)) return { ok: false, reason: 'unwritable' };
   const cwd = canonicaliseCwd(entry.cwd);
-  const id = fingerprintId(hash, cwd);
+  const sessionKey = entry.sessionKey ? String(entry.sessionKey).slice(0, 64) : undefined;
+  const sessionBound = entry.bindSession === true && sessionKey !== undefined;
+  const id = fingerprintId(hash, cwd, sessionBound ? sessionKey : undefined);
 
   const result = withLock(opts.home, (file) => {
     // Prune WITHOUT claiming the unspent-expiry notice: "reported once" has to
@@ -681,7 +694,8 @@ export function recordDenialFingerprint(
         lastDeniedAt: now,
         originScope: {
           ...(cwd ? { cwd } : {}),
-          ...(entry.sessionKey ? { sessionKey: String(entry.sessionKey).slice(0, 64) } : {}),
+          ...(sessionKey ? { sessionKey } : {}),
+          ...(sessionBound ? { sessionBound: true as const } : {}),
         },
         signals: (entry.signals ?? []).map((s) => String(s)).slice(0, 8),
         redactedSurface: String(entry.redactedSurface ?? '').slice(0, 300),
@@ -694,8 +708,10 @@ export function recordDenialFingerprint(
       row.tool = String(entry.tool ?? row.tool).slice(0, 64);
       if (entry.signals?.length) row.signals = entry.signals.map((s) => String(s)).slice(0, 8);
       if (entry.redactedSurface) row.redactedSurface = String(entry.redactedSurface).slice(0, 300);
-      // sessionKey is diagnostic; keep the most recent one that reached us.
-      if (entry.sessionKey) row.originScope.sessionKey = String(entry.sessionKey).slice(0, 64);
+      // Unbound rows keep diagnostic recency. Bound rows have sessionKey in
+      // their identity, so this assignment can never move a grant to another
+      // session.
+      if (sessionKey) row.originScope.sessionKey = sessionKey;
     }
     const actionId = typeof entry.actionId === 'string' ? entry.actionId.trim() : '';
     if (actionId && !row.actionIds.includes(actionId)) {
@@ -1025,6 +1041,9 @@ export function grantRetry(
       // identity); this is the TTY path without --any-origin.
       return { value: { failed: 'unscopeable' }, commit: true };
     }
+    if (row.originScope.sessionBound === true && !row.originScope.sessionKey && !anyOrigin) {
+      return { value: { failed: 'unscopeable' }, commit: true };
+    }
 
     if (grantIsLive(row.grant, now)) {
       // Double tap. Idempotent by construction: the FIRST grant stands, its
@@ -1058,6 +1077,9 @@ export function grantRetry(
       origin: {
         ...(anyOrigin ? { anyOrigin: true } : {}),
         ...(row.originScope.cwd && !anyOrigin ? { cwd: row.originScope.cwd } : {}),
+        ...(row.originScope.sessionBound === true && row.originScope.sessionKey && !anyOrigin
+          ? { sessionKey: row.originScope.sessionKey }
+          : {}),
         tool: String(opts.tool ?? row.tool ?? 'tool').slice(0, 64),
       },
     };
@@ -1094,6 +1116,9 @@ export interface ConsumeRetryOrigin {
   /** Caller-computed, from the hook's own context. Canonicalised here. */
   cwd?: string;
   tool: string;
+  /** Supplying this opts into the session-bound predicate. Bound grants also
+   * require it, so neither a bound nor unbound caller can cross the boundary. */
+  sessionKey?: string;
 }
 
 export type ConsumedRetryGrant = RetryGrant & { hash: string; id: string; actionId?: string };
@@ -1102,9 +1127,10 @@ export type ConsumedRetryGrant = RetryGrant & { hash: string; id: string; action
  * Spend a retry grant for this exact call, if one is live and the origin
  * AND-matches. Returns the consumed grant (for auditing) or null.
  *
- * The predicate is `{cwd, tool}` and nothing else (R3 rule 3): sessionKey is
- * diagnostic, because the next cron tick is a NEW Claude session with a fresh
- * sessionKey and fail-closing on that would break the case this exists for.
+ * The ordinary predicate is `{cwd, tool}` (R3 rule 3): sessionKey remains
+ * diagnostic for cron retries because the next tick gets a fresh one. Lanes
+ * that recorded a session-bound fingerprint add the captured sessionKey to
+ * both the grant and this predicate.
  * `--any-origin` grants (TTY-only, confirmed) skip the cwd leg and match tool
  * alone.
  *
@@ -1121,6 +1147,9 @@ export function consumeRetryGrant(
   const tool = String(args.origin?.tool ?? '').trim();
   if (!tool) return null;
   const cwd = canonicaliseCwd(args.origin?.cwd);
+  const sessionKey = typeof args.origin?.sessionKey === 'string'
+    ? args.origin.sessionKey.trim().slice(0, 64) || undefined
+    : undefined;
 
   const result = withLock<ConsumedRetryGrant | null>(opts.home, (file) => {
     // Snapshotted so a no-op consume — the overwhelming majority, since every
@@ -1137,7 +1166,11 @@ export function consumeRetryGrant(
       if (origin.tool !== tool) return false;
       if (origin.anyOrigin === true) return true; // TTY-only, confirmed
       if (!origin.cwd) return false; // unscopeable never matches
-      return origin.cwd === cwd;
+      if (origin.cwd !== cwd) return false;
+      if (origin.sessionKey !== undefined || sessionKey !== undefined) {
+        return origin.sessionKey !== undefined && origin.sessionKey === sessionKey;
+      }
+      return true;
     });
     if (!row) return { value: null, commit: JSON.stringify(file) !== before };
     row.grant!.consumedAt = now;
