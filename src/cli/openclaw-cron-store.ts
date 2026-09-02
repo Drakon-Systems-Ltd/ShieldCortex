@@ -1,5 +1,5 @@
 /**
- * Read-only reader for OpenClaw's SQLite cron store (#375).
+ * Read-only reader for OpenClaw's SQLite cron store (#375, #456).
  *
  * OpenClaw migrated `~/.openclaw/cron/jobs.json` into
  * `~/.openclaw/state/openclaw.sqlite` (`cron_jobs`, `cron_run_logs`) and
@@ -8,6 +8,21 @@
  * gateway cron scripts and reported "all clear" — every new cron script broke
  * silently on its first run. This module is the single place that reads the
  * new store.
+ *
+ * OpenClaw 2026.8.1 changed the schema again (#456, measured on a live
+ * 82-job host), so the store now has two recognised generations:
+ *
+ *   - **gen1** (OpenClaw 1): `cron_jobs` with `payload_message` +
+ *     `trigger_script`, run outcomes in `cron_run_logs`
+ *     (`job_id`/`session_key`/`run_at_ms`/`status`).
+ *   - **gen2** (OpenClaw 2): `cron_jobs` WITHOUT those two columns — the
+ *     message lives at `job_json` → `payload.message` — and run outcomes in
+ *     `cron_run_receipts` (`job_id`/`status`/`started_at_ms`/`finished_at_ms`;
+ *     there is no `session_key` and no `run_at_ms`).
+ *
+ * A `cron_jobs` table matching NEITHER generation stays `schema_mismatch`:
+ * recognising gen2 must not soften the "unknown shape is cannot-look" rule
+ * that made the original bug visible.
  *
  * Two rules hold everywhere below:
  *
@@ -38,9 +53,14 @@ export function defaultOpenClawCronDbPath(home: string): string {
 
 export const CRON_JOBS_TABLE = 'cron_jobs';
 export const CRON_RUN_LOGS_TABLE = 'cron_run_logs';
+export const CRON_RUN_RECEIPTS_TABLE = 'cron_run_receipts';
 
-/** Columns P1 discovery reads. A store missing any of them is a shape we do
- *  not understand — reported, never silently skipped. */
+/** The two store shapes we know how to read (see module header). */
+export type CronStoreGeneration = 'gen1' | 'gen2';
+
+/** Columns P1 discovery reads on a gen1 store. A store missing any of them —
+ *  and not matching gen2 either — is a shape we do not understand: reported,
+ *  never silently skipped. */
 export const REQUIRED_CRON_JOB_COLUMNS = [
   'job_id',
   'name',
@@ -50,9 +70,25 @@ export const REQUIRED_CRON_JOB_COLUMNS = [
   'job_json',
 ] as const;
 
+/** Columns P1 discovery reads on a gen2 store. The message lives inside
+ *  `job_json` (payload.message); the two legacy columns must be ABSENT for a
+ *  store to classify as gen2 — their presence alongside a failed gen1 match
+ *  is an unknown shape, not a newer one. */
+export const REQUIRED_CRON_JOB_COLUMNS_GEN2 = ['job_id', 'name', 'enabled', 'job_json'] as const;
+
 /** Columns P2 correlation reads. The run log is the silent-source-of-truth:
  *  it is what says a run "reported ok" while the guard denied inside it. */
 export const REQUIRED_CRON_RUN_LOG_COLUMNS = ['job_id', 'session_key', 'run_at_ms', 'status'] as const;
+
+/** The gen2 run-outcome columns. `request_run_id` exists but was NULL on
+ *  every sampled live row, so correlation cannot key on it and we do not
+ *  require it. */
+export const REQUIRED_CRON_RUN_RECEIPT_COLUMNS = [
+  'job_id',
+  'status',
+  'started_at_ms',
+  'finished_at_ms',
+] as const;
 
 /**
  * The shared honesty enum.
@@ -88,16 +124,25 @@ export interface CronSourceProbe {
   /** Same as {@link CronSourceProbe.status}; named for the reader. */
   jobs: CronProbeStatus;
   /**
-   * `cron_run_logs` health — what P2 correlation keys off.
+   * Run-outcome table health — what P2 correlation keys off. Probed against
+   * {@link CronSourceProbe.runTable} for the detected generation.
    *
    * One deliberate promotion: when `cron_jobs` is `ok` the file demonstrably
-   * IS an OpenClaw cron store, so a missing `cron_run_logs` is not "not this
-   * shape" — it is a store we cannot read run outcomes from. That is
+   * IS an OpenClaw cron store, so a missing run-outcome table is not "not
+   * this shape" — it is a store we cannot read run outcomes from. That is
    * cannot-look, so it is reported `schema_mismatch` rather than `absent`;
    * otherwise a broken run log would collapse into a green `silentCount = 0`,
-   * which is the exact lie #375 exists to stop.
+   * which is the exact lie #375 exists to stop. Holds for both generations:
+   * a gen2 store missing `cron_run_receipts` is the same promotion.
    */
   runLogs: CronProbeStatus;
+  /** Which generation `cron_jobs` matched; null when it matched neither (or
+   *  could not be read at all). */
+  generation: CronStoreGeneration | null;
+  /** The run-outcome table {@link CronSourceProbe.runLogs} reports on —
+   *  `cron_run_logs` (gen1 / unknown) or `cron_run_receipts` (gen2). Callers
+   *  must name THIS table in cannot-look messages, not assume the legacy one. */
+  runTable: string;
 }
 
 /**
@@ -122,22 +167,44 @@ function fileState(dbPath: string): 'absent' | 'present' | 'unreadable' {
   }
 }
 
-/** Probed independently per table: a broken `cron_run_logs` must not make a
+/** Probed independently per table: a broken run-outcome table must not make a
  *  perfectly readable `cron_jobs` look unreadable, and vice versa. */
 function probeTable(db: SqliteDatabase, table: string, required: readonly string[]): CronProbeStatus {
   try {
-    const present = db
-      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
-      .get(table) as { present?: number } | undefined;
-    if (!present) return 'absent';
-    // Table names here are module constants, never caller input.
-    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
-    const have = new Set(cols.map((c) => String(c?.name ?? '')));
-    for (const col of required) if (!have.has(col)) return 'schema_mismatch';
+    const cols = tableColumns(db, table);
+    if (cols === null) return 'absent';
+    for (const col of required) if (!cols.has(col)) return 'schema_mismatch';
     return 'ok';
   } catch {
     return 'unreadable';
   }
+}
+
+/** Column names of a table, or null when the table is not there. Throws on a
+ *  query failure — callers turn that into `unreadable`. */
+function tableColumns(db: SqliteDatabase, table: string): Set<string> | null {
+  const present = db
+    .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table) as { present?: number } | undefined;
+  if (!present) return null;
+  // Table names here are module constants, never caller input.
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+  return new Set(cols.map((c) => String(c?.name ?? '')));
+}
+
+/** Which generation a `cron_jobs` column set matches, or null for neither.
+ *  gen1 is checked first; gen2 additionally requires the legacy columns to be
+ *  ABSENT, so a half-migrated hybrid cannot pass as either. */
+function classifyJobColumns(cols: Set<string>): CronStoreGeneration | null {
+  if (REQUIRED_CRON_JOB_COLUMNS.every((c) => cols.has(c))) return 'gen1';
+  if (
+    REQUIRED_CRON_JOB_COLUMNS_GEN2.every((c) => cols.has(c)) &&
+    !cols.has('payload_message') &&
+    !cols.has('trigger_script')
+  ) {
+    return 'gen2';
+  }
+  return null;
 }
 
 /**
@@ -147,23 +214,46 @@ function probeTable(db: SqliteDatabase, table: string, required: readonly string
  * would be caught somewhere upstream and turned back into silence.
  */
 export function probeCronSource(dbPath: string): CronSourceProbe {
+  const fail = (status: 'absent' | 'unreadable'): CronSourceProbe => ({
+    path: dbPath,
+    status,
+    jobs: status,
+    runLogs: status,
+    generation: null,
+    runTable: CRON_RUN_LOGS_TABLE,
+  });
   const state = fileState(dbPath);
-  if (state === 'absent') return { path: dbPath, status: 'absent', jobs: 'absent', runLogs: 'absent' };
-  if (state === 'unreadable') {
-    return { path: dbPath, status: 'unreadable', jobs: 'unreadable', runLogs: 'unreadable' };
-  }
+  if (state === 'absent') return fail('absent');
+  if (state === 'unreadable') return fail('unreadable');
 
   let db: SqliteDatabase | null = null;
   try {
     db = openCronStore(dbPath);
-    const jobs = probeTable(db, CRON_JOBS_TABLE, REQUIRED_CRON_JOB_COLUMNS);
-    let runLogs = probeTable(db, CRON_RUN_LOGS_TABLE, REQUIRED_CRON_RUN_LOG_COLUMNS);
-    // See CronSourceProbe.runLogs — a cron store with no run log is
-    // cannot-look, not "not a cron store".
+    let jobs: CronProbeStatus;
+    let generation: CronStoreGeneration | null = null;
+    try {
+      const cols = tableColumns(db, CRON_JOBS_TABLE);
+      if (cols === null) {
+        jobs = 'absent';
+      } else {
+        generation = classifyJobColumns(cols);
+        jobs = generation === null ? 'schema_mismatch' : 'ok';
+      }
+    } catch {
+      jobs = 'unreadable';
+    }
+    // An unknown/unreadable cron_jobs still probes the legacy run table, so
+    // the pre-gen2 statuses are unchanged on stores we never understood.
+    const runTable = generation === 'gen2' ? CRON_RUN_RECEIPTS_TABLE : CRON_RUN_LOGS_TABLE;
+    const runRequired =
+      generation === 'gen2' ? REQUIRED_CRON_RUN_RECEIPT_COLUMNS : REQUIRED_CRON_RUN_LOG_COLUMNS;
+    let runLogs = probeTable(db, runTable, runRequired);
+    // See CronSourceProbe.runLogs — a cron store with no run-outcome table is
+    // cannot-look, not "not a cron store". Both generations.
     if (jobs === 'ok' && runLogs === 'absent') runLogs = 'schema_mismatch';
-    return { path: dbPath, status: jobs, jobs, runLogs };
+    return { path: dbPath, status: jobs, jobs, runLogs, generation, runTable };
   } catch {
-    return { path: dbPath, status: 'unreadable', jobs: 'unreadable', runLogs: 'unreadable' };
+    return fail('unreadable');
   } finally {
     try {
       db?.close();
@@ -300,11 +390,14 @@ export function discoverDbCronScripts(opts: { dbPath: string; home: string }): D
   let db: SqliteDatabase | null = null;
   try {
     db = openCronStore(opts.dbPath);
-    const rows = db
-      .prepare(
-        `SELECT job_id, name, enabled, payload_message, trigger_script, job_json FROM ${CRON_JOBS_TABLE}`,
-      )
-      .all() as CronJobRow[];
+    // gen2 has no payload_message/trigger_script columns to read; its message
+    // lives at job_json → payload.message, which the structural walk below
+    // already visits as a string leaf.
+    const columns =
+      probe.generation === 'gen2'
+        ? 'job_id, name, enabled, job_json'
+        : 'job_id, name, enabled, payload_message, trigger_script, job_json';
+    const rows = db.prepare(`SELECT ${columns} FROM ${CRON_JOBS_TABLE}`).all() as CronJobRow[];
 
     const jobsById = new Map<string, DiscoveredCronJob>();
     const enabledPaths = new Set<string>();

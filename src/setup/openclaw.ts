@@ -2402,6 +2402,58 @@ export function readInstalledSkillVersion(skillDir: string): string | null {
   }
 }
 
+/** The ClawHub acknowledge flag OpenClaw 1 gen required (#179). Removed in
+ *  OpenClaw 2026.8.1 — passing it there fails every install with
+ *  `OpenClaw does not recognize option "--acknowledge-clawhub-risk"`. */
+export const LEGACY_CLAWHUB_ACK_FLAG = '--acknowledge-clawhub-risk';
+
+/** Its 2026.8.1 successor. Passed when the installed binary lists it, so a
+ *  policy warning cannot hang a quiet, non-interactive update step. */
+export const INSTALL_POLICY_ACK_FLAG = '--acknowledge-install-policy-warning';
+
+/** Probe `openclaw skills install --help` for flag support. Null when the
+ *  probe itself failed (missing binary, timeout, non-zero exit). */
+function probeSkillInstallHelp(bin: string, home: string): string | null {
+  try {
+    const r = spawnSync(bin, ['skills', 'install', '--help'], {
+      encoding: 'utf-8',
+      timeout: 15000,
+      env: { ...process.env, HOME: home },
+    });
+    if (r.error || r.status !== 0) return null;
+    return `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The one arg vector for `openclaw skills install shieldcortex` (#456).
+ *
+ * OpenClaw 2026.8.1 removed `--acknowledge-clawhub-risk`, so the hardcoded
+ * legacy vector made every skills install fail on updated hosts. Feature-
+ * detect against the installed binary's own help instead of betting on a
+ * version:
+ *
+ *   - help lists the legacy flag        → legacy args (OpenClaw 1 gen).
+ *   - help lists the policy-warning ack → new args + that ack.
+ *   - help lists neither                → bare `--force`.
+ *   - the probe itself fails            → the 2026.8.1 args. New OpenClaw is
+ *     the present; a probe we could not run must not resurrect a dead flag.
+ */
+export function resolveSkillInstallArgs(
+  bin: string,
+  opts: { home?: string; probe?: (bin: string, home: string) => string | null } = {},
+): string[] {
+  const home = opts.home ?? os.homedir();
+  const help = (opts.probe ?? probeSkillInstallHelp)(bin, home);
+  const base = ['skills', 'install', 'shieldcortex', '--force'];
+  if (help === null) return [...base, INSTALL_POLICY_ACK_FLAG];
+  if (help.includes(LEGACY_CLAWHUB_ACK_FLAG)) return [...base, LEGACY_CLAWHUB_ACK_FLAG];
+  if (help.includes(INSTALL_POLICY_ACK_FLAG)) return [...base, INSTALL_POLICY_ACK_FLAG];
+  return base;
+}
+
 /**
  * `shieldcortex openclaw skill install|update` (#179).
  *
@@ -2419,10 +2471,10 @@ export async function installOpenClawSkill(home: string = os.homedir()): Promise
   const bin = resolveOpenClawBinary(home);
   if (!bin) {
     console.log('✗ Could not find the `openclaw` binary (PATH or known install locations).');
-    console.log('  Install OpenClaw first, or run: openclaw skills install shieldcortex --force --acknowledge-clawhub-risk');
+    console.log('  Install OpenClaw first, or run: openclaw skills install shieldcortex --force');
     return false;
   }
-  const r = spawnSync(bin, ['skills', 'install', 'shieldcortex', '--force', '--acknowledge-clawhub-risk'], {
+  const r = spawnSync(bin, resolveSkillInstallArgs(bin, { home }), {
     encoding: 'utf-8',
     timeout: 120000,
     env: { ...process.env, HOME: home },

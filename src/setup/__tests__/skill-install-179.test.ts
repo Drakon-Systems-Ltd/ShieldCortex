@@ -17,8 +17,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   resolveOpenClawBinary,
+  resolveSkillInstallArgs,
   findInstalledSkillDirs,
   readInstalledSkillVersion,
+  LEGACY_CLAWHUB_ACK_FLAG,
+  INSTALL_POLICY_ACK_FLAG,
 } from '../openclaw.js';
 import { checkOpenClawSkillVersion } from '../../cli/doctor.js';
 
@@ -118,10 +121,48 @@ describe('#179 — the command the operator typed now exists', () => {
     expect(src).toMatch(/openclaw <install\|uninstall\|status\|repair\|inspect-runtime\|skill install>/);
   });
 
-  it('update wires the resolved binary + acknowledge flag, and its skip names the install command', () => {
+  it('update wires the resolved binary + feature-detected args, and its skip names the install command', () => {
     const src = fs.readFileSync(path.join(repoRoot, 'src', 'cli', 'update.ts'), 'utf-8');
     expect(src).toMatch(/resolveOpenClawBinary/);
-    expect(src).toMatch(/--acknowledge-clawhub-risk/);
+    expect(src).toMatch(/resolveSkillInstallArgs/);
     expect(src).toMatch(/shieldcortex openclaw skill install/);
+    // The dead OpenClaw 1 flag must never be hardcoded as an argument again
+    // (#456) — prose/comments may still name it, a string literal may not.
+    expect(src).not.toMatch(/'--acknowledge-clawhub-risk'/);
+  });
+});
+
+describe('#456 — skills install args are feature-detected, never a bet on a version', () => {
+  // OpenClaw 2026.8.1 removed --acknowledge-clawhub-risk; passing it fails
+  // every install. The helper probes the installed binary's own help.
+  const BASE = ['skills', 'install', 'shieldcortex', '--force'];
+  const args = (help: string | null): string[] =>
+    resolveSkillInstallArgs('/fake/openclaw', { home: '/fake/home', probe: () => help });
+
+  it('legacy help (lists the clawhub ack) → legacy args, current behaviour', () => {
+    expect(args(`Options:\n  --force\n  ${LEGACY_CLAWHUB_ACK_FLAG}  acknowledge\n`)).toEqual([
+      ...BASE,
+      LEGACY_CLAWHUB_ACK_FLAG,
+    ]);
+  });
+
+  it('2026.8.1 help (policy ack, no clawhub ack) → new args with the policy ack', () => {
+    const help = `Options:\n  ${INSTALL_POLICY_ACK_FLAG}\n  --force\n  --force-install\n  --global\n`;
+    expect(args(help)).toEqual([...BASE, INSTALL_POLICY_ACK_FLAG]);
+  });
+
+  it('help listing neither ack flag → bare --force', () => {
+    expect(args('Options:\n  --force\n  --global\n')).toEqual(BASE);
+  });
+
+  it('probe failure → the 2026.8.1 args, never the dead legacy flag', () => {
+    const resolved = args(null);
+    expect(resolved).toEqual([...BASE, INSTALL_POLICY_ACK_FLAG]);
+    expect(resolved).not.toContain(LEGACY_CLAWHUB_ACK_FLAG);
+  });
+
+  it('a real spawn probe against a missing binary falls back rather than throwing', () => {
+    const resolved = resolveSkillInstallArgs('/nonexistent/openclaw-bin', { home: os.tmpdir() });
+    expect(resolved).toEqual([...BASE, INSTALL_POLICY_ACK_FLAG]);
   });
 });

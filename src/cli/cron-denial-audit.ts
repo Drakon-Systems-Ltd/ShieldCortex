@@ -17,10 +17,21 @@
  *     matching, and the hook lane (Match B) is deferred until denials carry a
  *     join key — guessing would print a job name next to someone else's
  *     denial.
- *   - **No nearest-run fallback.** The run row is found by EXACT session_key
- *     inside an SQL-bounded window, or not at all. A nearest-in-time fallback
- *     can glue a denial to an unrelated run that happened to succeed, and then
- *     print a green lie with more confidence than the lie it replaced.
+ *   - **No nearest-run fallback.** On a gen1 store the run row is found by
+ *     EXACT session_key inside an SQL-bounded window, or not at all. A
+ *     nearest-in-time fallback can glue a denial to an unrelated run that
+ *     happened to succeed, and then print a green lie with more confidence
+ *     than the lie it replaced.
+ *   - **gen2 (OpenClaw 2, #456) joins by containment, which is exact in
+ *     time.** `cron_run_receipts` has no `session_key` and its
+ *     `request_run_id` was NULL on every sampled live row, so the exact-key
+ *     join is impossible there. Instead a denial at time T is matched to a
+ *     receipt of the SAME job whose run window contains T
+ *     (`started_at_ms <= T` and `finished_at_ms` NULL-or-`>= T`): the run was
+ *     demonstrably in progress when the denial fired. That is containment,
+ *     not nearest-run fuzzy matching — a receipt that merely happened nearby
+ *     never matches. Denial attribution itself is unchanged: OC2 denial
+ *     session keys still carry the `agent:<agent>:cron:<uuid>:run:` shape.
  *   - **No row means unconfirmed, never silent and never a pass.** "We could
  *     not look" is reported as its own count.
  *   - **Nothing from the denial surface is ever surfaced.** Correlation reads
@@ -36,6 +47,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   CRON_RUN_LOGS_TABLE,
+  CRON_RUN_RECEIPTS_TABLE,
   defaultOpenClawCronDbPath,
   discoverDbCronScripts,
   isIncomplete,
@@ -317,9 +329,11 @@ export function correlateCronDenials(opts: CorrelateCronDenialsOptions = {}): Cr
 
   // A cron store whose run log is present-but-wrong (or unreadable) is
   // cannot-look on its own terms, denials or not: reporting "0 silent" from a
-  // table we cannot read is the green lie in a new costume.
+  // table we cannot read is the green lie in a new costume. The probe names
+  // the table it actually looked at (gen1 cron_run_logs / gen2
+  // cron_run_receipts) so the operator is pointed at the right one.
   if (isIncomplete(discovery.probe.runLogs)) {
-    base.cannotCorrelate = `${CRON_RUN_LOGS_TABLE} ${discovery.probe.runLogs}`;
+    base.cannotCorrelate = `${discovery.probe.runTable} ${discovery.probe.runLogs}`;
   }
 
   if (log.status === 'absent') {
@@ -361,24 +375,37 @@ export function correlateCronDenials(opts: CorrelateCronDenialsOptions = {}): Cr
   // A run log we cannot read while denials ARE attributed is the fail-closed
   // case: count the denials, refuse to rule on silence.
   if (base.cannotCorrelate === null && discovery.probe.runLogs !== 'ok') {
-    base.cannotCorrelate = `${CRON_RUN_LOGS_TABLE} ${discovery.probe.runLogs}`;
+    base.cannotCorrelate = `${discovery.probe.runTable} ${discovery.probe.runLogs}`;
   }
 
   if (base.cannotCorrelate !== null) {
     return { ...base, jobs: renderJobs(aggregates, discovery.jobsById) };
   }
 
+  const gen2 = discovery.probe.generation === 'gen2';
   let db: SqliteDatabase | null = null;
   try {
     db = (opts.openStore ?? openCronStore)(dbPath);
-    const findRun = db.prepare(
-      `SELECT status FROM ${CRON_RUN_LOGS_TABLE}
-        WHERE job_id = ? AND run_at_ms BETWEEN ? AND ? AND session_key = ?
-        ORDER BY run_at_ms DESC LIMIT 1`,
-    );
+    // gen1: exact session_key match. gen2: containment — the receipt of the
+    // same job whose run window contains the denial timestamp (see module
+    // header). Both are exact joins; neither is nearest-run.
+    const findRun = gen2
+      ? db.prepare(
+          `SELECT status FROM ${CRON_RUN_RECEIPTS_TABLE}
+            WHERE job_id = ? AND started_at_ms <= ?
+              AND (finished_at_ms IS NULL OR finished_at_ms >= ?)
+            ORDER BY started_at_ms DESC LIMIT 1`,
+        )
+      : db.prepare(
+          `SELECT status FROM ${CRON_RUN_LOGS_TABLE}
+            WHERE job_id = ? AND run_at_ms BETWEEN ? AND ? AND session_key = ?
+            ORDER BY run_at_ms DESC LIMIT 1`,
+        );
     for (const a of attributed) {
       const agg = aggregates.get(a.jobId);
-      const row = findRun.get(a.jobId, windowStart, now, a.sessionKey) as { status?: unknown } | undefined;
+      const row = (
+        gen2 ? findRun.get(a.jobId, a.ts, a.ts) : findRun.get(a.jobId, windowStart, now, a.sessionKey)
+      ) as { status?: unknown } | undefined;
       if (!row) {
         // No exactly-matched run row. Not silent, not clean — unconfirmed.
         base.unconfirmedCount += 1;
@@ -398,7 +425,7 @@ export function correlateCronDenials(opts: CorrelateCronDenialsOptions = {}): Cr
     return {
       ...base,
       storeStatus: 'unreadable',
-      cannotCorrelate: `${CRON_RUN_LOGS_TABLE} unreadable`,
+      cannotCorrelate: `${discovery.probe.runTable} unreadable`,
       jobs: renderJobs(aggregates, discovery.jobsById),
     };
   } finally {
