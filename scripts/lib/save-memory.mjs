@@ -129,7 +129,11 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     const contentForm = typeof defence.classifyContentForm === 'function'
       ? defence.classifyContentForm(memory.content)
       : null;
-    insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, result.sensitivity?.level, contentForm);
+    const memoryId = insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, result.sensitivity?.level, contentForm);
+    // #458: embed HERE, awaited, not scheduled. See embedStoredRow().
+    if (memoryId !== null) {
+      await embedStoredRow(db, memoryId, `${memory.title} ${memory.content}`);
+    }
     return;
   }
 
@@ -148,6 +152,11 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
 
 // ==================== Internal: writes ====================
 
+/**
+ * @returns {number|null} the new `memories.id`, or null when the write was
+ *   skipped as a duplicate. The caller needs the id to attach an embedding
+ *   (#458), and a skip must not be mistaken for a stored row.
+ */
 function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel, contentForm) {
   const timestamp = new Date().toISOString();
 
@@ -167,7 +176,7 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
   ).get(memory.title, project || null, project || null);
   if (existing) {
     process.stderr.write(`[shieldcortex save-memory] skipped duplicate: ${memory.title}\n`);
-    return;
+    return null;
   }
 
   // Near-duplicate dedup: exact-title only catches verbatim re-saves. Reworded
@@ -194,7 +203,7 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
       process.stderr.write(
         `[shieldcortex save-memory] skipped near-duplicate (combined=${combined.toFixed(2)}): ${memory.title}\n`,
       );
-      return;
+      return null;
     }
   }
 
@@ -202,7 +211,7 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
   const captureLayer = memory.capture_layer || memory.captureLayer || 'L0';
   // host_id/agent_id may be missing on pre-migration DBs — try/catch insert with fallback.
   try {
-    db.prepare(`
+    const info = db.prepare(`
       INSERT INTO memories (
         uuid, title, content, type, category, salience, tags, project,
         memory_purpose, source, source_kind, capture_method,
@@ -230,10 +239,11 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
       timestamp,
       timestamp,
     );
+    return Number(info.lastInsertRowid);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     if (!/no such column/i.test(msg)) throw err;
-    db.prepare(`
+    const info = db.prepare(`
       INSERT INTO memories (
         uuid, title, content, type, category, salience, tags, project,
         memory_purpose, source, source_kind, capture_method,
@@ -256,6 +266,7 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
       timestamp,
       timestamp,
     );
+    return Number(info.lastInsertRowid);
   }
 }
 
@@ -318,6 +329,100 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
   } catch {
     // Schema may be older than the audit columns. Better silent here than
     // raising into the hook — the stderr line above carries the signal.
+  }
+}
+
+// ==================== Internal: embeddings (#458) ====================
+
+// A hook is a short-lived process. `addMemory()` can afford to schedule an
+// embedding and let the long-lived gateway finish it; a hook that did the same
+// would exit at `process.exit(0)` with the promise still pending and leave the
+// column NULL for ever — which is exactly the state #458 measured (267 auto
+// rows, 0 embedded, all-time). So this path AWAITS the embed inline.
+//
+// Cost, measured on clawdbot1 with the model already on disk: 508ms for the
+// first embed in a process (worker spawn + 90MB ONNX load) and 7ms warm. That
+// is affordable once per hook invocation; an unbounded wait is not, because a
+// wedged model load would stall the turn the hook is ending. Hence the timeout.
+//
+// Best-effort by construction: any failure leaves the row stored with a NULL
+// embedding and is reported on stderr. `shieldcortex memories embed-backfill`
+// is the guaranteed-coverage path, and the doctor MEMEMB check is what makes a
+// host with a growing NULL population visible instead of silently keyword-only.
+const EMBED_TIMEOUT_MS = pickNumber('SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', 10_000);
+
+let _embedCache = null;
+let _embedCacheKey = null;
+let _warnedEmbedUnavailable = false;
+
+async function loadEmbedder() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const distRoot = resolve(here, '..', '..', 'dist');
+  if (_embedCache !== null && _embedCacheKey === distRoot) return _embedCache;
+
+  try {
+    const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'index.js')).href);
+    _embedCache = typeof mod.generateEmbedding === 'function' ? mod.generateEmbedding : null;
+  } catch {
+    // No dist build (dev workspace before `npm run build`) — same fail-soft
+    // posture the defence loader takes, except a missing embedder degrades
+    // recall rather than admitting unscanned content, so it is not fail-CLOSED.
+    _embedCache = null;
+  }
+  _embedCacheKey = distRoot;
+  return _embedCache;
+}
+
+/**
+ * Generate and persist the embedding for a just-stored row.
+ *
+ * Never throws: the memory is already committed, and losing the row because the
+ * ONNX worker is unavailable would be a strictly worse outcome than losing the
+ * vector.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} memoryId
+ * @param {string} text
+ */
+async function embedStoredRow(db, memoryId, text) {
+  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
+
+  const generateEmbedding = await loadEmbedder();
+  if (!generateEmbedding) {
+    if (!_warnedEmbedUnavailable) {
+      _warnedEmbedUnavailable = true;
+      process.stderr.write('[shieldcortex save-memory] embeddings unavailable (no dist build) — row stored without a vector; run `shieldcortex memories embed-backfill` after building\n');
+    }
+    return;
+  }
+
+  let timer;
+  try {
+    const embedding = await Promise.race([
+      generateEmbedding(text),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`embedding timed out after ${EMBED_TIMEOUT_MS}ms`)), EMBED_TIMEOUT_MS);
+      }),
+    ]);
+    if (!embedding || !embedding.buffer) {
+      process.stderr.write(`[shieldcortex save-memory] embedding returned no vector for memory ${memoryId}\n`);
+      return;
+    }
+    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(embedding.buffer), memoryId);
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    // Absent worker / explicitly disabled embeddings are configuration, not
+    // failure — say it once and stay quiet, exactly as store.ts does.
+    if (/Embedding worker unavailable|Embeddings disabled via/i.test(msg)) {
+      if (!_warnedEmbedUnavailable) {
+        _warnedEmbedUnavailable = true;
+        process.stderr.write(`[shieldcortex save-memory] embeddings unavailable — rows stored without vectors (${msg})\n`);
+      }
+      return;
+    }
+    process.stderr.write(`[shieldcortex save-memory] embedding failed for memory ${memoryId}: ${msg}\n`);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

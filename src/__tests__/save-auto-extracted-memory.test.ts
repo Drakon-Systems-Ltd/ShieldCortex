@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 // @ts-expect-error -- importing a .mjs hook util
 import { saveAutoExtractedMemory } from '../../scripts/lib/save-memory.mjs';
 
@@ -181,5 +182,88 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
       .get('DV') as { downvote_count: number; last_downvoted_at: string | null };
     expect(row.downvote_count).toBe(0);
     expect(row.last_downvoted_at).toBeNull();
+  });
+
+  /**
+   * #458: the hook write path never populated `embedding`.
+   *
+   * `addMemory()` (src/memory/store.ts) schedules an embedding for every row it
+   * writes. `scripts/lib/save-memory.mjs` was a second, independent writer whose
+   * INSERT simply never mentioned the column — so every `capture_method='auto'`
+   * row went in vector-less, and `src/memory/search.ts` (`WHERE embedding IS NOT
+   * NULL`) silently excluded it from semantic recall for ever after. Measured on
+   * clawdbot1 2026-09-02: 267 auto rows, 0 embedded, all-time.
+   *
+   * This runs in a REAL SUBPROCESS, deliberately, for two reasons.
+   *
+   * 1. `scripts/run-jest.mjs` sets `SHIELDCORTEX_SKIP_EMBEDDINGS=1` for the whole
+   *    suite. That is why no existing test could have caught this bug, and it is
+   *    why an in-process assertion here would be testing the stub, not the fix.
+   * 2. A hook is a short-lived process that ends at `process.exit(0)`. The defect
+   *    class this guards against is an embedding that is *scheduled* rather than
+   *    *awaited* — which passes any in-process test that happens to yield, and
+   *    still writes NULL in production. Only a real process that runs the write
+   *    and then exits can tell those two apart.
+   */
+  it('#458: a real hook process persists the embedding before it exits', () => {
+    const probe = path.join(tempDir, 'probe.mjs');
+    const probeDbPath = path.join(tempDir, 'probe.db');
+    fs.writeFileSync(probe, `
+      import Database from ${JSON.stringify(path.join(repoRoot, 'node_modules', 'better-sqlite3', 'lib', 'index.js'))};
+      import { readFileSync } from 'fs';
+      import { saveAutoExtractedMemory } from ${JSON.stringify(path.join(repoRoot, 'scripts', 'lib', 'save-memory.mjs'))};
+
+      const db = new Database(${JSON.stringify(probeDbPath)});
+      db.exec(readFileSync(${JSON.stringify(schemaPath)}, 'utf-8'));
+      await saveAutoExtractedMemory(
+        db,
+        {
+          title: 'EMB probe',
+          content: 'After comparing Prisma and Kysely we decided Drizzle for the SaaS layer.',
+          category: 'architecture',
+          salience: 0.45,
+          tags: ['auto-extracted'],
+        },
+        'p',
+        { source: 'stop-hook' },
+      );
+      const row = db.prepare('SELECT length(embedding) AS len FROM memories WHERE title = ?').get('EMB probe');
+      process.stdout.write(JSON.stringify(row ?? null));
+      // Exactly what stop-hook.mjs does — nothing gets a chance to drain here.
+      process.exit(0);
+    `);
+
+    const env = { ...process.env };
+    delete env.SHIELDCORTEX_SKIP_EMBEDDINGS;
+
+    const out = execFileSync(process.execPath, [probe], {
+      env,
+      timeout: 120_000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).toString();
+
+    const row = JSON.parse(out) as { len: number | null } | null;
+    expect(row).not.toBeNull();
+    // 384 float32 dimensions — the all-MiniLM-L6-v2 output width store.ts writes.
+    expect(row!.len).toBe(384 * 4);
+  }, 180_000);
+
+  /**
+   * The suite-wide `SHIELDCORTEX_SKIP_EMBEDDINGS=1` (and any host that has
+   * deliberately disabled embeddings) must still get its memory stored. Losing
+   * the row because the ONNX worker is unavailable would be strictly worse than
+   * losing the vector, so the embed step is best-effort by construction and the
+   * backfill is what guarantees eventual coverage.
+   */
+  it('#458: a disabled embedder still stores the row (best-effort, never fail-closed)', async () => {
+    expect(process.env.SHIELDCORTEX_SKIP_EMBEDDINGS).toBe('1');
+
+    await saveAutoExtractedMemory(db, makeMemory({ title: 'NOEMB' }), 'p', { source: 'stop-hook' });
+
+    const row = db.prepare('SELECT title, embedding FROM memories WHERE title = ?')
+      .get('NOEMB') as { title: string; embedding: Buffer | null } | undefined;
+
+    expect(row).toBeDefined();
+    expect(row!.embedding).toBeNull();
   });
 });
