@@ -463,6 +463,25 @@ describe('#310 retry control — the one lock plane', () => {
     )).not.toBeNull();
   });
 
+  it('bindSession without a sessionKey is unscopeable — it does not mint an unbound row', () => {
+    const recorded = recordDenialFingerprint(
+      {
+        hash: HASH,
+        tool: 'Bash',
+        actionId: 'act-6000000000000002',
+        signals: ['privilege-escalation'],
+        redactedSurface: 's',
+        cwd,
+        sessionKey: '   ',
+        bindSession: true,
+      },
+      { home, now: t0 },
+    );
+    expect(recorded.ok).toBe(false);
+    expect(recorded.reason).toBe('unscopeable');
+    expect(listRetryRows({ home, now: t0 })).toHaveLength(0);
+  });
+
   it('canonicalises cwd before matching (realpath + trailing slash)', () => {
     const canon = canonicaliseCwd(cwd)!;
     expect(canonicaliseCwd(`${cwd}/`)).toBe(canon);

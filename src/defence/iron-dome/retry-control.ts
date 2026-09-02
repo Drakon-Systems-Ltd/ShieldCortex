@@ -647,7 +647,7 @@ export interface DenialFingerprintEntry {
 
 export interface DenialFingerprintResult {
   ok: boolean;
-  reason?: 'locked' | 'unwritable';
+  reason?: 'locked' | 'unwritable' | 'unscopeable';
   id?: string;
   row?: RetryRow;
   /** True when a live deny suppression covers this identity. The caller MUST
@@ -673,7 +673,12 @@ export function recordDenialFingerprint(
   const hash = String(entry.hash ?? '').trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(hash)) return { ok: false, reason: 'unwritable' };
   const cwd = canonicaliseCwd(entry.cwd);
-  const sessionKey = entry.sessionKey ? String(entry.sessionKey).slice(0, 64) : undefined;
+  const sessionKey = typeof entry.sessionKey === 'string'
+    ? entry.sessionKey.trim().slice(0, 64) || undefined
+    : undefined;
+  if (entry.bindSession === true && !sessionKey) {
+    return { ok: false, reason: 'unscopeable' };
+  }
   const sessionBound = entry.bindSession === true && sessionKey !== undefined;
   const id = fingerprintId(hash, cwd, sessionBound ? sessionKey : undefined);
 
