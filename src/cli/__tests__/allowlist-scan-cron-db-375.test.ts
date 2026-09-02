@@ -79,6 +79,43 @@ function buildStore(
 
 
 
+/**
+ * Writable ONLY here — the OC2 (gen2, #456) fixture: the measured 2026.8.1
+ * shape (no payload_message/trigger_script; cron_run_receipts, not
+ * cron_run_logs). Before #456 this exact live shape scanned as
+ * SCHEMA MISMATCH and exited 1 on an 82-job host.
+ */
+function buildGen2Store(
+  dbPath: string,
+  shape: { jobs?: Array<{ job_id: string; name?: string; enabled?: unknown; job_json?: string | null }> } = {},
+): void {
+  mkdirSync(dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  try {
+    db.prepare(
+      `CREATE TABLE cron_jobs (store_key TEXT, job_id TEXT, declaration_key TEXT,
+        owner_agent_id TEXT, name TEXT, description TEXT, enabled INTEGER, agent_id TEXT,
+        payload_kind TEXT, job_json TEXT, state_json TEXT, runtime_updated_at_ms INTEGER,
+        schedule_identity TEXT, sort_order INTEGER, updated_at INTEGER)`,
+    ).run();
+    for (const j of shape.jobs ?? []) {
+      db.prepare(
+        `INSERT INTO cron_jobs (store_key, job_id, owner_agent_id, name, enabled, agent_id,
+          payload_kind, job_json, state_json, runtime_updated_at_ms, sort_order, updated_at)
+         VALUES ('default', ?, 'main', ?, ?, 'main', 'agentTurn', ?, '{}', 0, 0, 0)`,
+      ).run(j.job_id, j.name ?? j.job_id, (j.enabled ?? 1) as never, j.job_json ?? null);
+    }
+    db.prepare(
+      `CREATE TABLE cron_run_receipts (receipt_id TEXT, store_key TEXT, job_id TEXT,
+        config_revision INTEGER, agent_id TEXT, request_run_id TEXT, status TEXT,
+        owner_pid INTEGER, owner_start_time INTEGER, started_at_ms INTEGER,
+        finished_at_ms INTEGER, error_text TEXT)`,
+    ).run();
+  } finally {
+    db.close();
+  }
+}
+
 /** Paths may soft/hard-wrap for 40-col TUI; assert against whitespace-collapsed logs.
  *  macOS realpath often adds a `/private` prefix — accept both forms. */
 function flatLogs(logs: string[]): string {
@@ -209,6 +246,32 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     // The live SQLite store is readable, so the scan is complete.
     const code = await runAllowlistScan([], deps());
     expect(code).toBe(3);
+  });
+
+  test('an OC2 (gen2, #456) store scans ok and its job_json scripts are discovered', async () => {
+    // The regression this pins: before #456 this measured live shape probed
+    // schema_mismatch, so a healthy 82-job OpenClaw 2 host exited 1 with an
+    // empty script list.
+    buildGen2Store(dbPath, {
+      jobs: [
+        {
+          job_id: JOB_A,
+          name: 'oc2 sentry',
+          job_json: JSON.stringify({ payload: { kind: 'agentTurn', message: `python3 ${scriptPath}` } }),
+        },
+      ],
+    });
+
+    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    expect(found.sources.openclawDb).toMatchObject({ path: dbPath, status: 'ok' });
+    expect(found.scripts.map((s) => s.path)).toContain(scriptPath);
+
+    const code = await runAllowlistScan([], deps());
+    expect(code).toBe(3);
+    expect(logs.join('\n')).toContain('openclaw-cron-db');
+    expect(logs.join('\n')).not.toContain('SCHEMA MISMATCH');
+    expectLogPath(logs, realpathSync(scriptPath));
+    expect(stored).toEqual([]);
   });
 
   // -- Visibility rule ------------------------------------------
