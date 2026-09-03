@@ -19,6 +19,9 @@ import { reconcilePluginState, type ReconcileInput } from '../integrations/openc
 // Real lines, copied from clawdbot1 and veronica gateway logs.
 const JARVIS_LINE =
   '2026-07-26T10:28:52.378+00:00 [gateway] http server listening (14 plugins: acpx, anthropic, browser, codex, ekho-adapter, elevenlabs, google, memory-core, microsoft, multi-clawd, openai, shieldcortex-realtime, telegram, xai; 4.0s)';
+/** clawdbot1 OpenClaw 2026.8.2 journal, issue #459. Consent-inactive is in the registration line, not the listen list. */
+const JARVIS_2026_09_LINE =
+  '2026-09-02T06:12:47.000Z [gateway] http server listening (14 plugins: acpx, anthropic, browser, codex, ekho-adapter, elevenlabs, memory-core, microsoft, multi-clawd, openai, shieldcortex-realtime, signal, telegram, xai; 5.1s)';
 const VERONICA_LINE =
   '2026-07-20T00:16:51.758+01:00 [gateway] http server listening (11 plugins: anthropic, browser, canvas, device-pair, ekho-adapter, file-transfer, memory-core, ollama, phone-control, talk-voice, telegram; 1.1s)';
 
@@ -61,10 +64,17 @@ describe('parseBootRosterLine', () => {
   });
 
   it('declaredCount and parsed ids agree on real lines (guards list truncation)', () => {
-    for (const line of [JARVIS_LINE, VERONICA_LINE]) {
+    for (const line of [JARVIS_LINE, VERONICA_LINE, JARVIS_2026_09_LINE]) {
       const r = parseBootRosterLine(line)!;
       expect(r.plugins).toHaveLength(r.declaredCount);
     }
+  });
+
+  it('#459: the 2026-09-02 clawdbot1 listen line names shieldcortex-realtime', () => {
+    const r = parseBootRosterLine(JARVIS_2026_09_LINE)!;
+    expect(r.declaredCount).toBe(14);
+    expect(rosterContains(r, 'shieldcortex-realtime')).toBe(true);
+    expect(r.plugins).toContain('signal');
   });
 });
 
@@ -133,6 +143,18 @@ describe('readLatestBootRoster', () => {
       processStartedAtMs: Date.parse('2026-07-26T10:28:52.378+00:00'),
     });
     expect(live).not.toBeNull();
+  });
+
+  it('#459: journal text is consulted before /tmp/openclaw when injected', () => {
+    const r = readLatestBootRoster({
+      ...io,
+      readDir: () => ['other.txt'],
+      processStartedAtMs: Date.parse('2026-09-02T06:12:26.000Z'),
+      readJournalText: () => JARVIS_2026_09_LINE,
+    });
+    expect(r).not.toBeNull();
+    expect(rosterContains(r!, 'shieldcortex-realtime')).toBe(true);
+    expect(r!.source).toBe('journal');
   });
 });
 

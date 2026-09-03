@@ -127,4 +127,31 @@ describe('reconcilePluginState — #74 field fixtures', () => {
     reconcilePluginState(fx.input);
     expect(JSON.stringify(fx.input)).toBe(snapshot);
   });
+
+  it('#459: a live boot roster that NAMES the plugin outranks plugins_json miss — not UNPROTECTED', () => {
+    // Jarvis 2026-09-02: journal listen line includes shieldcortex-realtime,
+    // conversation scanning inactive (consent) is a separate warn. LOAD must
+    // not fail just because plugins_json omitted the id after a generation-dir
+    // change. #74 still holds: this fixture WITHOUT liveRoster stays fail.
+    const fx = loadFixture('enabled-not-loaded');
+    const verdict = reconcilePluginState({
+      ...fx.input,
+      liveRoster: [
+        'acpx', 'anthropic', 'browser', 'codex', 'ekho-adapter', 'elevenlabs',
+        'memory-core', 'microsoft', 'multi-clawd', 'openai',
+        'shieldcortex-realtime', 'signal', 'telegram', 'xai',
+      ],
+    });
+    expect(verdict.loadedInLiveRoster).toBe(true);
+    expect(verdict.state).not.toBe('enabled-not-loaded');
+    expect(verdict.severity).not.toBe('fail');
+  });
+
+  it('#459: unread live roster (null) + index omit remains the #74 fail — missing evidence is not a pass', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    expect(fx.input.liveRoster).toBeUndefined();
+    const verdict = reconcilePluginState(fx.input);
+    expect(verdict.state).toBe('enabled-not-loaded');
+    expect(verdict.severity).toBe('fail');
+  });
 });

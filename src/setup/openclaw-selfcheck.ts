@@ -320,7 +320,7 @@ export async function runPluginSelfCheck(
       if (!proc) return null;
       gatewayPid = proc.pid;
       processStartedAtMs = proc.startedAtMs;
-      latestBoot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
+      latestBoot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs, home });
       return latestBoot?.plugins ?? null;
     });
   const probe = options.canaryProbe ?? defaultCanaryProbe;

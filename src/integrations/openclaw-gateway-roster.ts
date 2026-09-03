@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 
 /**
  * Reading the LIVE gateway plugin roster.
@@ -126,21 +127,97 @@ export interface ReadBootRosterOptions {
   readDir?: (dir: string) => string[];
   readFile?: (file: string) => string;
   statMtimeMs?: (file: string) => number;
+  /**
+   * #459 — systemd journal text (already `--since`-bounded by the caller when
+   * possible). Injected in tests; production default is journalctl user units.
+   * Null/empty means "this source has nothing".
+   */
+  readJournalText?: (sinceMs?: number) => string | null;
+  /** Operator HOME, for `~/.openclaw/logs` fallback. Tests pass this explicitly. */
+  home?: string;
 }
 
 const DEFAULT_LOG_DIR = '/tmp/openclaw';
 
+function rosterIsFresh(roster: BootRoster, processStartedAtMs?: number): boolean {
+  if (processStartedAtMs == null || roster.atMs == null) return true;
+  return roster.atMs >= processStartedAtMs;
+}
+
+/**
+ * systemd user journal for the gateway. Bounded at the source (#150): journald
+ * default lines have no year, so `--since=@epoch` is the freshness proof.
+ * Never throws. Never runs under Jest unless the caller injected readJournalText.
+ */
+export function defaultReadGatewayJournalText(sinceMs?: number): string | null {
+  if (process.env.JEST_WORKER_ID !== undefined) return null;
+  if (sinceMs == null || !Number.isFinite(sinceMs)) return null;
+  const since = `--since=@${Math.floor(sinceMs / 1000)}`;
+  for (const unit of ['openclaw-gateway', 'openclaw']) {
+    try {
+      const out = execFileSync(
+        'journalctl',
+        ['--user', '-u', unit, '--no-pager', '-n', '2000', since],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      if (typeof out === 'string' && out.trim().length > 0) return out;
+    } catch {
+      // no systemd / unknown unit / no perms
+    }
+  }
+  return null;
+}
+
+function readHomeGatewayLogs(home: string, readFile: (file: string) => string): string | null {
+  const candidates = [
+    path.join(home, '.openclaw', 'logs', 'gateway.log'),
+    path.join(home, '.openclaw', 'logs', 'openclaw-gateway.log'),
+    path.join(home, '.openclaw', 'gateway.log'),
+  ];
+  const parts: string[] = [];
+  for (const file of candidates) {
+    try {
+      const text = readFile(file);
+      if (text && text.trim()) parts.push(text);
+    } catch {
+      // missing / unreadable
+    }
+  }
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
 /**
  * Read the newest boot roster the gateway has written.
  *
- * Returns null — meaning "cannot prove" — when the log dir is missing, holds
- * no roster line, or the only line found predates the running process. Callers
- * must treat null as absence of evidence, NEVER as evidence of health.
+ * Source order matches doctor running-plugin-version (#459): journalctl user
+ * units, then ~/.openclaw/logs, then /tmp/openclaw. Returns null — meaning
+ * "cannot prove" — when none of those hold a fresh roster line. Callers must
+ * treat null as absence of evidence, NEVER as evidence of health.
  */
 export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootRoster | null {
+  const processStartedAtMs = options.processStartedAtMs;
+  const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
+
+  const consider = (text: string | null | undefined, source: string): BootRoster | null => {
+    if (!text) return null;
+    const roster = parseLatestBootRoster(text);
+    if (!roster) return null;
+    if (!rosterIsFresh(roster, processStartedAtMs)) return null;
+    return { ...roster, source };
+  };
+
+  const journalText = (options.readJournalText ?? defaultReadGatewayJournalText)(processStartedAtMs);
+  const fromJournal = consider(journalText, 'journal');
+  if (fromJournal) return fromJournal;
+
+  const home = options.home;
+  if (home) {
+    const fromHome = consider(readHomeGatewayLogs(home, readFile), path.join(home, '.openclaw', 'logs'));
+    if (fromHome) return fromHome;
+  }
+
   const logDir = options.logDir ?? DEFAULT_LOG_DIR;
   const readDir = options.readDir ?? ((d: string) => fs.readdirSync(d));
-  const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
   const statMtimeMs = options.statMtimeMs ?? ((f: string) => fs.statSync(f).mtimeMs);
 
   let names: string[];
@@ -175,17 +252,8 @@ export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootR
     } catch {
       continue;
     }
-    const roster = parseLatestBootRoster(text);
-    if (!roster) continue;
-    // A line from a previous process proves nothing about this one.
-    if (
-      options.processStartedAtMs != null &&
-      roster.atMs != null &&
-      roster.atMs < options.processStartedAtMs
-    ) {
-      return null;
-    }
-    return { ...roster, source: file };
+    const roster = consider(text, file);
+    if (roster) return roster;
   }
   return null;
 }
@@ -240,31 +308,7 @@ export function findRegistrationSince(
   sinceMs: number,
   options: ReadBootRosterOptions = {},
 ): RegistrationSighting | null {
-  const logDir = options.logDir ?? DEFAULT_LOG_DIR;
-  const readDir = options.readDir ?? ((d: string) => fs.readdirSync(d));
-  const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
-
-  let names: string[];
-  try {
-    names = readDir(logDir);
-  } catch {
-    return null;
-  }
-
-  let newest: RegistrationSighting | null = null;
-  for (const name of names) {
-    if (!name.startsWith('openclaw-') || !name.endsWith('.log')) continue;
-    let text: string;
-    try {
-      text = readFile(path.join(logDir, name));
-    } catch {
-      continue;
-    }
-    for (const sighting of parseRegistrationsSince(text, sinceMs)) {
-      if (!newest || sighting.atMs > newest.atMs) newest = sighting;
-    }
-  }
-  return newest;
+  return newestRegistrationFromSources(sinceMs, options);
 }
 
 /**
@@ -284,29 +328,43 @@ export function findGatewayAttributedRegistrationSince(
   options: ReadBootRosterOptions = {},
 ): RegistrationSighting | null {
   if (!Number.isInteger(gatewayPid) || gatewayPid <= 0) return null;
+  return newestRegistrationFromSources(sinceMs, options, gatewayPid);
+}
+
+function newestRegistrationFromSources(
+  sinceMs: number,
+  options: ReadBootRosterOptions,
+  gatewayPid?: number,
+): RegistrationSighting | null {
+  const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
+  const texts: string[] = [];
+
+  const journalText = (options.readJournalText ?? defaultReadGatewayJournalText)(sinceMs);
+  if (journalText) texts.push(journalText);
+  if (options.home) {
+    const homeText = readHomeGatewayLogs(options.home, readFile);
+    if (homeText) texts.push(homeText);
+  }
 
   const logDir = options.logDir ?? DEFAULT_LOG_DIR;
   const readDir = options.readDir ?? ((d: string) => fs.readdirSync(d));
-  const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
-
-  let names: string[];
   try {
-    names = readDir(logDir);
+    for (const name of readDir(logDir)) {
+      if (!name.startsWith('openclaw-') || !name.endsWith('.log')) continue;
+      try {
+        texts.push(readFile(path.join(logDir, name)));
+      } catch {
+        // unreadable file
+      }
+    }
   } catch {
-    return null;
+    // log dir missing — other sources may still have spoken
   }
 
   let newest: RegistrationSighting | null = null;
-  for (const name of names) {
-    if (!name.startsWith('openclaw-') || !name.endsWith('.log')) continue;
-    let text: string;
-    try {
-      text = readFile(path.join(logDir, name));
-    } catch {
-      continue;
-    }
+  for (const text of texts) {
     for (const sighting of parseRegistrationsSince(text, sinceMs)) {
-      if (sighting.pid !== gatewayPid) continue;
+      if (gatewayPid != null && sighting.pid !== gatewayPid) continue;
       if (!newest || sighting.atMs > newest.atMs) newest = sighting;
     }
   }

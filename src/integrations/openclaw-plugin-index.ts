@@ -491,7 +491,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   }
 
   // 4. THE #74 silent drop: enabled in config but missing from a READABLE index.
-  if (enabledInConfig && !loadedInIndex) {
+  // #459: live boot-roster proof outranks plugins_json. Jarvis 2026-09-02 had
+  // shieldcortex-realtime on the gateway listen line while plugins_json omitted
+  // it (generation-dir / consent warning). Convicting UNPROTECTED there is the
+  // false red that trains operators to ignore the check that caught #74.
+  // Unread live roster (null) still takes this fail — that is #74.
+  // Explicit live miss (false) already failed at rule 2.
+  if (enabledInConfig && !loadedInIndex && loadedInLiveRoster !== true) {
     reasons.push('enabled:true in config but ABSENT from the loaded roster (plugins_json) — interceptor not loaded, host unprotected while status reports ON');
     if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
     return {
@@ -878,7 +884,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
       if (!proc) return null;
       gatewayPid = proc.pid;
       processStartedAtMs = proc.startedAtMs;
-      const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
+      const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs, home });
       bootAtMs = boot?.atMs ?? null;
       return boot?.plugins ?? null;
     });
