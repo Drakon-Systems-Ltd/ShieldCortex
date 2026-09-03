@@ -61,8 +61,12 @@ function readFlag(args: string[], name: string): { present: boolean; raw?: strin
 
 /** Absent/`--all` → 0 (unbounded). `--limit 0` / `--limit=0` / `--limit=3` must not silently mean all. */
 export function parseEmbedBackfillLimit(args: string[]): { ok: true; limit: number } | { ok: false; error: string } {
-  if (args.includes('--all')) return { ok: true, limit: 0 };
+  const wantAll = args.includes('--all');
   const f = readFlag(args, '--limit');
+  if (wantAll && f.present) {
+    return { ok: false, error: 'embed-backfill: --all and --limit cannot be combined' };
+  }
+  if (wantAll) return { ok: true, limit: 0 };
   if (!f.present) return { ok: true, limit: 0 };
   if (f.raw === undefined || !/^[1-9]\d*$/.test(f.raw)) {
     return { ok: false, error: 'embed-backfill: --limit must be a positive integer (omit --limit or pass --all for unbounded)' };
@@ -73,8 +77,8 @@ export function parseEmbedBackfillLimit(args: string[]): { ok: true; limit: numb
 export function parseEmbedBackfillProject(args: string[]): { ok: true; project?: string } | { ok: false; error: string } {
   const f = readFlag(args, '--project');
   if (!f.present) return { ok: true };
-  if (f.raw === undefined || f.raw === '') {
-    return { ok: false, error: 'embed-backfill: --project requires a non-empty value' };
+  if (f.raw === undefined || f.raw === '' || f.raw.startsWith('-')) {
+    return { ok: false, error: 'embed-backfill: --project requires a non-empty value that is not another flag' };
   }
   return { ok: true, project: f.raw };
 }

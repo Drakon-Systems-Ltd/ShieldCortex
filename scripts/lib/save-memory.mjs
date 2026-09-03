@@ -390,9 +390,10 @@ async function embeddingCacheIsHealthy() {
     const here = dirname(fileURLToPath(import.meta.url));
     const distRoot = resolve(here, '..', '..', 'dist');
     const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'model-cache.js')).href);
-    if (typeof mod.inspectEmbeddingModelCache !== 'function') return false;
-    const insp = await mod.inspectEmbeddingModelCache();
-    return insp && insp.status === 'ok';
+    const inspect = mod.inspectEmbeddingHookReady || null;
+    if (typeof inspect !== 'function') return false;
+    const ready = await inspect();
+    return Boolean(ready && ready.ready === true);
   } catch {
     return false;
   }
@@ -405,7 +406,11 @@ async function embedStoredRow(db, memoryId, text) {
   if (!(await embeddingCacheIsHealthy())) return;
 
   if (process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1') {
-    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.alloc(384 * 4), memoryId);
+    // Async on purpose: a sync UPDATE would pass even if the caller forgot to await.
+    await new Promise((r) => setImmediate(r));
+    const v = new Float32Array(384);
+    v[0] = 0.42;
+    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(v.buffer), memoryId);
     return;
   }
 

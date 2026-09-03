@@ -115,6 +115,8 @@ describe('#458 embed-backfill + semantic coverage', () => {
       expect(parseEmbedBackfillLimit([]).ok).toBe(true);
       expect((parseEmbedBackfillLimit([]) as { ok: true; limit: number }).limit).toBe(0);
       expect(parseEmbedBackfillProject(['--project=']).ok).toBe(false);
+      expect(parseEmbedBackfillProject(['--project', '--execute']).ok).toBe(false);
+      expect(parseEmbedBackfillLimit(['--all', '--limit', '3']).ok).toBe(false);
       expect((parseEmbedBackfillProject(['--project=alpha']) as { ok: true; project?: string }).project).toBe('alpha');
     });
 

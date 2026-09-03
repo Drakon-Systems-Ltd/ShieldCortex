@@ -1,6 +1,8 @@
 export { generateEmbedding, cosineSimilarity, isModelLoaded, preloadModel, disposeModel } from './generator.js';
 export {
   inspectEmbeddingModelCache,
+  inspectEmbeddingHookReady,
+  EMBEDDING_REQUIRED_SIBLINGS,
   quarantineEmbeddingOnnx,
   formatModelCacheDoctorMessage,
   EMBEDDING_ONNX_EXPECTED_BYTES,

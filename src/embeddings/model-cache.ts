@@ -268,6 +268,40 @@ export async function inspectEmbeddingModelCache(
   }
 }
 
+/** Files transformers.js fetches from HuggingFace if absent, even when model.onnx is valid. */
+export const EMBEDDING_REQUIRED_SIBLINGS = [
+  'config.json',
+  'tokenizer.json',
+  'tokenizer_config.json',
+] as const;
+
+/**
+ * Hook-safe local completeness: ONNX integrity PLUS tokenizer/config siblings.
+ * inspectEmbeddingModelCache() alone is not enough — a valid model.onnx with
+ * missing tokenizer.json still enters the worker with allowRemoteModels=true.
+ */
+export async function inspectEmbeddingHookReady(
+  opts: { cacheRoot?: string } = {},
+): Promise<{ ready: boolean; reason: string; missing: string[] }> {
+  const insp = await inspectEmbeddingModelCache(opts);
+  if (insp.status !== 'ok') {
+    return { ready: false, reason: insp.status, missing: [] };
+  }
+  const missing: string[] = [];
+  for (const name of EMBEDDING_REQUIRED_SIBLINGS) {
+    const p = join(insp.cacheDir, name);
+    try {
+      if (!existsSync(p) || statSync(p).size === 0) missing.push(name);
+    } catch {
+      missing.push(name);
+    }
+  }
+  if (missing.length) {
+    return { ready: false, reason: `missing siblings: ${missing.join(', ')}`, missing };
+  }
+  return { ready: true, reason: 'ok', missing: [] };
+}
+
 function moveSidecarAside(sidecarPath: string, destWeightPath: string): void {
   if (!existsSync(sidecarPath)) return;
   const dest = `${destWeightPath}.shieldcortex.json`;
