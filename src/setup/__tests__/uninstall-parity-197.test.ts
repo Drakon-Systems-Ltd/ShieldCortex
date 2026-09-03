@@ -70,6 +70,20 @@ describe('#197 — the manifest rule: exactly one fate per artifact', () => {
     expect(start).toBeGreaterThan(-1);
     expect(src.slice(start, end)).toContain('uninstallOpenClawSkill();');
   });
+
+  it('the Codex MCP artifact is in the manifest — the gap that opened #452 stays closed', () => {
+    const codex = UNINSTALL_MANIFEST.find((a) => a.id === 'codex-mcp');
+    expect(codex?.removedBy).toBe('uninstallCodex');
+  });
+
+  it('the full uninstall path itself removes the Codex MCP block — the standalone verb alone is not parity', () => {
+    const src = fs.readFileSync(path.join(repoRoot, 'src', 'setup', 'uninstall.ts'), 'utf-8');
+    const start = src.indexOf('export async function uninstallAll');
+    expect(start).toBeGreaterThan(-1);
+    const next = src.indexOf('\nexport ', start + 1);
+    const body = next === -1 ? src.slice(start) : src.slice(start, next);
+    expect(body).toContain('await uninstallCodex();');
+  });
 });
 
 describe('#197 — skill removal is fail-closed on ownership', () => {

@@ -13,6 +13,7 @@ import os from 'os';
 import readline from 'readline';
 import { uninstallService } from '../service/install.js';
 import { uninstallOpenClawHook } from './openclaw.js';
+import { uninstallCodex } from './codex.js';
 import { looksLikeShieldcortex } from './json-config.js';
 import { formatKeptSummary } from './uninstall-manifest.js';
 
@@ -289,6 +290,16 @@ export async function uninstallAll(options?: {
     removeMcpEntry();
   } catch (err: any) {
     console.error(`Failed to remove MCP entry: ${err.message}`);
+  }
+
+  // 5b. Codex MCP block in ~/.codex/config.toml (#452). The standalone
+  //     `shieldcortex codex uninstall` verb already did this; full uninstall
+  //     did not, so Codex kept a dead `shieldcortex-memory` server after the
+  //     package was gone.
+  try {
+    await uninstallCodex();
+  } catch (err: any) {
+    console.error(`Failed to remove Codex MCP entry: ${err.message}`);
   }
 
   // 6. Deep clean: purge all known OpenClaw residue locations that the

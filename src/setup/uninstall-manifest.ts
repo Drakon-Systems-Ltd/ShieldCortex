@@ -74,6 +74,12 @@ export const UNINSTALL_MANIFEST: UninstallArtifact[] = [
     removedBy: 'uninstallOpenClawSkill',
   },
   {
+    id: 'codex-mcp',
+    description: 'Codex MCP server block in ~/.codex/config.toml',
+    createdBy: 'shieldcortex codex install',
+    removedBy: 'uninstallCodex',
+  },
+  {
     id: 'memories-db',
     description: 'Memory database',
     createdBy: 'shieldcortex install (first run)',
