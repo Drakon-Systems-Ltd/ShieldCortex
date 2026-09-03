@@ -384,8 +384,16 @@ async function loadEmbedder() {
  * @param {number} memoryId
  * @param {string} text
  */
+function embeddingModelOnDisk() {
+  const onnx = join(homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2', 'onnx', 'model.onnx');
+  return existsSync(onnx);
+}
+
 async function embedStoredRow(db, memoryId, text) {
   if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
+  // #460 review: never trigger an ONNX download at session close. If the
+  // weight is not already local, skip; embed-backfill is the explicit path.
+  if (!embeddingModelOnDisk()) return;
 
   const generateEmbedding = await loadEmbedder();
   if (!generateEmbedding) {
@@ -397,11 +405,15 @@ async function embedStoredRow(db, memoryId, text) {
   }
 
   let timer;
+  let timedOut = false;
   try {
     const embedding = await Promise.race([
       generateEmbedding(text),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`embedding timed out after ${EMBED_TIMEOUT_MS}ms`)), EMBED_TIMEOUT_MS);
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`embedding timed out after ${EMBED_TIMEOUT_MS}ms`));
+        }, EMBED_TIMEOUT_MS);
       }),
     ]);
     if (!embedding || !embedding.buffer) {
@@ -421,6 +433,16 @@ async function embedStoredRow(db, memoryId, text) {
       return;
     }
     process.stderr.write(`[shieldcortex save-memory] embedding failed for memory ${memoryId}: ${msg}\n`);
+    if (timedOut) {
+      try {
+        const here = dirname(fileURLToPath(import.meta.url));
+        const distRoot = resolve(here, '..', '..', 'dist');
+        const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'index.js')).href);
+        if (typeof mod.disposeModel === 'function') await mod.disposeModel();
+      } catch {
+        /* worker may never have started */
+      }
+    }
   } finally {
     if (timer) clearTimeout(timer);
   }

@@ -976,6 +976,22 @@ export function runSemanticCoverageCheck(dbPath: string): CheckResult {
 }
 
 async function checkSemanticCoverage(): Promise<CheckResult> {
+  const label = 'Semantic coverage';
+  try {
+    const { inspectEmbeddingModelCache } = await import('../embeddings/model-cache.js');
+    const insp = await inspectEmbeddingModelCache();
+    if (insp.status !== 'ok') {
+      return {
+        label,
+        status: 'pass',
+        message:
+          `embedding model cache is ${insp.status} — coverage skipped so doctor does not recommend embed-backfill (that would download model.onnx). Cache: ${insp.onnxPath}`,
+      };
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'warn', message: `model-cache inspect failed — ${msg}` };
+  }
   return runSemanticCoverageCheck(getDbPath());
 }
 

@@ -18,6 +18,8 @@
  * on a large store is a long, worker-bound operation and the operator should see
  * the size of it before starting.
  */
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 
 export interface EmbedBackfillOptions {
@@ -50,16 +52,37 @@ interface PendingRow {
   content: string;
 }
 
+/** Parse `--limit`. Absent → 0 (no cap). Present but not a non-negative integer → error (NaN must not unbounded --execute). */
+export function parseEmbedBackfillLimit(args: string[]): { ok: true; limit: number } | { ok: false; error: string } {
+  const i = args.indexOf('--limit');
+  if (i === -1) return { ok: true, limit: 0 };
+  const raw = args[i + 1];
+  if (raw === undefined || !/^\d+$/.test(raw)) {
+    return { ok: false, error: 'embed-backfill: --limit must be a non-negative integer' };
+  }
+  return { ok: true, limit: Number(raw) };
+}
+
 export async function backfillEmbeddings(options: EmbedBackfillOptions = {}): Promise<EmbedBackfillResult> {
   const dryRun = options.execute !== true;
-  const limit = Number.isFinite(options.limit) && (options.limit as number) > 0 ? Number(options.limit) : 0;
+  const limit = Number.isFinite(options.limit) && (options.limit as number) >= 0 ? Number(options.limit) : 0;
 
   let db = options.db;
+  let openedOwn = false;
   if (!db) {
-    const { initDatabase, getDatabase } = await import('../database/init.js');
-    initDatabase();
-    db = getDatabase();
+    if (dryRun) {
+      const Database = (await import('better-sqlite3')).default;
+      const dbPath = join(homedir(), '.shieldcortex', 'memories.db');
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      openedOwn = true;
+    } else {
+      const { initDatabase, getDatabase } = await import('../database/init.js');
+      initDatabase();
+      db = getDatabase();
+      openedOwn = true;
+    }
   }
+  try {
 
   const projectClause = options.project ? 'AND project = ?' : '';
   const projectArgs = options.project ? [options.project] : [];
@@ -107,6 +130,18 @@ export async function backfillEmbeddings(options: EmbedBackfillOptions = {}): Pr
   }
 
   return { missing, total, embedded, failed, dryRun };
+  } finally {
+    if (openedOwn && db) {
+      if (dryRun) {
+        try { db.close(); } catch { /* already closed */ }
+      } else {
+        try {
+          const { closeDatabase } = await import('../database/init.js');
+          closeDatabase();
+        } catch { /* already closed */ }
+      }
+    }
+  }
 }
 
 export async function runEmbedBackfill(args: string[]): Promise<void> {
@@ -115,29 +150,52 @@ export async function runEmbedBackfill(args: string[]): Promise<void> {
     return i !== -1 ? args[i + 1] : undefined;
   };
 
-  const execute = args.includes('--execute');
-  const limit = Number(flag('--limit') ?? 0);
-  const project = flag('--project');
+  const parsed = parseEmbedBackfillLimit(args);
+  try {
+    if (!parsed.ok) {
+      console.error(parsed.error);
+      process.exitCode = 2;
+      return;
+    }
+    const execute = args.includes('--execute');
+    const project = flag('--project');
 
-  const result = await backfillEmbeddings({
-    execute,
-    limit,
-    project,
-    onProgress: (done, count) => {
-      if (done % 25 === 0 || done === count) {
-        process.stdout.write(`  ...${done}/${count}\n`);
-      }
-    },
-  });
+    const result = await backfillEmbeddings({
+      execute,
+      limit: parsed.limit,
+      project,
+      onProgress: (done, count) => {
+        if (done % 25 === 0 || done === count) {
+          process.stdout.write(`  ...${done}/${count}\n`);
+        }
+      },
+    });
 
-  const banner = result.dryRun ? '[DRY RUN] ' : '';
-  console.log(`${banner}Backfill embeddings for memories missing a vector (#458)`);
-  console.log(`  Project: ${project ?? '(all)'}`);
-  console.log(`  Missing: ${result.missing} of ${result.total}`);
-  if (result.dryRun) {
-    if (result.missing > 0) console.log('  Re-run with --execute to embed them.');
-    return;
+    const banner = result.dryRun ? '[DRY RUN] ' : '';
+    console.log(`${banner}Backfill embeddings for memories missing a vector (#458)`);
+    console.log(`  Project: ${project ?? '(all)'}`);
+    console.log(`  Missing: ${result.missing} of ${result.total}`);
+    if (result.dryRun) {
+      if (result.missing > 0) console.log('  Re-run with --execute to embed them.');
+      return;
+    }
+    console.log(`  Embedded: ${result.embedded}`);
+    if (result.failed > 0) console.log(`  Failed:   ${result.failed}`);
+  } finally {
+    try {
+      const { disposeModel } = await import('../embeddings/index.js');
+      await disposeModel();
+    } catch {
+      /* worker never started */
+    }
+    try {
+      const { closeDatabase } = await import('../database/init.js');
+      closeDatabase();
+    } catch {
+      /* already closed */
+    }
+    if (!process.env.JEST_WORKER_ID) {
+      process.exit(process.exitCode ?? 0);
+    }
   }
-  console.log(`  Embedded: ${result.embedded}`);
-  if (result.failed > 0) console.log(`  Failed:   ${result.failed}`);
 }

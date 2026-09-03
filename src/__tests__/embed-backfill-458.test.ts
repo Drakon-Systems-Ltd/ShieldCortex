@@ -13,7 +13,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { backfillEmbeddings } from '../cli/embed-backfill.js';
+import { backfillEmbeddings, parseEmbedBackfillLimit } from '../cli/embed-backfill.js';
 import { runSemanticCoverageCheck } from '../cli/doctor.js';
 
 const thisFile = fileURLToPath(import.meta.url);
@@ -104,6 +104,13 @@ describe('#458 embed-backfill + semantic coverage', () => {
 
       expect(result.embedded).toBe(3);
       expect(result.failed).toBe(1);
+    });
+
+    it('rejects a non-integer --limit so NaN cannot unbounded --execute', () => {
+      expect(parseEmbedBackfillLimit(['--limit', 'NaN']).ok).toBe(false);
+      expect(parseEmbedBackfillLimit(['--limit', '2']).ok).toBe(true);
+      expect(parseEmbedBackfillLimit([]).ok).toBe(true);
+      expect((parseEmbedBackfillLimit([]) as { ok: true; limit: number }).limit).toBe(0);
     });
 
     it('honours --limit and --project', async () => {
