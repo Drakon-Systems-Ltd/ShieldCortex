@@ -18,8 +18,6 @@
  * on a large store is a long, worker-bound operation and the operator should see
  * the size of it before starting.
  */
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import type { Database } from 'better-sqlite3';
 
 export interface EmbedBackfillOptions {
@@ -52,15 +50,33 @@ interface PendingRow {
   content: string;
 }
 
-/** Parse `--limit`. Absent → 0 (no cap). Present but not a non-negative integer → error (NaN must not unbounded --execute). */
+function readFlag(args: string[], name: string): { present: boolean; raw?: string } {
+  const prefix = `${name}=`;
+  const eq = args.find((a) => a.startsWith(prefix));
+  if (eq) return { present: true, raw: eq.slice(prefix.length) };
+  const i = args.indexOf(name);
+  if (i === -1) return { present: false };
+  return { present: true, raw: args[i + 1] };
+}
+
+/** Absent/`--all` → 0 (unbounded). `--limit 0` / `--limit=0` / `--limit=3` must not silently mean all. */
 export function parseEmbedBackfillLimit(args: string[]): { ok: true; limit: number } | { ok: false; error: string } {
-  const i = args.indexOf('--limit');
-  if (i === -1) return { ok: true, limit: 0 };
-  const raw = args[i + 1];
-  if (raw === undefined || !/^\d+$/.test(raw)) {
-    return { ok: false, error: 'embed-backfill: --limit must be a non-negative integer' };
+  if (args.includes('--all')) return { ok: true, limit: 0 };
+  const f = readFlag(args, '--limit');
+  if (!f.present) return { ok: true, limit: 0 };
+  if (f.raw === undefined || !/^[1-9]\d*$/.test(f.raw)) {
+    return { ok: false, error: 'embed-backfill: --limit must be a positive integer (omit --limit or pass --all for unbounded)' };
   }
-  return { ok: true, limit: Number(raw) };
+  return { ok: true, limit: Number(f.raw) };
+}
+
+export function parseEmbedBackfillProject(args: string[]): { ok: true; project?: string } | { ok: false; error: string } {
+  const f = readFlag(args, '--project');
+  if (!f.present) return { ok: true };
+  if (f.raw === undefined || f.raw === '') {
+    return { ok: false, error: 'embed-backfill: --project requires a non-empty value' };
+  }
+  return { ok: true, project: f.raw };
 }
 
 export async function backfillEmbeddings(options: EmbedBackfillOptions = {}): Promise<EmbedBackfillResult> {
@@ -70,14 +86,15 @@ export async function backfillEmbeddings(options: EmbedBackfillOptions = {}): Pr
   let db = options.db;
   let openedOwn = false;
   if (!db) {
+    const { resolveMemoriesDbPath } = await import('../database/init.js');
+    const dbPath = resolveMemoriesDbPath();
     if (dryRun) {
       const Database = (await import('better-sqlite3')).default;
-      const dbPath = join(homedir(), '.shieldcortex', 'memories.db');
       db = new Database(dbPath, { readonly: true, fileMustExist: true });
       openedOwn = true;
     } else {
       const { initDatabase, getDatabase } = await import('../database/init.js');
-      initDatabase();
+      initDatabase(); // same resolveMemoriesDbPath() as dry-run, without marking the path "explicit"
       db = getDatabase();
       openedOwn = true;
     }
@@ -145,25 +162,25 @@ export async function backfillEmbeddings(options: EmbedBackfillOptions = {}): Pr
 }
 
 export async function runEmbedBackfill(args: string[]): Promise<void> {
-  const flag = (name: string): string | undefined => {
-    const i = args.indexOf(name);
-    return i !== -1 ? args[i + 1] : undefined;
-  };
-
-  const parsed = parseEmbedBackfillLimit(args);
+  const parsedLimit = parseEmbedBackfillLimit(args);
+  const parsedProject = parseEmbedBackfillProject(args);
   try {
-    if (!parsed.ok) {
-      console.error(parsed.error);
+    if (!parsedLimit.ok) {
+      console.error(parsedLimit.error);
+      process.exitCode = 2;
+      return;
+    }
+    if (!parsedProject.ok) {
+      console.error(parsedProject.error);
       process.exitCode = 2;
       return;
     }
     const execute = args.includes('--execute');
-    const project = flag('--project');
 
     const result = await backfillEmbeddings({
       execute,
-      limit: parsed.limit,
-      project,
+      limit: parsedLimit.limit,
+      project: parsedProject.project,
       onProgress: (done, count) => {
         if (done % 25 === 0 || done === count) {
           process.stdout.write(`  ...${done}/${count}\n`);
@@ -173,7 +190,7 @@ export async function runEmbedBackfill(args: string[]): Promise<void> {
 
     const banner = result.dryRun ? '[DRY RUN] ' : '';
     console.log(`${banner}Backfill embeddings for memories missing a vector (#458)`);
-    console.log(`  Project: ${project ?? '(all)'}`);
+    console.log(`  Project: ${parsedProject.project ?? '(all)'}`);
     console.log(`  Missing: ${result.missing} of ${result.total}`);
     if (result.dryRun) {
       if (result.missing > 0) console.log('  Re-run with --execute to embed them.');
@@ -181,6 +198,10 @@ export async function runEmbedBackfill(args: string[]): Promise<void> {
     }
     console.log(`  Embedded: ${result.embedded}`);
     if (result.failed > 0) console.log(`  Failed:   ${result.failed}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`embed-backfill failed: ${msg}`);
+    process.exitCode = process.exitCode || 1;
   } finally {
     try {
       const { disposeModel } = await import('../embeddings/index.js');
@@ -195,7 +216,7 @@ export async function runEmbedBackfill(args: string[]): Promise<void> {
       /* already closed */
     }
     if (!process.env.JEST_WORKER_ID) {
-      process.exit(process.exitCode ?? 0);
+      process.exit(typeof process.exitCode === 'number' ? process.exitCode : 0);
     }
   }
 }

@@ -235,6 +235,7 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
 
     const env = { ...process.env };
     delete env.SHIELDCORTEX_SKIP_EMBEDDINGS;
+    env.SHIELDCORTEX_HOOK_EMBED_FAKE = '1';
 
     const out = execFileSync(process.execPath, [probe], {
       env,
@@ -247,6 +248,35 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     // 384 float32 dimensions — the all-MiniLM-L6-v2 output width store.ts writes.
     expect(row!.len).toBe(384 * 4);
   }, 180_000);
+
+  it('#458: isolated HOME with no model cache skips embed (NULL) and still stores the row', () => {
+    const probe = path.join(tempDir, 'probe-nocache.mjs');
+    const probeDbPath = path.join(tempDir, 'probe-nocache.db');
+    const isolatedHome = path.join(tempDir, 'empty-home');
+    fs.mkdirSync(isolatedHome);
+    fs.writeFileSync(probe, `
+      import Database from ${JSON.stringify(path.join(repoRoot, 'node_modules', 'better-sqlite3', 'lib', 'index.js'))};
+      import { readFileSync } from 'fs';
+      import { saveAutoExtractedMemory } from ${JSON.stringify(path.join(repoRoot, 'scripts', 'lib', 'save-memory.mjs'))};
+      const db = new Database(${JSON.stringify(probeDbPath)});
+      db.exec(readFileSync(${JSON.stringify(schemaPath)}, 'utf-8'));
+      await saveAutoExtractedMemory(db, { title: 'NOCACHE', content: 'x', category: 'note', salience: 0.4, tags: [] }, 'p', { source: 'session-end-hook' });
+      const row = db.prepare('SELECT length(embedding) AS len FROM memories WHERE title = ?').get('NOCACHE');
+      process.stdout.write(JSON.stringify(row ?? null));
+      process.exit(0);
+    `);
+    const env = { ...process.env, HOME: isolatedHome };
+    delete env.SHIELDCORTEX_SKIP_EMBEDDINGS;
+    delete env.SHIELDCORTEX_HOOK_EMBED_FAKE;
+    const out = execFileSync(process.execPath, [probe], {
+      env,
+      timeout: 30_000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).toString();
+    const row = JSON.parse(out) as { len: number | null } | null;
+    expect(row).not.toBeNull();
+    expect(row!.len).toBeNull();
+  });
 
   /**
    * The suite-wide `SHIELDCORTEX_SKIP_EMBEDDINGS=1` (and any host that has

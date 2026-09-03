@@ -384,16 +384,30 @@ async function loadEmbedder() {
  * @param {number} memoryId
  * @param {string} text
  */
-function embeddingModelOnDisk() {
-  const onnx = join(homedir(), '.cache', 'shieldcortex', 'models', 'Xenova', 'all-MiniLM-L6-v2', 'onnx', 'model.onnx');
-  return existsSync(onnx);
+async function embeddingCacheIsHealthy() {
+  if (process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1') return true;
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const distRoot = resolve(here, '..', '..', 'dist');
+    const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'model-cache.js')).href);
+    if (typeof mod.inspectEmbeddingModelCache !== 'function') return false;
+    const insp = await mod.inspectEmbeddingModelCache();
+    return insp && insp.status === 'ok';
+  } catch {
+    return false;
+  }
 }
 
 async function embedStoredRow(db, memoryId, text) {
   if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
-  // #460 review: never trigger an ONNX download at session close. If the
-  // weight is not already local, skip; embed-backfill is the explicit path.
-  if (!embeddingModelOnDisk()) return;
+  // #460 review: never download at session close. existsSync(model.onnx) is not
+  // enough — a truncated file still trips worker heal + HuggingFace fetch.
+  if (!(await embeddingCacheIsHealthy())) return;
+
+  if (process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1') {
+    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.alloc(384 * 4), memoryId);
+    return;
+  }
 
   const generateEmbedding = await loadEmbedder();
   if (!generateEmbedding) {
