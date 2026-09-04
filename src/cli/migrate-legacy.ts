@@ -360,6 +360,12 @@ function printUsage(): void {
   console.log('      DRY-RUN BY DEFAULT — pass --execute to actually delete.');
   console.log('      Backup auto-saved before any delete.');
   console.log('');
+  console.log('  embed-backfill [--project X] [--limit N] [--execute]');
+  console.log('      Generate the missing semantic vectors for memories whose');
+  console.log('      embedding is NULL (#458 — hook-captured rows never had one).');
+  console.log('      Rows without a vector are invisible to semantic recall.');
+  console.log('      DRY-RUN BY DEFAULT — pass --execute to embed.');
+  console.log('');
   console.log('  dedupe [--project X] [--limit 200] [--execute]');
   console.log('      Cluster near-duplicate long-term memories and keep the highest-');
   console.log('      salience representative. DRY-RUN BY DEFAULT — pass --execute.');
@@ -426,6 +432,11 @@ export async function handleMemoriesCommand(args: string[]): Promise<void> {
   }
   if (sub === 'recalc') {
     await runRecalc(args.slice(1));
+    return;
+  }
+  if (sub === 'embed-backfill') {
+    const { runEmbedBackfill } = await import('./embed-backfill.js');
+    await runEmbedBackfill(args.slice(1));
     return;
   }
   printUsage();

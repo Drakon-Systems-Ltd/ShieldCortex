@@ -53,6 +53,11 @@ function expandPath(path: string): string {
  * legacy DB read by the CLI migrate command).
  */
 let _legacyFallbackWarned = false;
+export function resolveMemoriesDbPath(explicitPath?: string): string {
+  const envDbPath = process.env.CLAUDE_MEMORY_DB?.trim();
+  return explicitPath || envDbPath || getDefaultDbPath();
+}
+
 function getDefaultDbPath(): string {
   const newPath = join(homedir(), '.shieldcortex', 'memories.db');
   const legacyPath = join(homedir(), '.claude-memory', 'memories.db');
@@ -507,8 +512,7 @@ export function initDatabase(dbPath?: string): Database.Database {
   // CLAUDE_MEMORY_DB is the supported sandbox/CLI override used throughout the
   // command surface. Keep an explicit argument highest priority and preserve
   // the existing live default when neither override is present.
-  const envDbPath = process.env.CLAUDE_MEMORY_DB?.trim();
-  const resolvedPath = dbPath || envDbPath || getDefaultDbPath();
+  const resolvedPath = resolveMemoriesDbPath(dbPath);
   // Only a REAL caller argument counts as "the operator explicitly chose this
   // database" for the safe-runtime guard. An environment variable is ambient:
   // a redundant CLAUDE_MEMORY_DB pointing at the live default must NOT let an

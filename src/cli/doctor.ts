@@ -907,6 +907,94 @@ async function checkMemoryStats(): Promise<CheckResult> {
   return runMemoryStatsCheck(getDbPath());
 }
 
+// ── Check 3a: Semantic coverage (#458) ────────────────────
+/**
+ * What fraction of the store is actually reachable by semantic recall.
+ *
+ * `src/memory/search.ts` selects `WHERE embedding IS NOT NULL`. A row without a
+ * vector is therefore not ranked badly — it is not a candidate at all, and no
+ * surface says so. Until 4.54.16 the hook writer never populated the column, so
+ * on a host where auto-capture dominates (which is what the `sc_only` plane
+ * makes it) the majority of memories were silently unsearchable while every
+ * other check on this report passed. Measured on clawdbot1 2026-09-02: 302 of
+ * 342 rows, 88%, across four months.
+ *
+ * Reported as a ratio rather than a count because the count alone is
+ * meaningless — 300 un-embedded rows in a 100,000-row store is noise, and 30 in
+ * a store of 40 is the whole product not working.
+ *
+ * WARN rather than FAIL: recall degrades, nothing is lost or exposed, and the
+ * repair is a single command. A check that cries damage over a degradation is
+ * how it earns the right to be ignored.
+ *
+ * Exported for tests, in the style of runMemoryStatsCheck.
+ */
+export function runSemanticCoverageCheck(dbPath: string): CheckResult {
+  const label = 'Semantic coverage';
+  const prerequisite = databasePrerequisite(label, dbPath);
+  if (prerequisite) return prerequisite;
+
+  try {
+    const Database = require('better-sqlite3');
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const total = (db.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number }).count;
+      if (total === 0) {
+        return { label, status: 'pass', message: 'no memories stored yet' };
+      }
+
+      const missing = (db.prepare('SELECT COUNT(*) as count FROM memories WHERE embedding IS NULL').get() as { count: number }).count;
+      const embedded = total - missing;
+      const pct = Math.round((missing / total) * 100);
+
+      if (missing === 0) {
+        return { label, status: 'pass', message: `${embedded}/${total} memories embedded — all searchable semantically` };
+      }
+
+      // A handful of un-embedded rows is normal: the hook embed is best-effort
+      // under a timeout, so a slow model load legitimately leaves the odd row
+      // for the backfill. A tenth of the store is not that.
+      const status: CheckStatus = pct >= 10 ? 'warn' : 'pass';
+      const message = `${embedded}/${total} memories embedded — ${missing} (${pct}%) have no vector and are INVISIBLE to semantic recall`
+        + (status === 'warn' ? ' (search.ts filters WHERE embedding IS NOT NULL; they are not ranked low, they are not candidates)' : '');
+
+      return {
+        label,
+        status,
+        message,
+        ...(status === 'warn'
+          ? { fix: 'Backfill the missing vectors with `shieldcortex memories embed-backfill --execute`. If the count keeps growing after a backfill, the write path is dropping them again — that is #458 and it needs the hook writer, not another backfill.' }
+          : {}),
+      };
+    } finally {
+      db.close();
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'warn', message: `check failed — ${msg}` };
+  }
+}
+
+async function checkSemanticCoverage(): Promise<CheckResult> {
+  const label = 'Semantic coverage';
+  try {
+    const { inspectEmbeddingModelCache } = await import('../embeddings/model-cache.js');
+    const insp = await inspectEmbeddingModelCache();
+    if (insp.status !== 'ok') {
+      return {
+        label,
+        status: 'pass',
+        message:
+          `embedding model cache is ${insp.status} — coverage skipped so doctor does not recommend embed-backfill (that would download model.onnx). Cache: ${insp.onnxPath}`,
+      };
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'warn', message: `model-cache inspect failed — ${msg}` };
+  }
+  return runSemanticCoverageCheck(getDbPath());
+}
+
 // ── Check 3b: Write-path smoke test ───────────────────────
 /**
  * The honest "is it working?" check.
@@ -6269,6 +6357,7 @@ export async function runDoctor(
     checkSchema,
     checkWritePath, // Smoke test: real INSERT/SELECT/DELETE round-trip — catches silent schema drift
     checkMemoryStats,
+    checkSemanticCoverage, // #458: how much of the store semantic recall can actually see
     checkHooks,
     checkHookTimeouts,
     checkAutoMemoryHooks,

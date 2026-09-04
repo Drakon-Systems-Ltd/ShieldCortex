@@ -24,6 +24,7 @@ import {
   EMBEDDING_ONNX_EXPECTED_SHA256,
   formatModelCacheDoctorMessage,
   inspectEmbeddingModelCache,
+  inspectEmbeddingHookReady,
   isCorruptModelLoadError,
   quarantineEmbeddingOnnx,
   resetModelCacheHealLatchForTests,
@@ -207,6 +208,39 @@ describe('model-cache #383', () => {
     expect(hasAttemptedModelCacheHeal()).toBe(true);
     resetModelCacheHealLatchForTests();
     expect(hasAttemptedModelCacheHeal()).toBe(false);
+  });
+
+  it('#458 hook-ready: valid ONNX with missing tokenizer siblings is not ready', async () => {
+    writeOnnxSparse(cacheRoot, EMBEDDING_ONNX_EXPECTED_BYTES);
+    writeTrustedSidecarFor(cacheRoot);
+    const onnxOk = await inspectEmbeddingModelCache({ cacheRoot });
+    expect(onnxOk.status).toBe('ok');
+    const ready = await inspectEmbeddingHookReady({ cacheRoot });
+    expect(ready.ready).toBe(false);
+    expect(ready.missing).toEqual(expect.arrayContaining(['tokenizer.json', 'config.json', 'tokenizer_config.json']));
+  });
+
+  it('#458 hook-ready: zero-byte tokenizer sibling is not ready', async () => {
+    writeOnnxSparse(cacheRoot, EMBEDDING_ONNX_EXPECTED_BYTES);
+    writeTrustedSidecarFor(cacheRoot);
+    const { cacheDir } = (await inspectEmbeddingModelCache({ cacheRoot }));
+    writeFileSync(join(cacheDir, 'config.json'), '{}');
+    writeFileSync(join(cacheDir, 'tokenizer.json'), '');
+    writeFileSync(join(cacheDir, 'tokenizer_config.json'), '{}');
+    const ready = await inspectEmbeddingHookReady({ cacheRoot });
+    expect(ready.ready).toBe(false);
+    expect(ready.missing).toContain('tokenizer.json');
+  });
+
+  it('#458 hook-ready: valid ONNX plus complete siblings is ready', async () => {
+    writeOnnxSparse(cacheRoot, EMBEDDING_ONNX_EXPECTED_BYTES);
+    writeTrustedSidecarFor(cacheRoot);
+    const { cacheDir } = (await inspectEmbeddingModelCache({ cacheRoot }));
+    writeFileSync(join(cacheDir, 'config.json'), '{}');
+    writeFileSync(join(cacheDir, 'tokenizer.json'), '{"x":1}');
+    writeFileSync(join(cacheDir, 'tokenizer_config.json'), '{}');
+    const ready = await inspectEmbeddingHookReady({ cacheRoot });
+    expect(ready).toEqual({ ready: true, reason: 'ok', missing: [] });
   });
 
   it('known-good constants match the fleet reference weight when present', () => {
