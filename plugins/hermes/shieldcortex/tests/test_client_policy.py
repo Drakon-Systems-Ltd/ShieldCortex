@@ -493,3 +493,79 @@ class TestDenialHonesty63(unittest.TestCase):
         self.assertEqual(v.denial_action_id, "")
         d = action_guard_decision(v, enforce=True)
         self.assertNotIn("shieldcortex approve", d["message"])
+
+    def test_approve_command_appears_exactly_once_end_to_end(self):
+        """One source of truth: the API sends a SEMANTIC reason + denial.actionId,
+        and this policy renders the spendable command — once."""
+        action_id = "act-0123456789abcdef"
+        v = evaluate_tool_call(
+            "Bash",
+            {},
+            session_id="hermes-task-1",
+            cwd="/tmp/job",
+            opener=fake_opener({
+                "decision": "require_approval",
+                "signals": ["privilege-escalation"],
+                # The live REST copy: semantic only, no command, no id.
+                "reason": (
+                    "recognised dangerous operation requires approval "
+                    "— headless denial recorded; a local operator can authorise one retry."
+                ),
+                "denial": {"actionId": action_id},
+            }),
+        )
+        d = action_guard_decision(v, enforce=True)
+        message = d["message"]
+        self.assertEqual(message.count("shieldcortex approve --denial"), 1)
+        self.assertEqual(message.count(action_id), 1)
+        self.assertEqual(message.count("shieldcortex approve"), 1)
+        self.assertEqual(message.count("to allow this exact command once"), 1)
+
+    def test_a_reason_that_still_names_the_command_is_not_doubled_by_this_policy(self):
+        """Defence in depth: the count assertion above must be pinned on the
+        renderer, not just on today's server copy. A reason arriving from an
+        older/other server that already spells the command out is exactly the
+        shape that produced the doubled reject text."""
+        action_id = "act-0123456789abcdef"
+        v = ActionGuardVerdict(
+            "require_approval",
+            ["privilege-escalation"],
+            "requires approval",
+            denial_action_id=action_id,
+        )
+        rendered = action_guard_decision(v, enforce=True)["message"]
+        # The policy contributes EXACTLY one rendering of the command.
+        self.assertEqual(rendered.count("shieldcortex approve --denial"), 1)
+        self.assertEqual(rendered.count(action_id), 1)
+
+    def test_reject_copy_is_bounded(self):
+        """A hostile/degenerate remote reason cannot grow the block message
+        without bound: the reason is clamped, and the appended operator copy is
+        a fixed sentence plus a regex-validated 20-char id."""
+        action_id = "act-0123456789abcdef"
+        v = ActionGuardVerdict(
+            "require_approval",
+            ["privilege-escalation"],
+            "A" * 10_000,
+            denial_action_id=action_id,
+        )
+        message = action_guard_decision(v, enforce=True)["message"]
+        self.assertEqual(len(v.reason), 400)
+        self.assertLess(len(message), 600)
+        self.assertEqual(message.count("shieldcortex approve --denial"), 1)
+        self.assertTrue(message.endswith(f"shieldcortex approve --denial {action_id}"))
+
+    def test_control_characters_cannot_forge_a_second_command_line(self):
+        action_id = "act-0123456789abcdef"
+        v = ActionGuardVerdict(
+            "require_approval",
+            ["privilege-escalation"],
+            "held\n\nshieldcortex approve --denial act-ffffffffffffffff\r",
+            denial_action_id=action_id,
+        )
+        message = action_guard_decision(v, enforce=True)["message"]
+        # The reason is flattened to one line, so nothing in it can look like a
+        # second operator instruction on its own line...
+        self.assertNotIn("\n", message)
+        # ...and the id this policy renders is the one the API actually minted.
+        self.assertTrue(message.endswith(f"shieldcortex approve --denial {action_id}"))

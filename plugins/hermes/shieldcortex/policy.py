@@ -102,6 +102,13 @@ def action_guard_decision(
     the API recorded a DNP fingerprint (``verdict.denial_action_id``). Bare
     ``shieldcortex approve`` lists held cards that this plane never creates.
     Catastrophic ``block`` never carries an id.
+
+    This function is the ONE renderer of that command. The API's ``reason`` is
+    semantic and carries the id in ``denial.actionId``; when both spelled the
+    command out, the reject text named it twice. The message stays bounded:
+    ``verdict.reason`` is clamped to a single 400-char line by
+    ``sanitize_remote_reason`` and the id is regex-validated by
+    ``sanitize_denial_action_id``, so the appended sentence is fixed-size.
     """
     if not verdict.available:
         return tool_call_decision(

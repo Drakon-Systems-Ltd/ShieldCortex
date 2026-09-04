@@ -516,6 +516,82 @@ describe('#310 retry control — the one lock plane', () => {
     expect(consumeRetryGrant({ hash: HASH, origin: { cwd: otherCwd, tool: 'Bash' } }, { home, now: t0 + 1_000 })).not.toBeNull();
   });
 
+  it('--any-origin widens the DIRECTORY only — a session-bound grant stays in its session', () => {
+    const sessionKey = 'hermes-task-1111';
+    const actionId = 'act-6000000000000010';
+    recordDenialFingerprint(
+      {
+        hash: HASH,
+        tool: 'Bash',
+        actionId,
+        signals: ['privilege-escalation'],
+        redactedSurface: 's',
+        cwd,
+        sessionKey,
+        bindSession: true,
+      },
+      { home, now: t0 },
+    );
+
+    const granted = grantRetry(
+      { actionId },
+      { isInteractive: true, anyOrigin: true },
+      { home, now: t0 + 1_000, tool: 'Bash' },
+    );
+    expect(granted.ok).toBe(true);
+    // The widener drops cwd and NOTHING else: the session binding is still on
+    // the grant, so the CLI copy that reports it is reporting the truth.
+    expect(granted.ok && granted.grant.origin.anyOrigin).toBe(true);
+    expect(granted.ok && granted.grant.origin.cwd).toBeUndefined();
+    expect(granted.ok && granted.grant.origin.sessionKey).toBe(sessionKey);
+
+    // Another session cannot spend it — in ANY directory.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash', sessionKey: 'hermes-task-2222' } },
+      { home, now: t0 + 1_500 },
+    )).toBeNull();
+    // Neither can a session-less caller.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash' } },
+      { home, now: t0 + 1_600 },
+    )).toBeNull();
+    // Nor another tool.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Write', sessionKey } },
+      { home, now: t0 + 1_700 },
+    )).toBeNull();
+
+    // The recorded session spends it once — and this is what --any-origin
+    // actually bought: a DIFFERENT directory.
+    const spent = consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash', sessionKey } },
+      { home, now: t0 + 2_000 },
+    );
+    expect(spent).not.toBeNull();
+    expect(spent!.actionId).toBe(actionId);
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash', sessionKey } },
+      { home, now: t0 + 2_100 },
+    )).toBeNull();
+  });
+
+  it('ordinary cron semantics are unchanged — an unbound --any-origin grant still spends anywhere', () => {
+    // No bindSession: the ordinary #310 lane, where the next tick is a new
+    // session and sessionKey is diagnostic only.
+    denial();
+    const granted = grantRetry(
+      { hash: HASH, cwd },
+      { isInteractive: true, anyOrigin: true },
+      { home, now: t0 + 1_000 },
+    );
+    expect(granted.ok).toBe(true);
+    expect(granted.ok && granted.grant.origin.sessionKey).toBeUndefined();
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash' } },
+      { home, now: t0 + 2_000 },
+    )).not.toBeNull();
+  });
+
   it('--any-origin and --override-deny are TTY-only — a card can never set either', () => {
     denial();
     recordDenySuppression({ hash: HASH, cwd }, { home, now: t0, suppressionMs: 900_000 });

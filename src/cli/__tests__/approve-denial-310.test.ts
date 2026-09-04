@@ -171,6 +171,57 @@ describe('#310 — approve --denial', () => {
     expect(getRetryRow({ id: fingerprintId(HASH, undefined) }, { home })!.grant!.origin.anyOrigin).toBe(true);
   });
 
+  it('--any-origin copy says DIRECTORY only, and reports a session binding that survives it', () => {
+    const sessionKey = 'hermes-task-1111';
+    const boundActionId = 'act-00000000000000cd';
+    recordDenialFingerprint(
+      {
+        hash: HASH,
+        tool: 'Bash',
+        actionId: boundActionId,
+        signals: ['privilege-escalation'],
+        redactedSurface: 'Bash: [redacted action surface] fields=command',
+        cwd,
+        sessionKey,
+        bindSession: true,
+      },
+      { home, now: t0 },
+    );
+
+    const asked: string[] = [];
+    const out = sink();
+    const code = runApprove(['--denial', boundActionId, '--any-origin'], {
+      home,
+      now: t0,
+      interactive: true,
+      log: out.write,
+      error: out.write,
+      confirm: (q) => { asked.push(q); return true; },
+    });
+
+    expect(code).toBe(0);
+    // The confirmation must not promise more than the store hands out.
+    expect(asked.join('\n')).toContain('DIRECTORY binding');
+    expect(asked.join('\n')).toContain('session-bound, and stays bound');
+    // ...and neither may the success copy.
+    expect(out.text()).toContain('--any-origin widens the directory only');
+    expect(out.text()).toContain('still bound');
+
+    const grant = getRetryRow({ id: fingerprintId(HASH, canonicaliseCwd(cwd), sessionKey) }, { home })!.grant!;
+    expect(grant.origin.anyOrigin).toBe(true);
+    expect(grant.origin.sessionKey).toBe(sessionKey);
+    // The copy is honest because the predicate is: another session is refused
+    // in any directory, the recorded one passes once.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey: 'hermes-task-2222' } },
+      { home, now: t0 + 1_000 },
+    )).toBeNull();
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey } },
+      { home, now: t0 + 1_100 },
+    )).not.toBeNull();
+  });
+
   it('refuses by default during a deny suppression, and names when the silence ends', () => {
     denial();
     recordDenySuppression({ hash: HASH, cwd }, { home, now: t0, suppressionMs: 900_000, via: 'card' });

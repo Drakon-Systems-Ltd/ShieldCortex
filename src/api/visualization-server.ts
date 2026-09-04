@@ -321,10 +321,13 @@ export function handleV1ScanBatch(req: Request, res: Response): void {
  * interceptor already share. Content scanning stays on `/api/v1/scan`.
  *
  * #63 — Hermes has no approval prompt. `require_approval` is a headless
- * denial. Record a #310 fingerprint (not a #118 pending card) and name the
- * exact spendable command `shieldcortex approve --denial <actionId>`. Bind
+ * denial. Record a #310 fingerprint (not a #118 pending card) and return the
+ * id in `denial.actionId`. The id is the ONE source of truth for the operator
+ * command: `reason` stays semantic and the Hermes policy renders
+ * `shieldcortex approve --denial <actionId>` from the id, exactly once. Bind
  * cwd + sessionId from TOP-LEVEL request fields (host/Hermes), never from
  * agent-authored args. Catastrophic `block` stays a hard stop with no door.
+ * A consumed retry grant is audited before the allow is returned.
  *
  * Exported for unit tests. Optional `deps` injects home/now so tests never
  * touch the operator live store.
@@ -338,6 +341,74 @@ function topLevelToken(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+/**
+ * Tool names and action ids reach this plane over HTTP. The ledger's `reason`
+ * is a single-line evidence string, so coerce them to bounded tokens rather
+ * than letting caller-authored text shape a stored audit row.
+ */
+function auditToken(value: string | undefined, fallback: string): string {
+  const cleaned = String(value ?? '').replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64);
+  return cleaned || fallback;
+}
+
+/**
+ * #63 — the REST twin of the hook lane's `approved` audit row.
+ *
+ * The Claude Code hook writes an `action_guard` audit entry carrying
+ * `grantKind: 'retry'` + the actionId (beside its `sessionKey`) whenever a
+ * retry grant flips a refusal into a pass. The REST lane returns the same
+ * allow to Hermes, so it owes the ledger the same evidence: WHICH action was
+ * retried, WHO spent it, HOW the grant was minted and WHAT call it was bound
+ * to.
+ *
+ * The binding is the byte-exact `hashToolCall` digest the grant was minted
+ * against — it identifies the call precisely and carries none of its content.
+ * The command text is deliberately absent: an audit row is not a place to
+ * store the thing the guard refused to run.
+ */
+function logRetryGrantConsumed(
+  tool: string,
+  verdict: { signals?: unknown },
+  spent: { via?: string; actionId?: string },
+  sessionId: string,
+  hash: string,
+  now: number,
+): void {
+  try {
+    const signals = Array.isArray(verdict.signals)
+      ? verdict.signals.filter((s): s is string => typeof s === 'string').slice(0, 32)
+      : [];
+    logAudit({
+      memory_id: null,
+      project: null,
+      timestamp: new Date(now).toISOString(),
+      source_type: 'api',
+      source_identifier: 'action-guard',
+      trust_score: 0,
+      sensitivity_level: 'INTERNAL',
+      // The call ran: an operator-authorised retry overturned the refusal.
+      firewall_result: 'ALLOW',
+      operation: null, // a guard decision, not a memory read/write/delete
+      content_hash: hash,
+      anomaly_score: 0.6,
+      threat_indicators: JSON.stringify(signals),
+      blocked_patterns: '[]',
+      reason:
+        `[action-guard:retry_grant_consumed] tool=${auditToken(tool, 'tool')} `
+        + 'action=require_approval outcome=approved grantKind=retry '
+        + `via=${auditToken(spent.via, 'unknown')} `
+        + `session=${auditToken(sessionId, 'none')} `
+        + `actionId=${auditToken(spent.actionId, 'none')}`,
+      fragmentation_score: null,
+      pipeline_duration_ms: 0,
+      source_attested: null,
+    });
+  } catch {
+    // Best-effort, like every other audit sink here: an unwritable ledger must
+    // never un-spend a grant the operator already authorised.
+  }
 }
 
 export function handleV1ActionGuard(
@@ -380,6 +451,13 @@ export function handleV1ActionGuard(
             { home, now },
           );
           if (spent) {
+            // Audit BEFORE the allow leaves this function. The hook lane
+            // writes an `approved` row carrying grantKind + actionId for
+            // exactly this event; a REST retry that flipped a refusal to an
+            // allow with no durable row would be the one guard outcome the
+            // ledger could not answer for. Evidence only — the call is bound
+            // by its byte-exact hash, never by its command text.
+            logRetryGrantConsumed(tool, verdict, spent, sessionId, hash, now);
             payload.decision = 'allow';
             payload.approved = true;
             payload.reason = spent.actionId
@@ -405,10 +483,14 @@ export function handleV1ActionGuard(
             { home, now },
           );
           if (recorded.ok) {
+            // ONE source of truth for the operator command: `denial.actionId`
+            // carries the id and the Hermes policy renders
+            // `shieldcortex approve --denial <id>` exactly once from it. This
+            // reason stays SEMANTIC — spelling the command here too produced a
+            // reject message that named it twice.
             payload.denial = { actionId };
             payload.reason =
-              `${verdict.reason} — to allow this exact command once, run in YOUR terminal on this host: ` +
-              `shieldcortex approve --denial ${actionId}`;
+              `${verdict.reason} — headless denial recorded; a local operator can authorise one retry.`;
           }
         }
       } catch {

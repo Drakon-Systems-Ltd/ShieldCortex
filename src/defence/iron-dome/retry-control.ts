@@ -946,8 +946,9 @@ export interface GrantRetryAuth {
   nonce?: string;
   /** The TTY path — pass the live `isInteractive` value from src/cli/approve.ts. */
   isInteractive?: boolean;
-  /** TTY only, off by default: grant with no cwd binding ("ANY local process
-   *  may spend this"). Cards can never set it. */
+  /** TTY only, off by default: grant with no cwd binding ("ANY local
+   *  DIRECTORY may spend this"). Widens the cwd leg only — a session-bound
+   *  fingerprint keeps its session binding. Cards can never set it. */
   anyOrigin?: boolean;
   /** TTY only: grant despite a live deny suppression. Cards can never set it. */
   overrideDeny?: boolean;
@@ -1046,7 +1047,11 @@ export function grantRetry(
       // identity); this is the TTY path without --any-origin.
       return { value: { failed: 'unscopeable' }, commit: true };
     }
-    if (row.originScope.sessionBound === true && !row.originScope.sessionKey && !anyOrigin) {
+    // `--any-origin` widens the CWD leg and NOTHING else. A row that recorded
+    // an explicit session binding but no key cannot have that binding honoured
+    // at spend time, so it stays unscopeable even here — the widener the
+    // operator confirmed was "any directory", never "any session".
+    if (row.originScope.sessionBound === true && !row.originScope.sessionKey) {
       return { value: { failed: 'unscopeable' }, commit: true };
     }
 
@@ -1082,7 +1087,9 @@ export function grantRetry(
       origin: {
         ...(anyOrigin ? { anyOrigin: true } : {}),
         ...(row.originScope.cwd && !anyOrigin ? { cwd: row.originScope.cwd } : {}),
-        ...(row.originScope.sessionBound === true && row.originScope.sessionKey && !anyOrigin
+        // Session binding survives `--any-origin`: the flag drops the cwd leg,
+        // not the session the fingerprint was recorded under.
+        ...(row.originScope.sessionBound === true && row.originScope.sessionKey
           ? { sessionKey: row.originScope.sessionKey }
           : {}),
         tool: String(opts.tool ?? row.tool ?? 'tool').slice(0, 64),
@@ -1136,8 +1143,9 @@ export type ConsumedRetryGrant = RetryGrant & { hash: string; id: string; action
  * diagnostic for cron retries because the next tick gets a fresh one. Lanes
  * that recorded a session-bound fingerprint add the captured sessionKey to
  * both the grant and this predicate.
- * `--any-origin` grants (TTY-only, confirmed) skip the cwd leg and match tool
- * alone.
+ * `--any-origin` grants (TTY-only, confirmed) skip the cwd leg ONLY. Tool and
+ * session are still AND-matched, so an operator who widened the directory has
+ * not also handed the grant to another session.
  *
  * Consumption is a locked read-modify-write in the one plane, so two racing
  * tool calls cannot both spend the same grant: exactly one sees it unspent.
@@ -1169,9 +1177,14 @@ export function consumeRetryGrant(
       if (suppressionIsLive(r, now)) return false; // deny beats a live grant
       const origin = r.grant!.origin;
       if (origin.tool !== tool) return false;
-      if (origin.anyOrigin === true) return true; // TTY-only, confirmed
-      if (!origin.cwd) return false; // unscopeable never matches
-      if (origin.cwd !== cwd) return false;
+      // `--any-origin` (TTY-only, confirmed) widens the CWD leg — and only
+      // that leg. The session predicate below still runs, so a grant minted
+      // from a session-bound fingerprint stays spendable ONLY by the session
+      // it was recorded under, whatever directory the retry runs in.
+      if (origin.anyOrigin !== true) {
+        if (!origin.cwd) return false; // unscopeable never matches
+        if (origin.cwd !== cwd) return false;
+      }
       if (origin.sessionKey !== undefined || sessionKey !== undefined) {
         return origin.sessionKey !== undefined && origin.sessionKey === sessionKey;
       }
