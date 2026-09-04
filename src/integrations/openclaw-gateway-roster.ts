@@ -180,22 +180,25 @@ export function defaultReadGatewayJournalText(sinceMs?: number): string | null {
   return null;
 }
 
-function readHomeGatewayLogs(home: string, readFile: (file: string) => string): string | null {
+function readHomeGatewayLogFiles(
+  home: string,
+  readFile: (file: string) => string,
+): Array<{ file: string; text: string }> {
   const candidates = [
     path.join(home, '.openclaw', 'logs', 'gateway.log'),
     path.join(home, '.openclaw', 'logs', 'openclaw-gateway.log'),
     path.join(home, '.openclaw', 'gateway.log'),
   ];
-  const parts: string[] = [];
+  const out: Array<{ file: string; text: string }> = [];
   for (const file of candidates) {
     try {
       const text = readFile(file);
-      if (text && text.trim()) parts.push(text);
+      if (text && text.trim()) out.push({ file, text });
     } catch {
       // missing / unreadable
     }
   }
-  return parts.length > 0 ? parts.join('\n') : null;
+  return out;
 }
 
 /**
@@ -228,7 +231,26 @@ export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootR
 
   const home = options.home;
   if (home) {
-    const fromHome = consider(readHomeGatewayLogs(home, readFile), path.join(home, '.openclaw', 'logs'), true);
+    // #461: evaluate each home candidate file INDEPENDENTLY and keep the
+    // newest fresh roster by timestamp. Concatenating the candidates let "last
+    // roster line in path order" decide, so a stale roster in a later
+    // candidate (~/.openclaw/gateway.log, the legacy location) overrode a
+    // fresh one in an earlier candidate — either winning outright when
+    // undated-tolerant, or, when dated-stale, getting the whole home source
+    // rejected as unfresh and the fresh roster lost with it. A dated roster
+    // outranks a dateless one; among dated rosters the newest wins; the file
+    // it came from stays on the verdict as source evidence.
+    let fromHome: BootRoster | null = null;
+    for (const { file, text } of readHomeGatewayLogFiles(home, readFile)) {
+      const roster = consider(text, file, true);
+      if (!roster) continue;
+      if (
+        !fromHome ||
+        (roster.atMs != null && (fromHome.atMs == null || roster.atMs > fromHome.atMs))
+      ) {
+        fromHome = roster;
+      }
+    }
     if (fromHome) return fromHome;
   }
 
@@ -358,8 +380,9 @@ function newestRegistrationFromSources(
   const journalText = (options.readJournalText ?? defaultReadGatewayJournalText)(sinceMs);
   if (journalText) texts.push(journalText);
   if (options.home) {
-    const homeText = readHomeGatewayLogs(options.home, readFile);
-    if (homeText) texts.push(homeText);
+    // Per-file texts, same scan semantics as the old concatenation: every
+    // dated sighting in every candidate is considered and the newest wins.
+    for (const { text } of readHomeGatewayLogFiles(options.home, readFile)) texts.push(text);
   }
 
   const logDir = options.logDir ?? DEFAULT_LOG_DIR;

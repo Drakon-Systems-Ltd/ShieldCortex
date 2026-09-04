@@ -5410,6 +5410,17 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
   const label = 'OpenClaw plugin loaded';
   const fix = 'Run `shieldcortex repair` to reconcile the plugin install metadata and verify it actually loads.';
 
+  // #461: the RUNNING gateway has it loaded while a READABLE plugins_json does
+  // not list it. `reconcilePluginState` records this in `reasons` but lets the
+  // more specific conflicted-metadata / duplicate-install states own the
+  // verdict, so those two headlines must carry the divergence rather than
+  // swallow it — it is the fact that says "protected NOW, not guaranteed after
+  // the next restart", and neither of their messages implies it.
+  const liveIndexDivergence =
+    verdict.loadedInLiveRoster === true && !verdict.loadedInIndex && verdict.indexReadable
+      ? ' The RUNNING gateway HAS it loaded, but the plugin index (plugins_json) does NOT list it — protected now, not guaranteed at the next restart.'
+      : '';
+
   switch (verdict.state) {
     case 'not-installed':
       return { label, status: 'info', message: 'skipped (realtime plugin not installed)' };
@@ -5539,7 +5550,7 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
-        message: `installs.json and the SQLite index disagree on the realtime plugin — a toggle can silently drop it. ${verdict.reasons[verdict.reasons.length - 1] ?? ''}`.trim(),
+        message: `installs.json and the SQLite index disagree on the realtime plugin — a toggle can silently drop it. ${verdict.reasons[verdict.reasons.length - 1] ?? ''}`.trim() + liveIndexDivergence,
         fix,
         needsOpenClawCli: { subcommand: 'plugins' },
       };
@@ -5547,8 +5558,34 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
-        message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it`,
+        message: `${(verdict.onDiskVersion && 'realtime plugin has ') || ''}multiple install dirs on disk — prune the stale duplicate before a toggle re-resolves to it` + liveIndexDivergence,
         fix,
+        needsOpenClawCli: { subcommand: 'plugins' },
+      };
+    case 'loaded-not-indexed':
+      // #461: the live roster proves the RUNNING gateway loaded the plugin, so
+      // the host is protected right now — #459 keeps this from failing as
+      // UNPROTECTED. But a readable plugins_json omits it, and rendering that
+      // as a green "healthy" buried the control-plane disagreement: the index
+      // decides what loads at the NEXT restart.
+      //
+      // The fix names the route `planReconcileActions` will ACTUALLY take for
+      // this verdict, on the same tracked/local split the reconciler uses. A
+      // generic "run repair" here was the paired half of the recommendedAction
+      // 'none' bug: doctor pointed at a command whose plan for this state was a
+      // bare self-check, so following the advice changed nothing and the same
+      // warning came back. Advice a user can follow to a result, or none.
+      return {
+        label,
+        status: 'warn',
+        message:
+          'realtime plugin IS loaded on the RUNNING gateway (live roster proof) — protected right now — but OpenClaw\'s plugin index (plugins_json) does NOT list it, so the control plane disagrees with the live gateway and the next restart is not guaranteed to load it',
+        fix: verdict.openClawTracked
+          ? 'Re-index the install so the control plane matches the running gateway: `shieldcortex repair` (runs `openclaw plugins update @drakon-systems/shieldcortex-realtime`, reloads the gateway, then re-proves load). Nothing is uninstalled, and the reload is consent-gated.'
+          : `Re-index the install so the control plane matches the running gateway: \`shieldcortex repair\` (runs \`openclaw plugins install --force @drakon-systems/shieldcortex-realtime@${verdict.expectedVersion}\` — pinned, so the refresh cannot re-resolve to an older build — then reloads the gateway and re-proves load; the reload is consent-gated).`,
+        // Both routes shell out to `openclaw plugins`, so a host where that CLI
+        // is unusable must be told the remedy is unfollowable rather than
+        // handed it anyway.
         needsOpenClawCli: { subcommand: 'plugins' },
       };
     // EXPLICIT, not `default:`. #222 was a state that fell through to a green

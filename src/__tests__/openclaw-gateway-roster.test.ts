@@ -198,6 +198,57 @@ describe('readLatestBootRoster', () => {
     expect(r!.source).toBe('journal');
   });
 
+  it('#461: a fresh roster in an EARLIER home candidate wins despite a stale roster in a later one', () => {
+    // ~/.openclaw/logs/gateway.log holds the RUNNING gateway's dated roster;
+    // ~/.openclaw/gateway.log (the legacy location) still holds a dated line
+    // from a long-dead boot that names a different roster. The old code
+    // concatenated the candidates in path order and took the LAST roster line,
+    // so the stale legacy line either won outright or — being older than the
+    // process start — got the whole home source rejected and the fresh roster
+    // lost with it. Each file must be judged on its own.
+    const processStartedAtMs = Date.parse('2026-09-02T06:12:26.000Z');
+    const byPath: Record<string, string> = {
+      '/home/mike/.openclaw/logs/gateway.log':
+        '2026-09-02T06:12:47.000Z [gateway] http server listening (2 plugins: telegram, shieldcortex-realtime; 1.0s)',
+      '/home/mike/.openclaw/gateway.log':
+        '2026-07-20T00:16:51.758+01:00 [gateway] http server listening (1 plugin: telegram; 1.1s)',
+    };
+    const r = readLatestBootRoster({
+      home: '/home/mike',
+      processStartedAtMs,
+      readJournalText: () => null,
+      readDir: () => [],
+      readFile: (f: string) => byPath[f],
+    });
+    expect(r).not.toBeNull();
+    expect(r!.source).toBe('/home/mike/.openclaw/logs/gateway.log');
+    expect(r!.atMs).toBe(Date.parse('2026-09-02T06:12:47.000Z'));
+    expect(rosterContains(r!, 'shieldcortex-realtime')).toBe(true);
+  });
+
+  it('#461: among fresh home candidates the NEWEST timestamp wins, not path order', () => {
+    // Both candidates postdate the process start; the later candidate file
+    // holds the newer roster. Timestamp decides, and the winning file is the
+    // source evidence.
+    const processStartedAtMs = Date.parse('2026-09-02T06:12:26.000Z');
+    const byPath: Record<string, string> = {
+      '/home/mike/.openclaw/logs/gateway.log':
+        '2026-09-02T06:12:30.000Z [gateway] http server listening (1 plugin: telegram; 1.0s)',
+      '/home/mike/.openclaw/gateway.log':
+        '2026-09-02T06:12:47.000Z [gateway] http server listening (2 plugins: telegram, shieldcortex-realtime; 1.0s)',
+    };
+    const r = readLatestBootRoster({
+      home: '/home/mike',
+      processStartedAtMs,
+      readJournalText: () => null,
+      readDir: () => [],
+      readFile: (f: string) => byPath[f],
+    });
+    expect(r).not.toBeNull();
+    expect(r!.source).toBe('/home/mike/.openclaw/gateway.log');
+    expect(rosterContains(r!, 'shieldcortex-realtime')).toBe(true);
+  });
+
   it('#461: undated HOME roster is not proof when process start is known and nothing else speaks', () => {
     const r = readLatestBootRoster({
       home: '/home/mike',
