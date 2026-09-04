@@ -227,7 +227,7 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
         'p',
         { source: 'stop-hook' },
       );
-      const row = db.prepare('SELECT length(embedding) AS len FROM memories WHERE title = ?').get('EMB probe');
+      const row = db.prepare("SELECT length(embedding) AS len, hex(substr(embedding,1,4)) AS head FROM memories WHERE title = ?").get('EMB probe');
       process.stdout.write(JSON.stringify(row ?? null));
       // Exactly what stop-hook.mjs does — nothing gets a chance to drain here.
       process.exit(0);
@@ -244,10 +244,11 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
       stdio: ['pipe', 'pipe', 'pipe'],
     }).toString();
 
-    const row = JSON.parse(out) as { len: number | null } | null;
+    const row = JSON.parse(out) as { len: number | null; head: string | null } | null;
     expect(row).not.toBeNull();
-    // 384 float32 dimensions — the all-MiniLM-L6-v2 output width store.ts writes.
     expect(row!.len).toBe(384 * 4);
+    // 0.42f little-endian — proves the FAKE seam ran, not a warm-cache ONNX or all-zero blob.
+    expect(row!.head).toBe('3D0AD73E');
   }, 180_000);
 
   it('#458: FAKE env without TEST_SEAM is ignored (production hooks cannot honour it)', () => {

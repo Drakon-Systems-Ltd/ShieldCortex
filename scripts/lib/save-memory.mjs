@@ -373,17 +373,6 @@ async function loadEmbedder() {
   return _embedCache;
 }
 
-/**
- * Generate and persist the embedding for a just-stored row.
- *
- * Never throws: the memory is already committed, and losing the row because the
- * ONNX worker is unavailable would be a strictly worse outcome than losing the
- * vector.
- *
- * @param {import('better-sqlite3').Database} db
- * @param {number} memoryId
- * @param {string} text
- */
 /** Production hooks must never honour FAKE. Tests opt in with SHIELDCORTEX_TEST_SEAM=1. */
 function testEmbedSeamOpen() {
   return process.env.SHIELDCORTEX_TEST_SEAM === '1' && process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1';
@@ -404,6 +393,17 @@ async function embeddingCacheIsHealthy() {
   }
 }
 
+/**
+ * Generate and persist the embedding for a just-stored row.
+ *
+ * Never throws: the memory is already committed, and losing the row because the
+ * ONNX worker is unavailable would be a strictly worse outcome than losing the
+ * vector.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {number} memoryId
+ * @param {string} text
+ */
 async function embedStoredRow(db, memoryId, text) {
   if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
   // #460 review: never download at session close. existsSync(model.onnx) is not
