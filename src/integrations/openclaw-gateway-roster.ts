@@ -139,8 +139,20 @@ export interface ReadBootRosterOptions {
 
 const DEFAULT_LOG_DIR = '/tmp/openclaw';
 
-function rosterIsFresh(roster: BootRoster, processStartedAtMs?: number): boolean {
-  if (processStartedAtMs == null || roster.atMs == null) return true;
+/**
+ * `requireTimestamp` is per-source: raw log files accumulate lines from every
+ * boot, so a dateless line there proves nothing and must be rejected whenever
+ * a process start is known — otherwise a stale undated ~/.openclaw line can
+ * outrank a fresh dated /tmp line (#461). Journal text is exempt because it is
+ * already `--since`-bounded at the source (#150).
+ */
+function rosterIsFresh(
+  roster: BootRoster,
+  processStartedAtMs: number | undefined,
+  requireTimestamp: boolean,
+): boolean {
+  if (processStartedAtMs == null) return true;
+  if (roster.atMs == null) return !requireTimestamp;
   return roster.atMs >= processStartedAtMs;
 }
 
@@ -198,21 +210,25 @@ export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootR
   const processStartedAtMs = options.processStartedAtMs;
   const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
 
-  const consider = (text: string | null | undefined, source: string): BootRoster | null => {
+  const consider = (
+    text: string | null | undefined,
+    source: string,
+    requireTimestamp: boolean,
+  ): BootRoster | null => {
     if (!text) return null;
     const roster = parseLatestBootRoster(text);
     if (!roster) return null;
-    if (!rosterIsFresh(roster, processStartedAtMs)) return null;
+    if (!rosterIsFresh(roster, processStartedAtMs, requireTimestamp)) return null;
     return { ...roster, source };
   };
 
   const journalText = (options.readJournalText ?? defaultReadGatewayJournalText)(processStartedAtMs);
-  const fromJournal = consider(journalText, 'journal');
+  const fromJournal = consider(journalText, 'journal', false);
   if (fromJournal) return fromJournal;
 
   const home = options.home;
   if (home) {
-    const fromHome = consider(readHomeGatewayLogs(home, readFile), path.join(home, '.openclaw', 'logs'));
+    const fromHome = consider(readHomeGatewayLogs(home, readFile), path.join(home, '.openclaw', 'logs'), true);
     if (fromHome) return fromHome;
   }
 
@@ -252,7 +268,7 @@ export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootR
     } catch {
       continue;
     }
-    const roster = consider(text, file);
+    const roster = consider(text, file, true);
     if (roster) return roster;
   }
   return null;

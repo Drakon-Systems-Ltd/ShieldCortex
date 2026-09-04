@@ -156,6 +156,61 @@ describe('readLatestBootRoster', () => {
     expect(rosterContains(r!, 'shieldcortex-realtime')).toBe(true);
     expect(r!.source).toBe('journal');
   });
+
+  it('#461 SECURITY: an undated HOME roster must not outrank a fresh dated /tmp roster', () => {
+    // Stale console-format line (no timestamp) from a long-dead boot, still
+    // sitting in ~/.openclaw/logs — it names the plugin. The RUNNING gateway's
+    // dated /tmp line omits it. A line that cannot be dated cannot be called
+    // fresh, so the /tmp roster must win.
+    const staleHomeLine =
+      '[gateway] http server listening (2 plugins: telegram, shieldcortex-realtime; 0.9s)';
+    const freshTmpLine =
+      '2026-09-02T06:12:47.000Z [gateway] http server listening (1 plugin: telegram; 1.0s)';
+    const byName: Record<string, string> = {
+      'gateway.log': staleHomeLine,
+      'openclaw-2026-09-02.log': freshTmpLine,
+    };
+    const r = readLatestBootRoster({
+      logDir: '/tmp/openclaw',
+      home: '/home/mike',
+      processStartedAtMs: Date.parse('2026-09-02T06:12:26.000Z'),
+      readJournalText: () => null,
+      readDir: () => ['openclaw-2026-09-02.log'],
+      readFile: (f: string) => byName[f.split('/').pop()!],
+      statMtimeMs: () => 3000,
+    });
+    expect(r).not.toBeNull();
+    expect(r!.source).toBe('/tmp/openclaw/openclaw-2026-09-02.log');
+    expect(rosterContains(r!, 'shieldcortex-realtime')).toBe(false);
+  });
+
+  it('#461: undated journal roster is still accepted — journalctl is --since bounded', () => {
+    // journald short format carries no year, so journal lines parse dateless;
+    // freshness there is proven at the source by `--since=@epoch` (#150).
+    const r = readLatestBootRoster({
+      processStartedAtMs: Date.parse('2026-09-02T06:12:26.000Z'),
+      readJournalText: () =>
+        'Sep 02 06:12:47 clawdbot1 openclaw-gateway[4242]: [gateway] http server listening (2 plugins: telegram, shieldcortex-realtime; 5.1s)',
+      readDir: () => [],
+    });
+    expect(r).not.toBeNull();
+    expect(rosterContains(r!, 'shieldcortex-realtime')).toBe(true);
+    expect(r!.source).toBe('journal');
+  });
+
+  it('#461: undated HOME roster is not proof when process start is known and nothing else speaks', () => {
+    const r = readLatestBootRoster({
+      home: '/home/mike',
+      processStartedAtMs: Date.parse('2026-09-02T06:12:26.000Z'),
+      readJournalText: () => null,
+      readDir: () => [],
+      readFile: (f: string) =>
+        f.endsWith('gateway.log')
+          ? '[gateway] http server listening (2 plugins: telegram, shieldcortex-realtime; 0.9s)'
+          : '',
+    });
+    expect(r).toBeNull();
+  });
 });
 
 describe('reconcilePluginState — #103 live roster overrides the install index', () => {
