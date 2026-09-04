@@ -413,11 +413,73 @@ describe('#310 retry control — the one lock plane', () => {
     const c = claim();
     grantRetry({ hash: HASH, cwd }, { nonce: c.ok ? c.nonce : '' }, { home, now: t0 + 1_000 });
 
-    // The next cron tick is a NEW Claude session — different sessionKey, same
-    // cwd and tool. It must spend.
+    // A session-aware lane cannot accidentally consume an ordinary unbound
+    // cron grant.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey: 'sc-2222222222222222' } },
+      { home, now: t0 + 1_500 },
+    )).toBeNull();
+    // The next cron tick is a NEW Claude session, but this legacy lane does not
+    // put diagnostic session metadata in its predicate. Same cwd/tool spends.
     const spent = consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: t0 + 2_000 });
     expect(spent).not.toBeNull();
     expect(getRetryRow({ hash: HASH, cwd }, { home })?.originScope.sessionKey).toBe('sc-1111111111111111');
+  });
+
+  it('an explicitly session-bound fingerprint spends only in its captured session', () => {
+    const sessionKey = 'hermes-task-1111';
+    const actionId = 'act-6000000000000001';
+    recordDenialFingerprint(
+      {
+        hash: HASH,
+        tool: 'Bash',
+        actionId,
+        signals: ['privilege-escalation'],
+        redactedSurface: 's',
+        cwd,
+        sessionKey,
+        bindSession: true,
+      },
+      { home, now: t0 },
+    );
+    const granted = grantRetry(
+      { actionId },
+      { isInteractive: true },
+      { home, now: t0 + 1_000, tool: 'Bash' },
+    );
+    expect(granted.ok).toBe(true);
+
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash' } },
+      { home, now: t0 + 1_500 },
+    )).toBeNull();
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey: 'hermes-task-2222' } },
+      { home, now: t0 + 2_000 },
+    )).toBeNull();
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash', sessionKey } },
+      { home, now: t0 + 2_100 },
+    )).not.toBeNull();
+  });
+
+  it('bindSession without a sessionKey is unscopeable — it does not mint an unbound row', () => {
+    const recorded = recordDenialFingerprint(
+      {
+        hash: HASH,
+        tool: 'Bash',
+        actionId: 'act-6000000000000002',
+        signals: ['privilege-escalation'],
+        redactedSurface: 's',
+        cwd,
+        sessionKey: '   ',
+        bindSession: true,
+      },
+      { home, now: t0 },
+    );
+    expect(recorded.ok).toBe(false);
+    expect(recorded.reason).toBe('unscopeable');
+    expect(listRetryRows({ home, now: t0 })).toHaveLength(0);
   });
 
   it('canonicalises cwd before matching (realpath + trailing slash)', () => {
@@ -452,6 +514,82 @@ describe('#310 retry control — the one lock plane', () => {
     // ANY local process in ANY directory may spend it — that is what the
     // confirmation upstream is for.
     expect(consumeRetryGrant({ hash: HASH, origin: { cwd: otherCwd, tool: 'Bash' } }, { home, now: t0 + 1_000 })).not.toBeNull();
+  });
+
+  it('--any-origin widens the DIRECTORY only — a session-bound grant stays in its session', () => {
+    const sessionKey = 'hermes-task-1111';
+    const actionId = 'act-6000000000000010';
+    recordDenialFingerprint(
+      {
+        hash: HASH,
+        tool: 'Bash',
+        actionId,
+        signals: ['privilege-escalation'],
+        redactedSurface: 's',
+        cwd,
+        sessionKey,
+        bindSession: true,
+      },
+      { home, now: t0 },
+    );
+
+    const granted = grantRetry(
+      { actionId },
+      { isInteractive: true, anyOrigin: true },
+      { home, now: t0 + 1_000, tool: 'Bash' },
+    );
+    expect(granted.ok).toBe(true);
+    // The widener drops cwd and NOTHING else: the session binding is still on
+    // the grant, so the CLI copy that reports it is reporting the truth.
+    expect(granted.ok && granted.grant.origin.anyOrigin).toBe(true);
+    expect(granted.ok && granted.grant.origin.cwd).toBeUndefined();
+    expect(granted.ok && granted.grant.origin.sessionKey).toBe(sessionKey);
+
+    // Another session cannot spend it — in ANY directory.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash', sessionKey: 'hermes-task-2222' } },
+      { home, now: t0 + 1_500 },
+    )).toBeNull();
+    // Neither can a session-less caller.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash' } },
+      { home, now: t0 + 1_600 },
+    )).toBeNull();
+    // Nor another tool.
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Write', sessionKey } },
+      { home, now: t0 + 1_700 },
+    )).toBeNull();
+
+    // The recorded session spends it once — and this is what --any-origin
+    // actually bought: a DIFFERENT directory.
+    const spent = consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash', sessionKey } },
+      { home, now: t0 + 2_000 },
+    );
+    expect(spent).not.toBeNull();
+    expect(spent!.actionId).toBe(actionId);
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash', sessionKey } },
+      { home, now: t0 + 2_100 },
+    )).toBeNull();
+  });
+
+  it('ordinary cron semantics are unchanged — an unbound --any-origin grant still spends anywhere', () => {
+    // No bindSession: the ordinary #310 lane, where the next tick is a new
+    // session and sessionKey is diagnostic only.
+    denial();
+    const granted = grantRetry(
+      { hash: HASH, cwd },
+      { isInteractive: true, anyOrigin: true },
+      { home, now: t0 + 1_000 },
+    );
+    expect(granted.ok).toBe(true);
+    expect(granted.ok && granted.grant.origin.sessionKey).toBeUndefined();
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd: otherCwd, tool: 'Bash' } },
+      { home, now: t0 + 2_000 },
+    )).not.toBeNull();
   });
 
   it('--any-origin and --override-deny are TTY-only — a card can never set either', () => {

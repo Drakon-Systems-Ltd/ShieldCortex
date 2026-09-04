@@ -47,9 +47,25 @@ describe('action approvals (#118)', () => {
   });
 
   describe('hashing', () => {
-    it('is stable across calls and insensitive to whitespace noise', () => {
+    it('is BYTE-EXACT on strings — whitespace is meaningful in shell (#451 review)', () => {
+      // The old collapse made these equal; the double-spaced and single-
+      // spaced spellings now need their own grants. Fails toward a
+      // re-approve, never toward a grant releasing an unseen command.
       expect(hashToolCall('Bash', { command: 'sudo  modprobe   softdog' }))
-        .toBe(hashToolCall('Bash', { command: 'sudo modprobe softdog' }));
+        .not.toBe(hashToolCall('Bash', { command: 'sudo modprobe softdog' }));
+    });
+
+    it('a space-to-newline mutation NEVER retains the granted hash (#451 regression)', () => {
+      // CASE reproduction: with whitespace collapse, replacing the space
+      // before a trailing token with a newline appended a SECOND command
+      // while keeping the granted hash. In shell the newline is a command
+      // separator — a different action must mint a different hash.
+      const granted = hashToolCall('Bash', { command: 'echo ok payload' });
+      const mutated = hashToolCall('Bash', { command: 'echo ok\npayload' });
+      expect(mutated).not.toBe(granted);
+      // Tabs and CRLF are mutations too, not formatting.
+      expect(hashToolCall('Bash', { command: 'echo ok\tpayload' })).not.toBe(granted);
+      expect(hashToolCall('Bash', { command: 'echo ok\r\npayload' })).not.toBe(granted);
     });
 
     it('is key-order independent but content sensitive', () => {
