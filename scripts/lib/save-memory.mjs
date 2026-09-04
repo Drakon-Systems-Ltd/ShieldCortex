@@ -384,8 +384,13 @@ async function loadEmbedder() {
  * @param {number} memoryId
  * @param {string} text
  */
+/** Production hooks must never honour FAKE. Tests opt in with SHIELDCORTEX_TEST_SEAM=1. */
+function testEmbedSeamOpen() {
+  return process.env.SHIELDCORTEX_TEST_SEAM === '1' && process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1';
+}
+
 async function embeddingCacheIsHealthy() {
-  if (process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1') return true;
+  if (testEmbedSeamOpen()) return true;
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const distRoot = resolve(here, '..', '..', 'dist');
@@ -405,7 +410,7 @@ async function embedStoredRow(db, memoryId, text) {
   // enough — a truncated file still trips worker heal + HuggingFace fetch.
   if (!(await embeddingCacheIsHealthy())) return;
 
-  if (process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1') {
+  if (testEmbedSeamOpen()) {
     // Async on purpose: a sync UPDATE would pass even if the caller forgot to await.
     await new Promise((r) => setImmediate(r));
     const v = new Float32Array(384);
