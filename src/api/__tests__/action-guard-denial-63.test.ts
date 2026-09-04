@@ -134,6 +134,36 @@ describe('#63 — action-guard REST DNP honesty', () => {
     });
   });
 
+  // The bug above was pinned on privilege-escalation alone, whose remediation
+  // copy happened to be clean — so two install hints that DID spell the
+  // command out shipped a doubled reject message anyway (#451). The contract
+  // belongs to the lane, not to one signal.
+  describe('one source of truth holds for every require_approval signal', () => {
+    const signalled: Array<[string, string]> = [
+      ['privilege-escalation', PRIV],
+      ['install-package-global', `${'n' + 'pm'} ${'in' + 'stall'} ${'-' + 'g'} left-pad`],
+      ['install-package', `${'p' + 'ip'} ${'in' + 'stall'} requests`],
+      ['git-force-push', `git ${'pu' + 'sh'} --force origin main`],
+      ['registry-code-exec', `${'uv' + 'x'} ruff check .`],
+    ];
+
+    it.each(signalled)('%s: the id travels in denial.actionId, never in the copy', (signal, command) => {
+      const { body } = ask({ tool: 'Bash', args: { command }, sessionId: SESSION, cwd });
+
+      expect(body.decision).toBe('require_approval');
+      expect(body.signals).toContain(signal);
+      expect(body.denial?.actionId).toMatch(/^act-[0-9a-f]{16}$/);
+      expect(body.reason).toContain('headless denial recorded');
+      // The Hermes policy is the ONE renderer. A reason that names the command
+      // makes the reject text say it twice, and the copy here can only ever
+      // spell an id nobody can run.
+      expect(body.reason ?? '').not.toContain('--denial');
+      expect(body.reason ?? '').not.toMatch(BARE_APPROVE);
+      expect(body.reason ?? '').not.toMatch(/<\s*action[_ -]?id\s*>/i);
+      expect(body.reason ?? '').not.toContain(body.denial!.actionId);
+    });
+  });
+
   describe('exact command / host / session binding', () => {
     const grantOnce = () => {
       const actionId = ask(privileged()).body.denial!.actionId;

@@ -95,7 +95,12 @@ describe('content intent install #386', () => {
     const v = evaluateToolCall('Bash', { command: real }, cfg);
     expect(v.signals ?? []).toContain('install-package-global');
     expect(v.severity).toBe('dangerous');
-    expect(String(v.reason)).toMatch(/approve --denial|human authorisation|terminal/i);
+    // Honest copy is human-auth + a real terminal. It is NOT an approval
+    // command: this layer cannot know an actionId, so the alternation used to
+    // let a `<actionId>` placeholder pass as honest copy (#451 / #63).
+    expect(String(v.reason)).toMatch(/human authorisation/i);
+    expect(String(v.reason)).toMatch(/terminal/i);
+    expect(String(v.reason)).not.toMatch(/shieldcortex\s+approve|approve\s+--denial/i);
     expect(String(v.reason)).not.toMatch(/enforce:false/);
   });
 

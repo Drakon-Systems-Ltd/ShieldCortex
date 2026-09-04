@@ -3192,18 +3192,25 @@ function matchSpansClassified(
 // Remediation hints keyed by signal — turn an opaque "failure policy: deny" into
 // an actionable message that names the rule, the matched span, and the fix
 // (issue #73 item 5).
+//
+// #63 — no hint here may name an approval command, in ANY form.
+// evaluateToolCall does not know whether the calling surface recorded a DNP
+// fingerprint, so it cannot know the actionId: a hint that spells the command
+// out can only spell a `<actionId>` placeholder the operator cannot run. Bare
+// `shieldcortex approve` is worse — it lists #118 held cards this plane never
+// creates. The minted id travels separately in REST `denial.actionId`; the
+// downstream Hermes policy renderer is the one source of operator copy and
+// appends the exact `shieldcortex approve --denial <id>` command once. A hint
+// that named it too made the reject copy say it twice, the first time unusably.
+//
 const REMEDIATION: Record<string, string> = {
   'pipe-download-to-shell': 'download to a file and inspect it before running (curl -o get.sh URL; less get.sh; sh get.sh)',
   'pipe-download-stdin-exec': 'the inline program executes its stdin, so the fetched bytes still run as code — download to a file and inspect it first',
   'decode-pipe-to-shell': 'the decoded/fetched bytes are executed as code by a bare interpreter — download to a file and inspect it first',
   'pipe-download-module-exec': 'the interpreter module (code/pty/pdb) runs its stdin as code, so the fetched bytes still execute — download to a file and inspect it first',
-  'install-package-global': 'human authorisation required — run it yourself in a real terminal, or after a headless deny: shieldcortex approve --denial <actionId> (one-shot retry). Workspace-local install needs no global flag.',
-  'install-package': 'human authorisation required — run the install yourself if intended, or shieldcortex approve --denial <actionId> after a headless deny',
+  'install-package-global': 'human authorisation required — run it yourself in a real terminal. Workspace-local install needs no global flag.',
+  'install-package': 'human authorisation required — run the install yourself in a real terminal if intended',
   'registry-code-exec': 'review the package + source on the registry before running (npx/bunx/uvx/dlx fetch and execute immediately)',
-  // #63 — evaluateToolCall does not know whether a surface recorded a DNP
-  // fingerprint. Never name bare `shieldcortex approve` here (that lists #118
-  // held cards and is empty on Hermes/REST). The surface that mints an
-  // actionId appends the exact `shieldcortex approve --denial <id>` command.
   'privilege-escalation': 'run the specific privileged step yourself in your own terminal',
   'external-egress': 'confirm the destination and payload before data leaves the host',
   'git-force-push': 'confirm the branch and remote; a force-push can overwrite others’ work',
