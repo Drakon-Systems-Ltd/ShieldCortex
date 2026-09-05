@@ -22,11 +22,12 @@ const HEX_PATTERN = /(?:0x[0-9a-fA-F]{2}\s*){4,}|(?:\\x[0-9a-fA-F]{2}){4,}|\b[0-
 // Suspicious URL encoding (4+ encoded chars in sequence)
 const URL_ENCODING_PATTERN = /(?:%[0-9A-Fa-f]{2}){4,}/g;
 
-// Zero-width characters.
+// Match the sanitiser's smuggling characters, not emoji presentation selectors
+// U+FE0E/U+FE0F. Joiners remain detectable even though benign emoji also use them.
 // NOTE: presence check only (used with `.test()`), so NO `/g` flag \u2014 a stateful
 // `/g` regex advances `lastIndex` across `.test()` calls and flip-flops between
 // true/false for identical content, silently missing zero-width smuggling.
-const ZERO_WIDTH_PATTERN = /[\u200B\u200C\u200D\uFEFF]/;
+const ZERO_WIDTH_PATTERN = /[\u200B\u200C\u200D\uFEFF\u2060\u180E]/;
 
 // RTL override \u2014 presence check only, NO `/g` (same stateful-test hazard).
 const RTL_OVERRIDE_PATTERN = /\u202E/;
@@ -154,7 +155,8 @@ export function detectEncoding(content: string): EncodingDetectionResult {
   //   1. a curated cross-script confusable is present (hasConfusables — folding
   //      changed something beyond plain NFKC), AND
   //   2. the content also contains an ASCII Latin letter.
-  // That combination means a Latin word has a foreign lookalike hidden in it.
+  // That combination may be obfuscation OR legitimate mixed-script prose; it
+  // supplies an indicator, not evidence of a hostile directive on its own.
   // A wholly-Cyrillic Russian sentence has NO ASCII Latin letters, so it does
   // NOT flag — genuine non-Latin text is left alone. Covers the Cyrillic AND
   // Greek glyphs in the confusables map (a single substitution is enough).

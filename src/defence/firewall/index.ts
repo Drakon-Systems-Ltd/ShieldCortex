@@ -69,11 +69,9 @@ export function analyzeFirewall(
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
 
-  // Fold pre-sanitisation zero-width/bidi strips into the encoding signal so
-  // determineResult escalates (quarantine in balanced, block in strict). We map
-  // them onto the SAME encodingTypes the detector emits ('zero_width_chars' /
-  // 'rtl_override') so the existing "suspicious encoding → quarantine" rule and
-  // the strict-mode detection count both fire without any extra branches.
+  // Preserve pre-strip evidence for strict blocking and balanced corroboration.
+  // Reuse the detector's encoding types: sanitisation and direct detection are
+  // the same signal, not two independent reasons to escalate benign text.
   if (preSanitisationStrips?.includes('zero_width') &&
       !encoding.encodingTypes.includes('zero_width_chars')) {
     encoding.encodingTypes.push('zero_width_chars');
@@ -306,12 +304,10 @@ function determineResult(
     }
   }
 
-  // Zero-width chars / RTL override are always suspicious → quarantine
-  if (encoding.detected && (
-    encoding.encodingTypes.includes('zero_width_chars') ||
-    encoding.encodingTypes.includes('rtl_override') ||
-    encoding.encodingTypes.includes('unicode_homoglyph')
-  )) {
+  // Bidi override alone still quarantines. Mixed-script and ordinary zero-width
+  // text need corroboration, hostile decoded content, or low trust; otherwise
+  // keep their encoding indicator without denying benign prose.
+  if (encoding.detected && encoding.encodingTypes.includes('rtl_override')) {
     return {
       result: 'QUARANTINE',
       reason: `Suspicious encoding: ${encoding.encodingTypes.join(', ')}`,
