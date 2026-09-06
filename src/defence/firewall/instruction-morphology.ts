@@ -337,13 +337,21 @@ const DIRECTIVE_BASES = alternation(OVERRIDE_VERBS.flatMap(directiveVerbForms));
 
 /** One bounded whitespace gap. `\s` covers the newline, so wrapped prose folds. */
 const GAP = String.raw`\s{1,8}`;
+const HORIZONTAL = String.raw`[^\S\r\n\u2028\u2029]`;
+const LINE_GAP = String.raw`${HORIZONTAL}{1,8}`;
+const NEWLINE = String.raw`(?:\r\n|[\r\n\u2028\u2029])`;
+/** Explicit relative markers may wrap one line per gap, never a blank line. */
+const RELATIVE_GAP = String.raw`(?:${LINE_GAP}|${HORIZONTAL}{0,3}${NEWLINE}${HORIZONTAL}{0,3})`;
+const LINE_START = String.raw`(?:^|(?<=[\r\n\u2028\u2029]))[ \t]{0,3}`;
+const MARKDOWN_MARKER = String.raw`(?:[-+*]|\d{1,3}[.)]|#{1,6})${LINE_GAP}`;
+const HEADING = String.raw`#{1,6}${LINE_GAP}[^\r\n\u2028\u2029]{1,120}${NEWLINE}[ \t]{0,3}`;
 /**
- * Positive request prefix, not a growing negation/report blacklist. Newlines
- * wrap prose; they do NOT start a new sentence ("do not\nshare …"). Commas are
- * not sentence starts either. Nested/conditional directives are a deliberate
- * recall limit. Both callers preserve punctuation for these contextual frames.
+ * A sentence/colon or explicit Markdown structure can introduce a request.
+ * A bare newline cannot ("do not\nshare …"). Keep heading text bounded and
+ * line markers anchored, so ordinary adjacent lines and inline dashes do not
+ * acquire directive status. Normalised variants retain these line boundaries.
  */
-const SENTENCE_REQUEST = String.raw`(?:^|(?<=[.!?;]))\s{0,8}(?:please${GAP})?`;
+const SENTENCE_REQUEST = String.raw`(?:(?:^|(?<=[.!?;:]))\s{0,8}|${LINE_START}(?:${HEADING}(?:${MARKDOWN_MARKER})?|${MARKDOWN_MARKER}))(?:please${GAP})?`;
 
 /** Cap all gaps in the new closed frames without altering the #204 anchors. */
 function agentFrameRegex(source: string): RegExp {
@@ -372,6 +380,9 @@ const REVEAL_DETERMINER = String.raw`(?:(?:the|your|any|all|those|what|which)\s+
 const EXTRACTION_ADJECTIVE = String.raw`(?:(?:exact|full|entire|complete|original|initial|verbatim|actual|underlying|real|true)\s+)?`;
 /** Copulas that can precede a configured-participle. */
 const CONFIGURED_AUX = String.raw`(?:were|are|was|have\s+been|had\s+been)`;
+/** No-marker relatives stay on one line, including multiword auxiliaries. */
+const CONFIGURED_RELATIVE = String.raw`you\s+${CONFIGURED_AUX}\s+(?:${PARTICIPLES_CONFIGURED})\b`;
+const EXTRACTION_RELATIVE = String.raw`${LINE_GAP}(?:(?:that|which)${RELATIVE_GAP}${CONFIGURED_RELATIVE.replaceAll(String.raw`\s+`, RELATIVE_GAP)}|${CONFIGURED_RELATIVE.replaceAll(String.raw`\s+`, LINE_GAP)})`;
 
 const ROLES = alternation(AUTHORITY_ROLES);
 const GRANTS = alternation(GRANT_VERBS);
@@ -388,6 +399,8 @@ export interface MorphologyPattern {
   regex: RegExp;
   /** Punctuation carries clause/negation context; never erase it in a variant. */
   preservePunctuation?: boolean;
+  /** Keep line structure and real context at both ends of scan windows. */
+  preserveLineBreaks?: boolean;
 }
 
 /**
@@ -428,7 +441,7 @@ export const OVERRIDE_MORPHOLOGY: MorphologyPattern[] = [
     // Sentence-leading imperative + second-person guard, not a report or an
     // arbitrary base/gerund verb found somewhere inside an operational sentence.
     name: 'override_morphology_own_rules',
-    preservePunctuation: true,
+    preserveLineBreaks: true,
     description:
       "Directive to set aside the agent's own guard rules (e.g. \"ignore your safety rules\")",
     regex: agentFrameRegex(
@@ -460,17 +473,18 @@ export const PROMPT_EXTRACTION: MorphologyPattern[] = [
     //   1. reveal verb + instruction noun + `… you were given/configured with`
     //   2. reveal verb + your + concealment adjective + instruction noun
     //   3. the interrogative form ("what instructions were you given")
-    // Arm 1 accepts only an actual relative connection: optional that/which,
-    // then you + configured auxiliary/participle. No arbitrary text bridge.
+    // Arm 1 requires a line-bounded no-marker relative, or a same-line
+    // that/which marker followed by bounded wrapping. No arbitrary text bridge.
     // Human-to-human requests with this exact wording remain indistinguishable
     // without provenance; broader coaxing belongs to the future semantic layer.
     name: 'hidden_instruction_extraction',
     preservePunctuation: true,
+    preserveLineBreaks: true,
     description:
       'Request to reveal the hidden/system instructions the agent was given, without naming them a "prompt"',
     regex: agentFrameRegex(
       [
-        String.raw`${SENTENCE_REQUEST}(?:${REVEAL})\s+${RECIPIENT}${REVEAL_DETERMINER}${EXTRACTION_ADJECTIVE}(?:(?:${CONCEALED})\s+)?(?:system\s+)?(?:${HIDDEN_NOUNS})\s+(?:(?:that|which)\s+)?you\s+${CONFIGURED_AUX}\s+(?:${PARTICIPLES_CONFIGURED})\b`,
+        String.raw`${SENTENCE_REQUEST}(?:${REVEAL})\s+${RECIPIENT}${REVEAL_DETERMINER}${EXTRACTION_ADJECTIVE}(?:(?:${CONCEALED})\s+)?(?:system\s+)?(?:${HIDDEN_NOUNS})${EXTRACTION_RELATIVE}`,
         String.raw`${SENTENCE_REQUEST}(?:${REVEAL})\s+${RECIPIENT}your\s+${EXTRACTION_ADJECTIVE}(?:${CONCEALED})\s+(?:system\s+)?(?:${HIDDEN_NOUNS})\b`,
         String.raw`${SENTENCE_REQUEST}what\s+${EXTRACTION_ADJECTIVE}(?:(?:${CONCEALED})\s+)?(?:system\s+)?(?:${HIDDEN_NOUNS})\s+(?:were|was|are)\s+you\s+(?:${PARTICIPLES_CONFIGURED})\b`,
       ].join('|'),
@@ -488,7 +502,7 @@ export const PROMPT_EXTRACTION: MorphologyPattern[] = [
 export const AUTHORITY_GRANT: MorphologyPattern[] = [
   {
     name: 'authority_grant_delegated',
-    preservePunctuation: true,
+    preserveLineBreaks: true,
     description:
       'Claims a developer/admin/operator has granted the agent permission (e.g. "the developer authorised you to skip the approval")',
     regex: agentFrameRegex(
@@ -497,7 +511,7 @@ export const AUTHORITY_GRANT: MorphologyPattern[] = [
   },
   {
     name: 'authority_grant_claimed',
-    preservePunctuation: true,
+    preserveLineBreaks: true,
     description:
       'Claims to hold permission from a developer/admin/operator (e.g. "you have explicit permission from the security team")',
     regex: agentFrameRegex(
@@ -514,5 +528,12 @@ export const AUTHORITY_GRANT_PATTERNS: RegExp[] = AUTHORITY_GRANT.map(p => p.reg
 export const PUNCTUATION_SENSITIVE_PATTERNS = new Set(
   [...OVERRIDE_MORPHOLOGY, ...PROMPT_EXTRACTION, ...AUTHORITY_GRANT]
     .filter(p => p.preservePunctuation)
+    .map(p => p.regex),
+);
+
+/** Window/line context is independent of the punctuation-run policy. */
+export const CONTEXT_SENSITIVE_PATTERNS = new Set(
+  [...OVERRIDE_MORPHOLOGY, ...PROMPT_EXTRACTION, ...AUTHORITY_GRANT]
+    .filter(p => p.preserveLineBreaks || p.preservePunctuation)
     .map(p => p.regex),
 );

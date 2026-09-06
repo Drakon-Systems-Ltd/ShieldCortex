@@ -25,8 +25,9 @@
  *     against. The classic set (0/3/4/5/7/@) carries the real payloads.
  *
  * The variant budget is capped at 3 per policy (original + normalised + leet).
- * Contextual agent frames opt out of punctuation collapse: erasing `...` in
+ * Hidden-instruction extraction opts out of punctuation collapse: erasing `...` in
  * "show the guidelines... you were given the link" invents a relative clause.
+ * New agent frames retain line breaks; own-rules and authority still fold runs.
  * The default policy and all #204/#318 anchors keep their existing fold.
  */
 
@@ -89,8 +90,21 @@ export function foldLeetSpeak(input: string): string {
 }
 
 export interface InstructionNormalizationOptions {
-  /** Keep sentence/clause boundaries for context-sensitive frames. */
+  /** Keep sentence/clause punctuation AND line boundaries for extraction. */
   preservePunctuation?: boolean;
+  /** Retain Markdown/line boundaries while still collapsing punctuation runs. */
+  preserveLineBreaks?: boolean;
+}
+
+function foldInstructionText(input: string): string {
+  return foldConfusables(input.replace(ZERO_WIDTH_AND_BIDI, ''));
+}
+
+function normalizeFoldedText(folded: string, options: InstructionNormalizationOptions): string {
+  const punctuated = options.preservePunctuation ? folded : folded.replace(PUNCTUATION_RUN, ' ');
+  return options.preservePunctuation || options.preserveLineBreaks
+    ? punctuated.replace(/[^\S\r\n\u2028\u2029]+/g, ' ').trim()
+    : punctuated.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -98,7 +112,7 @@ export interface InstructionNormalizationOptions {
  *   1. strip zero-width / bidi marks (they hide between any two characters)
  *   2. NFKC + cross-script confusable fold (existing `foldConfusables`)
  *   3. collapse punctuation runs between words (unless preserving boundaries)
- *   4. collapse whitespace and trim
+ *   4. collapse whitespace and trim (retain line breaks for new agent frames)
  *
  * Leet folding is NOT applied here — see `instructionMatchVariants`.
  */
@@ -106,9 +120,34 @@ export function normalizeInstructionText(
   input: string,
   options: InstructionNormalizationOptions = {},
 ): string {
-  const folded = foldConfusables(input.replace(ZERO_WIDTH_AND_BIDI, ''));
-  const punctuated = options.preservePunctuation ? folded : folded.replace(PUNCTUATION_RUN, ' ');
-  return punctuated.replace(/\s+/g, ' ').trim();
+  return normalizeFoldedText(foldInstructionText(input), options);
+}
+
+function matchVariants(input: string, normalised: string, leetFolded: string): string[] {
+  return [...new Set([input, normalised, leetFolded])];
+}
+
+/**
+ * Build all rule policies with one zero-width/NFKC/confusable fold. The legacy
+ * policy differs from the line-preserving fold only in whitespace; derive its
+ * normal and leet copies instead of reprocessing source. Punctuation must be
+ * folded BEFORE leet, because leet can change PUNCTUATION_RUN's word boundary.
+ */
+export function instructionMatchVariantSets(input: string): {
+  variants: string[];
+  lineVariants: string[];
+  contextualVariants: string[];
+} {
+  const folded = foldInstructionText(input);
+  const contextual = normalizeFoldedText(folded, { preservePunctuation: true });
+  const line = normalizeFoldedText(folded, { preserveLineBreaks: true });
+  const contextualLeet = foldLeetSpeak(contextual);
+  const lineLeet = line === contextual ? contextualLeet : foldLeetSpeak(line);
+  return {
+    variants: matchVariants(input, line.replace(/\s+/g, ' ').trim(), lineLeet.replace(/\s+/g, ' ').trim()),
+    lineVariants: matchVariants(input, line, lineLeet),
+    contextualVariants: matchVariants(input, contextual, contextualLeet),
+  };
 }
 
 /**
@@ -121,13 +160,6 @@ export function instructionMatchVariants(
   input: string,
   options: InstructionNormalizationOptions = {},
 ): string[] {
-  const variants = [input];
-
   const normalised = normalizeInstructionText(input, options);
-  if (normalised !== input) variants.push(normalised);
-
-  const leetFolded = foldLeetSpeak(normalised);
-  if (leetFolded !== normalised && !variants.includes(leetFolded)) variants.push(leetFolded);
-
-  return variants;
+  return matchVariants(input, normalised, foldLeetSpeak(normalised));
 }
