@@ -59,6 +59,7 @@ interface PatternDef {
   name: string;
   description: string;
   regex: RegExp;
+  preservePunctuation: boolean;
 }
 
 const PATTERNS: PatternDef[] = [];
@@ -69,8 +70,9 @@ function pattern(
   name: string,
   description: string,
   regex: RegExp,
+  preservePunctuation = false,
 ): void {
-  PATTERNS.push({ category, severity, name, description, regex });
+  PATTERNS.push({ category, severity, name, description, regex, preservePunctuation });
 }
 
 // ── Fake system / admin messages ──
@@ -134,6 +136,7 @@ for (const frame of OVERRIDE_MORPHOLOGY) {
     frame.name,
     frame.description,
     new RegExp(frame.regex.source, 'gi'),
+    frame.preservePunctuation,
   );
 }
 
@@ -147,6 +150,7 @@ for (const frame of PROMPT_EXTRACTION) {
     frame.name,
     frame.description,
     new RegExp(frame.regex.source, 'gi'),
+    frame.preservePunctuation,
   );
 }
 
@@ -188,6 +192,7 @@ for (const frame of AUTHORITY_GRANT) {
     frame.name,
     frame.description,
     new RegExp(frame.regex.source, 'gi'),
+    frame.preservePunctuation,
   );
 }
 
@@ -370,6 +375,7 @@ interface ExternalPatternDef {
   name: string;
   description: string;
   regex: RegExp;
+  preservePunctuation?: boolean;
 }
 
 let externalPatterns: ExternalPatternDef[] = [];
@@ -469,7 +475,7 @@ function reclassifyHostRuntimeNotices(
  */
 const NORMALISED_MATCH_NOTE =
   ' — matched only after normalisation (zero-width/bidi strip, confusable fold, ' +
-  'punctuation collapse, classic leet); the span recorded below is the normalised text.';
+  'rule-specific punctuation policy, classic leet); the span recorded below is the normalised text.';
 
 export function scanForInjection(text: string): InjectionScanResult {
   const detections: InjectionDetection[] = [];
@@ -479,15 +485,19 @@ export function scanForInjection(text: string): InjectionScanResult {
   // folds — the same helper the memory firewall uses. A rule that already fired
   // on an earlier variant is skipped, so a normalised copy can only add rules the
   // raw text missed; it never re-reports the same rule with a rewritten span.
-  // (Budget: at most 3 variants — see instructionMatchVariants.)
+  // Contextual agent frames retain punctuation rather than manufacturing a
+  // relative clause by collapsing it. Legacy/custom rules keep the #204 fold.
+  // Budget: at most 3 variants per policy — see instructionMatchVariants.
   const variants = instructionMatchVariants(text);
+  const contextualVariants = instructionMatchVariants(text, { preservePunctuation: true });
   const firedRules = new Set<string>();
 
-  for (let variantIndex = 0; variantIndex < variants.length; variantIndex++) {
-    const target = variants[variantIndex];
+  for (let variantIndex = 0; variantIndex < Math.max(variants.length, contextualVariants.length); variantIndex++) {
     const normalised = variantIndex > 0;
 
     for (const pat of [...PATTERNS, ...externalPatterns]) {
+      const target = (pat.preservePunctuation ? contextualVariants : variants)[variantIndex];
+      if (target === undefined) continue;
       const ruleKey = `${pat.category}:${pat.name}`;
       if (normalised && firedRules.has(ruleKey)) continue;
 

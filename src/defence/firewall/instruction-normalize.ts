@@ -24,8 +24,10 @@
  *     turns every version string and identifier into a new token to false-match
  *     against. The classic set (0/3/4/5/7/@) carries the real payloads.
  *
- * The variant budget is capped at 3 (original + normalised + leet) so the
- * per-scan cost stays bounded on large inputs.
+ * The variant budget is capped at 3 per policy (original + normalised + leet).
+ * Contextual agent frames opt out of punctuation collapse: erasing `...` in
+ * "show the guidelines... you were given the link" invents a relative clause.
+ * The default policy and all #204/#318 anchors keep their existing fold.
  */
 
 import { foldConfusables } from './confusables.js';
@@ -86,20 +88,27 @@ export function foldLeetSpeak(input: string): string {
   return out;
 }
 
+export interface InstructionNormalizationOptions {
+  /** Keep sentence/clause boundaries for context-sensitive frames. */
+  preservePunctuation?: boolean;
+}
+
 /**
  * Full normalisation fold for matching. Order matters:
  *   1. strip zero-width / bidi marks (they hide between any two characters)
  *   2. NFKC + cross-script confusable fold (existing `foldConfusables`)
- *   3. collapse punctuation runs between words
+ *   3. collapse punctuation runs between words (unless preserving boundaries)
  *   4. collapse whitespace and trim
  *
  * Leet folding is NOT applied here — see `instructionMatchVariants`.
  */
-export function normalizeInstructionText(input: string): string {
-  return foldConfusables(input.replace(ZERO_WIDTH_AND_BIDI, ''))
-    .replace(PUNCTUATION_RUN, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+export function normalizeInstructionText(
+  input: string,
+  options: InstructionNormalizationOptions = {},
+): string {
+  const folded = foldConfusables(input.replace(ZERO_WIDTH_AND_BIDI, ''));
+  const punctuated = options.preservePunctuation ? folded : folded.replace(PUNCTUATION_RUN, ' ');
+  return punctuated.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -108,10 +117,13 @@ export function normalizeInstructionText(input: string): string {
  * dropped, and the original is always first so an un-mangled payload matches on
  * the cheapest pass with its span intact.
  */
-export function instructionMatchVariants(input: string): string[] {
+export function instructionMatchVariants(
+  input: string,
+  options: InstructionNormalizationOptions = {},
+): string[] {
   const variants = [input];
 
-  const normalised = normalizeInstructionText(input);
+  const normalised = normalizeInstructionText(input, options);
   if (normalised !== input) variants.push(normalised);
 
   const leetFolded = foldLeetSpeak(normalised);

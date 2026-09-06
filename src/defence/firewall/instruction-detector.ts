@@ -20,12 +20,13 @@
  *     (trust scoring, quarantine, semantic) do not assume it is exhaustive.
  */
 
-import { someWindow } from '../scan-windows.js';
+import { forEachWindow, SCAN_WINDOW_OVERLAP, someWindow } from '../scan-windows.js';
 import { instructionMatchVariants } from './instruction-normalize.js';
 import {
   AUTHORITY_GRANT_PATTERNS,
   OVERRIDE_MORPHOLOGY_PATTERNS,
   PROMPT_EXTRACTION_PATTERNS,
+  PUNCTUATION_SENSITIVE_PATTERNS,
 } from './instruction-morphology.js';
 
 export interface InstructionDetectionResult {
@@ -219,8 +220,19 @@ const PATTERN_GROUPS: PatternGroup[] = [
  * overlap means a payload buried past 50KB of filler is still tested — closing
  * the >50KB padding bypass.
  */
-function safeRegexTest(pattern: RegExp, text: string): boolean {
-  return someWindow(text, (window) => pattern.test(window));
+function safeRegexTest(pattern: RegExp, text: string, preserveContext: boolean): boolean {
+  if (!preserveContext) return someWindow(text, (window) => pattern.test(window));
+
+  // Contextual frames must not see an artificial ^ or word boundary where a
+  // slice dropped a subject/negation. Search from inside the overlap, retaining
+  // its left context. The previous window owns skipped starts; these bounded
+  // frames span less than half the overlap, so it also contains their ends.
+  // Clone rather than mutating the shared non-global pattern's lastIndex.
+  const search = new RegExp(pattern.source, `${pattern.flags}g`);
+  return forEachWindow(text, (window, start) => {
+    search.lastIndex = start === 0 ? 0 : SCAN_WINDOW_OVERLAP / 2;
+    return search.test(window);
+  });
 }
 
 export function detectInstructions(content: string): InstructionDetectionResult {
@@ -233,11 +245,14 @@ export function detectInstructions(content: string): InstructionDetectionResult 
   // instruction-normalize.ts. The original always leads, so normalisation can
   // only ever *add* a match, never lose one the raw text would have caught.
   const variants = instructionMatchVariants(content);
+  const contextualVariants = instructionMatchVariants(content, { preservePunctuation: true });
 
   for (const group of PATTERN_GROUPS) {
     if (group.subsumedBy && matchedPatterns.includes(group.subsumedBy)) continue;
     for (const pattern of group.patterns) {
-      if (variants.some((variant) => safeRegexTest(pattern, variant))) {
+      const preserveContext = PUNCTUATION_SENSITIVE_PATTERNS.has(pattern);
+      const targets = preserveContext ? contextualVariants : variants;
+      if (targets.some((variant) => safeRegexTest(pattern, variant, preserveContext))) {
         matchedPatterns.push(group.name);
         totalWeight += group.weight;
         if (group.weight > maxWeight) {
