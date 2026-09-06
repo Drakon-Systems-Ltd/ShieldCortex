@@ -170,8 +170,9 @@ function runDefencePipelineInternal(
 
     // 3. Run firewall (on sanitised content). Pass the strip categories so the
     // firewall can account for zero-width/bidi bytes the sanitiser already
-    // removed — otherwise its encoding detector never sees them and the
-    // "zero-width/RTL → quarantine" rule can't fire.
+    // removed: strict blocking, low-trust and harmful corroboration checks need
+    // that evidence. Bidi still quarantines alone; benign zero-width-only text
+    // can remain ALLOW at normal trust in balanced mode.
     const firewall: FirewallAnalysis = analyzeFirewall(
       cleanContent,
       title,

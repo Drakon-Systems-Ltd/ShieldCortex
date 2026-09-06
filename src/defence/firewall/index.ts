@@ -57,8 +57,9 @@ export function analyzeFirewall(
   /**
    * Categories stripped by Layer 1 sanitisation BEFORE this content arrived.
    * The sanitiser removes zero-width/bidi bytes, so the encoding detector below
-   * never sees them — feeding the strip signal back in lets the verdict reflect
-   * the smuggling attempt instead of silently allowing the cleaned content.
+   * never sees them. Preserve that evidence for strict blocking, low-trust and
+   * harmful corroboration checks; bidi still quarantines on its own. Benign
+   * zero-width-only content can remain ALLOW at normal trust in balanced mode.
    */
   preSanitisationStrips?: SanitisationCategory[],
 ): FirewallAnalysis {
@@ -126,11 +127,12 @@ export function analyzeFirewall(
   }
 
   // Markdown-image exfiltration — a rendered image URL that smuggles data to an
-  // attacker. Reported as external_url so determineResult treats it the same as
-  // any other off-host link: low-severity alone, but it escalates the verdict
-  // when it co-occurs with another detection (encoding combined with >=2, etc.).
-  if (markdownImage.detected && !threatIndicators.includes('external_url')) {
-    threatIndicators.push('external_url');
+  // attacker. Keep the public external_url indicator, but preserve the harmful
+  // image signal separately: an ordinary link is not encoding corroboration.
+  if (markdownImage.detected) {
+    if (!threatIndicators.includes('external_url')) {
+      threatIndicators.push('external_url');
+    }
     blockedPatterns.push('markdown_image_exfil');
   }
 
@@ -154,6 +156,7 @@ export function analyzeFirewall(
     trustScore,
     threatIndicators,
     skillThreats,
+    markdownImage.detected,
   );
 
   return {
@@ -174,6 +177,7 @@ function determineResult(
   trustScore: number,
   threatIndicators: ThreatIndicator[],
   skillThreats?: { detected: boolean; threats: string[]; confidence: number },
+  markdownImageExfil: boolean = false,
 ): { result: FirewallResult; reason: string } {
   const lowTrust = trustScore < 0.5;
   const detectionCount = threatIndicators.length;
@@ -243,17 +247,17 @@ function determineResult(
     };
   }
 
-  // Encoding combined with another detection → quarantine
-  if (encoding.detected && detectionCount >= 2) {
-    return {
-      result: 'QUARANTINE',
-      reason: `Encoding obfuscation combined with ${threatIndicators.filter((t) => t !== 'encoding_obfuscation').join(', ')}`,
-    };
-  }
-
-  // Encoding-only: run FULL pipeline on decoded content (not just instruction detection)
+  // Re-scan decoded content even beside an ordinary URL. Do this before generic
+  // corroboration so it cannot mask a decoded credential/exfiltration BLOCK.
   if (encoding.detected && encoding.decodedSnippets.length > 0) {
     for (const snippet of encoding.decodedSnippets) {
+      if (detectCredentialExfil(snippet).detected) {
+        return {
+          result: 'BLOCK',
+          reason: `Encoded content contains credential exfiltration (${encoding.encodingTypes.join(', ')})`,
+        };
+      }
+
       // Check for instruction injection in decoded content
       const decodedInstructions = detectInstructions(snippet);
       if (decodedInstructions.detected) {
@@ -293,6 +297,16 @@ function determineResult(
         };
       }
 
+      // A URL alone is not harmful, but decoded outbound movement or a rendered
+      // data-bearing image must not lose the old encoding corroboration floor.
+      if (decodedPrivilege.indicators.includes('network_exfiltration') ||
+          detectMarkdownImageExfil(snippet).detected) {
+        return {
+          result: 'QUARANTINE',
+          reason: `Encoded content contains ${decodedPrivilege.indicators.includes('network_exfiltration') ? 'network exfiltration' : 'markdown_image_exfil'} (${encoding.encodingTypes.join(', ')})`,
+        };
+      }
+
       // Check anomaly score of decoded content
       const decodedAnomaly = scoreAnomaly(snippet, '');
       if (decodedAnomaly > 0.6) {
@@ -302,6 +316,18 @@ function determineResult(
         };
       }
     }
+  }
+
+  // Encoding needs an independent harmful signal, not merely an ordinary URL.
+  // Keep all indicators for audit/strict/low-trust policy; only corroboration
+  // excludes bare links. A data-bearing markdown image is still corroboration.
+  const corroborating: string[] = threatIndicators.filter(t => t !== 'encoding_obfuscation' && t !== 'external_url');
+  if (markdownImageExfil) corroborating.push('markdown_image_exfil');
+  if (encoding.detected && corroborating.length > 0) {
+    return {
+      result: 'QUARANTINE',
+      reason: `Encoding obfuscation combined with ${corroborating.join(', ')}`,
+    };
   }
 
   // Bidi override alone still quarantines. Mixed-script and ordinary zero-width
@@ -322,7 +348,7 @@ function determineResult(
     };
   }
 
-  // Single low-severity detection → allow with warning
+  // Only low-severity detections remain (possibly encoding + URL) → warn/allow
   if (detectionCount > 0) {
     return {
       result: 'ALLOW',

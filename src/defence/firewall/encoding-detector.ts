@@ -5,7 +5,8 @@
  * hex encoding, suspicious URL encoding, and invisible characters.
  */
 
-import { hasConfusables } from './confusables.js';
+import { foldConfusables, hasConfusables } from './confusables.js';
+import { forEachWindow } from '../scan-windows.js';
 
 export interface EncodingDetectionResult {
   detected: boolean;
@@ -162,6 +163,12 @@ export function detectEncoding(content: string): EncodingDetectionResult {
   // Greek glyphs in the confusables map (a single substitution is enough).
   if (hasConfusables(content) && ASCII_LATIN.test(content)) {
     encodingTypes.push('unicode_homoglyph');
+    // Feed the skeleton to ALL decoded-content checks, not just instructions.
+    // Reuse bounded, overlapping windows over the whole fold: a prefix cap
+    // would let padding or a split command/path bypass the non-instruction checks.
+    forEachWindow(foldConfusables(content), (window) => {
+      decodedSnippets.push(window);
+    });
   }
 
   return {
