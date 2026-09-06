@@ -8,9 +8,8 @@
  *   - scanForInjection   — Iron Dome regex set (named-pattern reporting)
  *   - detectInstructions — write-path instruction detector; folds cross-script
  *                          homoglyphs and scans in windows (catches `ignorе …`)
- *   - detectEncoding     — write-path encoding detector; decodes base64/hex/url
- *                          blobs so a BARE blob that decodes to an injection is
- *                          re-scanned on the plaintext (decode-and-rescan)
+ *   - detectEncoding     — bounded full base64/hex/url decode-and-rescan, plus
+ *                          a separate whole-document normalized-content channel
  *   - detectMarkdownImageExfil — markdown image whose URL smuggles data out
  *   - scanForCredentials — credential leak scanning (retained)
  *
@@ -31,7 +30,7 @@ import { detectInstructions } from './firewall/instruction-detector.js';
 import { detectEncoding } from './firewall/encoding-detector.js';
 import { detectMarkdownImageExfil } from './firewall/markdown-image-detector.js';
 import { detectHiddenWebInjection } from './hidden-web-injection.js';
-import { neutraliseToolResponse } from './tool-response-enforce.js';
+import { neutraliseToolResponse, TOOL_OUTPUT_BLOCKED_PLACEHOLDER } from './tool-response-enforce.js';
 import { attestedFlag, logAudit } from './audit/logger.js';
 import { isDatabaseInitialized } from '../database/init.js';
 import { getToolResponseScanConfig } from '../cloud/config.js';
@@ -142,25 +141,30 @@ export function scanToolResponse(
   //    instructions", "you are now…") lives in the other groups + Iron Dome and
   //    is unaffected. Decoded snippets (below) keep full detection — an encoded
   //    imperative is inherently suspicious.
-  const instructionsRaw = detectInstructions(content);
-  const instructionPatterns = instructionsRaw.patterns.filter(
+  const encoding = detectEncoding(content);
+  const instructionPatterns = [content, ...encoding.normalizedContents]
+    .flatMap(text => detectInstructions(text).patterns).filter(
     (p) => !READ_PATH_EXCLUDED_INSTRUCTION_PATTERNS.has(p),
   );
-  const instructions = { detected: instructionPatterns.length > 0, patterns: instructionPatterns };
-  const encoding = detectEncoding(content);
+  const instructions = { detected: instructionPatterns.length > 0, patterns: [...new Set(instructionPatterns)] };
 
   // 2b. Decode-and-rescan: re-run instruction + credential detection on each
   //     decoded snippet so a BARE base64/hex blob that decodes to an injection
   //     (the Iron Dome base64 rule only fires on literal framing words) is
   //     caught on its plaintext. Reuses the write-path detectors — no
-  //     duplicated detection logic.
+  //     duplicated detection logic. Normalized prose above keeps exactly the
+  //     raw read-path exclusions; it is not an encoded imperative. Only BLOCKED
+  //     credential findings on either derived channel justify full withholding.
   let decodedInjection = false;
   let decodedCredentialLeak = false;
+  const normalizedCredentialLeak = encoding.normalizedContents.some(text =>
+    scanForCredentials(text).findings.some(f => f.action === 'blocked'),
+  );
   for (const snippet of encoding.decodedSnippets) {
     if (!decodedInjection && detectInstructions(snippet).detected) {
       decodedInjection = true;
     }
-    if (!decodedCredentialLeak && scanForCredentials(snippet).leaked) {
+    if (!decodedCredentialLeak && scanForCredentials(snippet).findings.some(f => f.action === 'blocked')) {
       decodedCredentialLeak = true;
     }
     if (decodedInjection && decodedCredentialLeak) break;
@@ -168,6 +172,8 @@ export function scanToolResponse(
 
   // 3. Markdown-image exfiltration (rendered image URL smuggling data out).
   const markdownImage = detectMarkdownImageExfil(content);
+  const derivedMarkdownExfil = [...encoding.decodedSnippets, ...encoding.normalizedContents]
+    .some(text => detectMarkdownImageExfil(text).detected);
 
   // 4. Credential leak scan (retained from the original 2-layer read path).
   const credentials = scanForCredentials(content);
@@ -200,10 +206,10 @@ export function scanToolResponse(
       pushIndicator('encoding_obfuscation');
     }
   }
-  if (markdownImage.detected) {
+  if (markdownImage.detected || derivedMarkdownExfil) {
     pushIndicator('external_url');
   }
-  if (credentials.leaked || decodedCredentialLeak) {
+  if (credentials.leaked || decodedCredentialLeak || normalizedCredentialLeak) {
     pushIndicator('credential_leak');
   }
   if (hiddenWeb.detected) {
@@ -215,7 +221,10 @@ export function scanToolResponse(
     !instructions.detected &&
     !encoding.detected &&
     !decodedInjection &&
+    !decodedCredentialLeak &&
+    !normalizedCredentialLeak &&
     !markdownImage.detected &&
+    !derivedMarkdownExfil &&
     !credentials.leaked &&
     !hiddenWeb.detected;
   const durationMs = Math.round(performance.now() - startTime);
@@ -227,7 +236,16 @@ export function scanToolResponse(
   let sanitisedContent: string | null = null;
   let blocked = false;
   let enforceActions: string[] = [];
-  if (!clean && resolvedMode === 'enforce') {
+  if (!clean && resolvedMode === 'enforce' &&
+      (encoding.scanIncomplete || normalizedCredentialLeak || derivedMarkdownExfil)) {
+    // No reliable positional redaction from derived text back into the original.
+    // Incomplete coverage is a separate fail-safe, not an invented injection.
+    sanitisedContent = TOOL_OUTPUT_BLOCKED_PLACEHOLDER;
+    blocked = true;
+    if (encoding.scanIncomplete) enforceActions.push('blocked: encoding scan incomplete (budget exhausted)');
+    if (normalizedCredentialLeak) enforceActions.push('blocked: normalized content contains a blocked credential');
+    if (derivedMarkdownExfil) enforceActions.push('blocked: decoded/normalized markdown-image exfil');
+  } else if (!clean && resolvedMode === 'enforce') {
     const neutralisation = neutraliseToolResponse(content, {
       injectionRisk: injection.riskLevel,
       instructionsDetected: instructions.detected || hiddenWeb.detected,
@@ -256,6 +274,9 @@ export function scanToolResponse(
     if (!injection.clean) parts.push(`injection: ${injection.summary}`);
     if (instructions.detected) parts.push(`instructions: ${instructions.patterns.join(', ')}`);
     if (decodedInjection) parts.push('decoded payload contains injection');
+    if (normalizedCredentialLeak) parts.push('normalized content contains a blocked credential');
+    if (derivedMarkdownExfil) parts.push('decoded/normalized markdown-image exfil');
+    if (encoding.scanIncomplete) parts.push('encoding scan incomplete (budget exhausted)');
     if (encoding.detected) parts.push(`encoding: ${encoding.encodingTypes.join(', ')}`);
     if (markdownImage.detected) parts.push(`markdown-image exfil: ${markdownImage.urls.length} URL(s)`);
     if (credentials.leaked) parts.push(`credentials: ${credentials.findings.length} finding(s)`);
@@ -275,6 +296,8 @@ export function scanToolResponse(
     ...instructions.patterns,
     ...encoding.encodingTypes,
     ...(decodedInjection ? ['decoded_injection'] : []),
+    ...(normalizedCredentialLeak ? ['normalized_credential_leak'] : []),
+    ...(derivedMarkdownExfil ? ['derived_markdown_image_exfil'] : []),
     ...(markdownImage.detected ? ['markdown_image_exfil'] : []),
     ...(hiddenWeb.detected ? hiddenWeb.techniques.map(t => `hidden_${t}`) : []),
   ];
@@ -290,7 +313,7 @@ export function scanToolResponse(
         source_type: 'tool_response',
         source_identifier: toolName,
         trust_score: 0.5,
-        sensitivity_level: (credentials.leaked || decodedCredentialLeak) ? 'CONFIDENTIAL' : 'PUBLIC',
+        sensitivity_level: (credentials.leaked || decodedCredentialLeak || normalizedCredentialLeak) ? 'CONFIDENTIAL' : 'PUBLIC',
         firewall_result: firewallResult,
         operation: 'read',
         anomaly_score: anomalyScore,

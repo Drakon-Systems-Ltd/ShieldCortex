@@ -147,7 +147,7 @@ export function analyzeFirewall(
   }
 
   // Determine result based on mode
-  const { result, reason } = determineResult(
+  const rawVerdict = determineResult(
     config.mode,
     instructions,
     privilege,
@@ -158,6 +158,11 @@ export function analyzeFirewall(
     skillThreats,
     markdownImage.detected,
   );
+  // Raw instructions/anomalies and earlier blobs cannot hide a later BLOCK.
+  // Strict/permissive policy is already final; balanced compares both surfaces.
+  const { result, reason } = config.mode === 'balanced'
+    ? strictestVerdict(rawVerdict, rescanDerivedContent(encoding, trustScore))
+    : rawVerdict;
 
   return {
     result,
@@ -166,6 +171,55 @@ export function analyzeFirewall(
     anomalyScore: anomaly,
     blockedPatterns,
   };
+}
+
+type Verdict = { result: FirewallResult; reason: string };
+const VERDICT_ORDER = { ALLOW: 0, QUARANTINE: 1, BLOCK: 2 };
+
+function strictestVerdict(current: Verdict, candidate: Verdict): Verdict {
+  return VERDICT_ORDER[candidate.result] > VERDICT_ORDER[current.result] ? candidate : current;
+}
+
+function rescanDerivedContent(encoding: EncodingDetectionResult, trustScore: number): Verdict {
+  let verdict: Verdict = { result: 'ALLOW', reason: 'No threats detected' };
+  const elevated: FirewallResult = trustScore < 0.5 ? 'BLOCK' : 'QUARANTINE';
+  const surfaces = [
+    ...encoding.decodedSnippets.map(text => ({ text, label: 'Encoded' })),
+    ...encoding.normalizedContents.map(text => ({ text, label: 'Normalized' })),
+  ];
+  const seen = new Set<string>();
+  for (const { text, label } of surfaces) {
+    if (seen.has(text)) continue;
+    seen.add(text);
+    // Each detector gets the complete bounded document, once. In particular,
+    // privilege quote stripping and exfil conjunctions must never see windows.
+    const instructions = detectInstructions(text);
+    const privilege = detectPrivilegeEscalation(text);
+    const exfil = detectCredentialExfil(text);
+    const credentials = scanForCredentials(text);
+    const skill = detectSkillThreats(text);
+    const markdown = detectMarkdownImageExfil(text);
+    const anomaly = scoreAnomaly(text, '');
+    const contains = (effect: string) => `${label} content contains ${effect} (${encoding.encodingTypes.join(', ')})`;
+    let candidate: Verdict = { result: 'ALLOW', reason: 'No threats detected' };
+    if (exfil.detected) {
+      candidate = { result: 'BLOCK', reason: contains('credential exfiltration') };
+    } else if (credentials.findings.some(f => f.action === 'blocked')) {
+      candidate = { result: 'BLOCK', reason: contains('credential leak') };
+    } else if (instructions.detected) {
+      candidate = { result: elevated, reason: contains('instruction injection') };
+    } else if (privilege.detected && privilege.severity === 'high') {
+      candidate = { result: elevated, reason: contains(`privilege escalation: ${privilege.indicators.join(', ')}`) };
+    } else if (skill.detected && skill.confidence >= 0.8) {
+      candidate = { result: elevated, reason: contains(`skill threat: ${skill.threats.join(', ')}`) };
+    } else if (privilege.indicators.includes('network_exfiltration') || markdown.detected) {
+      candidate = { result: elevated, reason: contains(privilege.indicators.includes('network_exfiltration') ? 'network exfiltration' : 'markdown_image_exfil') };
+    } else if (anomaly > 0.6) {
+      candidate = { result: 'QUARANTINE', reason: `${label} content has high anomaly score (${anomaly.toFixed(2)})` };
+    }
+    verdict = strictestVerdict(verdict, candidate);
+  }
+  return verdict;
 }
 
 function determineResult(
@@ -247,75 +301,8 @@ function determineResult(
     };
   }
 
-  // Re-scan decoded content even beside an ordinary URL. Do this before generic
-  // corroboration so it cannot mask a decoded credential/exfiltration BLOCK.
-  if (encoding.detected && encoding.decodedSnippets.length > 0) {
-    for (const snippet of encoding.decodedSnippets) {
-      if (detectCredentialExfil(snippet).detected) {
-        return {
-          result: 'BLOCK',
-          reason: `Encoded content contains credential exfiltration (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check for instruction injection in decoded content
-      const decodedInstructions = detectInstructions(snippet);
-      if (decodedInstructions.detected) {
-        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
-        return {
-          result,
-          reason: `Encoded content contains instruction injection (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check for privilege escalation in decoded content
-      const decodedPrivilege = detectPrivilegeEscalation(snippet);
-      if (decodedPrivilege.detected && decodedPrivilege.severity === 'high') {
-        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
-        return {
-          result,
-          reason: `Encoded content contains privilege escalation: ${decodedPrivilege.indicators.join(', ')} (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check for credential leaks in decoded content
-      const decodedCredentials = scanForCredentials(snippet);
-      if (decodedCredentials.findings.some(f => f.action === 'blocked')) {
-        return {
-          result: 'BLOCK',
-          reason: `Encoded content contains credential leak (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check for skill-level threats in decoded content
-      const decodedSkill = detectSkillThreats(snippet);
-      if (decodedSkill.detected && decodedSkill.confidence >= 0.8) {
-        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
-        return {
-          result,
-          reason: `Encoded content contains skill threat: ${decodedSkill.threats.join(', ')} (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // A URL alone is not harmful, but decoded outbound movement or a rendered
-      // data-bearing image must not lose the old encoding corroboration floor.
-      if (decodedPrivilege.indicators.includes('network_exfiltration') ||
-          detectMarkdownImageExfil(snippet).detected) {
-        return {
-          result: 'QUARANTINE',
-          reason: `Encoded content contains ${decodedPrivilege.indicators.includes('network_exfiltration') ? 'network exfiltration' : 'markdown_image_exfil'} (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check anomaly score of decoded content
-      const decodedAnomaly = scoreAnomaly(snippet, '');
-      if (decodedAnomaly > 0.6) {
-        return {
-          result: 'QUARANTINE',
-          reason: `Encoded content has high anomaly score (${decodedAnomaly.toFixed(2)})`,
-        };
-      }
-    }
+  if (encoding.scanIncomplete) {
+    return { result: 'QUARANTINE', reason: 'Encoding scan incomplete: count/byte/depth budget exhausted' };
   }
 
   // Encoding needs an independent harmful signal, not merely an ordinary URL.
