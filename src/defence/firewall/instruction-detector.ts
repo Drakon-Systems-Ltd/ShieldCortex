@@ -20,11 +20,14 @@
  *     (trust scoring, quarantine, semantic) do not assume it is exhaustive.
  */
 
-import { someWindow } from '../scan-windows.js';
-import { instructionMatchVariants } from './instruction-normalize.js';
+import { forEachWindow, SCAN_WINDOW_OVERLAP, someWindow } from '../scan-windows.js';
+import { instructionMatchVariantSets } from './instruction-normalize.js';
 import {
+  AUTHORITY_GRANT_PATTERNS,
+  CONTEXT_SENSITIVE_PATTERNS,
   OVERRIDE_MORPHOLOGY_PATTERNS,
   PROMPT_EXTRACTION_PATTERNS,
+  PUNCTUATION_SENSITIVE_PATTERNS,
 } from './instruction-morphology.js';
 
 export interface InstructionDetectionResult {
@@ -161,6 +164,10 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /\burgent\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
       /\bemergency\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
       /\b(disable|remove|bypass|turn\s+off)\s+(all\s+)?(filter|security|protection|safet)/i,
+      // Delegated authority — "the developer authorised you to skip the check".
+      // Shared with the Iron Dome scanner so a claimed permission grant is the
+      // same signal on both tiers (see instruction-morphology.ts).
+      ...AUTHORITY_GRANT_PATTERNS,
     ],
   },
   {
@@ -214,8 +221,24 @@ const PATTERN_GROUPS: PatternGroup[] = [
  * overlap means a payload buried past 50KB of filler is still tested — closing
  * the >50KB padding bypass.
  */
-function safeRegexTest(pattern: RegExp, text: string): boolean {
-  return someWindow(text, (window) => pattern.test(window));
+function safeRegexTest(pattern: RegExp, text: string, preserveContext: boolean): boolean {
+  if (!preserveContext) return someWindow(text, (window) => pattern.test(window));
+
+  // Contextual frames must not see an artificial ^ or word boundary where a
+  // slice dropped a subject/negation. Search from inside the overlap, retaining
+  // its left context. Reserve half the overlap as RIGHT context too: starts in
+  // that margin belong to the next window. These frames (including a bounded
+  // heading) span less than half the overlap, so every owned match has its end
+  // and following character present. Never let a truncated word manufacture \b.
+  // Clone rather than mutating a shared pattern's lastIndex, even if global.
+  const search = new RegExp(pattern.source, pattern.global ? pattern.flags : `${pattern.flags}g`);
+  return forEachWindow(text, (window, start) => {
+    search.lastIndex = start === 0 ? 0 : SCAN_WINDOW_OVERLAP / 2;
+    const match = search.exec(window);
+    if (!match) return false;
+    return start + window.length === text.length
+      || (match.index < window.length - SCAN_WINDOW_OVERLAP / 2 && search.lastIndex < window.length);
+  });
 }
 
 export function detectInstructions(content: string): InstructionDetectionResult {
@@ -224,15 +247,19 @@ export function detectInstructions(content: string): InstructionDetectionResult 
   let maxWeight = 0;
 
   // Test the original first, then up to two normalised copies (confusable fold,
-  // zero-width/bidi strip, punctuation collapse, and a classic-leet fold) — see
+  // zero-width/bidi strip, rule-specific punctuation/line policy, classic leet) — see
   // instruction-normalize.ts. The original always leads, so normalisation can
   // only ever *add* a match, never lose one the raw text would have caught.
-  const variants = instructionMatchVariants(content);
+  const { variants, lineVariants, contextualVariants } = instructionMatchVariantSets(content);
 
   for (const group of PATTERN_GROUPS) {
     if (group.subsumedBy && matchedPatterns.includes(group.subsumedBy)) continue;
     for (const pattern of group.patterns) {
-      if (variants.some((variant) => safeRegexTest(pattern, variant))) {
+      const preserveContext = CONTEXT_SENSITIVE_PATTERNS.has(pattern);
+      const targets = PUNCTUATION_SENSITIVE_PATTERNS.has(pattern)
+        ? contextualVariants
+        : preserveContext ? lineVariants : variants;
+      if (targets.some((variant) => safeRegexTest(pattern, variant, preserveContext))) {
         matchedPatterns.push(group.name);
         totalWeight += group.weight;
         if (group.weight > maxWeight) {
