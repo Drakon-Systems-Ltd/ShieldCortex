@@ -170,8 +170,17 @@ function runDefencePipelineInternal(
 
     // 3. Run firewall (on sanitised content). Pass the strip categories so the
     // firewall can account for zero-width/bidi bytes the sanitiser already
-    // removed — otherwise its encoding detector never sees them and the
-    // "zero-width/RTL → quarantine" rule can't fire.
+    // removed: strict blocking, low-trust and harmful corroboration checks need
+    // that evidence. Bidi still quarantines alone; benign zero-width-only text
+    // can remain ALLOW at normal trust in balanced mode.
+    // The firewall's encoding channels are distinct: decodedSnippets contains
+    // only complete base64/hex/URL decoded blobs; normalizedContents contains
+    // complete confusable/zero-width-normalized documents, never sliced windows.
+    // All derived detectors run on those full surfaces, and balanced mode keeps
+    // the strictest raw/derived verdict (an earlier QUARANTINE cannot hide BLOCK).
+    // Count/byte/depth exhaustion is explicit and cannot silently ALLOW.
+    // Residual: Layer 1 still removes U+200D inside ZWJ emoji. Allowing benign
+    // emoji prose is a verdict fix, NOT a claim that joined emoji are preserved.
     const firewall: FirewallAnalysis = analyzeFirewall(
       cleanContent,
       title,
