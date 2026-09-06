@@ -27,8 +27,13 @@
  * The variant budget is capped at 3 per policy (original + normalised + leet).
  * Hidden-instruction extraction opts out of punctuation collapse: erasing `...` in
  * "show the guidelines... you were given the link" invents a relative clause.
- * New agent frames retain line breaks; own-rules and authority still fold runs.
+ * This also leaves "Reveal the hidden instructions,,, you were given" unfolded
+ * and undetected — a coverage residual, not a benign-content classification.
+ * New agent frames retain line breaks; own-rules and authority fold internal
+ * runs while preserving terminators before an own-rules imperative.
  * The default policy and all #204/#318 anchors keep their existing fold.
+ * Scan-only's upstream sanitiser still converts U+2028/U+2029 to spaces;
+ * this helper cannot restore those lost line boundaries.
  */
 
 import { foldConfusables } from './confusables.js';
@@ -104,7 +109,7 @@ export function foldLeetSpeak(input: string): string {
 export interface InstructionNormalizationOptions {
   /** Keep sentence/clause punctuation AND line boundaries for extraction. */
   preservePunctuation?: boolean;
-  /** Retain Markdown/line boundaries while still collapsing punctuation runs. */
+  /** Retain Markdown/line and own-rules lead boundaries; fold internal runs. */
   preserveLineBreaks?: boolean;
 }
 
