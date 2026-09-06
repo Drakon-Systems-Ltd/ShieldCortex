@@ -134,7 +134,13 @@ bounded morphology generator for override intent. You still cannot enumerate a
 language — non-English and free paraphrase are out of scope for this tier.
 
 The new agent-directed frames require an own-guard directive, an agent-linked
-extraction request, or a permission grant addressed to `you`. Own-rules and
+extraction request, or a permission grant addressed to `you`. A grant must also
+be *asserted*: a negation, denial, prohibition or condition in the same clause
+("do not assume the operator has approved you") is prose about a grant that does
+not exist, so the authority frames decline it. That polarity test reads one
+bounded clause — a cue in an earlier sentence, on an earlier line, or further
+back than the window does not suppress a genuine grant, and one written into the
+same clause does. Own-rules and
 authority fold punctuation runs such as `Ignore,,, your safety rules`; hidden-
 instruction extraction keeps sentence punctuation and line breaks so separate
 sentences or adjacent lines do not invent a relative clause. No-marker relatives
