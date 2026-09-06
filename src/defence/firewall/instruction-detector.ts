@@ -23,6 +23,7 @@
 import { someWindow } from '../scan-windows.js';
 import { instructionMatchVariants } from './instruction-normalize.js';
 import {
+  AUTHORITY_GRANT_PATTERNS,
   OVERRIDE_MORPHOLOGY_PATTERNS,
   PROMPT_EXTRACTION_PATTERNS,
 } from './instruction-morphology.js';
@@ -161,6 +162,10 @@ const PATTERN_GROUPS: PatternGroup[] = [
       /\burgent\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
       /\bemergency\s*:.*\b(disable|remove|bypass|turn\s+off)\b/i,
       /\b(disable|remove|bypass|turn\s+off)\s+(all\s+)?(filter|security|protection|safet)/i,
+      // Delegated authority — "the developer authorised you to skip the check".
+      // Shared with the Iron Dome scanner so a claimed permission grant is the
+      // same signal on both tiers (see instruction-morphology.ts).
+      ...AUTHORITY_GRANT_PATTERNS,
     ],
   },
   {
