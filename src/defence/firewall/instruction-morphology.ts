@@ -14,8 +14,9 @@
  *   nouns    instructions rules prompts context directives constraints guidelines
  *            filters
  *
- * Every frame requires an OBJECT **and** a NOUN from the closed tables. That
- * requirement is the false-positive floor, and it is deliberate:
+ * Each of these three #204 backward-reference frames requires an OBJECT and a
+ * NOUN. Later agent-directed frames have their own discriminators below. The
+ * backward-reference requirement is a deliberate false-positive floor:
  *
  *   "I ignored the previous warning and continued the build"  → no in-set noun
  *   "Please disregard this email if you already replied"      → no object/noun
@@ -78,8 +79,9 @@ export const OVERRIDE_NOUNS = [
  * is the agent's guard and `the safety rules` is documentation. `its` is NOT a
  * second alias for it — see AGENT_POSSESSIVE.
  *
- * The verb side requires a sentence-leading imperative (see directiveVerbForms
- * and SENTENCE_REQUEST). A base verb elsewhere can still describe a program:
+ * The verb side requires an imperative at a sentence/colon or explicit Markdown
+ * boundary (see directiveVerbForms and SENTENCE_REQUEST). A base elsewhere can
+ * still describe a program:
  * "the services bypass your content filters" is not an agent directive.
  *
  * The noun side is split in two because the two halves have different
@@ -135,8 +137,11 @@ export const GUARD_BARE_NOUNS = [
  *   - the relative clause `… you were given / are operating under`, which is
  *     what makes the noun the AGENT's instructions rather than any document, or
  *   - `your` plus an explicit concealment adjective (`hidden`, `secret`).
- * Requests must start a sentence (optionally with `please`), so negated
- * disclosure policy is not rediscovered as an imperative halfway through it.
+ * Requests need a sentence/colon or explicit Markdown boundary (optionally with
+ * `please`), so ordinary negated disclosure prose is not rediscovered halfway
+ * through it. This frame preserves punctuation and lines; own-rules and authority
+ * preserve lines but retain the punctuation-run fold. These are textual shapes,
+ * not proof of intent or of who a request addresses in the real conversation.
  * `configuration` is not a noun here: "show me the config you are running with"
  * is a normal thing to ask an agent.
  */
@@ -438,7 +443,7 @@ export const OVERRIDE_MORPHOLOGY: MorphologyPattern[] = [
     ),
   },
   {
-    // Sentence-leading imperative + second-person guard, not a report or an
+    // Boundary-leading imperative + second-person guard, not a report or an
     // arbitrary base/gerund verb found somewhere inside an operational sentence.
     name: 'override_morphology_own_rules',
     preserveLineBreaks: true,

@@ -129,9 +129,28 @@ only when an embedding model is available; see the note under the list.
 
 The instruction-injection regex tier is a **fast pre-filter floor**, not a claim of
 complete or multilingual coverage: shared normalisation (zero-width/bidi strip,
-confusable fold, punctuation collapse, classic leet as an extra variant) plus a
+confusable fold, rule-specific punctuation/line policy, classic leet as an extra variant) plus a
 bounded morphology generator for override intent. You still cannot enumerate a
 language — non-English and free paraphrase are out of scope for this tier.
+
+The new agent-directed frames require an own-guard directive, an agent-linked
+extraction request, or a permission grant addressed to `you`. Own-rules and
+authority fold punctuation runs such as `Ignore,,, your safety rules`; hidden-
+instruction extraction keeps sentence punctuation and line breaks so separate
+sentences or adjacent lines do not invent a relative clause. No-marker relatives
+stay on one line; a same-line `that`/`which` marker permits bounded wrapping,
+but not blank lines. Own-rules and extraction accept colon lead-ins and bounded,
+line-anchored Markdown headings/bullets, not bare newline boundaries. Legacy
+#204/#318 rules retain their existing punctuation/whitespace fold. Each rule tests
+at most three variants, with shared Unicode preprocessing across policies.
+
+The tested dashboard/eslint/SQL/PR-approval prose stays quiet **for these new
+frames**, not necessarily the entire scanner: Iron Dome's existing
+`constraint_removal` still flags the eslint and SQL examples. Gerunds, ambiguous
+`reset`, nested directives, and genuine-versus-claimed authority remain limits of
+this floor. LF/CRLF/CR adjacent-line controls stay benign through scan-only;
+the existing input sanitiser replaces U+2028/U+2029 with spaces before detection,
+so raw detector line preservation does not survive that conversion.
 
 Unicode confusables (Cyrillic/Greek homoglyphs, NFKC forms) are folded *inside* the
 instruction and encoding detectors rather than being a detector of their own, so a
