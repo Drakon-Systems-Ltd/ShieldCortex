@@ -200,13 +200,47 @@ export function isDocumentationPlaceholder(value: string): boolean {
  * `=` etc. so a real base64 secret that merely contains a hex-looking run is
  * not whitelisted.
  */
-function matchIsWellKnownNonSecret(content: string, start: number, end: number): boolean {
+function identifierCheck(content: string): (start: number, end: number) => boolean {
+  // Index boundaries once, then cache the classification of each expanded span.
+  // A long token can contain thousands of bounded Azure matches: walking or
+  // slicing that entire token again for each match is quadratic (#51).
   const tokenChar = /[A-Za-z0-9-]/;
-  let s = start;
-  let e = end;
-  while (s > 0 && tokenChar.test(content[s - 1])) s--;
-  while (e < content.length && tokenChar.test(content[e])) e++;
-  return isWellKnownNonSecret(content.slice(s, e));
+  const left = new Uint32Array(content.length + 1);
+  const right = new Uint32Array(content.length + 1);
+  for (let i = 0; i < content.length; i++) {
+    left[i + 1] = tokenChar.test(content[i]) ? left[i] : i + 1;
+  }
+  right[content.length] = content.length;
+  for (let i = content.length - 1; i >= 0; i--) {
+    right[i] = tokenChar.test(content[i]) ? right[i + 1] : i;
+  }
+  const known = new Map<string, boolean>();
+  return (start, end) => {
+    const s = left[start];
+    const e = right[end];
+    const key = `${s}:${e}`;
+    if (!known.has(key)) known.set(key, isWellKnownNonSecret(content.slice(s, e)));
+    return known.get(key)!;
+  };
+}
+
+type RedactionRange = { start: number; end: number; replacement: string };
+
+/** Stable counting order over input offsets, without match-count sorting cost. */
+function orderByPosition<T>(values: T[], length: number, position: (value: T) => number): T[] {
+  const buckets = new Map<number, T[]>();
+  for (const value of values) {
+    const offset = position(value);
+    const bucket = buckets.get(offset);
+    if (bucket) bucket.push(value);
+    else buckets.set(offset, [value]);
+  }
+  const ordered: T[] = [];
+  for (let offset = 0; offset <= length; offset++) {
+    const bucket = buckets.get(offset);
+    if (bucket) for (const value of bucket) ordered.push(value);
+  }
+  return ordered;
 }
 
 // ── Scanner ──
@@ -231,13 +265,19 @@ export function scanForCredentials(
     return { leaked: false, findings: [] };
   }
 
-  const findings: CredentialFinding[] = [];
-  let matchedRanges: Array<{ start: number; end: number; replacement: string }> = [];
+  let findings: CredentialFinding[] = [];
+  let matchedRanges: RedactionRange[] = [];
+  const matchIsWellKnownNonSecret = identifierCheck(content);
+  const rangeEnds = new Uint32Array(content.length + 1);
 
   const patterns = [...ALL_CREDENTIAL_PATTERNS, ...cfg.customPatterns];
 
   // Run all pattern matchers
   for (const pattern of patterns) {
+    // Regex matches advance monotonically. Prefix-max coverage replaces a
+    // repeated .some() over all previous findings, including within a pattern.
+    let coverageCursor = 0;
+    let coveredEnd = 0;
     // Reset regex lastIndex for each scan
     const regex = new RegExp(pattern.regex.source, pattern.regex.flags);
     let match: RegExpExecArray | null;
@@ -261,12 +301,15 @@ export function scanForCredentials(
       // Skip if this range is already covered by a higher-priority pattern
       const start = match.index;
       const end = start + fullMatch.length;
-      if (matchedRanges.some(r => start >= r.start && end <= r.end)) continue;
+      while (coverageCursor <= start) {
+        coveredEnd = Math.max(coveredEnd, rangeEnds[coverageCursor++]);
+      }
+      if (end <= coveredEnd) continue;
 
       // Skip well-known PUBLIC identifiers (git SHA / UUID). Generic hex rules
       // match a substring of these, so expand to the full token before testing
       // (Phase 17 A5 / #205 empty digests).
-      if (matchIsWellKnownNonSecret(content, start, end)) continue;
+      if (matchIsWellKnownNonSecret(start, end)) continue;
 
       const action = actionForSeverity(pattern.severity, cfg);
       const redacted = redactMatch(secretValue, pattern.type);
@@ -283,6 +326,8 @@ export function scanForCredentials(
 
       const replacement = `[REDACTED-${pattern.type}${pattern.provider ? `-${pattern.provider}` : ''}]`;
       matchedRanges.push({ start, end, replacement });
+      rangeEnds[start] = Math.max(rangeEnds[start], end);
+      coveredEnd = Math.max(coveredEnd, end);
     }
   }
 
@@ -299,20 +344,16 @@ export function scanForCredentials(
   //               telling the operator anything they did not already know.
   const entropyTokens = extractHighEntropyTokens(content);
   const reportedEntropyTokens = new Set<string>();
-  // Snapshot the pattern layer's ranges BEFORE the entropy loop mutates
-  // matchedRanges: finding-emission (below) discriminates against these, and
-  // entropy ranges pushed for earlier tokens must never suppress later ones.
-  // Merged into disjoint intervals so two overlapping pattern matches cannot
-  // double-subtract coverage in the uncovered-length arithmetic.
-  const patternRanges = matchedRanges
-    .map(r => ({ start: r.start, end: r.end }))
-    .sort((a, b) => a.start - b.start)
-    .reduce<Array<{ start: number; end: number }>>((merged, r) => {
-      const last = merged[merged.length - 1];
-      if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
-      else merged.push({ ...r });
-      return merged;
-    }, []);
+  // Snapshot pattern coverage as prefix counts. Each character contributes at
+  // most once even when patterns overlap; entropy queries are then O(1).
+  const coveredBytes = new Uint32Array(content.length + 1);
+  let coveredEnd = 0;
+  for (let i = 0; i < content.length; i++) {
+    coveredEnd = Math.max(coveredEnd, rangeEnds[i]);
+    coveredBytes[i + 1] = coveredBytes[i] + (coveredEnd > i ? 1 : 0);
+    rangeEnds[i] = coveredEnd;
+  }
+  const entropyRanges: RedactionRange[] = [];
   for (const token of entropyTokens) {
     const start = token.position;
     const end = start + token.token.length;
@@ -322,7 +363,7 @@ export function scanForCredentials(
     // of a padded secret (`aaaa...` as a generic hex/Azure key). Treating that
     // partial overlap as "already caught" left the real high-entropy suffix raw
     // in redacted output — exactly the #257 bypass shape.
-    if (matchedRanges.some(r => start >= r.start && end <= r.end)) continue;
+    if (end <= rangeEnds[start]) continue;
 
     // Skip allowlisted
     if (isAllowlisted(token.token, cfg.allowlist)) continue;
@@ -331,8 +372,7 @@ export function scanForCredentials(
     // though it will not produce a second finding below. Drop narrower pattern
     // ranges contained inside this entropy token so a filler-only match cannot
     // split or shrink the redaction span.
-    matchedRanges = matchedRanges.filter(r => !(r.start >= start && r.end <= end));
-    matchedRanges.push({ start, end, replacement: '[REDACTED-high_entropy]' });
+    entropyRanges.push({ start, end, replacement: '[REDACTED-high_entropy]' });
 
     if (reportedEntropyTokens.has(token.token)) continue;
     reportedEntropyTokens.add(token.token);
@@ -346,11 +386,7 @@ export function scanForCredentials(
     // length — anything smaller cannot be a distinct secret by the net's own
     // definition). The redaction RANGE above is recorded unconditionally
     // either way: #257 completeness and #256 reporting are separate concerns.
-    let uncovered = end - start;
-    for (const r of patternRanges) {
-      const overlap = Math.min(end, r.end) - Math.max(start, r.start);
-      if (overlap > 0) uncovered -= overlap;
-    }
+    const uncovered = end - start - (coveredBytes[end] - coveredBytes[start]);
     if (uncovered < 20 && uncovered < end - start) continue;
 
     const severity: CredentialSeverity = token.confidence >= 0.8 ? 'medium' : 'low';
@@ -366,8 +402,16 @@ export function scanForCredentials(
     });
   }
 
-  // Sort findings by position
-  findings.sort((a, b) => a.position - b.position);
+  // Remove pattern ranges contained in entropy tokens in one ordered sweep.
+  // Entropy tokens are disjoint and already in input order.
+  let entropyCursor = 0;
+  matchedRanges = orderByPosition(matchedRanges, content.length, r => r.start).filter(r => {
+    while (entropyCursor < entropyRanges.length && entropyRanges[entropyCursor].end <= r.start) entropyCursor++;
+    const token = entropyRanges[entropyCursor];
+    return !token || r.start < token.start || r.end > token.end;
+  });
+  matchedRanges = orderByPosition([...matchedRanges, ...entropyRanges], content.length, r => r.start);
+  findings = orderByPosition(findings, content.length, f => f.position);
 
   const leaked = findings.length > 0;
   const hasBlocked = findings.some(f => f.action === 'blocked');
@@ -407,44 +451,37 @@ function buildRedactedContent(
   ranges: Array<{ start: number; end: number; replacement: string }>,
 ): string {
   const merged = mergeOverlappingRanges(ranges);
-  // Sort by start position descending to replace from end to start
-  const sorted = [...merged].sort((a, b) => b.start - a.start);
-  let result = content;
-  for (const range of sorted) {
-    result = result.slice(0, range.start) + range.replacement + result.slice(range.end);
+  // Copy each untouched span once. Repeated right-to-left splicing copies the
+  // whole response for every finding even after identifier checks are bounded.
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const range of merged) {
+    parts.push(content.slice(cursor, range.start), range.replacement);
+    cursor = range.end;
   }
-  return result;
+  parts.push(content.slice(cursor));
+  return parts.join('');
 }
 
 /**
  * Collapse overlapping (not just nested) ranges into a single span before
  * replacement.
  *
- * `buildRedactedContent` replaces right-to-left on the assumption that ranges
- * never overlap, using offsets computed against the ORIGINAL content. A
- * PARTIAL overlap — e.g. a pattern match whose captured charset stops short
- * of a longer entropy token, so the pattern's end falls strictly inside the
- * entropy token's span while neither range contains the other — breaks that
- * assumption: replacing the first range shrinks/reshapes the working string,
- * and the second range's original-content `end` then lands on the wrong
- * position in that already-mutated string, silently truncating or duplicating
- * output. The two-range-removal dance in `scanForCredentials` only handles
- * the fully-NESTED case (one range wholly inside another); it does not — and
- * structurally cannot, since it only sees one new range at a time — catch a
- * crossing overlap. Merging here makes "ranges never overlap" true by
- * construction for every caller, instead of relying on every producer of
- * `matchedRanges` to keep it true by hand.
+ * A pattern and an entropy token can overlap without either containing the
+ * other. Removing only nested ranges leaves crossing spans that would make
+ * the output cursor move backwards and expose or duplicate original bytes.
+ * Merge those spans before copying untouched slices of the ORIGINAL content.
  */
 function mergeOverlappingRanges(
   ranges: Array<{ start: number; end: number; replacement: string }>,
 ): Array<{ start: number; end: number; replacement: string }> {
   if (ranges.length <= 1) return ranges;
 
-  const sorted = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end);
-  const merged: Array<{ start: number; end: number; replacement: string }> = [sorted[0]];
+  // The scanner supplies ranges in ascending start order.
+  const merged: Array<{ start: number; end: number; replacement: string }> = [ranges[0]];
 
-  for (let i = 1; i < sorted.length; i++) {
-    const next = sorted[i];
+  for (let i = 1; i < ranges.length; i++) {
+    const next = ranges[i];
     const last = merged[merged.length - 1];
     if (next.start < last.end) {
       // Overlapping (or one nested in the other) — union the span. Keep

@@ -180,6 +180,8 @@ function strictestVerdict(current: Verdict, candidate: Verdict): Verdict {
   return VERDICT_ORDER[candidate.result] > VERDICT_ORDER[current.result] ? candidate : current;
 }
 
+// Derived surfaces require concrete hostile evidence. Anomaly-only policy
+// stays with the raw gate, using the real title and existing trust threshold.
 function rescanDerivedContent(encoding: EncodingDetectionResult, trustScore: number): Verdict {
   let verdict: Verdict = { result: 'ALLOW', reason: 'No threats detected' };
   const elevated: FirewallResult = trustScore < 0.5 ? 'BLOCK' : 'QUARANTINE';
@@ -199,7 +201,6 @@ function rescanDerivedContent(encoding: EncodingDetectionResult, trustScore: num
     const credentials = scanForCredentials(text);
     const skill = detectSkillThreats(text);
     const markdown = detectMarkdownImageExfil(text);
-    const anomaly = scoreAnomaly(text, '');
     const contains = (effect: string) => `${label} content contains ${effect} (${encoding.encodingTypes.join(', ')})`;
     let candidate: Verdict = { result: 'ALLOW', reason: 'No threats detected' };
     if (exfil.detected) {
@@ -214,8 +215,6 @@ function rescanDerivedContent(encoding: EncodingDetectionResult, trustScore: num
       candidate = { result: elevated, reason: contains(`skill threat: ${skill.threats.join(', ')}`) };
     } else if (privilege.indicators.includes('network_exfiltration') || markdown.detected) {
       candidate = { result: elevated, reason: contains(privilege.indicators.includes('network_exfiltration') ? 'network exfiltration' : 'markdown_image_exfil') };
-    } else if (anomaly > 0.6) {
-      candidate = { result: 'QUARANTINE', reason: `${label} content has high anomaly score (${anomaly.toFixed(2)})` };
     }
     verdict = strictestVerdict(verdict, candidate);
   }

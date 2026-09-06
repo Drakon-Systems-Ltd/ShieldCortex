@@ -42,6 +42,12 @@ const URL_ENCODING_PATTERN = /(?:%[0-9A-Fa-f]{2}){4,}/g;
 // `/g` regex advances `lastIndex` across `.test()` calls and flip-flops between
 // true/false for identical content, silently missing zero-width smuggling.
 const ZERO_WIDTH_PATTERN = /[\u200B\u200C\u200D\uFEFF\u2060\u180E]/;
+const ZERO_WIDTH_GLOBAL_PATTERN = new RegExp(ZERO_WIDTH_PATTERN.source, 'g');
+
+/** The same whole-document transform for discovery and raw-redaction rescans. */
+export function normalizeEncodingContent(content: string): string {
+  return foldConfusables(content).replace(ZERO_WIDTH_GLOBAL_PATTERN, '');
+}
 
 // RTL override \u2014 presence check only, NO `/g` (same stateful-test hazard).
 const RTL_OVERRIDE_PATTERN = /\u202E/;
@@ -118,8 +124,9 @@ export function detectEncoding(content: string): EncodingDetectionResult {
   ];
 
   // Breadth-first discovery retains each full decoded blob, including all
-  // siblings and intermediate layers. Count/byte budgets include failed decode
-  // attempts; a wall of unreadable candidates cannot consume unbounded work.
+  // siblings and intermediate layers. Only readable decodes spend candidate
+  // count/bytes: hashes are not payloads. Failed attempts are still bounded by
+  // the input + decoded + normalized surface byte limits and fixed decoders.
   for (let index = 0; index < queue.length; index++) {
     const { text, depth } = queue[index];
     const zeroWidth = ZERO_WIDTH_PATTERN.test(text);
@@ -131,7 +138,7 @@ export function detectEncoding(content: string): EncodingDetectionResult {
 
     const surfaces = [text];
     if (homoglyph || zeroWidth) {
-      const normalized = folded.replace(new RegExp(ZERO_WIDTH_PATTERN.source, 'g'), '');
+      const normalized = folded.replace(ZERO_WIDTH_GLOBAL_PATTERN, '');
       const bytes = Buffer.byteLength(normalized);
       if (!normalizedSeen.has(normalized)) {
         if (normalizedBytes + bytes > ENCODING_SCAN_LIMITS.maxNormalizedBytes) {
@@ -149,6 +156,8 @@ export function detectEncoding(content: string): EncodingDetectionResult {
     discovery: for (const surface of surfaces) {
       for (const { type, pattern, decode } of decoders) {
         for (const match of surface.matchAll(pattern)) {
+          const decoded = decode(match[0]);
+          if (!decoded) continue;
           const bytes = Buffer.byteLength(match[0]);
           if (depth >= ENCODING_SCAN_LIMITS.maxDepth ||
               candidates >= ENCODING_SCAN_LIMITS.maxCandidates ||
@@ -161,8 +170,6 @@ export function detectEncoding(content: string): EncodingDetectionResult {
           }
           candidates++;
           candidateBytes += bytes;
-          const decoded = decode(match[0]);
-          if (!decoded) continue;
           encodingTypes.push(type);
           if (decodedSeen.has(decoded)) continue;
           const outputBytes = Buffer.byteLength(decoded);
