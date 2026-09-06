@@ -125,7 +125,10 @@ export const GUARD_BARE_NOUNS = [
   'limitations?',
   'boundaries?',
   'directives?',
-  'programming',
+  // Inspect only bounded right context before excluding programming-language
+  // prose. Longer gaps must normalise first, so a scan window cannot hide the
+  // language suffix beyond its right margin and manufacture a bare-guard hit.
+  'programming(?=\\s{0,8}(?:\\S|$))(?!\\s+language)',
 ] as const;
 
 /**
