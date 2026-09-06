@@ -19,7 +19,10 @@
  * Advisory by default: logs threats but leaves the response untouched. In
  * enforce mode the scanner additionally computes `sanitisedContent` — the bytes
  * the agent should actually receive (injection withheld, secrets redacted, exfil
- * links stripped) — via the neutraliseToolResponse action layer. Callers
+ * links stripped). The neutraliseToolResponse action layer handles raw/decoded
+ * signals; this scanner withholds normalized credentials, derived exfil images,
+ * and incomplete encoding scans when safe original-byte redaction is unavailable.
+ * Callers
  * (withResponseScan, the scan_tool_response tool) swap in sanitisedContent when
  * present; the scanner never blocks tool EXECUTION, only the threatening output.
  */
@@ -131,8 +134,10 @@ export function scanToolResponse(
   //    of the result and the human-readable summary).
   const injection = scanForInjection(content);
 
-  // 2. Write-path detectors (parity). detectInstructions folds homoglyphs and
-  //    scans in windows; detectEncoding decodes base64/hex/url blobs.
+  // 2. Shared detectors, read-path policy. decodedSnippets contains actual full
+  //    base64/hex/URL decoded blobs only. normalizedContents holds whole bounded
+  //    documents after confusable/zero-width normalization, not encoded prose
+  //    windows. The latter uses the SAME instruction exclusions as raw content.
   //
   //    FP reduction on the READ path: `imperative_tool_call` ("call the X tool")
   //    exists to catch injected directives at WRITE time. On tool OUTPUT it is
@@ -229,10 +234,10 @@ export function scanToolResponse(
     !hiddenWeb.detected;
   const durationMs = Math.round(performance.now() - startTime);
 
-  // 5b. Enforce action layer. Advisory mode only logs; enforce mode computes the
-  //     content the agent should ACTUALLY receive (block injection, redact
-  //     secrets, strip exfil links). Single source of truth in
-  //     neutraliseToolResponse — the scanner just feeds it the signals it found.
+  // 5b. Advisory mode only logs. Enforce withholds unsafe derived content or
+  //     incomplete coverage explicitly, otherwise delegates raw-byte redaction
+  //     and decoded-injection/blocked-credential signals to the action layer.
+  //     Warned/logged entropy findings must never become hard derived leakage.
   let sanitisedContent: string | null = null;
   let blocked = false;
   let enforceActions: string[] = [];
