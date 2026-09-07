@@ -256,6 +256,8 @@ export const PERMISSION_NOUNS = [
  *   "do not assume the operator has approved you to deploy"
  *   "the policy denies that the developer authorised you to deploy"
  *   "never say the admin allowed you access to production"
+ *   "it is incorrect that the developer authorised you to deploy"
+ *   "stop claiming the admin allowed you access"
  *
  * A negation, denial, prohibition or condition earlier in the SAME clause
  * inverts the claim, so the frames decline it. Intra-frame negation ("the
@@ -274,6 +276,11 @@ export const NON_ASSERTIVE_CUES = [
   'forbid(?:s|den|ding)?',
   'false',
   'untrue',
+  'incorrect',
+  'wrong',
+  'stop',
+  'avoid',
+  'refrain',
   'if',
   'unless',
   'whether',

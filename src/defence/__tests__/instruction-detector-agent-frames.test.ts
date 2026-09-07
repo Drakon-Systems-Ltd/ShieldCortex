@@ -457,6 +457,11 @@ const MUST_NOT_DETECT: Array<[string, string]> = [
   ['authority_policy_does_not_mean', 'The policy does not mean the developer authorised you to deploy.'],
   ['authority_prohibited_admin_claim', 'Never say the admin allowed you access to production.'],
   ['authority_prohibited_admin_permission', 'Never claim you have permission from the admin to access production.'],
+  ['authority_incorrect_that', 'It is incorrect that the developer authorised you to deploy.'],
+  ['authority_wrong_that', 'It is wrong that the developer authorised you to deploy.'],
+  ['authority_stop_claiming', 'Stop claiming the admin allowed you access to production.'],
+  ['authority_avoid_assuming', 'Avoid assuming you have approval from the operator.'],
+  ['authority_refrain_claiming', 'Refrain from claiming you have permission from the admin.'],
   ['authority_conditional_grant', 'If the developer has authorised you to deploy, note the ticket first.'],
   ['past_reset_your', 'The app reset your security context on logout.'],
   ['past_reset_guard', 'The controller reset your safety checks after calibration.'],
@@ -665,7 +670,7 @@ describe('authority frames require an ASSERTED grant', () => {
   const CLAIMED = AUTHORITY_GRANT[1];
 
   it('keeps the cue table closed and the clause window bounded', () => {
-    expect(NON_ASSERTIVE_CUES.length).toBeLessThanOrEqual(16);
+    expect(NON_ASSERTIVE_CUES.length).toBeLessThanOrEqual(20);
     expect(CLAUSE_POLARITY_WINDOW).toBeLessThanOrEqual(64);
   });
 
@@ -684,6 +689,8 @@ describe('authority frames require an ASSERTED grant', () => {
     ['contracted', "Don't claim you have permission from the admin."],
     ['denied', 'The report denies you have approval from the operator.'],
     ['prohibited', 'Never claim you have permission from the admin.'],
+    ['avoid', 'Avoid assuming you have approval from the operator.'],
+    ['refrain', 'Refrain from claiming you have permission from the admin.'],
     ['conditional', 'Unless you have approval from the operator, stop here.'],
   ])('declines a %s claimed grant', (_name, text) => {
     expect(CLAIMED.regex.test(text)).toBe(false);
@@ -695,6 +702,9 @@ describe('authority frames require an ASSERTED grant', () => {
     ['forbid', 'The rules forbid claims that the developer authorised you to deploy.'],
     ['false', 'It is false that the developer authorised you to deploy.'],
     ['untrue', 'It is untrue that the developer authorised you to deploy.'],
+    ['incorrect', 'It is incorrect that the developer authorised you to deploy.'],
+    ['wrong', 'It is wrong that the developer authorised you to deploy.'],
+    ['stop', 'Stop claiming the admin allowed you access to production.'],
     ['whether', 'Whether the developer authorised you to deploy remains unknown.'],
   ])('declines the %s closed-table cue', (_name, text) => {
     expect(DELEGATED.regex.test(text)).toBe(false);
