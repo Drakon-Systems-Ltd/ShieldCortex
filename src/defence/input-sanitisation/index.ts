@@ -34,8 +34,22 @@ export type SanitisationCategory =
 /** Null bytes — used to truncate strings in C-based parsers */
 const NULL_BYTES = /\0/g;
 
-/** ASCII control characters (0x00-0x1F, 0x7F) except tab, newline, carriage return */
-const CONTROL_CHARS = /[\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+/**
+ * ASCII control characters (0x00-0x1F, 0x7F) that carry no text and no
+ * separation: stripped outright.
+ */
+const CONTROL_CHARS = /[\x01-\x08\x0E-\x1F\x7F]/g;
+
+/**
+ * Vertical tab and form feed are WHITESPACE controls, like the tab, newline and
+ * carriage return this layer already keeps. Deleting them joined the tokens
+ * either side — "Ignore\x0Byour safety rules" reached the firewall as
+ * "Ignoreyour safety rules" and every downstream frame lost the word boundary
+ * it matches on. They fold to a space for the same reason HOMOGLYPH_SEPARATORS
+ * do: the character is removed, the separation it carried is not. Their
+ * security treatment is unchanged — this is still a `control_char` strip.
+ */
+const WHITESPACE_CONTROLS = /[\x0B\x0C]/g;
 
 /** Zero-width characters — invisible text that can hide payloads */
 const ZERO_WIDTH = /[\u200B\u200C\u200D\uFEFF\u2060\u180E]/g;
@@ -67,10 +81,13 @@ export function sanitiseInput(content: string): SanitisationResult {
     sanitised = sanitised.replace(NULL_BYTES, '');
   }
 
-  // 2. Control characters (keep \t \n \r)
-  if (CONTROL_CHARS.test(sanitised)) {
+  // 2. Control characters (keep \t \n \r; VT/FF fold to a space)
+  const hasControlChars = CONTROL_CHARS.test(sanitised);
+  const hasWhitespaceControls = WHITESPACE_CONTROLS.test(sanitised);
+  if (hasControlChars || hasWhitespaceControls) {
     strippedCategories.push('control_char');
-    sanitised = sanitised.replace(CONTROL_CHARS, '');
+    if (hasControlChars) sanitised = sanitised.replace(CONTROL_CHARS, '');
+    if (hasWhitespaceControls) sanitised = sanitised.replace(WHITESPACE_CONTROLS, ' ');
   }
 
   // 3. BOM
