@@ -15,13 +15,18 @@
  *
  * The second trap (proven on clawdbot1): even in the right dir, `npm rebuild
  * better-sqlite3` — AND `npm rebuild … --build-from-source` — can report "rebuilt
- * dependencies successfully" while the binary never built. better-sqlite3's
- * install runs prebuild-install, which on a platform with no matching prebuilt
- * exits 0 WITHOUT building (the `--build-from-source` flag does not reliably force
- * it). So when a plain rebuild doesn't heal, we escalate to better-sqlite3's own
- * `npm run build-release` (= `node-gyp rebuild --release`) IN its package dir,
- * which bypasses prebuild-install and actually compiles — surfacing the real
- * build error (almost always a missing C/C++ toolchain) if it can't.
+ * dependencies successfully" while the binary never built. On 12.x that was
+ * prebuild-install exiting 0 without building; on 13.x npm's implicit node-gyp
+ * rebuild is a deliberate no-op whenever the package already carries a prebuilt
+ * for the host. Either way, when a plain rebuild doesn't heal, we escalate to
+ * better-sqlite3's own `npm run build-release` (= `node-gyp rebuild --release
+ * --force_build=1`) IN its package dir, which actually compiles — surfacing the
+ * real build error (almost always a missing C/C++ toolchain) if it can't.
+ *
+ * The third trap, new in 13.x: `lib/binding.js` resolves `prebuilds/` BEFORE
+ * `build/Release/`, so a from-source build is invisible while an unloadable
+ * prebuilt is still sitting there. {@link shelvePrebuild} moves it aside for the
+ * duration of a forced build, and puts it back if that build fails.
  *
  * Used by: `shieldcortex update` (verify+heal step), `shieldcortex repair`,
  * `shieldcortex doctor` (correct remediation text), and the postinstall guidance.
@@ -29,6 +34,7 @@
 
 import path from 'path';
 import { spawn } from 'child_process';
+import { existsSync, renameSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 
@@ -127,11 +133,21 @@ export function rebuildNativeBinding(
   installDir: string,
   opts: { fromSource?: boolean } = {},
 ): Promise<{ ok: boolean; output: string }> {
-  const { cmd, args, cwd } = nativeRebuildCommand(installDir, opts.fromSource ?? false);
+  const fromSource = opts.fromSource ?? false;
+  const { cmd, args, cwd } = nativeRebuildCommand(installDir, fromSource);
+  const shadowing = fromSource ? shelvePrebuild(installDir) : null;
   return new Promise((resolve) => {
     let output = '';
     let settled = false;
-    const finish = (ok: boolean) => { if (!settled) { settled = true; resolve({ ok, output }); } };
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      // A failed source build must not leave the install with NO binding at
+      // all: put the shelved prebuilt back, since it is still the best
+      // available binary.
+      if (shadowing && !ok) restorePrebuild(shadowing);
+      resolve({ ok, output });
+    };
 
     let child;
     try {
@@ -158,6 +174,51 @@ export function rebuildNativeBinding(
     child.on('error', (err) => { clearTimeout(timer); output += String(err?.message ?? err); finish(false); });
     child.on('close', (code) => { clearTimeout(timer); finish(code === 0); });
   });
+}
+
+interface ShelvedPrebuild {
+  from: string;
+  to: string;
+}
+
+/**
+ * Move better-sqlite3 13's shipped prebuilt binary aside before a from-source
+ * compile, and remember where it went.
+ *
+ * Why this is needed: 13.x resolves its binding as
+ * `prebuilds/<platform>-<arch>.node` FIRST and only falls back to the node-gyp
+ * output in `build/Release/`. So on a box where the shipped prebuilt exists but
+ * cannot load (unsupported glibc, a truncated download, a hardened mount),
+ * `npm run build-release` would compile a perfectly good binary that nothing
+ * ever loads — the exact silent no-op this module exists to prevent, one layer
+ * down. Shelving the prebuilt makes the fresh build the resolved binding.
+ *
+ * Best-effort by design: on 12.x (no `lib/binding`, no `prebuilds/`) and on any
+ * fs error this returns null and the build proceeds unchanged.
+ */
+function shelvePrebuild(installDir: string): ShelvedPrebuild | null {
+  try {
+    const pkgDir = path.join(installDir, 'node_modules', 'better-sqlite3');
+    const { getPrebuildPath } = require(path.join(pkgDir, 'lib', 'binding.js')) as {
+      getPrebuildPath(): string | null;
+    };
+    const from = getPrebuildPath();
+    if (!from || !existsSync(from)) return null;
+    const to = `${from}.shelved-for-source-build`;
+    renameSync(from, to);
+    return { from, to };
+  } catch {
+    return null;
+  }
+}
+
+/** Undo {@link shelvePrebuild} when the source build did not produce a binding. */
+function restorePrebuild(shelved: ShelvedPrebuild): void {
+  try {
+    if (existsSync(shelved.to) && !existsSync(shelved.from)) renameSync(shelved.to, shelved.from);
+  } catch {
+    // Best-effort: the source build's own output is the remediation path now.
+  }
 }
 
 /**

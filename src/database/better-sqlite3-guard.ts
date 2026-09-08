@@ -1,11 +1,13 @@
 /**
  * Guarded loader for the better-sqlite3 native module.
  *
- * better-sqlite3 ships prebuilt binaries per Node ABI. On a Node version
- * newer than the installed better-sqlite3's prebuilds (and with no C++
- * toolchain to compile from source), the native load fails — historically
- * with a bare `libc++abi: terminating ... Napi::Error` crash-loop and zero
- * guidance. This module is the single place better-sqlite3 is loaded at
+ * better-sqlite3 13 ships Node-API prebuilt binaries per PLATFORM (not per
+ * Node ABI), so a Node upgrade no longer strands the binding — that was the
+ * 12.x failure mode, where a Node version newer than the installed prebuilds
+ * (and with no C++ toolchain to compile from source) failed to load with a
+ * bare `libc++abi: terminating ... Napi::Error` crash-loop and zero guidance.
+ * An unsupported platform, a stripped install or a half-finished local build
+ * can still fail. This module is the single place better-sqlite3 is loaded at
  * runtime: it turns that failure into one actionable, catchable error
  * instead of an opaque abort.
  *
@@ -53,15 +55,16 @@ export function formatNativeLoadError(
   return [
     'ShieldCortex could not load its database engine (better-sqlite3).',
     '',
-    `Node ${nodeVersion} (ABI ${abi}) has no matching prebuilt binary and`,
-    'the module was not compiled locally.',
+    `Node ${nodeVersion} (ABI ${abi}) could not load the better-sqlite3 binding.`,
+    'The shipped prebuilt binary is missing for this platform, or the module',
+    'was not compiled locally.',
     '',
     'Fix one of these:',
     '  • Run `shieldcortex repair` (compiles better-sqlite3 from source + re-verifies)',
     '  • Or recompile manually in the better-sqlite3 package dir:  npm run build-release',
     '    (requires a C/C++ toolchain — Xcode CLT / build-essential; a plain `npm rebuild` can silently no-op)',
-    '  • Or run ShieldCortex on a supported Node LTS (20.x or 22.x),',
-    '    which ship prebuilt binaries — no compiler needed.',
+    '  • Or reinstall ShieldCortex on Node 22+ (`npm i -g shieldcortex`) so the',
+    '    Node-API prebuilt binary is restored — no compiler needed.',
     '',
     `Underlying error: ${detail}`,
   ].join('\n');
