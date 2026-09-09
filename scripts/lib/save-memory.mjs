@@ -378,6 +378,17 @@ function testEmbedSeamOpen() {
   return process.env.SHIELDCORTEX_TEST_SEAM === '1' && process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1';
 }
 
+/**
+ * Test-only failure injection, behind the same SHIELDCORTEX_TEST_SEAM=1 gate:
+ * the embed call rejects with this exact message, so the shutdown-vs-failure
+ * classification below is exercised for real without a model on disk.
+ * Returns null (no injection) in production.
+ */
+function testEmbedFailure() {
+  if (process.env.SHIELDCORTEX_TEST_SEAM !== '1') return null;
+  return process.env.SHIELDCORTEX_HOOK_EMBED_FAIL || null;
+}
+
 async function embeddingCacheIsHealthy() {
   if (testEmbedSeamOpen()) return true;
   try {
@@ -405,10 +416,15 @@ async function embeddingCacheIsHealthy() {
  * @param {string} text
  */
 async function embedStoredRow(db, memoryId, text) {
-  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
-  // #460 review: never download at session close. existsSync(model.onnx) is not
-  // enough — a truncated file still trips worker heal + HuggingFace fetch.
-  if (!(await embeddingCacheIsHealthy())) return;
+  // An injected failure needs no model and no cache, so it skips both gates
+  // below rather than forcing a test to unset SKIP_EMBEDDINGS process-wide.
+  const injectedFailure = testEmbedFailure();
+  if (!injectedFailure) {
+    if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
+    // #460 review: never download at session close. existsSync(model.onnx) is not
+    // enough — a truncated file still trips worker heal + HuggingFace fetch.
+    if (!(await embeddingCacheIsHealthy())) return;
+  }
 
   if (testEmbedSeamOpen()) {
     // Async on purpose: a sync UPDATE would pass even if the caller forgot to await.
@@ -419,7 +435,9 @@ async function embedStoredRow(db, memoryId, text) {
     return;
   }
 
-  const generateEmbedding = await loadEmbedder();
+  const generateEmbedding = injectedFailure
+    ? async () => { throw new Error(injectedFailure); }
+    : await loadEmbedder();
   if (!generateEmbedding) {
     if (!_warnedEmbedUnavailable) {
       _warnedEmbedUnavailable = true;
@@ -447,6 +465,11 @@ async function embedStoredRow(db, memoryId, text) {
     db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(embedding.buffer), memoryId);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
+    // Shutdown cancelled this embed on purpose — generator.ts settles cancelled
+    // work with exactly this message. Matched whole, exactly as store.ts does:
+    // the timeout kill, a crash, or anything that merely mentions disposal is a
+    // failure and still gets reported below.
+    if (msg === 'Embedding worker disposed') return;
     // Absent worker / explicitly disabled embeddings are configuration, not
     // failure — say it once and stay quiet, exactly as store.ts does.
     if (/Embedding worker unavailable|Embeddings disabled via/i.test(msg)) {
