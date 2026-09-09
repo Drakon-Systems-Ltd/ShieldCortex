@@ -105,6 +105,34 @@ function settleAll(handle: WorkerHandle, message: string): void {
   }
 }
 
+/**
+ * Terminations we have started and not yet seen finish. worker.terminate()
+ * settles when the thread is actually gone, so awaiting this is the only
+ * honest way to call a disposal complete — including a kill the timeout path
+ * started, which disposeModel() has to wait out rather than step over.
+ */
+let terminationBarrier: Promise<void> = Promise.resolve();
+
+/**
+ * Kill a worker for a reason we chose, and record the kill so later disposals
+ * and later admissions wait for the thread to actually exit.
+ */
+function terminateHandle(handle: WorkerHandle, reason: RetireReason, message: string): void {
+  // Retire before terminating so the exit this causes is not reported as a
+  // crash, and settle in-flight requests explicitly — clearing the map left
+  // them to whatever the exit handler said, i.e. a phantom crash.
+  retire(handle, reason);
+  settleAll(handle, message);
+  // Failure to terminate is swallowed, not thrown: disposal runs inside
+  // shutdown handlers that call process.exit() on the next line, and the
+  // worker's own exit handler still reports anything genuinely unexpected.
+  const done = handle.worker.terminate().then(
+    () => undefined,
+    () => undefined,
+  );
+  terminationBarrier = Promise.all([terminationBarrier, done]).then(() => undefined);
+}
+
 function ensureWorker(): WorkerHandle {
   if (current) return current;
 
@@ -174,9 +202,7 @@ function sendMessage(type: string, text?: string, timeoutMs?: number): Promise<u
       // The timeout itself still fails loudly — only the kill we do about it
       // is treated as intentional, so it is not re-reported as a crash.
       reject(new Error(`${type} timed out after ${timeout}ms`));
-      retire(handle, 'timeout');
-      settleAll(handle, WORKER_TIMEOUT_KILL_MSG);
-      handle.worker.terminate().catch(() => { /* already on its way out */ });
+      terminateHandle(handle, 'timeout', WORKER_TIMEOUT_KILL_MSG);
     }, timeout);
 
     handle.pending.set(id, { resolve, reject, timer });
@@ -185,17 +211,39 @@ function sendMessage(type: string, text?: string, timeoutMs?: number): Promise<u
 }
 
 /**
- * Work admitted before a disposal belongs to the lifecycle that was current
- * when it was queued. disposeModel() cancels that lifecycle and opens the next
- * one, so embeds still sitting on embedChain settle as disposed instead of
- * waking a replacement worker — while a genuinely new call afterwards starts a
- * fresh worker as usual. Dispose is a boundary, not a process-wide off switch.
+ * A lifecycle is the stretch between two disposeModel() calls. Work is admitted
+ * into whichever lifecycle is current when it is CALLED — not when it later
+ * gets its turn to run — and from there:
+ *
+ *  - work whose lifecycle a disposal cancelled settles as disposed instead of
+ *    reaching ensureWorker() and resurrecting the worker just shut down;
+ *  - work admitted after that disposal belongs to the NEXT lifecycle and waits
+ *    on the terminations outstanding when that lifecycle opened (`barrier`)
+ *    before it touches a worker, so it can neither race the old worker's exit
+ *    nor stand a replacement up beside it. It still runs afterwards — unless a
+ *    further disposal cancels its lifecycle in turn.
+ *
+ * Dispose is a boundary, not a process-wide off switch.
  */
 interface Lifecycle {
   cancelled: boolean;
+  /** Terminations that were still outstanding when this lifecycle opened. */
+  barrier: Promise<void>;
 }
 
-let lifecycle: Lifecycle = { cancelled: false };
+let lifecycle: Lifecycle = { cancelled: false, barrier: Promise.resolve() };
+
+/**
+ * Gate work on the lifecycle it was admitted into, then hand off to `send`
+ * with no await in between: a disposal landing in that gap would otherwise get
+ * exactly the replacement worker it is trying to prevent.
+ */
+async function runInLifecycle<T>(admitted: Lifecycle, send: () => Promise<T>): Promise<T> {
+  if (admitted.cancelled) throw new Error(WORKER_DISPOSED_MSG);
+  await admitted.barrier;
+  if (admitted.cancelled) throw new Error(WORKER_DISPOSED_MSG);
+  return send();
+}
 
 // Single ONNX worker cannot safely run concurrent embeds — queue them.
 let embedChain: Promise<unknown> = Promise.resolve();
@@ -206,13 +254,11 @@ let embedChain: Promise<unknown> = Promise.resolve();
  */
 export async function generateEmbedding(text: string): Promise<Float32Array> {
   const admitted = lifecycle;
-  const run = async (): Promise<Float32Array> => {
-    // Queued before a dispose: settle as disposed rather than reaching
-    // ensureWorker() and resurrecting the worker the caller just shut down.
-    if (admitted.cancelled) throw new Error(WORKER_DISPOSED_MSG);
-    const data = await sendMessage('embed', text, INFERENCE_TIMEOUT_MS) as number[];
-    return new Float32Array(data);
-  };
+  const run = (): Promise<Float32Array> =>
+    runInLifecycle(admitted, async () => {
+      const data = await sendMessage('embed', text, INFERENCE_TIMEOUT_MS) as number[];
+      return new Float32Array(data);
+    });
   // Serialize: each call waits for prior embed (success or fail).
   const next = embedChain.then(run, run);
   // Keep chain alive without surfacing rejection to later waiters twice.
@@ -257,48 +303,42 @@ export function isModelLoaded(): boolean {
 
 /**
  * Preload the model in the worker thread
+ *
+ * Admitted exactly like an embed: a preload cannot slip past the boundary and
+ * stand a worker up beside one that is still being disposed.
  */
 export async function preloadModel(): Promise<void> {
-  await sendMessage('load', undefined, MODEL_LOAD_TIMEOUT_MS);
+  await runInLifecycle(lifecycle, () => sendMessage('load', undefined, MODEL_LOAD_TIMEOUT_MS));
 }
-
-/**
- * Termination in flight, if any. Overlapping callers queue behind it rather
- * than returning while the worker they asked us to kill is still running.
- */
-let disposalChain: Promise<void> = Promise.resolve();
 
 /**
  * Dispose the worker thread and release resources.
  *
- * Resolves only once the worker has actually exited, so a second shutdown
- * handler cannot reach process.exit() while the first termination is still in
- * flight. Work queued before the call is cancelled; a call made afterwards
- * starts a fresh worker.
+ * The boundary is drawn synchronously by the CALL, not by whenever the
+ * termination it starts gets to run: work already admitted is cancelled, and
+ * work admitted afterwards belongs to the next lifecycle — it waits for this
+ * termination rather than racing it, then proceeds unless a further disposal
+ * cancels it too.
+ *
+ * Resolves only once every termination outstanding at the call has finished —
+ * this one, a concurrent disposer's, or a kill the timeout path started — so a
+ * second shutdown handler cannot reach process.exit() while a worker we killed
+ * is still running.
  */
 export async function disposeModel(): Promise<void> {
-  const run = async (): Promise<void> => {
-    // Close the current lifecycle first: settling the in-flight request below
-    // releases the queue, and everything already on it must see the boundary.
-    // Done even with no live worker, since queued work may not have started
-    // one yet — that is exactly the call that would resurrect it.
-    lifecycle.cancelled = true;
-    lifecycle = { cancelled: false };
+  // Close the current lifecycle first: settling the in-flight request below
+  // releases the embed queue, and everything already on it must see the
+  // boundary. Done even with no live worker, since queued work may not have
+  // started one yet — that is exactly the call that would resurrect it.
+  lifecycle.cancelled = true;
 
-    const handle = current;
-    if (!handle) return;
+  const handle = current;
+  if (handle) terminateHandle(handle, 'disposed', WORKER_DISPOSED_MSG);
 
-    // Retire before terminating so the exit this causes is not reported as a
-    // crash, and settle in-flight requests explicitly — clearing the map left
-    // them to whatever the exit handler said, i.e. a phantom crash.
-    retire(handle, 'disposed');
-    settleAll(handle, WORKER_DISPOSED_MSG);
-    // Guarded like the timeout kill: disposal must not throw into a shutdown
-    // handler and skip the process.exit() that follows it.
-    await handle.worker.terminate().catch(() => { /* already on its way out */ });
-  };
-
-  const next = disposalChain.then(run, run);
-  disposalChain = next.then(() => undefined, () => undefined);
-  return next;
+  // Snapshot after our own kill is registered, so this call waits for that as
+  // well as for anything already in flight. The lifecycle we open next is
+  // gated on the same snapshot.
+  const barrier = terminationBarrier;
+  lifecycle = { cancelled: false, barrier };
+  await barrier;
 }

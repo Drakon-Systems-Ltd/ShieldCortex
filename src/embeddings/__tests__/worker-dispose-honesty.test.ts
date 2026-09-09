@@ -46,6 +46,9 @@ const TIMEOUT_DECL_TEST =
  *                      announces itself in SC_FAKE_WORKER_BLOCK once the
  *                      thread is committed, so the driver never disposes
  *                      during the killable JS window before the block.
+ * A 'load' request hangs the same way whenever the file named by
+ * SC_FAKE_WORKER_HANG_LOAD exists, so the driver can catch preloadModel()
+ * mid-flight and then flip the same worker back to answering.
  * Every instance appends its threadId to SC_FAKE_WORKER_LOG on startup, so the
  * driver can count how many workers were spawned. A hanging instance also
  * heartbeats its threadId into SC_FAKE_WORKER_BEAT every 10ms: an intentional
@@ -54,7 +57,7 @@ const TIMEOUT_DECL_TEST =
  */
 const FAKE_WORKER = [
   "import { parentPort, threadId } from 'worker_threads';",
-  "import { appendFileSync } from 'fs';",
+  "import { appendFileSync, existsSync } from 'fs';",
   "import { spawnSync } from 'child_process';",
   '',
   'const mark = (file, line) => {',
@@ -72,6 +75,8 @@ const FAKE_WORKER = [
   '',
   "parentPort.on('message', (msg) => {",
   "  const text = typeof msg?.text === 'string' ? msg.text : '';",
+  "  // A flagged 'load' never answers, so a model load can be caught in flight.",
+  "  if (msg?.type === 'load' && existsSync(process.env.SC_FAKE_WORKER_HANG_LOAD || '')) return;",
   "  if (text.includes('__CRASH_EXIT__')) { process.exit(3); }",
   "  if (text.includes('__CRASH_THROW__')) {",
   "    setTimeout(() => { throw new Error('fake worker boom'); }, 10);",
@@ -98,13 +103,15 @@ const FAKE_WORKER = [
 const DRIVER = [
   "import fs from 'fs';",
   "import { setTimeout as delay } from 'timers/promises';",
-  "import { generateEmbedding, disposeModel, isModelLoaded } from './generator.js';",
+  "import { generateEmbedding, disposeModel, isModelLoaded, preloadModel } from './generator.js';",
   '',
   'const scenario = process.argv[2];',
   "const out = (obj) => fs.writeSync(1, '__RESULT__ ' + JSON.stringify(obj) + '\\n');",
   "process.on('unhandledRejection', (e) => { out({ fatal: e instanceof Error ? e.message : String(e) }); process.exit(1); });",
   'const msgOf = (e) => (e instanceof Error ? e.message : String(e));',
   "const settle = (p) => p.then(() => ({ state: 'resolved', message: '' }), (e) => ({ state: 'rejected', message: msgOf(e) }));",
+  "const settleDims = (p) => p.then((v) => ({ state: 'resolved', message: '', dims: v.length }), (e) => ({ state: 'rejected', message: msgOf(e), dims: -1 }));",
+  "const hung = { state: 'hung', message: '', dims: -1 };",
   'const readLines = (file) => {',
   '  try {',
   "    return fs.readFileSync(file, 'utf8').split('\\n').filter(Boolean);",
@@ -253,7 +260,10 @@ const DRIVER = [
   '  } catch (e) { secondError = msgOf(e); }',
   '  const loadedRightAfterReplacement = isModelLoaded();',
   "  // Worker A's exit handler logging is the event itself, not a proxy for it:",
-  '  // wait for that line instead of sleeping past where it usually lands.',
+  '  // wait for that line instead of sleeping past where it usually lands. That',
+  "  // line exists because a 'crashed' worker logs both error and exit; deduping",
+  '  // the pair would flip this gate to false and fail here — fail-closed, but a',
+  '  // test-coupling failure, not a product regression.',
   '  const staleExitObserved = await waitFor(() => sawLog(/Embedding worker exited with code/));',
   '  const loadedAfterStaleExit = isModelLoaded();',
   '  let third = -1;',
@@ -272,6 +282,126 @@ const DRIVER = [
   '    third,',
   '    thirdError,',
   '    spawned: spawnedAfterThird,',
+  '  });',
+  "} else if (scenario === 'dispose-then-generate') {",
+  "  const first = (await generateEmbedding('ok-1')).length;",
+  '  // Same synchronous turn, dispose deliberately not awaited: the boundary is',
+  '  // drawn by the CALL, so this request belongs to the lifecycle it opened and',
+  '  // must run once the termination it inherited is done — not be cancelled.',
+  '  const disposal = disposeModel();',
+  "  const admitted = settleDims(generateEmbedding('ok-2'));",
+  '  await disposal;',
+  '  const after = await Promise.race([admitted, delay(3000).then(() => hung)]);',
+  '  // Same ordering again, but a second dispose closes the lifecycle this one',
+  '  // was admitted into: now it must be cancelled rather than started.',
+  '  const firstOfPair = disposeModel();',
+  "  const cancelled = settleDims(generateEmbedding('ok-3'));",
+  '  const secondOfPair = disposeModel();',
+  '  await Promise.all([firstOfPair, secondOfPair]);',
+  '  const cancelledOutcome = await Promise.race([cancelled, delay(3000).then(() => hung)]);',
+  '  await delay(300); // a worker woken by cancelled work would appear here',
+  '  out({',
+  '    first,',
+  '    afterState: after.state,',
+  '    afterDims: after.dims,',
+  '    afterMessage: after.message,',
+  '    cancelledState: cancelledOutcome.state,',
+  '    cancelledMessage: cancelledOutcome.message,',
+  '    spawned: spawned(),',
+  '    loadedAtEnd: isModelLoaded(),',
+  '  });',
+  "} else if (scenario === 'dispose-during-slow-termination') {",
+  "  const blocked = settleDims(generateEmbedding('__BLOCK_EXIT__'));",
+  '  const reachedBlock = await waitFor(() => readLines(process.env.SC_FAKE_WORKER_BLOCK).length > 0);',
+  '  const startedAt = Date.now();',
+  '  const first = disposeModel().then(() => Date.now() - startedAt);',
+  '  await delay(150); // well inside the block: that termination is still running',
+  "  const queuedA = settleDims(generateEmbedding('queued-a'));",
+  "  const queuedB = settleDims(generateEmbedding('queued-b'));",
+  '  await delay(100); // work that raced the termination would own a worker by now',
+  '  const spawnedMidTermination = spawned();',
+  '  const second = disposeModel().then(() => Date.now() - startedAt);',
+  '  const [firstMs, secondMs] = await Promise.all([first, second]);',
+  '  const outcomes = await Promise.race([',
+  '    Promise.all([blocked, queuedA, queuedB]),',
+  "    delay(3000).then(() => 'hung'),",
+  '  ]);',
+  '  await delay(300);',
+  '  out({',
+  '    reachedBlock,',
+  '    firstMs,',
+  '    secondMs,',
+  '    spawnedMidTermination,',
+  '    outcomes,',
+  '    spawned: spawned(),',
+  '    loadedAfter: isModelLoaded(),',
+  '  });',
+  "} else if (scenario === 'preload-settles-on-dispose') {",
+  "  fs.writeFileSync(process.env.SC_FAKE_WORKER_HANG_LOAD, 'hang');",
+  '  const load = settle(preloadModel());',
+  '  await waitFor(() => spawned() >= 1);',
+  "  const embed = settle(generateEmbedding('__HANG__'));",
+  '  const workerId = spawnedIds()[0];',
+  '  // The load is still unanswered, so the embed reaching the worker proves both',
+  '  // requests are pending on the same handle when the disposal lands.',
+  '  const embedReachedWorker = await waitFor(() => beatsFrom(workerId) > 0);',
+  '  await disposeModel();',
+  "  const outcomes = await Promise.race([Promise.all([load, embed]), delay(3000).then(() => 'hung')]);",
+  '  // Disposal has completed, so a preload now is new work, not resurrection.',
+  '  fs.rmSync(process.env.SC_FAKE_WORKER_HANG_LOAD, { force: true });',
+  "  let reloadError = '';",
+  '  try { await preloadModel(); } catch (e) { reloadError = msgOf(e); }',
+  '  const loadedAfterReload = isModelLoaded();',
+  '  await disposeModel();',
+  '  await delay(300);',
+  '  out({',
+  '    embedReachedWorker,',
+  '    outcomes,',
+  '    reloadError,',
+  '    loadedAfterReload,',
+  '    spawned: spawned(),',
+  '    loadedAtEnd: isModelLoaded(),',
+  '  });',
+  "} else if (scenario === 'preload-during-slow-dispose') {",
+  "  const blocked = settle(generateEmbedding('__BLOCK_EXIT__'));",
+  '  const reachedBlock = await waitFor(() => readLines(process.env.SC_FAKE_WORKER_BLOCK).length > 0);',
+  '  const first = disposeModel();',
+  '  await delay(150); // still inside the block: that termination is still running',
+  '  const load = settle(preloadModel());',
+  '  await delay(100); // a preload that raced the termination would own a worker by now',
+  '  const spawnedMidTermination = spawned();',
+  '  const second = disposeModel();',
+  '  await Promise.all([first, second]);',
+  "  const outcomes = await Promise.race([Promise.all([blocked, load]), delay(3000).then(() => 'hung')]);",
+  '  await delay(300);',
+  '  out({',
+  '    reachedBlock,',
+  '    spawnedMidTermination,',
+  '    outcomes,',
+  '    spawned: spawned(),',
+  '    loadedAtEnd: isModelLoaded(),',
+  '  });',
+  "} else if (scenario === 'dispose-waits-for-timeout-kill') {",
+  "  let timeoutMessage = '';",
+  "  const blocked = generateEmbedding('__BLOCK_EXIT__').catch((e) => { timeoutMessage = msgOf(e); });",
+  '  const reachedBlock = await waitFor(() => readLines(process.env.SC_FAKE_WORKER_BLOCK).length > 0);',
+  '  await blocked; // the inference timeout fires while the worker is uninterruptible',
+  '  const startedAt = Date.now();',
+  '  await disposeModel(); // a kill this call did not start, but must still wait out',
+  '  const disposeMs = Date.now() - startedAt;',
+  '  let after = -1;',
+  "  let afterError = '';",
+  "  try { after = (await generateEmbedding('ok-after')).length; } catch (e) { afterError = msgOf(e); }",
+  '  await disposeModel();',
+  '  await delay(300);',
+  '  out({',
+  '    reachedBlock,',
+  '    timeoutMessage,',
+  '    disposeMs,',
+  '    after,',
+  '    afterError,',
+  '    spawned: spawned(),',
+  '    loadedAtEnd: isModelLoaded(),',
   '  });',
   '} else {',
   "  out({ error: 'unknown scenario: ' + scenario });",
@@ -295,6 +425,7 @@ function runScenario(name: string, extraEnv: Record<string, string> = {}): Scena
     SC_FAKE_WORKER_LOG: path.join(sandbox, `spawned-${name}.log`),
     SC_FAKE_WORKER_BEAT: path.join(sandbox, `beats-${name}.log`),
     SC_FAKE_WORKER_BLOCK: path.join(sandbox, `blocking-${name}.log`),
+    SC_FAKE_WORKER_HANG_LOAD: path.join(sandbox, `hang-load-${name}.flag`),
     ...extraEnv,
   };
   delete env.SHIELDCORTEX_SKIP_EMBEDDINGS; // the jest runner sets this to 1 globally
@@ -434,6 +565,93 @@ describe('embedding worker — intentional disposal is not a crash', () => {
       spawned: 2,
     });
     expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('a request made in the same turn as disposeModel() belongs to the next lifecycle', () => {
+    const run = runScenario('dispose-then-generate');
+
+    // Admitted after the dispose CALL: it waits out that termination and runs.
+    expect(run.result.afterMessage).toBe('');
+    expect(run.result).toMatchObject({ first: 3, afterState: 'resolved', afterDims: 3 });
+    // Admitted after a dispose and then overtaken by another: cancelled.
+    expect(run.result.cancelledState).toBe('rejected');
+    expect(String(run.result.cancelledMessage)).toMatch(/dispos/i);
+    expect(run.result).toMatchObject({ spawned: 2, loadedAtEnd: false });
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('a second disposeModel() cancels work admitted while the first termination runs', () => {
+    const run = runScenario('dispose-during-slow-termination');
+
+    expect(run.result.reachedBlock).toBe(true); // worker really is mid-block
+    // The whole point: that work waited on the termination instead of racing it.
+    expect(run.result.spawnedMidTermination).toBe(1);
+    const outcomes = run.result.outcomes as Array<{ state: string; message: string }>;
+    expect(Array.isArray(outcomes)).toBe(true); // 'hung' means something never settled
+    expect(outcomes).toHaveLength(3);
+    for (const outcome of outcomes) {
+      expect(outcome.state).toBe('rejected');
+      expect(outcome.message).toMatch(/dispos/i);
+    }
+    expect(run.result.firstMs as number).toBeGreaterThan(300);
+    expect(run.result.secondMs as number).toBeGreaterThan(300); // no early return
+    expect(run.result).toMatchObject({ spawned: 1, loadedAfter: false });
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
+    expect(run.status).toBe(0); // a leaked worker would hold the event loop open
+  }, 30_000);
+
+  it('disposeModel() settles a pending preload alongside a pending embed', () => {
+    const run = runScenario('preload-settles-on-dispose');
+
+    expect(run.result.embedReachedWorker).toBe(true); // both really were in flight
+    const outcomes = run.result.outcomes as Array<{ state: string; message: string }>;
+    expect(Array.isArray(outcomes)).toBe(true);
+    expect(outcomes).toHaveLength(2);
+    for (const outcome of outcomes) {
+      expect(outcome.state).toBe('rejected');
+      expect(outcome.message).toMatch(/dispos/i);
+    }
+    // A preload after the disposal completed is new work, not resurrection.
+    expect(run.result).toMatchObject({
+      reloadError: '',
+      loadedAfterReload: true,
+      spawned: 2,
+      loadedAtEnd: false,
+    });
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('preloadModel() during a disposal waits for it and is cancelled by the next one', () => {
+    const run = runScenario('preload-during-slow-dispose');
+
+    expect(run.result.reachedBlock).toBe(true);
+    expect(run.result.spawnedMidTermination).toBe(1); // preload did not race the kill
+    const outcomes = run.result.outcomes as Array<{ state: string; message: string }>;
+    expect(Array.isArray(outcomes)).toBe(true);
+    expect(outcomes).toHaveLength(2);
+    for (const outcome of outcomes) {
+      expect(outcome.state).toBe('rejected');
+      expect(outcome.message).toMatch(/dispos/i);
+    }
+    expect(run.result).toMatchObject({ spawned: 1, loadedAtEnd: false });
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('disposeModel() waits for a timeout kill it did not start', () => {
+    const run = runScenario('dispose-waits-for-timeout-kill', { SC_TEST_INFERENCE_TIMEOUT_MS: '200' });
+
+    expect(run.result.reachedBlock).toBe(true);
+    expect(String(run.result.timeoutMessage)).toMatch(/embed timed out after 200ms/);
+    // The blocked worker needs ~600ms to die; claiming completion before that
+    // lands near 0. Measured from after the timeout already fired.
+    expect(run.result.disposeMs as number).toBeGreaterThan(150);
+    expect(run.result).toMatchObject({ after: 3, afterError: '', spawned: 2, loadedAtEnd: false });
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/); // no fake crash
+    expect(run.stderr).not.toMatch(/Embedding worker error/);
     expect(run.status).toBe(0);
   }, 30_000);
 
