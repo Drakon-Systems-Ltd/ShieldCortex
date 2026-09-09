@@ -495,7 +495,10 @@ describe('embedding worker — intentional disposal is not a crash', () => {
     const run = runScenario('dispose-with-pending');
 
     expect(run.result.state).toBe('rejected');
-    expect(String(run.result.message)).toMatch(/dispos/i);
+    // Pinned exactly, not by pattern: shutdown callers (src/memory/store.ts,
+    // scripts/lib/save-memory.mjs) classify this message by equality, so the
+    // two ends of that contract are held by behaviour at both ends.
+    expect(run.result.message).toBe('Embedding worker disposed');
     expect(String(run.result.message)).not.toMatch(/exited with code/);
     expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
     expect(run.status).toBe(0);
