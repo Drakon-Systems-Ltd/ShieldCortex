@@ -125,7 +125,7 @@ function requireDist(): void {
 
 // ── The two failure shapes ─────────────────────────────────────────────────
 
-type FailureShape = 'require' | 'construct';
+type FailureShape = 'require' | 'construct' | 'syntax' | 'missing-internal';
 
 /**
  * REQUIRE-time failure: the package entry cannot be required at all. Modelled
@@ -148,7 +148,41 @@ const CONSTRUCT_FAILURE_MESSAGE =
   `The module '/app/node_modules/better-sqlite3/prebuilds/${process.platform}-${process.arch}.node' `
   + 'requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.';
 
+/**
+ * The two PACKAGE-LOAD shapes whose thrown error says nothing about a native
+ * addon at all — the entry file is broken JavaScript, or it requires an
+ * internal file a pruning install removed.
+ *
+ * Both are require-time failures like `require` above, but `Cannot find module
+ * 'better-sqlite3'` is a catalogued native-load signature and these are not:
+ * `isNativeModuleLoadError` returns FALSE for "Unexpected end of input" and for
+ * "Cannot find module './lib/index.js'". Anything that classifies a load
+ * failure by reading its message therefore cannot see them — which is why the
+ * doctor split below has to be structural (a separately guarded load stage,
+ * classified by the loader's TYPE) rather than one more regex.
+ */
+const SYNTAX_FAILURE_DETAIL = 'Unexpected end of input';
+const MISSING_INTERNAL_FAILURE_DETAIL = "Cannot find module './lib/index.js'";
+
 const STUB_SOURCE: Record<FailureShape, string> = {
+  // A REAL JavaScript SyntaxError raised by the parser at require time — the
+  // entry file truncated mid-object, as a half-written install or a torn npm
+  // cache entry leaves it. Deliberately not an Error whose *message* is
+  // stage-managed: the point is that the parser, not the test, decides what
+  // this failure looks like.
+  syntax: [
+    "'use strict';",
+    '// Truncated mid-object: requiring this file is a parse error.',
+    'module.exports = {',
+    '',
+  ].join('\n'),
+  // The package entry is intact but an internal file it requires is gone.
+  'missing-internal': [
+    "'use strict';",
+    '// The entry resolves, its own dependency does not (pruned/partial install).',
+    "module.exports = require('./lib/index.js');",
+    '',
+  ].join('\n'),
   require: [
     "'use strict';",
     '// The package cannot be required at all (missing / stripped / corrupt entry).',
@@ -190,15 +224,24 @@ function makeSandbox(shape: FailureShape): string {
   // as real sibling files, so the sandbox needs them alongside dist.
   cpSync(path.join(REPO_ROOT, 'scripts'), path.join(dir, 'scripts'), { recursive: true });
   symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(dir, 'node_modules'), 'dir');
+  plantStub(dir, shape);
+  return dir;
+}
 
-  const stubDir = path.join(dir, 'dist', 'node_modules', 'better-sqlite3');
+/**
+ * (Re)write the poisoned better-sqlite3 in an existing sandbox. Split out of
+ * makeSandbox so a describe that exercises several REQUIRE-time shapes pays
+ * for one 6 MB dist copy instead of one per shape — every child process is
+ * spawned fresh, so re-planting between spawns is the whole of the setup.
+ */
+function plantStub(sandbox: string, shape: FailureShape): void {
+  const stubDir = path.join(sandbox, 'dist', 'node_modules', 'better-sqlite3');
   mkdirSync(stubDir, { recursive: true });
   writeFileSync(
     path.join(stubDir, 'package.json'),
     JSON.stringify({ name: 'better-sqlite3', version: '13.0.3', main: 'index.js' }),
   );
   writeFileSync(path.join(stubDir, 'index.js'), STUB_SOURCE[shape]);
-  return dir;
 }
 
 /**
@@ -286,6 +329,22 @@ describe('main entry must dispatch with a broken better-sqlite3', () => {
       const err = new Error(CONSTRUCT_FAILURE_MESSAGE);
       expect(isNativeModuleLoadError(err)).toBe(true);
       expect(isPackagedPrebuildLoadError(err)).toBe(true);
+    });
+
+    // The control for the doctor split below: these two are genuine
+    // package-load failures that the MESSAGE classifier cannot see. Any fix
+    // that routed them by inspecting error text would leave them exactly where
+    // they were — in the "must be file corruption, then" branch.
+    it('a corrupt entry / missing internal module is invisible to the message classifier', () => {
+      const syntaxErr = new SyntaxError(SYNTAX_FAILURE_DETAIL);
+      expect(isNativeModuleLoadError(syntaxErr)).toBe(false);
+      expect(isPackagedPrebuildLoadError(syntaxErr)).toBe(false);
+
+      const missingInternal = new Error(
+        `${MISSING_INTERNAL_FAILURE_DETAIL}\nRequire stack:\n- /app/node_modules/better-sqlite3/index.js`,
+      );
+      expect(isNativeModuleLoadError(missingInternal)).toBe(false);
+      expect(isPackagedPrebuildLoadError(missingInternal)).toBe(false);
     });
   });
 
@@ -570,5 +629,146 @@ describe('main entry must dispatch with a broken better-sqlite3', () => {
       expect(readFileSync(dbPath, 'utf8')).toBe(LIVE_DB_CONTENT);
       expect(readdirSync(dbDir).filter((name) => name.includes('.corrupt.'))).toEqual([]);
     }, 120_000);
+  });
+
+  /**
+   * PACKAGE-LOAD failure inside `doctor` (#465).
+   *
+   * `runDatabaseCheck` required better-sqlite3 inside the SAME try that opened
+   * the database, so a failure to load the PACKAGE landed in a catch whose
+   * final else is "then it must be a broken file": doctor answered a corrupt
+   * entry file with `Back up and delete ~/.shieldcortex/memories.db` — for a
+   * database it had never opened — and `doctor --ai` uploaded that instruction
+   * to a model as the evidence to reason from.
+   *
+   * The shapes here are the ones no message classifier can catch (see the
+   * control above), so they pin the STRUCTURE: the load stage is separately
+   * guarded and routed by the loader's type, not by what its error says.
+   */
+  describe('PACKAGE-LOAD failure: doctor must not read it as a corrupt database', () => {
+    let sandbox: string;
+
+    const LIVE_DB_CONTENT = 'doctor-live-database-bytes-that-must-survive';
+    /** The pre-fix advice. It must appear nowhere — not on screen, not in the
+     *  prompt `--ai` sends. */
+    const DELETE_ADVICE = 'Back up and delete';
+
+    interface DoctorProbe {
+      check: { label: string; status: string; message: string; fix?: string };
+      aiPrompt: string;
+      aiAttempted: boolean;
+    }
+
+    beforeAll(() => {
+      requireDist();
+      sandbox = makeSandbox('syntax');
+    }, 180_000);
+
+    afterAll(() => {
+      if (sandbox) rmSync(sandbox, { recursive: true, force: true });
+    });
+
+    /** A fresh directory holding a pre-existing "live" DB, one per case. */
+    const liveDbDir = (name: string): string => {
+      const dir = path.join(sandbox, `dbstate-${name}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, 'memories.db'), LIVE_DB_CONTENT);
+      return dir;
+    };
+
+    /**
+     * Drive the BUILT doctor end to end for one shape: the `Database`
+     * CheckResult an operator sees, and the exact prompt `--ai` would hand a
+     * model, captured through runDoctorAiSection's own invoker seam. Both come
+     * from the same run, because they are the same defect seen twice.
+     */
+    const probeDoctor = (shape: FailureShape, name: string): { probe: DoctorProbe; dbDir: string } => {
+      plantStub(sandbox, shape);
+      const dbDir = liveDbDir(name);
+      const dbPath = path.join(dbDir, 'memories.db');
+      const resultPath = path.join(dbDir, 'doctor-probe.json');
+      const r = runModule(
+        [
+          `const { writeFileSync } = await import('fs');`,
+          `const doctor = await import(${JSON.stringify(distPath(sandbox, 'cli', 'doctor.js'))});`,
+          // Explicit environment: the check must not depend on what happens to
+          // exist in the sandbox's HOME.
+          `const env = { hasClaude: false, hasOpenClaw: false, hasVSCode: false, hasCodex: false, isHeadless: true };`,
+          `const check = doctor.runDatabaseCheck(${JSON.stringify(dbPath)}, env);`,
+          `let aiPrompt = '';`,
+          `const ai = await doctor.runDoctorAiSection([check], {`,
+          `  invoke: async (_system, user) => { aiPrompt = user; return ''; },`,
+          `});`,
+          `writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ check, aiPrompt, aiAttempted: ai.outcome.attempted }));`,
+        ].join('\n'),
+        sandbox,
+      );
+      expect(r.stderr ?? '').not.toContain('SyntaxError');
+      expect(r.status).toBe(0);
+      return { probe: JSON.parse(readFileSync(resultPath, 'utf8')) as DoctorProbe, dbDir };
+    };
+
+    it('the corrupt entry really is a parser-raised SyntaxError (harness sanity)', () => {
+      plantStub(sandbox, 'syntax');
+      const r = runNode(
+        [
+          '-e',
+          "try { require('better-sqlite3'); console.log('LOADED'); }"
+          + " catch (e) { console.log('THREW|' + e.name + '|' + e.message); }",
+        ],
+        distPath(sandbox),
+      );
+      expect(r.stdout.trim()).toBe(`THREW|SyntaxError|${SYNTAX_FAILURE_DETAIL}`);
+    }, 120_000);
+
+    for (const [shape, detail] of [
+      ['syntax', SYNTAX_FAILURE_DETAIL],
+      ['missing-internal', MISSING_INTERNAL_FAILURE_DETAIL],
+    ] as const) {
+      it(`[${shape}] the Database row advises reinstalling the engine, never deleting the database`, () => {
+        const { probe, dbDir } = probeDoctor(shape, shape);
+        const { check } = probe;
+
+        expect(check.label).toBe('Database');
+        expect(check.status).toBe('fail');
+
+        // The whole row, message and fix together: the advice must not survive
+        // anywhere on it.
+        const row = `${check.message}\n${check.fix ?? ''}`;
+        expect(row).not.toContain(DELETE_ADVICE);
+        expect(row).not.toContain('memories.db`, then restart the MCP server');
+
+        // Says what actually broke, and says what did NOT.
+        expect(check.message).toContain('NOT database corruption');
+        expect(check.message).toContain(detail);
+
+        // The guard's already-formatted guidance, carried through intact: one
+        // header, the missing/source-only class kept, no second formatting
+        // pass flipping it to the unfixable packaged-prebuild copy.
+        expectMissingSourceOnlyGuidance(check.message);
+
+        // Installation recovery, from the one remediation authority.
+        expect(check.fix).toContain('npm run build-release');
+        expect(check.fix).toContain('node_modules/better-sqlite3');
+
+        // The data-loss regression itself: doctor never opened the file, so
+        // the bytes are untouched and nothing was moved aside.
+        expect(readFileSync(path.join(dbDir, 'memories.db'), 'utf8')).toBe(LIVE_DB_CONTENT);
+        expect(readdirSync(dbDir).filter((n) => n.includes('.corrupt.'))).toEqual([]);
+      }, 120_000);
+
+      it(`[${shape}] the prompt \`--ai\` uploads carries the same advice, not the deletion`, () => {
+        const { probe } = probeDoctor(shape, `${shape}-ai`);
+
+        // A failing check exists, so the explainer really did run — otherwise
+        // "no deletion advice in the prompt" would be true of an empty string.
+        expect(probe.aiAttempted).toBe(true);
+        expect(probe.aiPrompt).toContain('[FAIL] Database:');
+
+        expect(probe.aiPrompt).not.toContain(DELETE_ADVICE);
+        expect(probe.aiPrompt).toContain('NOT database corruption');
+        expect(probe.aiPrompt).toContain('npm run build-release');
+      }, 120_000);
+    }
   });
 });

@@ -38,7 +38,12 @@ import {
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
-import { isNativeModuleLoadError } from '../database/native-load-classify.js';
+import { isNativeModuleLoadError, NativeModuleLoadError } from '../database/native-load-classify.js';
+// The typed lazy loader — the SAME one every real database open goes through
+// (database/init.ts). Importing it adds no static edge doctor did not already
+// have (init.js reaches it), and it requires nothing at module evaluation, so
+// `doctor` still dispatches on a host whose engine package is unloadable.
+import { getBetterSqlite3 } from '../database/better-sqlite3-guard.js';
 import {
   evaluateHostContract,
   openClawConfigUsesInclude,
@@ -494,6 +499,40 @@ function getDbPath(): string {
 
 // ── Check 1: Database health ──────────────────────────────
 /**
+ * The `Database` row for a failure to LOAD the engine package — as opposed to
+ * a failure to open the database file. An install problem, so the remedy is
+ * installation recovery; the file was never touched, so nothing here may ever
+ * suggest moving it aside.
+ *
+ * Nothing is re-formatted and nothing is re-classified from prose.
+ * `getBetterSqlite3()` has already diagnosed the failure and its `.message`
+ * carries that guidance, so a second `formatNativeLoadError` pass would nest a
+ * duplicate header AND flip the class — the formatter's generic diagnosis
+ * ("this Node build predates the Node-API version it requires") is itself a
+ * packaged-prebuild signature, which relabels a repairable missing/source-only
+ * fault as an unfixable packaged one (database/init.ts carries the same rule
+ * and the same reason). For the same reason the ORIGINAL cause, not the
+ * formatted text, is what `nativeBindingRemediation` classifies.
+ *
+ * The verdict leads the message rather than trailing it: `doctor --ai` bounds
+ * each finding it uploads, and "this is not corruption" is the one sentence
+ * that must survive truncation.
+ */
+function engineLoadFailure(dbPath: string, err: unknown): CheckResult {
+  const typed = err instanceof NativeModuleLoadError;
+  const cause = typed ? err.cause : err;
+  const guidance = typed ? err.message : (err instanceof Error ? err.message : String(err));
+  return {
+    label: 'Database',
+    status: 'fail',
+    message:
+      'cannot load the database engine (better-sqlite3) — an install problem, ' +
+      `NOT database corruption: ${tildify(dbPath)} was never opened and is untouched.\n${guidance}`,
+    fix: nativeBindingRemediation(resolveSelfInstallDir(), cause),
+  };
+}
+
+/**
  * Pure helper for the database health check. Exported so tests can drive it
  * against any path/environment without going through doctor's homedir-derived
  * getDbPath().
@@ -528,8 +567,26 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
     };
   }
 
+  // LOADING the engine and OPENING the file are two different faults, so they
+  // get two different try blocks. Sharing one meant a failure to load the
+  // PACKAGE fell into the catch below, whose final else is "then the file must
+  // be broken" — doctor answered an unrequirable better-sqlite3 with "back up
+  // and delete your database", about a file it had never opened, and `--ai`
+  // then uploaded that instruction to a model as the evidence to reason from.
+  //
+  // The split has to be structural, not one more signature: the shapes that
+  // reach here (a corrupt entry file, a pruned internal module) raise a plain
+  // SyntaxError / MODULE_NOT_FOUND that says nothing about a native addon, so
+  // isNativeModuleLoadError cannot see them. getBetterSqlite3() classifies by
+  // being the load stage, not by reading the message.
+  let Database: ReturnType<typeof getBetterSqlite3>;
   try {
-    const Database = require('better-sqlite3');
+    Database = getBetterSqlite3();
+  } catch (loadErr: unknown) {
+    return engineLoadFailure(dbPath, loadErr);
+  }
+
+  try {
     const db = new Database(dbPath, { readonly: true });
     try {
       const result = db.pragma('integrity_check');
