@@ -155,6 +155,78 @@ export interface CheckResult {
   openClawCliBlocked?: true;
 }
 
+/** The `Node runtime` check's label. */
+export const NODE_RUNTIME_LABEL = 'Node runtime';
+
+/**
+ * The supported runtime range, read from this package's OWN `engines.node` so
+ * the gate can never drift from what npm resolves the install against. The
+ * literal is only a fallback for an unreadable/stripped manifest — never a
+ * second hand-rolled version parser, which is precisely the kind of copy that
+ * ends up disagreeing with the manifest it is supposed to enforce.
+ */
+export const SUPPORTED_NODE_RANGE: string =
+  typeof pkg?.engines?.node === 'string' && semver.validRange(pkg.engines.node)
+    ? (pkg.engines.node as string)
+    : '^22.14.0 || >=24.0.0';
+
+/**
+ * Is this Node build supported at all?
+ *
+ * FAIL, not WARN, and FIRST in the check list. npm `engines` is advisory
+ * unless engine-strict is set, so a Node 20 (or Node 23) user gets an
+ * EBADENGINE warning, installs successfully, and only discovers the problem
+ * when nothing can open the database: better-sqlite3 13 declares
+ * NAPI_VERSION=10 and those builds cap below it, so the engine cannot load at
+ * all. Understating that as a warning would also exit 0 — reporting a host
+ * healthy while every memory operation on it is impossible.
+ *
+ * It has to run BEFORE the database checks, whose failures are merely
+ * downstream of it, and it must not depend on them: on a fresh install there
+ * is no database to fail, every DB check is correctly `info`, and an
+ * unsupported runtime would otherwise pass completely unremarked.
+ *
+ * `setup/doctor.ts` carries the same verdict for the legacy command that
+ * nothing dispatches; THIS is the one `shieldcortex doctor` actually runs.
+ * The version is a parameter so the verdict is testable without a second
+ * runtime; production always takes the default.
+ */
+export async function checkNodeRuntime(nodeVersion: string = process.version): Promise<CheckResult> {
+  const parsed = semver.coerce(nodeVersion);
+  if (!parsed) {
+    return {
+      label: NODE_RUNTIME_LABEL,
+      status: 'warn',
+      message: `unrecognised Node version "${nodeVersion}" — cannot check it against ${SUPPORTED_NODE_RANGE}`,
+    };
+  }
+  if (semver.satisfies(parsed.version, SUPPORTED_NODE_RANGE)) {
+    return {
+      label: NODE_RUNTIME_LABEL,
+      status: 'pass',
+      message: `Node ${nodeVersion} (${SUPPORTED_NODE_RANGE} required)`,
+    };
+  }
+  // The remedy lives in the MESSAGE, not only in `fix`. There is no single
+  // correct copy-paste command here — the right one depends on nvm/fnm/brew/apt
+  // and on how ShieldCortex was originally installed — so `extractFixCommands`
+  // finds nothing to promote and the report would otherwise render this fault
+  // with "(no single copy-paste command)" and no guidance at all. `fix` is kept
+  // for the structured consumers (`--ai`, the suggested-fixes machinery).
+  const remedy =
+    'Install Node 22.14+ LTS or Node 24+ (Node 23 is not supported), then reinstall ' +
+    'ShieldCortex via the route you originally used so npm restores a matching packaged prebuild';
+  return {
+    label: NODE_RUNTIME_LABEL,
+    status: 'fail',
+    message:
+      `Node ${nodeVersion} is an unsupported runtime (${SUPPORTED_NODE_RANGE} required) — ` +
+      'better-sqlite3 13 requires Node-API 10, which this Node build cannot provide, so the ' +
+      `database engine will not load. ${remedy}.`,
+    fix: remedy,
+  };
+}
+
 /** The `OpenClaw config` check's label. */
 export const OPENCLAW_CONFIG_LABEL = 'OpenClaw config';
 
@@ -6354,6 +6426,10 @@ export async function runDoctor(
 
   // Run checks sequentially (some depend on DB access)
   const checks: Array<() => Promise<CheckResult | CheckResult[]>> = [
+    // First deliberately: an unsupported Node is the root cause under which
+    // every check below it is a symptom — including on a fresh box, where the
+    // database checks have nothing to fail on.
+    checkNodeRuntime,
     checkDatabase,
     checkSchema,
     checkWritePath, // Smoke test: real INSERT/SELECT/DELETE round-trip — catches silent schema drift
