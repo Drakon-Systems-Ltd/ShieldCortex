@@ -16,181 +16,56 @@
  * imports the package must not be terminated. The load failure is thrown as a
  * typed `NativeModuleLoadError`; a CLI/server entry point can catch it and
  * decide to exit, but the module itself stays a well-behaved library.
+ *
+ * It must ALSO never load the addon at MODULE EVALUATION. `dist/index.js` is
+ * simultaneously the `bin` entry and the package `main`, and it re-exports the
+ * library surface (`export * from './lib.js'` → `initDatabase` → this module),
+ * so a module-scope `require('better-sqlite3')` here threw before `main()`
+ * could dispatch — taking `shieldcortex repair`, `doctor`, `--help` and the
+ * MCP startup self-heal down with it, i.e. every command that exists to fix a
+ * broken binding. The load is therefore lazy and memoised behind
+ * `getBetterSqlite3()`: the first `new Database(...)` still fails loudly with
+ * the same typed error, but importing the module costs nothing.
+ *
+ * The classifiers and the message formatter deliberately live in the
+ * side-effect-free `./native-load-classify.js`, re-exported below for existing
+ * callers. Anything that only needs to classify or explain a failure should
+ * import THAT module directly and never reach this one.
  */
 
 import { createRequire } from 'module';
 import type DatabaseConstructor from 'better-sqlite3';
+import {
+  NativeModuleLoadError,
+  formatNativeLoadError,
+} from './native-load-classify.js';
 
 const require = createRequire(import.meta.url);
 
+export {
+  NativeModuleLoadError,
+  formatNativeLoadError,
+  isNativeModuleLoadError,
+  isPackagedPrebuildLoadError,
+} from './native-load-classify.js';
+
+/** Memoised addon handle — populated on first successful load, never reset. */
+let cachedConstructor: typeof DatabaseConstructor | undefined;
+
 /**
- * Thrown when the better-sqlite3 native binding cannot be loaded (missing /
- * ABI-mismatched / wrong-arch prebuild, or the module is not installed).
+ * Resolve the better-sqlite3 constructor, loading the native addon on first
+ * call and reusing it thereafter.
  *
- * Carries the actionable, formatted guidance in `.message` so a caller can
- * print it verbatim. Typed so entry points can distinguish an environmental
- * install problem from a genuine runtime error and exit cleanly if they choose.
+ * Lazy on purpose (see the module header): callers get the same typed
+ * `NativeModuleLoadError` they always did, but only when they actually try to
+ * open a database — never merely because something on the CLI startup path
+ * imported this file.
  */
-export class NativeModuleLoadError extends Error {
-  /** The original error raised by `require('better-sqlite3')`. */
-  readonly cause: unknown;
-
-  constructor(message: string, cause: unknown) {
-    super(message);
-    this.name = 'NativeModuleLoadError';
-    this.cause = cause;
-  }
-}
-
-/**
- * Build the user-facing message for a native-load failure. Pure and
- * side-effect free so it can be unit-tested without breaking the binding.
- */
-export function formatNativeLoadError(
-  err: unknown,
-  nodeVersion: string,
-  abi: string,
-): string {
-  const detail = err instanceof Error ? err.message : String(err);
-  const lines = [
-    'ShieldCortex could not load its database engine (better-sqlite3).',
-    '',
-    `Node ${nodeVersion} (module ABI ${abi}) could not load the better-sqlite3 binding.`,
-    'The shipped Node-API prebuilt binary is missing for this platform, this',
-    'Node build predates the Node-API version it requires, or the module was',
-    'not compiled locally.',
-    '',
-    'Fix one of these:',
-    '  • Use Node ^22.14.0 || >=24.0.0, then reinstall ShieldCortex so npm restores the',
-    '    matching Node-API prebuilt binary — no compiler needed.',
-  ];
-  if (isPackagedPrebuildLoadError(err)) {
-    lines.push(
-      '  • If the error persists after reinstalling on a supported Node, report',
-      '    that platform failure; a source build cannot safely override the packaged prebuild',
-      '    in this release.',
-    );
-  } else {
-    lines.push(
-      '  • For a missing/source-only binding, run `shieldcortex repair` or',
-      '    compile in the better-sqlite3 package dir with `npm run build-release`',
-      '    (requires Xcode CLT / build-essential; a plain `npm rebuild` can',
-      '    silently no-op).',
-    );
-  }
-  lines.push('', `Underlying error: ${detail}`);
-  return lines.join('\n');
-}
-
-/**
- * Signatures of a NATIVE-MODULE load failure (missing / ABI-mismatched / wrong-
- * arch better-sqlite3 binding, incompatible Node-API version, or the module
- * not being installed). These throw from `new Database()` — better-sqlite3
- * resolves its binding lazily at construction, not at require() — and must be
- * distinguished from genuine SQLite FILE corruption: a load failure is an
- * install problem, and treating it as corruption (renaming the live DB to
- * .corrupt.*) is data loss.
- *
- * better-sqlite3 13 ships Node-API prebuilds named `prebuilds/<platform>-
- * <arch>.node` (e.g. `prebuilds/linux-x64.node`, `prebuilds/darwin-arm64.node`)
- * instead of the 12.x `build/Release/better_sqlite3.node` layout, so the
- * filename signatures below cover both. A prebuild can also be a truncated /
- * corrupted download (`invalid ELF header`, `not a valid Win32 application`,
- * `is not a Mach-O`, a bad file magic) or unreadable (`EACCES`) without ever
- * touching the live database file — those still belong here. Node-API
- * incompatibility (a Node build too old for the addon's required Node-API
- * version — see https://github.com/WiseLibs/better-sqlite3/issues/1514, fixed
- * floor is Node 22.14.0) surfaces as "N-API version" / "Node-API version" /
- * "napi_version" wording, not an ABI number, and must route the same way.
- */
-// v13 Node-API prebuild layout: prebuilds/<platform>-<arch>(.node), e.g.
-// "prebuilds/linux-x64.node", "prebuilds\\win32-arm64.node". Extracted as a
-// named pattern (rather than inlined only in NATIVE_LOAD_SIGNATURES) so
-// isPackagedPrebuildLoadError below can reuse the exact same contract instead
-// of duplicating it.
-const PREBUILD_PATH_PATTERN = /prebuilds[\\/][a-z0-9_]+-[a-z0-9_]+\.node\b/i;
-
-// Node-API version incompatibility (better-sqlite3 13 requires Node-API 10,
-// true floor Node >=22.14.0 — an older/odd Node build lacks the requested
-// Node-API version). Distinct wording from the legacy ABI/NODE_MODULE_VERSION
-// mismatch below but the same "wrong Node for this prebuild" failure mode.
-// Extracted as a named list so isPackagedPrebuildLoadError below reuses the
-// exact same patterns instead of duplicating the broad message logic.
-const NODE_API_INCOMPATIBILITY_PATTERNS: RegExp[] = [
-  /this node(?:\.js)? instance does not support/i,
-  /does not support builds for (?:node|n)-?api version/i,
-  /\b(?:node|n)-?api version\b.{0,80}\b(?:not supported|unsupported|requires?|too (?:old|low)|only supports?)/i,
-  /\brequires? (?:node|n)-?api version\b/i,
-  /napi_module_register/i,
-];
-
-const NATIVE_LOAD_SIGNATURES: RegExp[] = [
-  /could not locate the bindings file/i,
-  /better_sqlite3\.node/i,
-  PREBUILD_PATH_PATTERN,
-  /NODE_MODULE_VERSION/i,
-  /compiled against a different node/i,
-  ...NODE_API_INCOMPATIBILITY_PATTERNS,
-  /invalid ELF header/i,
-  /wrong ELF class/i,
-  // glibc/musl prebuild mismatch (a glibc-linked prebuild run on musl/Alpine,
-  // or vice versa) — Node reports it as a shared-library resolution failure,
-  // not a corruption message.
-  /GLIBC_[\d.]+/i,
-  /version `GLIBC/i,
-  /ld-linux[^\s]*\.so/i,
-  /error while loading shared libraries/i,
-  // Truncated/corrupted native binary downloads — file-format errors on the
-  // .node addon itself, not on a SQLite database file.
-  /is not a valid win32 application/i,
-  /not a valid (?:win32|mach-?o) (?:application|file)/i,
-  /is not a mach-?o/i,
-  /file too short/i,
-  /dlopen\(/i,
-  /symbol not found/i,
-  /specified module could not be found/i,
-  /cannot find module ['"]better-sqlite3/i,
-  // Permission-denied reading/loading the addon itself (EACCES/EPERM naming a
-  // .node file, in either message order — Node's own EACCES wording puts the
-  // code first, "invalid ELF header"-style wrappers put the path first).
-  // Gated on the .node extension so a permissions error on the SQLite
-  // database file (a plain .db/.sqlite path) is never misclassified.
-  /(?:EACCES|EPERM)\b[\s\S]{0,200}\.node\b(?![\\/])/i,
-  /\.node\b(?![\\/])[\s\S]{0,200}(?:EACCES|EPERM|permission denied)/i,
-];
-
-/**
- * True when an error from opening the database is a better-sqlite3 native-module
- * load failure (environmental), as opposed to genuine file corruption. Pure +
- * exported so the init path can route it away from destructive recovery.
- */
-export function isNativeModuleLoadError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message : String(error ?? '');
-  return NATIVE_LOAD_SIGNATURES.some((re) => re.test(msg));
-}
-
-/**
- * Narrow predicate, true only for the subset of native-load failures that a
- * local rebuild cannot safely heal in this release: an unloadable PACKAGED
- * prebuild (the error names a `prebuilds/<platform>-<arch>.node` file) or a
- * Node-API version the running Node build does not support. Both mean the
- * shipped binary itself is the problem — reinstalling on a supported Node is
- * the fix, not `npm run build-release`: the package resolver gives the shipped
- * prebuild priority over local source-build output.
- *
- * Deliberately narrower than isNativeModuleLoadError: a merely missing /
- * source-only binding (e.g. "Could not locate the bindings file" with no
- * prebuilds/*.node in the message) stays false here — ensureNativeBinding can
- * still heal that case by rebuilding.
- */
-export function isPackagedPrebuildLoadError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message : String(error ?? '');
-  return PREBUILD_PATH_PATTERN.test(msg) || NODE_API_INCOMPATIBILITY_PATTERNS.some((re) => re.test(msg));
-}
-
-function loadBetterSqlite3(): typeof DatabaseConstructor {
+export function getBetterSqlite3(): typeof DatabaseConstructor {
+  if (cachedConstructor) return cachedConstructor;
   try {
-    return require('better-sqlite3') as typeof DatabaseConstructor;
+    cachedConstructor = require('better-sqlite3') as typeof DatabaseConstructor;
+    return cachedConstructor;
   } catch (err) {
     const message = formatNativeLoadError(
       err,
@@ -204,7 +79,4 @@ function loadBetterSqlite3(): typeof DatabaseConstructor {
   }
 }
 
-const BetterSqlite3: typeof DatabaseConstructor = loadBetterSqlite3();
-
 export type { DatabaseConstructor };
-export default BetterSqlite3;

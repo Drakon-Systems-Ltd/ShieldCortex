@@ -6,7 +6,11 @@
  * which is how a Node 26 better-sqlite3 ABI death scored as a 100% catch rate.
  */
 
-import { formatNativeLoadError, isNativeModuleLoadError } from '../database/better-sqlite3-guard.js';
+// Classification/formatting only — imported from the side-effect-free
+// classifier module, NEVER from `better-sqlite3-guard.js`. `src/index.ts`
+// imports this file statically, so any path from here to the loader would
+// put the native addon on the CLI's startup graph again.
+import { formatNativeLoadError, isNativeModuleLoadError } from '../database/native-load-classify.js';
 
 export const SCAN_EXIT = Object.freeze({
   ALLOW: 0,
