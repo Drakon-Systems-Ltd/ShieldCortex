@@ -117,7 +117,7 @@ describe('better-sqlite3 must be Node-API based (Node 24 worker crash-loop)', ()
     expect(semver.satisfies('23.5.0', range)).toBe(false);
   });
 
-  it('declares a >=13 floor in package.json (whole range excludes <13)', () => {
+  it('declares the tested 13.0.3 floor in package.json (whole range excludes <13.0.3)', () => {
     const semver = require('semver') as typeof import('semver');
     const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8'));
     const range: string = pkg.dependencies['better-sqlite3'];
@@ -126,11 +126,29 @@ describe('better-sqlite3 must be Node-API based (Node 24 worker crash-loop)', ()
     // string can be crafted (e.g. via a caret on a 0.x, an OR-range, or a
     // loose `*`) whose printed "floor" looks >=13 while the range still
     // matches a 12.x or earlier version. `semver.subset` proves the declared
-    // range is entirely contained within ">=13.0.0", i.e. it truly cannot
-    // resolve anything below 13.
+    // range is entirely contained within the floor, i.e. it truly cannot
+    // resolve anything below it.
+    //
+    // 13.0.3 rather than 13.0.0: that is the version this branch's evidence
+    // was gathered against (loader precedence, NAPI_VERSION=10, the eight
+    // prebuild names the classifier matches). A consumer resolving 13.0.0-13.0.2
+    // would be running an untested engine under a tested floor's warranty.
     expect(semver.validRange(range)).not.toBeNull();
-    expect(semver.subset(range, '>=13.0.0')).toBe(true);
-    expect(semver.intersects(range, '<13.0.0')).toBe(false);
+    expect(semver.subset(range, '>=13.0.3')).toBe(true);
+    expect(semver.intersects(range, '<13.0.3')).toBe(false);
+  });
+
+  it('the lockfile declares the same floor as package.json', () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8'));
+    const lock = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf-8'));
+    const declared: string = pkg.dependencies['better-sqlite3'];
+    expect(lock.packages['']?.dependencies?.['better-sqlite3']).toBe(declared);
+
+    // …and the version the lock actually pins satisfies it, so `npm ci` cannot
+    // install below the tested floor.
+    const semver = require('semver') as typeof import('semver');
+    const resolved: string = lock.packages['node_modules/better-sqlite3'].version;
+    expect(semver.satisfies(resolved, declared)).toBe(true);
   });
 
   it('has an installed version >=13', () => {
