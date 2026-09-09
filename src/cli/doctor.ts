@@ -38,7 +38,7 @@ import {
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
-import { isNativeModuleLoadError } from '../database/better-sqlite3-guard.js';
+import { isNativeModuleLoadError } from '../database/native-load-classify.js';
 import {
   evaluateHostContract,
   openClawConfigUsesInclude,

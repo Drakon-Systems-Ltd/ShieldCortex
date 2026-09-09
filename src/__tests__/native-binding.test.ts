@@ -40,7 +40,7 @@ describe('native-binding helper', () => {
       expect(c.cwd).toBe('/opt/install/shieldcortex');
     });
 
-    it('fromSource uses `npm run build-release` IN the better-sqlite3 dir (bypasses prebuild-install no-op)', () => {
+    it('fromSource uses `npm run build-release` IN the better-sqlite3 dir (overrides the prebuild_exists no-op)', () => {
       const c = nativeRebuildCommand('/opt/install/shieldcortex', true);
       expect(c.cmd).toBe('npm');
       expect(c.args).toEqual(['run', 'build-release']);
@@ -53,7 +53,8 @@ describe('native-binding helper', () => {
   describe('nativeBindingRemediation', () => {
     it('points at `npm run build-release` in the better-sqlite3 dir, with a toolchain hint', () => {
       const text = nativeBindingRemediation('/opt/install/shieldcortex');
-      // The reliable forced compile — NOT the prebuild-install no-op forms.
+      // The reliable forced compile (node-gyp --force_build=1) — NOT the
+      // `npm rebuild` forms that binding.gyp's prebuild_exists gate no-ops.
       expect(text).toContain(path.join('/opt/install/shieldcortex', 'node_modules', 'better-sqlite3'));
       expect(text).toContain('npm run build-release');
       expect(text).not.toContain('npm rebuild better-sqlite3');

@@ -7,7 +7,9 @@ import {
   NativeModuleLoadError,
   isNativeModuleLoadError,
   isPackagedPrebuildLoadError,
+  getBetterSqlite3,
 } from '../better-sqlite3-guard.js';
+import * as pure from '../native-load-classify.js';
 
 const GUARD_SRC = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -40,8 +42,9 @@ describe('formatNativeLoadError', () => {
     const msg = formatNativeLoadError(new Error('ERR_DLOPEN_FAILED'), nodeVersion, abi);
     expect(msg).toContain('npm run build-release');
     expect(msg).toContain('shieldcortex repair');
-    // Must NOT suggest the bare `npm rebuild better-sqlite3`, which goes through
-    // prebuild-install and silently no-ops when no prebuilt matches this Node/arch.
+    // Must NOT suggest the bare `npm rebuild better-sqlite3`: under v13 that runs
+    // node-gyp with force_build=0, and binding.gyp's prebuild_exists gate turns
+    // the build into a silent no-op whenever a prebuild exists for the host.
     expect(msg).not.toContain('npm rebuild better-sqlite3');
   });
 
@@ -276,5 +279,44 @@ describe('native-load failure must never terminate the host process (C1)', () =>
     // A binding-load error is recognised as native (routes away from the
     // destructive corrupt-DB recovery in init.ts).
     expect(isNativeModuleLoadError(cause)).toBe(true);
+  });
+});
+
+describe('the guard is the single loader, and it loads lazily (CLI dispatch contract)', () => {
+  // `dist/index.js` is the bin entry AND the package main, and it re-exports
+  // the library surface, so this module is evaluated on every CLI invocation.
+  // A module-evaluation-time load here killed `repair`/`doctor`/`--help`
+  // before dispatch. src/__tests__/main-entry-native-import-graph.test.ts
+  // proves the built-artefact behaviour; these pin the module contract.
+  it('re-exports the SAME classifier functions as the pure module (one implementation, not a fork)', () => {
+    expect(isNativeModuleLoadError).toBe(pure.isNativeModuleLoadError);
+    expect(isPackagedPrebuildLoadError).toBe(pure.isPackagedPrebuildLoadError);
+    expect(formatNativeLoadError).toBe(pure.formatNativeLoadError);
+    expect(NativeModuleLoadError).toBe(pure.NativeModuleLoadError);
+  });
+
+  it('exposes the addon through an accessor, not a module-scope constant', () => {
+    const src = readFileSync(GUARD_SRC, 'utf-8');
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    // No top-level `const X = <something>()` that resolves the addon, and no
+    // default export handing out an eagerly-resolved constructor.
+    expect(code).not.toMatch(/^const\s+\w+\s*(?::[^=]+)?=\s*loadBetterSqlite3\(\)/m);
+    expect(code).not.toMatch(/^export default/m);
+    expect(code).toMatch(/export function getBetterSqlite3\(/);
+  });
+
+  it('getBetterSqlite3() returns a usable, memoised constructor', () => {
+    const first = getBetterSqlite3();
+    const second = getBetterSqlite3();
+    // Memoised: the addon is resolved once and reused.
+    expect(second).toBe(first);
+    const db = new first(':memory:');
+    try {
+      db.exec('CREATE TABLE _sc_guard_probe(x)');
+    } finally {
+      db.close();
+    }
   });
 });

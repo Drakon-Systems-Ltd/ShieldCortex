@@ -16,9 +16,10 @@
  * better-sqlite3` can report "rebuilt dependencies successfully" while a
  * missing/source-only binding remains absent. So when a plain rebuild does not
  * heal that class, we escalate to better-sqlite3's own
- * `npm run build-release` (= `node-gyp rebuild --release`) IN its package dir,
- * which bypasses prebuild-install and actually compiles — surfacing the real
- * build error (almost always a missing C/C++ toolchain) if it can't.
+ * `npm run build-release` (= `node-gyp clean && node-gyp rebuild --release
+ * --force_build=1`) IN its package dir, which forces a real compile —
+ * surfacing the real build error (almost always a missing C/C++ toolchain) if
+ * it can't.
  *
  * Used by: `shieldcortex update` (verify+heal step), `shieldcortex repair`,
  * `shieldcortex doctor` (correct remediation text), and the postinstall guidance.
@@ -28,7 +29,11 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
-import { isPackagedPrebuildLoadError } from '../database/better-sqlite3-guard.js';
+// Classification only — the side-effect-free classifier module, never the
+// loader in `better-sqlite3-guard.js`. `repair.ts` and `mcp-self-heal.ts`
+// import this file, and they must stay loadable on precisely the host whose
+// binding is broken.
+import { isPackagedPrebuildLoadError } from '../database/native-load-classify.js';
 
 const require = createRequire(import.meta.url);
 
@@ -92,11 +97,16 @@ export function verifyNativeBinding(): VerifyResult {
  * - normal: `npm rebuild better-sqlite3` in the install dir. Fast first pass;
  *   verification, not npm's exit text, decides whether it healed the binding.
  * - fromSource: `npm run build-release` IN the better-sqlite3 dir — its own script
- *   (`node-gyp rebuild --release`). This is the ONLY reliable force-compile:
- *   `npm rebuild … --build-from-source` still goes through prebuild-install, which
- *   on a platform with no matching prebuilt exits 0 WITHOUT building and reports
- *   "rebuilt dependencies successfully" (proven on arm64 Node 22). build-release
- *   bypasses prebuild-install entirely and invokes node-gyp directly.
+ *   (`node-gyp clean && node-gyp rebuild --release --force_build=1`). This is the
+ *   ONLY reliable force-compile. better-sqlite3 13 dropped prebuild-install
+ *   entirely (no `install` script, no such dependency); instead its binding.gyp
+ *   reads `prebuild_exists%: '<!(node lib/binding.js)'` and, unless
+ *   `force_build==1`, collapses both targets to `'type': 'none'` whenever a
+ *   prebuild exists for the host. So npm's implicit `node-gyp rebuild` — what a
+ *   plain `npm rebuild`, with or without `--build-from-source`, ends up running —
+ *   exits 0 WITHOUT building and npm reports "rebuilt dependencies successfully"
+ *   (the same silent no-op proven on arm64 Node 22 under 12.x's prebuild-install).
+ *   `build-release` passes `--force_build=1`, which overrides that gate.
  */
 export function nativeRebuildCommand(
   installDir: string,
@@ -117,9 +127,10 @@ export function nativeRebuildCommand(
  * callers can keep a spinner alive. Never throws.
  *
  * With `{ fromSource: true }` it forces a real compile via better-sqlite3's
- * `build-release` (node-gyp) — bypassing prebuild-install's silent no-op — and
- * captures the build output so a failed compile surfaces its real error rather
- * than npm's misleading "rebuilt dependencies successfully".
+ * `build-release` (node-gyp `--force_build=1`) — overriding binding.gyp's
+ * prebuild_exists no-op gate — and captures the build output so a failed
+ * compile surfaces its real error rather than npm's misleading "rebuilt
+ * dependencies successfully".
  */
 export function rebuildNativeBinding(
   installDir: string,
@@ -196,11 +207,12 @@ function toolchainHint(): string {
  *   generic build-release remediation below. Two things users (and a naive
  *   `npm rebuild`) get wrong, both leading to a silent no-op:
  *     1. running the rebuild outside the package's install dir, and
- *     2. using `npm rebuild`/`--build-from-source`, which goes through
- *        prebuild-install and exits 0 without building when no prebuilt
- *        matches.
- *   The reliable command is better-sqlite3's own `build-release` (node-gyp)
- *   run in its package dir, which compiles from source directly.
+ *     2. using `npm rebuild`/`--build-from-source`, which under v13 runs
+ *        node-gyp with `force_build=0` and so exits 0 without building
+ *        whenever binding.gyp's `prebuild_exists` check is satisfied.
+ *   The reliable command is better-sqlite3's own `build-release` (node-gyp
+ *   with `--force_build=1`) run in its package dir, which compiles from
+ *   source directly.
  */
 export function nativeBindingRemediation(installDir: string, error?: unknown): string {
   if (isPackagedPrebuildLoadError(error)) {
