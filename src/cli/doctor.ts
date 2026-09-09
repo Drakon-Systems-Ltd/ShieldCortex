@@ -37,7 +37,8 @@ import {
 } from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
-import { resolveSelfInstallDir } from '../setup/native-binding.js';
+import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
+import { isNativeModuleLoadError } from '../database/better-sqlite3-guard.js';
 import {
   evaluateHostContract,
   openClawConfigUsesInclude,
@@ -487,12 +488,12 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    const isNativeBindingFault = /bindings file|napi|abi|MODULE_VERSION|was compiled against/i.test(msg);
+    const isNativeBindingFault = isNativeModuleLoadError(err);
     // A stat'able DB can still be unopenable because the file itself is owned
     // by another user (mode 600 root:root — the other half of the sudo
     // artefact). Telling that user to delete their database is bad advice.
     const fix = isNativeBindingFault
-      ? `Native DB engine failed to load. Run \`shieldcortex repair\` (compiles better-sqlite3 from source + re-verifies), or manually: cd "${path.join(resolveSelfInstallDir(), 'node_modules', 'better-sqlite3')}" && npm run build-release`
+      ? nativeBindingRemediation(resolveSelfInstallDir(), msg)
       : looksLikePermissionError(err, msg)
         ? ownershipFix()
         : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server';

@@ -42,11 +42,12 @@ function formatBytes(bytes: number): string {
 }
 
 function checkNode(): void {
-  const major = parseInt(process.version.slice(1), 10);
-  if (major >= 18) {
-    add('PASS', `Node.js ${process.version} (>= 18 required)`);
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  const supported = (major === 22 && minor >= 14) || major >= 24;
+  if (supported) {
+    add('PASS', `Node.js ${process.version} (^22.14.0 || >=24.0.0 required)`);
   } else {
-    add('WARN', `Node.js ${process.version} — version 18+ recommended`);
+    add('WARN', `Node.js ${process.version} — use Node 22.14+ LTS or Node 24+; Node 23 is unsupported`);
   }
 }
 

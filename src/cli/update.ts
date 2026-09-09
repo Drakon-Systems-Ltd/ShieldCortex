@@ -338,8 +338,8 @@ async function stepNpmPackage(
  * `npm install -g` reports success on its exit code even when the native
  * binding never built for this platform/ABI (common on arm64 / a Node newer
  * than the prebuilds) — leaving the package installed-but-broken. This step
- * runs AFTER the install completes (not nested inside it), rebuilds the binding
- * in the correct install dir if it's missing, and reports honestly.
+ * runs AFTER the install completes (not nested inside it), attempts only the
+ * recovery appropriate to the detected binding class, and reports honestly.
  */
 async function stepVerifyEngine(): Promise<{ remediation: string | null }> {
   let remediation: string | null = null;
@@ -349,7 +349,7 @@ async function stepVerifyEngine(): Promise<{ remediation: string | null }> {
     if (r.status === 'ok') return 'native binding OK';
     if (r.status === 'healed') return 'rebuilt native binding';
     remediation = r.remediation ?? null;
-    return { status: 'warn' as const, summary: 'binding failed — run `shieldcortex repair`' };
+    return { status: 'warn' as const, summary: 'binding failed — see remediation below' };
   });
   return { remediation };
 }

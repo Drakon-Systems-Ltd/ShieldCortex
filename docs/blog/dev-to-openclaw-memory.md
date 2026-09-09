@@ -121,7 +121,7 @@ You get memory AND security. Not one or the other.
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 22.14+ LTS or Node.js 24+ (Node 23 is unsupported)
 - OpenClaw installed globally (`npm install -g openclaw`)
 - ~50MB disk space for the SQLite database
 

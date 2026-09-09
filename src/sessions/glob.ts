@@ -1,11 +1,10 @@
 /**
  * Minimal portable glob expansion for the session-capture import flow.
  *
- * Node 22 added `fs.promises.glob`, but ShieldCortex's `engines.node`
- * still declares `>=18.0.0` — using fs/promises.glob would break the
- * CI matrix (Node 20) and any production deployment running an LTS
- * earlier than 22. This module implements the narrow subset of glob
- * semantics the importer actually needs:
+ * Node 22 added `fs.promises.glob`, but this module predates that runtime
+ * floor and remains the importer's deliberately narrow, synchronous glob
+ * implementation. Keeping it avoids changing importer semantics merely
+ * because the minimum Node version moved:
  *
  *   - Literal paths (no wildcards) — return as-is, caller checks existence.
  *   - Shell wildcards `*` `?` `[]` within a single directory segment.

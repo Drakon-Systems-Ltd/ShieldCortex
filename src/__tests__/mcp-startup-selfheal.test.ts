@@ -52,7 +52,7 @@ describe('MCP startup self-heal (#76)', () => {
     expect(fs.existsSync(path.join(logsDir, MCP_SPAWN_ERROR_LOG))).toBe(false);
   });
 
-  it('fails LOUDLY when heal is impossible: message names the exact fix command, never a bare -32000', async () => {
+  it('fails LOUDLY when heal is impossible: message carries the selected remediation, never a bare -32000', async () => {
     const out = await selfHealMcpNativeBinding(
       deps({ status: 'failed', error: 'NODE_MODULE_VERSION mismatch', remediation: 'cd .../better-sqlite3 && npm run build-release' }),
     );
@@ -61,11 +61,11 @@ describe('MCP startup self-heal (#76)', () => {
     expect(out.message).toBeDefined();
     // The whole point: a diagnosable message, not an opaque -32000.
     expect(out.message).not.toBe('-32000');
-    expect(out.message).toContain('shieldcortex repair');
+    expect(out.message).toContain('npm run build-release');
     expect(out.message).toContain(installDir);
   });
 
-  it('drops a breadcrumb naming the install path and repair command on failure', async () => {
+  it('drops a breadcrumb naming the install path and selected recovery on failure', async () => {
     const out = await selfHealMcpNativeBinding(
       deps({ status: 'failed', error: 'could not locate the bindings file', remediation: 'cd x && npm run build-release' }),
     );
@@ -74,16 +74,34 @@ describe('MCP startup self-heal (#76)', () => {
     expect(fs.existsSync(crumb)).toBe(true);
     const body = fs.readFileSync(crumb, 'utf-8');
     expect(body).toContain(installDir);
-    expect(body).toContain('shieldcortex repair');
+    expect(body).toContain('npm run build-release');
     // The underlying error is preserved for diagnosis.
     expect(body).toContain('could not locate the bindings file');
   });
 
   it('formatMcpSpawnError produces an actionable, non-opaque message', () => {
     const msg = formatMcpSpawnError(installDir, 'NODE_MODULE_VERSION 127 vs 108');
-    expect(msg).toContain('shieldcortex repair');
+    expect(msg).toContain('npm run build-release');
     expect(msg).toContain(installDir);
     expect(msg).not.toBe('-32000');
     expect(msg.toLowerCase()).toContain('database engine');
+  });
+
+  it('uses packaged-prebuild remediation without claiming an automatic rebuild ran', async () => {
+    const remediation = [
+      'Use Node ^22.14.0 || >=24.0.0, then reinstall ShieldCortex.',
+      'A source build cannot safely override the packaged prebuild in this release.',
+    ].join('\n');
+    const out = await selfHealMcpNativeBinding(deps({
+      status: 'failed',
+      error: "The module 'better-sqlite3' requires Node-API version 10, but this version only supports version 9.",
+      remediation,
+    }));
+    expect(out.message).toContain(remediation.split('\n')[0]);
+    expect(out.message).toContain('cannot safely override');
+    expect(out.message).not.toContain('automatic rebuild did not fix');
+    expect(out.message).not.toContain('shieldcortex repair');
+    const body = fs.readFileSync(path.join(logsDir, MCP_SPAWN_ERROR_LOG), 'utf-8');
+    expect(body.match(/cannot safely override/g)).toHaveLength(1);
   });
 });

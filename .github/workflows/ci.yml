@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22.14.0'
           cache: 'npm'
 
       - name: Install dependencies
@@ -51,7 +51,17 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20, 22]
+        # Node 24 is a required leg, not a nice-to-have: better-sqlite3 <=12
+        # subclassed the raw `node::ObjectWrap`, whose Node 24 destructor calls
+        # RemoveEnvironmentCleanupHook and aborts when a Statement is collected
+        # in a GC weak callback with no current Environment. That crash-looped
+        # worker mode on a Node 24 host and CI could not see it. Node 20 is
+        # dropped — it went EOL in April 2026 and better-sqlite3 13 requires >=22.
+        # The floor is pinned to the exact 22.14.0 patch (Node-API 10, matching
+        # engines.node in package.json/package-lock.json) rather than a rolling
+        # `22`, so CI cannot silently drift onto a floor build that never
+        # actually ships to users.
+        node-version: ['22.14.0', '24']
 
     steps:
       - uses: actions/checkout@v4

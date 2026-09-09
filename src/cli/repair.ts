@@ -37,12 +37,16 @@ export async function runRepair(_args: string[] = []): Promise<void> {
     process.stdout.write(`  ${c('90', 'Restart Claude Code / the OpenClaw gateway so running processes reload it.')}\n`);
   } else {
     // failed
-    process.stdout.write(`  ${c('31', '✗')}  Database engine: still cannot load after a rebuild\n`);
+    const attemptedRebuild = r.rebuildOutput !== undefined;
+    const failure = attemptedRebuild
+      ? 'Database engine: still cannot load after a rebuild'
+      : 'Database engine: packaged binding cannot load on this Node/platform';
+    process.stdout.write(`  ${c('31', '✗')}  ${failure}\n`);
     if (r.error) process.stdout.write(`     ${c('90', r.error.split('\n')[0])}\n`);
 
-    // Surface the REAL build error, not just the load failure. `rebuildOutput`
-    // is from the forced `--build-from-source` attempt, so it carries the
-    // actual compiler/node-gyp output (e.g. "g++: command not found").
+    // Surface the REAL build error when a source-only repair was attempted.
+    // Packaged-prebuild / Node-API failures deliberately perform no rebuild,
+    // because a source build cannot override that prebuild in this release.
     const buildTail = (r.rebuildOutput ?? '').trim();
     if (buildTail) {
       const lines = buildTail.split('\n').slice(-12);
@@ -50,7 +54,7 @@ export async function runRepair(_args: string[] = []): Promise<void> {
       for (const line of lines) process.stdout.write(`     ${c('90', line)}\n`);
     }
 
-    process.stdout.write(`\n  ${c('1', 'Fix it manually:')}\n`);
+    process.stdout.write(`\n  ${c('1', 'Recommended recovery:')}\n`);
     for (const line of (r.remediation ?? '').split('\n')) {
       process.stdout.write(`     ${c('33', line)}\n`);
     }

@@ -134,11 +134,11 @@
     "url": "https://github.com/Drakon-Systems-Ltd/ShieldCortex/issues"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": "^22.14.0 || >=24.0.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^12.0.0",
+    "better-sqlite3": "^13.0.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "safe-regex2": "^5.0.0",

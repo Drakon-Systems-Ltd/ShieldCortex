@@ -3,7 +3,7 @@
  */
 
 import type Database from 'better-sqlite3';
-import BetterSqlite3, { isNativeModuleLoadError } from './better-sqlite3-guard.js';
+import BetterSqlite3, { isNativeModuleLoadError, formatNativeLoadError } from './better-sqlite3-guard.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
@@ -567,14 +567,10 @@ export function initDatabase(dbPath?: string): Database.Database {
     // mismatch — a live memories.db was moved aside). Never touch the DB file on
     // a binding error; surface an actionable message and let the caller stop.
     if (isNativeModuleLoadError(openError)) {
-      const detail = openError instanceof Error ? openError.message : String(openError);
+      const message = formatNativeLoadError(openError, process.version, String(process.versions.modules));
       throw new Error(
-        'ShieldCortex could not load its database engine (the better-sqlite3 native module). ' +
-        `This is an install / Node-version issue, NOT database corruption — your data at ${expandedPath} is untouched. ` +
-        'Rebuild the native module and retry — easiest is `shieldcortex repair`, or manually:\n' +
-        '  cd "$(npm root -g)/shieldcortex/node_modules/better-sqlite3" && npm run build-release\n' +
-        '(install a C/C++ toolchain first if it fails to compile; a plain `npm rebuild` can silently no-op)\n' +
-        `Underlying error: ${detail}`,
+        `${message}\n\n` +
+        `This is an install / Node-version issue, NOT database corruption — your data at ${expandedPath} is untouched.`,
       );
     }
 

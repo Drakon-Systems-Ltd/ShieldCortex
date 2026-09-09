@@ -46,10 +46,20 @@ describe('scan exit contract (#449)', () => {
       'the module (for instance, using `npm rebuild` or `npm install`).',
     );
     const text = formatScanToolFailure(abi);
-    expect(text).toMatch(/native\/ABI/);
-    expect(text).toMatch(/Control is absent/);
-    expect(text).toMatch(/shieldcortex repair/);
+    expect(text).toMatch(/native binding/);
+    expect(text).toMatch(/control is absent/);
+    expect(text).toMatch(/Node \^22\.14\.0 \|\| >=24\.0\.0/);
+    expect(text).toMatch(/missing\/source-only binding/);
     expect(text).not.toMatch(/Usage:/);
+  });
+
+  it('packaged Node-API failure gets install guidance rather than a bare repair hint', () => {
+    const text = formatScanToolFailure(new Error(
+      "The module 'better-sqlite3' requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.",
+    ));
+    expect(text).toMatch(/Node \^22\.14\.0 \|\| >=24\.0\.0/);
+    expect(text).toMatch(/reinstall ShieldCortex/);
+    expect(text).not.toMatch(/Try: shieldcortex repair/);
   });
 
   it('generic throw is still tool-failure, still not usage', () => {

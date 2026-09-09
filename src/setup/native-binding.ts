@@ -1,11 +1,10 @@
 /**
  * Self-healing for the better-sqlite3 native binding.
  *
- * better-sqlite3 ships prebuilt binaries for common platform/ABI combos; when
- * none matches (e.g. a newer Node than the prebuilds, or arm64 with no prebuilt)
- * it must compile from source, which needs a C/C++ toolchain. If that hasn't
- * happened the binding is missing and every DB operation fails with
- * "Could not locate the bindings file".
+ * better-sqlite3 ships prebuilt binaries for common platforms. A stripped or
+ * source-only install can still need a local C/C++ build; an unloadable shipped
+ * prebuild instead needs a supported Node plus reinstall because the package
+ * resolver gives that prebuild priority over local build output.
  *
  * The trap (observed on an arm64 fleet box): `npm rebuild better-sqlite3` only
  * works when run IN THE PACKAGE'S INSTALL DIR. Run from anywhere else (e.g. the
@@ -14,11 +13,9 @@
  * running code's own location and rebuilds there.
  *
  * The second trap (proven on clawdbot1): even in the right dir, `npm rebuild
- * better-sqlite3` — AND `npm rebuild … --build-from-source` — can report "rebuilt
- * dependencies successfully" while the binary never built. better-sqlite3's
- * install runs prebuild-install, which on a platform with no matching prebuilt
- * exits 0 WITHOUT building (the `--build-from-source` flag does not reliably force
- * it). So when a plain rebuild doesn't heal, we escalate to better-sqlite3's own
+ * better-sqlite3` can report "rebuilt dependencies successfully" while a
+ * missing/source-only binding remains absent. So when a plain rebuild does not
+ * heal that class, we escalate to better-sqlite3's own
  * `npm run build-release` (= `node-gyp rebuild --release`) IN its package dir,
  * which bypasses prebuild-install and actually compiles — surfacing the real
  * build error (almost always a missing C/C++ toolchain) if it can't.
@@ -31,6 +28,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
+import { isPackagedPrebuildLoadError } from '../database/better-sqlite3-guard.js';
 
 const require = createRequire(import.meta.url);
 
@@ -91,8 +89,8 @@ export function verifyNativeBinding(): VerifyResult {
  * The command used to (re)build the binding — split out so the choice is
  * unit-testable without actually spawning npm.
  *
- * - normal: `npm rebuild better-sqlite3` in the install dir. Fast, and places a
- *   matching prebuilt when one exists for this platform/ABI.
+ * - normal: `npm rebuild better-sqlite3` in the install dir. Fast first pass;
+ *   verification, not npm's exit text, decides whether it healed the binding.
  * - fromSource: `npm run build-release` IN the better-sqlite3 dir — its own script
  *   (`node-gyp rebuild --release`). This is the ONLY reliable force-compile:
  *   `npm rebuild … --build-from-source` still goes through prebuild-install, which
@@ -182,15 +180,37 @@ function toolchainHint(): string {
 }
 
 /**
- * The correct copy-paste remediation. Two things users (and a naive
- * `npm rebuild`) get wrong, both leading to a silent no-op:
- *   1. running the rebuild outside the package's install dir, and
- *   2. using `npm rebuild`/`--build-from-source`, which goes through
- *      prebuild-install and exits 0 without building when no prebuilt matches.
- * The reliable command is better-sqlite3's own `build-release` (node-gyp) run in
- * its package dir, which compiles from source directly.
+ * The correct copy-paste remediation.
+ *
+ * `error`, when given, is classified with isPackagedPrebuildLoadError to pick
+ * between two entirely different fixes:
+ *
+ * - Packaged prebuild / Node-API class: the shipped better-sqlite3 13 binary
+ *   itself is the problem (unloadable `prebuilds/<platform>-<arch>.node`, or
+ *   this Node build's Node-API version is too old). Source cannot safely
+ *   override a packaged prebuild in this release because the resolver selects
+ *   the packaged file first, so the
+ *   only real fix is reinstalling on a supported Node — NOT build-release or
+ *   `shieldcortex repair`, which would be a false cure here.
+ * - Anything else (missing / source-only binding, no `error` given): the
+ *   generic build-release remediation below. Two things users (and a naive
+ *   `npm rebuild`) get wrong, both leading to a silent no-op:
+ *     1. running the rebuild outside the package's install dir, and
+ *     2. using `npm rebuild`/`--build-from-source`, which goes through
+ *        prebuild-install and exits 0 without building when no prebuilt
+ *        matches.
+ *   The reliable command is better-sqlite3's own `build-release` (node-gyp)
+ *   run in its package dir, which compiles from source directly.
  */
-export function nativeBindingRemediation(installDir: string): string {
+export function nativeBindingRemediation(installDir: string, error?: unknown): string {
+  if (isPackagedPrebuildLoadError(error)) {
+    return [
+      'ShieldCortex could not load the packaged better-sqlite3 prebuild for this platform, or this Node build is missing the Node-API version it requires.',
+      'Use Node ^22.14.0 || >=24.0.0, then reinstall ShieldCortex via the same installation route you used originally so npm restores a matching packaged prebuild.',
+      'A source build cannot safely override the packaged prebuild in this release, so compiling locally will not fix this — if reinstalling on a supported Node still fails, report it as a platform issue.',
+    ].join('\n');
+  }
+
   const pkgDir = path.join(installDir, 'node_modules', 'better-sqlite3');
   return [
     `cd "${pkgDir}" && npm run build-release`,
@@ -205,12 +225,20 @@ export function nativeBindingRemediation(installDir: string): string {
  * - 'healed' — rebuilt and now loads.
  * - 'failed' — still broken after a rebuild; `remediation` carries the fix.
  *
- * Two rebuild attempts when needed: first a plain `npm rebuild` (fast, uses a
- * matching prebuilt if one exists), then — only if that didn't heal it — a
+ * Two rebuild attempts when needed: first a plain `npm rebuild`, then — only if
+ * verification says that did not heal a missing/source-only binding — a
  * forced `npm run build-release` (node-gyp) source compile. The forced build is
  * what actually produces the binary when no prebuilt matches AND surfaces the
  * real error if it can't (and `rebuildOutput` in the failed result carries IT,
  * not the earlier misleading "rebuilt dependencies successfully").
+ *
+ * Neither rebuild attempt runs at all once the failure is classified as the
+ * packaged-prebuild / Node-API class (isPackagedPrebuildLoadError): a source
+ * build cannot safely override a packaged v13 prebuild in this release (see
+ * nativeBindingRemediation), so rebuilding would just waste time reproducing
+ * the same unhealable failure. This is checked both right after the initial
+ * verify AND after the plain rebuild — a rebuild can leave the binding in, or
+ * newly reveal, this exact unhealable state.
  */
 export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Promise<EnsureResult> {
   const verify = deps.verify ?? verifyNativeBinding;
@@ -222,10 +250,27 @@ export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Prom
 
   const dir = installDir();
 
-  // Attempt 1: a plain rebuild (matches a prebuilt for this platform/ABI if any).
+  if (isPackagedPrebuildLoadError(first.error)) {
+    return {
+      status: 'failed',
+      error: first.error,
+      remediation: nativeBindingRemediation(dir, first.error),
+    };
+  }
+
+  // Attempt 1: a plain rebuild, followed by an independent load verification.
   const normal = await rebuild(dir);
   const afterNormal = verify();
   if (afterNormal.ok) return { status: 'healed', rebuildOutput: normal.output };
+
+  if (isPackagedPrebuildLoadError(afterNormal.error)) {
+    return {
+      status: 'failed',
+      error: afterNormal.error,
+      rebuildOutput: normal.output,
+      remediation: nativeBindingRemediation(dir, afterNormal.error),
+    };
+  }
 
   // Attempt 2: force a source compile. A plain rebuild can report success while
   // never producing the binary; this forces the build and captures the real
@@ -234,10 +279,11 @@ export async function ensureNativeBinding(deps: Partial<BindingDeps> = {}): Prom
   const afterSource = verify();
   if (afterSource.ok) return { status: 'healed', rebuildOutput: sourceBuild.output };
 
+  const finalError = afterSource.error ?? afterNormal.error ?? first.error;
   return {
     status: 'failed',
-    error: afterSource.error ?? afterNormal.error ?? first.error,
+    error: finalError,
     rebuildOutput: sourceBuild.output,
-    remediation: nativeBindingRemediation(dir),
+    remediation: nativeBindingRemediation(dir, finalError),
   };
 }

@@ -2,19 +2,17 @@
  * MCP-server startup self-heal for the better-sqlite3 native binding (issue #76).
  *
  * When the MCP server is spawned by a GUI app (Claude Code, VS Code, launchd)
- * and better-sqlite3's native binding is ABI-mismatched — the classic
- * "npm version bump without `shieldcortex repair`" trap — the process dies
+ * and better-sqlite3's native binding is missing or unloadable, the process dies
  * before the MCP handshake and the operator sees only a bare JSON-RPC `-32000`
  * with no explanation.
  *
  * This module makes MCP startup:
- *   1. SELF-HEAL: attempt the documented repair programmatically, REUSING the
- *      `shieldcortex repair` machinery (`ensureNativeBinding`) — never a second
- *      rebuild implementation.
+ *   1. SELF-HEAL: run the class-appropriate recovery through
+ *      `ensureNativeBinding` — never a second rebuild implementation.
  *   2. FAIL LOUDLY: if the heal is impossible, produce a one-line actionable
- *      message naming the exact fix command (`shieldcortex repair`) AND drop a
- *      breadcrumb file (`~/.shieldcortex/logs/mcp-spawn-error.log`) naming the
- *      exact install path + repair command — so `-32000` is diagnosable in
+ *      message carrying the selected remediation AND drop a breadcrumb file
+ *      (`~/.shieldcortex/logs/mcp-spawn-error.log`) naming the exact install
+ *      path and recovery — so `-32000` is diagnosable in
  *      seconds instead of being opaque.
  *
  * Pure/injectable so both outcomes are unit-testable without a real ABI break.
@@ -26,6 +24,7 @@ import path from 'path';
 import os from 'os';
 import {
   ensureNativeBinding,
+  nativeBindingRemediation,
   resolveSelfInstallDir,
   type EnsureResult,
 } from './native-binding.js';
@@ -51,8 +50,8 @@ export interface McpSelfHealOutcome {
   ok: boolean;
   /** True when a rebuild was needed and succeeded. */
   healed: boolean;
-  /** Loud, actionable message — present only when `ok` is false. Names the exact
-   * fix command; NEVER a bare `-32000`. */
+  /** Loud, actionable message — present only when `ok` is false. Carries the
+   * selected remediation; NEVER a bare `-32000`. */
   message?: string;
   /** Absolute path of the breadcrumb written on failure, if any. */
   breadcrumbPath?: string;
@@ -66,20 +65,23 @@ function defaultLogsDir(): string {
  * Build the loud, actionable startup-failure message. Pure so it can be printed
  * to stderr AND embedded in the breadcrumb, and unit-tested directly.
  *
- * The contract: it must name the exact fix command and the install path, and it
- * must NEVER be an opaque `-32000` — that opacity is the whole bug.
+ * The contract: it must carry the remediation selected for this failure and the
+ * install path, and it must NEVER be an opaque `-32000` — that opacity is the
+ * whole bug.
  */
-export function formatMcpSpawnError(installDir: string, underlying: string): string {
+export function formatMcpSpawnError(
+  installDir: string,
+  underlying: string,
+  remediation = nativeBindingRemediation(installDir, underlying),
+): string {
   return [
     'ShieldCortex MCP server failed to start: the database engine (better-sqlite3)',
-    'could not be loaded and an automatic rebuild did not fix it (native-module',
-    'ABI mismatch — typically an npm version bump without a repair).',
+    'could not be loaded and automatic recovery did not produce a loadable binding.',
     '',
     `Install: ${installDir}`,
     '',
-    'Fix it with:',
-    '  shieldcortex repair',
-    `  (or: cd "${path.join(installDir, 'node_modules', 'better-sqlite3')}" && npm run build-release)`,
+    'Recommended recovery:',
+    ...remediation.split('\n').map((line) => `  ${line}`),
     'Then restart the app that launches this MCP server.',
     '',
     `Underlying error: ${underlying}`,
@@ -90,7 +92,7 @@ export function formatMcpSpawnError(installDir: string, underlying: string): str
  * Verify + heal the native binding for MCP startup; on unrecoverable failure,
  * write a breadcrumb and return a loud, actionable message. Never throws.
  *
- * REUSES `ensureNativeBinding` (the `shieldcortex repair` machinery) — no second
+ * REUSES `ensureNativeBinding` — no second
  * rebuild path. The caller (the MCP entry point) prints `message` to stderr and
  * exits non-zero when `ok` is false, so the client never just sees `-32000`.
  */
@@ -110,7 +112,8 @@ export async function selfHealMcpNativeBinding(
   // status === 'failed' — heal impossible. Fail loudly.
   const dir = installDir();
   const underlying = result.error ?? 'unknown native-module load failure';
-  const message = formatMcpSpawnError(dir, underlying);
+  const remediation = result.remediation ?? nativeBindingRemediation(dir, underlying);
+  const message = formatMcpSpawnError(dir, underlying, remediation);
 
   let breadcrumbPath: string | undefined;
   try {
@@ -120,7 +123,6 @@ export async function selfHealMcpNativeBinding(
     const body = [
       `[${now()}] ShieldCortex MCP server spawn failed (better-sqlite3 native-module load).`,
       message,
-      result.remediation ? `\nRemediation:\n${result.remediation}` : '',
       result.rebuildOutput ? `\nRebuild output (tail):\n${result.rebuildOutput.split('\n').slice(-12).join('\n')}` : '',
       '',
     ].join('\n');

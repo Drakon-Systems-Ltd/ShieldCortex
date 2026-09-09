@@ -6,6 +6,8 @@
  * which is how a Node 26 better-sqlite3 ABI death scored as a 100% catch rate.
  */
 
+import { formatNativeLoadError, isNativeModuleLoadError } from '../database/better-sqlite3-guard.js';
+
 export const SCAN_EXIT = Object.freeze({
   ALLOW: 0,
   CAUGHT: 1,
@@ -22,9 +24,6 @@ export const SCAN_USAGE_LINES = [
   '  Exit codes: 0=allow 1=caught 2=usage 3=tool-failure (control absent).',
 ] as const;
 
-const ABI_HINT =
-  /NODE_MODULE_VERSION|better-sqlite3|was compiled against a different Node\.js version/i;
-
 export function scanVerdictExit(allowed: boolean): typeof SCAN_EXIT.ALLOW | typeof SCAN_EXIT.CAUGHT {
   return allowed ? SCAN_EXIT.ALLOW : SCAN_EXIT.CAUGHT;
 }
@@ -36,11 +35,10 @@ export function cliCatchExit(command: string | undefined): number {
 
 export function formatScanToolFailure(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  if (ABI_HINT.test(msg) || ABI_HINT.test(String(err))) {
+  if (isNativeModuleLoadError(err)) {
     return (
-      `Scan tool failure (native/ABI): ${msg}\n` +
-      'Control is absent until the scanner binary matches this Node. ' +
-      'Try: shieldcortex repair'
+      'Scan tool failure (native binding): control is absent until the scanner binary matches this Node.\n' +
+      formatNativeLoadError(err, process.version, process.versions.modules ?? 'unknown')
     );
   }
   return `Scan tool failure: ${msg}`;

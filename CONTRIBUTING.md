@@ -16,7 +16,7 @@ bar than the size of the diff usually suggests.
 
 ## Getting Set Up
 
-Node 20 or later is required (CI runs 20 and 22).
+Node 22.14+ LTS or Node 24+ is required (CI runs the exact 22.14.0 floor and Node 24; Node 23 is unsupported).
 
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/ShieldCortex.git
