@@ -184,6 +184,19 @@ function sendMessage(type: string, text?: string, timeoutMs?: number): Promise<u
   });
 }
 
+/**
+ * Work admitted before a disposal belongs to the lifecycle that was current
+ * when it was queued. disposeModel() cancels that lifecycle and opens the next
+ * one, so embeds still sitting on embedChain settle as disposed instead of
+ * waking a replacement worker — while a genuinely new call afterwards starts a
+ * fresh worker as usual. Dispose is a boundary, not a process-wide off switch.
+ */
+interface Lifecycle {
+  cancelled: boolean;
+}
+
+let lifecycle: Lifecycle = { cancelled: false };
+
 // Single ONNX worker cannot safely run concurrent embeds — queue them.
 let embedChain: Promise<unknown> = Promise.resolve();
 
@@ -192,7 +205,11 @@ let embedChain: Promise<unknown> = Promise.resolve();
  * @returns Float32Array of 384 dimensions
  */
 export async function generateEmbedding(text: string): Promise<Float32Array> {
+  const admitted = lifecycle;
   const run = async (): Promise<Float32Array> => {
+    // Queued before a dispose: settle as disposed rather than reaching
+    // ensureWorker() and resurrecting the worker the caller just shut down.
+    if (admitted.cancelled) throw new Error(WORKER_DISPOSED_MSG);
     const data = await sendMessage('embed', text, INFERENCE_TIMEOUT_MS) as number[];
     return new Float32Array(data);
   };
@@ -246,16 +263,42 @@ export async function preloadModel(): Promise<void> {
 }
 
 /**
+ * Termination in flight, if any. Overlapping callers queue behind it rather
+ * than returning while the worker they asked us to kill is still running.
+ */
+let disposalChain: Promise<void> = Promise.resolve();
+
+/**
  * Dispose the worker thread and release resources.
+ *
+ * Resolves only once the worker has actually exited, so a second shutdown
+ * handler cannot reach process.exit() while the first termination is still in
+ * flight. Work queued before the call is cancelled; a call made afterwards
+ * starts a fresh worker.
  */
 export async function disposeModel(): Promise<void> {
-  const handle = current;
-  if (!handle) return;
+  const run = async (): Promise<void> => {
+    // Close the current lifecycle first: settling the in-flight request below
+    // releases the queue, and everything already on it must see the boundary.
+    // Done even with no live worker, since queued work may not have started
+    // one yet — that is exactly the call that would resurrect it.
+    lifecycle.cancelled = true;
+    lifecycle = { cancelled: false };
 
-  // Retire before terminating so the exit this causes is not reported as a
-  // crash, and settle in-flight requests explicitly — clearing the map left
-  // callers awaiting a promise that could never settle.
-  retire(handle, 'disposed');
-  settleAll(handle, WORKER_DISPOSED_MSG);
-  await handle.worker.terminate();
+    const handle = current;
+    if (!handle) return;
+
+    // Retire before terminating so the exit this causes is not reported as a
+    // crash, and settle in-flight requests explicitly — clearing the map left
+    // them to whatever the exit handler said, i.e. a phantom crash.
+    retire(handle, 'disposed');
+    settleAll(handle, WORKER_DISPOSED_MSG);
+    // Guarded like the timeout kill: disposal must not throw into a shutdown
+    // handler and skip the process.exit() that follows it.
+    await handle.worker.terminate().catch(() => { /* already on its way out */ });
+  };
+
+  const next = disposalChain.then(run, run);
+  disposalChain = next.then(() => undefined, () => undefined);
+  return next;
 }
