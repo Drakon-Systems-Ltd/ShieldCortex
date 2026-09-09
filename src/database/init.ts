@@ -4,7 +4,7 @@
 
 import type Database from 'better-sqlite3';
 import { getBetterSqlite3 } from './better-sqlite3-guard.js';
-import { isNativeModuleLoadError, formatNativeLoadError } from './native-load-classify.js';
+import { NativeModuleLoadError, isNativeModuleLoadError, formatNativeLoadError } from './native-load-classify.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
@@ -567,11 +567,25 @@ export function initDatabase(dbPath?: string): Database.Database {
     // here is data loss (observed 2026-06-09 on an arm64 box after a Node/native
     // mismatch — a live memories.db was moved aside). Never touch the DB file on
     // a binding error; surface an actionable message and let the caller stop.
-    if (isNativeModuleLoadError(openError)) {
-      const message = formatNativeLoadError(openError, process.version, String(process.versions.modules));
-      throw new Error(
+    //
+    // TWO shapes arrive here and only one of them is raw evidence. A packaged
+    // prebuild that cannot be dlopen'd throws a RAW error from the constructor;
+    // a package that cannot be required at all reaches us as the guard's
+    // already-formatted `NativeModuleLoadError`. Re-formatting the second shape
+    // is a class flip, not a no-op: formatNativeLoadError's generic diagnosis
+    // itself says "this Node build predates the Node-API version it requires",
+    // which isPackagedPrebuildLoadError matches, so a second pass relabels a
+    // repairable missing/source-only failure as an unfixable packaged-prebuild
+    // one. Keep the class, message and cause intact and let the rendered text
+    // stay evidence of nothing.
+    if (openError instanceof NativeModuleLoadError || isNativeModuleLoadError(openError)) {
+      const message = openError instanceof NativeModuleLoadError
+        ? openError.message
+        : formatNativeLoadError(openError, process.version, String(process.versions.modules));
+      throw new NativeModuleLoadError(
         `${message}\n\n` +
         `This is an install / Node-version issue, NOT database corruption — your data at ${expandedPath} is untouched.`,
+        openError instanceof NativeModuleLoadError ? openError.cause : openError,
       );
     }
 

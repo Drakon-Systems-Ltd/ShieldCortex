@@ -10,7 +10,11 @@
 // classifier module, NEVER from `better-sqlite3-guard.js`. `src/index.ts`
 // imports this file statically, so any path from here to the loader would
 // put the native addon on the CLI's startup graph again.
-import { formatNativeLoadError, isNativeModuleLoadError } from '../database/native-load-classify.js';
+import {
+  NativeModuleLoadError,
+  formatNativeLoadError,
+  isNativeModuleLoadError,
+} from '../database/native-load-classify.js';
 
 export const SCAN_EXIT = Object.freeze({
   ALLOW: 0,
@@ -37,11 +41,25 @@ export function cliCatchExit(command: string | undefined): number {
   return command === 'scan' ? SCAN_EXIT.TOOL_FAILURE : 1;
 }
 
+const NATIVE_BINDING_HEADER =
+  'Scan tool failure (native binding): control is absent until the scanner binary matches this Node.';
+
 export function formatScanToolFailure(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
+  // Already diagnosed upstream (the guard, or initDatabase): print its message
+  // verbatim. formatNativeLoadError is NOT idempotent — its own generic
+  // diagnosis says "this Node build predates the Node-API version it
+  // requires", which isPackagedPrebuildLoadError matches, so a second pass
+  // over a rendered message both nests a duplicate header and rewrites a
+  // repairable missing/source-only failure as a packaged-prebuild one,
+  // headlining "a source build cannot help" above the only fix that works.
+  // The class travels with the typed error; never re-derive it from prose.
+  if (err instanceof NativeModuleLoadError) {
+    return `${NATIVE_BINDING_HEADER}\n${msg}`;
+  }
   if (isNativeModuleLoadError(err)) {
     return (
-      'Scan tool failure (native binding): control is absent until the scanner binary matches this Node.\n' +
+      `${NATIVE_BINDING_HEADER}\n` +
       formatNativeLoadError(err, process.version, process.versions.modules ?? 'unknown')
     );
   }

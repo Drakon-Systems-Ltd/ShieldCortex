@@ -228,13 +228,20 @@ function reproducePreFixEagerLoad(sandbox: string): void {
   );
 }
 
-/** argv-array spawn (never a shell string) of the CURRENT node binary. */
-function runNode(args: string[], cwd: string) {
+/**
+ * argv-array spawn (never a shell string) of the CURRENT node binary.
+ *
+ * `env`, when given, is MERGED over the inherited environment — the CLI cases
+ * below need HOME / CLAUDE_MEMORY_DB pointed inside the sandbox so no live
+ * config or database is read or written.
+ */
+function runNode(args: string[], cwd: string, env?: NodeJS.ProcessEnv) {
   return spawnSync(process.execPath, args, {
     cwd,
     encoding: 'utf-8',
     timeout: 90_000,
     windowsHide: true,
+    ...(env ? { env: { ...process.env, ...env } } : {}),
   });
 }
 
@@ -244,6 +251,28 @@ function runModule(source: string, cwd: string) {
 }
 
 const distPath = (root: string, ...rest: string[]) => path.join(root, 'dist', ...rest);
+
+const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+
+/**
+ * The COMPLETE user-facing output for a REQUIRE-time (missing / source-only)
+ * failure, asserted as one whole rather than per-layer.
+ *
+ * The formatter is not self-idempotent: its generic diagnosis says "this Node
+ * build predates the Node-API version it requires", which is itself a
+ * packaged-prebuild signature. So formatting an already-formatted message a
+ * second time both NESTS a duplicate header and FLIPS the class, headlining
+ * "a source build cannot safely override the packaged prebuild" above the one
+ * remedy that actually works. Counting occurrences across the whole output is
+ * what catches that — a `toContain` on the correct guidance passes happily
+ * while the contradiction sits two layers above it.
+ */
+function expectMissingSourceOnlyGuidance(text: string): void {
+  expect(occurrences(text, 'ShieldCortex could not load its database engine')).toBe(1);
+  expect(occurrences(text, 'For a missing/source-only binding, run `shieldcortex repair`')).toBe(1);
+  expect(text).not.toContain('The packaged Node-API native binding cannot be loaded here');
+  expect(text).not.toContain('a source build cannot safely override the packaged prebuild');
+}
 
 describe('main entry must dispatch with a broken better-sqlite3', () => {
   describe('the two failure shapes are genuinely different faults', () => {
@@ -296,6 +325,16 @@ describe('main entry must dispatch with a broken better-sqlite3', () => {
   describe('REQUIRE-time failure: better-sqlite3 cannot be required at all', () => {
     let sandbox: string;
     let control: string;
+
+    const LIVE_DB_CONTENT = 'require-shape-live-database-bytes-that-must-survive';
+
+    /** A fresh directory holding a pre-existing "live" DB, one per test. */
+    const liveDbDir = (name: string): string => {
+      const dir = path.join(sandbox, `dbstate-${name}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, 'memories.db'), LIVE_DB_CONTENT);
+      return dir;
+    };
 
     beforeAll(() => {
       requireDist();
@@ -350,6 +389,57 @@ describe('main entry must dispatch with a broken better-sqlite3', () => {
         sandbox,
       );
       expect(r.stdout).toBe('NativeModuleLoadError|true');
+    }, 120_000);
+
+    it('a real initDatabase keeps the missing/source-only class and never touches the DB file', () => {
+      // The construction-shape sibling below has always driven initDatabase.
+      // The require shape reaches this catch for the FIRST time now that the
+      // guard is lazy, carrying an already-formatted NativeModuleLoadError —
+      // which is precisely the input that used to be re-formatted into the
+      // wrong class.
+      const dbDir = liveDbDir('init');
+      const dbPath = path.join(dbDir, 'memories.db');
+      const resultPath = path.join(dbDir, 'init-result.json');
+      const r = runModule(
+        [
+          `const { writeFileSync } = await import('fs');`,
+          `const { initDatabase } = await import(${JSON.stringify(distPath(sandbox, 'database', 'init.js'))});`,
+          `let out;`,
+          `try { initDatabase(${JSON.stringify(dbPath)}); out = { threw: false, name: '', message: '' }; }`,
+          `catch (err) { out = { threw: true, name: err && err.name, message: String(err && err.message) }; }`,
+          `writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(out));`,
+        ].join('\n'),
+        sandbox,
+      );
+      expect(r.status).toBe(0);
+      const out = JSON.parse(readFileSync(resultPath, 'utf8'));
+      expect(out.threw).toBe(true);
+      // The typed class must survive the wrap: it is what lets the next
+      // consumer render the failure without re-deriving a class from prose.
+      expect(out.name).toBe('NativeModuleLoadError');
+      expectMissingSourceOnlyGuidance(out.message);
+      expect(out.message).toContain('NOT database corruption');
+      expect(out.message).toContain(REQUIRE_FAILURE_MESSAGE);
+      expect(readFileSync(dbPath, 'utf8')).toBe(LIVE_DB_CONTENT);
+      expect(readdirSync(dbDir).filter((name) => name.includes('.corrupt.'))).toEqual([]);
+    }, 120_000);
+
+    it('the real `scan` CLI exits 3 with one header and the same unflipped guidance', () => {
+      const dbDir = liveDbDir('scan');
+      const dbPath = path.join(dbDir, 'memories.db');
+      const r = runNode([distPath(sandbox, 'index.js'), 'scan', 'hello world'], sandbox, {
+        HOME: sandbox,
+        CLAUDE_MEMORY_DB: dbPath,
+        SHIELDCORTEX_AUDIT_DIR: path.join(sandbox, 'audit'),
+      });
+      expect(r.status).toBe(3);
+      const output = `${r.stdout ?? ''}\n${r.stderr ?? ''}`;
+      expect(occurrences(output, 'Scan tool failure (native binding)')).toBe(1);
+      expectMissingSourceOnlyGuidance(output);
+      expect(output).toContain('NOT database corruption');
+      expect(output).not.toContain('ShieldCortex Scan Result');
+      expect(readFileSync(dbPath, 'utf8')).toBe(LIVE_DB_CONTENT);
+      expect(readdirSync(dbDir).filter((name) => name.includes('.corrupt.'))).toEqual([]);
     }, 120_000);
 
     it('CONTROL: reproducing the pre-fix eager require makes `--help` fail before dispatch', () => {
