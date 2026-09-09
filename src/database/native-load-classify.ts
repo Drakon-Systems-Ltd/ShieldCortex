@@ -48,19 +48,36 @@ export function formatNativeLoadError(
   abi: string,
 ): string {
   const detail = err instanceof Error ? err.message : String(err);
+  const packagedPrebuild = isPackagedPrebuildLoadError(err);
   const lines = [
     'ShieldCortex could not load its database engine (better-sqlite3).',
     '',
     `Node ${nodeVersion} (module ABI ${abi}) could not load the better-sqlite3 binding.`,
-    'The shipped Node-API prebuilt binary is missing for this platform, this',
-    'Node build predates the Node-API version it requires, or the module was',
-    'not compiled locally.',
+  ];
+  // The diagnosis has to match the class. "the module was not compiled
+  // locally" is simply wrong for a packaged-prebuild failure: a prebuilt
+  // binary IS present, it just cannot be loaded on this runtime, and nothing
+  // the user compiles will be used instead of it.
+  if (packagedPrebuild) {
+    lines.push(
+      'The packaged Node-API native binding cannot be loaded here: the shipped',
+      'prebuilt binary is unusable on this platform, or this Node build predates',
+      'the Node-API version it requires.',
+    );
+  } else {
+    lines.push(
+      'The shipped Node-API prebuilt binary is missing for this platform, this',
+      'Node build predates the Node-API version it requires, or the module was',
+      'not compiled locally.',
+    );
+  }
+  lines.push(
     '',
     'Fix one of these:',
     '  • Use Node ^22.14.0 || >=24.0.0, then reinstall ShieldCortex so npm restores the',
     '    matching Node-API prebuilt binary — no compiler needed.',
-  ];
-  if (isPackagedPrebuildLoadError(err)) {
+  );
+  if (packagedPrebuild) {
     lines.push(
       '  • If the error persists after reinstalling on a supported Node, report',
       '    that platform failure; a source build cannot safely override the packaged prebuild',
@@ -135,13 +152,11 @@ const NATIVE_LOAD_SIGNATURES: RegExp[] = [
   /GLIBC_[\d.]+/i,
   /version `GLIBC/i,
   /ld-linux[^\s]*\.so/i,
-  /error while loading shared libraries/i,
   // Truncated/corrupted native binary downloads — file-format errors on the
   // .node addon itself, not on a SQLite database file.
   /is not a valid win32 application/i,
   /not a valid (?:win32|mach-?o) (?:application|file)/i,
   /is not a mach-?o/i,
-  /file too short/i,
   /dlopen\(/i,
   /symbol not found/i,
   /specified module could not be found/i,
@@ -156,13 +171,40 @@ const NATIVE_LOAD_SIGNATURES: RegExp[] = [
 ];
 
 /**
+ * Evidence that a message is talking about a NATIVE ADDON at all — a `.node`
+ * file, better-sqlite3 itself, or the v13 prebuilds directory.
+ *
+ * Required alongside the generic signatures below, which are real native-load
+ * wordings but are not self-identifying: `file too short` is a plain
+ * truncated-file error and `error while loading shared libraries` is emitted by
+ * the dynamic loader for any ELF binary (including `node` itself failing on
+ * libnode.so). Ungated, either could classify an unrelated
+ * database-path failure as a native-binding fault and route a genuinely
+ * recoverable condition away from recovery.
+ */
+const NATIVE_ADDON_CONTEXT = /(?:\.node\b(?![\\/])|better[_-]sqlite3|prebuilds[\\/])/i;
+
+/**
+ * Native-load wordings that are only meaningful WITH native-addon context.
+ * Matched conjunctively with NATIVE_ADDON_CONTEXT — never on their own.
+ */
+const CONTEXTUAL_NATIVE_LOAD_SIGNATURES: RegExp[] = [
+  /file too short/i,
+  /error while loading shared libraries/i,
+];
+
+/**
  * True when an error from opening the database is a better-sqlite3 native-module
  * load failure (environmental), as opposed to genuine file corruption. Pure +
  * exported so the init path can route it away from destructive recovery.
  */
 export function isNativeModuleLoadError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error ?? '');
-  return NATIVE_LOAD_SIGNATURES.some((re) => re.test(msg));
+  if (NATIVE_LOAD_SIGNATURES.some((re) => re.test(msg))) return true;
+  return (
+    NATIVE_ADDON_CONTEXT.test(msg) &&
+    CONTEXTUAL_NATIVE_LOAD_SIGNATURES.some((re) => re.test(msg))
+  );
 }
 
 /**

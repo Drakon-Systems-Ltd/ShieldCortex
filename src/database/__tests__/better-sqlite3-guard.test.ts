@@ -150,6 +150,73 @@ describe('isNativeModuleLoadError — better-sqlite3 13 (Node-API) prebuild fail
   });
 });
 
+describe('generic signatures are gated on native-addon context', () => {
+  // `file too short` is a plain truncated-file error and `error while loading
+  // shared libraries` is the dynamic loader's wording for ANY ELF binary —
+  // neither names an addon. Ungated they would classify an unrelated
+  // database-path failure as a native-binding fault, which routes a genuinely
+  // recoverable condition away from recovery. They now require `.node`,
+  // `better-sqlite3` or `prebuilds/` in the same message.
+  it('still matches when the message names the addon (positive controls)', () => {
+    expect(isNativeModuleLoadError(new Error(
+      '/app/node_modules/better-sqlite3/prebuilds/linux-arm64.node: file too short',
+    ))).toBe(true);
+    expect(isNativeModuleLoadError(new Error(
+      '/app/node_modules/better-sqlite3/prebuilds/linux-x64.node: error while loading shared libraries: libstdc++.so.6: cannot open shared object file',
+    ))).toBe(true);
+    expect(isNativeModuleLoadError(new Error(
+      'Error: file too short, loading better_sqlite3.node',
+    ))).toBe(true);
+  });
+
+  it('does NOT match the same wording on a database path (negative controls)', () => {
+    expect(isNativeModuleLoadError(new Error(
+      'SQLITE_NOTADB: /home/user/.shieldcortex/memories.db: file too short',
+    ))).toBe(false);
+    expect(isNativeModuleLoadError(new Error('file too short'))).toBe(false);
+    expect(isNativeModuleLoadError(new Error(
+      "unable to open database file '/var/lib/shieldcortex/memories.db': file too short",
+    ))).toBe(false);
+  });
+
+  it('does NOT match a loader failure on the node binary itself (negative control)', () => {
+    expect(isNativeModuleLoadError(new Error(
+      'node: error while loading shared libraries: libnode.so.127: cannot open shared object file: No such file or directory',
+    ))).toBe(false);
+    expect(isNativeModuleLoadError(new Error('error while loading shared libraries'))).toBe(false);
+  });
+
+  it('the gate is context, not the whole signature set — self-identifying wordings still stand alone', () => {
+    // Nothing above weakened the signatures that name the addon themselves.
+    expect(isNativeModuleLoadError(new Error('Could not locate the bindings file'))).toBe(true);
+    expect(isNativeModuleLoadError(new Error(
+      'The module was compiled against NODE_MODULE_VERSION 115.',
+    ))).toBe(true);
+  });
+});
+
+describe('formatNativeLoadError diagnosis matches the failure class', () => {
+  const nodeVersion = 'v22.14.0';
+  const abi = '127';
+
+  it('never claims a packaged-prebuild failure means the module "was not compiled locally"', () => {
+    for (const text of [
+      '/app/node_modules/better-sqlite3/prebuilds/linux-arm64.node: invalid ELF header',
+      "The module 'better-sqlite3' requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.",
+    ]) {
+      const msg = formatNativeLoadError(new Error(text), nodeVersion, abi);
+      expect(msg).not.toContain('not compiled locally');
+      expect(msg).toContain('native binding cannot be loaded');
+    }
+  });
+
+  it('keeps the source-only diagnosis for a missing/source-only binding', () => {
+    const msg = formatNativeLoadError(new Error('Could not locate the bindings file'), nodeVersion, abi);
+    expect(msg).toContain('not compiled locally');
+    expect(msg).not.toContain('native binding cannot be loaded');
+  });
+});
+
 describe('classifier/formatter contract consumed by init.ts', () => {
   // This does NOT reimplement or mock a second classifier — it exercises the
   // exact exported functions init.ts imports (isNativeModuleLoadError,
