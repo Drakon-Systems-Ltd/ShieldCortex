@@ -7,7 +7,11 @@ import {
   formatMcpSpawnError,
   MCP_SPAWN_ERROR_LOG,
 } from '../setup/mcp-self-heal.js';
-import type { EnsureResult } from '../setup/native-binding.js';
+import {
+  ensureNativeBinding,
+  nativeBindingRemediation,
+  type EnsureResult,
+} from '../setup/native-binding.js';
 
 /**
  * Issue #76: the MCP server dies with a bare JSON-RPC `-32000` when
@@ -87,21 +91,48 @@ describe('MCP startup self-heal (#76)', () => {
     expect(msg.toLowerCase()).toContain('database engine');
   });
 
-  it('uses packaged-prebuild remediation without claiming an automatic rebuild ran', async () => {
-    const remediation = [
-      'Use Node ^22.14.0 || >=24.0.0, then reinstall ShieldCortex.',
-      'A source build cannot safely override the packaged prebuild in this release.',
-    ].join('\n');
-    const out = await selfHealMcpNativeBinding(deps({
-      status: 'failed',
-      error: "The module 'better-sqlite3' requires Node-API version 10, but this version only supports version 9.",
-      remediation,
-    }));
-    expect(out.message).toContain(remediation.split('\n')[0]);
-    expect(out.message).toContain('cannot safely override');
-    expect(out.message).not.toContain('automatic rebuild did not fix');
+  it('carries the class-aware packaged-prebuild remediation, not the generic rebuild one', async () => {
+    // The previous version of this test asserted
+    // `not.toContain('automatic rebuild did not fix')` — a phrase
+    // formatMcpSpawnError emits on NO path, so it could not fail and pinned
+    // nothing. What actually needs pinning is that the message carries the
+    // remediation the classifier SELECTED and not the generic one it replaced.
+    const nodeApiError =
+      "The module 'better-sqlite3' requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.";
+
+    // Drive the REAL heal machinery — only its verify/rebuild seams are
+    // injected, never its classification.
+    const rebuildAttempts: string[] = [];
+    const ensured = await ensureNativeBinding({
+      verify: () => ({ ok: false, error: nodeApiError }),
+      rebuild: async (_dir, opts) => {
+        rebuildAttempts.push(opts?.fromSource ? 'source' : 'plain');
+        return { ok: false, output: 'rebuilt dependencies successfully' };
+      },
+      installDir: () => installDir,
+    });
+    expect(ensured.status).toBe('failed');
+    // Premise: this class deliberately attempts no rebuild at all.
+    expect(rebuildAttempts).toEqual([]);
+
+    const out = await selfHealMcpNativeBinding(deps(ensured));
+    expect(out.ok).toBe(false);
+
+    const classAware = nativeBindingRemediation(installDir, nodeApiError);
+    const generic = nativeBindingRemediation(installDir);
+    // Guard against a vacuous comparison: if the two ever collapsed into the
+    // same text, the assertions below would pass while proving nothing.
+    expect(classAware).not.toBe(generic);
+
+    for (const line of classAware.split('\n')) expect(out.message).toContain(line);
+    for (const line of generic.split('\n')) expect(out.message).not.toContain(line);
+
+    // The generic path's signature commands, absent outright.
+    expect(out.message).not.toContain('npm run build-release');
     expect(out.message).not.toContain('shieldcortex repair');
+
     const body = fs.readFileSync(path.join(logsDir, MCP_SPAWN_ERROR_LOG), 'utf-8');
+    expect(body).toContain(classAware.split('\n')[0]);
     expect(body.match(/cannot safely override/g)).toHaveLength(1);
   });
 });
