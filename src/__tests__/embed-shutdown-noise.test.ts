@@ -20,7 +20,9 @@
  * The writer itself is unmodified and carries no test seam: it finds the
  * fixture's embedder the same way it finds the real one, by relative package
  * layout, and the last case below proves the retired injection variables now
- * do nothing even in a genuine jest runtime.
+ * do nothing even in a genuine jest runtime. Each hook process also runs on its
+ * own HOME, config dir and audit dir — one case here proves that an operator's
+ * config and audit trail, inherited or handed in, come back untouched.
  *
  * The match is EXACT. A timeout, a timeout kill, a crash, an invalid vector, a
  * database error, or any message that merely mentions disposal stays loud.
@@ -31,8 +33,11 @@ import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { WORKER_DISPOSED_MSG, isWorkerDisposedError } from '../embeddings/generator.js';
 import {
+  DB_UPDATE_REJECTED_MSG,
   FIXTURE_VECTOR_BYTES,
   FIXTURE_VECTOR_HEAD,
+  HOOK_CASE_MS,
+  HOOK_CHILD_MS,
   createHookPackage,
   repoRoot,
   runHook,
@@ -55,15 +60,6 @@ const STILL_LOUD = [
 ];
 
 /**
- * Per-test budget for the cases that spawn a real hook process.
- *
- * The repo default is 10s, which is the right budget for an in-process test and
- * the wrong one for a case whose subject is a whole Node process doing a real
- * defence scan. The headroom is here so a slow machine reports the behaviour
- * under test rather than a timeout; none of the assertions are weakened for it.
- */
-const HOOK_CASE_MS = 60_000;
-/**
  * Every line the writer prints starts with this.
  *
  * A quiet case asserts the absence of it rather than an empty stderr: the
@@ -74,6 +70,46 @@ const HOOK_CASE_MS = 60_000;
 const WRITER_PREFIX = '[shieldcortex save-memory]';
 /** Building a package copies the whole build; only ever done once per suite. */
 const PACKAGE_BUILD_MS = 120_000;
+
+/**
+ * A config the child must never read, and its isolated twin.
+ *
+ * Both are unsigned and carry no device identity, which is the shape a hook
+ * process CHANGES: reading one rewrites it in place with a `deviceId`, this
+ * machine's `deviceName` and an HMAC `_sig`, and drops an `.integrity-key`
+ * beside it. So a canary that comes back byte-identical is evidence the child
+ * never read it — not merely that it never wrote to it — and the twin that DID
+ * get healed says where the child's config work went instead.
+ *
+ * Cloud is on in both, because config work only happens when it is, and the
+ * only endpoint either names is the discard port on loopback: an isolation
+ * failure could still not reach a live endpoint with the key beside it. Every
+ * other run in this file leaves its isolated config empty, which is the
+ * cloud-disabled default and names no endpoint at all.
+ */
+function canaryShapedConfig(marker: string): string {
+  return `${JSON.stringify({
+    cloudEnabled: true,
+    cloudApiKey: marker,
+    cloudBaseUrl: 'http://127.0.0.1:9/shieldcortex-canary',
+  }, null, 2)}\n`;
+}
+const CANARY_KEY = 'canary-key-must-never-be-read';
+const ISOLATED_KEY = 'isolated-twin-key';
+const CANARY_CONFIG = canaryShapedConfig(CANARY_KEY);
+const ISOLATED_CONFIG = canaryShapedConfig(ISOLATED_KEY);
+const CANARY_AUDIT_LINE = '{"canary":"an operator\'s real forensics"}\n';
+
+/** Every path under `dir`, with file bytes, so an added file or an edit both show. */
+function snapshot(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of fs.readdirSync(dir, { recursive: true, withFileTypes: true })) {
+    const full = path.join(entry.parentPath, entry.name);
+    const rel = path.relative(dir, full);
+    out[rel] = entry.isDirectory() ? '<dir>' : fs.readFileSync(full, 'utf-8');
+  }
+  return out;
+}
 
 // --- store.ts seam: the embedder is a stub, never the real worker ----------
 let embedFailure: Error | null = null;
@@ -313,18 +349,67 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(run.len).toBeNull();
   }, HOOK_CASE_MS);
 
-  it('still reports a failure raised at the write step', () => {
+  it('still reports a vector whose buffer cannot be read', () => {
+    // Raised by the `!embedding.buffer` validity check, before any SQL runs —
+    // the case below is the one that fails inside the UPDATE itself.
     const run = runHook({
       dir: root,
       pkgRoot: pkg,
       plan: { mode: 'unusable', message: 'vector buffer detached' },
-      title: 'HOOK write fails',
+      title: 'HOOK buffer unreadable',
     });
 
     expect(run.stderr).toContain('embedding failed for memory');
     expect(run.stderr).toContain('vector buffer detached');
     expect(run.len).toBeNull();
   }, HOOK_CASE_MS);
+
+  it('still reports a database failure raised by the embedding UPDATE itself', () => {
+    // A real vector, a committed row, and SQLite refusing `UPDATE memories SET
+    // embedding = ?` — the probe's own BEFORE UPDATE trigger raises it, so the
+    // error comes back through better-sqlite3 from inside the statement rather
+    // than from anything the fixture handed the writer.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'vector' },
+      dbFailure: 'embedding-update',
+      title: 'HOOK db rejects update',
+    });
+
+    expect(run.events).toEqual(['generateEmbedding']); // the embed itself succeeded
+    // The whole composed line, so a mangled trigger that failed for some other
+    // SQLite reason (a quoting slip turns RAISE's argument into a column
+    // reference) cannot pass by merely containing the right words.
+    expect(run.stderr).toMatch(
+      new RegExp(`embedding failed for memory \\d+: ${DB_UPDATE_REJECTED_MSG}`),
+    );
+    // Loud, and the memory still survives its lost vector: runHook fails the
+    // case outright if the row is missing, so NULL here is the whole damage.
+    expect(run.len).toBeNull();
+  }, HOOK_CASE_MS);
+
+  it('kills a wedged child on its own budget, and says what it was doing', () => {
+    // The embedder never settles and the writer's own embed timeout (10s by
+    // default) is well beyond the budget given here, so the only thing that can
+    // end this run is spawnSync's kill — the mechanism that must fire before
+    // jest's case budget for every other subprocess case in this file.
+    expect(() => runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'hang' },
+      timeoutMs: 1_500,
+      title: 'HOOK wedged',
+    })).toThrow(/hook probe did not finish within its 1500ms child budget \(killed with SIGTERM\)/);
+  }, HOOK_CASE_MS);
+
+  it('gives every child a strictly smaller budget than the case running it', () => {
+    // An invariant, not a behaviour: HOOK_CHILD_MS is runHook's default, so a
+    // wedged child under jest gets the kill above — with the child's stdout and
+    // stderr attached — instead of the case expiring first and reporting only
+    // that it took too long.
+    expect(HOOK_CHILD_MS).toBeLessThan(HOOK_CASE_MS);
+  });
 
   it('awaits the vector and stores it before the process exits', () => {
     const run = runHook({ dir: root, pkgRoot: pkg, plan: { mode: 'vector' }, title: 'HOOK stores it' });
@@ -335,6 +420,10 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(run.len).toBe(FIXTURE_VECTOR_BYTES);
     expect(run.head).toBe(FIXTURE_VECTOR_HEAD);
     expect(run.stderr).not.toContain(WRITER_PREFIX);
+    // An empty isolated config is the authority for every ordinary run: no key,
+    // no endpoint, nothing to sync — so the child wrote nothing into it at all,
+    // and the only entry is the audit directory the fixture made for it.
+    expect(fs.readdirSync(run.configDir)).toEqual(['audit']);
   }, HOOK_CASE_MS);
 
   it('embeds nothing at all when embeddings are disabled', () => {
@@ -348,6 +437,75 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(run.events).toEqual([]); // the gate is before the embedder, not after
     expect(run.len).toBeNull();
     expect(run.stderr).not.toContain(WRITER_PREFIX);
+  }, HOOK_CASE_MS);
+
+  it('never touches a config or audit directory it inherited from outside', () => {
+    // The hook process reads the live defence config on every scan. Whatever the
+    // machine, the operator or the enclosing test runner has exported for
+    // SHIELDCORTEX_CONFIG_DIR / SHIELDCORTEX_AUDIT_DIR, this child must read and
+    // write its own — so an operator's config is neither consulted nor signed.
+    const ext = fs.mkdtempSync(path.join(root, 'ext-'));
+    const inheritedConfig = path.join(ext, 'inherited-config');
+    const inheritedAudit = path.join(ext, 'inherited-audit');
+    const suppliedConfig = path.join(ext, 'supplied-config');
+    const suppliedAudit = path.join(ext, 'supplied-audit');
+    for (const d of [inheritedConfig, suppliedConfig]) {
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'config.json'), CANARY_CONFIG);
+    }
+    for (const d of [inheritedAudit, suppliedAudit]) {
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'realtime-canary.jsonl'), CANARY_AUDIT_LINE);
+    }
+    const before = [inheritedConfig, inheritedAudit, suppliedConfig, suppliedAudit].map(snapshot);
+
+    const priorConfig = process.env.SHIELDCORTEX_CONFIG_DIR;
+    const priorAudit = process.env.SHIELDCORTEX_AUDIT_DIR;
+    try {
+      // Both channels at once: inherited from this process, and handed to
+      // runHook by the caller. Neither may win over the run's own isolation.
+      process.env.SHIELDCORTEX_CONFIG_DIR = inheritedConfig;
+      process.env.SHIELDCORTEX_AUDIT_DIR = inheritedAudit;
+      const run = runHook({
+        dir: root,
+        pkgRoot: pkg,
+        plan: { mode: 'vector' },
+        env: { SHIELDCORTEX_CONFIG_DIR: suppliedConfig, SHIELDCORTEX_AUDIT_DIR: suppliedAudit },
+        seedConfig: ISOLATED_CONFIG,
+        title: 'HOOK external canary',
+      });
+
+      // The run did the whole job — this is not a case that passed by not running.
+      expect(run.events).toEqual(['generateEmbedding']);
+      expect(run.len).toBe(FIXTURE_VECTOR_BYTES);
+
+      // ...and the config work the canaries must not receive happened HERE: the
+      // child read its own config, healed it with a device identity and an HMAC,
+      // and dropped the integrity key beside it. Every path it wrote is inside
+      // this run's directory, owner-only.
+      const healed = fs.readFileSync(path.join(run.configDir, 'config.json'), 'utf-8');
+      expect(healed).toContain(ISOLATED_KEY); // the twin, not one of the canaries
+      expect(healed).toContain('"deviceId"'); // identity stamped...
+      expect(healed).toContain('"_sig"');     // ...and signed, which no canary is
+      expect(fs.existsSync(path.join(run.configDir, '.integrity-key'))).toBe(true);
+      expect(run.configDir.startsWith(`${root}${path.sep}`)).toBe(true);
+      expect(run.auditDir.startsWith(`${run.configDir}${path.sep}`)).toBe(true);
+      for (const isolated of [run.home, run.configDir, run.auditDir]) {
+        expect(fs.statSync(isolated).mode & 0o777).toBe(0o700);
+      }
+      // Nothing appends to the audit dir on this path, so the isolated one is
+      // empty. It exists and is owner-only regardless, because the directory an
+      // audit append WOULD use is chosen before anyone knows whether it happens.
+      expect(fs.readdirSync(run.auditDir)).toEqual([]);
+    } finally {
+      if (priorConfig === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
+      else process.env.SHIELDCORTEX_CONFIG_DIR = priorConfig;
+      if (priorAudit === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;
+      else process.env.SHIELDCORTEX_AUDIT_DIR = priorAudit;
+    }
+
+    // Not one byte, and not one new file, in any of the four.
+    expect([inheritedConfig, inheritedAudit, suppliedConfig, suppliedAudit].map(snapshot)).toEqual(before);
   }, HOOK_CASE_MS);
 
   it('embeds nothing at all when the model cache is not ready', () => {
@@ -472,11 +630,47 @@ describe('hook writer — no test seam survives into production', () => {
       title: 'HOOK real layout',
     });
 
+    // No `events` assertion here on purpose: the real build has no recorder, so
+    // an empty log is a property of the package rather than of the writer, and
+    // would read like the non-vacuity control the fixture cases genuinely have.
+    // What carries this case is the NULL column — a seam is the only thing that
+    // could have filled it.
     expect(run.len).toBeNull();
-    expect(run.events).toEqual([]);
     expect(run.stderr).not.toContain('Worker exited with code 3');
     expect(run.stderr).not.toContain('embedding failed for memory');
   }, HOOK_CASE_MS);
+});
+
+/**
+ * The fixture builds packages by renaming and overwriting files under a
+ * destination it is handed. Every caller passes an `mkdtemp` path — but the one
+ * call that does not must not be carried out, because the repository is a
+ * destination this builder would damage: it overwrites `package.json` first,
+ * then renames `dist/embeddings/generator.js` out from under the build.
+ */
+describe('hook package fixture — never builds inside the repository', () => {
+  it('rejects the repo root and anything under it, before writing anything', () => {
+    const packageJson = path.join(repoRoot, 'package.json');
+    const generator = path.join(repoRoot, 'dist', 'embeddings', 'generator.js');
+    const before = fs.readFileSync(packageJson);
+    const strayPackage = path.join(repoRoot, 'stray-fixture-package');
+
+    for (const dest of [
+      repoRoot,
+      `${repoRoot}${path.sep}`,
+      path.join(repoRoot, 'dist'),
+      path.join(repoRoot, 'src', '__tests__', 'nested'),
+      strayPackage,
+    ]) {
+      expect(() => createHookPackage(dest)).toThrow(/refuses to build inside the repository/);
+    }
+
+    // Nothing was written, renamed or copied on the way to those throws.
+    expect(fs.readFileSync(packageJson)).toEqual(before);
+    expect(fs.existsSync(generator)).toBe(true);
+    expect(fs.existsSync(path.join(repoRoot, 'dist', 'embeddings', 'generator.real.js'))).toBe(false);
+    expect(fs.existsSync(strayPackage)).toBe(false);
+  });
 });
 
 /**

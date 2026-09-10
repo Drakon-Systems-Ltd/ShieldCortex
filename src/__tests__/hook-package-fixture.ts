@@ -35,6 +35,11 @@
  * Nothing in the package can reach ONNX: the fixture embedder never touches the
  * real generator, and the fixture `generator.js` throws if its embedder surface
  * is called at all.
+ *
+ * And nothing in a run reaches the machine it runs on. Each child gets its own
+ * HOME, config dir and audit dir inside that run's scratch directory, owner-only
+ * and not overridable by the caller — because a hook process reads the defence
+ * config on every scan and signs what it reads. See `runHook` below.
  */
 import fs from 'fs';
 import path from 'path';
@@ -45,6 +50,40 @@ import { fileURLToPath } from 'url';
 export const FIXTURE_VECTOR_BYTES = 384 * 4;
 /** 0.75f little-endian — the first four bytes of a vector this fixture made. */
 export const FIXTURE_VECTOR_HEAD = '0000403F';
+
+/**
+ * Wall-clock budget for one child hook process.
+ *
+ * Strictly below {@link HOOK_CASE_MS}, and that ordering is the point: a wedged
+ * child is killed by `spawnSync` while jest is still waiting, so the failure a
+ * developer reads is this fixture's diagnostic — which carries the child's
+ * stdout and stderr — rather than a bare "exceeded timeout of 60000 ms" that
+ * says nothing about what the hook process was doing.
+ */
+export const HOOK_CHILD_MS = 30_000;
+
+/**
+ * Per-test budget for a case that spawns a child hook process.
+ *
+ * The repo default is 10s, which is right for an in-process test and wrong for
+ * a case whose subject is a whole Node process doing a real defence scan. Twice
+ * {@link HOOK_CHILD_MS}, so the child's own budget always fires first.
+ */
+export const HOOK_CASE_MS = 2 * HOOK_CHILD_MS;
+
+/** What the probe's rejecting trigger raises from inside SQLite's UPDATE. */
+export const DB_UPDATE_REJECTED_MSG = 'hook package fixture: embedding UPDATE rejected';
+
+/**
+ * Quote a string as SQL — single quotes, doubled inside.
+ *
+ * `JSON.stringify` is not this: SQLite reads a double-quoted token as an
+ * IDENTIFIER, so a JSON-quoted RAISE argument becomes a column reference and
+ * the trigger fails with `no such column` instead of the message it was given.
+ */
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const schemaPath = path.join(repoRoot, 'src', 'database', 'schema.sql');
@@ -191,6 +230,46 @@ export function cosineSimilarity() { return 0; }
 }
 
 /**
+ * Resolve `p` through symlinked ancestors, so a destination that only *reaches*
+ * the repository through a link is still recognised as being inside it.
+ */
+function resolveThroughLinks(p: string): string {
+  const target = path.resolve(p);
+  const tail: string[] = [];
+  let existing = target;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) return target;
+    tail.unshift(path.basename(existing));
+    existing = parent;
+  }
+  return path.join(fs.realpathSync(existing), ...tail);
+}
+
+/**
+ * Refuse to build a package inside the repository, before anything is written.
+ *
+ * Building at `repoRoot` overwrites the real `package.json` and then renames
+ * `dist/embeddings/generator.js` out from under the build; building at a
+ * subdirectory of it silently drops a copy of `dist/` and a `node_modules`
+ * symlink into the working tree. Every caller passes an `mkdtemp` path, so this
+ * only ever fires on a mistake — which is exactly when a mistake must not be
+ * carried out. The check runs first: no mkdir, no write, no copy, no rename
+ * happens before it.
+ */
+function assertOutsideRepo(dest: string): void {
+  const target = resolveThroughLinks(dest);
+  const repo = resolveThroughLinks(repoRoot);
+  if (target === repo || target.startsWith(repo + path.sep)) {
+    throw new Error(
+      `hook package fixture refuses to build inside the repository: ${target} is `
+      + `${target === repo ? 'the repository root' : `under ${repo}`}. `
+      + 'Pass a fresh temporary directory (fs.mkdtempSync) instead.',
+    );
+  }
+}
+
+/**
  * Build one hermetic package at `dest` and return its root.
  *
  * Needs a build: the copied `dist/` is where the real defence pipeline, the
@@ -199,6 +278,8 @@ export function cosineSimilarity() { return 0; }
  * the defence pipeline is unavailable.
  */
 export function createHookPackage(dest: string, { classifier = 'real' }: HookPackageOptions = {}): string {
+  assertOutsideRepo(dest);
+
   const builtGenerator = path.join(repoRoot, 'dist', 'embeddings', 'generator.js');
   if (!fs.existsSync(builtGenerator)) {
     throw new Error(`hook package fixture needs a build: ${builtGenerator} is missing — run \`npm run build:ts\``);
@@ -236,12 +317,40 @@ export interface HookRunOptions {
   pkgRoot?: string;
   /** Only the fixture package reads this; the real build ignores it. */
   plan?: EmbedPlan;
-  /** Extra environment for the hook process (overrides the defaults below). */
+  /**
+   * Extra environment for the hook process.
+   *
+   * Overrides anything inherited — except the run's own isolation paths (`HOME`,
+   * `SHIELDCORTEX_CONFIG_DIR`, `SHIELDCORTEX_AUDIT_DIR`), which are applied last
+   * and cannot be opened up from here. A test that wants to prove the isolation
+   * holds passes external directories in and finds them untouched.
+   */
   env?: Record<string, string>;
-  /** Child wall-clock budget. Distinct from the per-test jest timeout. */
+  /**
+   * Child wall-clock budget. Distinct from — and strictly below — the per-test
+   * jest budget: see {@link HOOK_CHILD_MS}.
+   */
   timeoutMs?: number;
   /** Title the probe writes, so a run's row is identifiable. */
   title?: string;
+  /**
+   * Config JSON to place in this run's ISOLATED config dir before the child
+   * starts. Omitted by default: an empty config dir is the authority, and it
+   * yields cloud-disabled defaults, so nothing in the child has an endpoint or a
+   * key to reach. Used by the isolation cases, which need a config the child
+   * will actually self-heal in order to show where the healing landed.
+   */
+  seedConfig?: string;
+  /**
+   * Make the row's embedding UPDATE fail inside SQLite.
+   *
+   * A `BEFORE UPDATE OF embedding` trigger in the probe's own database raises
+   * {@link DB_UPDATE_REJECTED_MSG}, so the writer's `UPDATE memories SET
+   * embedding = ?` genuinely fails at the database — after the INSERT committed,
+   * with a real vector in hand. Test-owned, in the generated probe: the writer
+   * and the package are untouched.
+   */
+  dbFailure?: 'embedding-update';
 }
 
 export interface HookRunResult {
@@ -252,6 +361,12 @@ export interface HookRunResult {
   stderr: string;
   /** What the fixture embedder recorded, in order. Empty for a real build. */
   events: string[];
+  /** This run's isolated HOME. Nothing the child wrote can be outside it. */
+  home: string;
+  /** This run's isolated config dir — where a self-heal or signature lands. */
+  configDir: string;
+  /** This run's isolated audit dir — where an audit append would land. */
+  auditDir: string;
 }
 
 /**
@@ -266,8 +381,10 @@ export function runHook({
   pkgRoot = repoRoot,
   plan,
   env = {},
-  timeoutMs = 60_000,
+  timeoutMs = HOOK_CHILD_MS,
   title = 'HOOK probe',
+  seedConfig,
+  dbFailure,
 }: HookRunOptions): HookRunResult {
   const tag = Math.random().toString(36).slice(2);
   const probePath = path.join(dir, `probe-${tag}.mjs`);
@@ -284,6 +401,11 @@ export function runHook({
 
     const db = new Database(${JSON.stringify(dbPath)});
     db.exec(readFileSync(${JSON.stringify(schemaPath)}, 'utf-8'));
+    ${dbFailure === 'embedding-update' ? `db.exec(\`
+      CREATE TRIGGER sc_fixture_reject_embedding_update
+      BEFORE UPDATE OF embedding ON memories
+      BEGIN SELECT RAISE(ABORT, ${sqlString(DB_UPDATE_REJECTED_MSG)}); END;
+    \`);` : ''}
     await saveAutoExtractedMemory(
       db,
       {
@@ -302,15 +424,38 @@ export function runHook({
     process.exit(0);
   `);
 
+  // Isolation, not a default.
+  //
   // An isolated HOME means no model cache and no host config: whatever the row
-  // ends up holding was put there by this package, not by the machine.
+  // ends up holding was put there by this package, not by the machine. But HOME
+  // alone is not isolation — `getConfigDir()` and `defaultRealtimeAuditDir()`
+  // prefer SHIELDCORTEX_CONFIG_DIR / SHIELDCORTEX_AUDIT_DIR over `~`, and the
+  // hook reads the defence config on every scan. Inherited from an operator's
+  // shell or handed in by a caller, those two point a child that SIGNS what it
+  // reads at somebody's real config: it rewrites config.json in place, adding a
+  // device identity and an HMAC, and drops an .integrity-key beside it.
+  //
+  // So the run pins all three inside its own directory, owner-only, applied
+  // AFTER the caller's `env` — a caller can add variables, never open a path out.
+  // The config dir starts empty (unless a case seeds it), which means
+  // cloud-disabled defaults: no key, no endpoint, nothing to upload to.
   const home = path.join(dir, `home-${tag}`);
-  fs.mkdirSync(home, { recursive: true });
+  const configDir = path.join(home, '.shieldcortex');
+  const auditDir = path.join(configDir, 'audit');
+  for (const isolated of [home, configDir, auditDir]) {
+    fs.mkdirSync(isolated, { recursive: true, mode: 0o700 });
+    fs.chmodSync(isolated, 0o700);
+  }
+  if (seedConfig !== undefined) {
+    fs.writeFileSync(path.join(configDir, 'config.json'), seedConfig, { mode: 0o600 });
+  }
   const childEnv: Record<string, string | undefined> = {
     ...process.env,
-    HOME: home,
-    SC_HOOK_FIXTURE_PLAN: planPath,
     ...env,
+    HOME: home,
+    SHIELDCORTEX_CONFIG_DIR: configDir,
+    SHIELDCORTEX_AUDIT_DIR: auditDir,
+    SC_HOOK_FIXTURE_PLAN: planPath,
   };
   // The jest runner sets this to 1 for the whole suite; a hook process that
   // inherited it would skip the embed step entirely. Tests that want the gate
@@ -324,8 +469,16 @@ export function runHook({
     timeout: timeoutMs,
   });
 
-  if (proc.status !== 0) {
-    throw new Error(`hook probe exited ${proc.status} (signal ${proc.signal})\n--- stdout ---\n${proc.stdout}\n--- stderr ---\n${proc.stderr}`);
+  if (proc.error || proc.status !== 0) {
+    // Naming the budget matters: this fires while jest is still waiting, so the
+    // failure a developer reads says which timeout ran out and what the child
+    // had said before it was killed.
+    const why = (proc.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+      ? `hook probe did not finish within its ${timeoutMs}ms child budget (killed with ${proc.signal})`
+      : proc.error
+        ? `hook probe could not run: ${proc.error.message}`
+        : `hook probe exited ${proc.status} (signal ${proc.signal})`;
+    throw new Error(`${why}\n--- stdout ---\n${proc.stdout}\n--- stderr ---\n${proc.stderr}`);
   }
 
   let row: { len: number | null; head: string | null } | null;
@@ -342,5 +495,5 @@ export function runHook({
     ? fs.readFileSync(eventsPath, 'utf-8').split('\n').filter(Boolean)
     : [];
 
-  return { len: row.len, head: row.head, stderr: proc.stderr, events };
+  return { len: row.len, head: row.head, stderr: proc.stderr, events, home, configDir, auditDir };
 }
