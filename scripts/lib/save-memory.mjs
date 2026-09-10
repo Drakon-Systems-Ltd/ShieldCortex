@@ -373,20 +373,70 @@ async function loadEmbedder() {
   return _embedCache;
 }
 
+/**
+ * Evidence that this process is a test RUNTIME, not merely a process that
+ * inherited an env key.
+ *
+ * A hook is started by the host with whatever environment it happens to have,
+ * so SHIELDCORTEX_TEST_SEAM=1 left in a shell profile — or inherited from a
+ * test run that spawned an agent — used to be enough on its own to open the
+ * seams below, which skip the SKIP_EMBEDDINGS and cache-health gates the rest
+ * of this path respects. Jest sets both of these itself (jest-cli/bin defaults
+ * NODE_ENV to 'test'; jest-runner sets JEST_WORKER_ID even with --runInBand)
+ * and the probe processes tests spawn inherit them, so honest tests keep
+ * working while a leaked seam key alone opens nothing.
+ */
+function testRuntimePresent() {
+  return process.env.NODE_ENV === 'test' && Boolean(process.env.JEST_WORKER_ID);
+}
+
 /** Production hooks must never honour FAKE. Tests opt in with SHIELDCORTEX_TEST_SEAM=1. */
 function testEmbedSeamOpen() {
-  return process.env.SHIELDCORTEX_TEST_SEAM === '1' && process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1';
+  return testRuntimePresent()
+    && process.env.SHIELDCORTEX_TEST_SEAM === '1'
+    && process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1';
 }
 
 /**
- * Test-only failure injection, behind the same SHIELDCORTEX_TEST_SEAM=1 gate:
- * the embed call rejects with this exact message, so the shutdown-vs-failure
- * classification below is exercised for real without a model on disk.
+ * Test-only failure injection, behind the same gates as FAKE: the embed call
+ * rejects with this exact message, so the shutdown-vs-failure classification
+ * below is exercised for real without a model on disk.
  * Returns null (no injection) in production.
  */
 function testEmbedFailure() {
+  if (!testRuntimePresent()) return null;
   if (process.env.SHIELDCORTEX_TEST_SEAM !== '1') return null;
   return process.env.SHIELDCORTEX_HOOK_EMBED_FAIL || null;
+}
+
+/**
+ * The disposal contract, borrowed from the build rather than copied here.
+ *
+ * `src/embeddings/generator.ts` owns the message a disposal settles cancelled
+ * work with, and the classifier that matches it whole. This writer is a plain
+ * .mjs that cannot import TypeScript, so it loads the compiled classifier out
+ * of dist/ the first time it has an embedding failure to classify.
+ *
+ * Not a fallback risk: without a build the defence pipeline is unavailable and
+ * this writer drops the memory long before it embeds anything, so any embed
+ * that could produce a disposal has the build loaded already. If the import
+ * fails regardless, nothing is suppressed and a disposal prints one line —
+ * exactly the pre-fix behaviour, and the safe direction to fail in.
+ */
+let _disposalClassifier; // undefined = not looked up yet, null = unavailable
+
+async function isShutdownCancellation(err) {
+  if (_disposalClassifier === undefined) {
+    try {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const distRoot = resolve(here, '..', '..', 'dist');
+      const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'generator.js')).href);
+      _disposalClassifier = typeof mod.isWorkerDisposedError === 'function' ? mod.isWorkerDisposedError : null;
+    } catch {
+      _disposalClassifier = null;
+    }
+  }
+  return _disposalClassifier ? _disposalClassifier(err) : false;
 }
 
 async function embeddingCacheIsHealthy() {
@@ -465,11 +515,15 @@ async function embedStoredRow(db, memoryId, text) {
     db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(embedding.buffer), memoryId);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
-    // Shutdown cancelled this embed on purpose — generator.ts settles cancelled
-    // work with exactly this message. Matched whole, exactly as store.ts does:
-    // the timeout kill, a crash, or anything that merely mentions disposal is a
-    // failure and still gets reported below.
-    if (msg === 'Embedding worker disposed') return;
+    // Shutdown cancelled this embed on purpose — the disposal doing its job,
+    // not a failure. The generator's own classifier decides, matched whole and
+    // exactly as store.ts does it: the timeout kill, a crash, or anything that
+    // merely mentions disposal is a failure and still gets reported below.
+    // Parity, not a live path: embeds here are serial and the only
+    // disposeModel() in this process runs below this catch, so nothing in
+    // production reaches it today. It is kept so a future concurrent disposer
+    // cannot reintroduce in the hook writer the noise the others just lost.
+    if (await isShutdownCancellation(err)) return;
     // Absent worker / explicitly disabled embeddings are configuration, not
     // failure — say it once and stay quiet, exactly as store.ts does.
     if (/Embedding worker unavailable|Embeddings disabled via/i.test(msg)) {
