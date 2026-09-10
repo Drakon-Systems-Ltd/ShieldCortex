@@ -31,6 +31,24 @@ const repoRoot = path.resolve(process.cwd());
 const GENERATOR_SRC = path.join(repoRoot, 'src', 'embeddings', 'generator.ts');
 const RESULT_PREFIX = '__RESULT__ ';
 
+/**
+ * The disposal contract, written out as literals — here and nowhere else.
+ *
+ * Every other caller in the repository imports these from `generator.ts`, so a
+ * change to any of the three fails HERE, once, instead of quietly agreeing with
+ * itself everywhere. All three matter to a consumer:
+ *
+ *  - the message is what an operator reads;
+ *  - the `code` is what a caller with no access to the class can check;
+ *  - the brand KEY is a `Symbol.for` registry name, which is what makes the
+ *    brand survive a module boundary. A hook's `dist/` build and this file's
+ *    transpiled sandbox copy are two different module instances: `instanceof`
+ *    across them is false, and a registry symbol is the same symbol.
+ */
+const DISPOSED_MSG = 'Embedding worker disposed';
+const DISPOSED_CODE = 'SHIELDCORTEX_EMBEDDING_WORKER_DISPOSED';
+const DISPOSED_BRAND_KEY = 'shieldcortex.embeddings.worker-disposed';
+
 const TIMEOUT_DECL = 'const INFERENCE_TIMEOUT_MS = 30_000;';
 const TIMEOUT_DECL_TEST =
   'const INFERENCE_TIMEOUT_MS = Number(process.env.SC_TEST_INFERENCE_TIMEOUT_MS) || 30_000;';
@@ -104,6 +122,17 @@ const DRIVER = [
   "import fs from 'fs';",
   "import { setTimeout as delay } from 'timers/promises';",
   "import { generateEmbedding, disposeModel, isModelLoaded, preloadModel } from './generator.js';",
+  // The disposal CONTRACT, taken as a namespace on purpose: a named import of an
+  // export the module does not have is a link-time SyntaxError, which would fail
+  // every scenario in this file for one missing symbol instead of failing the
+  // scenario that asks for it.
+  "import * as contract from './generator.js';",
+  '',
+  // The one place these literals are spelled out is the TypeScript constants
+  // above; the driver receives them rather than keeping a second copy.
+  `const MESSAGE = ${JSON.stringify(DISPOSED_MSG)};`,
+  `const CODE = ${JSON.stringify(DISPOSED_CODE)};`,
+  `const BRAND = Symbol.for(${JSON.stringify(DISPOSED_BRAND_KEY)});`,
   '',
   'const scenario = process.argv[2];',
   "const out = (obj) => fs.writeSync(1, '__RESULT__ ' + JSON.stringify(obj) + '\\n');",
@@ -194,8 +223,9 @@ const DRIVER = [
   '  const beatsBeforeReplacement = beatsFrom(staleId);',
   '  let second = -1;',
   "  let secondError = '';",
-  '  // The replacement is created here, while the timed-out worker is still',
-  "  // terminating — its exit lands afterwards and must not poison worker B.",
+  '  // The replacement is created here — after the timed-out kill has landed,',
+  '  // because this call waits it out. The dead thread\'s exit event still',
+  '  // arrives around now and must not poison worker B.',
   "  try { second = (await generateEmbedding('ok-after-timeout')).length; } catch (e) { secondError = msgOf(e); }",
   '  const loadedRightAfterReplacement = isModelLoaded();',
   '  // The kill we asked for logs nothing, so wait for the dead thread to stop',
@@ -403,6 +433,107 @@ const DRIVER = [
   '    spawned: spawned(),',
   '    loadedAtEnd: isModelLoaded(),',
   '  });',
+  "} else if (scenario === 'timeout-blocks-replacement') {",
+  '  // A timeout starts a termination nobody asked for, and the blocked worker',
+  '  // cannot die for ~600ms — so between the timeout firing and the thread',
+  '  // actually exiting there is a kill this process started and has not seen',
+  '  // finish. Work ALREADY ADMITTED to the lifecycle is what makes that window',
+  '  // dangerous: it is past the gate, and the moment the timed-out request',
+  '  // rejects it is released with a replacement worker one call away.',
+  "  const blocked = settleDims(generateEmbedding('__BLOCK_EXIT__'));",
+  '  const reachedBlock = await waitFor(() => readLines(process.env.SC_FAKE_WORKER_BLOCK).length > 0);',
+  '  // Admitted BEFORE the timeout fires, so these two are already inside this',
+  '  // lifecycle and are queued only behind the request that is about to fail.',
+  "  const queuedA = settleDims(generateEmbedding('queued-a'));",
+  "  const queuedB = settleDims(generateEmbedding('queued-b'));",
+  '  const timedOut = await blocked; // the kill is registered and still running',
+  '  const killStartedAt = Date.now();',
+  '  // Admitted mid-termination: a preload is the other way a replacement gets',
+  '  // built, and it does not go through the embed queue at all.',
+  '  const load = settle(preloadModel());',
+  '  await delay(150); // work that stepped over the kill would own a worker by now',
+  '  const spawnedMidTermination = spawned();',
+  '  const outcomes = await Promise.race([',
+  '    Promise.all([queuedA, queuedB, load]),',
+  "    delay(3000).then(() => 'hung'),",
+  '  ]);',
+  '  const settledMs = Date.now() - killStartedAt;',
+  '  const spawnedAfterSettle = spawned();',
+  '  await disposeModel();',
+  '  await delay(300);',
+  '  out({',
+  '    reachedBlock,',
+  '    timeoutMessage: timedOut.message,',
+  '    spawnedMidTermination,',
+  '    settledMs,',
+  '    outcomes,',
+  '    spawnedAfterSettle,',
+  '    loadedAtEnd: isModelLoaded(),',
+  '  });',
+  "} else if (scenario === 'disposal-error-brand') {",
+  '  // What a disposal actually THROWS, at each of the three places one is',
+  '  // raised, and what the shared classifier says about near misses a layer',
+  '  // below could produce by accident.',
+  '  const seen = {};',
+  '  const describe = (e) => ({',
+  '    isError: e instanceof Error,',
+  "    name: e && e.name ? String(e.name) : '',",
+  "    code: e && e.code !== undefined ? String(e.code) : '',",
+  '    message: msgOf(e),',
+  '    branded: Boolean(e && e[BRAND] === true),',
+  '    classified: contract.isWorkerDisposedError(e),',
+  '  });',
+  '  const capture = (label, p) => p.then(',
+  "    () => { seen[label] = { state: 'resolved' }; },",
+  "    (e) => { seen[label] = { state: 'rejected', ...describe(e) }; },",
+  '  );',
+  "  const inFlight = capture('inFlight', generateEmbedding('__HANG__'));",
+  '  await waitFor(() => spawned() >= 1); // the stub worker owns that request',
+  "  const queued = capture('queued', generateEmbedding('queued'));",
+  '  await disposeModel();',
+  '  await Promise.all([inFlight, queued]);',
+  '  // Admitted into the lifecycle the disposal above opened, then overtaken by',
+  '  // a second disposal before it ever reaches a worker: the third and last',
+  '  // place a disposal error is raised.',
+  '  const firstOfPair = disposeModel();',
+  "  const cancelled = capture('cancelled', generateEmbedding('ok-3'));",
+  '  const secondOfPair = disposeModel();',
+  '  await Promise.all([firstOfPair, secondOfPair, cancelled]);',
+  '  out({',
+  '    contract: {',
+  "      message: String(contract.WORKER_DISPOSED_MSG ?? ''),",
+  "      code: String(contract.WORKER_DISPOSED_CODE ?? ''),",
+  "      brandKey: String(contract.WORKER_DISPOSED_BRAND_KEY ?? ''),",
+  "      constructs: typeof contract.WorkerDisposedError === 'function'",
+  '        ? describe(new contract.WorkerDisposedError())',
+  '        : null,',
+  '    },',
+  '    inFlight: seen.inFlight,',
+  '    queued: seen.queued,',
+  '    cancelled: seen.cancelled,',
+  '    probes: {',
+  '      // The exact sentence, and nothing else — what a database driver, a',
+  '      // wrapper or a stale copy of the string could raise by accident.',
+  '      messageOnly: contract.isWorkerDisposedError(new Error(MESSAGE)),',
+  '      // Minted HERE, with no access to the class: the brand is a registry',
+  '      // symbol, so a second copy of the module (a dist build beside a',
+  '      // transpiled one) is recognised without sharing an identity.',
+  '      structural: contract.isWorkerDisposedError(',
+  '        Object.assign(new Error(MESSAGE), { code: CODE, [BRAND]: true }),',
+  '      ),',
+  '      brandWithoutCode: contract.isWorkerDisposedError(',
+  '        Object.assign(new Error(MESSAGE), { [BRAND]: true }),',
+  '      ),',
+  '      codeWithoutBrand: contract.isWorkerDisposedError(',
+  '        Object.assign(new Error(MESSAGE), { code: CODE }),',
+  '      ),',
+  '      wrongMessage: contract.isWorkerDisposedError(',
+  "        Object.assign(new Error(MESSAGE + ' while writing the vector'), { code: CODE, [BRAND]: true }),",
+  '      ),',
+  '      notAnError: contract.isWorkerDisposedError({ message: MESSAGE, code: CODE, [BRAND]: true }),',
+  '      plainString: contract.isWorkerDisposedError(MESSAGE),',
+  '    },',
+  '  });',
   '} else {',
   "  out({ error: 'unknown scenario: ' + scenario });",
   '  process.exitCode = 2;',
@@ -496,9 +627,9 @@ describe('embedding worker — intentional disposal is not a crash', () => {
 
     expect(run.result.state).toBe('rejected');
     // Pinned exactly, not by pattern: shutdown callers (src/memory/store.ts,
-    // scripts/lib/save-memory.mjs) classify this message by equality, so the
-    // two ends of that contract are held by behaviour at both ends.
-    expect(run.result.message).toBe('Embedding worker disposed');
+    // scripts/lib/save-memory.mjs) classify this by equality on top of the
+    // brand, so the two ends of that contract are held by behaviour at both.
+    expect(run.result.message).toBe(DISPOSED_MSG);
     expect(String(run.result.message)).not.toMatch(/exited with code/);
     expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
     expect(run.status).toBe(0);
@@ -674,6 +805,82 @@ describe('embedding worker — intentional disposal is not a crash', () => {
       spawned: 2,
     });
     expect(run.stderr).toMatch(/Embedding worker error: fake worker boom/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('a timeout kill blocks the replacement every admitted caller would build', () => {
+    const run = runScenario('timeout-blocks-replacement', { SC_TEST_INFERENCE_TIMEOUT_MS: '200' });
+
+    expect(run.result.reachedBlock).toBe(true); // the worker really is uninterruptible
+    expect(String(run.result.timeoutMessage)).toMatch(/embed timed out after 200ms/);
+    // The blocker itself: a timeout starts a termination the DISPOSAL path did
+    // not, and every caller already admitted to this lifecycle — two queued
+    // embeds and a preload that skips the queue entirely — must see it before
+    // it can call ensureWorker(). One worker, not two.
+    expect(run.result.spawnedMidTermination).toBe(1);
+    // ...and they waited rather than being dropped. The blocked thread needs
+    // ~600ms to die and the timeout fires at 200ms, so work that stepped over
+    // the kill would settle here at once instead.
+    expect(run.result.settledMs as number).toBeGreaterThan(150);
+    const outcomes = run.result.outcomes as Array<{ state: string; dims?: number }>;
+    expect(Array.isArray(outcomes)).toBe(true); // 'hung' means something never settled
+    expect(outcomes).toHaveLength(3);
+    // Waiting is not refusing: once the kill lands, all three do their work.
+    for (const outcome of outcomes) expect(outcome.state).toBe('resolved');
+    expect(outcomes[0].dims).toBe(3);
+    expect(outcomes[1].dims).toBe(3);
+    // And on exactly one fresh worker, built after the old thread was gone.
+    expect(run.result.spawnedAfterSettle).toBe(2);
+    expect(run.result.loadedAtEnd).toBe(false);
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/); // the kill was ours
+    expect(run.stderr).not.toMatch(/Embedding worker error/);
+    expect(run.status).toBe(0); // a leaked worker would hold the event loop open
+  }, 30_000);
+
+  it('settles cancelled work with a branded error, not a recognisable sentence', () => {
+    const run = runScenario('disposal-error-brand');
+
+    const disposal = {
+      isError: true,
+      name: 'WorkerDisposedError',
+      code: DISPOSED_CODE,
+      message: DISPOSED_MSG,
+      branded: true,
+      classified: true,
+    };
+    expect(run.result.contract).toEqual({
+      message: DISPOSED_MSG,
+      code: DISPOSED_CODE,
+      brandKey: DISPOSED_BRAND_KEY,
+      constructs: disposal,
+    });
+
+    // All three places a disposal is raised — the in-flight request the kill
+    // settles, work already queued behind it, and work admitted into the next
+    // lifecycle and then overtaken — carry the same brand. A caller can only be
+    // told "shutdown" by this module, never by a layer that knows the words.
+    for (const label of ['inFlight', 'queued', 'cancelled']) {
+      expect(run.result[label]).toEqual({ state: 'rejected', ...disposal });
+    }
+
+    expect(run.result.probes).toEqual({
+      // The exact sentence and nothing else — a database driver, a wrapper or a
+      // stale copy of the string. This is the one CASE called out: it used to
+      // be enough to make a post-embedding failure disappear.
+      messageOnly: false,
+      // Minted in the driver with no access to the class: a registry symbol is
+      // the same symbol in every module instance, so a `dist/` build's error is
+      // recognised by this transpiled copy and vice versa.
+      structural: true,
+      // Each half of the brand alone is not the brand.
+      brandWithoutCode: false,
+      codeWithoutBrand: false,
+      // Fully branded and still not this: the message must match whole.
+      wrongMessage: false,
+      // Shape is not identity.
+      notAnError: false,
+      plainString: false,
+    });
     expect(run.status).toBe(0);
   }, 30_000);
 });

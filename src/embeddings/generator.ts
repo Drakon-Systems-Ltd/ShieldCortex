@@ -18,14 +18,69 @@ const WORKER_UNAVAILABLE_MSG = 'Embedding worker unavailable. Run `npm run build
 /**
  * The exact message a disposal settles cancelled work with.
  *
- * Exported so that every caller which has to tell "shutdown cancelled this"
- * from "this failed" tests the string this module actually produces, instead
- * of its own copy of it. Deliberately NOT re-exported from `./index.js`: the
- * barrel is the embedding API other layers consume and stays as it is — this
- * is an internal contract between the generator and the callers that observe
- * its disposals, so they import it from here.
+ * One of THREE things a disposal must carry — see {@link WorkerDisposedError}.
+ * The message is what an operator reads and what a near miss is measured
+ * against; it is no longer sufficient on its own to make a caller go quiet.
+ *
+ * Exported so that a caller testing this axis tests the string this module
+ * actually produces instead of its own copy of it. Deliberately NOT
+ * re-exported from `./index.js`: the barrel is the embedding API other layers
+ * consume and stays as it is — this is an internal contract between the
+ * generator and the callers that observe its disposals, so they import it
+ * from here.
  */
 export const WORKER_DISPOSED_MSG = 'Embedding worker disposed';
+
+/**
+ * The `code` a disposal error carries, for callers that never see the class.
+ *
+ * `scripts/lib/save-memory.mjs` is a plain .mjs that loads this contract out of
+ * `dist/` at runtime; a future caller may only have the error object. A code is
+ * the half of the brand such a caller can check without importing anything.
+ */
+export const WORKER_DISPOSED_CODE = 'SHIELDCORTEX_EMBEDDING_WORKER_DISPOSED';
+
+/**
+ * Registry key for the structural brand — the other half.
+ *
+ * `Symbol.for` resolves through the cross-realm global symbol registry, so this
+ * is the SAME symbol in every module instance: the compiled `dist/` copy a hook
+ * loads, the source copy the MCP server runs, and a transpiled sandbox copy in
+ * a test are three separate modules whose classes are three separate
+ * identities. `instanceof` cannot span them; this can.
+ *
+ * Exported as the key rather than only as the symbol so a caller in another
+ * language runtime — or a test with no import at all — can rebuild it.
+ */
+export const WORKER_DISPOSED_BRAND_KEY = 'shieldcortex.embeddings.worker-disposed';
+const WORKER_DISPOSED_BRAND = Symbol.for(WORKER_DISPOSED_BRAND_KEY);
+
+/**
+ * What a disposal settles cancelled work with.
+ *
+ * The message alone used to BE the contract, and that made the sentence itself
+ * a suppression key: any layer under an embed — a SQLite driver, a wrapper, a
+ * stale copy of the string — could raise an `Error` reading `Embedding worker
+ * disposed` and every caller would treat a genuine failure as a clean shutdown.
+ * So a disposal now has to prove it came from here: the exact message AND the
+ * code AND the registry brand, all three, checked by
+ * {@link isWorkerDisposedError}.
+ *
+ * Nothing else this module raises is branded — not the timeout, not the kill
+ * the timeout performs, not a crash. Those are failures and stay loud.
+ */
+export class WorkerDisposedError extends Error {
+  readonly code: string = WORKER_DISPOSED_CODE;
+
+  constructor() {
+    super(WORKER_DISPOSED_MSG);
+    this.name = 'WorkerDisposedError';
+    // Non-enumerable: this must not travel through JSON, a structured clone or
+    // a spread and turn a copy of the error into something that gets silenced.
+    Object.defineProperty(this, WORKER_DISPOSED_BRAND, { value: true, enumerable: false });
+  }
+}
+
 const WORKER_TIMEOUT_KILL_MSG = 'Embedding worker terminated after a timed-out request';
 
 /**
@@ -93,13 +148,17 @@ function getWorkerPath(): string {
 /**
  * True only for work `disposeModel()` cancelled — nothing else.
  *
- * Whole-message equality, deliberately: the timeout kill, a crash, a timeout,
- * and any message that merely starts with or mentions disposal are failures
- * and stay loud at every caller. The one classifier every caller shares, so
- * "silent" can never widen in one of them without widening here.
+ * A real `Error`, the exact message, the code and the registry brand: all four,
+ * because message equality alone is a contract anything under a caller can
+ * satisfy by accident. The timeout kill, a crash, a timeout, and any message
+ * that merely starts with or mentions disposal are failures and stay loud at
+ * every caller. The one classifier every caller shares, so "silent" can never
+ * widen in one of them without widening here.
  */
 export function isWorkerDisposedError(e: unknown): boolean {
-  return e instanceof Error && e.message === WORKER_DISPOSED_MSG;
+  if (!(e instanceof Error) || e.message !== WORKER_DISPOSED_MSG) return false;
+  const branded = e as unknown as { code?: unknown; [key: symbol]: unknown };
+  return branded.code === WORKER_DISPOSED_CODE && branded[WORKER_DISPOSED_BRAND] === true;
 }
 
 /** A kill we asked for — its non-zero exit code is not news. */
@@ -107,8 +166,14 @@ function isIntentional(reason: RetireReason | null): boolean {
   return reason === 'disposed' || reason === 'timeout';
 }
 
-function intentionalMessage(reason: RetireReason | null): string {
-  return reason === 'timeout' ? WORKER_TIMEOUT_KILL_MSG : WORKER_DISPOSED_MSG;
+/**
+ * The error a kill we asked for settles its requests with.
+ *
+ * Only the disposal branch is branded. A timeout kill reads as what it is —
+ * collateral of a request that failed — and must stay loud at every caller.
+ */
+function intentionalError(reason: RetireReason | null): Error {
+  return reason === 'timeout' ? new Error(WORKER_TIMEOUT_KILL_MSG) : new WorkerDisposedError();
 }
 
 /** Detach a handle from the module. Keeps the first reason — it is the cause. */
@@ -118,12 +183,17 @@ function retire(handle: WorkerHandle, reason: RetireReason): void {
   if (current === handle) current = null;
 }
 
-/** Reject every request this handle still owns. Never touches another worker's. */
-function settleAll(handle: WorkerHandle, message: string): void {
+/**
+ * Reject every request this handle still owns. Never touches another worker's.
+ *
+ * `error` is a factory, not an error: each caller gets its own object, so a
+ * stack trace belongs to one rejection and nothing is shared across them.
+ */
+function settleAll(handle: WorkerHandle, error: () => Error): void {
   for (const [id, p] of handle.pending) {
     handle.pending.delete(id);
     clearTimeout(p.timer);
-    p.reject(new Error(message));
+    p.reject(error());
   }
 }
 
@@ -136,15 +206,50 @@ function settleAll(handle: WorkerHandle, message: string): void {
 let terminationBarrier: Promise<void> = Promise.resolve();
 
 /**
+ * How many terminations this process has ever started.
+ *
+ * The barrier is REPLACED by each new kill, so a waiter holding the promise it
+ * read a moment ago is holding a barrier that a later termination is not in.
+ * That is exactly what the timeout path does — it starts a kill nobody asked
+ * for, in between an admission and its turn to run — so a counter is what lets
+ * {@link awaitTerminations} tell "the barrier I awaited is current" from "a
+ * kill started while I was waiting on the old one".
+ */
+let terminationsStarted = 0;
+
+/**
+ * Wait until no termination this process started is still running.
+ *
+ * Re-reads the barrier after every await instead of snapshotting it once: a
+ * snapshot is only correct if no further kill can start while the waiter is
+ * parked, and a timeout can. The loop ends as soon as an await finishes with
+ * the counter unchanged, i.e. nothing new was started while it waited.
+ *
+ * Bounded in practice because `worker.terminate()` always settles and a
+ * termination is only started by a disposal or a timed-out request — this does
+ * not spin, it parks on a promise per outstanding kill.
+ */
+async function awaitTerminations(): Promise<void> {
+  for (let seen = -1; seen !== terminationsStarted;) {
+    seen = terminationsStarted;
+    await terminationBarrier;
+  }
+}
+
+/**
  * Kill a worker for a reason we chose, and record the kill so later disposals
  * and later admissions wait for the thread to actually exit.
  */
-function terminateHandle(handle: WorkerHandle, reason: RetireReason, message: string): void {
+function terminateHandle(handle: WorkerHandle, reason: 'disposed' | 'timeout'): void {
   // Retire before terminating so the exit this causes is not reported as a
   // crash, and settle in-flight requests explicitly — clearing the map left
   // them to whatever the exit handler said, i.e. a phantom crash.
   retire(handle, reason);
-  settleAll(handle, message);
+  settleAll(handle, () => intentionalError(reason));
+  // Counted BEFORE the terminate() call, so the kill is visible to anything
+  // that reads the barrier in the same turn — including a queued caller
+  // released by the very rejection this function just performed.
+  terminationsStarted += 1;
   // Failure to terminate is swallowed, not thrown: disposal runs inside
   // shutdown handlers that call process.exit() on the next line, and the
   // worker's own exit handler still reports anything genuinely unexpected.
@@ -191,19 +296,19 @@ function ensureWorker(): WorkerHandle {
     // A real error is never softened, even on a worker we had already retired.
     console.error('[shieldcortex] Embedding worker error:', err.message);
     retire(handle, 'crashed');
-    settleAll(handle, 'Worker crashed: ' + err.message);
+    settleAll(handle, () => new Error('Worker crashed: ' + err.message));
   });
 
   handle.worker.on('exit', (code) => {
-    const intentional = isIntentional(handle.retiredReason);
+    const reason = handle.retiredReason;
+    const intentional = isIntentional(reason);
     if (!intentional && code !== 0) {
       console.error(`[shieldcortex] Embedding worker exited with code ${code}`);
     }
-    const message = intentional
-      ? intentionalMessage(handle.retiredReason)
-      : `Worker exited with code ${code}`;
     retire(handle, 'exited');
-    settleAll(handle, message);
+    settleAll(handle, () => (intentional
+      ? intentionalError(reason)
+      : new Error(`Worker exited with code ${code}`)));
   });
 
   return handle;
@@ -221,10 +326,15 @@ function sendMessage(type: string, text?: string, timeoutMs?: number): Promise<u
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       handle.pending.delete(id);
+      // Register the kill BEFORE the caller is told, not after. Settling this
+      // request releases the embed queue, and everything already on it has to
+      // find this termination in the barrier — a queued embed that ran first
+      // would call ensureWorker() and stand a replacement up beside a thread
+      // we are still killing.
+      terminateHandle(handle, 'timeout');
       // The timeout itself still fails loudly — only the kill we do about it
       // is treated as intentional, so it is not re-reported as a crash.
       reject(new Error(`${type} timed out after ${timeout}ms`));
-      terminateHandle(handle, 'timeout', WORKER_TIMEOUT_KILL_MSG);
     }, timeout);
 
     handle.pending.set(id, { resolve, reject, timer });
@@ -239,21 +349,25 @@ function sendMessage(type: string, text?: string, timeoutMs?: number): Promise<u
  *
  *  - work whose lifecycle a disposal cancelled settles as disposed instead of
  *    reaching ensureWorker() and resurrecting the worker just shut down;
- *  - work admitted after that disposal belongs to the NEXT lifecycle and waits
- *    on the terminations outstanding when that lifecycle opened (`barrier`)
- *    before it touches a worker, so it can neither race the old worker's exit
- *    nor stand a replacement up beside it. It still runs afterwards — unless a
- *    further disposal cancels its lifecycle in turn.
+ *  - all other work waits out every termination still running when it gets its
+ *    turn before it touches a worker, so it can neither race a dying worker's
+ *    exit nor stand a replacement up beside it. It still runs afterwards —
+ *    unless a further disposal cancels its lifecycle in turn.
+ *
+ * The wait is deliberately NOT a snapshot taken when the lifecycle opened. A
+ * timeout starts a termination inside a lifecycle, with no disposal involved
+ * and no new lifecycle to carry it: work admitted before that timeout would
+ * hold a barrier the kill is not in, and the first queued caller released by
+ * the timed-out request would build the replacement. See
+ * {@link awaitTerminations}.
  *
  * Dispose is a boundary, not a process-wide off switch.
  */
 interface Lifecycle {
   cancelled: boolean;
-  /** Terminations that were still outstanding when this lifecycle opened. */
-  barrier: Promise<void>;
 }
 
-let lifecycle: Lifecycle = { cancelled: false, barrier: Promise.resolve() };
+let lifecycle: Lifecycle = { cancelled: false };
 
 /**
  * Gate work on the lifecycle it was admitted into, then hand off to `send`
@@ -261,9 +375,9 @@ let lifecycle: Lifecycle = { cancelled: false, barrier: Promise.resolve() };
  * exactly the replacement worker it is trying to prevent.
  */
 async function runInLifecycle<T>(admitted: Lifecycle, send: () => Promise<T>): Promise<T> {
-  if (admitted.cancelled) throw new Error(WORKER_DISPOSED_MSG);
-  await admitted.barrier;
-  if (admitted.cancelled) throw new Error(WORKER_DISPOSED_MSG);
+  if (admitted.cancelled) throw new WorkerDisposedError();
+  await awaitTerminations();
+  if (admitted.cancelled) throw new WorkerDisposedError();
   return send();
 }
 
@@ -355,12 +469,13 @@ export async function disposeModel(): Promise<void> {
   lifecycle.cancelled = true;
 
   const handle = current;
-  if (handle) terminateHandle(handle, 'disposed', WORKER_DISPOSED_MSG);
+  if (handle) terminateHandle(handle, 'disposed');
 
-  // Snapshot after our own kill is registered, so this call waits for that as
-  // well as for anything already in flight. The lifecycle we open next is
-  // gated on the same snapshot.
+  // Snapshotted AFTER our own kill is registered, so this call waits for that
+  // as well as for anything already in flight — and only for those. A caller
+  // shutting down must not be held open indefinitely by kills that start later;
+  // work admitted later waits for those itself, in runInLifecycle().
   const barrier = terminationBarrier;
-  lifecycle = { cancelled: false, barrier };
+  lifecycle = { cancelled: false };
   await barrier;
 }
