@@ -15,7 +15,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const MODEL_LOAD_TIMEOUT_MS = 120_000;
 const INFERENCE_TIMEOUT_MS = 30_000;
 const WORKER_UNAVAILABLE_MSG = 'Embedding worker unavailable. Run `npm run build` so dist/embeddings/worker.js exists.';
-const WORKER_DISPOSED_MSG = 'Embedding worker disposed';
+/**
+ * The exact message a disposal settles cancelled work with.
+ *
+ * Exported so that every caller which has to tell "shutdown cancelled this"
+ * from "this failed" tests the string this module actually produces, instead
+ * of its own copy of it. Deliberately NOT re-exported from `./index.js`: the
+ * barrel is the embedding API other layers consume and stays as it is — this
+ * is an internal contract between the generator and the callers that observe
+ * its disposals, so they import it from here.
+ */
+export const WORKER_DISPOSED_MSG = 'Embedding worker disposed';
 const WORKER_TIMEOUT_KILL_MSG = 'Embedding worker terminated after a timed-out request';
 
 /**
@@ -78,6 +88,18 @@ function getWorkerPath(): string {
     loggedMissingWorker = true;
   }
   throw new Error(WORKER_UNAVAILABLE_MSG);
+}
+
+/**
+ * True only for work `disposeModel()` cancelled — nothing else.
+ *
+ * Whole-message equality, deliberately: the timeout kill, a crash, a timeout,
+ * and any message that merely starts with or mentions disposal are failures
+ * and stay loud at every caller. The one classifier every caller shares, so
+ * "silent" can never widen in one of them without widening here.
+ */
+export function isWorkerDisposedError(e: unknown): boolean {
+  return e instanceof Error && e.message === WORKER_DISPOSED_MSG;
 }
 
 /** A kill we asked for — its non-zero exit code is not news. */

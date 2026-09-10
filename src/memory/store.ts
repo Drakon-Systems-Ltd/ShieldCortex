@@ -53,6 +53,7 @@ import {
   persistEvent,
 } from '../api/events.js';
 import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
+import { isWorkerDisposedError } from '../embeddings/generator.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
@@ -135,21 +136,6 @@ export function resolveDefaultAgentId(): string | null {
 }
 
 
-/**
- * The exact message `embeddings/generator.ts` settles cancelled work with when
- * `disposeModel()` closes a lifecycle. Shutdown cancelling queued embed jobs is
- * the disposal doing its job, not a failure — reporting one line per queued job
- * as "Failed to generate embedding" is noise that scales with queue depth.
- *
- * Matched whole, deliberately: the timeout kill message, a crash, or anything
- * that merely mentions disposal is a failure and still gets reported.
- */
-const WORKER_DISPOSED_MSG = 'Embedding worker disposed';
-
-function isShutdownCancellation(e: unknown): boolean {
-  return e instanceof Error && e.message === WORKER_DISPOSED_MSG;
-}
-
 const pendingEmbeddingWrites = new Set<Promise<void>>();
 
 /** Await all in-flight embedding writes (bench/tests). No-op if empty. */
@@ -176,7 +162,12 @@ function scheduleMemoryEmbedding(db: ReturnType<typeof getDatabase>, memoryId: n
       }
     })
     .catch(e => {
-      if (isShutdownCancellation(e)) return;
+      // Shutdown cancelled this job on purpose — the disposal doing its job,
+      // not a failure, and reporting one line per queued job is noise that
+      // scales with queue depth. The generator owns the classifier, matched
+      // whole: the timeout kill, a crash, or a message that merely mentions
+      // disposal is a failure and still gets reported below.
+      if (isWorkerDisposedError(e)) return;
       if (
         e instanceof Error
         && (
@@ -1399,7 +1390,9 @@ function refreshEmbeddingAsync(memoryId: number, title: string, content: string)
       }
     })
     .catch((e) => {
-      if (isShutdownCancellation(e)) return;
+      // Same boundary as the create path: a shutdown-cancelled refresh is not
+      // a failure, and only the generator's exact disposal message is quiet.
+      if (isWorkerDisposedError(e)) return;
       if (
         e instanceof Error &&
         (
