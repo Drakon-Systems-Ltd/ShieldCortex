@@ -20,9 +20,20 @@
  * The writer itself is unmodified and carries no test seam: it finds the
  * fixture's embedder the same way it finds the real one, by relative package
  * layout, and the last case below proves the retired injection variables now
- * do nothing even in a genuine jest runtime. Each hook process also runs on its
- * own HOME, config dir and audit dir — one case here proves that an operator's
- * config and audit trail, inherited or handed in, come back untouched.
+ * do nothing even in a genuine jest runtime.
+ *
+ * Each hook process also runs on its own home, config dir and audit dir, all
+ * pinned AFTER the caller's environment. The isolation case below is where that
+ * is measured, and the two halves of it are not equally strong:
+ *
+ * - config isolation is proven non-vacuously, by the healed local twin. The
+ *   child really did read a config, stamp an identity into it and sign it —
+ *   into this run's directory, while the inherited and supplied canaries came
+ *   back byte-identical;
+ * - the audit-dir pin is belt-and-braces. This path writes its audit rows into
+ *   SQLite (`defence_audit`), not into a directory, so an untouched audit
+ *   canary says the pin held, NOT that a filesystem audit write was diverted.
+ *   No such write executes here, and the case does not claim one.
  *
  * The match is EXACT. A timeout, a timeout kill, a crash, an invalid vector, a
  * database error, or any message that merely mentions disposal stays loud.
@@ -38,6 +49,8 @@ import {
   FIXTURE_VECTOR_HEAD,
   HOOK_CASE_MS,
   HOOK_CHILD_MS,
+  HOOK_NO_PROXY,
+  HOOK_PROXY_CONTROL_KEY,
   createHookPackage,
   repoRoot,
   runHook,
@@ -104,11 +117,37 @@ const CANARY_AUDIT_LINE = '{"canary":"an operator\'s real forensics"}\n';
 function snapshot(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const entry of fs.readdirSync(dir, { recursive: true, withFileTypes: true })) {
-    const full = path.join(entry.parentPath, entry.name);
+    // `parentPath` landed in Node 20.12; this package supports >=20.0, where the
+    // same value is on `path`. Without the fallback an older-but-declared-
+    // supported Node throws ERR_INVALID_ARG_TYPE out of path.join instead of
+    // failing an assertion.
+    const { parentPath, path: legacyParent } = entry as unknown as { parentPath?: string; path?: string };
+    const parent = parentPath ?? legacyParent;
+    if (!parent) throw new Error('this Node reports neither Dirent.parentPath nor Dirent.path');
+    const full = path.join(parent, entry.name);
     const rel = path.relative(dir, full);
     out[rel] = entry.isDirectory() ? '<dir>' : fs.readFileSync(full, 'utf-8');
   }
   return out;
+}
+
+/** Regex-safe form of a literal, so an interpolated constant matches itself. */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Owner-only, where that means something.
+ *
+ * 0700 is a POSIX bit pattern; Windows reports its ACLs through a fabricated
+ * mode that no permission assertion can read, so the platform check is the
+ * honest form of this assertion rather than a way of skipping it.
+ */
+function expectOwnerOnly(dir: string): void {
+  const stat = fs.statSync(dir);
+  expect(stat.isDirectory()).toBe(true);
+  if (process.platform === 'win32') return;
+  expect(stat.mode & 0o777).toBe(0o700);
 }
 
 // --- store.ts seam: the embedder is a stub, never the real worker ----------
@@ -381,8 +420,10 @@ describe('hook writer (real process, hermetic package) — same classification',
     // The whole composed line, so a mangled trigger that failed for some other
     // SQLite reason (a quoting slip turns RAISE's argument into a column
     // reference) cannot pass by merely containing the right words.
+    // Escaped, so the constant matches ITSELF: a future message carrying `(` or
+    // `.` would otherwise quietly change what this pattern accepts.
     expect(run.stderr).toMatch(
-      new RegExp(`embedding failed for memory \\d+: ${DB_UPDATE_REJECTED_MSG}`),
+      new RegExp(`embedding failed for memory \\d+: ${escapeRegExp(DB_UPDATE_REJECTED_MSG)}`),
     );
     // Loud, and the memory still survives its lost vector: runHook fails the
     // case outright if the row is missing, so NULL here is the whole damage.
@@ -390,14 +431,18 @@ describe('hook writer (real process, hermetic package) — same classification',
   }, HOOK_CASE_MS);
 
   it('kills a wedged child on its own budget, and says what it was doing', () => {
-    // The embedder never settles and the writer's own embed timeout (10s by
-    // default) is well beyond the budget given here, so the only thing that can
-    // end this run is spawnSync's kill — the mechanism that must fire before
-    // jest's case budget for every other subprocess case in this file.
+    // The embedder never settles, and the writer's own embed timeout is PINNED
+    // here rather than assumed: its default is 10s, but it reads
+    // SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS, so an operator shell exporting a
+    // short one would end the run by timing out — a green pass for the wrong
+    // mechanism. At 30s against a 1.5s budget, the only thing that can end this
+    // run is spawnSync's kill: the mechanism that must fire before jest's case
+    // budget for every other subprocess case in this file.
     expect(() => runHook({
       dir: root,
       pkgRoot: pkg,
       plan: { mode: 'hang' },
+      env: { SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '30000' },
       timeoutMs: 1_500,
       title: 'HOOK wedged',
     })).toThrow(/hook probe did not finish within its 1500ms child budget \(killed with SIGTERM\)/);
@@ -411,6 +456,20 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(HOOK_CHILD_MS).toBeLessThan(HOOK_CASE_MS);
   });
 
+  it('refuses a child budget its own case could not outlive', () => {
+    // The constant invariant above holds for the DEFAULT budget only. A case
+    // passing its own `timeoutMs` at or beyond the jest budget would get the
+    // bare "exceeded timeout" the whole arrangement exists to avoid, so runHook
+    // rejects it at the boundary instead of spawning something it cannot report
+    // on. Nothing is written before the refusal.
+    const before = fs.readdirSync(root);
+    for (const timeoutMs of [HOOK_CASE_MS, HOOK_CASE_MS + 1, 0, -1]) {
+      expect(() => runHook({ dir: root, pkgRoot: pkg, timeoutMs, title: 'HOOK bad budget' }))
+        .toThrow(/child budget/);
+    }
+    expect(fs.readdirSync(root)).toEqual(before);
+  });
+
   it('awaits the vector and stores it before the process exits', () => {
     const run = runHook({ dir: root, pkgRoot: pkg, plan: { mode: 'vector' }, title: 'HOOK stores it' });
 
@@ -421,9 +480,10 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(run.head).toBe(FIXTURE_VECTOR_HEAD);
     expect(run.stderr).not.toContain(WRITER_PREFIX);
     // An empty isolated config is the authority for every ordinary run: no key,
-    // no endpoint, nothing to sync — so the child wrote nothing into it at all,
-    // and the only entry is the audit directory the fixture made for it.
-    expect(fs.readdirSync(run.configDir)).toEqual(['audit']);
+    // no endpoint, nothing to sync — so the child wrote no config here at all.
+    // What the whole directory holds is the isolation case's subject, not this
+    // one's: asserting it here would fail this case for an unrelated change.
+    expect(fs.existsSync(path.join(run.configDir, 'config.json'))).toBe(false);
   }, HOOK_CASE_MS);
 
   it('embeds nothing at all when embeddings are disabled', () => {
@@ -439,7 +499,7 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(run.stderr).not.toContain(WRITER_PREFIX);
   }, HOOK_CASE_MS);
 
-  it('never touches a config or audit directory it inherited from outside', () => {
+  it('never reads or signs a config directory it inherited from outside', () => {
     // The hook process reads the live defence config on every scan. Whatever the
     // machine, the operator or the enclosing test runner has exported for
     // SHIELDCORTEX_CONFIG_DIR / SHIELDCORTEX_AUDIT_DIR, this child must read and
@@ -481,21 +541,39 @@ describe('hook writer (real process, hermetic package) — same classification',
 
       // ...and the config work the canaries must not receive happened HERE: the
       // child read its own config, healed it with a device identity and an HMAC,
-      // and dropped the integrity key beside it. Every path it wrote is inside
-      // this run's directory, owner-only.
+      // and dropped the integrity key beside it. That is what makes this case
+      // non-vacuous — a real read-and-sign, landing inside this run's directory.
       const healed = fs.readFileSync(path.join(run.configDir, 'config.json'), 'utf-8');
       expect(healed).toContain(ISOLATED_KEY); // the twin, not one of the canaries
       expect(healed).toContain('"deviceId"'); // identity stamped...
       expect(healed).toContain('"_sig"');     // ...and signed, which no canary is
-      expect(fs.existsSync(path.join(run.configDir, '.integrity-key'))).toBe(true);
+      // The whole directory, here rather than in the storing case above: this is
+      // the case whose subject is where the child's own paths are and what may
+      // appear in them. Nothing beyond the heal, the key it signs with, and the
+      // audit dir the fixture made.
+      expect(fs.readdirSync(run.configDir).sort()).toEqual(['.integrity-key', 'audit', 'config.json']);
       expect(run.configDir.startsWith(`${root}${path.sep}`)).toBe(true);
       expect(run.auditDir.startsWith(`${run.configDir}${path.sep}`)).toBe(true);
       for (const isolated of [run.home, run.configDir, run.auditDir]) {
-        expect(fs.statSync(isolated).mode & 0o777).toBe(0o700);
+        expectOwnerOnly(isolated);
       }
-      // Nothing appends to the audit dir on this path, so the isolated one is
-      // empty. It exists and is owner-only regardless, because the directory an
-      // audit append WOULD use is chosen before anyone knows whether it happens.
+      // The child answered from the pinned paths, not from anything the caller
+      // or this process exported.
+      expect(run.child.configDirIsIsolated).toBe(true);
+      expect(run.child.auditDirIsIsolated).toBe(true);
+      expect(run.child.homedirIsIsolated).toBe(true);
+      // The seeded config is the one cloud-enabled run in this file, so it is
+      // also the one that must not be able to leave the machine: it names the
+      // loopback discard port, and the child carries no proxy that could turn
+      // that into an egress.
+      expect(run.child.proxyKeysPresent).toEqual([]);
+      expect(run.child.noProxyIsLoopback).toBe(true);
+      // Belt-and-braces, and labelled as such: NOTHING on this path appends to
+      // an audit DIRECTORY — the writer's audit trail is the `defence_audit`
+      // table — so the empty isolated audit dir says the pin held, not that a
+      // filesystem audit write was diverted into it. The pin is still worth
+      // having: the directory an append WOULD use is chosen before anyone knows
+      // whether an append happens.
       expect(fs.readdirSync(run.auditDir)).toEqual([]);
     } finally {
       if (priorConfig === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
@@ -504,8 +582,91 @@ describe('hook writer (real process, hermetic package) — same classification',
       else process.env.SHIELDCORTEX_AUDIT_DIR = priorAudit;
     }
 
-    // Not one byte, and not one new file, in any of the four.
+    // Not one byte, and not one new file, in any of the four. For the two config
+    // canaries that is the load-bearing half — reading one would have signed it.
     expect([inheritedConfig, inheritedAudit, suppliedConfig, suppliedAudit].map(snapshot)).toEqual(before);
+  }, HOOK_CASE_MS);
+
+  it('pins its own home, whatever the caller and the environment say', () => {
+    // HOME is not the whole of it: on Windows `os.homedir()` ignores HOME and
+    // reads USERPROFILE, so a child pinned on HOME alone would still resolve an
+    // operator's real home — and the model-cache root, which is derived from
+    // homedir(), with it. Both channels are exercised at once, inherited from
+    // this process and handed to runHook, exactly as the config case does.
+    const ext = fs.mkdtempSync(path.join(root, 'ext-home-'));
+    const prior = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    try {
+      process.env.HOME = ext;
+      process.env.USERPROFILE = ext;
+      const run = runHook({
+        dir: root,
+        pkgRoot: pkg,
+        plan: { mode: 'vector' },
+        env: { HOME: ext, USERPROFILE: ext },
+        title: 'HOOK home pinned',
+      });
+
+      // The run did the whole job — not a case that passed by not running.
+      expect(run.events).toEqual(['generateEmbedding']);
+      expect(run.len).toBe(FIXTURE_VECTOR_BYTES);
+
+      // What the child actually resolved, reported by the probe as booleans
+      // against the paths this run pinned.
+      expect(run.child.homeEnvIsIsolated).toBe(true);
+      expect(run.child.userProfileIsIsolated).toBe(true);
+      expect(run.child.homedirIsIsolated).toBe(true);
+      expect(run.home.startsWith(`${root}${path.sep}`)).toBe(true);
+      expectOwnerOnly(run.home);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    // ...and the home it was TOLD to use, twice, stayed empty.
+    expect(fs.readdirSync(ext)).toEqual([]);
+  }, HOOK_CASE_MS);
+
+  it('strips every proxy variable and points NO_PROXY at loopback', () => {
+    // A hook child inherits an operator's shell. A proxy there is an egress the
+    // isolation cannot see: the seeded cloud config names loopback, but a
+    // CONNECT proxy would carry that request — key and all — off the machine
+    // anyway. So the whole family is removed after the caller's env, and
+    // NO_PROXY is set to loopback for anything that consults it.
+    const prior = { HTTP_PROXY: process.env.HTTP_PROXY, https_proxy: process.env.https_proxy };
+    try {
+      process.env.HTTP_PROXY = 'http://proxy.invalid:3128';
+      process.env.https_proxy = 'http://proxy.invalid:3128';
+      const run = runHook({
+        dir: root,
+        pkgRoot: pkg,
+        plan: { mode: 'vector' },
+        env: {
+          HTTPS_PROXY: 'http://proxy.invalid:3128',
+          all_proxy: 'socks5://proxy.invalid:1080',
+          // Proxy-SHAPED, and deliberately not one of the stripped keys: the
+          // probe reports it, which is how an empty list for the real six is
+          // known to be a scrub rather than a probe that never looked.
+          [HOOK_PROXY_CONTROL_KEY]: 'http://127.0.0.1:9',
+        },
+        title: 'HOOK proxies stripped',
+      });
+
+      expect(run.events).toEqual(['generateEmbedding']); // it really ran
+      // Names only. The probe never reports a proxy VALUE, so a failure here
+      // cannot print an operator's credentialed proxy URL into a CI log.
+      expect(run.child.proxyKeysPresent).toEqual([HOOK_PROXY_CONTROL_KEY]);
+      expect(run.child.noProxyIsLoopback).toBe(true);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    // And what the child was told to bypass is loopback, nothing else.
+    expect(HOOK_NO_PROXY.split(',')).toEqual(['localhost', '127.0.0.1', '::1']);
   }, HOOK_CASE_MS);
 
   it('embeds nothing at all when the model cache is not ready', () => {
@@ -670,6 +831,104 @@ describe('hook package fixture — never builds inside the repository', () => {
     expect(fs.existsSync(generator)).toBe(true);
     expect(fs.existsSync(path.join(repoRoot, 'dist', 'embeddings', 'generator.real.js'))).toBe(false);
     expect(fs.existsSync(strayPackage)).toBe(false);
+  });
+});
+
+/**
+ * The same refusal, generalised — because `repoRoot` is only ONE checkout.
+ *
+ * This repository is worked in worktrees: a dozen sibling checkouts and a main
+ * clone sit beside the one these tests run from, each with a `package.json` and
+ * a `dist/embeddings/generator.js` this builder would overwrite and rename
+ * exactly as it would here. `repoRoot` names none of them, so the guard is
+ * written against what a checkout IS — a directory holding a `.git` entry,
+ * a directory in a clone and a file in a worktree — and the destination itself
+ * must not exist at all, since the builder writes THROUGH a link.
+ *
+ * Every case below uses disposable twins under a temporary directory. A real
+ * sibling checkout is never passed to the builder, not even to be refused.
+ */
+describe('hook package fixture — a destination must be fresh, and outside every checkout', () => {
+  const TWIN_PACKAGE_JSON = `${JSON.stringify({ name: 'a-real-checkouts-package-json' }, null, 2)}\n`;
+  let root: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-embed-dest-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('rejects a destination that already exists, whatever it is', () => {
+    const existingDir = path.join(root, 'existing-dir');
+    fs.mkdirSync(path.join(existingDir, 'keep'), { recursive: true });
+    const existingFile = path.join(root, 'existing-file');
+    fs.writeFileSync(existingFile, 'not a package');
+    const linkTarget = path.join(root, 'link-target');
+    fs.mkdirSync(linkTarget);
+    const liveLink = path.join(root, 'live-link');
+    fs.symlinkSync(linkTarget, liveLink, 'dir');
+    // The one `fs.existsSync` cannot see, and the one that matters most: a
+    // dangling link is a path the builder's own mkdir would CREATE, through the
+    // link, wherever it points.
+    const danglingLink = path.join(root, 'dangling-link');
+    fs.symlinkSync(path.join(root, 'not-there'), danglingLink, 'dir');
+
+    for (const dest of [existingDir, existingFile, liveLink, danglingLink]) {
+      expect(() => createHookPackage(dest)).toThrow(/refuses to build at an existing path/);
+    }
+
+    // Nothing was written into, through or beside any of them.
+    expect(fs.readFileSync(existingFile, 'utf-8')).toBe('not a package');
+    expect(fs.readdirSync(existingDir)).toEqual(['keep']);
+    expect(fs.readdirSync(linkTarget)).toEqual([]);
+    expect(fs.existsSync(path.join(root, 'not-there'))).toBe(false);
+  });
+
+  it('rejects a destination inside another checkout, clone or worktree alike', () => {
+    const clone = path.join(root, 'clone-twin');
+    fs.mkdirSync(path.join(clone, '.git', 'objects'), { recursive: true });
+    const worktree = path.join(root, 'worktree-twin');
+    fs.mkdirSync(worktree);
+    fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: /nowhere/.git/worktrees/twin\n');
+    for (const twin of [clone, worktree]) {
+      fs.writeFileSync(path.join(twin, 'package.json'), TWIN_PACKAGE_JSON);
+    }
+
+    for (const dest of [
+      path.join(clone, 'pkg'),
+      path.join(worktree, 'pkg'),
+      // Ancestors that do not exist yet: the walk starts at the deepest one
+      // that does, so depth cannot get a destination past the guard.
+      path.join(worktree, 'nested', 'deeper', 'pkg'),
+    ]) {
+      expect(() => createHookPackage(dest)).toThrow(/refuses to build inside a checkout/);
+      expect(fs.existsSync(dest)).toBe(false);
+    }
+
+    // Neither twin lost its package.json, and neither gained a dist/ or a
+    // node_modules symlink.
+    for (const twin of [clone, worktree]) {
+      expect(fs.readFileSync(path.join(twin, 'package.json'), 'utf-8')).toBe(TWIN_PACKAGE_JSON);
+      expect(fs.readdirSync(twin).sort()).toEqual(['.git', 'package.json']);
+    }
+  });
+
+  it('follows a link into a checkout before deciding', () => {
+    // The destination's PARENT is an ordinary temporary directory; only its
+    // resolved location is inside a checkout. A guard that reasoned about the
+    // literal path would build here.
+    const twin = path.join(root, 'linked-twin');
+    fs.mkdirSync(path.join(twin, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(twin, 'package.json'), TWIN_PACKAGE_JSON);
+    const doorway = path.join(root, 'doorway');
+    fs.symlinkSync(twin, doorway, 'dir');
+
+    expect(() => createHookPackage(path.join(doorway, 'pkg')))
+      .toThrow(/refuses to build inside a checkout/);
+    expect(fs.readFileSync(path.join(twin, 'package.json'), 'utf-8')).toBe(TWIN_PACKAGE_JSON);
+    expect(fs.readdirSync(twin).sort()).toEqual(['.git', 'package.json']);
   });
 });
 
