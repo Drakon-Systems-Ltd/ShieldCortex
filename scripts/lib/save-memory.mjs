@@ -355,6 +355,19 @@ let _embedCache = null;
 let _embedCacheKey = null;
 let _warnedEmbedUnavailable = false;
 
+/**
+ * The embedder, resolved by package layout — `dist/` two directories up.
+ *
+ * That resolution is also the ONLY substitution point tests get. This module
+ * carried env-gated seams for a while (a fake vector, an injected failure), and
+ * the cost was that a hook process whose environment happened to carry those
+ * keys ran test behaviour in production, skipping the SKIP_EMBEDDINGS and
+ * cache-health gates below. Fencing them behind more inherited variables only
+ * moved that boundary. They are gone: a test that needs a different embedder
+ * builds a package around a copy of this file and puts its own
+ * `dist/embeddings/*` in it (see `src/__tests__/hook-package-fixture.ts`), so
+ * nothing about a test can reach a hook the host started.
+ */
 async function loadEmbedder() {
   const here = dirname(fileURLToPath(import.meta.url));
   const distRoot = resolve(here, '..', '..', 'dist');
@@ -371,42 +384,6 @@ async function loadEmbedder() {
   }
   _embedCacheKey = distRoot;
   return _embedCache;
-}
-
-/**
- * Evidence that this process is a test RUNTIME, not merely a process that
- * inherited an env key.
- *
- * A hook is started by the host with whatever environment it happens to have,
- * so SHIELDCORTEX_TEST_SEAM=1 left in a shell profile — or inherited from a
- * test run that spawned an agent — used to be enough on its own to open the
- * seams below, which skip the SKIP_EMBEDDINGS and cache-health gates the rest
- * of this path respects. Jest sets both of these itself (jest-cli/bin defaults
- * NODE_ENV to 'test'; jest-runner sets JEST_WORKER_ID even with --runInBand)
- * and the probe processes tests spawn inherit them, so honest tests keep
- * working while a leaked seam key alone opens nothing.
- */
-function testRuntimePresent() {
-  return process.env.NODE_ENV === 'test' && Boolean(process.env.JEST_WORKER_ID);
-}
-
-/** Production hooks must never honour FAKE. Tests opt in with SHIELDCORTEX_TEST_SEAM=1. */
-function testEmbedSeamOpen() {
-  return testRuntimePresent()
-    && process.env.SHIELDCORTEX_TEST_SEAM === '1'
-    && process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1';
-}
-
-/**
- * Test-only failure injection, behind the same gates as FAKE: the embed call
- * rejects with this exact message, so the shutdown-vs-failure classification
- * below is exercised for real without a model on disk.
- * Returns null (no injection) in production.
- */
-function testEmbedFailure() {
-  if (!testRuntimePresent()) return null;
-  if (process.env.SHIELDCORTEX_TEST_SEAM !== '1') return null;
-  return process.env.SHIELDCORTEX_HOOK_EMBED_FAIL || null;
 }
 
 /**
@@ -440,7 +417,6 @@ async function isShutdownCancellation(err) {
 }
 
 async function embeddingCacheIsHealthy() {
-  if (testEmbedSeamOpen()) return true;
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const distRoot = resolve(here, '..', '..', 'dist');
@@ -466,28 +442,12 @@ async function embeddingCacheIsHealthy() {
  * @param {string} text
  */
 async function embedStoredRow(db, memoryId, text) {
-  // An injected failure needs no model and no cache, so it skips both gates
-  // below rather than forcing a test to unset SKIP_EMBEDDINGS process-wide.
-  const injectedFailure = testEmbedFailure();
-  if (!injectedFailure) {
-    if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
-    // #460 review: never download at session close. existsSync(model.onnx) is not
-    // enough — a truncated file still trips worker heal + HuggingFace fetch.
-    if (!(await embeddingCacheIsHealthy())) return;
-  }
+  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
+  // #460 review: never download at session close. existsSync(model.onnx) is not
+  // enough — a truncated file still trips worker heal + HuggingFace fetch.
+  if (!(await embeddingCacheIsHealthy())) return;
 
-  if (testEmbedSeamOpen()) {
-    // Async on purpose: a sync UPDATE would pass even if the caller forgot to await.
-    await new Promise((r) => setImmediate(r));
-    const v = new Float32Array(384);
-    v[0] = 0.42;
-    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(v.buffer), memoryId);
-    return;
-  }
-
-  const generateEmbedding = injectedFailure
-    ? async () => { throw new Error(injectedFailure); }
-    : await loadEmbedder();
+  const generateEmbedding = await loadEmbedder();
   if (!generateEmbedding) {
     if (!_warnedEmbedUnavailable) {
       _warnedEmbedUnavailable = true;
