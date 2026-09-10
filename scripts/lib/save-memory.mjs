@@ -18,6 +18,40 @@ function pickNumber(envName, fallback) {
   return fallback;
 }
 
+/**
+ * A DEADLINE read from the environment, or the documented default.
+ *
+ * Separate from pickNumber() because the two have opposite failure modes. A
+ * threshold of 0 is a meaningful (if aggressive) setting; a deadline of 0, a
+ * negative number or a NaN is not a setting at all — it is a timer that fires
+ * in the turn it is armed, which turns "bound this work" into "never let this
+ * work happen". `SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS=0` would time every embed
+ * out instantly, and `SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS=0` would give
+ * up on a shutdown that had not been given a chance to start.
+ *
+ * A typo, an empty export, or a shell that resolved an unset variable to `0`
+ * therefore falls back to the documented default, and says so once: silently
+ * ignoring an operator's explicit setting is its own trap, and this is the
+ * deadline that keeps `process.exit(0)` reachable.
+ *
+ * A small POSITIVE value is honoured as written. "Time out almost immediately"
+ * is a coherent thing to ask for — the tests here ask for it — and clamping it
+ * to a floor of our choosing would be us overruling a valid instruction.
+ */
+function pickDeadlineMs(envName, fallback) {
+  const raw = process.env[envName];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    process.stderr.write(
+      `[shieldcortex save-memory] ignoring ${envName}=${JSON.stringify(raw).slice(0, 64)} `
+      + `— a deadline must be a finite positive number of milliseconds; using ${fallback}ms\n`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
 // Title-Jaccard PRE-GATE: only pairs whose titles already overlap this much get
 // a content comparison (bounds cost + avoids merging unrelated notes).
 const DEDUP_TITLE_JACCARD = pickNumber('SHIELDCORTEX_DEDUP_TITLE_JACCARD', 0.6);
@@ -349,7 +383,7 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
 // embedding and is reported on stderr. `shieldcortex memories embed-backfill`
 // is the guaranteed-coverage path, and the doctor MEMEMB check is what makes a
 // host with a growing NULL population visible instead of silently keyword-only.
-const EMBED_TIMEOUT_MS = pickNumber('SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', 10_000);
+const EMBED_TIMEOUT_MS = pickDeadlineMs('SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', 10_000);
 
 /**
  * A SECOND, separate budget: how long the cleanup after that timeout may take.
@@ -364,13 +398,38 @@ const EMBED_TIMEOUT_MS = pickNumber('SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', 10_000
  *
  * Deliberately not derived from EMBED_TIMEOUT_MS: shutting a worker down is a
  * different operation from an inference, and an operator who shortens one has
- * said nothing about the other.
+ * said nothing about the other. Read through {@link pickDeadlineMs}, like the
+ * embed deadline, so neither can be turned into an instant give-up by a value
+ * that is not a deadline at all.
  */
-const EMBED_DISPOSE_TIMEOUT_MS = pickNumber('SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS', 2_000);
+const EMBED_DISPOSE_TIMEOUT_MS = pickDeadlineMs('SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS', 2_000);
 
 let _embedCache = null;
 let _embedCacheKey = null;
 let _warnedEmbedUnavailable = false;
+
+/**
+ * Set once this process has proven it cannot shut the embedder down.
+ *
+ * A hook run is not one row. `saveAutoExtractedMemory()` is called per extracted
+ * memory, and each call embeds inline, so the per-row bound below — embed
+ * deadline, then disposal deadline — is a per-row bound on a wedge that is not
+ * per-row. What wedges an embed is the worker thread, and the give-up path is
+ * reached precisely when that thread could not be killed: the next row's
+ * `generateEmbedding()` therefore has the same thread to wait on, times out the
+ * same way, and prints the same give-up line. N memories cost
+ * N x (embed deadline + disposal deadline), and say so N times.
+ *
+ * So the first proven wedge latches for the rest of THIS process. Later rows
+ * skip the embed step outright — no import, no cache probe, no timer — and are
+ * stored with NULL vectors, which is the same outcome they were heading for at
+ * a fraction of the wall clock. `embed-backfill` is the guaranteed-coverage
+ * path either way, so nothing is lost that was not already lost.
+ *
+ * Process-scoped by construction: a hook is a short-lived process, so this
+ * cannot outlive the run that observed the wedge.
+ */
+let _embedderWedged = false;
 
 /**
  * The embedder, resolved by package layout — `dist/` two directories up.
@@ -463,6 +522,10 @@ async function embeddingCacheIsHealthy() {
  */
 async function embedStoredRow(db, memoryId, text) {
   if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
+  // Before every other gate, including the dynamic imports: a run that has
+  // already given up on this embedder has nothing to gain by asking it again,
+  // and the row is stored whatever happens here. See {@link _embedderWedged}.
+  if (_embedderWedged) return;
   // #460 review: never download at session close. existsSync(model.onnx) is not
   // enough — a truncated file still trips worker heal + HuggingFace fetch.
   if (!(await embeddingCacheIsHealthy())) return;
@@ -551,6 +614,11 @@ async function embedStoredRow(db, memoryId, text) {
  *
  * Never throws, never leaves a timer behind, and says one line if it gave up:
  * the caller's next statement is `process.exit(0)`, and it has to be reachable.
+ *
+ * Giving up also LATCHES (see {@link _embedderWedged}). The deadline expiring
+ * is the strongest evidence a hook run gets that the worker thread survived the
+ * kill, and every later row in this process would meet the same thread; without
+ * the latch this bound is per row and the run has no bound at all.
  */
 async function disposeEmbedderWithinBudget() {
   let deadline;
@@ -582,8 +650,12 @@ async function disposeEmbedderWithinBudget() {
       expired,
     ]);
     if (outcome === 'expired') {
+      // Latched before the line is printed, so the line can truthfully describe
+      // what the rest of the run will do — and so it is printed once.
+      _embedderWedged = true;
       process.stderr.write(
-        `[shieldcortex save-memory] embedding worker shutdown did not finish within ${EMBED_DISPOSE_TIMEOUT_MS}ms — exiting without it\n`,
+        `[shieldcortex save-memory] embedding worker shutdown did not finish within ${EMBED_DISPOSE_TIMEOUT_MS}ms `
+        + '— exiting without it; skipping embeddings for the rest of this hook run\n',
       );
     }
   } catch {

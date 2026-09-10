@@ -68,6 +68,27 @@ import {
   WORKER_DISPOSED_MSG,
 } from '../embeddings/generator.js';
 
+/**
+ * Distinct memories a multi-row run stores, in order.
+ *
+ * Distinct on purpose, and not merely cosmetically: `insertMemoryRow()` drops an
+ * exact-title repeat outright and runs a near-duplicate scan over same-project,
+ * same-category rows on top of that, so N copies of one note would be stored
+ * once and the run would be measuring a single row while claiming to measure N.
+ * Different subjects, not reworded ones.
+ *
+ * The first entry is what every single-row case in this suite has always
+ * stored, so those runs are byte-identical to what they were.
+ */
+const ROW_CONTENTS = [
+  'We compared three queue designs and settled on the batched writer for ingest.',
+  'The nightly compaction job now runs before the index rebuild, not after it.',
+  'Retry budgets moved out of the transport layer into the scheduler that owns them.',
+  'Cache eviction switched to a segmented LRU once the hit rate stalled at 61 percent.',
+  'Session identifiers are minted by the writer, so a replayed request cannot reuse one.',
+  'The audit row is written inside the transaction that writes the row it describes.',
+];
+
 /** Bytes a stored fixture vector occupies: 384 float32s. */
 export const FIXTURE_VECTOR_BYTES = 384 * 4;
 /** 0.75f little-endian — the first four bytes of a vector this fixture made. */
@@ -626,6 +647,18 @@ export interface HookRunOptions {
   /** Title the probe writes, so a run's row is identifiable. */
   title?: string;
   /**
+   * How many memories this one hook process stores, in sequence.
+   *
+   * Defaults to 1, which is what every classification case wants. More than
+   * one is how a run measures what a hook COSTS: `saveAutoExtractedMemory()`
+   * embeds inline per call, so a bound that is really per-row shows up here as
+   * N deadlines and N give-up lines rather than one of each.
+   *
+   * Capped by {@link ROW_CONTENTS}: each row needs its own subject to survive
+   * the writer's exact-title and near-duplicate gates.
+   */
+  rows?: number;
+  /**
    * Config JSON to place in this run's ISOLATED config dir before the child
    * starts. Omitted by default: an empty config dir is the authority, and it
    * yields cloud-disabled defaults, so nothing in the child has an endpoint or a
@@ -703,10 +736,18 @@ export interface HookRunResult {
    * came back" is not the same claim as "it came back on its own budget".
    */
   durationMs: number;
-  /** Bytes in the stored `embedding` column, or null when it stayed empty. */
+  /** Bytes in the FIRST row's `embedding` column, or null when it stayed empty. */
   len: number | null;
   /** First four bytes, hex — {@link FIXTURE_VECTOR_HEAD} when the fixture embedded. */
   head: string | null;
+  /**
+   * Every row this run stored, in the order it stored them.
+   *
+   * One entry per requested row, always — a run that lost a memory throws
+   * rather than reporting a short array, so a case reading `rows[2]` is reading
+   * a row that exists.
+   */
+  rows: Array<{ len: number | null; head: string | null }>;
   stderr: string;
   /** What the fixture embedder recorded, in order. Empty for a real build. */
   events: string[];
@@ -736,7 +777,14 @@ export function runHook({
   title = 'HOOK probe',
   seedConfig,
   dbFailure,
+  rows = 1,
 }: HookRunOptions): HookRunResult {
+  if (!Number.isInteger(rows) || rows < 1 || rows > ROW_CONTENTS.length) {
+    throw new Error(
+      `hook probe row count must be an integer between 1 and ${ROW_CONTENTS.length} — each row needs `
+      + `its own subject to survive the writer's duplicate gates; got ${rows}.`,
+    );
+  }
   // Before anything is written. HOOK_CHILD_MS < HOOK_CASE_MS holds for the
   // default, but a case passing its own budget can break the ordering the whole
   // arrangement rests on: a child that outlives its case is killed by jest, and
@@ -837,19 +885,30 @@ export function runHook({
       ? { run() { throw scFixtureDisposal(); } }
       : scFixturePrepare(sql));
     ` : ''}
-    await saveAutoExtractedMemory(
-      db,
-      {
-        title: ${JSON.stringify(title)},
-        content: 'We compared three queue designs and settled on the batched writer for ingest.',
-        category: 'architecture',
-        salience: 0.45,
-        tags: ['auto-extracted'],
-      },
-      'hook-package-fixture',
-      { source: 'stop-hook' },
-    );
-    const row = db.prepare("SELECT length(embedding) AS len, hex(substr(embedding,1,4)) AS head FROM memories WHERE title = ?").get(${JSON.stringify(title)});
+    // One call per memory — exactly how a hook with N extractions behaves. A
+    // single-row run is the same single call it always was.
+    const specs = ${JSON.stringify(
+      Array.from({ length: rows }, (_, i) => ({
+        title: rows === 1 ? title : `${title} ${i + 1}`,
+        content: ROW_CONTENTS[i],
+      })),
+    )};
+    for (const spec of specs) {
+      await saveAutoExtractedMemory(
+        db,
+        {
+          title: spec.title,
+          content: spec.content,
+          category: 'architecture',
+          salience: 0.45,
+          tags: ['auto-extracted'],
+        },
+        'hook-package-fixture',
+        { source: 'stop-hook' },
+      );
+    }
+    const readRow = db.prepare("SELECT length(embedding) AS len, hex(substr(embedding,1,4)) AS head FROM memories WHERE title = ?");
+    const storedRows = specs.map((spec) => readRow.get(spec.title) ?? null);
     // What this process resolved, compared HERE against the paths the fixture
     // pinned. Booleans and key names only — never a value: this is printed into
     // failures, and an inherited proxy URL or a real home path is not a
@@ -872,7 +931,7 @@ export function runHook({
       noProxyIsLoopback: process.env.NO_PROXY === ${JSON.stringify(HOOK_NO_PROXY)}
         && process.env.no_proxy === ${JSON.stringify(HOOK_NO_PROXY)},
     };
-    process.stdout.write(JSON.stringify({ row: row ?? null, child }));
+    process.stdout.write(JSON.stringify({ rows: storedRows, child }));
     // Exactly what stop-hook.mjs does — nothing gets a chance to drain here.
     process.exit(0);
   `);
@@ -937,17 +996,25 @@ export function runHook({
     throw new Error(`${why}\n--- stdout ---\n${proc.stdout}\n--- stderr ---\n${proc.stderr}`);
   }
 
-  let printed: { row: { len: number | null; head: string | null } | null; child: HookChildFacts };
+  type StoredRow = { len: number | null; head: string | null };
+  let printed: { rows: Array<StoredRow | null>; child: HookChildFacts };
   try {
     printed = JSON.parse(proc.stdout) as typeof printed;
   } catch {
     throw new Error(`hook probe printed no row\n--- stdout ---\n${proc.stdout}\n--- stderr ---\n${proc.stderr}`);
   }
-  // `!printed` as well as `!printed.row`: a probe that printed a bare `null`
-  // parses fine and would otherwise be read as a row.
-  if (!printed || !printed.row) {
-    throw new Error(`the hook lost the memory itself, not just its vector\n--- stderr ---\n${proc.stderr}`);
+  // `!printed` as well as the row checks: a probe that printed a bare `null`
+  // parses fine and would otherwise be read as a result. A missing row means a
+  // memory was DROPPED — by the defence pipeline or a duplicate gate — which is
+  // a different failure from a lost vector and must never read as one.
+  if (!printed || !Array.isArray(printed.rows) || printed.rows.length !== rows
+    || printed.rows.some((row) => !row)) {
+    throw new Error(
+      `the hook lost a memory itself, not just its vector: expected ${rows} row(s), got `
+      + `${JSON.stringify(printed?.rows)}\n--- stderr ---\n${proc.stderr}`,
+    );
   }
+  const storedRows = printed.rows as StoredRow[];
 
   const events = fs.existsSync(eventsPath)
     ? fs.readFileSync(eventsPath, 'utf-8').split('\n').filter(Boolean)
@@ -960,8 +1027,9 @@ export function runHook({
   return {
     fetchAttempts,
     durationMs,
-    len: printed.row.len,
-    head: printed.row.head,
+    len: storedRows[0].len,
+    head: storedRows[0].head,
+    rows: storedRows,
     stderr: proc.stderr,
     events,
     home,

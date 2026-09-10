@@ -81,8 +81,9 @@ const STILL_LOUD = [
   'Embedding worker disposed while writing the vector', // merely starts the same
   'the worker was disposed',                            // merely mentions it
   // The exact sentence on an ordinary Error — no code, no brand. A SQLite
-  // driver, a wrapper or a stale copy of the string can produce this; only the
-  // generator can produce a disposal.
+  // driver, a wrapper or a stale copy of the string produces exactly this by
+  // accident, and accidental collision is the axis the brand covers. It is a
+  // classification contract, not an attestation of where an error came from.
   DISPOSED,
 ];
 
@@ -97,6 +98,30 @@ const STILL_LOUD = [
 const WRITER_PREFIX = '[shieldcortex save-memory]';
 /** Building a package copies the whole build; only ever done once per suite. */
 const PACKAGE_BUILD_MS = 120_000;
+
+/**
+ * Everything one hook child spends that is NOT a deadline it was given.
+ *
+ * Node startup, better-sqlite3, the real defence pipeline and one scan per
+ * stored row. Measured on this machine at ~1.05s for a single row (a 1557ms
+ * child against 500ms of deadline) and ~1.35s for four (3345ms against
+ * 2000ms); 4s is deliberate headroom for a loaded runner, and it is stated as
+ * its own number so that a bound below reads as "the budgets, plus a known
+ * constant" rather than as a round figure somebody once found convenient.
+ */
+const HOOK_FIXED_OVERHEAD_MS = 4_000;
+
+/**
+ * What a run that respects its budgets may take.
+ *
+ * The budgets are PINNED by the case that uses this, so the arithmetic is a
+ * claim about the writer's bound. A per-row bound fails it by construction: N
+ * rows against a wedged embedder cost N x (embed + disposal), which exceeds
+ * this as soon as N x budgets outgrows one budget plus the overhead — which is
+ * exactly what the multi-row case is arranged to do.
+ */
+const boundedRunMs = (embedMs: number, disposeMs: number): number =>
+  embedMs + disposeMs + HOOK_FIXED_OVERHEAD_MS;
 
 /**
  * A config the child must never read, and its isolated twin.
@@ -573,10 +598,116 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(gaveUp[0]).toContain(WRITER_PREFIX);
     expect(gaveUp[0]).toContain('250ms');
     expect(run.len).toBeNull();
-    // On its own budget: the child came back well inside the 10s the harness
-    // would otherwise have killed it at, and the two deadlines it was given
-    // account for half a second of that.
-    expect(run.durationMs).toBeLessThan(5_000);
+    // On its own budget, and the bound is derived from the two budgets this run
+    // PINNED rather than from a round number: what is being claimed is that the
+    // child came back inside the deadlines it was given plus a known constant,
+    // not that it came back inside five seconds.
+    expect(run.durationMs).toBeLessThan(boundedRunMs(250, 250));
+  }, HOOK_CASE_MS);
+
+  it('gives up on the whole run, not once per row, when the embedder is wedged', () => {
+    // The bound the r9 review asked for. `saveAutoExtractedMemory()` embeds
+    // inline per memory, and what wedges an embed is the worker thread — so
+    // every later row in the same process meets the SAME wedged thread, times
+    // out the same way, and prints the same give-up line. Four rows used to
+    // cost four embed deadlines and four disposal deadlines.
+    //
+    // Budgets are pinned an order of magnitude above the previous case on
+    // purpose: at 1s each, four rows unlatched cost 8s of deadline, which no
+    // amount of machine speed can hide inside the bound asserted below.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'hang', disposeHangs: true },
+      env: {
+        SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '1000',
+        SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS: '1000',
+      },
+      rows: 4,
+      timeoutMs: 20_000,
+      title: 'HOOK wedge bounds the run',
+    });
+
+    // One embed, one disposal — for the whole run, not for the first row.
+    expect(run.events).toEqual(['generateEmbedding', 'disposeModel']);
+    const timedOut = run.stderr.split('\n').filter((line) => /embedding timed out after 1000ms/.test(line));
+    expect(timedOut).toHaveLength(1);
+    const gaveUp = run.stderr.split('\n').filter((line) => /shutdown did not finish/.test(line));
+    expect(gaveUp).toHaveLength(1);
+    // The line says what the rest of the run will do, so an operator reading
+    // one give-up and three silent rows is not left inferring it.
+    expect(gaveUp[0]).toContain('skipping embeddings for the rest of this hook run');
+    // Every row survived, and every row lost its vector: skipping the embed is
+    // not skipping the memory. `rows` has one entry per requested row or the
+    // fixture would have thrown, so this counts what was actually stored.
+    expect(run.rows).toHaveLength(4);
+    for (const row of run.rows) expect(row.len).toBeNull();
+    // ...and the rows after the wedge cost the run nothing at all: no second
+    // embed to time out, so the whole child fits inside ONE pair of deadlines.
+    expect(run.durationMs).toBeLessThan(boundedRunMs(1000, 1000));
+  }, HOOK_CASE_MS);
+
+  it('ignores a disposal deadline that is not a deadline, and uses the default', () => {
+    // `SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS=0` armed a timer that fired in
+    // the turn it was created, so the cleanup gave up before `disposeModel()`
+    // could possibly have finished — and, now, latched the rest of the run off
+    // an embedder that was working. Zero is not a short deadline; it is not a
+    // deadline. The disposal here settles at once, so a give-up line is proof
+    // the value was honoured rather than rejected.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'hang' },
+      env: {
+        SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '250',
+        SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS: '0',
+      },
+      title: 'HOOK zero dispose deadline',
+    });
+
+    expect(run.stderr).toContain('embedding timed out after 250ms');
+    expect(run.events).toEqual(['generateEmbedding', 'disposeModel']);
+    // Said once, naming the variable and the value it fell back to, because a
+    // setting that is silently discarded is a setting an operator keeps.
+    const ignored = run.stderr.split('\n').filter((line) => /ignoring SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS/.test(line));
+    expect(ignored).toHaveLength(1);
+    expect(ignored[0]).toContain('using 2000ms');
+    // The disposal really did complete inside the default, so nothing gave up
+    // and nothing latched.
+    expect(run.stderr).not.toMatch(/shutdown did not finish/);
+    expect(run.len).toBeNull(); // the embed still timed out; that part is real
+  }, HOOK_CASE_MS);
+
+  it('ignores an embed deadline that is not a deadline, and waits the default out', () => {
+    // The same defect on the other knob, and the more damaging half: a negative
+    // or zero embed deadline fails every embed in the process before the worker
+    // can answer, so a host with a stray export silently stops embedding and
+    // the only evidence is a timeout that names a nonsense number.
+    //
+    // The plan hangs, so the run has to sit out the full 10s default to prove
+    // the fallback is the DOCUMENTED default rather than anything nearer zero.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'hang' },
+      env: {
+        SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '-250',
+        SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS: '250',
+      },
+      timeoutMs: 25_000,
+      title: 'HOOK negative embed deadline',
+    });
+
+    const ignored = run.stderr.split('\n').filter((line) => /ignoring SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS/.test(line));
+    expect(ignored).toHaveLength(1);
+    expect(ignored[0]).toContain('using 10000ms');
+    expect(run.stderr).toContain('embedding timed out after 10000ms');
+    expect(run.stderr).not.toContain('after -250ms');
+    // The clock, not just the message: an instant timeout comes back in about a
+    // second, and this one cannot have unless it ignored its own default.
+    expect(run.durationMs).toBeGreaterThan(8_000);
+    expect(run.events).toEqual(['generateEmbedding', 'disposeModel']);
+    expect(run.len).toBeNull();
   }, HOOK_CASE_MS);
 
   it('kills a wedged child on its own budget, and says what it was doing', () => {
