@@ -38,8 +38,9 @@
  *
  * And nothing in a run reaches the machine it runs on. Each child gets its own
  * home, config dir and audit dir inside that run's scratch directory, owner-only
- * and not overridable by the caller, and it carries no proxy. The three are not
- * equally load-bearing:
+ * and not overridable by the caller, and it carries no proxy variable (that last
+ * one belt-and-braces: see {@link HOOK_PROXY_KEYS}). The three directories are
+ * not equally load-bearing either:
  *
  * - the config dir is: a hook process reads the defence config on every scan
  *   and SIGNS what it reads, rewriting it in place;
@@ -57,7 +58,7 @@
 import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 /** Bytes a stored fixture vector occupies: 384 float32s. */
 export const FIXTURE_VECTOR_BYTES = 384 * 4;
@@ -90,11 +91,19 @@ export const DB_UPDATE_REJECTED_MSG = 'hook package fixture: embedding UPDATE re
 /**
  * Proxy variables a child must not inherit, in both spellings anything reads.
  *
- * A hook process inherits an operator's shell. A proxy there is an egress this
- * fixture's isolation cannot otherwise see: the one cloud-enabled run in the
- * suite names the loopback discard port, but a CONNECT proxy would happily
- * carry that request — key and all — off the machine. So the whole family is
- * removed, after the caller's env, in {@link runHook}.
+ * Belt-and-braces, and worth stating as such rather than as a network sandbox.
+ * Nothing in this codebase honours these variables today: every cloud call site
+ * goes through global `fetch`, whose undici implementation ignores them, and no
+ * module installs a dispatcher that would not. So the scrub removes an egress
+ * that WOULD exist the day a proxy-aware client is added — not one that exists
+ * now, and not one that would survive being wrong about `fetch`.
+ *
+ * It is still the right default: a hook process inherits an operator's shell,
+ * and the one cloud-enabled run in the suite names a loopback discard port
+ * precisely because the isolation, not the proxy list, is what has to hold.
+ *
+ * Removed in {@link runHook}, after the caller's env and without regard to
+ * case — see {@link deleteEnvKeys}.
  */
 export const HOOK_PROXY_KEYS = [
   'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY',
@@ -285,6 +294,23 @@ function resolveThroughLinks(p: string): string {
   return path.join(fs.realpathSync(existing), ...tail);
 }
 
+/**
+ * Delete every key of `env` whose NAME matches one of `names`, in any casing.
+ *
+ * A Windows environment block is case-INSENSITIVE and case-PRESERVING: a shell
+ * that exported `Http_Proxy` hands a child a variable that IS HTTP_PROXY. The
+ * plain JavaScript object this fixture copies the environment into is neither,
+ * so deleting by exact name there removes the spelling this file knows and
+ * leaves the operator's — a proxy that survives the scrub, or an alias sitting
+ * beside a path this run pinned and shadowing it in the child.
+ */
+function deleteEnvKeys(env: Record<string, string | undefined>, names: readonly string[]): void {
+  const unwanted = new Set(names.map((name) => name.toLowerCase()));
+  for (const key of Object.keys(env)) {
+    if (unwanted.has(key.toLowerCase())) delete env[key];
+  }
+}
+
 /** `lstat`, or null — never follows a link, and never throws for a missing path. */
 function lstatOrNull(p: string): fs.Stats | null {
   try {
@@ -307,16 +333,16 @@ function lstatOrNull(p: string): fs.Stats | null {
  * link, the one case where the builder's own mkdir would bring the target into
  * existence — so this uses `lstat`, which reports the link itself.
  */
-function assertFreshDestination(dest: string): void {
+function freshnessRefusal(dest: string): string | null {
   const stat = lstatOrNull(dest);
-  if (!stat) return;
+  if (!stat) return null;
   const kind = stat.isSymbolicLink()
     ? (fs.existsSync(dest) ? 'a symlink' : 'a dangling symlink')
     : stat.isDirectory() ? 'a directory' : stat.isFile() ? 'a file' : 'an existing entry';
-  throw new Error(
+  return (
     `hook package fixture refuses to build at an existing path: ${dest} is already ${kind}. `
     + 'This builder overwrites package.json, copies dist/ and renames files inside it, and it '
-    + 'writes THROUGH a link. Pass a fresh path that does not exist yet (inside fs.mkdtempSync).',
+    + 'writes THROUGH a link. Pass a fresh path that does not exist yet (inside fs.mkdtempSync).'
   );
 }
 
@@ -335,23 +361,23 @@ function assertFreshDestination(dest: string): void {
  * root, through resolved links, so neither depth nor a doorway symlink gets a
  * destination past it.
  */
-function assertOutsideAnyCheckout(dest: string): void {
+function anyCheckoutRefusal(dest: string): string | null {
   let dir = resolveThroughLinks(dest);
   while (!lstatOrNull(dir)) {
     const parent = path.dirname(dir);
-    if (parent === dir) return;
+    if (parent === dir) return null;
     dir = parent;
   }
   for (;;) {
     if (lstatOrNull(path.join(dir, '.git'))) {
-      throw new Error(
+      return (
         `hook package fixture refuses to build inside a checkout: ${dir} holds a .git entry, `
         + `so ${dest} is inside a clone or worktree whose package.json and dist/ this builder `
-        + 'would overwrite. Pass a fresh temporary directory (fs.mkdtempSync) instead.',
+        + 'would overwrite. Pass a fresh temporary directory (fs.mkdtempSync) instead.'
       );
     }
     const parent = path.dirname(dir);
-    if (parent === dir) return;
+    if (parent === dir) return null;
     dir = parent;
   }
 }
@@ -367,16 +393,37 @@ function assertOutsideAnyCheckout(dest: string): void {
  * carried out. The check runs first: no mkdir, no write, no copy, no rename
  * happens before it.
  */
-function assertOutsideRepo(dest: string): void {
+function repoRefusal(dest: string): string | null {
   const target = resolveThroughLinks(dest);
   const repo = resolveThroughLinks(repoRoot);
-  if (target === repo || target.startsWith(repo + path.sep)) {
-    throw new Error(
-      `hook package fixture refuses to build inside the repository: ${target} is `
-      + `${target === repo ? 'the repository root' : `under ${repo}`}. `
-      + 'Pass a fresh temporary directory (fs.mkdtempSync) instead.',
-    );
-  }
+  if (target !== repo && !target.startsWith(repo + path.sep)) return null;
+  return (
+    `hook package fixture refuses to build inside the repository: ${target} is `
+    + `${target === repo ? 'the repository root' : `under ${repo}`}. `
+    + 'Pass a fresh temporary directory (fs.mkdtempSync) instead.'
+  );
+}
+
+/**
+ * Why a build at `dest` would be refused, or null if it would go ahead.
+ *
+ * Read-only, and that is the point of it existing separately: `lstat` and
+ * `realpath`, no mkdir and no write on any path, so a REAL location can be
+ * classified without being handed to a builder that would damage it if a guard
+ * ever regressed. The repository these tests run in is exactly such a location,
+ * and pinning its classification is otherwise a test that overwrites its own
+ * `package.json` the day the guard breaks.
+ *
+ * {@link createHookPackage} asks this and nothing else, so what a test pins
+ * here is what the builder does — not a second opinion that could drift from it.
+ *
+ * Repository first, so a destination inside THIS checkout keeps its specific
+ * diagnostic rather than the general one; freshness last, so a destination that
+ * is both inside a checkout and already exists is reported as the worse of the
+ * two.
+ */
+export function destinationRefusal(dest: string): string | null {
+  return repoRefusal(dest) ?? anyCheckoutRefusal(dest) ?? freshnessRefusal(dest);
 }
 
 /**
@@ -388,12 +435,11 @@ function assertOutsideRepo(dest: string): void {
  * the defence pipeline is unavailable.
  */
 export function createHookPackage(dest: string, { classifier = 'real' }: HookPackageOptions = {}): string {
-  // All three refusals run before anything is created, written, copied or
-  // renamed. `assertOutsideRepo` goes first so a destination inside THIS
-  // checkout keeps its specific diagnostic, rather than the general one.
-  assertOutsideRepo(dest);
-  assertOutsideAnyCheckout(dest);
-  assertFreshDestination(dest);
+  // Every refusal runs before anything is created, written, copied or renamed —
+  // and it is the same classification a test can ask for on its own, so the
+  // guard a test pins is the guard that runs here.
+  const refusal = destinationRefusal(dest);
+  if (refusal) throw new Error(refusal);
 
   const builtGenerator = path.join(repoRoot, 'dist', 'embeddings', 'generator.js');
   if (!fs.existsSync(builtGenerator)) {
@@ -447,7 +493,10 @@ export interface HookRunOptions {
    *   SC_HOOK_FIXTURE_PLAN     this run's plan file — the fixture package's own
    *                            channel, so a caller cannot repoint it either
    *   NO_PROXY, no_proxy       {@link HOOK_NO_PROXY}: loopback, nothing else
-   *   {@link HOOK_PROXY_KEYS}  deleted, in both spellings
+   *   {@link HOOK_PROXY_KEYS}  deleted, in any casing
+   *
+   * Each of those names is deleted from the inherited-and-caller environment
+   * before the pin is written, so a Windows-cased alias cannot shadow it.
    *
    * `SHIELDCORTEX_SKIP_EMBEDDINGS` is the one inherited key handled the other
    * way round: the jest runner sets it for the whole suite, so it is dropped
@@ -504,7 +553,11 @@ export interface HookChildFacts {
   auditDirIsIsolated: boolean;
   /**
    * Which of {@link HOOK_PROXY_KEYS} — plus {@link HOOK_PROXY_CONTROL_KEY} —
-   * the child could see. Names, in scan order.
+   * the child could see, matched by name WITHOUT regard to case: on Windows an
+   * operator's `Http_Proxy` is the same variable as HTTP_PROXY, so an
+   * exact-name scan would report a surviving alias as absent.
+   *
+   * Names as the child spells them, sorted. Never a value.
    */
   proxyKeysPresent: string[];
   /** Both spellings of NO_PROXY carry exactly {@link HOOK_NO_PROXY}. */
@@ -598,11 +651,16 @@ export function runHook({
   }
 
   fs.writeFileSync(planPath, JSON.stringify({ mode: 'vector', ...plan, eventsPath }));
+  // An ESM specifier is a URL, not a path. On POSIX an absolute path happens to
+  // read as one; on Windows `C:\...` is a scheme Node's loader rejects outright,
+  // so a probe written with quoted paths could not run there at all — and every
+  // Windows pin in this fixture would be describing a platform it cannot reach.
+  // `pathToFileURL` is also what escapes a `#` or a space in a scratch path.
   fs.writeFileSync(probePath, `
-    import Database from ${JSON.stringify(betterSqlitePath)};
+    import Database from ${JSON.stringify(pathToFileURL(betterSqlitePath).href)};
     import os from 'os';
     import { readFileSync } from 'fs';
-    import { saveAutoExtractedMemory } from ${JSON.stringify(writer)};
+    import { saveAutoExtractedMemory } from ${JSON.stringify(pathToFileURL(writer).href)};
 
     const db = new Database(${JSON.stringify(dbPath)});
     db.exec(readFileSync(${JSON.stringify(schemaPath)}, 'utf-8'));
@@ -634,8 +692,15 @@ export function runHook({
       userProfileIsIsolated: process.env.USERPROFILE === ${JSON.stringify(home)},
       configDirIsIsolated: process.env.SHIELDCORTEX_CONFIG_DIR === ${JSON.stringify(configDir)},
       auditDirIsIsolated: process.env.SHIELDCORTEX_AUDIT_DIR === ${JSON.stringify(auditDir)},
-      proxyKeysPresent: ${JSON.stringify([...HOOK_PROXY_KEYS, HOOK_PROXY_CONTROL_KEY])}
-        .filter((key) => process.env[key] !== undefined),
+      // Every environment key whose NAME belongs to the proxy family, matched
+      // without regard to case: Windows keeps an operator's own casing, so a
+      // surviving \`Http_Proxy\` is HTTP_PROXY to this child and has to be
+      // reported as present rather than missed by an exact-name scan.
+      proxyKeysPresent: Object.keys(process.env)
+        .filter((key) => ${JSON.stringify(
+          [...HOOK_PROXY_KEYS, HOOK_PROXY_CONTROL_KEY].map((key) => key.toLowerCase()),
+        )}.includes(key.toLowerCase()))
+        .sort(),
       noProxyIsLoopback: process.env.NO_PROXY === ${JSON.stringify(HOOK_NO_PROXY)}
         && process.env.no_proxy === ${JSON.stringify(HOOK_NO_PROXY)},
     };
@@ -644,14 +709,15 @@ export function runHook({
     process.exit(0);
   `);
 
-  const childEnv: Record<string, string | undefined> = {
-    ...process.env,
-    ...env,
-    // Pinned LAST, all of it: a caller adds variables, never opens a path out.
+  // What this run decides for itself, whatever anyone else says.
+  //
+  // `os.homedir()` reads HOME on POSIX and USERPROFILE on Windows, so HOME
+  // alone would leave a Windows child resolving an operator's real home — and
+  // looking for the model cache in it. NO_PROXY is written in both spellings
+  // because both are read; on Windows they are one variable and the second
+  // assignment is simply the same pin again.
+  const pinned: Record<string, string> = {
     HOME: home,
-    // `os.homedir()` reads HOME on POSIX and USERPROFILE on Windows, so HOME
-    // alone would leave a Windows child resolving an operator's real home —
-    // and looking for the model cache in it.
     USERPROFILE: home,
     SHIELDCORTEX_CONFIG_DIR: configDir,
     SHIELDCORTEX_AUDIT_DIR: auditDir,
@@ -659,26 +725,28 @@ export function runHook({
     NO_PROXY: HOOK_NO_PROXY,
     no_proxy: HOOK_NO_PROXY,
   };
+  const childEnv: Record<string, string | undefined> = { ...process.env, ...env };
+  // Removed first — every proxy variable, and every name this run is about to
+  // pin — and only then pinned, so a caller adds variables but never opens a
+  // path out. An operator's shell, the enclosing runner and the caller are
+  // three channels for one variable, and on Windows a fourth: a spelling this
+  // fixture does not use. HOMEDRIVE/HOMEPATH go too, and come back below only
+  // if they can be given a meaningful value.
+  deleteEnvKeys(childEnv, [...Object.keys(pinned), ...HOOK_PROXY_KEYS, 'HOMEDRIVE', 'HOMEPATH']);
+  Object.assign(childEnv, pinned);
   // HOMEDRIVE/HOMEPATH are a Windows pair, and only a drive-rooted path can
   // give them a valid value. Inventing `C:` for a `/tmp/...` home would hand the
-  // child syntax that means nothing, so a home with no drive letter REMOVES the
-  // inherited pair instead: half of somebody else's home is worse than none.
+  // child syntax that means nothing, so a home with no drive letter leaves the
+  // pair deleted: half of somebody else's home is worse than none.
   const driveRoot = /^([A-Za-z]:)[\\/]$/.exec(path.parse(home).root);
   if (driveRoot) {
     childEnv.HOMEDRIVE = driveRoot[1];
     childEnv.HOMEPATH = home.slice(driveRoot[1].length);
-  } else {
-    delete childEnv.HOMEDRIVE;
-    delete childEnv.HOMEPATH;
   }
-  // Also after the caller's env, and for the same reason: an operator's shell,
-  // the enclosing runner and a caller are three channels for one variable. A
-  // proxy is an egress this fixture's isolation could not otherwise see.
-  for (const key of HOOK_PROXY_KEYS) delete childEnv[key];
   // The jest runner sets this to 1 for the whole suite; a hook process that
   // inherited it would skip the embed step entirely. Tests that want the gate
-  // pass it back in through `env`.
-  if (!('SHIELDCORTEX_SKIP_EMBEDDINGS' in env)) delete childEnv.SHIELDCORTEX_SKIP_EMBEDDINGS;
+  // pass it back in through `env`, in this exact spelling.
+  if (!('SHIELDCORTEX_SKIP_EMBEDDINGS' in env)) deleteEnvKeys(childEnv, ['SHIELDCORTEX_SKIP_EMBEDDINGS']);
 
   const proc = spawnSync(process.execPath, [probePath], {
     cwd: pkgRoot,

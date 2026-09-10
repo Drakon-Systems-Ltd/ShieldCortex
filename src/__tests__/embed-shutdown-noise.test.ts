@@ -41,6 +41,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { WORKER_DISPOSED_MSG, isWorkerDisposedError } from '../embeddings/generator.js';
 import {
@@ -52,6 +53,7 @@ import {
   HOOK_NO_PROXY,
   HOOK_PROXY_CONTROL_KEY,
   createHookPackage,
+  destinationRefusal,
   repoRoot,
   runHook,
 } from './hook-package-fixture.js';
@@ -113,21 +115,31 @@ const CANARY_CONFIG = canaryShapedConfig(CANARY_KEY);
 const ISOLATED_CONFIG = canaryShapedConfig(ISOLATED_KEY);
 const CANARY_AUDIT_LINE = '{"canary":"an operator\'s real forensics"}\n';
 
-/** Every path under `dir`, with file bytes, so an added file or an edit both show. */
+/**
+ * Every path under `dir`, with file bytes, so an added file or an edit both show.
+ *
+ * Walked explicitly rather than with `readdirSync({ recursive: true })`, which
+ * only tells a caller where an entry came from through `Dirent.parentPath`
+ * (Node 20.12) or its predecessor `Dirent.path` (20.1) — neither of which
+ * exists on the 20.0 this package declares support for, where the recursive
+ * option itself does not exist either. One `readdirSync` per directory is the
+ * whole of what this needs and has been there since long before that floor.
+ */
 function snapshot(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const entry of fs.readdirSync(dir, { recursive: true, withFileTypes: true })) {
-    // `parentPath` landed in Node 20.12; this package supports >=20.0, where the
-    // same value is on `path`. Without the fallback an older-but-declared-
-    // supported Node throws ERR_INVALID_ARG_TYPE out of path.join instead of
-    // failing an assertion.
-    const { parentPath, path: legacyParent } = entry as unknown as { parentPath?: string; path?: string };
-    const parent = parentPath ?? legacyParent;
-    if (!parent) throw new Error('this Node reports neither Dirent.parentPath nor Dirent.path');
-    const full = path.join(parent, entry.name);
-    const rel = path.relative(dir, full);
-    out[rel] = entry.isDirectory() ? '<dir>' : fs.readFileSync(full, 'utf-8');
-  }
+  const walk = (current: string, prefix: string): void => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      const rel = prefix ? path.join(prefix, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        out[rel] = '<dir>';
+        walk(full, rel);
+      } else {
+        out[rel] = fs.readFileSync(full, 'utf-8');
+      }
+    }
+  };
+  walk(dir, '');
   return out;
 }
 
@@ -295,6 +307,38 @@ describe('store.ts embedding jobs — shutdown cancellation is not a failure', (
     await flush();
     expect(embedCalls).toBe(3);
     expect(errors.join('\n')).toMatch(/Failed to regenerate embedding/);
+  });
+});
+
+/**
+ * The canary comparison in the isolation case below is only as strong as what
+ * `snapshot` sees. A walker that reported nothing would make "byte-identical"
+ * true of every directory, including one the child had just rewritten — so the
+ * walk itself is pinned here, on a tree that has something at the bottom of it.
+ */
+describe('snapshot — the canary comparison is only as good as the walk', () => {
+  it('reports every file and directory under the root, at every depth', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-embed-snapshot-'));
+    const leaf = path.join('nested', 'deeper', 'leaf.jsonl');
+    try {
+      fs.mkdirSync(path.join(dir, 'nested', 'deeper'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'top.json'), '{"top":true}');
+      fs.writeFileSync(path.join(dir, leaf), '{"leaf":true}\n');
+
+      expect(snapshot(dir)).toEqual({
+        'top.json': '{"top":true}',
+        nested: '<dir>',
+        [path.join('nested', 'deeper')]: '<dir>',
+        [leaf]: '{"leaf":true}\n',
+      });
+
+      // And an edit at the bottom of it moves the answer: this is a comparison
+      // of bytes, not a listing of names.
+      fs.writeFileSync(path.join(dir, leaf), '{"leaf":false}\n');
+      expect(snapshot(dir)[leaf]).toBe('{"leaf":false}\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -470,6 +514,32 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(fs.readdirSync(root)).toEqual(before);
   });
 
+  it('generates a probe whose imports are file: URLs, not filesystem paths', () => {
+    // The probe is generated ESM, and an ESM specifier is a URL — not a path.
+    // A JSON-quoted `C:\...` is rejected by Node's loader as an unsupported
+    // scheme, so a probe written that way cannot run on Windows at all, and the
+    // Windows pins in this file (homedir, HOMEDRIVE, the proxy casing) would be
+    // pinning a platform the harness itself cannot reach.
+    //
+    // Its own scratch directory, so the single probe left in it is this case's.
+    const dir = fs.mkdtempSync(path.join(root, 'probe-source-'));
+    const run = runHook({ dir, pkgRoot: pkg, plan: { mode: 'vector' }, title: 'HOOK probe source' });
+    expect(run.len).toBe(FIXTURE_VECTOR_BYTES); // it really ran
+
+    const probes = fs.readdirSync(dir).filter((name) => /^probe-.*\.mjs$/.test(name));
+    expect(probes).toHaveLength(1);
+    const source = fs.readFileSync(path.join(dir, probes[0]), 'utf-8');
+    const specifiers = [...source.matchAll(/\bfrom (["'])([^"']+)\1/g)].map((m) => m[2]);
+    // Every specifier that names a location rather than a builtin. Both of them
+    // — the driver and the writer — and nothing else.
+    const located = specifiers.filter((specifier) => /[/\\]/.test(specifier));
+    expect(located).toHaveLength(2);
+    expect(located).toContain(pathToFileURL(path.join(pkg, 'scripts', 'lib', 'save-memory.mjs')).href);
+    for (const specifier of located) {
+      expect(specifier.startsWith('file://')).toBe(true);
+    }
+  }, HOOK_CASE_MS);
+
   it('awaits the vector and stores it before the process exits', () => {
     const run = runHook({ dir: root, pkgRoot: pkg, plan: { mode: 'vector' }, title: 'HOOK stores it' });
 
@@ -563,9 +633,10 @@ describe('hook writer (real process, hermetic package) — same classification',
       expect(run.child.auditDirIsIsolated).toBe(true);
       expect(run.child.homedirIsIsolated).toBe(true);
       // The seeded config is the one cloud-enabled run in this file, so it is
-      // also the one that must not be able to leave the machine: it names the
-      // loopback discard port, and the child carries no proxy that could turn
-      // that into an egress.
+      // also the one that must not be able to leave the machine. What holds
+      // that is the endpoint: a loopback discard port. The empty proxy list is
+      // belt-and-braces beside it — nothing here honours those variables today
+      // — and it is pinned so the day something does, this run is still local.
       expect(run.child.proxyKeysPresent).toEqual([]);
       expect(run.child.noProxyIsLoopback).toBe(true);
       // Belt-and-braces, and labelled as such: NOTHING on this path appends to
@@ -628,16 +699,29 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(fs.readdirSync(ext)).toEqual([]);
   }, HOOK_CASE_MS);
 
-  it('strips every proxy variable and points NO_PROXY at loopback', () => {
-    // A hook child inherits an operator's shell. A proxy there is an egress the
-    // isolation cannot see: the seeded cloud config names loopback, but a
-    // CONNECT proxy would carry that request — key and all — off the machine
-    // anyway. So the whole family is removed after the caller's env, and
-    // NO_PROXY is set to loopback for anything that consults it.
-    const prior = { HTTP_PROXY: process.env.HTTP_PROXY, https_proxy: process.env.https_proxy };
+  it('strips every proxy variable, in any casing, and points NO_PROXY at loopback', () => {
+    // A hook child inherits an operator's shell, and a proxy there is one more
+    // thing this run did not choose. Belt-and-braces rather than a sandbox: no
+    // call site in this codebase honours these variables — every cloud request
+    // goes through global `fetch`, which ignores them, and nothing installs a
+    // dispatcher that would not — so the scrub removes an egress that WOULD
+    // exist the day a proxy-aware client is added, not one that exists today.
+    //
+    // Casing is the part that has to be right for it to mean anything on
+    // Windows: `process.env` there is case-insensitive, so a shell's
+    // `Http_Proxy` IS HTTP_PROXY to the child, while the plain object this
+    // fixture copies it into is case-SENSITIVE and keeps the two apart. A
+    // delete by exact name would leave the alias behind, still pointing the
+    // child at the proxy. Both channels carry both spellings and an alias.
+    const prior = {
+      HTTP_PROXY: process.env.HTTP_PROXY,
+      https_proxy: process.env.https_proxy,
+      Https_Proxy: process.env.Https_Proxy,
+    };
     try {
       process.env.HTTP_PROXY = 'http://proxy.invalid:3128';
       process.env.https_proxy = 'http://proxy.invalid:3128';
+      process.env.Https_Proxy = 'http://proxy.invalid:3128';
       const run = runHook({
         dir: root,
         pkgRoot: pkg,
@@ -645,8 +729,10 @@ describe('hook writer (real process, hermetic package) — same classification',
         env: {
           HTTPS_PROXY: 'http://proxy.invalid:3128',
           all_proxy: 'socks5://proxy.invalid:1080',
+          Http_Proxy: 'http://proxy.invalid:3128',
+          ALL_Proxy: 'socks5://proxy.invalid:1080',
           // Proxy-SHAPED, and deliberately not one of the stripped keys: the
-          // probe reports it, which is how an empty list for the real six is
+          // probe reports it, which is how an empty list for the real family is
           // known to be a scrub rather than a probe that never looked.
           [HOOK_PROXY_CONTROL_KEY]: 'http://127.0.0.1:9',
         },
@@ -808,9 +894,16 @@ describe('hook writer — no test seam survives into production', () => {
  * call that does not must not be carried out, because the repository is a
  * destination this builder would damage: it overwrites `package.json` first,
  * then renames `dist/embeddings/generator.js` out from under the build.
+ *
+ * Which is precisely why the repository is never handed to the builder, not
+ * even to watch it refuse. A test written that way IS the accident on the day
+ * the guard regresses — it destroys the working tree it runs in, and only then
+ * reports that the guard is gone. So the real path is put to
+ * `destinationRefusal`, which reads and returns rather than writes and throws,
+ * and the builder's agreement with it is pinned on disposable twins below.
  */
 describe('hook package fixture — never builds inside the repository', () => {
-  it('rejects the repo root and anything under it, before writing anything', () => {
+  it('classifies the repository root and everything under it as refused', () => {
     const packageJson = path.join(repoRoot, 'package.json');
     const generator = path.join(repoRoot, 'dist', 'embeddings', 'generator.js');
     const before = fs.readFileSync(packageJson);
@@ -823,10 +916,22 @@ describe('hook package fixture — never builds inside the repository', () => {
       path.join(repoRoot, 'src', '__tests__', 'nested'),
       strayPackage,
     ]) {
-      expect(() => createHookPackage(dest)).toThrow(/refuses to build inside the repository/);
+      expect(destinationRefusal(dest)).toMatch(/refuses to build inside the repository/);
     }
 
-    // Nothing was written, renamed or copied on the way to those throws.
+    // Non-vacuity: the classifier can say yes. A fresh path under a temporary
+    // directory is the shape every caller in this file passes and the shape
+    // `createHookPackage` actually builds at, so "refused" is not simply its
+    // answer to everything.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-embed-outside-'));
+    try {
+      expect(destinationRefusal(path.join(outside, 'pkg'))).toBeNull();
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+
+    // And asking cost the working tree nothing: no write, no rename, no stray
+    // package — this is a read-only question about a real checkout.
     expect(fs.readFileSync(packageJson)).toEqual(before);
     expect(fs.existsSync(generator)).toBe(true);
     expect(fs.existsSync(path.join(repoRoot, 'dist', 'embeddings', 'generator.real.js'))).toBe(false);
@@ -850,6 +955,7 @@ describe('hook package fixture — never builds inside the repository', () => {
  */
 describe('hook package fixture — a destination must be fresh, and outside every checkout', () => {
   const TWIN_PACKAGE_JSON = `${JSON.stringify({ name: 'a-real-checkouts-package-json' }, null, 2)}\n`;
+  const TWIN_GENERATOR_JS = '// a real checkout\'s built generator\nexport const notOurs = true;\n';
   let root: string;
 
   beforeEach(() => {
@@ -859,6 +965,34 @@ describe('hook package fixture — a destination must be fresh, and outside ever
   afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  /**
+   * A disposable stand-in for a checkout, carrying the two things the builder
+   * damages: a `package.json` it overwrites, and a `dist/embeddings/generator.js`
+   * it renames aside. Under a `.git` entry of the shape the real thing has — a
+   * directory in a clone, a file in a worktree.
+   */
+  function makeCheckoutTwin(name: string, git: 'clone' | 'worktree'): string {
+    const twin = path.join(root, name);
+    fs.mkdirSync(path.join(twin, 'dist', 'embeddings'), { recursive: true });
+    fs.writeFileSync(path.join(twin, 'package.json'), TWIN_PACKAGE_JSON);
+    fs.writeFileSync(path.join(twin, 'dist', 'embeddings', 'generator.js'), TWIN_GENERATOR_JS);
+    if (git === 'clone') fs.mkdirSync(path.join(twin, '.git', 'objects'), { recursive: true });
+    else fs.writeFileSync(path.join(twin, '.git'), 'gitdir: /nowhere/.git/worktrees/twin\n');
+    return twin;
+  }
+
+  /** Byte-for-byte what the twin was built with, with nothing added anywhere. */
+  function expectTwinIntact(twin: string): void {
+    expect(fs.readFileSync(path.join(twin, 'package.json'), 'utf-8')).toBe(TWIN_PACKAGE_JSON);
+    const embeddings = path.join(twin, 'dist', 'embeddings');
+    expect(fs.readFileSync(path.join(embeddings, 'generator.js'), 'utf-8')).toBe(TWIN_GENERATOR_JS);
+    // The rename is the destructive half, and it would leave a trace of its
+    // own: a `generator.real.js` beside a generator.js the fixture wrote.
+    expect(fs.readdirSync(embeddings)).toEqual(['generator.js']);
+    // No package built at the root, and none dropped underneath it either.
+    expect(fs.readdirSync(twin).sort()).toEqual(['.git', 'dist', 'package.json']);
+  }
 
   it('rejects a destination that already exists, whatever it is', () => {
     const existingDir = path.join(root, 'existing-dir');
@@ -887,48 +1021,49 @@ describe('hook package fixture — a destination must be fresh, and outside ever
   });
 
   it('rejects a destination inside another checkout, clone or worktree alike', () => {
-    const clone = path.join(root, 'clone-twin');
-    fs.mkdirSync(path.join(clone, '.git', 'objects'), { recursive: true });
-    const worktree = path.join(root, 'worktree-twin');
-    fs.mkdirSync(worktree);
-    fs.writeFileSync(path.join(worktree, '.git'), 'gitdir: /nowhere/.git/worktrees/twin\n');
-    for (const twin of [clone, worktree]) {
-      fs.writeFileSync(path.join(twin, 'package.json'), TWIN_PACKAGE_JSON);
-    }
+    const clone = makeCheckoutTwin('clone-twin', 'clone');
+    const worktree = makeCheckoutTwin('worktree-twin', 'worktree');
 
     for (const dest of [
+      // The checkout root itself, and the two ways a path names it — the shapes
+      // the repository case can only ask the classifier about.
+      clone,
+      `${clone}${path.sep}`,
+      path.join(clone, 'dist'),
+      // And underneath it, where the damage is a package dropped in somebody's
+      // working tree rather than an overwrite of theirs.
       path.join(clone, 'pkg'),
       path.join(worktree, 'pkg'),
       // Ancestors that do not exist yet: the walk starts at the deepest one
       // that does, so depth cannot get a destination past the guard.
       path.join(worktree, 'nested', 'deeper', 'pkg'),
+      path.join(worktree, 'stray-fixture-package'),
     ]) {
-      expect(() => createHookPackage(dest)).toThrow(/refuses to build inside a checkout/);
-      expect(fs.existsSync(dest)).toBe(false);
+      // The builder refuses with exactly what the classifier says. That
+      // agreement is what carries the repository case: it pins the same
+      // function, on a path no builder may be pointed at.
+      const refusal = destinationRefusal(dest);
+      expect(refusal).toMatch(/refuses to build inside a checkout/);
+      expect(() => createHookPackage(dest)).toThrow(String(refusal));
     }
 
-    // Neither twin lost its package.json, and neither gained a dist/ or a
-    // node_modules symlink.
-    for (const twin of [clone, worktree]) {
-      expect(fs.readFileSync(path.join(twin, 'package.json'), 'utf-8')).toBe(TWIN_PACKAGE_JSON);
-      expect(fs.readdirSync(twin).sort()).toEqual(['.git', 'package.json']);
-    }
+    // Neither twin lost its package.json or its built generator, and neither
+    // gained a package, a dist/ copy or a node_modules link.
+    expectTwinIntact(clone);
+    expectTwinIntact(worktree);
   });
 
   it('follows a link into a checkout before deciding', () => {
     // The destination's PARENT is an ordinary temporary directory; only its
     // resolved location is inside a checkout. A guard that reasoned about the
     // literal path would build here.
-    const twin = path.join(root, 'linked-twin');
-    fs.mkdirSync(path.join(twin, '.git'), { recursive: true });
-    fs.writeFileSync(path.join(twin, 'package.json'), TWIN_PACKAGE_JSON);
+    const twin = makeCheckoutTwin('linked-twin', 'clone');
     const doorway = path.join(root, 'doorway');
     fs.symlinkSync(twin, doorway, 'dir');
 
     expect(() => createHookPackage(path.join(doorway, 'pkg')))
       .toThrow(/refuses to build inside a checkout/);
-    expect(fs.readFileSync(path.join(twin, 'package.json'), 'utf-8')).toBe(TWIN_PACKAGE_JSON);
-    expect(fs.readdirSync(twin).sort()).toEqual(['.git', 'package.json']);
+    expectTwinIntact(twin);
   });
 });
 
