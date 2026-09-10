@@ -253,6 +253,19 @@ export interface EmbedPlan {
   /** What the fixture cache-health gate reports. Defaults to ready. */
   cacheReady?: boolean;
   /**
+   * Hold the answer for this many ms before the mode below decides it.
+   *
+   * The default is one `setImmediate`, which is faster than the shortest timer
+   * a run can arm — so a run whose deadline was silently coerced to 1ms still
+   * gets its vector, and "the deadline was honoured" and "the deadline was
+   * rejected" look identical. A delay an order of magnitude above that makes
+   * the two outcomes different: an instant deadline times the embed out, and a
+   * deadline that fell back to its documented default does not.
+   *
+   * Wall clock, so keep it small — it is spent by every row in the run.
+   */
+  delayMs?: number;
+  /**
    * Make `disposeModel()` never settle.
    *
    * The wedge the hook's post-timeout cleanup has to survive: `disposeModel()`
@@ -325,6 +338,9 @@ export async function generateEmbedding(text) {
   // awaiting it exits with the column still NULL, exactly as production did
   // before #458 — which is the defect the 'vector' mode exists to catch.
   await new Promise((resolve) => setImmediate(resolve));
+  // ...and, when a plan asks for it, a real WAIT on top of that boundary, long
+  // enough that a deadline of 1ms would beat it. See EmbedPlan.delayMs.
+  if (plan.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, plan.delayMs));
   switch (plan.mode) {
     case 'fail':
       throw plannedError(plan);

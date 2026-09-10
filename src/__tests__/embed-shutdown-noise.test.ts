@@ -124,6 +124,74 @@ const boundedRunMs = (embedMs: number, disposeMs: number): number =>
   embedMs + disposeMs + HOOK_FIXED_OVERHEAD_MS;
 
 /**
+ * The longest delay a Node timer can hold — and so the longest deadline the
+ * writer accepts.
+ *
+ * Spelled out here as well as in the writer on purpose: `setTimeout()` stores
+ * its delay in a signed 32-bit int and converts anything above this to 1ms, so
+ * an over-range deadline is not a long one, it is an INSTANT one. A value the
+ * writer accepted at this boundary and a value it rejected produce opposite
+ * behaviour, and the cases below drive both edges of it.
+ */
+const MAX_DEADLINE_MS = 2_147_483_647;
+
+/** Both deadline knobs, with the default each documents falling back to. */
+const DEADLINE_KNOBS = [
+  { envName: 'SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', fallbackMs: 10_000 },
+  { envName: 'SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS', fallbackMs: 2_000 },
+] as const;
+
+/**
+ * A credential-shaped value in a deadline variable, with a newline in it.
+ *
+ * Not a hypothetical shape: a deadline export is an ordinary place for a shell
+ * to spill something else into, and the writer's diagnostic runs during module
+ * import — before any embedding gate, in a process whose stderr lands in a hook
+ * log. The newline is there because a diagnostic that echoed the value back
+ * unescaped would also forge a second line of its own output.
+ */
+const DEADLINE_CANARY = 'sc-canary-Ax9QpZ\nAKIAQQQQQQQQQQQQQQQQ=deadline-secret';
+
+/** Every way a value can fail to be a deadline, with what may be said about it. */
+const NOT_A_DEADLINE = [
+  {
+    label: 'a nonnumeric value shaped like a credential',
+    value: DEADLINE_CANARY,
+    klass: 'not a number',
+    absent: ['sc-canary-Ax9QpZ', 'AKIAQQQQQQQQQQQQQQQQ', 'deadline-secret'],
+  },
+  // A lone zero is a substring of every fallback the writer names, so this case
+  // rests on the whole-line pin below rather than on an absence scan.
+  { label: 'zero', value: '0', klass: 'not positive', absent: [] },
+  { label: 'a negative number', value: '-250', klass: 'not positive', absent: ['-250'] },
+  { label: 'Infinity', value: 'Infinity', klass: 'not finite', absent: ['Infinity'] },
+  {
+    label: 'a delay longer than a timer can hold',
+    value: String(MAX_DEADLINE_MS + 1),
+    klass: 'beyond the maximum timer delay',
+    absent: [String(MAX_DEADLINE_MS + 1)],
+  },
+] as const;
+
+const NOT_A_DEADLINE_CASES = DEADLINE_KNOBS.flatMap(({ envName, fallbackMs }) =>
+  NOT_A_DEADLINE.map((bad) => ({ envName, fallbackMs, ...bad })),
+);
+
+/**
+ * The WHOLE line the writer prints for a value that is not a deadline.
+ *
+ * Asserted by equality rather than by `toContain`, which is the point: an exact
+ * line cannot also be carrying the value somewhere in it. What it may name is
+ * the variable, the class of invalidity, and the fallback it used — each of
+ * which an operator needs in order to fix the setting, and none of which
+ * discloses what was in the variable.
+ */
+function ignoredDeadlineLine(envName: string, klass: string, fallbackMs: number): string {
+  return `${WRITER_PREFIX} ignoring ${envName} (${klass}) — a deadline must be a finite positive `
+    + `number of milliseconds no greater than ${MAX_DEADLINE_MS}ms; using ${fallbackMs}ms`;
+}
+
+/**
  * A config the child must never read, and its isolated twin.
  *
  * Both are unsigned and carry no device identity, which is the shape a hook
@@ -708,6 +776,103 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(run.durationMs).toBeGreaterThan(8_000);
     expect(run.events).toEqual(['generateEmbedding', 'disposeModel']);
     expect(run.len).toBeNull();
+  }, HOOK_CASE_MS);
+
+  it.each(NOT_A_DEADLINE_CASES)(
+    'ignores $label on $envName without printing it back',
+    ({ envName, fallbackMs, value, klass, absent }) => {
+      // Read at module import, before any embedding gate: this diagnostic is
+      // printed even by a run that skips embeddings entirely, so whatever is in
+      // the variable reaches stderr whether or not the deadline is ever armed.
+      const run = runHook({
+        dir: root,
+        pkgRoot: pkg,
+        plan: { mode: 'vector' },
+        env: { [envName]: value },
+        title: `HOOK deadline ${klass} on ${envName}`,
+      });
+
+      // Said once, and said in full: naming the variable, the class of the
+      // problem and the fallback — and, by equality, nothing else.
+      const ignored = run.stderr.split('\n').filter((line) => line.includes(`ignoring ${envName}`));
+      expect(ignored).toHaveLength(1);
+      expect(ignored[0]).toBe(ignoredDeadlineLine(envName, klass, fallbackMs));
+      // ...and no other line of the run echoed it either.
+      for (const fragment of absent) expect(run.stderr).not.toContain(fragment);
+      // The fallback is a working deadline, not a refusal: the row still embeds.
+      expect(run.events).toEqual(['generateEmbedding']);
+      expect(run.stderr).not.toMatch(/embedding timed out/);
+      expect(run.len).toBe(FIXTURE_VECTOR_BYTES);
+      expect(run.head).toBe(FIXTURE_VECTOR_HEAD);
+    },
+    HOOK_CASE_MS,
+  );
+
+  it("does not instant-timeout an embed whose deadline is beyond a timer's range", () => {
+    // `setTimeout(delay)` above MAX_DEADLINE_MS is converted to 1ms. Honoured
+    // as written, an over-range embed deadline therefore fails EVERY embed in
+    // the process before the model can answer — the same defect as zero, in a
+    // number a finite-and-positive check waves through.
+    //
+    // The plan holds its answer for 400ms so the two outcomes are actually
+    // different: 1ms beats it and the documented 10s default does not. No long
+    // real wait is spent either way — the fallback is never reached.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'vector', delayMs: 400 },
+      env: { SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: String(MAX_DEADLINE_MS + 1) },
+      title: 'HOOK over-range embed deadline',
+    });
+
+    const ignored = run.stderr.split('\n').filter((line) => /ignoring SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS/.test(line));
+    expect(ignored).toHaveLength(1);
+    expect(ignored[0]).toContain('using 10000ms');
+    // Nothing timed out, so nothing was disposed of either.
+    expect(run.stderr).not.toMatch(/embedding timed out/);
+    expect(run.events).toEqual(['generateEmbedding']);
+    // And the vector the embed genuinely produced is the one that was stored.
+    expect(run.len).toBe(FIXTURE_VECTOR_BYTES);
+    expect(run.head).toBe(FIXTURE_VECTOR_HEAD);
+    // The fallback bounds this run; it is not spent by it.
+    expect(run.durationMs).toBeLessThan(boundedRunMs(400, 0));
+  }, HOOK_CASE_MS);
+
+  it('does not latch a run off a working embedder because the disposal deadline is out of range', () => {
+    // The same coercion on the other knob, and the more damaging half now that
+    // giving up LATCHES: a 1ms disposal deadline expires before `disposeModel()`
+    // can possibly have finished, so a run reports a wedge that never happened
+    // and skips embeddings for every remaining row.
+    //
+    // Two rows, so the latch is observable and not merely the give-up line.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'hang' },
+      env: {
+        SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '250',
+        SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS: String(MAX_DEADLINE_MS + 1),
+      },
+      rows: 2,
+      title: 'HOOK over-range dispose deadline',
+    });
+
+    const ignored = run.stderr.split('\n').filter((line) => /ignoring SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS/.test(line));
+    expect(ignored).toHaveLength(1);
+    expect(ignored[0]).toContain('using 2000ms');
+    // The disposal really does settle, well inside the default it fell back to.
+    expect(run.stderr).not.toMatch(/shutdown did not finish/);
+    expect(run.stderr).not.toMatch(/skipping embeddings for the rest of this hook run/);
+    // ...so nothing latched: the second row still reached the embedder, and
+    // still timed out on its own (real) embed deadline.
+    expect(run.events).toEqual(['generateEmbedding', 'disposeModel', 'generateEmbedding', 'disposeModel']);
+    const timedOut = run.stderr.split('\n').filter((line) => /embedding timed out after 250ms/.test(line));
+    expect(timedOut).toHaveLength(2);
+    // Every row survived its lost vector, and the run stayed inside the budgets
+    // it was actually given: two real embed deadlines and one disposal default.
+    expect(run.rows).toHaveLength(2);
+    for (const row of run.rows) expect(row.len).toBeNull();
+    expect(run.durationMs).toBeLessThan(boundedRunMs(2 * 250, 2_000));
   }, HOOK_CASE_MS);
 
   it('kills a wedged child on its own budget, and says what it was doing', () => {

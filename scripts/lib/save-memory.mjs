@@ -19,33 +19,77 @@ function pickNumber(envName, fallback) {
 }
 
 /**
+ * The longest delay a timer can hold, and so the longest deadline this accepts.
+ *
+ * `setTimeout()` keeps its delay in a signed 32-bit integer: a delay above
+ * 2^31-1 ms (~24.9 days) is converted to 1ms. An over-range deadline is
+ * therefore not a very long deadline at all — it is an INSTANT one, i.e. the
+ * same defect as `0` wearing a number that a finite-and-positive check waves
+ * through. On the embed knob it fails every embed in the process before the
+ * worker can answer; on the disposal knob it expires before `disposeModel()`
+ * can possibly have finished, reports a wedge that did not happen and latches
+ * the rest of the run off a working embedder.
+ *
+ * Node does not export this bound — `TIMEOUT_MAX` is internal to the timers
+ * implementation — so it is spelled out here, and pinned by the tests.
+ */
+const MAX_DEADLINE_MS = 2_147_483_647;
+
+/**
+ * Why a value is not a deadline. `null` when it is one.
+ *
+ * A short CLASS, deliberately, because this is the only thing said out loud
+ * about the value — see {@link pickDeadlineMs}.
+ */
+function deadlineFault(parsed) {
+  if (Number.isNaN(parsed)) return 'not a number';
+  if (!Number.isFinite(parsed)) return 'not finite';
+  if (parsed <= 0) return 'not positive';
+  if (parsed > MAX_DEADLINE_MS) return 'beyond the maximum timer delay';
+  return null;
+}
+
+/**
  * A DEADLINE read from the environment, or the documented default.
  *
  * Separate from pickNumber() because the two have opposite failure modes. A
  * threshold of 0 is a meaningful (if aggressive) setting; a deadline of 0, a
- * negative number or a NaN is not a setting at all — it is a timer that fires
- * in the turn it is armed, which turns "bound this work" into "never let this
- * work happen". `SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS=0` would time every embed
- * out instantly, and `SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS=0` would give
- * up on a shutdown that had not been given a chance to start.
+ * negative number, a NaN or a delay past {@link MAX_DEADLINE_MS} is not a
+ * setting at all — it is a timer that fires in the turn it is armed, which
+ * turns "bound this work" into "never let this work happen".
+ * `SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS=0` would time every embed out instantly,
+ * and `SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS=0` would give up on a
+ * shutdown that had not been given a chance to start.
  *
  * A typo, an empty export, or a shell that resolved an unset variable to `0`
  * therefore falls back to the documented default, and says so once: silently
  * ignoring an operator's explicit setting is its own trap, and this is the
  * deadline that keeps `process.exit(0)` reachable.
  *
- * A small POSITIVE value is honoured as written. "Time out almost immediately"
- * is a coherent thing to ask for — the tests here ask for it — and clamping it
- * to a floor of our choosing would be us overruling a valid instruction.
+ * A small POSITIVE value inside the range is honoured as written. "Time out
+ * almost immediately" is a coherent thing to ask for — the tests here ask for
+ * it — and clamping it to a floor of our choosing would be us overruling a
+ * valid instruction.
+ *
+ * The diagnostic names the VARIABLE, the class of the problem and the fallback,
+ * and never the value. This runs at module import, before any embedding gate,
+ * in a process whose stderr lands in a hook log — so it prints even for a run
+ * that skips embeddings entirely. A deadline export is an ordinary place for a
+ * shell to spill something else into (a paste into the wrong name, a credential
+ * in an inherited environment), and echoing the value back would publish it.
+ * Truncating it would not help: truncation is not redaction, and a cut inside
+ * an escape produces a mangled line on top of the disclosure. Everything an
+ * operator needs to fix the setting is in the three things above.
  */
 function pickDeadlineMs(envName, fallback) {
   const raw = process.env[envName];
   if (raw === undefined || raw === '') return fallback;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  const fault = deadlineFault(parsed);
+  if (fault) {
     process.stderr.write(
-      `[shieldcortex save-memory] ignoring ${envName}=${JSON.stringify(raw).slice(0, 64)} `
-      + `— a deadline must be a finite positive number of milliseconds; using ${fallback}ms\n`,
+      `[shieldcortex save-memory] ignoring ${envName} (${fault}) — a deadline must be a finite `
+      + `positive number of milliseconds no greater than ${MAX_DEADLINE_MS}ms; using ${fallback}ms\n`,
     );
     return fallback;
   }
