@@ -108,17 +108,29 @@ const PACKAGE_BUILD_MS = 120_000;
  * never read it — not merely that it never wrote to it — and the twin that DID
  * get healed says where the child's config work went instead.
  *
- * Cloud is on in both, because config work only happens when it is, and the
- * only endpoint either names is the discard port on loopback: an isolation
- * failure could still not reach a live endpoint with the key beside it. Every
- * other run in this file leaves its isolated config empty, which is the
+ * Cloud is on in both, because config work only happens when it is — and with
+ * it on, the real pipeline really does try to upload: `syncToCloud()` POSTs the
+ * run's device id, device name and platform to `cloudBaseUrl`. Two independent
+ * things stop that leaving the machine, and neither is a port convention:
+ *
+ * - the probe installs a fail-closed `globalThis.fetch` before it loads the
+ *   pipeline, so the attempt is recorded locally and rejected. That is the
+ *   boundary, and the isolation case reads the recording rather than asserting
+ *   an absence;
+ * - the endpoint is reserved-invalid. RFC 2606 reserves `.invalid` precisely so
+ *   that no resolver may answer for it, which the previous `127.0.0.1:9` was
+ *   not: the discard port is a convention, and an unrelated local listener
+ *   there would have received generated host metadata.
+ *
+ * Every other run in this file leaves its isolated config empty, which is the
  * cloud-disabled default and names no endpoint at all.
  */
+const CANARY_BASE_URL = 'https://cloud.invalid/shieldcortex-canary';
 function canaryShapedConfig(marker: string): string {
   return `${JSON.stringify({
     cloudEnabled: true,
     cloudApiKey: marker,
-    cloudBaseUrl: 'http://127.0.0.1:9/shieldcortex-canary',
+    cloudBaseUrl: CANARY_BASE_URL,
   }, null, 2)}\n`;
 }
 const CANARY_KEY = 'canary-key-must-never-be-read';
@@ -622,15 +634,29 @@ describe('hook writer (real process, hermetic package) — same classification',
     const probes = fs.readdirSync(dir).filter((name) => /^probe-.*\.mjs$/.test(name));
     expect(probes).toHaveLength(1);
     const source = fs.readFileSync(path.join(dir, probes[0]), 'utf-8');
-    const specifiers = [...source.matchAll(/\bfrom (["'])([^"']+)\1/g)].map((m) => m[2]);
-    // Every specifier that names a location rather than a builtin. Both of them
-    // — the driver and the writer — and nothing else.
+    // Both import forms, in SOURCE ORDER: `import x from '...'` and the bare
+    // `import '...'` the network guard uses. Order is load-bearing below, so
+    // this is one pass over the file rather than two lists concatenated.
+    const specifiers = [...source.matchAll(/^[ \t]*import\s+(?:[^'"]*?\bfrom\s+)?(["'])([^"']+)\1/gm)]
+      .map((m) => m[2]);
+    // Every specifier that names a location rather than a builtin. Three of
+    // them — the network guard, the sqlite driver and the writer — and nothing
+    // else.
     const located = specifiers.filter((specifier) => /[/\\]/.test(specifier));
-    expect(located).toHaveLength(2);
+    expect(located).toHaveLength(3);
     expect(located).toContain(pathToFileURL(path.join(pkg, 'scripts', 'lib', 'save-memory.mjs')).href);
     for (const specifier of located) {
       expect(specifier.startsWith('file://')).toBe(true);
     }
+
+    // ...and the guard is FIRST. An ESM graph evaluates its imports in order,
+    // so this position is the whole of what "before the real pipeline" means:
+    // a guard imported second would be installing itself into a process that
+    // had already loaded the writer, the defence pipeline and the cloud client.
+    const guards = fs.readdirSync(dir).filter((name) => /^netguard-.*\.mjs$/.test(name));
+    expect(guards).toHaveLength(1);
+    expect(located[0]).toBe(pathToFileURL(path.join(dir, guards[0])).href);
+    expect(fs.readFileSync(path.join(dir, guards[0]), 'utf-8')).toContain('globalThis.fetch =');
   }, HOOK_CASE_MS);
 
   it('awaits the vector and stores it before the process exits', () => {
@@ -726,10 +752,22 @@ describe('hook writer (real process, hermetic package) — same classification',
       expect(run.child.auditDirIsIsolated).toBe(true);
       expect(run.child.homedirIsIsolated).toBe(true);
       // The seeded config is the one cloud-enabled run in this file, so it is
-      // also the one that must not be able to leave the machine. What holds
-      // that is the endpoint: a loopback discard port. The empty proxy list is
-      // belt-and-braces beside it — nothing here honours those variables today
-      // — and it is pinned so the day something does, this run is still local.
+      // also the one that must not be able to leave the machine — and the only
+      // one where something actually tries. The real pipeline's `syncToCloud()`
+      // POSTs this run's device id, device name and platform, and every attempt
+      // is here: intercepted by the probe's fail-closed `fetch`, recorded
+      // locally, never sent. Non-vacuous in both directions — the guard proves
+      // it was reached, and the URLs prove nothing external was named.
+      expect(run.fetchAttempts.length).toBeGreaterThan(0);
+      for (const attempt of run.fetchAttempts) {
+        expect(attempt.url.startsWith(CANARY_BASE_URL)).toBe(true);
+        // Reserved-invalid by RFC 2606, so this is a host no resolver may
+        // answer for — not a port that happens to be free.
+        expect(new URL(attempt.url).hostname.endsWith('.invalid')).toBe(true);
+      }
+      // The empty proxy list is belt-and-braces beside that — nothing here
+      // honours those variables today — and it is pinned so the day something
+      // does, this run is still local.
       expect(run.child.proxyKeysPresent).toEqual([]);
       expect(run.child.noProxyIsLoopback).toBe(true);
       // Belt-and-braces, and labelled as such: NOTHING on this path appends to
@@ -827,7 +865,7 @@ describe('hook writer (real process, hermetic package) — same classification',
           // Proxy-SHAPED, and deliberately not one of the stripped keys: the
           // probe reports it, which is how an empty list for the real family is
           // known to be a scrub rather than a probe that never looked.
-          [HOOK_PROXY_CONTROL_KEY]: 'http://127.0.0.1:9',
+          [HOOK_PROXY_CONTROL_KEY]: 'http://proxy-control.invalid:3128',
         },
         title: 'HOOK proxies stripped',
       });

@@ -36,11 +36,14 @@
  * real generator, and the fixture `generator.js` throws if its embedder surface
  * is called at all.
  *
- * And nothing in a run reaches the machine it runs on. Each child gets its own
- * home, config dir and audit dir inside that run's scratch directory, owner-only
- * and not overridable by the caller, and it carries no proxy variable (that last
- * one belt-and-braces: see {@link HOOK_PROXY_KEYS}). The three directories are
- * not equally load-bearing either:
+ * And nothing in a run reaches the machine it runs on, or the network it is on.
+ * Each child gets its own home, config dir and audit dir inside that run's
+ * scratch directory, owner-only and not overridable by the caller; it carries no
+ * proxy variable (belt-and-braces: see {@link HOOK_PROXY_KEYS}); and it loads a
+ * fail-closed `globalThis.fetch` before it loads anything else, so the real
+ * cloud-sync path in the real pipeline is intercepted locally and recorded
+ * rather than sent (see {@link fetchGuardJs}). The three directories are not
+ * equally load-bearing either:
  *
  * - the config dir is: a hook process reads the defence config on every scan
  *   and SIGNS what it reads, rewriting it in place;
@@ -104,8 +107,8 @@ export const DB_UPDATE_REJECTED_MSG = 'hook package fixture: embedding UPDATE re
  * now, and not one that would survive being wrong about `fetch`.
  *
  * It is still the right default: a hook process inherits an operator's shell,
- * and the one cloud-enabled run in the suite names a loopback discard port
- * precisely because the isolation, not the proxy list, is what has to hold.
+ * and what actually holds a run local is the isolation and the fail-closed
+ * `fetch` guard below — not this list.
  *
  * Removed in {@link runHook}, after the caller's env and without regard to
  * case — see {@link deleteEnvKeys}.
@@ -126,6 +129,59 @@ export const HOOK_NO_PROXY = 'localhost,127.0.0.1,::1';
  * probe that never looked.
  */
 export const HOOK_PROXY_CONTROL_KEY = 'SC_HOOK_FIXTURE_PROXY_CONTROL';
+
+/**
+ * The fail-closed network guard every hook probe loads before anything else.
+ *
+ * The proxy scrub above is belt-and-braces; THIS is the sandbox. A hook process
+ * runs the real defence pipeline, and with cloud enabled that pipeline calls
+ * `syncToCloud()`, which POSTs the run's device id, device name and platform to
+ * whatever `cloudBaseUrl` says. A test must not make that request — not to a
+ * remote host, and not to loopback either, where "a port nobody is listening
+ * on" is a convention rather than a guarantee and an unrelated local listener
+ * would receive generated host metadata.
+ *
+ * Global `fetch` is the whole of this codebase's egress: every cloud call site
+ * goes through it, and no module installs an undici dispatcher or opens a
+ * socket of its own. Replacing it before the first dist module is loaded is
+ * therefore a real boundary rather than a partial one — and the endpoints this
+ * suite names are reserved-invalid anyway (RFC 2606 `.invalid`, which no
+ * resolver may answer), so even a path that somehow escaped this could reach
+ * nothing.
+ *
+ * Attempts are recorded to a file, so a run can PROVE the interception happened
+ * locally instead of asserting an absence.
+ */
+function fetchGuardJs(logPath: string): string {
+  return `
+// Fixture module — written by src/__tests__/hook-package-fixture.ts, never shipped.
+//
+// Imported FIRST by the generated probe. An ESM graph is evaluated in import
+// order, so nothing the writer or the real pipeline loads can have captured the
+// original global before this replaces it.
+import { appendFileSync } from 'fs';
+
+const LOG = ${JSON.stringify(logPath)};
+
+function targetOf(input) {
+  if (typeof input === 'string') return input;
+  if (input && typeof input.url === 'string') return input.url;
+  try { return String(input); } catch { return '<unprintable request>'; }
+}
+
+globalThis.fetch = async (input, init) => {
+  const url = targetOf(input);
+  const method = String((init && init.method) || (input && input.method) || 'GET');
+  try {
+    appendFileSync(LOG, JSON.stringify({ method, url }) + '\\n');
+  } catch { /* the run's scratch directory may already be gone */ }
+  // Rejected, not thrown synchronously: every cloud call site either awaits
+  // this or attaches .catch(), and a synchronous throw would take a path none
+  // of them handle — turning a blocked request into a pipeline failure.
+  throw new Error('hook package fixture: network is fail-closed — intercepted ' + method + ' ' + url);
+};
+`;
+}
 
 /**
  * Quote a string as SQL — single quotes, doubled inside.
@@ -631,6 +687,15 @@ export interface HookChildFacts {
 
 export interface HookRunResult {
   /**
+   * Every request the child's `fetch` was asked to make, in order.
+   *
+   * Empty is the ordinary answer — a cloud-disabled config has no endpoint to
+   * reach. A cloud-ENABLED run does attempt an upload, and this is where that
+   * attempt shows up: recorded locally by {@link fetchGuardJs} and rejected,
+   * never sent. Method and URL only, which is all the guard is handed.
+   */
+  fetchAttempts: Array<{ method: string; url: string }>;
+  /**
    * Wall-clock ms the child process took, start to exit.
    *
    * The subject of the bounded-shutdown case: a hook that cannot give up on a
@@ -686,6 +751,8 @@ export function runHook({
 
   const tag = Math.random().toString(36).slice(2);
   const probePath = path.join(dir, `probe-${tag}.mjs`);
+  const guardPath = path.join(dir, `netguard-${tag}.mjs`);
+  const fetchLogPath = path.join(dir, `fetch-${tag}.log`);
   const dbPath = path.join(dir, `probe-${tag}.db`);
   const eventsPath = path.join(dir, `events-${tag}.log`);
   const planPath = path.join(dir, `plan-${tag}.json`);
@@ -724,12 +791,21 @@ export function runHook({
   }
 
   fs.writeFileSync(planPath, JSON.stringify({ mode: 'vector', ...plan, eventsPath }));
+  // A separate module rather than a statement at the top of the probe: an ESM
+  // graph evaluates its imports before ANY of the importer's own body runs, so
+  // a `globalThis.fetch = ...` written inline would land after the writer and
+  // the whole real pipeline had already been loaded. Importing this first is
+  // what makes "before the real pipeline" a property of the module graph
+  // instead of a hope about evaluation order.
+  fs.writeFileSync(guardPath, fetchGuardJs(fetchLogPath));
   // An ESM specifier is a URL, not a path. On POSIX an absolute path happens to
   // read as one; on Windows `C:\...` is a scheme Node's loader rejects outright,
   // so a probe written with quoted paths could not run there at all — and every
   // Windows pin in this fixture would be describing a platform it cannot reach.
   // `pathToFileURL` is also what escapes a `#` or a space in a scratch path.
   fs.writeFileSync(probePath, `
+    // First, and deliberately before every other specifier in this file.
+    import ${JSON.stringify(pathToFileURL(guardPath).href)};
     import Database from ${JSON.stringify(pathToFileURL(betterSqlitePath).href)};
     import os from 'os';
     import { readFileSync } from 'fs';
@@ -876,8 +952,13 @@ export function runHook({
   const events = fs.existsSync(eventsPath)
     ? fs.readFileSync(eventsPath, 'utf-8').split('\n').filter(Boolean)
     : [];
+  const fetchAttempts = (fs.existsSync(fetchLogPath)
+    ? fs.readFileSync(fetchLogPath, 'utf-8').split('\n').filter(Boolean)
+    : []
+  ).map((line) => JSON.parse(line) as { method: string; url: string });
 
   return {
+    fetchAttempts,
     durationMs,
     len: printed.row.len,
     head: printed.row.head,
