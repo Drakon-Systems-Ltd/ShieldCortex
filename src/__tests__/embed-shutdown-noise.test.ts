@@ -135,6 +135,21 @@ const boundedRunMs = (embedMs: number, disposeMs: number): number =>
  */
 const MAX_DEADLINE_MS = 2_147_483_647;
 
+/**
+ * How long the fixture's `disposeModel()` really takes in the disposal-deadline
+ * cases below.
+ *
+ * Those cases assert that a value which is not a deadline was NOT armed, and
+ * that assertion needs a disposal the rejected value would have beaten. The
+ * fixture's default disposal returns at once — a microtask, ahead of every
+ * timer — so a cleanup deadline of 0 or 1ms would find it finished too, and
+ * "honoured" and "rejected" would be the same run. Fifty times the 1ms an
+ * over-range delay is coerced to, and a fortieth of the 2000ms default it must
+ * fall back to: the two outcomes are opposite, and neither costs the run a
+ * fallback's worth of wall clock.
+ */
+const DISPOSE_DELAY_MS = 50;
+
 /** Both deadline knobs, with the default each documents falling back to. */
 const DEADLINE_KNOBS = [
   { envName: 'SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', fallbackMs: 10_000 },
@@ -720,12 +735,13 @@ describe('hook writer (real process, hermetic package) — same classification',
     // the turn it was created, so the cleanup gave up before `disposeModel()`
     // could possibly have finished — and, now, latched the rest of the run off
     // an embedder that was working. Zero is not a short deadline; it is not a
-    // deadline. The disposal here settles at once, so a give-up line is proof
-    // the value was honoured rather than rejected.
+    // deadline. The disposal here takes DISPOSE_DELAY_MS, which a zero deadline
+    // beats and the 2000ms default does not, so a give-up line is proof the
+    // value was honoured rather than rejected.
     const run = runHook({
       dir: root,
       pkgRoot: pkg,
-      plan: { mode: 'hang' },
+      plan: { mode: 'hang', disposeDelayMs: DISPOSE_DELAY_MS },
       env: {
         SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '250',
         SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS: '0',
@@ -845,10 +861,17 @@ describe('hook writer (real process, hermetic package) — same classification',
     // and skips embeddings for every remaining row.
     //
     // Two rows, so the latch is observable and not merely the give-up line.
+    //
+    // And a disposal that really takes DISPOSE_DELAY_MS, because the outcome
+    // has to DEPEND on which deadline was armed: against the fixture's default
+    // disposal — settled in a microtask — this case passes even for a writer
+    // that armed the 1ms its over-range value was coerced to, which is exactly
+    // the defect it exists to catch. At 50ms the coerced deadline expires first
+    // and latches; the 2000ms default it must fall back to does not.
     const run = runHook({
       dir: root,
       pkgRoot: pkg,
-      plan: { mode: 'hang' },
+      plan: { mode: 'hang', disposeDelayMs: DISPOSE_DELAY_MS },
       env: {
         SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '250',
         SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS: String(MAX_DEADLINE_MS + 1),

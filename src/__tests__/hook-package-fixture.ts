@@ -274,6 +274,24 @@ export interface EmbedPlan {
    * the call that does not come back.
    */
   disposeHangs?: boolean;
+  /**
+   * Hold `disposeModel()` genuinely pending for this many ms, then resolve.
+   *
+   * {@link delayMs} for the other deadline, and for the same reason. A
+   * disposal that returns at once settles in a MICROTASK, which no timer
+   * callback can beat, so the writer's cleanup race is won by the disposal
+   * whatever deadline it was armed with — and a deadline silently coerced to
+   * 1ms looks exactly like one that was rejected in favour of the documented
+   * default. A wait well above 1ms and well below that default separates them:
+   * the instant deadline gives up and latches the run, the default does not.
+   *
+   * Not {@link disposeHangs}, which never settles at all: this one FINISHES, so
+   * a run can assert that the cleanup COMPLETED rather than that it was
+   * abandoned.
+   *
+   * Wall clock, spent once per disposal — so once per row that timed out.
+   */
+  disposeDelayMs?: number;
 }
 
 export interface HookPackageOptions {
@@ -368,10 +386,15 @@ export async function generateEmbedding(text) {
 }
 
 export async function disposeModel() {
+  const plan = readPlan();
   record('disposeModel');
   // The wedge: a terminate() that never lands. Recorded FIRST, so a run proves
   // the writer really called it and then gave up on it.
-  if (readPlan().disposeHangs) return new Promise(() => {});
+  if (plan.disposeHangs) return new Promise(() => {});
+  // ...or a shutdown that genuinely takes a moment. Returning here instead
+  // settles in a microtask, ahead of every timer, so a cleanup deadline of 1ms
+  // would still find a disposal that had "finished". See EmbedPlan.disposeDelayMs.
+  if (plan.disposeDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, plan.disposeDelayMs));
 }
 export async function preloadModel() { record('preloadModel'); }
 export function isModelLoaded() { return false; }
