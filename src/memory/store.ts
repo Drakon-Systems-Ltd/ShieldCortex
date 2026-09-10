@@ -164,9 +164,11 @@ function scheduleMemoryEmbedding(db: ReturnType<typeof getDatabase>, memoryId: n
     .catch(e => {
       // Shutdown cancelled this job on purpose — the disposal doing its job,
       // not a failure, and reporting one line per queued job is noise that
-      // scales with queue depth. The generator owns the classifier, matched
-      // whole: the timeout kill, a crash, or a message that merely mentions
-      // disposal is a failure and still gets reported below.
+      // scales with queue depth. The generator owns the classifier, and it
+      // takes the brand and the code as well as the message: the timeout kill,
+      // a kill that failed, a crash, a message that merely mentions disposal,
+      // and the exact sentence on an ordinary Error a layer below us raised are
+      // all failures and still get reported below.
       if (isWorkerDisposedError(e)) return;
       if (
         e instanceof Error
@@ -1390,8 +1392,9 @@ function refreshEmbeddingAsync(memoryId: number, title: string, content: string)
       }
     })
     .catch((e) => {
-      // Same boundary as the create path: a shutdown-cancelled refresh is not
-      // a failure, and only the generator's exact disposal message is quiet.
+      // Same boundary as the create path: a shutdown-cancelled refresh is not a
+      // failure, and only an error the generator branded as a disposal — the
+      // message, the code and the registry brand together — is quiet.
       if (isWorkerDisposedError(e)) return;
       if (
         e instanceof Error &&

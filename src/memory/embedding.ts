@@ -25,8 +25,9 @@ function isExpectedEmbeddingDisable(message: string): boolean {
  * configuration, and work `disposeModel()` cancelled is the disposal doing its
  * job — a recall or a preload that was in flight when the server shut down is
  * cancelled, not failed. The generator owns the disposal classifier and it
- * matches the message whole, so the timeout kill, a crash, or anything that
- * merely mentions disposal is a failure and stays loud.
+ * requires the brand and the code as well as the whole message, so the timeout
+ * kill, a kill that failed, a crash, anything that merely mentions disposal,
+ * and the exact sentence on an ordinary Error are failures and stay loud.
  */
 function isQuietEmbeddingOutcome(e: unknown, message: string): boolean {
   return isWorkerDisposedError(e) || isExpectedEmbeddingDisable(message);
