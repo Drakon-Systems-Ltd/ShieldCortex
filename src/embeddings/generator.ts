@@ -94,6 +94,16 @@ export class WorkerDisposedError extends Error {
 const WORKER_TIMEOUT_KILL_MSG = 'Embedding worker terminated after a timed-out request';
 
 /**
+ * What a request that could not even be handed to the thread settles with.
+ *
+ * `postMessage()` is documented to throw for a value the structured clone
+ * algorithm refuses, and a throw there means nothing was sent: the worker is
+ * untouched, the thread will never answer, and the request is the only
+ * casualty. Loud and unbranded, like every other failure in this file.
+ */
+const SEND_FAILED_MSG = 'Embedding worker request could not be sent';
+
+/**
  * Why a worker instance is gone.
  *
  * 'disposed'/'timeout' are kills we asked for: worker.terminate() reports exit
@@ -117,6 +127,16 @@ interface WorkerHandle {
   worker: Worker;
   ready: boolean;
   retiredReason: RetireReason | null;
+  /**
+   * Proof this thread is gone, set by its OWN `exit` event and by nothing else.
+   *
+   * Distinct from `retiredReason`, which only records that we STOPPED USING a
+   * worker — a retirement is a decision, an exit is an observation, and the one
+   * invariant in this file that needs the observation is
+   * {@link noteTerminationFailure}: a `terminate()` failure reported after this
+   * is true has no exit left to clear it, because `exit` fires once.
+   */
+  exited: boolean;
   pending: Map<number, PendingRequest>;
 }
 
@@ -242,10 +262,34 @@ const TERMINATION_FAILED_MSG = 'Embedding worker could not be terminated and may
  */
 const terminationFailures = new Set<WorkerHandle>();
 
-/** Record a kill that did not happen, and say so once, where it happened. */
+/**
+ * Record a kill that did not happen, and say so once, where it happened.
+ *
+ * The two events can arrive in EITHER order, and they mean opposite things:
+ *
+ *  - failure first, exit later (or never) — the thread may still be running,
+ *    which is the whole hazard. Tracked, so work is refused until that exit;
+ *  - exit first, failure later — the host awaited the real termination and
+ *    reported the failure afterwards. The thread is provably gone. Tracking it
+ *    here would be permanent by construction: `exit` fires once, and the only
+ *    thing that clears a fault is the exit that has already been and gone, so
+ *    every embed and preload for the rest of the process would be refused on
+ *    behalf of a thread that is not there.
+ *
+ * Still reported in both cases — a kill that came back a failure is worth
+ * knowing about however it landed — and never awaited: after a proven exit
+ * this says its line and returns, so nothing downstream blocks on it.
+ */
 function noteTerminationFailure(handle: WorkerHandle, reason: RetireReason, cause: unknown): void {
-  terminationFailures.add(handle);
   const detail = cause instanceof Error ? cause.message : String(cause);
+  if (handle.exited) {
+    console.error(
+      `[shieldcortex] Embedding worker reported a failed ${reason} kill after that thread had `
+      + `already exited — the thread is gone, so new work is not refused: ${detail}`,
+    );
+    return;
+  }
+  terminationFailures.add(handle);
   console.error(
     `[shieldcortex] ${TERMINATION_FAILED_MSG} (${reason} kill): ${detail}`,
   );
@@ -355,6 +399,7 @@ function ensureWorker(): WorkerHandle {
     worker: new Worker(getWorkerPath()),
     ready: false,
     retiredReason: null,
+    exited: false,
     pending: new Map(),
   };
   current = handle;
@@ -393,6 +438,11 @@ function ensureWorker(): WorkerHandle {
     // The proof a failed kill did not give us: THIS thread is gone. Keyed on the
     // handle this listener closed over, so a late event from a worker we
     // replaced cannot clear a fault that belongs to another one.
+    //
+    // Recorded on the handle as well as used to clear, because a failure report
+    // can arrive AFTER this event and there is no second exit behind it. See
+    // {@link noteTerminationFailure}.
+    handle.exited = true;
     terminationFailures.delete(handle);
     if (!intentional && code !== 0) {
       console.error(`[shieldcortex] Embedding worker exited with code ${code}`);
@@ -438,7 +488,24 @@ function sendMessage(type: string, text?: string, timeoutMs?: number): Promise<u
     }, timeout);
 
     handle.pending.set(id, { resolve, reject, timer });
-    handle.worker.postMessage({ id, type, text });
+    try {
+      handle.worker.postMessage({ id, type, text });
+    } catch (err) {
+      // The request never left this thread, so nothing will ever answer it —
+      // and the timer above is now armed on behalf of a request that does not
+      // exist. Left installed it fires on its own schedule and calls
+      // terminateHandle() on whichever worker this handle is by then, settling
+      // that worker's unrelated requests with the timeout kill's collateral
+      // error. Both halves of the registration are undone in the same turn the
+      // send failed, before anything can await.
+      handle.pending.delete(id);
+      clearTimeout(timer);
+      // The worker itself is NOT retired: a postMessage that threw never
+      // reached it, so it is exactly as healthy as it was a line ago and the
+      // next request reuses it.
+      const detail = err instanceof Error ? err.message : String(err);
+      reject(new Error(`${SEND_FAILED_MSG} (${type}): ${detail}`));
+    }
   });
 }
 

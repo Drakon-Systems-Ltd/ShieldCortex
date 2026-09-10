@@ -28,9 +28,11 @@ import ts from 'typescript';
  *    scenario leaves the env unset and runs the shipped 30s value.
  *  - the `worker_threads` import is redirected to a test-owned shim, so a
  *    scenario can make `Worker#terminate()` FAIL — the one thing a real Worker
- *    will not do on request. With SC_TEST_TERMINATE_MODE unset the shim
- *    re-exports the real class by identity, so every other scenario in this
- *    file is driving `worker_threads.Worker` itself and nothing else.
+ *    will not do on request — and can make `Worker#postMessage()` throw, which
+ *    a real one does only for a payload the structured clone algorithm refuses.
+ *    With none of the shim's knobs set it re-exports the real class by
+ *    identity, so every other scenario in this file is driving
+ *    `worker_threads.Worker` itself and nothing else.
  *
  * Both live in test-owned files. The generator carries no seam for either.
  */
@@ -76,44 +78,124 @@ const WORKER_IMPORT_TEST = "import { Worker } from './worker-threads-shim.js';";
 const TERMINATION_FAILED = 'Embedding worker could not be terminated';
 
 /**
- * A `Worker` whose `terminate()` fails, and nothing else.
+ * What the module says when the kill it asked for was reported as failed AFTER
+ * that thread had provably exited.
+ *
+ * A different sentence from {@link TERMINATION_FAILED} on purpose, and pinned
+ * separately, because the two say opposite things about what happens next: one
+ * refuses every subsequent embed and preload until an exit arrives, and this
+ * one is a note about a kill whose exit has ALREADY arrived. Reporting the
+ * failure is still right — a host that could not kill a thread is worth
+ * knowing about — but there is nothing left to refuse work on behalf of.
+ */
+const TERMINATION_FAILED_AFTER_EXIT = 'after that thread had already exited';
+
+/**
+ * What a request that could not even be handed to the thread settles with.
+ *
+ * `postMessage()` throwing means nothing was sent, so the worker is untouched
+ * and the request is the only casualty. Loud and unbranded: a send that failed
+ * is a failure, not a shutdown.
+ */
+const SEND_FAILED = 'Embedding worker request could not be sent';
+
+/**
+ * A `Worker` whose `terminate()` or `postMessage()` fails, and nothing else.
  *
  * Test-owned, written into the sandbox beside the transpiled generator. The
- * real class is what a scenario gets unless SC_TEST_TERMINATE_MODE selects a
- * failure — not a pass-through wrapper around it, the class itself, so the
- * fourteen scenarios that say nothing about termination failure are driving
- * exactly what they were driving before this shim existed.
+ * real class is what a scenario gets unless one of the knobs below selects a
+ * fault — not a pass-through wrapper around it, the class itself, so the
+ * scenarios that say nothing about failure are driving exactly what they were
+ * driving before this shim existed.
  *
  *   SC_TEST_TERMINATE_MODE           'sync-throw' | 'async-reject'
+ *                                    | 'reject-after-exit' | 'reject-before-exit'
  *   SC_TEST_TERMINATE_RECOVER_INDEX  1-based spawn whose thread dies ANYWAY,
  *                                    a short while after its terminate() failed
  *   SC_TEST_TERMINATE_RECOVER_MS     how long after
+ *   SC_TEST_TERMINATE_KILL_FLAG      'reject-before-exit' only: the thread of
+ *                                    spawn N dies when `<flag>.N` exists, so the
+ *                                    driver decides WHEN the exit arrives
+ *   SC_TEST_POSTMESSAGE_FAIL_COUNT   how many postMessage() calls throw, from
+ *                                    the first, counted across the process
  *
- * A failing terminate() genuinely leaves the thread running: that is the whole
- * hazard, and it is why the scenarios that use it end with an explicit
- * process.exit(0) rather than an empty event loop.
+ * The two orderings a failed kill can arrive in are both deterministic here,
+ * and they are opposite hazards:
+ *
+ *  - 'reject-before-exit' reports the failure while the thread is genuinely
+ *    still running. Work must be refused, and released only by that thread's
+ *    own exit — which the driver triggers by hand rather than by a timer, so
+ *    the refusal window is observed instead of raced;
+ *  - 'reject-after-exit' really kills the thread and reports the failure only
+ *    once that handle's `exit` event has been delivered. There is no exit left
+ *    to clear a fault installed at that point, so a fault installed there is
+ *    permanent — for a thread that is provably gone.
+ *
+ * A failing terminate() that does not recover genuinely leaves the thread
+ * running: that is the whole hazard, and it is why those scenarios end with an
+ * explicit process.exit(0) rather than an empty event loop.
  */
 const WORKER_SHIM = [
   "import { Worker as RealWorker } from 'worker_threads';",
+  "import { existsSync } from 'fs';",
   '',
   "const MODE = process.env.SC_TEST_TERMINATE_MODE || '';",
   'const RECOVER_INDEX = Number(process.env.SC_TEST_TERMINATE_RECOVER_INDEX || 0);',
   'const RECOVER_MS = Number(process.env.SC_TEST_TERMINATE_RECOVER_MS || 0);',
+  "const KILL_FLAG = process.env.SC_TEST_TERMINATE_KILL_FLAG || '';",
+  'const SEND_FAILURES = Number(process.env.SC_TEST_POSTMESSAGE_FAIL_COUNT || 0);',
   '',
   'let spawnCount = 0;',
+  'let sendFailuresLeft = SEND_FAILURES;',
   '',
-  'class FailingTerminateWorker extends RealWorker {',
+  'class FaultInjectingWorker extends RealWorker {',
   '  #index;',
   '  #failed = false;',
   '  constructor(...args) {',
   '    super(...args);',
   '    this.#index = ++spawnCount;',
   '  }',
+  '  postMessage(...args) {',
+  '    // A synchronous send failure — what a payload the structured clone',
+  '    // algorithm refuses raises. Counted across the process rather than per',
+  '    // worker, so a scenario can fail exactly the first request and leave the',
+  '    // worker itself untouched: postMessage throwing means nothing was sent.',
+  '    if (sendFailuresLeft > 0) {',
+  '      sendFailuresLeft -= 1;',
+  "      throw new Error('fake postMessage failure');",
+  '    }',
+  '    return super.postMessage(...args);',
+  '  }',
   '  terminate() {',
+  '    // The send knob is independent of this one: a scenario that only fails',
+  '    // postMessage() gets a terminate() that really works.',
+  '    if (!MODE) return super.terminate();',
   '    // One failure per worker: a retry is a different question, and the',
   '    // recovery path below needs a terminate() that can still work.',
   '    if (this.#failed) return super.terminate();',
   '    this.#failed = true;',
+  "    if (MODE === 'reject-after-exit') {",
+  "      // The kill LANDS. The failure is reported only once this handle's own",
+  "      // exit event has been delivered: this listener is registered inside",
+  "      // terminate(), i.e. after the module's own (attached at construction),",
+  '      // and an emitter calls listeners in registration order.',
+  "      const exited = new Promise((resolve) => { this.once('exit', resolve); });",
+  '      super.terminate();',
+  "      return exited.then(() => { throw new Error('fake terminate failure (after exit)'); });",
+  '    }',
+  "    if (MODE === 'reject-before-exit') {",
+  '      // The thread stays alive until the driver says otherwise, so the window',
+  '      // in which the module is refusing work is one a driver can step into.',
+  '      if (KILL_FLAG) {',
+  "        const flag = KILL_FLAG + '.' + this.#index;",
+  '        const poll = setInterval(() => {',
+  '          if (!existsSync(flag)) return;',
+  '          clearInterval(poll);',
+  '          super.terminate();',
+  '        }, 10);',
+  '      }',
+  "      return Promise.reject(new Error('fake terminate failure (before exit)'));",
+  '    }',
   '    if (this.#index === RECOVER_INDEX) {',
   '      // The thread dies on its own later. Its exit event is the only thing',
   "      // that may clear this handle's fault.",
@@ -124,8 +206,8 @@ const WORKER_SHIM = [
   '  }',
   '}',
   '',
-  '// Identity, not delegation: with no mode selected this IS worker_threads.Worker.',
-  'export const Worker = MODE ? FailingTerminateWorker : RealWorker;',
+  '// Identity, not delegation: with no fault selected this IS worker_threads.Worker.',
+  'export const Worker = MODE || SEND_FAILURES > 0 ? FaultInjectingWorker : RealWorker;',
   '',
 ].join('\n');
 
@@ -640,6 +722,132 @@ const DRIVER = [
   '    loadedAtEnd: isModelLoaded(),',
   '  });',
   '  process.exit(0); // worker B outlived its kill and holds the loop open',
+  "} else if (scenario === 'terminate-rejects-after-exit') {",
+  '  // The OTHER ordering. The kill lands — the thread is provably gone — and',
+  '  // the host reports the failure afterwards. A fault recorded at that point',
+  '  // has no exit left to clear it (`exit` fires once, and it already has), so',
+  '  // it would refuse every embed and preload for the rest of the process on',
+  '  // behalf of a thread that is not there. Two rounds, on two different',
+  '  // handles, so a recovery is a property of the module and not a one-off.',
+  '  const rounds = [];',
+  '  for (let i = 0; i < 2; i++) {',
+  "    const blocked = settleDims(generateEmbedding('__HANG__'));",
+  '    await waitFor(() => spawned() >= i + 1);',
+  '    const workerId = spawnedIds()[i];',
+  '    const reachedWorker = await waitFor(() => beatsFrom(workerId) > 0);',
+  '    const timedOut = await blocked;',
+  '    // The rejection is delivered a microtask after that exit; parking here',
+  '    // is what puts it before the next admission rather than beside it.',
+  '    await delay(100);',
+  "    const after = await settleDims(generateEmbedding('after-' + i));",
+  '    const load = await settle(preloadModel());',
+  '    rounds.push({',
+  '      reachedWorker,',
+  '      timeoutMessage: timedOut.message,',
+  '      afterState: after.state,',
+  '      afterDims: after.dims,',
+  '      afterMessage: after.message,',
+  '      loadState: load.state,',
+  '      loadMessage: load.message,',
+  '      spawnedAfterRound: spawned(),',
+  '    });',
+  '  }',
+  '  await disposeModel();',
+  '  await delay(200);',
+  '  out({ rounds, spawned: spawned(), loadedAtEnd: isModelLoaded() });',
+  "} else if (scenario === 'terminate-fault-clears-before-exit') {",
+  '  // The ordering the module already claimed, made deterministic: the failure',
+  '  // is reported while that thread is genuinely still running, so work is',
+  '  // refused — and released only by that thread\'s OWN exit, which this driver',
+  '  // asks for by hand instead of waiting out a timer. Two rounds, so the',
+  '  // clear is proven to be per handle rather than a one-way unlatch.',
+  '  const flag = process.env.SC_TEST_TERMINATE_KILL_FLAG;',
+  '  const rounds = [];',
+  '  for (let i = 0; i < 2; i++) {',
+  "    const blocked = settleDims(generateEmbedding('__HANG__'));",
+  '    await waitFor(() => spawned() >= i + 1);',
+  '    const workerId = spawnedIds()[i];',
+  '    const reachedWorker = await waitFor(() => beatsFrom(workerId) > 0);',
+  '    const timedOut = await blocked;',
+  "    const duringFault = await settleDims(generateEmbedding('during-' + i));",
+  '    const spawnedDuringFault = spawned();',
+  '    const beatsDuringFault = beatsFrom(workerId); // it really is still there',
+  "    fs.writeFileSync(flag + '.' + (i + 1), 'die');",
+  '    // An intentional kill is silent, so the moment the heartbeat stops is the',
+  '    // only observable proof that thread is gone.',
+  '    let lastBeats = beatsFrom(workerId);',
+  '    let quietSince = Date.now();',
+  '    const workerGone = await waitFor(() => {',
+  '      const now = beatsFrom(workerId);',
+  '      if (now !== lastBeats) { lastBeats = now; quietSince = Date.now(); return false; }',
+  '      return Date.now() - quietSince > 150;',
+  '    });',
+  '    await delay(100); // the exit event lands in this window',
+  "    const afterExit = await settleDims(generateEmbedding('after-' + i));",
+  '    rounds.push({',
+  '      reachedWorker,',
+  '      timeoutMessage: timedOut.message,',
+  '      duringFaultState: duringFault.state,',
+  '      duringFaultMessage: duringFault.message,',
+  '      spawnedDuringFault,',
+  '      beatsDuringFault,',
+  '      workerGone,',
+  '      afterExitState: afterExit.state,',
+  '      afterExitDims: afterExit.dims,',
+  '      afterExitMessage: afterExit.message,',
+  '      spawnedAfterExit: spawned(),',
+  '    });',
+  '  }',
+  '  out({ rounds, spawned: spawned(), loadedAtEnd: isModelLoaded() });',
+  '  // The last worker is idle and alive, and no scenario step kills it: this',
+  '  // run is about kills that failed, so ending it explicitly is the honest',
+  '  // close rather than waiting on a loop that will not empty.',
+  '  process.exit(0);',
+  "} else if (scenario === 'send-failure-cleanup') {",
+  '  // postMessage() throws for the FIRST request only. That request never',
+  '  // reached the thread, so the worker is healthy — and the timeout timer the',
+  '  // request armed a line earlier must not still be there to kill it.',
+  "  const sendFailed = await settleDims(generateEmbedding('send-fails'));",
+  "  const okDuringWindow = await settleDims(generateEmbedding('ok-1'));",
+  '  const spawnedDuringWindow = spawned();',
+  '  // Past the point an abandoned timer would have fired.',
+  '  await delay(Number(process.env.SC_TEST_INFERENCE_TIMEOUT_MS) + 300);',
+  "  const okAfterWindow = await settleDims(generateEmbedding('ok-2'));",
+  '  const spawnedAtEnd = spawned();',
+  '  await disposeModel();',
+  '  await delay(200);',
+  '  out({',
+  '    sendFailedState: sendFailed.state,',
+  '    sendFailedMessage: sendFailed.message,',
+  '    okDuringWindowState: okDuringWindow.state,',
+  '    okDuringWindowDims: okDuringWindow.dims,',
+  '    spawnedDuringWindow,',
+  '    okAfterWindowState: okAfterWindow.state,',
+  '    okAfterWindowDims: okAfterWindow.dims,',
+  '    okAfterWindowMessage: okAfterWindow.message,',
+  '    spawnedAtEnd,',
+  '    loadedAtEnd: isModelLoaded(),',
+  '  });',
+  "} else if (scenario === 'send-failure-spares-later-request') {",
+  '  // What an abandoned timer does to OTHER work: it terminates the worker a',
+  '  // later request is sitting on, and settles that request with the timeout',
+  "  // kill's collateral error, early, instead of with its own timeout.",
+  "  const sendFailed = await settleDims(generateEmbedding('send-fails'));",
+  '  const timeout = Number(process.env.SC_TEST_INFERENCE_TIMEOUT_MS);',
+  '  await delay(Math.floor(timeout / 2)); // an abandoned timer fires mid-flight',
+  '  const startedAt = Date.now();',
+  "  const hung = await settleDims(generateEmbedding('__HANG__'));",
+  '  const hungMs = Date.now() - startedAt;',
+  '  await delay(200);',
+  '  out({',
+  '    sendFailedState: sendFailed.state,',
+  '    sendFailedMessage: sendFailed.message,',
+  '    hungState: hung.state,',
+  '    hungMessage: hung.message,',
+  '    hungMs,',
+  '    spawnedAtEnd: spawned(),',
+  '    loadedAtEnd: isModelLoaded(),',
+  '  });',
   "} else if (scenario === 'disposal-error-brand') {",
   '  // What a disposal actually THROWS, at each of the three places one is',
   '  // raised, and what the shared classifier says about near misses a layer',
@@ -1104,6 +1312,152 @@ describe('embedding worker — intentional disposal is not a crash', () => {
     // Both kills were ours, including the one that eventually landed.
     expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
     expect(run.stderr).not.toMatch(/Embedding worker error/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('does not refuse work on behalf of a thread that reported its failed kill after exiting', () => {
+    // The ordering the r10 review found. `terminate()` LANDS — the thread is
+    // gone and its `exit` event has been delivered — and the host reports the
+    // failure afterwards. `exit` fires once, so a fault installed at that point
+    // has nothing left that can clear it, and every embed and preload for the
+    // rest of the process is refused on behalf of a thread that is not there.
+    const run = runScenario('terminate-rejects-after-exit', {
+      SC_TEST_INFERENCE_TIMEOUT_MS: '200',
+      SC_TEST_TERMINATE_MODE: 'reject-after-exit',
+    });
+
+    const rounds = run.result.rounds as Array<Record<string, unknown>>;
+    expect(Array.isArray(rounds)).toBe(true);
+    expect(rounds).toHaveLength(2);
+    rounds.forEach((round, i) => {
+      expect(round.reachedWorker).toBe(true); // the worker really had the request
+      expect(String(round.timeoutMessage)).toMatch(/embed timed out after 200ms/);
+      // The whole point: fresh work runs, because the thread it would have been
+      // refused for is provably gone.
+      expect(round.afterMessage).toBe('');
+      expect(round.afterState).toBe('resolved');
+      expect(round.afterDims).toBe(3);
+      expect(round.loadMessage).toBe(''); // a preload skips the embed queue
+      expect(round.loadState).toBe('resolved');
+      // One replacement per round, and it is a DIFFERENT handle each time: the
+      // recovery is a property of the module, not a single unlatch.
+      expect(round.spawnedAfterRound).toBe(i + 2);
+    });
+    expect(run.result).toMatchObject({ spawned: 3, loadedAtEnd: false });
+
+    // Still said, and said truthfully. Three kills reported a failure after
+    // their thread had exited — two timeouts and the closing disposal — and
+    // none of them refuses anything.
+    const late = run.stderr.split('\n').filter((line) => line.includes(TERMINATION_FAILED_AFTER_EXIT));
+    expect(late).toHaveLength(3);
+    for (const line of late) expect(line).toContain('fake terminate failure (after exit)');
+    expect(late.filter((line) => line.includes('timeout kill'))).toHaveLength(2);
+    expect(late.filter((line) => line.includes('disposed kill'))).toHaveLength(1);
+    // ...and not one of them was recorded as a thread that may still be running.
+    expect(run.stderr).not.toContain(TERMINATION_FAILED);
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/); // the kills were ours
+    expect(run.stderr).not.toMatch(/Embedding worker error/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('refuses work until the exit arrives when the failure is reported first', () => {
+    // The opposite ordering, and the one that must NOT change: the failure is
+    // reported while that thread is genuinely still running, so work is refused
+    // until its own exit says otherwise. The kill is triggered by the driver
+    // writing a file rather than by a timer, so the refusal window is stepped
+    // into rather than raced.
+    const run = runScenario('terminate-fault-clears-before-exit', {
+      SC_TEST_INFERENCE_TIMEOUT_MS: '200',
+      SC_TEST_TERMINATE_MODE: 'reject-before-exit',
+      SC_TEST_TERMINATE_KILL_FLAG: path.join(sandbox, 'kill-flag'),
+    });
+
+    const rounds = run.result.rounds as Array<Record<string, unknown>>;
+    expect(Array.isArray(rounds)).toBe(true);
+    expect(rounds).toHaveLength(2);
+    rounds.forEach((round, i) => {
+      expect(round.reachedWorker).toBe(true);
+      expect(String(round.timeoutMessage)).toMatch(/embed timed out after 200ms/);
+      // Blocked while that thread might still be alive...
+      expect(round.duringFaultState).toBe('rejected');
+      expect(String(round.duringFaultMessage)).toContain(TERMINATION_FAILED);
+      expect(String(round.duringFaultMessage)).not.toMatch(/dispos/i); // a failure, not a shutdown
+      expect(round.beatsDuringFault as number).toBeGreaterThan(0); // it really is still there
+      expect(round.spawnedDuringFault).toBe(i + 1); // nothing built beside it
+      // ...and released by that thread's OWN exit, which the driver asked for.
+      expect(round.workerGone).toBe(true);
+      expect(round.afterExitMessage).toBe('');
+      expect(round.afterExitState).toBe('resolved');
+      expect(round.afterExitDims).toBe(3);
+      expect(round.spawnedAfterExit).toBe(i + 2);
+    });
+    // Three handles, and the last of them is healthy and idle: this scenario
+    // never disposes, so a module that had latched itself off would report
+    // `false` here instead.
+    expect(run.result).toMatchObject({ spawned: 3, loadedAtEnd: true });
+
+    // Two faults, two lines — one per handle, and each of them the blocking
+    // kind. Nothing here exited before its failure was reported.
+    const faults = run.stderr.split('\n').filter((line) => line.includes(TERMINATION_FAILED));
+    expect(faults).toHaveLength(2);
+    for (const line of faults) expect(line).toContain('fake terminate failure (before exit)');
+    expect(run.stderr).not.toContain(TERMINATION_FAILED_AFTER_EXIT);
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('cleans up after a postMessage() that throws, and keeps the worker it never reached', () => {
+    // `postMessage()` throwing means nothing was sent: the request is the only
+    // casualty and the worker is untouched. The timer armed a line earlier is
+    // the hazard — left installed it fires on its own schedule and terminates
+    // whichever worker is current by then.
+    const run = runScenario('send-failure-cleanup', {
+      SC_TEST_INFERENCE_TIMEOUT_MS: '400',
+      SC_TEST_POSTMESSAGE_FAIL_COUNT: '1',
+    });
+
+    // 1. The caller is told, loudly, and told what actually happened.
+    expect(run.result.sendFailedState).toBe('rejected');
+    expect(String(run.result.sendFailedMessage)).toContain(SEND_FAILED);
+    expect(String(run.result.sendFailedMessage)).toContain('fake postMessage failure');
+    expect(String(run.result.sendFailedMessage)).not.toMatch(/dispos/i);
+    // 2. The worker was never retired: the very next request uses it and works.
+    expect(run.result.okDuringWindowState).toBe('resolved');
+    expect(run.result.okDuringWindowDims).toBe(3);
+    expect(run.result.spawnedDuringWindow).toBe(1);
+    // 3. ...and it is STILL that same worker after the abandoned timer's
+    //    deadline has passed. A stale timeout would have killed it in between,
+    //    and this embed would be running on a replacement.
+    expect(run.result.okAfterWindowMessage).toBe('');
+    expect(run.result.okAfterWindowState).toBe('resolved');
+    expect(run.result.okAfterWindowDims).toBe(3);
+    expect(run.result).toMatchObject({ spawnedAtEnd: 1, loadedAtEnd: false });
+    expect(run.stderr).not.toMatch(/Embedding worker exited with code/);
+    expect(run.stderr).not.toMatch(/Embedding worker error/);
+    expect(run.status).toBe(0);
+  }, 30_000);
+
+  it('does not let a failed send time out a later request', () => {
+    // The other half of the damage. A stale timer does not merely kill a
+    // worker — it settles the requests that worker owns with the timeout
+    // kill's collateral error, early, in place of their own answer.
+    const run = runScenario('send-failure-spares-later-request', {
+      SC_TEST_INFERENCE_TIMEOUT_MS: '400',
+      SC_TEST_POSTMESSAGE_FAIL_COUNT: '1',
+    });
+
+    expect(run.result.sendFailedState).toBe('rejected');
+    expect(String(run.result.sendFailedMessage)).toContain(SEND_FAILED);
+    // The later request gets its OWN timeout, at its own deadline...
+    expect(run.result.hungState).toBe('rejected');
+    expect(String(run.result.hungMessage)).toMatch(/embed timed out after 400ms/);
+    // ...not the collateral of a kill performed on behalf of a request that
+    // was never sent.
+    expect(String(run.result.hungMessage)).not.toMatch(/terminated after a timed-out request/);
+    // The clock says the same thing: the abandoned timer's deadline falls
+    // halfway through this request, so a run that honoured it lands near 200ms.
+    expect(run.result.hungMs as number).toBeGreaterThan(300);
+    expect(run.result).toMatchObject({ spawnedAtEnd: 1, loadedAtEnd: false });
     expect(run.status).toBe(0);
   }, 30_000);
 
