@@ -87,6 +87,10 @@ function restoreConsole(): void {
   console.warn = realWarn;
 }
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const schemaPath = path.join(repoRoot, 'src', 'database', 'schema.sql');
+const betterSqlite = path.join(repoRoot, 'node_modules', 'better-sqlite3', 'lib', 'index.js');
+
 /** The refresh path is fire-and-forget — let its catch run. */
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 30));
 
@@ -193,9 +197,6 @@ describe('store.ts embedding jobs — shutdown cancellation is not a failure', (
 });
 
 describe('hook writer (scripts/lib/save-memory.mjs) — same classification', () => {
-  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-  const schemaPath = path.join(repoRoot, 'src', 'database', 'schema.sql');
-
   let tempDir: string;
   let db: Database.Database;
   let written: string[];
@@ -259,10 +260,6 @@ describe('hook writer (scripts/lib/save-memory.mjs) — same classification', ()
 // opens its test seams, and where it gets the disposal contract from. Neither
 // question can be answered by an in-process stub, because both are decided by
 // the process's own environment and module resolution.
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const schemaPath = path.join(repoRoot, 'src', 'database', 'schema.sql');
-const betterSqlite = path.join(repoRoot, 'node_modules', 'better-sqlite3', 'lib', 'index.js');
 
 interface HookProbe {
   /** Where the probe writes its scratch files. */
