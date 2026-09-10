@@ -12,7 +12,10 @@
  * and the classifier deciding is the production one — the mock factory spreads
  * the real generator module and replaces only `preloadModel`.
  *
- * A genuine preload failure keeps the doctor guidance, verbatim.
+ * A genuine preload failure keeps the doctor guidance, verbatim — and so does
+ * an `Error` merely carrying the disposal sentence. A cancellation is a
+ * `WorkerDisposedError` this module minted, brand and code included; the words
+ * on their own are not a contract anything under a preload can be trusted with.
  */
 import fs from 'fs';
 import path from 'path';
@@ -20,6 +23,7 @@ import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 
 const actualGenerator = await import('../generator.js');
 const DISPOSED = actualGenerator.WORKER_DISPOSED_MSG;
+const { WorkerDisposedError } = actualGenerator;
 
 /** Messages that must NEVER be swallowed, each a near miss in its own way. */
 const STILL_LOUD = [
@@ -29,6 +33,9 @@ const STILL_LOUD = [
   'Embedding worker unavailable. Run `npm run build` so dist/embeddings/worker.js exists.',
   'Embedding worker disposed while loading the model',     // merely starts the same
   'the worker was disposed',                               // merely mentions it
+  // The exact sentence, unbranded: what a layer under the preload could raise
+  // by accident. Only a disposal this module MINTED is a cancellation.
+  DISPOSED,
 ];
 
 let preloadFailure: unknown = null;
@@ -60,7 +67,7 @@ beforeEach(() => {
 
 describe('background preload — a shutdown is not a preload failure', () => {
   it('says nothing when disposal cancels the preload', async () => {
-    preloadFailure = new Error(DISPOSED);
+    preloadFailure = new WorkerDisposedError();
 
     await startBackgroundPreload();
 

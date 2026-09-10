@@ -351,6 +351,23 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
 // host with a growing NULL population visible instead of silently keyword-only.
 const EMBED_TIMEOUT_MS = pickNumber('SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', 10_000);
 
+/**
+ * A SECOND, separate budget: how long the cleanup after that timeout may take.
+ *
+ * `disposeModel()` resolves when the embedding worker thread is actually gone,
+ * which is the honest definition and also the dangerous one here. The case
+ * that reaches this code is a wedged embed, and if what wedged it is native
+ * ONNX work — the exact thing `terminate()` has to interrupt — then this is
+ * precisely the call that may not come back. Awaiting it unbounded would leave
+ * a hook process hanging on its own cleanup, past the failure it has already
+ * reported, and its caller would never reach `process.exit(0)`.
+ *
+ * Deliberately not derived from EMBED_TIMEOUT_MS: shutting a worker down is a
+ * different operation from an inference, and an operator who shortens one has
+ * said nothing about the other.
+ */
+const EMBED_DISPOSE_TIMEOUT_MS = pickNumber('SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS', 2_000);
+
 let _embedCache = null;
 let _embedCacheKey = null;
 let _warnedEmbedUnavailable = false;
@@ -389,10 +406,13 @@ async function loadEmbedder() {
 /**
  * The disposal contract, borrowed from the build rather than copied here.
  *
- * `src/embeddings/generator.ts` owns the message a disposal settles cancelled
- * work with, and the classifier that matches it whole. This writer is a plain
- * .mjs that cannot import TypeScript, so it loads the compiled classifier out
- * of dist/ the first time it has an embedding failure to classify.
+ * `src/embeddings/generator.ts` owns what a disposal IS — the exact message,
+ * the `code`, and a `Symbol.for` brand — and the classifier that requires all
+ * three. This writer is a plain .mjs that cannot import TypeScript, so it loads
+ * the compiled classifier out of dist/ the first time it has an embedding
+ * failure to classify. Borrowing rather than copying is what makes the brand
+ * worth having: a local copy of the message would go on suppressing whatever
+ * happened to carry those words.
  *
  * Not a fallback risk: without a build the defence pipeline is unavailable and
  * this writer drops the memory long before it embeds anything, so any embed
@@ -456,10 +476,19 @@ async function embedStoredRow(db, memoryId, text) {
     return;
   }
 
+  // The classified catch covers generateEmbedding() and NOTHING else.
+  //
+  // It used to wrap the vector check and the SQLite UPDATE as well, which made
+  // the disposal contract reach across two steps it has no business in: any
+  // post-embedding error that satisfied the classifier was read as a
+  // cancellation, and a row lost its vector with no diagnostic at all. Those
+  // two steps now run below, outside this catch, where every failure is loud
+  // whatever it looks like.
+  let embedding;
   let timer;
   let timedOut = false;
   try {
-    const embedding = await Promise.race([
+    embedding = await Promise.race([
       generateEmbedding(text),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
@@ -468,17 +497,13 @@ async function embedStoredRow(db, memoryId, text) {
         }, EMBED_TIMEOUT_MS);
       }),
     ]);
-    if (!embedding || !embedding.buffer) {
-      process.stderr.write(`[shieldcortex save-memory] embedding returned no vector for memory ${memoryId}\n`);
-      return;
-    }
-    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(embedding.buffer), memoryId);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     // Shutdown cancelled this embed on purpose — the disposal doing its job,
-    // not a failure. The generator's own classifier decides, matched whole and
-    // exactly as store.ts does it: the timeout kill, a crash, or anything that
-    // merely mentions disposal is a failure and still gets reported below.
+    // not a failure. The generator's own classifier decides, and it decides on
+    // the brand rather than on the words: the timeout kill, a crash, anything
+    // that merely mentions disposal, and an ordinary Error carrying the exact
+    // sentence are all failures and still get reported below.
     // Parity, not a live path: embeds here are serial and the only
     // disposeModel() in this process runs below this catch, so nothing in
     // production reaches it today. It is kept so a future concurrent disposer
@@ -494,18 +519,77 @@ async function embedStoredRow(db, memoryId, text) {
       return;
     }
     process.stderr.write(`[shieldcortex save-memory] embedding failed for memory ${memoryId}: ${msg}\n`);
-    if (timedOut) {
-      try {
-        const here = dirname(fileURLToPath(import.meta.url));
-        const distRoot = resolve(here, '..', '..', 'dist');
-        const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'index.js')).href);
-        if (typeof mod.disposeModel === 'function') await mod.disposeModel();
-      } catch {
-        /* worker may never have started */
-      }
-    }
+    if (timedOut) await disposeEmbedderWithinBudget();
+    return;
   } finally {
     if (timer) clearTimeout(timer);
+  }
+
+  // Below the boundary: the embed itself succeeded, so nothing from here can
+  // truthfully be a cancellation of it. No classifier runs, deliberately — a
+  // disposal-shaped error out of the buffer getter or out of SQLite is a lost
+  // vector, and a lost vector is reported.
+  try {
+    if (!embedding || !embedding.buffer) {
+      process.stderr.write(`[shieldcortex save-memory] embedding returned no vector for memory ${memoryId}\n`);
+      return;
+    }
+    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(embedding.buffer), memoryId);
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    process.stderr.write(`[shieldcortex save-memory] embedding failed for memory ${memoryId}: ${msg}\n`);
+  }
+}
+
+/**
+ * Shut the embedding worker down after a timeout — on a deadline of our own.
+ *
+ * The hook has already reported the failure by the time this runs, so its only
+ * job is to release the worker if it can and to get out of the way if it
+ * cannot. See {@link EMBED_DISPOSE_TIMEOUT_MS} for why "if it cannot" is a real
+ * case rather than a defensive flourish.
+ *
+ * Never throws, never leaves a timer behind, and says one line if it gave up:
+ * the caller's next statement is `process.exit(0)`, and it has to be reachable.
+ */
+async function disposeEmbedderWithinBudget() {
+  let deadline;
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const distRoot = resolve(here, '..', '..', 'dist');
+    const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'index.js')).href);
+    if (typeof mod.disposeModel !== 'function') return;
+
+    // Deliberately NOT unref'd, and this is the subtle half.
+    //
+    // Unref'ing it looks right — a timer that gives up should not hold a
+    // process open — but it is the one thing that stops it working. When
+    // `disposeModel()` never settles, this timer can be the only ref'd work
+    // left; unref'd, Node finds an empty loop, tears the process down on an
+    // unsettled top-level await (exit 13) and neither the diagnostic nor the
+    // caller's `process.exit(0)` is ever reached. Measured, not reasoned: that
+    // is exactly what the wedged-disposal case did with the unref in place.
+    //
+    // The bound comes from clearing it in `finally` instead, so it can outlive
+    // the race by nothing at all, and from the deadline itself being short.
+    const expired = new Promise((settle) => {
+      deadline = setTimeout(() => settle('expired'), EMBED_DISPOSE_TIMEOUT_MS);
+    });
+    const outcome = await Promise.race([
+      // Settled either way — a disposal that FAILS has still finished, and its
+      // own error is not this path's news.
+      Promise.resolve(mod.disposeModel()).then(() => 'finished', () => 'finished'),
+      expired,
+    ]);
+    if (outcome === 'expired') {
+      process.stderr.write(
+        `[shieldcortex save-memory] embedding worker shutdown did not finish within ${EMBED_DISPOSE_TIMEOUT_MS}ms — exiting without it\n`,
+      );
+    }
+  } catch {
+    /* worker may never have started */
+  } finally {
+    if (deadline) clearTimeout(deadline);
   }
 }
 

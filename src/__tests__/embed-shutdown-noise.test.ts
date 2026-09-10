@@ -35,15 +35,23 @@
  *   canary says the pin held, NOT that a filesystem audit write was diverted.
  *   No such write executes here, and the case does not claim one.
  *
- * The match is EXACT. A timeout, a timeout kill, a crash, an invalid vector, a
- * database error, or any message that merely mentions disposal stays loud.
+ * The match is EXACT, and it is not a match on words: a cancellation is a
+ * `WorkerDisposedError` the generator minted — message, code and registry
+ * brand. A timeout, a timeout kill, a crash, an invalid vector, a database
+ * error, any message that merely mentions disposal, and the exact sentence on
+ * an ordinary Error all stay loud.
+ *
+ * And only `generateEmbedding()` is classified. Validating the vector and
+ * writing it to SQLite happen OUTSIDE that catch, so a genuine disposal raised
+ * from either of them — brand and all — is still reported. Two hook cases
+ * below raise exactly that.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { WORKER_DISPOSED_MSG, isWorkerDisposedError } from '../embeddings/generator.js';
+import { WORKER_DISPOSED_MSG, WorkerDisposedError, isWorkerDisposedError } from '../embeddings/generator.js';
 import {
   DB_UPDATE_REJECTED_MSG,
   FIXTURE_VECTOR_BYTES,
@@ -72,6 +80,10 @@ const STILL_LOUD = [
   'Worker crashed: fake worker boom',
   'Embedding worker disposed while writing the vector', // merely starts the same
   'the worker was disposed',                            // merely mentions it
+  // The exact sentence on an ordinary Error — no code, no brand. A SQLite
+  // driver, a wrapper or a stale copy of the string can produce this; only the
+  // generator can produce a disposal.
+  DISPOSED,
 ];
 
 /**
@@ -239,7 +251,7 @@ describe('store.ts embedding jobs — shutdown cancellation is not a failure', (
   }
 
   it('says nothing when a queued job is cancelled by disposal', async () => {
-    embedFailure = new Error(DISPOSED);
+    embedFailure = new WorkerDisposedError();
 
     await addAndEmbed('disposal is quiet');
 
@@ -248,7 +260,7 @@ describe('store.ts embedding jobs — shutdown cancellation is not a failure', (
   });
 
   it('stays silent for every job a shutdown cancels, not just the first', async () => {
-    embedFailure = new Error(DISPOSED);
+    embedFailure = new WorkerDisposedError();
 
     for (let i = 0; i < 5; i++) await addAndEmbed(`queued job ${i}`);
 
@@ -296,7 +308,7 @@ describe('store.ts embedding jobs — shutdown cancellation is not a failure', (
     await awaitPendingEmbeddings();
     errors = [];
 
-    embedFailure = new Error(DISPOSED);
+    embedFailure = new WorkerDisposedError();
     updateMemory(created.id, { content: 'Rewritten content, first pass.' });
     await flush();
     expect(embedCalls).toBe(2); // the refresh really ran — silence is not vacuum
@@ -368,7 +380,9 @@ describe('hook writer (real process, hermetic package) — same classification',
     const run = runHook({
       dir: root,
       pkgRoot: pkg,
-      plan: { mode: 'fail', message: DISPOSED },
+      // A genuine disposal from the package's own build — brand and code, not
+      // an Error carrying the words. The unbranded twin is in STILL_LOUD.
+      plan: { mode: 'fail', branded: true },
       title: 'HOOK disposal is quiet',
     });
 
@@ -472,6 +486,85 @@ describe('hook writer (real process, hermetic package) — same classification',
     // Loud, and the memory still survives its lost vector: runHook fails the
     // case outright if the row is missing, so NULL here is the whole damage.
     expect(run.len).toBeNull();
+  }, HOOK_CASE_MS);
+
+  it('still reports a vector whose buffer throws a genuine disposal', () => {
+    // The narrowing, first half. This is a REAL `WorkerDisposedError` — exact
+    // message, code, registry brand — raised while the writer reaches for the
+    // vector, i.e. after `generateEmbedding()` already returned. A catch that
+    // still covered the validation step would classify it and say nothing,
+    // leaving a NULL column with no diagnostic anywhere.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'unusable', branded: true },
+      title: 'HOOK disposal at the buffer',
+    });
+
+    expect(run.events).toEqual(['generateEmbedding']); // the embed itself succeeded
+    expect(run.stderr).toMatch(/embedding failed for memory \d+/);
+    expect(run.stderr).toContain(DISPOSED);
+    expect(run.len).toBeNull();
+  }, HOOK_CASE_MS);
+
+  it('still reports an embedding UPDATE that throws a genuine disposal', () => {
+    // The narrowing, second half — and the case CASE asked for. The database
+    // write throws a disposal the writer's own classifier accepts: same
+    // message, same code, same registry brand, minted in the probe with no
+    // shared class. Only the boundary of the catch can keep this loud.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'vector' },
+      dbFailure: 'embedding-update-disposal',
+      title: 'HOOK disposal at the update',
+    });
+
+    expect(run.events).toEqual(['generateEmbedding']); // a real vector, in hand
+    expect(run.stderr).toMatch(
+      new RegExp(`embedding failed for memory \\d+: ${escapeRegExp(DISPOSED)}`),
+    );
+    // Loud, and the memory survives its lost vector — runHook fails the case
+    // outright if the row is missing, so NULL here is the whole damage.
+    expect(run.len).toBeNull();
+  }, HOOK_CASE_MS);
+
+  it('gives up on a disposeModel() that never settles, and exits anyway', () => {
+    // The hook's own cleanup, on its own deadline. `disposeModel()` resolves
+    // when the worker thread is actually gone; if the native work that wedged
+    // the embed is what `terminate()` has to interrupt, this is precisely the
+    // call that does not come back — and the hook's caller never reaches
+    // `process.exit(0)`.
+    //
+    // Both budgets are pinned rather than defaulted, so the run measures the
+    // writer's bound and not the machine's speed.
+    const run = runHook({
+      dir: root,
+      pkgRoot: pkg,
+      plan: { mode: 'hang', disposeHangs: true },
+      env: {
+        SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS: '250',
+        SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS: '250',
+      },
+      timeoutMs: 10_000,
+      title: 'HOOK dispose wedged',
+    });
+
+    // It really tried to shut the worker down — silence here would be a hook
+    // that skipped the cleanup rather than one that survived it.
+    expect(run.events).toEqual(['generateEmbedding', 'disposeModel']);
+    expect(run.stderr).toContain('embedding timed out after 250ms');
+    // One line, truthful about what it gave up on. Counted, because a cleanup
+    // that reported itself once per retry would be its own kind of noise.
+    const gaveUp = run.stderr.split('\n').filter((line) => /shutdown did not finish/.test(line));
+    expect(gaveUp).toHaveLength(1);
+    expect(gaveUp[0]).toContain(WRITER_PREFIX);
+    expect(gaveUp[0]).toContain('250ms');
+    expect(run.len).toBeNull();
+    // On its own budget: the child came back well inside the 10s the harness
+    // would otherwise have killed it at, and the two deadlines it was given
+    // account for half a second of that.
+    expect(run.durationMs).toBeLessThan(5_000);
   }, HOOK_CASE_MS);
 
   it('kills a wedged child on its own budget, and says what it was doing', () => {
@@ -801,7 +894,9 @@ describe('hook writer — the disposal contract is borrowed from the build', () 
     const run = runHook({
       dir: root,
       pkgRoot: stale,
-      plan: { mode: 'fail', message: DISPOSED },
+      // Genuinely branded, so nothing but the missing classifier can explain a
+      // loud line here: an unbranded near miss is reported by every build.
+      plan: { mode: 'fail', branded: true },
       title: 'HOOK stale build',
     });
 
@@ -1070,16 +1165,27 @@ describe('hook package fixture — a destination must be fresh, and outside ever
 /**
  * Negative controls for the boundary every caller now shares.
  *
- * Whole-message equality on an `Error` is the whole contract, so the two ways a
- * near miss could still carry the exact text — a bare string, and something
- * that merely has a `message` property — must both be rejected. Neither can be
- * produced by `intentionalMessage()`, and if one day the classifier were
- * loosened to `err.message === MSG` without the `instanceof` guard, an
- * arbitrary object thrown by any layer could go quiet.
+ * The contract is a real `Error` carrying the exact message AND the code AND
+ * the registry brand — all of it minted by `generator.ts`. The message alone
+ * used to be enough, which made the SENTENCE the suppression key: any layer
+ * under an embed could raise it by accident and be read as a clean shutdown.
+ * So the near misses pinned here are the ways something could still carry the
+ * exact text — a bare string, a message-shaped object, an ordinary Error, a
+ * real disposal whose message was widened afterwards — and none of them go
+ * quiet. The positive cross-module cases (a brand minted with no access to the
+ * class, and each half of the brand alone) live at the producer end, in
+ * `src/embeddings/__tests__/worker-dispose-honesty.test.ts`.
  */
 describe('isWorkerDisposedError — negative controls', () => {
-  it('accepts only a real Error carrying the exact message', () => {
-    expect(isWorkerDisposedError(new Error(DISPOSED))).toBe(true);
+  it('accepts a disposal this module minted', () => {
+    expect(isWorkerDisposedError(new WorkerDisposedError())).toBe(true);
+  });
+
+  it('rejects an Error carrying the exact message and nothing else', () => {
+    // The near miss every caller in this file drives, and the one CASE called
+    // out: an ordinary Error with the exact sentence, which anything under an
+    // embed can raise. It is a failure, and it stays a failure.
+    expect(isWorkerDisposedError(new Error(DISPOSED))).toBe(false);
   });
 
   it('rejects the exact sentinel as a plain string', () => {
@@ -1094,6 +1200,15 @@ describe('isWorkerDisposedError — negative controls', () => {
   it('rejects an Error whose message merely contains the sentinel', () => {
     expect(isWorkerDisposedError(new Error(`${DISPOSED} while writing the vector`))).toBe(false);
     expect(isWorkerDisposedError(new Error(`worker: ${DISPOSED}`))).toBe(false);
+  });
+
+  it('rejects a disposal whose message was widened after it was minted', () => {
+    // Branded, coded, and still not this: the message is matched whole, so a
+    // layer that wrapped a real disposal in a longer sentence does not inherit
+    // its silence.
+    const widened = new WorkerDisposedError();
+    Object.defineProperty(widened, 'message', { value: `${DISPOSED} while writing the vector` });
+    expect(isWorkerDisposedError(widened)).toBe(false);
   });
 
   it('rejects the empty and absent cases', () => {

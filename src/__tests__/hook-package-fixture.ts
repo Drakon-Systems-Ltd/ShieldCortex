@@ -59,6 +59,11 @@ import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
+import {
+  WORKER_DISPOSED_BRAND_KEY,
+  WORKER_DISPOSED_CODE,
+  WORKER_DISPOSED_MSG,
+} from '../embeddings/generator.js';
 
 /** Bytes a stored fixture vector occupies: 384 float32s. */
 export const FIXTURE_VECTOR_BYTES = 384 * 4;
@@ -154,8 +159,31 @@ export interface EmbedPlan {
   mode?: EmbedMode;
   /** Rejection message for 'fail', buffer-failure message for 'unusable'. */
   message?: string;
+  /**
+   * Raise a GENUINE disposal instead of an error carrying `message`.
+   *
+   * A disposal is a branded `WorkerDisposedError` from the package's own build
+   * — the exact message, the code and the registry brand — so it is the one
+   * thing the writer's classifier accepts, not an imitation of it. Applies to
+   * whichever error `mode` raises: the rejection of 'fail', and the buffer
+   * getter of 'unusable'.
+   *
+   * That difference is the whole subject of the narrowing cases: a disposal out
+   * of `generateEmbedding()` is a cancellation and quiet, while the SAME error
+   * raised while validating or storing the vector is a failure and loud.
+   */
+  branded?: boolean;
   /** What the fixture cache-health gate reports. Defaults to ready. */
   cacheReady?: boolean;
+  /**
+   * Make `disposeModel()` never settle.
+   *
+   * The wedge the hook's post-timeout cleanup has to survive: `disposeModel()`
+   * resolves when the worker thread is actually gone, and if the native work
+   * that hung the embed is what `terminate()` has to interrupt, that is exactly
+   * the call that does not come back.
+   */
+  disposeHangs?: boolean;
 }
 
 export interface HookPackageOptions {
@@ -163,6 +191,11 @@ export interface HookPackageOptions {
    * 'real'    — `dist/embeddings/generator.js` re-exports the real classifier.
    * 'missing' — it does not export one at all, i.e. a build too old to have it.
    *             The writer must then suppress nothing.
+   *
+   * The disposal CLASS is re-exported either way: a stale package still has to
+   * be able to raise a genuine branded disposal, or the case that proves the
+   * classifier is borrowed would be passing on an unbranded near miss that any
+   * build goes loud about.
    */
   classifier?: 'real' | 'missing';
 }
@@ -196,8 +229,17 @@ const FIXTURE_INDEX_JS = `
 // the fixture cache module, which stars the real one) so any other dist module
 // that imports the barrel still links.
 import { readPlan, record } from './fixture-plan.js';
+// The package's OWN compiled disposal class, so a branded plan raises the
+// thing the writer's classifier accepts rather than a copy that looks like it.
+import { WorkerDisposedError } from './generator.js';
 
 export * from './model-cache.js';
+
+/** What this plan raises: a real disposal, or an ordinary error with a message. */
+function plannedError(plan) {
+  if (plan.branded) return new WorkerDisposedError();
+  return new Error(plan.message);
+}
 
 export async function generateEmbedding(text) {
   const plan = readPlan();
@@ -208,13 +250,19 @@ export async function generateEmbedding(text) {
   await new Promise((resolve) => setImmediate(resolve));
   switch (plan.mode) {
     case 'fail':
-      throw new Error(plan.message);
+      throw plannedError(plan);
     case 'hang':
       return new Promise(() => {});
     case 'null':
       return null;
     case 'unusable':
-      return { get buffer() { throw new Error(plan.message || 'vector buffer detached'); } };
+      return {
+        get buffer() {
+          throw plan.branded
+            ? new WorkerDisposedError()
+            : new Error(plan.message || 'vector buffer detached');
+        },
+      };
     default: {
       const vector = new Float32Array(384);
       // Deliberately NOT the 0.42 the deleted production FAKE seam wrote: a row
@@ -226,7 +274,12 @@ export async function generateEmbedding(text) {
   }
 }
 
-export async function disposeModel() { record('disposeModel'); }
+export async function disposeModel() {
+  record('disposeModel');
+  // The wedge: a terminate() that never lands. Recorded FIRST, so a run proves
+  // the writer really called it and then gave up on it.
+  if (readPlan().disposeHangs) return new Promise(() => {});
+}
 export async function preloadModel() { record('preloadModel'); }
 export function isModelLoaded() { return false; }
 export function cosineSimilarity() { return 0; }
@@ -250,10 +303,13 @@ export async function inspectEmbeddingHookReady() {
 
 function fixtureGeneratorJs(classifier: 'real' | 'missing'): string {
   const contract = classifier === 'real'
-    ? "export { WORKER_DISPOSED_MSG, isWorkerDisposedError } from './generator.real.js';"
+    ? "export { WORKER_DISPOSED_MSG, WorkerDisposedError, isWorkerDisposedError } from './generator.real.js';"
     : [
-      "export { WORKER_DISPOSED_MSG } from './generator.real.js';",
+      "export { WORKER_DISPOSED_MSG, WorkerDisposedError } from './generator.real.js';",
       '// isWorkerDisposedError deliberately absent: a build older than the contract.',
+      '// The CLASS stays, so this package can still raise a genuine disposal —',
+      '// otherwise the case that proves the classifier is borrowed would be',
+      '// asserting on a near miss every build reports loudly.',
     ].join('\n');
 
   return `
@@ -522,15 +578,24 @@ export interface HookRunOptions {
    */
   seedConfig?: string;
   /**
-   * Make the row's embedding UPDATE fail inside SQLite.
+   * Make the row's embedding UPDATE fail.
    *
-   * A `BEFORE UPDATE OF embedding` trigger in the probe's own database raises
-   * {@link DB_UPDATE_REJECTED_MSG}, so the writer's `UPDATE memories SET
-   * embedding = ?` genuinely fails at the database — after the INSERT committed,
-   * with a real vector in hand. Test-owned, in the generated probe: the writer
-   * and the package are untouched.
+   * 'embedding-update' — a `BEFORE UPDATE OF embedding` trigger in the probe's
+   * own database raises {@link DB_UPDATE_REJECTED_MSG}, so the writer's `UPDATE
+   * memories SET embedding = ?` genuinely fails at the database, after the
+   * INSERT committed and with a real vector in hand.
+   *
+   * 'embedding-update-disposal' — the same statement instead throws a GENUINE
+   * branded disposal: exact message, code and registry brand, the thing the
+   * writer's classifier accepts. This is the narrowing case. A catch that still
+   * covered the database write would read a lost vector as a clean shutdown and
+   * say nothing at all; the row would keep its NULL column with no diagnostic.
+   * The error is minted structurally in the probe rather than imported, which
+   * is also what pins the brand as cross-module rather than class identity.
+   *
+   * Test-owned, in the generated probe: the writer and the package are untouched.
    */
-  dbFailure?: 'embedding-update';
+  dbFailure?: 'embedding-update' | 'embedding-update-disposal';
 }
 
 /**
@@ -565,6 +630,14 @@ export interface HookChildFacts {
 }
 
 export interface HookRunResult {
+  /**
+   * Wall-clock ms the child process took, start to exit.
+   *
+   * The subject of the bounded-shutdown case: a hook that cannot give up on a
+   * wedged `disposeModel()` runs until something kills it, and "it eventually
+   * came back" is not the same claim as "it came back on its own budget".
+   */
+  durationMs: number;
   /** Bytes in the stored `embedding` column, or null when it stayed empty. */
   len: number | null;
   /** First four bytes, hex — {@link FIXTURE_VECTOR_HEAD} when the fixture embedded. */
@@ -669,6 +742,25 @@ export function runHook({
       BEFORE UPDATE OF embedding ON memories
       BEGIN SELECT RAISE(ABORT, ${sqlString(DB_UPDATE_REJECTED_MSG)}); END;
     \`);` : ''}
+    ${dbFailure === 'embedding-update-disposal' ? `
+    // The embedding UPDATE throws a GENUINE disposal — exact message, code and
+    // registry brand — from the database layer, where a disposal cannot
+    // truthfully come from. Minted here with no import: \`Symbol.for\` resolves
+    // through the cross-realm registry, so this IS the writer's brand without
+    // this probe sharing a class with anything.
+    const scFixtureDisposal = () => Object.assign(
+      new Error(${JSON.stringify(WORKER_DISPOSED_MSG)}),
+      {
+        name: 'WorkerDisposedError',
+        code: ${JSON.stringify(WORKER_DISPOSED_CODE)},
+        [Symbol.for(${JSON.stringify(WORKER_DISPOSED_BRAND_KEY)})]: true,
+      },
+    );
+    const scFixturePrepare = db.prepare.bind(db);
+    db.prepare = (sql) => (/UPDATE\\s+memories\\s+SET\\s+embedding/i.test(sql)
+      ? { run() { throw scFixtureDisposal(); } }
+      : scFixturePrepare(sql));
+    ` : ''}
     await saveAutoExtractedMemory(
       db,
       {
@@ -748,12 +840,14 @@ export function runHook({
   // pass it back in through `env`, in this exact spelling.
   if (!('SHIELDCORTEX_SKIP_EMBEDDINGS' in env)) deleteEnvKeys(childEnv, ['SHIELDCORTEX_SKIP_EMBEDDINGS']);
 
+  const startedAt = Date.now();
   const proc = spawnSync(process.execPath, [probePath], {
     cwd: pkgRoot,
     env: childEnv as NodeJS.ProcessEnv,
     encoding: 'utf-8',
     timeout: timeoutMs,
   });
+  const durationMs = Date.now() - startedAt;
 
   if (proc.error || proc.status !== 0) {
     // Naming the budget matters: this fires while jest is still waiting, so the
@@ -784,6 +878,7 @@ export function runHook({
     : [];
 
   return {
+    durationMs,
     len: printed.row.len,
     head: printed.row.head,
     stderr: proc.stderr,

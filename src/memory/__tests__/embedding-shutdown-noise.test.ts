@@ -15,11 +15,13 @@
  * test is the production one imported from `generator.ts` — not a copy of the
  * string kept alive in this file.
  *
- * The match is EXACT. A timeout, the timeout kill, a crash, or any message
- * that merely starts with or mentions disposal stays loud.
+ * The match is EXACT, and the message is not the whole of it: a cancellation is
+ * a `WorkerDisposedError` the generator minted, brand and code included. A
+ * timeout, the timeout kill, a crash, any message that merely starts with or
+ * mentions disposal — and the exact sentence on a plain `Error` — stay loud.
  */
 import { beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { WORKER_DISPOSED_MSG } from '../../embeddings/generator.js';
+import { WORKER_DISPOSED_MSG, WorkerDisposedError } from '../../embeddings/generator.js';
 
 const DISPOSED = WORKER_DISPOSED_MSG;
 const DISABLED = 'Embeddings disabled via SHIELDCORTEX_SKIP_EMBEDDINGS=1';
@@ -32,6 +34,9 @@ const STILL_LOUD = [
   'Worker crashed: fake worker boom',
   'Embedding worker disposed while writing the vector',    // merely starts the same
   'the worker was disposed',                               // merely mentions it
+  // The exact sentence, unbranded: what a layer under the embedder could raise
+  // by accident. Only a disposal this module MINTED is a cancellation.
+  DISPOSED,
 ];
 
 let embedFailure: Error | null = null;
@@ -80,7 +85,7 @@ beforeEach(() => {
 
 describe('embedText — shutdown cancellation is not a failure', () => {
   it('says nothing when disposal cancels the embed', async () => {
-    embedFailure = new Error(DISPOSED);
+    embedFailure = new WorkerDisposedError();
 
     const result = await embedText('what did we decide about the ingest queue?');
 
@@ -91,7 +96,7 @@ describe('embedText — shutdown cancellation is not a failure', () => {
   });
 
   it('stays silent for every cancelled recall, not just the first', async () => {
-    embedFailure = new Error(DISPOSED);
+    embedFailure = new WorkerDisposedError();
 
     for (let i = 0; i < 5; i++) {
       expect(await embedText(`query ${i}`)).toBeNull();
@@ -122,7 +127,7 @@ describe('embedText — shutdown cancellation is not a failure', () => {
 
 describe('initEmbeddings — shutdown cancellation is not a failure', () => {
   it('says nothing when disposal cancels the preload', async () => {
-    preloadFailure = new Error(DISPOSED);
+    preloadFailure = new WorkerDisposedError();
 
     const ready = await initEmbeddings();
 
