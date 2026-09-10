@@ -63,6 +63,15 @@ const STILL_LOUD = [
  * under test rather than a timeout; none of the assertions are weakened for it.
  */
 const HOOK_CASE_MS = 60_000;
+/**
+ * Every line the writer prints starts with this.
+ *
+ * A quiet case asserts the absence of it rather than an empty stderr: the
+ * subject is what the WRITER said, and a future Node deprecation notice on the
+ * child's stderr is not that. Nothing about the axis under test is weakened —
+ * the writer has no other way to speak.
+ */
+const WRITER_PREFIX = '[shieldcortex save-memory]';
 /** Building a package copies the whole build; only ever done once per suite. */
 const PACKAGE_BUILD_MS = 120_000;
 
@@ -245,8 +254,7 @@ describe('hook writer (real process, hermetic package) — same classification',
     });
 
     expect(run.events).toEqual(['generateEmbedding']); // it really ran
-    expect(run.stderr).not.toContain('embedding failed for memory');
-    expect(run.stderr).not.toContain('embeddings unavailable');
+    expect(run.stderr).not.toContain(WRITER_PREFIX); // the writer said nothing at all
     expect(run.stderr).not.toContain(DISPOSED);
     expect(run.len).toBeNull(); // the vector is lost; the memory is not
   }, HOOK_CASE_MS);
@@ -326,7 +334,7 @@ describe('hook writer (real process, hermetic package) — same classification',
     expect(run.events).toEqual(['generateEmbedding']);
     expect(run.len).toBe(FIXTURE_VECTOR_BYTES);
     expect(run.head).toBe(FIXTURE_VECTOR_HEAD);
-    expect(run.stderr).toBe('');
+    expect(run.stderr).not.toContain(WRITER_PREFIX);
   }, HOOK_CASE_MS);
 
   it('embeds nothing at all when embeddings are disabled', () => {
@@ -339,7 +347,7 @@ describe('hook writer (real process, hermetic package) — same classification',
 
     expect(run.events).toEqual([]); // the gate is before the embedder, not after
     expect(run.len).toBeNull();
-    expect(run.stderr).toBe('');
+    expect(run.stderr).not.toContain(WRITER_PREFIX);
   }, HOOK_CASE_MS);
 
   it('embeds nothing at all when the model cache is not ready', () => {
@@ -354,7 +362,7 @@ describe('hook writer (real process, hermetic package) — same classification',
     // between a hook and a HuggingFace fetch, and nothing may skip it.
     expect(run.events).toEqual([]);
     expect(run.len).toBeNull();
-    expect(run.stderr).toBe('');
+    expect(run.stderr).not.toContain(WRITER_PREFIX);
   }, HOOK_CASE_MS);
 });
 
