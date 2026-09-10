@@ -228,7 +228,8 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   // Lazy-load heavy server/worker/embedding modules — only the actual MCP
   // server path needs them, so they stay out of fast CLI/hook startup.
   const { createServer } = await import('./server.js');
-  const { disposeModel, preloadModel } = await import('./embeddings/index.js');
+  const { disposeModel } = await import('./embeddings/index.js');
+  const { startBackgroundPreload } = await import('./embeddings/background-preload.js');
   const { startDefaultWorker, stopDefaultWorker } = await import('./worker/brain-worker.js');
 
   // Create the MCP server
@@ -283,16 +284,9 @@ async function startMcpServer(dbPath?: string): Promise<void> {
 
   // Preload embedding model in background so first tool call doesn't hang.
   // Fire-and-forget: failure is fine — searchMemories falls back to FTS-only.
-  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS !== '1') {
-    preloadModel().catch(err => {
-      // #383: worker quarantines a corrupt on-disk weight and retries once.
-      // If we still land here, the heal did not recover — operator should run doctor.
-      console.error(
-        '[shieldcortex] Model preload failed (worker heals a corrupt cache at most once per process; run `shieldcortex doctor` if this repeats):',
-        err instanceof Error ? err.message : err,
-      );
-    });
-  }
+  // The host check, the doctor guidance and the shutdown-vs-failure call all
+  // live in the module, where they are reachable by a test.
+  void startBackgroundPreload();
 
   // Detect when the MCP client (mcporter) disconnects
   process.stdin.on('end', async () => {
