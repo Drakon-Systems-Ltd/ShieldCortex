@@ -2,11 +2,16 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { execFileSync } from 'node:child_process';
 // @ts-expect-error -- importing a .mjs hook util
 import { saveAutoExtractedMemory } from '../../scripts/lib/save-memory.mjs';
+import {
+  FIXTURE_VECTOR_BYTES,
+  FIXTURE_VECTOR_HEAD,
+  createHookPackage,
+  runHook,
+} from './hook-package-fixture.js';
 
 /**
  * v4.12.4's auto-extract path silently failed every insert with
@@ -27,6 +32,20 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
   let tempDir: string;
   let dbPath: string;
   let db: Database.Database;
+  let packageRoot: string;
+  let hookPackage: string;
+
+  beforeAll(() => {
+    // One hermetic package for the subprocess case below — a copy of the real
+    // writer, the real build's defence/database modules, and an embedder the
+    // test owns. See ./hook-package-fixture.ts.
+    packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-save-memory-pkg-'));
+    hookPackage = createHookPackage(path.join(packageRoot, 'pkg'));
+  }, 120_000);
+
+  afterAll(() => {
+    fs.rmSync(packageRoot, { recursive: true, force: true });
+  });
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-save-memory-'));
@@ -204,110 +223,61 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
    *    *awaited* — which passes any in-process test that happens to yield, and
    *    still writes NULL in production. Only a real process that runs the write
    *    and then exits can tell those two apart.
+   *
+   * The embedder is the hermetic package's, not the writer's: the writer used to
+   * carry an env-gated FAKE seam for exactly this measurement, and production
+   * code carrying test behaviour is what that seam cost. The substitute settles
+   * across a `setImmediate`, so a scheduled-not-awaited embed still exits with a
+   * NULL column and still fails this case.
    */
   it('#458: a real hook process persists the embedding before it exits', () => {
-    const probe = path.join(tempDir, 'probe.mjs');
-    const probeDbPath = path.join(tempDir, 'probe.db');
-    fs.writeFileSync(probe, `
-      import Database from ${JSON.stringify(path.join(repoRoot, 'node_modules', 'better-sqlite3', 'lib', 'index.js'))};
-      import { readFileSync } from 'fs';
-      import { saveAutoExtractedMemory } from ${JSON.stringify(path.join(repoRoot, 'scripts', 'lib', 'save-memory.mjs'))};
+    const run = runHook({ dir: tempDir, pkgRoot: hookPackage, plan: { mode: 'vector' }, title: 'EMB probe' });
 
-      const db = new Database(${JSON.stringify(probeDbPath)});
-      db.exec(readFileSync(${JSON.stringify(schemaPath)}, 'utf-8'));
-      await saveAutoExtractedMemory(
-        db,
-        {
-          title: 'EMB probe',
-          content: 'After comparing Prisma and Kysely we decided Drizzle for the SaaS layer.',
-          category: 'architecture',
-          salience: 0.45,
-          tags: ['auto-extracted'],
-        },
-        'p',
-        { source: 'stop-hook' },
-      );
-      const row = db.prepare("SELECT length(embedding) AS len, hex(substr(embedding,1,4)) AS head FROM memories WHERE title = ?").get('EMB probe');
-      process.stdout.write(JSON.stringify(row ?? null));
-      // Exactly what stop-hook.mjs does — nothing gets a chance to drain here.
-      process.exit(0);
-    `);
-
-    const env = { ...process.env };
-    delete env.SHIELDCORTEX_SKIP_EMBEDDINGS;
-    env.SHIELDCORTEX_HOOK_EMBED_FAKE = '1';
-    env.SHIELDCORTEX_TEST_SEAM = '1';
-
-    const out = execFileSync(process.execPath, [probe], {
-      env,
-      timeout: 120_000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).toString();
-
-    const row = JSON.parse(out) as { len: number | null; head: string | null } | null;
-    expect(row).not.toBeNull();
-    expect(row!.len).toBe(384 * 4);
-    // 0.42f little-endian — proves the FAKE seam ran, not a warm-cache ONNX or all-zero blob.
-    expect(row!.head).toBe('3D0AD73E');
+    expect(run.events).toEqual(['generateEmbedding']); // it really embedded
+    expect(run.len).toBe(FIXTURE_VECTOR_BYTES);
+    // The fixture's marker, not a warm-cache ONNX vector and not an all-zero blob.
+    expect(run.head).toBe(FIXTURE_VECTOR_HEAD);
   }, 180_000);
 
-  it('#458: FAKE env without TEST_SEAM is ignored (production hooks cannot honour it)', () => {
-    const probe = path.join(tempDir, 'probe-nofence.mjs');
-    const probeDbPath = path.join(tempDir, 'probe-nofence.db');
-    const isolatedHome = path.join(tempDir, 'fake-unfenced-home');
-    fs.mkdirSync(isolatedHome);
-    fs.writeFileSync(probe, `
-      import Database from ${JSON.stringify(path.join(repoRoot, 'node_modules', 'better-sqlite3', 'lib', 'index.js'))};
-      import { readFileSync } from 'fs';
-      import { saveAutoExtractedMemory } from ${JSON.stringify(path.join(repoRoot, 'scripts', 'lib', 'save-memory.mjs'))};
-      const db = new Database(${JSON.stringify(probeDbPath)});
-      db.exec(readFileSync(${JSON.stringify(schemaPath)}, 'utf-8'));
-      await saveAutoExtractedMemory(db, { title: 'UNFENCED', content: 'x', category: 'note', salience: 0.4, tags: [] }, 'p', { source: 'stop-hook' });
-      const row = db.prepare('SELECT length(embedding) AS len FROM memories WHERE title = ?').get('UNFENCED');
-      process.stdout.write(JSON.stringify(row ?? null));
-      process.exit(0);
-    `);
-    const env = { ...process.env, HOME: isolatedHome, SHIELDCORTEX_HOOK_EMBED_FAKE: '1' };
-    delete env.SHIELDCORTEX_SKIP_EMBEDDINGS;
-    delete env.SHIELDCORTEX_TEST_SEAM;
-    const out = execFileSync(process.execPath, [probe], {
-      env,
-      timeout: 30_000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).toString();
-    const row = JSON.parse(out) as { len: number | null } | null;
-    expect(row).not.toBeNull();
-    expect(row!.len).toBeNull();
-  });
+  /**
+   * The writer honours no embedding-injection environment at all any more.
+   *
+   * `SHIELDCORTEX_TEST_SEAM` + `SHIELDCORTEX_HOOK_EMBED_FAKE` used to make any
+   * process running this writer store a fake vector, skipping the
+   * SKIP_EMBEDDINGS and cache-health gates; fencing the pair behind `NODE_ENV`
+   * and `JEST_WORKER_ID` only meant a leaked shell profile needed two more keys.
+   * Here every retired key is set AND the jest runtime markers are present, in
+   * the repository's own layout with an isolated HOME — so the model cache is
+   * genuinely cold and a seam is the only thing that could produce a vector.
+   */
+  it('#458: no environment variable can inject an embedding into a hook', () => {
+    const run = runHook({
+      dir: tempDir,
+      env: {
+        SHIELDCORTEX_TEST_SEAM: '1',
+        SHIELDCORTEX_HOOK_EMBED_FAKE: '1',
+        SHIELDCORTEX_HOOK_EMBED_FAIL: 'Worker exited with code 3',
+        NODE_ENV: 'test',
+        JEST_WORKER_ID: '1',
+      },
+      title: 'UNFENCED',
+    });
+
+    expect(run.len).toBeNull();
+    expect(run.stderr).not.toContain('Worker exited with code 3');
+    expect(run.stderr).not.toContain('embedding failed for memory');
+  }, 60_000);
 
   it('#458: isolated HOME with no model cache skips embed (NULL) and still stores the row', () => {
-    const probe = path.join(tempDir, 'probe-nocache.mjs');
-    const probeDbPath = path.join(tempDir, 'probe-nocache.db');
-    const isolatedHome = path.join(tempDir, 'empty-home');
-    fs.mkdirSync(isolatedHome);
-    fs.writeFileSync(probe, `
-      import Database from ${JSON.stringify(path.join(repoRoot, 'node_modules', 'better-sqlite3', 'lib', 'index.js'))};
-      import { readFileSync } from 'fs';
-      import { saveAutoExtractedMemory } from ${JSON.stringify(path.join(repoRoot, 'scripts', 'lib', 'save-memory.mjs'))};
-      const db = new Database(${JSON.stringify(probeDbPath)});
-      db.exec(readFileSync(${JSON.stringify(schemaPath)}, 'utf-8'));
-      await saveAutoExtractedMemory(db, { title: 'NOCACHE', content: 'x', category: 'note', salience: 0.4, tags: [] }, 'p', { source: 'session-end-hook' });
-      const row = db.prepare('SELECT length(embedding) AS len FROM memories WHERE title = ?').get('NOCACHE');
-      process.stdout.write(JSON.stringify(row ?? null));
-      process.exit(0);
-    `);
-    const env = { ...process.env, HOME: isolatedHome };
-    delete env.SHIELDCORTEX_SKIP_EMBEDDINGS;
-    delete env.SHIELDCORTEX_HOOK_EMBED_FAKE;
-    const out = execFileSync(process.execPath, [probe], {
-      env,
-      timeout: 30_000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).toString();
-    const row = JSON.parse(out) as { len: number | null } | null;
-    expect(row).not.toBeNull();
-    expect(row!.len).toBeNull();
-  });
+    // The repository's own layout and an empty HOME: the cache-health gate is
+    // real, finds no model, and the row lands without a vector rather than
+    // triggering a download at session close (#460). `runHook` fails the test
+    // if the memory itself is missing, so this is NULL-vector, not no-row.
+    const run = runHook({ dir: tempDir, title: 'NOCACHE' });
+
+    expect(run.len).toBeNull();
+    expect(run.stderr).not.toContain('embedding failed for memory');
+  }, 60_000);
 
   /**
    * The suite-wide `SHIELDCORTEX_SKIP_EMBEDDINGS=1` (and any host that has
