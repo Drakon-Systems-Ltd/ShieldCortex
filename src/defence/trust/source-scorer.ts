@@ -2,7 +2,7 @@
  * Trust source scorer — assigns trust levels based on memory source.
  */
 
-import type { DefenceSource, TrustScore } from '../types.js';
+import type { DefenceSource, ProvenanceSource, TrustScore } from '../types.js';
 import { scoreAgent, buildAgentHierarchy } from './agent-scorer.js';
 import { stripUnattestedStamp } from './attestation-stamp.js';
 
@@ -26,6 +26,30 @@ export const TYPE_SCORES: Record<DefenceSource['type'], number> = {
   agent: 0.5,
   email: 0.4,
   web: 0.3,
+};
+
+/**
+ * Trust for the DECLARED-ONLY provenance labels (see ProvenanceSource).
+ *
+ * These are not memory sources — nothing writes a `document:` or
+ * `memory_candidate:` row — so they never appear in TYPE_SCORES, and
+ * `isUntrustedInbound` keeps treating them as untrusted inbound (unmapped =>
+ * true). This map exists so a label that an ingress DOES declare gets a
+ * coherent number instead of the bare 0 fallback, pinned to the nearest
+ * existing type: tool_result ~ tool_response, agent_message ~ agent,
+ * document ~ web, system ~ cli.
+ *
+ * `unknown` is deliberately ABSENT: undeclared provenance falls through to the
+ * 0 floor, which is the fail-closed answer to "we do not know where this came
+ * from". None of these are attested — a caller declaring `system` is making a
+ * claim, exactly as `--source=user` already was.
+ */
+const PROVENANCE_TYPE_SCORES: Record<string, number> = {
+  system: 0.9,
+  tool_result: 0.5,
+  agent_message: 0.5,
+  document: 0.3,
+  memory_candidate: 0.3,
 };
 
 /**
@@ -110,7 +134,7 @@ const HIERARCHY_DISPLAY = [
  */
 const NATIVE_IMPORT_SOURCE_SHAPE = /^native-import:[A-Za-z0-9._-]{1,128}:file:[0-9a-f]{24}$/;
 
-export function scoreSource(source: DefenceSource): TrustScore {
+export function scoreSource(source: DefenceSource | ProvenanceSource): TrustScore {
   const key = `${source.type}:${source.identifier}`;
   // Score off the BARE identifier: the ownership stamp separates a self-declared
   // identity from the host-attested one of the same name, and must not move the
@@ -168,7 +192,10 @@ export function scoreSource(source: DefenceSource): TrustScore {
     };
   }
 
-  // Type fallback
-  const score = TYPE_SCORES[source.type] ?? 0;
+  // Type fallback. Declared-only provenance labels resolve through
+  // PROVENANCE_TYPE_SCORES; anything still unmapped stays at the 0 floor.
+  const score = TYPE_SCORES[source.type as DefenceSource['type']]
+    ?? PROVENANCE_TYPE_SCORES[source.type]
+    ?? 0;
   return { score, source, hierarchy: [...HIERARCHY_DISPLAY, `>> ${key} = ${score}`] };
 }

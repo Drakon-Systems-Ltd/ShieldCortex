@@ -20,7 +20,7 @@
  */
 
 import { getDatabase, isDatabaseInitialized } from '../database/init.js';
-import type { DefenceSource } from '../defence/types.js';
+import type { DefenceSource, ProvenanceSource } from '../defence/types.js';
 import { logAudit } from '../defence/audit/logger.js';
 import { inferSourceFromEnvironment } from '../defence/trust/env-detector.js';
 import { cachedStmt } from './shared.js';
@@ -146,7 +146,10 @@ export interface RiskModifierResult {
  *    can only switch enforcement OFF;
  *  - subtraction only (additive-tightening): never raises trust.
  */
-export function computeRiskModifier(source: DefenceSource, mode: TrustModifierMode): RiskModifierResult {
+export function computeRiskModifier(
+  source: DefenceSource | ProvenanceSource,
+  mode: TrustModifierMode,
+): RiskModifierResult {
   if (mode === 'off') return { modifier: 0, applied: false };
   if (!isDatabaseInitialized()) return { modifier: 0, applied: false };
 
