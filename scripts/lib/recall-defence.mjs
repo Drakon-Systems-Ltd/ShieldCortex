@@ -218,12 +218,13 @@ export function defendRecallRows(rows, opts = {}, deps) {
       continue;
     }
 
-    // Decode-and-rescan: a bare encoding flag is NOT a drop (base64 hashes are
-    // common) — only drop if a DECODED snippet itself trips a detector.
+    // Decode/normalize-and-rescan: a bare encoding flag is NOT a drop (base64
+    // hashes are common). Whole normalized documents have a separate channel;
+    // incomplete budget coverage must not silently pass the recall boundary.
     const enc = deps.detectEncoding(scanContent);
     if (enc && enc.detected) {
-      let malicious = false;
-      for (const snippet of enc.decodedSnippets ?? []) {
+      let malicious = !!enc.scanIncomplete;
+      for (const snippet of [...(enc.decodedSnippets ?? []), ...(enc.normalizedContents ?? [])]) {
         const di = deps.detectInstructions(snippet);
         const dc = deps.scanForCredentials(snippet);
         const dcBlocked = !!dc && Array.isArray(dc.findings) && dc.findings.some((f) => f && f.action === 'blocked');

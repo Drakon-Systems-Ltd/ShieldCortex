@@ -57,8 +57,9 @@ export function analyzeFirewall(
   /**
    * Categories stripped by Layer 1 sanitisation BEFORE this content arrived.
    * The sanitiser removes zero-width/bidi bytes, so the encoding detector below
-   * never sees them — feeding the strip signal back in lets the verdict reflect
-   * the smuggling attempt instead of silently allowing the cleaned content.
+   * never sees them. Preserve that evidence for strict blocking, low-trust and
+   * harmful corroboration checks; bidi still quarantines on its own. Benign
+   * zero-width-only content can remain ALLOW at normal trust in balanced mode.
    */
   preSanitisationStrips?: SanitisationCategory[],
 ): FirewallAnalysis {
@@ -69,11 +70,9 @@ export function analyzeFirewall(
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
 
-  // Fold pre-sanitisation zero-width/bidi strips into the encoding signal so
-  // determineResult escalates (quarantine in balanced, block in strict). We map
-  // them onto the SAME encodingTypes the detector emits ('zero_width_chars' /
-  // 'rtl_override') so the existing "suspicious encoding → quarantine" rule and
-  // the strict-mode detection count both fire without any extra branches.
+  // Preserve pre-strip evidence for strict blocking and balanced corroboration.
+  // Reuse the detector's encoding types: sanitisation and direct detection are
+  // the same signal, not two independent reasons to escalate benign text.
   if (preSanitisationStrips?.includes('zero_width') &&
       !encoding.encodingTypes.includes('zero_width_chars')) {
     encoding.encodingTypes.push('zero_width_chars');
@@ -128,11 +127,12 @@ export function analyzeFirewall(
   }
 
   // Markdown-image exfiltration — a rendered image URL that smuggles data to an
-  // attacker. Reported as external_url so determineResult treats it the same as
-  // any other off-host link: low-severity alone, but it escalates the verdict
-  // when it co-occurs with another detection (encoding combined with >=2, etc.).
-  if (markdownImage.detected && !threatIndicators.includes('external_url')) {
-    threatIndicators.push('external_url');
+  // attacker. Keep the public external_url indicator, but preserve the harmful
+  // image signal separately: an ordinary link is not encoding corroboration.
+  if (markdownImage.detected) {
+    if (!threatIndicators.includes('external_url')) {
+      threatIndicators.push('external_url');
+    }
     blockedPatterns.push('markdown_image_exfil');
   }
 
@@ -147,7 +147,7 @@ export function analyzeFirewall(
   }
 
   // Determine result based on mode
-  const { result, reason } = determineResult(
+  const rawVerdict = determineResult(
     config.mode,
     instructions,
     privilege,
@@ -156,7 +156,13 @@ export function analyzeFirewall(
     trustScore,
     threatIndicators,
     skillThreats,
+    markdownImage.detected,
   );
+  // Raw instructions/anomalies and earlier blobs cannot hide a later BLOCK.
+  // Strict/permissive policy is already final; balanced compares both surfaces.
+  const { result, reason } = config.mode === 'balanced'
+    ? strictestVerdict(rawVerdict, rescanDerivedContent(encoding, trustScore))
+    : rawVerdict;
 
   return {
     result,
@@ -165,6 +171,54 @@ export function analyzeFirewall(
     anomalyScore: anomaly,
     blockedPatterns,
   };
+}
+
+type Verdict = { result: FirewallResult; reason: string };
+const VERDICT_ORDER = { ALLOW: 0, QUARANTINE: 1, BLOCK: 2 };
+
+function strictestVerdict(current: Verdict, candidate: Verdict): Verdict {
+  return VERDICT_ORDER[candidate.result] > VERDICT_ORDER[current.result] ? candidate : current;
+}
+
+// Derived surfaces require concrete hostile evidence. Anomaly-only policy
+// stays with the raw gate, using the real title and existing trust threshold.
+function rescanDerivedContent(encoding: EncodingDetectionResult, trustScore: number): Verdict {
+  let verdict: Verdict = { result: 'ALLOW', reason: 'No threats detected' };
+  const elevated: FirewallResult = trustScore < 0.5 ? 'BLOCK' : 'QUARANTINE';
+  const surfaces = [
+    ...encoding.decodedSnippets.map(text => ({ text, label: 'Encoded' })),
+    ...encoding.normalizedContents.map(text => ({ text, label: 'Normalized' })),
+  ];
+  const seen = new Set<string>();
+  for (const { text, label } of surfaces) {
+    if (seen.has(text)) continue;
+    seen.add(text);
+    // Each detector gets the complete bounded document, once. In particular,
+    // privilege quote stripping and exfil conjunctions must never see windows.
+    const instructions = detectInstructions(text);
+    const privilege = detectPrivilegeEscalation(text);
+    const exfil = detectCredentialExfil(text);
+    const credentials = scanForCredentials(text);
+    const skill = detectSkillThreats(text);
+    const markdown = detectMarkdownImageExfil(text);
+    const contains = (effect: string) => `${label} content contains ${effect} (${encoding.encodingTypes.join(', ')})`;
+    let candidate: Verdict = { result: 'ALLOW', reason: 'No threats detected' };
+    if (exfil.detected) {
+      candidate = { result: 'BLOCK', reason: contains('credential exfiltration') };
+    } else if (credentials.findings.some(f => f.action === 'blocked')) {
+      candidate = { result: 'BLOCK', reason: contains('credential leak') };
+    } else if (instructions.detected) {
+      candidate = { result: elevated, reason: contains('instruction injection') };
+    } else if (privilege.detected && privilege.severity === 'high') {
+      candidate = { result: elevated, reason: contains(`privilege escalation: ${privilege.indicators.join(', ')}`) };
+    } else if (skill.detected && skill.confidence >= 0.8) {
+      candidate = { result: elevated, reason: contains(`skill threat: ${skill.threats.join(', ')}`) };
+    } else if (privilege.indicators.includes('network_exfiltration') || markdown.detected) {
+      candidate = { result: elevated, reason: contains(privilege.indicators.includes('network_exfiltration') ? 'network exfiltration' : 'markdown_image_exfil') };
+    }
+    verdict = strictestVerdict(verdict, candidate);
+  }
+  return verdict;
 }
 
 function determineResult(
@@ -176,6 +230,7 @@ function determineResult(
   trustScore: number,
   threatIndicators: ThreatIndicator[],
   skillThreats?: { detected: boolean; threats: string[]; confidence: number },
+  markdownImageExfil: boolean = false,
 ): { result: FirewallResult; reason: string } {
   const lowTrust = trustScore < 0.5;
   const detectionCount = threatIndicators.length;
@@ -245,73 +300,26 @@ function determineResult(
     };
   }
 
-  // Encoding combined with another detection → quarantine
-  if (encoding.detected && detectionCount >= 2) {
+  if (encoding.scanIncomplete) {
+    return { result: 'QUARANTINE', reason: 'Encoding scan incomplete: count/byte/depth budget exhausted' };
+  }
+
+  // Encoding needs an independent harmful signal, not merely an ordinary URL.
+  // Keep all indicators for audit/strict/low-trust policy; only corroboration
+  // excludes bare links. A data-bearing markdown image is still corroboration.
+  const corroborating: string[] = threatIndicators.filter(t => t !== 'encoding_obfuscation' && t !== 'external_url');
+  if (markdownImageExfil) corroborating.push('markdown_image_exfil');
+  if (encoding.detected && corroborating.length > 0) {
     return {
       result: 'QUARANTINE',
-      reason: `Encoding obfuscation combined with ${threatIndicators.filter((t) => t !== 'encoding_obfuscation').join(', ')}`,
+      reason: `Encoding obfuscation combined with ${corroborating.join(', ')}`,
     };
   }
 
-  // Encoding-only: run FULL pipeline on decoded content (not just instruction detection)
-  if (encoding.detected && encoding.decodedSnippets.length > 0) {
-    for (const snippet of encoding.decodedSnippets) {
-      // Check for instruction injection in decoded content
-      const decodedInstructions = detectInstructions(snippet);
-      if (decodedInstructions.detected) {
-        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
-        return {
-          result,
-          reason: `Encoded content contains instruction injection (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check for privilege escalation in decoded content
-      const decodedPrivilege = detectPrivilegeEscalation(snippet);
-      if (decodedPrivilege.detected && decodedPrivilege.severity === 'high') {
-        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
-        return {
-          result,
-          reason: `Encoded content contains privilege escalation: ${decodedPrivilege.indicators.join(', ')} (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check for credential leaks in decoded content
-      const decodedCredentials = scanForCredentials(snippet);
-      if (decodedCredentials.findings.some(f => f.action === 'blocked')) {
-        return {
-          result: 'BLOCK',
-          reason: `Encoded content contains credential leak (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check for skill-level threats in decoded content
-      const decodedSkill = detectSkillThreats(snippet);
-      if (decodedSkill.detected && decodedSkill.confidence >= 0.8) {
-        const result: FirewallResult = lowTrust ? 'BLOCK' : 'QUARANTINE';
-        return {
-          result,
-          reason: `Encoded content contains skill threat: ${decodedSkill.threats.join(', ')} (${encoding.encodingTypes.join(', ')})`,
-        };
-      }
-
-      // Check anomaly score of decoded content
-      const decodedAnomaly = scoreAnomaly(snippet, '');
-      if (decodedAnomaly > 0.6) {
-        return {
-          result: 'QUARANTINE',
-          reason: `Encoded content has high anomaly score (${decodedAnomaly.toFixed(2)})`,
-        };
-      }
-    }
-  }
-
-  // Zero-width chars / RTL override are always suspicious → quarantine
-  if (encoding.detected && (
-    encoding.encodingTypes.includes('zero_width_chars') ||
-    encoding.encodingTypes.includes('rtl_override') ||
-    encoding.encodingTypes.includes('unicode_homoglyph')
-  )) {
+  // Bidi override alone still quarantines. Mixed-script and ordinary zero-width
+  // text need corroboration, hostile decoded content, or low trust; otherwise
+  // keep their encoding indicator without denying benign prose.
+  if (encoding.detected && encoding.encodingTypes.includes('rtl_override')) {
     return {
       result: 'QUARANTINE',
       reason: `Suspicious encoding: ${encoding.encodingTypes.join(', ')}`,
@@ -326,7 +334,7 @@ function determineResult(
     };
   }
 
-  // Single low-severity detection → allow with warning
+  // Only low-severity detections remain (possibly encoding + URL) → warn/allow
   if (detectionCount > 0) {
     return {
       result: 'ALLOW',
