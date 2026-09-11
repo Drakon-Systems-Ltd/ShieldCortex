@@ -872,6 +872,8 @@ shieldcortex uninstall            # Full uninstall (requires TTY)
 shieldcortex uninstall --deep     # Also purge OpenClaw residue (v4.12.0)
 shieldcortex status               # Database and hook status
 shieldcortex scan "text"          # Scan content for threats (exit 0=allow, 1=caught, 2=usage, 3=tool-fail; parse stdout)
+shieldcortex scan --source=<web|document|email|tool_result|agent_message|memory_candidate|user|cli|system> "text"
+                                  # Declare provenance — untrusted labels enable the L2 floor; default is trusted
 shieldcortex scan-skills          # Scan installed agent skills for threats
 shieldcortex env scan <url>       # Environment Firewall — score URL provenance + hidden content
 shieldcortex dashboard            # Launch the visual dashboard

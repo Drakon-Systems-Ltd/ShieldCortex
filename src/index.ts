@@ -1135,9 +1135,9 @@ ${bold}DOCS${reset}
   // Exit contract (#449): 0=allow, 1=caught (verdict on stdout), 2=usage, 3=tool-failure.
   if (process.argv[2] === 'scan') {
     const { installScanToolFailureHandlers } = await import('./cli/scan-exit.js');
-    const { runScanCommand } = await import('./cli/scan-command.js');
+    const { runScanArgv } = await import('./cli/scan-command.js');
     installScanToolFailureHandlers();
-    process.exit(await runScanCommand(process.argv[3]));
+    process.exit(await runScanArgv(process.argv.slice(3)));
   }
 
   // Handle "scan-skill" subcommand — scan a single skill/instruction file

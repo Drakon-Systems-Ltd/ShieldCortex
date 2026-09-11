@@ -13,11 +13,14 @@ import type {
   DefenceSource,
   DefenceConfig,
   ThreatIndicator,
+  ProvenanceLabel,
 } from '../types.js';
 import type { SanitisationCategory } from '../input-sanitisation/index.js';
 
 import { detectInstructions } from './instruction-detector.js';
 import type { InstructionDetectionResult } from './instruction-detector.js';
+import { detectNonAuthoritativeInstruction } from './provenance-policy.js';
+import type { NonAuthoritativeInstructionResult } from './provenance-policy.js';
 
 import { detectPrivilegeEscalation } from './privilege-detector.js';
 import type { PrivilegeDetectionResult } from './privilege-detector.js';
@@ -44,6 +47,18 @@ export type { EncodingDetectionResult } from './encoding-detector.js';
 export { detectMarkdownImageExfil } from './markdown-image-detector.js';
 export type { MarkdownImageExfilResult } from './markdown-image-detector.js';
 export { scoreAnomaly } from './anomaly-scorer.js';
+export {
+  describeProvenance,
+  detectNonAuthoritativeInstruction,
+  isProvenanceLabel,
+  isTrustedProvenance,
+  isUntrustedDataOrigin,
+  NAI_PATTERN,
+  PROVENANCE_LABELS,
+  TRUSTED_PROVENANCE_SOURCES,
+  UNTRUSTED_DATA_ORIGIN_SOURCES,
+} from './provenance-policy.js';
+export type { NonAuthoritativeInstructionResult, NonAuthoritativePattern } from './provenance-policy.js';
 
 /**
  * Run the full firewall analysis pipeline on memory content.
@@ -51,7 +66,7 @@ export { scoreAnomaly } from './anomaly-scorer.js';
 export function analyzeFirewall(
   content: string,
   title: string,
-  source: DefenceSource,
+  source: DefenceSource | { type: ProvenanceLabel; identifier: string },
   trustScore: number,
   config: DefenceConfig,
   /**
@@ -68,6 +83,7 @@ export function analyzeFirewall(
   const encoding = detectEncoding(content);
   const markdownImage = detectMarkdownImageExfil(content);
   const anomaly = scoreAnomaly(content, title);
+  const nonAuthoritative = detectNonAuthoritativeInstruction(content, source.type);
 
   // Fold pre-sanitisation zero-width/bidi strips into the encoding signal so
   // determineResult escalates (quarantine in balanced, block in strict). We map
@@ -97,6 +113,11 @@ export function analyzeFirewall(
   if (instructions.detected) {
     threatIndicators.push('instruction_injection');
     blockedPatterns.push(...instructions.patterns);
+  }
+
+  if (nonAuthoritative.detected) {
+    threatIndicators.push('non_authoritative_instruction');
+    blockedPatterns.push(...nonAuthoritative.patterns);
   }
 
   // Credential exfiltration is a first-class classification (v4.47.2): credential
@@ -156,6 +177,7 @@ export function analyzeFirewall(
     trustScore,
     threatIndicators,
     skillThreats,
+    nonAuthoritative,
   );
 
   return {
@@ -167,7 +189,66 @@ export function analyzeFirewall(
   };
 }
 
+/**
+ * Verdict assembly, with the L2 floor applied MONOTONICALLY.
+ *
+ * The provenance floor is an additive layer, so the one thing it must never do
+ * is answer a question an earlier layer already answered more severely. Before
+ * this the L2 branch sat above the skill-threat / privilege / encoding branches
+ * in balanced mode and returned QUARANTINE unconditionally, so appending a
+ * memory-persistence sentence to text that already reached the low-trust
+ * privilege BLOCK *downgraded* the verdict: adding an indicator made the
+ * product safer on paper and weaker in fact.
+ *
+ * So the base verdict is computed as if L2 had never fired — its indicator is
+ * withheld from the balanced count as well, because "the L1 verdict" must not
+ * be a function of the L2 hit either — and L2 may then escalate ALLOW →
+ * QUARANTINE. A base BLOCK or QUARANTINE stands, carrying the L2 indicator and
+ * pattern names beside its own (both are collected in `analyzeFirewall`, which
+ * is unconditional and therefore unaffected by this ordering).
+ *
+ * Strict and permissive keep the FULL indicator list and are untouched: strict
+ * already blocks on any detection (escalation only, by construction) and
+ * permissive allows everything by definition. Adding a quarantine there would
+ * be a posture change, which this round is explicitly not making.
+ */
 function determineResult(
+  mode: DefenceConfig['mode'],
+  instructions: InstructionDetectionResult,
+  privilege: PrivilegeDetectionResult,
+  encoding: EncodingDetectionResult,
+  anomalyScore: number,
+  trustScore: number,
+  threatIndicators: ThreatIndicator[],
+  skillThreats?: { detected: boolean; threats: string[]; confidence: number },
+  nonAuthoritative?: NonAuthoritativeInstructionResult,
+): { result: FirewallResult; reason: string } {
+  const balanced = mode !== 'strict' && mode !== 'permissive';
+  const baseIndicators = balanced && nonAuthoritative?.detected
+    ? threatIndicators.filter((t) => t !== 'non_authoritative_instruction')
+    : threatIndicators;
+
+  const base = determineBaseResult(
+    mode,
+    instructions,
+    privilege,
+    encoding,
+    anomalyScore,
+    trustScore,
+    baseIndicators,
+    skillThreats,
+  );
+
+  if (!balanced || !nonAuthoritative?.detected) return base;
+  // Never weaken: only a verdict L1 left at ALLOW is L2's to raise.
+  if (base.result !== 'ALLOW') return base;
+  return {
+    result: 'QUARANTINE',
+    reason: 'Non-authoritative instruction from untrusted data origin',
+  };
+}
+
+function determineBaseResult(
   mode: DefenceConfig['mode'],
   instructions: InstructionDetectionResult,
   privilege: PrivilegeDetectionResult,
@@ -226,6 +307,10 @@ function determineResult(
       reason: `Instruction injection detected (confidence: ${instructions.confidence})${lowTrust ? ', low trust source' : ''}`,
     };
   }
+
+  // The L2 provenance floor is NOT a branch here: it is applied by the caller
+  // AFTER this function returns, so it can only raise an ALLOW. See
+  // determineResult().
 
   // Skill-level threats (tool injection, scope escalation, agent manipulation, etc.)
   if (skillThreats?.detected && skillThreats.confidence >= 0.8) {
