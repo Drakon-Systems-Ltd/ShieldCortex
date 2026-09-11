@@ -171,6 +171,35 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     return;
   }
 
+  // L2 provenance floor, BEFORE the pipeline.
+  //
+  // Everything that reaches here is an AUTO-captured candidate: text the
+  // extractor lifted out of a transcript, with no operator in the loop. The
+  // pipeline below scores it as `hook` — a trusted integration identity — and
+  // that is correct about WHO is writing, but it says nothing about where the
+  // words came from. An agent-directed imperative in that text ("persist this
+  // as a standing order") is not a fact somebody asked to remember; it is data
+  // trying to become a standing instruction, and storing it is memory
+  // poisoning with the hook's own trust attached.
+  //
+  // So the CANDIDATE is judged under `memory_candidate` while the WRITER stays
+  // `hook`. The two labels answer different questions and neither is a
+  // substitute for the other. A hit refuses the write outright rather than
+  // quarantining it: quarantine is for content admitted far enough to be worth
+  // reviewing, and an auto-captured injection shape has no reviewer waiting.
+  // Title AND content: a title is stored and recalled into context exactly as
+  // content is, so screening one half examined the longer one and shipped the
+  // shorter, more quotable one.
+  const refusal = screenMemoryCandidate(defence, memory.content, memory.title);
+  if (refusal) {
+    writeRefusalAudit(db, project, sourceIdentifier, refusal);
+    process.stderr.write(
+      `[shieldcortex save-memory] refused (${NON_AUTHORITATIVE_INDICATOR}: `
+      + `${refusal.join(', ')}): ${memory.title}\n`,
+    );
+    return;
+  }
+
   let result;
   try {
     result = defence.runDefencePipeline(memory.content, memory.title, source, undefined, project ?? undefined, {
@@ -226,6 +255,34 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     : db;
   insertQuarantineRow(quarantineDb, memory, project, source, result);
   process.stderr.write(`[shieldcortex save-memory] ${disposition.firewallResult.toLowerCase()} (held): ${memory.title} — ${disposition.reason}\n`);
+}
+
+// ==================== Internal: provenance floor ====================
+
+/** The indicator name the firewall uses for an L2 hit. Mirrored, not guessed. */
+const NON_AUTHORITATIVE_INDICATOR = 'non_authoritative_instruction';
+
+/**
+ * Pattern names when the candidate is a non-authoritative instruction, else null.
+ *
+ * Degrades to `null` — i.e. today's behaviour, store as before — on an older
+ * dist that has no provenance policy, and on any throw. An additive floor must
+ * not turn a missing export into a refused capture: that would silently stop a
+ * working host from remembering anything the moment its dist drifted.
+ */
+function screenMemoryCandidate(defence, content, title) {
+  if (typeof defence.detectNonAuthoritativeInstruction !== 'function') return null;
+  const body = typeof content === 'string' ? content : '';
+  const head = typeof title === 'string' ? title : '';
+  const candidate = head && body ? `${head}\n${body}` : (body || head);
+  if (candidate.length === 0) return null;
+  try {
+    const nai = defence.detectNonAuthoritativeInstruction(candidate, 'memory_candidate');
+    if (!nai || !nai.detected) return null;
+    return Array.isArray(nai.patterns) ? nai.patterns : [];
+  } catch {
+    return null;
+  }
 }
 
 // ==================== Internal: writes ====================
@@ -372,14 +429,20 @@ function insertQuarantineRow(db, memory, project, source, result) {
   );
 }
 
-function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
-  // Synthetic audit row for cases where the pipeline could not run.
-  //
-  // source_attested is DELIBERATELY absent (schema default NULL): both call
-  // sites are self-inflicted states (dist build missing / pipeline threw), and
-  // an attested BLOCK here would accrue full-weight risk against the hook's
-  // own identity for a packaging problem, not an attack. Leave NULL — do not
-  // "fix" this into an accruing row.
+/**
+ * The one BLOCK row shape this file writes, for the cases the pipeline did not
+ * produce a row itself. No new sink: the same `defence_audit` table, the same
+ * columns, the same silent-on-older-schema behaviour.
+ *
+ * source_attested is DELIBERATELY absent (schema default NULL) on every call
+ * site here. The fallback sites are self-inflicted states (dist build missing /
+ * pipeline threw), and an attested BLOCK would accrue full-weight risk against
+ * the hook's own identity for a packaging problem rather than an attack. The
+ * refusal site is a claim about the CANDIDATE, not about the hook that carried
+ * it — attributing it to the hook would be the same mistake wearing a
+ * different label. Leave NULL — do not "fix" these into accruing rows.
+ */
+function writeBlockAudit(db, { project, sourceType, sourceIdentifier, reason, indicators, patterns }) {
   try {
     db.prepare(`
       INSERT INTO defence_audit (
@@ -393,13 +456,13 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
       null,
       project || null,
       new Date().toISOString(),
-      'hook',
+      sourceType,
       sourceIdentifier,
       0,
       'INTERNAL',
       0,
-      '[]',
-      '[]',
+      JSON.stringify(indicators ?? []),
+      JSON.stringify(patterns ?? []),
       reason,
       null,
       0,
@@ -408,6 +471,39 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
     // Schema may be older than the audit columns. Better silent here than
     // raising into the hook — the stderr line above carries the signal.
   }
+}
+
+function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
+  // Synthetic audit row for cases where the pipeline could not run.
+  writeBlockAudit(db, {
+    project,
+    sourceType: 'hook',
+    sourceIdentifier,
+    reason,
+    indicators: [],
+    patterns: [],
+  });
+}
+
+/**
+ * The refusal row for an L2 hit on an auto-captured candidate.
+ *
+ * `source_type` is `memory_candidate`, not `hook`: the row is the record of a
+ * CANDIDATE that was refused, and filing it under the hook's identity would
+ * attribute a transcript's content to the integration that carried it. It also
+ * keeps the new rows out of the `hook:*` risk keys that legitimate captures
+ * accrue against. The row carries names and a reason — never the refused text,
+ * which is already the part nobody wanted persisted.
+ */
+function writeRefusalAudit(db, project, sourceIdentifier, patterns) {
+  writeBlockAudit(db, {
+    project,
+    sourceType: 'memory_candidate',
+    sourceIdentifier,
+    reason: `Refused auto-capture: ${NON_AUTHORITATIVE_INDICATOR} (${patterns.join(', ')})`,
+    indicators: [NON_AUTHORITATIVE_INDICATOR],
+    patterns,
+  });
 }
 
 // ==================== Internal: embeddings (#458) ====================
@@ -731,14 +827,20 @@ async function loadDefenceModules(db) {
     const initUrl = pathToFileURL(resolve(distRoot, 'database', 'init.js')).href;
     const dispositionUrl = pathToFileURL(resolve(distRoot, 'defence', 'disposition.js')).href;
     const formUrl = pathToFileURL(resolve(distRoot, 'defence', 'form-classifier.js')).href;
+    const provenanceUrl = pathToFileURL(
+      resolve(distRoot, 'defence', 'firewall', 'provenance-policy.js'),
+    ).href;
 
-    const [pipelineMod, initMod, dispositionMod, formMod] = await Promise.all([
+    const [pipelineMod, initMod, dispositionMod, formMod, provenanceMod] = await Promise.all([
       import(pipelineUrl),
       import(initUrl),
       import(dispositionUrl),
       // #402 classifier; tolerate its absence on an older dist (falls back to
       // NULL content_form → fail-closed non-injectable, never a hard failure).
       import(formUrl).catch(() => ({})),
+      // L2 provenance policy; same tolerance. Absent on an older dist means no
+      // candidate screen, i.e. exactly the behaviour before this round.
+      import(provenanceUrl).catch(() => ({})),
     ]);
 
     if (typeof pipelineMod.runDefencePipeline !== 'function') return null;
@@ -749,6 +851,10 @@ async function loadDefenceModules(db) {
       runDefencePipeline: pipelineMod.runDefencePipeline,
       resolveDisposition: dispositionMod.resolveDisposition,
       classifyContentForm: typeof formMod.classifyContentForm === 'function' ? formMod.classifyContentForm : null,
+      detectNonAuthoritativeInstruction:
+        typeof provenanceMod.detectNonAuthoritativeInstruction === 'function'
+          ? provenanceMod.detectNonAuthoritativeInstruction
+          : null,
       initDatabase: initMod.initDatabase,
       isDatabaseInitialized: initMod.isDatabaseInitialized,
       getDatabase: initMod.getDatabase,

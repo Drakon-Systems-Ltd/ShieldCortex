@@ -154,6 +154,12 @@ export function createOpenClawRuntime({
         extractSessionMemoriesWithDistill: typeof mod.extractSessionMemoriesWithDistill === "function"
           ? mod.extractSessionMemoriesWithDistill
           : null,
+        // L2 candidate screen. Optional: an older installed package has no such
+        // export, and its absence must mean "no screen" (today's behaviour),
+        // never a hook that refuses every capture.
+        loadMemoryCandidateScreen: typeof mod.loadMemoryCandidateScreen === "function"
+          ? mod.loadMemoryCandidateScreen
+          : null,
       };
       return _openClawExtract;
     } catch {

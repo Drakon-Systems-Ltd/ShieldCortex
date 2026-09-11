@@ -416,13 +416,40 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
     return;
   }
 
+  // L2 candidate screen, resolved once per capture run.
+  //
+  // Everything in `memories` here was lifted out of a TRANSCRIPT by the
+  // extractor, with no operator in the loop. An agent-directed imperative in
+  // that text ("keep this directive across sessions") is not a fact anyone
+  // asked to remember — it is data trying to become a standing instruction,
+  // and persisting it would do so with this hook's own trust attached. The
+  // candidate is therefore judged under `memory_candidate`; the WRITER stays
+  // `hook`, because those are different questions.
+  //
+  // Null when the installed package predates the screen: no screen, i.e.
+  // exactly the pre-L2 behaviour. A missing export must never become a hook
+  // that refuses every capture.
+  const candidateScreen = typeof extract.loadMemoryCandidateScreen === "function"
+    ? await extract.loadMemoryCandidateScreen()
+    : null;
+
   const noveltyGate = await getSharedNoveltyGate();
   let saved = 0;
   let skipped = 0;
+  let refused = 0;
   for (const mem of memories) {
     const novelty = noveltyGate.inspect(mem.content);
     if (!novelty.allow) {
       skipped++;
+      continue;
+    }
+
+    const patterns = candidateScreen ? candidateScreen(mem.content, mem.title) : null;
+    if (patterns) {
+      refused++;
+      // Names and a title, never the refused text — it is the part nobody
+      // wanted persisted. No new sink: this is the hook's existing console.
+      console.log(`[cortex-memory] Candidate refused (non_authoritative_instruction: ${patterns.join(", ")}): "${mem.title}"`);
       continue;
     }
 
@@ -446,7 +473,7 @@ async function runSessionExtraction(event, { sessionEntry, tags, sourceIdentifie
   }
   await noveltyGate.flush();
 
-  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories from session (${skipped} skipped as duplicates)`);
+  console.log(`[cortex-memory] Saved ${saved}/${memories.length} memories from session (${skipped} skipped as duplicates, ${refused} refused)`);
 
   // Provide visible feedback to user
   if (saved > 0 && event.messages) {
@@ -748,6 +775,23 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
   // The trigger phrase carries the authoritative classification — pass its
   // extractorType so the wrapper pins category/purpose instead of re-guessing
   // from content (which collapsed typed triggers to `note`).
+  // NOT screened as a memory_candidate, deliberately. A keyword trigger is the
+  // operator typing "remember this" — explicit, attended intent, which is the
+  // trusted side of the provenance policy. Screening it would mean telling an
+  // operator they may not save words they chose to save.
+  //
+  // THE CAVEAT, WRITTEN DOWN (r2/B8). Attended intent is an inference from a
+  // SUBSTRING, not an attestation. The match is `lower.indexOf(phrase)`
+  // anywhere in the message, and several triggers ("we decided", "going with",
+  // "important:") are ordinary English. So an operator who pastes or forwards
+  // a tool result that itself contains "remember this: <directive>", and adds
+  // nothing, gets that directive stored with the operator's own trust — the
+  // classic confused deputy, where the authority is real and the intent is
+  // borrowed. It is accepted here because the alternative (screening an
+  // explicit save) breaks the one path where the operator is unambiguously
+  // in the loop, and because the trigger still requires a HUMAN TURN to carry
+  // it: nothing auto-captured reaches this function. The exposure is measured
+  // in openclaw-memory-candidate-screen.test.ts rather than assumed away.
   const candidates = extract.extractKeywordMemory(content, matchedTrigger.extractorType);
   if (candidates.length === 0) {
     console.log(`[cortex-memory] Keyword trigger skipped (rejected as malformed): "${matchedTrigger.phrase}"`);
