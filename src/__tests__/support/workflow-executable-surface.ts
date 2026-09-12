@@ -413,11 +413,13 @@ function usesScannerAction(reference: string, scanner: string): boolean {
  * `run: npx snyk test` counts and `run: echo "snyk is not installed"` does not.
  * A `uses:` counts when the scanner names the action's owner or repository.
  *
- * A command that is a *path* — `./snyk-wrapper.sh`, `scripts/snyk.sh`,
- * `/usr/local/bin/snyk` — is a script this function is not reading, and its
- * filename is a label on it. That is the same shape as a local `uses:`
- * reference, and it gets the same answer: refused. Only a bare command name,
- * resolved off `PATH`, is taken to be the tool itself.
+ * A command that is a *path* — `./snyk-wrapper.sh`, `scripts/snyk.sh` — is a
+ * script this function is not reading, and its filename is a label on it. That
+ * is the same shape as a local `uses:` reference, and it gets the same answer:
+ * refused. Two path forms are the tool itself and count: a bare name resolved
+ * off `PATH`, and the package-manager bin directory (`./node_modules/.bin/snyk`,
+ * `node_modules/.bin/snyk`), which is where a declared dependency's own
+ * executable lives and nothing else does.
  *
  * A scanner with no workflow form at all — `dependabot`, which is configured in
  * `.github/dependabot.yml` and never invoked by a step — can therefore never
@@ -433,7 +435,10 @@ export function invokesScanner(steps: readonly ExecutableStep[], scanner: string
       ? usesScannerAction(value, name)
       : statementsIn(value).some((tokens) => {
           const command = invokedCommand(tokens);
-          return command !== undefined && !command.includes('/') && namesScanner(command, name);
+          if (command === undefined) return false;
+          const binDir = /^(?:\.\/)?node_modules\/\.bin\/([^/]+)$/.exec(command);
+          if (binDir) return namesScanner(binDir[1], name);
+          return !command.includes('/') && namesScanner(command, name);
         });
   });
 }
