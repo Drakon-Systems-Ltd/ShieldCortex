@@ -87,6 +87,24 @@ function parseClaim(): { unwaived: number; waived: number; raw: string } {
 
 const waiverMarkdown = readFileSync(WAIVERS_MD, 'utf8');
 
+/** Scanners whose result SKILL.md may only advertise if CI actually runs them. */
+const SCANNERS = ['snyk', 'trivy', 'grype', 'dependabot'] as const;
+
+/**
+ * Scanner results claimed in SKILL.md metadata that no workflow backs.
+ *
+ * Pure so the rule can be exercised in both directions — the failure that
+ * matters is "claimed but never run", and the case that must stay GREEN is
+ * "claimed and genuinely wired up", which a one-sided test would not catch.
+ * `workflowsText` is the concatenated, lowercased contents of
+ * `.github/workflows`.
+ */
+export function scannerClaimViolations(metadataKeys: string[], workflowsText: string): string[] {
+  const claimed = new Set(metadataKeys);
+  return SCANNERS.filter((s) => claimed.has(s) && !workflowsText.includes(s));
+}
+
+
 describe('#466 hermetic — the SKILL.md security claim is structurally honest', () => {
   it('states counts in a form a machine can re-check', () => {
     const claim = parseClaim();
@@ -132,15 +150,33 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
     const workflows = readdirSync(WORKFLOWS)
       .map((f) => readFileSync(join(WORKFLOWS, f), 'utf8').toLowerCase())
       .join('\n');
-    const metadata = skillMetadata();
-    for (const scanner of ['snyk', 'trivy', 'grype', 'dependabot']) {
-      if (metadata.has(scanner)) {
-        expect(
-          workflows.includes(scanner),
-          `SKILL.md claims a ${scanner} result but no .github/workflows file runs ${scanner}`,
-        ).toBe(true);
-      }
-    }
+    expect(scannerClaimViolations([...skillMetadata().keys()], workflows)).toEqual([]);
+  });
+});
+
+describe('#466 hermetic — the scanner rule permits a claim exactly when CI earns it', () => {
+  it('flags a claim no workflow backs', () => {
+    expect(scannerClaimViolations(['npm_audit', 'snyk'], 'jobs:\n  test:\n    run: npm test')).toEqual([
+      'snyk',
+    ]);
+  });
+
+  it('permits the claim once a workflow actually runs the scanner', () => {
+    expect(
+      scannerClaimViolations(['npm_audit', 'snyk'], 'jobs:\n  sec:\n    run: snyk test --all-projects'),
+    ).toEqual([]);
+  });
+
+  it('does not care about a scanner that runs in CI but is not claimed', () => {
+    expect(scannerClaimViolations(['npm_audit'], 'run: snyk test')).toEqual([]);
+  });
+
+  it('reports every unbacked claim, not just the first', () => {
+    expect(scannerClaimViolations(['snyk', 'trivy', 'grype'], 'run: npm test')).toEqual([
+      'snyk',
+      'trivy',
+      'grype',
+    ]);
   });
 });
 
