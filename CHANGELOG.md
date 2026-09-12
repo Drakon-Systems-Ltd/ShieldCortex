@@ -7,7 +7,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ⚠️ Breaking (5.0.0)
+
+This is a **major**. Read [docs/UPGRADING-5.md](docs/UPGRADING-5.md) before you update. In one line each:
+
+- **Node 20 is no longer supported.** `engines` is `^22.14.0 || >=24.0.0`. Node 23 remains unsupported. See *Changed* → Node 24 worker compatibility.
+- **Express 4 → 5** for the dashboard API. Three wire-level differences for **direct HTTP clients only** (the dashboard UI is unaffected): catch-all spelling, query parser `simple`, empty `req.body` restored to `{}`. See *Changed* → Express 4 → 5.
+- That is the whole breaking list. Action Guard stays off by default; memory-injection scanning stays off; the `sharp` waiver is documented, not a silent "clean".
+
 ### Added
+- **5.0.0 upgrade notice:** [docs/UPGRADING-5.md](docs/UPGRADING-5.md) is the migration page; README, CHANGELOG, postinstall, and the npm tarball all point at it *before* `npm install`. Node 20 is gone; Action Guard stays off by default.
 - **#51 scan provenance flags:** `shieldcortex scan TEXT --source=web|email|tool_response|… [--identifier=ID]` labels the payload for trust scoring. Bare `scan TEXT` is unchanged (`cli:shieldcortex-scan`, host-attested). Declared `--source` is never attested. Unknown types/flags remain usage (exit 2).
 - **L2 provenance floor (#51):** an ingress can now declare where its bytes came from, and a declared *untrusted data origin* (`web`, `document`, `email`, `tool_result`, `agent_message`, `memory_candidate`) arms a second, deterministic instruction layer over explicit agent-directed imperatives. Three ingresses declare: **`shieldcortex scan --source=<label>`** on the CLI (bare `scan TEXT` unchanged and still attested; `--json` never echoes the scanned text or matched credential bytes); **block-level provenance for `llm_input`** in the OpenClaw realtime plugin, where the content BLOCK decides rather than the message role, so a tool result nested inside a user-role message is labelled `tool_result` and not `user`, and a leading `System:` is no longer an exemption; and **the memory-candidate screen**, which judges every automatically captured candidate's title *and* content as `memory_candidate` and refuses the write on a hit, while the writer keeps its own `hook` identity. Trusted origins (`user`, `system`, `cli`) and unclassified ones (`hook`, `agent`, `file`, `api`, `tool_response`, `unknown`) keep exactly the path they had. The floor is monotonic: it may raise ALLOW to QUARANTINE and can never weaken a verdict an earlier layer already reached. Explicit keyword-triggered saves are deliberately not screened.
 

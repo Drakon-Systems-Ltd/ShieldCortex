@@ -185,6 +185,8 @@
     "scripts/lib/capture-distill.mjs",
     "scripts/lib/openclaw-distill-auth.mjs",
     "scripts/lib/openclaw-extract.mjs",
-    "templates/work-lanes"
+    "templates/work-lanes",
+    "docs/UPGRADING-5.md",
+    "docs/security/audit-waivers.md"
   ]
 }
