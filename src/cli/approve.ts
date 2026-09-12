@@ -9,7 +9,7 @@
  *   shieldcortex approve --denial           # list headless denials awaiting a retry decision (#310)
  *   shieldcortex approve --denial <actionId>              # authorise ONE retry, scoped to cwd+tool
  *   shieldcortex approve --denial <actionId> --ttl 20     # ...with a 20-minute spend window
- *   shieldcortex approve --denial <actionId> --any-origin # ...unscoped (confirmed, dangerous)
+ *   shieldcortex approve --denial <actionId> --any-origin # ...any directory (confirmed, dangerous)
  *   shieldcortex approve --denial <actionId> --override-deny  # ...despite your own earlier Deny
  *
  * Two different things live behind one verb, deliberately: `<hash>` answers a
@@ -249,7 +249,8 @@ interface DenialRetryDeps {
  * `shieldcortex approve --denial <actionId>` (#310).
  *
  * The TTY half of retry control, and the ONLY half that can widen a grant:
- * `--any-origin` drops the cwd binding and `--override-deny` overrules the
+ * `--any-origin` drops the cwd binding (the cwd binding ONLY — a session-bound
+ * denial stays bound to its session) and `--override-deny` overrules the
  * operator's own earlier Deny. Both are off by default and both require a
  * typed confirmation that names, in plain words, what is being handed out — a
  * card can set neither, ever.
@@ -289,9 +290,16 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
   }
 
   if (args.anyOrigin) {
+    // Say exactly what is widened. A session-bound denial keeps its session
+    // binding through --any-origin, and an operator who is told "ANY local
+    // process" full stop would be reading a wider promise than the store makes.
+    const sessionBound = row.originScope.sessionBound === true && Boolean(row.originScope.sessionKey);
     const ok = deps.confirm(
-      `${RED}--any-origin removes the directory binding from this grant.${RESET}\n`
-      + `ANY local process, in ANY directory, may spend it once within ${Math.round(args.ttlMs / 60_000)} minute(s).`,
+      `${RED}--any-origin removes the DIRECTORY binding from this grant — nothing else.${RESET}\n`
+      + `ANY local process, in ANY directory, may spend it once within ${Math.round(args.ttlMs / 60_000)} minute(s).\n`
+      + (sessionBound
+        ? `This denial is session-bound, and stays bound: only session ${scopeTail(row.originScope.sessionKey)} can spend it.`
+        : 'This denial recorded no session binding, so nothing narrows it beyond the tool.'),
     );
     if (!ok) {
       err('Not confirmed — nothing was granted.');
@@ -325,7 +333,7 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
   if (!outcome.ok) {
     if (outcome.reason === 'unscopeable') {
       err('This denial has no recorded working directory, so a scoped grant is impossible.');
-      err('Re-run with --any-origin if you accept that ANY local process may spend it.');
+      err('Re-run with --any-origin if you accept that a process in ANY local directory may spend it.');
     } else if (outcome.reason === 'suppressed') {
       err(`This action is silenced by your own Deny until ${new Date(outcome.suppressedUntilMs ?? now).toISOString()}.`);
       err('Re-run with --override-deny to overrule it.');
@@ -348,10 +356,17 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
 
   log(`${GREEN}✓${RESET} Authorised ONE retry of ${BOLD}${row.tool}${RESET} (${args.actionId}).`);
   log(`  ${row.redactedSurface || '(no surface recorded)'}`);
+  // The scope line reports what the STORE recorded, not what the flag was
+  // called: --any-origin widens the directory leg only, so a session binding
+  // that survived it must be printed or the operator is told a wider story
+  // than the grant tells.
+  const sessionScope = grant.origin.sessionKey
+    ? `, session ${scopeTail(grant.origin.sessionKey)} (still bound)`
+    : '';
   log(
     grant.origin.anyOrigin
-      ? `${DIM}  Scope: ANY directory (--any-origin), tool ${grant.origin.tool}.${RESET}`
-      : `${DIM}  Scope: ${grant.origin.cwd} (${scopeTail(grant.origin.cwd)}), tool ${grant.origin.tool}.${RESET}`,
+      ? `${DIM}  Scope: ANY directory (--any-origin widens the directory only), tool ${grant.origin.tool}${sessionScope}.${RESET}`
+      : `${DIM}  Scope: ${grant.origin.cwd} (${scopeTail(grant.origin.cwd)}), tool ${grant.origin.tool}${sessionScope}.${RESET}`,
   );
   log(
     `${DIM}  Spend window: ${minutes} minute(s) from now (expires ${new Date(grant.approvedAt + grant.ttlMs).toISOString()}).${RESET}`,

@@ -131,11 +131,16 @@ function projectForHash(tool: string, input: unknown): unknown {
 
 /**
  * Canonical hash of the exact call. Stable across processes: object keys are
- * sorted, whitespace in string values is collapsed, and everything else is
- * JSON with no formatting. Two textually different-but-equivalent commands
- * (extra spaces) hash the same; a different command never does. Exec-tool
- * advisory fields are excluded (#201) so the hash is per COMMAND, not per
- * attempt.
+ * sorted and everything is JSON with no formatting. String values are
+ * BYTE-EXACT: whitespace is meaningful in shell (`foo bar` is one command,
+ * `foo\nbar` is two), so any textual difference is a different call and needs
+ * its own approval. The old whitespace-collapse "equivalent retry" affordance
+ * let a space→newline mutation append a second command while keeping the
+ * granted hash — a grant for one command must never release another (#451
+ * review). Cost of byte-exactness is a re-approve on a reformatted retry;
+ * that fails toward the operator, never toward the attacker. Exec-tool
+ * advisory fields are still excluded (#201) so the hash is per COMMAND, not
+ * per attempt.
  */
 export function hashToolCall(tool: string, input: unknown): string {
   const canonical = JSON.stringify([tool, canonicalise(projectForHash(tool, input))]);
@@ -143,7 +148,7 @@ export function hashToolCall(tool: string, input: unknown): string {
 }
 
 function canonicalise(value: unknown): unknown {
-  if (typeof value === 'string') return value.replace(/\s+/g, ' ').trim();
+  if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(canonicalise);
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
