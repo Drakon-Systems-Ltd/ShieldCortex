@@ -555,7 +555,9 @@ export function startVisualizationServer(dbPath?: string): void {
   const bindLoopback = isLoopbackHost(HOST);
   // Auth middleware: require Bearer token on all requests except public paths.
   // #474 — both the prefix test and the exemption run over the normalised path
-  // view, so every spelling express routes to a protected handler is gated.
+  // view, and the only method left unauthenticated is the one CORS genuinely
+  // needs, so every spelling AND every method express routes to a protected
+  // handler is gated.
   const publicPaths = bindLoopback
     ? ['/api/health', '/api/auth/session-token']
     : ['/api/health'];
@@ -565,8 +567,16 @@ export function startVisualizationServer(dbPath?: string): void {
     if (!isApiRequestPath(req.path)) {
       return next();
     }
-    // Allow OPTIONS/HEAD for CORS preflight
-    if (['OPTIONS', 'HEAD'].includes(req.method)) {
+    // CORS preflight, which is OPTIONS and nothing else. `HEAD` was exempt here
+    // "for CORS preflight" too, and preflight has never been a HEAD: express
+    // routes HEAD to the GET handler, so the handler RAN unauthenticated and
+    // Node dropped only the body — leaving a `Content-Length` and a
+    // content-derived `ETag` byte-identical to the authenticated GET. 60 of 125
+    // routes answered 200 that way, and `HEAD /api/memories?mode=search&query=…`
+    // made the store searchable one content-length at a time, including on a
+    // non-loopback bind where the token is the only defence because
+    // `/api/auth/session-token` is deliberately not registered there (#474).
+    if (req.method === 'OPTIONS') {
       return next();
     }
     // Public endpoints that never need auth

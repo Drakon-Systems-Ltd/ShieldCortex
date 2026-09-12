@@ -25,6 +25,11 @@
  *   between the socket and the handler; nothing short of a real request proves
  *   the ordering of cors/json/auth/redaction/routes.
  *
+ * The gate has a second exemption list, and it had the same defect in the
+ * method dimension: `HEAD` was exempt "for CORS preflight", preflight is
+ * `OPTIONS`, and express routes `HEAD` to the `GET` handler. See the METHOD
+ * section of leg 2 for what that answered unauthenticated.
+ *
  * Percent-encoded paths are sent with `http.request`, not `fetch`: the WHATWG
  * URL parser resolves `%2E%2E` to `..` and collapses the segment CLIENT-side,
  * so a fetch-based probe never puts the traversal on the wire and proves
@@ -58,29 +63,52 @@ interface RawResponse {
   status: number;
   type: string;
   body: string;
+  /** `content-length` as the server sent it, or `undefined` when absent. */
+  length: string | undefined;
+  /** `etag` as the server sent it, or `undefined` when absent. */
+  etag: string | undefined;
 }
 
 /**
- * One GET over the wire with the path byte-for-byte as given.
+ * One request over the wire with the path byte-for-byte as given.
  * `http.request` does not normalise the path; `fetch` does.
+ *
+ * The response's `content-length` and `etag` are returned alongside the body
+ * because a `HEAD` has no body and those two headers are exactly what leaked
+ * through it (#474) — the assertion has to be able to read what the caller
+ * could read.
  */
-function rawGet(port: number, path: string, headers: Record<string, string> = {}): Promise<RawResponse> {
+function raw(
+  port: number,
+  method: string,
+  path: string,
+  headers: Record<string, string> = {},
+  body?: string,
+): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
-    const req = httpRequest({ host: '127.0.0.1', port, path, method: 'GET', headers }, (res) => {
-      let body = '';
+    const req = httpRequest({ host: '127.0.0.1', port, path, method, headers }, (res) => {
+      let received = '';
       res.setEncoding('utf8');
-      res.on('data', (chunk) => (body += chunk));
+      res.on('data', (chunk) => (received += chunk));
       res.on('end', () =>
         resolve({
           status: res.statusCode ?? 0,
           type: String(res.headers['content-type'] ?? '').split(';')[0],
-          body,
+          body: received,
+          length: res.headers['content-length'],
+          etag: res.headers.etag,
         }),
       );
     });
     req.on('error', reject);
+    if (body !== undefined) req.write(body);
     req.end();
   });
+}
+
+/** The overwhelmingly common case: a GET with no body. */
+function rawGet(port: number, path: string, headers: Record<string, string> = {}): Promise<RawResponse> {
+  return raw(port, 'GET', path, headers);
 }
 
 /** A port nothing is listening on, chosen by the kernel and then released. */
@@ -327,5 +355,102 @@ describe('#474 — the booted server refuses every respelling without a token', 
     const res = await rawGet(port, '/API/memories', { authorization: 'Bearer not-the-token' });
     expect(res.status).toBe(401);
     expect(JSON.parse(res.body).code).toBe('AUTH_INVALID');
+  });
+
+  // ── The gate's METHOD exemption ────────────────────────────────────────────
+  //
+  // Respelling the path was half of it. The gate also exempted two METHODS,
+  // `OPTIONS` and `HEAD`, with the comment "for CORS preflight" — and preflight
+  // has never been a `HEAD`. express routes `HEAD` to the `GET` handler, so the
+  // handler RAN for an unauthenticated caller and Node suppressed only the
+  // body. Measured on this harness at ef06f9d3:
+  //
+  //   GET  /api/memories (no token)  -> 401  Content-Length 47
+  //   HEAD /api/memories (no token)  -> 200  Content-Length 786  ETag W/"312-+pKMUUkL…"
+  //   GET  /api/memories (token)     -> 200  Content-Length 786  ETag W/"312-+pKMUUkL…"
+  //
+  // Byte-identical length and a content-derived ETag: the size of the
+  // authenticated answer, for free, on 60 of the 125 API routes. With
+  // `?mode=search&query=` that is a search oracle over the memory store, and it
+  // reaches a non-loopback bind too — the one mode where the token is the only
+  // defence, because `/api/auth/session-token` is deliberately not registered
+  // there.
+
+  it.each(['/api/memories', '/API/memories', '/api/gated-stats', '/API/MEMORIES'])(
+    'answers 401 for an unauthenticated HEAD %s — it runs the same handler as the GET',
+    async (path) => {
+      const head = await raw(port, 'HEAD', path);
+      expect({ path, status: head.status }).toEqual({ path, status: 401 });
+      // The 401 is the gate and not a 404: the same HEAD with a token reaches
+      // the handler. Without this the test would pass on a server that simply
+      // does not route HEAD at all.
+      const authedHead = await raw(port, 'HEAD', path, authed);
+      expect({ path, status: authedHead.status }).toEqual({ path, status: 200 });
+    },
+  );
+
+  it('tells an unauthenticated HEAD nothing about the size of the authenticated answer', async () => {
+    // Give the store something to find, so the authenticated answers differ by
+    // query and the oracle would have something to leak.
+    const seed = await raw(
+      port,
+      'POST',
+      '/api/memories',
+      { ...authed, 'content-type': 'application/json' },
+      JSON.stringify({ title: 'oracle marker alpha', content: 'SC474-MARKER-ALPHA present in the store' }),
+    );
+    expect(seed.status).toBeLessThan(300);
+
+    const hit = '/api/memories?mode=search&query=SC474-MARKER-ALPHA';
+    const miss = '/api/memories?mode=search&query=SC474-NOTHING-MATCHES-THIS';
+
+    // Authenticated, the two queries genuinely answer differently — that is the
+    // signal a HEAD used to carry.
+    const authedHit = await rawGet(port, hit, authed);
+    const authedMiss = await rawGet(port, miss, authed);
+    expect(authedHit.status).toBe(200);
+    expect(authedMiss.status).toBe(200);
+    expect(authedHit.length).not.toBe(authedMiss.length);
+
+    const headHit = await raw(port, 'HEAD', hit);
+    const headMiss = await raw(port, 'HEAD', miss);
+    // Unauthenticated, both are the same constant refusal: same status, same
+    // length, same ETag, and neither equal to the authenticated answer. A
+    // constant carries no bits about the store, which is the property that
+    // matters — not the mere absence of a header.
+    expect({ status: headHit.status, length: headHit.length, etag: headHit.etag }).toEqual({
+      status: headMiss.status,
+      length: headMiss.length,
+      etag: headMiss.etag,
+    });
+    expect(headHit.status).toBe(401);
+    expect(headHit.length).not.toBe(authedHit.length);
+    expect(headHit.length).not.toBe(authedMiss.length);
+    expect(headHit.etag).not.toBe(authedHit.etag);
+    expect(headHit.etag).not.toBe(authedMiss.etag);
+    // And it is the same refusal an unauthenticated GET gets, byte for byte.
+    const getRefusal = await rawGet(port, hit);
+    expect({ length: headHit.length, etag: headHit.etag }).toEqual({
+      length: getRefusal.length,
+      etag: getRefusal.etag,
+    });
+  });
+
+  it('still lets a CORS preflight through — OPTIONS is the one exempt method', async () => {
+    const res = await raw(port, 'OPTIONS', '/api/memories', {
+      origin: 'http://localhost:3030',
+      'access-control-request-method': 'GET',
+    });
+    // The `cors` middleware answers preflight itself with 204. What matters is
+    // that it is not the gate's 401: a browser that cannot preflight cannot
+    // then send the credentialed request at all.
+    expect(res.status).toBe(204);
+  });
+
+  it('keeps HEAD on a public path public, exactly like its GET', async () => {
+    const head = await raw(port, 'HEAD', '/api/health');
+    const get = await rawGet(port, '/api/health');
+    expect({ head: head.status, get: get.status }).toEqual({ head: 200, get: 200 });
+    expect(head.length).toBe(get.length);
   });
 });
