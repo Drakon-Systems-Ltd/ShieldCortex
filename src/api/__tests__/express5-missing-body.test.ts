@@ -291,6 +291,26 @@ describe('#466 — a body-less request reaches the handler, not a TypeError', ()
     expectNoInternals(res, 'malformed JSON body');
   });
 
+  it('answers a refused CORS origin 403 CORS_DENIED, not a 500 server fault', async () => {
+    // `/api/health` is public, so nothing here can be the auth gate: a 403 at
+    // all proves `cors` runs ahead of it, and 403 rather than 500 is the fix.
+    const res = await raw(port, 'GET', '/api/health', { origin: 'http://evil.example' });
+    expect({ status: res.status, type: res.type, body: JSON.parse(res.body) }).toEqual({
+      status: 403,
+      type: 'application/json',
+      body: { error: 'Origin not allowed', code: 'CORS_DENIED' },
+    });
+    // The refused origin is the caller's own string. It goes to the server log
+    // and no further — echoing it would make the API a reflector.
+    expect(res.body).not.toContain('evil.example');
+    expectNoInternals(res, 'refused CORS origin');
+  });
+
+  it('leaves an allowed origin alone, so the 403 above is the policy and not the middleware', async () => {
+    const res = await raw(port, 'GET', '/api/health', { origin: 'http://localhost:3030' });
+    expect({ status: res.status, ok: JSON.parse(res.body).status }).toEqual({ status: 200, ok: 'ok' });
+  });
+
   it('leaves a non-API path on express default error handling', async () => {
     const truncated = '{"title": ';
     const res = await raw(
@@ -433,6 +453,83 @@ describe('#466 — defaultEmptyBody', () => {
   it('always continues the chain, and never with an error', () => {
     expect(run(undefined).nextCalls).toEqual([[]]);
     expect(run({ a: 1 }).nextCalls).toEqual([[]]);
+  });
+});
+
+describe('#466 — a server-authored API error response', () => {
+  const authored = (err: unknown): { status: number; body: unknown } => {
+    const written: { status: number; body: unknown } = { status: 0, body: undefined };
+    const res = {
+      headersSent: false,
+      status(code: number) {
+        written.status = code;
+        return this;
+      },
+      json(body: unknown) {
+        written.body = body;
+      },
+    } as unknown as Parameters<typeof __test__.apiJsonErrorHandler>[2];
+    __test__.apiJsonErrorHandler(
+      err,
+      { path: '/api/health', method: 'GET', originalUrl: '/api/health' } as never,
+      res,
+      () => {
+        throw new Error('must not delegate an API-path error');
+      },
+    );
+    return written;
+  };
+
+  it('sends exactly what the CORS refusal names', () => {
+    expect(authored(__test__.corsDeniedError('http://evil.example'))).toEqual({
+      status: 403,
+      body: { error: 'Origin not allowed', code: 'CORS_DENIED' },
+    });
+  });
+
+  it('never carries the rejected origin into the response, only into the message', () => {
+    const err = __test__.corsDeniedError('http://evil.example');
+    expect(err.message).toContain('http://evil.example');
+    expect(JSON.stringify(authored(err).body)).not.toContain('evil.example');
+  });
+
+  /**
+   * The refusal deliberately does NOT tag `status`/`statusCode`. express hands
+   * non-API errors to `finalhandler`, which reads those tags — so tagging would
+   * also move the status the dashboard shell answers, and this change is scoped
+   * to the JSON plane exactly as the rest of the handler is.
+   */
+  it('keeps the status off the http-errors tags, so the shell is untouched', () => {
+    const err = __test__.corsDeniedError('http://evil.example') as unknown as Record<string, unknown>;
+    expect(err.status).toBeUndefined();
+    expect(err.statusCode).toBeUndefined();
+  });
+
+  it.each([
+    ['a bare error', new Error('nope')],
+    ['a non-object', 'nope'],
+    ['a null apiError', Object.assign(new Error('x'), { apiError: null })],
+    ['a string apiError', Object.assign(new Error('x'), { apiError: 'CORS_DENIED' })],
+    ['a missing code', Object.assign(new Error('x'), { apiError: { status: 403, error: 'no' } })],
+    ['a non-numeric status', Object.assign(new Error('x'), { apiError: { status: '403', error: 'a', code: 'B' } })],
+    ['a 200 status', Object.assign(new Error('x'), { apiError: { status: 200, error: 'a', code: 'B' } })],
+    ['a 600 status', Object.assign(new Error('x'), { apiError: { status: 600, error: 'a', code: 'B' } })],
+  ])('reads no authored response from %s', (_label, err) => {
+    expect(__test__.apiAuthoredResponse(err)).toBeUndefined();
+  });
+
+  it('falls back to the fixed 500 when nothing is authored', () => {
+    expect(authored(new Error('boom'))).toEqual({
+      status: 500,
+      body: { error: 'Internal server error', code: 'INTERNAL' },
+    });
+  });
+
+  it('still prefers an http-errors client status over the 500 when nothing is authored', () => {
+    expect(authored(Object.assign(new Error('too big'), { status: 413 }))).toEqual({
+      status: 413,
+      body: { error: 'Bad request', code: 'BAD_REQUEST' },
+    });
   });
 });
 

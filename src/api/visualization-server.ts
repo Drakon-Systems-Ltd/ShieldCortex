@@ -225,6 +225,73 @@ function clientErrorStatus(err: unknown): number | undefined {
   return raw >= 400 && raw <= 499 ? raw : undefined;
 }
 
+/** The exact response a server-authored error asks the API plane to send. */
+interface ApiErrorResponse {
+  status: number;
+  error: string;
+  code: string;
+}
+
+/**
+ * The response a server-authored error names for the API plane, or `undefined`.
+ *
+ * `clientErrorStatus` gets the status right for anything `http-errors` tagged,
+ * but every one of those answers `{"error":"Bad request","code":"BAD_REQUEST"}`
+ * — which is the wrong thing to tell a caller whose ORIGIN was refused. A CORS
+ * refusal is a decision about the caller, knowable to them, and naming it costs
+ * nothing. So an error raised by THIS module may carry the exact response to
+ * send.
+ *
+ * It carries its own status rather than an `http-errors` `status` tag on
+ * purpose. express hands non-API errors to `finalhandler`, which reads
+ * `err.status` too — so tagging the error would ALSO move what the dashboard
+ * shell answers for a rejected origin, and this change is scoped to the JSON
+ * plane exactly as the rest of `apiJsonErrorHandler` is. Non-API paths keep the
+ * status they had.
+ *
+ * `apiError` is only ever attached here, and only ever as a module-level
+ * literal: nothing from the request is copied into one, so honouring it cannot
+ * become an echo of attacker-controlled text (the rejected origin goes to the
+ * server log, in the error's message, and no further). No dependency sets the
+ * key — body-parser and http-errors tag `status`/`statusCode`/`type`/`expose`.
+ */
+function apiAuthoredResponse(err: unknown): ApiErrorResponse | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const authored = (err as { apiError?: unknown }).apiError;
+  if (typeof authored !== 'object' || authored === null) return undefined;
+  const { status, error, code } = authored as { status?: unknown; error?: unknown; code?: unknown };
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 400 || status > 599) {
+    return undefined;
+  }
+  if (typeof error !== 'string' || typeof code !== 'string') return undefined;
+  return { status, error, code };
+}
+
+/** What a caller whose origin is not allowed is told. A literal, deliberately. */
+const CORS_DENIED_RESPONSE: ApiErrorResponse = {
+  status: 403,
+  error: 'Origin not allowed',
+  code: 'CORS_DENIED',
+};
+
+/**
+ * The error the CORS origin callback refuses with (#466).
+ *
+ * `cors` has no way to answer a request itself: denying means `callback(err)`,
+ * which becomes `next(err)`. A bare `Error` carries no status and no code, so a
+ * refused origin was reported as `500 {"error":"Internal server error","code":
+ * "INTERNAL"}` — a policy decision dressed up as a server fault, measured on the
+ * booted server for `GET /api/health` with `Origin: http://evil.example`. On the
+ * API plane it is now `403 {"error":"Origin not allowed","code":"CORS_DENIED"}`.
+ *
+ * The message names the origin for the operator's log; `apiError` does not.
+ */
+function corsDeniedError(origin: string): Error {
+  return Object.assign(new Error(`Origin ${origin} not allowed by CORS`), {
+    apiError: CORS_DENIED_RESPONSE,
+  });
+}
+
 /**
  * Terminal error handler for the JSON API plane (#466).
  *
@@ -265,6 +332,11 @@ function apiJsonErrorHandler(
     next(err);
     return;
   }
+  const authored = apiAuthoredResponse(err);
+  if (authored !== undefined) {
+    res.status(authored.status).json({ error: authored.error, code: authored.code });
+    return;
+  }
   const clientStatus = clientErrorStatus(err);
   if (clientStatus !== undefined) {
     res.status(clientStatus).json({ error: 'Bad request', code: 'BAD_REQUEST' });
@@ -282,6 +354,9 @@ export const __test__ = {
   isPublicApiPath,
   defaultEmptyBody,
   apiJsonErrorHandler,
+  apiAuthoredResponse,
+  corsDeniedError,
+  CORS_DENIED_RESPONSE,
 };
 
 /**
@@ -534,7 +609,7 @@ export function startVisualizationServer(dbPath?: string): void {
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error(`Origin ${origin} not allowed by CORS`));
+        callback(corsDeniedError(origin));
       }
     },
   }));
