@@ -141,21 +141,18 @@ function verifyNativeModule() {
     return true;
   } catch (err) {
     const detail = err && err.message ? err.message : String(err);
-    // Install dir = this package's root (where better-sqlite3 lives). The
-    // reliable manual compile is `npm run build-release` IN the better-sqlite3
-    // dir — a plain `npm rebuild` goes through prebuild-install and can silently
-    // no-op when no prebuilt matches this Node/arch.
+    // Install dir = this package's root (where better-sqlite3 lives). v13's
+    // packaged prebuild wins over build/Release, so do not present source
+    // compilation as a cure when that packaged binary itself is unloadable.
     const installDir = join(dirname(fileURLToPath(import.meta.url)), '..');
     const betterSqliteDir = join(installDir, 'node_modules', 'better-sqlite3');
     console.log('');
     console.warn('\x1b[33m[shieldcortex] ⚠  Database engine (better-sqlite3) failed to load.\x1b[0m');
-    console.warn(`[shieldcortex] Node ${process.version} (ABI ${process.versions.modules}) has no matching`);
-    console.warn('[shieldcortex] prebuilt binary and it was not compiled locally.');
-    console.warn('[shieldcortex] Fix it (one command, self-healing):');
-    console.warn('[shieldcortex]   \x1b[36mshieldcortex repair\x1b[0m');
-    console.warn('[shieldcortex] Or compile manually IN THE better-sqlite3 DIR (the cd is required):');
+    console.warn(`[shieldcortex] Node ${process.version} (module ABI ${process.versions.modules}) could not load the database binding.`);
+    console.warn('[shieldcortex] Use Node 22.14+ LTS or Node 24+ (not Node 23), then reinstall ShieldCortex via the same package route so npm restores the packaged prebuild.');
+    console.warn('[shieldcortex] For a genuinely missing/source-only binding (not an unloadable prebuilds/*.node file), `shieldcortex repair` or this command may help:');
     console.warn(`[shieldcortex]   cd "${betterSqliteDir}" && npm run build-release`);
-    console.warn('[shieldcortex]   (needs a C/C++ toolchain — e.g. python3 make g++; a plain `npm rebuild` can silently no-op)');
+    console.warn('[shieldcortex] A source build cannot safely override an unloadable packaged prebuild in this release.');
     console.warn(`[shieldcortex] Underlying error: ${detail}`);
     return false;
   }

@@ -7,7 +7,11 @@ import {
   formatMcpSpawnError,
   MCP_SPAWN_ERROR_LOG,
 } from '../setup/mcp-self-heal.js';
-import type { EnsureResult } from '../setup/native-binding.js';
+import {
+  ensureNativeBinding,
+  nativeBindingRemediation,
+  type EnsureResult,
+} from '../setup/native-binding.js';
 
 /**
  * Issue #76: the MCP server dies with a bare JSON-RPC `-32000` when
@@ -52,7 +56,7 @@ describe('MCP startup self-heal (#76)', () => {
     expect(fs.existsSync(path.join(logsDir, MCP_SPAWN_ERROR_LOG))).toBe(false);
   });
 
-  it('fails LOUDLY when heal is impossible: message names the exact fix command, never a bare -32000', async () => {
+  it('fails LOUDLY when heal is impossible: message carries the selected remediation, never a bare -32000', async () => {
     const out = await selfHealMcpNativeBinding(
       deps({ status: 'failed', error: 'NODE_MODULE_VERSION mismatch', remediation: 'cd .../better-sqlite3 && npm run build-release' }),
     );
@@ -61,11 +65,11 @@ describe('MCP startup self-heal (#76)', () => {
     expect(out.message).toBeDefined();
     // The whole point: a diagnosable message, not an opaque -32000.
     expect(out.message).not.toBe('-32000');
-    expect(out.message).toContain('shieldcortex repair');
+    expect(out.message).toContain('npm run build-release');
     expect(out.message).toContain(installDir);
   });
 
-  it('drops a breadcrumb naming the install path and repair command on failure', async () => {
+  it('drops a breadcrumb naming the install path and selected recovery on failure', async () => {
     const out = await selfHealMcpNativeBinding(
       deps({ status: 'failed', error: 'could not locate the bindings file', remediation: 'cd x && npm run build-release' }),
     );
@@ -74,16 +78,61 @@ describe('MCP startup self-heal (#76)', () => {
     expect(fs.existsSync(crumb)).toBe(true);
     const body = fs.readFileSync(crumb, 'utf-8');
     expect(body).toContain(installDir);
-    expect(body).toContain('shieldcortex repair');
+    expect(body).toContain('npm run build-release');
     // The underlying error is preserved for diagnosis.
     expect(body).toContain('could not locate the bindings file');
   });
 
   it('formatMcpSpawnError produces an actionable, non-opaque message', () => {
     const msg = formatMcpSpawnError(installDir, 'NODE_MODULE_VERSION 127 vs 108');
-    expect(msg).toContain('shieldcortex repair');
+    expect(msg).toContain('npm run build-release');
     expect(msg).toContain(installDir);
     expect(msg).not.toBe('-32000');
     expect(msg.toLowerCase()).toContain('database engine');
+  });
+
+  it('carries the class-aware packaged-prebuild remediation, not the generic rebuild one', async () => {
+    // The previous version of this test asserted
+    // `not.toContain('automatic rebuild did not fix')` — a phrase
+    // formatMcpSpawnError emits on NO path, so it could not fail and pinned
+    // nothing. What actually needs pinning is that the message carries the
+    // remediation the classifier SELECTED and not the generic one it replaced.
+    const nodeApiError =
+      "The module 'better-sqlite3' requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.";
+
+    // Drive the REAL heal machinery — only its verify/rebuild seams are
+    // injected, never its classification.
+    const rebuildAttempts: string[] = [];
+    const ensured = await ensureNativeBinding({
+      verify: () => ({ ok: false, error: nodeApiError }),
+      rebuild: async (_dir, opts) => {
+        rebuildAttempts.push(opts?.fromSource ? 'source' : 'plain');
+        return { ok: false, output: 'rebuilt dependencies successfully' };
+      },
+      installDir: () => installDir,
+    });
+    expect(ensured.status).toBe('failed');
+    // Premise: this class deliberately attempts no rebuild at all.
+    expect(rebuildAttempts).toEqual([]);
+
+    const out = await selfHealMcpNativeBinding(deps(ensured));
+    expect(out.ok).toBe(false);
+
+    const classAware = nativeBindingRemediation(installDir, nodeApiError);
+    const generic = nativeBindingRemediation(installDir);
+    // Guard against a vacuous comparison: if the two ever collapsed into the
+    // same text, the assertions below would pass while proving nothing.
+    expect(classAware).not.toBe(generic);
+
+    for (const line of classAware.split('\n')) expect(out.message).toContain(line);
+    for (const line of generic.split('\n')) expect(out.message).not.toContain(line);
+
+    // The generic path's signature commands, absent outright.
+    expect(out.message).not.toContain('npm run build-release');
+    expect(out.message).not.toContain('shieldcortex repair');
+
+    const body = fs.readFileSync(path.join(logsDir, MCP_SPAWN_ERROR_LOG), 'utf-8');
+    expect(body).toContain(classAware.split('\n')[0]);
+    expect(body.match(/cannot safely override/g)).toHaveLength(1);
   });
 });

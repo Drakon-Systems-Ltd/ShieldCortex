@@ -211,12 +211,12 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   console.log = (...args: unknown[]): void => { console.error(...args); };
 
   // Startup self-heal (#76): before we touch the database, make sure the
-  // better-sqlite3 native binding actually loads. On an ABI mismatch (npm
-  // version bump without `shieldcortex repair`) it wouldn't, and `createServer`
+  // better-sqlite3 native binding actually loads. If the packaged prebuild is
+  // incompatible or missing, `createServer`
   // → `initDatabase` would throw, killing the process before the MCP handshake
-  // — the client sees only a bare `-32000`. Attempt the documented repair
-  // (reusing the `shieldcortex repair` machinery); if it can't heal, fail LOUDLY
-  // to stderr + a breadcrumb naming the exact fix command, never a silent death.
+  // — the client sees only a bare `-32000`. Attempt the class-appropriate
+  // recovery through the shared binding helper; if it cannot heal, fail LOUDLY
+  // to stderr + a breadcrumb carrying the selected remediation, never silently.
   const { selfHealMcpNativeBinding } = await import('./setup/mcp-self-heal.js');
   const heal = await selfHealMcpNativeBinding();
   if (!heal.ok) {

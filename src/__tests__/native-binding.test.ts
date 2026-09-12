@@ -40,7 +40,7 @@ describe('native-binding helper', () => {
       expect(c.cwd).toBe('/opt/install/shieldcortex');
     });
 
-    it('fromSource uses `npm run build-release` IN the better-sqlite3 dir (bypasses prebuild-install no-op)', () => {
+    it('fromSource uses `npm run build-release` IN the better-sqlite3 dir (overrides the prebuild_exists no-op)', () => {
       const c = nativeRebuildCommand('/opt/install/shieldcortex', true);
       expect(c.cmd).toBe('npm');
       expect(c.args).toEqual(['run', 'build-release']);
@@ -53,12 +53,42 @@ describe('native-binding helper', () => {
   describe('nativeBindingRemediation', () => {
     it('points at `npm run build-release` in the better-sqlite3 dir, with a toolchain hint', () => {
       const text = nativeBindingRemediation('/opt/install/shieldcortex');
-      // The reliable forced compile — NOT the prebuild-install no-op forms.
+      // The reliable forced compile (node-gyp --force_build=1) — NOT the
+      // `npm rebuild` forms that binding.gyp's prebuild_exists gate no-ops.
       expect(text).toContain(path.join('/opt/install/shieldcortex', 'node_modules', 'better-sqlite3'));
       expect(text).toContain('npm run build-release');
       expect(text).not.toContain('npm rebuild better-sqlite3');
       // platform toolchain hint — at least one of the known package managers
       expect(/apt|xcode-select|build tools|python3|make|g\+\+/.test(text)).toBe(true);
+    });
+
+    it('still gives the build-release/toolchain advice when the error is a generic missing/source-only binding', () => {
+      const text = nativeBindingRemediation('/opt/install/shieldcortex', new Error('Could not locate the bindings file'));
+      expect(text).toContain('npm run build-release');
+      expect(/apt|xcode-select|build tools/i.test(text)).toBe(true);
+    });
+
+    it('for a packaged-prebuild load failure, tells the user to reinstall on a supported Node instead of building from source', () => {
+      const err = new Error('/app/node_modules/better-sqlite3/prebuilds/linux-x64.node: invalid ELF header');
+      const text = nativeBindingRemediation('/opt/install/shieldcortex', err);
+      expect(text).toContain('^22.14.0');
+      expect(text).toContain('>=24.0.0');
+      expect(text).toMatch(/reinstall shieldcortex/i);
+      expect(text).toMatch(/same installation/i);
+      expect(text).toContain('cannot safely override the packaged prebuild');
+      // Must not offer these as the cure for THIS class.
+      expect(text).not.toContain('npm run build-release');
+      expect(text).not.toContain('shieldcortex repair');
+    });
+
+    it('for a Node-API version incompatibility, gives the same reinstall-on-supported-Node remediation', () => {
+      const err = new Error(
+        "The module 'better-sqlite3' requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.",
+      );
+      const text = nativeBindingRemediation('/opt/install/shieldcortex', err);
+      expect(text).toMatch(/reinstall shieldcortex/i);
+      expect(text).not.toContain('npm run build-release');
+      expect(text).not.toContain('shieldcortex repair');
     });
   });
 
@@ -133,6 +163,62 @@ describe('native-binding helper', () => {
       });
       expect(rebuilds).toBe(2);
       expect(r.status).toBe('healed');
+    });
+
+    it('does ZERO rebuilds and returns failed when the initial verify names an unloadable packaged prebuild', async () => {
+      let rebuilt = 0;
+      const r = await ensureNativeBinding({
+        verify: () => ({
+          ok: false,
+          error: '/app/node_modules/better-sqlite3/prebuilds/linux-x64.node: invalid ELF header',
+        }),
+        rebuild: async () => { rebuilt++; return { ok: true, output: '' }; },
+        installDir: () => '/opt/install/shieldcortex',
+      });
+      expect(rebuilt).toBe(0);
+      expect(r.status).toBe('failed');
+      expect(r.remediation).toMatch(/reinstall shieldcortex/i);
+      expect(r.remediation).not.toContain('npm run build-release');
+    });
+
+    it('does ZERO rebuilds and returns failed when the initial verify reports a Node-API version incompatibility', async () => {
+      let rebuilt = 0;
+      const r = await ensureNativeBinding({
+        verify: () => ({
+          ok: false,
+          error: 'requires Node-API version 10, but this version of Node.js only supports version 9',
+        }),
+        rebuild: async () => { rebuilt++; return { ok: true, output: '' }; },
+        installDir: () => '/opt/install/shieldcortex',
+      });
+      expect(rebuilt).toBe(0);
+      expect(r.status).toBe('failed');
+      expect(r.remediation).not.toContain('shieldcortex repair');
+    });
+
+    it('stops before the forced source build when the post-normal-rebuild verify now reports the packaged-prebuild class', async () => {
+      let rebuilds = 0;
+      let verifyCalls = 0;
+      const r = await ensureNativeBinding({
+        verify: () => {
+          verifyCalls++;
+          if (verifyCalls === 1) return { ok: false, error: 'Could not locate the bindings file' };
+          return {
+            ok: false,
+            error: '/app/node_modules/better-sqlite3/prebuilds/linux-x64.node: invalid ELF header',
+          };
+        },
+        rebuild: async (_dir, opts) => {
+          rebuilds++;
+          return { ok: false, output: opts?.fromSource ? 'SHOULD NOT RUN' : 'rebuilt dependencies successfully' };
+        },
+        installDir: () => '/opt/install/shieldcortex',
+      });
+      // Only the plain rebuild ran — the forced source build never fires once
+      // the class is recognised as unhealable.
+      expect(rebuilds).toBe(1);
+      expect(r.status).toBe('failed');
+      expect(r.remediation).not.toContain('npm run build-release');
     });
   });
 });

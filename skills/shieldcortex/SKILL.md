@@ -19,9 +19,10 @@ metadata:
 install:
   command: shieldcortex quickstart
   runtime: node
-  minVersion: "20"
+  minVersion: "22.14.0"
   note: >
-    Run the installed `shieldcortex` binary directly. The quickstart command
+    Requires Node 22.14+ LTS or Node 24+; Node 23 is unsupported. Run the installed
+    `shieldcortex` binary directly. The quickstart command
     detects your environment. Claude Code and OpenClaw get hooks that can deny;
     Codex/Cursor/VS Code get an MCP memory server only (not a tool gate).
     All data stays local in ~/.shieldcortex/. No account or API key needed

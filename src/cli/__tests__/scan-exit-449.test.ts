@@ -10,6 +10,10 @@ import {
   scanVerdictExit,
 } from '../scan-exit.js';
 import { runScanCommand } from '../scan-command.js';
+import {
+  NativeModuleLoadError,
+  formatNativeLoadError,
+} from '../../database/native-load-classify.js';
 import { closeDatabase } from '../../database/init.js';
 
 describe('scan exit contract (#449)', () => {
@@ -46,10 +50,61 @@ describe('scan exit contract (#449)', () => {
       'the module (for instance, using `npm rebuild` or `npm install`).',
     );
     const text = formatScanToolFailure(abi);
-    expect(text).toMatch(/native\/ABI/);
-    expect(text).toMatch(/Control is absent/);
-    expect(text).toMatch(/shieldcortex repair/);
+    expect(text).toMatch(/native binding/);
+    expect(text).toMatch(/control is absent/);
+    expect(text).toMatch(/Node \^22\.14\.0 \|\| >=24\.0\.0/);
+    expect(text).toMatch(/missing\/source-only binding/);
     expect(text).not.toMatch(/Usage:/);
+  });
+
+  it('packaged Node-API failure gets install guidance rather than a bare repair hint', () => {
+    const text = formatScanToolFailure(new Error(
+      "The module 'better-sqlite3' requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.",
+    ));
+    expect(text).toMatch(/Node \^22\.14\.0 \|\| >=24\.0\.0/);
+    expect(text).toMatch(/reinstall ShieldCortex/);
+    expect(text).not.toMatch(/Try: shieldcortex repair/);
+  });
+
+  const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+
+  // An ALREADY-FORMATTED failure must survive the exit contract unchanged.
+  // `getBetterSqlite3()` and `initDatabase` both hand back a
+  // `NativeModuleLoadError` whose `.message` is already the rendered guidance,
+  // and re-running the formatter over that text is not idempotent: its own
+  // generic prose says "this Node build predates the Node-API version it
+  // requires", which `isPackagedPrebuildLoadError` matches — so a second pass
+  // nests a second header AND rewrites a repairable missing/source-only
+  // failure as a packaged-prebuild one, telling the user the one fix that
+  // works cannot. The class is carried by the error, never re-derived from
+  // rendered text. Counted, not just `toContain`ed: the correct guidance is
+  // still present in the broken output, just buried under its contradiction.
+  it('an already-wrapped NativeModuleLoadError is rendered once, with no class flip', () => {
+    const raw = new Error("Cannot find module 'better-sqlite3'");
+    const wrapped = new NativeModuleLoadError(formatNativeLoadError(raw, 'v22.14.0', '127'), raw);
+
+    const text = formatScanToolFailure(wrapped);
+
+    expect(occurrences(text, 'Scan tool failure (native binding)')).toBe(1);
+    expect(occurrences(text, 'ShieldCortex could not load its database engine')).toBe(1);
+    expect(occurrences(text, 'For a missing/source-only binding, run `shieldcortex repair`')).toBe(1);
+    expect(text).not.toMatch(/The packaged Node-API native binding cannot be loaded here/);
+    expect(text).not.toMatch(/a source build cannot safely override the packaged prebuild/);
+    expect(text).toContain("Cannot find module 'better-sqlite3'");
+  });
+
+  it('a wrapped packaged-prebuild failure keeps its packaged diagnosis (no flip the other way)', () => {
+    const raw = new Error(
+      `The module '/app/node_modules/better-sqlite3/prebuilds/${process.platform}-${process.arch}.node' `
+      + 'requires Node-API version 10, but this version of Node.js only supports version 9 add-ons.',
+    );
+    const wrapped = new NativeModuleLoadError(formatNativeLoadError(raw, 'v22.14.0', '127'), raw);
+
+    const text = formatScanToolFailure(wrapped);
+
+    expect(occurrences(text, 'Scan tool failure (native binding)')).toBe(1);
+    expect(occurrences(text, 'The packaged Node-API native binding cannot be loaded here')).toBe(1);
+    expect(text).not.toMatch(/For a missing\/source-only binding/);
   });
 
   it('generic throw is still tool-failure, still not usage', () => {

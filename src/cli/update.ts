@@ -31,6 +31,12 @@ import {
   type UpdatePanelRow,
   sanitiseDisplayField,
 } from './term-ui.js';
+// Type-only: erased at compile time, so this adds no runtime edge to the
+// native-binding module (which `stepVerifyEngine` still imports lazily).
+import type { EnsureResult } from '../setup/native-binding.js';
+// Classification only — the side-effect-free classifier module, never the
+// better-sqlite3 loader.
+import { isPackagedPrebuildLoadError } from '../database/native-load-classify.js';
 
 // ── ANSI ────────────────────────────────────────────────────
 
@@ -338,20 +344,69 @@ async function stepNpmPackage(
  * `npm install -g` reports success on its exit code even when the native
  * binding never built for this platform/ABI (common on arm64 / a Node newer
  * than the prebuilds) — leaving the package installed-but-broken. This step
- * runs AFTER the install completes (not nested inside it), rebuilds the binding
- * in the correct install dir if it's missing, and reports honestly.
+ * runs AFTER the install completes (not nested inside it), attempts only the
+ * recovery appropriate to the detected binding class, and reports honestly.
  */
-async function stepVerifyEngine(): Promise<{ remediation: string | null }> {
-  let remediation: string | null = null;
+export interface EngineVerifyOutcome {
+  /** Copy-paste remediation selected for the detected failure class, if failed. */
+  remediation: string | null;
+  /**
+   * True when the failure is the packaged-prebuild / Node-API class. For that
+   * class `ensureNativeBinding` deliberately attempts NO rebuild (a source
+   * build cannot override a packaged v13 prebuild), so any summary claiming a
+   * rebuild was tried — or telling the user to run one — is false.
+   */
+  packagedPrebuild: boolean;
+}
+
+/**
+ * Collapse an `EnsureResult` into what `update`'s reporting needs, carrying
+ * the failure CLASS forward. Pure, and the single place that classification
+ * happens for the update flow.
+ */
+export function engineOutcomeFromEnsure(result: EnsureResult): EngineVerifyOutcome {
+  if (result.status !== 'failed') return { remediation: null, packagedPrebuild: false };
+  return {
+    remediation: result.remediation ?? null,
+    packagedPrebuild: isPackagedPrebuildLoadError(result.error),
+  };
+}
+
+/**
+ * EVERY line `update` prints about a failed engine verification, plus the
+ * closing-panel detail row. Returns null when there is nothing to report.
+ *
+ * Split out and made pure because the old inline strings contradicted the
+ * recovery actually selected: for the packaged-prebuild / Node-API class the
+ * flow deliberately runs no rebuild and tells the user a source build cannot
+ * help, while the summary still said the engine "could not be rebuilt
+ * automatically" and that the binding "needs manual rebuild" — recommending
+ * the exact futile remedy the class-aware remediation exists to retire.
+ */
+export function renderEngineFailure(
+  outcome: EngineVerifyOutcome,
+): { headline: string; body: string[]; detail: string } | null {
+  if (!outcome.remediation) return null;
+  const headline = outcome.packagedPrebuild
+    ? 'Database engine binding remains unavailable; follow the remediation below.'
+    : 'Database engine could not be rebuilt automatically.';
+  const detail = outcome.packagedPrebuild
+    ? 'engine: binding remains unavailable; follow remediation above'
+    : 'engine: database binding needs manual rebuild';
+  return { headline, body: outcome.remediation.split('\n'), detail };
+}
+
+async function stepVerifyEngine(): Promise<EngineVerifyOutcome> {
+  let outcome: EngineVerifyOutcome = { remediation: null, packagedPrebuild: false };
   await step('Database engine', async () => {
     const { ensureNativeBinding } = await import('../setup/native-binding.js');
     const r = await ensureNativeBinding();
     if (r.status === 'ok') return 'native binding OK';
     if (r.status === 'healed') return 'rebuilt native binding';
-    remediation = r.remediation ?? null;
-    return { status: 'warn' as const, summary: 'binding failed — run `shieldcortex repair`' };
+    outcome = engineOutcomeFromEnsure(r);
+    return { status: 'warn' as const, summary: 'binding failed — see remediation below' };
   });
-  return { remediation };
+  return outcome;
 }
 
 /**
@@ -794,9 +849,12 @@ export async function runUpdate(): Promise<void> {
   const protection = await stepVerifyProtection(home);
 
   // If the binding couldn't be auto-healed, print the exact copy-paste fix.
-  if (engineResult.remediation) {
-    process.stdout.write(`\n  ${paint('yellow', '⚠')}  ${paint('bold', 'Database engine could not be rebuilt automatically.')}\n`);
-    for (const line of engineResult.remediation.split('\n')) {
+  // Headline and panel detail come from renderEngineFailure so they can never
+  // drift back into contradicting the class-aware remediation below them.
+  const engineFailure = renderEngineFailure(engineResult);
+  if (engineFailure) {
+    process.stdout.write(`\n  ${paint('yellow', '⚠')}  ${paint('bold', engineFailure.headline)}\n`);
+    for (const line of engineFailure.body) {
       process.stdout.write(`     ${paint('gray', line)}\n`);
     }
     process.stdout.write('\n');
@@ -855,7 +913,7 @@ export async function runUpdate(): Promise<void> {
       details.push(d);
     }
   }
-  if (engineResult.remediation) details.push('engine: database binding needs manual rebuild');
+  if (engineFailure) details.push(engineFailure.detail);
   if (keyAttention) details.push('keys: ambiguous project-key collisions remain');
 
   // Unproven is attention, not failure. Only true unprotected / npm fail exit 1.

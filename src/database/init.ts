@@ -3,7 +3,8 @@
  */
 
 import type Database from 'better-sqlite3';
-import BetterSqlite3, { isNativeModuleLoadError } from './better-sqlite3-guard.js';
+import { getBetterSqlite3 } from './better-sqlite3-guard.js';
+import { NativeModuleLoadError, isNativeModuleLoadError, formatNativeLoadError } from './native-load-classify.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
@@ -139,7 +140,7 @@ function enforceSafeRuntimePath(expandedPath: string, explicitDbPath: boolean): 
 function inspectDatabaseFile(dbPath: string): DatabaseInspection {
   let inspectionDb: Database.Database | null = null;
   try {
-    inspectionDb = new BetterSqlite3(dbPath, {
+    inspectionDb = new (getBetterSqlite3())(dbPath, {
       readonly: true,
       fileMustExist: true,
     });
@@ -332,7 +333,7 @@ function attemptDumpRecovery(dbPath: string): Database.Database | null {
     console.error(`[database] Backed up corrupt database to: ${backupPath}`);
 
     // Create fresh database and import the dump
-    const freshDb = new BetterSqlite3(dbPath);
+    const freshDb = new (getBetterSqlite3())(dbPath);
     try {
       freshDb.exec(dumpOutput);
       console.error('[database] Successfully recovered data via dump/reimport.');
@@ -557,7 +558,7 @@ export function initDatabase(dbPath?: string): Database.Database {
   // Wrap the initial open in try/catch to handle corrupt files gracefully
   let database: Database.Database;
   try {
-    database = new BetterSqlite3(expandedPath);
+    database = new (getBetterSqlite3())(expandedPath);
   } catch (openError) {
     // A NATIVE-MODULE load failure (missing / ABI-mismatched better-sqlite3
     // binding) throws here too — better-sqlite3 resolves its binding lazily in
@@ -566,15 +567,25 @@ export function initDatabase(dbPath?: string): Database.Database {
     // here is data loss (observed 2026-06-09 on an arm64 box after a Node/native
     // mismatch — a live memories.db was moved aside). Never touch the DB file on
     // a binding error; surface an actionable message and let the caller stop.
-    if (isNativeModuleLoadError(openError)) {
-      const detail = openError instanceof Error ? openError.message : String(openError);
-      throw new Error(
-        'ShieldCortex could not load its database engine (the better-sqlite3 native module). ' +
-        `This is an install / Node-version issue, NOT database corruption — your data at ${expandedPath} is untouched. ` +
-        'Rebuild the native module and retry — easiest is `shieldcortex repair`, or manually:\n' +
-        '  cd "$(npm root -g)/shieldcortex/node_modules/better-sqlite3" && npm run build-release\n' +
-        '(install a C/C++ toolchain first if it fails to compile; a plain `npm rebuild` can silently no-op)\n' +
-        `Underlying error: ${detail}`,
+    //
+    // TWO shapes arrive here and only one of them is raw evidence. A packaged
+    // prebuild that cannot be dlopen'd throws a RAW error from the constructor;
+    // a package that cannot be required at all reaches us as the guard's
+    // already-formatted `NativeModuleLoadError`. Re-formatting the second shape
+    // is a class flip, not a no-op: formatNativeLoadError's generic diagnosis
+    // itself says "this Node build predates the Node-API version it requires",
+    // which isPackagedPrebuildLoadError matches, so a second pass relabels a
+    // repairable missing/source-only failure as an unfixable packaged-prebuild
+    // one. Keep the class, message and cause intact and let the rendered text
+    // stay evidence of nothing.
+    if (openError instanceof NativeModuleLoadError || isNativeModuleLoadError(openError)) {
+      const message = openError instanceof NativeModuleLoadError
+        ? openError.message
+        : formatNativeLoadError(openError, process.version, String(process.versions.modules));
+      throw new NativeModuleLoadError(
+        `${message}\n\n` +
+        `This is an install / Node-version issue, NOT database corruption — your data at ${expandedPath} is untouched.`,
+        openError instanceof NativeModuleLoadError ? openError.cause : openError,
       );
     }
 
@@ -585,12 +596,12 @@ export function initDatabase(dbPath?: string): Database.Database {
     if (latestHealthyBackup) {
       console.error(`[database] Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
       restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'failed-open');
-      database = new BetterSqlite3(expandedPath);
+      database = new (getBetterSqlite3())(expandedPath);
     } else {
       const backupPath = backupCorruptDatabase(expandedPath);
       console.error(`   Backed up to ${backupPath}`);
       console.error('   Creating fresh database...');
-      database = new BetterSqlite3(expandedPath);
+      database = new (getBetterSqlite3())(expandedPath);
     }
   }
 
@@ -615,7 +626,7 @@ export function initDatabase(dbPath?: string): Database.Database {
         if (freshIntegrityResult === 'ok') {
           console.warn('[database] Integrity failure was transient. Reopening the on-disk database without destructive recovery.');
           database.close();
-          database = new BetterSqlite3(expandedPath);
+          database = new (getBetterSqlite3())(expandedPath);
           liveIntegrityOk = true; // On-disk re-check was clean.
         } else {
           console.warn(`[database] Fresh integrity check also failed: ${freshIntegrityResult}`);
@@ -632,7 +643,7 @@ export function initDatabase(dbPath?: string): Database.Database {
             if (latestHealthyBackup) {
               console.error(`[database] Recovery failed. Restoring latest healthy backup with ${latestHealthyBackup.count} memories: ${latestHealthyBackup.path}`);
               restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'recovery-failed');
-              database = new BetterSqlite3(expandedPath);
+              database = new (getBetterSqlite3())(expandedPath);
             } else {
               // Recovery failed — backup and create fresh
               if (existsSync(expandedPath)) {
@@ -640,7 +651,7 @@ export function initDatabase(dbPath?: string): Database.Database {
                 console.error(`[database] Recovery failed. Backed up corrupt file to: ${backupPath}`);
               }
               console.error('[database] Creating fresh database...');
-              database = new BetterSqlite3(expandedPath);
+              database = new (getBetterSqlite3())(expandedPath);
             }
           }
           // Dump-recovery, backup-restore and fresh-create all yield a
@@ -677,7 +688,7 @@ export function initDatabase(dbPath?: string): Database.Database {
       console.error(`[database] Empty live database detected alongside a recent healthy backup (${latestHealthyBackup.count} memories). Restoring ${latestHealthyBackup.path}`);
       database.close();
       restoreBackupAsLive(expandedPath, latestHealthyBackup.path, 'empty-live');
-      database = new BetterSqlite3(expandedPath);
+      database = new (getBetterSqlite3())(expandedPath);
     }
   }
 
@@ -884,7 +895,7 @@ export function repairDatabase(): { status: 'ok' | 'repaired' | 'recreated'; mes
 
   // Full recreation
   const backupPath = backupCorruptDatabase(currentDbPath);
-  db = new BetterSqlite3(currentDbPath);
+  db = new (getBetterSqlite3())(currentDbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');

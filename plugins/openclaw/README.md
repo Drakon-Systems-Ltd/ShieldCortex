@@ -4,7 +4,7 @@ OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory 
 
 ## Compatibility
 
-- **Node.js** — ≥ 20 required (the `shieldcortex` peer ships `better-sqlite3` ^12, which needs Node 20+)
+- **Node.js** — Node 22.14+ LTS or Node 24+ required (`^22.14.0 || >=24.0.0`). The `shieldcortex` peer ships `better-sqlite3` ^13, which uses Node-API 10; Node 23 is unsupported.
 - **OpenClaw** — ≥ 2026.3.22 required, **≥ 2026.4.23 recommended** — 2026.4.23 added host-package linking for plugins that declare `openclaw` as a peer dependency ([#70462](https://github.com/openclaw/openclaw/pull/70462)), which lets any future `openclaw/plugin-sdk/*` imports resolve without a duplicate runtime bundle
 - **OpenClaw ≥ 2026.5.12 for conversation *enforcement*** — the `before_agent_run` input gate first appears in 2026.5.9-beta.1 and first ships stable in 2026.5.12. Below that floor everything else works, but the conversation firewall is observation-only and says so (see [Conversation firewall](#conversation-firewall))
 - **ShieldCortex** — ≥ 4.18.3 required (matches the declared peer dependency; ship both packages at the same version)

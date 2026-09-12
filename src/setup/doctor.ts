@@ -11,9 +11,9 @@ import { REQUIRED_HOOK_NAMES } from './settings-hooks.js';
 
 const require = createRequire(import.meta.url);
 
-type Status = 'PASS' | 'WARN' | 'FAIL';
+export type Status = 'PASS' | 'WARN' | 'FAIL';
 
-interface CheckResult {
+export interface CheckResult {
   status: Status;
   message: string;
 }
@@ -41,13 +41,39 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function checkNode(): void {
-  const major = parseInt(process.version.slice(1), 10);
-  if (major >= 18) {
-    add('PASS', `Node.js ${process.version} (>= 18 required)`);
-  } else {
-    add('WARN', `Node.js ${process.version} — version 18+ recommended`);
+/**
+ * Verdict for a Node version against the declared `engines.node`
+ * (`^22.14.0 || >=24.0.0`). Pure so the mapping is testable without a second
+ * runtime.
+ *
+ * FAIL, not WARN. npm `engines` is advisory unless engine-strict is set, so a
+ * Node 20 user installing ShieldCortex gets an EBADENGINE warning, installs
+ * successfully, and only then hard-fails: better-sqlite3 13's binding.gyp
+ * defines NAPI_VERSION=10, and Node 20 caps at Node-API 9, so the database
+ * engine cannot load at all. `doctor` is the de facto preflight for that, and
+ * a WARN understated a fatal condition — worse, `handleDoctorCommand` exits 0
+ * on warnings, so the box reported healthy while nothing could open the DB.
+ */
+export function nodeSupportVerdict(nodeVersion: string): CheckResult {
+  const [major, minor] = nodeVersion.replace(/^v/, '').split('.').map(Number);
+  const supported = (major === 22 && minor >= 14) || major >= 24;
+  const display = nodeVersion.startsWith('v') ? nodeVersion : `v${nodeVersion}`;
+  if (supported) {
+    return { status: 'PASS', message: `Node.js ${display} (^22.14.0 || >=24.0.0 required)` };
   }
+  return {
+    status: 'FAIL',
+    message:
+      `Node.js ${display} is an unsupported runtime (^22.14.0 || >=24.0.0 required) — ` +
+      'better-sqlite3 13 requires Node-API 10, which this Node build cannot provide, so ' +
+      'the database engine will not load. Install Node 22.14+ LTS or Node 24+ and ' +
+      'reinstall ShieldCortex; Node 23 is unsupported.',
+  };
+}
+
+function checkNode(): void {
+  const verdict = nodeSupportVerdict(process.version);
+  add(verdict.status, verdict.message);
 }
 
 function checkDatabase(): void {

@@ -10,7 +10,7 @@ import { mkdirSecure } from './state-permissions.js';
 import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
-import Database from '../database/better-sqlite3-guard.js';
+import { getBetterSqlite3 } from '../database/better-sqlite3-guard.js';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 const CLAUDE_MD_PATH = path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -250,7 +250,7 @@ export function migrateDatabase(): { copied: boolean; merged: boolean; mergedCou
 
   // Target exists — merge memories that don't already exist
   try {
-    const db = new Database(targetPath);
+    const db = new (getBetterSqlite3())(targetPath);
     db.pragma('journal_mode = WAL');
     db.pragma('busy_timeout = 5000');
 
