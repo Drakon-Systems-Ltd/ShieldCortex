@@ -27,7 +27,8 @@
  *   node scripts/lab/audit-report.mjs --omit=optional   # extra npm audit flags
  *
  * Environment:
- *   SC_AUDIT_TIMEOUT_MS   wall-clock deadline for the `npm audit` subprocess
+ *   SC_AUDIT_TIMEOUT_MS   wall-clock deadline for the `npm audit` subprocess,
+ *                         overriding any deadline the CALLER asked for
  *                         (default 120000; it is SIGKILLed on expiry, exit 2)
  *
  * Exit codes: 0 pass, 1 unwaived advisory or expired/invalid waiver,
@@ -331,14 +332,29 @@ export function viaProblems(nodes) {
 export const DEFAULT_AUDIT_TIMEOUT_MS = 120_000;
 
 /**
- * The deadline for this run: `SC_AUDIT_TIMEOUT_MS` if it is a positive number,
- * otherwise the default. Read per call so a spawned CLI can be given a short
- * deadline by its environment without the module having to be reloaded.
+ * The deadline for this run.
+ *
+ * A positive `SC_AUDIT_TIMEOUT_MS` WINS over a deadline the caller passed. That
+ * is the opposite of the usual precedence, and it is what makes the advice this
+ * gate prints true. The message a timeout produces says to set this variable to
+ * raise the deadline — and the one caller that ever hits that message, the live
+ * leg in release-audit-claims.test.ts, passes `timeoutMs: 60_000` explicitly, so
+ * under caller-wins precedence the only remedy on offer did nothing. Review
+ * measured exactly that: a 500 ms fixture still passed with
+ * `SC_AUDIT_TIMEOUT_MS=50`.
+ *
+ * So an explicit `timeoutMs` is the caller's default and the environment is the
+ * operator's override, in both directions. The direction of risk is one-way: the
+ * deadline is a liveness bound, and every way of missing it — too short, too
+ * long — ends in exit 2, never in a PASS.
+ *
+ * Read per call, so a spawned CLI can be given a deadline by its environment
+ * without the module having to be reloaded.
  */
-function auditTimeoutMs(override) {
-  if (typeof override === 'number' && Number.isFinite(override) && override > 0) return override;
+export function auditTimeoutMs(override) {
   const fromEnv = Number(process.env.SC_AUDIT_TIMEOUT_MS);
   if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  if (typeof override === 'number' && Number.isFinite(override) && override > 0) return override;
   return DEFAULT_AUDIT_TIMEOUT_MS;
 }
 
@@ -389,7 +405,18 @@ export function runNpmAudit(extraArgs = [], cwd = REPO_ROOT, { timeoutMs } = {})
     );
   }
   if (report && report.error) {
-    throw new Error(`npm audit reported an error: ${JSON.stringify(report.error).slice(0, 800)}`);
+    // npm's envelope can be `{"summary":"","detail":""}` — an error object that
+    // says nothing at all, while the actual cause (an `ECONNRESET`, a proxy
+    // refusal, a registry 503) sits on stderr and the exit status sits in
+    // `res.status`. Both used to be discarded, leaving the operator with two
+    // empty strings, so both are named here. stderr is bounded at 2 KB and put
+    // on its own line, which keeps the live leg's skip title — the first line —
+    // as short as it was.
+    throw new Error(
+      `npm audit reported an error (exit ${res.status}): ` +
+        `${JSON.stringify(report.error).slice(0, 800)}\n` +
+        `stderr: ${(res.stderr || '').trim().slice(0, 2048)}`,
+    );
   }
   const problems = auditReportProblems(report);
   if (problems.length > 0) {

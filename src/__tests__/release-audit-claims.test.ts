@@ -39,7 +39,7 @@
  * explicit skip naming the reason rather than a passing test.
  */
 
-import { describe, expect, it } from '@jest/globals';
+import { afterEach, describe, expect, it } from '@jest/globals';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -62,6 +62,8 @@ const {
   runNpmAudit,
   isCalendarDate,
   auditReportProblems,
+  auditTimeoutMs,
+  DEFAULT_AUDIT_TIMEOUT_MS,
 } = auditModule as {
   parseWaivers: (md: string) => Array<Record<string, unknown> & { id: string; advisories: number[]; expires: string }>;
   waivedAdvisoryIds: (w: Array<{ advisories: number[] }>) => Set<number>;
@@ -77,6 +79,8 @@ const {
   ) => { vulnerabilities: Record<string, unknown> };
   isCalendarDate: (value: unknown) => boolean;
   auditReportProblems: (report: unknown) => string[];
+  auditTimeoutMs: (override?: number) => number;
+  DEFAULT_AUDIT_TIMEOUT_MS: number;
 };
 
 /** Read one `key: value` out of the SKILL.md frontmatter metadata block. */
@@ -613,6 +617,54 @@ describe('#466 hermetic — an unreadable audit report is undecidable, not clean
       }),
     ).toEqual([]);
   });
+});
+
+/**
+ * The deadline rule, which has to match what the gate ADVISES.
+ *
+ * `runNpmAudit`'s timeout message says to set `SC_AUDIT_TIMEOUT_MS` to raise the
+ * deadline, and the live leg below passes `timeoutMs: 60_000` explicitly. Under
+ * the old caller-wins precedence that advice was inert for exactly the caller
+ * that prints it — review measured a 500 ms fixture passing with the variable
+ * set to 50 ms. The environment is the operator's override now, in both
+ * directions, and these cases pin the rule the prose promises.
+ */
+describe('#466 hermetic — the audit deadline is what the gate says it is', () => {
+  const saved = process.env.SC_AUDIT_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.SC_AUDIT_TIMEOUT_MS;
+    else process.env.SC_AUDIT_TIMEOUT_MS = saved;
+  });
+
+  it('uses the default when neither the caller nor the environment says', () => {
+    delete process.env.SC_AUDIT_TIMEOUT_MS;
+    expect(auditTimeoutMs()).toBe(DEFAULT_AUDIT_TIMEOUT_MS);
+  });
+
+  it('honours a caller that names its own deadline', () => {
+    delete process.env.SC_AUDIT_TIMEOUT_MS;
+    expect(auditTimeoutMs(5_000)).toBe(5_000);
+  });
+
+  it('lets the environment SHORTEN a deadline the caller set — the measured defect', () => {
+    process.env.SC_AUDIT_TIMEOUT_MS = '200';
+    expect(auditTimeoutMs(60_000)).toBe(200);
+  });
+
+  it('lets the environment RAISE it too, which is what the timeout message advises', () => {
+    process.env.SC_AUDIT_TIMEOUT_MS = '300000';
+    expect(auditTimeoutMs(60_000)).toBe(300_000);
+  });
+
+  it.each(['', 'abc', '0', '-1', 'Infinity', 'NaN'])(
+    'ignores an environment value that is not a positive number: %s',
+    (value) => {
+      process.env.SC_AUDIT_TIMEOUT_MS = value;
+      expect(auditTimeoutMs(60_000)).toBe(60_000);
+      expect(auditTimeoutMs()).toBe(DEFAULT_AUDIT_TIMEOUT_MS);
+    },
+  );
 });
 
 /** What the live leg found out before any test ran. */

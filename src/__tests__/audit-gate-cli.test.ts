@@ -191,6 +191,38 @@ describe('#466 CLI — a report the gate cannot read is exit 2, never PASS', () 
     expect(res.stderr).toMatch(/npm audit reported an error/);
   });
 
+  /**
+   * npm's envelope can say nothing at all. Review's fixture is npm's real
+   * shape for a network failure — `{"summary":"","detail":""}` on stdout, the
+   * cause on stderr — and at ef06f9d3 the whole diagnostic was:
+   *
+   *     [audit:release] npm audit reported an error: {"summary":"","detail":""}
+   *
+   * Two empty strings. The exit status and the stderr were both discarded.
+   */
+  it('names the subprocess status and stderr when the error envelope says nothing', () => {
+    const res = runGate(JSON.stringify({ error: { summary: '', detail: '' } }), {
+      code: 1,
+      stderr: 'npm error code ECONNRESET\nnpm error network request to https://registry.npmjs.org/ failed\n',
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/npm audit reported an error \(exit 1\)/);
+    expect(res.stderr).toMatch(/ECONNRESET/);
+    expect(res.stderr).toMatch(/registry\.npmjs\.org/);
+    expect(res.stderr).not.toMatch(/PASS/);
+  });
+
+  it('bounds the stderr it quotes, so a chatty npm cannot bury the reason', () => {
+    const res = runGate(JSON.stringify({ error: { summary: '', detail: '' } }), {
+      code: 1,
+      stderr: `npm error code ECONNRESET\n${'x'.repeat(20_000)}`,
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/ECONNRESET/);
+    // 2 KB of it, not 20 KB.
+    expect((res.stderr.match(/x/g) ?? []).length).toBeLessThan(2_100);
+  });
+
   it('refuses a report that is valid JSON but not an object', () => {
     const res = runGate('[]');
     expect(res.status).toBe(2);
@@ -363,7 +395,7 @@ describe('#466 CLI — the audit subprocess has a deadline that actually fires',
  * skip, so whether a leg is pending is decided at collection time in the child.
  */
 describe('#466 — an unavailable audit skips the live leg; drift still fails it', () => {
-  function runClaimsSuite(label: string): {
+  function runClaimsSuite(label: string, extraEnv: Record<string, string> = {}): {
     status: number | null;
     failed: number;
     pending: number;
@@ -392,6 +424,7 @@ describe('#466 — an unavailable audit skips the live leg; drift still fails it
           SHIELDCORTEX_CONFIG_DIR: join(home, 'config'),
           SHIELDCORTEX_AUDIT_DIR: join(home, 'audit'),
           npm_config_cache: join(home, 'npm-cache'),
+          ...extraEnv,
         },
         timeout: 240_000,
       },
@@ -431,6 +464,25 @@ describe('#466 — an unavailable audit skips the live leg; drift still fails it
     expect(run.status).not.toBe(0);
     expect(run.failureMessages).toContain('lodash');
     expect(run.pendingNames.join('\n')).not.toContain('live audit unavailable');
+  }, 300_000);
+
+  /**
+   * The live leg passes `timeoutMs: 60_000` explicitly, and the message a
+   * timeout prints tells the operator to set `SC_AUDIT_TIMEOUT_MS`. Under
+   * caller-wins precedence that advice did nothing for the one caller that ever
+   * reads it: review measured a 500 ms fixture passing with the variable set to
+   * 50 ms. So the environment now overrides the caller, and this is the
+   * consequence — a fixture that would answer (with a report that CONTRADICTS
+   * the claim, so a measured leg would be red) is cut off by the variable
+   * instead, and the leg is a skip naming the deadline.
+   */
+  it('lets the environment shorten a deadline the caller set for itself', () => {
+    installFakeNpm(realisticReport({}), { delayMs: 8_000 });
+    const run = runClaimsSuite('env-deadline', { SC_AUDIT_TIMEOUT_MS: '400' });
+    expect(run.failed).toBe(0);
+    expect(run.status).toBe(0);
+    expect(run.pendingNames.join('\n')).toContain('skipped: live audit unavailable');
+    expect(run.pendingNames.join('\n')).toContain('did not answer within 400 ms');
   }, 300_000);
 
   it('skips on the documented opt-out, without calling npm at all', () => {
