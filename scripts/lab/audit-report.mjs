@@ -23,7 +23,9 @@
  *   node scripts/lab/audit-report.mjs --omit=optional   # extra npm audit flags
  *
  * Exit codes: 0 pass, 1 unwaived advisory or expired/invalid waiver,
- *             2 could not run or parse `npm audit` at all.
+ *             2 could not run `npm audit`, or its output is not a usable
+ *               report. Undecidable is NOT zero findings: exit 2 is the gate
+ *               refusing to answer, and CI must treat it as a failure.
  *
  * `spawnSync` is called with a fixed argv array and no shell, so nothing here
  * is interpolated into a command line.
@@ -39,6 +41,23 @@ export const WAIVER_FILE = join(REPO_ROOT, 'docs', 'security', 'audit-waivers.md
 
 /** The fenced block in the waiver markdown that carries the machine-readable records. */
 const WAIVER_BLOCK = /```json audit-waivers\r?\n([\s\S]*?)```/;
+
+/**
+ * Is this string a real calendar date in `YYYY-MM-DD` form?
+ *
+ * The spelling check alone accepted `2099-99-99`, and expiry then compares
+ * strings — so a typo (or a deliberately absurd date) bought an entry that no
+ * `expiredWaivers` run could ever retire. Round-trip through `Date.UTC` so the
+ * month and day have to survive being turned into a real instant: 2099-99-99
+ * rolls over into 2107 and fails, as does 2026-02-30.
+ */
+export function isCalendarDate(value) {
+  const m = String(value ?? '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return false;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const at = new Date(Date.UTC(year, month - 1, day));
+  return at.getUTCFullYear() === year && at.getUTCMonth() === month - 1 && at.getUTCDate() === day;
+}
 
 /**
  * Pull the waiver records out of the markdown.
@@ -67,8 +86,10 @@ export function parseWaivers(markdown) {
         throw new Error(`waiver ${w.id} lists a non-numeric advisory id: ${JSON.stringify(a)}`);
       }
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(w.expires ?? '')) {
-      throw new Error(`waiver ${w.id} has no ISO \`expires\` date`);
+    if (!isCalendarDate(w.expires)) {
+      throw new Error(
+        `waiver ${w.id} has no real ISO \`expires\` date (got ${JSON.stringify(w.expires)})`,
+      );
     }
     if (!w.owner) throw new Error(`waiver ${w.id} has no \`owner\``);
     if (!w.reason) throw new Error(`waiver ${w.id} has no \`reason\``);
@@ -90,6 +111,11 @@ export function waivedAdvisoryIds(waivers) {
  * Package-only nodes (no advisory ids of their own) are resolved against the
  * classification of the packages they derive from, iterating to a fixed point
  * so a chain of any depth settles. Anything still undecided fails closed.
+ *
+ * This is classification, not validation: `report` must already have been
+ * through `auditReportProblems()` (`runNpmAudit` does it), because an empty or
+ * missing map classifies as "nothing to report" here and that is only a true
+ * statement about a report we have established we can read.
  */
 export function classify(report, waivedIds) {
   const nodes = Object.entries(report.vulnerabilities ?? {}).map(([name, v]) => ({
@@ -143,11 +169,85 @@ export function expiredWaivers(waivers, now = new Date()) {
   return waivers.filter((w) => w.expires < today);
 }
 
+/** A plain `{}` object — not null, not an array, not a string. */
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Everything wrong with an `npm audit --json` payload, as a list of reasons.
+ *
+ * Syntactically valid JSON is not a usable audit report. `{}` parses; so does
+ * `{"metadata":{"vulnerabilities":{"high":1,"total":1}}}`, which says "one high
+ * advisory" while carrying no node to name it. Read either one the tolerant way
+ * — `report.vulnerabilities ?? {}` — and the gate prints PASS, 0 unwaived, over
+ * a report it could not read. That is the worst possible failure mode for a
+ * security gate: silence that looks like a clean bill of health.
+ *
+ * So the shape is checked before anything is classified, and the strongest
+ * check is the cross-one: `metadata.vulnerabilities.total` must equal the
+ * number of nodes in `vulnerabilities`. npm derives that histogram from that
+ * map, so the two agree in every real report (measured across seven of them,
+ * from 0 to 7 advisories). When they disagree, the payload is not an npm audit
+ * report and must not be classified as an empty one.
+ *
+ * Returns [] for a usable report.
+ */
+export function auditReportProblems(report) {
+  if (!isPlainObject(report)) {
+    return [`expected a JSON object, got ${Array.isArray(report) ? 'an array' : typeof report}`];
+  }
+  const problems = [];
+  const nodes = report.vulnerabilities;
+  if (!isPlainObject(nodes)) {
+    problems.push(
+      `\`vulnerabilities\` is ${nodes === undefined ? 'missing' : JSON.stringify(nodes)}` +
+        ' — a report with no vulnerability map is undecidable, not clean',
+    );
+  }
+  const totals = report.metadata?.vulnerabilities;
+  if (!isPlainObject(totals)) {
+    problems.push(
+      `\`metadata.vulnerabilities\` is ${totals === undefined ? 'missing' : JSON.stringify(totals)}`,
+    );
+    return problems;
+  }
+  for (const [key, value] of Object.entries(totals)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      problems.push(`\`metadata.vulnerabilities.${key}\` is not a count: ${JSON.stringify(value)}`);
+    }
+  }
+  if (!Number.isSafeInteger(totals.total)) {
+    problems.push('`metadata.vulnerabilities.total` is missing');
+    return problems;
+  }
+  if (problems.length > 0) return problems;
+
+  const nodeCount = Object.keys(nodes).length;
+  if (totals.total !== nodeCount) {
+    problems.push(
+      `audit output inconsistent: metadata.vulnerabilities.total is ${totals.total}` +
+        ` but \`vulnerabilities\` carries ${nodeCount} node(s)`,
+    );
+  }
+  const bucketSum = Object.entries(totals)
+    .filter(([key]) => key !== 'total')
+    .reduce((sum, [, value]) => sum + value, 0);
+  if (bucketSum !== totals.total) {
+    problems.push(
+      `audit output inconsistent: severity counts sum to ${bucketSum},` +
+        ` metadata.vulnerabilities.total says ${totals.total}`,
+    );
+  }
+  return problems;
+}
+
 /**
  * Run `npm audit --omit=dev --json` and return the parsed report.
  *
  * npm exits non-zero whenever advisories exist, so the exit code carries no
- * information here — only unparseable output does.
+ * information here — only output we cannot read as a report does. Every throw
+ * from this function means "could not measure" and is exit 2 at the CLI.
  */
 export function runNpmAudit(extraArgs = [], cwd = REPO_ROOT) {
   const args = ['audit', '--omit=dev', '--json', ...extraArgs];
@@ -164,8 +264,15 @@ export function runNpmAudit(extraArgs = [], cwd = REPO_ROOT) {
         `stderr: ${(res.stderr || '').trim().slice(0, 800)}`,
     );
   }
-  if (report.error) {
+  if (report && report.error) {
     throw new Error(`npm audit reported an error: ${JSON.stringify(report.error).slice(0, 800)}`);
+  }
+  const problems = auditReportProblems(report);
+  if (problems.length > 0) {
+    throw new Error(
+      `\`npm ${args.join(' ')}\` did not produce a usable report (exit ${res.status}):\n` +
+        problems.map((p) => `  - ${p}`).join('\n'),
+    );
   }
   return report;
 }

@@ -35,7 +35,15 @@ const AUDIT_SCRIPT = join(REPO_ROOT, 'scripts', 'lab', 'audit-report.mjs');
 
 /** ESM specifiers must be file: URLs under this jest setup. */
 const auditModule = await import(pathToFileURL(AUDIT_SCRIPT).href);
-const { parseWaivers, waivedAdvisoryIds, classify, expiredWaivers, runNpmAudit } = auditModule as {
+const {
+  parseWaivers,
+  waivedAdvisoryIds,
+  classify,
+  expiredWaivers,
+  runNpmAudit,
+  isCalendarDate,
+  auditReportProblems,
+} = auditModule as {
   parseWaivers: (md: string) => Array<Record<string, unknown> & { id: string; advisories: number[]; expires: string }>;
   waivedAdvisoryIds: (w: Array<{ advisories: number[] }>) => Set<number>;
   classify: (
@@ -44,6 +52,8 @@ const { parseWaivers, waivedAdvisoryIds, classify, expiredWaivers, runNpmAudit }
   ) => { unwaived: Array<{ name: string }>; waived: Array<{ name: string }>; waivedIds: number[] };
   expiredWaivers: (w: Array<{ expires: string }>, now?: Date) => unknown[];
   runNpmAudit: (extra?: string[], cwd?: string) => { vulnerabilities: Record<string, unknown> };
+  isCalendarDate: (value: unknown) => boolean;
+  auditReportProblems: (report: unknown) => string[];
 };
 
 /** Read one `key: value` out of the SKILL.md frontmatter metadata block. */
@@ -238,6 +248,70 @@ describe('#466 hermetic — the waiver gate is not vacuous', () => {
     const lapsed = [{ expires: '2000-01-01' }];
     expect(expiredWaivers(lapsed, new Date('2026-09-12T00:00:00Z'))).toHaveLength(1);
     expect(expiredWaivers([{ expires: '2099-01-01' }], new Date('2026-09-12T00:00:00Z'))).toHaveLength(0);
+  });
+
+  it('rejects an expiry that is spelled like a date but is not one', () => {
+    const bad = (expires: string) =>
+      '```json audit-waivers\n' +
+      JSON.stringify({
+        waivers: [{ id: 'x', advisories: [1], expires, owner: 'o', reason: 'r' }],
+      }) +
+      '\n```';
+    // A waiver dated 2099-99-99 can never expire: `expires < today` compares
+    // strings, and no real date sorts above it.
+    for (const impossible of ['2099-99-99', '2026-13-01', '2026-02-30', '2026-00-10', '2026-01-32']) {
+      expect(() => parseWaivers(bad(impossible))).toThrow(/expires/);
+    }
+    expect(parseWaivers(bad('2026-02-28'))[0].expires).toBe('2026-02-28');
+    expect(parseWaivers(bad('2028-02-29'))[0].expires).toBe('2028-02-29'); // leap year
+  });
+
+  it('accepts only real calendar dates', () => {
+    for (const good of ['2026-01-01', '2026-12-31', '2028-02-29', '1970-01-01']) {
+      expect(isCalendarDate(good)).toBe(true);
+    }
+    for (const bad of ['2099-99-99', '2027-02-29', '2026-1-1', '26-01-01', '2026-01-01T00:00:00Z', '', null, 20260101]) {
+      expect(isCalendarDate(bad)).toBe(false);
+    }
+  });
+});
+
+describe('#466 hermetic — an unreadable audit report is undecidable, not clean', () => {
+  const clean = {
+    auditReportVersion: 2,
+    vulnerabilities: {},
+    metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } },
+  };
+
+  it('accepts the shape npm really emits', () => {
+    expect(auditReportProblems(clean)).toEqual([]);
+    expect(
+      auditReportProblems({
+        ...clean,
+        vulnerabilities: { sharp: { severity: 'high', via: [{ source: 1124066 }] } },
+        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 } },
+      }),
+    ).toEqual([]);
+  });
+
+  it('rejects the payloads that used to classify as zero findings', () => {
+    expect(auditReportProblems({ metadata: { vulnerabilities: { high: 1, total: 1 } } })).not.toEqual([]);
+    expect(auditReportProblems({})).not.toEqual([]);
+    expect(auditReportProblems({ ...clean, vulnerabilities: null })).not.toEqual([]);
+  });
+
+  it('rejects a total the vulnerability map cannot account for', () => {
+    const problems = auditReportProblems({
+      ...clean,
+      metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 2, critical: 0, total: 2 } },
+    });
+    expect(problems.join('\n')).toMatch(/audit output inconsistent/);
+  });
+
+  it('rejects anything that is not a JSON object', () => {
+    for (const notAReport of [null, [], 'ok', 42, undefined]) {
+      expect(auditReportProblems(notAReport)).not.toEqual([]);
+    }
   });
 });
 
