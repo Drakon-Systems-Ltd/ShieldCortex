@@ -596,6 +596,25 @@ export function startVisualizationServer(dbPath?: string): void {
   initDatabase(dbPath || DEFAULT_CONFIG.dbPath);
 
   const app = express();
+  // #466 — the dashboard shell keeps express's default error PAGE, but not the
+  // stack trace inside it. express hands non-API errors to `finalhandler`, which
+  // renders `err.stack` into the page unless the `env` setting reads
+  // 'production' — and `env` is the only thing it consults (`opts.env`, which
+  // express fills from `app.get('env')` per request; `NODE_ENV` is merely where
+  // express reads the initial value, and nothing in this server's startup path
+  // sets it). So a real install answered an unauthenticated `POST /` carrying a
+  // truncated JSON body with a 400 HTML page containing the absolute install
+  // path, the `node_modules` layout and body-parser's internals.
+  //
+  // One setting rather than a second error handler: a handler would have to
+  // re-derive finalhandler's status selection and re-render its page to change
+  // only the part that is wrong. Statuses are untouched — the page keeps its
+  // code and loses the trace — and express's own error LOG still prints the
+  // stack server-side, where the operator and not the caller reads it. Nothing
+  // else reads this setting: express's only other uses are that log and the
+  // `view cache` default, which is fixed at construction from `NODE_ENV` and
+  // moot here because the server registers no views.
+  app.set('env', 'production');
   const server = createServer(app);
 
   // Middleware — CORS restricted to localhost by default

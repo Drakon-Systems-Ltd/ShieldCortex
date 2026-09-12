@@ -28,6 +28,13 @@
  *   test therefore pins an equivalence ("no body behaves as an empty body")
  *   rather than a list of today's error strings.
  *
+ *   `app.set('env', 'production')` takes the stack out of the page express
+ *   renders for everything else. The dashboard shell keeps its HTML error page
+ *   and its status codes — that scope boundary is deliberate — but the page no
+ *   longer carries the trace, because `finalhandler` prints `err.stack` into it
+ *   unless that one setting says otherwise. The stack still goes to the server
+ *   log, which a test below reads from the child's stderr.
+ *
  *   `apiJsonErrorHandler` makes the API plane answer an unhandled error with
  *   JSON carrying no detail. `xray-findings.ts` has no try/catch, so its
  *   handlers reached express's default HTML error page — in a server whose
@@ -192,6 +199,13 @@ describe('#466 — a body-less request reaches the handler, not a TypeError', ()
   let child: ChildProcess | undefined;
   let port = 0;
   let home = '';
+  /**
+   * Everything the server wrote to its own stderr. Hoisted out of `beforeAll`
+   * because the non-API error page is only half the claim: the stack has to stop
+   * reaching the CALLER while still reaching the OPERATOR, and the second half
+   * is only observable here.
+   */
+  let serverLog = '';
 
   beforeAll(async () => {
     port = await freePort();
@@ -211,14 +225,13 @@ describe('#466 — a body-less request reaches the handler, not a TypeError', ()
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stderr = '';
     child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', (chunk: string) => (stderr += chunk));
+    child.stderr?.on('data', (chunk: string) => (serverLog += chunk));
 
     let up = false;
     for (let attempt = 0; attempt < 100 && !up; attempt++) {
       if (child.exitCode !== null) {
-        throw new Error(`server exited ${child.exitCode} before listening:\n${stderr.slice(-2000)}`);
+        throw new Error(`server exited ${child.exitCode} before listening:\n${serverLog.slice(-2000)}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
       try {
@@ -227,7 +240,7 @@ describe('#466 — a body-less request reaches the handler, not a TypeError', ()
         /* not listening yet */
       }
     }
-    if (!up) throw new Error(`server never came up on ${port}:\n${stderr.slice(-2000)}`);
+    if (!up) throw new Error(`server never came up on ${port}:\n${serverLog.slice(-2000)}`);
   }, 60_000);
 
   afterAll(() => {
@@ -311,19 +324,47 @@ describe('#466 — a body-less request reaches the handler, not a TypeError', ()
     expect({ status: res.status, ok: JSON.parse(res.body).status }).toEqual({ status: 200, ok: 'ok' });
   });
 
-  it('leaves a non-API path on express default error handling', async () => {
+  it('leaves a non-API path on express default error handling, minus the stack', async () => {
     const truncated = '{"title": ';
     const res = await raw(
       port,
       'POST',
       '/not-an-api-path',
-      { ...authed, 'content-type': 'application/json', 'content-length': String(truncated.length) },
+      { 'content-type': 'application/json', 'content-length': String(truncated.length) },
       truncated,
     );
-    // Still express's own HTML page — the handler is scoped to the JSON plane
-    // and must not quietly change the dashboard shell's behaviour.
+    // Still express's own HTML page at its own status — `apiJsonErrorHandler` is
+    // scoped to the JSON plane and must not quietly change the dashboard shell.
     expect(res.status).toBe(400);
     expect(res.type).not.toBe('application/json');
+    // But the page no longer renders `err.stack` into its `<pre>`. Measured
+    // unauthenticated at 669dee5b, this same request answered a 1,079-byte page
+    // naming `/home/…/node_modules/body-parser/lib/types/json.js:91:21`; it is
+    // now a 138-byte page whose body is the status message.
+    expect(res.body).toContain('Bad Request');
+    expect(res.body).not.toContain('SyntaxError');
+    expectNoInternals(res, 'non-API malformed JSON body');
+  });
+
+  it('renders the shell error page for a refused origin too, still without a stack', async () => {
+    const res = await raw(port, 'GET', '/', { origin: 'http://evil.example' });
+    // The 500 is what the shell answered before this change and is unchanged by
+    // it: the refusal deliberately does not carry an http-errors status tag, so
+    // only the JSON plane moved to 403.
+    expect({ status: res.status, type: res.type }).toEqual({ status: 500, type: 'text/html' });
+    expect(res.body).toContain('Internal Server Error');
+    expect(res.body).not.toContain('not allowed by CORS');
+    expect(res.body).not.toContain('evil.example');
+    expectNoInternals(res, 'non-API refused CORS origin');
+  });
+
+  it('still gives the operator the stack it stopped giving the caller', async () => {
+    // The two requests above are the ones whose pages lost their traces. If the
+    // fix had merely suppressed the errors rather than relocating them, the
+    // server log would be empty and nobody could debug a live install.
+    expect(serverLog).toContain('SyntaxError: Unexpected end of JSON input');
+    expect(serverLog).toContain('not allowed by CORS');
+    expect(serverLog).toMatch(/\bat .*:\d+:\d+/);
   });
 
   it('still applies a body-less request as express 4 did, rather than only failing politely', async () => {
