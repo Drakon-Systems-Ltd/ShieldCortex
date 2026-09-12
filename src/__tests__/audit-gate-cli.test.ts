@@ -22,7 +22,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..');
 const AUDIT_SCRIPT = join(REPO_ROOT, 'scripts', 'lab', 'audit-report.mjs');
+const CLAIMS_SUITE = join('src', '__tests__', 'release-audit-claims.test.ts');
 
 /** The two advisory ids docs/security/audit-waivers.md waives. */
 const WAIVED = [1124066, 1193725];
@@ -48,16 +49,13 @@ afterAll(() => {
 });
 
 /**
- * Install a fake `npm` that prints `stdout` verbatim and exits with `code`,
- * then run the real gate against it.
+ * Put a fake `npm` on the fixture PATH: it prints `stdout` verbatim, after
+ * `delayMs`, and exits with `code`.
  *
  * The shebang is this process's own node binary, so the fixture does not
  * depend on a `node` being resolvable from the stripped PATH.
  */
-function runGate(
-  stdout: string,
-  { code = 1, stderr = '', delayMs = 0, extraArgs = [] as string[] } = {},
-): { status: number | null; stdout: string; stderr: string } {
+function installFakeNpm(stdout: string, { code = 1, stderr = '', delayMs = 0 } = {}): void {
   const body =
     `#!${process.execPath}\n` +
     `const emit = () => {\n` +
@@ -69,6 +67,19 @@ function runGate(
   const npmPath = join(fakeBin, 'npm');
   writeFileSync(npmPath, body);
   chmodSync(npmPath, 0o755);
+}
+
+function runGate(
+  stdout: string,
+  {
+    code = 1,
+    stderr = '',
+    delayMs = 0,
+    extraArgs = [] as string[],
+    timeoutMs = 0,
+  } = {},
+): { status: number | null; stdout: string; stderr: string } {
+  installFakeNpm(stdout, { code, stderr, delayMs });
 
   const res = spawnSync(process.execPath, [AUDIT_SCRIPT, ...extraArgs], {
     cwd: REPO_ROOT,
@@ -77,6 +88,7 @@ function runGate(
       PATH: `${fakeBin}:/usr/bin:/bin`,
       HOME: home,
       npm_config_cache: join(home, 'npm-cache'),
+      ...(timeoutMs > 0 ? { SC_AUDIT_TIMEOUT_MS: String(timeoutMs) } : {}),
     },
     timeout: 60_000,
   });
@@ -234,4 +246,154 @@ describe('#466 CLI — a report the gate CAN read still decides on the merits', 
     expect(parsed.npmTotals.total).toBe(1);
     expect(parsed.waivedAdvisoryIdsHit.sort()).toEqual([...WAIVED].sort());
   });
+});
+
+/**
+ * The deadline has to live on the subprocess. Review proved a caller-side one
+ * is inert: `spawnSync` blocks the event loop, so the live test's declared
+ * 120 s Jest timeout could never fire — a fixture npm that answered after
+ * 1,500 ms passed a test declared with a 20 ms timeout, and an npm that never
+ * answered would hang the suite indefinitely.
+ */
+describe('#466 CLI — the audit subprocess has a deadline that actually fires', () => {
+  it('kills a slow npm and exits 2 rather than waiting for it', () => {
+    const started = Date.now();
+    const res = runGate(realisticReport({}), { delayMs: 10_000, timeoutMs: 400 });
+    const elapsed = Date.now() - started;
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/did not answer within 400 ms and was killed/);
+    expect(res.stderr).toMatch(/SC_SKIP_LIVE_AUDIT=1/);
+    // The fixture would have answered — with a PASSING report — at 10 s. Coming
+    // back in well under that is what proves the deadline fired and not merely
+    // that the gate disliked the output.
+    expect(elapsed).toBeLessThan(8_000);
+  }, 30_000);
+
+  it('leaves an audit that answers inside the deadline alone', () => {
+    const res = runGate(realisticReport({}), { delayMs: 150, timeoutMs: 10_000 });
+    expect(res.stderr).toMatch(/PASS — 0 unwaived production advisories/);
+    expect(res.status).toBe(0);
+  }, 30_000);
+});
+
+/**
+ * The live leg's three outcomes, driven through a real Jest run.
+ *
+ * The unit tests in release-audit-claims.test.ts pin the classification; these
+ * pin the CONSEQUENCE, which is the thing that was wrong: a registry blip used
+ * to turn the ordinary unit suite red with no code regression behind it, and
+ * "re-run until green" is a habit that lets real drift through. Unavailable has
+ * to be a visible skip, and drift has to be a failure, in the same suite.
+ *
+ * A nested Jest run is the only way to observe a skip: Jest has no runtime
+ * skip, so whether a leg is pending is decided at collection time in the child.
+ */
+describe('#466 — an unavailable audit skips the live leg; drift still fails it', () => {
+  function runClaimsSuite(label: string): {
+    status: number | null;
+    failed: number;
+    pending: number;
+    pendingNames: string[];
+    failureMessages: string;
+  } {
+    const outFile = join(home, `nested-${label}.json`);
+    const res = spawnSync(
+      process.execPath,
+      [
+        join('scripts', 'run-jest.mjs'),
+        '--runInBand',
+        '--no-cache',
+        `--cacheDirectory=${join(home, 'jest-cache')}`,
+        '--runTestsByPath',
+        CLAIMS_SUITE,
+        '--json',
+        `--outputFile=${outFile}`,
+      ],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          PATH: `${fakeBin}:/usr/bin:/bin`,
+          HOME: home,
+          SHIELDCORTEX_CONFIG_DIR: join(home, 'config'),
+          SHIELDCORTEX_AUDIT_DIR: join(home, 'audit'),
+          npm_config_cache: join(home, 'npm-cache'),
+        },
+        timeout: 240_000,
+      },
+    );
+    const report = JSON.parse(readFileSync(outFile, 'utf8'));
+    const assertions = report.testResults.flatMap(
+      (suite: { assertionResults: Array<{ status: string; fullName: string; failureMessages: string[] }> }) =>
+        suite.assertionResults,
+    );
+    return {
+      status: res.status,
+      failed: report.numFailedTests,
+      pending: report.numPendingTests,
+      pendingNames: assertions.filter((a: { status: string }) => a.status === 'pending').map((a: { fullName: string }) => a.fullName),
+      failureMessages: assertions.flatMap((a: { failureMessages: string[] }) => a.failureMessages).join('\n'),
+    };
+  }
+
+  it('skips, naming the reason, when the registry blips', () => {
+    installFakeNpm(
+      JSON.stringify({ error: { code: 'ECONNRESET', summary: 'request to registry failed' } }),
+    );
+    const run = runClaimsSuite('blip');
+    expect(run.failed).toBe(0);
+    expect(run.status).toBe(0);
+    expect(run.pending).toBeGreaterThanOrEqual(1);
+    expect(run.pendingNames.join('\n')).toContain('skipped: live audit unavailable');
+    expect(run.pendingNames.join('\n')).toContain('ECONNRESET');
+  }, 300_000);
+
+  it('still fails when npm answers and the answer contradicts the claim', () => {
+    installFakeNpm(
+      realisticReport({ lodash: { severity: 'high', via: [{ source: 999999 }] } }),
+    );
+    const run = runClaimsSuite('drift');
+    expect(run.failed).toBeGreaterThanOrEqual(1);
+    expect(run.status).not.toBe(0);
+    expect(run.failureMessages).toContain('lodash');
+    expect(run.pendingNames.join('\n')).not.toContain('live audit unavailable');
+  }, 300_000);
+
+  it('skips on the documented opt-out, without calling npm at all', () => {
+    installFakeNpm('this fixture must never be parsed', { code: 0 });
+    const outFile = join(home, 'nested-optout.json');
+    const res = spawnSync(
+      process.execPath,
+      [
+        join('scripts', 'run-jest.mjs'),
+        '--runInBand',
+        '--no-cache',
+        `--cacheDirectory=${join(home, 'jest-cache')}`,
+        '--runTestsByPath',
+        CLAIMS_SUITE,
+        '--json',
+        `--outputFile=${outFile}`,
+      ],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          PATH: `${fakeBin}:/usr/bin:/bin`,
+          HOME: home,
+          SHIELDCORTEX_CONFIG_DIR: join(home, 'config'),
+          SC_SKIP_LIVE_AUDIT: '1',
+        },
+        timeout: 240_000,
+      },
+    );
+    const report = JSON.parse(readFileSync(outFile, 'utf8'));
+    const pending = report.testResults
+      .flatMap((suite: { assertionResults: Array<{ status: string; fullName: string }> }) => suite.assertionResults)
+      .filter((a: { status: string }) => a.status === 'pending')
+      .map((a: { fullName: string }) => a.fullName)
+      .join('\n');
+    expect(report.numFailedTests).toBe(0);
+    expect(res.status).toBe(0);
+    expect(pending).toContain('SC_SKIP_LIVE_AUDIT=1');
+  }, 300_000);
 });

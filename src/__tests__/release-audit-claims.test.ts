@@ -19,6 +19,24 @@
  *   a security claim that silently passes when it cannot be verified is worse
  *   than no test. If you are genuinely offline, set SC_SKIP_LIVE_AUDIT=1 and
  *   understand you have turned off the drift detector, not satisfied it.
+ *
+ * Three outcomes for the live leg, never two — DRIFT, MEASURED and
+ * UNAVAILABLE are different facts:
+ *
+ *   measured    -> the assertions run, and a mismatch is a red suite. That is
+ *                  claim drift, and it should stop a release.
+ *   unavailable -> `npm audit` could not produce a report (no network, a
+ *                  registry blip, the deadline expired). The leg is SKIPPED,
+ *                  with the reason in the skipped test's name, and the
+ *                  hermetic leg still has to pass. Before this, an ECONNRESET
+ *                  from the registry turned the ordinary unit suite red with
+ *                  no code regression behind it — which teaches a team to
+ *                  re-run until green, the exact habit that lets real drift
+ *                  through.
+ *   opted out   -> SC_SKIP_LIVE_AUDIT=1, also a visible skip.
+ *
+ * "Unavailable" must never be silently green either, which is why it is an
+ * explicit skip naming the reason rather than a passing test.
  */
 
 import { describe, expect, it } from '@jest/globals';
@@ -315,22 +333,110 @@ describe('#466 hermetic — an unreadable audit report is undecidable, not clean
   });
 });
 
-const skipLive = process.env.SC_SKIP_LIVE_AUDIT === '1';
+/** What the live leg found out before any test ran. */
+export type LiveAuditOutcome =
+  | { kind: 'measured'; report: { vulnerabilities: Record<string, unknown> } }
+  | { kind: 'unavailable'; reason: string }
+  | { kind: 'opted-out' };
 
-(skipLive ? describe.skip : describe)('#466 live — the claim equals what npm audit reports now', () => {
-  it(
-    'reports 0 unwaived production advisories and exactly the waived set the claim names',
-    () => {
-      const waivers = parseWaivers(waiverMarkdown);
-      const ids = waivedAdvisoryIds(waivers);
-      const report = runNpmAudit([], REPO_ROOT);
-      const result = classify(report, ids);
-      const claim = parseClaim();
+/**
+ * Decide which of the three outcomes applies. Pure apart from the injected
+ * runner, so both branches can be exercised without a registry.
+ */
+export function liveAuditOutcome(
+  run: () => { vulnerabilities: Record<string, unknown> },
+  optedOut: boolean,
+): LiveAuditOutcome {
+  if (optedOut) return { kind: 'opted-out' };
+  try {
+    return { kind: 'measured', report: run() };
+  } catch (err) {
+    return { kind: 'unavailable', reason: (err as Error).message };
+  }
+}
 
-      expect(result.unwaived.map((n) => n.name)).toEqual([]);
-      expect(claim.unwaived).toBe(result.unwaived.length);
-      expect(claim.waived).toBe(result.waivedIds.length);
-    },
-    120_000,
-  );
+/**
+ * The name Jest prints for the live leg. An unavailable audit has to say so on
+ * the terminal, with the reason attached — "skipped" that does not say why is
+ * how a permanently broken check survives.
+ */
+export function liveAuditTitle(outcome: LiveAuditOutcome): string {
+  switch (outcome.kind) {
+    case 'measured':
+      return '#466 live — the claim equals what npm audit reports now';
+    case 'opted-out':
+      return '#466 live — skipped: SC_SKIP_LIVE_AUDIT=1, the drift detector is off';
+    default:
+      return `#466 live — skipped: live audit unavailable — ${outcome.reason.split('\n')[0]}`;
+  }
+}
+
+/**
+ * Run it ONCE, here, before any test is defined.
+ *
+ * Jest has no runtime skip: a test body cannot decide to become pending, it can
+ * only pass or fail. The availability of `npm audit` therefore has to be known
+ * at collection time for "unavailable" to be expressible as a skip at all.
+ * `runNpmAudit` is synchronous, so this blocks the worker for the duration —
+ * bounded by the deadline below, which is deliberately well inside the batch
+ * budget the full suite runs under.
+ */
+const liveAudit = liveAuditOutcome(
+  () => runNpmAudit([], REPO_ROOT, { timeoutMs: 60_000 }),
+  process.env.SC_SKIP_LIVE_AUDIT === '1',
+);
+if (liveAudit.kind === 'unavailable') {
+  console.warn(`[#466] live audit unavailable — ${liveAudit.reason}`);
+}
+
+(liveAudit.kind === 'measured' ? describe : describe.skip)(liveAuditTitle(liveAudit), () => {
+  it('reports 0 unwaived production advisories and exactly the waived set the claim names', () => {
+    if (liveAudit.kind !== 'measured') throw new Error('unreachable: leg is skipped');
+    const waivers = parseWaivers(waiverMarkdown);
+    const ids = waivedAdvisoryIds(waivers);
+    const result = classify(liveAudit.report, ids);
+    const claim = parseClaim();
+
+    expect(result.unwaived.map((n) => n.name)).toEqual([]);
+    expect(claim.unwaived).toBe(result.unwaived.length);
+    expect(claim.waived).toBe(result.waivedIds.length);
+  });
+});
+
+describe('#466 hermetic — the live leg tells drift apart from unavailability', () => {
+  const report = { vulnerabilities: {} };
+
+  it('measures when npm answers', () => {
+    expect(liveAuditOutcome(() => report, false)).toEqual({ kind: 'measured', report });
+  });
+
+  it('is unavailable — not clean, and not a failure — when npm cannot answer', () => {
+    const outcome = liveAuditOutcome(() => {
+      throw new Error('npm audit reported an error: {"code":"ECONNRESET"}');
+    }, false);
+    expect(outcome.kind).toBe('unavailable');
+    expect(liveAuditTitle(outcome)).toContain('skipped: live audit unavailable — ');
+    expect(liveAuditTitle(outcome)).toContain('ECONNRESET');
+  });
+
+  it('names the deadline when the audit is killed for taking too long', () => {
+    const outcome = liveAuditOutcome(() => {
+      throw new Error('`npm audit --omit=dev --json` did not answer within 300 ms and was killed.');
+    }, false);
+    expect(liveAuditTitle(outcome)).toContain('did not answer within 300 ms');
+  });
+
+  it('reports the opt-out as its own outcome, not as unavailability', () => {
+    const outcome = liveAuditOutcome(() => report, true);
+    expect(outcome).toEqual({ kind: 'opted-out' });
+    expect(liveAuditTitle(outcome)).toContain('SC_SKIP_LIVE_AUDIT=1');
+  });
+
+  it('keeps the reason to one line so the test name stays readable', () => {
+    const outcome = liveAuditOutcome(() => {
+      throw new Error('first line\nsecond line\nthird line');
+    }, false);
+    expect(liveAuditTitle(outcome)).toContain('first line');
+    expect(liveAuditTitle(outcome)).not.toContain('second line');
+  });
 });

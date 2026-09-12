@@ -22,6 +22,10 @@
  *   node scripts/lab/audit-report.mjs --json
  *   node scripts/lab/audit-report.mjs --omit=optional   # extra npm audit flags
  *
+ * Environment:
+ *   SC_AUDIT_TIMEOUT_MS   wall-clock deadline for the `npm audit` subprocess
+ *                         (default 120000; it is SIGKILLed on expiry, exit 2)
+ *
  * Exit codes: 0 pass, 1 unwaived advisory or expired/invalid waiver,
  *             2 could not run `npm audit`, or its output is not a usable
  *               report. Undecidable is NOT zero findings: exit 2 is the gate
@@ -242,18 +246,57 @@ export function auditReportProblems(report) {
   return problems;
 }
 
+/** How long `npm audit` gets before the gate gives up on it. */
+export const DEFAULT_AUDIT_TIMEOUT_MS = 120_000;
+
+/**
+ * The deadline for this run: `SC_AUDIT_TIMEOUT_MS` if it is a positive number,
+ * otherwise the default. Read per call so a spawned CLI can be given a short
+ * deadline by its environment without the module having to be reloaded.
+ */
+function auditTimeoutMs(override) {
+  if (typeof override === 'number' && Number.isFinite(override) && override > 0) return override;
+  const fromEnv = Number(process.env.SC_AUDIT_TIMEOUT_MS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return DEFAULT_AUDIT_TIMEOUT_MS;
+}
+
 /**
  * Run `npm audit --omit=dev --json` and return the parsed report.
  *
  * npm exits non-zero whenever advisories exist, so the exit code carries no
  * information here — only output we cannot read as a report does. Every throw
  * from this function means "could not measure" and is exit 2 at the CLI.
+ *
+ * The subprocess has a real wall-clock deadline, because a declared timeout on
+ * the *caller* is not one: `spawnSync` blocks the event loop, so the 120 s Jest
+ * timeout on the live test could never fire. Review proved it — a fixture npm
+ * that answered after 1,500 ms passed a test declared with a 20 ms timeout.
+ * The deadline has to be on the child, and it is enforced with SIGKILL rather
+ * than SIGTERM: a signal the child may trap is not a deadline either.
  */
-export function runNpmAudit(extraArgs = [], cwd = REPO_ROOT) {
+export function runNpmAudit(extraArgs = [], cwd = REPO_ROOT, { timeoutMs } = {}) {
   const args = ['audit', '--omit=dev', '--json', ...extraArgs];
-  const res = spawnSync('npm', args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const deadline = auditTimeoutMs(timeoutMs);
+  const res = spawnSync('npm', args, {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: deadline,
+    killSignal: 'SIGKILL',
+  });
   if (res.error) {
+    if (res.error.code === 'ETIMEDOUT') {
+      throw new Error(
+        `\`npm ${args.join(' ')}\` did not answer within ${deadline} ms and was killed.` +
+          ' Set SC_AUDIT_TIMEOUT_MS to raise the deadline, or SC_SKIP_LIVE_AUDIT=1 to' +
+          ' turn the live drift check off knowingly.',
+      );
+    }
     throw new Error(`could not run \`npm ${args.join(' ')}\`: ${res.error.message}`);
+  }
+  if (res.signal) {
+    throw new Error(`\`npm ${args.join(' ')}\` was killed by ${res.signal} before it finished`);
   }
   let report;
   try {
