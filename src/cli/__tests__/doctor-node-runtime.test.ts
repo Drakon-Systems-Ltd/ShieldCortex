@@ -12,6 +12,7 @@ import {
   checkNodeRuntime,
   doctorExitCode,
 } from '../doctor.js';
+import { closeDatabase, initDatabase } from '../../database/init.js';
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,52 @@ function plain(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+/g, ' ');
 }
+
+interface DoctorRun {
+  stdout: string;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * Move the CHILD's `process.version` before the CLI module graph loads.
+ * `process.versions.modules` is deliberately left alone: this pins the
+ * doctor's own runtime verdict, not any ABI-derived behaviour.
+ */
+function writePreload(home: string, version: string): string {
+  const preload = path.join(home, 'force-node-version.cjs');
+  fs.writeFileSync(
+    preload,
+    `Object.defineProperty(process, 'version', { value: ${JSON.stringify(version)}, configurable: true });\n`,
+    { mode: 0o600 },
+  );
+  return preload;
+}
+
+/**
+ * A scrubbed environment: HOME points at the caller's sandbox so doctor reads
+ * and writes nothing of the host's, and inherited SHIELDCORTEX_* would
+ * otherwise change what the checks resolve to (#125).
+ */
+const runDoctorCli = (
+  home: string,
+  args: string[] = [],
+  opts: { forceVersion?: string } = {},
+): Promise<DoctorRun> =>
+  new Promise((resolve, reject) => {
+    const nodeArgs = opts.forceVersion ? ['--require', writePreload(home, opts.forceVersion)] : [];
+    const child = spawn(process.execPath, [...nodeArgs, CLI_PATH, 'doctor', ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home },
+    });
+    let stdout = '';
+    child.stdout.on('data', (c) => { stdout += c.toString(); });
+    child.stderr.on('data', (c) => { stdout += c.toString(); });
+    child.on('error', reject);
+    // #471: SIGABRT yields code=null, signal=SIGABRT. Mapping null→0 hid the
+    // Node 24 better-sqlite3 ObjectWrap abort as a green doctor run.
+    child.on('close', (code, signal) => resolve({ stdout, code, signal }));
+  });
 
 describe('doctor — Node runtime verdict (live command)', () => {
   let exitCodeBefore: number | string | undefined;
@@ -94,53 +141,14 @@ describe('doctor — Node runtime verdict (live command)', () => {
 
 describe('doctor — unsupported Node fails the real CLI with no database present', () => {
   let home: string;
-  let preload: string;
 
   beforeEach(() => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-doctor-node-'));
-    preload = path.join(home, 'force-node-version.cjs');
   });
 
   afterEach(() => {
     try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* ignore */ }
   });
-
-  /**
-   * Move the CHILD's `process.version` before the CLI module graph loads.
-   * `process.versions.modules` is deliberately left alone: this pins the
-   * doctor's own runtime verdict, not any ABI-derived behaviour.
-   */
-  function writePreload(version: string): void {
-    fs.writeFileSync(
-      preload,
-      `Object.defineProperty(process, 'version', { value: ${JSON.stringify(version)}, configurable: true });\n`,
-    );
-  }
-
-  /**
-   * A scrubbed environment: HOME points at the empty sandbox so doctor reads
-   * and writes nothing of the host's, and inherited SHIELDCORTEX_* would
-   * otherwise change what the checks resolve to (#125).
-   */
-  const runDoctorCli = (
-    args: string[] = [],
-    opts: { forceVersion?: string } = {},
-  ): Promise<{ stdout: string; code: number | null; signal: NodeJS.Signals | null }> =>
-    new Promise((resolve, reject) => {
-      if (opts.forceVersion) writePreload(opts.forceVersion);
-      const nodeArgs = opts.forceVersion ? ['--require', preload] : [];
-      const child = spawn(process.execPath, [...nodeArgs, CLI_PATH, 'doctor', ...args], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home },
-      });
-      let stdout = '';
-      child.stdout.on('data', (c) => { stdout += c.toString(); });
-      child.stderr.on('data', (c) => { stdout += c.toString(); });
-      child.on('error', reject);
-      // #471: SIGABRT yields code=null, signal=SIGABRT. Mapping null→0 hid the
-      // Node 24 better-sqlite3 ObjectWrap abort as a green doctor run.
-      child.on('close', (code, signal) => resolve({ stdout, code, signal }));
-    });
 
   it('the check is in the live check list and passes on this supported runtime', async () => {
     // dist is built before tests in CI; assert the invariant so a missing
@@ -148,7 +156,7 @@ describe('doctor — unsupported Node fails the real CLI with no database presen
     expect(fs.existsSync(CLI_PATH)).toBe(true);
 
     // Passes are collapsed into theme codes without --verbose.
-    const { stdout, code, signal } = await runDoctorCli(['--verbose']);
+    const { stdout, code, signal } = await runDoctorCli(home, ['--verbose']);
     expect(signal).toBeNull();
     expect(code).not.toBe(134);
     expect(plain(stdout)).not.toMatch(/Assertion failed: \(env\) != nullptr/);
@@ -161,7 +169,7 @@ describe('doctor — unsupported Node fails the real CLI with no database presen
   it.each(['v20.19.0', 'v23.11.0'])('exits 1 with a ❌ on Node %s, database or not', async (version) => {
     expect(fs.existsSync(CLI_PATH)).toBe(true);
 
-    const { stdout, code } = await runDoctorCli([], { forceVersion: version });
+    const { stdout, code } = await runDoctorCli(home, [], { forceVersion: version });
     const report = plain(stdout);
 
     expect(report).toContain(`Node ${version} is an unsupported runtime`);
@@ -174,4 +182,92 @@ describe('doctor — unsupported Node fails the real CLI with no database presen
     expect(report).toContain('not initialised yet');
     expect(fs.existsSync(path.join(home, '.shieldcortex', 'memories.db'))).toBe(false);
   }, 120_000);
+});
+
+/**
+ * #471 regression gate: the abort it names is `Database::~Database`, so the
+ * run has to have a database to destroy.
+ *
+ * The sibling suite above deliberately runs in an EMPTY sandbox, where every
+ * DB check is the fresh-install `info` and no better-sqlite3 handle is ever
+ * constructed — a green run there says nothing about the destructor. Here the
+ * child opens a real initialised database (the read-only per-check handles in
+ * `runDoctor` are exactly the objects better-sqlite3 12 aborted on when the
+ * Node 24 environment was torn down before GC ran their destructor), so a
+ * dependency regression that brings the ObjectWrap cleanup back fails this
+ * test instead of reading as a healthy host.
+ *
+ * The fixture is built through the real `initDatabase` rather than by driving
+ * another CLI verb: it is the same schema + migrations + WAL state a user's
+ * database has, and nothing about the assertion depends on a second command's
+ * behaviour.
+ */
+describe('doctor — an initialised database survives teardown on the real CLI (#471)', () => {
+  let home: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-doctor-db-'));
+    dbPath = path.join(home, '.shieldcortex', 'memories.db');
+  });
+
+  afterEach(() => {
+    // `initDatabase` owns a MODULE-GLOBAL handle plus a startup lock file, and
+    // this is the only suite in the file that takes them. Release them on every
+    // path — including the one where the build itself threw — so neither the
+    // handle nor the lock outlives the sandbox we are about to delete.
+    try { closeDatabase(); } catch { /* ignore */ }
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  /**
+   * Build the fixture in-process, then close it: the spawned doctor must meet
+   * a quiescent file, not this process's open connection.
+   *
+   * Everything `initDatabase` leaves in the directory is forced owner-only
+   * afterwards. That is not hygiene theatre — the doctor's State permissions
+   * check FAILS the whole run on a single group/world-readable file under
+   * `~/.shieldcortex`, and `initDatabase` writes its `.pre-backfill-*` snapshot
+   * at the ambient umask. Without the chmod the run exits 1 for a reason that
+   * has nothing to do with #471.
+   */
+  function buildDatabaseFixture(): void {
+    try {
+      initDatabase(dbPath);
+    } finally {
+      closeDatabase();
+    }
+    const dir = path.dirname(dbPath);
+    fs.chmodSync(dir, 0o700);
+    for (const entry of fs.readdirSync(dir)) {
+      fs.chmodSync(path.join(dir, entry), 0o600);
+    }
+  }
+
+  it('exits 0 with no signal and no destructor assertion', async () => {
+    expect(fs.existsSync(CLI_PATH)).toBe(true);
+
+    buildDatabaseFixture();
+    expect(fs.existsSync(dbPath)).toBe(true);
+    expect(fs.statSync(dbPath).size).toBeGreaterThan(0);
+
+    const { stdout, code, signal } = await runDoctorCli(home, ['--verbose']);
+    const report = plain(stdout);
+
+    // A SIGABRT death is code=null + signal='SIGABRT', which a shell reports as
+    // 134. Assert every shape: no single mapping can then hide the abort.
+    expect(signal).toBeNull();
+    expect(report).not.toMatch(/Assertion failed: \(env\) != nullptr/);
+    expect(report).not.toMatch(/SIGABRT/);
+    expect(code).not.toBe(134);
+
+    // Non-vacuity: the CHILD really opened the fixture. `not initialised yet`
+    // is the empty-sandbox wording the sibling suite asserts, so its absence
+    // here proves this run took the database path and not the fresh-install
+    // one that constructs no native handle at all.
+    expect(report).toContain(NODE_RUNTIME_LABEL);
+    expect(report).not.toContain('not initialised yet');
+
+    expect(code).toBe(0);
+  }, 180_000);
 });

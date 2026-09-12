@@ -68,7 +68,7 @@ import {
   type NativeSotEvidence,
   type PlaneDriftCounts,
 } from '../memory/plane-drift.js';
-import { closeDatabase, getCanonicalSchema } from '../database/init.js';
+import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
@@ -6666,15 +6666,13 @@ export async function runDoctor(
 
   console.log('');
 
-  // #471: Node 24 + better-sqlite3 12 aborts in Database::~Database when GC
-  // runs after the environment is gone. Close while the env still exists so
-  // the report is not replaced by a native stack (exit 134). Best-effort —
-  // a close failure must not hide the checks already printed.
-  try {
-    closeDatabase();
-  } catch {
-    /* ignore */
-  }
-
+  // No closeDatabase() here, deliberately (#471). The shipped `shieldcortex
+  // doctor` path never calls initDatabase() — every DB check opens its own
+  // short-lived `new Database(...)` handle — so the singleton is always null
+  // and the call would be inert. In-process callers (MCP server, OpenClaw
+  // extension) DO own that singleton, and closing it from a read-only report
+  // would shut their connection and unlink their startup lock. The Node 24
+  // `Database::~Database` abort is fixed by the better-sqlite3 13 upgrade, not
+  // by anything the doctor does at the end of its run.
   return { passed, warnings, failures, infos, total, exitCode, ai };
 }
