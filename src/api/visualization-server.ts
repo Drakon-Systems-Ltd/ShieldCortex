@@ -119,10 +119,69 @@ export function normaliseDefenceSource(raw: unknown): DefenceSource {
  */
 const API_CATCH_ALL_PATH = '/api/{*splat}';
 
+/**
+ * The one normalised view of a request path that the auth gate, the public-path
+ * exemptions and the API catch-all all reason over (#474).
+ *
+ * express route matching is case-INSENSITIVE by default, so `/API/memories`
+ * reaches the `/api/memories` handler. The auth gate used to ask
+ * `req.path.startsWith('/api/')` — a case-SENSITIVE question about a
+ * case-insensitive router — and so every uppercase spelling of every protected
+ * route answered with data and no `Authorization` header at all: `/API/memories`
+ * returned the memory list, `/API/gated-stats` returned the counters. Two checks
+ * over the same request must not be allowed to disagree, so there is exactly one
+ * definition of "this is an API path" here and both use it.
+ *
+ * Lowercasing is the right normalisation because it is exactly the equivalence
+ * express applies: path-to-regexp compiles the route to a RegExp with the `i`
+ * flag and no `u` flag, whose canonicalisation never folds a non-ASCII code
+ * point onto an ASCII one. Turning on `case sensitive routing` instead would
+ * change the behaviour of every route in the app and would still leave the gate
+ * and the router asking different questions.
+ *
+ * Percent-encoding is untouched: `%2E` lowercases to the literal triple `%2e`
+ * and is never decoded, so normalising cannot manufacture a traversal that the
+ * raw path did not already contain.
+ */
+function apiPathView(path: string): string {
+  return path.toLowerCase();
+}
+
+/**
+ * Does this request address the JSON API surface, in any spelling express will
+ * route to it? This is the set the auth gate protects and, by construction, the
+ * set `API_CATCH_ALL_PATH` matches — `api-auth-path-normalisation.test.ts` pins
+ * the two as equal against a real express router.
+ */
+function isApiRequestPath(path: string): boolean {
+  return apiPathView(path).startsWith('/api/');
+}
+
+/**
+ * Is this one of the endpoints that never needs auth, in any spelling express
+ * will route to it? Entries in `publicPaths` are lowercase with no trailing
+ * slash.
+ *
+ * The exemption has to match the router's equivalence exactly — no wider (that
+ * is a bypass) and no narrower (that is `/api/health/` answering 401 while the
+ * identical handler answers 200 one slash earlier).
+ */
+function isPublicApiPath(path: string, publicPaths: readonly string[]): boolean {
+  const view = apiPathView(path);
+  // express's non-strict routing accepts exactly ONE optional trailing slash:
+  // `/api/health/` reaches the `/api/health` handler, `/api/health//` does not.
+  const canonical =
+    view.length > 1 && view.endsWith('/') && !view.endsWith('//') ? view.slice(0, -1) : view;
+  return publicPaths.includes(canonical);
+}
+
 export const __test__ = {
   ALLOWED_DEFENCE_SOURCE_TYPES,
   MAX_SOURCE_IDENTIFIER_LENGTH,
   API_CATCH_ALL_PATH,
+  apiPathView,
+  isApiRequestPath,
+  isPublicApiPath,
 };
 
 /**
@@ -390,14 +449,16 @@ export function startVisualizationServer(dbPath?: string): void {
   // is loopback-only (never on non-loopback network binds).
   const HOST = process.env.SHIELDCORTEX_HOST || '127.0.0.1';
   const bindLoopback = isLoopbackHost(HOST);
-  // Auth middleware: require Bearer token on all requests except public paths
+  // Auth middleware: require Bearer token on all requests except public paths.
+  // #474 — both the prefix test and the exemption run over the normalised path
+  // view, so every spelling express routes to a protected handler is gated.
   const publicPaths = bindLoopback
     ? ['/api/health', '/api/auth/session-token']
     : ['/api/health'];
   app.use((req: Request, res: Response, next) => {
     // Dashboard pages and static assets must load before the client can fetch
     // its API session token. Protect API routes, not the Next.js shell.
-    if (!req.path.startsWith('/api/')) {
+    if (!isApiRequestPath(req.path)) {
       return next();
     }
     // Allow OPTIONS/HEAD for CORS preflight
@@ -405,7 +466,7 @@ export function startVisualizationServer(dbPath?: string): void {
       return next();
     }
     // Public endpoints that never need auth
-    if (publicPaths.includes(req.path)) {
+    if (isPublicApiPath(req.path, publicPaths)) {
       return next();
     }
     const authHeader = req.headers.authorization;
