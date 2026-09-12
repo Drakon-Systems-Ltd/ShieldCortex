@@ -43,6 +43,7 @@ import { describe, expect, it } from '@jest/globals';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { workflowExecutableText } from './support/workflow-executable-surface.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..');
@@ -69,7 +70,11 @@ const {
     waived: Set<number>,
   ) => { unwaived: Array<{ name: string }>; waived: Array<{ name: string }>; waivedIds: number[] };
   expiredWaivers: (w: Array<{ expires: string }>, now?: Date) => unknown[];
-  runNpmAudit: (extra?: string[], cwd?: string) => { vulnerabilities: Record<string, unknown> };
+  runNpmAudit: (
+    extra?: string[],
+    cwd?: string,
+    opts?: { timeoutMs?: number },
+  ) => { vulnerabilities: Record<string, unknown> };
   isCalendarDate: (value: unknown) => boolean;
   auditReportProblems: (report: unknown) => string[];
 };
@@ -121,15 +126,26 @@ const SCANNERS = ['snyk', 'trivy', 'grype', 'dependabot'] as const;
 /**
  * Scanner results claimed in SKILL.md metadata that no workflow backs.
  *
+ * `workflowSources` is the RAW text of each `.github/workflows` file. The rule
+ * takes sources rather than a haystack on purpose: it used to be handed the
+ * concatenated, lowercased text and ask `.includes(scanner)`, and review broke
+ * that with a workflow file whose entire contents were
+ *
+ *     # snyk is not installed or run
+ *
+ * after which `snyk: no-known-vulnerabilities` was permitted back into
+ * SKILL.md. Mentioning a scanner is not running one. Only the values of `run:`
+ * and `uses:` keys count, and only from mappings that are not switched off with
+ * `if: false` — see support/workflow-executable-surface.ts.
+ *
  * Pure so the rule can be exercised in both directions — the failure that
  * matters is "claimed but never run", and the case that must stay GREEN is
  * "claimed and genuinely wired up", which a one-sided test would not catch.
- * `workflowsText` is the concatenated, lowercased contents of
- * `.github/workflows`.
  */
-export function scannerClaimViolations(metadataKeys: string[], workflowsText: string): string[] {
+export function scannerClaimViolations(metadataKeys: string[], workflowSources: string[]): string[] {
   const claimed = new Set(metadataKeys);
-  return SCANNERS.filter((s) => claimed.has(s) && !workflowsText.includes(s));
+  const executable = workflowSources.map(workflowExecutableText).join('\n');
+  return SCANNERS.filter((s) => claimed.has(s) && !executable.includes(s));
 }
 
 
@@ -175,36 +191,134 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
   });
 
   it('only claims a scanner that some workflow actually runs', () => {
-    const workflows = readdirSync(WORKFLOWS)
-      .map((f) => readFileSync(join(WORKFLOWS, f), 'utf8').toLowerCase())
-      .join('\n');
+    const workflows = readdirSync(WORKFLOWS).map((f) => readFileSync(join(WORKFLOWS, f), 'utf8'));
     expect(scannerClaimViolations([...skillMetadata().keys()], workflows)).toEqual([]);
   });
 });
 
 describe('#466 hermetic — the scanner rule permits a claim exactly when CI earns it', () => {
   it('flags a claim no workflow backs', () => {
-    expect(scannerClaimViolations(['npm_audit', 'snyk'], 'jobs:\n  test:\n    run: npm test')).toEqual([
+    expect(scannerClaimViolations(['npm_audit', 'snyk'], ['jobs:\n  test:\n    run: npm test'])).toEqual([
       'snyk',
     ]);
   });
 
   it('permits the claim once a workflow actually runs the scanner', () => {
     expect(
-      scannerClaimViolations(['npm_audit', 'snyk'], 'jobs:\n  sec:\n    run: snyk test --all-projects'),
+      scannerClaimViolations(['npm_audit', 'snyk'], ['jobs:\n  sec:\n    run: snyk test --all-projects']),
+    ).toEqual([]);
+  });
+
+  it('permits a claim backed by an action rather than a shell command', () => {
+    expect(
+      scannerClaimViolations(
+        ['trivy'],
+        ['jobs:\n  sec:\n    steps:\n      - uses: aquasecurity/trivy-action@0.24.0'],
+      ),
     ).toEqual([]);
   });
 
   it('does not care about a scanner that runs in CI but is not claimed', () => {
-    expect(scannerClaimViolations(['npm_audit'], 'run: snyk test')).toEqual([]);
+    expect(scannerClaimViolations(['npm_audit'], ['run: snyk test'])).toEqual([]);
   });
 
   it('reports every unbacked claim, not just the first', () => {
-    expect(scannerClaimViolations(['snyk', 'trivy', 'grype'], 'run: npm test')).toEqual([
+    expect(scannerClaimViolations(['snyk', 'trivy', 'grype'], ['run: npm test'])).toEqual([
       'snyk',
       'trivy',
       'grype',
     ]);
+  });
+
+  // ── The mutations review used to get past this rule ──────────────────────
+  //
+  // Each of these files mentions snyk. None of them runs it. The old rule —
+  // `concatenatedWorkflowText.includes('snyk')` — permitted the claim for all
+  // three, and the first one is a single comment line.
+
+  it('refuses a claim backed only by a comment', () => {
+    expect(scannerClaimViolations(['snyk'], ['# snyk is not installed or run\n'])).toEqual(['snyk']);
+  });
+
+  it('refuses a claim backed only by a comment inside a real job', () => {
+    const workflow = [
+      'name: CI',
+      'jobs:',
+      '  test:',
+      '    steps:',
+      '      # TODO: wire up snyk once we have a token',
+      '      - run: npm test',
+    ].join('\n');
+    expect(scannerClaimViolations(['snyk'], [workflow])).toEqual(['snyk']);
+  });
+
+  it('refuses a claim backed only by a step that is switched off', () => {
+    const workflow = [
+      'jobs:',
+      '  sec:',
+      '    steps:',
+      '      - name: Scan',
+      '        if: false',
+      '        run: snyk test --all-projects',
+      '      - run: npm test',
+    ].join('\n');
+    expect(scannerClaimViolations(['snyk'], [workflow])).toEqual(['snyk']);
+  });
+
+  it('refuses a claim backed only by a job that is switched off', () => {
+    const workflow = [
+      'jobs:',
+      '  sec:',
+      '    if: false',
+      '    steps:',
+      '      - run: snyk test',
+    ].join('\n');
+    expect(scannerClaimViolations(['snyk'], [workflow])).toEqual(['snyk']);
+  });
+
+  it('refuses a claim backed only by a step NAME', () => {
+    const workflow = [
+      'jobs:',
+      '  sec:',
+      '    steps:',
+      '      - name: snyk (disabled, see #123)',
+      '        run: echo skipping',
+    ].join('\n');
+    expect(scannerClaimViolations(['snyk'], [workflow])).toEqual(['snyk']);
+  });
+
+  it('still permits a step carrying a real condition — conditional is not disabled', () => {
+    const workflow = [
+      'jobs:',
+      '  sec:',
+      '    steps:',
+      "      - if: github.ref == 'refs/heads/main'",
+      '        run: snyk test',
+    ].join('\n');
+    expect(scannerClaimViolations(['snyk'], [workflow])).toEqual([]);
+  });
+
+  it('reads a multi-line run block, where the scanner is not on the first line', () => {
+    const workflow = [
+      'jobs:',
+      '  sec:',
+      '    steps:',
+      '      - run: |',
+      '          npm ci',
+      '          npx snyk test --all-projects',
+    ].join('\n');
+    expect(scannerClaimViolations(['snyk'], [workflow])).toEqual([]);
+  });
+
+  it('is not fooled by a scanner name in an unrelated key', () => {
+    const workflow = ['jobs:', '  sec:', '    env:', '      SCANNER: snyk', '    steps:', '      - run: npm test'].join(
+      '\n',
+    );
+    expect(scannerClaimViolations(['snyk'], [workflow])).toEqual(['snyk']);
+  });
+
+  it('refuses when a workflow file is unparseable rather than permitting it', () => {
+    expect(scannerClaimViolations(['snyk'], ['\t\t}}}} snyk {{{{\n'])).toEqual(['snyk']);
   });
 });
 
