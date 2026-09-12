@@ -158,6 +158,18 @@ export interface CheckResult {
    * with no test failing — the class of coupling that produced #222 and #103.
    */
   openClawCliBlocked?: true;
+  /**
+   * Set when the state this check found makes every check BELOW it unsafe to
+   * run at all, rather than merely likely to fail. `runDoctor` stops the list
+   * here and renders what it has (#471).
+   *
+   * Reserved for exactly that: a host whose installed database engine aborts
+   * the PROCESS when a handle is destroyed cannot be reported on by a doctor
+   * that keeps opening handles. Never set for a state that is merely broken —
+   * a fail that still lets the run finish must leave this unset, because every
+   * row it suppresses is a finding the operator does not get.
+   */
+  haltsRun?: true;
 }
 
 /** The `Node runtime` check's label. */
@@ -230,6 +242,282 @@ export async function checkNodeRuntime(nodeVersion: string = process.version): P
       `database engine will not load. ${remedy}.`,
     fix: remedy,
   };
+}
+
+/** The `Database engine` check's label. */
+export const NATIVE_ENGINE_LABEL = 'Database engine';
+
+/**
+ * The better-sqlite3 range THIS build declares, read from the package's own
+ * `dependencies` so the remedy quotes exactly what a reinstall will resolve.
+ * Same rule as `SUPPORTED_NODE_RANGE`: the literal is a fallback for a
+ * stripped manifest, never a second hand-maintained source of truth.
+ */
+export const REQUIRED_ENGINE_RANGE: string =
+  typeof pkg?.dependencies?.['better-sqlite3'] === 'string' &&
+  semver.validRange(pkg.dependencies['better-sqlite3'])
+    ? (pkg.dependencies['better-sqlite3'] as string)
+    : '^13.0.3';
+
+/**
+ * The first better-sqlite3 major that survives a Node 24 process, and the Node
+ * major from which the 12.x fault is reachable.
+ *
+ * Deliberately CONSTANTS and not derived from `REQUIRED_ENGINE_RANGE`: the fact
+ * being encoded is "12.x cleans up through `node::ObjectWrap` and 13.x moved to
+ * Node-API", which does not move when the declared floor is bumped to a later
+ * 13.x patch or to 14. A drift test pins the manifest floor above these instead,
+ * so the two can never end up contradicting each other silently.
+ */
+export const NATIVE_ENGINE_MAJOR_FLOOR = 13;
+export const NATIVE_ENGINE_AFFECTED_NODE_MAJOR = 24;
+
+/**
+ * What could actually be learned about the INSTALLED engine package.
+ *
+ * `resolved` carries the version read off the package's own manifest on disk —
+ * npm metadata, a lockfile or `package.json`'s declared range say what SHOULD
+ * be there, and the whole point of this check is the install where they lie.
+ */
+export interface InstalledEngineVersion {
+  state: 'resolved' | 'unresolvable' | 'unreadable';
+  /** The manifest's `version`, present only when `state` is `resolved`. */
+  version?: string;
+  /** The manifest that was read, when one was found. */
+  source?: string;
+  /** Why the version could not be established. */
+  detail?: string;
+}
+
+/**
+ * Read the version of the better-sqlite3 that THIS process would actually load.
+ *
+ * Resolution only — `require.resolve` opens no `.node`, constructs no Database
+ * and runs none of the package's code, so this is safe to call on precisely the
+ * broken install it exists to diagnose.
+ *
+ * The seams are parameters so the verdict above can be driven without an install
+ * layout; production always takes the defaults.
+ */
+export function readInstalledEngineVersion(
+  deps: { resolve?: (specifier: string) => string; read?: (file: string) => string } = {},
+): InstalledEngineVersion {
+  const resolve = deps.resolve ?? ((specifier: string) => require.resolve(specifier));
+  const read = deps.read ?? ((file: string) => fs.readFileSync(file, 'utf8'));
+
+  let manifestPath: string | undefined;
+  let detail = '';
+  try {
+    manifestPath = resolve('better-sqlite3/package.json');
+  } catch (err) {
+    detail = err instanceof Error ? err.message : String(err);
+  }
+
+  if (!manifestPath) {
+    // A package's `exports` may withhold its own manifest (better-sqlite3 13
+    // lists `./package.json`; the 12.x line has no `exports` at all, so both
+    // resolve today — a repackaged or vendored tree need not). The ENTRY still
+    // resolves, and the manifest is the one above it whose `name` matches.
+    try {
+      let dir = path.dirname(resolve('better-sqlite3'));
+      for (let depth = 0; depth < 12; depth++) {
+        const candidate = path.join(dir, 'package.json');
+        try {
+          if ((JSON.parse(read(candidate)) as { name?: unknown }).name === 'better-sqlite3') {
+            manifestPath = candidate;
+            break;
+          }
+        } catch { /* not this directory's manifest — keep walking up */ }
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    } catch (err) {
+      detail = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (!manifestPath) {
+    return {
+      state: 'unresolvable',
+      detail: detail || 'no better-sqlite3 manifest on this process’s resolution path',
+    };
+  }
+
+  let raw: string;
+  try {
+    raw = read(manifestPath);
+  } catch (err) {
+    return {
+      state: 'unreadable',
+      source: manifestPath,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  let version: unknown;
+  try {
+    version = (JSON.parse(raw) as { version?: unknown }).version;
+  } catch (err) {
+    return {
+      state: 'unreadable',
+      source: manifestPath,
+      detail: `manifest is not valid JSON — ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (typeof version !== 'string' || !semver.coerce(version)) {
+    return {
+      state: 'unreadable',
+      source: manifestPath,
+      detail: `manifest carries no usable "version" (${JSON.stringify(version)})`,
+    };
+  }
+  return { state: 'resolved', version, source: manifestPath };
+}
+
+/**
+ * The remedy for a stale installed engine.
+ *
+ * A REBUILD is deliberately not offered, and is named as useless, because the
+ * fault is the package VERSION on disk and not its compiled state: `npm rebuild
+ * better-sqlite3` recompiles the same 12.x and leaves the abort exactly where it
+ * was. Only a reinstall/upgrade makes npm resolve this release's declared range
+ * afresh. The rebuild sentence carries no backticks on purpose — `extractFixCommands`
+ * promotes backticked commands into the Suggested-fixes block, and the one thing
+ * that must not be handed to an operator here is the command that cannot work.
+ */
+function staleEngineRemedy(): string {
+  return (
+    'Upgrade/reinstall ShieldCortex via the route you originally used so npm resolves ' +
+    `better-sqlite3 ${REQUIRED_ENGINE_RANGE} afresh — for a global install, ` +
+    '`npm install -g shieldcortex@latest` — then re-run `shieldcortex doctor`. ' +
+    'Rebuilding does not help: npm rebuild recompiles the 12.x already on disk, and what ' +
+    'is incompatible is the package version, not the build'
+  );
+}
+
+/**
+ * Is the INSTALLED database engine able to run on THIS Node at all? (#471)
+ *
+ * Pure, and separate from the reader above, so every branch is decidable without
+ * an install to point it at.
+ *
+ * The fault it gates is not hypothetical: better-sqlite3 12 tears its handles
+ * down through `node::ObjectWrap`, whose finaliser asserts once Node 24 has begun
+ * disposing the environment (`Database::~Database` → `Assertion failed: (env) !=
+ * nullptr`, SIGABRT / exit 134). doctor constructs several short-lived read-only
+ * handles across its DB checks, so on such an install the process could abort
+ * inside a LATER check — `checkDiskUsage` was where it landed — having rendered
+ * no report at all. The operator then sees a crash with no diagnosis, on the one
+ * command whose job is to diagnose.
+ *
+ * Hence: decided from the RESOLVED PACKAGE ON DISK rather than from `package.json`'s
+ * declared range or a lockfile, because a stale tree is exactly the state where
+ * metadata and disk disagree; placed ahead of every check that opens the database;
+ * and `haltsRun`, so the report is what the operator gets instead of the abort.
+ *
+ * What it will NOT do:
+ *  - fail a Node 22 host for holding 12.x. That install is stale against the
+ *    declared range but is not exposed to this abort, and doctor does not invent
+ *    failures for hosts that work.
+ *  - claim compatibility it did not establish. An unresolvable or malformed
+ *    version state warns, explicitly, that nothing was proven either way.
+ */
+export function nativeEngineVerdict(
+  nodeVersion: string,
+  engine: InstalledEngineVersion,
+): CheckResult {
+  const parsedNode = semver.coerce(nodeVersion);
+  if (!parsedNode) {
+    // `checkNodeRuntime` warns about the same string; this row says what that
+    // costs HERE, which is that the engine floor could not be applied at all.
+    return {
+      label: NATIVE_ENGINE_LABEL,
+      status: 'warn',
+      message:
+        `cannot check the installed database engine — unrecognised Node version "${nodeVersion}". ` +
+        `better-sqlite3 ${NATIVE_ENGINE_MAJOR_FLOOR}.x or newer is required on Node ` +
+        `${NATIVE_ENGINE_AFFECTED_NODE_MAJOR}+; this run did not establish that either way.`,
+    };
+  }
+  const affectedRuntime = parsedNode.major >= NATIVE_ENGINE_AFFECTED_NODE_MAJOR;
+
+  const parsedEngine =
+    engine.state === 'resolved' && typeof engine.version === 'string'
+      ? semver.coerce(engine.version)
+      : null;
+
+  if (!parsedEngine) {
+    const where = engine.source ? ` (${tildify(engine.source)})` : '';
+    const why = engine.detail
+      ? ` — ${engine.detail}`
+      : engine.state === 'resolved'
+        ? ` — unparseable version ${JSON.stringify(engine.version ?? null)}`
+        : '';
+    return {
+      label: NATIVE_ENGINE_LABEL,
+      status: 'warn',
+      message:
+        `cannot determine the installed better-sqlite3 version${where}${why}. ` +
+        (affectedRuntime
+          ? `On Node ${parsedNode.version} that leaves the ${NATIVE_ENGINE_MAJOR_FLOOR}.x floor unproven: ` +
+            'if this tree is really a stale 12.x, the checks below can still abort the process. '
+          : `Node ${parsedNode.version} is not exposed to the Node ${NATIVE_ENGINE_AFFECTED_NODE_MAJOR} ` +
+            'native-cleanup abort, so this is not an incompatibility finding. ') +
+        'No compatibility is claimed from this row.',
+      fix: staleEngineRemedy(),
+    };
+  }
+
+  if (affectedRuntime && parsedEngine.major < NATIVE_ENGINE_MAJOR_FLOOR) {
+    const remedy = staleEngineRemedy();
+    return {
+      label: NATIVE_ENGINE_LABEL,
+      status: 'fail',
+      // Stops the run. Every check below this one opens a database, and on this
+      // install that is the abort — a doctor that dies mid-report tells the
+      // operator nothing, so the report replaces the crash rather than racing it.
+      haltsRun: true,
+      message:
+        `the INSTALLED database engine is better-sqlite3 ${engine.version}` +
+        (engine.source ? ` (${tildify(engine.source)})` : '') +
+        `, which is incompatible with Node ${parsedNode.version}: the 12.x binding cleans up ` +
+        'through node::ObjectWrap, whose finaliser aborts the process once Node ' +
+        `${NATIVE_ENGINE_AFFECTED_NODE_MAJOR} has begun disposing the environment ` +
+        // The literal assertion banner is deliberately NOT reproduced here. It is
+        // how a real abort is recognised — in this report, in the regression
+        // tests, and in an operator's log search — and a diagnosis that prints
+        // it makes a clean failure indistinguishable from the crash it prevented.
+        '(a native Database::~Database abort, exit 134). ' +
+        `This release requires better-sqlite3 ${REQUIRED_ENGINE_RANGE}, so this installation is ` +
+        'STALE whatever its package metadata says. The remaining checks were not run: each of ' +
+        `them opens the database, and this process would have aborted part-way through the ` +
+        `report instead of telling you why. ${remedy}.`,
+      fix: remedy,
+    };
+  }
+
+  return {
+    label: NATIVE_ENGINE_LABEL,
+    status: 'pass',
+    message: affectedRuntime
+      ? `better-sqlite3 ${engine.version} on Node ${parsedNode.version} ` +
+        `(${NATIVE_ENGINE_MAJOR_FLOOR}.x or newer required on Node ${NATIVE_ENGINE_AFFECTED_NODE_MAJOR}+)`
+      : `better-sqlite3 ${engine.version} on Node ${parsedNode.version} — the Node ` +
+        `${NATIVE_ENGINE_AFFECTED_NODE_MAJOR}+ engine floor (${NATIVE_ENGINE_MAJOR_FLOOR}.x or newer) ` +
+        'does not apply to this runtime',
+  };
+}
+
+/**
+ * The live check. Both inputs are parameters so the verdict is testable without
+ * a second runtime or a second install; production passes neither.
+ */
+export async function checkNativeEngineCompat(
+  nodeVersion: string = process.version,
+  engine: InstalledEngineVersion = readInstalledEngineVersion(),
+): Promise<CheckResult> {
+  return nativeEngineVerdict(nodeVersion, engine);
 }
 
 /** The `OpenClaw config` check's label. */
@@ -6487,6 +6775,13 @@ export async function runDoctor(
     // every check below it is a symptom — including on a fresh box, where the
     // database checks have nothing to fail on.
     checkNodeRuntime,
+    // Second, and necessarily ahead of EVERY check that opens or touches the
+    // database (#471). On a stale better-sqlite3 12 under Node 24 the abort
+    // fires from a handle destructor somewhere down that list, killing the
+    // process mid-report; this row is the diagnosis, and its `haltsRun` is what
+    // keeps the rest of the list from racing the crash. `checkNodeRuntime`
+    // above it opens nothing, so it is not in that blast radius.
+    checkNativeEngineCompat,
     checkDatabase,
     checkSchema,
     checkWritePath, // Smoke test: real INSERT/SELECT/DELETE round-trip — catches silent schema drift
@@ -6532,17 +6827,19 @@ export async function runDoctor(
   ];
 
   for (const check of checks) {
+    let halt = false;
     try {
       const result = await check();
-      if (Array.isArray(result)) {
-        results.push(...result);
-      } else {
-        results.push(result);
-      }
+      const produced = Array.isArray(result) ? result : [result];
+      results.push(...produced);
+      halt = produced.some(r => r.haltsRun === true);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       results.push({ label: 'Unknown', status: 'fail', message: `check crashed — ${msg}` });
     }
+    // After the push, never before it: the row that stops the run is the one
+    // row that has to reach the report. See `CheckResult.haltsRun`.
+    if (halt) break;
   }
 
   // --fix-project-keys: auto-repair the project-key collision warning
