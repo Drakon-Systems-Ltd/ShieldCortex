@@ -19,6 +19,9 @@
 
 Your AI agent forgets useful context, stores untrusted context, and then confidently builds on both. ShieldCortex fixes that by giving agents memory you can inspect, review, and defend before it poisons future decisions.
 
+> [!WARNING]
+> **ShieldCortex 5.0 requires Node 22.14+ or Node 24.** Node 20 is no longer supported — `npm install` will refuse. Read [Upgrading to 5.0](docs/UPGRADING-5.md) **before** you update. Action Guard stays off by default; enable it deliberately.
+
 ```bash
 npm install -g shieldcortex
 shieldcortex quickstart
@@ -192,6 +195,11 @@ steps:
 <br>
 
 ## 🚀 Quick Start
+
+### Requirements
+
+- **Node 22.14+ LTS, or Node 24.** Node 20 is not supported in 5.0. Node 23 never was. Check with `node -v` before you install.
+- Full upgrade notes, including what breaks and how to stay on 4.x: [Upgrading to 5.0](docs/UPGRADING-5.md).
 
 ### Fastest path
 

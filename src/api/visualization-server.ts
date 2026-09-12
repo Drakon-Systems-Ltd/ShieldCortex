@@ -107,9 +107,256 @@ export function normaliseDefenceSource(raw: unknown): DefenceSource {
   return { type, identifier };
 }
 
+/**
+ * Catch-all path for unmatched `/api/...` requests.
+ *
+ * express 5 carries path-to-regexp v8, which rejects the bare `*` this used to
+ * be written as (`'/api/*'` now throws at registration). `'/api/{*splat}'` is
+ * the express 5 spelling with the same match set as express 4's `'/api/*'`:
+ * every path under `/api/` including the bare `/api/`, while `/api` and
+ * `/apix` still fall through to the dashboard shell. `'/api/*splat'` is NOT
+ * equivalent — it misses `/api/`. Pinned by express5-api-routing.test.ts.
+ */
+const API_CATCH_ALL_PATH = '/api/{*splat}';
+
+/**
+ * The one normalised view of a request path that the auth gate, the public-path
+ * exemptions and the API catch-all all reason over (#474).
+ *
+ * express route matching is case-INSENSITIVE by default, so `/API/memories`
+ * reaches the `/api/memories` handler. The auth gate used to ask
+ * `req.path.startsWith('/api/')` — a case-SENSITIVE question about a
+ * case-insensitive router — and so every uppercase spelling of every protected
+ * route answered with data and no `Authorization` header at all: `/API/memories`
+ * returned the memory list, `/API/gated-stats` returned the counters. Two checks
+ * over the same request must not be allowed to disagree, so there is exactly one
+ * definition of "this is an API path" here and both use it.
+ *
+ * Lowercasing is the right normalisation because it is exactly the equivalence
+ * express applies: path-to-regexp compiles the route to a RegExp with the `i`
+ * flag and no `u` flag, whose canonicalisation never folds a non-ASCII code
+ * point onto an ASCII one. Turning on `case sensitive routing` instead would
+ * change the behaviour of every route in the app and would still leave the gate
+ * and the router asking different questions.
+ *
+ * Percent-encoding is untouched: `%2E` lowercases to the literal triple `%2e`
+ * and is never decoded, so normalising cannot manufacture a traversal that the
+ * raw path did not already contain.
+ */
+function apiPathView(path: string): string {
+  return path.toLowerCase();
+}
+
+/**
+ * Does this request address the JSON API surface, in any spelling express will
+ * route to it? This is the set the auth gate protects and, by construction, the
+ * set `API_CATCH_ALL_PATH` matches — `api-auth-path-normalisation.test.ts` pins
+ * the two as equal against a real express router.
+ */
+function isApiRequestPath(path: string): boolean {
+  return apiPathView(path).startsWith('/api/');
+}
+
+/**
+ * Is this one of the endpoints that never needs auth, in any spelling express
+ * will route to it? Entries in `publicPaths` are lowercase with no trailing
+ * slash.
+ *
+ * The exemption has to match the router's equivalence exactly — no wider (that
+ * is a bypass) and no narrower (that is `/api/health/` answering 401 while the
+ * identical handler answers 200 one slash earlier).
+ */
+function isPublicApiPath(path: string, publicPaths: readonly string[]): boolean {
+  const view = apiPathView(path);
+  // express's non-strict routing accepts exactly ONE optional trailing slash:
+  // `/api/health/` reaches the `/api/health` handler, `/api/health//` does not.
+  const canonical =
+    view.length > 1 && view.endsWith('/') && !view.endsWith('//') ? view.slice(0, -1) : view;
+  return publicPaths.includes(canonical);
+}
+
+/**
+ * Restore express-4 `req.body` semantics for requests no body parser claimed
+ * (#466, express 4 -> 5).
+ *
+ * body-parser 1.x (express 4) initialised `req.body` to `{}` for every request
+ * and only replaced it when a parser matched. body-parser 2.x (express 5) leaves
+ * it `undefined` instead. Nothing in this server sends a body-less request down
+ * a different path on purpose, but ~20 mutating handlers destructure `req.body`
+ * directly, so on express 5 any client that omits `Content-Type:
+ * application/json` turned a clean `400 {"error":"... is required"}` into a
+ * `500 TypeError: Cannot destructure property '...' of 'req.body' as it is
+ * undefined` — measured on the booted server at e9a8e1a8 for `/api/v1/scan`,
+ * `/api/sql`, `/api/memories`, `/api/iron-dome/activate`, `/api/cloud/config`,
+ * `PATCH /api/xray/findings/:id` and 14 more.
+ *
+ * One middleware rather than 30 guards at the destructuring sites: the defect is
+ * a single changed default, the handlers were all correct against the default
+ * they were written for, and 30 `?? {}` patches would leave the 31st handler —
+ * the next one anybody writes — carrying the bug again. Registered immediately
+ * after the parsers so every route, present and future, sees the same shape.
+ *
+ * It cannot mask a parse failure: a body that IS present but malformed makes
+ * `express.json()` call `next(err)`, which skips the rest of the chain including
+ * this, and lands on `apiJsonErrorHandler`.
+ */
+function defaultEmptyBody(req: Request, _res: Response, next: (err?: unknown) => void): void {
+  if (req.body === undefined) {
+    req.body = {};
+  }
+  next();
+}
+
+/**
+ * A client-error status carried by an express error, or `undefined`.
+ *
+ * `http-errors` — which body-parser uses — tags its errors with `status` and
+ * `statusCode`. Those are genuine 4xx client errors (malformed JSON body 400,
+ * oversized payload 413, unsupported charset 415) and express 5's default
+ * handler already answers them with the right code; only the HTML stack-trace
+ * body is wrong. Honouring the tag keeps the status honest, because reporting a
+ * caller's malformed JSON as a 500 would be a fresh defect of its own.
+ */
+function clientErrorStatus(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const tagged = err as { status?: unknown; statusCode?: unknown };
+  const raw = typeof tagged.status === 'number' ? tagged.status : tagged.statusCode;
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) return undefined;
+  return raw >= 400 && raw <= 499 ? raw : undefined;
+}
+
+/** The exact response a server-authored error asks the API plane to send. */
+interface ApiErrorResponse {
+  status: number;
+  error: string;
+  code: string;
+}
+
+/**
+ * The response a server-authored error names for the API plane, or `undefined`.
+ *
+ * `clientErrorStatus` gets the status right for anything `http-errors` tagged,
+ * but every one of those answers `{"error":"Bad request","code":"BAD_REQUEST"}`
+ * — which is the wrong thing to tell a caller whose ORIGIN was refused. A CORS
+ * refusal is a decision about the caller, knowable to them, and naming it costs
+ * nothing. So an error raised by THIS module may carry the exact response to
+ * send.
+ *
+ * It carries its own status rather than an `http-errors` `status` tag on
+ * purpose. express hands non-API errors to `finalhandler`, which reads
+ * `err.status` too — so tagging the error would ALSO move what the dashboard
+ * shell answers for a rejected origin, and this change is scoped to the JSON
+ * plane exactly as the rest of `apiJsonErrorHandler` is. Non-API paths keep the
+ * status they had.
+ *
+ * `apiError` is only ever attached here, and only ever as a module-level
+ * literal: nothing from the request is copied into one, so honouring it cannot
+ * become an echo of attacker-controlled text (the rejected origin goes to the
+ * server log, in the error's message, and no further). No dependency sets the
+ * key — body-parser and http-errors tag `status`/`statusCode`/`type`/`expose`.
+ */
+function apiAuthoredResponse(err: unknown): ApiErrorResponse | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const authored = (err as { apiError?: unknown }).apiError;
+  if (typeof authored !== 'object' || authored === null) return undefined;
+  const { status, error, code } = authored as { status?: unknown; error?: unknown; code?: unknown };
+  if (typeof status !== 'number' || !Number.isInteger(status) || status < 400 || status > 599) {
+    return undefined;
+  }
+  if (typeof error !== 'string' || typeof code !== 'string') return undefined;
+  return { status, error, code };
+}
+
+/** What a caller whose origin is not allowed is told. A literal, deliberately. */
+const CORS_DENIED_RESPONSE: ApiErrorResponse = {
+  status: 403,
+  error: 'Origin not allowed',
+  code: 'CORS_DENIED',
+};
+
+/**
+ * The error the CORS origin callback refuses with (#466).
+ *
+ * `cors` has no way to answer a request itself: denying means `callback(err)`,
+ * which becomes `next(err)`. A bare `Error` carries no status and no code, so a
+ * refused origin was reported as `500 {"error":"Internal server error","code":
+ * "INTERNAL"}` — a policy decision dressed up as a server fault, measured on the
+ * booted server for `GET /api/health` with `Origin: http://evil.example`. On the
+ * API plane it is now `403 {"error":"Origin not allowed","code":"CORS_DENIED"}`.
+ *
+ * The message names the origin for the operator's log; `apiError` does not.
+ */
+function corsDeniedError(origin: string): Error {
+  return Object.assign(new Error(`Origin ${origin} not allowed by CORS`), {
+    apiError: CORS_DENIED_RESPONSE,
+  });
+}
+
+/**
+ * Terminal error handler for the JSON API plane (#466).
+ *
+ * express's default error handler answers with an HTML page whose `<pre>` is the
+ * error's stack trace. On this server that meant a `PATCH /api/xray/findings/1`
+ * with no body replied `500 text/html` containing absolute filesystem paths for
+ * the source tree AND `node_modules` — in an API whose catch-all exists
+ * specifically so unmatched routes return JSON instead of express HTML. The same
+ * leak reached a `400` for any malformed JSON body, on every path.
+ *
+ * So: for anything `isApiRequestPath` calls API — the one definition the auth
+ * gate and the catch-all already share (#474) — the response is JSON with no
+ * detail beyond the class of failure, and the stack goes to the server log
+ * where the operator, not the caller, can read it. Non-API paths are handed back
+ * to express so the dashboard shell keeps its default behaviour.
+ *
+ * Registered AFTER the catch-all, which is after every route: express dispatches
+ * error middleware in registration order, so anything registered earlier would
+ * only cover the routes declared above it.
+ */
+function apiJsonErrorHandler(
+  err: unknown,
+  req: Request,
+  res: Response,
+  next: (err?: unknown) => void,
+): void {
+  if (!isApiRequestPath(req.path)) {
+    next(err);
+    return;
+  }
+  // Server-side only. `req.originalUrl` is attacker-controlled, so it is logged
+  // but never echoed.
+  console.error(`[api] unhandled error on ${req.method} ${req.originalUrl}:`, err);
+  // Something already started writing a response; there is no status left to
+  // set, and express's default handler is the only thing that can destroy the
+  // socket cleanly.
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  const authored = apiAuthoredResponse(err);
+  if (authored !== undefined) {
+    res.status(authored.status).json({ error: authored.error, code: authored.code });
+    return;
+  }
+  const clientStatus = clientErrorStatus(err);
+  if (clientStatus !== undefined) {
+    res.status(clientStatus).json({ error: 'Bad request', code: 'BAD_REQUEST' });
+    return;
+  }
+  res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
+}
+
 export const __test__ = {
   ALLOWED_DEFENCE_SOURCE_TYPES,
   MAX_SOURCE_IDENTIFIER_LENGTH,
+  API_CATCH_ALL_PATH,
+  apiPathView,
+  isApiRequestPath,
+  isPublicApiPath,
+  defaultEmptyBody,
+  apiJsonErrorHandler,
+  apiAuthoredResponse,
+  corsDeniedError,
+  CORS_DENIED_RESPONSE,
 };
 
 /**
@@ -349,6 +596,25 @@ export function startVisualizationServer(dbPath?: string): void {
   initDatabase(dbPath || DEFAULT_CONFIG.dbPath);
 
   const app = express();
+  // #466 — the dashboard shell keeps express's default error PAGE, but not the
+  // stack trace inside it. express hands non-API errors to `finalhandler`, which
+  // renders `err.stack` into the page unless the `env` setting reads
+  // 'production' — and `env` is the only thing it consults (`opts.env`, which
+  // express fills from `app.get('env')` per request; `NODE_ENV` is merely where
+  // express reads the initial value, and nothing in this server's startup path
+  // sets it). So a real install answered an unauthenticated `POST /` carrying a
+  // truncated JSON body with a 400 HTML page containing the absolute install
+  // path, the `node_modules` layout and body-parser's internals.
+  //
+  // One setting rather than a second error handler: a handler would have to
+  // re-derive finalhandler's status selection and re-render its page to change
+  // only the part that is wrong. Statuses are untouched — the page keeps its
+  // code and loses the trace — and express's own error LOG still prints the
+  // stack server-side, where the operator and not the caller reads it. Nothing
+  // else reads this setting: express's only other uses are that log and the
+  // `view cache` default, which is fixed at construction from `NODE_ENV` and
+  // moot here because the server registers no views.
+  app.set('env', 'production');
   const server = createServer(app);
 
   // Middleware — CORS restricted to localhost by default
@@ -362,11 +628,15 @@ export function startVisualizationServer(dbPath?: string): void {
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error(`Origin ${origin} not allowed by CORS`));
+        callback(corsDeniedError(origin));
       }
     },
   }));
   app.use(express.json());
+  // #466 — immediately after the last body parser, so every handler below sees
+  // `req.body` as the `{}` express 4 guaranteed rather than express 5's
+  // `undefined`. See defaultEmptyBody.
+  app.use(defaultEmptyBody);
 
   // ── Session Auth ────────────────────────────────────────
   // Generate per-session token (written to ~/.shieldcortex/.api-token)
@@ -377,22 +647,34 @@ export function startVisualizationServer(dbPath?: string): void {
   // is loopback-only (never on non-loopback network binds).
   const HOST = process.env.SHIELDCORTEX_HOST || '127.0.0.1';
   const bindLoopback = isLoopbackHost(HOST);
-  // Auth middleware: require Bearer token on all requests except public paths
+  // Auth middleware: require Bearer token on all requests except public paths.
+  // #474 — both the prefix test and the exemption run over the normalised path
+  // view, and the only method left unauthenticated is the one CORS genuinely
+  // needs, so every spelling AND every method express routes to a protected
+  // handler is gated.
   const publicPaths = bindLoopback
     ? ['/api/health', '/api/auth/session-token']
     : ['/api/health'];
   app.use((req: Request, res: Response, next) => {
     // Dashboard pages and static assets must load before the client can fetch
     // its API session token. Protect API routes, not the Next.js shell.
-    if (!req.path.startsWith('/api/')) {
+    if (!isApiRequestPath(req.path)) {
       return next();
     }
-    // Allow OPTIONS/HEAD for CORS preflight
-    if (['OPTIONS', 'HEAD'].includes(req.method)) {
+    // CORS preflight, which is OPTIONS and nothing else. `HEAD` was exempt here
+    // "for CORS preflight" too, and preflight has never been a HEAD: express
+    // routes HEAD to the GET handler, so the handler RAN unauthenticated and
+    // Node dropped only the body — leaving a `Content-Length` and a
+    // content-derived `ETag` byte-identical to the authenticated GET. 60 of 125
+    // routes answered 200 that way, and `HEAD /api/memories?mode=search&query=…`
+    // made the store searchable one content-length at a time, including on a
+    // non-loopback bind where the token is the only defence because
+    // `/api/auth/session-token` is deliberately not registered there (#474).
+    if (req.method === 'OPTIONS') {
       return next();
     }
     // Public endpoints that never need auth
-    if (publicPaths.includes(req.path)) {
+    if (isPublicApiPath(req.path, publicPaths)) {
       return next();
     }
     const authHeader = req.headers.authorization;
@@ -913,9 +1195,15 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Catch-all for unmatched API routes — return JSON instead of Express HTML 404
-  app.all('/api/*', (_req: Request, res: Response) => {
+  app.all(API_CATCH_ALL_PATH, (_req: Request, res: Response) => {
     res.status(404).json({ error: 'Not found' });
   });
+
+  // #466 — and the same for an unmatched ERROR: JSON instead of express's HTML
+  // stack-trace page, which leaked absolute filesystem paths. Last registration,
+  // because express dispatches error middleware in registration order and this
+  // one has to be reachable from every route above. See apiJsonErrorHandler.
+  app.use(apiJsonErrorHandler);
 
   // ============================================
   // WEBSOCKET SERVER

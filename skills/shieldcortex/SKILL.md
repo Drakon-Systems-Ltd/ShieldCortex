@@ -13,8 +13,7 @@ metadata:
   npm: https://www.npmjs.com/package/shieldcortex
   verified_publisher: Drakon Systems Ltd
   publisher_github: https://github.com/Drakon-Systems-Ltd
-  npm_audit: clean
-  snyk: no-known-vulnerabilities
+  npm_audit: "0 unwaived production advisories; 2 waived (sharp: GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c, reachable only via the optional @huggingface/transformers) - see docs/security/audit-waivers.md"
   downloads: 11K+/month
 install:
   command: shieldcortex quickstart

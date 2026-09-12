@@ -150,6 +150,7 @@ function verifyNativeModule() {
     console.warn('\x1b[33m[shieldcortex] ⚠  Database engine (better-sqlite3) failed to load.\x1b[0m');
     console.warn(`[shieldcortex] Node ${process.version} (module ABI ${process.versions.modules}) could not load the database binding.`);
     console.warn('[shieldcortex] Use Node 22.14+ LTS or Node 24+ (not Node 23), then reinstall ShieldCortex via the same package route so npm restores the packaged prebuild.');
+    console.warn('[shieldcortex] ShieldCortex 5 dropped Node 20 — see https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/UPGRADING-5.md');
     console.warn('[shieldcortex] For a genuinely missing/source-only binding (not an unloadable prebuilds/*.node file), `shieldcortex repair` or this command may help:');
     console.warn(`[shieldcortex]   cd "${betterSqliteDir}" && npm run build-release`);
     console.warn('[shieldcortex] A source build cannot safely override an unloadable packaged prebuild in this release.');
@@ -263,6 +264,10 @@ if (isGlobal && !isCI) {
   console.log('\x1b[36m│\x1b[0m  Your conversations will remember context across     \x1b[36m│\x1b[0m');
   console.log('\x1b[36m│\x1b[0m  sessions, compactions, and projects.                \x1b[36m│\x1b[0m');
   console.log('\x1b[36m╰───────────────────────────────────────────────────────╯\x1b[0m');
+  console.log('');
+  console.log('[shieldcortex] 5.0 requires Node 22.14+ or Node 24 (Node 20 is gone).');
+  console.log('[shieldcortex] Action Guard is off by default; enable it deliberately.');
+  console.log('[shieldcortex] Before updating from 4.x: https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/UPGRADING-5.md');
   console.log('');
   if (isFreshInstall) {
     console.log('\x1b[2mFresh install — flagship integrations enabled by default:\x1b[0m');

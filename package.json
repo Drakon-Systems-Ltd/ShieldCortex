@@ -80,6 +80,7 @@
     "bench": "tsx benchmark/longmemeval/run.ts",
     "bench:smoke": "SHIELDCORTEX_SKIP_EMBEDDINGS=1 tsx benchmark/longmemeval/run.ts --quiet",
     "audit:security": "npm audit --audit-level=moderate",
+    "audit:release": "node scripts/lab/audit-report.mjs",
     "prepack": "node scripts/ensure-bin-executable.mjs",
     "release:clawhub": "node scripts/clawhub-sync.mjs",
     "release:clawhub:check": "node scripts/clawhub-sync.mjs --check",
@@ -140,7 +141,7 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^13.0.3",
     "cors": "^2.8.5",
-    "express": "^4.21.0",
+    "express": "^5.2.1",
     "safe-regex2": "^5.0.0",
     "semver": "^7.7.0",
     "ws": "^8.18.0",
@@ -184,6 +185,8 @@
     "scripts/lib/capture-distill.mjs",
     "scripts/lib/openclaw-distill-auth.mjs",
     "scripts/lib/openclaw-extract.mjs",
-    "templates/work-lanes"
+    "templates/work-lanes",
+    "docs/UPGRADING-5.md",
+    "docs/security/audit-waivers.md"
   ]
 }
