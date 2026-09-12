@@ -18,6 +18,84 @@ function pickNumber(envName, fallback) {
   return fallback;
 }
 
+/**
+ * The longest delay a timer can hold, and so the longest deadline this accepts.
+ *
+ * `setTimeout()` keeps its delay in a signed 32-bit integer: a delay above
+ * 2^31-1 ms (~24.9 days) is converted to 1ms. An over-range deadline is
+ * therefore not a very long deadline at all — it is an INSTANT one, i.e. the
+ * same defect as `0` wearing a number that a finite-and-positive check waves
+ * through. On the embed knob it fails every embed in the process before the
+ * worker can answer; on the disposal knob it expires before `disposeModel()`
+ * can possibly have finished, reports a wedge that did not happen and latches
+ * the rest of the run off a working embedder.
+ *
+ * Node does not export this bound — `TIMEOUT_MAX` is internal to the timers
+ * implementation — so it is spelled out here, and pinned by the tests.
+ */
+const MAX_DEADLINE_MS = 2_147_483_647;
+
+/**
+ * Why a value is not a deadline. `null` when it is one.
+ *
+ * A short CLASS, deliberately, because this is the only thing said out loud
+ * about the value — see {@link pickDeadlineMs}.
+ */
+function deadlineFault(parsed) {
+  if (Number.isNaN(parsed)) return 'not a number';
+  if (!Number.isFinite(parsed)) return 'not finite';
+  if (parsed <= 0) return 'not positive';
+  if (parsed > MAX_DEADLINE_MS) return 'beyond the maximum timer delay';
+  return null;
+}
+
+/**
+ * A DEADLINE read from the environment, or the documented default.
+ *
+ * Separate from pickNumber() because the two have opposite failure modes. A
+ * threshold of 0 is a meaningful (if aggressive) setting; a deadline of 0, a
+ * negative number, a NaN or a delay past {@link MAX_DEADLINE_MS} is not a
+ * setting at all — it is a timer that fires in the turn it is armed, which
+ * turns "bound this work" into "never let this work happen".
+ * `SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS=0` would time every embed out instantly,
+ * and `SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS=0` would give up on a
+ * shutdown that had not been given a chance to start.
+ *
+ * A typo, an empty export, or a shell that resolved an unset variable to `0`
+ * therefore falls back to the documented default, and says so once: silently
+ * ignoring an operator's explicit setting is its own trap, and this is the
+ * deadline that keeps `process.exit(0)` reachable.
+ *
+ * A small POSITIVE value inside the range is honoured as written. "Time out
+ * almost immediately" is a coherent thing to ask for — the tests here ask for
+ * it — and clamping it to a floor of our choosing would be us overruling a
+ * valid instruction.
+ *
+ * The diagnostic names the VARIABLE, the class of the problem and the fallback,
+ * and never the value. This runs at module import, before any embedding gate,
+ * in a process whose stderr lands in a hook log — so it prints even for a run
+ * that skips embeddings entirely. A deadline export is an ordinary place for a
+ * shell to spill something else into (a paste into the wrong name, a credential
+ * in an inherited environment), and echoing the value back would publish it.
+ * Truncating it would not help: truncation is not redaction, and a cut inside
+ * an escape produces a mangled line on top of the disclosure. Everything an
+ * operator needs to fix the setting is in the three things above.
+ */
+function pickDeadlineMs(envName, fallback) {
+  const raw = process.env[envName];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  const fault = deadlineFault(parsed);
+  if (fault) {
+    process.stderr.write(
+      `[shieldcortex save-memory] ignoring ${envName} (${fault}) — a deadline must be a finite `
+      + `positive number of milliseconds no greater than ${MAX_DEADLINE_MS}ms; using ${fallback}ms\n`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
 // Title-Jaccard PRE-GATE: only pairs whose titles already overlap this much get
 // a content comparison (bounds cost + avoids merging unrelated notes).
 const DEDUP_TITLE_JACCARD = pickNumber('SHIELDCORTEX_DEDUP_TITLE_JACCARD', 0.6);
@@ -93,6 +171,35 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     return;
   }
 
+  // L2 provenance floor, BEFORE the pipeline.
+  //
+  // Everything that reaches here is an AUTO-captured candidate: text the
+  // extractor lifted out of a transcript, with no operator in the loop. The
+  // pipeline below scores it as `hook` — a trusted integration identity — and
+  // that is correct about WHO is writing, but it says nothing about where the
+  // words came from. An agent-directed imperative in that text ("persist this
+  // as a standing order") is not a fact somebody asked to remember; it is data
+  // trying to become a standing instruction, and storing it is memory
+  // poisoning with the hook's own trust attached.
+  //
+  // So the CANDIDATE is judged under `memory_candidate` while the WRITER stays
+  // `hook`. The two labels answer different questions and neither is a
+  // substitute for the other. A hit refuses the write outright rather than
+  // quarantining it: quarantine is for content admitted far enough to be worth
+  // reviewing, and an auto-captured injection shape has no reviewer waiting.
+  // Title AND content: a title is stored and recalled into context exactly as
+  // content is, so screening one half examined the longer one and shipped the
+  // shorter, more quotable one.
+  const refusal = screenMemoryCandidate(defence, memory.content, memory.title);
+  if (refusal) {
+    writeRefusalAudit(db, project, sourceIdentifier, refusal);
+    process.stderr.write(
+      `[shieldcortex save-memory] refused (${NON_AUTHORITATIVE_INDICATOR}: `
+      + `${refusal.join(', ')}): ${memory.title}\n`,
+    );
+    return;
+  }
+
   let result;
   try {
     result = defence.runDefencePipeline(memory.content, memory.title, source, undefined, project ?? undefined, {
@@ -148,6 +255,34 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     : db;
   insertQuarantineRow(quarantineDb, memory, project, source, result);
   process.stderr.write(`[shieldcortex save-memory] ${disposition.firewallResult.toLowerCase()} (held): ${memory.title} — ${disposition.reason}\n`);
+}
+
+// ==================== Internal: provenance floor ====================
+
+/** The indicator name the firewall uses for an L2 hit. Mirrored, not guessed. */
+const NON_AUTHORITATIVE_INDICATOR = 'non_authoritative_instruction';
+
+/**
+ * Pattern names when the candidate is a non-authoritative instruction, else null.
+ *
+ * Degrades to `null` — i.e. today's behaviour, store as before — on an older
+ * dist that has no provenance policy, and on any throw. An additive floor must
+ * not turn a missing export into a refused capture: that would silently stop a
+ * working host from remembering anything the moment its dist drifted.
+ */
+function screenMemoryCandidate(defence, content, title) {
+  if (typeof defence.detectNonAuthoritativeInstruction !== 'function') return null;
+  const body = typeof content === 'string' ? content : '';
+  const head = typeof title === 'string' ? title : '';
+  const candidate = head && body ? `${head}\n${body}` : (body || head);
+  if (candidate.length === 0) return null;
+  try {
+    const nai = defence.detectNonAuthoritativeInstruction(candidate, 'memory_candidate');
+    if (!nai || !nai.detected) return null;
+    return Array.isArray(nai.patterns) ? nai.patterns : [];
+  } catch {
+    return null;
+  }
 }
 
 // ==================== Internal: writes ====================
@@ -294,14 +429,20 @@ function insertQuarantineRow(db, memory, project, source, result) {
   );
 }
 
-function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
-  // Synthetic audit row for cases where the pipeline could not run.
-  //
-  // source_attested is DELIBERATELY absent (schema default NULL): both call
-  // sites are self-inflicted states (dist build missing / pipeline threw), and
-  // an attested BLOCK here would accrue full-weight risk against the hook's
-  // own identity for a packaging problem, not an attack. Leave NULL — do not
-  // "fix" this into an accruing row.
+/**
+ * The one BLOCK row shape this file writes, for the cases the pipeline did not
+ * produce a row itself. No new sink: the same `defence_audit` table, the same
+ * columns, the same silent-on-older-schema behaviour.
+ *
+ * source_attested is DELIBERATELY absent (schema default NULL) on every call
+ * site here. The fallback sites are self-inflicted states (dist build missing /
+ * pipeline threw), and an attested BLOCK would accrue full-weight risk against
+ * the hook's own identity for a packaging problem rather than an attack. The
+ * refusal site is a claim about the CANDIDATE, not about the hook that carried
+ * it — attributing it to the hook would be the same mistake wearing a
+ * different label. Leave NULL — do not "fix" these into accruing rows.
+ */
+function writeBlockAudit(db, { project, sourceType, sourceIdentifier, reason, indicators, patterns }) {
   try {
     db.prepare(`
       INSERT INTO defence_audit (
@@ -315,13 +456,13 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
       null,
       project || null,
       new Date().toISOString(),
-      'hook',
+      sourceType,
       sourceIdentifier,
       0,
       'INTERNAL',
       0,
-      '[]',
-      '[]',
+      JSON.stringify(indicators ?? []),
+      JSON.stringify(patterns ?? []),
       reason,
       null,
       0,
@@ -330,6 +471,39 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
     // Schema may be older than the audit columns. Better silent here than
     // raising into the hook — the stderr line above carries the signal.
   }
+}
+
+function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
+  // Synthetic audit row for cases where the pipeline could not run.
+  writeBlockAudit(db, {
+    project,
+    sourceType: 'hook',
+    sourceIdentifier,
+    reason,
+    indicators: [],
+    patterns: [],
+  });
+}
+
+/**
+ * The refusal row for an L2 hit on an auto-captured candidate.
+ *
+ * `source_type` is `memory_candidate`, not `hook`: the row is the record of a
+ * CANDIDATE that was refused, and filing it under the hook's identity would
+ * attribute a transcript's content to the integration that carried it. It also
+ * keeps the new rows out of the `hook:*` risk keys that legitimate captures
+ * accrue against. The row carries names and a reason — never the refused text,
+ * which is already the part nobody wanted persisted.
+ */
+function writeRefusalAudit(db, project, sourceIdentifier, patterns) {
+  writeBlockAudit(db, {
+    project,
+    sourceType: 'memory_candidate',
+    sourceIdentifier,
+    reason: `Refused auto-capture: ${NON_AUTHORITATIVE_INDICATOR} (${patterns.join(', ')})`,
+    indicators: [NON_AUTHORITATIVE_INDICATOR],
+    patterns,
+  });
 }
 
 // ==================== Internal: embeddings (#458) ====================
@@ -349,12 +523,67 @@ function writeFallbackAudit(db, memory, project, sourceIdentifier, reason) {
 // embedding and is reported on stderr. `shieldcortex memories embed-backfill`
 // is the guaranteed-coverage path, and the doctor MEMEMB check is what makes a
 // host with a growing NULL population visible instead of silently keyword-only.
-const EMBED_TIMEOUT_MS = pickNumber('SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', 10_000);
+const EMBED_TIMEOUT_MS = pickDeadlineMs('SHIELDCORTEX_HOOK_EMBED_TIMEOUT_MS', 10_000);
+
+/**
+ * A SECOND, separate budget: how long the cleanup after that timeout may take.
+ *
+ * `disposeModel()` resolves when the embedding worker thread is actually gone,
+ * which is the honest definition and also the dangerous one here. The case
+ * that reaches this code is a wedged embed, and if what wedged it is native
+ * ONNX work — the exact thing `terminate()` has to interrupt — then this is
+ * precisely the call that may not come back. Awaiting it unbounded would leave
+ * a hook process hanging on its own cleanup, past the failure it has already
+ * reported, and its caller would never reach `process.exit(0)`.
+ *
+ * Deliberately not derived from EMBED_TIMEOUT_MS: shutting a worker down is a
+ * different operation from an inference, and an operator who shortens one has
+ * said nothing about the other. Read through {@link pickDeadlineMs}, like the
+ * embed deadline, so neither can be turned into an instant give-up by a value
+ * that is not a deadline at all.
+ */
+const EMBED_DISPOSE_TIMEOUT_MS = pickDeadlineMs('SHIELDCORTEX_HOOK_EMBED_DISPOSE_TIMEOUT_MS', 2_000);
 
 let _embedCache = null;
 let _embedCacheKey = null;
 let _warnedEmbedUnavailable = false;
 
+/**
+ * Set once this process has proven it cannot shut the embedder down.
+ *
+ * A hook run is not one row. `saveAutoExtractedMemory()` is called per extracted
+ * memory, and each call embeds inline, so the per-row bound below — embed
+ * deadline, then disposal deadline — is a per-row bound on a wedge that is not
+ * per-row. What wedges an embed is the worker thread, and the give-up path is
+ * reached precisely when that thread could not be killed: the next row's
+ * `generateEmbedding()` therefore has the same thread to wait on, times out the
+ * same way, and prints the same give-up line. N memories cost
+ * N x (embed deadline + disposal deadline), and say so N times.
+ *
+ * So the first proven wedge latches for the rest of THIS process. Later rows
+ * skip the embed step outright — no import, no cache probe, no timer — and are
+ * stored with NULL vectors, which is the same outcome they were heading for at
+ * a fraction of the wall clock. `embed-backfill` is the guaranteed-coverage
+ * path either way, so nothing is lost that was not already lost.
+ *
+ * Process-scoped by construction: a hook is a short-lived process, so this
+ * cannot outlive the run that observed the wedge.
+ */
+let _embedderWedged = false;
+
+/**
+ * The embedder, resolved by package layout — `dist/` two directories up.
+ *
+ * That resolution is also the ONLY substitution point tests get. This module
+ * carried env-gated seams for a while (a fake vector, an injected failure), and
+ * the cost was that a hook process whose environment happened to carry those
+ * keys ran test behaviour in production, skipping the SKIP_EMBEDDINGS and
+ * cache-health gates below. Fencing them behind more inherited variables only
+ * moved that boundary. They are gone: a test that needs a different embedder
+ * builds a package around a copy of this file and puts its own
+ * `dist/embeddings/*` in it (see `src/__tests__/hook-package-fixture.ts`), so
+ * nothing about a test can reach a hook the host started.
+ */
 async function loadEmbedder() {
   const here = dirname(fileURLToPath(import.meta.url));
   const distRoot = resolve(here, '..', '..', 'dist');
@@ -373,13 +602,40 @@ async function loadEmbedder() {
   return _embedCache;
 }
 
-/** Production hooks must never honour FAKE. Tests opt in with SHIELDCORTEX_TEST_SEAM=1. */
-function testEmbedSeamOpen() {
-  return process.env.SHIELDCORTEX_TEST_SEAM === '1' && process.env.SHIELDCORTEX_HOOK_EMBED_FAKE === '1';
+/**
+ * The disposal contract, borrowed from the build rather than copied here.
+ *
+ * `src/embeddings/generator.ts` owns what a disposal IS — the exact message,
+ * the `code`, and a `Symbol.for` brand — and the classifier that requires all
+ * three. This writer is a plain .mjs that cannot import TypeScript, so it loads
+ * the compiled classifier out of dist/ the first time it has an embedding
+ * failure to classify. Borrowing rather than copying is what makes the brand
+ * worth having: a local copy of the message would go on suppressing whatever
+ * happened to carry those words.
+ *
+ * Not a fallback risk: without a build the defence pipeline is unavailable and
+ * this writer drops the memory long before it embeds anything, so any embed
+ * that could produce a disposal has the build loaded already. If the import
+ * fails regardless, nothing is suppressed and a disposal prints one line —
+ * exactly the pre-fix behaviour, and the safe direction to fail in.
+ */
+let _disposalClassifier; // undefined = not looked up yet, null = unavailable
+
+async function isShutdownCancellation(err) {
+  if (_disposalClassifier === undefined) {
+    try {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const distRoot = resolve(here, '..', '..', 'dist');
+      const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'generator.js')).href);
+      _disposalClassifier = typeof mod.isWorkerDisposedError === 'function' ? mod.isWorkerDisposedError : null;
+    } catch {
+      _disposalClassifier = null;
+    }
+  }
+  return _disposalClassifier ? _disposalClassifier(err) : false;
 }
 
 async function embeddingCacheIsHealthy() {
-  if (testEmbedSeamOpen()) return true;
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const distRoot = resolve(here, '..', '..', 'dist');
@@ -406,18 +662,13 @@ async function embeddingCacheIsHealthy() {
  */
 async function embedStoredRow(db, memoryId, text) {
   if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') return;
+  // Before every other gate, including the dynamic imports: a run that has
+  // already given up on this embedder has nothing to gain by asking it again,
+  // and the row is stored whatever happens here. See {@link _embedderWedged}.
+  if (_embedderWedged) return;
   // #460 review: never download at session close. existsSync(model.onnx) is not
   // enough — a truncated file still trips worker heal + HuggingFace fetch.
   if (!(await embeddingCacheIsHealthy())) return;
-
-  if (testEmbedSeamOpen()) {
-    // Async on purpose: a sync UPDATE would pass even if the caller forgot to await.
-    await new Promise((r) => setImmediate(r));
-    const v = new Float32Array(384);
-    v[0] = 0.42;
-    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(v.buffer), memoryId);
-    return;
-  }
 
   const generateEmbedding = await loadEmbedder();
   if (!generateEmbedding) {
@@ -428,10 +679,19 @@ async function embedStoredRow(db, memoryId, text) {
     return;
   }
 
+  // The classified catch covers generateEmbedding() and NOTHING else.
+  //
+  // It used to wrap the vector check and the SQLite UPDATE as well, which made
+  // the disposal contract reach across two steps it has no business in: any
+  // post-embedding error that satisfied the classifier was read as a
+  // cancellation, and a row lost its vector with no diagnostic at all. Those
+  // two steps now run below, outside this catch, where every failure is loud
+  // whatever it looks like.
+  let embedding;
   let timer;
   let timedOut = false;
   try {
-    const embedding = await Promise.race([
+    embedding = await Promise.race([
       generateEmbedding(text),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
@@ -440,13 +700,18 @@ async function embedStoredRow(db, memoryId, text) {
         }, EMBED_TIMEOUT_MS);
       }),
     ]);
-    if (!embedding || !embedding.buffer) {
-      process.stderr.write(`[shieldcortex save-memory] embedding returned no vector for memory ${memoryId}\n`);
-      return;
-    }
-    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(embedding.buffer), memoryId);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
+    // Shutdown cancelled this embed on purpose — the disposal doing its job,
+    // not a failure. The generator's own classifier decides, and it decides on
+    // the brand rather than on the words: the timeout kill, a crash, anything
+    // that merely mentions disposal, and an ordinary Error carrying the exact
+    // sentence are all failures and still get reported below.
+    // Parity, not a live path: embeds here are serial and the only
+    // disposeModel() in this process runs below this catch, so nothing in
+    // production reaches it today. It is kept so a future concurrent disposer
+    // cannot reintroduce in the hook writer the noise the others just lost.
+    if (await isShutdownCancellation(err)) return;
     // Absent worker / explicitly disabled embeddings are configuration, not
     // failure — say it once and stay quiet, exactly as store.ts does.
     if (/Embedding worker unavailable|Embeddings disabled via/i.test(msg)) {
@@ -457,18 +722,86 @@ async function embedStoredRow(db, memoryId, text) {
       return;
     }
     process.stderr.write(`[shieldcortex save-memory] embedding failed for memory ${memoryId}: ${msg}\n`);
-    if (timedOut) {
-      try {
-        const here = dirname(fileURLToPath(import.meta.url));
-        const distRoot = resolve(here, '..', '..', 'dist');
-        const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'index.js')).href);
-        if (typeof mod.disposeModel === 'function') await mod.disposeModel();
-      } catch {
-        /* worker may never have started */
-      }
-    }
+    if (timedOut) await disposeEmbedderWithinBudget();
+    return;
   } finally {
     if (timer) clearTimeout(timer);
+  }
+
+  // Below the boundary: the embed itself succeeded, so nothing from here can
+  // truthfully be a cancellation of it. No classifier runs, deliberately — a
+  // disposal-shaped error out of the buffer getter or out of SQLite is a lost
+  // vector, and a lost vector is reported.
+  try {
+    if (!embedding || !embedding.buffer) {
+      process.stderr.write(`[shieldcortex save-memory] embedding returned no vector for memory ${memoryId}\n`);
+      return;
+    }
+    db.prepare('UPDATE memories SET embedding = ? WHERE id = ?').run(Buffer.from(embedding.buffer), memoryId);
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    process.stderr.write(`[shieldcortex save-memory] embedding failed for memory ${memoryId}: ${msg}\n`);
+  }
+}
+
+/**
+ * Shut the embedding worker down after a timeout — on a deadline of our own.
+ *
+ * The hook has already reported the failure by the time this runs, so its only
+ * job is to release the worker if it can and to get out of the way if it
+ * cannot. See {@link EMBED_DISPOSE_TIMEOUT_MS} for why "if it cannot" is a real
+ * case rather than a defensive flourish.
+ *
+ * Never throws, never leaves a timer behind, and says one line if it gave up:
+ * the caller's next statement is `process.exit(0)`, and it has to be reachable.
+ *
+ * Giving up also LATCHES (see {@link _embedderWedged}). The deadline expiring
+ * is the strongest evidence a hook run gets that the worker thread survived the
+ * kill, and every later row in this process would meet the same thread; without
+ * the latch this bound is per row and the run has no bound at all.
+ */
+async function disposeEmbedderWithinBudget() {
+  let deadline;
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const distRoot = resolve(here, '..', '..', 'dist');
+    const mod = await import(pathToFileURL(resolve(distRoot, 'embeddings', 'index.js')).href);
+    if (typeof mod.disposeModel !== 'function') return;
+
+    // Deliberately NOT unref'd, and this is the subtle half.
+    //
+    // Unref'ing it looks right — a timer that gives up should not hold a
+    // process open — but it is the one thing that stops it working. When
+    // `disposeModel()` never settles, this timer can be the only ref'd work
+    // left; unref'd, Node finds an empty loop, tears the process down on an
+    // unsettled top-level await (exit 13) and neither the diagnostic nor the
+    // caller's `process.exit(0)` is ever reached. Measured, not reasoned: that
+    // is exactly what the wedged-disposal case did with the unref in place.
+    //
+    // The bound comes from clearing it in `finally` instead, so it can outlive
+    // the race by nothing at all, and from the deadline itself being short.
+    const expired = new Promise((settle) => {
+      deadline = setTimeout(() => settle('expired'), EMBED_DISPOSE_TIMEOUT_MS);
+    });
+    const outcome = await Promise.race([
+      // Settled either way — a disposal that FAILS has still finished, and its
+      // own error is not this path's news.
+      Promise.resolve(mod.disposeModel()).then(() => 'finished', () => 'finished'),
+      expired,
+    ]);
+    if (outcome === 'expired') {
+      // Latched before the line is printed, so the line can truthfully describe
+      // what the rest of the run will do — and so it is printed once.
+      _embedderWedged = true;
+      process.stderr.write(
+        `[shieldcortex save-memory] embedding worker shutdown did not finish within ${EMBED_DISPOSE_TIMEOUT_MS}ms `
+        + '— exiting without it; skipping embeddings for the rest of this hook run\n',
+      );
+    }
+  } catch {
+    /* worker may never have started */
+  } finally {
+    if (deadline) clearTimeout(deadline);
   }
 }
 
@@ -494,14 +827,20 @@ async function loadDefenceModules(db) {
     const initUrl = pathToFileURL(resolve(distRoot, 'database', 'init.js')).href;
     const dispositionUrl = pathToFileURL(resolve(distRoot, 'defence', 'disposition.js')).href;
     const formUrl = pathToFileURL(resolve(distRoot, 'defence', 'form-classifier.js')).href;
+    const provenanceUrl = pathToFileURL(
+      resolve(distRoot, 'defence', 'firewall', 'provenance-policy.js'),
+    ).href;
 
-    const [pipelineMod, initMod, dispositionMod, formMod] = await Promise.all([
+    const [pipelineMod, initMod, dispositionMod, formMod, provenanceMod] = await Promise.all([
       import(pipelineUrl),
       import(initUrl),
       import(dispositionUrl),
       // #402 classifier; tolerate its absence on an older dist (falls back to
       // NULL content_form → fail-closed non-injectable, never a hard failure).
       import(formUrl).catch(() => ({})),
+      // L2 provenance policy; same tolerance. Absent on an older dist means no
+      // candidate screen, i.e. exactly the behaviour before this round.
+      import(provenanceUrl).catch(() => ({})),
     ]);
 
     if (typeof pipelineMod.runDefencePipeline !== 'function') return null;
@@ -512,6 +851,10 @@ async function loadDefenceModules(db) {
       runDefencePipeline: pipelineMod.runDefencePipeline,
       resolveDisposition: dispositionMod.resolveDisposition,
       classifyContentForm: typeof formMod.classifyContentForm === 'function' ? formMod.classifyContentForm : null,
+      detectNonAuthoritativeInstruction:
+        typeof provenanceMod.detectNonAuthoritativeInstruction === 'function'
+          ? provenanceMod.detectNonAuthoritativeInstruction
+          : null,
       initDatabase: initMod.initDatabase,
       isDatabaseInitialized: initMod.isDatabaseInitialized,
       getDatabase: initMod.getDatabase,

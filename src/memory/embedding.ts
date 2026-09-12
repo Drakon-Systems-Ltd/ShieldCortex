@@ -8,6 +8,7 @@
  */
 
 import { generateEmbedding, cosineSimilarity as rawCosineSimilarity, preloadModel, isModelLoaded } from '../embeddings/index.js';
+import { isWorkerDisposedError } from '../embeddings/generator.js';
 
 let initialized = false;
 let initFailed = false;
@@ -17,6 +18,19 @@ const queryEmbeddingCache = new Map<string, { embedding: Float32Array; expiresAt
 
 function isExpectedEmbeddingDisable(message: string): boolean {
   return message.includes('SHIELDCORTEX_SKIP_EMBEDDINGS=1');
+}
+
+/**
+ * Reasons this layer has nothing to report: an explicitly disabled embedder is
+ * configuration, and work `disposeModel()` cancelled is the disposal doing its
+ * job — a recall or a preload that was in flight when the server shut down is
+ * cancelled, not failed. The generator owns the disposal classifier and it
+ * requires the brand and the code as well as the whole message, so the timeout
+ * kill, a kill that failed, a crash, anything that merely mentions disposal,
+ * and the exact sentence on an ordinary Error are failures and stay loud.
+ */
+function isQuietEmbeddingOutcome(e: unknown, message: string): boolean {
+  return isWorkerDisposedError(e) || isExpectedEmbeddingDisable(message);
 }
 
 function normalizeQuery(text: string): string {
@@ -55,7 +69,7 @@ export async function initEmbeddings(): Promise<boolean> {
     return true;
   } catch (e) {
     const message = (e as Error).message;
-    if (!isExpectedEmbeddingDisable(message)) {
+    if (!isQuietEmbeddingOutcome(e, message)) {
       console.warn('[shieldcortex] Embedding init failed, vector recall disabled:', message);
     }
     initFailed = false; // Allow retry on next call
@@ -74,7 +88,7 @@ export async function embedText(text: string): Promise<Float32Array | null> {
     return embedding;
   } catch (e) {
     const message = (e as Error).message;
-    if (!isExpectedEmbeddingDisable(message)) {
+    if (!isQuietEmbeddingOutcome(e, message)) {
       console.warn('[shieldcortex] embedText failed:', message);
     }
     return null;

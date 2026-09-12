@@ -119,13 +119,19 @@ describe('hook plane attestation', () => {
     }
   });
 
-  it('the fallback audit rows stay NULL deliberately (source pin)', () => {
-    // writeFallbackAudit fires when the pipeline could not run (dist missing /
-    // pipeline throw) — self-inflicted states that must not accrue full-weight
-    // risk against the hook's own identity. Its INSERT must NOT include
-    // source_attested (schema default NULL). Textual pin on the shipped .mjs.
+  it('the synthetic audit rows stay NULL deliberately (source pin)', () => {
+    // The writer emits a synthetic BLOCK row in two situations, and NEITHER
+    // may accrue full-weight risk against the hook's own identity:
+    //   - writeFallbackAudit — the pipeline could not run (dist missing /
+    //     pipeline throw), i.e. a self-inflicted packaging state;
+    //   - writeRefusalAudit — the L2 provenance floor refused an auto-captured
+    //     candidate, which is a claim about the CANDIDATE, not about the hook
+    //     that carried it.
+    // Both route through ONE INSERT (writeBlockAudit) so the two cannot drift,
+    // and that INSERT must not carry source_attested (schema default NULL).
+    // Textual pin on the shipped .mjs.
     const src = fs.readFileSync(path.join(repoRoot, 'scripts', 'lib', 'save-memory.mjs'), 'utf-8');
-    const fnStart = src.indexOf('function writeFallbackAudit');
+    const fnStart = src.indexOf('function writeBlockAudit');
     expect(fnStart).toBeGreaterThan(-1);
     const fnBody = src.slice(fnStart, src.indexOf('\n}', fnStart));
     // The INSERT itself must not carry the column (comments may discuss it).
@@ -135,7 +141,16 @@ describe('hook plane attestation', () => {
     expect(insertStmt).not.toContain('source_attested');
     // And the deliberate-NULL decision is documented where the next editor
     // will see it, so it isn't "fixed" into an accruing row later.
-    expect(fnBody).toMatch(/DELIBERATELY absent/);
+    expect(src.slice(0, fnStart + fnBody.length)).toMatch(/DELIBERATELY absent/);
+
+    // There is exactly one INSERT into defence_audit in this file: a second
+    // one is how a call site quietly grows its own attestation.
+    expect(src.split('INSERT INTO defence_audit')).toHaveLength(2);
+    for (const caller of ['function writeFallbackAudit', 'function writeRefusalAudit']) {
+      const start = src.indexOf(caller);
+      expect(start).toBeGreaterThan(-1);
+      expect(src.slice(start, src.indexOf('\n}', start))).toContain('writeBlockAudit(db, {');
+    }
   });
 
   it('emitRecallAudit stamps attested=1 (hook:recall-defence is a code literal)', () => {

@@ -34,6 +34,21 @@ export { scoreSource, filterByTrust } from './trust/index.js';
 
 // Firewall
 export { analyzeFirewall } from './firewall/index.js';
+// L2 provenance policy — exported so out-of-process ingresses (the OpenClaw
+// realtime plugin, the memory-capture hook writer) apply the SAME floor the
+// in-process firewall does, rather than growing a second copy of it.
+export {
+  describeProvenance,
+  detectNonAuthoritativeInstruction,
+  isProvenanceLabel,
+  isTrustedProvenance,
+  isUntrustedDataOrigin,
+  NAI_PATTERN,
+  PROVENANCE_LABELS,
+  TRUSTED_PROVENANCE_SOURCES,
+  UNTRUSTED_DATA_ORIGIN_SOURCES,
+} from './firewall/index.js';
+export type { NonAuthoritativeInstructionResult, NonAuthoritativePattern } from './firewall/index.js';
 
 // Sensitivity
 export { classifySensitivity, redactContent, redactForDisplay } from './sensitivity/index.js';

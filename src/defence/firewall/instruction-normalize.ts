@@ -87,6 +87,17 @@ export function foldLeetSpeak(input: string): string {
 }
 
 /**
+ * Strip the invisible formatting marks, and nothing else.
+ *
+ * Exported so a caller that must PRESERVE layout (the L2 provenance policy
+ * reads fences, indentation and list markers, so it cannot use the whitespace-
+ * collapsing fold below) still shares one list of what counts as invisible.
+ */
+export function stripZeroWidthAndBidi(input: string): string {
+  return input.replace(ZERO_WIDTH_AND_BIDI, '');
+}
+
+/**
  * Full normalisation fold for matching. Order matters:
  *   1. strip zero-width / bidi marks (they hide between any two characters)
  *   2. NFKC + cross-script confusable fold (existing `foldConfusables`)
@@ -96,7 +107,7 @@ export function foldLeetSpeak(input: string): string {
  * Leet folding is NOT applied here — see `instructionMatchVariants`.
  */
 export function normalizeInstructionText(input: string): string {
-  return foldConfusables(input.replace(ZERO_WIDTH_AND_BIDI, ''))
+  return foldConfusables(stripZeroWidthAndBidi(input))
     .replace(PUNCTUATION_RUN, ' ')
     .replace(/\s+/g, ' ')
     .trim();

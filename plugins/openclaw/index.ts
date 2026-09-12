@@ -35,6 +35,8 @@ import { createRequire } from "node:module";
 import { readConversationAccess, describeRegisteredHooks } from './conversation-access.js';
 import { createSessionTaintStore } from './session-taint.js';
 import { isTaintingScanSummary, severityFromScanSummary } from './scan-taint-policy.js';
+import { labelLlmInput } from './provenance.js';
+import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
@@ -69,6 +71,12 @@ type DefenceModule = {
     summary?: string;
     injection: { clean: boolean; riskLevel: string; detections: unknown[] };
   };
+  /** L2 provenance floor. Optional: an older installed dist does not have it,
+   *  and its absence must degrade to today's behaviour (no L2), never throw. */
+  detectNonAuthoritativeInstruction?: (
+    content: string,
+    sourceType: string,
+  ) => { detected: boolean; patterns: string[] };
   /** #225 sink: the notify transport shared with the Action Guard (#143).
    *  Every member is optional — an older installed dist won't have them, and
    *  the guard must degrade to a loud log rather than fail. The field names
@@ -369,8 +377,11 @@ export function __resetConfigStateForTest(): void {
   _config = null;
   _configOverride = null;
   _lastShieldConfigRef = null;
+  _provenanceUndeclared = 0;
+  _l2Degraded = 0;
   // Re-arm the once-per-load config-failure warning (#226).
   _shieldConfigLoadFailureLogged = false;
+  _l2DegradedLogged = false;
   _registered = false;
   _beforeToolCallRegistered = false;
   _registrationError = null;
@@ -526,6 +537,11 @@ export interface ConversationScanResult {
   /** Failure detail, for the audit row and the operator alert. Never contains
    *  scanned content. */
   error?: string;
+  /** The origin this text was scanned UNDER, when the caller declared one.
+   *  A closed-set label, never content. Absent = the caller did not declare. */
+  provenance?: PluginProvenanceLabel;
+  /** L2 pattern names, when the provenance floor fired. Names only. */
+  nonAuthoritativePatterns?: string[];
 }
 
 export interface ConversationDecision {
@@ -1814,6 +1830,61 @@ function applyPluginConfigOverride(api: PluginApi): void {
  */
 let _shieldConfigLoadFailureLogged = false;
 
+/**
+ * How many texts this plugin load has scanned WITHOUT being able to declare
+ * where they came from.
+ *
+ * Surfaced by `shieldcortex-status`, because it is the one number that tells
+ * an operator the provenance layer is not doing its job on their host: a
+ * non-zero count means the event shape this gateway sends is not one
+ * `labelLlmInput` recognises, so those texts kept the pre-L2 path. It is a
+ * COUNT of texts, never the texts. Process-global for the life of the plugin
+ * load, like the other counters here; a gateway restart resets it.
+ */
+let _provenanceUndeclared = 0;
+
+/** Test seam: the undeclared-provenance count for this plugin load. */
+export function __getProvenanceUndeclaredCountForTest(): number {
+  return _provenanceUndeclared;
+}
+
+/**
+ * How many texts this plugin load scanned with a DECLARED origin but no L2.
+ *
+ * A separate number from L1 availability on purpose (#r2/B8): the base
+ * scanner and the provenance floor fail independently, and "conversation
+ * scanning is available" was reporting true while the floor was silently
+ * absent — a missing export on an older installed dist, a detector that
+ * threw, or the MCP fallback, which has no local policy to ask and never
+ * could have applied L2. Fail-open behaviour is unchanged; what changes is
+ * that the degrade is now visible instead of reading as clean.
+ */
+let _l2Degraded = 0;
+let _l2DegradedLogged = false;
+
+/** Test seam: the L2-degraded count for this plugin load. */
+export function __getL2DegradedCountForTest(): number {
+  return _l2Degraded;
+}
+
+/**
+ * Count one L2-less scan, and say so ONCE per plugin load.
+ *
+ * Bounded like every other warning here: one line, a fixed reason from this
+ * file (never a transport string, never content), and the counter carries the
+ * rest so a per-turn degrade cannot become per-turn log spam.
+ */
+function noteL2Degraded(reason: string): void {
+  _l2Degraded += 1;
+  if (_l2DegradedLogged) return;
+  _l2DegradedLogged = true;
+  console.warn(
+    `[shieldcortex] ⚠️ provenance floor (L2) unavailable — ${reason}. Content with a declared ` +
+    'origin was judged by the base scanner alone; L1 is unaffected and nothing is blocked by ' +
+    'this. (Logged once per plugin load; the count is in shieldcortex-status.)',
+  );
+}
+
 async function loadConfig(): Promise<SCConfig> {
   let shieldConfigRaw: unknown;
   try {
@@ -1891,7 +1962,69 @@ function parseScanResponse(response: string): { clean: boolean; summary: string 
  * caller audits it, alerts on it, and doctor/status report the plane as
  * unavailable rather than protected.
  */
-export async function scanRealtimeContent(text: string): Promise<ConversationScanResult> {
+/**
+ * The L2 provenance floor, applied to a text whose origin the caller declared.
+ *
+ * Returns names, never content. Fails OPEN in exactly two cases, both of which
+ * are "the installed package predates L2" rather than "this text is fine": the
+ * export is missing, or it threw. Both leave behaviour exactly as it was
+ * before this round, which is the only safe degrade for an additive floor — an
+ * older dist must not start erroring every turn. What is NO LONGER silent is
+ * the degrade itself: each one is counted and reported once per load, because
+ * silent-clean made an absent floor indistinguishable from a clean verdict.
+ *
+ * WHY THIS IS AN INDICATOR AND NOT A LEVER (Opus nit 4, load-bearing).
+ * `handleBeforeAgentRun` — the only enforcing hook — calls `scanWithDeadline`,
+ * which calls `scanRealtimeContent` with NO provenance argument. This function
+ * therefore returns `[]` on the gate path, so an L2 hit can never reach
+ * `evaluateConversationRun`, which is what would block a `clean:false` verdict
+ * under posture `enforce`. L2 reaches the observation hook and the audit row
+ * and stops there. That is a fact about the call graph, not a convention: if
+ * a future change passes provenance into the gate, L2 becomes an enforcement
+ * lever the same day, and this comment is where that shows up.
+ */
+function applyProvenanceFloor(
+  mod: DefenceModule | null,
+  text: string,
+  /** `memory_candidate` is not an llm_input label: it is the question the
+   *  auto-memory paths ask about text they are ABOUT TO WRITE. */
+  provenance: PluginProvenanceLabel | 'memory_candidate' | undefined,
+): string[] {
+  // No declared origin is not a degrade: there was no L2 question to ask.
+  if (!provenance) return [];
+  if (!mod || typeof mod.detectNonAuthoritativeInstruction !== 'function') {
+    noteL2Degraded('the installed shieldcortex package has no detectNonAuthoritativeInstruction export');
+    return [];
+  }
+  try {
+    const nai = mod.detectNonAuthoritativeInstruction(text, provenance);
+    return nai?.detected && Array.isArray(nai.patterns) ? [...nai.patterns] : [];
+  } catch {
+    noteL2Degraded('the provenance detector threw');
+    return [];
+  }
+}
+
+/**
+ * The L2 half of a summary.
+ *
+ * Deliberately worded so `isTaintingScanSummary` does NOT match it: no
+ * severity word, no "threat", no "N detections". L2 adds an INDICATOR to this
+ * round, not a new enforcement lever — session taint escalates the Action
+ * Guard, and arming that off a newly-widened detector is a behaviour change
+ * this work is explicitly not making. A text that ALSO trips the base scanner
+ * still carries that scanner's own summary, so it still taints exactly as it
+ * did before.
+ */
+function nonAuthoritativeSummary(provenance: PluginProvenanceLabel, patterns: string[]): string {
+  return `non_authoritative_instruction from ${provenance} (${patterns.join(', ')})`;
+}
+
+export async function scanRealtimeContent(
+  text: string,
+  /** Declared origin for the L2 floor. Omitted = pre-provenance behaviour. */
+  provenance?: PluginProvenanceLabel,
+): Promise<ConversationScanResult> {
   // PRIMARY: scan in-process via the shared shieldcortex/defence module. The
   // scan is pure (no DB handle required — scanToolResponse's audit write is
   // guarded by isDatabaseInitialized()), so it is safe in the long-lived
@@ -1926,18 +2059,40 @@ export async function scanRealtimeContent(text: string): Promise<ConversationSca
       } else {
         summary = 'THREAT (non-injection layer)';
       }
-      return { clean: scan.clean, summary, available: true };
+      // L2 runs only on this branch. The MCP fallback below has no local
+      // module to ask, and an L2 verdict invented from a remote text response
+      // would be a second copy of the policy.
+      const patterns = applyProvenanceFloor(defenceMod, text, provenance);
+      if (patterns.length > 0) {
+        const l2 = nonAuthoritativeSummary(provenance!, patterns);
+        return {
+          clean: false,
+          summary: scan.clean ? l2 : `${summary}; ${l2}`,
+          available: true,
+          provenance,
+          nonAuthoritativePatterns: patterns,
+        };
+      }
+      return { clean: scan.clean, summary, available: true, provenance };
     } catch (err) {
       // A scanner that THROWS is not a clean verdict either. Same treatment as
       // an absent one: unavailable, reported, never silently allowed to read as
       // protected.
       const detail = err instanceof Error ? err.message : String(err);
-      return { clean: false, available: false, errored: true, error: `in-process scanner threw: ${detail}`, summary: "scan unavailable" };
+      return { clean: false, available: false, errored: true, error: `in-process scanner threw: ${detail}`, summary: "scan unavailable", provenance };
     }
   }
 
   // FALLBACK: in-process defence unavailable (older install, import failed) —
   // degrade to the MCP shell-out so scanning still happens rather than breaking.
+  //
+  // L2 cannot run here at all: there is no local module to ask, and inventing
+  // a verdict from a remote text response would be a second copy of the
+  // policy. With a declared origin that IS a degrade, so it is counted —
+  // otherwise the fallback reads as a scan that found nothing.
+  if (provenance) {
+    noteL2Degraded('in-process defence is unavailable, so the MCP fallback ran without the local policy');
+  }
   let response: string | null = null;
   try {
     response = await callCortex("scan_tool_response", {
@@ -1947,7 +2102,7 @@ export async function scanRealtimeContent(text: string): Promise<ConversationSca
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    return { clean: false, available: false, errored: true, error: `scan fallback failed: ${detail}`, summary: "scan unavailable" };
+    return { clean: false, available: false, errored: true, error: `scan fallback failed: ${detail}`, summary: "scan unavailable", provenance };
   }
 
   if (!response) {
@@ -1957,11 +2112,12 @@ export async function scanRealtimeContent(text: string): Promise<ConversationSca
       errored: true,
       error: 'no in-process defence module and the MCP fallback returned nothing',
       summary: 'scan unavailable',
+      provenance,
     };
   }
 
   const parsed = parseScanResponse(response);
-  return { ...parsed, available: true };
+  return { ...parsed, available: true, provenance };
 }
 
 /**
@@ -2050,18 +2206,6 @@ function extractMemories(texts: string[]): Array<{ title: string; content: strin
 }
 
 // ==================== HELPERS ====================
-
-function extractUserContent(msgs: unknown[]): string[] {
-  const out: string[] = [];
-  for (const msg of msgs) {
-    if (!msg || typeof msg !== "object") continue;
-    const m = msg as any;
-    if (m.role !== "user") continue;
-    if (typeof m.content === "string") out.push(m.content);
-    else if (Array.isArray(m.content)) for (const b of m.content) if (b?.type === "text") out.push(b.text);
-  }
-  return out;
-}
 
 /** Where the realtime audit jsonl lives.
  *
@@ -2389,11 +2533,32 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
       return trustMemo;
     };
     const sessionId = resolveHookSessionId(event, _ctx);
-    const userTexts = extractUserContent(event.historyMessages).slice(-5);
-    const texts = [event.prompt, ...userTexts].filter(t => t && !isInternalContent(t, sessionId));
-    for (const text of texts) {
+    // Each text now arrives with the origin it was declared under (see
+    // provenance.ts). The BOUND is unchanged — prompt plus the last five
+    // history texts — but a tool result is no longer judged as if the
+    // operator had typed it, which is the whole point of the L2 floor.
+    const { inputs, unreadableToolBlocks } = labelLlmInput(event);
+    // A tool result this file could not read is a text that was NOT scanned.
+    // Counted with the undeclared ones, because they are the same operator
+    // fact: this host sends a shape the provenance layer does not cover.
+    _provenanceUndeclared += unreadableToolBlocks;
+    const labelled = inputs.filter(
+      // #r2/B5: the internal-message exemption is for content the HOST
+      // generated — boot checks, heartbeats, its own system notices — and the
+      // only thing attesting to that is the label. `/^System:/` is eight
+      // characters any fetched page can start with, so applying the exemption
+      // to tool output let untrusted bytes buy their way out of BOTH scanners
+      // by claiming to be a system message. Tool-origin and unclassifiable
+      // content is now always scanned; only the host-attributed turn may skip.
+      input => input.text && (input.label !== 'user' || !isInternalContent(input.text, sessionId)),
+    );
+    for (const labelledInput of labelled) {
+      const text = labelledInput.text;
       if (!text || text.length < 10) continue;
-      const result = await scanRealtimeContent(text);
+      // Counted BEFORE the scan, so the number reflects what this host
+      // actually sends rather than only what tripped a detector.
+      if (labelledInput.label === 'unknown') _provenanceUndeclared += 1;
+      const result = await scanRealtimeContent(text, labelledInput.label);
       // #225: "we could not look" is its own outcome. Before this branch the
       // unavailable path returned clean:true and this loop did nothing at all —
       // an unscanned message was indistinguishable from a scanned one, on the
@@ -2419,6 +2584,7 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
           model: event.model, reason: detail,
           chars: text.length,
           contentSha256: createHash('sha256').update(text).digest('hex').slice(0, 16),
+          provenance: labelledInput.label,
           ts: new Date().toISOString(),
         });
         continue;
@@ -2461,6 +2627,10 @@ export async function scanLlmInput(event: LlmInputEvent, _ctx: AgentCtx): Promis
           model: event.model, reason: result.summary,
           chars: text.length,
           contentSha256: createHash('sha256').update(text).digest('hex').slice(0, 16),
+          // The declared origin this text was judged under. A closed-set
+          // label, so it is metadata on the same footing as `chars` — it says
+          // WHICH policy applied, never what the text said.
+          provenance: labelledInput.label,
           // Whether this detection tainted the session (threat-graph Phase D:
           // lets the threat graph attribute taint-raising events). Metadata
           // only — no content, same as the fields above.
@@ -2978,6 +3148,16 @@ function gatePass(): InputGateDecision {
  * explicit pass, which is a stronger statement than the absence of an answer:
  * it is the same word said in the vocabulary the host validates.
  */
+/**
+ * NOTE FOR THE L2 FLOOR (Opus nit 4). This is the only ENFORCING hook, and it
+ * scans through `scanWithDeadline`, which calls `scanRealtimeContent` with no
+ * provenance argument. `applyProvenanceFloor` therefore returns `[]` on this
+ * path and an L2 hit cannot reach `evaluateConversationRun` below, which is
+ * what would block a `clean:false` verdict under posture `enforce`. That is
+ * why "L2 adds an indicator, not a lever" is true — a fact about the call
+ * graph, not a convention. Passing provenance in here would make the floor an
+ * enforcement lever the same day.
+ */
 export async function handleBeforeAgentRun(
   event: BeforeAgentRunEvent,
   ctx: AgentCtx,
@@ -3249,49 +3429,97 @@ function isToolResultContent(text: string): boolean {
 
 function handleLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): void {
   // Fire and forget
-  (async () => {
-    try {
-      const config = await loadConfig();
-      if (!isAutoMemoryEnabled(config)) return;
+  void captureLlmOutput(event, ctx);
+}
 
-      const texts = event.assistantTexts
-        .filter(t => t && t.length >= 30)
-        .filter(t => !isToolResultContent(t));
-      if (!texts.length) return;
-      const memories = extractMemories(texts);
-      if (!memories.length) return;
+/**
+ * Awaitable capture body — extracted so the jest suite can verify the
+ * pre-write candidate screen deterministically, exactly as `scanLlmInput` is
+ * extracted from `handleLlmInput`. The hook itself stays non-blocking.
+ */
+export async function captureLlmOutput(event: LlmOutputEvent, ctx: AgentCtx): Promise<void> {
+  try {
+    const config = await loadConfig();
+    if (!isAutoMemoryEnabled(config)) return;
 
-      const noveltyGate = await createNoveltyGate(config);
-      let saved = 0;
-      let skipped = 0;
-      for (const mem of memories) {
-        const novelty = noveltyGate.inspect(mem.content);
-        if (!novelty.allow) {
-          skipped++;
-          continue;
-        }
+    const texts = event.assistantTexts
+      .filter(t => t && t.length >= 30)
+      .filter(t => !isToolResultContent(t));
+    if (!texts.length) return;
+    const memories = extractMemories(texts);
+    if (!memories.length) return;
 
-        const r = await callCortex("remember", {
-          title: mem.title, content: mem.content, category: mem.category,
-          project: ctx.agentId || "openclaw", scope: "global",
-          importance: "normal", tags: "auto-extracted,realtime-plugin,llm-output",
-          sourceType: "agent", sourceIdentifier: `openclaw-plugin:${event.sessionId}`,
-          sessionId: event.sessionId, agentId: ctx.agentId || "openclaw", workspaceDir: ctx.workspaceDir || "",
-        });
-        if (r) {
-          saved++;
-          noveltyGate.remember(mem, novelty);
-        }
+    // L2 candidate screen, immediately before the automatic write (#r2/B5).
+    //
+    // This is the SIBLING of the capture-hook path, and it was unscreened.
+    // `extractMemories` lifts a sentence out of assistant output on a
+    // pattern as loose as /\b(?:important|remember|key\s*point)\s*:/ and
+    // `remember` then persists it under sourceType "agent" with no operator
+    // in the loop — so an injected directive that the model repeated once
+    // becomes a stored standing instruction. Screening the extracted
+    // CANDIDATE is not the same as scanning assistant output: the question
+    // is only ever asked about text already selected for a write.
+    //
+    // Refuse, do not quarantine: quarantine is for content admitted far
+    // enough to be worth reviewing, and nobody is waiting to review an
+    // auto-captured injection shape. Fails OPEN (no module / no export /
+    // a throw returns no patterns), like every other L2 site here.
+    const defenceMod = await getDefenceModule().catch(() => null);
+
+    const noveltyGate = await createNoveltyGate(config);
+    let saved = 0;
+    let skipped = 0;
+    let refused = 0;
+    for (const mem of memories) {
+      const novelty = noveltyGate.inspect(mem.content);
+      if (!novelty.allow) {
+        skipped++;
+        continue;
       }
-      await noveltyGate.flush();
-      if (saved) {
-        console.log(`[shieldcortex] Extracted ${saved} memor${saved === 1 ? "y" : "ies"} from LLM output (${skipped} duplicates skipped)`);
-        auditLog({ type: "memory", hook: "llm_output", sessionId: event.sessionId, count: saved, skipped, ts: new Date().toISOString() });
+
+      // Title AND content as one string (#r2/B7). Here the title is the
+      // content's own first 80 characters, so this is belt-and-braces rather
+      // than new coverage -- but the rule is the same at every capture site,
+      // so a later change to extractMemories cannot quietly open a gap the
+      // other sites do not have.
+      const patterns = applyProvenanceFloor(
+        defenceMod,
+        `${mem.title}\n${mem.content}`,
+        'memory_candidate',
+      );
+      if (patterns.length > 0) {
+        refused++;
+        // Names and a title, never the refused text — it is the part nobody
+        // wanted persisted. No new sink: the plugin's existing console.
+        console.warn(
+          `[shieldcortex] ⚠️ auto-memory candidate refused (non_authoritative_instruction: ` +
+          `${patterns.join(', ')}): "${mem.title.slice(0, 80)}"`,
+        );
+        continue;
       }
-    } catch (e) {
-      console.error("[shieldcortex] llm_output error:", e instanceof Error ? e.message : String(e));
+
+      const r = await callCortex("remember", {
+        title: mem.title, content: mem.content, category: mem.category,
+        project: ctx.agentId || "openclaw", scope: "global",
+        importance: "normal", tags: "auto-extracted,realtime-plugin,llm-output",
+        sourceType: "agent", sourceIdentifier: `openclaw-plugin:${event.sessionId}`,
+        sessionId: event.sessionId, agentId: ctx.agentId || "openclaw", workspaceDir: ctx.workspaceDir || "",
+      });
+      if (r) {
+        saved++;
+        noveltyGate.remember(mem, novelty);
+      }
     }
-  })();
+    await noveltyGate.flush();
+    if (saved) {
+      console.log(`[shieldcortex] Extracted ${saved} memor${saved === 1 ? "y" : "ies"} from LLM output (${skipped} duplicates skipped, ${refused} refused)`);
+    }
+    if (saved || refused) {
+      auditLog({ type: "memory", hook: "llm_output", sessionId: event.sessionId, count: saved, skipped, refused, ts: new Date().toISOString() });
+    }
+  } catch (e) {
+    console.error("[shieldcortex] llm_output error:", e instanceof Error ? e.message : String(e));
+  }
 }
 
 class TypedApprovalRequest extends Error {
@@ -3615,6 +3843,17 @@ export default {
               '    — read from openclaw.json when this plugin LOADED; it is a snapshot, not a live read.\n' +
               '      Editing that key takes effect only after a gateway restart, for the gateway and for this line.\n' +
               `  Operator notify: ${notifyState}\n` +
+              // Provenance plane (L2). The count is the honest half: a
+              // non-zero number means this host sent llm_input shapes the
+              // labeller could not classify, so those texts kept the
+              // pre-L2 path. Texts, never text.
+              `  Provenance: llm_input labelled (user / tool_result); ` +
+              `${_provenanceUndeclared} undeclared since plugin load\n` +
+              // L2 availability is its OWN line: the base scanner and the
+              // provenance floor fail independently, and a plane that reports
+              // "available" while the floor is absent is the silent-clean bug
+              // this product already fixed once, one layer down.
+              `  Provenance floor (L2): ${_l2Degraded === 0 ? 'applied' : `DEGRADED — ${_l2Degraded} text(s) scanned without it`}\n` +
               `  Auto memory: ${autoMemory} | Dedupe: ${dedupe}\n` +
               `  Cloud sync: ${cloud}`,
           };

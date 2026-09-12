@@ -10,6 +10,7 @@ import type {
   DefencePipelineResult,
   DefencePipelineResultWithVerify,
   DefenceSource,
+  ProvenanceSource,
   FirewallAnalysis,
   FragmentationAnalysis,
   SensitivityClassification,
@@ -90,10 +91,21 @@ function publicPipelineOptions(options?: PipelineRunOptions): PipelineRunOptions
   };
 }
 
+/**
+ * Run the defence pipeline.
+ *
+ * `source.type` accepts any ProvenanceLabel, not only the nine stored
+ * `DefenceSource` types. The extra labels are DECLARATIONS by an ingress about
+ * where the bytes came from (`web`, `document`, `tool_result`,
+ * `memory_candidate`, `agent_message`, `system`, `unknown`) and are what arms
+ * the L2 non-authoritative-instruction floor inside analyzeFirewall. A label is
+ * never host attestation — `options.sourceAttested` is the separate, internal
+ * answer to that question.
+ */
 export function runDefencePipeline(
   content: string,
   title: string,
-  source: DefenceSource,
+  source: DefenceSource | ProvenanceSource,
   config?: DefenceConfig,
   project?: string,
   options?: PipelineRunOptions,
@@ -108,7 +120,7 @@ export function runDefencePipeline(
 export function runDefencePipelinePreviewInternal(
   content: string,
   title: string,
-  source: DefenceSource,
+  source: DefenceSource | ProvenanceSource,
   config?: DefenceConfig,
   project?: string,
   options?: PipelineRunOptions,
@@ -125,7 +137,7 @@ export function runDefencePipelinePreviewInternal(
 export function runDefencePipelineTransactionalInternal(
   content: string,
   title: string,
-  source: DefenceSource,
+  source: DefenceSource | ProvenanceSource,
   deferredEffects: DeferredPipelineEffect[],
   config?: DefenceConfig,
   project?: string,
@@ -143,7 +155,7 @@ export function runDefencePipelineTransactionalInternal(
 function runDefencePipelineInternal(
   content: string,
   title: string,
-  source: DefenceSource,
+  source: DefenceSource | ProvenanceSource,
   config: DefenceConfig | undefined,
   project: string | undefined,
   options: InternalPipelineRunOptions,
@@ -504,7 +516,7 @@ function runDefencePipelineInternal(
 export async function runDefencePipelineWithVerify(
   content: string,
   title: string,
-  source: DefenceSource,
+  source: DefenceSource | ProvenanceSource,
   config?: DefenceConfig,
   project?: string,
   // sourceAttested is SYSTEM-derivation only (resolver / code-constant

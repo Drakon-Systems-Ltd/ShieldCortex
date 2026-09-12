@@ -26,9 +26,17 @@ export const SCAN_EXIT = Object.freeze({
 export type ScanExitCode = (typeof SCAN_EXIT)[keyof typeof SCAN_EXIT];
 
 export const SCAN_USAGE_LINES = [
-  'Usage: shieldcortex scan "text to analyse"',
+  'Usage: shieldcortex scan "text to analyse" [--source=TYPE] [--identifier=ID] [--json]',
   '  Runs the defence pipeline (firewall + trust + sensitivity).',
   '  No MCP server or ML model required — works on ARM64.',
+  '  --source=user|cli|hook|email|web|agent|file|api|tool_response',
+  '          |system|tool_result|document|memory_candidate|agent_message|unknown',
+  '  --identifier=ID   optional label (requires --source). Default ID is "scan".',
+  '  --json            emit one JSON object on stdout instead of the report.',
+  '  Bare `scan TEXT` stays attested cli:shieldcortex-scan. Declared --source is not host-attested.',
+  '  Untrusted data origins (web, document, email, tool_result, agent_message,',
+  '  memory_candidate) additionally get the L2 non-authoritative-instruction floor.',
+  '  Use `--` before TEXT that starts with `-`. Empty TEXT is usage.',
   '  Exit codes: 0=allow 1=caught 2=usage 3=tool-failure (control absent).',
 ] as const;
 

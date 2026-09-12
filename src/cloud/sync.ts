@@ -1,6 +1,6 @@
 import { getCloudConfig, getDeviceId, getDeviceName, updateLastSyncAt } from './config.js';
 import { enqueueFailedSync } from './sync-queue.js';
-import type { DefencePipelineResult, DefenceSource } from '../defence/types.js';
+import type { DefencePipelineResult, DefenceSource, ProvenanceSource } from '../defence/types.js';
 
 // ── In-flight tracking ───────────────────────────────────
 //
@@ -93,7 +93,7 @@ export function sendHeartbeat(): void {
  */
 export function syncToCloud(
   result: DefencePipelineResult,
-  source: DefenceSource,
+  source: DefenceSource | ProvenanceSource,
   durationMs: number,
 ): void {
   const config = getCloudConfig();

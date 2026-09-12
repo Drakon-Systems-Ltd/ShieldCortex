@@ -53,6 +53,7 @@ import {
   persistEvent,
 } from '../api/events.js';
 import { generateEmbedding, cosineSimilarity } from '../embeddings/index.js';
+import { isWorkerDisposedError } from '../embeddings/generator.js';
 import { isPaused } from '../api/control.js';
 import { extractFromMemory } from '../graph/extract.js';
 import { processExtractionResult, removeMemoryGraph, replaceMemoryGraph } from '../graph/resolve.js';
@@ -161,6 +162,14 @@ function scheduleMemoryEmbedding(db: ReturnType<typeof getDatabase>, memoryId: n
       }
     })
     .catch(e => {
+      // Shutdown cancelled this job on purpose — the disposal doing its job,
+      // not a failure, and reporting one line per queued job is noise that
+      // scales with queue depth. The generator owns the classifier, and it
+      // takes the brand and the code as well as the message: the timeout kill,
+      // a kill that failed, a crash, a message that merely mentions disposal,
+      // and the exact sentence on an ordinary Error a layer below us raised are
+      // all failures and still get reported below.
+      if (isWorkerDisposedError(e)) return;
       if (
         e instanceof Error
         && (
@@ -1383,6 +1392,10 @@ function refreshEmbeddingAsync(memoryId: number, title: string, content: string)
       }
     })
     .catch((e) => {
+      // Same boundary as the create path: a shutdown-cancelled refresh is not a
+      // failure, and only an error the generator branded as a disposal — the
+      // message, the code and the registry brand together — is quiet.
+      if (isWorkerDisposedError(e)) return;
       if (
         e instanceof Error &&
         (

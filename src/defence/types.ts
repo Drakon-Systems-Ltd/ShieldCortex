@@ -13,6 +13,7 @@ export type FirewallResult = 'ALLOW' | 'BLOCK' | 'QUARANTINE';
 
 export type ThreatIndicator =
   | 'instruction_injection'
+  | 'non_authoritative_instruction'
   | 'privilege_escalation'
   | 'credential_exfil'
   | 'encoding_obfuscation'
@@ -30,6 +31,36 @@ export type ThreatIndicator =
 
 export interface DefenceSource {
   type: 'user' | 'cli' | 'hook' | 'email' | 'web' | 'agent' | 'file' | 'api' | 'tool_response';
+  identifier: string;
+}
+
+/**
+ * Caller-declared content origin for provenance policy.
+ * A label is a declaration, not host attestation. Current DefenceSource
+ * types are preserved; the extra members are additive scan/firewall labels.
+ */
+export type ProvenanceLabel =
+  | DefenceSource['type']
+  | 'system'
+  | 'tool_result'
+  | 'document'
+  | 'memory_candidate'
+  | 'agent_message'
+  | 'unknown';
+
+/**
+ * A source whose `type` may be ANY provenance label.
+ *
+ * A strict superset of {@link DefenceSource} — every DefenceSource is already
+ * a ProvenanceSource, so widening a parameter to this type is additive for
+ * every existing caller. It exists because ingresses that DECLARE provenance
+ * (the `scan` CLI, the OpenClaw realtime hook, memory capture) can name
+ * origins the stored-memory `DefenceSource` union deliberately does not have:
+ * `document`, `memory_candidate`, `agent_message`, `tool_result`, `system`,
+ * `unknown`. Those labels drive policy; they are not new memory sources.
+ */
+export interface ProvenanceSource {
+  type: ProvenanceLabel;
   identifier: string;
 }
 
@@ -78,7 +109,12 @@ export interface SensitivityClassification {
 
 export interface TrustScore {
   score: number;
-  source: DefenceSource;
+  /**
+   * Widened to ProvenanceSource (a superset of DefenceSource) so a scan that
+   * declares `document`/`memory_candidate`/... can be scored and reported.
+   * Every value a pre-existing caller put here is still assignable.
+   */
+  source: ProvenanceSource;
   hierarchy: string[];
 }
 

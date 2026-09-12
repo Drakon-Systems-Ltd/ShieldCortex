@@ -11,7 +11,7 @@
 
 import { getCloudConfig, getVerifyConfig, getDeviceId, getDeviceName } from './config.js';
 import { redactCredentials } from '../defence/credential-leak/index.js';
-import type { DefencePipelineResult, DefenceSource, VerifyResult } from '../defence/types.js';
+import type { DefencePipelineResult, DefenceSource, ProvenanceSource, VerifyResult } from '../defence/types.js';
 
 /**
  * Submit content for LLM verification.
@@ -23,7 +23,7 @@ export async function submitVerification(
   content: string,
   title: string,
   pipelineResult: DefencePipelineResult,
-  source: DefenceSource,
+  source: DefenceSource | ProvenanceSource,
 ): Promise<VerifyResult | null> {
   const cloudConfig = getCloudConfig();
   const verifyConfig = getVerifyConfig();
