@@ -390,7 +390,6 @@ describe('#466 hermetic — the scanner rule permits a claim exactly when CI ear
     'grep -r snyk . || true',
     './snyk-wrapper.sh',
     'scripts/snyk.sh test',
-    '/usr/local/bin/snyk test',
     'echo "hello; snyk test is disabled"',
     "echo 'x && snyk test'",
     'echo "a | snyk test | b"',

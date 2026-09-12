@@ -86,8 +86,11 @@ describe('#466 — the executable surface is a step’s run: and uses:, nothing 
     expect(surface(steps('- run: |', '    npm ci', '    npx snyk test'))).toEqual(['npm ci\nnpx snyk test']);
   });
 
-  it('collects a folded block scalar too', () => {
-    expect(surface(steps('- run: >-', '    npm ci', '    && npm test'))).toEqual(['npm ci\n&& npm test']);
+  it('collects a folded block scalar as the ONE line the shell will see', () => {
+    // `>` folds newlines to spaces. `|` keeps them (tested above). Joining a
+    // folded scalar with `\n` manufactured a second statement the workflow
+    // never runs — review used that to back a scanner claim.
+    expect(surface(steps('- run: >-', '    npm ci', '    && npm test'))).toEqual(['npm ci && npm test']);
   });
 
   it('collects a job-level reusable-workflow call', () => {

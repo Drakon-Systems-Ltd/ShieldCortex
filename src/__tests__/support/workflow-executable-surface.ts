@@ -457,12 +457,14 @@ function usesScannerAction(reference: string, scanner: string): boolean {
  * `run: npx snyk test` counts and `run: echo "snyk is not installed"` does not.
  * A `uses:` counts when the scanner names the action's owner or repository.
  *
- * A command that is a *path* — `./snyk-wrapper.sh`, `scripts/snyk.sh` — is a
- * script this function is not reading, and its filename is a label on it. That
- * is the same shape as a local `uses:` reference, and it gets the same answer:
- * refused. Two path forms are the tool itself and count: a bare name resolved
- * off `PATH`, and the package-manager bin directory (`./node_modules/.bin/snyk`,
- * `node_modules/.bin/snyk`), which is where a declared dependency's own
+ * A command that is a *relative path into the repository* — `./snyk-wrapper.sh`,
+ * `scripts/snyk.sh` — is a script this function is not reading, and its
+ * filename is a label on it. That is the same shape as a local `uses:`
+ * reference, and it gets the same answer: refused. Three forms are the tool
+ * itself and count: a bare name resolved off `PATH`; an absolute path
+ * (`/usr/local/bin/snyk` — an installed binary, not something checked into the
+ * repo under a chosen name); and the package-manager bin directory
+ * (`./node_modules/.bin/snyk`), which is where a declared dependency's own
  * executable lives and nothing else does.
  *
  * A scanner with no workflow form at all — `dependabot`, which is configured in
@@ -480,9 +482,9 @@ export function invokesScanner(steps: readonly ExecutableStep[], scanner: string
       : statementsIn(value).some((tokens) => {
           const command = invokedCommand(tokens);
           if (command === undefined) return false;
-          const binDir = /^(?:\.\/)?node_modules\/\.bin\/([^/]+)$/.exec(command);
-          if (binDir) return namesScanner(binDir[1], name);
-          return !command.includes('/') && namesScanner(command, name);
+          if (!command.includes('/')) return namesScanner(command, name);
+          const trusted = /^(?:\/.*\/|(?:\.\/)?node_modules\/\.bin\/)([^/]+)$/.exec(command);
+          return trusted !== null && namesScanner(trusted[1], name);
         });
   });
 }
