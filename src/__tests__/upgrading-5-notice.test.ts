@@ -53,15 +53,19 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     expect(readme.slice(req, install)).toMatch(/Node 20 is not supported/);
   });
 
-  it('CHANGELOG opens Unreleased with a Breaking (5.0.0) block', () => {
+  it('CHANGELOG 5.0.0 section opens with Breaking, and Unreleased is empty', () => {
     const log = read('CHANGELOG.md');
-    const unreleased = log.indexOf('## [Unreleased]');
-    const breaking = log.indexOf('### ⚠️ Breaking (5.0.0)', unreleased);
-    const added = log.indexOf('### Added', unreleased);
-    expect(breaking).toBeGreaterThan(unreleased);
+    const five = log.indexOf('## [5.0.0]');
+    const four = log.indexOf('## [4.54.15]');
+    const breaking = log.indexOf('### ⚠️ Breaking (5.0.0)', five);
+    const added = log.indexOf('### Added', five);
+    expect(five).toBeGreaterThan(log.indexOf('## [Unreleased]'));
+    expect(breaking).toBeGreaterThan(five);
+    expect(breaking).toBeLessThan(four);
     expect(added).toBeGreaterThan(breaking);
     expect(log.slice(breaking, added)).toMatch(/Node 20 is no longer supported/);
     expect(log.slice(breaking, added)).toMatch(/docs\/UPGRADING-5\.md/);
+    expect(log.slice(log.indexOf('## [Unreleased]'), five)).toMatch(/\(none yet\)/);
   });
 
   it('postinstall banner names 5.0, the Node floor, Guard-off, and the upgrade URL', () => {
