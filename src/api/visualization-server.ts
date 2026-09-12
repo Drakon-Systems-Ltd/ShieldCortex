@@ -175,6 +175,104 @@ function isPublicApiPath(path: string, publicPaths: readonly string[]): boolean 
   return publicPaths.includes(canonical);
 }
 
+/**
+ * Restore express-4 `req.body` semantics for requests no body parser claimed
+ * (#466, express 4 -> 5).
+ *
+ * body-parser 1.x (express 4) initialised `req.body` to `{}` for every request
+ * and only replaced it when a parser matched. body-parser 2.x (express 5) leaves
+ * it `undefined` instead. Nothing in this server sends a body-less request down
+ * a different path on purpose, but ~20 mutating handlers destructure `req.body`
+ * directly, so on express 5 any client that omits `Content-Type:
+ * application/json` turned a clean `400 {"error":"... is required"}` into a
+ * `500 TypeError: Cannot destructure property '...' of 'req.body' as it is
+ * undefined` — measured on the booted server at e9a8e1a8 for `/api/v1/scan`,
+ * `/api/sql`, `/api/memories`, `/api/iron-dome/activate`, `/api/cloud/config`,
+ * `PATCH /api/xray/findings/:id` and 14 more.
+ *
+ * One middleware rather than 30 guards at the destructuring sites: the defect is
+ * a single changed default, the handlers were all correct against the default
+ * they were written for, and 30 `?? {}` patches would leave the 31st handler —
+ * the next one anybody writes — carrying the bug again. Registered immediately
+ * after the parsers so every route, present and future, sees the same shape.
+ *
+ * It cannot mask a parse failure: a body that IS present but malformed makes
+ * `express.json()` call `next(err)`, which skips the rest of the chain including
+ * this, and lands on `apiJsonErrorHandler`.
+ */
+function defaultEmptyBody(req: Request, _res: Response, next: (err?: unknown) => void): void {
+  if (req.body === undefined) {
+    req.body = {};
+  }
+  next();
+}
+
+/**
+ * A client-error status carried by an express error, or `undefined`.
+ *
+ * `http-errors` — which body-parser uses — tags its errors with `status` and
+ * `statusCode`. Those are genuine 4xx client errors (malformed JSON body 400,
+ * oversized payload 413, unsupported charset 415) and express 5's default
+ * handler already answers them with the right code; only the HTML stack-trace
+ * body is wrong. Honouring the tag keeps the status honest, because reporting a
+ * caller's malformed JSON as a 500 would be a fresh defect of its own.
+ */
+function clientErrorStatus(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const tagged = err as { status?: unknown; statusCode?: unknown };
+  const raw = typeof tagged.status === 'number' ? tagged.status : tagged.statusCode;
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) return undefined;
+  return raw >= 400 && raw <= 499 ? raw : undefined;
+}
+
+/**
+ * Terminal error handler for the JSON API plane (#466).
+ *
+ * express's default error handler answers with an HTML page whose `<pre>` is the
+ * error's stack trace. On this server that meant a `PATCH /api/xray/findings/1`
+ * with no body replied `500 text/html` containing absolute filesystem paths for
+ * the source tree AND `node_modules` — in an API whose catch-all exists
+ * specifically so unmatched routes return JSON instead of express HTML. The same
+ * leak reached a `400` for any malformed JSON body, on every path.
+ *
+ * So: for anything `isApiRequestPath` calls API — the one definition the auth
+ * gate and the catch-all already share (#474) — the response is JSON with no
+ * detail beyond the class of failure, and the stack goes to the server log
+ * where the operator, not the caller, can read it. Non-API paths are handed back
+ * to express so the dashboard shell keeps its default behaviour.
+ *
+ * Registered AFTER the catch-all, which is after every route: express dispatches
+ * error middleware in registration order, so anything registered earlier would
+ * only cover the routes declared above it.
+ */
+function apiJsonErrorHandler(
+  err: unknown,
+  req: Request,
+  res: Response,
+  next: (err?: unknown) => void,
+): void {
+  if (!isApiRequestPath(req.path)) {
+    next(err);
+    return;
+  }
+  // Server-side only. `req.originalUrl` is attacker-controlled, so it is logged
+  // but never echoed.
+  console.error(`[api] unhandled error on ${req.method} ${req.originalUrl}:`, err);
+  // Something already started writing a response; there is no status left to
+  // set, and express's default handler is the only thing that can destroy the
+  // socket cleanly.
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  const clientStatus = clientErrorStatus(err);
+  if (clientStatus !== undefined) {
+    res.status(clientStatus).json({ error: 'Bad request', code: 'BAD_REQUEST' });
+    return;
+  }
+  res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
+}
+
 export const __test__ = {
   ALLOWED_DEFENCE_SOURCE_TYPES,
   MAX_SOURCE_IDENTIFIER_LENGTH,
@@ -182,6 +280,8 @@ export const __test__ = {
   apiPathView,
   isApiRequestPath,
   isPublicApiPath,
+  defaultEmptyBody,
+  apiJsonErrorHandler,
 };
 
 /**
@@ -439,6 +539,10 @@ export function startVisualizationServer(dbPath?: string): void {
     },
   }));
   app.use(express.json());
+  // #466 — immediately after the last body parser, so every handler below sees
+  // `req.body` as the `{}` express 4 guaranteed rather than express 5's
+  // `undefined`. See defaultEmptyBody.
+  app.use(defaultEmptyBody);
 
   // ── Session Auth ────────────────────────────────────────
   // Generate per-session token (written to ~/.shieldcortex/.api-token)
@@ -990,6 +1094,12 @@ export function startVisualizationServer(dbPath?: string): void {
   app.all(API_CATCH_ALL_PATH, (_req: Request, res: Response) => {
     res.status(404).json({ error: 'Not found' });
   });
+
+  // #466 — and the same for an unmatched ERROR: JSON instead of express's HTML
+  // stack-trace page, which leaked absolute filesystem paths. Last registration,
+  // because express dispatches error middleware in registration order and this
+  // one has to be reachable from every route above. See apiJsonErrorHandler.
+  app.use(apiJsonErrorHandler);
 
   // ============================================
   // WEBSOCKET SERVER
