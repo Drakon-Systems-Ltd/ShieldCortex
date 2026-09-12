@@ -225,7 +225,9 @@ describe('doctor — an initialised database survives teardown on the real CLI (
    * a quiescent file, not this process's open connection.
    *
    * Everything `initDatabase` leaves in the directory is forced owner-only
-   * afterwards. That is not hygiene theatre — the doctor's State permissions
+   * afterwards (files 0600, directories 0700 — a directory chmod'd 0600 loses
+   * its execute bit and everything under it becomes unreachable). That is not
+   * hygiene theatre — the doctor's State permissions
    * check FAILS the whole run on a single group/world-readable file under
    * `~/.shieldcortex`, and `initDatabase` writes its `.pre-backfill-*` snapshot
    * at the ambient umask. Without the chmod the run exits 1 for a reason that
@@ -237,11 +239,15 @@ describe('doctor — an initialised database survives teardown on the real CLI (
     } finally {
       closeDatabase();
     }
-    const dir = path.dirname(dbPath);
-    fs.chmodSync(dir, 0o700);
-    for (const entry of fs.readdirSync(dir)) {
-      fs.chmodSync(path.join(dir, entry), 0o600);
-    }
+    const ownerOnly = (dir: string): void => {
+      fs.chmodSync(dir, 0o700);
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const child = path.join(dir, entry.name);
+        if (entry.isDirectory()) ownerOnly(child);
+        else fs.chmodSync(child, 0o600);
+      }
+    };
+    ownerOnly(path.dirname(dbPath));
   }
 
   it('exits 0 with no signal and no destructor assertion', async () => {
@@ -267,6 +273,12 @@ describe('doctor — an initialised database survives teardown on the real CLI (
     // one that constructs no native handle at all.
     expect(report).toContain(NODE_RUNTIME_LABEL);
     expect(report).not.toContain('not initialised yet');
+    // The positive half of the same proof: `runDatabaseCheck` emits this pass
+    // row only after the child's own read-only handle ran the integrity check
+    // — the exact native object whose destructor #471 aborts on. The verbose
+    // report puts the `Database` label and its `healthy (<size>)` message on
+    // separate wrapped lines; `plain()` collapses them to one space apart.
+    expect(report).toMatch(/Database healthy \(/);
 
     expect(code).toBe(0);
   }, 180_000);
