@@ -122,6 +122,7 @@ const PATH_CORPUS = [
   '/api/%2E%2E/memories',
   '/api/%2e%2e',
   '/api/..%2fmemories',
+  '/api/../api/memories',
   '/api//memories',
   '/api/memories/',
   '/api',
@@ -275,14 +276,17 @@ describe('#474 — the booted server refuses every respelling without a token', 
     });
   });
 
-  it.each(['/api/%2E%2E/memories', '/api/%2e%2e', '/api/..%2fmemories', '/api//memories'])(
-    'answers 401 for unauthenticated %s rather than letting it reach a handler',
-    async (path) => {
-      const res = await rawGet(port, path);
-      expect(res.status).toBe(401);
-      expect(JSON.parse(res.body).code).toBe('AUTH_REQUIRED');
-    },
-  );
+  it.each([
+    '/api/%2E%2E/memories',
+    '/api/%2e%2e',
+    '/api/..%2fmemories',
+    '/api/../api/memories',
+    '/api//memories',
+  ])('answers 401 for unauthenticated %s rather than letting it reach a handler', async (path) => {
+    const res = await rawGet(port, path);
+    expect(res.status).toBe(401);
+    expect(JSON.parse(res.body).code).toBe('AUTH_REQUIRED');
+  });
 
   it('reaches the real uppercase route once authenticated — the 401 is the gate, not a 404', async () => {
     const res = await rawGet(port, '/API/gated-stats', authed);
