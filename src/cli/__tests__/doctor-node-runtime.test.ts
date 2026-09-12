@@ -458,24 +458,36 @@ describe('doctor — installed-engine preflight verdict (#471, pure)', () => {
    * Not-knowing must READ as not-knowing. A silent `pass` here would be the
    * worst outcome of the three: it would tell an operator on the exact broken
    * install that their engine is fine, in the report printed right before the
-   * process aborts.
+   * process aborts. And on Node 24 not-knowing must also STOP the run (#465):
+   * a preflight that could not read the version cannot rule the abort out, so
+   * continuing gambles the report on exactly what it failed to establish.
    */
   it.each([
     ['unresolvable', at('unresolvable', undefined, { detail: 'Cannot find module \'better-sqlite3\'' })],
     ['unreadable', at('unreadable', undefined, { source: '/opt/sc/node_modules/better-sqlite3/package.json', detail: 'manifest is not valid JSON — Unexpected token' })],
     ['malformed version', at('resolved', 'not-a-version', { source: '/opt/sc/node_modules/better-sqlite3/package.json' })],
-  ])('warns explicitly, and claims nothing, on a %s engine version under Node 24', (_label, engine) => {
+    // Coercible junk is still junk: `semver.coerce("13-garbage")` invents
+    // 13.0.0, which would wave a version nothing can vouch for past the floor.
+    ['coercible-but-not-semver version', at('resolved', '13-garbage', { source: '/opt/sc/node_modules/better-sqlite3/package.json' })],
+  ])('warns, halts the run, and claims nothing on a %s engine version under Node 24', (_label, engine) => {
     const result = nativeEngineVerdict('v24.21.0', engine);
     expect(result.label).toBe(NATIVE_ENGINE_LABEL);
+    // A warn, not a fail: an unreadable manifest is not evidence of 12.x, so
+    // the exit code stays 0 — but the run still halts, and the report says
+    // outright which findings the operator is not getting, and why.
     expect(result.status).toBe('warn');
-    expect(result.haltsRun).toBeUndefined();
+    expect(doctorExitCode([result])).toBe(0);
+    expect(result.haltsRun).toBe(true);
     expect(result.message).toContain('cannot determine the installed better-sqlite3 version');
     expect(result.message).toContain('No compatibility is claimed from this row');
     expect(result.message).toContain('floor unproven');
-    // A warn, not a fail: an unreadable manifest is not evidence of 12.x, and
-    // blacking out the whole report on a host that may be perfectly healthy is
-    // a worse failure mode than the one being guarded.
-    expect(doctorExitCode([result])).toBe(0);
+    expect(result.message).toContain('The remaining checks were not run');
+    // Unproven is not proven-stale: no incompatibility claim, no forged abort
+    // banner, and no rebuild story about a 12.x nothing established is there.
+    expect(result.message).not.toContain('incompatible');
+    expect(result.message).not.toMatch(/Assertion failed|SIGABRT/);
+    expect(result.fix).toContain('npm install -g shieldcortex@latest');
+    expect(result.fix).not.toContain('Rebuilding');
   });
 
   it('says the same not-knowing on Node 22, without importing the Node 24 alarm', () => {
@@ -484,6 +496,12 @@ describe('doctor — installed-engine preflight verdict (#471, pure)', () => {
     expect(result.message).toContain('cannot determine the installed better-sqlite3 version');
     expect(result.message).toContain('not exposed to the Node 24');
     expect(result.message).not.toContain('floor unproven');
+    // Non-halting AND unfixed: this runtime runs 12.x and 13.x alike, so there
+    // is no incompatibility finding — the list keeps running and no reinstall
+    // is promoted for a fault that was not found.
+    expect(result.haltsRun).toBeUndefined();
+    expect(result.message).not.toContain('The remaining checks were not run');
+    expect(result.fix).toBeUndefined();
   });
 
   it('warns rather than guessing when the Node version itself is unparseable', () => {
@@ -545,7 +563,11 @@ describe('doctor — readInstalledEngineVersion reports what it could not learn'
     ['unparseable JSON', 'not json at all', /not valid JSON/],
     ['a missing version', JSON.stringify({ name: 'better-sqlite3' }), /no usable "version"/],
     ['a non-string version', JSON.stringify({ version: 12 }), /no usable "version"/],
-    ['a version semver cannot coerce', JSON.stringify({ version: 'latest' }), /no usable "version"/],
+    ['a version that is not semver at all', JSON.stringify({ version: 'latest' }), /no usable "version"/],
+    // The #465 case: `semver.coerce` would salvage 13.0.0 out of this and the
+    // preflight would then PASS a manifest it could not actually read. Only a
+    // full valid semantic version counts as known.
+    ['a coercible-but-invalid version', JSON.stringify({ version: '13-garbage' }), /no usable "version"/],
   ])('is unreadable, with a reason, on %s', (_label, body, reason) => {
     const result = readInstalledEngineVersion({
       resolve: () => '/opt/sc/node_modules/better-sqlite3/package.json',
@@ -630,6 +652,66 @@ describe('doctor — a stale installed engine fails early on the real CLI (#471)
     // Reached the checks the stale run never got to.
     expect(report).toContain('not initialised yet');
     expect(report).toContain('Disk');
+  }, 120_000);
+
+  // #465 blocker: unknowable must not fall through into the same abort. A
+  // manifest whose version is coercible junk ("13-garbage" → 13.0.0 under
+  // `semver.coerce`) used to read as a resolved 13.x and PASS — straight into
+  // the handle-opening checks the preflight exists to keep away from a
+  // maybe-12.x tree. Same two short-circuit witnesses as the stale-12 proof.
+  it('halts before any later check or native load on Node 24 when the version is unknowable', async () => {
+    expect(fs.existsSync(CLI_PATH)).toBe(true);
+    const engine = installFakeEngine(home, '13-garbage');
+
+    const { stdout, code, signal } = await runDoctorCli(home, [], {
+      forceVersion: 'v24.21.0',
+      preloads: [engine.preload],
+    });
+    const report = plain(stdout);
+
+    expect(signal).toBeNull();
+    expect(report).not.toMatch(/Assertion failed: \(env\) != nullptr/);
+    expect(code).not.toBe(134);
+
+    // Honest severity: nothing was DISproven, so this is a warning and exit 0
+    // — but the report says outright why the rest of the list is missing.
+    expect(code).toBe(0);
+    expect(report).toContain(NATIVE_ENGINE_LABEL);
+    expect(report).toContain('cannot determine the installed better-sqlite3 version');
+    expect(report).toContain('The remaining checks were not run');
+    expect(report).toContain('npm install -g shieldcortex@latest');
+    expect(report).not.toContain('incompatible with Node');
+
+    expect(report).not.toContain('not initialised yet'); // the Database row
+    for (const laterCheck of ['Disk', 'Write path', 'Hooks', 'Lock', 'Schema', 'Memories']) {
+      expect(report).not.toContain(laterCheck);
+    }
+    expect(fs.existsSync(engine.marker)).toBe(false);
+    expect(fs.existsSync(path.join(home, '.shieldcortex', 'memories.db'))).toBe(false);
+  }, 120_000);
+
+  // Node 22 is not exposed to the abort, so not-knowing stays an ordinary
+  // warning there: the list runs to the end and no reinstall is promoted for
+  // an incompatibility that was never found.
+  it('keeps an unknowable version non-halting, with no reinstall pitch, on Node 22', async () => {
+    expect(fs.existsSync(CLI_PATH)).toBe(true);
+    const engine = installFakeEngine(home, '13-garbage');
+
+    const { stdout, code, signal } = await runDoctorCli(home, ['--verbose'], {
+      forceVersion: 'v22.14.0',
+      preloads: [engine.preload],
+    });
+    const report = plain(stdout);
+
+    expect(signal).toBeNull();
+    expect(report).toContain('cannot determine the installed better-sqlite3 version');
+    expect(report).toContain('not an incompatibility finding');
+    expect(report).not.toContain('The remaining checks were not run');
+    expect(report).not.toContain('npm install -g shieldcortex@latest');
+    // The run continued past the preflight.
+    expect(report).toContain('not initialised yet');
+    expect(report).toContain('Disk');
+    expect(code).toBe(0);
   }, 120_000);
 
   // Node 22 is the runtime the 12.x line was fine on. A host that never

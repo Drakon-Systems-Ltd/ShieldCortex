@@ -165,9 +165,13 @@ export interface CheckResult {
    *
    * Reserved for exactly that: a host whose installed database engine aborts
    * the PROCESS when a handle is destroyed cannot be reported on by a doctor
-   * that keeps opening handles. Never set for a state that is merely broken —
-   * a fail that still lets the run finish must leave this unset, because every
-   * row it suppresses is a finding the operator does not get.
+   * that keeps opening handles. It is about SAFETY, not severity — on Node 24+
+   * an engine whose installed version cannot even be read halts as a `warn`,
+   * because "unproven" and "proven stale" leave the same abort reachable while
+   * only the second is evidence of a fault. Never set for a state that is
+   * merely broken — a fail that still lets the run finish must leave this
+   * unset, because every row it suppresses is a finding the operator does not
+   * get.
    */
   haltsRun?: true;
 }
@@ -365,7 +369,11 @@ export function readInstalledEngineVersion(
       detail: `manifest is not valid JSON — ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  if (typeof version !== 'string' || !semver.coerce(version)) {
+  // `semver.valid`, never `semver.coerce`: coercion SALVAGES a number out of
+  // junk — `"13-garbage"` coerces to 13.0.0 — and a salvaged floor is a floor
+  // this reader invented. A manifest `version` is either a full semantic
+  // version or it is unknown.
+  if (typeof version !== 'string' || !semver.valid(version)) {
     return {
       state: 'unreadable',
       source: manifestPath,
@@ -397,6 +405,23 @@ function staleEngineRemedy(): string {
 }
 
 /**
+ * The remedy when the installed engine's version cannot be established at all.
+ *
+ * Deliberately NOT `staleEngineRemedy`: that one asserts a 12.x on disk and
+ * argues against rebuilding it, and this state proved neither. What a
+ * reinstall fixes HERE is knowability — npm lays the declared range down with
+ * a manifest doctor can read, after which the floor is provable again (and
+ * enforced, if the tree really was stale).
+ */
+function unprovenEngineRemedy(): string {
+  return (
+    'Reinstall ShieldCortex via the route you originally used so npm lays down ' +
+    `better-sqlite3 ${REQUIRED_ENGINE_RANGE} with a readable manifest — for a global install, ` +
+    '`npm install -g shieldcortex@latest` — then re-run `shieldcortex doctor`'
+  );
+}
+
+/**
  * Is the INSTALLED database engine able to run on THIS Node at all? (#471)
  *
  * Pure, and separate from the reader above, so every branch is decidable without
@@ -421,7 +446,10 @@ function staleEngineRemedy(): string {
  *    declared range but is not exposed to this abort, and doctor does not invent
  *    failures for hosts that work.
  *  - claim compatibility it did not establish. An unresolvable or malformed
- *    version state warns, explicitly, that nothing was proven either way.
+ *    version state warns, explicitly, that nothing was proven either way —
+ *    and on Node 24+ that warning also stops the run, naming the checks it
+ *    withheld: an unknowable engine and a proven-stale one leave the SAME
+ *    abort reachable from the first handle a later check opens.
  */
 export function nativeEngineVerdict(
   nodeVersion: string,
@@ -442,9 +470,13 @@ export function nativeEngineVerdict(
   }
   const affectedRuntime = parsedNode.major >= NATIVE_ENGINE_AFFECTED_NODE_MAJOR;
 
+  // Strict parse, no coercion: `coerce("13-garbage")` invents 13.0.0 and would
+  // wave a version this check cannot actually vouch for past the floor. The
+  // reader above already refuses such a manifest; refusing it here too keeps
+  // the verdict honest for every caller of the pure function.
   const parsedEngine =
     engine.state === 'resolved' && typeof engine.version === 'string'
-      ? semver.coerce(engine.version)
+      ? semver.parse(engine.version)
       : null;
 
   if (!parsedEngine) {
@@ -454,18 +486,42 @@ export function nativeEngineVerdict(
       : engine.state === 'resolved'
         ? ` — unparseable version ${JSON.stringify(engine.version ?? null)}`
         : '';
+    const preamble = `cannot determine the installed better-sqlite3 version${where}${why}. `;
+
+    if (!affectedRuntime) {
+      // Not an incompatibility finding: 12.x and 13.x both run here, so there
+      // is nothing to reinstall FOR — no `fix`, or the report would promote a
+      // remedy for a fault it has not found.
+      return {
+        label: NATIVE_ENGINE_LABEL,
+        status: 'warn',
+        message:
+          preamble +
+          `Node ${parsedNode.version} is not exposed to the Node ${NATIVE_ENGINE_AFFECTED_NODE_MAJOR} ` +
+          'native-cleanup abort, so this is not an incompatibility finding. ' +
+          'No compatibility is claimed from this row.',
+      };
+    }
+
+    const remedy = unprovenEngineRemedy();
     return {
       label: NATIVE_ENGINE_LABEL,
       status: 'warn',
+      // A warn that still stops the run. Severity says what was ESTABLISHED —
+      // nothing, so no fail and the exit code stays honest — while `haltsRun`
+      // says what is SAFE: also nothing, because if this tree really is a
+      // stale 12.x, the first handle a later check opens is the same abort
+      // the proven case halts for, and a preflight that could not read the
+      // version has no way to rule that out.
+      haltsRun: true,
       message:
-        `cannot determine the installed better-sqlite3 version${where}${why}. ` +
-        (affectedRuntime
-          ? `On Node ${parsedNode.version} that leaves the ${NATIVE_ENGINE_MAJOR_FLOOR}.x floor unproven: ` +
-            'if this tree is really a stale 12.x, the checks below can still abort the process. '
-          : `Node ${parsedNode.version} is not exposed to the Node ${NATIVE_ENGINE_AFFECTED_NODE_MAJOR} ` +
-            'native-cleanup abort, so this is not an incompatibility finding. ') +
-        'No compatibility is claimed from this row.',
-      fix: staleEngineRemedy(),
+        preamble +
+        `On Node ${parsedNode.version} that leaves the ${NATIVE_ENGINE_MAJOR_FLOOR}.x floor unproven: ` +
+        'if this tree is really a stale 12.x, any database handle the checks below open could ' +
+        'still abort the process. The remaining checks were not run — each of them opens the ' +
+        'database, and compatibility is unproven, not disproven, which is why this row is a ' +
+        `warning and not a failure. No compatibility is claimed from this row. ${remedy}.`,
+      fix: remedy,
     };
   }
 
