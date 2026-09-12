@@ -324,6 +324,26 @@ export function viaProblems(nodes) {
           ' advisory object with an integer `source`, or the name of another node in this report',
       );
     });
+    // `effects` is the inverse of `via`: the nodes THIS one makes vulnerable.
+    // The gate does not classify on it, but a report that names a dependent
+    // it did not include is inconsistent with itself, and an inconsistent
+    // report is undecidable, not clean — the same rule `via` and the totals get.
+    if (node.effects !== undefined) {
+      if (!Array.isArray(node.effects)) {
+        problems.push(`unreadable effects on ${name}: \`effects\` is ${describe(node.effects)}, not an array`);
+      } else {
+        node.effects.forEach((entry, index) => {
+          if (typeof entry !== 'string') {
+            problems.push(`unreadable effects on ${name}: effects[${index}] is ${describe(entry)}, not a node name`);
+          } else if (!Object.prototype.hasOwnProperty.call(nodes, entry)) {
+            problems.push(
+              `unreadable effects on ${name}: effects[${index}] names ${describe(entry)},` +
+                ' which is not a node in this report',
+            );
+          }
+        });
+      }
+    }
   }
   return problems;
 }

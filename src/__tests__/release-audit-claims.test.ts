@@ -391,8 +391,20 @@ describe('#466 hermetic — the scanner rule permits a claim exactly when CI ear
     './snyk-wrapper.sh',
     'scripts/snyk.sh test',
     '/usr/local/bin/snyk test',
+    'echo "hello; snyk test is disabled"',
+    "echo 'x && snyk test'",
+    'echo "a | snyk test | b"',
   ])('refuses a claim backed by a step that only NAMES the scanner: %s', (command) => {
     expect(scannerClaimViolations(['snyk'], [oneJob(`- run: ${command}`)])).toEqual(['snyk']);
+  });
+
+  it('refuses a claim backed by a FOLDED block scalar, which the shell sees as one line', () => {
+    // `>` folds newlines to spaces: the shell runs `echo hi npx snyk test`, a single echo.
+    expect(scannerClaimViolations(['snyk'], [oneJob('- run: >', '    echo hi', '    npx snyk test')])).toEqual(['snyk']);
+  });
+
+  it('permits a claim backed by a LITERAL block scalar with the scanner on a later line', () => {
+    expect(scannerClaimViolations(['snyk'], [oneJob('- run: |', '    echo hi', '    npx snyk test')])).toEqual([]);
   });
 
   it.each([

@@ -167,7 +167,13 @@ function parseNode(lines: SourceLine[], start: number, indent: number): { node: 
         bodyLines.push(lines[j].body);
         j++;
       }
-      entries.push([key, { kind: 'scalar', value: bodyLines.join('\n') }]);
+      // `|` keeps newlines: each line is its own shell statement. `>` folds
+      // them to spaces: the shell gets ONE line, so `echo hi` / `npx snyk test`
+      // across two source lines is the single command `echo hi npx snyk test`.
+      // Joining a folded scalar with `\n` would manufacture a second statement
+      // that the workflow never runs.
+      const folded = inlineValue.trim().startsWith('>');
+      entries.push([key, { kind: 'scalar', value: bodyLines.join(folded ? ' ' : '\n') }]);
       i = j;
       continue;
     }
@@ -352,14 +358,52 @@ const COMMAND_WRAPPERS: ReadonlyArray<readonly string[]> = [
  * `secrets.SNYK_TOKEN`. They can also contain `&&`, which would split one
  * statement into two.
  *
- * Nothing here models quoting, subshells or `$(…)` — anything this misses is a
- * statement whose command goes unrecognised, which refuses a true claim rather
- * than permitting a false one.
+ * Quotes are honoured for the one purpose that matters here: a `;`, `&&`,
+ * `||` or `|` inside `"…"` or `'…'` does not end a statement, so
+ * `echo "hello; snyk test is disabled"` is one statement whose command is
+ * `echo`, not two. Review manufactured scanner-execution evidence with exactly
+ * that. Subshells and `$(…)` are still not modelled — anything this misses is
+ * a statement whose command goes unrecognised, which refuses a true claim
+ * rather than permitting a false one.
  */
 function statementsIn(script: string): string[][] {
-  return script
-    .replace(/\$\{\{[^}]*\}\}/g, '${{expression}}')
-    .split(/[\n;]|&&|\|\||\|/)
+  const text = script.replace(/\$\{\{[^}]*\}\}/g, '${{expression}}');
+  const statements: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '\n' || ch === ';') {
+      statements.push(current);
+      current = '';
+      continue;
+    }
+    if (ch === '&' && text[i + 1] === '&') {
+      statements.push(current);
+      current = '';
+      i++;
+      continue;
+    }
+    if (ch === '|') {
+      statements.push(current);
+      current = '';
+      if (text[i + 1] === '|') i++;
+      continue;
+    }
+    current += ch;
+  }
+  statements.push(current);
+  return statements
     .map((statement) => statement.trim().split(/\s+/).filter((token) => token !== ''))
     .filter((tokens) => tokens.length > 0);
 }

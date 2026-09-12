@@ -96,7 +96,7 @@ function runGate(
 }
 
 /** A report npm would really emit: n nodes, metadata agreeing with the map. */
-function realisticReport(nodes: Record<string, { severity: string; via?: unknown[] }>) {
+function realisticReport(nodes: Record<string, { severity: string; via?: unknown[]; effects?: unknown }>) {
   const counts: Record<string, number> = { info: 0, low: 0, moderate: 0, high: 0, critical: 0 };
   for (const node of Object.values(nodes)) counts[node.severity] = (counts[node.severity] ?? 0) + 1;
   return JSON.stringify({
@@ -264,6 +264,26 @@ describe('#466 CLI — a report the gate cannot read is exit 2, never PASS', () 
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/names "missing-package", which is not a node in this report/);
     expect(res.stderr).not.toMatch(/PASS/);
+  });
+
+  it('refuses an effects list that names a package with no node in the report', () => {
+    // A waived node whose `effects` claims dependents the report never included.
+    // The gate never classifies on `effects`, but an inconsistent report is
+    // undecidable, not clean — review found this shape passing.
+    const res = runGate(
+      realisticReport({
+        sharp: { severity: 'high', via: [{ source: WAIVED[0] }], effects: ['ghost-package', '@huggingface/transformers'] },
+      }),
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/unreadable effects on sharp: effects\[0\] names "ghost-package"/);
+    expect(res.stderr).not.toMatch(/PASS/);
+  });
+
+  it('refuses an effects value that is not an array', () => {
+    const res = runGate(realisticReport({ sharp: { severity: 'high', via: [{ source: WAIVED[0] }], effects: 'sharp' } }));
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/unreadable effects on sharp/);
   });
 
   it('refuses a node carrying no via list at all', () => {
