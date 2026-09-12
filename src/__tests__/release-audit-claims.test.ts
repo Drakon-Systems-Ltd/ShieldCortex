@@ -439,6 +439,44 @@ describe('#466 hermetic — the waiver gate is not vacuous', () => {
     expect(classify(report, ids).unwaived.map((n) => n.name)).toEqual(['mystery']);
   });
 
+  /**
+   * The older rule seeded a node from its own advisory ids and then never looked
+   * at the rest of its `via`. So a node carrying one waived advisory was decided
+   * `true` before anyone asked where else it derived from — and review found
+   * that passing a report whose waived node also derived from a package that
+   * was never defined. Waiving is per ENTRY: all the advisories AND all the
+   * packages.
+   */
+  it('does NOT waive a node whose own advisories are waived but whose source package is not', () => {
+    const report = {
+      vulnerabilities: {
+        lodash: { severity: 'high', via: [{ source: 999999 }] },
+        sharp: { severity: 'high', via: [...[...ids].map((id) => ({ source: id })), 'lodash'] },
+      },
+    };
+    expect(classify(report, ids).unwaived.map((n) => n.name).sort()).toEqual(['lodash', 'sharp']);
+    expect(classify(report, ids).waived).toEqual([]);
+  });
+
+  it('fails closed on a waived node whose source package the report never defined', () => {
+    const report = {
+      vulnerabilities: {
+        sharp: { severity: 'high', via: [...[...ids].map((id) => ({ source: id })), 'missing-package'] },
+      },
+    };
+    expect(classify(report, ids).unwaived.map((n) => n.name)).toEqual(['sharp']);
+  });
+
+  it('fails closed on a cycle rather than waiving both ends of it', () => {
+    const report = {
+      vulnerabilities: {
+        a: { severity: 'high', via: ['b'] },
+        b: { severity: 'high', via: ['a'] },
+      },
+    };
+    expect(classify(report, ids).unwaived.map((n) => n.name).sort()).toEqual(['a', 'b']);
+  });
+
   it('rejects a waiver file with no expiry, owner, reason or advisory ids', () => {
     const bad = (body: string) => '```json audit-waivers\n' + body + '\n```';
     expect(() => parseWaivers(bad('{"waivers":[{"id":"x","advisories":[1]}]}'))).toThrow(/expires/);
@@ -517,6 +555,63 @@ describe('#466 hermetic — an unreadable audit report is undecidable, not clean
     for (const notAReport of [null, [], 'ok', 42, undefined]) {
       expect(auditReportProblems(notAReport)).not.toEqual([]);
     }
+  });
+
+  /**
+   * Classification filtered `via` for the two kinds of entry it understands and
+   * discarded the rest, so an entry it could not read simply stopped existing.
+   * All three shapes below are v2-shaped with consistent totals, and all three
+   * exited 0 "1 waived" at ef06f9d3.
+   */
+  const oneNode = (via: unknown[]) => ({
+    ...clean,
+    vulnerabilities: { sharp: { severity: 'high', via } },
+    metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 } },
+  });
+
+  it.each([
+    ['a bare number', [{ source: 1124066 }, 999999]],
+    ['a null', [{ source: 1124066 }, null]],
+    ['a nested array', [{ source: 1124066 }, ['sharp']]],
+    ['a boolean', [{ source: 1124066 }, true]],
+    ['an advisory with a string source', [{ source: '1124066' }]],
+    ['an advisory with no source at all', [{ title: 'something' }]],
+    ['an advisory with a fractional source', [{ source: 1.5 }]],
+  ])('refuses a via entry that is %s', (_label, via) => {
+    expect(auditReportProblems(oneNode(via)).join('\n')).toMatch(/unreadable via entry on sharp/);
+  });
+
+  it('refuses a via that names a package the report never defined', () => {
+    expect(auditReportProblems(oneNode([{ source: 1124066 }, 'missing-package'])).join('\n')).toMatch(
+      /names "missing-package", which is not a node in this report/,
+    );
+  });
+
+  it('refuses a node with no via list, and one that is not a node at all', () => {
+    expect(auditReportProblems(oneNode(undefined as unknown as unknown[])).join('\n')).toMatch(
+      /`via` is missing/,
+    );
+    expect(
+      auditReportProblems({
+        ...clean,
+        vulnerabilities: { sharp: 'high' },
+        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 } },
+      }).join('\n'),
+    ).toMatch(/not a vulnerability node/);
+  });
+
+  it('accepts the two via shapes npm really emits, including a self-reference', () => {
+    expect(auditReportProblems(oneNode([{ source: 1124066 }, 'sharp']))).toEqual([]);
+    expect(
+      auditReportProblems({
+        ...clean,
+        vulnerabilities: {
+          sharp: { severity: 'high', via: [{ source: 1124066 }] },
+          '@huggingface/transformers': { severity: 'high', via: ['sharp'] },
+        },
+        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 2, critical: 0, total: 2 } },
+      }),
+    ).toEqual([]);
   });
 });
 

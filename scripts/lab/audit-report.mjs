@@ -14,8 +14,12 @@
  *
  * `npm audit --json` also emits a node per *dependent* of a vulnerable package
  * (`@huggingface/transformers` has `via: ["sharp"]` and no advisory ID of its
- * own). Those are resolved transitively: a node carrying no advisory IDs is
- * waived only when every package it derives from is itself fully waived.
+ * own). Those are resolved transitively, and the rule is per ENTRY rather than
+ * per node: a node is waived only when every advisory in its `via` is waived
+ * AND every package in its `via` resolves to a node that is itself waived.
+ * Review found the weaker version — seed the node from its own advisory ids,
+ * then never look at the rest of `via` — passing a report whose waived node also
+ * derived from a package that did not exist.
  *
  * Usage:
  *   npm run audit:release                 # the gate
@@ -112,9 +116,12 @@ export function waivedAdvisoryIds(waivers) {
  * Returns `{ unwaived, waived, waivedIds, seenIds }` where `unwaived` and
  * `waived` are arrays of `{ name, severity, ids, viaPackages }`.
  *
- * Package-only nodes (no advisory ids of their own) are resolved against the
- * classification of the packages they derive from, iterating to a fixed point
- * so a chain of any depth settles. Anything still undecided fails closed.
+ * A node is waived only when EVERY entry in its `via` is: each advisory id it
+ * carries is listed in a waiver, and each package it derives from resolves to a
+ * node that is itself waived. Package references are resolved by iterating to a
+ * fixed point, so a chain of any depth settles; anything still undecided —
+ * including a reference into a cycle, or one the report never defined — fails
+ * closed.
  *
  * This is classification, not validation: `report` must already have been
  * through `auditReportProblems()` (`runNpmAudit` does it), because an empty or
@@ -130,18 +137,24 @@ export function classify(report, waivedIds) {
   }));
 
   const verdict = new Map();
-  // Seed: nodes with their own advisory ids decide themselves.
+  // An unwaived advisory of a node's own decides it immediately and finally:
+  // nothing further down its `via` can rescue it.
   for (const n of nodes) {
-    if (n.ids.length > 0) verdict.set(n.name, n.ids.every((id) => waivedIds.has(id)));
+    if (n.ids.some((id) => !waivedIds.has(id))) verdict.set(n.name, false);
   }
-  // Fixed point: a package-only node inherits from everything it derives from.
+  // Fixed point. A node still undecided carries only waived advisories, if any,
+  // so what is left to establish is its packages — EVERY one of them, whether or
+  // not the node also had advisories of its own. Review found the older version,
+  // which seeded a node `true` from its own waived ids and never looked at its
+  // `via` packages again, passing a report whose waived node also derived from
+  // `missing-package`.
   for (let pass = 0; pass < nodes.length + 1; pass++) {
     let changed = false;
     for (const n of nodes) {
       if (verdict.has(n.name)) continue;
       const parents = n.viaPackages;
       // No ids and no parents: nothing to justify it, so it is not waived.
-      if (parents.length === 0) {
+      if (n.ids.length === 0 && parents.length === 0) {
         verdict.set(n.name, false);
         changed = true;
         continue;
@@ -242,6 +255,74 @@ export function auditReportProblems(report) {
       `audit output inconsistent: severity counts sum to ${bucketSum},` +
         ` metadata.vulnerabilities.total says ${totals.total}`,
     );
+  }
+  problems.push(...viaProblems(nodes));
+  return problems;
+}
+
+/**
+ * Everything unreadable in the `via` lists of a vulnerability map.
+ *
+ * `via` is how npm says WHY a node is vulnerable, and it holds exactly two
+ * kinds of thing: advisory objects carrying an integer `source`, and the names
+ * of other nodes in the same report that this one derives from. Classification
+ * filtered for those two kinds and DISCARDED everything else, which meant an
+ * entry it could not read simply stopped existing. Review measured the
+ * consequence on v2-shaped reports with consistent totals:
+ *
+ *   via: [{ source: 1124066 }, 999999 ]              PASS, "1 waived"
+ *   via: [{ source: 1124066 }, null ]                PASS, "1 waived"
+ *   via: [{ source: 1124066 }, "missing-package" ]   PASS, "1 waived"
+ *
+ * The third has no `missing-package` node anywhere in the report, so the gate
+ * announced a clean bill of health over a dependency chain it could not follow.
+ * None of the three is a shape npm 7+ emits — this is incomplete validation, not
+ * a demonstrated bypass with real npm output — but a security gate that silently
+ * discards what it cannot read is the failure mode this whole file exists to
+ * close. Unreadable is exit 2, the same as any other undecidable report.
+ */
+export function viaProblems(nodes) {
+  const problems = [];
+  const describe = (value) => JSON.stringify(value) ?? String(value);
+  for (const [name, node] of Object.entries(nodes)) {
+    if (!isPlainObject(node)) {
+      problems.push(`\`vulnerabilities.${name}\` is ${describe(node)}, not a vulnerability node`);
+      continue;
+    }
+    if (!Array.isArray(node.via)) {
+      problems.push(
+        `unreadable via entry on ${name}: \`via\` is ${node.via === undefined ? 'missing' : describe(node.via)}` +
+          ' — a node that does not say why it is vulnerable is undecidable, not clean',
+      );
+      continue;
+    }
+    node.via.forEach((entry, index) => {
+      if (isPlainObject(entry)) {
+        if (!Number.isSafeInteger(entry.source)) {
+          problems.push(
+            `unreadable via entry on ${name}: via[${index}] is an advisory whose` +
+              ` \`source\` is ${describe(entry.source)}, not an integer advisory id`,
+          );
+        }
+        return;
+      }
+      if (typeof entry === 'string') {
+        // A node may name itself; npm does that for a package with a direct
+        // advisory. Naming anything else means the report claims a chain it did
+        // not include, and the missing link is exactly what would decide it.
+        if (entry !== name && !Object.prototype.hasOwnProperty.call(nodes, entry)) {
+          problems.push(
+            `unreadable via entry on ${name}: via[${index}] names ${describe(entry)},` +
+              ' which is not a node in this report',
+          );
+        }
+        return;
+      }
+      problems.push(
+        `unreadable via entry on ${name}: via[${index}] is ${describe(entry)} — expected an` +
+          ' advisory object with an integer `source`, or the name of another node in this report',
+      );
+    });
   }
   return problems;
 }

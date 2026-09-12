@@ -96,7 +96,7 @@ function runGate(
 }
 
 /** A report npm would really emit: n nodes, metadata agreeing with the map. */
-function realisticReport(nodes: Record<string, { severity: string; via: unknown[] }>) {
+function realisticReport(nodes: Record<string, { severity: string; via?: unknown[] }>) {
   const counts: Record<string, number> = { info: 0, low: 0, moderate: 0, high: 0, critical: 0 };
   for (const node of Object.values(nodes)) counts[node.severity] = (counts[node.severity] ?? 0) + 1;
   return JSON.stringify({
@@ -197,6 +197,58 @@ describe('#466 CLI — a report the gate cannot read is exit 2, never PASS', () 
     expect(res.stderr).toMatch(/expected a JSON object, got an array/);
   });
 
+  /**
+   * A `via` entry the gate cannot read used to be an entry it dropped.
+   * Classification filtered for the two kinds it understands — advisory objects
+   * and package names — and discarded the rest, so all three payloads below are
+   * v2-shaped with totals that agree and all three exited 0 at ef06f9d3:
+   *
+   *   via: [{source: 1124066}, 999999]            PASS — 0 unwaived (1 waived)
+   *   via: [{source: 1124066}, null]              PASS — 0 unwaived (1 waived)
+   *   via: [{source: 1124066}, "missing-package"] PASS — 0 unwaived (1 waived)
+   *
+   * The last names a node the report does not contain, so the gate announced a
+   * clean bill of health over a chain it could not follow. None of the three is
+   * a shape npm 7+ emits — incomplete validation rather than a demonstrated
+   * bypass with real output — but silently discarding the unreadable is the one
+   * failure mode this gate exists to prevent.
+   */
+  it.each([
+    ['a bare number', [{ source: WAIVED[0] }, 999999]],
+    ['a null', [{ source: WAIVED[0] }, null]],
+    ['a nested array', [{ source: WAIVED[0] }, ['sharp']]],
+    ['an advisory whose source is a string', [{ source: String(WAIVED[0]) }]],
+  ])('refuses a via entry that is %s', (_label, via) => {
+    const res = runGate(realisticReport({ sharp: { severity: 'high', via } }));
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/unreadable via entry on sharp/);
+    expect(res.stderr).not.toMatch(/PASS/);
+  });
+
+  it('refuses a via that names a package with no node in the report', () => {
+    const res = runGate(
+      realisticReport({ sharp: { severity: 'high', via: [{ source: WAIVED[0] }, 'missing-package'] } }),
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/names "missing-package", which is not a node in this report/);
+    expect(res.stderr).not.toMatch(/PASS/);
+  });
+
+  it('refuses a node carrying no via list at all', () => {
+    const res = runGate(
+      JSON.stringify({
+        auditReportVersion: 2,
+        vulnerabilities: { sharp: { severity: 'high' } },
+        metadata: {
+          vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 },
+          dependencies: { prod: 1, dev: 0, optional: 0, peer: 0, peerOptional: 0, total: 1 },
+        },
+      }),
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/unreadable via entry on sharp: `via` is missing/);
+  });
+
   it('refuses to run at all when there is no npm on PATH', () => {
     const res = spawnSync(process.execPath, [AUDIT_SCRIPT], {
       cwd: REPO_ROOT,
@@ -233,6 +285,28 @@ describe('#466 CLI — a report the gate CAN read still decides on the merits', 
     );
     expect(res.status).toBe(1);
     expect(res.stderr).toMatch(/FAIL — 1 unwaived production advisory node/);
+  });
+
+  /**
+   * Exit 1, not 2 and not 0. The report is perfectly readable; the verdict is
+   * that `sharp`'s own advisories being waived does not waive the unwaived
+   * `lodash` it derives from. At ef06f9d3 `sharp` was seeded `true` from its own
+   * ids and its `via` packages were never consulted again, so the gate named one
+   * unwaived node where there are two.
+   */
+  it('does not waive a node whose advisories are waived but whose source package is not', () => {
+    const res = runGate(
+      realisticReport({
+        lodash: { severity: 'high', via: [{ source: 999999 }] },
+        sharp: { severity: 'high', via: [...WAIVED.map((source) => ({ source })), 'lodash'] },
+      }),
+    );
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/FAIL — 2 unwaived production advisory node/);
+    // The per-node verdicts are the report, on stdout; the summary is on stderr.
+    expect(res.stdout).toMatch(/UNWAIVED sharp/);
+    expect(res.stdout).toMatch(/UNWAIVED lodash/);
+    expect(res.stdout).not.toMatch(/WAIVED {3}sharp/);
   });
 
   it('reports the measured totals in --json mode', () => {
