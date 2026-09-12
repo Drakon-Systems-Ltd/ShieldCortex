@@ -125,7 +125,7 @@ describe('doctor — unsupported Node fails the real CLI with no database presen
   const runDoctorCli = (
     args: string[] = [],
     opts: { forceVersion?: string } = {},
-  ): Promise<{ stdout: string; code: number }> =>
+  ): Promise<{ stdout: string; code: number | null; signal: NodeJS.Signals | null }> =>
     new Promise((resolve, reject) => {
       if (opts.forceVersion) writePreload(opts.forceVersion);
       const nodeArgs = opts.forceVersion ? ['--require', preload] : [];
@@ -137,7 +137,9 @@ describe('doctor — unsupported Node fails the real CLI with no database presen
       child.stdout.on('data', (c) => { stdout += c.toString(); });
       child.stderr.on('data', (c) => { stdout += c.toString(); });
       child.on('error', reject);
-      child.on('close', (code) => resolve({ stdout, code: code ?? 0 }));
+      // #471: SIGABRT yields code=null, signal=SIGABRT. Mapping null→0 hid the
+      // Node 24 better-sqlite3 ObjectWrap abort as a green doctor run.
+      child.on('close', (code, signal) => resolve({ stdout, code, signal }));
     });
 
   it('the check is in the live check list and passes on this supported runtime', async () => {
@@ -146,7 +148,10 @@ describe('doctor — unsupported Node fails the real CLI with no database presen
     expect(fs.existsSync(CLI_PATH)).toBe(true);
 
     // Passes are collapsed into theme codes without --verbose.
-    const { stdout, code } = await runDoctorCli(['--verbose']);
+    const { stdout, code, signal } = await runDoctorCli(['--verbose']);
+    expect(signal).toBeNull();
+    expect(code).not.toBe(134);
+    expect(plain(stdout)).not.toMatch(/Assertion failed: \(env\) != nullptr/);
     expect(plain(stdout)).toContain(NODE_RUNTIME_LABEL);
     expect(code).toBe(0);
   }, 120_000);
