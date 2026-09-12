@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- (none yet)
+
+## [5.0.0] - 2026-09-12
+
+**Breaking major.** Node 20 is gone. Read [docs/UPGRADING-5.md](docs/UPGRADING-5.md) *before* `npm install -g shieldcortex`. Stay on 4.x with `npm install -g shieldcortex@4` (last 4.x is 4.54.15). Action Guard stays off by default.
+
 ### ⚠️ Breaking (5.0.0)
 
 This is a **major**. Read [docs/UPGRADING-5.md](docs/UPGRADING-5.md) before you update. In one line each:
