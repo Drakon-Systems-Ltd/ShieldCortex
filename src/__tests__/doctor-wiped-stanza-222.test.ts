@@ -1,5 +1,11 @@
 import { describe, expect, it } from '@jest/globals';
-import { reconcilePluginState, planReconcileActions, type PluginLoadState, type ReconcileInput } from '../integrations/openclaw-plugin-index.js';
+import {
+  reconcilePluginState,
+  planReconcileActions,
+  type PluginLoadState,
+  type ReconcileInput,
+  type ReconcileVerdict,
+} from '../integrations/openclaw-plugin-index.js';
 import { renderPluginLoadVerdict } from '../cli/doctor.js';
 
 /**
@@ -107,12 +113,13 @@ describe('#222 — doctor cannot green-tick an unrecognised state', () => {
     'config-unreadable',
     'index-unreadable',
     'load-unproven',
+    'loaded-not-indexed',
     'version-regressed',
     'conflicted-metadata',
     'duplicate-install',
   ];
 
-  function verdictFor(state: PluginLoadState) {
+  function verdictFor(state: PluginLoadState, over: Partial<ReconcileVerdict> = {}): ReconcileVerdict {
     return {
       state,
       severity: 'fail' as const,
@@ -121,6 +128,8 @@ describe('#222 — doctor cannot green-tick an unrecognised state', () => {
       loadedInIndex: false,
       loadedInLiveRoster: null,
       indexReadable: true,
+      configReadable: true,
+      configPresent: true,
       openClawTracked: false,
       indexWarnsConflict: false,
       metadataConflict: false,
@@ -129,6 +138,7 @@ describe('#222 — doctor cannot green-tick an unrecognised state', () => {
       onDiskVersion: '4.47.36',
       expectedVersion: '4.47.36',
       reasons: ['because'],
+      ...over,
     };
   }
 
@@ -148,6 +158,92 @@ describe('#222 — doctor cannot green-tick an unrecognised state', () => {
         expect([state, r.status]).not.toEqual([state, 'pass']);
       }
     }
+  });
+
+  it('#461: renders loaded-not-indexed as a WARN naming the control-plane disagreement', () => {
+    // Live roster proves load (protected now), plugins_json omits the plugin.
+    // Never a green tick — the index decides what loads at the next restart —
+    // and never a red UNPROTECTED, which is the #459 false alarm.
+    const r = renderPluginLoadVerdict(verdictFor('loaded-not-indexed'));
+    expect(r.status).toBe('warn');
+    // Not the unknown-state fallback: the arm must name both halves of the
+    // disagreement — loaded on the RUNNING gateway, absent from plugins_json.
+    expect(r.message).toMatch(/loaded on the RUNNING gateway/);
+    expect(r.message).toMatch(/plugins_json.*does NOT list/i);
+    expect(r.message).not.toMatch(/not recognised/);
+    expect(r.fix).toBeTruthy();
+  });
+
+  // The rendered advice and the plan `shieldcortex repair` will actually
+  // execute have to describe the SAME action. A `fix` that merely exists —
+  // "run repair" over a plan that only self-checks — is advice a user follows
+  // to no effect, and the identical warning greets them next run.
+  for (const [kind, tracked, expectedCommand] of [
+    ['OpenClaw-tracked', true, 'openclaw plugins update @drakon-systems/shieldcortex-realtime'],
+    ['local/untracked', false, 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@4.47.36'],
+  ] as const) {
+    it(`#461: the ${kind} fix names the command its own remediation plan runs`, () => {
+      const verdict = verdictFor('loaded-not-indexed', {
+        severity: 'warn',
+        enabledInConfig: true,
+        loadedInLiveRoster: true,
+        openClawTracked: tracked,
+        recommendedAction: tracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
+      });
+
+      const r = renderPluginLoadVerdict(verdict);
+      expect(r.fix).toContain(expectedCommand);
+      // Both routes shell out to `openclaw plugins`, so the row must be tagged
+      // for the "remedy blocked" annotation on hosts without a usable CLI.
+      expect(r.needsOpenClawCli).toEqual({ subcommand: 'plugins' });
+
+      // …and the planner really does run exactly that, then prove the result.
+      const plan = planReconcileActions(verdict, {
+        pluginId: PLUGIN_ID,
+        packageName: '@drakon-systems/shieldcortex-realtime',
+        expectedVersion: '4.47.36',
+      });
+      const shellStep = plan.find((s) => Array.isArray(s.command));
+      expect(`openclaw ${shellStep!.command!.join(' ')}`).toBe(expectedCommand);
+      // Never the do-nothing plan that recommendedAction 'none' produced.
+      expect(plan.map((s) => s.kind)).not.toEqual(['self-check']);
+      expect(plan.map((s) => s.kind)).toContain('gateway-reload');
+      expect(plan[plan.length - 1].kind).toBe('self-check');
+    });
+  }
+
+  it('#461: a stronger state keeps its own headline but still says the index disagrees', () => {
+    // When conflicted-metadata or duplicate-install owns the verdict, the
+    // divergence is in `reasons` — the rendered line must not swallow it, or
+    // the operator never learns that protection is only current-boot deep.
+    for (const state of ['conflicted-metadata', 'duplicate-install'] as const) {
+      const r = renderPluginLoadVerdict(
+        verdictFor(state, {
+          severity: 'warn',
+          enabledInConfig: true,
+          loadedInIndex: false,
+          loadedInLiveRoster: true,
+          indexReadable: true,
+        }),
+      );
+      expect(r.status).toBe('warn');
+      expect(r.message).toMatch(/RUNNING gateway HAS it loaded/);
+      expect(r.message).toMatch(/not guaranteed at the next restart/);
+    }
+  });
+
+  it('#461: the divergence note is NOT added when the index does list the plugin', () => {
+    // It is keyed on evidence, not on the state name: an indexed plugin has no
+    // control-plane disagreement to report.
+    const r = renderPluginLoadVerdict(
+      verdictFor('duplicate-install', {
+        severity: 'warn',
+        enabledInConfig: true,
+        loadedInIndex: true,
+        loadedInLiveRoster: true,
+      }),
+    );
+    expect(r.message).not.toMatch(/RUNNING gateway HAS it loaded/);
   });
 
   it('treats a completely unknown state as a warning rather than health', () => {
@@ -215,7 +311,7 @@ describe('#222 — repair actually remediates the wiped state', () => {
 });
 
 describe('#103 — doctor must not claim roster confirmation it does not have', () => {
-  function healthyVerdict(loadedInLiveRoster: boolean | null) {
+  function healthyVerdict(loadedInLiveRoster: boolean | null): ReconcileVerdict {
     return {
       state: 'healthy' as const,
       severity: 'ok' as const,
@@ -224,6 +320,8 @@ describe('#103 — doctor must not claim roster confirmation it does not have', 
       loadedInIndex: true,
       loadedInLiveRoster,
       indexReadable: true,
+      configReadable: true,
+      configPresent: true,
       openClawTracked: true,
       indexWarnsConflict: false,
       metadataConflict: false,

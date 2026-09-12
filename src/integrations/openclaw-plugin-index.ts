@@ -186,6 +186,10 @@ export type PluginLoadState =
   | 'config-unreadable'
   | 'index-unreadable'
   | 'load-unproven'
+  /** #461: the RUNNING gateway proves the plugin loaded while a READABLE
+   *  plugins_json omits it — protected right now, but the control plane
+   *  disagrees with the live gateway about what loads at the next restart. */
+  | 'loaded-not-indexed'
   | 'version-regressed'
   | 'conflicted-metadata'
   | 'duplicate-install';
@@ -491,7 +495,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   }
 
   // 4. THE #74 silent drop: enabled in config but missing from a READABLE index.
-  if (enabledInConfig && !loadedInIndex) {
+  // #459: live boot-roster proof outranks plugins_json. Jarvis 2026-09-02 had
+  // shieldcortex-realtime on the gateway listen line while plugins_json omitted
+  // it (generation-dir / consent warning). Convicting UNPROTECTED there is the
+  // false red that trains operators to ignore the check that caught #74.
+  // Unread live roster (null) still takes this fail — that is #74.
+  // Explicit live miss (false) already failed at rule 2.
+  if (enabledInConfig && !loadedInIndex && loadedInLiveRoster !== true) {
     reasons.push('enabled:true in config but ABSENT from the loaded roster (plugins_json) — interceptor not loaded, host unprotected while status reports ON');
     if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
     return {
@@ -507,6 +517,32 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   if (regressed) {
     reasons.push(`running version ${effective} is older than expected ${expected} — refuse downgrade, reinstall pinned`);
     return { ...base, state: 'version-regressed', severity: 'fail', recommendedAction: 'reinstall-pinned', reasons };
+  }
+
+  // 4b. #461: live proof of load with a READABLE plugins_json that omits the
+  //     plugin. #459 rightly keeps rule 4 from convicting UNPROTECTED here —
+  //     the live roster outranks the index — but falling through to healthy/ok
+  //     buried the disagreement entirely: the control plane that decides what
+  //     loads at the NEXT restart does not list the plugin. Protected now, not
+  //     guaranteed after a restart.
+  //
+  //     RECORDED HERE, RETURNED BELOW (after rules 5 and 6). The first cut
+  //     returned the new state right here and so outranked conflicted-metadata
+  //     and duplicate-install — two states that describe the same host MORE
+  //     specifically and carry STRONGER remediations (prune the stale
+  //     generation dir; reconcile installs.json against the index). Returning
+  //     first replaced `dedupe-and-reload` with a weaker plan and, via
+  //     `mayHaveDuplicateDirs` in openclaw-reconcile.ts, stopped the duplicate
+  //     dirs being pruned at all — a fix that hid the cause of the very
+  //     divergence it was reporting. So the divergence is added to `reasons`
+  //     now — nothing is suppressed, and rules 5/6 carry it into their
+  //     verdicts — while the more specific state keeps its priority.
+  const loadedButNotIndexed =
+    enabledInConfig && !loadedInIndex && indexReadable && loadedInLiveRoster === true;
+  if (loadedButNotIndexed) {
+    reasons.push('the RUNNING gateway proves the plugin loaded — the host is protected right now');
+    reasons.push('but the READABLE install index (plugins_json) does NOT list it as an enabled plugin — the control plane disagrees with the live gateway, and the control plane decides what loads at the NEXT restart');
+    if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
   }
 
   // 5. installs.json ↔ SQLite index disagree (the precondition for a future drop).
@@ -526,6 +562,34 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   if (projectDirs.length > 1) {
     reasons.push(`${projectDirs.length} plugin project dirs on disk — prune the stale duplicate so a future toggle cannot re-resolve to it`);
     return { ...base, state: 'duplicate-install', severity: 'warn', recommendedAction: 'dedupe-and-reload', reasons };
+  }
+
+  // 6b. #461 (recorded at 4b): the live gateway and a readable plugins_json
+  //     disagree, and no more specific state above claimed the host. This is
+  //     the LAST stop before `healthy`, which is where it used to land.
+  //
+  //     `recommendedAction` is NOT 'none'. 'none' plans a bare self-check
+  //     ("verify the healthy state") — so doctor said "run repair" about a
+  //     disagreement repair had no step for, and the next run reported the
+  //     identical warn forever. That is the #222 shape one layer down: a
+  //     remediation that succeeds by doing nothing. The lever that rewrites
+  //     the index is an install-layer refresh, so this routes exactly where
+  //     the other index-disagreement state (conflicted-metadata, rule 5)
+  //     routes, on the same tracked/local split: an OpenClaw-tracked plugin is
+  //     refreshed with `plugins update` (the SC install path skips tracked
+  //     plugins → "source not found"), an untracked one is reinstalled PINNED
+  //     to the expected version so the refresh cannot re-resolve to an older
+  //     build. Both plans then reload and re-prove load, and both are gated
+  //     behind the reconcile/restart consent envs — nothing here touches a
+  //     protected host without the operator asking.
+  if (loadedButNotIndexed) {
+    return {
+      ...base,
+      state: 'loaded-not-indexed',
+      severity: 'warn',
+      recommendedAction: openClawTracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
+      reasons,
+    };
   }
 
   // Say exactly which evidence we have. Claiming "loaded in roster" off the
@@ -878,7 +942,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
       if (!proc) return null;
       gatewayPid = proc.pid;
       processStartedAtMs = proc.startedAtMs;
-      const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
+      const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs, home });
       bootAtMs = boot?.atMs ?? null;
       return boot?.plugins ?? null;
     });
