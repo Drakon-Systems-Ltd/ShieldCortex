@@ -107,9 +107,22 @@ export function normaliseDefenceSource(raw: unknown): DefenceSource {
   return { type, identifier };
 }
 
+/**
+ * Catch-all path for unmatched `/api/...` requests.
+ *
+ * express 5 carries path-to-regexp v8, which rejects the bare `*` this used to
+ * be written as (`'/api/*'` now throws at registration). `'/api/{*splat}'` is
+ * the express 5 spelling with the same match set as express 4's `'/api/*'`:
+ * every path under `/api/` including the bare `/api/`, while `/api` and
+ * `/apix` still fall through to the dashboard shell. `'/api/*splat'` is NOT
+ * equivalent — it misses `/api/`. Pinned by express5-api-routing.test.ts.
+ */
+const API_CATCH_ALL_PATH = '/api/{*splat}';
+
 export const __test__ = {
   ALLOWED_DEFENCE_SOURCE_TYPES,
   MAX_SOURCE_IDENTIFIER_LENGTH,
+  API_CATCH_ALL_PATH,
 };
 
 /**
@@ -913,7 +926,7 @@ export function startVisualizationServer(dbPath?: string): void {
   });
 
   // Catch-all for unmatched API routes — return JSON instead of Express HTML 404
-  app.all('/api/*', (_req: Request, res: Response) => {
+  app.all(API_CATCH_ALL_PATH, (_req: Request, res: Response) => {
     res.status(404).json({ error: 'Not found' });
   });
 
