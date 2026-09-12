@@ -366,10 +366,31 @@ describe('#466 hermetic — the scanner rule permits a claim exactly when CI ear
   });
 
   it.each([
+    '${{ !true }}',
+    '${{ !on }}',
+    '${{ !true && github.event_name == \'push\' }}',
+    '${{ github.event_name == \'push\' && !yes }}',
+  ])('refuses a claim backed by a step behind a negated truthy literal: %s', (condition) => {
+    expect(scannerClaimViolations(['snyk'], [oneJob(`- if: ${condition}`, '  run: snyk test')])).toEqual(['snyk']);
+  });
+
+  it.each([
+    '${{ !false }}',
+    '${{ !github.event.pull_request.draft }}',
+    '${{ 1 == 2 }}',
+    '${{ !true || true }}',
+  ])('still permits a claim behind a condition it cannot evaluate: %s', (condition) => {
+    expect(scannerClaimViolations(['snyk'], [oneJob(`- if: ${condition}`, '  run: snyk test')])).toEqual([]);
+  });
+
+  it.each([
     'echo "snyk is not installed"',
     'echo snyk is disabled',
     'printf \'snyk: skipped\\n\'',
     'grep -r snyk . || true',
+    './snyk-wrapper.sh',
+    'scripts/snyk.sh test',
+    '/usr/local/bin/snyk test',
   ])('refuses a claim backed by a step that only NAMES the scanner: %s', (command) => {
     expect(scannerClaimViolations(['snyk'], [oneJob(`- run: ${command}`)])).toEqual(['snyk']);
   });

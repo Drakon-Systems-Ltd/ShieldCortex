@@ -207,6 +207,20 @@ export function parseWorkflow(text: string): WorkflowNode {
 
 /** The spellings GitHub Actions reads as an unconditionally false `if:`. */
 const FALSY_LITERALS = ['false', 'off', 'no', '0', ''];
+/** What `!` turns into a falsy conjunct. Same reading GitHub's expression grammar gives them. */
+const TRUTHY_LITERALS = ['true', 'on', 'yes', '1'];
+
+/**
+ * Is one operand plainly false? A falsy literal, or `!` applied to a truthy
+ * literal. `!` on anything else (a context lookup, a function call) is unknown
+ * and therefore counts as running.
+ */
+function isFalsyOperand(operand: string): boolean {
+  const bare = unquote(operand.trim());
+  if (FALSY_LITERALS.includes(bare)) return true;
+  const negated = /^!\s*(.+)$/.exec(bare);
+  return negated !== null && TRUTHY_LITERALS.includes(unquote(negated[1].trim()));
+}
 
 /**
  * Is this `if:` value a switch that is off?
@@ -220,10 +234,12 @@ const FALSY_LITERALS = ['false', 'off', 'no', '0', ''];
  * somewhere.
  *
  * `${{ false && github.event_name == 'push' }}` is still plainly false, though,
- * and review found a step hidden behind exactly that. A conjunction is false
- * whenever any conjunct is, so a trivially-constant falsy conjunct disables the
- * step. Nothing else is evaluated: a `||` anywhere means a false operand
- * decides nothing, so the whole condition reads as unknown and the step counts.
+ * and review found a step hidden behind exactly that; `${{ !true }}` is the
+ * same trick one operator over. What counts as disabled is exactly this: a
+ * falsy literal, or `!` applied to a truthy literal, standing alone or as any
+ * conjunct of an `&&` chain. Nothing else is evaluated — no comparisons, no
+ * context lookups — and a `||` anywhere means a false operand decides nothing,
+ * so the whole condition reads as unknown and the step counts.
  */
 export function isDisabledCondition(value: string): boolean {
   const inner = unquote(
@@ -232,9 +248,9 @@ export function isDisabledCondition(value: string): boolean {
       .replace(/\s*\}\}$/, '')
       .trim(),
   ).toLowerCase();
-  if (FALSY_LITERALS.includes(inner)) return true;
+  if (isFalsyOperand(inner)) return true;
   if (inner.includes('||')) return false;
-  return inner.split('&&').some((conjunct) => FALSY_LITERALS.includes(unquote(conjunct.trim())));
+  return inner.split('&&').some(isFalsyOperand);
 }
 
 /** One thing a workflow will execute, and which kind of key put it there. */
@@ -397,6 +413,12 @@ function usesScannerAction(reference: string, scanner: string): boolean {
  * `run: npx snyk test` counts and `run: echo "snyk is not installed"` does not.
  * A `uses:` counts when the scanner names the action's owner or repository.
  *
+ * A command that is a *path* — `./snyk-wrapper.sh`, `scripts/snyk.sh`,
+ * `/usr/local/bin/snyk` — is a script this function is not reading, and its
+ * filename is a label on it. That is the same shape as a local `uses:`
+ * reference, and it gets the same answer: refused. Only a bare command name,
+ * resolved off `PATH`, is taken to be the tool itself.
+ *
  * A scanner with no workflow form at all — `dependabot`, which is configured in
  * `.github/dependabot.yml` and never invoked by a step — can therefore never
  * satisfy this, and a SKILL.md claiming it would be refused. That is the safe
@@ -411,7 +433,7 @@ export function invokesScanner(steps: readonly ExecutableStep[], scanner: string
       ? usesScannerAction(value, name)
       : statementsIn(value).some((tokens) => {
           const command = invokedCommand(tokens);
-          return command !== undefined && namesScanner(command.split('/').pop() ?? '', name);
+          return command !== undefined && !command.includes('/') && namesScanner(command, name);
         });
   });
 }
