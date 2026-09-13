@@ -2938,9 +2938,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         label: `${label} config`,
         status: 'warn',
         message: `Action Guard is disabled in config (\`${provenance('enabled')}: false\`) — tool calls are not gated on either surface`,
-        fix: pluginOff
-          ? pluginOffFix
-          : 'Run `shieldcortex config --action-guard-enable` to restore gating — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
+        fix: 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.',
       });
     } else if (!effective.enforce) {
       results.push({
@@ -2949,7 +2947,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         message: `Action Guard runs in warn-mode (\`${provenance('enforce')}: false\`) on both surfaces — dangerous ops log but are not gated (catastrophic still blocks)`,
         fix: pluginOff
           ? pluginOffFix
-          : 'Run `shieldcortex config --action-guard-enforce` to gate dangerous ops — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
+          : 'Action Guard is advisory. Do not run --action-guard-enforce from this warning. Enable only after the review loop says yes.',
       });
     }
 

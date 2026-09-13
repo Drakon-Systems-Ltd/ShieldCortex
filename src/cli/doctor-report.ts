@@ -153,9 +153,7 @@ export function extractFixCommands(fix: string | undefined): string[] {
   // Edith: fix prose backticks only the restart. Grant must lead or operators
   // keep restarting and the SCAN warn never clears.
   if (/allowConversationAccess/i.test(fix)) {
-    const grant = 'shieldcortex openclaw install --allow-conversation-access';
-    const rest = unique(cmds.filter((c) => !/allow-conversation-access/i.test(c)));
-    return unique([grant, ...rest.length ? rest : ['openclaw gateway restart']]);
+    return [];
   }
   if (cmds.length > 0) return unique(cmds);
 
@@ -187,10 +185,7 @@ export function extractFixCommands(fix: string | undefined): string[] {
   // Conversation access: config grant FIRST, then restart. Restart alone
   // never sticks (Edith 2026-08-18 — operators kept restarting, warn remained).
   if (/allowConversationAccess/i.test(fix)) {
-    return [
-      'shieldcortex openclaw install --allow-conversation-access',
-      'openclaw gateway restart',
-    ];
+    return [];
   }
   if (/restart.{0,40}gateway/i.test(fix) || /restart long-running/i.test(fix)) {
     return ['openclaw gateway restart'];
@@ -370,22 +365,25 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
   if (g.fixCommands.length === 0) {
     lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
   } else {
-    for (const cmd of g.fixCommands) {
-      const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
-        || cmd.startsWith('SHIELDCORTEX_');
-      const prefixed = runnable ? `$ ${cmd}` : cmd;
-      for (const wl of wrapLine(prefixed, width, 4, 6)) {
-        lines.push(runnable ? `${style.bold}${wl}${style.reset}` : `${style.dim}${wl}${style.reset}`);
+    const cmds = g.status === 'warn'
+      ? g.fixCommands.filter((c) => !/action-guard-enable|action-guard-enforce|allow-conversation-access/i.test(c))
+      : g.fixCommands;
+    if (cmds.length === 0) {
+      lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
+    } else {
+      for (const cmd of cmds) {
+        const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
+          || cmd.startsWith('SHIELDCORTEX_');
+        const prefixed = runnable ? `$ ${cmd}` : cmd;
+        for (const wl of wrapLine(prefixed, width, 4, 6)) {
+          lines.push(runnable ? `${style.bold}${wl}${style.reset}` : `${style.dim}${wl}${style.reset}`);
+        }
       }
     }
   }
   if (g.theme === 'SCAN') {
-    // Prefer the install flag command (already in fixCommands). Footnote only
-    // when the extractor failed to surface a conversation-access grant.
-    const note = 'manual alt: set plugins.entries.shieldcortex-realtime.hooks.allowConversationAccess=true';
-    if (!g.fixCommands.some((c) => /allow-conversation-access|allowConversationAccess/i.test(c))) {
-      lines.push(...wrapLine(note, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
-    }
+    const note = 'Conversation scanning is off. That is valid. Do not grant conversation access from this warning.';
+    lines.push(...wrapLine(note, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
   }
   return lines;
 }

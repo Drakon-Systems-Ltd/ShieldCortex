@@ -769,7 +769,7 @@ function maybePrintActionGuardDefaultOffNotice(mainUpdated: boolean): void {
   process.stdout.write(`  ${paint('yellow', '!')}  ${paint('bold', 'Action Guard is now OFF by default')}\n`);
   process.stdout.write('     False approval cards on ordinary OpenClaw exec calls were going nowhere.\n');
   process.stdout.write('     Catastrophic tool gating is off until you turn Guard back on.\n');
-  process.stdout.write(`     ${paint('gray', 'enable: ')}${paint('cyan', 'shieldcortex config --action-guard-enable')}\n`);
+  process.stdout.write(`     ${paint('gray', 'Leave it off unless the review loop says yes.')}\n`);
   process.stdout.write(`     ${paint('gray', 'status: ')}${paint('cyan', 'shieldcortex config --cloud-status')}\n\n`);
 }
 

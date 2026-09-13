@@ -82,12 +82,11 @@ describe('extractFixCommands', () => {
     ]);
   });
 
-  it('promotes grant ahead of backticked restart-only fix prose (Edith live shape)', () => {
+  it('does not mint a conversation-access grant from honesty copy', () => {
     const cmds = extractFixCommands(
       'Add hooks.allowConversationAccess=true in openclaw.json, then run `openclaw gateway restart`. Conversation content is sensitive.',
     );
-    expect(cmds[0]).toBe('shieldcortex openclaw install --allow-conversation-access');
-    expect(cmds).toContain('openclaw gateway restart');
+    expect(cmds).toEqual([]);
   });
 
 
@@ -95,10 +94,7 @@ describe('extractFixCommands', () => {
     const cmds = extractFixCommands(
       'Add "hooks": { "allowConversationAccess": true } to plugins.entries["shieldcortex-realtime"] in ~/.openclaw/openclaw.json, then restart the gateway.',
     );
-    expect(cmds).toEqual([
-      'shieldcortex openclaw install --allow-conversation-access',
-      'openclaw gateway restart',
-    ]);
+    expect(cmds).toEqual([]);
   });
 
   it('never treats English restart prose as a command', () => {
@@ -155,10 +151,12 @@ describe('formatDoctorReport — Edith case', () => {
     expect(text).toMatch(/KEY/);
 
     // commands on own lines
-    expect(text).toMatch(/\$ shieldcortex config --action-guard-enforce/);
     expect(text).toMatch(/\$ shieldcortex doctor --fix-project-keys/);
     expect(text).toMatch(/\$ openclaw gateway restart/);
     expect(text).toMatch(/allowConversationAccess/);
+    expect(text).not.toMatch(/\$ shieldcortex config --action-guard-enable/);
+    expect(text).not.toMatch(/\$ shieldcortex config --action-guard-enforce/);
+    expect(text).not.toMatch(/\$ shieldcortex openclaw install --allow-conversation-access/);
     expect(text).not.toMatch(/\$ restart OpenClaw/);
     expect(text).not.toMatch(/\$ restart MCP/);
     expect(text).toMatch(/\$ /);
