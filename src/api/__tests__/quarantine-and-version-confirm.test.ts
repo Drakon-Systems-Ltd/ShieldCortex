@@ -155,6 +155,10 @@ describe('POST /api/version/restart and /update confirm (#477 #478)', () => {
   });
 
   afterEach(() => {
+    const home = process.env.HOME;
+    if (home && home.includes('sc-ver-')) {
+      rmSync(home, { recursive: true, force: true });
+    }
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
     jest.resetModules();
@@ -178,6 +182,10 @@ describe('POST /api/version/restart and /update confirm (#477 #478)', () => {
     { name: 'boolean true', body: { confirm: true } },
     { name: 'string yes', body: { confirm: 'yes' } },
     { name: 'wrong verb', body: { confirm: 'update' } },
+    { name: 'null body', body: null },
+    { name: 'boolean body', body: true },
+    { name: 'string body', body: 'restart' },
+    { name: 'array body', body: ['restart'] },
   ];
 
   for (const { name, body } of rejectBodies) {

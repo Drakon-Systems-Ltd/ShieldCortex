@@ -72,4 +72,55 @@ describe('POST /api/sessions/import-jsonl default glob (#476)', () => {
 
     initModule.closeDatabase();
   });
+
+  it('does not echo $HOME when a default-glob match fails to import', async () => {
+    const { mkdirSync, writeFileSync, chmodSync } = await import('fs');
+    const projects = join(isolatedHome, '.claude', 'projects', 'x');
+    mkdirSync(projects, { recursive: true });
+    const bad = join(projects, 'broken.jsonl');
+    writeFileSync(bad, '{"type":"user","sessionId":"s1"}\n');
+    chmodSync(bad, 0o000);
+
+    const initModule = await import('../../database/init.js');
+    initModule.closeDatabase();
+    initModule.initDatabase(':memory:');
+
+    const { registerSessionRoutes } = await import('../routes/sessions.js');
+    const routes = { post: new Map<string, Handler[]>() };
+    const app = {
+      get() { /* unused */ },
+      post(route: string, ...handlers: Handler[]) { routes.post.set(route, handlers); },
+      patch() { /* unused */ },
+      delete() { /* unused */ },
+    };
+    registerSessionRoutes(app as never, (_req, _res, next) => next());
+
+    const handlers = routes.post.get('/api/sessions/import-jsonl')!;
+    const res: { statusCode: number; body: unknown; status(code: number): typeof res; json(payload: unknown): typeof res } = {
+      statusCode: 200,
+      body: undefined,
+      status(code) { this.statusCode = code; return this; },
+      json(payload) { this.body = payload; return this; },
+    };
+    let idx = 0;
+    let handlerReturn: unknown;
+    const req = { query: {}, params: {}, body: {} };
+    const next = (err?: unknown) => {
+      if (err) throw err;
+      idx++;
+      if (idx < handlers.length) handlerReturn = handlers[idx](req, res, next);
+    };
+    const first = handlers[0](req, res, next);
+    if (first && typeof (first as Promise<unknown>).then === 'function') await first;
+    if (handlerReturn && typeof (handlerReturn as Promise<unknown>).then === 'function') await handlerReturn;
+
+    const dumped = JSON.stringify(res.body);
+    expect(dumped).not.toContain(isolatedHome);
+    expect(dumped).not.toMatch(/\/home\//);
+    expect(dumped).toContain('broken.jsonl');
+    expect(dumped).not.toContain(bad);
+
+    chmodSync(bad, 0o644);
+    initModule.closeDatabase();
+  });
 });
