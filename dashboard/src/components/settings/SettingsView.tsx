@@ -60,10 +60,10 @@ function SettingsContent() {
             <div className="space-y-6">
               <LicenseStatusCard />
               <GlassCard className="p-6">
-                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Enterprise</h3>
-                <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
+                <h3 className="text-lg font-semibold text-[var(--sc-text)]">Enterprise</h3>
+                <p className="mt-2 text-sm text-[var(--sc-text-dim)]">
                   Cloud replication, team management, shared patterns, self-hosted deployments, and fleets:{' '}
-                  <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-accent-cyan)] hover:underline">
+                  <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-ok)] hover:underline">
                     sales@drakonsystems.com
                   </a>
                 </p>
@@ -76,22 +76,22 @@ function SettingsContent() {
               <PrunePanel />
               <DedupePanel />
               <GlassCard className="p-6">
-                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">System Information</h3>
+                <h3 className="text-lg font-semibold text-[var(--sc-text)]">System Information</h3>
                 <div className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Dashboard</span>
-                    <span className="font-mono text-sm text-[var(--sc-text-primary)]">localhost:3030</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Dashboard</span>
+                    <span className="font-mono text-sm text-[var(--sc-text)]">localhost:3030</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">API Server</span>
-                    <span className="font-mono text-sm text-[var(--sc-text-primary)]">localhost:3001</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">API Server</span>
+                    <span className="font-mono text-sm text-[var(--sc-text)]">localhost:3001</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Database</span>
-                    <span className="font-mono text-sm text-[var(--sc-text-primary)]">~/.shieldcortex/memories.db</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Database</span>
+                    <span className="font-mono text-sm text-[var(--sc-text)]">~/.shieldcortex/memories.db</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Licence Tier</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Licence Tier</span>
                     <Badge variant={license?.tier === 'pro' ? 'cyan' : license?.tier === 'team' ? 'coral' : 'muted'}>
                       {TIER_LABELS[license?.tier ?? 'free']}
                     </Badge>

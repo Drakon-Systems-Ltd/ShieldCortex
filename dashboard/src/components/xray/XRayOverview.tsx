@@ -10,6 +10,7 @@ import {
   Lock,
   Radar,
   ScanSearch,
+  ShieldCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { FeatureLockedError } from '@/lib/auth';
@@ -17,11 +18,22 @@ import { useWebSocketEvent } from '@/components/MemoryWebSocketProvider';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge, riskVariant } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
+import { CardError } from '@/components/ds/CardError';
+import { Drawer } from '@/components/ds/Drawer';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { StatCard } from '@/components/ds/StatCard';
-import { TrustGauge } from '@/components/xray/TrustGauge';
+import { Table, type Column } from '@/components/ds/Table';
 import { FindingActions } from '@/components/xray/FindingActions';
 import { LocalAiFindingExplainer } from '@/components/xray/LocalAiFindingExplainer';
+
+/** Trust score accent (brief §8: trust gauge -> StatTile — a plain number
+ *  fits the rest of the dashboard's decision-first stat tiles better than a
+ *  bespoke circular gauge). */
+function trustAccent(score: number): 'coral' | 'amber' | 'cyan' {
+  if (score <= 50) return 'coral';
+  if (score <= 75) return 'amber';
+  return 'cyan';
+}
 import {
   useXRayActivity,
   useXRayHistory,
@@ -56,6 +68,11 @@ interface PersistedFinding {
   detectedAt: string;
 }
 
+type FindingRow = PersistedFinding & {
+  guidance?: { whatItMeans: string; whatToDo: string; falsePositiveNote: string; urgency: string };
+  systemFile?: boolean;
+};
+
 export function XRayOverview() {
   const [tab, setTab] = useState<XRayTab>('scanner');
   const [target, setTarget] = useState('');
@@ -70,6 +87,7 @@ export function XRayOverview() {
   const [watchTarget, setWatchTarget] = useState('');
   const [watchDeep, setWatchDeep] = useState(false);
   const [findingsFilter, setFindingsFilter] = useState<string>('new');
+  const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null);
 
   const { data: historyData } = useXRayHistory({
     risk: historyRisk,
@@ -81,7 +99,42 @@ export function XRayOverview() {
   const { data: watchSessionsData } = useXRayWatchSessions(8, { state: watchState });
   const { data: statusData } = useXRayStatus();
   const { data: findingsStats } = useXRayFindingsStats();
-  const { data: findingsData } = useXRayFindingsList({ status: findingsFilter === 'all' ? undefined : findingsFilter });
+  const {
+    data: findingsData,
+    isLoading: findingsLoading,
+    isError: findingsError,
+    error: findingsErrorObj,
+    refetch: refetchFindings,
+  } = useXRayFindingsList({ status: findingsFilter === 'all' ? undefined : findingsFilter });
+
+  const findings = useMemo(() => (findingsData?.findings as FindingRow[] | undefined) ?? [], [findingsData]);
+  const selectedFinding = findings.find((f) => f.id === selectedFindingId) ?? null;
+  const findingColumns: Column<FindingRow>[] = useMemo(
+    () => [
+      {
+        key: 'severity',
+        header: 'Severity',
+        cell: (f) => <Badge variant={riskVariant(f.severity)}>{f.severity}</Badge>,
+        sortValue: (f) => f.severity,
+      },
+      { key: 'title', header: 'Finding', cell: (f) => <span className="text-[var(--sc-text)]">{f.title}</span>, sortValue: (f) => f.title },
+      { key: 'category', header: 'Category', cell: (f) => f.category, sortValue: (f) => f.category },
+      {
+        key: 'file',
+        header: 'File',
+        cell: (f) => (f.file ? <span className="font-mono text-xs">{f.line ? `${f.file}:${f.line}` : f.file}</span> : '—'),
+        className: 'max-w-xs truncate',
+      },
+      {
+        key: 'detectedAt',
+        header: 'Detected',
+        cell: (f) => formatDate(f.detectedAt),
+        sortValue: (f) => new Date(f.detectedAt).getTime(),
+        className: 'whitespace-nowrap text-[var(--sc-text-dim)]',
+      },
+    ],
+    [],
+  );
 
   const historyEntries = useMemo(() => historyData?.entries ?? [], [historyData?.entries]);
   const activityEntries = activityData?.entries ?? [];
@@ -171,14 +224,14 @@ export function XRayOverview() {
                     scanMutation.mutate({ target: target.trim(), deep });
                   }}
                 >
-                  <label className="text-sm font-semibold text-[var(--sc-text-primary)]">
+                  <label className="text-sm font-semibold text-[var(--sc-text)]">
                     What do you want to scan?
                   </label>
                   <input
                     value={target}
                     onChange={(e) => setTarget(e.target.value)}
                     placeholder="Package name, file path, or directory..."
-                    className="mt-3 w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-4 py-3 text-sm text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
+                    className="mt-3 w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-4 py-3 text-sm text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
                   />
                   <div className="mt-4 flex flex-wrap items-center gap-3">
                     <button
@@ -186,7 +239,7 @@ export function XRayOverview() {
                       onClick={() => pickTargetMutation.mutate('file', {
                         onSuccess: (r) => { if (r.path) setTarget(r.path); },
                       })}
-                      className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-4 py-2.5 text-sm font-medium text-[var(--sc-text-secondary)] transition-all hover:bg-[var(--sc-surface-interactive-hover)] hover:text-[var(--sc-text-primary)]"
+                      className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-4 py-2.5 text-sm font-medium text-[var(--sc-text-dim)] transition-all hover:bg-[var(--sc-surface-interactive-hover)] hover:text-[var(--sc-text)]"
                     >
                       <FileSearch size={14} /> Browse file
                     </button>
@@ -195,19 +248,19 @@ export function XRayOverview() {
                       onClick={() => pickTargetMutation.mutate('folder', {
                         onSuccess: (r) => { if (r.path) setTarget(r.path); },
                       })}
-                      className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-4 py-2.5 text-sm font-medium text-[var(--sc-text-secondary)] transition-all hover:bg-[var(--sc-surface-interactive-hover)] hover:text-[var(--sc-text-primary)]"
+                      className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-4 py-2.5 text-sm font-medium text-[var(--sc-text-dim)] transition-all hover:bg-[var(--sc-surface-interactive-hover)] hover:text-[var(--sc-text)]"
                     >
                       <FolderSearch size={14} /> Browse folder
                     </button>
-                    <label className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-3 py-2.5 text-sm text-[var(--sc-text-secondary)]">
+                    <label className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-3 py-2.5 text-sm text-[var(--sc-text-dim)]">
                       <input
                         type="checkbox"
                         checked={deep}
                         onChange={(e) => setDeep(e.target.checked)}
-                        className="h-4 w-4 rounded border-[var(--sc-border)] accent-[var(--sc-cyan)]"
+                        className="h-4 w-4 rounded border-[var(--sc-border)] accent-[var(--sc-ok)]"
                       />
                       Deep scan
-                      {!capabilities?.deepScan && <Lock size={12} className="text-[var(--sc-coral)]" />}
+                      {!capabilities?.deepScan && <Lock size={12} className="text-[var(--sc-danger)]" />}
                     </label>
                     <Button type="submit" variant="coral" glow disabled={scanMutation.isPending || !target.trim()}>
                       {scanMutation.isPending ? 'Scanning\u2026' : 'Run Scan'}
@@ -220,7 +273,7 @@ export function XRayOverview() {
                 </form>
 
                 {pickTargetMutation.isError && (
-                  <div className="mt-3 rounded-xl border border-[var(--sc-coral)]/20 bg-[var(--sc-coral)]/5 px-4 py-3 text-sm text-[var(--sc-coral)]">
+                  <div className="mt-3 rounded-xl border border-[var(--sc-danger)]/20 bg-[var(--sc-danger)]/5 px-4 py-3 text-sm text-[var(--sc-danger)]">
                     {pickTargetMutation.error instanceof Error ? pickTargetMutation.error.message : 'Failed to open native picker'}
                   </div>
                 )}
@@ -229,7 +282,7 @@ export function XRayOverview() {
                   <div className={`mt-4 rounded-xl px-4 py-3 text-sm ${
                     isFeatureLocked
                       ? 'border border-[var(--sc-amber)]/20 bg-[var(--sc-amber)]/5 text-[var(--sc-amber)]'
-                      : 'border border-[var(--sc-coral)]/20 bg-[var(--sc-coral)]/5 text-[var(--sc-coral)]'
+                      : 'border border-[var(--sc-danger)]/20 bg-[var(--sc-danger)]/5 text-[var(--sc-danger)]'
                   }`}>
                     {latestError.message}
                   </div>
@@ -239,7 +292,7 @@ export function XRayOverview() {
               {/* Scan result */}
               <GlassCard className={`p-6 ${scanMutation.isPending ? 'scan-sweep' : ''}`}>
                 <div className="flex items-center justify-between gap-3">
-                  <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Scan Result</h3>
+                  <h3 className="text-lg font-semibold text-[var(--sc-text)]">Scan Result</h3>
                   <div className="flex gap-2">
                     <Badge variant="muted">{summary.total} scans</Badge>
                     <Badge variant="muted">Avg {summary.avgScore ?? '\u2014'}</Badge>
@@ -247,17 +300,23 @@ export function XRayOverview() {
                 </div>
 
                 {!visibleResult ? (
-                  <div className="mt-5 rounded-xl bg-[var(--sc-bg-elevated)] px-5 py-8 text-center text-sm text-[var(--sc-text-muted)]">
+                  <div className="mt-5 rounded-xl bg-[var(--sc-surface-2)] px-5 py-8 text-center text-sm text-[var(--sc-text-muted)]">
                     Run a scan or select one from history to see results here.
                   </div>
                 ) : (
                   <div className="mt-5 space-y-4">
                     {/* Result header */}
-                    <div className="flex items-start gap-6">
-                      <TrustGauge score={visibleResult.trustScore} size={120} />
+                    <div className="flex items-start gap-4">
+                      <StatCard
+                        label="Trust score"
+                        value={visibleResult.trustScore}
+                        icon={ShieldCheck}
+                        accent={trustAccent(visibleResult.trustScore)}
+                        className="w-32 shrink-0"
+                      />
                       <div className="flex-1 min-w-0">
                         <div className="flex flex-wrap items-center gap-3">
-                          <h4 className="min-w-0 break-words text-lg font-semibold text-[var(--sc-text-primary)]">{visibleResult.target}</h4>
+                          <h4 className="min-w-0 break-words text-lg font-semibold text-[var(--sc-text)]">{visibleResult.target}</h4>
                           <Badge variant={riskVariant(visibleResult.riskLevel)}>{visibleResult.riskLevel}</Badge>
                         </div>
                         <div className="mt-2 flex flex-wrap gap-2">
@@ -271,7 +330,7 @@ export function XRayOverview() {
                     {/* Findings */}
                     <div className="space-y-3">
                       {visibleResult.findings.length === 0 ? (
-                        <div className="rounded-xl border border-[var(--sc-cyan)]/20 bg-[var(--sc-cyan)]/5 px-4 py-4 text-sm text-[var(--sc-cyan)]">
+                        <div className="rounded-xl border border-[var(--sc-ok)]/20 bg-[var(--sc-ok)]/5 px-4 py-4 text-sm text-[var(--sc-ok)]">
                           No findings detected. This target looks clean.
                         </div>
                       ) : (
@@ -281,8 +340,8 @@ export function XRayOverview() {
                               <Badge variant={riskVariant(finding.severity)}>{finding.severity}</Badge>
                               <Badge variant="muted">{finding.category}</Badge>
                             </div>
-                            <p className="mt-2 text-sm font-semibold text-[var(--sc-text-primary)]">{finding.title}</p>
-                            <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">{finding.description}</p>
+                            <p className="mt-2 text-sm font-semibold text-[var(--sc-text)]">{finding.title}</p>
+                            <p className="mt-1 text-sm text-[var(--sc-text-dim)]">{finding.description}</p>
                             {(finding.file || finding.evidence) && (
                               <div className="mt-2 space-y-0.5 font-mono text-xs text-[var(--sc-text-muted)]">
                                 {finding.file && <div>File: {finding.line ? `${finding.file}:${finding.line}` : finding.file}</div>}
@@ -330,8 +389,8 @@ export function XRayOverview() {
                     { label: 'npm inspection', enabled: capabilities?.npmInspection ?? false },
                     { label: 'Deep scan', enabled: capabilities?.deepScan ?? false },
                   ].map((cap) => (
-                    <div key={cap.label} className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-3 py-2">
-                      <span className="text-sm text-[var(--sc-text-secondary)]">{cap.label}</span>
+                    <div key={cap.label} className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-3 py-2">
+                      <span className="text-sm text-[var(--sc-text-dim)]">{cap.label}</span>
                       <Badge variant={cap.enabled ? 'cyan' : 'muted'} dot>{cap.enabled ? 'On' : 'Off'}</Badge>
                     </div>
                   ))}
@@ -343,17 +402,17 @@ export function XRayOverview() {
                   Quick stats
                 </h4>
                 <div className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-3 py-2">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Watch roots</span>
-                    <span className="text-sm font-semibold text-[var(--sc-text-primary)]">{statusSummary?.activeWatchRoots ?? 0} active</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-3 py-2">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Watch roots</span>
+                    <span className="text-sm font-semibold text-[var(--sc-text)]">{statusSummary?.activeWatchRoots ?? 0} active</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-3 py-2">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Stale roots</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-3 py-2">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Stale roots</span>
                     <span className="text-sm font-semibold text-[var(--sc-amber)]">{statusSummary?.staleWatchRoots ?? 0}</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-3 py-2">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Blocked events</span>
-                    <span className="text-sm font-semibold text-[var(--sc-coral)]">{statusSummary?.blockedEvents ?? 0}</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-3 py-2">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Blocked events</span>
+                    <span className="text-sm font-semibold text-[var(--sc-danger)]">{statusSummary?.blockedEvents ?? 0}</span>
                   </div>
                 </div>
               </GlassCard>
@@ -371,12 +430,12 @@ export function XRayOverview() {
                   value={historySearch}
                   onChange={(e) => setHistorySearch(e.target.value)}
                   placeholder="Filter by file, folder, or package..."
-                  className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-4 py-2.5 text-sm text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
+                  className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-4 py-2.5 text-sm text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
                 />
                 <select
                   value={historyRisk}
                   onChange={(e) => setHistoryRisk(e.target.value as typeof historyRisk)}
-                  className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-4 py-2.5 text-sm text-[var(--sc-text-primary)]"
+                  className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-4 py-2.5 text-sm text-[var(--sc-text)]"
                 >
                   <option value="ALL">All risk</option>
                   <option value="CRITICAL">Critical</option>
@@ -388,7 +447,7 @@ export function XRayOverview() {
                 <select
                   value={historyTargetType}
                   onChange={(e) => setHistoryTargetType(e.target.value as typeof historyTargetType)}
-                  className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-4 py-2.5 text-sm text-[var(--sc-text-primary)]"
+                  className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-4 py-2.5 text-sm text-[var(--sc-text)]"
                 >
                   <option value="all">All targets</option>
                   <option value="file">Files</option>
@@ -403,8 +462,8 @@ export function XRayOverview() {
                     onClick={() => setHistoryDepth(v)}
                     className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
                       historyDepth === v
-                        ? 'bg-[var(--sc-coral)] text-white'
-                        : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)]'
+                        ? 'bg-[var(--sc-danger)] text-white'
+                        : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-dim)]'
                     }`}
                   >
                     {v === 'all' ? 'All scans' : v === 'true' ? 'Deep only' : 'Standard only'}
@@ -433,7 +492,7 @@ export function XRayOverview() {
                       }}
                       className="p-4"
                     >
-                      <div className="truncate text-sm font-semibold text-[var(--sc-text-primary)]">{entry.target}</div>
+                      <div className="truncate text-sm font-semibold text-[var(--sc-text)]">{entry.target}</div>
                       <div className="mt-1 text-xs text-[var(--sc-text-muted)]">{formatDate(entry.scannedAt)}</div>
                       <div className="mt-2 flex flex-wrap gap-2">
                         <Badge variant={riskVariant(entry.riskLevel)}>{entry.riskLevel}</Badge>
@@ -448,10 +507,16 @@ export function XRayOverview() {
               {/* Detail panel */}
               {visibleResult ? (
                 <GlassCard strong className="p-6">
-                  <div className="flex items-start gap-5">
-                    <TrustGauge score={visibleResult.trustScore} size={100} />
+                  <div className="flex items-start gap-4">
+                    <StatCard
+                      label="Trust score"
+                      value={visibleResult.trustScore}
+                      icon={ShieldCheck}
+                      accent={trustAccent(visibleResult.trustScore)}
+                      className="w-32 shrink-0"
+                    />
                     <div className="flex-1 min-w-0">
-                      <h4 className="break-words text-lg font-semibold text-[var(--sc-text-primary)]">{visibleResult.target}</h4>
+                      <h4 className="break-words text-lg font-semibold text-[var(--sc-text)]">{visibleResult.target}</h4>
                       <div className="mt-2 flex flex-wrap gap-2">
                         <Badge variant={riskVariant(visibleResult.riskLevel)}>{visibleResult.riskLevel}</Badge>
                         <Badge variant="muted">{visibleResult.filesScanned} files</Badge>
@@ -461,7 +526,7 @@ export function XRayOverview() {
                   </div>
                   <div className="mt-5 space-y-3">
                     {visibleResult.findings.length === 0 ? (
-                      <div className="rounded-xl border border-[var(--sc-cyan)]/20 bg-[var(--sc-cyan)]/5 px-4 py-3 text-sm text-[var(--sc-cyan)]">
+                      <div className="rounded-xl border border-[var(--sc-ok)]/20 bg-[var(--sc-ok)]/5 px-4 py-3 text-sm text-[var(--sc-ok)]">
                         Clean — no findings.
                       </div>
                     ) : (
@@ -469,9 +534,9 @@ export function XRayOverview() {
                         <GlassCard key={`${f.title}-${i}`} severity={f.severity as 'critical' | 'high' | 'medium' | 'low'} className="p-3">
                           <div className="flex items-center gap-2">
                             <Badge variant={riskVariant(f.severity)}>{f.severity}</Badge>
-                            <span className="text-sm font-medium text-[var(--sc-text-primary)]">{f.title}</span>
+                            <span className="text-sm font-medium text-[var(--sc-text)]">{f.title}</span>
                           </div>
-                          <p className="mt-1 text-xs text-[var(--sc-text-secondary)]">{f.description}</p>
+                          <p className="mt-1 text-xs text-[var(--sc-text-dim)]">{f.description}</p>
                           <LocalAiFindingExplainer finding={f} target={visibleResult.target} />
                         </GlassCard>
                       ))
@@ -492,7 +557,7 @@ export function XRayOverview() {
           <div className="space-y-6">
             {/* Start new watch */}
             <GlassCard strong className="p-6">
-              <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Start Watching</h3>
+              <h3 className="text-lg font-semibold text-[var(--sc-text)]">Start Watching</h3>
               <p className="mt-1 text-sm text-[var(--sc-text-muted)]">
                 Monitor a directory for file changes and automatically scan for threats in real-time.
               </p>
@@ -509,7 +574,7 @@ export function XRayOverview() {
                     value={watchTarget}
                     onChange={(e) => setWatchTarget(e.target.value)}
                     placeholder="Directory path, e.g. /Users/michael/Development/project"
-                    className="w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-4 py-3 text-sm text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
+                    className="w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-4 py-3 text-sm text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
                   />
                 </div>
                 <button
@@ -517,16 +582,16 @@ export function XRayOverview() {
                   onClick={() => pickTargetMutation.mutate('folder', {
                     onSuccess: (r) => { if (r.path) setWatchTarget(r.path); },
                   })}
-                  className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-4 py-3 text-sm font-medium text-[var(--sc-text-secondary)] transition-all hover:bg-[var(--sc-surface-interactive-hover)] hover:text-[var(--sc-text-primary)]"
+                  className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-4 py-3 text-sm font-medium text-[var(--sc-text-dim)] transition-all hover:bg-[var(--sc-surface-interactive-hover)] hover:text-[var(--sc-text)]"
                 >
                   <FolderSearch size={14} /> Browse
                 </button>
-                <label className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-3 py-3 text-sm text-[var(--sc-text-secondary)]">
+                <label className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-3 py-3 text-sm text-[var(--sc-text-dim)]">
                   <input
                     type="checkbox"
                     checked={watchDeep}
                     onChange={(e) => setWatchDeep(e.target.checked)}
-                    className="h-4 w-4 rounded accent-[var(--sc-cyan)]"
+                    className="h-4 w-4 rounded accent-[var(--sc-ok)]"
                   />
                   Deep
                 </label>
@@ -536,12 +601,12 @@ export function XRayOverview() {
                 </Button>
               </form>
               {startWatchMutation.isSuccess && (
-                <p className="mt-3 text-sm text-[var(--sc-cyan)]">
+                <p className="mt-3 text-sm text-[var(--sc-ok)]">
                   Watching {startWatchMutation.data.root}
                 </p>
               )}
               {startWatchMutation.isError && (
-                <p className="mt-3 text-sm text-[var(--sc-coral)]">
+                <p className="mt-3 text-sm text-[var(--sc-danger)]">
                   {startWatchMutation.error instanceof Error ? startWatchMutation.error.message : 'Failed to start watch'}
                 </p>
               )}
@@ -555,7 +620,7 @@ export function XRayOverview() {
                   {activeWatchers.map((w) => (
                     <GlassCard key={w.root} className="flex items-center justify-between p-4">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold text-[var(--sc-text-primary)]">{w.root}</p>
+                        <p className="truncate text-sm font-semibold text-[var(--sc-text)]">{w.root}</p>
                         <p className="text-xs text-[var(--sc-text-muted)]">PID {w.pid}</p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -585,8 +650,8 @@ export function XRayOverview() {
                     onClick={() => setWatchState(s)}
                     className={`rounded-lg px-3 py-1.5 text-xs font-medium capitalize transition-all ${
                       watchState === s
-                        ? 'bg-[var(--sc-coral)] text-white'
-                        : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)]'
+                        ? 'bg-[var(--sc-danger)] text-white'
+                        : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-dim)]'
                     }`}
                   >
                     {s}
@@ -597,7 +662,7 @@ export function XRayOverview() {
 
             {watchSessions.length === 0 ? (
               <GlassCard className="p-8 text-center text-sm text-[var(--sc-text-muted)]">
-                No watch sessions recorded yet. Start a watcher above or use <code className="font-mono text-[var(--sc-cyan)]">shieldcortex xray --watch ./src</code> from the CLI.
+                No watch sessions recorded yet. Start a watcher above or use <code className="font-mono text-[var(--sc-ok)]">shieldcortex xray --watch ./src</code> from the CLI.
               </GlassCard>
             ) : (
               <div className="grid gap-4 lg:grid-cols-2">
@@ -605,7 +670,7 @@ export function XRayOverview() {
                   <GlassCard key={session.id} className="p-5">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold text-[var(--sc-text-primary)]">{session.root}</p>
+                        <p className="truncate text-sm font-semibold text-[var(--sc-text)]">{session.root}</p>
                         <p className="mt-1 text-xs text-[var(--sc-text-muted)]">Started {formatDate(session.startedAt)}</p>
                       </div>
                       <Badge
@@ -616,7 +681,7 @@ export function XRayOverview() {
                         {session.state}
                       </Badge>
                     </div>
-                    <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">{session.lastEventSummary ?? 'No detections yet'}</p>
+                    <p className="mt-2 text-sm text-[var(--sc-text-dim)]">{session.lastEventSummary ?? 'No detections yet'}</p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <Badge variant="muted">{session.changesDetected} changes</Badge>
                       <Badge variant="muted">{session.findingsDetected} findings</Badge>
@@ -639,8 +704,8 @@ export function XRayOverview() {
                   onClick={() => setActivityKind(k)}
                   className={`rounded-lg px-3 py-1.5 text-xs font-medium capitalize transition-all ${
                     activityKind === k
-                      ? 'bg-[var(--sc-coral)] text-white'
-                      : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)]'
+                      ? 'bg-[var(--sc-danger)] text-white'
+                      : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-dim)]'
                   }`}
                 >
                   {k === 'all' ? 'All activity' : k}
@@ -659,10 +724,10 @@ export function XRayOverview() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <Radar size={14} className="shrink-0 text-[var(--sc-coral)]" />
-                          <span className="text-sm font-semibold capitalize text-[var(--sc-text-primary)]">{entry.kind}</span>
+                          <Radar size={14} className="shrink-0 text-[var(--sc-danger)]" />
+                          <span className="text-sm font-semibold capitalize text-[var(--sc-text)]">{entry.kind}</span>
                         </div>
-                        <p className="mt-1 truncate text-sm text-[var(--sc-text-secondary)]">{entry.target}</p>
+                        <p className="mt-1 truncate text-sm text-[var(--sc-text-dim)]">{entry.target}</p>
                         <p className="mt-1 text-xs text-[var(--sc-text-muted)]">{entry.summary}</p>
                       </div>
                       <Badge
@@ -713,8 +778,8 @@ export function XRayOverview() {
                   onClick={() => setFindingsFilter(key)}
                   className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
                     findingsFilter === key
-                      ? accent ? 'bg-[var(--sc-coral)] text-white' : 'bg-[var(--sc-cyan)] text-[var(--sc-bg-deep)]'
-                      : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)]'
+                      ? accent ? 'bg-[var(--sc-danger)] text-white' : 'bg-[var(--sc-ok)] text-[var(--sc-bg)]'
+                      : 'bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-dim)]'
                   }`}
                 >
                   {label}
@@ -727,92 +792,86 @@ export function XRayOverview() {
               ))}
             </div>
 
-            {/* Findings list */}
-            {!findingsData?.findings || findingsData.findings.length === 0 ? (
-              <GlassCard className="p-8 text-center">
-                <p className="text-sm text-[var(--sc-text-primary)]">
-                  {findingsFilter === 'new' ? 'All clear — no findings need attention' : `No ${findingsFilter === 'all' ? '' : findingsFilter + ' '}findings`}
-                </p>
-                <p className="mt-1 text-xs text-[var(--sc-text-muted)]">
-                  {findingsFilter === 'new'
-                    ? 'Run an X-Ray scan or start a watcher to monitor for threats.'
-                    : 'Findings move here when you take action on them.'}
-                </p>
-              </GlassCard>
+            {/* Findings: one Table, click a row for the full guidance/
+                evidence/explainer/actions in a drawer (brief §8). */}
+            {findingsError ? (
+              <CardError
+                message={`Failed to load findings: ${findingsErrorObj instanceof Error ? findingsErrorObj.message : 'fetch failed'}`}
+                onRetry={() => refetchFindings()}
+              />
             ) : (
-              <div className="space-y-3">
-                {(findingsData.findings as (PersistedFinding & { guidance?: { whatItMeans: string; whatToDo: string; falsePositiveNote: string; urgency: string }; systemFile?: boolean })[]).map((finding) => (
-                  <GlassCard
-                    key={finding.id}
-                    severity={finding.severity as 'critical' | 'high' | 'medium' | 'low'}
-                    className="p-5"
-                  >
-                    {/* Header row */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={riskVariant(finding.severity)}>{finding.severity}</Badge>
-                      <Badge variant="muted">{finding.category}</Badge>
-                      {finding.systemFile && (
-                        <Badge variant="muted">System file — likely safe</Badge>
-                      )}
-                      {finding.guidance?.urgency === 'usually-safe' && !finding.systemFile && (
-                        <Badge variant="cyan">Usually safe</Badge>
-                      )}
-                      {finding.guidance?.urgency === 'act-now' && (
-                        <Badge variant="critical" dot pulse>Act now</Badge>
-                      )}
-                    </div>
-
-                    {/* Title */}
-                    <p className="mt-3 text-sm font-semibold text-[var(--sc-text-primary)]">{finding.title}</p>
-
-                    {/* Guidance — the human-readable explanation */}
-                    {finding.guidance && (
-                      <div className="mt-3 space-y-3 rounded-xl bg-[var(--sc-bg-elevated)] p-4">
-                        <div>
-                          <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">What this means</p>
-                          <p className="mt-1 text-sm leading-relaxed text-[var(--sc-text-secondary)]">{finding.guidance.whatItMeans}</p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-cyan)]">What to do</p>
-                          <p className="mt-1 text-sm leading-relaxed text-[var(--sc-text-secondary)]">{finding.guidance.whatToDo}</p>
-                        </div>
-                        <div>
-                          <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">False positive?</p>
-                          <p className="mt-1 text-xs leading-relaxed text-[var(--sc-text-muted)]">{finding.guidance.falsePositiveNote}</p>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* File + evidence */}
-                    {(finding.file || finding.evidence) && (
-                      <div className="mt-3 space-y-0.5 font-mono text-xs text-[var(--sc-text-muted)]">
-                        {finding.file && (
-                          <div>File: {finding.line ? `${finding.file}:${finding.line}` : finding.file}</div>
-                        )}
-                        {finding.evidence && <div>Evidence: {finding.evidence}</div>}
-                      </div>
-                    )}
-
-                    <LocalAiFindingExplainer finding={finding} />
-
-                    {/* Timestamp */}
-                    <div className="mt-2 text-xs text-[var(--sc-text-muted)]">
-                      {formatDate(finding.detectedAt)}
-                    </div>
-
-                    {/* Actions */}
-                    <div className="mt-3 border-t border-[var(--sc-border)] pt-3">
-                      <FindingActions
-                        findingId={finding.id}
-                        status={finding.status}
-                        hasFile={!!finding.file}
-                        compact
-                      />
-                    </div>
-                  </GlassCard>
-                ))}
-              </div>
+              <Table
+                columns={findingColumns}
+                rows={findings}
+                rowKey={(f) => f.id}
+                onRowClick={(f) => setSelectedFindingId(f.id)}
+                selectedKey={selectedFindingId}
+                loading={findingsLoading}
+                emptyMessage={
+                  findingsFilter === 'new'
+                    ? 'All clear — no findings need attention. Run an X-Ray scan or start a watcher to monitor for threats.'
+                    : `No ${findingsFilter === 'all' ? '' : findingsFilter + ' '}findings — they move here when you take action on them.`
+                }
+                initialSort={{ key: 'detectedAt', dir: 'desc' }}
+              />
             )}
+
+            <Drawer open={selectedFinding !== null} onClose={() => setSelectedFindingId(null)} title={selectedFinding?.title} modal={false}>
+              {selectedFinding && (
+                <div className="space-y-4 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={riskVariant(selectedFinding.severity)}>{selectedFinding.severity}</Badge>
+                    <Badge variant="muted">{selectedFinding.category}</Badge>
+                    {selectedFinding.systemFile && <Badge variant="muted">System file — likely safe</Badge>}
+                    {selectedFinding.guidance?.urgency === 'usually-safe' && !selectedFinding.systemFile && (
+                      <Badge variant="cyan">Usually safe</Badge>
+                    )}
+                    {selectedFinding.guidance?.urgency === 'act-now' && (
+                      <Badge variant="critical" dot pulse>Act now</Badge>
+                    )}
+                  </div>
+
+                  {selectedFinding.guidance && (
+                    <div className="space-y-3 rounded-xl bg-[var(--sc-surface-2)] p-4">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">What this means</p>
+                        <p className="mt-1 text-sm leading-relaxed text-[var(--sc-text-dim)]">{selectedFinding.guidance.whatItMeans}</p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-ok)]">What to do</p>
+                        <p className="mt-1 text-sm leading-relaxed text-[var(--sc-text-dim)]">{selectedFinding.guidance.whatToDo}</p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">False positive?</p>
+                        <p className="mt-1 text-xs leading-relaxed text-[var(--sc-text-muted)]">{selectedFinding.guidance.falsePositiveNote}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {(selectedFinding.file || selectedFinding.evidence) && (
+                    <div className="space-y-0.5 font-mono text-xs text-[var(--sc-text-muted)]">
+                      {selectedFinding.file && (
+                        <div>File: {selectedFinding.line ? `${selectedFinding.file}:${selectedFinding.line}` : selectedFinding.file}</div>
+                      )}
+                      {selectedFinding.evidence && <div>Evidence: {selectedFinding.evidence}</div>}
+                    </div>
+                  )}
+
+                  <LocalAiFindingExplainer finding={selectedFinding} />
+
+                  <div className="text-xs text-[var(--sc-text-muted)]">{formatDate(selectedFinding.detectedAt)}</div>
+
+                  <div className="border-t border-[var(--sc-border)] pt-3">
+                    <FindingActions
+                      findingId={selectedFinding.id}
+                      status={selectedFinding.status}
+                      hasFile={!!selectedFinding.file}
+                      compact
+                    />
+                  </div>
+                </div>
+              )}
+            </Drawer>
           </div>
         )}
       </div>

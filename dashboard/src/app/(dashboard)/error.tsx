@@ -17,11 +17,11 @@ export default function DashboardError({
   return (
     <div className="flex h-full items-center justify-center p-8">
       <div className="glass-card max-w-lg p-8 text-center">
-        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--sc-coral)]/10">
-          <AlertTriangle size={24} className="text-[var(--sc-coral)]" />
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--sc-danger)]/10">
+          <AlertTriangle size={24} className="text-[var(--sc-danger)]" />
         </div>
-        <h2 className="text-xl font-bold text-[var(--sc-text-primary)]">Something went wrong</h2>
-        <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
+        <h2 className="text-xl font-bold text-[var(--sc-text)]">Something went wrong</h2>
+        <p className="mt-2 text-sm text-[var(--sc-text-dim)]">
           {error.message || 'An unexpected error occurred in the dashboard.'}
         </p>
         {error.digest && (
@@ -32,14 +32,14 @@ export default function DashboardError({
         <div className="mt-6 flex justify-center gap-3">
           <button
             onClick={reset}
-            className="inline-flex items-center gap-2 rounded-xl bg-[var(--sc-coral)] px-4 py-2 text-sm font-semibold text-white transition-all hover:-translate-y-0.5 hover:shadow-[0_8px_30px_var(--sc-glow-coral-mid)]"
+            className="inline-flex items-center gap-2 rounded-xl bg-[var(--sc-danger)] px-4 py-2 text-sm font-semibold text-white transition-all hover:-translate-y-0.5 hover:shadow-[0_8px_30px_var(--sc-danger-soft)]"
           >
             <RefreshCw size={14} />
             Try again
           </button>
           <a
             href="/overview"
-            className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] px-4 py-2 text-sm font-medium text-[var(--sc-text-secondary)] transition-colors hover:bg-[var(--sc-surface-interactive)]"
+            className="inline-flex items-center gap-2 rounded-xl border border-[var(--sc-border)] px-4 py-2 text-sm font-medium text-[var(--sc-text-dim)] transition-colors hover:bg-[var(--sc-surface-interactive)]"
           >
             Go to Overview
           </a>

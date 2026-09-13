@@ -7,8 +7,8 @@ import { AuditExportPanel } from './AuditExportPanel';
 import { AuditDetailPanel } from './AuditDetailPanel';
 
 const RESULT_COLORS: Record<string, string> = {
-  ALLOW: 'bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]',
-  BLOCK: 'bg-[var(--sc-coral)]/10 text-[var(--sc-coral)]',
+  ALLOW: 'bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]',
+  BLOCK: 'bg-[var(--sc-danger)]/10 text-[var(--sc-danger)]',
   QUARANTINE: 'bg-[var(--sc-amber)]/10 text-[var(--sc-amber)]',
 };
 
@@ -70,13 +70,13 @@ export function AuditLogViewGlass() {
     <div className="space-y-6">
       <div className="glass-card-strong p-5">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between mb-3">
-          <div className="flex gap-1 bg-[var(--sc-bg-elevated)] rounded-lg p-0.5 ml-auto">
+          <div className="flex gap-1 bg-[var(--sc-surface-2)] rounded-lg p-0.5 ml-auto">
             {(['24h', '7d', '30d'] as const).map((range) => (
               <button
                 key={range}
                 onClick={() => setTimeRange(range)}
                 className={`px-3 py-1 text-xs rounded-md transition-colors ${
-                  timeRange === range ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
+                  timeRange === range ? 'bg-[var(--sc-ok)] text-[var(--sc-text)]' : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)]'
                 }`}
               >
                 {range}
@@ -86,19 +86,19 @@ export function AuditLogViewGlass() {
         </div>
 
         <div className="mb-4 grid gap-3 md:grid-cols-4">
-          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)] p-3">
             <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Entries</div>
-            <div className="mt-1 text-xl font-semibold text-[var(--sc-text-primary)]">{logs.length}</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-text)]">{logs.length}</div>
           </div>
-          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)] p-3">
             <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Allowed</div>
-            <div className="mt-1 text-xl font-semibold text-[var(--sc-cyan)]">{allowedCount}</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-ok)]">{allowedCount}</div>
           </div>
-          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)] p-3">
             <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Blocked</div>
-            <div className="mt-1 text-xl font-semibold text-[var(--sc-coral)]">{blockedCount}</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-danger)]">{blockedCount}</div>
           </div>
-          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)] p-3">
+          <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)] p-3">
             <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Quarantined</div>
             <div className="mt-1 text-xl font-semibold text-[var(--sc-amber)]">{quarantinedCount}</div>
           </div>
@@ -108,7 +108,7 @@ export function AuditLogViewGlass() {
           <select
             value={resultFilter || ''}
             onChange={(e) => setResultFilter(e.target.value || undefined)}
-            className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-xs rounded-lg px-2 py-1"
+            className="bg-[var(--sc-surface-2)] border border-[var(--sc-border)] text-[var(--sc-text)] text-xs rounded-lg px-2 py-1"
           >
             <option value="">All Results</option>
             <option value="ALLOW">Allowed</option>
@@ -119,7 +119,7 @@ export function AuditLogViewGlass() {
           <select
             value={sourceFilter || ''}
             onChange={(e) => setSourceFilter(e.target.value || undefined)}
-            className="bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-xs rounded-lg px-2 py-1"
+            className="bg-[var(--sc-surface-2)] border border-[var(--sc-border)] text-[var(--sc-text)] text-xs rounded-lg px-2 py-1"
           >
             <option value="">All Sources</option>
             <option value="hook">Hook</option>
@@ -131,7 +131,7 @@ export function AuditLogViewGlass() {
 
           <button
             onClick={() => setSelectedAuditEntry(null)}
-            className="ml-auto rounded-full border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-3 py-1 text-xs text-[var(--sc-text-primary)] transition-colors hover:border-[var(--sc-border)] hover:text-[var(--sc-text-primary)]"
+            className="ml-auto rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface)] px-3 py-1 text-xs text-[var(--sc-text)] transition-colors hover:border-[var(--sc-border)] hover:text-[var(--sc-text)]"
           >
             Clear selection
           </button>
@@ -151,7 +151,7 @@ export function AuditLogViewGlass() {
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
-                <thead className="bg-[var(--sc-bg-deep)]">
+                <thead className="bg-[var(--sc-bg)]">
                   <tr className="border-b border-[var(--sc-border)]">
                     <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Time</th>
                     <th className="text-left text-[var(--sc-text-muted)] font-medium px-4 py-2">Source</th>
@@ -168,30 +168,30 @@ export function AuditLogViewGlass() {
                       onClick={() => handleRowClick(log)}
                       className={`border-b border-[var(--sc-border)] cursor-pointer transition-colors ${
                         selectedAuditEntry?.id === log.id
-                          ? 'bg-[var(--sc-cyan)]/10 hover:bg-[var(--sc-cyan)]/15'
+                          ? 'bg-[var(--sc-ok)]/10 hover:bg-[var(--sc-ok)]/15'
                           : 'hover:bg-[var(--sc-surface-interactive)]'
                       }`}
                     >
-                      <td className="px-4 py-2 text-[var(--sc-text-secondary)] whitespace-nowrap">
+                      <td className="px-4 py-2 text-[var(--sc-text-dim)] whitespace-nowrap">
                         {new Date(log.timestamp).toLocaleString()}
                       </td>
-                      <td className="px-4 py-2 text-[var(--sc-text-primary)]">
+                      <td className="px-4 py-2 text-[var(--sc-text)]">
                         {log.source_type}
                       </td>
                       <td className="px-4 py-2">
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${RESULT_COLORS[log.firewall_result] || 'text-[var(--sc-text-secondary)]'}`}>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${RESULT_COLORS[log.firewall_result] || 'text-[var(--sc-text-dim)]'}`}>
                           {log.firewall_result}
                         </span>
                       </td>
-                      <td className="px-4 py-2 text-[var(--sc-text-secondary)]">
+                      <td className="px-4 py-2 text-[var(--sc-text-dim)]">
                         {log.trust_score.toFixed(1)}
                       </td>
                       <td className="px-4 py-2">
-                        <span className={log.anomaly_score > 0.5 ? 'text-[var(--sc-coral)]' : log.anomaly_score > 0.2 ? 'text-[var(--sc-amber)]' : 'text-[var(--sc-text-secondary)]'}>
+                        <span className={log.anomaly_score > 0.5 ? 'text-[var(--sc-danger)]' : log.anomaly_score > 0.2 ? 'text-[var(--sc-amber)]' : 'text-[var(--sc-text-dim)]'}>
                           {log.anomaly_score.toFixed(2)}
                         </span>
                       </td>
-                      <td className="px-4 py-2 text-[var(--sc-text-secondary)] max-w-xs truncate">
+                      <td className="px-4 py-2 text-[var(--sc-text-dim)] max-w-xs truncate">
                         {log.reason || '\u2014'}
                       </td>
                     </tr>
@@ -213,7 +213,7 @@ export function AuditLogViewGlass() {
       </div>
 
       <details className="glass-card p-6">
-        <summary className="cursor-pointer list-none text-sm font-medium text-[var(--sc-text-primary)]">
+        <summary className="cursor-pointer list-none text-sm font-medium text-[var(--sc-text)]">
           Export audit trail
         </summary>
         <div className="mt-4">

@@ -20,13 +20,19 @@ import { AuditLogView } from '@/components/audit/AuditLogView';
 import { InterceptorEventsView } from '@/components/protection/InterceptorEventsView';
 import { PolicyManagementView } from '@/components/protection/PolicyManagementView';
 
-type ProtectionTab = 'dome' | 'quarantine' | 'audit' | 'intercepts' | 'policies';
+type ProtectionTab = 'status' | 'quarantine' | 'audit' | 'intercepts' | 'policies';
+
+const VALID_TABS: ProtectionTab[] = ['status', 'quarantine', 'audit', 'intercepts', 'policies'];
 
 function ProtectionContent() {
   const searchParams = useSearchParams();
-  const urlTab = searchParams.get('tab') as ProtectionTab | null;
-  const validUrlTab = urlTab && ['dome', 'quarantine', 'audit', 'intercepts', 'policies'].includes(urlTab) ? urlTab : null;
-  const [userTab, setTab] = useState<ProtectionTab>('dome');
+  const urlTab = searchParams.get('tab');
+  // 'dome' is the pre-restyle tab id (brief §8 renamed Iron Dome -> Status);
+  // kept as a redirecting alias so old deep links and bookmarks still land.
+  const normalisedUrlTab = urlTab === 'dome' ? 'status' : urlTab;
+  const validUrlTab =
+    normalisedUrlTab && VALID_TABS.includes(normalisedUrlTab as ProtectionTab) ? (normalisedUrlTab as ProtectionTab) : null;
+  const [userTab, setTab] = useState<ProtectionTab>('status');
   const tab = validUrlTab ?? userTab;
 
   const { data: ironDome } = useIronDomeStatus();
@@ -35,7 +41,7 @@ function ProtectionContent() {
   const { data: intercepts } = useInterceptorEvents({ limit: 25 });
 
   const tabs = [
-    { id: 'dome', label: 'Iron Dome', icon: <ShieldAlert size={14} /> },
+    { id: 'status', label: 'Status', icon: <ShieldAlert size={14} /> },
     { id: 'quarantine', label: 'Quarantine', count: quarantine?.total ?? 0 },
     { id: 'audit', label: 'Audit' },
     { id: 'intercepts', label: 'Intercepts', count: intercepts?.summary?.total ?? 0 },
@@ -84,7 +90,7 @@ function ProtectionContent() {
 
         {/* Tab content */}
         <div>
-          {tab === 'dome' && <IronDomeView />}
+          {tab === 'status' && <IronDomeView />}
           {tab === 'quarantine' && <QuarantineView />}
           {tab === 'audit' && <AuditLogView />}
           {tab === 'intercepts' && <InterceptorEventsView />}

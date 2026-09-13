@@ -15,6 +15,7 @@ import {
 } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
 import { AlertTriangle, Bot, Check, Loader2, Sparkles, Tags, Wand2, X, CheckSquare, Square, MinusSquare } from 'lucide-react';
+import { CardError } from '@/components/ds/CardError';
 
 function ConfirmationDialog({
   action,
@@ -33,11 +34,11 @@ function ConfirmationDialog({
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
-        <h3 className="text-sm font-semibold text-[var(--sc-text-primary)] mb-2">
+      <div className="bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
+        <h3 className="text-sm font-semibold text-[var(--sc-text)] mb-2">
           {action === 'approve' ? 'Approve' : 'Reject'} quarantined item?
         </h3>
-        <p className="text-xs text-[var(--sc-text-secondary)] mb-1">
+        <p className="text-xs text-[var(--sc-text-dim)] mb-1">
           <strong>{item.title || 'Untitled'}</strong>
         </p>
         <p className="text-xs text-[var(--sc-text-muted)] mb-4">
@@ -51,14 +52,14 @@ function ConfirmationDialog({
         </p>
 
         <div className="mb-4">
-          <label className="text-xs text-[var(--sc-text-secondary)] block mb-1">
-            Type <strong className="text-[var(--sc-text-primary)]">YES</strong> to confirm:
+          <label className="text-xs text-[var(--sc-text-dim)] block mb-1">
+            Type <strong className="text-[var(--sc-text)]">YES</strong> to confirm:
           </label>
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            className="w-full bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] text-[var(--sc-text-primary)] text-sm rounded-lg px-3 py-2 focus:ring-[var(--sc-cyan)] focus:border-[var(--sc-cyan)]"
+            className="w-full bg-[var(--sc-surface-2)] border border-[var(--sc-border)] text-[var(--sc-text)] text-sm rounded-lg px-3 py-2 focus:ring-[var(--sc-ok)] focus:border-[var(--sc-ok)]"
             autoFocus
             onKeyDown={(e) => {
               if (e.key === 'Enter' && isValid) onConfirm();
@@ -70,7 +71,7 @@ function ConfirmationDialog({
         <div className="flex gap-2 justify-end">
           <button
             onClick={onCancel}
-            className="px-3 py-1.5 text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
+            className="px-3 py-1.5 text-xs text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] transition-colors"
           >
             Cancel
           </button>
@@ -80,9 +81,9 @@ function ConfirmationDialog({
             className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
               isValid
                 ? action === 'approve'
-                  ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-cyan-mid)]'
-                  : 'bg-[var(--sc-coral)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-coral-mid)]'
-                : 'bg-[var(--sc-bg-elevated)] text-[var(--sc-text-muted)] cursor-not-allowed'
+                  ? 'bg-[var(--sc-ok)] text-[var(--sc-text)] hover:bg-[var(--sc-ok)]'
+                  : 'bg-[var(--sc-danger)] text-[var(--sc-text)] hover:bg-[var(--sc-danger)]'
+                : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)] cursor-not-allowed'
             }`}
           >
             {action === 'approve' && isMemoryFile ? 'Mark reviewed' : action === 'approve' ? 'Approve' : 'Reject'}
@@ -94,10 +95,10 @@ function ConfirmationDialog({
 }
 
 function actionTone(action: ReviewAnnotation['suggestedAction']): string {
-  if (action === 'approve') return 'text-[var(--sc-cyan)] bg-[var(--sc-cyan)]/10 border-[var(--sc-cyan)]/25';
-  if (action === 'reject') return 'text-[var(--sc-coral)] bg-[var(--sc-coral)]/10 border-[var(--sc-coral)]/25';
+  if (action === 'approve') return 'text-[var(--sc-ok)] bg-[var(--sc-ok)]/10 border-[var(--sc-ok)]/25';
+  if (action === 'reject') return 'text-[var(--sc-danger)] bg-[var(--sc-danger)]/10 border-[var(--sc-danger)]/25';
   if (action === 'create_rule') return 'text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 border-[var(--sc-amber)]/25';
-  return 'text-[var(--sc-text-secondary)] bg-[var(--sc-surface-interactive)] border-[var(--sc-border)]';
+  return 'text-[var(--sc-text-dim)] bg-[var(--sc-surface-interactive)] border-[var(--sc-border)]';
 }
 
 function categoryLabel(category: string): string {
@@ -106,12 +107,12 @@ function categoryLabel(category: string): string {
 
 function LocalAiQuarantineAnnotation({ annotation }: { annotation: ReviewAnnotation }) {
   return (
-    <div className="mb-3 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)]/70 p-3">
+    <div className="mb-3 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)]/70 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--sc-cyan)]">
+        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--sc-ok)]">
           <Bot size={12} /> Local AI Explainer
         </span>
-        <span className="rounded border border-[var(--sc-border)] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--sc-text-secondary)]">
+        <span className="rounded border border-[var(--sc-border)] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--sc-text-dim)]">
           {categoryLabel(annotation.category)}
         </span>
         <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${actionTone(annotation.suggestedAction)}`}>
@@ -126,14 +127,14 @@ function LocalAiQuarantineAnnotation({ annotation }: { annotation: ReviewAnnotat
           </span>
         )}
       </div>
-      <p className="mt-2 text-xs leading-5 text-[var(--sc-text-primary)]">{annotation.summary}</p>
-      <p className="mt-1 text-[11px] leading-5 text-[var(--sc-text-secondary)]">{annotation.reasoning}</p>
+      <p className="mt-2 text-xs leading-5 text-[var(--sc-text)]">{annotation.summary}</p>
+      <p className="mt-1 text-[11px] leading-5 text-[var(--sc-text-dim)]">{annotation.reasoning}</p>
       {annotation.evidence.length > 0 && (
         <div className="mt-2 space-y-1.5">
           {annotation.evidence.map((entry, index) => (
-            <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-2 py-1.5">
+            <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-surface)] px-2 py-1.5">
               <div className="text-[10px] text-[var(--sc-text-muted)]">{entry.reason}</div>
-              <div className="mt-0.5 text-[11px] text-[var(--sc-text-primary)] break-words">&quot;{entry.snippet}&quot;</div>
+              <div className="mt-0.5 text-[11px] text-[var(--sc-text)] break-words">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>
@@ -145,7 +146,7 @@ function LocalAiQuarantineAnnotation({ annotation }: { annotation: ReviewAnnotat
 export function QuarantineView() {
   const { projectFilter } = useDashboardStore();
   const [statusFilter, setStatusFilter] = useState<string>('pending');
-  const { data, isLoading } = useQuarantine(statusFilter, 100, projectFilter || undefined);
+  const { data, isLoading, isError, error, refetch } = useQuarantine(statusFilter, 100, projectFilter || undefined);
   const { data: copilotStatus } = useReviewCopilotStatus();
   const approveMutation = useApproveQuarantine();
   const rejectMutation = useRejectQuarantine();
@@ -250,11 +251,11 @@ export function QuarantineView() {
       {/* Bulk confirmation dialog */}
       {bulkConfirm && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
-            <h3 className="text-sm font-semibold text-[var(--sc-text-primary)] mb-2">
+          <div className="bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
+            <h3 className="text-sm font-semibold text-[var(--sc-text)] mb-2">
               {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}?
             </h3>
-            <p className="text-xs text-[var(--sc-text-secondary)] mb-4">
+            <p className="text-xs text-[var(--sc-text-dim)] mb-4">
               {bulkConfirm === 'approve'
                 ? selectedMemoryFileCount > 0
                   ? 'Memory-file findings will be marked reviewed without editing files. Other selected items will be promoted into memory.'
@@ -266,7 +267,7 @@ export function QuarantineView() {
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setBulkConfirm(null)}
-                className="px-3 py-1.5 text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
+                className="px-3 py-1.5 text-xs text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] transition-colors"
               >
                 Cancel
               </button>
@@ -274,8 +275,8 @@ export function QuarantineView() {
                 onClick={handleBulkConfirm}
                 className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
                   bulkConfirm === 'approve'
-                    ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-cyan-mid)]'
-                    : 'bg-[var(--sc-coral)] text-[var(--sc-text-primary)] hover:bg-[var(--sc-coral-mid)]'
+                    ? 'bg-[var(--sc-ok)] text-[var(--sc-text)] hover:bg-[var(--sc-ok)]'
+                    : 'bg-[var(--sc-danger)] text-[var(--sc-text)] hover:bg-[var(--sc-danger)]'
                 }`}
               >
                 {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}
@@ -289,26 +290,26 @@ export function QuarantineView() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--sc-text-primary)]">
-                <Sparkles size={16} className="text-[var(--sc-cyan)]" />
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--sc-text)]">
+                <Sparkles size={16} className="text-[var(--sc-ok)]" />
                 Local AI Explainer
               </h3>
               <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
                 copilotStatus?.enabled
-                  ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
+                  ? 'border-[var(--sc-ok)]/25 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
                   : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
               }`}>
                 {copilotStatus?.enabled ? 'enabled' : 'disabled'}
               </span>
               <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
                 copilotStatus?.modelCached
-                  ? 'border-[var(--sc-cyan)]/25 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
+                  ? 'border-[var(--sc-ok)]/25 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
                   : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
               }`}>
                 {copilotStatus?.modelCached ? 'model cached' : 'model not cached'}
               </span>
             </div>
-            <div className="mt-2 text-xs leading-5 text-[var(--sc-text-secondary)]">
+            <div className="mt-2 text-xs leading-5 text-[var(--sc-text-dim)]">
               {!copilotStatus?.enabled
                 ? 'Enable from the CLI first: shieldcortex review-copilot enable'
                 : !copilotStatus.modelCached
@@ -331,7 +332,7 @@ export function QuarantineView() {
             <button
               onClick={handleAnnotatePending}
               disabled={!canAnnotate || copilotBusy || needsAiReviewItems.length === 0}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--sc-cyan)]/10 px-3 py-1.5 text-xs font-semibold text-[var(--sc-cyan)] transition-colors hover:bg-[var(--sc-cyan)]/20 disabled:pointer-events-none disabled:opacity-45"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--sc-ok)]/10 px-3 py-1.5 text-xs font-semibold text-[var(--sc-ok)] transition-colors hover:bg-[var(--sc-ok)]/20 disabled:pointer-events-none disabled:opacity-45"
             >
               {annotatePendingMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
               Explain all
@@ -343,13 +344,13 @@ export function QuarantineView() {
       {/* Filters and bulk actions */}
       <div className="glass-card p-5">
         <div className="flex items-center justify-between">
-          <div className="flex gap-1 bg-[var(--sc-bg-elevated)] rounded-lg p-0.5">
+          <div className="flex gap-1 bg-[var(--sc-surface-2)] rounded-lg p-0.5">
             {['pending', 'approved', 'rejected'].map((status) => (
               <button
                 key={status}
                 onClick={() => { setStatusFilter(status); setSelectedIds(new Set()); }}
                 className={`px-3 py-1 text-xs rounded-md transition-colors capitalize ${
-                  statusFilter === status ? 'bg-[var(--sc-cyan)] text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
+                  statusFilter === status ? 'bg-[var(--sc-ok)] text-[var(--sc-text)]' : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)]'
                 }`}
               >
                 {status}
@@ -363,9 +364,9 @@ export function QuarantineView() {
           <div className="flex items-center gap-3 mt-3">
             <button
               onClick={toggleSelectAll}
-              className="flex items-center gap-1.5 text-xs text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)] transition-colors"
+              className="flex items-center gap-1.5 text-xs text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] transition-colors"
             >
-              {allSelected ? <CheckSquare size={14} className="text-[var(--sc-cyan)]" /> : someSelected ? <MinusSquare size={14} className="text-[var(--sc-cyan)]" /> : <Square size={14} />}
+              {allSelected ? <CheckSquare size={14} className="text-[var(--sc-ok)]" /> : someSelected ? <MinusSquare size={14} className="text-[var(--sc-ok)]" /> : <Square size={14} />}
               {allSelected ? 'Deselect all' : 'Select all'}
             </button>
             {someSelected && (
@@ -373,13 +374,13 @@ export function QuarantineView() {
                 <span className="text-xs text-[var(--sc-text-muted)]">{selectedIds.size} selected</span>
                 <button
                   onClick={() => setBulkConfirm('approve')}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)] rounded-lg hover:bg-[var(--sc-cyan)]/20 transition-colors"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] rounded-lg hover:bg-[var(--sc-ok)]/20 transition-colors"
                 >
                   <Check size={12} /> Approve
                 </button>
                 <button
                   onClick={() => setBulkConfirm('reject')}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-coral)]/10 text-[var(--sc-coral)] rounded-lg hover:bg-[var(--sc-coral)]/20 transition-colors"
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-danger)]/10 text-[var(--sc-danger)] rounded-lg hover:bg-[var(--sc-danger)]/20 transition-colors"
                 >
                   <X size={12} /> Reject
                 </button>
@@ -390,14 +391,19 @@ export function QuarantineView() {
       </div>
 
       {mutationError && (
-        <div className="glass-card p-5 border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 text-sm text-[var(--sc-coral)]">
+        <div className="glass-card p-5 border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 text-sm text-[var(--sc-danger)]">
           {mutationError}
         </div>
       )}
 
       {/* Items */}
       <div>
-        {isLoading ? (
+        {isError ? (
+          <CardError
+            message={`Failed to load quarantine: ${error instanceof Error ? error.message : 'fetch failed'}`}
+            onRetry={() => refetch()}
+          />
+        ) : isLoading ? (
           <div className="glass-card p-5 flex items-center justify-center h-32">
             <div className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading quarantine items...</div>
           </div>
@@ -419,7 +425,7 @@ export function QuarantineView() {
                   key={item.id}
                   className={`glass-card p-5 ${
                     selectedIds.has(item.id)
-                      ? 'border-[var(--sc-cyan)]/50'
+                      ? 'border-[var(--sc-ok)]/50'
                       : item.status === 'pending' && !item.annotation
                         ? 'border-[var(--sc-amber)]/35'
                         : ''
@@ -430,14 +436,14 @@ export function QuarantineView() {
                       {item.status === 'pending' && (
                         <button
                           onClick={() => toggleSelect(item.id)}
-                          className="mt-0.5 text-[var(--sc-text-muted)] hover:text-[var(--sc-cyan)] transition-colors shrink-0"
+                          className="mt-0.5 text-[var(--sc-text-muted)] hover:text-[var(--sc-ok)] transition-colors shrink-0"
                         >
-                          {selectedIds.has(item.id) ? <CheckSquare size={14} className="text-[var(--sc-cyan)]" /> : <Square size={14} />}
+                          {selectedIds.has(item.id) ? <CheckSquare size={14} className="text-[var(--sc-ok)]" /> : <Square size={14} />}
                         </button>
                       )}
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
-                          <h4 className="text-sm font-medium text-[var(--sc-text-primary)]">
+                          <h4 className="text-sm font-medium text-[var(--sc-text)]">
                             {item.title || 'Untitled'}
                           </h4>
                           {item.status === 'pending' && !item.annotation && (
@@ -449,7 +455,7 @@ export function QuarantineView() {
                         <div className="text-[10px] text-[var(--sc-text-muted)] mt-0.5">
                           {item.source_type} &middot; {new Date(item.created_at).toLocaleString()}
                           {item.anomaly_score > 0 && (
-                            <span className={`ml-2 ${item.anomaly_score > 0.5 ? 'text-[var(--sc-coral)]' : 'text-[var(--sc-amber)]'}`}>
+                            <span className={`ml-2 ${item.anomaly_score > 0.5 ? 'text-[var(--sc-danger)]' : 'text-[var(--sc-amber)]'}`}>
                               Anomaly: {item.anomaly_score.toFixed(2)}
                             </span>
                           )}
@@ -461,13 +467,13 @@ export function QuarantineView() {
                         )}
                       </div>
                     </div>
-                    <span className="text-[10px] text-[var(--sc-coral)] bg-[var(--sc-coral)]/10 px-2 py-0.5 rounded">
+                    <span className="text-[10px] text-[var(--sc-danger)] bg-[var(--sc-danger)]/10 px-2 py-0.5 rounded">
                       {item.reason?.slice(0, 50) || 'Threat detected'}
                     </span>
                   </div>
 
                   {/* Content preview */}
-                  <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3 mb-3 text-xs text-[var(--sc-text-primary)] whitespace-pre-wrap break-words">
+                  <div className="bg-[var(--sc-surface-2)] rounded-lg p-3 mb-3 text-xs text-[var(--sc-text)] whitespace-pre-wrap break-words">
                     {item.content?.slice(0, 500) || 'No content'}
                   </div>
 
@@ -490,7 +496,7 @@ export function QuarantineView() {
                       <button
                         onClick={() => annotateMutation.mutate(item.id)}
                         disabled={!canAnnotate || annotateMutation.isPending || annotatePendingMutation.isPending}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)] rounded-lg hover:text-[var(--sc-cyan)] transition-colors disabled:pointer-events-none disabled:opacity-45"
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-surface-2)] text-[var(--sc-text-dim)] border border-[var(--sc-border)] rounded-lg hover:text-[var(--sc-ok)] transition-colors disabled:pointer-events-none disabled:opacity-45"
                       >
                         {annotateMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
                         {item.annotation ? 'Re-explain' : 'Explain'}
@@ -498,14 +504,14 @@ export function QuarantineView() {
                       <button
                         onClick={() => setConfirmAction({ action: 'approve', item })}
                         disabled={approveMutation.isPending || bulkApproveMutation.isPending}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)] rounded-lg hover:bg-[var(--sc-cyan)]/20 transition-colors"
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] rounded-lg hover:bg-[var(--sc-ok)]/20 transition-colors"
                       >
                         <Check size={12} /> {isMemoryFile ? 'Mark reviewed' : 'Approve'}
                       </button>
                       <button
                         onClick={() => setConfirmAction({ action: 'reject', item })}
                         disabled={rejectMutation.isPending || bulkRejectMutation.isPending}
-                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-coral)]/10 text-[var(--sc-coral)] rounded-lg hover:bg-[var(--sc-coral)]/20 transition-colors"
+                        className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[var(--sc-danger)]/10 text-[var(--sc-danger)] rounded-lg hover:bg-[var(--sc-danger)]/20 transition-colors"
                       >
                         <X size={12} /> Reject
                       </button>

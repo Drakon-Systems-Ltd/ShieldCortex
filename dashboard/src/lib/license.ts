@@ -23,15 +23,15 @@ export const TIER_LABELS: Record<LicenseTier, string> = {
 
 export const TIER_COLOURS: Record<LicenseTier, string> = {
   free: 'text-[var(--sc-text-muted)]',
-  pro: 'text-[var(--sc-cyan)]',
-  team: 'text-[var(--sc-coral)]',
+  pro: 'text-[var(--sc-ok)]',
+  team: 'text-[var(--sc-danger)]',
   enterprise: 'text-[var(--sc-amber)]',
 };
 
 export const TIER_BG: Record<LicenseTier, string> = {
   free: 'bg-[var(--sc-surface-interactive)]',
-  pro: 'bg-[var(--sc-cyan)]/10',
-  team: 'bg-[var(--sc-coral)]/10',
+  pro: 'bg-[var(--sc-ok)]/10',
+  team: 'bg-[var(--sc-danger)]/10',
   enterprise: 'bg-[var(--sc-amber)]/10',
 };
 

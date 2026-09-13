@@ -13,16 +13,16 @@ export function TrustGauge({ score, size = 160, label }: TrustGaugeProps) {
 
   // Interpolate from coral (low) to cyan (high)
   const hue = score <= 50
-    ? `var(--sc-coral)`
+    ? `var(--sc-danger)`
     : score <= 75
       ? `var(--sc-amber)`
-      : `var(--sc-cyan)`;
+      : `var(--sc-ok)`;
 
   const glow = score <= 50
-    ? 'var(--sc-glow-coral)'
+    ? 'var(--sc-danger-soft)'
     : score <= 75
       ? 'rgba(245, 158, 11, 0.15)'
-      : 'var(--sc-glow-cyan)';
+      : 'var(--sc-ok-soft)';
 
   return (
     <div className="flex flex-col items-center gap-2">
@@ -32,7 +32,7 @@ export function TrustGauge({ score, size = 160, label }: TrustGaugeProps) {
           <circle
             cx="50" cy="50" r={radius}
             fill="none"
-            stroke="var(--sc-bg-elevated)"
+            stroke="var(--sc-surface-2)"
             strokeWidth="7"
           />
           {/* Progress */}
@@ -52,7 +52,7 @@ export function TrustGauge({ score, size = 160, label }: TrustGaugeProps) {
         </div>
       </div>
       {label && (
-        <span className="text-xs font-medium text-[var(--sc-text-secondary)]">{label}</span>
+        <span className="text-xs font-medium text-[var(--sc-text-dim)]">{label}</span>
       )}
     </div>
   );

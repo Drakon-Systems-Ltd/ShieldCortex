@@ -58,8 +58,8 @@ export function MaintenanceCard() {
   return (
     <GlassCard className="p-6">
       <div className="flex items-center gap-2">
-        <Brain size={16} className="text-[var(--sc-cyan)]" />
-        <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Memory Maintenance</h3>
+        <Brain size={16} className="text-[var(--sc-ok)]" />
+        <h3 className="text-lg font-semibold text-[var(--sc-text)]">Memory Maintenance</h3>
         {status?.isRunning ? (
           <Badge variant="cyan" dot>Running</Badge>
         ) : statusLoading ? (
@@ -68,7 +68,7 @@ export function MaintenanceCard() {
           <Badge variant="amber">Stopped</Badge>
         )}
       </div>
-      <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
+      <p className="mt-2 text-sm text-[var(--sc-text-dim)]">
         Background brain worker prunes activation cache, consolidates short-term to long-term, removes
         low-salience duplicates, and prunes orphan graph entities. Runs automatically on intervals;
         you can trigger a tick manually below.
@@ -77,38 +77,38 @@ export function MaintenanceCard() {
       {/* Decay distribution */}
       {stats && (
         <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
             <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">Healthy</div>
-            <div className="mt-1 text-xl font-semibold text-[var(--sc-cyan)]">{stats.decayDistribution.healthy}</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-ok)]">{stats.decayDistribution.healthy}</div>
           </div>
-          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
             <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">Fading</div>
             <div className="mt-1 text-xl font-semibold text-[var(--sc-amber)]">{stats.decayDistribution.fading}</div>
           </div>
-          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
             <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">Critical</div>
-            <div className="mt-1 text-xl font-semibold text-[var(--sc-coral)]">{stats.decayDistribution.critical}</div>
+            <div className="mt-1 text-xl font-semibold text-[var(--sc-danger)]">{stats.decayDistribution.critical}</div>
           </div>
         </div>
       )}
 
       {/* Last-run summary */}
-      <div className="mt-4 space-y-2 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3 text-xs">
+      <div className="mt-4 space-y-2 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3 text-xs">
         <div className="flex items-center justify-between">
           <span className="text-[var(--sc-text-muted)]">Light tick (every ~5 min)</span>
-          <span className="text-[var(--sc-text-primary)]">
+          <span className="text-[var(--sc-text)]">
             {formatRelative(status?.lastLightTick ?? null)} · {status?.stats.lightTicks ?? 0} runs
           </span>
         </div>
         <div className="flex items-center justify-between">
           <span className="text-[var(--sc-text-muted)]">Heavy tick (every ~1 hr)</span>
-          <span className="text-[var(--sc-text-primary)]">
+          <span className="text-[var(--sc-text)]">
             {formatRelative(status?.lastMediumTick ?? null)} · {status?.stats.mediumTicks ?? 0} runs
           </span>
         </div>
         <div className="flex items-center justify-between">
           <span className="text-[var(--sc-text-muted)]">Last consolidation</span>
-          <span className="text-[var(--sc-text-primary)]">
+          <span className="text-[var(--sc-text)]">
             {formatRelative(status?.lastConsolidation ?? null)} · {status?.stats.consolidations ?? 0} runs
           </span>
         </div>

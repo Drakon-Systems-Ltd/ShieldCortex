@@ -45,9 +45,9 @@ function statusTone(status: 'healthy' | 'queued' | 'warning' | 'disabled') {
   switch (status) {
     case 'healthy':
       return {
-        border: 'border-[var(--sc-cyan)]/20',
-        bg: 'bg-[var(--sc-cyan)]/10',
-        text: 'text-[var(--sc-cyan)]',
+        border: 'border-[var(--sc-ok)]/20',
+        bg: 'bg-[var(--sc-ok)]/10',
+        text: 'text-[var(--sc-ok)]',
         icon: CheckCircle2,
       };
     case 'queued':
@@ -59,16 +59,16 @@ function statusTone(status: 'healthy' | 'queued' | 'warning' | 'disabled') {
       };
     case 'warning':
       return {
-        border: 'border-[var(--sc-coral)]/20',
-        bg: 'bg-[var(--sc-coral)]/10',
-        text: 'text-[var(--sc-coral)]',
+        border: 'border-[var(--sc-danger)]/20',
+        bg: 'bg-[var(--sc-danger)]/10',
+        text: 'text-[var(--sc-danger)]',
         icon: AlertTriangle,
       };
     default:
       return {
         border: 'border-[var(--sc-border)]',
-        bg: 'bg-[var(--sc-bg-elevated)]',
-        text: 'text-[var(--sc-text-primary)]',
+        bg: 'bg-[var(--sc-surface-2)]',
+        text: 'text-[var(--sc-text)]',
         icon: Server,
       };
   }
@@ -140,20 +140,20 @@ export function CloudSyncStatus() {
             <StatusIcon size={16} className={tone.text} />
             <span className={`text-sm font-medium ${tone.text}`}>{label}</span>
           </div>
-          <p className="mt-1 text-xs text-[var(--sc-text-secondary)]">{detail}</p>
+          <p className="mt-1 text-xs text-[var(--sc-text-dim)]">{detail}</p>
           <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--sc-text-muted)]">
-            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sc-bg-surface)] px-2 py-1">
+            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sc-surface)] px-2 py-1">
               <Server size={11} />
               {device.name}
             </span>
             {lastSyncAt && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sc-bg-surface)] px-2 py-1">
+              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sc-surface)] px-2 py-1">
                 <Clock3 size={11} />
                 Synced {formatTimeAgo(lastSyncAt)}
               </span>
             )}
             {queue.oldestPendingAt && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sc-bg-surface)] px-2 py-1">
+              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sc-surface)] px-2 py-1">
                 Oldest queued {formatTimeAgo(queue.oldestPendingAt)}
               </span>
             )}
@@ -161,26 +161,26 @@ export function CloudSyncStatus() {
         </div>
 
         <div className="grid grid-cols-2 gap-2 text-xs sm:min-w-[260px]">
-          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Memory queue</div>
-            <div className="mt-1 text-lg font-semibold text-[var(--sc-text-primary)]">{memoryQueue.pending}</div>
+            <div className="mt-1 text-lg font-semibold text-[var(--sc-text)]">{memoryQueue.pending}</div>
             <div className="text-[11px] text-[var(--sc-text-muted)]">pending writes</div>
           </div>
-          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Replication failures</div>
-            <div className={`mt-1 text-lg font-semibold ${replicationFailed > 0 ? 'text-[var(--sc-coral)]' : 'text-[var(--sc-text-primary)]'}`}>
+            <div className={`mt-1 text-lg font-semibold ${replicationFailed > 0 ? 'text-[var(--sc-danger)]' : 'text-[var(--sc-text)]'}`}>
               {replicationFailed}
             </div>
             <div className="text-[11px] text-[var(--sc-text-muted)]">memory + graph only</div>
           </div>
-          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Replicated</div>
-            <div className="mt-1 text-lg font-semibold text-[var(--sc-text-primary)]">{memoryQueue.synced}</div>
+            <div className="mt-1 text-lg font-semibold text-[var(--sc-text)]">{memoryQueue.synced}</div>
             <div className="text-[11px] text-[var(--sc-text-muted)]">memory sync jobs</div>
           </div>
-          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+          <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Retrying next</div>
-            <div className="mt-1 text-sm font-semibold text-[var(--sc-text-primary)]">
+            <div className="mt-1 text-sm font-semibold text-[var(--sc-text)]">
               {queue.nextRetryAt ? formatTimeUntil(queue.nextRetryAt) : 'Idle'}
             </div>
             <div className="text-[11px] text-[var(--sc-text-muted)]">
@@ -192,7 +192,7 @@ export function CloudSyncStatus() {
       <div className="mt-4 flex justify-end">
         <button
           onClick={() => setViewMode('cloud')}
-          className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 px-3 py-2 text-xs font-medium text-[var(--sc-text-primary)] transition-colors hover:border-[var(--sc-cyan)]/40 hover:text-[var(--sc-text-primary)]"
+          className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 px-3 py-2 text-xs font-medium text-[var(--sc-text)] transition-colors hover:border-[var(--sc-ok)]/40 hover:text-[var(--sc-text)]"
         >
           Open cloud diagnostics
         </button>
