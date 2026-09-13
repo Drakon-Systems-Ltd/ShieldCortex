@@ -176,6 +176,31 @@ describe('#456 — skills install args are feature-detected, never a bet on a ve
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   });
 
+  it('does not invent --agent from malformed entries, empty agents, or unreadable config', () => {
+    const probe = () => 'Options:\n  --agent <id>  Target agent\n  --force\n';
+    const home = fakeHome('5.0.0');
+    try {
+      const argsOf = () => resolveSkillInstallArgs('/fake/openclaw', { home, probe });
+      fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({
+        agents: { entries: { main: null, 'mc-watchdog': false } },
+      }));
+      expect(readConfiguredAgentIds(home)).toBeNull();
+      expect(argsOf()).not.toContain('--agent');
+
+      fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ agents: {} }));
+      expect(readConfiguredAgentIds(home)).toBeNull();
+      expect(argsOf()).not.toContain('--agent');
+
+      fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), '{not json');
+      expect(readConfiguredAgentIds(home)).toBeNull();
+      expect(argsOf()).not.toContain('--agent');
+
+      fs.rmSync(path.join(home, '.openclaw', 'openclaw.json'));
+      expect(readConfiguredAgentIds(home)).toBeNull();
+      expect(argsOf()).not.toContain('--agent');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
   it('retries a rejected flag once, including its value, without changing other args', async () => {
     const calls: string[][] = [];
     await runSkillInstallWithRetry([...BASE, '--agent', 'main', INSTALL_POLICY_ACK_FLAG], async (args) => {
