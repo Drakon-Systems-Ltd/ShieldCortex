@@ -2775,7 +2775,74 @@ export async function checkDefenceCanary(): Promise<CheckResult> {
  * does NOT prove the OpenClaw interceptor or the PreToolUse hook is actually
  * wired into a live agent loop — that proof stays with the consent-gated live
  * canary (`SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1` + the openclaw self-check).
+ *
+ * Jarvis 5.0.1: signed config said Enforce while the OpenClaw plugin entry
+ * said Guard off. NOTIFY FAILed and the `$` footer prescribed a webhook.
+ * FAIL is for a live enforcing plane that claims a sink it does not have.
+ * An explicit plugin-off is under-configured, not lying — WARN, no webhook.
  */
+function isConfigBlock(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * Live OpenClaw plugin Guard posture from openclaw.json plugin config.
+ * Missing / unreadable / no Guard keys → cannot prove the plugin is off
+ * (NOTIFY still FAILs on leftover signed Enforce). Explicit
+ * `actionGuard.enabled:false`, `enforce:false`, or `interceptor.enabled:false`
+ * is the Jarvis shape.
+ */
+function readOpenClawPluginGuardLive(): {
+  readable: boolean;
+  pluginEnabled?: boolean;
+  interceptorEnabled?: boolean;
+  guardEnabled?: boolean;
+  guardEnforce?: boolean;
+} {
+  const resolved = openClawEffectiveHome();
+  if ('unresolvable' in resolved) return { readable: false };
+  try {
+    const raw = JSON.parse(
+      fs.readFileSync(path.join(resolved.home, '.openclaw', 'openclaw.json'), 'utf-8'),
+    ) as unknown;
+    if (!isConfigBlock(raw)) return { readable: false };
+    const entries = isConfigBlock((raw as { plugins?: unknown }).plugins)
+      ? ((raw as { plugins: { entries?: unknown } }).plugins.entries)
+      : undefined;
+    if (!isConfigBlock(entries)) return { readable: true };
+    const entry =
+      entries[REALTIME_PLUGIN_ID] ?? entries['@drakon-systems/shieldcortex-realtime'];
+    if (!isConfigBlock(entry)) return { readable: true };
+    const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
+    const pluginEnabled = bool(entry.enabled);
+    const config = isConfigBlock(entry.config) ? entry.config : null;
+    if (!config) return { readable: true, pluginEnabled };
+    const interceptor = isConfigBlock(config.interceptor) ? config.interceptor : null;
+    const alias = interceptor && isConfigBlock(interceptor.actionGuard) ? interceptor.actionGuard : null;
+    const top = isConfigBlock(config.actionGuard) ? config.actionGuard : null;
+    const merged = { ...(alias ?? {}), ...(top ?? {}) };
+    return {
+      readable: true,
+      pluginEnabled,
+      interceptorEnabled: interceptor ? bool(interceptor.enabled) : undefined,
+      guardEnabled: bool(merged.enabled),
+      guardEnforce: bool(merged.enforce),
+    };
+  } catch {
+    return { readable: false };
+  }
+}
+
+function pluginPlaneDisarmed(live: ReturnType<typeof readOpenClawPluginGuardLive>): boolean {
+  if (!live.readable) return false;
+  return (
+    live.pluginEnabled === false ||
+    live.interceptorEnabled === false ||
+    live.guardEnabled === false ||
+    live.guardEnforce === false
+  );
+}
+
 export async function checkActionGuard(): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const label = 'Action guard';
@@ -2842,8 +2909,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // runtime accessors read — including the SHIELDCORTEX_CONFIG_DIR override.
     const configPath = path.join(getConfigDir(), 'config.json');
     const raw = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
-    const isBlock = (v: unknown): v is Record<string, unknown> =>
-      !!v && typeof v === 'object' && !Array.isArray(v);
+    const isBlock = isConfigBlock;
     const top = isBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
     const alias = isBlock(raw?.interceptor?.actionGuard)
       ? (raw.interceptor.actionGuard as Record<string, unknown>)
@@ -2853,20 +2919,28 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // Which key set this value — top-level when it has the key, else the alias.
     const provenance = (k: string) =>
       top && k in top ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
+    const pluginLive = readOpenClawPluginGuardLive();
+    const pluginOff = pluginPlaneDisarmed(pluginLive);
+    const pluginOffFix =
+      'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
 
     if (!effective.enabled) {
       results.push({
         label: `${label} config`,
         status: 'warn',
         message: `Action Guard is disabled in config (\`${provenance('enabled')}: false\`) — tool calls are not gated on either surface`,
-        fix: 'Run `shieldcortex config --action-guard-enable` to restore gating — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
+        fix: pluginOff
+          ? pluginOffFix
+          : 'Run `shieldcortex config --action-guard-enable` to restore gating — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
       });
     } else if (!effective.enforce) {
       results.push({
         label: `${label} config`,
         status: 'warn',
         message: `Action Guard runs in warn-mode (\`${provenance('enforce')}: false\`) on both surfaces — dangerous ops log but are not gated (catastrophic still blocks)`,
-        fix: 'Run `shieldcortex config --action-guard-enforce` to gate dangerous ops — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
+        fix: pluginOff
+          ? pluginOffFix
+          : 'Run `shieldcortex config --action-guard-enforce` to gate dangerous ops — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
       });
     }
 
@@ -2902,7 +2976,12 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       const openclaw = notify.openclaw === true;
       // Denial-capable sink for unattended/DNP path = enabled notify + webhook URL.
       const denialSink = notifyOn && webhook.length > 0;
-      const armed = effective.enabled && effective.enforce;
+      const signedArmed = effective.enabled && effective.enforce;
+      // FAIL only when a live enforcing plane claims a sink. Signed Enforce
+      // leftover against an explicit plugin-off is the Jarvis 5.0.1 1-fail:
+      // not lying, not a missing webhook. Missing plugin config cannot prove
+      // the plugin is off — that still FAILs.
+      const armed = signedArmed && !pluginOff;
       if (!denialSink) {
         const openclawOnly = notifyOn && openclaw && !webhook;
         // FAIL, not WARN, for the armed no-sink that CLAIMS to be configured.
@@ -2922,11 +3001,21 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         // but still told, which is the whole point of un-gating.
         const claimsASink = notifyOn && !webhook;
         const status: CheckResult['status'] = armed && claimsASink ? 'fail' : 'warn';
-        const prefix = armed
-          ? 'Action Guard is enforcing with'
-          : effective.enabled
-            ? 'Action Guard is in warn-mode and running with'
-            : 'Action Guard is disabled and, when re-enabled, would run with';
+        const prefix = pluginOff && signedArmed
+          ? 'Action Guard signed config says Enforce, but the OpenClaw plugin is off, and, when re-enabled, would run with'
+          : pluginOff
+            ? 'Action Guard OpenClaw plugin is off, and, when re-enabled, would run with'
+            : armed
+              ? 'Action Guard is enforcing with'
+              : effective.enabled
+                ? 'Action Guard is in warn-mode and running with'
+                : 'Action Guard is disabled and, when re-enabled, would run with';
+        const webhookFix =
+          'Run `shieldcortex config --action-guard-notify-webhook <https-url>` so denied/unattended actions ' +
+          'reach a human via a denial-capable webhook sink. `notify.openclaw` is separate (interactive cards ' +
+          'for live require_approval holds) and does not replace the webhook for DNP. ' +
+          'The CLI writes a signed config — hand-editing config.json invalidates its integrity signature and ' +
+          "forces strict mode. OpenClaw lastRunStatus is not ShieldCortex's to write.";
         results.push({
           label: `${label} notify`,
           status,
@@ -2937,12 +3026,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
             : `${prefix} no denial-capable notify sink (actionGuard.notify.webhookUrl unset` +
               `${notifyOn ? '' : ', notify.enabled is not true'}) — unattended denials stay in the ` +
               `audit log and session-guard index only. The #242 cron incidents were this shape.`,
-          fix:
-            'Run `shieldcortex config --action-guard-notify-webhook <https-url>` so denied/unattended actions ' +
-            'reach a human via a denial-capable webhook sink. `notify.openclaw` is separate (interactive cards ' +
-            'for live require_approval holds) and does not replace the webhook for DNP. ' +
-            'The CLI writes a signed config — hand-editing config.json invalidates its integrity signature and ' +
-            'forces strict mode. OpenClaw lastRunStatus is not ShieldCortex\'s to write.',
+          fix: pluginOff ? pluginOffFix : webhookFix,
         });
       }
 
