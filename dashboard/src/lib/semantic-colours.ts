@@ -115,6 +115,46 @@ const FALLBACK_ENTITY_HEX: Record<ResolvedTheme, string> = {
 
 export const KNOWN_ENTITY_TYPES = Object.keys(ENTITY_TYPE_HEX.dark);
 
+/**
+ * Stable memory-category palette (Timeline day cards, category filter chips).
+ * A distinct domain from entity types above — "pattern" means something
+ * different in each — kept as its own theme-aware map rather than collapsed
+ * into the 6-bucket {@link Semantic} set, which would make categories that
+ * are meant to be visually distinguishable at a glance (architecture vs.
+ * context vs. note, say) render identically.
+ */
+const MEMORY_CATEGORY_HEX: Record<ResolvedTheme, Record<string, string>> = {
+  light: {
+    architecture: '#2563eb',
+    error: '#dc2626',
+    pattern: '#7c3aed',
+    preference: '#b45309',
+    learning: '#15803d',
+    context: '#4f46e5',
+    todo: '#c2410c',
+    note: '#64748b',
+    relationship: '#be185d',
+    custom: '#475569',
+  },
+  dark: {
+    architecture: '#60a5fa',
+    error: '#f0564f',
+    pattern: '#a78bfa',
+    preference: '#fbbf24',
+    learning: '#4ade80',
+    context: '#818cf8',
+    todo: '#fb923c',
+    note: '#94a3b8',
+    relationship: '#f472b6',
+    custom: '#cbd5e1',
+  },
+};
+
+export function memoryCategoryHex(theme: ResolvedTheme, category: string): string {
+  const c = (category || '').toLowerCase();
+  return MEMORY_CATEGORY_HEX[theme][c] ?? MEMORY_CATEGORY_HEX[theme].custom;
+}
+
 export function entityTypeHex(theme: ResolvedTheme, type: string): string {
   return ENTITY_TYPE_HEX[theme][type?.toLowerCase()] ?? FALLBACK_ENTITY_HEX[theme];
 }

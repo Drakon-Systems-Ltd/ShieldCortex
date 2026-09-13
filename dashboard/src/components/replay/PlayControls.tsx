@@ -140,8 +140,8 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
               className={cn(
                 'px-2 py-0.5 text-[10px] font-mono tabular-nums transition-colors',
                 s === speed
-                  ? 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-cyan)]/15 theme-glass:text-[var(--sc-cyan)]'
-                  : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] theme-glass:text-[var(--sc-text-secondary)]',
+                  ? 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-ok)]/15 theme-glass:text-[var(--sc-ok)]'
+                  : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] theme-glass:text-[var(--sc-text-dim)]',
               )}
               aria-pressed={s === speed}
               aria-label={`${s}× speed`}
@@ -175,7 +175,7 @@ function ControlButton({ ariaLabel, onClick, children, primary, disabled }: Cont
         'inline-flex items-center rounded px-2 py-1 text-xs font-mono transition-colors',
         'disabled:opacity-40 disabled:cursor-not-allowed',
         primary
-          ? 'border border-[var(--sc-primary)] text-[var(--sc-primary)] hover:bg-[var(--sc-primary)]/10 theme-glass:bg-[var(--sc-cyan)] theme-glass:text-[var(--sc-bg-deep)] theme-glass:border-0 theme-glass:hover:bg-[var(--sc-cyan-mid)]'
+          ? 'border border-[var(--sc-primary)] text-[var(--sc-primary)] hover:bg-[var(--sc-primary)]/10 theme-glass:bg-[var(--sc-ok)] theme-glass:text-[var(--sc-bg)] theme-glass:border-0 theme-glass:hover:bg-[var(--sc-ok)]'
           : 'border border-[var(--sc-border)] text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] hover:border-[var(--sc-text-muted)] theme-glass:border-[var(--sc-border)]',
       )}
     >

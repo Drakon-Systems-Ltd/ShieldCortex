@@ -5,6 +5,7 @@ import { useState, Suspense, useCallback } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import dynamic from 'next/dynamic';
 import {
+  Clock,
   Database,
   FileText,
   GitBranch,
@@ -20,6 +21,7 @@ import { RecallWorkspace } from '@/components/recall/RecallWorkspace';
 import { ReviewQueueView } from '@/components/review/ReviewQueueView';
 import { MemoriesView } from '@/components/memories/MemoriesView';
 import { MemoryFilesView } from '@/components/memories/MemoryFilesView';
+import { MemoryTimeline } from '@/components/timeline/MemoryTimeline';
 
 const MemoryGraph = dynamic(
   () => import('@/components/graph/MemoryGraph'),
@@ -33,13 +35,13 @@ const MemoryGraph = dynamic(
   },
 );
 
-type MemoryTab = 'library' | 'files' | 'recall' | 'review' | 'graph';
+type MemoryTab = 'library' | 'files' | 'recall' | 'review' | 'timeline' | 'graph';
+
+const MEMORY_TABS: MemoryTab[] = ['library', 'files', 'recall', 'review', 'timeline', 'graph'];
 
 function normaliseTab(tab: string | null): MemoryTab | null {
   if (tab === 'capture') return 'library';
-  return tab && ['library', 'files', 'recall', 'review', 'graph'].includes(tab)
-    ? (tab as MemoryTab)
-    : null;
+  return tab && MEMORY_TABS.includes(tab as MemoryTab) ? (tab as MemoryTab) : null;
 }
 
 function MemoryContent() {
@@ -83,10 +85,11 @@ function MemoryContent() {
 
   const tabs = [
     { id: 'library', label: 'Library', icon: <Database size={14} />, count: totalMemories || undefined },
-    { id: 'files', label: 'Files', icon: <FileText size={14} /> },
+    { id: 'graph', label: 'Graph', icon: <GitBranch size={14} /> },
     { id: 'recall', label: 'Recall', icon: <Search size={14} /> },
     { id: 'review', label: 'Review', count: reviewTotal || undefined },
-    { id: 'graph', label: 'Graph', icon: <GitBranch size={14} /> },
+    { id: 'timeline', label: 'Timeline', icon: <Clock size={14} /> },
+    { id: 'files', label: 'Files', icon: <FileText size={14} /> },
   ];
 
   return (
@@ -110,10 +113,11 @@ function MemoryContent() {
 
         <div>
           {tab === 'library' && <MemoriesView />}
-          {tab === 'files' && <MemoryFilesView />}
+          {tab === 'graph' && <MemoryGraph />}
           {tab === 'recall' && <RecallWorkspace />}
           {tab === 'review' && <ReviewQueueView />}
-          {tab === 'graph' && <MemoryGraph />}
+          {tab === 'timeline' && <MemoryTimeline />}
+          {tab === 'files' && <MemoryFilesView />}
         </div>
       </div>
     </div>

@@ -39,7 +39,7 @@ export function SessionList({
     <div className="flex h-full flex-col">
       {/* Header — terminal: bracketed sort toggle, glass: pill buttons. */}
       <div className="flex items-center justify-between border-b border-[var(--sc-border)] px-3 py-2 theme-glass:border-[var(--sc-border)]">
-        <span className="text-xs font-mono uppercase tracking-wider text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-secondary)]">
+        <span className="text-xs font-mono uppercase tracking-wider text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)]">
           Sessions <span className="text-[var(--sc-text-dim)]">({sessions.length})</span>
         </span>
         <div className="flex gap-1">
@@ -51,8 +51,8 @@ export function SessionList({
               className={cn(
                 'rounded px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider transition-colors',
                 sort === key
-                  ? 'text-[var(--sc-ok)] bg-[var(--sc-ok)]/10 theme-glass:bg-[var(--sc-cyan)]/15 theme-glass:text-[var(--sc-cyan)]'
-                  : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] theme-glass:text-[var(--sc-text-secondary)]',
+                  ? 'text-[var(--sc-ok)] bg-[var(--sc-ok)]/10 theme-glass:bg-[var(--sc-ok)]/15 theme-glass:text-[var(--sc-ok)]'
+                  : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] theme-glass:text-[var(--sc-text-dim)]',
               )}
             >
               {key === 'recency' ? 'recent' : 'events'}
@@ -65,33 +65,33 @@ export function SessionList({
       <div className="flex-1 overflow-y-auto">
         {error && sessions.length === 0 ? (
           <div className="p-4 text-xs font-mono">
-            <div className="text-[var(--sc-danger)] theme-glass:text-[var(--sc-coral)]">
+            <div className="text-[var(--sc-danger)] theme-glass:text-[var(--sc-danger)]">
               API unreachable.
             </div>
-            <div className="mt-1 text-[var(--sc-text-dim)] theme-glass:text-[var(--sc-text-secondary)] break-words">
+            <div className="mt-1 text-[var(--sc-text-dim)] theme-glass:text-[var(--sc-text-dim)] break-words">
               {error.message || 'Failed to load sessions.'}
             </div>
-            <div className="mt-2 text-[var(--sc-text-dim)] theme-glass:text-[var(--sc-text-secondary)]">
-              Is <code className="text-[var(--sc-ok)] theme-glass:text-[var(--sc-cyan)]">npm run dev:api</code> running on :3001?
+            <div className="mt-2 text-[var(--sc-text-dim)] theme-glass:text-[var(--sc-text-dim)]">
+              Is <code className="text-[var(--sc-ok)] theme-glass:text-[var(--sc-ok)]">npm run dev:api</code> running on :3001?
             </div>
             {onRetry && (
               <button
                 type="button"
                 onClick={onRetry}
-                className="mt-3 rounded border border-[var(--sc-border)] px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] theme-glass:border-[var(--sc-border)] theme-glass:text-[var(--sc-text-secondary)]"
+                className="mt-3 rounded border border-[var(--sc-border)] px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] theme-glass:border-[var(--sc-border)] theme-glass:text-[var(--sc-text-dim)]"
               >
                 Retry
               </button>
             )}
           </div>
         ) : loading && sessions.length === 0 ? (
-          <div className="p-4 text-xs font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-secondary)]">Loading…</div>
+          <div className="p-4 text-xs font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)]">Loading…</div>
         ) : sorted.length === 0 ? (
-          <div className="p-4 text-xs font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-secondary)]">
+          <div className="p-4 text-xs font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)]">
             <div>No sessions yet.</div>
-            <div className="mt-1 text-[var(--sc-text-dim)] theme-glass:text-[var(--sc-text-secondary)]">
-              Click <span className="text-[var(--sc-ok)] theme-glass:text-[var(--sc-cyan)]">Import JSONL</span> above to ingest your existing Claude Code transcripts, or run{' '}
-              <code className="text-[var(--sc-ok)] theme-glass:text-[var(--sc-cyan)]">shieldcortex import-jsonl</code> from the CLI.
+            <div className="mt-1 text-[var(--sc-text-dim)] theme-glass:text-[var(--sc-text-dim)]">
+              Click <span className="text-[var(--sc-ok)] theme-glass:text-[var(--sc-ok)]">Import JSONL</span> above to ingest your existing Claude Code transcripts, or run{' '}
+              <code className="text-[var(--sc-ok)] theme-glass:text-[var(--sc-ok)]">shieldcortex import-jsonl</code> from the CLI.
             </div>
           </div>
         ) : (
@@ -105,14 +105,14 @@ export function SessionList({
                     'block w-full text-left px-3 py-2 transition-colors',
                     'hover:bg-[var(--sc-primary)]/5 theme-glass:hover:bg-[var(--sc-surface-interactive)]',
                     selectedSessionId === s.session_id &&
-                      'bg-[var(--sc-primary)]/10 theme-glass:bg-[var(--sc-cyan)]/10',
+                      'bg-[var(--sc-primary)]/10 theme-glass:bg-[var(--sc-ok)]/10',
                   )}
                 >
                   <div className="flex items-baseline justify-between gap-2">
-                    <code className="text-[11px] font-mono text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)] truncate">
+                    <code className="text-[11px] font-mono text-[var(--sc-text)] theme-glass:text-[var(--sc-text)] truncate">
                       {shortSessionId(s.session_id)}
                     </code>
-                    <span className="text-[10px] font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-secondary)] tabular-nums">
+                    <span className="text-[10px] font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)] tabular-nums">
                       {s.event_count}
                     </span>
                   </div>

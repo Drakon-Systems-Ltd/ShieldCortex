@@ -220,6 +220,11 @@ function isRedactableMemoryObject(o: Record<string, unknown>): boolean {
  */
 export function deepRedactRestrictedContent<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
   if (value === null || typeof value !== 'object') return value;
+  // A Date has no enumerable own properties, so the generic-object branch
+  // below (`Object.keys(obj)` -> rebuild) silently turned every createdAt/
+  // lastAccessed/updatedAt in every JSON response into `{}` — a real Date
+  // never carries redactable credential text, so it passes through as-is.
+  if (value instanceof Date) return value;
   if (seen.has(value as object)) return value; // cycle guard
   seen.add(value as object);
 

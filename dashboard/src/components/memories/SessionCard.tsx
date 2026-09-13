@@ -38,8 +38,8 @@ export function SessionCard({ session, expanded, onToggle }: SessionCardProps) {
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className={`h-2 w-2 rounded-full ${session.threats > 0 ? 'bg-[var(--sc-coral)]' : 'bg-[var(--sc-cyan)]'}`} />
-              <span className="truncate text-sm font-medium text-[var(--sc-text-primary)]">
+              <span className={`h-2 w-2 rounded-full ${session.threats > 0 ? 'bg-[var(--sc-danger)]' : 'bg-[var(--sc-ok)]'}`} />
+              <span className="truncate text-sm font-medium text-[var(--sc-text)]">
                 {session.sessionId}
               </span>
             </div>
@@ -80,10 +80,10 @@ export function SessionCard({ session, expanded, onToggle }: SessionCardProps) {
               {session.memories.map((memory) => (
                 <div
                   key={memory.id}
-                  className="flex items-center justify-between gap-3 rounded-lg bg-[var(--sc-bg-elevated)]/60 px-3 py-2"
+                  className="flex items-center justify-between gap-3 rounded-lg bg-[var(--sc-surface-2)]/60 px-3 py-2"
                 >
                   <div className="min-w-0">
-                    <div className="truncate text-sm text-[var(--sc-text-primary)]">
+                    <div className="truncate text-sm text-[var(--sc-text)]">
                       {memory.title}
                     </div>
                     <div className="mt-0.5 flex items-center gap-2">

@@ -96,7 +96,7 @@ function ScanResultPanel({ result }: { result: MemoryScanResult }) {
   const indicators = result.firewall.threatIndicators ?? [];
 
   return (
-    <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+    <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={riskVariant(risk)}>{risk}</Badge>
         <Badge variant="muted">anomaly {result.firewall.anomalyScore.toFixed(2)}</Badge>
@@ -105,13 +105,13 @@ function ScanResultPanel({ result }: { result: MemoryScanResult }) {
           {result.sensitivity.level}
         </Badge>
       </div>
-      <p className="mt-3 text-sm text-[var(--sc-text-primary)]">{result.firewall.reason}</p>
+      <p className="mt-3 text-sm text-[var(--sc-text)]">{result.firewall.reason}</p>
       {indicators.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {indicators.map((indicator) => (
             <span
               key={indicator}
-              className="rounded bg-[var(--sc-bg-elevated)] px-2 py-1 text-[11px] text-[var(--sc-text-secondary)]"
+              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-[11px] text-[var(--sc-text-dim)]"
             >
               {indicator}
             </span>
@@ -119,7 +119,7 @@ function ScanResultPanel({ result }: { result: MemoryScanResult }) {
         </div>
       )}
       {result.firewall.blockedPatterns.length > 0 && (
-        <div className="mt-3 rounded border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-2 text-xs text-[var(--sc-coral)]">
+        <div className="mt-3 rounded border border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 p-2 text-xs text-[var(--sc-danger)]">
           {result.firewall.blockedPatterns.join(', ')}
         </div>
       )}
@@ -253,7 +253,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] shadow-2xl">
+      <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)] shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-[var(--sc-border)] p-5">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -263,14 +263,14 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
                 {memory.status ?? 'active'}
               </Badge>
             </div>
-            <h2 id="memory-detail-title" className="mt-3 text-lg font-semibold text-[var(--sc-text-primary)]">
+            <h2 id="memory-detail-title" className="mt-3 text-lg font-semibold text-[var(--sc-text)]">
               {memory.title}
             </h2>
-            <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">{memory.project || 'Global memory'}</p>
+            <p className="mt-1 text-sm text-[var(--sc-text-dim)]">{memory.project || 'Global memory'}</p>
           </div>
           <button
             onClick={onClose}
-            className="rounded-lg p-2 text-[var(--sc-text-muted)] transition-colors hover:bg-[var(--sc-bg-elevated)] hover:text-[var(--sc-text-primary)]"
+            className="rounded-lg p-2 text-[var(--sc-text-muted)] transition-colors hover:bg-[var(--sc-surface-2)] hover:text-[var(--sc-text)]"
             aria-label="Close memory detail"
             type="button"
           >
@@ -283,7 +283,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
             <div className="space-y-4">
               <section>
                 <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Content</h3>
-                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3 font-sans text-sm leading-6 text-[var(--sc-text-primary)]">
+                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3 font-sans text-sm leading-6 text-[var(--sc-text)]">
                   {memory.content}
                 </pre>
               </section>
@@ -312,7 +312,7 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
               )}
 
               {explainMutation.error && (
-                <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">
+                <div className="rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 p-3 text-sm text-[var(--sc-danger)]">
                   {explainMutation.error instanceof Error ? explainMutation.error.message : 'Local explanation failed'}
                 </div>
               )}
@@ -320,71 +320,71 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
               {scanMutation.data && <ScanResultPanel result={scanMutation.data} />}
 
               {scanMutation.error && (
-                <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">
+                <div className="rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 p-3 text-sm text-[var(--sc-danger)]">
                   {scanMutation.error instanceof Error ? scanMutation.error.message : 'Memory scan failed'}
                 </div>
               )}
             </div>
 
             <div className="space-y-4">
-              <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+              <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
                 <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Health</h3>
                 <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <div className="text-[var(--sc-text-muted)]">Salience</div>
-                    <div className="font-semibold text-[var(--sc-text-primary)]">{percent(memory.salience)}</div>
+                    <div className="font-semibold text-[var(--sc-text)]">{percent(memory.salience)}</div>
                   </div>
                   <div>
                     <div className="text-[var(--sc-text-muted)]">Decay</div>
-                    <div className="font-semibold text-[var(--sc-text-primary)]">{percent(memory.decayedScore ?? memory.salience)}</div>
+                    <div className="font-semibold text-[var(--sc-text)]">{percent(memory.decayedScore ?? memory.salience)}</div>
                   </div>
                   <div>
                     <div className="text-[var(--sc-text-muted)]">Trust</div>
-                    <div className="font-semibold text-[var(--sc-text-primary)]">{(memory.trustScore ?? 1).toFixed(2)}</div>
+                    <div className="font-semibold text-[var(--sc-text)]">{(memory.trustScore ?? 1).toFixed(2)}</div>
                   </div>
                   <div>
                     <div className="text-[var(--sc-text-muted)]">Accesses</div>
-                    <div className="font-semibold text-[var(--sc-text-primary)]">{memory.accessCount}</div>
+                    <div className="font-semibold text-[var(--sc-text)]">{memory.accessCount}</div>
                   </div>
                 </div>
               </section>
 
-              <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+              <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
                 <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Provenance</h3>
                 <dl className="mt-3 space-y-2 text-sm">
                   <div className="flex justify-between gap-3">
                     <dt className="text-[var(--sc-text-muted)]">Source</dt>
-                    <dd className="text-right text-[var(--sc-text-primary)]">{memory.sourceKind || 'user'}</dd>
+                    <dd className="text-right text-[var(--sc-text)]">{memory.sourceKind || 'user'}</dd>
                   </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-[var(--sc-text-muted)]">Capture</dt>
-                    <dd className="text-right text-[var(--sc-text-primary)]">{memory.captureMethod || 'manual'}</dd>
+                    <dd className="text-right text-[var(--sc-text)]">{memory.captureMethod || 'manual'}</dd>
                   </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-[var(--sc-text-muted)]">Created</dt>
-                    <dd className="text-right text-[var(--sc-text-primary)]">{formatDate(memory.createdAt)}</dd>
+                    <dd className="text-right text-[var(--sc-text)]">{formatDate(memory.createdAt)}</dd>
                   </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-[var(--sc-text-muted)]">Updated</dt>
-                    <dd className="text-right text-[var(--sc-text-primary)]">{formatDate(memory.updatedAt)}</dd>
+                    <dd className="text-right text-[var(--sc-text)]">{formatDate(memory.updatedAt)}</dd>
                   </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-[var(--sc-text-muted)]">Sensitivity</dt>
-                    <dd className="text-right text-[var(--sc-text-primary)]">{memory.sensitivityLevel || 'INTERNAL'}</dd>
+                    <dd className="text-right text-[var(--sc-text)]">{memory.sensitivityLevel || 'INTERNAL'}</dd>
                   </div>
                   <div className="flex justify-between gap-3">
                     <dt className="text-[var(--sc-text-muted)]">Cloud</dt>
-                    <dd className="text-right text-[var(--sc-text-primary)]">{memory.cloudExcluded ? 'Excluded' : 'Eligible'}</dd>
+                    <dd className="text-right text-[var(--sc-text)]">{memory.cloudExcluded ? 'Excluded' : 'Eligible'}</dd>
                   </div>
                 </dl>
               </section>
 
               {tags.length > 0 && (
-                <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+                <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
                   <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Tags</h3>
                   <div className="mt-3 flex flex-wrap gap-1.5">
                     {tags.map((tag) => (
-                      <span key={tag} className="rounded bg-[var(--sc-bg-elevated)] px-2 py-1 text-xs text-[var(--sc-text-secondary)]">
+                      <span key={tag} className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-xs text-[var(--sc-text-dim)]">
                         {tag}
                       </span>
                     ))}
@@ -397,9 +397,9 @@ export function MemoryActionModal({ memory, onClose }: MemoryActionModalProps) {
 
         <div className="border-t border-[var(--sc-border)] p-4">
           {confirmAction && (
-            <div className="mb-3 rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3">
+            <div className="mb-3 rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 p-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-sm text-[var(--sc-coral)]">
+                <p className="text-sm text-[var(--sc-danger)]">
                   {confirmAction === 'delete'
                     ? 'Delete this memory permanently?'
                     : 'Move this memory to quarantine for manual review?'}

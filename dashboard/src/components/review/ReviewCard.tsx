@@ -45,10 +45,10 @@ export function ReviewCard({ memory, reasons, onAction, busy = false }: ReviewCa
         </div>
 
         {/* Title */}
-        <h3 className="mt-3 text-lg font-bold leading-tight text-[var(--sc-text-primary)]">{memory.title}</h3>
+        <h3 className="mt-3 text-lg font-bold leading-tight text-[var(--sc-text)]">{memory.title}</h3>
 
         {/* Content preview */}
-        <div className="mt-2 text-sm leading-relaxed text-[var(--sc-text-secondary)]">
+        <div className="mt-2 text-sm leading-relaxed text-[var(--sc-text-dim)]">
           {memory.content}
         </div>
 
@@ -78,7 +78,7 @@ export function ReviewCard({ memory, reasons, onAction, busy = false }: ReviewCa
           </Button>
 
           <details className="ml-auto">
-            <summary className="cursor-pointer text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text-secondary)]">
+            <summary className="cursor-pointer text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text-dim)]">
               More actions
             </summary>
             <div className="mt-2 flex flex-wrap gap-2">

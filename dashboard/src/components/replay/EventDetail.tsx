@@ -22,12 +22,12 @@ interface EventDetailProps {
  * args, content) into a friendlier layout instead of dumping raw JSON.
  */
 const KIND_BG: Record<ReplayKind, string> = {
-  prompt: 'bg-[var(--sc-primary)]/15 text-[var(--sc-primary)] theme-glass:bg-[var(--sc-coral)]/15 theme-glass:text-[var(--sc-coral)]',
-  response: 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-cyan)]/15 theme-glass:text-[var(--sc-cyan)]',
+  prompt: 'bg-[var(--sc-primary)]/15 text-[var(--sc-primary)] theme-glass:bg-[var(--sc-danger)]/15 theme-glass:text-[var(--sc-danger)]',
+  response: 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-ok)]/15 theme-glass:text-[var(--sc-ok)]',
   tool_call: 'bg-[var(--sc-warn)]/15 text-[var(--sc-warn)] theme-glass:bg-amber-500/15 theme-glass:text-amber-400',
-  tool_result: 'bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-cyan)]/10 theme-glass:text-[var(--sc-cyan)]',
+  tool_result: 'bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-ok)]/10 theme-glass:text-[var(--sc-ok)]',
   tool_error: 'bg-[var(--sc-danger)]/15 text-[var(--sc-danger)] theme-glass:bg-rose-500/15 theme-glass:text-rose-400',
-  hook_fire: 'bg-[var(--sc-border)] text-[var(--sc-text-muted)] theme-glass:bg-[var(--sc-border)] theme-glass:text-[var(--sc-text-secondary)]',
+  hook_fire: 'bg-[var(--sc-border)] text-[var(--sc-text-muted)] theme-glass:bg-[var(--sc-border)] theme-glass:text-[var(--sc-text-dim)]',
 };
 
 export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
@@ -142,7 +142,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
         </div>
         <div>
           <div className="text-[10px] uppercase tracking-wider text-[var(--sc-text-muted)] mb-1">input</div>
-          <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
+          <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text)]">
             {prettyJson(payload.input)}
           </pre>
         </div>
@@ -159,7 +159,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
         {toolUseId && (
           <div className="text-[var(--sc-text-dim)] text-[10px]">↳ {toolUseId}</div>
         )}
-        <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
+        <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text)]">
           {typeof content === 'string' ? content : prettyJson(content)}
         </pre>
       </div>
@@ -169,7 +169,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
   // Prompt / response: the .text field is the headline; show it cleanly
   if (text) {
     return (
-      <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
+      <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text)]">
         {text}
       </pre>
     );
@@ -177,7 +177,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
 
   // Fallback: pretty-print the whole payload
   return (
-    <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
+    <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text)]">
       {prettyJson(payload)}
     </pre>
   );

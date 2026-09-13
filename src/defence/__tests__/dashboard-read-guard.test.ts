@@ -189,4 +189,19 @@ describe('deepRedactRestrictedContent (HTTP response interceptor core)', () => {
     expect(() => deepRedactRestrictedContent(obj)).not.toThrow();
     expect((deepRedactRestrictedContent(obj) as { content: string }).content).toBe(RESTRICTED_CONTENT_PLACEHOLDER);
   });
+
+  it('passes Date fields through untouched instead of collapsing them to {} (dashboard-v2 step 5 regression)', () => {
+    // A Date has no enumerable own properties, so the generic-object
+    // rebuild (`Object.keys(obj)` -> copy) used to turn every
+    // createdAt/lastAccessed/updatedAt in every JSON response into `{}` —
+    // reproduced here exactly as res.json() sees it: a real Date instance,
+    // not an ISO string (JSON.stringify only stringifies it at the end).
+    const createdAt = new Date('2026-06-01T12:00:00.000Z');
+    const out = deepRedactRestrictedContent({
+      memories: [{ ...mem({ sensitivityLevel: 'INTERNAL' }), createdAt, lastAccessed: createdAt }],
+    }) as { memories: Array<{ createdAt: Date; lastAccessed: Date }> };
+    expect(out.memories[0].createdAt).toBeInstanceOf(Date);
+    expect(out.memories[0].createdAt.toISOString()).toBe('2026-06-01T12:00:00.000Z');
+    expect(out.memories[0].lastAccessed).toBeInstanceOf(Date);
+  });
 });
