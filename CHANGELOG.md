@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
+- **#472:** `shieldcortex setup openclaw` honours absolute `OPENCLAW_HOME` (and `~/…`) instead of always writing the operator's real `~/.openclaw`. Relative / `~user` values are ignored — they resolve against OpenClaw's process cwd, which this CLI cannot know. Source checkout no longer carries a stale `plugins/openclaw/dist` manifest (build output only). `v4.54.15` is tagged. The main tarball still does not ship the OpenClaw plugin — that remains `@drakon-systems/shieldcortex-realtime`.
 - **#475:** `POST /api/memories/:id/quarantine` now writes `firewall_result='QUARANTINE'`. The column is `NOT NULL` with no default, so the dashboard "quarantine this memory" action 500'd on every call and never moved the row.
 - **#476:** `POST /api/sessions/import-jsonl` 404s no longer echo the resolved filesystem glob. An empty body used to return the server's absolute `$HOME` in the JSON error.
 - **#477:** `POST /api/version/restart` requires `{"confirm":"restart"}`. An empty body no longer schedules `process.exit`. Action Guard being off by default is not treated as consent.

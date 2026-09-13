@@ -95,12 +95,31 @@ export function isDockerEnvironment(): boolean {
 const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 
 /**
- * Resolve the real user's home directory.
+ * Resolve the operator home the installer will write under.
+ *
+ * #472: OPENCLAW_HOME (absolute, or `~/…`) wins, matching OpenClaw's
+ * home-dir.ts and doctor's openClawEffectiveHome. Relative / `~user`
+ * values are ignored — they resolve against OpenClaw's process cwd,
+ * which this CLI cannot know, so probing them would write into the
+ * live tree while a throwaway profile thought it was isolated.
  *
  * When run under sudo, os.homedir() returns /root/.
  * We check SUDO_USER first and resolve their actual home.
  */
 function resolveUserHome(): string {
+  const explicit = process.env.OPENCLAW_HOME?.trim();
+  if (explicit) {
+    if (/^~($|[\\/])/.test(explicit)) {
+      const fallback = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || os.homedir();
+      if (fallback) {
+        return path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback));
+      }
+    } else if (path.isAbsolute(explicit)) {
+      return path.resolve(explicit);
+    }
+    // relative / ~user: fall through to sudo / os.homedir, never cwd.
+  }
+
   const sudoUser = process.env.SUDO_USER;
   if (sudoUser && SAFE_USERNAME.test(sudoUser)) {
     // Try getent passwd (reliable on Linux) — argv-array, no shell.
@@ -125,6 +144,11 @@ function resolveUserHome(): string {
         return homeDir;
       }
     }
+  }
+
+  const envHome = process.env.HOME?.trim() || process.env.USERPROFILE?.trim();
+  if (envHome && path.isAbsolute(envHome)) {
+    return path.resolve(envHome);
   }
 
   const home = os.homedir();

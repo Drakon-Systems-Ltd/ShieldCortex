@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { describe, expect, it } from '@jest/globals';
 
@@ -61,6 +62,15 @@ describe('shieldcortex-realtime plugin manifest', () => {
     const rootPkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf-8'));
     expect(pkg.version).toBe(rootPkg.version);
     expect(manifest.version).toBe(rootPkg.version);
+  });
+
+  it('does not commit plugins/openclaw/dist/openclaw.plugin.json (#472)', () => {
+    const listed = execFileSync(
+      'git',
+      ['ls-files', 'plugins/openclaw/dist/openclaw.plugin.json'],
+      { cwd: repoRoot, encoding: 'utf-8' },
+    ).trim();
+    expect(listed).toBe('');
   });
 });
 
