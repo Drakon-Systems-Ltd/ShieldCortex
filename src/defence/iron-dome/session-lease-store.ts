@@ -131,7 +131,53 @@ function liveRecord(rec: StoredLease | undefined, nowMs: number): StoredLease | 
   const expiry =
     rec.expiresAtMs ?? (rec.acquiredAtMs != null ? rec.acquiredAtMs + DEFAULT_LEASE_TTL_MS : null);
   if (expiry == null || nowMs > expiry) return null;
+  // #438: a crashed holder must not wedge the scope for the rest of the TTL.
+  // Only reap when the recorded PID is present and confirmed dead. Blank /
+  // non-positive / unconfirmed PIDs stay live — fail closed.
+  if (isHolderPidAlive(rec.pid) === false) return null;
   return rec;
+}
+
+/**
+ * Same-host liveness of a recorded holder PID.
+ *   - false: confirmed dead (ESRCH, or Linux zombie /proc state Z/X)
+ *   - true: process table has a live (or permission-denied) entry
+ *   - undefined: no PID we can trust — caller must fail closed
+ *
+ * After kill(pid,0) succeeds, missing /proc/<pid>/stat is NOT death
+ * (#438 GPT-6): an empty /proc dir, a PID-namespace mismatch, or macOS
+ * can all ENOENT a living process. Only a positively observed Z/X
+ * state reaps a still-signallable pid.
+ */
+export type ProcStatRead = (pid: number) => string | null;
+
+function defaultProcStat(pid: number): string | null {
+  try {
+    return fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+export function isHolderPidAlive(
+  pid: number | null | undefined,
+  readProcStat: ProcStatRead = defaultProcStat,
+): boolean | undefined {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    // EPERM: the pid exists but we cannot signal it. That is "alive", not dead.
+    return true;
+  }
+  const stat = readProcStat(pid);
+  if (stat == null) return true;
+  const rparen = stat.lastIndexOf(')');
+  const state = rparen >= 0 ? stat.slice(rparen + 2, rparen + 3) : '';
+  if (state === 'Z' || state === 'X') return false;
+  return true;
 }
 
 export interface AcquireInput {
@@ -294,7 +340,8 @@ export function evaluateToolCallLease(
     }
 
     const held = liveRecord(readLeaseFile(dir).leases[scope] as StoredLease | undefined, nowMs);
-    const decision = checkSessionLease({ scope, ledger, held, self, nowMs });
+    const holderAlive = held ? isHolderPidAlive(held.pid) : undefined;
+    const decision = checkSessionLease({ scope, ledger, held, self, nowMs, holderAlive });
 
     if (decision.verdict === 'allow') {
       const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs });

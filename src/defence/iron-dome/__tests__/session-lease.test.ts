@@ -114,6 +114,66 @@ describe('checkSessionLease — mutual exclusion', () => {
     });
     expect(d.verdict).toBe('allow');
   });
+
+  it('#438: a lease whose holder PID is confirmed dead does not block', () => {
+    const d = checkSessionLease({
+      ...base,
+      held: {
+        holder: 'session-B',
+        pid: 160367,
+        acquiredAtMs: NOW - 30_000,
+        expiresAtMs: NOW + 600_000,
+      },
+      holderAlive: false,
+    });
+    expect(d.verdict).toBe('allow');
+  });
+
+  it('#438: unknown liveness still fails closed — a live-looking lease stays held', () => {
+    const d = checkSessionLease({
+      ...base,
+      held: {
+        holder: 'session-B',
+        pid: 160367,
+        acquiredAtMs: NOW - 30_000,
+        expiresAtMs: NOW + 600_000,
+      },
+    });
+    expect(d.verdict).toBe('held');
+  });
+
+  it('#438: a blank PID is never a skeleton key even if the caller claims dead', () => {
+    const d = checkSessionLease({
+      ...base,
+      held: {
+        holder: 'session-B',
+        pid: null,
+        acquiredAtMs: NOW - 30_000,
+        expiresAtMs: NOW + 600_000,
+      },
+      holderAlive: false,
+    });
+    expect(d.verdict).toBe('held');
+  });
+});
+
+describe('checkSessionLease — freeze outranks dead PID', () => {
+  it('#438: a confirmed-dead holder on a FROZEN scope is still frozen', () => {
+    const d = checkSessionLease({
+      scope: 'npm-publish',
+      ledger: LEDGER,
+      held: {
+        holder: 'session-B',
+        pid: 160367,
+        acquiredAtMs: NOW - 30_000,
+        expiresAtMs: NOW + 600_000,
+      },
+      self: 'session-A',
+      nowMs: NOW,
+      holderAlive: false,
+    });
+    expect(d.verdict).toBe('frozen');
+  });
 });
 
 describe('checkSessionLease — fails closed', () => {
