@@ -21,13 +21,13 @@ import { ReviewQueueView } from '@/components/review/ReviewQueueView';
 import { MemoriesView } from '@/components/memories/MemoriesView';
 import { MemoryFilesView } from '@/components/memories/MemoryFilesView';
 
-const UnifiedGraph = dynamic(
-  () => import('@/components/graph/UnifiedGraph'),
+const MemoryGraph = dynamic(
+  () => import('@/components/graph/MemoryGraph'),
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-[600px] items-center justify-center text-[var(--sc-text-muted)]">
-        Loading graph...
+      <div className="flex h-[480px] items-center justify-center text-[var(--sc-text-muted)]">
+        Loading graph…
       </div>
     ),
   },
@@ -113,19 +113,7 @@ function MemoryContent() {
           {tab === 'files' && <MemoryFilesView />}
           {tab === 'recall' && <RecallWorkspace />}
           {tab === 'review' && <ReviewQueueView />}
-          {tab === 'graph' && (
-            <div className="rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface)] overflow-hidden flex flex-col">
-              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--sc-border)] bg-[var(--sc-surface-2)] font-mono">
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--sc-danger)]" />
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--sc-warn)]" />
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--sc-ok)]" />
-                <span className="ml-2 text-xs text-[var(--sc-text-muted)] select-none">knowledge-graph</span>
-              </div>
-              <div className="h-[600px]">
-                <UnifiedGraph />
-              </div>
-            </div>
-          )}
+          {tab === 'graph' && <MemoryGraph />}
         </div>
       </div>
     </div>
