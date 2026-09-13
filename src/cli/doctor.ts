@@ -2794,6 +2794,7 @@ function isConfigBlock(v: unknown): v is Record<string, unknown> {
  */
 function readOpenClawPluginGuardLive(): {
   readable: boolean;
+  pluginEnabled?: boolean;
   interceptorEnabled?: boolean;
   guardEnabled?: boolean;
   guardEnforce?: boolean;
@@ -2812,15 +2813,17 @@ function readOpenClawPluginGuardLive(): {
     const entry =
       entries[REALTIME_PLUGIN_ID] ?? entries['@drakon-systems/shieldcortex-realtime'];
     if (!isConfigBlock(entry)) return { readable: true };
+    const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
+    const pluginEnabled = bool(entry.enabled);
     const config = isConfigBlock(entry.config) ? entry.config : null;
-    if (!config) return { readable: true };
+    if (!config) return { readable: true, pluginEnabled };
     const interceptor = isConfigBlock(config.interceptor) ? config.interceptor : null;
     const alias = interceptor && isConfigBlock(interceptor.actionGuard) ? interceptor.actionGuard : null;
     const top = isConfigBlock(config.actionGuard) ? config.actionGuard : null;
     const merged = { ...(alias ?? {}), ...(top ?? {}) };
-    const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
     return {
       readable: true,
+      pluginEnabled,
       interceptorEnabled: interceptor ? bool(interceptor.enabled) : undefined,
       guardEnabled: bool(merged.enabled),
       guardEnforce: bool(merged.enforce),
@@ -2832,7 +2835,12 @@ function readOpenClawPluginGuardLive(): {
 
 function pluginPlaneDisarmed(live: ReturnType<typeof readOpenClawPluginGuardLive>): boolean {
   if (!live.readable) return false;
-  return live.interceptorEnabled === false || live.guardEnabled === false || live.guardEnforce === false;
+  return (
+    live.pluginEnabled === false ||
+    live.interceptorEnabled === false ||
+    live.guardEnabled === false ||
+    live.guardEnforce === false
+  );
 }
 
 export async function checkActionGuard(): Promise<CheckResult[]> {

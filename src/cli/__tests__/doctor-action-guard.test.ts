@@ -305,12 +305,12 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
   let isolated: string;
   let prevHome: string | undefined;
 
-  function writePluginConfig(config: Record<string, unknown>): void {
+  function writePluginConfig(config: Record<string, unknown>, entryEnabled: boolean = true): void {
     const dir = path.join(isolated, '.openclaw');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, 'openclaw.json'),
-      JSON.stringify({ plugins: { entries: { [PLUGIN]: { enabled: true, config } } } }, null, 2),
+      JSON.stringify({ plugins: { entries: { [PLUGIN]: { enabled: entryEnabled, config } } } }, null, 2),
     );
   }
 
@@ -390,6 +390,16 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     const results = await checkActionGuard();
     const notify = results.find((r) => /notify/i.test(r.label));
     expect(notify!.status).toBe('fail');
+  });
+
+  it('WARNs when plugins.entries.shieldcortex-realtime.enabled is false — even with empty config', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true, notify: { enabled: true } } });
+    writePluginConfig({}, false);
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('warn');
+    expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
+    expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
   });
 });
 
