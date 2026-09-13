@@ -298,6 +298,102 @@ export function buildFocusData(nbhd: NeighbourhoodPayload, showMemories: boolean
   return { nodes, links };
 }
 
+// ── Path mode (review item 4) ──────────────────────────────
+
+/** One hop of a `/api/graph/paths` response, as drawn (real fields only). */
+export interface PathHopInput {
+  entity: string;
+  entityId: number;
+  /** legacy field: `~pred` on reverse hops */
+  predicate: string;
+  direction: 'forward' | 'reverse' | '';
+  entityType?: string;
+  memoryCount?: number;
+  confidence?: number | null;
+  disputed?: boolean;
+}
+
+/**
+ * Merge a found path into the current graph so EVERY hop is on the canvas,
+ * even entities the Map filters/caps omitted. Hop entities missing from
+ * `base` are added (type/memoryCount from the payload); consecutive hops
+ * whose pair has no drawn link get one bundled-triple link built from the
+ * hop's real predicate/confidence/disputed. Existing nodes and links are
+ * untouched (positions preserved downstream by withPreservedPositions).
+ */
+export function buildPathData(base: V2GraphData, path: PathHopInput[]): V2GraphData {
+  if (path.length === 0) return base;
+  const nodes = [...base.nodes];
+  const links = [...base.links];
+  const present = new Set(nodes.map((n) => n.id));
+  const linkIds = new Set(links.map((l) => l.id));
+
+  for (const hop of path) {
+    const id = entityNodeId(hop.entityId);
+    if (present.has(id)) continue;
+    present.add(id);
+    nodes.push({
+      id,
+      kind: 'entity',
+      numericId: hop.entityId,
+      label: hop.entity,
+      subtype: hop.entityType ?? 'unknown',
+      size: hop.memoryCount ?? 0,
+    });
+  }
+
+  for (let i = 1; i < path.length; i++) {
+    const prev = entityNodeId(path[i - 1].entityId);
+    const cur = entityNodeId(path[i].entityId);
+    const [lo, hi] = prev < cur ? [prev, cur] : [cur, prev];
+    const key = `${lo}|${hi}`;
+    if (linkIds.has(key)) continue;
+    linkIds.add(key);
+    const hop = path[i];
+    const predicate = hop.predicate.replace(/^~/, '');
+    // A forward hop is prev→cur (subject prev); reverse is cur→prev.
+    const subject = hop.direction === 'reverse' ? cur : prev;
+    links.push({
+      id: key,
+      kind: 'triple',
+      source: lo,
+      target: hi,
+      triples: [
+        {
+          predicate,
+          confidence: hop.confidence ?? 0,
+          disputed: hop.disputed ?? false,
+          direction: subject === lo ? 'forward' : 'reverse',
+        },
+      ],
+      weakOnly: predicate === 'related_to',
+    });
+  }
+  return { nodes, links };
+}
+
+// ── Map truncation breakdown (review item 9) ───────────────
+
+/**
+ * Why loaded Map entities are not on screen, split honestly: hidden by a
+ * type chip vs. below the min-mentions threshold. An entity hidden by BOTH
+ * counts once, under "type" (re-enabling the chip is the first thing that
+ * would change).
+ */
+export function hiddenBreakdown(
+  entities: Array<{ type: string; memoryCount: number }>,
+  hiddenTypes: Set<string>,
+  minMentions: number,
+): { hiddenByType: number; belowThreshold: number } {
+  let hiddenByType = 0;
+  let belowThreshold = 0;
+  for (const e of entities) {
+    if (hiddenTypes.has(e.type)) hiddenByType++;
+    else if (e.memoryCount < minMentions) belowThreshold++;
+  }
+  return { hiddenByType, belowThreshold };
+}
+
 /**
  * Clone `next` for the force graph, carrying positions/pins over from the
  * previous simulation nodes by id. The returned objects are fresh — d3 may

@@ -19,6 +19,8 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 interface GraphDrawerProps {
   node: V2Node | null;
   neighbourhood: NeighbourhoodPayload | undefined;
+  /** state of the depth-1 fetch made on select (review item 8) */
+  neighbourhoodStatus?: 'idle' | 'pending' | 'error';
   onClose: () => void;
   onFocus: (entityId: number) => void;
   onSelectEntity: (entityId: number) => void;
@@ -40,13 +42,14 @@ interface MemoryDetailPayload {
 }
 
 /** Right drawer for the graph: entity or memory details + real actions. */
-export function GraphDrawer({ node, neighbourhood, onClose, onFocus, onSelectEntity, onPathFrom }: GraphDrawerProps) {
+export function GraphDrawer({ node, neighbourhood, neighbourhoodStatus = 'idle', onClose, onFocus, onSelectEntity, onPathFrom }: GraphDrawerProps) {
   return (
     <Drawer open={node !== null} onClose={onClose} title={node?.label} modal={false}>
       {node?.kind === 'entity' && (
         <EntityDetails
           node={node}
           neighbourhood={neighbourhood}
+          neighbourhoodStatus={neighbourhoodStatus}
           onFocus={onFocus}
           onSelectEntity={onSelectEntity}
           onPathFrom={onPathFrom}
@@ -60,12 +63,14 @@ export function GraphDrawer({ node, neighbourhood, onClose, onFocus, onSelectEnt
 function EntityDetails({
   node,
   neighbourhood,
+  neighbourhoodStatus,
   onFocus,
   onSelectEntity,
   onPathFrom,
 }: {
   node: V2Node;
   neighbourhood: NeighbourhoodPayload | undefined;
+  neighbourhoodStatus: 'idle' | 'pending' | 'error';
   onFocus: (entityId: number) => void;
   onSelectEntity: (entityId: number) => void;
   onPathFrom: (entityId: number) => void;
@@ -135,8 +140,11 @@ function EntityDetails({
         <h3 className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--sc-text-muted)]">
           Memories {isFocalLoaded && neighbourhood ? `(${neighbourhood.counts.totalMemories})` : ''}
         </h3>
-        {!isFocalLoaded && (
-          <p className="text-xs text-[var(--sc-text-muted)]">Focus this entity to load its memories.</p>
+        {!isFocalLoaded && neighbourhoodStatus === 'error' && (
+          <p className="text-xs text-[var(--sc-warn)]">Memories unavailable — the neighbourhood fetch failed.</p>
+        )}
+        {!isFocalLoaded && neighbourhoodStatus !== 'error' && (
+          <p className="text-xs text-[var(--sc-text-muted)]">Loading related entities and memories…</p>
         )}
         {isFocalLoaded && memories.length === 0 && (
           <p className="text-xs text-[var(--sc-text-muted)]">No memories linked to this entity{neighbourhood?.counts.totalMemories ? ' in this view' : ''}.</p>

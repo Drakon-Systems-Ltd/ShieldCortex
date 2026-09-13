@@ -80,6 +80,11 @@ export interface PathHop {
   entityId: number;
   predicate: string;
   direction: 'forward' | 'reverse' | '';
+  /** real entity/triple fields so the path is drawable on its own (review item 4) */
+  entityType?: string;
+  memoryCount?: number;
+  confidence?: number | null;
+  disputed?: boolean;
 }
 
 export interface PathPayload {

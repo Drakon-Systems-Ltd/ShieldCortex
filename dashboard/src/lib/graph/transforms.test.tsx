@@ -1,7 +1,9 @@
 import {
   buildFocusData,
   buildMapData,
+  buildPathData,
   computeDefaultMinMentions,
+  hiddenBreakdown,
   linkTooltip,
   linkWidth,
   MAP_DEFAULT_TARGET_MAX,
@@ -139,5 +141,47 @@ describe('link width and tooltip honesty', () => {
     const text = linkTooltip(two, (id) => (id === 'e:1' ? 'alpha' : 'beta'));
     expect(text).toContain('alpha uses beta (90%)');
     expect(text).toContain('beta configures alpha (70%, disputed)');
+  });
+});
+
+describe('buildPathData (review item 4)', () => {
+  it('adds every hop entity the Map omitted and draws a real-data link per hop', () => {
+    // Map filtered to alpha only (minMentions 10): beta and the never-loaded
+    // #7 must still land on the canvas when a path runs through them.
+    const base = buildMapData(overview, { minMentions: 10 });
+    expect(base.nodes.map((n) => n.id)).toEqual(['e:1']);
+    const out = buildPathData(base, [
+      { entity: 'alpha', entityId: 1, predicate: '', direction: '' },
+      { entity: 'beta', entityId: 2, predicate: 'uses', direction: 'forward', entityType: 'concept', memoryCount: 5, confidence: 0.9, disputed: false },
+      { entity: 'omega', entityId: 7, predicate: '~monitors', direction: 'reverse', entityType: 'tool', memoryCount: 1, confidence: 0.6, disputed: true },
+    ]);
+    expect(out.nodes.map((n) => n.id)).toEqual(['e:1', 'e:2', 'e:7']);
+    expect(out.nodes[2]).toMatchObject({ label: 'omega', subtype: 'tool', size: 1 });
+    expect(out.links.map((l) => l.id)).toEqual(['e:1|e:2', 'e:2|e:7']);
+    // reverse hop: omega monitors beta → subject is omega (e:7, the hi end) → 'reverse' relative to lo→hi
+    expect(out.links[1].triples?.[0]).toEqual({ predicate: 'monitors', confidence: 0.6, disputed: true, direction: 'reverse' });
+    expect(out.links[0].triples?.[0]).toMatchObject({ predicate: 'uses', direction: 'forward' });
+  });
+
+  it('keeps existing nodes/links and never duplicates a pair already drawn', () => {
+    const base = buildMapData(overview);
+    const out = buildPathData(base, [
+      { entity: 'alpha', entityId: 1, predicate: '', direction: '' },
+      { entity: 'beta', entityId: 2, predicate: 'uses', direction: 'forward' },
+    ]);
+    expect(out.nodes).toHaveLength(base.nodes.length);
+    expect(out.links).toHaveLength(base.links.length);
+    // The already-bundled alpha↔beta link keeps both of its real predicates.
+    expect(out.links.find((l) => l.id === 'e:1|e:2')?.triples).toHaveLength(2);
+    expect(buildPathData(base, [])).toBe(base);
+  });
+});
+
+describe('hiddenBreakdown (review item 9)', () => {
+  it('splits hidden-by-type from below-threshold, counting a doubly-hidden entity once under type', () => {
+    const out = hiddenBreakdown(overview.entities, new Set(['tool']), 6);
+    // alpha(tool,10) + gamma(tool,2) hidden by type; beta(concept,5) below 6.
+    expect(out).toEqual({ hiddenByType: 2, belowThreshold: 1 });
+    expect(hiddenBreakdown(overview.entities, new Set(), 1)).toEqual({ hiddenByType: 0, belowThreshold: 0 });
   });
 });

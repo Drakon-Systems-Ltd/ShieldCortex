@@ -4,7 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useRouter } from 'next/navigation';
 import ForceGraph2D, { type ForceGraphMethods, type LinkObject, type NodeObject } from 'react-force-graph-2d';
 import {
+  Copy,
   Crosshair,
+  EyeOff,
   Info,
   List,
   Lock,
@@ -32,8 +34,10 @@ import {
 import {
   buildFocusData,
   buildMapData,
+  buildPathData,
   computeDefaultMinMentions,
   entityNodeId,
+  hiddenBreakdown,
   linkTooltip,
   linkWidth,
   withPreservedPositions,
@@ -53,6 +57,9 @@ type FGNode = NodeObject & V2Node;
 type FGLink = LinkObject & V2Link;
 
 const PULSE_MS = 600;
+/** Long-press duration that opens the context menu on touch (§6.3). */
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP_PX = 8;
 
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
@@ -87,7 +94,9 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   const [focusTrail, setFocusTrail] = useState<number[]>([]);
   const focusId = focusTrail.length > 0 ? focusTrail[focusTrail.length - 1] : null;
   const [depth, setDepth] = useState<1 | 2>(1);
-  const [showMemories, setShowMemories] = useState(true);
+  // Off by default (review item 6): Map never draws memories, so a checked
+  // box there was a lie; Focus is where it applies and where it is shown.
+  const [showMemories, setShowMemories] = useState(false);
   const [showWeak, setShowWeak] = useState(true);
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
   // Starts at 1 (show everything) until the real distribution arrives; the
@@ -105,12 +114,20 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   const [pathTo, setPathTo] = useState<{ id: number; name: string } | null>(null);
   const [searchText, setSearchText] = useState('');
   const debouncedSearch = useDebouncedValue(searchText, 250);
+  const [contextMenu, setContextMenu] = useState<{ node: FGNode; x: number; y: number } | null>(null);
 
   // ── Data ─────────────────────────────────────────────────
-  const overview = useGraphOverview(1, preview ? 150 : 400);
+  // The Overview preview reuses the SAME bounded payload as the full graph
+  // (one query key, one budget — §13.3) and applies the same default
+  // min-mentions rule below (review item 10).
+  const overview = useGraphOverview(1, 400);
   const nbhd = useNeighbourhoodV2(focusId, { depth, includeMemories: showMemories });
   const path = useGraphPath(pathFrom?.id ?? null, pathTo?.id ?? null);
   const search = useGraphSearchV2(debouncedSearch);
+  // Drawer data without Focus (review item 8): selecting an entity fetches
+  // its depth-1 neighbourhood + memories so the drawer is useful at once.
+  const selectedEntityId = selectedId?.startsWith('e:') ? Number(selectedId.slice(2)) : null;
+  const drawerNbhd = useNeighbourhoodV2(preview ? null : selectedEntityId, { depth: 1, includeMemories: true });
 
   // Project scope change (review item 1): every selection, focus trail and
   // path endpoint belonged to the previous scope, so drop them all and return
@@ -133,9 +150,9 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   // opens readable instead of a 400-node hairball. Only ever applied once —
   // after the user moves the slider, their choice sticks across refetches.
   useEffect(() => {
-    if (preview || minMentionsTouchedRef.current || !overview.data) return;
+    if (minMentionsTouchedRef.current || !overview.data) return;
     setMinMentions(computeDefaultMinMentions(overview.data.entities));
-  }, [preview, overview.data]);
+  }, [overview.data]);
 
   // ── Graph data with preserved positions ──────────────────
   const liveDataRef = useRef<V2GraphData | null>(null);
@@ -153,6 +170,10 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
         hideWeakLinks: !showWeak,
         minMentions,
       });
+      // Path mode draws the path from the /paths response itself (review
+      // item 4): every hop is merged into the Map data, so a hop the filter
+      // or cap omitted is still on the canvas.
+      if (mode === 'path' && path.data?.path?.length) base = buildPathData(base, path.data.path);
     } else {
       base = { nodes: [], links: [] };
     }
@@ -191,7 +212,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
     }
     liveDataRef.current = preserved;
     return preserved;
-  }, [mode, nbhd.data, overview.data, showMemories, hiddenTypes, showWeak, minMentions]);
+  }, [mode, nbhd.data, overview.data, path.data, showMemories, hiddenTypes, showWeak, minMentions]);
 
   const nodeById = useMemo(() => new Map(graphData.nodes.map((n) => [n.id, n])), [graphData]);
 
@@ -420,6 +441,52 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
     [preview, focusEntity],
   );
 
+  // ── Context menu: right-click / long-press (§6.3, review item 12) ──
+  const openContextMenu = useCallback((node: FGNode, clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    setContextMenu({ node, x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) });
+  }, []);
+
+  const onNodeRightClick = useCallback(
+    (node: FGNode, event: MouseEvent) => {
+      if (preview) return;
+      event.preventDefault();
+      openContextMenu(node, event.clientX, event.clientY);
+    },
+    [preview, openContextMenu],
+  );
+
+  const longPressRef = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
+  const cancelLongPress = useCallback(() => {
+    if (longPressRef.current) clearTimeout(longPressRef.current.timer);
+    longPressRef.current = null;
+  }, []);
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (preview || e.pointerType === 'mouse' || !hoverNode) return;
+      cancelLongPress();
+      const node = hoverNode;
+      const { clientX, clientY } = e;
+      longPressRef.current = {
+        x: clientX,
+        y: clientY,
+        timer: setTimeout(() => {
+          longPressRef.current = null;
+          openContextMenu(node, clientX, clientY);
+        }, LONG_PRESS_MS),
+      };
+    },
+    [preview, hoverNode, cancelLongPress, openContextMenu],
+  );
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      const lp = longPressRef.current;
+      if (lp && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > LONG_PRESS_SLOP_PX) cancelLongPress();
+    },
+    [cancelLongPress],
+  );
+  useEffect(() => cancelLongPress, [cancelLongPress]);
+
   const onNodeDragEnd = useCallback((node: FGNode) => {
     // Drag pins (brief §6.3); release via "release pins".
     node.fx = node.x;
@@ -459,16 +526,17 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
           fgRef.current?.d3ReheatSimulation();
         }
       } else if (e.key === 'Escape') {
-        // First Esc clears the selection (closes the drawer); the next one
-        // backs out of Focus/Path.
-        if (selectedId) setSelectedId(null);
+        // Esc closes the context menu first, then clears the selection
+        // (closes the drawer), then backs out of Focus/Path.
+        if (contextMenu) setContextMenu(null);
+        else if (selectedId) setSelectedId(null);
         else backOut();
       } else if (e.key === 'Enter' && selectedId) {
         const n = nodeById.get(selectedId);
         if (n?.kind === 'entity') focusEntity(n.numericId);
       }
     },
-    [selectedId, nodeById, focusEntity, backOut, reducedMotion],
+    [selectedId, nodeById, focusEntity, backOut, reducedMotion, contextMenu],
   );
 
   // ── Painting ─────────────────────────────────────────────
@@ -658,14 +726,20 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   //     threshold; the slider directly controls this one.
   //  2. omitted by the server load cap — never fetched at all; only search
   //     reaches these.
+  // (review item 9) "hidden" is itself split: by a type chip vs. below the
+  // min-mentions threshold — the two have different remedies.
   const loadedEntityCount = overview.data?.entities.length ?? 0;
-  const visibleEntityCount = graphData.nodes.filter((n) => n.kind === 'entity').length;
-  const hiddenByFilter = mode === 'map' ? Math.max(0, loadedEntityCount - visibleEntityCount) : 0;
+  const hidden = mode === 'map' && overview.data
+    ? hiddenBreakdown(overview.data.entities, hiddenTypes, minMentions)
+    : { hiddenByType: 0, belowThreshold: 0 };
   const truncationNotice =
     mode === 'map' && counts
       ? [
-          hiddenByFilter > 0
-            ? `${hiddenByFilter} of ${loadedEntityCount} loaded entities are below min mentions ${minMentions} — lower the slider above to reveal more`
+          hidden.hiddenByType > 0
+            ? `${hidden.hiddenByType} of ${loadedEntityCount} loaded entities are hidden by type (${[...hiddenTypes].sort().join(', ')}) — re-enable the chip in the legend`
+            : null,
+          hidden.belowThreshold > 0
+            ? `${hidden.belowThreshold} of ${loadedEntityCount} loaded entities are below min mentions ${minMentions} — lower the slider above to reveal more`
             : null,
           counts.omittedEntities > 0
             ? `${counts.omittedEntities} more exist beyond the loaded top ${loadedEntityCount} — search to jump to one directly`
@@ -716,6 +790,11 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
       style={{ background: palette.background }}
       tabIndex={preview ? -1 : 0}
       onKeyDown={preview ? undefined : onKeyDown}
+      onPointerDown={preview ? undefined : onPointerDown}
+      onPointerMove={preview ? undefined : onPointerMove}
+      onPointerUp={preview ? undefined : cancelLongPress}
+      onPointerCancel={preview ? undefined : cancelLongPress}
+      onContextMenu={preview ? undefined : (e) => e.preventDefault()}
       role="application"
       aria-label="Memory knowledge graph. Keyboard: slash to search, plus and minus to zoom, zero to fit, F to focus the selected node, P to pin or unpin it, Escape to go back."
     >
@@ -740,11 +819,11 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
         linkCanvasObjectMode={() => 'after'}
         linkCanvasObject={paintLinkLabel}
         onNodeClick={onNodeClick as never}
-        onNodeRightClick={((node: FGNode) => { if (node.kind === 'entity' && !preview) focusEntity(node.numericId); }) as never}
+        onNodeRightClick={onNodeRightClick as never}
         onNodeHover={((n: FGNode | null) => setHoverNode(n)) as never}
         onLinkHover={((l: FGLink | null) => setHoverLink(l)) as never}
         onNodeDragEnd={onNodeDragEnd as never}
-        onBackgroundClick={() => setSelectedId(null)}
+        onBackgroundClick={() => { setSelectedId(null); setContextMenu(null); }}
         enableNodeDrag={!preview}
         onNodeDrag={undefined}
         autoPauseRedraw={false}
@@ -845,7 +924,17 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
                   )}
                 </div>
                 {path.isLoading && <div>Searching…</div>}
-                {path.data?.message && <div>{path.data.message} (within 4 hops).</div>}
+                {path.isError && <div className="text-[var(--sc-warn)]">Path search failed — {path.error instanceof Error ? path.error.message : 'fetch failed'}</div>}
+                {path.data?.message && (
+                  <div className={path.data.truncated ? 'text-[var(--sc-warn)]' : undefined}>
+                    {path.data.truncated
+                      ? 'Search stopped at its budget (4 hops, bounded fan-out) — a path may exist but was not found.'
+                      : `${path.data.message} (within 4 hops).`}
+                  </div>
+                )}
+                {path.data?.truncated && path.data.path.length > 0 && (
+                  <div className="text-[var(--sc-warn)]">Search hit its budget before finishing — a shorter path may exist.</div>
+                )}
                 {path.data?.path && path.data.path.length > 0 && (
                   <ol className="space-y-0.5">
                     {path.data.path.map((hop, i) => (
@@ -858,9 +947,6 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
                         <button type="button" className="underline-offset-2 hover:underline" onClick={() => setSelectedId(entityNodeId(hop.entityId))}>
                           {hop.entity}
                         </button>
-                        {!nodeById.has(entityNodeId(hop.entityId)) && (
-                          <span className="text-[var(--sc-text-muted)]">(below display threshold)</span>
-                        )}
                       </li>
                     ))}
                   </ol>
@@ -889,6 +975,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
                   <input type="checkbox" checked={showWeak} onChange={(e) => setShowWeak(e.target.checked)} />
                   weak links (related_to)
                 </label>
+                <span className="text-[var(--sc-text-muted)]">double-click an entity to see its memories</span>
               </div>
             )}
           </div>
@@ -970,6 +1057,50 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
             )}
           </div>
 
+          {/* ── Context menu (right-click / long-press) ── */}
+          {contextMenu && (
+            <div
+              role="menu"
+              aria-label={`Actions for ${contextMenu.node.label}`}
+              className="absolute z-30 min-w-[160px] rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface)] py-1 text-xs text-[var(--sc-text)] shadow-[var(--sc-shadow-drawer)]"
+              style={{ left: Math.min(contextMenu.x, size.width - 176), top: Math.min(contextMenu.y, size.height - 140) }}
+              onMouseLeave={() => setContextMenu(null)}
+            >
+              <div className="truncate px-3 py-1 text-[10px] text-[var(--sc-text-muted)]">{contextMenu.node.label}</div>
+              {contextMenu.node.kind === 'entity' && (
+                <>
+                  <MenuItem icon={<Crosshair size={12} aria-hidden />} label="Focus" onClick={() => { focusEntity(contextMenu.node.numericId); setContextMenu(null); }} />
+                  <MenuItem
+                    icon={<Route size={12} aria-hidden />}
+                    label="Path from here"
+                    onClick={() => {
+                      setMode('path');
+                      setPathFrom({ id: contextMenu.node.numericId, name: contextMenu.node.label });
+                      setPathTo(null);
+                      setContextMenu(null);
+                    }}
+                  />
+                  <MenuItem
+                    icon={<EyeOff size={12} aria-hidden />}
+                    label={`Hide type “${contextMenu.node.subtype}”`}
+                    onClick={() => {
+                      setHiddenTypes((prev) => new Set(prev).add(contextMenu.node.subtype));
+                      setContextMenu(null);
+                    }}
+                  />
+                </>
+              )}
+              <MenuItem
+                icon={<Copy size={12} aria-hidden />}
+                label={`Copy id (${contextMenu.node.numericId})`}
+                onClick={() => {
+                  void navigator.clipboard?.writeText(String(contextMenu.node.numericId));
+                  setContextMenu(null);
+                }}
+              />
+            </div>
+          )}
+
           {/* ── Hover link tooltip ── */}
           {hoverTooltip && (
             <div className="pointer-events-none absolute left-1/2 top-3 z-10 max-w-md -translate-x-1/2 whitespace-pre-line rounded-md bg-[var(--sc-surface)]/95 px-3 py-1.5 text-center text-[11px] text-[var(--sc-text-dim)] shadow-[var(--sc-shadow-card)]">
@@ -1026,7 +1157,8 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
       {!preview && (
         <GraphDrawer
           node={selectedNode}
-          neighbourhood={nbhd.data}
+          neighbourhood={nbhd.data?.focal.id === selectedEntityId ? nbhd.data : drawerNbhd.data}
+          neighbourhoodStatus={drawerNbhd.isError ? 'error' : drawerNbhd.isLoading ? 'pending' : 'idle'}
           onClose={() => setSelectedId(null)}
           onFocus={focusEntity}
           onSelectEntity={(id) => setSelectedId(entityNodeId(id))}
@@ -1060,6 +1192,20 @@ function ModeButton({ active, disabled, onClick, icon, label }: { active: boolea
     >
       {icon}
       {label}
+    </button>
+  );
+}
+
+function MenuItem({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--sc-surface-2)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--sc-focus)]"
+    >
+      <span className="text-[var(--sc-text-muted)]">{icon}</span>
+      <span className="truncate">{label}</span>
     </button>
   );
 }

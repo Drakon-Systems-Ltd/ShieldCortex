@@ -6,9 +6,13 @@ type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) 
 type BFSNode = {
   id: number;
   name: string;
+  type: string;
+  memoryCount: number;
   parentId: number | null;
   predicate: string;
   direction: 'forward' | 'reverse' | '';
+  confidence: number | null;
+  disputed: boolean;
   sourceMemoryId: number | null;
 };
 
@@ -605,15 +609,16 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
       // can neither start, end nor pass through an out-of-project entity.
       const scope = project ? `AND ${ENTITY_PROJECT_SCOPE_SQL}` : '';
       const scopeArgs = project ? [project] : [];
-      const resolve = (id: number | undefined, name: string): { id: number; name: string } | undefined => {
+      type Endpoint = { id: number; name: string; type: string; memory_count: number };
+      const resolve = (id: number | undefined, name: string): Endpoint | undefined => {
         if (id !== undefined) {
-          return db.prepare(`SELECT e.id, e.name FROM entities e WHERE e.id = ? ${scope}`)
-            .get(id, ...scopeArgs) as { id: number; name: string } | undefined;
+          return db.prepare(`SELECT e.id, e.name, e.type, e.memory_count FROM entities e WHERE e.id = ? ${scope}`)
+            .get(id, ...scopeArgs) as Endpoint | undefined;
         }
         if (!name) return undefined;
         return db.prepare(
-          `SELECT e.id, e.name FROM entities e WHERE LOWER(e.name) = LOWER(?) ${scope} ORDER BY e.memory_count DESC, e.id ASC`,
-        ).get(name, ...scopeArgs) as { id: number; name: string } | undefined;
+          `SELECT e.id, e.name, e.type, e.memory_count FROM entities e WHERE LOWER(e.name) = LOWER(?) ${scope} ORDER BY e.memory_count DESC, e.id ASC`,
+        ).get(name, ...scopeArgs) as Endpoint | undefined;
       };
 
       const fromRow = resolve(fromId, fromName);
@@ -627,7 +632,10 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
 
       if (fromRow.id === toRow.id) {
         return res.json({
-          path: [{ entity: fromRow.name, entityId: fromRow.id, predicate: '(self)', direction: '' }],
+          path: [{
+            entity: fromRow.name, entityId: fromRow.id, predicate: '(self)', direction: '',
+            entityType: fromRow.type, memoryCount: fromRow.memory_count, confidence: null, disputed: false,
+          }],
           sourceMemories: [],
           truncated: false,
         });
@@ -637,15 +645,19 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
       // nodes ≤ PATH_VISIT_BUDGET, per-node fan-out ≤ PATH_FANOUT_LIMIT.
       // Exceeding either budget sets `truncated` so "no path" is never
       // mistaken for "no path exists".
-      type Hop = { next_id: number; predicate: string; source_memory_id: number | null; name: string };
+      type Hop = {
+        next_id: number; predicate: string; confidence: number; disputed: number;
+        source_memory_id: number | null; name: string; type: string; memory_count: number;
+      };
+      const hopColumns = 't.predicate, t.confidence, t.disputed, t.source_memory_id, e.name, e.type, e.memory_count';
       const outgoingStmt = db.prepare(
-        `SELECT t.object_id as next_id, t.predicate, t.source_memory_id, e.name
+        `SELECT t.object_id as next_id, ${hopColumns}
          FROM triples t JOIN entities e ON e.id = t.object_id
          WHERE t.subject_id = ? AND t.valid_to IS NULL ${scope}
          ORDER BY t.id ASC LIMIT ?`,
       );
       const incomingStmt = db.prepare(
-        `SELECT t.subject_id as next_id, t.predicate, t.source_memory_id, e.name
+        `SELECT t.subject_id as next_id, ${hopColumns}
          FROM triples t JOIN entities e ON e.id = t.subject_id
          WHERE t.object_id = ? AND t.valid_to IS NULL ${scope}
          ORDER BY t.id ASC LIMIT ?`,
@@ -655,9 +667,13 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
       visited.set(fromRow.id, {
         id: fromRow.id,
         name: fromRow.name,
+        type: fromRow.type,
+        memoryCount: fromRow.memory_count,
         parentId: null,
         predicate: '',
         direction: '',
+        confidence: null,
+        disputed: false,
         sourceMemoryId: null,
       });
 
@@ -676,11 +692,15 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
           visited.set(row.next_id, {
             id: row.next_id,
             name: row.name,
+            type: row.type,
+            memoryCount: row.memory_count,
             parentId: nodeId,
             // Legacy field keeps the ~ prefix on reverse hops; the `direction`
             // field is the honest signal (a reverse hop is not a reversed claim).
             predicate: direction === 'forward' ? row.predicate : `~${row.predicate}`,
             direction,
+            confidence: row.confidence,
+            disputed: row.disputed === 1,
             sourceMemoryId: row.source_memory_id,
           });
           nextFrontier.push(row.next_id);
@@ -716,7 +736,14 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
         });
       }
 
-      const path: Array<{ entity: string; entityId: number; predicate: string; direction: string }> = [];
+      // Each hop carries the REAL entity type/memoryCount and the REAL triple
+      // confidence/disputed (review item 4): the client draws the path from
+      // this payload alone, so it must be drawable without inventing data.
+      type PathHop = {
+        entity: string; entityId: number; predicate: string; direction: string;
+        entityType: string; memoryCount: number; confidence: number | null; disputed: boolean;
+      };
+      const path: PathHop[] = [];
       const sourceMemoryIds: number[] = [];
       let current: BFSNode | undefined = visited.get(toRow.id);
 
@@ -726,6 +753,10 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
           entityId: current.id,
           predicate: current.predicate,
           direction: current.direction,
+          entityType: current.type,
+          memoryCount: current.memoryCount,
+          confidence: current.confidence,
+          disputed: current.disputed,
         });
         if (current.sourceMemoryId) sourceMemoryIds.push(current.sourceMemoryId);
         current = current.parentId !== null ? visited.get(current.parentId) : undefined;

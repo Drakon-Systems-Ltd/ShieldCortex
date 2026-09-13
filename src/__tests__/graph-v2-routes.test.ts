@@ -301,6 +301,10 @@ describe('GET /api/graph/paths (v2)', () => {
     const body = r.body as PathBody;
     expect(body.path.map((h) => h.entityId)).toEqual([a, b, c]);
     expect(body.path[1]).toMatchObject({ predicate: 'uses', direction: 'forward' });
+    // Each hop carries the REAL entity type/memoryCount and triple confidence/disputed
+    // so the client can draw the path without inventing anything (review item 4).
+    expect(body.path[1]).toMatchObject({ entityType: 'tool', memoryCount: 0, confidence: 0.8, disputed: false });
+    expect(body.path[0]).toMatchObject({ entityType: 'tool', confidence: null });
     // Legacy field keeps ~; direction carries the truth.
     expect(body.path[2]).toMatchObject({ predicate: '~monitors', direction: 'reverse' });
   });

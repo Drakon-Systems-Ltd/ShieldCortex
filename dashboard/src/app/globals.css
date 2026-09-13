@@ -234,15 +234,8 @@
 .severity-safe { border-left: 3px solid var(--sc-ok); }
 .severity-info { border-left: 3px solid var(--sc-text-muted); }
 
-/* ── Status-dot pulse (live indicators only; motion-gated) ── */
-
-@keyframes pulseGlow {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
-}
-
-.pulse-cyan { animation: pulseGlow 2s ease-in-out infinite; }
-.pulse-coral { animation: pulseGlow 1.5s ease-in-out infinite; }
+/* Looping status-dot pulse (.pulse-cyan/.pulse-coral, @keyframes pulseGlow)
+   removed in the dashboard-v2 fix round: nothing loops (brief §5, §13.3). */
 
 /* ── Card-slide transitions (review queue) ── */
 
@@ -302,8 +295,6 @@
 /* ── Reduced motion: still every looping/entrance animation ── */
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-cyan,
-  .pulse-coral,
   .sc-card-enter {
     animation: none !important;
   }
