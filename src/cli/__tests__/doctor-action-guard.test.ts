@@ -368,6 +368,29 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     const notify = results.find((r) => /notify/i.test(r.label));
     expect(notify!.status).toBe('fail');
   });
+
+  it('WARNs (no webhook, no --action-guard-enable) when plugin-off AND signed Guard is also off', async () => {
+    writeConfig({ actionGuard: { enabled: false, notify: { enabled: true } } });
+    writePluginConfig({ actionGuard: { enabled: false } });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('warn');
+    expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
+    expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
+    const config = results.find((r) => r.label === 'Action guard config');
+    expect(config?.fix ?? '').not.toMatch(/--action-guard-enable/);
+    expect(config?.fix ?? '').toMatch(/do not enable Action Guard/i);
+  });
+
+  it('still FAILs when openclaw.json is unreadable garbage — cannot prove the plugin is off', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true, notify: { enabled: true } } });
+    const dir = path.join(isolated, '.openclaw');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'openclaw.json'), '{not-json');
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('fail');
+  });
 });
 
 /**
