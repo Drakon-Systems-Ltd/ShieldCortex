@@ -131,7 +131,45 @@ function liveRecord(rec: StoredLease | undefined, nowMs: number): StoredLease | 
   const expiry =
     rec.expiresAtMs ?? (rec.acquiredAtMs != null ? rec.acquiredAtMs + DEFAULT_LEASE_TTL_MS : null);
   if (expiry == null || nowMs > expiry) return null;
+  // #438: a crashed holder must not wedge the scope for the rest of the TTL.
+  // Only reap when the recorded PID is present and confirmed dead. Blank /
+  // non-positive / unconfirmed PIDs stay live — fail closed.
+  if (isHolderPidAlive(rec.pid) === false) return null;
   return rec;
+}
+
+/**
+ * Same-host liveness of a recorded holder PID.
+ *   - false: confirmed dead (ESRCH, or Linux zombie)
+ *   - true: process table has a live (or permission-denied) entry
+ *   - undefined: no PID we can trust — caller must fail closed
+ */
+export function isHolderPidAlive(pid: number | null | undefined): boolean | undefined {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    // EPERM: the pid exists but we cannot signal it. That is "alive", not dead.
+    return true;
+  }
+  // kill(pid, 0) succeeded — including zombies. On Linux a zombie still
+  // occupies the pid; it is not a live holder. macOS has no /proc: success
+  // stays alive (fail closed).
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const rparen = stat.lastIndexOf(')');
+    const state = rparen >= 0 ? stat.slice(rparen + 2, rparen + 3) : '';
+    if (state === 'Z' || state === 'X') return false;
+  } catch (err) {
+    // macOS has no /proc: ENOENT there must NOT look like a dead pid.
+    // Only treat missing /proc/<pid> as dead when /proc itself exists.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' && fs.existsSync('/proc')) {
+      return false;
+    }
+  }
+  return true;
 }
 
 export interface AcquireInput {
@@ -294,7 +332,8 @@ export function evaluateToolCallLease(
     }
 
     const held = liveRecord(readLeaseFile(dir).leases[scope] as StoredLease | undefined, nowMs);
-    const decision = checkSessionLease({ scope, ledger, held, self, nowMs });
+    const holderAlive = held ? isHolderPidAlive(held.pid) : undefined;
+    const decision = checkSessionLease({ scope, ledger, held, self, nowMs, holderAlive });
 
     if (decision.verdict === 'allow') {
       const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs });

@@ -79,6 +79,16 @@ export interface LeaseCheckInput {
   /** Identity of the session asking — a holder may re-enter its own lease. */
   self: string;
   nowMs: number;
+  /**
+   * Injected liveness of `held.pid` (#438). Pure core does not probe the
+   * process table. Store layer sets this after a same-host check.
+   *
+   *   - false: recorded PID is present and confirmed dead → treat as free
+   *   - true / omitted: fail closed; a live or unconfirmed holder still binds
+   *
+   * A blank/missing PID is never a skeleton key even when this is false.
+   */
+  holderAlive?: boolean;
 }
 
 export type LeaseVerdict = 'allow' | 'frozen' | 'held' | 'unknown';
@@ -205,6 +215,20 @@ export function checkSessionLease(input: LeaseCheckInput): LeaseDecision {
       // same session, and emptiness must not become a skeleton key.
       if (held.holder === self && self.trim() !== '') {
         return { verdict: 'allow', reason: `${scope} lease already held by this session` };
+      }
+      // #438: a crashed hook still wedges the scope for the full TTL unless
+      // we reap a holder whose PID is present and confirmed dead. Missing /
+      // non-positive / unconfirmed PIDs stay held — a blank pid must not
+      // become a skeleton key, and "cannot know" must not behave like dead.
+      const pid = held.pid;
+      const pidPresent = typeof pid === 'number' && Number.isInteger(pid) && pid > 0;
+      if (pidPresent && input.holderAlive === false) {
+        return {
+          verdict: 'allow',
+          reason:
+            `${scope} lease holder pid ${pid} is dead — treating the slot as free ` +
+            `rather than waiting out the TTL`,
+        };
       }
       const ageSec = held.acquiredAtMs != null ? Math.round((nowMs - held.acquiredAtMs) / 1000) : null;
       return {

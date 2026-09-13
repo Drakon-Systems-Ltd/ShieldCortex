@@ -7,6 +7,7 @@ import {
   acquireOrRefreshLease,
   releaseLease,
   evaluateToolCallLease,
+  isHolderPidAlive,
 } from '../session-lease-store.js';
 
 /**
@@ -30,6 +31,17 @@ afterEach(() => {
 });
 
 const NOW = Date.parse('2026-08-13T12:00:00Z');
+
+function unusedDeadPid(): number {
+  for (let pid = 4_000_000; pid > 100_000; pid -= 97) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error('could not find an unused pid for #438');
+}
 
 describe('readDecisionsLedger — absent vs unreadable are different answers', () => {
   it('a missing ledger reads as empty (nothing ever frozen) — allow-shaped', () => {
@@ -78,6 +90,62 @@ describe('acquire / refresh / release / crash recovery', () => {
     const later = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-b', nowMs: NOW + 5000 });
     expect(later.acquired).toBe(true);
     expect(later.record?.holder).toBe('session-b');
+  });
+
+  it('#438: a lease whose recorded PID is confirmed dead is recoverable before TTL', () => {
+    const deadPid = unusedDeadPid();
+    const first = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-a', nowMs: NOW });
+    expect(first.acquired).toBe(true);
+    const file = JSON.parse(readFileSync(join(dir, 'leases', 'leases.json'), 'utf-8')) as {
+      leases: { install: { holder: string; pid: number; expiresAtMs: number } };
+    };
+    file.leases.install.pid = deadPid;
+    writeFileSync(join(dir, 'leases', 'leases.json'), JSON.stringify(file, null, 2));
+
+    const later = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-b', nowMs: NOW + 1000 });
+    expect(later.acquired).toBe(true);
+    expect(later.record?.holder).toBe('session-b');
+  });
+
+  it('#438: a live recorded PID still blocks the other session', () => {
+    const first = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-a', nowMs: NOW });
+    expect(first.acquired).toBe(true);
+    const file = JSON.parse(readFileSync(join(dir, 'leases', 'leases.json'), 'utf-8')) as {
+      leases: { install: { holder: string; pid: number; expiresAtMs: number } };
+    };
+    file.leases.install.pid = process.pid;
+    writeFileSync(join(dir, 'leases', 'leases.json'), JSON.stringify(file, null, 2));
+
+    const later = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-b', nowMs: NOW + 1000 });
+    expect(later.acquired).toBe(false);
+    expect(later.record?.holder).toBe('session-a');
+  });
+
+  it('#438: evaluateToolCallLease also reaps a dead-PID install lease', () => {
+    const deadPid = unusedDeadPid();
+    acquireOrRefreshLease({ dir, scope: 'install', self: 'session-a', nowMs: NOW });
+    const file = JSON.parse(readFileSync(join(dir, 'leases', 'leases.json'), 'utf-8')) as {
+      leases: { install: { holder: string; pid: number } };
+    };
+    file.leases.install.pid = deadPid;
+    writeFileSync(join(dir, 'leases', 'leases.json'), JSON.stringify(file, null, 2));
+
+    const r = evaluateToolCallLease(
+      'Bash',
+      { command: 'npm install -g shieldcortex' },
+      { self: 'session-b', dir, nowMs: NOW + 1000 },
+    );
+    expect(r?.decision.verdict).toBe('allow');
+  });
+
+  it('#438: isHolderPidAlive fails closed on missing/non-positive PIDs', () => {
+    expect(isHolderPidAlive(undefined)).toBeUndefined();
+    expect(isHolderPidAlive(null)).toBeUndefined();
+    expect(isHolderPidAlive(0)).toBeUndefined();
+    expect(isHolderPidAlive(-1)).toBeUndefined();
+    expect(isHolderPidAlive(1.5)).toBeUndefined();
+    expect(isHolderPidAlive(process.pid)).toBe(true);
+    expect(isHolderPidAlive(unusedDeadPid())).toBe(false);
   });
 
   it('release frees the lease for the holder only', () => {
