@@ -5,15 +5,17 @@
  * resolving the operator's real ~/.openclaw and ignoring OPENCLAW_HOME, so a
  * throwaway profile wrote into the live extensions dir. Doctor already
  * mirrors OpenClaw's home-dir.ts (OPENCLAW_HOME > HOME). The installer must
- * do the same.
+ * do the same for OPENCLAW_HOME. Isolated Jest suites still spy os.homedir()
+ * because process.env.HOME does not reach the native binding (#226); this
+ * module does not prefer raw HOME over that spy.
  *
  * Relative / ~user OPENCLAW_HOME stays unresolvable — we do not probe the
- * process cwd. Relative HOME is allowed (Jest isolation).
+ * process cwd.
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'fs';
 import { homedir, tmpdir } from 'os';
-import { join } from 'path';
+import { join, isAbsolute } from 'path';
 
 const openclaw = await import('../openclaw.js');
 
@@ -73,11 +75,38 @@ describe('OPENCLAW_HOME override (#472)', () => {
 
   it('relative OPENCLAW_HOME is ignored — never resolved against the process cwd', () => {
     process.env.OPENCLAW_HOME = 'oc-home';
-    process.env.HOME = join(tmp, 'real-home');
-    mkdirSync(process.env.HOME, { recursive: true });
+    const configPath = openclaw.openClawConfigPath();
+    expect(configPath).toBe(join(homedir(), '.openclaw', 'openclaw.json'));
+    expect(configPath).not.toMatch(/\/oc-home\//);
+  });
+
+  it('~/… expands against absolute HOME and child env gets the absolute OPENCLAW_HOME', () => {
+    const operator = join(tmp, 'operator');
+    mkdirSync(operator, { recursive: true });
+    process.env.HOME = operator;
+    process.env.OPENCLAW_HOME = '~/isolated';
 
     const configPath = openclaw.openClawConfigPath();
-    expect(configPath).toBe(join(tmp, 'real-home', '.openclaw', 'openclaw.json'));
-    expect(configPath).not.toContain('/oc-home/');
+    expect(configPath).toBe(join(operator, 'isolated', '.openclaw', 'openclaw.json'));
+
+    const child = openclaw.__openClawChildEnvForTest();
+    expect(child.HOME).toBe(join(operator, 'isolated'));
+    expect(child.OPENCLAW_HOME).toBe(join(operator, 'isolated'));
+    expect(child.OPENCLAW_HOME).not.toBe('~/isolated');
+  });
+
+  it('~/… with relative HOME does not resolve against cwd', () => {
+    process.env.HOME = 'relative-home';
+    process.env.OPENCLAW_HOME = '~/isolated';
+    const configPath = openclaw.openClawConfigPath();
+    expect(configPath).not.toMatch(/isolated/);
+    expect(isAbsolute(configPath)).toBe(true);
+    expect(configPath).toBe(join(homedir(), '.openclaw', 'openclaw.json'));
+  });
+
+  it('~user OPENCLAW_HOME is ignored', () => {
+    process.env.OPENCLAW_HOME = '~ubuntu/oc';
+    const configPath = openclaw.openClawConfigPath();
+    expect(configPath).toBe(join(homedir(), '.openclaw', 'openclaw.json'));
   });
 });

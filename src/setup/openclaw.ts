@@ -111,9 +111,10 @@ function resolveUserHome(): string {
   if (explicit) {
     if (/^~($|[\\/])/.test(explicit)) {
       const fallback = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || os.homedir();
-      if (fallback) {
+      if (fallback && path.isAbsolute(fallback)) {
         return path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback));
       }
+      // relative HOME / missing base: do not path.resolve against cwd.
     } else if (path.isAbsolute(explicit)) {
       return path.resolve(explicit);
     }
@@ -146,11 +147,6 @@ function resolveUserHome(): string {
     }
   }
 
-  const envHome = process.env.HOME?.trim() || process.env.USERPROFILE?.trim();
-  if (envHome && path.isAbsolute(envHome)) {
-    return path.resolve(envHome);
-  }
-
   const home = os.homedir();
 
   // If we're root without SUDO_USER (e.g. after `sudo su -`),
@@ -174,6 +170,22 @@ function resolveUserHome(): string {
   }
 
   return home;
+}
+
+/**
+ * Env for child `openclaw` so it sees the same home this CLI just resolved.
+ * Setting HOME to the resolved path while leaving a `~/…` OPENCLAW_HOME
+ * would make OpenClaw expand the tilde a second time against the rewritten
+ * HOME (#472 GPT-6). Always pass the absolute result as both HOME and
+ * OPENCLAW_HOME.
+ */
+function openClawChildEnv(extra: NodeJS.ProcessEnv = {}, home = resolveUserHome()): NodeJS.ProcessEnv {
+  return { ...process.env, HOME: home, OPENCLAW_HOME: home, ...extra };
+}
+
+/** Test seam: the env native `openclaw` would inherit. */
+export function __openClawChildEnvForTest(): NodeJS.ProcessEnv {
+  return openClawChildEnv();
 }
 
 /**
@@ -1017,7 +1029,7 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // state. If OpenClaw refuses "plugin already exists", the --link attempt
   // and the local-copy fallback still have something to work with.
 
-  const env = { ...process.env, HOME: resolveUserHome() };
+  const env = openClawChildEnv();
   const attempts: Array<{ args: string[]; label: string }> = [
     { args: ['plugins', 'install', '@drakon-systems/shieldcortex-realtime@latest'], label: 'package install' },
     { args: ['plugins', 'install', '--link', PLUGIN_PACKAGE_SOURCE], label: 'linked install' },
@@ -2062,7 +2074,7 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   } catch {
     return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `openclaw plugins install --force ' + pluginSpec + '` then `openclaw gateway restart`.' };
   }
-  const spawnEnv = { ...process.env, HOME: home };
+  const spawnEnv = openClawChildEnv();
 
   // 4. Re-enable if it was auto-disabled.
   if (disabled) {
@@ -2245,7 +2257,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
     process.exit(1);
   }
 
-  const spawnEnv = { ...process.env, HOME: home };
+  const spawnEnv = openClawChildEnv();
 
   // Step 3: Uninstall the plugin. The uninstall command requires interactive
   // confirmation by default; pipe `y\n` via stdin to auto-confirm.
@@ -2442,7 +2454,7 @@ function probeSkillInstallHelp(bin: string, home: string): string | null {
     const r = spawnSync(bin, ['skills', 'install', '--help'], {
       encoding: 'utf-8',
       timeout: 15000,
-      env: { ...process.env, HOME: home },
+      env: openClawChildEnv({}, home),
     });
     if (r.error || r.status !== 0) return null;
     return `${r.stdout ?? ''}${r.stderr ?? ''}`;
@@ -2573,7 +2585,7 @@ export async function installOpenClawSkill(home: string = os.homedir(), agent?: 
   const r = await runSkillInstallWithRetry(resolveSkillInstallArgs(bin, { home, agent }), async (args) => spawnSync(bin, args, {
     encoding: 'utf-8',
     timeout: 120000,
-    env: { ...process.env, HOME: home },
+    env: openClawChildEnv({}, home),
     shell: false,
   }));
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
