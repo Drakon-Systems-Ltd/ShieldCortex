@@ -141,7 +141,10 @@ describe('gatherReconcileInput — reads all three layers off disk', () => {
       plugins: [{ pluginId: 'brave', enabled: true }],
     });
 
-    const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '4.47.2' }));
+    const unread = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '4.47.2', readLiveRoster: () => null }));
+    expect(unread.state).toBe('load-unproven');
+    expect(unread.severity).toBe('warn');
+    const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '4.47.2', readLiveRoster: () => ['brave'] }));
     expect(verdict.state).toBe('enabled-not-loaded');
     expect(verdict.severity).toBe('fail');
     expect(verdict.recommendedAction).toBe('update-openclaw-tracked');
