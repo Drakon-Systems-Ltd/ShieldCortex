@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- **Guard plane sync + Re-Authorise:** `shieldcortex config --action-guard-*` now best-effort syncs `enabled`/`enforce` onto an existing OpenClaw plugin entry (`plugins.entries.shieldcortex-realtime.config.actionGuard`) so signed config and the interceptor stop lying to each other. Missing/malformed OpenClaw config does not invent an entry. Missed/expired cards stay a no-op; `approve --denial <id> --reauth` grants the same fingerprint from a TTY. A live card and a TTY grant cannot both be spendable. Headless DNP copy points at `--denial`, not bare `approve`. Guard stays off by default.
 
 ## [5.0.3] - 2026-09-13
 

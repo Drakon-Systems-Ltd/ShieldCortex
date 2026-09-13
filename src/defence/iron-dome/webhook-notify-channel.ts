@@ -124,7 +124,9 @@ function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> 
     reason: n.reason,
     judge: n.judge,
     text: formatOperatorNotification(n),
-    approveCommand: `shieldcortex approve ${n.shortHash}`,
+    approveCommand: denied
+      ? `shieldcortex approve --denial ${n.actionId ?? '<actionId>'}`
+      : `shieldcortex approve ${n.shortHash}`,
     ts: new Date().toISOString(),
   };
   // Present only where they mean something: `denyCommand` on a live hold (on a

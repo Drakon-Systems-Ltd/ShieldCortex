@@ -39,9 +39,14 @@ function writeConfig(cfg: Record<string, unknown>): void {
 }
 
 let savedConfig: string | null = null;
+let prevOpenclawHome: string | undefined;
+let openclawHome: string;
 
 beforeEach(() => {
   savedConfig = fs.existsSync(configPath()) ? fs.readFileSync(configPath(), 'utf-8') : null;
+  prevOpenclawHome = process.env.OPENCLAW_HOME;
+  openclawHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ag-doctor-oc-'));
+  process.env.OPENCLAW_HOME = openclawHome;
 });
 
 afterEach(() => {
@@ -52,6 +57,9 @@ afterEach(() => {
   }
   fs.rmSync(legacySigPath(), { force: true });
   clearCloudConfigCache();
+  if (prevOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+  else process.env.OPENCLAW_HOME = prevOpenclawHome;
+  fs.rmSync(openclawHome, { recursive: true, force: true });
   jest.restoreAllMocks();
 });
 

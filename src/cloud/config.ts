@@ -4,6 +4,10 @@ import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import type { RankerConfig, RankerEngine, RankerWeights } from '../memory/types.js';
 import { mkdirSecure } from '../setup/state-permissions.js';
+import {
+  syncOpenClawPluginActionGuard,
+  type OpenClawPluginGuardSync,
+} from '../setup/openclaw-plugin-guard-sync.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -823,13 +827,24 @@ export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
  * alias is deliberately left alone — top-level wins on both surfaces (#209),
  * and migration is `doctor --fix-action-guard`'s job.
  */
-export function setActionGuardCoreConfig(updates: Partial<ActionGuardCoreConfig>): void {
+export function setActionGuardCoreConfig(updates: Partial<ActionGuardCoreConfig>): OpenClawPluginGuardSync {
   mutateRawConfig((raw) => {
     const guard = actionGuardBlock(raw);
     if (updates.enabled !== undefined) guard.enabled = updates.enabled;
     if (updates.enforce !== undefined) guard.enforce = updates.enforce;
     raw.actionGuard = guard;
   });
+  if (updates.enabled === undefined && updates.enforce === undefined) {
+    return { status: 'skipped', reason: 'noop' };
+  }
+  try {
+    return syncOpenClawPluginActionGuard({
+      ...(updates.enabled !== undefined ? { enabled: updates.enabled } : {}),
+      ...(updates.enforce !== undefined ? { enforce: updates.enforce } : {}),
+    });
+  } catch {
+    return { status: 'skipped', reason: 'unreadable' };
+  }
 }
 
 /**

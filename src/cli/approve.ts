@@ -9,6 +9,7 @@
  *   shieldcortex approve --denial           # list headless denials awaiting a retry decision (#310)
  *   shieldcortex approve --denial <actionId>              # authorise ONE retry, scoped to cwd+tool
  *   shieldcortex approve --denial <actionId> --ttl 20     # ...with a 20-minute spend window
+ *   shieldcortex approve --denial <actionId> --reauth        # after a missed/expired card: TTY grant, same identity
  *   shieldcortex approve --denial <actionId> --any-origin # ...unscoped (confirmed, dangerous)
  *   shieldcortex approve --denial <actionId> --override-deny  # ...despite your own earlier Deny
  *
@@ -171,6 +172,7 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
 
   const anyOrigin = args.includes('--any-origin');
   const overrideDeny = args.includes('--override-deny');
+  const reauth = args.includes('--reauth');
   const denialIndex = args.indexOf('--denial');
   const positional = args.filter((a) => !a.startsWith('-'));
 
@@ -186,13 +188,13 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
 
   if (denialIndex >= 0) {
     return runDenialRetry(
-      { actionId: positional[0], ttlMs: ttlGiven ? ttlMs : DEFAULT_RETRY_GRANT_TTL_MS, anyOrigin, overrideDeny },
+      { actionId: positional[0], ttlMs: ttlGiven ? ttlMs : DEFAULT_RETRY_GRANT_TTL_MS, anyOrigin, overrideDeny, reauth },
       { now, home, log, err, interactive: deps.interactive, confirm: deps.confirm ?? defaultConfirm },
     );
   }
 
-  if (anyOrigin || overrideDeny) {
-    err('--any-origin and --override-deny only apply to `shieldcortex approve --denial <actionId>`.');
+  if (anyOrigin || overrideDeny || reauth) {
+    err('--any-origin, --override-deny and --reauth only apply to `shieldcortex approve --denial <actionId>`.');
     return 1;
   }
 
@@ -234,6 +236,7 @@ interface DenialRetryArgs {
   ttlMs: number;
   anyOrigin: boolean;
   overrideDeny: boolean;
+  reauth: boolean;
 }
 
 interface DenialRetryDeps {
@@ -329,6 +332,9 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
     } else if (outcome.reason === 'suppressed') {
       err(`This action is silenced by your own Deny until ${new Date(outcome.suppressedUntilMs ?? now).toISOString()}.`);
       err('Re-run with --override-deny to overrule it.');
+    } else if (outcome.reason === 'card-live') {
+      err('A live approval card is already outstanding for this identity — one door at a time.');
+      err('Tap that card, or wait for it to expire, then re-run with --reauth.');
     } else if (outcome.reason === 'locked') {
       err('The retry-control store is busy (another guard event holds the lock). Try again in a moment.');
     } else {

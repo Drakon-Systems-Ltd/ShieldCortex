@@ -12,6 +12,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { handleCloudConfig } from '../cloud/cli.js';
 import {
@@ -33,9 +35,14 @@ function resetConfigDir(): void {
 }
 
 let logSpy: ReturnType<typeof jest.spyOn>;
+let prevOpenclawHome: string | undefined;
+let openclawHome: string;
 
 beforeEach(() => {
   resetConfigDir();
+  prevOpenclawHome = process.env.OPENCLAW_HOME;
+  openclawHome = mkdtempSync(path.join(tmpdir(), 'sc-ag-cli-oc-'));
+  process.env.OPENCLAW_HOME = openclawHome;
   logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
   jest.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -43,6 +50,9 @@ beforeEach(() => {
 afterEach(() => {
   jest.restoreAllMocks();
   resetConfigDir();
+  if (prevOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+  else process.env.OPENCLAW_HOME = prevOpenclawHome;
+  rmSync(openclawHome, { recursive: true, force: true });
 });
 
 describe('config --action-guard-* core flags', () => {

@@ -130,12 +130,12 @@ export interface OperatorNotification {
    *  useful on an ask, load-bearing on a denial. */
   sessionId?: string;
   cwd?: string;
-  /** The `shieldcortex approve <hash>` / `shieldcortex deny <hash>` text.
-   *  ALWAYS present — this is the floor (#118) and is never conditional on
-   *  whether a channel is configured or expected to succeed. On a denial it
-   *  carries the approve half only: the call is already refused, so "deny" is
-   *  an affordance with nothing behind it. */
+  /** The `shieldcortex approve <hash>` / `shieldcortex deny <hash>` text for a
+   *  LIVE hold (#118). On DNP this is `shieldcortex approve --denial <id>` —
+   *  bare `approve` cannot spend a fingerprint. */
   fallbackHint: string;
+  /** #310 action id when this notification is a headless denial. */
+  actionId?: string;
 }
 
 /**
@@ -269,6 +269,9 @@ export interface RequestOperatorApprovalInput {
   deniedReason?: string;
   sessionId?: string;
   cwd?: string;
+  /** #310 fingerprint id. On DNP this is the spendable `--denial` target.
+   *  Live holds still use `shieldcortex approve <hash>`. */
+  actionId?: string;
 }
 
 export interface RequestOperatorApprovalDeps {
@@ -331,6 +334,8 @@ function optionalText(v: unknown): string | undefined {
 function buildNotification(input: RequestOperatorApprovalInput): OperatorNotification {
   const shortHash = input.hash.slice(0, 12);
   const denied = input.event === 'denied_no_prompt_surface';
+  const actionId = optionalText(input.actionId);
+  const denialTarget = actionId ?? '<actionId>';
   const notification: OperatorNotification = {
     event: denied ? 'denied_no_prompt_surface' : 'approval_requested',
     hash: input.hash,
@@ -341,15 +346,12 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
     severity: input.severity,
     reason: input.reason,
     judge: input.judge ?? null,
-    // On a denial the deny half is dropped: the guard already said no, and an
-    // affordance that does nothing is how an operator learns to ignore the
-    // ones that do.
+    // Live hold: #118 hash. DNP: spendable fingerprint, never bare approve.
     fallbackHint: denied
-      ? `shieldcortex approve ${shortHash}   (authorises a RETRY — the blocked call is already gone)`
+      ? `shieldcortex approve --denial ${denialTarget}   (authorises a RETRY — the blocked call is already gone)`
       : `shieldcortex approve ${shortHash}   |   shieldcortex deny ${shortHash}`,
   };
-  // Only set on the event they belong to, so an absent field is unambiguous
-  // rather than "maybe the caller forgot".
+  if (denied && actionId) notification.actionId = actionId;
   if (denied) {
     const deniedReason = optionalText(input.deniedReason);
     if (deniedReason) notification.deniedReason = deniedReason;
@@ -700,7 +702,7 @@ export function formatOperatorNotification(n: AnyOperatorNotification): string {
     // which is the only thing that can still happen.
     lines.push('The agent has already been refused; this job did not do the work.');
     lines.push('To authorise a RETRY, run in YOUR terminal:');
-    lines.push(`  shieldcortex approve ${n.shortHash}`);
+    lines.push(`  shieldcortex approve --denial ${n.actionId ?? '<actionId>'}`);
   } else {
     lines.push(`[Approve]  shieldcortex approve ${n.shortHash}`);
     lines.push(`[Deny]     shieldcortex deny ${n.shortHash}`);
