@@ -41,6 +41,26 @@ interface SystemRouteDeps {
   requireIronDomeAction: (options: IronDomeRouteGuardOptions) => IronDomeMiddleware;
 }
 
+/** Strict string confirm. Truthy / boolean / wrong word is not consent (#477/#478). */
+function readConfirmToken(body: unknown): string | null {
+  if (body == null || typeof body !== 'object' || Array.isArray(body)) return null;
+  const confirm = (body as { confirm?: unknown }).confirm;
+  return typeof confirm === 'string' ? confirm : null;
+}
+
+function rejectUnlessConfirmed(
+  req: Request,
+  res: Response,
+  expected: 'restart' | 'update',
+): boolean {
+  if (readConfirmToken(req.body) === expected) return false;
+  res.status(400).json({
+    error: `this action requires confirm: '${expected}'`,
+    code: 'CONFIRMATION_REQUIRED',
+  });
+  return true;
+}
+
 export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void {
   const { broadcast, clients, requireIronDomeAction } = deps;
 
@@ -406,7 +426,8 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
     channel: 'dashboard',
     sourceIdentifier: 'dashboard:version-update',
     enforceAmber: true,
-  }), async (_req: Request, res: Response) => {
+  }), async (req: Request, res: Response) => {
+    if (rejectUnlessConfirmed(req, res, 'update')) return;
     try {
       broadcast({
         type: 'update_started',
@@ -433,7 +454,8 @@ export function registerSystemRoutes(app: Express, deps: SystemRouteDeps): void 
     channel: 'dashboard',
     sourceIdentifier: 'dashboard:version-restart',
     enforceAmber: true,
-  }), (_req: Request, res: Response) => {
+  }), (req: Request, res: Response) => {
+    if (rejectUnlessConfirmed(req, res, 'restart')) return;
     try {
       broadcast({
         type: 'server_restarting',

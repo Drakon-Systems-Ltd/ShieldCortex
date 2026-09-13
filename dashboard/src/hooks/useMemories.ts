@@ -381,6 +381,8 @@ async function checkForUpdates(force = false): Promise<VersionInfo> {
 async function performUpdate(): Promise<UpdateResult> {
   const response = await authFetch(`${API_BASE}/api/version/update`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: 'update' }),
   });
   if (!response.ok) throw new Error('Failed to perform update');
   return response.json();
@@ -390,6 +392,8 @@ async function performUpdate(): Promise<UpdateResult> {
 async function restartServer(): Promise<{ success: boolean; message: string }> {
   const response = await authFetch(`${API_BASE}/api/version/restart`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: 'restart' }),
   });
   if (!response.ok) throw new Error('Failed to restart server');
   return response.json();

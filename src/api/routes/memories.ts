@@ -1469,8 +1469,8 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
 
       const db = getDatabase();
       db.prepare(
-        `INSERT INTO quarantine (original_title, original_content, source_type, source_identifier, reason, project, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO quarantine (original_title, original_content, source_type, source_identifier, reason, project, status, firewall_result, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', 'QUARANTINE', ?)`,
       ).run(
         memory.title,
         memory.content,

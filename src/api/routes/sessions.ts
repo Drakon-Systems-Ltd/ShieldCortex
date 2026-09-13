@@ -16,7 +16,7 @@
 
 import type { Express, Request, Response } from 'express';
 import { homedir, tmpdir } from 'os';
-import { isAbsolute, join, normalize, resolve, sep } from 'path';
+import { basename, isAbsolute, join, normalize, resolve, sep } from 'path';
 import { getDatabase } from '../../database/init.js';
 import { getTimeline } from '../../sessions/timeline.js';
 import { importJsonlTranscript } from '../../sessions/import-jsonl.js';
@@ -200,13 +200,20 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
         // Path-traversal rejection from resolveImportFiles → 400 (caller error),
         // not 500 (server bug). Any other error rethrows.
         if (err instanceof Error && /must be under/i.test(err.message)) {
-          res.status(400).json({ error: err.message });
+          res.status(400).json({ error: 'path must be under home or temp directory' });
           return;
         }
         throw err;
       }
       if (files.length === 0) {
-        res.status(404).json({ error: `no JSONL files matched: ${target}` });
+        // Never echo the resolved filesystem path. For the default glob that
+        // is the server's $HOME; even an explicit path is layout the caller
+        // already knows and does not belong in the JSON error body (#476).
+        res.status(404).json({
+          error: explicit
+            ? 'no JSONL files matched the requested path'
+            : 'no JSONL files matched the default import location',
+        });
         return;
       }
 
@@ -216,7 +223,8 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
       let imported = 0;
       let failed = 0;
       let lastSessionId: string | null = null;
-      const errors: Array<{ path: string; error: string }> = [];
+      const errors: Array<{ file: string; error: string }> = [];
+      let lastImportError = '';
 
       for (const file of files) {
         try {
@@ -228,7 +236,8 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
           imported++;
         } catch (err) {
           failed++;
-          errors.push({ path: file, error: (err as Error).message });
+          lastImportError = (err as Error).message ?? '';
+          errors.push({ file: basename(file), error: 'import failed' });
         }
       }
 
@@ -239,9 +248,9 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
         files.length === 1 &&
         imported === 0 &&
         errors.length === 1 &&
-        /not found|ENOENT/i.test(errors[0].error)
+        /not found|ENOENT/i.test(lastImportError)
       ) {
-        res.status(404).json({ error: errors[0].error });
+        res.status(404).json({ error: 'no JSONL files matched the requested path' });
         return;
       }
 
@@ -258,7 +267,11 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
     } catch (err) {
       const message = (err as Error).message;
       const status = /not found|ENOENT/i.test(message) ? 404 : 500;
-      res.status(status).json({ error: message });
+      res.status(status).json({
+        error: status === 404
+          ? 'no JSONL files matched the requested path'
+          : 'import failed',
+      });
     }
   });
 }
