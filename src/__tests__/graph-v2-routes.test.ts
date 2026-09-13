@@ -368,6 +368,26 @@ describe('GET /api/graph/paths (v2)', () => {
     expect(db2.sourceMemories.map((m) => m.id)).toEqual([ma]);
   });
 
+  it('reports truncated when the depth bound (4) is what stopped the search', async () => {
+    // a → b → c → d → e → f is 5 hops; BFS depth is capped at 4, so f is
+    // reachable in principle but not within the bound. An empty path here
+    // must say "truncated", never "no path exists" (TARS review, PR #491).
+    const ids = ['d0', 'd1', 'd2', 'd3', 'd4', 'd5'].map((n) => entity(n));
+    for (let i = 0; i < ids.length - 1; i++) triple(ids[i], 'feeds', ids[i + 1]);
+
+    const r = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(ids[0]), toId: String(ids[5]) });
+    expect(r.statusCode).toBe(200);
+    const body = r.body as PathBody;
+    expect(body.path).toEqual([]);
+    expect(body.truncated).toBe(true);
+    expect(body.message).toBe('No path found within the search budget');
+
+    // Four hops (a → e) is inside the bound and must still resolve, untruncated.
+    const ok = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(ids[0]), toId: String(ids[4]) });
+    expect((ok.body as PathBody).path.map((h) => h.entityId)).toEqual(ids.slice(0, 5));
+    expect((ok.body as PathBody).truncated).toBe(false);
+  });
+
   it('stops at the visit budget and reports truncated instead of pretending no path exists', async () => {
     // hub fans out to PATH_VISIT_BUDGET + 5 leaves; the target hangs off the
     // LAST leaf, so it is only reachable past the budget.

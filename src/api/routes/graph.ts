@@ -85,7 +85,10 @@ function fail(res: Response, error: unknown): void {
     res.status(400).json({ error: error.message });
     return;
   }
-  res.status(500).json({ error: (error as Error).message });
+  // Exception text stays server-side (TARS review, PR #491): the JSON plane
+  // answers with the same constant shape the API-wide error handler uses.
+  console.error('[graph] route failed:', error);
+  res.status(500).json({ error: 'Internal server error', code: 'INTERNAL' });
 }
 
 /**
@@ -726,6 +729,10 @@ export function registerGraphRoutes(app: Express, requireNotLocked: Middleware):
         frontier = nextFrontier;
         if (frontier.length === 0) break;
       }
+      // Depth is a bound like the others (TARS review, PR #491): leaving the
+      // loop with work still on the frontier means the search was cut at
+      // PATH_MAX_DEPTH, not that no path exists.
+      if (!found && frontier.length > 0) truncated = true;
 
       if (!found) {
         return res.json({

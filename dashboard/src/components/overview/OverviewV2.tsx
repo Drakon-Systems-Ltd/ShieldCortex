@@ -6,7 +6,6 @@ import dynamic from 'next/dynamic';
 import { ArrowRight, Activity, Database, HeartPulse, Shield } from 'lucide-react';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { StatusPill, type StatusPillState } from '@/components/ds/StatusPill';
-import { CopyableCommand } from '@/components/ds/EmptyState';
 import { FirstRunGuide } from '@/components/overview/FirstRunGuide';
 import { CloudUpsellCard } from '@/components/shield/CloudUpsellCard';
 import { useWebSocketEvent, useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
@@ -238,9 +237,11 @@ export function OverviewV2() {
         {/* ── Four status tiles ── */}
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <Tile icon={<Shield size={15} aria-hidden />} title="Protection" href="/protection">
-            <TileRow label="Action Guard" pill={guard.state} pillText={guard.text}
+            {/* /api/iron-dome/status reports Iron Dome, not Action Guard (which no
+                dashboard endpoint exposes) — label it for what it is and offer no
+                activate command from here (TARS review, PR #491). */}
+            <TileRow label="Iron Dome" pill={guard.state} pillText={guard.text}
               onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
-            {guard.state === 'off' && <CopyableCommand command="shieldcortex iron-dome activate" />}
             <TileRow label="Conversation scanning" pill={scanning.state} pillText={scanning.text}
               onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
             <TileRow label="Operations" pill={operations.state} pillText={operations.text}
