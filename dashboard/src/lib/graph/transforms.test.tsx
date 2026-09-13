@@ -1,8 +1,11 @@
 import {
   buildFocusData,
   buildMapData,
+  computeDefaultMinMentions,
   linkTooltip,
   linkWidth,
+  MAP_DEFAULT_TARGET_MAX,
+  MAP_DEFAULT_TARGET_MIN,
   withPreservedPositions,
   type NeighbourhoodPayload,
   type OverviewPayload,
@@ -99,6 +102,26 @@ describe('withPreservedPositions', () => {
     expect(next.nodes[0]).not.toBe(base.nodes[0]); // fresh clone, cache untouched
     expect(base.nodes[0].x).toBeUndefined();
     expect(next.nodes[1].x).toBeUndefined();
+  });
+});
+
+describe('computeDefaultMinMentions', () => {
+  it('shows everything when the loaded set is already within the target band', () => {
+    expect(computeDefaultMinMentions(overview.entities)).toBe(1);
+    const exactlyMax = Array.from({ length: MAP_DEFAULT_TARGET_MAX }, (_, i) => ({ memoryCount: i + 1 }));
+    expect(computeDefaultMinMentions(exactlyMax)).toBe(1);
+  });
+
+  it('picks a real distribution value that lands the default inside the target band', () => {
+    // 400 entities, memoryCount uniformly spread 1..40 (10 entities per value)
+    // — a stand-in for the shipped fixture's roughly-bell-shaped mention counts.
+    const entities = Array.from({ length: 400 }, (_, i) => ({ memoryCount: 1 + (i % 40) }));
+    const threshold = computeDefaultMinMentions(entities);
+    const visible = entities.filter((e) => e.memoryCount >= threshold).length;
+    expect(visible).toBeGreaterThanOrEqual(MAP_DEFAULT_TARGET_MIN);
+    expect(visible).toBeLessThanOrEqual(MAP_DEFAULT_TARGET_MAX + 10); // ties can overshoot slightly
+    // The threshold must be a value that actually occurs in the data (never invented).
+    expect(entities.some((e) => e.memoryCount === threshold)).toBe(true);
   });
 });
 

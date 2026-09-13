@@ -139,6 +139,33 @@ export interface V2GraphData {
 export const entityNodeId = (id: number): string => `e:${id}`;
 export const memoryNodeId = (id: number): string => `m:${id}`;
 
+// ── Map default (step-3 polish, 2026-09-13) ─────────────────
+
+/** Target band for the number of entities the default Map shows at once. */
+export const MAP_DEFAULT_TARGET_MIN = 120;
+export const MAP_DEFAULT_TARGET_MAX = 150;
+
+/**
+ * Pick a default `minMentions` for Map mode from the real memoryCount
+ * distribution of the loaded entities (not a hardcoded constant): at 400
+ * loaded entities and a fixed minMentions of 1, Map painted a hairball —
+ * every node ~3px, labels overlapping. Rule: sort the loaded entities'
+ * memoryCount descending and read off the value at the rank in the middle of
+ * the target band (≈135th); filtering with `memoryCount >= that value`
+ * (`buildMapData`'s existing `>=` semantics) then keeps roughly that many
+ * entities, landing inside [MAP_DEFAULT_TARGET_MIN, MAP_DEFAULT_TARGET_MAX]
+ * for the shipped fixture (400 loaded → threshold 8 → 147 shown). Below the
+ * target band there is nothing to trim, so show everything (threshold 1).
+ * This is only the *default* — the min-mentions slider still overrides it.
+ */
+export function computeDefaultMinMentions(entities: Array<{ memoryCount: number }>): number {
+  if (entities.length <= MAP_DEFAULT_TARGET_MAX) return 1;
+  const counts = entities.map((e) => e.memoryCount).sort((a, b) => b - a);
+  const targetRank = Math.floor((MAP_DEFAULT_TARGET_MIN + MAP_DEFAULT_TARGET_MAX) / 2);
+  const idx = Math.min(targetRank, counts.length - 1);
+  return Math.max(1, counts[idx]);
+}
+
 // ── Builders ───────────────────────────────────────────────
 
 function bundleTriples(

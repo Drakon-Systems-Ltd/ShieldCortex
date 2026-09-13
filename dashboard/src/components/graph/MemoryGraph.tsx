@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import ForceGraph2D, { type ForceGraphMethods, type LinkObject, type NodeObject } from 'react-force-graph-2d';
 import {
   Crosshair,
+  Info,
   List,
   Lock,
   LockOpen,
@@ -30,6 +31,7 @@ import {
 import {
   buildFocusData,
   buildMapData,
+  computeDefaultMinMentions,
   entityNodeId,
   linkTooltip,
   linkWidth,
@@ -87,7 +89,11 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   const [showMemories, setShowMemories] = useState(true);
   const [showWeak, setShowWeak] = useState(true);
   const [hiddenTypes, setHiddenTypes] = useState<Set<string>>(new Set());
+  // Starts at 1 (show everything) until the real distribution arrives; the
+  // effect below raises it once to a data-derived default (never overridden
+  // again once the user touches the slider — see minMentionsTouchedRef).
   const [minMentions, setMinMentions] = useState(1);
+  const minMentionsTouchedRef = useRef(false);
   const [legendOpen, setLegendOpen] = useState(!preview);
   const [listOpen, setListOpen] = useState(false);
   const [frozen, setFrozen] = useState(false);
@@ -104,6 +110,15 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   const nbhd = useNeighbourhoodV2(focusId, { depth, includeMemories: showMemories });
   const path = useGraphPath(pathFrom?.id ?? null, pathTo?.id ?? null);
   const search = useGraphSearchV2(debouncedSearch);
+
+  // Once the real entities arrive, raise the default min-mentions threshold
+  // from the loaded distribution (see computeDefaultMinMentions) so Map
+  // opens readable instead of a 400-node hairball. Only ever applied once —
+  // after the user moves the slider, their choice sticks across refetches.
+  useEffect(() => {
+    if (preview || minMentionsTouchedRef.current || !overview.data) return;
+    setMinMentions(computeDefaultMinMentions(overview.data.entities));
+  }, [preview, overview.data]);
 
   // ── Graph data with preserved positions ──────────────────
   const liveDataRef = useRef<V2GraphData | null>(null);
@@ -177,12 +192,18 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
     return adj;
   }, [graphData]);
 
-  // Label LOD: always label the top-degree nodes.
+  // Label LOD: always label the top-degree nodes at fit zoom; the rest only
+  // on hover/zoom-in (paintNode's `scale > 1.6` check below). N scales with
+  // how many nodes are actually on screen — 12 was tuned for the old
+  // 400-node hairball and looked sparse once the default Map dropped to
+  // ~130-150 (step-3 polish); ~10% of the visible set, clamped to a sane
+  // band, keeps density comparable as the min-mentions filter changes it.
   const topLabelIds = useMemo(() => {
+    const labelCount = Math.max(10, Math.min(25, Math.round(graphData.nodes.length * 0.1)));
     const byDegree = [...graphData.nodes].sort(
       (a, b) => (adjacency.get(b.id)?.size ?? 0) - (adjacency.get(a.id)?.size ?? 0),
     );
-    return new Set(byDegree.slice(0, 12).map((n) => n.id));
+    return new Set(byDegree.slice(0, labelCount).map((n) => n.id));
   }, [graphData, adjacency]);
 
   // Path highlight set.
@@ -436,7 +457,9 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   // ── Painting ─────────────────────────────────────────────
   const nodeRadius = useCallback((node: FGNode): number => {
     if (node.kind === 'memory') return 3 + node.size * 4;
-    return Math.max(3.5, Math.min(14, 3 + Math.sqrt(node.size)));
+    // Floor raised 3.5→5.5 (step-3 polish): a min-degree entity used to
+    // render as a ~3px dot at fit zoom, unreadable next to its neighbours.
+    return Math.max(5.5, Math.min(14, 4 + Math.sqrt(node.size)));
   }, []);
 
   const paintNode = useCallback(
@@ -597,16 +620,44 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
     return [...types].sort();
   }, [graphData, counts]);
 
+  // Slider ceiling from the real loaded data, not a fixed 20 — a fixture or
+  // live database can easily have entities with more than 20 mentions, which
+  // would otherwise put the computed default outside the slider's range.
+  const minMentionsMax = useMemo(() => {
+    let max = 20;
+    for (const e of overview.data?.entities ?? []) if (e.memoryCount > max) max = e.memoryCount;
+    return max;
+  }, [overview.data]);
+
   const selectedNode = selectedId ? (nodeById.get(selectedId) ?? null) : null;
   const hoverTooltip = hoverLink
     ? linkTooltip(hoverLink, (id) => nodeById.get(id)?.label ?? id)
     : null;
 
+  // Two distinct, honestly-labelled reasons a Map node can be missing (never
+  // conflated into one misleading "raise min mentions" line, since raising
+  // the slider only ever hides MORE — see computeDefaultMinMentions):
+  //  1. hidden by the min-mentions filter — loaded but below the current
+  //     threshold; the slider directly controls this one.
+  //  2. omitted by the server load cap — never fetched at all; only search
+  //     reaches these.
+  const loadedEntityCount = overview.data?.entities.length ?? 0;
+  const visibleEntityCount = graphData.nodes.filter((n) => n.kind === 'entity').length;
+  const hiddenByFilter = mode === 'map' ? Math.max(0, loadedEntityCount - visibleEntityCount) : 0;
   const truncationNotice =
-    mode === 'map' && counts && counts.omittedEntities > 0
-      ? `${counts.omittedEntities} more entities below the display cap — raise min mentions or use search.`
+    mode === 'map' && counts
+      ? [
+          hiddenByFilter > 0
+            ? `${hiddenByFilter} of ${loadedEntityCount} loaded entities are below min mentions ${minMentions} — lower the slider above to reveal more`
+            : null,
+          counts.omittedEntities > 0
+            ? `${counts.omittedEntities} more exist beyond the loaded top ${loadedEntityCount} — search to jump to one directly`
+            : null,
+        ]
+          .filter(Boolean)
+          .join('. ') || null
       : mode === 'focus' && nbhd.data && nbhd.data.counts.omittedNeighbours > 0
-        ? `${nbhd.data.counts.omittedNeighbours} more neighbours not shown (capped view).`
+        ? `${nbhd.data.counts.omittedNeighbours} more neighbours not shown (capped view)`
         : null;
 
   // ── Render ───────────────────────────────────────────────
@@ -640,8 +691,11 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
 
   return (
     <div
+      className={cn('relative flex overflow-hidden rounded-lg border border-[var(--sc-border)]', preview ? 'h-[240px]' : 'h-[calc(100dvh-320px)] min-h-[480px]')}
+    >
+    <div
       ref={containerRef}
-      className={cn('relative overflow-hidden rounded-lg border border-[var(--sc-border)]', preview ? 'h-[240px]' : 'h-[calc(100dvh-320px)] min-h-[480px]')}
+      className="relative min-w-0 flex-1"
       style={{ background: palette.background }}
       tabIndex={preview ? -1 : 0}
       onKeyDown={preview ? undefined : onKeyDown}
@@ -804,9 +858,12 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
                   <input
                     type="range"
                     min={1}
-                    max={20}
+                    max={minMentionsMax}
                     value={minMentions}
-                    onChange={(e) => setMinMentions(Number(e.target.value))}
+                    onChange={(e) => {
+                      minMentionsTouchedRef.current = true;
+                      setMinMentions(Number(e.target.value));
+                    }}
                     aria-label="Minimum mentions to display an entity"
                   />
                   <span className="tabular-nums">{minMentions}</span>
@@ -868,7 +925,7 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
           </div>
 
           {/* ── Status line (bottom-right): honest counts + truncation ── */}
-          <div className="absolute bottom-3 right-3 z-10 max-w-[300px] rounded-md bg-[var(--sc-surface)]/95 px-2 py-1 text-right text-[10px] text-[var(--sc-text-muted)]">
+          <div className="absolute bottom-3 right-3 z-10 max-w-[320px] rounded-md bg-[var(--sc-surface)]/95 px-2 py-1 text-right text-[10px] text-[var(--sc-text-muted)]">
             {overview.isLoading && 'Loading graph…'}
             {mode === 'map' && counts && (
               <span>
@@ -885,7 +942,15 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
             {mode === 'focus' && nbhd.isError && (
               <span className="text-[var(--sc-warn)]">Neighbourhood unavailable — {nbhd.error instanceof Error ? nbhd.error.message : 'fetch failed'}</span>
             )}
-            {truncationNotice && <div>{truncationNotice}</div>}
+            {truncationNotice && (
+              <div
+                role="status"
+                className="mt-1.5 flex items-start gap-1.5 border-t border-[var(--sc-border)] pt-1.5 text-left text-[var(--sc-warn)]"
+              >
+                <Info size={12} aria-hidden className="mt-[1px] shrink-0" />
+                <span>{truncationNotice}.</span>
+              </div>
+            )}
           </div>
 
           {/* ── Hover link tooltip ── */}
@@ -894,68 +959,68 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
               {hoverTooltip}
             </div>
           )}
-
-          {/* ── Keyboard-accessible node list (shares selection) ── */}
-          {listOpen && (
-            <div
-              className={cn(
-                'absolute top-3 z-10 flex max-h-[70%] w-56 flex-col rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface)]/95 shadow-[var(--sc-shadow-card)]',
-                // Step aside for the (non-modal) drawer so both stay usable.
-                selectedNode ? 'right-3 md:right-[416px]' : 'right-3',
-              )}
-            >
-              <div className="border-b border-[var(--sc-border)] px-2 py-1 text-[11px] font-medium text-[var(--sc-text)]">
-                Nodes ({graphData.nodes.length})
-              </div>
-              <ul className="min-h-0 flex-1 overflow-y-auto py-1" aria-label="Graph nodes">
-                {[...graphData.nodes]
-                  .sort((a, b) => b.size - a.size)
-                  .slice(0, 300)
-                  .map((n) => (
-                    <li key={n.id}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSelectedId(n.id);
-                          if (n.x !== undefined && n.y !== undefined) fgRef.current?.centerAt(n.x, n.y, reducedMotion ? 0 : 300);
-                        }}
-                        onDoubleClick={() => n.kind === 'entity' && focusEntity(n.numericId)}
-                        className={cn(
-                          'flex w-full items-center gap-1.5 px-2 py-1 text-left text-[11px] text-[var(--sc-text-dim)] hover:bg-[var(--sc-surface-2)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--sc-focus)]',
-                          selectedId === n.id && 'bg-[var(--sc-primary-soft)] text-[var(--sc-text)]',
-                        )}
-                      >
-                        <span
-                          aria-hidden
-                          className={cn('h-2 w-2 shrink-0', n.kind === 'entity' ? 'rounded-full' : 'rounded-sm')}
-                          style={{ background: n.kind === 'entity' ? entityTypeHex(theme, n.subtype) : semanticHex(theme, memoryCategorySemantic(n.subtype)) }}
-                        />
-                        <span className="truncate">{n.label}</span>
-                      </button>
-                    </li>
-                  ))}
-              </ul>
-              <div className="border-t border-[var(--sc-border)] px-2 py-1 text-[10px] text-[var(--sc-text-muted)]">
-                <Kbd>Enter</Kbd> select · double-click to focus
-              </div>
-            </div>
-          )}
-
-          <GraphDrawer
-            node={selectedNode}
-            neighbourhood={nbhd.data}
-            onClose={() => setSelectedId(null)}
-            onFocus={focusEntity}
-            onSelectEntity={(id) => setSelectedId(entityNodeId(id))}
-            onPathFrom={(id) => {
-              const n = nodeById.get(entityNodeId(id));
-              setMode('path');
-              setPathFrom({ id, name: n?.label ?? `#${id}` });
-              setPathTo(null);
-              setSelectedId(null);
-            }}
-          />
         </>
+      )}
+    </div>
+
+      {/* ── Node list: docked in-flow at the graph area's right edge (step-3
+          polish) — a flex sibling of the canvas, not an absolute overlay, so
+          it shrinks the canvas via the ResizeObserver above instead of ever
+          floating on top of nodes. ── */}
+      {!preview && listOpen && (
+        <div className="flex w-56 shrink-0 flex-col border-l border-[var(--sc-border)] bg-[var(--sc-surface)]">
+          <div className="border-b border-[var(--sc-border)] px-2 py-1 text-[11px] font-medium text-[var(--sc-text)]">
+            Nodes ({graphData.nodes.length})
+          </div>
+          <ul className="min-h-0 flex-1 overflow-y-auto py-1" aria-label="Graph nodes">
+            {[...graphData.nodes]
+              .sort((a, b) => b.size - a.size)
+              .slice(0, 300)
+              .map((n) => (
+                <li key={n.id}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedId(n.id);
+                      if (n.x !== undefined && n.y !== undefined) fgRef.current?.centerAt(n.x, n.y, reducedMotion ? 0 : 300);
+                    }}
+                    onDoubleClick={() => n.kind === 'entity' && focusEntity(n.numericId)}
+                    className={cn(
+                      'flex w-full items-center gap-1.5 px-2 py-1 text-left text-[11px] text-[var(--sc-text-dim)] hover:bg-[var(--sc-surface-2)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--sc-focus)]',
+                      selectedId === n.id && 'bg-[var(--sc-primary-soft)] text-[var(--sc-text)]',
+                    )}
+                  >
+                    <span
+                      aria-hidden
+                      className={cn('h-2 w-2 shrink-0', n.kind === 'entity' ? 'rounded-full' : 'rounded-sm')}
+                      style={{ background: n.kind === 'entity' ? entityTypeHex(theme, n.subtype) : semanticHex(theme, memoryCategorySemantic(n.subtype)) }}
+                    />
+                    <span className="truncate">{n.label}</span>
+                  </button>
+                </li>
+              ))}
+          </ul>
+          <div className="border-t border-[var(--sc-border)] px-2 py-1 text-[10px] text-[var(--sc-text-muted)]">
+            <Kbd>Enter</Kbd> select · double-click to focus
+          </div>
+        </div>
+      )}
+
+      {!preview && (
+        <GraphDrawer
+          node={selectedNode}
+          neighbourhood={nbhd.data}
+          onClose={() => setSelectedId(null)}
+          onFocus={focusEntity}
+          onSelectEntity={(id) => setSelectedId(entityNodeId(id))}
+          onPathFrom={(id) => {
+            const n = nodeById.get(entityNodeId(id));
+            setMode('path');
+            setPathFrom({ id, name: n?.label ?? `#${id}` });
+            setPathTo(null);
+            setSelectedId(null);
+          }}
+        />
       )}
     </div>
   );
