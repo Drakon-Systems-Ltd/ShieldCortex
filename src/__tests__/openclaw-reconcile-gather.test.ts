@@ -122,6 +122,17 @@ function writeMigratedIndex(row: {
   db.close();
 }
 
+/** Write a raw `plugins.installedIndex` row so malformed shapes can be exercised. */
+function writeMigratedRaw(valueJson: string, updatedAtMs = 2000): void {
+  const stateDir = path.join(home, '.openclaw', 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const db = new Database(path.join(stateDir, 'openclaw.sqlite'));
+  db.exec(`CREATE TABLE IF NOT EXISTS config_machine_state (
+    state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);`);
+  db.prepare(`INSERT INTO config_machine_state VALUES ('plugins.installedIndex', @v, @u)`).run({ v: valueJson, u: updatedAtMs });
+  db.close();
+}
+
 describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('reads install records + loaded roster from a real index DB', () => {
     writeIndex({
@@ -204,6 +215,49 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
     expect(idx!.installRecords[PLUGIN]?.version).toBe('5.0.0');
     expect(idx!.plugins.find((p) => p.pluginId === PLUGIN)?.enabled).toBe(true);
     expect(idx!.generatedAtMs).toBe(1);
+  });
+
+  const MALFORMED: Array<[string, string]> = [
+    ['index is an array', JSON.stringify({ revision: 2000, index: [] })],
+    ['index is a string', JSON.stringify({ revision: 2000, index: 'bad' })],
+    ['plugins is not an array', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: 'bad' } })],
+    ['installRecords is an array', JSON.stringify({ revision: 2000, index: { installRecords: [], plugins: [] } })],
+    ['warning has the wrong type', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [], warning: 7 } })],
+    ['generatedAtMs has the wrong type', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [], generatedAtMs: 'x' } })],
+    ['value_json is not JSON', '{not json'],
+  ];
+
+  it.each(MALFORMED)('malformed migrated row (%s) alongside a valid legacy row → legacy row is read, not a readable empty index', (_label, valueJson) => {
+    writeIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath: '/legacy' } },
+      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      generatedAtMs: 4242,
+    });
+    writeMigratedRaw(valueJson);
+    const idx = readPluginInstallIndex(home);
+    expect(idx).not.toBeNull();
+    expect(idx!.installRecords[PLUGIN]?.installPath).toBe('/legacy');
+    expect(idx!.plugins.find((p) => p.pluginId === PLUGIN)?.enabled).toBe(true);
+    expect(idx!.generatedAtMs).toBe(4242);
+  });
+
+  it.each(MALFORMED)('malformed migrated row (%s) with no legacy table → null (unreadable), never an empty index', (_label, valueJson) => {
+    writeMigratedRaw(valueJson);
+    expect(readPluginInstallIndex(home)).toBeNull();
+  });
+
+  it('malformed migrated-only row reconciles to index-unreadable (warn), never enabled-not-loaded (fail)', () => {
+    writeConfig(true, true);
+    const canonical = 'drakon-systems-shieldcortex-realtime-abc';
+    writeProjectDir(canonical, '5.0.0');
+    writeMigratedRaw(JSON.stringify({ revision: 2000, index: [] }));
+    const verdict = reconcilePluginState(
+      gatherReconcileInput(home, { expectedVersion: '5.0.0', readLiveRoster: () => null }),
+    );
+    expect(verdict.indexReadable).toBe(false);
+    expect(verdict.state).toBe('index-unreadable');
+    expect(verdict.severity).toBe('warn');
+    expect(verdict.state).not.toBe('enabled-not-loaded');
   });
 });
 

@@ -776,25 +776,35 @@ function readMigratedIndexRow(db: import('better-sqlite3').Database): PluginInde
       .prepare("SELECT value_json, updated_at_ms FROM config_machine_state WHERE state_key = 'plugins.installedIndex'")
       .get() as { value_json: string; updated_at_ms: number | null } | undefined;
     if (!row) return null;
-    const parsed = safeParse<{ index?: unknown }>(row.value_json, {});
-    const index = parsed?.index;
-    if (!index || typeof index !== 'object') return null;
-    const idx = index as {
-      installRecords?: Record<string, IndexInstallRecord>;
-      plugins?: IndexPluginEntry[];
-      warning?: string | null;
-      generatedAtMs?: number;
-    };
+    const parsed = safeParse<unknown>(row.value_json, null);
+    if (!isPlainObject(parsed)) return null;
+    const index = parsed.index;
+    // Strict shape check, mirroring OpenClaw's own Zod-validated parser which
+    // returns null on an invalid index. A malformed migrated row must NOT be
+    // coerced into a readable EMPTY index: that would both suppress a valid
+    // legacy fallback and let the reconciler manufacture `enabled-not-loaded`
+    // (FAIL, "index omits the plugin") out of unreadable state. Null here means
+    // "no evidence", which the reconciler already handles as index-unreadable.
+    if (!isPlainObject(index)) return null;
+    if (!isPlainObject(index.installRecords)) return null;
+    if (!Array.isArray(index.plugins)) return null;
+    if (index.warning !== undefined && index.warning !== null && typeof index.warning !== 'string') return null;
+    if (index.generatedAtMs !== undefined && typeof index.generatedAtMs !== 'number') return null;
     return {
-      installRecords: idx.installRecords && typeof idx.installRecords === 'object' ? idx.installRecords : {},
-      plugins: Array.isArray(idx.plugins) ? idx.plugins : [],
-      warning: typeof idx.warning === 'string' ? idx.warning : null,
-      generatedAtMs: typeof idx.generatedAtMs === 'number' ? idx.generatedAtMs : (row.updated_at_ms ?? undefined),
+      installRecords: index.installRecords as Record<string, IndexInstallRecord>,
+      plugins: index.plugins as IndexPluginEntry[],
+      warning: typeof index.warning === 'string' ? index.warning : null,
+      generatedAtMs: typeof index.generatedAtMs === 'number' ? index.generatedAtMs : (row.updated_at_ms ?? undefined),
     };
   } catch {
     // No such table (pre-2026.9.4) or any other read failure: fall back.
     return null;
   }
+}
+
+/** A non-null, non-array object — `typeof [] === 'object'` is the trap. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function createRequireSafe(): NodeRequire {
