@@ -8,6 +8,16 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- (none yet)
+
+### Fixed
+- (none yet)
+
+## [5.0.4] - 2026-09-13
+
+Patch on 5.0.3. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`).
+
+### Added
 - **Dashboard v2**: the local dashboard (`shieldcortex --dashboard`) is rebuilt on one shell, one `--sc-*` token set (light/dark/system), and a shared design system (`dashboard/src/components/ds/*`) — the CIC "starship" terminal shell and the Glass shell are retired (`dashboard/legacy-v1/`, recoverable, not deleted). The memory graph is real now: entities and memories as actual nodes (not a nebula of scatter dots), all three edge families (entity↔entity, memory→entity, memory↔memory) drawn with real predicates/relationships, Map/Focus/Path modes, a default Map threshold computed from the real mention-count distribution so it opens readable instead of a 400-node hairball. Overview, Memory (Library/Graph/Recall/Review/Timeline/Files/Replay), Protection (Status/Quarantine/Audit/Intercepts/Policies & Rules), X-Ray, and Settings are restyled onto the DS with honest states throughout (`off`/`unknown`/`unavailable`/`on` — a disabled control never renders as if it were protecting you, and a failed fetch never renders identically to "no data"). New bounded, project-scoped graph endpoints (`GET /api/graph/overview`, `GET /api/graph/entities/:id/neighbourhood`) back the graph. Existing graph routes keep their response fields and gain additive ones (see *Changed*). See `docs/design/2026-09-13-dashboard-v2-ux.md` for the brief and `docs/design/dashboard-v2-final-report.md` for the verification record.
 
 ### Changed
