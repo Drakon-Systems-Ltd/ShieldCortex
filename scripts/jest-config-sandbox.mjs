@@ -56,18 +56,15 @@ mkdirSync(sandboxDir, { recursive: true });
 const auditSandboxDir = join(tmpdir(), 'shieldcortex-jest-audit', `worker-${workerId}`);
 mkdirSync(auditSandboxDir, { recursive: true });
 
-// Same WRITE-path footgun one directory over: signed Guard CLI now best-effort
-// syncs plugins.entries.shieldcortex-realtime.config.actionGuard. Without a
-// throwaway OPENCLAW_HOME, those tests would rewrite the operator's live
-// openclaw.json. Missing config in the sandbox is skip/no-entry — never invent.
-const openclawSandboxDir = join(tmpdir(), 'shieldcortex-jest-openclaw', `worker-${workerId}`);
-mkdirSync(openclawSandboxDir, { recursive: true });
-
 // Establish the sandbox immediately so any config read at test-file load time
 // (a few suites capture the dir at module scope) sees it, not the real dir.
 process.env.SHIELDCORTEX_CONFIG_DIR = sandboxDir;
 process.env.SHIELDCORTEX_AUDIT_DIR = auditSandboxDir;
-process.env.OPENCLAW_HOME = openclawSandboxDir;
+
+// Do NOT set OPENCLAW_HOME here. Installer suites spy os.homedir() and assert
+// openClawConfigPath() lands under that spy; a global OPENCLAW_HOME makes
+// those suites REFUSE / fail (#429/#226/#251). Suites that call
+// setActionGuardCoreConfig must isolate OPENCLAW_HOME themselves.
 
 // Re-assert before every test. Several suites `delete process.env
 // .SHIELDCORTEX_CONFIG_DIR` in their teardown — that pattern was written when
@@ -80,8 +77,5 @@ beforeEach(() => {
   }
   if (!process.env.SHIELDCORTEX_AUDIT_DIR) {
     process.env.SHIELDCORTEX_AUDIT_DIR = auditSandboxDir;
-  }
-  if (!process.env.OPENCLAW_HOME) {
-    process.env.OPENCLAW_HOME = openclawSandboxDir;
   }
 });
