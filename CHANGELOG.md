@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
+- (none yet)
+
+## [5.0.2] - 2026-09-13
+
+Patch on 5.0.1. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`).
+
+### Fixed
 - **Doctor NOTIFY:** signed Action Guard Enforce leftover no longer FAILs `NOTIFY` when the OpenClaw plugin is explicitly off (`plugins.entries.shieldcortex-realtime.enabled:false`, `actionGuard.enabled:false` / `enforce:false`, or `interceptor.enabled:false`). That was Jarvis's 5.0.1 1-fail; the `$` footer prescribed a webhook. FAIL remains when a live enforcing plane claims a sink it does not have. Do not add a webhook. Guard stays off.
 - **#438:** a session lease whose recorded holder PID is confirmed dead no longer wedges the scope until TTL. Blank / non-positive / unconfirmed PIDs still fail closed — a missing pid is not a skeleton key. Freeze semantics unchanged.
 - **#472:** `shieldcortex setup openclaw` honours absolute `OPENCLAW_HOME` (and `~/…`) instead of always writing the operator's real `~/.openclaw`. Relative / `~user` values are ignored — they resolve against OpenClaw's process cwd, which this CLI cannot know. Source checkout no longer carries a stale `plugins/openclaw/dist` manifest (build output only). `v4.54.15` is tagged. The main tarball still does not ship the OpenClaw plugin — that remains `@drakon-systems/shieldcortex-realtime`.
