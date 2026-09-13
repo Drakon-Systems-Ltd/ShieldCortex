@@ -109,4 +109,22 @@ describe('OPENCLAW_HOME override (#472)', () => {
     const configPath = openclaw.openClawConfigPath();
     expect(configPath).toBe(join(homedir(), '.openclaw', 'openclaw.json'));
   });
+
+  it('skill install defaults follow OPENCLAW_HOME, not os.homedir()', () => {
+    const isolated = join(tmp, 'oc-home');
+    mkdirSync(join(isolated, '.openclaw'), { recursive: true });
+    process.env.OPENCLAW_HOME = isolated;
+    const seen: string[] = [];
+    const args = openclaw.resolveSkillInstallArgs('/fake/openclaw', {
+      probe: (_bin, home) => {
+        seen.push(home);
+        return 'Options:\n  --force\n';
+      },
+      readAgents: () => null,
+    });
+    expect(seen).toEqual([isolated]);
+    expect(args).toEqual(['skills', 'install', 'shieldcortex', '--force']);
+    expect(openclaw.findInstalledSkillDirs().every((d) => d.startsWith(isolated))).toBe(true);
+    expect(openclaw.findInstalledSkillDirs().some((d) => d.includes(homedir()))).toBe(false);
+  });
 });

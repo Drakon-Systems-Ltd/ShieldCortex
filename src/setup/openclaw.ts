@@ -2400,7 +2400,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
  * a bare command name is a bet about someone else's PATH). Fall back to the
  * well-known install locations before giving up.
  */
-export function resolveOpenClawBinary(home: string = os.homedir()): string | null {
+export function resolveOpenClawBinary(home: string = resolveUserHome()): string | null {
   try {
     const found = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
     if (found && fs.existsSync(found)) return found;
@@ -2418,7 +2418,7 @@ export function resolveOpenClawBinary(home: string = os.homedir()): string | nul
 }
 
 /** The four places an installed skill copy can live, in preference order. */
-export function findInstalledSkillDirs(home: string = os.homedir()): string[] {
+export function findInstalledSkillDirs(home: string = resolveUserHome()): string[] {
   return [
     path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
     path.join(home, '.openclaw', 'skills', 'shieldcortex'),
@@ -2499,7 +2499,7 @@ export function resolveSkillInstallArgs(
     agent?: string;
   } = {},
 ): string[] {
-  const home = opts.home ?? os.homedir();
+  const home = opts.home ?? resolveUserHome();
   const help = (opts.probe ?? probeSkillInstallHelp)(bin, home);
   const base = ['skills', 'install', 'shieldcortex', '--force'];
   if (help === null) return [...base, INSTALL_POLICY_ACK_FLAG];
@@ -2575,7 +2575,7 @@ export async function runSkillInstallWithRetry<T extends { stderr?: string | nul
  * and it VERIFIES: the installed SKILL.md version must match this CLI's
  * version, or it says so plainly instead of printing a green line.
  */
-export async function installOpenClawSkill(home: string = os.homedir(), agent?: string): Promise<boolean> {
+export async function installOpenClawSkill(home: string = resolveUserHome(), agent?: string): Promise<boolean> {
   const bin = resolveOpenClawBinary(home);
   if (!bin) {
     console.log('✗ Could not find the `openclaw` binary (PATH or known install locations).');
@@ -2632,7 +2632,7 @@ export function skillDirLooksShieldcortex(dir: string): boolean {
  * no uninstall verb for skills, so direct removal of the known install
  * locations is the only mechanism — gated on the ownership check above.
  */
-export function uninstallOpenClawSkill(home: string = os.homedir()): { removed: string[]; skipped: string[] } {
+export function uninstallOpenClawSkill(home: string = resolveUserHome()): { removed: string[]; skipped: string[] } {
   const removed: string[] = [];
   const skipped: string[] = [];
   for (const dir of findInstalledSkillDirs(home)) {
@@ -2694,7 +2694,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
           console.error('--agent requires an agent id');
           process.exit(1);
         }
-        const ok = await installOpenClawSkill(os.homedir(), agent);
+        const ok = await installOpenClawSkill(resolveUserHome(), agent);
         if (!ok) process.exit(1);
       } else if (verb === 'uninstall') {
         uninstallOpenClawSkill();
