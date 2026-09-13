@@ -24,6 +24,8 @@
  * produces the headline: one status, one sentence, at most one command.
  */
 
+import semver from 'semver';
+
 export type RepairOutcome =
   /** Loaded and enforcing, both proven. */
   | 'protected'
@@ -51,6 +53,8 @@ export interface RepairVerdictInput {
   canaryConsented: boolean;
   /** True when the gateway was restarted but never proved ready. */
   readinessUnproven?: boolean;
+  onDiskVersion?: string | null;
+  expectedVersion?: string;
 }
 
 export interface RepairVerdict {
@@ -89,7 +93,21 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
     };
   }
 
-  // A downgrade is a real, actionable fault and deserves its own words.
+  // An old disk plugin is not proof the gateway is unprotected. A major CLI
+  // upgrade can outrun the plugin install; unread logs cannot prove a silent
+  // loaded-build downgrade either.
+  const majorUpgradeLag = input.onDiskVersion && input.expectedVersion &&
+    semver.valid(input.onDiskVersion) && semver.valid(input.expectedVersion) &&
+    semver.major(input.onDiskVersion) < semver.major(input.expectedVersion);
+  if (sc?.versionProof === false && (sc.rosterState !== 'loaded' || majorUpgradeLag)) {
+    return {
+      outcome: 'protected-unproven',
+      headline: 'The installed plugin is behind this CLI. Update the plugin; protection by the new build is not yet proven.',
+      nextCommand: 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest',
+    };
+  }
+
+  // A silent downgrade of the loaded build remains a real fault.
   if (sc?.versionProof === false) {
     return {
       outcome: 'unprotected',
@@ -123,7 +141,7 @@ export function summariseRepair(input: RepairVerdictInput): RepairVerdict {
 
   // Canary proved enforcement live, version OK, but boot roster unread.
   // Not unprotected — never scream FAILED for "install healthy, load line missing".
-  // versionProof===false already returned unprotected above; remaining is true|undefined.
+  // versionProof===false already returned above; remaining is true|undefined.
   if (sc?.canaryProof === true && sc.rosterState === 'unproven') {
     return {
       outcome: 'protected-unproven',

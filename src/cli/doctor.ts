@@ -6075,8 +6075,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'warn',
         message:
-          'load state UNPROVEN — absent from the boot roster snapshot, but a plugin registration was sighted after it ' +
-          '(registration races the snapshot; CLI activity writes identical lines). Neither protected nor unprotected is proven',
+          verdict.loadedInLiveRoster == null
+            ? 'load state UNPROVEN — no fresh gateway roster could be read. A missing install-index entry does not prove a live unload'
+            : 'load state UNPROVEN — absent from the boot roster snapshot, but a plugin registration was sighted after it ' +
+              '(registration races the snapshot; CLI activity writes identical lines). Neither protected nor unprotected is proven',
         fix: `Prove it live: ${LIVE_CANARY_COMMAND}`,
       };
     case 'enabled-not-loaded':
@@ -6560,7 +6562,11 @@ export async function checkOpenClawSkillVersion(
   cliVersion: string = pkg.version,
 ): Promise<CheckResult> {
   const label = 'OpenClaw skill version';
-  const { findInstalledSkillDirs, readInstalledSkillVersion } = await import('../setup/openclaw.js');
+  const { findInstalledSkillDirs, readInstalledSkillVersion, readConfiguredAgentIds, preferredSkillAgent } = await import('../setup/openclaw.js');
+  const agent = preferredSkillAgent(readConfiguredAgentIds(home));
+  // Agent ids are config data, so quote unusual ids in the copy-paste command.
+  const agentArg = agent && (/^[\w.-]+$/.test(agent) ? agent : `'${agent.replace(/'/g, `'\\''`)}'`);
+  const installCommand = `shieldcortex openclaw skill install${agentArg ? ` --agent ${agentArg}` : ''}`;
   const dirs = findInstalledSkillDirs(home);
   if (dirs.length === 0) {
     // Remediation lives in `message`, not `fix` — this is the only such site,
@@ -6568,7 +6574,7 @@ export async function checkOpenClawSkillVersion(
     return {
       label,
       status: 'info',
-      message: 'skill not installed (optional) — `shieldcortex openclaw skill install` adds it',
+      message: `skill not installed (optional) — \`${installCommand}\` adds it`,
       needsOpenClawCli: { subcommand: 'skills' },
     };
   }
@@ -6577,7 +6583,7 @@ export async function checkOpenClawSkillVersion(
     return {
       label, status: 'warn',
       message: `skill present at ${dirs[0]} but its SKILL.md version is unreadable`,
-      fix: 'Run shieldcortex openclaw skill install to reinstall a clean copy',
+      fix: `Run ${installCommand} to reinstall a clean copy`,
       needsOpenClawCli: { subcommand: 'skills' },
     };
   }
@@ -6587,7 +6593,7 @@ export async function checkOpenClawSkillVersion(
   return {
     label, status: 'warn',
     message: `skill v${v} does not match CLI v${cliVersion} — agents are reading stale instructions`,
-    fix: 'Run shieldcortex openclaw skill install',
+    fix: `Run ${installCommand}`,
     needsOpenClawCli: { subcommand: 'skills' },
   };
 }

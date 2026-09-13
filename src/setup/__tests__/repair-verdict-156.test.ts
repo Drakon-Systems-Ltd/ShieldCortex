@@ -18,6 +18,28 @@ import { describe, it, expect } from '@jest/globals';
 import { summariseRepair, renderRepairHeadline } from '../repair-verdict.js';
 
 describe('#156 — repair says whether you are protected, in English', () => {
+  it('5.0 update lag with unread roster is attention, not unprotected', () => {
+    const v = summariseRepair({
+      applied: true,
+      canaryConsented: false,
+      selfCheck: { ok: false, rosterState: 'unproven', canaryProof: false, versionProof: false },
+    });
+    expect(v.outcome).toBe('protected-unproven');
+    expect(v.headline).not.toMatch(/FAILED|Not protected/i);
+    expect(v.nextCommand).toBe('openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest');
+  });
+
+  it('a loaded previous-major plugin is update lag; live absence still outranks lag', () => {
+    for (const rosterState of ['loaded', 'absent'] as const) {
+      const v = summariseRepair({
+        applied: true, canaryConsented: false,
+        onDiskVersion: '4.54.15', expectedVersion: '5.0.0',
+        selfCheck: { ok: false, rosterState, canaryProof: false, versionProof: false },
+      });
+      expect(v.outcome).toBe(rosterState === 'loaded' ? 'protected-unproven' : 'unprotected');
+    }
+  });
+
   it('both proofs pass → protected, and nothing is asked of the operator', () => {
     const v = summariseRepair({
       applied: true,

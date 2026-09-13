@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - (none yet)
 
+### Fixed
+- Update and doctor now report what was actually verified: after an npm upgrade, update re-executes the newly installed CLI; a lagging OpenClaw plugin warns instead of claiming to be current, and lag with unread load evidence closes with NEEDS ATTENTION rather than FAILED. Skill installs retry once without a rejected flag and select an agent on multi-agent hosts. Doctor LOAD and repair also accept fresh, running-PID systemd journal evidence instead of contradicting a registered gateway. Action Guard stays off by default.
+
 ## [5.0.0] - 2026-09-12
 
 **Breaking major.** Node 20 is gone. Read [docs/UPGRADING-5.md](docs/UPGRADING-5.md) *before* `npm install -g shieldcortex`. Stay on 4.x with `npm install -g shieldcortex@4` (last 4.x is 4.54.15). Action Guard stays off by default.

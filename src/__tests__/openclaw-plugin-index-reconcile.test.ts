@@ -31,7 +31,11 @@ interface Fixture {
 }
 
 function loadFixture(name: string): Fixture {
-  return JSON.parse(fs.readFileSync(path.join(fixturesDir, `${name}.json`), 'utf-8')) as Fixture;
+  const fixture = JSON.parse(fs.readFileSync(path.join(fixturesDir, `${name}.json`), 'utf-8')) as Fixture;
+  // #501: the old index-only fixtures cannot prove a live unload. Supply an
+  // explicit live absence for these silent-drop regression scenarios.
+  if (name.startsWith('enabled-not-loaded')) fixture.input.liveRoster = ['brave', 'codex'];
+  return fixture;
 }
 
 const CASES = [
@@ -104,7 +108,7 @@ describe('reconcilePluginState — #74 field fixtures', () => {
     const fx = loadFixture('enabled-not-loaded');
     // Simulate a broken better-sqlite3 binding / locked DB / pre-2026.6.1 layout:
     // readPluginInstallIndex returns null. On-disk build is still present.
-    const verdict = reconcilePluginState({ ...fx.input, index: null });
+    const verdict = reconcilePluginState({ ...fx.input, index: null, liveRoster: null });
     expect(verdict.state).toBe('index-unreadable');
     expect(verdict.severity).toBe('warn');
     expect(verdict.indexReadable).toBe(false);
@@ -113,12 +117,12 @@ describe('reconcilePluginState — #74 field fixtures', () => {
     expect(verdict.reasons.join(' ')).toMatch(/unreadable|cannot read|sqlite/i);
   });
 
-  it('#74 finding 2: a READABLE index that omits the plugin from the roster IS the hard fail', () => {
+  it('#501: a READABLE index that omits the plugin is NOT live absence proof', () => {
     const fx = loadFixture('enabled-not-loaded');
-    const verdict = reconcilePluginState(fx.input);
+    const verdict = reconcilePluginState({ ...fx.input, liveRoster: null });
     expect(verdict.indexReadable).toBe(true);
-    expect(verdict.state).toBe('enabled-not-loaded');
-    expect(verdict.severity).toBe('fail');
+    expect(verdict.state).toBe('load-unproven');
+    expect(verdict.severity).toBe('warn');
   });
 
   it('is pure: does not mutate its input', () => {

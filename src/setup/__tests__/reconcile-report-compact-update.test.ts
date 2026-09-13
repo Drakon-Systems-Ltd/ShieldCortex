@@ -4,6 +4,7 @@ import {
   protectionLedgerFromReconcile,
   type ReconcileExecResult,
 } from '../openclaw-reconcile.js';
+import { deriveUpdateVerdict, renderUpdatePanel, NO_STYLE } from '../../cli/term-ui.js';
 
 /**
  * Friday Mac phone-SSH screenshot class: canary denied+audited, version OK,
@@ -96,6 +97,29 @@ describe('formatReconcileReport compact (update footer)', () => {
 });
 
 describe('protectionLedgerFromReconcile', () => {
+  it('5.0 CLI + 4.54.15 plugin + unread roster closes with NEEDS ATTENTION, exit 0', () => {
+    const r = fridayClassResult();
+    r.postVerdict = { ...r.postVerdict!, state: 'index-unreadable', onDiskVersion: '4.54.15', expectedVersion: '5.0.0' };
+    r.selfCheck = { ...r.selfCheck!, versionProof: false, canaryProof: false };
+    r.stepResults = [];
+    const ledger = protectionLedgerFromReconcile(r);
+    expect(ledger.status).toBe('unproven');
+    expect(ledger.outcome).toBe('protected-unproven');
+    expect(ledger.detail).toContain('next: openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest');
+    const compact = formatReconcileReport(r, { compact: true }).join('\n');
+    expect(compact).not.toMatch(/FAILED|unprotected|Not protected/i);
+    const failed = ledger.status === 'failed';
+    const exitCode = failed ? 1 : 0;
+    expect(exitCode).toBe(0);
+    const panel = renderUpdatePanel({
+      fromVersion: '4.54.15', toVersion: '5.0.0',
+      verdict: deriveUpdateVerdict({ failed, exitCode, attention: true }),
+      rows: [], details: ledger.detail, next: [],
+    }, { width: 100, style: NO_STYLE, unicode: true }).join('\n');
+    expect(panel).toContain('NEEDS ATTENTION');
+    expect(panel).not.toContain('FAILED');
+  });
+
   it('maps friday-class to unproven attention, not failed', () => {
     const ledger = protectionLedgerFromReconcile(fridayClassResult());
     expect(ledger.status).toBe('unproven');

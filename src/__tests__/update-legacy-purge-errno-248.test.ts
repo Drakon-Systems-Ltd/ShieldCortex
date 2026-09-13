@@ -62,6 +62,8 @@ describe('#248 — a denied legacy purge is surfaced, not swallowed', () => {
     const r = await stepOpenClawPlugin(home, {
       run: (() => Promise.resolve({ stdout: '', stderr: '' })) as never,
       rm: (() => {}) as never,
+      readPluginVersion: () => '5.0.0',
+      readCliVersion: () => '5.0.0',
     });
 
     expect(r.status).toBe('ok');
