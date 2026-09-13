@@ -313,7 +313,9 @@ export async function reexecUpdatedCli(
       child.once('close', (code) => resolve(code ?? 1));
     }));
     return await launch(process.execPath, [entry, ...(deps.argv ?? process.argv.slice(2))], {
-      ...env, SHIELDCORTEX_UPDATE_REEXEC: '1',
+      ...env,
+      SHIELDCORTEX_UPDATE_REEXEC: '1',
+      SHIELDCORTEX_UPDATE_FROM_VERSION: currentVersion,
     });
   } catch (err) {
     const reason = describeRunFailure(err).reason;
@@ -859,18 +861,21 @@ export async function stepVerifyProtection(home: string): Promise<StepResult> {
 export async function runUpdate(): Promise<void> {
   const home = homedir();
   const currentVersion = IN_PROCESS_VERSION;
+  const fromVersion = process.env.SHIELDCORTEX_UPDATE_FROM_VERSION || currentVersion;
   const flowStart = Date.now();
   const force = process.argv.includes('--force') || process.argv.includes('-f');
 
   // Header — show current version immediately, then update with latest once we know it.
   // (We resolve `latest` before drawing the arrow so the banner is correct.)
   const latest = await fetchLatestVersion();
-  header(currentVersion, latest.version);
-  if (force) {
-    process.stdout.write(`  ${paint('yellow', '!')}  ${paint('gray', '--force: reinstall everything regardless of version')}\n\n`);
+  const reexeced = process.env.SHIELDCORTEX_UPDATE_REEXEC === '1';
+  if (!reexeced) {
+    header(currentVersion, latest.version);
+    if (force) {
+      process.stdout.write(`  ${paint('yellow', '!')}  ${paint('gray', '--force: reinstall everything regardless of version')}\n\n`);
+    }
   }
 
-  const reexeced = process.env.SHIELDCORTEX_UPDATE_REEXEC === '1';
   let mainUpdated = reexeced;
   let npmStatus: StepResult['status'] = 'ok';
   try {
@@ -947,7 +952,7 @@ export async function runUpdate(): Promise<void> {
     /* update must not fail on allowlist scan */
   }
 
-  maybePrint411Notice(currentVersion, mainUpdated);
+  maybePrint411Notice(fromVersion, mainUpdated);
   maybePrintActionGuardDefaultOffNotice(mainUpdated);
   await maybePrintDashboardHint();
 
@@ -1014,7 +1019,7 @@ export async function runUpdate(): Promise<void> {
   const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
   const panel = renderUpdatePanel(
     {
-      fromVersion: currentVersion,
+      fromVersion,
       toVersion: latest.version || currentVersion,
       verdict,
       rows,

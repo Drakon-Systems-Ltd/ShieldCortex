@@ -15,6 +15,7 @@ describe('update executes the newly installed CLI', () => {
     })).toBe(7);
     expect(launch).toHaveBeenCalledWith(process.execPath, [path.join(root, 'dist/index.js'), 'update', '--force', '--verbose'], {
       SHIELDCORTEX_UPDATE_REEXEC: '1',
+      SHIELDCORTEX_UPDATE_FROM_VERSION: '4.54.15',
     });
   });
 
@@ -44,6 +45,8 @@ describe('update executes the newly installed CLI', () => {
     expect(body).toMatch(/reexecFailed[\s\S]*protection unproven/);
     expect(src).toMatch(/shell: false/);
     expect(body).toContain('maybePrintActionGuardDefaultOffNotice(mainUpdated)');
+    expect(src).toContain('SHIELDCORTEX_UPDATE_FROM_VERSION');
+    expect(body).toMatch(/maybePrint411Notice\(fromVersion/);
   });
 });
 
