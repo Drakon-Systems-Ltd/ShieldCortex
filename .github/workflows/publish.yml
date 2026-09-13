@@ -116,6 +116,22 @@ jobs:
           echo "version=${TAG#v}" >> $GITHUB_OUTPUT
           echo "Resolved release tag: ${TAG}"
 
+      # #472: refuse to publish an npm version that is not a git tag on this
+      # commit. A missing tag (v4.54.15 at issue time) leaves the artefact
+      # unbound to source. Tag-push already has the tag; workflow_dispatch
+      # from main must still see it locally after fetch.
+      - name: Require matching git tag
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" 2>/dev/null || true
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::No git tag ${TAG} for package.json version ${VERSION}. Tag the release commit before publishing (#472)."
+            exit 1
+          fi
+          TAG_COMMIT=$(git rev-list -n 1 "${TAG}")
+          echo "Tag ${TAG} -> ${TAG_COMMIT}"
+
       - name: Publish to npm
         if: steps.version_check.outputs.already_published == 'false'
         run: npm publish

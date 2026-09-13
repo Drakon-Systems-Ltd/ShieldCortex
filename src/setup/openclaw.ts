@@ -95,12 +95,32 @@ export function isDockerEnvironment(): boolean {
 const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 
 /**
- * Resolve the real user's home directory.
+ * Resolve the operator home the installer will write under.
+ *
+ * #472: OPENCLAW_HOME (absolute, or `~/…`) wins, matching OpenClaw's
+ * home-dir.ts and doctor's openClawEffectiveHome. Relative / `~user`
+ * values are ignored — they resolve against OpenClaw's process cwd,
+ * which this CLI cannot know, so probing them would write into the
+ * live tree while a throwaway profile thought it was isolated.
  *
  * When run under sudo, os.homedir() returns /root/.
  * We check SUDO_USER first and resolve their actual home.
  */
 function resolveUserHome(): string {
+  const explicit = process.env.OPENCLAW_HOME?.trim();
+  if (explicit) {
+    if (/^~($|[\\/])/.test(explicit)) {
+      const fallback = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || os.homedir();
+      if (fallback && path.isAbsolute(fallback)) {
+        return path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback));
+      }
+      // relative HOME / missing base: do not path.resolve against cwd.
+    } else if (path.isAbsolute(explicit)) {
+      return path.resolve(explicit);
+    }
+    // relative / ~user: fall through to sudo / os.homedir, never cwd.
+  }
+
   const sudoUser = process.env.SUDO_USER;
   if (sudoUser && SAFE_USERNAME.test(sudoUser)) {
     // Try getent passwd (reliable on Linux) — argv-array, no shell.
@@ -150,6 +170,22 @@ function resolveUserHome(): string {
   }
 
   return home;
+}
+
+/**
+ * Env for child `openclaw` so it sees the same home this CLI just resolved.
+ * Setting HOME to the resolved path while leaving a `~/…` OPENCLAW_HOME
+ * would make OpenClaw expand the tilde a second time against the rewritten
+ * HOME (#472 GPT-6). Always pass the absolute result as both HOME and
+ * OPENCLAW_HOME.
+ */
+function openClawChildEnv(extra: NodeJS.ProcessEnv = {}, home = resolveUserHome()): NodeJS.ProcessEnv {
+  return { ...process.env, HOME: home, OPENCLAW_HOME: home, ...extra };
+}
+
+/** Test seam: the env native `openclaw` would inherit. */
+export function __openClawChildEnvForTest(home?: string): NodeJS.ProcessEnv {
+  return home === undefined ? openClawChildEnv() : openClawChildEnv({}, home);
 }
 
 /**
@@ -993,7 +1029,7 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // state. If OpenClaw refuses "plugin already exists", the --link attempt
   // and the local-copy fallback still have something to work with.
 
-  const env = { ...process.env, HOME: resolveUserHome() };
+  const env = openClawChildEnv();
   const attempts: Array<{ args: string[]; label: string }> = [
     { args: ['plugins', 'install', '@drakon-systems/shieldcortex-realtime@latest'], label: 'package install' },
     { args: ['plugins', 'install', '--link', PLUGIN_PACKAGE_SOURCE], label: 'linked install' },
@@ -2038,7 +2074,7 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   } catch {
     return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `openclaw plugins install --force ' + pluginSpec + '` then `openclaw gateway restart`.' };
   }
-  const spawnEnv = { ...process.env, HOME: home };
+  const spawnEnv = openClawChildEnv({}, home);
 
   // 4. Re-enable if it was auto-disabled.
   if (disabled) {
@@ -2221,7 +2257,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
     process.exit(1);
   }
 
-  const spawnEnv = { ...process.env, HOME: home };
+  const spawnEnv = openClawChildEnv({}, home);
 
   // Step 3: Uninstall the plugin. The uninstall command requires interactive
   // confirmation by default; pipe `y\n` via stdin to auto-confirm.
@@ -2364,7 +2400,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
  * a bare command name is a bet about someone else's PATH). Fall back to the
  * well-known install locations before giving up.
  */
-export function resolveOpenClawBinary(home: string = os.homedir()): string | null {
+export function resolveOpenClawBinary(home: string = resolveUserHome()): string | null {
   try {
     const found = execSync('which openclaw', { encoding: 'utf-8', timeout: 5000 }).trim();
     if (found && fs.existsSync(found)) return found;
@@ -2382,7 +2418,7 @@ export function resolveOpenClawBinary(home: string = os.homedir()): string | nul
 }
 
 /** The four places an installed skill copy can live, in preference order. */
-export function findInstalledSkillDirs(home: string = os.homedir()): string[] {
+export function findInstalledSkillDirs(home: string = resolveUserHome()): string[] {
   return [
     path.join(home, '.openclaw', 'workspace', 'skills', 'shieldcortex'),
     path.join(home, '.openclaw', 'skills', 'shieldcortex'),
@@ -2418,7 +2454,7 @@ function probeSkillInstallHelp(bin: string, home: string): string | null {
     const r = spawnSync(bin, ['skills', 'install', '--help'], {
       encoding: 'utf-8',
       timeout: 15000,
-      env: { ...process.env, HOME: home },
+      env: openClawChildEnv({}, home),
     });
     if (r.error || r.status !== 0) return null;
     return `${r.stdout ?? ''}${r.stderr ?? ''}`;
@@ -2463,7 +2499,7 @@ export function resolveSkillInstallArgs(
     agent?: string;
   } = {},
 ): string[] {
-  const home = opts.home ?? os.homedir();
+  const home = opts.home ?? resolveUserHome();
   const help = (opts.probe ?? probeSkillInstallHelp)(bin, home);
   const base = ['skills', 'install', 'shieldcortex', '--force'];
   if (help === null) return [...base, INSTALL_POLICY_ACK_FLAG];
@@ -2539,7 +2575,7 @@ export async function runSkillInstallWithRetry<T extends { stderr?: string | nul
  * and it VERIFIES: the installed SKILL.md version must match this CLI's
  * version, or it says so plainly instead of printing a green line.
  */
-export async function installOpenClawSkill(home: string = os.homedir(), agent?: string): Promise<boolean> {
+export async function installOpenClawSkill(home: string = resolveUserHome(), agent?: string): Promise<boolean> {
   const bin = resolveOpenClawBinary(home);
   if (!bin) {
     console.log('✗ Could not find the `openclaw` binary (PATH or known install locations).');
@@ -2549,7 +2585,7 @@ export async function installOpenClawSkill(home: string = os.homedir(), agent?: 
   const r = await runSkillInstallWithRetry(resolveSkillInstallArgs(bin, { home, agent }), async (args) => spawnSync(bin, args, {
     encoding: 'utf-8',
     timeout: 120000,
-    env: { ...process.env, HOME: home },
+    env: openClawChildEnv({}, home),
     shell: false,
   }));
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
@@ -2596,7 +2632,7 @@ export function skillDirLooksShieldcortex(dir: string): boolean {
  * no uninstall verb for skills, so direct removal of the known install
  * locations is the only mechanism — gated on the ownership check above.
  */
-export function uninstallOpenClawSkill(home: string = os.homedir()): { removed: string[]; skipped: string[] } {
+export function uninstallOpenClawSkill(home: string = resolveUserHome()): { removed: string[]; skipped: string[] } {
   const removed: string[] = [];
   const skipped: string[] = [];
   for (const dir of findInstalledSkillDirs(home)) {
@@ -2658,7 +2694,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
           console.error('--agent requires an agent id');
           process.exit(1);
         }
-        const ok = await installOpenClawSkill(os.homedir(), agent);
+        const ok = await installOpenClawSkill(resolveUserHome(), agent);
         if (!ok) process.exit(1);
       } else if (verb === 'uninstall') {
         uninstallOpenClawSkill();

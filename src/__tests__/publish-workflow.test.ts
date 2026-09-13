@@ -161,4 +161,13 @@ describe('publish.yml — per-package recovery', () => {
     expect(noToken['Sync + verify ClawHub']).toBe(false);
     expect(noToken['Skip ClawHub sync (missing token)']).toBe(true);
   });
+
+  it('refuses to publish without a matching git tag (#472)', () => {
+    const step = byName['Require matching git tag'];
+    expect(step).toBeDefined();
+    expect(step?.if).toBeUndefined();
+    expect(step?.body).toMatch(/No git tag/);
+    expect(step?.body).toMatch(/rev-parse -q --verify/);
+    expect(simulate({ rootPublished: true, pluginPublished: true })['Require matching git tag']).toBe(true);
+  });
 });

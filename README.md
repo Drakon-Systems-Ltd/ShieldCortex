@@ -586,7 +586,9 @@ openclaw plugins install @drakon-systems/shieldcortex-realtime
 ```
 
 This installs the hook from the main `shieldcortex` package and the real-time
-plugin from the standalone OpenClaw plugin package.
+plugin from the standalone OpenClaw plugin package. The main tarball does
+**not** include `@drakon-systems/shieldcortex-realtime` — that is a separate
+npm package. Look in `plugins/hermes` on the main tarball, not `plugins/openclaw`.
 
 Existing installs can keep using the compatibility wrapper:
 
