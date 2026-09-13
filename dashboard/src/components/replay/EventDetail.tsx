@@ -22,26 +22,26 @@ interface EventDetailProps {
  * args, content) into a friendlier layout instead of dumping raw JSON.
  */
 const KIND_BG: Record<ReplayKind, string> = {
-  prompt: 'bg-[var(--term-electric)]/15 text-[var(--term-electric-fg)] theme-glass:bg-[var(--sc-coral)]/15 theme-glass:text-[var(--sc-coral)]',
-  response: 'bg-[var(--term-neon)]/15 text-[var(--term-neon-fg)] theme-glass:bg-[var(--sc-cyan)]/15 theme-glass:text-[var(--sc-cyan)]',
-  tool_call: 'bg-[var(--term-warn)]/15 text-[var(--term-warn)] theme-glass:bg-amber-500/15 theme-glass:text-amber-400',
-  tool_result: 'bg-[var(--term-neon)]/10 text-[var(--term-neon-fg)] theme-glass:bg-[var(--sc-cyan)]/10 theme-glass:text-[var(--sc-cyan)]',
-  tool_error: 'bg-[var(--term-danger)]/15 text-[var(--term-danger)] theme-glass:bg-rose-500/15 theme-glass:text-rose-400',
-  hook_fire: 'bg-[var(--term-border)] text-[var(--term-text-muted)] theme-glass:bg-[var(--sc-border)] theme-glass:text-[var(--sc-text-secondary)]',
+  prompt: 'bg-[var(--sc-primary)]/15 text-[var(--sc-primary)] theme-glass:bg-[var(--sc-coral)]/15 theme-glass:text-[var(--sc-coral)]',
+  response: 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-cyan)]/15 theme-glass:text-[var(--sc-cyan)]',
+  tool_call: 'bg-[var(--sc-warn)]/15 text-[var(--sc-warn)] theme-glass:bg-amber-500/15 theme-glass:text-amber-400',
+  tool_result: 'bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-cyan)]/10 theme-glass:text-[var(--sc-cyan)]',
+  tool_error: 'bg-[var(--sc-danger)]/15 text-[var(--sc-danger)] theme-glass:bg-rose-500/15 theme-glass:text-rose-400',
+  hook_fire: 'bg-[var(--sc-border)] text-[var(--sc-text-muted)] theme-glass:bg-[var(--sc-border)] theme-glass:text-[var(--sc-text-secondary)]',
 };
 
 export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
   if (loading) {
     return (
       <div className="flex h-full flex-col">
-        <div className="flex items-center justify-between gap-2 border-b border-[var(--term-border)] theme-glass:border-[var(--sc-border)] px-3 py-2">
-          <div className="h-4 w-20 animate-pulse rounded bg-[var(--term-border)]/60" />
-          <div className="h-3 w-16 animate-pulse rounded bg-[var(--term-border)]/40" />
+        <div className="flex items-center justify-between gap-2 border-b border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] px-3 py-2">
+          <div className="h-4 w-20 animate-pulse rounded bg-[var(--sc-border)]/60" />
+          <div className="h-3 w-16 animate-pulse rounded bg-[var(--sc-border)]/40" />
         </div>
         <div className="flex-1 space-y-2 p-3">
-          <div className="h-3 w-3/4 animate-pulse rounded bg-[var(--term-border)]/40" />
-          <div className="h-3 w-1/2 animate-pulse rounded bg-[var(--term-border)]/40" />
-          <div className="h-3 w-5/6 animate-pulse rounded bg-[var(--term-border)]/40" />
+          <div className="h-3 w-3/4 animate-pulse rounded bg-[var(--sc-border)]/40" />
+          <div className="h-3 w-1/2 animate-pulse rounded bg-[var(--sc-border)]/40" />
+          <div className="h-3 w-5/6 animate-pulse rounded bg-[var(--sc-border)]/40" />
         </div>
       </div>
     );
@@ -51,11 +51,11 @@ export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="max-w-xs space-y-2 px-6 text-center">
-          <div className="text-xs font-mono uppercase tracking-wider text-[var(--term-text-muted)]">
+          <div className="text-xs font-mono uppercase tracking-wider text-[var(--sc-text-muted)]">
             No event selected
           </div>
-          <div className="text-[11px] font-mono text-[var(--term-text-dim)]">
-            Click a tick on the scrubber, or press <kbd className="rounded border border-[var(--term-border)] px-1">space</kbd> to play.
+          <div className="text-[11px] font-mono text-[var(--sc-text-dim)]">
+            Click a tick on the scrubber, or press <kbd className="rounded border border-[var(--sc-border)] px-1">space</kbd> to play.
           </div>
         </div>
       </div>
@@ -70,7 +70,7 @@ export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
   return (
     <div className="flex h-full flex-col">
       {/* Header strip */}
-      <div className="flex items-center justify-between gap-2 border-b border-[var(--term-border)] theme-glass:border-[var(--sc-border)] px-3 py-2">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] px-3 py-2">
         <div className="flex items-center gap-2 min-w-0">
           <span
             className={cn(
@@ -81,37 +81,37 @@ export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
             {event.kind}
           </span>
           {indexLabel && (
-            <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--term-text-muted)]">
+            <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--sc-text-muted)]">
               {indexLabel}
             </span>
           )}
         </div>
-        <div className="text-[10px] font-mono text-[var(--term-text-dim)] tabular-nums">
+        <div className="text-[10px] font-mono text-[var(--sc-text-dim)] tabular-nums">
           {formatTs(event.ts)}
         </div>
       </div>
 
       {/* Meta line — actor, duration, audit link */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--term-border)] theme-glass:border-[var(--sc-border)] px-3 py-1.5 text-[10px] font-mono">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] px-3 py-1.5 text-[10px] font-mono">
         {event.actor && (
-          <span className="text-[var(--term-text-muted)]">
-            actor: <span className="text-[var(--term-text)]">{event.actor}</span>
+          <span className="text-[var(--sc-text-muted)]">
+            actor: <span className="text-[var(--sc-text)]">{event.actor}</span>
           </span>
         )}
         {event.duration_ms !== null && (
-          <span className="text-[var(--term-text-muted)]">
-            duration: <span className="text-[var(--term-text)] tabular-nums">{event.duration_ms}ms</span>
+          <span className="text-[var(--sc-text-muted)]">
+            duration: <span className="text-[var(--sc-text)] tabular-nums">{event.duration_ms}ms</span>
           </span>
         )}
         {event.project && (
-          <span className="text-[var(--term-text-muted)]">
-            project: <span className="text-[var(--term-text)]">{event.project}</span>
+          <span className="text-[var(--sc-text-muted)]">
+            project: <span className="text-[var(--sc-text)]">{event.project}</span>
           </span>
         )}
         {event.audit_id !== null && (
-          <span className="text-[var(--term-danger)]">
+          <span className="text-[var(--sc-danger)]">
             audit: <span className="tabular-nums">#{event.audit_id}</span>
-            <span className="ml-1 text-[var(--term-text-dim)]">(scanned)</span>
+            <span className="ml-1 text-[var(--sc-text-dim)]">(scanned)</span>
           </span>
         )}
       </div>
@@ -134,15 +134,15 @@ function renderBody(event: ReplayEvent, text: string | null) {
     return (
       <div className="space-y-2">
         <div>
-          <span className="text-[var(--term-text-muted)]">tool: </span>
-          <span className="text-[var(--term-warn)]">{name}</span>
+          <span className="text-[var(--sc-text-muted)]">tool: </span>
+          <span className="text-[var(--sc-warn)]">{name}</span>
           {toolUseId && (
-            <span className="ml-2 text-[var(--term-text-dim)]">{toolUseId}</span>
+            <span className="ml-2 text-[var(--sc-text-dim)]">{toolUseId}</span>
           )}
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-[var(--term-text-muted)] mb-1">input</div>
-          <pre className="whitespace-pre-wrap break-words text-[var(--term-text)] theme-glass:text-[var(--sc-text-primary)]">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--sc-text-muted)] mb-1">input</div>
+          <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
             {prettyJson(payload.input)}
           </pre>
         </div>
@@ -157,9 +157,9 @@ function renderBody(event: ReplayEvent, text: string | null) {
     return (
       <div className="space-y-2">
         {toolUseId && (
-          <div className="text-[var(--term-text-dim)] text-[10px]">↳ {toolUseId}</div>
+          <div className="text-[var(--sc-text-dim)] text-[10px]">↳ {toolUseId}</div>
         )}
-        <pre className="whitespace-pre-wrap break-words text-[var(--term-text)] theme-glass:text-[var(--sc-text-primary)]">
+        <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
           {typeof content === 'string' ? content : prettyJson(content)}
         </pre>
       </div>
@@ -169,7 +169,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
   // Prompt / response: the .text field is the headline; show it cleanly
   if (text) {
     return (
-      <pre className="whitespace-pre-wrap break-words text-[var(--term-text)] theme-glass:text-[var(--sc-text-primary)]">
+      <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
         {text}
       </pre>
     );
@@ -177,7 +177,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
 
   // Fallback: pretty-print the whole payload
   return (
-    <pre className="whitespace-pre-wrap break-words text-[var(--term-text)] theme-glass:text-[var(--sc-text-primary)]">
+    <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text-primary)]">
       {prettyJson(payload)}
     </pre>
   );

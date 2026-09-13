@@ -87,7 +87,7 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
   }, [toggle, stepBack, stepForward, jumpToStart, jumpToEnd, cycleSpeed]);
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] px-3 py-2">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] px-3 py-2">
       {/* Transport */}
       <div className="flex items-center gap-1">
         <ControlButton ariaLabel="Jump to start (Shift+←)" disabled={atStart} onClick={jumpToStart}>
@@ -120,18 +120,18 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
       </div>
 
       {/* Progress label */}
-      <div className="text-[11px] font-mono text-[var(--term-text-muted)] tabular-nums">
-        <span className="text-[var(--term-text)]">{Math.min(currentIndex + 1, total)}</span>
-        <span className="text-[var(--term-text-dim)]"> / </span>
+      <div className="text-[11px] font-mono text-[var(--sc-text-muted)] tabular-nums">
+        <span className="text-[var(--sc-text)]">{Math.min(currentIndex + 1, total)}</span>
+        <span className="text-[var(--sc-text-dim)]"> / </span>
         <span>{total}</span>
       </div>
 
       {/* Speed segmented control */}
       <div className="flex items-center gap-1">
-        <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--term-text-muted)]">
+        <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--sc-text-muted)]">
           speed
         </span>
-        <div className="flex overflow-hidden rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)]">
+        <div className="flex overflow-hidden rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)]">
           {REPLAY_SPEEDS.map((s) => (
             <button
               key={s}
@@ -140,8 +140,8 @@ export function PlayControls({ playback, totalOverride }: PlayControlsProps) {
               className={cn(
                 'px-2 py-0.5 text-[10px] font-mono tabular-nums transition-colors',
                 s === speed
-                  ? 'bg-[var(--term-neon)]/15 text-[var(--term-neon-fg)] theme-glass:bg-[var(--sc-cyan)]/15 theme-glass:text-[var(--sc-cyan)]'
-                  : 'text-[var(--term-text-dim)] hover:text-[var(--term-text)] theme-glass:text-[var(--sc-text-secondary)]',
+                  ? 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)] theme-glass:bg-[var(--sc-cyan)]/15 theme-glass:text-[var(--sc-cyan)]'
+                  : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] theme-glass:text-[var(--sc-text-secondary)]',
               )}
               aria-pressed={s === speed}
               aria-label={`${s}× speed`}
@@ -175,8 +175,8 @@ function ControlButton({ ariaLabel, onClick, children, primary, disabled }: Cont
         'inline-flex items-center rounded px-2 py-1 text-xs font-mono transition-colors',
         'disabled:opacity-40 disabled:cursor-not-allowed',
         primary
-          ? 'border border-[var(--term-electric)] text-[var(--term-electric-fg)] hover:bg-[var(--term-electric)]/10 theme-glass:bg-[var(--sc-cyan)] theme-glass:text-[var(--sc-bg-deep)] theme-glass:border-0 theme-glass:hover:bg-[var(--sc-cyan-mid)]'
-          : 'border border-[var(--term-border)] text-[var(--term-text-dim)] hover:text-[var(--term-text)] hover:border-[var(--term-text-muted)] theme-glass:border-[var(--sc-border)]',
+          ? 'border border-[var(--sc-primary)] text-[var(--sc-primary)] hover:bg-[var(--sc-primary)]/10 theme-glass:bg-[var(--sc-cyan)] theme-glass:text-[var(--sc-bg-deep)] theme-glass:border-0 theme-glass:hover:bg-[var(--sc-cyan-mid)]'
+          : 'border border-[var(--sc-border)] text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] hover:border-[var(--sc-text-muted)] theme-glass:border-[var(--sc-border)]',
       )}
     >
       {children}

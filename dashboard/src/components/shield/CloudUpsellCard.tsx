@@ -6,6 +6,8 @@ import { authFetch } from '@/lib/auth';
 import { useAuditStats } from '@/hooks/useDefence';
 import { useDashboardStore } from '@/lib/store';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
 type CardState = 'upsell' | 'polling' | 'success' | 'hidden';
 
 export function CloudUpsellCard() {
@@ -31,7 +33,7 @@ export function CloudUpsellCard() {
 
   // Check if cloud is already configured
   useEffect(() => {
-    authFetch('http://localhost:3001/api/cloud/config')
+    authFetch(`${API_BASE}/api/cloud/config`)
       .then(res => res.json())
       .then(data => {
         if (data.enabled && data.apiKeySet) {
@@ -52,7 +54,7 @@ export function CloudUpsellCard() {
 
         if (data.status === 'complete' && data.api_key) {
           // Auto-configure local cloud sync
-          await authFetch('http://localhost:3001/api/cloud/config', {
+          await authFetch(`${API_BASE}/api/cloud/config`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

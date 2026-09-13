@@ -6,64 +6,30 @@ interface SkeletonProps {
   className?: string;
 }
 
-// Terminal-loading-bar style: a row of decreasing-density block characters
-// pulsing at low opacity. Falls back to a flat surface when collapsed to a
-// height too small for text rendering.
+/** Loading placeholder — flat shimmer block, motion-gated by Tailwind's
+ *  animate-pulse (which respects prefers-reduced-motion via globals). */
 export function Skeleton({ className }: SkeletonProps) {
   return (
-    <>
-      {/* Terminal: animated block characters in a flat surface. */}
-      <div
-        className={cn(
-          'theme-glass:hidden flex items-center overflow-hidden rounded-md bg-[var(--term-surface-2)] text-[var(--term-text-muted)] text-xs leading-none animate-pulse px-2',
-          className,
-        )}
-        aria-busy="true"
-        aria-live="polite"
-      >
-        <span className="select-none whitespace-nowrap tracking-tighter">
-          █▓▓▓▒▒▒░░░░ ▓▓▒▒░░ █▓▒░ ▓▓▒░░ █▓▓▒░░░ ▓▒░░ █▒▒░
-        </span>
-      </div>
-      {/* Glass: gradient shimmer pill (original). */}
-      <div
-        className={cn(
-          'hidden theme-glass:block animate-pulse rounded-xl bg-[var(--sc-surface-interactive)]',
-          className,
-        )}
-        aria-busy="true"
-        aria-live="polite"
-      />
-    </>
+    <div
+      className={cn('animate-pulse rounded-md bg-[var(--sc-surface-2)] motion-reduce:animate-none', className)}
+      aria-busy="true"
+      aria-live="polite"
+    />
   );
 }
 
 export function PageSkeleton() {
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-6">
-      {/* Header skeleton */}
-      <div className="space-y-2">
-        <Skeleton className="h-3 w-24" />
-        <Skeleton className="h-7 w-56" />
-        <Skeleton className="h-4 w-80" />
-      </div>
-
-      {/* Tab bar skeleton */}
-      <Skeleton className="h-10 w-96" />
-
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+    <div className="space-y-4 p-6">
+      <Skeleton className="h-7 w-56" />
+      <Skeleton className="h-4 w-80" />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Skeleton className="h-24" />
         <Skeleton className="h-24" />
         <Skeleton className="h-24" />
         <Skeleton className="h-24" />
       </div>
-
-      {/* Content cards */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Skeleton className="h-64" />
-        <Skeleton className="h-64" />
-      </div>
+      <Skeleton className="h-64" />
     </div>
   );
 }

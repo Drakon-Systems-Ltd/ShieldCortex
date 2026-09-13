@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Retired v1 (CIC/Glass) modules — kept for recoverability, not compiled.
+    "legacy-v1/**",
   ]),
   // Allow underscore-prefixed unused vars across the project
   {

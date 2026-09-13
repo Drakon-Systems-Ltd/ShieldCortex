@@ -26,12 +26,12 @@ interface TimelineProps {
  */
 
 const KIND_COLOR: Record<ReplayKind, string> = {
-  prompt: 'var(--term-electric)',
-  response: 'var(--term-neon)',
-  tool_call: 'var(--term-warn)',
-  tool_result: 'var(--term-neon-fg)',
-  tool_error: 'var(--term-danger)',
-  hook_fire: 'var(--term-text-muted)',
+  prompt: 'var(--sc-primary)',
+  response: 'var(--sc-ok)',
+  tool_call: 'var(--sc-warn)',
+  tool_result: 'var(--sc-ok)',
+  tool_error: 'var(--sc-danger)',
+  hook_fire: 'var(--sc-text-muted)',
 };
 
 const KIND_LABEL: Record<ReplayKind, string> = {
@@ -108,8 +108,8 @@ export function Timeline({ events, currentIndex, onSeek, playing }: TimelineProp
 
   if (n === 0) {
     return (
-      <div className="rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)] p-4">
-        <div className="text-xs font-mono text-[var(--term-text-muted)]">
+      <div className="rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] p-4">
+        <div className="text-xs font-mono text-[var(--sc-text-muted)]">
           No events to scrub. Pick a session on the left.
         </div>
       </div>
@@ -124,7 +124,7 @@ export function Timeline({ events, currentIndex, onSeek, playing }: TimelineProp
       <div
         ref={containerRef}
         className={cn(
-          'rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] overflow-hidden',
+          'rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] overflow-hidden',
         )}
       >
         <svg
@@ -150,7 +150,7 @@ export function Timeline({ events, currentIndex, onSeek, playing }: TimelineProp
             y1={TRACK_HEIGHT / 2}
             x2={Math.max(width, PADDING_X * 2) - PADDING_X}
             y2={TRACK_HEIGHT / 2}
-            stroke="var(--term-border)"
+            stroke="var(--sc-border)"
             strokeWidth="1"
           />
           {/* Ticks */}
@@ -177,7 +177,7 @@ export function Timeline({ events, currentIndex, onSeek, playing }: TimelineProp
               y1={(TRACK_HEIGHT - PLAYHEAD_HEIGHT) / 2}
               x2={playheadX}
               y2={(TRACK_HEIGHT + PLAYHEAD_HEIGHT) / 2}
-              stroke="var(--term-electric)"
+              stroke="var(--sc-primary)"
               strokeWidth={2}
               className={playing ? 'animate-pulse' : ''}
             />
@@ -185,8 +185,8 @@ export function Timeline({ events, currentIndex, onSeek, playing }: TimelineProp
               cx={playheadX}
               cy={TRACK_HEIGHT / 2}
               r={4}
-              fill="var(--term-electric)"
-              stroke="var(--term-bg)"
+              fill="var(--sc-primary)"
+              stroke="var(--sc-bg)"
               strokeWidth={1.5}
             />
           </g>
@@ -199,13 +199,13 @@ export function Timeline({ events, currentIndex, onSeek, playing }: TimelineProp
           const count = kindCounts[k];
           if (!count) return null;
           return (
-            <span key={k} className="inline-flex items-center gap-1 text-[var(--term-text-muted)]">
+            <span key={k} className="inline-flex items-center gap-1 text-[var(--sc-text-muted)]">
               <span
                 aria-hidden
                 className="inline-block h-2 w-2"
                 style={{ backgroundColor: KIND_COLOR[k] }}
               />
-              {KIND_LABEL[k]} <span className="text-[var(--term-text-dim)] tabular-nums">({count})</span>
+              {KIND_LABEL[k]} <span className="text-[var(--sc-text-dim)] tabular-nums">({count})</span>
             </span>
           );
         })}

@@ -71,8 +71,8 @@ describe('runCommand', () => {
 
   it('theme switches to a valid theme', async () => {
     const ctx = mockCtx();
-    const res = await runCommand('theme glass', ctx);
-    expect(ctx.setTheme).toHaveBeenCalledWith('glass');
+    const res = await runCommand('theme dark', ctx);
+    expect(ctx.setTheme).toHaveBeenCalledWith('dark');
     expect(res.ok).toBe(true);
   });
 

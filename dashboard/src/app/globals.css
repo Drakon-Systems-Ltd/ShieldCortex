@@ -2,8 +2,12 @@
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
-@custom-variant theme-terminal (&:where(:where([data-theme="terminal"]) *, [data-theme="terminal"]));
-@custom-variant theme-glass (&:where(:where([data-theme="glass"]) *, [data-theme="glass"]));
+/* Legacy theme variants — retained as never-matching selectors so long-tail
+   `theme-glass:` / `theme-terminal:` utility classes still compile while pages
+   are migrated onto the v2 design system. v2 never sets data-theme to these
+   values, so these styles are inert. Remove once no usages remain. */
+@custom-variant theme-terminal (&:where([data-theme="terminal"] *));
+@custom-variant theme-glass (&:where([data-theme="glass"] *));
 
 @theme inline {
   --color-background: var(--background);
@@ -48,212 +52,146 @@
   --radius-4xl: calc(var(--radius) + 16px);
 }
 
-/* ── ShieldCortex Terminal Design System ── */
+/* ══════════════════════════════════════════════════════════════════
+   ShieldCortex v2 design tokens — ONE set (`--sc-*`), light + dark.
+   Brand: electric blue on deep navy (shieldcortex-site/BRANDING.md).
+   Semantics: blue = memory/neutral action · green = allowed/healthy ·
+   amber = quarantine/pending/warn · red = blocked/threat/fail only ·
+   violet = links/integrity/consolidation. Colour is information.
+   All text tokens pass AA on their surfaces in both themes.
+   ══════════════════════════════════════════════════════════════════ */
 
 :root {
   --radius: 0.625rem;
 
-  /* ── CIC brand-phosphor (24th-century terminal) — canonical tokens ──
-     The default ("terminal") theme. Multi-spectral phosphor on a near-black
-     void, keyed to MEANING (see src/lib/cic/regions.ts). */
-  --cic-void: #04060c;
-  --cic-surface: #070b14;
-  --cic-surface-2: #0b1120;
-  --cic-border: #16203a;
-  --cic-border-strong: #233456;
-  --cic-grid: rgba(0, 229, 204, 0.045);
+  /* Light theme (default; `.dark` overrides below). */
+  --sc-bg: #f6f8fc;
+  --sc-surface: #ffffff;
+  --sc-surface-2: #eef2f9;
+  --sc-border: #dbe2ee;
+  --sc-border-strong: #b9c5da;
 
-  /* Semantic / regional phosphor */
-  --cic-cyan: #00e5cc;    /* MEMORY · live · safe · system · link */
-  --cic-coral: #ff4d4d;   /* DEFENCE · threat · block · danger */
-  --cic-amber: #f5a623;   /* QUARANTINE · warn · pending */
-  --cic-violet: #a78bfa;  /* INTEGRITY · consolidation · links · recall */
-  --cic-cyan-fg: #5ff4e2;
-  --cic-coral-fg: #ff6b6b;
-  --cic-cyan-glow: rgba(0, 229, 204, 0.35);
-  --cic-coral-glow: rgba(255, 77, 77, 0.35);
-  --cic-amber-glow: rgba(245, 166, 35, 0.32);
-  --cic-violet-glow: rgba(167, 139, 250, 0.32);
+  --sc-text: #111a2e;
+  --sc-text-dim: #3c4a66;
+  --sc-text-muted: #5b6a89;      /* 4.9:1 on white */
 
-  --cic-text: #d7e3f4;
-  --cic-text-dim: #a6b4cd;     /* secondary — ~7:1 on void */
-  --cic-text-muted: #7e8fae;   /* tertiary — ~4.6:1, passes AA normal */
-  --cic-text-faint: #5e6f90;   /* quaternary labels — ~3.2:1, no longer 1.97:1 */
+  --sc-primary: #2563eb;         /* electric blue — memory / neutral action */
+  --sc-primary-hover: #1d4ed8;
+  --sc-primary-fg: #ffffff;
+  --sc-primary-soft: rgba(37, 99, 235, 0.10);
 
-  /* Legacy terminal palette now POINTS AT the CIC tokens, so every existing
-     --term-* / --sc-* consumer inherits the brand-phosphor look for free. */
-  --term-bg: var(--cic-void);
-  --term-surface: var(--cic-surface);
-  --term-surface-2: var(--cic-surface-2);
-  --term-border: var(--cic-border);
-  --term-border-strong: var(--cic-border-strong);
+  --sc-ok: #15803d;              /* allowed / healthy */
+  --sc-ok-soft: rgba(21, 128, 61, 0.12);
+  --sc-warn: #b45309;            /* quarantine / pending / warn */
+  --sc-warn-soft: rgba(180, 83, 9, 0.12);
+  --sc-danger: #dc2626;          /* blocked / threat / fail ONLY */
+  --sc-danger-soft: rgba(220, 38, 38, 0.10);
+  --sc-violet: #7c3aed;          /* links / integrity / consolidation */
+  --sc-violet-soft: rgba(124, 58, 237, 0.10);
+  --sc-info: #2563eb;
+  --sc-off: #64748b;             /* explicitly disabled — neutral, never green */
 
-  --term-text: var(--cic-text);
-  --term-text-dim: var(--cic-text-dim);
-  --term-text-muted: var(--cic-text-muted);
-  --term-text-faint: var(--cic-text-faint);
+  --sc-focus: #2563eb;
+  --sc-transition: 0.15s ease-out;
+  --sc-shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --sc-shadow-drawer: 0 8px 30px rgba(16, 24, 40, 0.18);
 
-  --term-electric: var(--cic-coral);     /* primary-action / defence role = coral */
-  --term-electric-fg: var(--cic-coral-fg);
-  --term-neon: var(--cic-cyan);          /* live / memory role = cyan */
-  --term-neon-fg: var(--cic-cyan-fg);
-  --term-warn: var(--cic-amber);
-  --term-danger: var(--cic-coral);
-
-  /* Window chrome dots — re-keyed to the phosphor palette */
-  --term-light-red: rgba(255, 77, 77, 0.75);
-  --term-light-yellow: rgba(245, 166, 35, 0.75);
-  --term-light-green: rgba(0, 229, 204, 0.75);
-
-  /* Legacy aliases — keep so existing class-name consumers keep rendering.
-     Every --sc-* below maps to its terminal-palette equivalent. */
-  --sc-bg-deep: var(--term-bg);
-  --sc-bg-surface: var(--term-surface);
-  --sc-bg-elevated: var(--term-surface-2);
-  --sc-text-primary: var(--term-text);
-  --sc-text-secondary: var(--term-text-dim);
-  --sc-text-muted: var(--term-text-muted);
-  --sc-coral: var(--term-electric);          /* primary-action role moved to electric */
-  --sc-coral-mid: var(--term-electric-fg);
-  --sc-coral-dark: #1e3a8a;
-  --sc-cyan: var(--term-neon);                /* live / accent role moved to neon */
-  --sc-cyan-mid: var(--term-neon-fg);
-  --sc-amber: var(--term-warn);
-
-  --sc-border: var(--term-border);
-  --sc-border-accent: var(--term-electric);
-  --sc-border-subtle: var(--cic-border);
-  --sc-card-bg: var(--term-surface);
-  --sc-card-bg-strong: var(--term-surface);
-  --sc-surface-interactive: var(--term-surface-2);
-  --sc-surface-interactive-hover: var(--term-border);
-  --sc-surface-glass: var(--cic-surface-2);
-  --sc-accent-cyan: var(--cic-cyan);
-
-  --sc-glow-coral: var(--cic-coral-glow);
-  --sc-glow-coral-mid: rgba(255, 77, 77, 0.30);
-  --sc-glow-cyan: var(--cic-cyan-glow);
-  --sc-glow-cyan-mid: rgba(0, 229, 204, 0.30);
-
-  --sc-transition: 0.15s linear;
-
-  /* shadcn overrides — terminal dark by default */
-  --background: var(--term-bg);
-  --foreground: var(--term-text);
-  --card: var(--term-surface);
-  --card-foreground: var(--term-text);
-  --popover: var(--term-surface);
-  --popover-foreground: var(--term-text);
-  --primary: var(--term-electric);
-  --primary-foreground: #ffffff;
-  --secondary: var(--term-surface-2);
-  --secondary-foreground: var(--term-text);
-  --muted: var(--term-surface-2);
-  --muted-foreground: var(--term-text-muted);
-  --accent: var(--term-surface-2);
-  --accent-foreground: var(--term-text);
-  --destructive: var(--term-danger);
-  --border: var(--term-border);
-  --input: var(--term-surface-2);
-  --ring: var(--term-electric);
-  --chart-1: var(--term-electric);
-  --chart-2: var(--term-neon);
-  --chart-3: var(--term-warn);
-  --chart-4: var(--term-electric-fg);
-  --chart-5: var(--term-text-muted);
-  --sidebar: var(--term-bg);
-  --sidebar-foreground: var(--term-text);
-  --sidebar-primary: var(--term-electric);
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: var(--term-surface);
-  --sidebar-accent-foreground: var(--term-text);
-  --sidebar-border: var(--term-border);
-  --sidebar-ring: var(--term-electric);
+  /* shadcn/Tailwind bridge */
+  --background: var(--sc-bg);
+  --foreground: var(--sc-text);
+  --card: var(--sc-surface);
+  --card-foreground: var(--sc-text);
+  --popover: var(--sc-surface);
+  --popover-foreground: var(--sc-text);
+  --primary: var(--sc-primary);
+  --primary-foreground: var(--sc-primary-fg);
+  --secondary: var(--sc-surface-2);
+  --secondary-foreground: var(--sc-text);
+  --muted: var(--sc-surface-2);
+  --muted-foreground: var(--sc-text-muted);
+  --accent: var(--sc-surface-2);
+  --accent-foreground: var(--sc-text);
+  --destructive: var(--sc-danger);
+  --border: var(--sc-border);
+  --input: var(--sc-surface-2);
+  --ring: var(--sc-focus);
+  --chart-1: var(--sc-primary);
+  --chart-2: var(--sc-ok);
+  --chart-3: var(--sc-warn);
+  --chart-4: var(--sc-violet);
+  --chart-5: var(--sc-text-muted);
+  --sidebar: var(--sc-surface);
+  --sidebar-foreground: var(--sc-text);
+  --sidebar-primary: var(--sc-primary);
+  --sidebar-primary-foreground: var(--sc-primary-fg);
+  --sidebar-accent: var(--sc-surface-2);
+  --sidebar-accent-foreground: var(--sc-text);
+  --sidebar-border: var(--sc-border);
+  --sidebar-ring: var(--sc-focus);
 }
 
-/* ── Glass theme — original ShieldCortex aesthetic ──
-   Activated by `<html data-theme="glass">`. Restores the coral/cyan
-   neon glass-morphic palette. The terminal palette (default) remains
-   the source of truth above; this block only overrides values where
-   the two themes diverge. */
+.dark {
+  --sc-bg: #0a0e1a;
+  --sc-surface: #101729;
+  --sc-surface-2: #16203a;
+  --sc-border: #223050;
+  --sc-border-strong: #31446e;
 
-[data-theme="glass"] {
-  /* Original core palette */
-  --sc-bg-deep: #050810;
-  --sc-bg-surface: #0a0f1a;
-  --sc-bg-elevated: #111827;
-  --sc-text-primary: #f0f4ff;
-  --sc-text-secondary: #8892b0;
-  --sc-text-muted: #5a6480;
-  --sc-coral: #ff4d4d;
-  --sc-coral-mid: #e63946;
-  --sc-coral-dark: #991b1b;
-  --sc-cyan: #00e5cc;
-  --sc-cyan-mid: #14b8a6;
-  --sc-amber: #f59e0b;
+  --sc-text: #e7edf9;
+  --sc-text-dim: #aab7d1;
+  --sc-text-muted: #8291b1;      /* 5.2:1 on --sc-surface */
 
-  --sc-border: rgba(136, 146, 176, 0.15);
-  --sc-border-accent: rgba(255, 77, 77, 0.3);
-  --sc-border-subtle: rgba(136, 146, 176, 0.12);
-  --sc-card-bg: rgba(10, 15, 26, 0.65);
-  --sc-card-bg-strong: rgba(10, 15, 26, 0.8);
-  --sc-surface-interactive: rgba(255, 255, 255, 0.06);
-  --sc-surface-interactive-hover: rgba(255, 255, 255, 0.1);
-  --sc-surface-glass: rgba(255, 255, 255, 0.04);
-  --sc-accent-cyan: #00e5cc;
+  --sc-primary: #3b82f6;
+  --sc-primary-hover: #60a5fa;
+  --sc-primary-fg: #ffffff;
+  --sc-primary-soft: rgba(59, 130, 246, 0.16);
 
-  --sc-glow-coral: rgba(255, 77, 77, 0.15);
-  --sc-glow-coral-mid: rgba(255, 77, 77, 0.25);
-  --sc-glow-cyan: rgba(0, 229, 204, 0.15);
-  --sc-glow-cyan-mid: rgba(0, 229, 204, 0.25);
+  --sc-ok: #4ade80;
+  --sc-ok-soft: rgba(74, 222, 128, 0.14);
+  --sc-warn: #f5a623;
+  --sc-warn-soft: rgba(245, 166, 35, 0.14);
+  --sc-danger: #f0564f;
+  --sc-danger-soft: rgba(240, 86, 79, 0.14);
+  --sc-violet: #a78bfa;
+  --sc-violet-soft: rgba(167, 139, 250, 0.14);
+  --sc-info: #60a5fa;
+  --sc-off: #94a3b8;
 
-  --sc-transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  --sc-focus: #60a5fa;
+  --sc-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sc-shadow-drawer: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
 
-  /* Mirror the new --term-* tokens onto glass values so terminal-mode
-     components passing through tokens still pick the right colour. */
-  --term-bg: var(--sc-bg-deep);
-  --term-surface: var(--sc-bg-surface);
-  --term-surface-2: var(--sc-bg-elevated);
-  --term-border: var(--sc-border);
-  --term-border-strong: rgba(136, 146, 176, 0.25);
-  --term-text: var(--sc-text-primary);
-  --term-text-dim: var(--sc-text-secondary);
-  --term-text-muted: var(--sc-text-muted);
-  --term-text-faint: rgba(90, 100, 128, 0.7);
-  --term-electric: var(--sc-coral);
-  --term-electric-fg: var(--sc-coral);
-  --term-neon: var(--sc-cyan);
-  --term-neon-fg: var(--sc-cyan);
-  --term-warn: var(--sc-amber);
-  --term-danger: var(--sc-coral);
-
-  /* shadcn overrides */
-  --background: #050810;
-  --foreground: #f0f4ff;
-  --card: #0a0f1a;
-  --card-foreground: #f0f4ff;
-  --popover: #0a0f1a;
-  --popover-foreground: #f0f4ff;
-  --primary: #ff4d4d;
-  --primary-foreground: #ffffff;
-  --secondary: #111827;
-  --secondary-foreground: #f0f4ff;
-  --muted: #111827;
-  --muted-foreground: #8892b0;
-  --accent: #111827;
-  --accent-foreground: #f0f4ff;
-  --destructive: #ff4d4d;
-  --border: rgba(136, 146, 176, 0.15);
-  --input: rgba(136, 146, 176, 0.15);
-  --ring: #00e5cc;
-  --chart-1: #ff4d4d;
-  --chart-2: #00e5cc;
-  --chart-3: #14b8a6;
-  --chart-4: #f59e0b;
-  --chart-5: #8892b0;
-  --sidebar: #050810;
-  --sidebar-primary: #ff4d4d;
-  --sidebar-ring: #00e5cc;
+/* ── Legacy `--sc-*` aliases ─────────────────────────────────────────
+   Pre-v2 components read these names. They now resolve to v2 tokens so
+   every un-migrated consumer picks up the new palette and theming for
+   free. Semantic mapping: coral (old brand red / threat) → danger;
+   cyan (old live/healthy accent) → ok; amber → warn. Remove aliases as
+   consumers migrate. */
+:root, .dark {
+  --sc-bg-deep: var(--sc-bg);
+  --sc-bg-surface: var(--sc-surface);
+  --sc-bg-elevated: var(--sc-surface-2);
+  --sc-text-primary: var(--sc-text);
+  --sc-text-secondary: var(--sc-text-dim);
+  --sc-coral: var(--sc-danger);
+  --sc-coral-mid: var(--sc-danger);
+  --sc-coral-dark: var(--sc-danger);
+  --sc-cyan: var(--sc-ok);
+  --sc-cyan-mid: var(--sc-ok);
+  --sc-amber: var(--sc-warn);
+  --sc-border-accent: var(--sc-border-strong);
+  --sc-border-subtle: var(--sc-border);
+  --sc-card-bg: var(--sc-surface);
+  --sc-card-bg-strong: var(--sc-surface);
+  --sc-surface-interactive: var(--sc-surface-2);
+  --sc-surface-interactive-hover: var(--sc-border);
+  --sc-surface-glass: var(--sc-surface-2);
+  --sc-accent-cyan: var(--sc-ok);
+  --sc-glow-coral: var(--sc-danger-soft);
+  --sc-glow-coral-mid: var(--sc-danger-soft);
+  --sc-glow-cyan: var(--sc-ok-soft);
+  --sc-glow-cyan-mid: var(--sc-ok-soft);
 }
 
 @layer base {
@@ -262,287 +200,51 @@
   }
   body {
     @apply bg-background text-foreground;
-    /* Terminal aesthetic: monospace by default. Geist Sans remains available
-       as the `font-sans` Tailwind class for one-off prose blocks. */
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-feature-settings: "ss01", "cv01", "cv11";
-  }
-  [data-theme="glass"] body {
-    /* Glass theme uses Geist Sans system stack instead of mono. */
     font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  code, kbd, samp, pre {
+    font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 }
 
-/* ── Glass theme component overrides — restore card blur, hover lift,
-   glow, scan animations that the terminal aesthetic dropped. ── */
+/* ── Cards (legacy class names kept; flat v2 styling) ── */
 
-[data-theme="glass"] .glass-card {
-  background: var(--sc-card-bg);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
-  border-radius: 16px;
-}
-
-[data-theme="glass"] .glass-card-strong {
-  background: var(--sc-card-bg-strong);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
-  border-radius: 16px;
-}
-
-[data-theme="glass"] .glass-card-hover:hover {
-  transform: translateY(-4px);
-  border-color: var(--sc-border-accent);
-  box-shadow: 0 12px 40px var(--sc-glow-coral);
-}
-
-[data-theme="glass"] .glass-card-hover-cyan:hover {
-  transform: translateY(-4px);
-  border-color: rgba(0, 229, 204, 0.3);
-  box-shadow: 0 12px 40px var(--sc-glow-cyan);
-}
-
-[data-theme="glass"] .glow-coral {
-  box-shadow: 0 0 20px var(--sc-glow-coral), 0 0 60px var(--sc-glow-coral);
-}
-
-[data-theme="glass"] .glow-cyan {
-  box-shadow: 0 0 20px var(--sc-glow-cyan), 0 0 60px var(--sc-glow-cyan);
-}
-
-[data-theme="glass"] .glow-coral-subtle {
-  box-shadow: 0 4px 20px var(--sc-glow-coral);
-}
-
-[data-theme="glass"] .glow-cyan-subtle {
-  box-shadow: 0 4px 20px var(--sc-glow-cyan);
-}
-
-@keyframes sc-glow-pulse-cyan {
-  0%, 100% {
-    box-shadow: 0 0 6px var(--sc-glow-cyan), 0 0 12px var(--sc-glow-cyan);
-  }
-  50% {
-    box-shadow: 0 0 14px var(--sc-glow-cyan-mid), 0 0 28px var(--sc-glow-cyan-mid);
-  }
-}
-
-[data-theme="glass"] .glow-cyan-pulse {
-  animation: sc-glow-pulse-cyan 1.4s ease-in-out infinite;
-}
-
-@keyframes scanSweep {
-  0% { transform: translateX(-100%); opacity: 0; }
-  10% { opacity: 1; }
-  90% { opacity: 1; }
-  100% { transform: translateX(100%); opacity: 0; }
-}
-
-[data-theme="glass"] .scan-sweep {
-  position: relative;
-  overflow: hidden;
-}
-
-[data-theme="glass"] .scan-sweep::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, var(--sc-glow-cyan-mid), transparent);
-  animation: scanSweep 2s ease-in-out infinite;
-  pointer-events: none;
-}
-
-/* ── Glass card (legacy class — restyled as a flat terminal panel) ──
-   Old consumers keep their class name, get terminal styling.
-   New consumers should use the GlassCard component which now renders
-   full terminal-window chrome. */
-
-.glass-card {
-  background: var(--term-surface);
-  border: 1px solid var(--term-border);
-  border-radius: var(--radius);
-  transition: border-color var(--sc-transition);
-}
-
+.glass-card,
 .glass-card-strong {
-  background: var(--term-surface);
-  border: 1px solid var(--term-border);
+  background: var(--sc-surface);
+  border: 1px solid var(--sc-border);
   border-radius: var(--radius);
+  box-shadow: var(--sc-shadow-card);
   transition: border-color var(--sc-transition);
 }
 
-.glass-card-hover:hover {
-  border-color: var(--term-electric);
-}
-
+.glass-card-hover:hover,
 .glass-card-hover-cyan:hover {
-  border-color: var(--term-neon);
+  border-color: var(--sc-border-strong);
 }
 
-/* ── CIC holographic panel depth (terminal only) ──
-   Panels read as projected holograms over the void: a phosphor top edge, an
-   inner top-highlight, and a soft drop projection. Scoped to terminal so the
-   Glass theme's blur/lift is untouched. */
-[data-theme='terminal'] .glass-card,
-[data-theme='terminal'] .glass-card-strong {
-  position: relative;
-  background: color-mix(in srgb, var(--cic-surface) 88%, transparent);
-  box-shadow: inset 0 1px 0 rgba(0, 229, 204, 0.06), 0 10px 30px -14px rgba(0, 0, 0, 0.7);
-}
+/* ── Severity left-border accents (semantic, used widely) ── */
 
-[data-theme='terminal'] .glass-card::before,
-[data-theme='terminal'] .glass-card-strong::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 12px;
-  right: 12px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--cic-cyan-glow), transparent);
-  opacity: 0.6;
-  pointer-events: none;
-}
+.severity-critical { border-left: 3px solid var(--sc-danger); }
+.severity-high { border-left: 3px solid var(--sc-danger); }
+.severity-medium { border-left: 3px solid var(--sc-warn); }
+.severity-low { border-left: 3px solid var(--sc-info); }
+.severity-safe { border-left: 3px solid var(--sc-ok); }
+.severity-info { border-left: 3px solid var(--sc-text-muted); }
 
-/* ── CIC immersive effects layer (gated by the motion policy) ── */
-
-.cic-fx {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  pointer-events: none;
-  background-image: repeating-linear-gradient(
-    to bottom,
-    rgba(0, 229, 204, 0.02) 0,
-    rgba(0, 229, 204, 0.02) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-  mix-blend-mode: screen;
-  opacity: 0.55;
-}
-
-.cic-fx::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 28vh;
-  background: linear-gradient(to bottom, transparent, var(--cic-cyan-glow), transparent);
-  opacity: 0.07;
-  animation: cic-sweep 7s linear infinite;
-}
-
-.cic-fx[data-animate='0']::after {
-  display: none;
-}
-
-@keyframes cic-sweep {
-  0% { transform: translateY(-30vh); }
-  100% { transform: translateY(130vh); }
-}
-
-.cic-boot {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  display: grid;
-  place-items: center;
-  background: var(--cic-void);
-  color: var(--cic-cyan);
-  cursor: pointer;
-}
-
-.cic-boot-line {
-  font-size: 1.1rem;
-  letter-spacing: 0.18em;
-  text-shadow: 0 0 12px var(--cic-cyan-glow);
-}
-
-/* Phosphor bloom — apply to accent text/glyphs that should "glow". */
-.cic-bloom {
-  text-shadow: 0 0 8px currentColor;
-}
-
-/* Glass theme never gets the CRT layer. */
-[data-theme='glass'] .cic-fx,
-[data-theme='glass'] .cic-boot {
-  display: none;
-}
-
-/* Calm toggle (set on <html> by CicEffects) stills ALL ambient motion — not just
-   the sweep/boot. The prefers-reduced-motion @media block below covers the OS
-   preference; this covers the in-app toggle, which a CSS media query cannot read. */
-[data-cic-motion='off'] .cic-fx::after,
-[data-cic-motion='off'] .pulse-cyan,
-[data-cic-motion='off'] .pulse-coral,
-[data-cic-motion='off'] .glow-cyan-pulse,
-[data-cic-motion='off'] .scan-sweep::after,
-[data-cic-motion='off'] .cli-cursor {
-  animation: none !important;
-}
-
-[data-cic-motion='off'] .cic-bloom {
-  text-shadow: 0 0 4px currentColor;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cic-fx::after,
-  .pulse-cyan,
-  .pulse-coral,
-  .glow-cyan-pulse,
-  .scan-sweep::after,
-  .cli-cursor {
-    animation: none !important;
-  }
-  .cic-bloom {
-    text-shadow: 0 0 4px currentColor;
-  }
-}
-
-/* ── CLI cursor ── */
-
-@keyframes cli-blink {
-  0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0; }
-}
-
-.cli-cursor {
-  display: inline-block;
-  width: 0.55em;
-  height: 1em;
-  background-color: currentColor;
-  vertical-align: text-bottom;
-  animation: cli-blink 1s steps(2, end) infinite;
-}
-
-/* ── Severity left-border accents (kept — semantic, used widely) ── */
-
-.severity-critical { border-left: 3px solid var(--term-danger); }
-.severity-high { border-left: 3px solid var(--term-danger); }
-.severity-medium { border-left: 3px solid var(--term-warn); }
-.severity-low { border-left: 3px solid var(--term-electric); }
-.severity-safe { border-left: 3px solid var(--term-neon); }
-.severity-info { border-left: 3px solid var(--term-text-muted); }
-
-/* ── Pulse — kept for status dots, sober terminal version ── */
+/* ── Status-dot pulse (live indicators only; motion-gated) ── */
 
 @keyframes pulseGlow {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
 }
 
-.pulse-cyan {
-  animation: pulseGlow 2s ease-in-out infinite;
-}
+.pulse-cyan { animation: pulseGlow 2s ease-in-out infinite; }
+.pulse-coral { animation: pulseGlow 1.5s ease-in-out infinite; }
 
-.pulse-coral {
-  animation: pulseGlow 1.5s ease-in-out infinite;
-}
-
-/* ── Card-slide transitions (used by review queue) — kept ── */
+/* ── Card-slide transitions (review queue) ── */
 
 .sc-card-exit {
   opacity: 0;
@@ -554,14 +256,8 @@
 }
 
 @keyframes sc-card-slide-in {
-  from {
-    opacity: 0;
-    transform: translateX(30px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  from { opacity: 0; transform: translateX(30px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
 /* ── Trust gauge animation ── */
@@ -570,7 +266,7 @@
   from { stroke-dashoffset: 282.7; }
 }
 
-/* ── Scrollbar — terminal-thin ── */
+/* ── Scrollbar ── */
 
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
@@ -586,19 +282,29 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--term-border-strong);
+  background: var(--sc-border-strong);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--term-text-muted);
+  background: var(--sc-text-muted);
 }
 
-/* ── Focus ring — single style now, electric ── */
+/* ── Focus ring (legacy class names) ── */
 
 .focus-ring-cyan:focus,
 .focus-ring-coral:focus {
   outline: none;
-  border-color: var(--term-electric);
-  box-shadow: 0 0 0 1px var(--term-electric);
+  border-color: var(--sc-focus);
+  box-shadow: 0 0 0 1px var(--sc-focus);
+}
+
+/* ── Reduced motion: still every looping/entrance animation ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-cyan,
+  .pulse-coral,
+  .sc-card-enter {
+    animation: none !important;
+  }
 }

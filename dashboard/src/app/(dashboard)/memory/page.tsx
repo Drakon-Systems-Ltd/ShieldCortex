@@ -114,12 +114,12 @@ function MemoryContent() {
           {tab === 'recall' && <RecallWorkspace />}
           {tab === 'review' && <ReviewQueueView />}
           {tab === 'graph' && (
-            <div className="rounded-md border border-[var(--term-border)] bg-[var(--term-surface)] overflow-hidden flex flex-col">
-              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--term-border)] bg-[var(--term-surface-2)] font-mono">
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-red)]" />
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-yellow)]" />
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-green)]" />
-                <span className="ml-2 text-xs text-[var(--term-text-muted)] select-none">knowledge-graph</span>
+            <div className="rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface)] overflow-hidden flex flex-col">
+              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--sc-border)] bg-[var(--sc-surface-2)] font-mono">
+                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--sc-danger)]" />
+                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--sc-warn)]" />
+                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--sc-ok)]" />
+                <span className="ml-2 text-xs text-[var(--sc-text-muted)] select-none">knowledge-graph</span>
               </div>
               <div className="h-[600px]">
                 <UnifiedGraph />

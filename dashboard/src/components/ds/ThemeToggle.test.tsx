@@ -3,7 +3,7 @@ import { ThemeToggle } from './ThemeToggle';
 
 describe('ThemeToggle', () => {
   afterEach(() => {
-    document.documentElement.removeAttribute('data-theme');
+    document.documentElement.classList.remove('dark');
     try {
       localStorage.clear();
     } catch {
@@ -11,24 +11,32 @@ describe('ThemeToggle', () => {
     }
   });
 
-  it('in glass, offers to switch to terminal and switches on click', () => {
-    document.documentElement.setAttribute('data-theme', 'glass');
+  it('cycles light → dark and applies the dark class', () => {
+    localStorage.setItem('sc-theme', 'light');
     render(<ThemeToggle />);
-    fireEvent.click(screen.getByRole('button', { name: /switch to terminal/i }));
-    expect(document.documentElement.getAttribute('data-theme')).toBe('terminal');
+    fireEvent.click(screen.getByRole('button', { name: /switch to dark/i }));
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+    expect(localStorage.getItem('sc-theme')).toBe('dark');
   });
 
-  it('in terminal, offers to switch to glass and switches on click', () => {
-    document.documentElement.setAttribute('data-theme', 'terminal');
+  it('cycles dark → system', () => {
+    localStorage.setItem('sc-theme', 'dark');
     render(<ThemeToggle />);
-    fireEvent.click(screen.getByRole('button', { name: /switch to glass/i }));
-    expect(document.documentElement.getAttribute('data-theme')).toBe('glass');
+    fireEvent.click(screen.getByRole('button', { name: /switch to system/i }));
+    expect(localStorage.getItem('sc-theme')).toBe('system');
+  });
+
+  it('migrates a legacy terminal preference to dark', () => {
+    localStorage.setItem('sc-theme', 'terminal');
+    render(<ThemeToggle />);
+    // Legacy value renders as Dark; next in the cycle is System.
+    expect(screen.getByRole('button', { name: /theme: dark/i })).toBeInTheDocument();
   });
 
   it('persists the choice to localStorage so it survives reload', () => {
-    document.documentElement.setAttribute('data-theme', 'glass');
+    localStorage.setItem('sc-theme', 'system');
     render(<ThemeToggle />);
-    fireEvent.click(screen.getByRole('button', { name: /switch to terminal/i }));
-    expect(localStorage.getItem('sc-theme')).toBe('terminal');
+    fireEvent.click(screen.getByRole('button', { name: /switch to light/i }));
+    expect(localStorage.getItem('sc-theme')).toBe('light');
   });
 });

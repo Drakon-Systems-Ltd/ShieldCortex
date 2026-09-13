@@ -21,10 +21,10 @@ interface CardErrorProps {
 export function CardError({ message = 'Failed to load', onRetry, inline = false, className }: CardErrorProps) {
   const row = (
     <div className="flex items-center gap-2" role="alert">
-      <AlertTriangle size={14} className="text-[var(--sc-coral)] shrink-0" />
+      <AlertTriangle size={14} className="text-[var(--sc-danger)] shrink-0" />
       <span className="text-xs text-[var(--sc-text-muted)]">{message}</span>
       {onRetry && (
-        <button type="button" onClick={onRetry} className="ml-auto text-xs text-[var(--sc-cyan)] hover:underline">
+        <button type="button" onClick={onRetry} className="ml-auto text-xs text-[var(--sc-primary)] hover:underline">
           Retry
         </button>
       )}
@@ -32,7 +32,7 @@ export function CardError({ message = 'Failed to load', onRetry, inline = false,
   );
   if (inline) return <div className={className}>{row}</div>;
   return (
-    <div className={cn('bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4', className)}>
+    <div className={cn('bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-lg p-4', className)}>
       {row}
     </div>
   );

@@ -15,6 +15,7 @@ interface PageHeaderProps {
   className?: string;
 }
 
+/** v2 page header: title, one-line description, actions right, optional tabs. */
 export function PageHeader({
   eyebrow,
   title,
@@ -26,44 +27,18 @@ export function PageHeader({
   className,
 }: PageHeaderProps) {
   return (
-    <div className={cn('space-y-3 theme-glass:space-y-4', className)}>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4 theme-glass:gap-3">
+    <div className={cn('space-y-4', className)}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div className="min-w-0">
-          {/* Terminal: prompt-style heading with cli-cursor. */}
-          <div className="theme-glass:hidden">
-            {eyebrow && (
-              <p className="text-[11px] uppercase tracking-wider text-[var(--term-text-muted)]">
-                <span className="text-[var(--cic-cyan)]">›</span> {eyebrow}
-              </p>
-            )}
-            <h1 className="mt-1 flex items-baseline flex-wrap gap-2 text-base font-mono text-[var(--term-text)] sm:text-lg">
-              <span className="text-[var(--cic-cyan)]" aria-hidden>$</span>
-              <span>shieldcortex</span>
-              <span className="text-[var(--term-text-dim)]">{title.toLowerCase()}</span>
-              <span className="cli-cursor text-[var(--cic-cyan)]" aria-hidden />
-            </h1>
-            {subtitle && (
-              <p className="mt-1 text-xs text-[var(--term-text-muted)]">
-                <span aria-hidden>#</span> {subtitle}
-              </p>
-            )}
-          </div>
-          {/* Glass: original eyebrow + title + subtitle block. */}
-          <div className="hidden theme-glass:block">
-            {eyebrow && (
-              <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--sc-coral)] sm:text-[11px]">
-                {eyebrow}
-              </p>
-            )}
-            <h1 className="mt-1 text-xl font-bold text-[var(--sc-text-primary)] sm:text-2xl">{title}</h1>
-            {subtitle && (
-              <p className="mt-1 text-xs text-[var(--sc-text-secondary)] sm:text-sm">{subtitle}</p>
-            )}
-          </div>
+          {eyebrow && (
+            <p className="text-[11px] uppercase tracking-wider text-[var(--sc-text-muted)]">{eyebrow}</p>
+          )}
+          <h1 className="truncate text-lg font-semibold text-[var(--sc-text)]">{title}</h1>
+          {subtitle && <p className="mt-0.5 text-sm text-[var(--sc-text-muted)]">{subtitle}</p>}
         </div>
         {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       </div>
-      {tabs && activeTab && onTabChange && (
+      {tabs && activeTab !== undefined && onTabChange && (
         <TabBar tabs={tabs} activeTab={activeTab} onChange={onTabChange} />
       )}
     </div>

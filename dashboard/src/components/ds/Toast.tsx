@@ -1,33 +1,24 @@
 'use client';
 
 import { Toaster } from 'sonner';
-import { useTheme } from '@/hooks/useTheme';
+import { useResolvedTheme } from '@/hooks/useTheme';
 
 export function ToastProvider() {
-  const [theme] = useTheme();
-  const isGlass = theme === 'glass';
+  const resolved = useResolvedTheme();
 
   return (
     <Toaster
       position="bottom-right"
+      theme={resolved}
       toastOptions={{
-        style: isGlass
-          ? {
-              background: 'var(--sc-bg-surface)',
-              border: '1px solid var(--sc-border)',
-              color: 'var(--sc-text-primary)',
-              fontFamily: 'system-ui, sans-serif',
-            }
-          : {
-              background: 'var(--term-surface)',
-              border: '1px solid var(--term-border)',
-              color: 'var(--term-text)',
-              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-              fontSize: '13px',
-              borderRadius: '6px',
-            },
+        style: {
+          background: 'var(--sc-surface)',
+          border: '1px solid var(--sc-border)',
+          color: 'var(--sc-text)',
+          fontSize: '13px',
+          borderRadius: '8px',
+        },
       }}
-      theme="dark"
     />
   );
 }
