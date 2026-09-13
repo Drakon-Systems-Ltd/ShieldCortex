@@ -491,7 +491,13 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   }
 
   // 4. THE #74 silent drop: enabled in config but missing from a READABLE index.
-  if (enabledInConfig && !loadedInIndex) {
+  //    `index != null` is load-bearing: when the index is unreadable and rule 3
+  //    did not fire, it is because the live roster proved load — a null index
+  //    is absence of evidence, and must never be read as an index that omits
+  //    the plugin. The 2026.9.4 index migration made every host's index
+  //    unreadable at once, and this branch turned that into a false UNPROTECTED
+  //    on boxes whose gateway journal showed the plugin registered.
+  if (enabledInConfig && !loadedInIndex && index != null) {
     reasons.push('enabled:true in config but ABSENT from the loaded roster (plugins_json) — interceptor not loaded, host unprotected while status reports ON');
     if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
     return {
@@ -531,6 +537,10 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   // Say exactly which evidence we have. Claiming "loaded in roster" off the
   // install index alone is what made #103 a false positive.
   // #216: distinguish boot-snapshot proof from PID-attributed hot-reload proof.
+  if (index == null) {
+    // Only reachable with loadedInLiveRoster === true (rule 3 catches the rest).
+    reasons.push('the SQLite plugin install index was unreadable, but the RUNNING gateway proves the plugin is loaded — the live roster outranks the install index');
+  }
   reasons.push(
     loadedInLiveRoster === true
       ? input.liveLoadEvidence === 'gateway-pid-registration'
@@ -694,10 +704,22 @@ function safeParse<T>(json: string | null | undefined, fallback: T): T {
 }
 
 /**
- * Read the latest `installed_plugin_index` row from OpenClaw's shared SQLite
- * state and parse the JSON columns we reconcile against. Opens READ-ONLY and
- * best-effort — returns null if the DB, table, or better-sqlite3 is unavailable
- * so callers degrade to the installs.json/on-disk layers rather than throwing.
+ * Read the latest plugin install index from OpenClaw's shared SQLite state and
+ * parse the JSON we reconcile against. Opens READ-ONLY and best-effort —
+ * returns null if the DB, table, or better-sqlite3 is unavailable so callers
+ * degrade to the installs.json/on-disk layers rather than throwing.
+ *
+ * Two on-disk layouts are understood:
+ *
+ *   - OpenClaw 2026.9.4+: migration `state-consolidation-v13` copies the row
+ *     into `config_machine_state` under `state_key = 'plugins.installedIndex'`
+ *     as `value_json = { revision, index: { installRecords, plugins, warning,
+ *     generatedAtMs, ... } }` and then DROPs `installed_plugin_index`. Reading
+ *     only the legacy table on such a host returned null on every run, and the
+ *     reconciler then reported a loaded plugin as UNPROTECTED.
+ *   - pre-2026.9.4: the legacy `installed_plugin_index` table.
+ *
+ * The migrated row wins when both exist (it is the one OpenClaw maintains).
  *
  * Read-only and path-scoped to the supplied `home`, so it is safe to exercise
  * against a temp fixture DB in tests without ever touching live `~/.openclaw`.
@@ -713,6 +735,10 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
     const require = createRequireSafe();
     const Database = require('better-sqlite3') as typeof import('better-sqlite3');
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
+
+    const migrated = readMigratedIndexRow(db);
+    if (migrated) return migrated;
+
     const row = db
       .prepare(
         'SELECT install_records_json, plugins_json, warning, generated_at_ms ' +
@@ -736,6 +762,38 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
     } catch {
       // ignore
     }
+  }
+}
+
+/**
+ * The OpenClaw 2026.9.4 `config_machine_state` shape. Returns null when the
+ * table or row is absent (pre-migration host) or the JSON does not carry an
+ * `index` object, so the caller can fall back to the legacy table.
+ */
+function readMigratedIndexRow(db: import('better-sqlite3').Database): PluginIndexRow | null {
+  try {
+    const row = db
+      .prepare("SELECT value_json, updated_at_ms FROM config_machine_state WHERE state_key = 'plugins.installedIndex'")
+      .get() as { value_json: string; updated_at_ms: number | null } | undefined;
+    if (!row) return null;
+    const parsed = safeParse<{ index?: unknown }>(row.value_json, {});
+    const index = parsed?.index;
+    if (!index || typeof index !== 'object') return null;
+    const idx = index as {
+      installRecords?: Record<string, IndexInstallRecord>;
+      plugins?: IndexPluginEntry[];
+      warning?: string | null;
+      generatedAtMs?: number;
+    };
+    return {
+      installRecords: idx.installRecords && typeof idx.installRecords === 'object' ? idx.installRecords : {},
+      plugins: Array.isArray(idx.plugins) ? idx.plugins : [],
+      warning: typeof idx.warning === 'string' ? idx.warning : null,
+      generatedAtMs: typeof idx.generatedAtMs === 'number' ? idx.generatedAtMs : (row.updated_at_ms ?? undefined),
+    };
+  } catch {
+    // No such table (pre-2026.9.4) or any other read failure: fall back.
+    return null;
   }
 }
 

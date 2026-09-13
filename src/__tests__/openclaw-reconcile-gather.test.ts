@@ -82,6 +82,46 @@ function writeIndex(row: {
   db.close();
 }
 
+/**
+ * OpenClaw 2026.9.4 layout: migration `state-consolidation-v13` moved the
+ * index into `config_machine_state` under `plugins.installedIndex` and
+ * dropped `installed_plugin_index`. `value_json` wraps the old row's fields
+ * in `{ revision, index: {...} }`.
+ */
+function writeMigratedIndex(row: {
+  installRecords: Record<string, unknown>;
+  plugins: unknown[];
+  warning?: string | null;
+  generatedAtMs?: number;
+  updatedAtMs?: number;
+}): void {
+  const stateDir = path.join(home, '.openclaw', 'state');
+  fs.mkdirSync(stateDir, { recursive: true });
+  const db = new Database(path.join(stateDir, 'openclaw.sqlite'));
+  db.exec(`CREATE TABLE IF NOT EXISTS config_machine_state (
+    state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);`);
+  const updatedAtMs = row.updatedAtMs ?? 1757980800000;
+  const index: Record<string, unknown> = {
+    version: 1,
+    warning: row.warning ?? null,
+    hostContractVersion: '2026.9.4',
+    compatRegistryVersion: 'x',
+    migrationVersion: 13,
+    policyHash: 'h',
+    workspaceDir: '/w',
+    refreshReason: 'r',
+    installRecords: row.installRecords,
+    plugins: row.plugins,
+    diagnostics: [],
+  };
+  if (row.generatedAtMs !== undefined) index.generatedAtMs = row.generatedAtMs;
+  db.prepare(`INSERT INTO config_machine_state VALUES ('plugins.installedIndex', @v, @u)`).run({
+    v: JSON.stringify({ revision: updatedAtMs, index }),
+    u: updatedAtMs,
+  });
+  db.close();
+}
+
 describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('reads install records + loaded roster from a real index DB', () => {
     writeIndex({
@@ -107,6 +147,63 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
 
   it('returns null when no DB exists', () => {
     expect(readPluginInstallIndex(home)).toBeNull();
+  });
+
+  it('legacy layout: a DB with ONLY installed_plugin_index still reads the row', () => {
+    writeIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: '/legacy' } },
+      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      warning: 'legacy-warning',
+      generatedAtMs: 4242,
+    });
+    const idx = readPluginInstallIndex(home);
+    expect(idx).not.toBeNull();
+    expect(idx!.installRecords[PLUGIN]?.installPath).toBe('/legacy');
+    expect(idx!.plugins.find((p) => p.pluginId === PLUGIN)?.enabled).toBe(true);
+    expect(idx!.warning).toBe('legacy-warning');
+    expect(idx!.generatedAtMs).toBe(4242);
+  });
+
+  it('OpenClaw 2026.9.4: reads the migrated config_machine_state row when installed_plugin_index is gone', () => {
+    writeMigratedIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: '/migrated' } },
+      plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'npm' }],
+      warning: 'migrated-warning',
+      generatedAtMs: 5151,
+    });
+    const idx = readPluginInstallIndex(home);
+    expect(idx).not.toBeNull();
+    expect(idx!.installRecords[PLUGIN]?.version).toBe('5.0.0');
+    expect(idx!.installRecords[PLUGIN]?.installPath).toBe('/migrated');
+    expect(idx!.plugins.find((p) => p.pluginId === PLUGIN)?.enabled).toBe(true);
+    expect(idx!.warning).toBe('migrated-warning');
+    expect(idx!.generatedAtMs).toBe(5151);
+  });
+
+  it('OpenClaw 2026.9.4: falls back to updated_at_ms when the migrated index carries no generatedAtMs', () => {
+    writeMigratedIndex({ installRecords: {}, plugins: [{ pluginId: PLUGIN, enabled: true }], updatedAtMs: 6161 });
+    const idx = readPluginInstallIndex(home);
+    expect(idx).not.toBeNull();
+    expect(idx!.generatedAtMs).toBe(6161);
+    expect(idx!.warning).toBeNull();
+  });
+
+  it('both layouts present: the migrated config_machine_state row wins', () => {
+    writeIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath: '/legacy' } },
+      plugins: [{ pluginId: PLUGIN, enabled: false }],
+      generatedAtMs: 9999999,
+    });
+    writeMigratedIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: '/migrated' } },
+      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      generatedAtMs: 1,
+    });
+    const idx = readPluginInstallIndex(home);
+    expect(idx!.installRecords[PLUGIN]?.installPath).toBe('/migrated');
+    expect(idx!.installRecords[PLUGIN]?.version).toBe('5.0.0');
+    expect(idx!.plugins.find((p) => p.pluginId === PLUGIN)?.enabled).toBe(true);
+    expect(idx!.generatedAtMs).toBe(1);
   });
 });
 

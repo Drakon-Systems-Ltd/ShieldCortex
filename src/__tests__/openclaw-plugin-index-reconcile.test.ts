@@ -121,6 +121,62 @@ describe('reconcilePluginState — #74 field fixtures', () => {
     expect(verdict.severity).toBe('fail');
   });
 
+  it('2026.9.4 regression: null index + live boot roster naming the plugin is HEALTHY, not enabled-not-loaded', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    // The 2026.9.4 index migration made readPluginInstallIndex return null on
+    // every host; the gateway journal still proved the plugin loaded. That
+    // combination reported a protected box as UNPROTECTED.
+    const verdict = reconcilePluginState({ ...fx.input, index: null, liveRoster: [fx.input.pluginId] });
+    expect(verdict.state).toBe('healthy');
+    expect(verdict.severity).toBe('ok');
+    expect(verdict.recommendedAction).toBe('none');
+    expect(verdict.indexReadable).toBe(false);
+    expect(verdict.loadedInLiveRoster).toBe(true);
+    expect(verdict.state).not.toBe('enabled-not-loaded');
+    expect(verdict.reasons.join(' ')).toMatch(/index was unreadable/i);
+    expect(verdict.reasons.join(' ')).toMatch(/RUNNING gateway proves/i);
+  });
+
+  it('2026.9.4 regression: null index + PID-attributed registration (no roster line) is HEALTHY', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    const verdict = reconcilePluginState({
+      ...fx.input,
+      index: null,
+      liveRoster: null,
+      liveLoadEvidence: 'gateway-pid-registration',
+    });
+    expect(verdict.state).toBe('healthy');
+    expect(verdict.severity).toBe('ok');
+    expect(verdict.loadedInLiveRoster).toBe(true);
+    expect(verdict.reasons.join(' ')).toMatch(/index was unreadable/i);
+  });
+
+  it('null index + NO live roster evidence stays index-unreadable (warn)', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    const verdict = reconcilePluginState({ ...fx.input, index: null, liveRoster: null });
+    expect(verdict.state).toBe('index-unreadable');
+    expect(verdict.severity).toBe('warn');
+    expect(verdict.loadedInLiveRoster).toBeNull();
+    expect(verdict.state).not.toBe('enabled-not-loaded');
+  });
+
+  it('null index + live roster that OMITS the plugin is still the #103 hard fail', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    const verdict = reconcilePluginState({ ...fx.input, index: null, liveRoster: ['some-other-plugin'] });
+    expect(verdict.state).toBe('enabled-not-loaded');
+    expect(verdict.severity).toBe('fail');
+    expect(verdict.loadedInLiveRoster).toBe(false);
+  });
+
+  it('regression guard: a READABLE index that omits the plugin + no live roster is still enabled-not-loaded', () => {
+    const fx = loadFixture('enabled-not-loaded');
+    const verdict = reconcilePluginState({ ...fx.input, liveRoster: null });
+    expect(verdict.indexReadable).toBe(true);
+    expect(verdict.loadedInLiveRoster).toBeNull();
+    expect(verdict.state).toBe('enabled-not-loaded');
+    expect(verdict.severity).toBe('fail');
+  });
+
   it('is pure: does not mutate its input', () => {
     const fx = loadFixture('enabled-not-loaded');
     const snapshot = JSON.stringify(fx.input);
