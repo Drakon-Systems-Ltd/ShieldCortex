@@ -347,7 +347,7 @@ describe('the denial notification — what it must say', () => {
 
   it('still carries the approve command, because authorising the RETRY is the only way forward', () => {
     const text = formatOperatorNotification(DENIED);
-    expect(text).toContain(`shieldcortex approve ${DENIED.shortHash}`);
+    expect(text).toContain(`shieldcortex approve --denial`);
     expect(text).toMatch(/retry/i);
   });
 

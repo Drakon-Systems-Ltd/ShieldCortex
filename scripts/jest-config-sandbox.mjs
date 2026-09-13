@@ -61,6 +61,11 @@ mkdirSync(auditSandboxDir, { recursive: true });
 process.env.SHIELDCORTEX_CONFIG_DIR = sandboxDir;
 process.env.SHIELDCORTEX_AUDIT_DIR = auditSandboxDir;
 
+// Do NOT set OPENCLAW_HOME here. Installer suites spy os.homedir() and assert
+// openClawConfigPath() lands under that spy; a global OPENCLAW_HOME makes
+// those suites REFUSE / fail (#429/#226/#251). Suites that call
+// setActionGuardCoreConfig must isolate OPENCLAW_HOME themselves.
+
 // Re-assert before every test. Several suites `delete process.env
 // .SHIELDCORTEX_CONFIG_DIR` in their teardown — that pattern was written when
 // the default was the real `~/.shieldcortex`, so a bare delete would otherwise

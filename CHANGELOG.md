@@ -21,6 +21,21 @@ All notable changes to this project will be documented in this file.
 - The dashboard API's RESTRICTED-content redactor (`deepRedactRestrictedContent`, installed on every `/api/*` JSON response) rebuilt every plain object via `Object.keys()` — a `Date` instance has no enumerable own properties, so every `createdAt`/`lastAccessed`/`updatedAt` in every response silently collapsed to `{}`, rendering as "NaNw ago" / "Invalid Date" across the dashboard. Dates are now normalised to a plain `Date` carrying only the timestamp (a decorated or subclassed Date with a custom `toJSON` cannot smuggle data through); `Map`/`Set` are materialised to object/array and redacted; binary views pass through.
 - The same redactor's cycle guard returned the **original** object on a repeat visit, so the second occurrence of an aliased RESTRICTED row (`{ a: row, b: row }`) reached the browser unredacted. It now maps each original to its sanitised copy.
 - Root Jest's `jest.config.js` `roots` still pointed at a `dashboard/src/components/graph/constellation/__tests__` path deleted months earlier — this failed Jest's own config validation outright and silently blocked every root-suite run before a single test executed.
+- **Guard plane sync + Re-Authorise:** `shieldcortex config --action-guard-*` now best-effort syncs `enabled`/`enforce` onto an existing OpenClaw plugin entry (`plugins.entries.shieldcortex-realtime.config.actionGuard`) so signed config and the interceptor stop lying to each other. Missing/malformed OpenClaw config does not invent an entry. Missed/expired cards stay a no-op; `approve --denial <id> --reauth` grants the same fingerprint from a TTY. A live card and a TTY grant cannot both be spendable. Headless DNP copy points at `--denial`, not bare `approve`. Guard stays off by default.
+
+## [5.0.3] - 2026-09-13
+
+Patch on 5.0.2. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`).
+
+### Fixed
+- **`shieldcortex update` skill step:** OpenClaw 2026.9 stores agents as `agents.entries`, not `agents.list`. Jarvis's 5.0.2 update therefore never passed `--agent main` and died with `Multiple agents are configured`. `update` now reads both shapes and still prefers `main`. Empty/unreadable config still does not invent an agent. Guard stays off.
+
+## [5.0.2] - 2026-09-13
+
+Patch on 5.0.1. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`).
+
+### Fixed
+- **Doctor NOTIFY:** signed Action Guard Enforce leftover no longer FAILs `NOTIFY` when the OpenClaw plugin is explicitly off (`plugins.entries.shieldcortex-realtime.enabled:false`, `actionGuard.enabled:false` / `enforce:false`, or `interceptor.enabled:false`). That was Jarvis's 5.0.1 1-fail; the `$` footer prescribed a webhook. FAIL remains when a live enforcing plane claims a sink it does not have. Do not add a webhook. Guard stays off.
 - **#438:** a session lease whose recorded holder PID is confirmed dead no longer wedges the scope until TTL. Blank / non-positive / unconfirmed PIDs still fail closed — a missing pid is not a skeleton key. Freeze semantics unchanged.
 - **#472:** `shieldcortex setup openclaw` honours absolute `OPENCLAW_HOME` (and `~/…`) instead of always writing the operator's real `~/.openclaw`. Relative / `~user` values are ignored — they resolve against OpenClaw's process cwd, which this CLI cannot know. Source checkout no longer carries a stale `plugins/openclaw/dist` manifest (build output only). `v4.54.15` is tagged. The main tarball still does not ship the OpenClaw plugin — that remains `@drakon-systems/shieldcortex-realtime`.
 - **#475:** `POST /api/memories/:id/quarantine` now writes `firewall_result='QUARANTINE'`. The column is `NOT NULL` with no default, so the dashboard "quarantine this memory" action 500'd on every call and never moved the row.

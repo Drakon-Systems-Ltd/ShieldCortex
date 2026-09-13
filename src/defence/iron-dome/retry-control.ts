@@ -935,7 +935,7 @@ export interface GrantRetryAuth {
 export type GrantRetryFailure =
   | 'not-found' | 'suppressed' | 'unscopeable' | 'claim-missing' | 'claim-expired'
   | 'claim-spent' | 'epoch-stale' | 'bad-nonce' | 'not-authenticated' | 'locked'
-  | 'unwritable' | 'no-key';
+  | 'unwritable' | 'no-key' | 'card-live';
 
 export type GrantRetryOutcome =
   | { ok: true; alreadyGranted?: boolean; grant: RetryGrant; row: RetryRow; id: string }
@@ -1009,6 +1009,9 @@ export function grantRetry(
       if (!constantTimeEquals(row.claim.nonceHmac, presentedHmac as string)) {
         return { value: { failed: 'bad-nonce' }, commit: true };
       }
+    } else if (claimIsLive(row.claim, now) && !row.claim?.grantedAt) {
+      // One live door: a TTY grant must not sit beside an unanswered card.
+      return { value: { failed: 'card-live' }, commit: true };
     }
 
     const suppressed = suppressionIsLive(row, now);
@@ -1350,6 +1353,6 @@ export function formatUnspentExpiryNotice(expired: ExpiredGrantNotice[]): string
   return [
     `retry grant expired UNSPENT (${expired.length}): the job did not run again inside the window.`,
     ...lines,
-    'Re-authorise from YOUR terminal: shieldcortex approve --denial <actionId> --ttl <minutes>',
+    'Re-authorise from YOUR terminal: shieldcortex approve --denial <actionId> --reauth',
   ].join('\n');
 }
