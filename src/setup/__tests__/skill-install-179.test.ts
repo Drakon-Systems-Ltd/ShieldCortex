@@ -163,6 +163,19 @@ describe('#456 — skills install args are feature-detected, never a bet on a ve
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   });
 
+  it('reads OpenClaw 2026.9 agents.entries (Jarvis) and still prefers main', async () => {
+    const home = fakeHome('5.0.0');
+    const probe = () => 'Options:\n  --agent <id>  Target agent\n  --force\n';
+    try {
+      fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({
+        agents: { entries: { main: { name: 'Jarvis' }, 'mc-watchdog': { name: 'watchdog' } } },
+      }));
+      expect(readConfiguredAgentIds(home)).toEqual(['main', 'mc-watchdog']);
+      expect(resolveSkillInstallArgs('/fake/openclaw', { home, probe }).slice(-2)).toEqual(['--agent', 'main']);
+      expect((await checkOpenClawSkillVersion(home, '5.0.2')).fix).toContain('--agent main');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
   it('retries a rejected flag once, including its value, without changing other args', async () => {
     const calls: string[][] = [];
     await runSkillInstallWithRetry([...BASE, '--agent', 'main', INSTALL_POLICY_ACK_FLAG], async (args) => {

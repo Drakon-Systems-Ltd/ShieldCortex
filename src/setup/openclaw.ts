@@ -2513,13 +2513,22 @@ export function resolveSkillInstallArgs(
   return base;
 }
 
-/** Read only agent identifiers; unreadable configuration is not a default agent. */
+/** Read only agent identifiers; unreadable configuration is not a default agent.
+ *  OpenClaw 2026.9 stores agents as `agents.entries` (id → record). OpenClaw 1
+ *  used `agents.list` (`{id}`). Jarvis 5.0.2 update died on the list shape. */
 export function readConfiguredAgentIds(home: string): string[] | null {
   try {
     const config = JSON.parse(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf8'));
-    const agents: unknown = config?.agents?.list;
-    if (!Array.isArray(agents)) return null;
-    return [...new Set(agents.flatMap((agent) =>
+    const agents = config?.agents;
+    if (!agents || typeof agents !== 'object') return null;
+    const entries = (agents as { entries?: unknown }).entries;
+    if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
+      const ids = Object.keys(entries).filter((id) => id.trim().length > 0);
+      if (ids.length > 0) return [...new Set(ids)];
+    }
+    const list = (agents as { list?: unknown }).list;
+    if (!Array.isArray(list)) return null;
+    return [...new Set(list.flatMap((agent) =>
       typeof agent?.id === 'string' && agent.id.trim() ? [agent.id] : []))];
   } catch { return null; }
 }
