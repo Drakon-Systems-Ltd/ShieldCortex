@@ -204,4 +204,71 @@ describe('deepRedactRestrictedContent (HTTP response interceptor core)', () => {
     expect(out.memories[0].createdAt.toISOString()).toBe('2026-06-01T12:00:00.000Z');
     expect(out.memories[0].lastAccessed).toBeInstanceOf(Date);
   });
+
+  // ── Review-round regressions (dashboard-v2 build review, item 7) ──
+
+  it('redacts EVERY occurrence of an aliased RESTRICTED row, not just the first (aliasing bypass)', () => {
+    const row = mem({ sensitivityLevel: 'RESTRICTED', content: 'the-secret', title: `t ${SECRET}` });
+    const out = deepRedactRestrictedContent({ a: row, b: row, list: [row, row] }) as {
+      a: Memory; b: Memory; list: Memory[];
+    };
+    for (const m of [out.a, out.b, out.list[0], out.list[1]]) {
+      expect(m.content).toBe(RESTRICTED_CONTENT_PLACEHOLDER);
+      expect(m.title).not.toContain(SECRET);
+      expect(m).not.toBe(row); // never the original object
+    }
+    expect(JSON.stringify(out)).not.toContain('the-secret');
+    expect(row.content).toBe('the-secret'); // input untouched
+  });
+
+  it('normalises Dates to plain timestamps: decorated / subclassed toJSON / invalid cannot carry data', () => {
+    const decorated = Object.assign(new Date('2026-06-01T12:00:00.000Z'), { smuggled: SECRET });
+    class LeakyDate extends Date {
+      toJSON() {
+        return `leak ${SECRET}`;
+      }
+    }
+    const leaky = new LeakyDate('2026-06-01T12:00:00.000Z');
+    const invalid = new Date('not a date');
+    const out = deepRedactRestrictedContent({ decorated, leaky, invalid }) as {
+      decorated: Date & { smuggled?: string }; leaky: Date; invalid: Date;
+    };
+    expect(out.decorated).toBeInstanceOf(Date);
+    expect(out.decorated.toISOString()).toBe('2026-06-01T12:00:00.000Z');
+    expect(out.decorated.smuggled).toBeUndefined();
+    expect(out.leaky.constructor).toBe(Date); // plain Date, subclass toJSON gone
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expect(out.invalid).toBeInstanceOf(Date);
+    expect(Number.isNaN(out.invalid.getTime())).toBe(true);
+  });
+
+  it('materialises Map → object and Set → array (then redacts), and passes binary views through', () => {
+    const restricted = mem({ sensitivityLevel: 'RESTRICTED', content: 'in-map' });
+    const buf = Buffer.from('bytes');
+    const u8 = new Uint8Array([1, 2, 3]);
+    const out = deepRedactRestrictedContent({
+      m: new Map<string, unknown>([['row', restricted], ['n', 1]]),
+      s: new Set<unknown>([restricted, 'x']),
+      buf,
+      u8,
+    }) as { m: Record<string, unknown>; s: unknown[]; buf: Buffer; u8: Uint8Array };
+    expect((out.m.row as Memory).content).toBe(RESTRICTED_CONTENT_PLACEHOLDER);
+    expect(out.m.n).toBe(1);
+    expect(Array.isArray(out.s)).toBe(true);
+    expect((out.s[0] as Memory).content).toBe(RESTRICTED_CONTENT_PLACEHOLDER);
+    expect(out.s[1]).toBe('x');
+    expect(out.buf).toBe(buf);
+    expect(out.u8).toBe(u8);
+    expect(JSON.stringify(out)).not.toContain('in-map');
+  });
+
+  it('shares one sanitised copy for a repeated benign object and still breaks cycles inside arrays', () => {
+    const shared = { title: `k ${SECRET}` };
+    const arr: unknown[] = [shared];
+    arr.push(arr);
+    const out = deepRedactRestrictedContent({ x: shared, y: shared, arr }) as { x: { title: string }; y: { title: string }; arr: unknown[] };
+    expect(out.x).toBe(out.y);
+    expect(out.x.title).not.toContain(SECRET);
+    expect(out.arr[1]).toBe(out.arr);
+  });
 });
