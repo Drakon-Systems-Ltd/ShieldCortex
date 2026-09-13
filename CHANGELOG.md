@@ -8,6 +8,16 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- (none yet)
+
+### Fixed
+- (none yet)
+
+## [5.0.5] - 2026-09-13
+
+Patch on 5.0.4. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`). Cloud pin stays `^5.0.0`.
+
+### Added
 - **One host table** for `setup` / `update` / `uninstall` / `doctor`. Detects Claude Code, OpenClaw, Hermes, Codex, and Cursor/VS Code. `setup` (and `quickstart`) prints the table and asks before wiring present-but-unwired hosts. `update` refreshes what is already wired, then asks about newly present hosts (non-TTY prints the ask and does not wire). `uninstall` now removes the Hermes plugin and Copilot/Cursor MCP entries. `doctor` prints the same table plus one NEXT command; `--repair` is TTY-only named jobs; `--repair --agent` writes a bounded brief and does not spawn an agent. Guard stays off. Conversation access is not granted.
 
 ### Fixed
