@@ -18,6 +18,15 @@ import { useHealthScore } from '@/hooks/useHealthScore';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { useXRayStatus } from '@/hooks/useXRay';
 import { useDashboardStore } from '@/lib/store';
+import {
+  combineStatus,
+  countText,
+  firewallPill,
+  guardPill,
+  operationsPill,
+  queryStatus,
+  scanningPill,
+} from '@/lib/query-status';
 import { cn } from '@/lib/utils';
 
 const MemoryGraph = dynamic(() => import('@/components/graph/MemoryGraph'), {
@@ -28,13 +37,6 @@ const MemoryGraph = dynamic(() => import('@/components/graph/MemoryGraph'), {
     </div>
   ),
 });
-
-/** '—' for counts whose query failed — never a fabricated zero (§13.4). */
-function count(n: number | undefined, failed: boolean): string {
-  if (failed) return '—';
-  if (n === undefined) return '…';
-  return n.toLocaleString();
-}
 
 interface FeedEvent {
   key: number;
@@ -108,20 +110,41 @@ export function OverviewV2() {
   const update = useCheckForUpdates(true);
   const { isConnected } = useWebSocketStatus();
 
-  // ── Protection tile rows (honest states, §13.4) ──────────
-  const guardState: StatusPillState = ironDome.isError ? 'unavailable' : ironDome.isLoading ? 'unknown' : ironDome.data?.enabled ? 'ok' : 'off';
-  const controlState: StatusPillState = control.isError ? 'unavailable' : control.isLoading ? 'unknown'
-    : control.data?.killSwitchActive ? 'fail' : control.data?.paused ? 'warn' : 'ok';
-  const firewallState: StatusPillState = defence.isError ? 'unavailable' : defence.isLoading ? 'unknown'
-    : defence.data?.mode === 'permissive' ? 'warn' : 'ok';
+  // ── Every row/count/pill derives from query status via one helper
+  //    (§13.4, review item 5): pending / unavailable / stale / confirmed. ──
+  const st = {
+    stats: queryStatus(stats),
+    review: queryStatus(review),
+    contradictions: queryStatus(contradictions),
+    audit: queryStatus(audit7d),
+    quarantine: queryStatus(quarantine),
+    ironDome: queryStatus(ironDome),
+    control: queryStatus(control),
+    defence: queryStatus(defence),
+    health: queryStatus(health),
+    license: queryStatus(license),
+    xray: queryStatus(xray),
+    update: queryStatus(update),
+  };
+  const guard = guardPill(st.ironDome, ironDome.data?.enabled);
+  const scanning = scanningPill(st.ironDome, ironDome.data?.enabled);
+  const operations = operationsPill(st.control, control.data);
+  const firewall = firewallPill(st.defence, defence.data);
 
   // ── Needs-you list ───────────────────────────────────────
   const needsYou = useMemo(() => {
     const items: { label: string; detail: string; href: string }[] = [];
     const unavailable: string[] = [];
+    const pending: string[] = [];
+    const stale: string[] = [];
+    const note = (name: string, status: ReturnType<typeof queryStatus>) => {
+      if (status === 'unavailable') unavailable.push(name);
+      else if (status === 'pending') pending.push(name);
+      else if (status === 'stale') stale.push(name);
+    };
 
-    if (quarantine.isError) unavailable.push('quarantine');
-    else if ((quarantine.data?.total ?? 0) > 0) {
+    note('quarantine', st.quarantine);
+    if (st.quarantine !== 'unavailable' && (quarantine.data?.total ?? 0) > 0) {
       items.push({
         label: `${quarantine.data!.total} quarantined item${quarantine.data!.total === 1 ? '' : 's'} pending`,
         detail: 'Approve or reject blocked writes and file findings.',
@@ -129,8 +152,8 @@ export function OverviewV2() {
       });
     }
 
-    if (contradictions.isError) unavailable.push('contradictions');
-    else if ((contradictions.data?.count ?? 0) > 0) {
+    note('contradictions', st.contradictions);
+    if (st.contradictions !== 'unavailable' && (contradictions.data?.count ?? 0) > 0) {
       items.push({
         label: `${contradictions.data!.count} contradiction${contradictions.data!.count === 1 ? '' : 's'} detected`,
         detail: 'Conflicting facts reduce recall trust.',
@@ -138,8 +161,8 @@ export function OverviewV2() {
       });
     }
 
-    if (review.isError) unavailable.push('review queue');
-    else {
+    note('review queue', st.review);
+    if (st.review !== 'unavailable') {
       const dupes = review.data?.summary?.duplicates ?? 0;
       const stale = review.data?.summary?.stale ?? 0;
       if (dupes + stale > 0) {
@@ -151,6 +174,9 @@ export function OverviewV2() {
       }
     }
 
+    // Licence / update-check failures are reported as unavailable too (review
+    // item 5) — a failed check is not "nothing to do".
+    note('licence', st.license);
     const trial = license.data?.trial as { daysRemaining?: number } | null | undefined;
     if (trial?.daysRemaining !== undefined && trial.daysRemaining <= 7) {
       items.push({
@@ -160,6 +186,7 @@ export function OverviewV2() {
       });
     }
 
+    note('update check', st.update);
     if (update.data?.updateAvailable) {
       items.push({
         label: `Newer version available — v${update.data.latestVersion}`,
@@ -168,8 +195,8 @@ export function OverviewV2() {
       });
     }
 
-    return { items, unavailable };
-  }, [quarantine.isError, quarantine.data, contradictions.isError, contradictions.data, review.isError, review.data, license.data, update.data]);
+    return { items, unavailable, pending, stale };
+  }, [st.quarantine, st.contradictions, st.review, st.license, st.update, quarantine.data, contradictions.data, review.data, license.data, update.data]);
 
   // ── Activity feed (WS-fed, last 50, filterable) ──────────
   const [feed, setFeed] = useState<FeedEvent[]>([]);
@@ -188,8 +215,9 @@ export function OverviewV2() {
     return Object.values(health.data.components).sort((a, b) => a.score - b.score).slice(0, 3);
   }, [health.data]);
 
-  const memErr = stats.isError;
-  const auditErr = audit7d.isError;
+  // The first-run guide only shows once ALL three of its inputs are confirmed
+  // (never on a failed fetch defaulted to 0 — review item 5).
+  const firstRunStatus = combineStatus(st.stats, st.xray, st.audit);
 
   return (
     <div className="h-full overflow-y-auto">
@@ -201,7 +229,7 @@ export function OverviewV2() {
         />
 
         <FirstRunGuide
-          ready={stats.data !== undefined}
+          ready={firstRunStatus === 'confirmed'}
           memoryCount={stats.data?.total ?? 0}
           scanCount={xray.data?.summary?.scans ?? 0}
           blockedCount={audit7d.data?.blockedCount ?? 0}
@@ -210,49 +238,53 @@ export function OverviewV2() {
         {/* ── Four status tiles ── */}
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <Tile icon={<Shield size={15} aria-hidden />} title="Protection" href="/protection">
-            <TileRow label="Action Guard" pill={guardState}
-              pillText={guardState === 'ok' ? 'on' : guardState === 'off' ? 'off' : guardState}
+            <TileRow label="Action Guard" pill={guard.state} pillText={guard.text}
               onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
-            {guardState === 'off' && <CopyableCommand command="shieldcortex iron-dome activate" />}
-            <TileRow label="Operations" pill={controlState}
-              pillText={control.data?.killSwitchActive ? 'emergency stop' : control.data?.paused ? 'paused' : control.data?.mode ?? controlState}
+            {guard.state === 'off' && <CopyableCommand command="shieldcortex iron-dome activate" />}
+            <TileRow label="Conversation scanning" pill={scanning.state} pillText={scanning.text}
+              onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
+            <TileRow label="Operations" pill={operations.state} pillText={operations.text}
               onRetry={control.isError ? () => control.refetch() : undefined} />
-            <TileRow label="Write firewall" pill={firewallState}
-              pillText={defence.data ? `enforced (${defence.data.mode})` : firewallState}
+            <TileRow label="Write firewall" pill={firewall.state} pillText={firewall.text}
               onRetry={defence.isError ? () => defence.refetch() : undefined} />
           </Tile>
 
           <Tile icon={<Database size={15} aria-hidden />} title="Memory" href="/memory">
-            <BigNumber value={count(stats.data?.total, memErr)} label="stored memories" />
+            <BigNumber value={countText(stats.data?.total, st.stats)} label="stored memories" />
             <div className="grid grid-cols-3 gap-2 text-center text-[11px] text-[var(--sc-text-muted)]">
-              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{count(stats.data?.shortTerm, memErr)}</div>short-term</div>
-              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{count(stats.data?.longTerm, memErr)}</div>long-term</div>
-              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{count(contradictions.data?.count, contradictions.isError)}</div>contradictions</div>
+              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{countText(stats.data?.shortTerm, st.stats)}</div>short-term</div>
+              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{countText(stats.data?.longTerm, st.stats)}</div>long-term</div>
+              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{countText(contradictions.data?.count, st.contradictions)}</div>contradictions</div>
             </div>
-            {memErr && <TileRow label="Stats" pill="unavailable" pillText="unavailable" onRetry={() => stats.refetch()} />}
+            {st.stats === 'unavailable' && <TileRow label="Stats" pill="unavailable" pillText="unavailable" onRetry={() => stats.refetch()} />}
+            {st.stats === 'stale' && <TileRow label="Stats" pill="warn" pillText="stale (refetch failed)" onRetry={() => stats.refetch()} />}
           </Tile>
 
           <Tile icon={<Activity size={15} aria-hidden />} title="Threats (7d)" href="/protection?tab=audit">
             <div className="grid grid-cols-3 gap-2 text-center text-[11px] text-[var(--sc-text-muted)]">
-              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-danger)]">{count(audit7d.data?.blockedCount, auditErr)}</div>blocked</div>
-              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-warn)]">{count(audit7d.data?.quarantinedCount, auditErr)}</div>quarantined</div>
-              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-text)]">{count(audit7d.data?.allowedCount, auditErr)}</div>allowed</div>
+              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-danger)]">{countText(audit7d.data?.blockedCount, st.audit)}</div>blocked</div>
+              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-warn)]">{countText(audit7d.data?.quarantinedCount, st.audit)}</div>quarantined</div>
+              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-text)]">{countText(audit7d.data?.allowedCount, st.audit)}</div>allowed</div>
             </div>
-            {auditErr ? (
+            {st.audit === 'unavailable' ? (
               <TileRow label="Audit" pill="unavailable" pillText="unavailable" onRetry={() => audit7d.refetch()} />
+            ) : st.audit === 'pending' ? (
+              <p className="text-[11px] italic text-[var(--sc-text-muted)]">Checking the audit log…</p>
             ) : (
               <p className="text-[11px] text-[var(--sc-text-muted)]">
                 {(audit7d.data?.totalOperations ?? 0) === 0 ? 'No gated operations recorded this week.' : `${audit7d.data!.totalOperations.toLocaleString()} gated operations this week.`}
+                {st.audit === 'stale' && <span className="italic text-[var(--sc-warn)]"> Last known — refetch failed.</span>}
               </p>
             )}
           </Tile>
 
           <Tile icon={<HeartPulse size={15} aria-hidden />} title="Health" href="/memory?tab=review">
-            {health.isError ? (
+            {st.health === 'unavailable' ? (
               <TileRow label="Score" pill="unavailable" pillText="unavailable" onRetry={() => health.refetch()} />
             ) : (
               <>
                 <BigNumber value={health.data ? `${health.data.overall}%` : '…'} label="memory health score" />
+                {st.health === 'stale' && <TileRow label="Score" pill="warn" pillText="stale (refetch failed)" onRetry={() => health.refetch()} />}
                 <ul className="space-y-1 text-[11px] text-[var(--sc-text-muted)]">
                   {weakest.map((c) => (
                     <li key={c.label} className="flex items-center justify-between gap-2">
@@ -271,8 +303,14 @@ export function OverviewV2() {
           <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)] p-4 shadow-[var(--sc-shadow-card)]">
             <h3 className="text-sm font-semibold text-[var(--sc-text)]">Needs you</h3>
             <div className="mt-3 space-y-2">
-              {needsYou.items.length === 0 && needsYou.unavailable.length === 0 && (
-                <p className="text-sm text-[var(--sc-text-muted)]">Nothing pending. All queues are clear.</p>
+              {needsYou.items.length === 0 && needsYou.pending.length > 0 && (
+                <p className="text-sm italic text-[var(--sc-text-muted)]">Checking {needsYou.pending.join(', ')}…</p>
+              )}
+              {needsYou.items.length === 0 && needsYou.pending.length === 0 && needsYou.unavailable.length === 0 && (
+                <p className="text-sm text-[var(--sc-text-muted)]">
+                  Nothing pending. All queues are clear.
+                  {needsYou.stale.length > 0 && <span className="italic text-[var(--sc-warn)]"> ({needsYou.stale.join(', ')}: last known — refetch failed.)</span>}
+                </p>
               )}
               {needsYou.items.map((item) => (
                 <Link key={item.label} href={item.href}
@@ -285,7 +323,10 @@ export function OverviewV2() {
                 </Link>
               ))}
               {needsYou.unavailable.map((src) => (
-                <p key={src} className="text-xs italic text-[var(--sc-warn)]">{src} status unavailable — counts here may be incomplete.</p>
+                <p key={src} className="text-xs italic text-[var(--sc-warn)]">{src} status unavailable — this list may be incomplete.</p>
+              ))}
+              {needsYou.items.length > 0 && needsYou.stale.map((src) => (
+                <p key={`stale-${src}`} className="text-xs italic text-[var(--sc-warn)]">{src}: last known — refetch failed.</p>
               ))}
             </div>
           </section>
