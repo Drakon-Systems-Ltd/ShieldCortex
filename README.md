@@ -205,10 +205,10 @@ steps:
 
 ```bash
 npm install -g shieldcortex
-shieldcortex quickstart
+shieldcortex setup
 ```
 
-`quickstart` detects which agent tools are installed and configures what each host can actually support. Claude Code and OpenClaw get hooks that can **deny**. Codex, Cursor, and VS Code get an MCP memory server — that is a scanner the model may call, not a tool gate. `doctor` will say so.
+`setup` (alias: `quickstart`) prints one host table — Claude Code, OpenClaw, Hermes, Codex, Cursor/VS Code — and asks before wiring each present-but-unwired host. Claude Code and OpenClaw get hooks that can **deny**. Hermes gets a tool gate. Codex, Cursor, and VS Code get an MCP memory server — that is a scanner the model may call, not a tool gate. `doctor` prints the same table. Action Guard stays off.
 
 > If you want to configure a single tool manually, use `shieldcortex install` instead. It registers the MCP server and session hooks for whichever agent is in the current working directory.
 

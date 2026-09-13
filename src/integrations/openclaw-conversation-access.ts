@@ -83,7 +83,7 @@ export function readConversationAccess(home: string, pluginId: string): Conversa
  * plugin's startup line and the tests cannot drift apart.
  */
 export function conversationAccessFix(pluginId: string): string {
-  return `Add "hooks": { "allowConversationAccess": true } to plugins.entries["${pluginId}"] in ~/.openclaw/openclaw.json, then run \`openclaw gateway restart\`. Conversation content is sensitive — this is your call, and leaving it ungranted is a valid choice.`;
+  return `Conversation scanning is off because plugins.entries["${pluginId}"].hooks.allowConversationAccess is not true. That is a valid choice. Do not grant conversation access or restart the gateway from this warning.`;
 }
 
 /**

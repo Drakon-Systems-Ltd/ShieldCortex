@@ -254,42 +254,27 @@ async function promptDetectedInstalls(autoApprove = false): Promise<void> {
 }
 
 export async function handleQuickstartCommand(target?: string): Promise<void> {
+  const { formatHostTable, offerUnwiredHosts, scanHostTable, wireHost } = await import('./host-table.js');
+  const table = scanHostTable();
+
   if (!target) {
-    printAutoGuide();
-
-    // Interactive runs get the outcome-based picker first; non-TTY runs (CI,
-    // piped output) fall through to the historical per-target prompt flow so
-    // existing automation keeps working.
-    if (isInteractiveTerminal()) {
-      const intent = await promptIntent();
-      console.log('');
-      switch (intent) {
-        case 'memory':
-          await promptDetectedInstalls(false);
-          return;
-        case 'defence':
-          printSecurityGuide();
-          return;
-        case 'both':
-          await promptDetectedInstalls(false);
-          console.log('');
-          printSecurityGuide();
-          return;
-        case 'skip':
-          // Fall through to the historical prompt flow.
-          break;
-      }
-    }
-
-    await promptDetectedInstalls(false);
+    console.log('');
+    for (const line of formatHostTable(table)) console.log(line);
+    await offerUnwiredHosts({ mode: 'setup' });
     return;
   }
 
   const normalized = target.toLowerCase();
 
   if (normalized === '--yes' || normalized === '--install-detected') {
-    printAutoGuide();
-    await promptDetectedInstalls(true);
+    console.log('');
+    for (const line of formatHostTable(table)) console.log(line);
+    await offerUnwiredHosts({ mode: 'setup', autoApprove: true });
+    return;
+  }
+
+  if (normalized === 'hermes') {
+    await wireHost('hermes');
     return;
   }
 
@@ -302,7 +287,7 @@ export async function handleQuickstartCommand(target?: string): Promise<void> {
       await runQuickstartTarget(normalized as QuickstartTarget);
       return;
     default:
-      console.error('Usage: shieldcortex quickstart [claude|openclaw|copilot|codex|security|--yes|--install-detected]');
+      console.error('Usage: shieldcortex setup [claude|openclaw|hermes|copilot|codex|security|--yes|--install-detected]');
       process.exit(1);
   }
 }

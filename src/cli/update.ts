@@ -683,7 +683,17 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
   });
 }
 
-async function stepClaudeHooks(): Promise<StepResult> {
+async function stepClaudeHooks(home: string): Promise<StepResult> {
+  const { scanHostTable } = await import('../setup/host-table.js');
+  const claude = scanHostTable(home).rows.find((r) => r.id === 'claude');
+  if (!claude?.wired) {
+    return await step('Claude Code hooks', async () => ({
+      status: 'skip' as const,
+      summary: claude?.present
+        ? 'present but not wired — `shieldcortex setup` asks first'
+        : 'not installed',
+    }));
+  }
   return await step('Claude Code hooks', async () => {
     // setupHooks logs its own progress; capture it so we can summarise.
     const logBuffer: string[] = [];
@@ -769,7 +779,7 @@ function maybePrintActionGuardDefaultOffNotice(mainUpdated: boolean): void {
   process.stdout.write(`  ${paint('yellow', '!')}  ${paint('bold', 'Action Guard is now OFF by default')}\n`);
   process.stdout.write('     False approval cards on ordinary OpenClaw exec calls were going nowhere.\n');
   process.stdout.write('     Catastrophic tool gating is off until you turn Guard back on.\n');
-  process.stdout.write(`     ${paint('gray', 'enable: ')}${paint('cyan', 'shieldcortex config --action-guard-enable')}\n`);
+  process.stdout.write(`     ${paint('gray', 'Leave it off unless the review loop says yes.')}\n`);
   process.stdout.write(`     ${paint('gray', 'status: ')}${paint('cyan', 'shieldcortex config --cloud-status')}\n\n`);
 }
 
@@ -903,7 +913,7 @@ export async function runUpdate(): Promise<void> {
 
   const pluginResult = await stepOpenClawPlugin(home);
   const skillResult = await stepOpenClawSkill(home);
-  await stepClaudeHooks();
+  await stepClaudeHooks(home);
   await stepStatePermissions();
 
   footer(Date.now() - flowStart, mainUpdated, latest);
@@ -955,6 +965,21 @@ export async function runUpdate(): Promise<void> {
   maybePrint411Notice(fromVersion, mainUpdated);
   maybePrintActionGuardDefaultOffNotice(mainUpdated);
   await maybePrintDashboardHint();
+
+  try {
+    const { offerUnwiredHosts, formatHostTable, scanHostTable } = await import('../setup/host-table.js');
+    const table = scanHostTable(home);
+    const todo = table.rows.filter((r) => r.present && !r.wired);
+    if (todo.length > 0) {
+      process.stdout.write('\n');
+      for (const line of formatHostTable(table, currentVersion)) {
+        process.stdout.write(`${line}\n`);
+      }
+      await offerUnwiredHosts({ mode: 'update', home });
+    }
+  } catch {
+    /* update must not fail on the host table */
+  }
 
   // Closing panel — last write (design lock v3).
   const rows: UpdatePanelRow[] = [

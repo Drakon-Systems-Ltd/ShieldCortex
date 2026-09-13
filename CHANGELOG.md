@@ -8,10 +8,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- (none yet)
+- **One host table** for `setup` / `update` / `uninstall` / `doctor`. Detects Claude Code, OpenClaw, Hermes, Codex, and Cursor/VS Code. `setup` (and `quickstart`) prints the table and asks before wiring present-but-unwired hosts. `update` refreshes what is already wired, then asks about newly present hosts (non-TTY prints the ask and does not wire). `uninstall` now removes the Hermes plugin and Copilot/Cursor MCP entries. `doctor` prints the same table plus one NEXT command; `--repair` is TTY-only named jobs; `--repair --agent` writes a bounded brief and does not spawn an agent. Guard stays off. Conversation access is not granted.
 
 ### Fixed
-- (none yet)
+- Doctor honesty warnings no longer print `$ shieldcortex config --action-guard-enable` or `$ shieldcortex openclaw install --allow-conversation-access`. Guard-off and SCAN-off stay informational. The SCAN footnote no longer tells operators to invent a plugin `allowConversationAccess` key.
+- `shieldcortex update` no longer silent-wires Claude Code hooks on a present-but-unwired box. Refresh stays for already-wired installs; first-time wiring goes through the host-table ask (non-TTY prints the ask and does not wire).
+- Claude “wired” now requires a ShieldCortex-owned `PreToolUse` hook. Empty `PreToolUse` plus stray `shieldcortex` text (permissions allowlist) is not wired.
 
 ## [5.0.4] - 2026-09-13
 

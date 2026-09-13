@@ -82,12 +82,11 @@ describe('extractFixCommands', () => {
     ]);
   });
 
-  it('promotes grant ahead of backticked restart-only fix prose (Edith live shape)', () => {
+  it('does not mint a conversation-access grant from honesty copy', () => {
     const cmds = extractFixCommands(
       'Add hooks.allowConversationAccess=true in openclaw.json, then run `openclaw gateway restart`. Conversation content is sensitive.',
     );
-    expect(cmds[0]).toBe('shieldcortex openclaw install --allow-conversation-access');
-    expect(cmds).toContain('openclaw gateway restart');
+    expect(cmds).toEqual([]);
   });
 
 
@@ -95,10 +94,7 @@ describe('extractFixCommands', () => {
     const cmds = extractFixCommands(
       'Add "hooks": { "allowConversationAccess": true } to plugins.entries["shieldcortex-realtime"] in ~/.openclaw/openclaw.json, then restart the gateway.',
     );
-    expect(cmds).toEqual([
-      'shieldcortex openclaw install --allow-conversation-access',
-      'openclaw gateway restart',
-    ]);
+    expect(cmds).toEqual([]);
   });
 
   it('never treats English restart prose as a command', () => {
@@ -155,10 +151,12 @@ describe('formatDoctorReport — Edith case', () => {
     expect(text).toMatch(/KEY/);
 
     // commands on own lines
-    expect(text).toMatch(/\$ shieldcortex config --action-guard-enforce/);
     expect(text).toMatch(/\$ shieldcortex doctor --fix-project-keys/);
     expect(text).toMatch(/\$ openclaw gateway restart/);
     expect(text).toMatch(/allowConversationAccess/);
+    expect(text).not.toMatch(/\$ shieldcortex config --action-guard-enable/);
+    expect(text).not.toMatch(/\$ shieldcortex config --action-guard-enforce/);
+    expect(text).not.toMatch(/\$ shieldcortex openclaw install --allow-conversation-access/);
     expect(text).not.toMatch(/\$ restart OpenClaw/);
     expect(text).not.toMatch(/\$ restart MCP/);
     expect(text).toMatch(/\$ /);
@@ -199,6 +197,30 @@ describe('formatDoctorReport — Edith case', () => {
       { width: 40, color: false },
     );
     expect(lines.join('\n')).toMatch(/All clear/);
+  });
+
+  it('prints HOSTS and NEXT when provided, and honesty note only on warn-without-fail', () => {
+    const warnOnly = formatDoctorReport(
+      [{ label: 'NOTIFY', status: 'warn', message: 'plugin off' }],
+      {
+        width: 80,
+        color: false,
+        hostTableLines: ['  Hermes  present  not wired  memory + tool gate'],
+        nextCommand: 'shieldcortex setup',
+      },
+    ).join('\n');
+    expect(warnOnly).toMatch(/HOSTS/);
+    expect(warnOnly).toMatch(/Hermes/);
+    expect(warnOnly).toMatch(/NEXT/);
+    expect(warnOnly).toMatch(/\$ shieldcortex setup/);
+    expect(warnOnly).toMatch(/Honesty warnings are not unprotected/);
+
+    const fail = formatDoctorReport(
+      [{ label: 'Database', status: 'fail', message: 'corrupt', fix: 'shieldcortex repair' }],
+      { width: 80, color: false, nextCommand: 'shieldcortex repair' },
+    ).join('\n');
+    expect(fail).not.toMatch(/Honesty warnings are not unprotected/);
+    expect(fail).toMatch(/\$ shieldcortex repair/);
   });
 
   it('failures section precedes warnings', () => {

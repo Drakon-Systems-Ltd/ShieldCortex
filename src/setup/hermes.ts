@@ -57,7 +57,7 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
   console.log(`✓ Hermes — plugin copied to ${dest}`);
   console.log();
   console.log('This is a tool gate (pre_tool_call → POST /api/v1/action-guard).');
-  console.log('Enforce is ON by default. Opt out: SHIELDCORTEX_ENFORCE=0');
+  console.log('Action Guard stays off in ShieldCortex until you enable it on purpose.');
   console.log('Requires a running local API:  shieldcortex api   (http://127.0.0.1:3001)');
   console.log('Enable in Hermes:              hermes plugins enable shieldcortex');
   console.log('Conversation / freeze:         NOT bound on this plane.');

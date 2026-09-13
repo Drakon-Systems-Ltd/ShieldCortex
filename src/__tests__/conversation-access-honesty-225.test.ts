@@ -111,8 +111,10 @@ describe('#225 — the message tells the truth in both directions', () => {
     const fix = conversationAccessFix(PLUGIN_ID);
     expect(fix).toContain('allowConversationAccess');
     expect(fix).toContain(PLUGIN_ID);
-    expect(fix.toLowerCase()).toMatch(/restart/);
+    expect(fix.toLowerCase()).toMatch(/do not grant conversation access/);
     expect(fix.toLowerCase()).toMatch(/valid choice|your call/);
+    expect(fix).not.toMatch(/--allow-conversation-access/);
+    expect(fix).not.toMatch(/openclaw gateway restart/);
   });
 });
 

@@ -80,6 +80,18 @@ export const UNINSTALL_MANIFEST: UninstallArtifact[] = [
     removedBy: 'uninstallCodex',
   },
   {
+    id: 'hermes-plugin',
+    description: 'Hermes plugin copy at ~/.hermes/plugins/shieldcortex',
+    createdBy: 'shieldcortex hermes install',
+    removedBy: 'uninstallHermes',
+  },
+  {
+    id: 'copilot-mcp',
+    description: 'VS Code / Cursor MCP memory server entries',
+    createdBy: 'shieldcortex copilot install',
+    removedBy: 'uninstallCopilot',
+  },
+  {
     id: 'memories-db',
     description: 'Memory database',
     createdBy: 'shieldcortex install (first run)',

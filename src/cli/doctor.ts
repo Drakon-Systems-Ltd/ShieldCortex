@@ -102,6 +102,15 @@ import {
   type DoctorReportStyle,
 } from './doctor-report.js';
 import {
+  formatHostTable,
+  isInteractiveTerminal,
+  offerUnwiredHosts,
+  presentUnwired,
+  repairJobsFor,
+  scanHostTable,
+  writeRepairAgentBrief,
+} from '../setup/host-table.js';
+import {
   correlateCronDenials,
   type CorrelateCronDenialsOptions,
   type CronDenialReport,
@@ -2929,9 +2938,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         label: `${label} config`,
         status: 'warn',
         message: `Action Guard is disabled in config (\`${provenance('enabled')}: false\`) — tool calls are not gated on either surface`,
-        fix: pluginOff
-          ? pluginOffFix
-          : 'Run `shieldcortex config --action-guard-enable` to restore gating — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
+        fix: 'Action Guard is off. That is the default. Do not enable Action Guard from this warning. Do not add a webhook.',
       });
     } else if (!effective.enforce) {
       results.push({
@@ -2940,7 +2947,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         message: `Action Guard runs in warn-mode (\`${provenance('enforce')}: false\`) on both surfaces — dangerous ops log but are not gated (catastrophic still blocks)`,
         fix: pluginOff
           ? pluginOffFix
-          : 'Run `shieldcortex config --action-guard-enforce` to gate dangerous ops — the CLI writes a signed config; hand-editing config.json invalidates its integrity signature.',
+          : 'Action Guard is advisory. Do not run --action-guard-enforce from this warning. Enable only after the review loop says yes.',
       });
     }
 
@@ -7060,6 +7067,17 @@ export async function runDoctor(
   // warning themes; --verbose restores the full pass list. Exit codes and
   // check logic are unchanged.
   const verbose = args.includes('--verbose') || args.includes('--debug');
+  const hostTable = scanHostTable();
+  const unwired = presentUnwired(hostTable);
+  let nextCommand: string | null = null;
+  if (failures > 0) {
+    const failFix = visible.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
+    nextCommand = failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
+      ?? 'shieldcortex doctor --verbose';
+  } else if (unwired.length > 0) {
+    nextCommand = 'shieldcortex setup';
+  }
+
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
   const reportLines = formatDoctorReport(visible, {
     verbose,
@@ -7070,8 +7088,29 @@ export async function runDoctor(
     color: shouldColorDoctor(),
     style,
     width: Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80,
+    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? '')),
+    nextCommand,
   });
   for (const line of reportLines) console.log(line);
+
+  if (args.includes('--repair')) {
+    if (!isInteractiveTerminal()) {
+      console.log('doctor --repair needs a terminal. Run `shieldcortex setup` instead.');
+    } else {
+      const jobs = repairJobsFor(hostTable);
+      if (jobs.length === 0) {
+        console.log('No named repair jobs. Hosts that are present are already wired.');
+      } else if (args.includes('--agent')) {
+        const brief = path.join(os.homedir(), '.shieldcortex', 'repair-brief.md');
+        writeRepairAgentBrief(jobs, brief);
+        console.log(`Bounded repair brief written to ${brief}`);
+        console.log('Jobs: ' + jobs.join(', '));
+        console.log('This does not spawn an agent. Open that brief in your own agent if you want.');
+      } else {
+        await offerUnwiredHosts({ mode: 'setup', autoApprove: false });
+      }
+    }
+  }
 
   if (suppressed.length > 0) {
     console.log(`${dim}(${suppressed.map(r => r.label).join(', ')} checked once the database exists)${reset}`);

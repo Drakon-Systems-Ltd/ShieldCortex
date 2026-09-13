@@ -14,6 +14,8 @@ import readline from 'readline';
 import { uninstallService } from '../service/install.js';
 import { uninstallOpenClawHook } from './openclaw.js';
 import { uninstallCodex } from './codex.js';
+import { uninstallHermes } from './hermes.js';
+import { uninstallCopilot } from './copilot.js';
 import { looksLikeShieldcortex } from './json-config.js';
 import { formatKeptSummary } from './uninstall-manifest.js';
 
@@ -300,6 +302,18 @@ export async function uninstallAll(options?: {
     await uninstallCodex();
   } catch (err: any) {
     console.error(`Failed to remove Codex MCP entry: ${err.message}`);
+  }
+
+  try {
+    await uninstallHermes();
+  } catch (err: any) {
+    console.error(`Failed to remove Hermes plugin: ${err.message}`);
+  }
+
+  try {
+    await uninstallCopilot();
+  } catch (err: any) {
+    console.error(`Failed to remove Copilot/Cursor MCP entry: ${err.message}`);
   }
 
   // 6. Deep clean: purge all known OpenClaw residue locations that the
