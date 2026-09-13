@@ -20,6 +20,7 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useGraphOverview, useGraphPath, useGraphSearchV2, useNeighbourhoodV2 } from '@/hooks/useGraphV2';
 import { useWebSocketEvent } from '@/components/MemoryWebSocketProvider';
 import { useResolvedTheme } from '@/hooks/useTheme';
+import { useDashboardStore } from '@/lib/store';
 import {
   GRAPH_CANVAS,
   KNOWN_ENTITY_TYPES,
@@ -110,6 +111,22 @@ export default function MemoryGraph({ preview = false }: { preview?: boolean }) 
   const nbhd = useNeighbourhoodV2(focusId, { depth, includeMemories: showMemories });
   const path = useGraphPath(pathFrom?.id ?? null, pathTo?.id ?? null);
   const search = useGraphSearchV2(debouncedSearch);
+
+  // Project scope change (review item 1): every selection, focus trail and
+  // path endpoint belonged to the previous scope, so drop them all and return
+  // to Map — a stale Focus/Path would otherwise 404 or draw cross-project ids.
+  const project = useDashboardStore((s) => s.projectFilter);
+  const lastProjectRef = useRef(project);
+  useEffect(() => {
+    if (lastProjectRef.current === project) return;
+    lastProjectRef.current = project;
+    setSelectedId(null);
+    setHoverNode(null);
+    setFocusTrail([]);
+    setPathFrom(null);
+    setPathTo(null);
+    setMode('map');
+  }, [project]);
 
   // Once the real entities arrive, raise the default min-mentions threshold
   // from the loaded distribution (see computeDefaultMinMentions) so Map

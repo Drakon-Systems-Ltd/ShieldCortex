@@ -85,14 +85,19 @@ export interface PathHop {
 export interface PathPayload {
   path: PathHop[];
   sourceMemories: Array<{ id: number; title: string }>;
+  /** true when the server hit its BFS budget — "no path" then means "not found within budget" */
+  truncated?: boolean;
   message?: string;
 }
 
 export function useGraphPath(fromId: number | null, toId: number | null) {
+  const project = useDashboardStore((s) => s.projectFilter);
   return useQuery<PathPayload>({
-    queryKey: ['graph-v2', 'path', fromId, toId],
+    queryKey: ['graph-v2', 'path', project ?? null, fromId, toId],
     queryFn: async () => {
-      const res = await authFetch(`${API_BASE}/api/graph/paths?fromId=${fromId}&toId=${toId}`);
+      const params = new URLSearchParams({ fromId: String(fromId), toId: String(toId) });
+      if (project) params.set('project', project);
+      const res = await authFetch(`${API_BASE}/api/graph/paths?${params}`);
       if (!res.ok) throw new Error(await readApiError(res, 'Path search failed'));
       return res.json();
     },

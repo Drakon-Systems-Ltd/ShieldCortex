@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import type { Request, Response } from 'express';
-import { registerGraphRoutes } from '../api/routes/graph.js';
+import { PATH_VISIT_BUDGET, registerGraphRoutes } from '../api/routes/graph.js';
 
 beforeEach(() => initDatabase(':memory:'));
 afterEach(() => closeDatabase());
@@ -313,8 +313,218 @@ describe('GET /api/graph/paths (v2)', () => {
     const ok = await invoke(app().handler('/api/graph/paths'), {}, { from: 'legacy-from', to: 'legacy-to' });
     expect((ok.body as PathBody).path).toHaveLength(2);
 
+    // A malformed id is a client error (400), not a lookup miss (404).
     const bad = await invoke(app().handler('/api/graph/paths'), {}, { fromId: 'abc', toId: String(b) });
-    expect(bad.statusCode).toBe(404);
+    expect(bad.statusCode).toBe(400);
+    const junk = await invoke(app().handler('/api/graph/paths'), {}, { fromId: `${a}junk`, toId: String(b) });
+    expect(junk.statusCode).toBe(400);
+  });
+
+  it('scopes endpoints, every hop and sourceMemories by project (out-of-scope bridge is invisible)', async () => {
+    // atlas: a —uses→ bridge —uses→ b, where bridge is only linked to a zephyr memory.
+    // Unscoped: path a→bridge→b. Scoped to atlas: no path, and bridge is 404 as an endpoint.
+    const a = entity('sc-a', 'tool', 5);
+    const bridge = entity('sc-bridge', 'tool', 9);
+    const b = entity('sc-b', 'tool', 4);
+    const ma = memory('sc-ma', { project: 'atlas' });
+    const mb = memory('sc-mb', { project: 'atlas' });
+    const mz = memory('sc-mz', { project: 'zephyr' });
+    mention(ma, a);
+    mention(mb, b);
+    mention(mz, bridge);
+    getDatabase().prepare('UPDATE triples SET source_memory_id = ? WHERE id = ?').run(mz, triple(a, 'uses', bridge));
+    getDatabase().prepare('UPDATE triples SET source_memory_id = ? WHERE id = ?').run(mz, triple(bridge, 'uses', b));
+
+    const global = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(a), toId: String(b) });
+    const gb = global.body as PathBody & { truncated: boolean };
+    expect(gb.path.map((h) => h.entityId)).toEqual([a, bridge, b]);
+    expect(gb.sourceMemories).toHaveLength(1); // the zephyr source memory is visible globally
+    expect(gb.truncated).toBe(false);
+
+    const scoped = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(a), toId: String(b), project: 'atlas' });
+    expect(scoped.statusCode).toBe(200);
+    const sb = scoped.body as PathBody & { truncated: boolean };
+    expect(sb.path).toEqual([]);
+    expect(sb.sourceMemories).toEqual([]);
+    expect(sb.truncated).toBe(false);
+
+    // Out-of-scope endpoint → 404 (by id and by legacy name); self-path too.
+    const endpoint = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(bridge), toId: String(b), project: 'atlas' });
+    expect(endpoint.statusCode).toBe(404);
+    const byName = await invoke(app().handler('/api/graph/paths'), {}, { from: 'sc-bridge', to: 'sc-b', project: 'atlas' });
+    expect(byName.statusCode).toBe(404);
+    const self = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(bridge), toId: String(bridge), project: 'atlas' });
+    expect(self.statusCode).toBe(404);
+
+    // An in-scope direct edge still resolves under scope, with a scoped sourceMemories lookup.
+    getDatabase().prepare('UPDATE triples SET source_memory_id = ? WHERE id = ?').run(ma, triple(a, 'monitors', b));
+    const direct = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(a), toId: String(b), project: 'atlas' });
+    const db2 = direct.body as PathBody & { sourceMemories: Array<{ id: number }> };
+    expect(db2.path.map((h) => h.entityId)).toEqual([a, b]);
+    expect(db2.sourceMemories.map((m) => m.id)).toEqual([ma]);
+  });
+
+  it('stops at the visit budget and reports truncated instead of pretending no path exists', async () => {
+    // hub fans out to PATH_VISIT_BUDGET + 5 leaves; the target hangs off the
+    // LAST leaf, so it is only reachable past the budget.
+    const from = entity('bud-from');
+    const target = entity('bud-target');
+    const db = getDatabase();
+    const insTriple = db.prepare(
+      `INSERT INTO triples (subject_id, predicate, object_id, confidence, created_at, valid_from)
+       VALUES (?, 'uses', ?, 0.8, '2026-08-12 00:00:00', '2026-08-12T00:00:00.000Z')`,
+    );
+    const insEntity = db.prepare("INSERT INTO entities (name, type, memory_count) VALUES (?, 'tool', 0)");
+    let last = 0;
+    db.transaction(() => {
+      for (let i = 0; i < PATH_VISIT_BUDGET + 5; i++) {
+        last = Number(insEntity.run(`leaf-${i}`).lastInsertRowid);
+        insTriple.run(from, last);
+      }
+      insTriple.run(last, target);
+    })();
+
+    const r = await invoke(app().handler('/api/graph/paths'), {}, { fromId: String(from), toId: String(target) });
+    expect(r.statusCode).toBe(200);
+    const body = r.body as PathBody & { truncated: boolean };
+    expect(body.path).toEqual([]);
+    expect(body.truncated).toBe(true);
+    expect(body.message).toMatch(/budget/);
+  });
+});
+
+describe('GET /api/graph/entities/:id/triples (legacy, hardened)', () => {
+  it('applies a LIMIT with deterministic newest-first, id-desc order and reports total/hasMore', async () => {
+    const f = entity('lt-focal');
+    const others = Array.from({ length: 4 }, (_, i) => entity(`lt-${i}`));
+    // Same created_at for all → tie-break must be id DESC.
+    const ids = others.map((o) => triple(f, 'uses', o, { createdAt: '2026-08-12 00:00:00' }));
+    const r = await invoke(app().handler('/api/graph/entities/:id/triples'), { id: String(f) }, { limit: '3' });
+    expect(r.statusCode).toBe(200);
+    const body = r.body as { triples: Array<{ id: number }>; total: number; limit: number; hasMore: boolean };
+    expect(body.triples.map((t) => t.id)).toEqual([ids[3], ids[2], ids[1]]);
+    expect(body.total).toBe(4);
+    expect(body.limit).toBe(3);
+    expect(body.hasMore).toBe(true);
+  });
+
+  it('optional ?project= applies the both-endpoints rule', async () => {
+    const f = entity('lp-focal');
+    const inN = entity('lp-in');
+    const outN = entity('lp-out');
+    mention(memory('lp-m1', { project: 'atlas' }), f);
+    mention(memory('lp-m2', { project: 'atlas' }), inN);
+    mention(memory('lp-m3', { project: 'zephyr' }), outN);
+    triple(f, 'uses', inN);
+    triple(outN, 'uses', f);
+
+    const all = await invoke(app().handler('/api/graph/entities/:id/triples'), { id: String(f) });
+    expect((all.body as { triples: unknown[] }).triples).toHaveLength(2);
+    const scoped = await invoke(app().handler('/api/graph/entities/:id/triples'), { id: String(f) }, { project: 'atlas' });
+    const body = scoped.body as { triples: Array<{ object_name: string }>; total: number };
+    expect(body.triples.map((t) => t.object_name)).toEqual(['lp-in']);
+    expect(body.total).toBe(1);
+  });
+});
+
+describe('GET /api/graph/triples (legacy, hardened)', () => {
+  it('optional ?project= applies the both-endpoints rule to the list and its total', async () => {
+    const a = entity('gt-a');
+    const b = entity('gt-b');
+    const z = entity('gt-z');
+    mention(memory('gt-m1', { project: 'atlas' }), a);
+    mention(memory('gt-m2', { project: 'atlas' }), b);
+    mention(memory('gt-m3', { project: 'zephyr' }), z);
+    triple(a, 'uses', b);
+    triple(a, 'uses', z);
+    const r = await invoke(app().handler('/api/graph/triples'), {}, { project: 'atlas' });
+    const body = r.body as { triples: Array<{ object_name: string }>; total: number };
+    expect(body.triples.map((t) => t.object_name)).toEqual(['gt-b']);
+    expect(body.total).toBe(1);
+  });
+});
+
+describe('neighbourhood project scope', () => {
+  it('404s an out-of-scope focal and excludes out-of-scope neighbours', async () => {
+    const f = entity('ns-focal', 'tool', 5);
+    const inN = entity('ns-in', 'tool', 4);
+    const outN = entity('ns-out', 'tool', 9);
+    mention(memory('ns-m1', { project: 'atlas' }), f);
+    mention(memory('ns-m2', { project: 'atlas' }), inN);
+    mention(memory('ns-m3', { project: 'zephyr' }), outN);
+    triple(f, 'uses', inN);
+    triple(f, 'uses', outN);
+
+    const inScope = await invoke(app().handler('/api/graph/entities/:id/neighbourhood'), { id: String(f) }, { project: 'atlas' });
+    expect(inScope.statusCode).toBe(200);
+    const body = inScope.body as NeighbourhoodBody;
+    expect(body.neighbours.map((n) => n.name)).toEqual(['ns-in']);
+    expect(body.counts.totalNeighbours).toBe(1);
+
+    const outScope = await invoke(app().handler('/api/graph/entities/:id/neighbourhood'), { id: String(outN) }, { project: 'atlas' });
+    expect(outScope.statusCode).toBe(404);
+    const unscoped = await invoke(app().handler('/api/graph/entities/:id/neighbourhood'), { id: String(outN) });
+    expect(unscoped.statusCode).toBe(200);
+  });
+
+  it('caps neighbour candidates in SQL yet still reports the honest total', async () => {
+    const f = entity('nc-focal', 'tool', 5);
+    for (let i = 0; i < 8; i++) triple(f, 'uses', entity(`nc-${i}`, 'tool', 8 - i));
+    const r = await invoke(app().handler('/api/graph/entities/:id/neighbourhood'), { id: String(f) }, { limit: '2', depth: '2' });
+    const body = r.body as NeighbourhoodBody;
+    expect(body.neighbours.map((n) => n.name)).toEqual(['nc-0', 'nc-1']);
+    expect(body.counts.totalNeighbours).toBe(8);
+    expect(body.counts.omittedNeighbours).toBe(6);
+  });
+});
+
+describe('strict parsing', () => {
+  it('rejects malformed :id (12junk, 0, negative, float) with 400 on every id route', async () => {
+    const ok = entity('strict-ok');
+    for (const route of ['/api/graph/entities/:id/triples', '/api/graph/entities/:id/memories', '/api/graph/entities/:id/neighbourhood']) {
+      for (const bad of [`${ok}junk`, '0', '-1', '1.5', '1e3', '']) {
+        const r = await invoke(app().handler(route), { id: bad });
+        expect([route, bad, r.statusCode]).toEqual([route, bad, 400]);
+      }
+      const good = await invoke(app().handler(route), { id: String(ok) });
+      expect(good.statusCode).toBe(200);
+    }
+  });
+
+  it('returns 400 when a supplied project is not a single string (array / object), never widening scope', async () => {
+    const a = entity('mp-a', 'tool', 5);
+    const arr = ['atlas', 'zephyr'] as unknown as string;
+    for (const [route, params] of [
+      ['/api/graph/overview', {}],
+      ['/api/graph/entities', {}],
+      ['/api/graph/search', { q: 'mp' }],
+      ['/api/graph/triples', {}],
+      ['/api/graph/paths', { fromId: String(a), toId: String(a) }],
+    ] as Array<[string, Record<string, string>]>) {
+      const r = await invoke(app().handler(route), {}, { ...params, project: arr });
+      expect([route, r.statusCode]).toEqual([route, 400]);
+    }
+    for (const route of ['/api/graph/entities/:id/triples', '/api/graph/entities/:id/memories', '/api/graph/entities/:id/neighbourhood']) {
+      const r = await invoke(app().handler(route), { id: String(a) }, { project: { x: 'y' } as unknown as string });
+      expect([route, r.statusCode]).toEqual([route, 400]);
+    }
+    // Empty string means "no filter" (an unset select), not an error.
+    const empty = await invoke(app().handler('/api/graph/overview'), {}, { project: '' });
+    expect(empty.statusCode).toBe(200);
+  });
+
+  it('boundedInt: non-integers fall back to the default, integers CLAMP (negative → min, not default)', async () => {
+    entity('bi');
+    const get = async (q: Record<string, string>) =>
+      (await invoke(app().handler('/api/graph/entities'), {}, q)).body as { limit: number; offset: number };
+    // /api/graph/entities echoes the parsed limit/offset (defaults 100 / 0, limit ∈ [1, 5000]).
+    expect(await get({})).toMatchObject({ limit: 100, offset: 0 });
+    expect(await get({ limit: 'abc', offset: 'NaN' })).toMatchObject({ limit: 100, offset: 0 });
+    expect(await get({ limit: '2.5', offset: '1e3' })).toMatchObject({ limit: 100, offset: 0 });
+    expect(await get({ limit: '-5', offset: '-3' })).toMatchObject({ limit: 1, offset: 0 }); // clamp, not default
+    expect(await get({ limit: '0' })).toMatchObject({ limit: 1 });
+    expect(await get({ limit: '99999' })).toMatchObject({ limit: 5000 });
+    expect(await get({ limit: ' 7 ', offset: '2' })).toMatchObject({ limit: 7, offset: 2 });
   });
 });
 
