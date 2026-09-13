@@ -4,8 +4,10 @@ import {
   parseLatestBootRoster,
   readLatestBootRoster,
   rosterContains,
+  findGatewayAttributedRegistrationSince,
+  readSystemdGatewayJournal,
 } from '../integrations/openclaw-gateway-roster.js';
-import { reconcilePluginState, type ReconcileInput } from '../integrations/openclaw-plugin-index.js';
+import { classifyLiveLoadEvidence, reconcilePluginState, type ReconcileInput } from '../integrations/openclaw-plugin-index.js';
 
 /**
  * Regression suite for field incident #103 (veronica, 19–26 Jul 2026).
@@ -133,6 +135,53 @@ describe('readLatestBootRoster', () => {
       processStartedAtMs: Date.parse('2026-07-26T10:28:52.378+00:00'),
     });
     expect(live).not.toBeNull();
+  });
+
+  it('rejects undated file rosters when freshness is required', () => {
+    expect(readLatestBootRoster({ ...io, processStartedAtMs: 1000,
+      readFile: () => '[gateway] http server listening (0 plugins; 1s)',
+    })).toBeNull();
+  });
+
+  it('uses the fresh systemd Jarvis roster rather than an old /tmp absence', () => {
+    const sinceMs = Date.parse('2026-07-26T10:28:50Z');
+    const journal = { text: `Jul 26 10:28:52 jarvis node[42]: ${JARVIS_LINE}\nJul 26 10:28:53 jarvis node[42]: [shieldcortex] v5.0.0 registered`, preBounded: true };
+    const roster = readLatestBootRoster({ ...io, processStartedAtMs: sinceMs, gatewayPid: 42,
+      readFile: () => VERONICA_LINE, readJournal: () => journal,
+    });
+    expect(roster?.plugins).toContain('shieldcortex-realtime');
+    expect(roster?.source).toBe('journalctl --user -u openclaw-gateway');
+    const v = reconcilePluginState({ pluginId: 'shieldcortex-realtime', expectedVersion: '5.0.0',
+      config: { enabled: true, inAllow: true }, installsJson: null, index: null,
+      onDiskVersion: '5.0.0', projectDirs: [], liveRoster: roster!.plugins,
+    });
+    expect(v.state).not.toBe('enabled-not-loaded');
+    expect(v.loadedInLiveRoster).toBe(true);
+  });
+
+  it('fresh gateway-PID journal registration overrides file absence; CLI PID does not', () => {
+    for (const pid of [42, 99]) {
+      const classified = classifyLiveLoadEvidence({
+        pluginId: 'shieldcortex-realtime', liveRoster: ['telegram'], gatewayPid: 42,
+        bootAtMs: 1000, processStartedAtMs: 900,
+        findGatewayReg: (sinceMs, gatewayPid) => findGatewayAttributedRegistrationSince(sinceMs, gatewayPid, {
+          readDir: () => [], readJournal: () => ({
+            text: `Sep 12 12:00:00 jarvis node[${pid}]: [shieldcortex] v5.0.0 registered`, preBounded: true,
+          }),
+        }), findAnyReg: () => null,
+      });
+      expect(classified.liveLoadEvidence).toBe(pid === 42 ? 'gateway-pid-registration' : null);
+    }
+  });
+
+  it('Darwin never invokes journalctl, Linux query is time/PID bounded with a timeout', () => {
+    const calls: unknown[][] = [];
+    const run = (...args: unknown[]) => { calls.push(args); return 'journal text'; };
+    expect(readSystemdGatewayJournal(1234, 42, { platform: 'darwin', run })).toBeNull();
+    expect(calls).toHaveLength(0);
+    expect(readSystemdGatewayJournal(1234, 42, { platform: 'linux', run })?.preBounded).toBe(true);
+    expect(calls[0][1]).toEqual(expect.arrayContaining(['--since=@1.234', '_PID=42']));
+    expect(calls[0][2]).toMatchObject({ timeout: 5000 });
   });
 });
 

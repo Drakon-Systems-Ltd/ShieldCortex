@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
+import semver from 'semver';
 import { resolveRealtimePluginInstallPath, readInstalledRealtimePluginVersion } from '../integrations/openclaw-plugin-state.js';
 import { describeRunFailure, sanitiseForReport } from '../integrations/child-output.js';
 import type { CapturedError } from '../integrations/child-output.js';
@@ -286,6 +287,43 @@ function readPackageVersion(): string {
   return JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version ?? 'unknown';
 }
 
+// Capture once, before npm can replace the files backing this process.
+const IN_PROCESS_VERSION = readPackageVersion();
+
+/** Hand off to this install's freshly replaced entrypoint, not a different
+ * shieldcortex earlier on PATH. The child owns the remaining update and status. */
+export async function reexecUpdatedCli(
+  currentVersion: string,
+  deps: {
+    readVersion?: () => string;
+    env?: NodeJS.ProcessEnv;
+    argv?: string[];
+    launch?: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<number>;
+    warn?: (message: string) => void;
+  } = {},
+): Promise<number | 'failed' | null> {
+  const env = deps.env ?? process.env;
+  if (env.SHIELDCORTEX_UPDATE_REEXEC === '1') return null;
+  try {
+    if ((deps.readVersion ?? readPackageVersion)() === currentVersion) return null;
+    const entry = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/index.js');
+    const launch = deps.launch ?? ((bin, args, childEnv) => new Promise<number>((resolve, reject) => {
+      const child = spawn(bin, args, { env: childEnv, stdio: 'inherit', shell: false });
+      child.once('error', reject);
+      child.once('close', (code) => resolve(code ?? 1));
+    }));
+    return await launch(process.execPath, [entry, ...(deps.argv ?? process.argv.slice(2))], {
+      ...env,
+      SHIELDCORTEX_UPDATE_REEXEC: '1',
+      SHIELDCORTEX_UPDATE_FROM_VERSION: currentVersion,
+    });
+  } catch (err) {
+    const reason = describeRunFailure(err).reason;
+    (deps.warn ?? console.warn)(`⚠ Update could not start the newly installed CLI — ${reason}; continuing with protection unproven. Re-run shieldcortex update.`);
+    return 'failed';
+  }
+}
+
 export interface LatestVersionResult {
   version: string | null;
   /**
@@ -511,10 +549,16 @@ export function isRealtimePluginRegistered(home: string): boolean {
 /** `run`/`rm` are injectable so the failure paths can be tested without a real spawn or a root-owned dir. */
 export async function stepOpenClawPlugin(
   home: string,
-  deps: { run?: typeof runQuiet; rm?: typeof fs.rmSync } = {},
+  deps: {
+    run?: typeof runQuiet;
+    rm?: typeof fs.rmSync;
+    readPluginVersion?: typeof readInstalledRealtimePluginVersion;
+    readCliVersion?: typeof readPackageVersion;
+  } = {},
 ): Promise<StepResult> {
   const run = deps.run ?? runQuiet;
   const rm = deps.rm ?? fs.rmSync;
+  const readVersion = deps.readPluginVersion ?? readInstalledRealtimePluginVersion;
   const extDir = path.join(home, '.openclaw', 'extensions', 'shieldcortex-realtime');
   const legacy = fs.existsSync(extDir);
   const registration = readRealtimePluginRegistration(home);
@@ -545,7 +589,7 @@ export async function stepOpenClawPlugin(
         purgeFailure = err instanceof Error ? err.message : String(err);
       }
     }
-    const before = readInstalledRealtimePluginVersion(home);
+    const before = readVersion(home);
     try {
       // `openclaw plugins update` no-ops when OpenClaw recorded an exact-pinned
       // spec (observed 2026-06-09: the index pinned @4.30.2 → "up to date" while
@@ -555,11 +599,15 @@ export async function stepOpenClawPlugin(
         { timeout: 120000, env: { ...process.env, HOME: home } });
       // Report the ACTUAL on-disk transition, not just command success — the old
       // "updated via openclaw" was printed even when the version never moved.
-      const after = readInstalledRealtimePluginVersion(home);
-      const transition =
-        before && after && before !== after ? `${before} → ${after}` :
-        after ? `up to date (v${after})` :
-        'reinstalled';
+      const after = readVersion(home);
+      const expected = (deps.readCliVersion ?? readPackageVersion)();
+      const comparable = Boolean(after && semver.valid(after) && semver.valid(expected));
+      const lag = comparable && semver.lt(after!, expected);
+      const changed = before && after && before !== after ? `${before} → ${after}` : null;
+      const transition = lag
+        ? `${changed ? `${changed}; ` : ''}still v${after} — CLI is v${expected}`
+        : !comparable ? 'installed version unreadable — could not compare plugin to CLI'
+        : changed ?? (semver.eq(after!, expected) ? `up to date (v${after})` : `v${after} installed — CLI is v${expected}`);
       if (purgeFailure) {
         return {
           status: 'warn' as const,
@@ -567,7 +615,7 @@ export async function stepOpenClawPlugin(
           detail: [sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
         };
       }
-      return transition;
+      return { status: lag || !comparable ? 'warn' as const : 'ok' as const, summary: transition };
     } catch (err) {
       // Don't propagate — surface as warn instead of failing the whole flow.
       //
@@ -600,7 +648,7 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
   // (#456 — OpenClaw 2026.8.1 removed `--acknowledge-clawhub-risk`, so a
   // hardcoded flag is a bet against the installed binary), verify-by-reading,
   // and the skip names the command that installs.
-  const { resolveOpenClawBinary, resolveSkillInstallArgs, findInstalledSkillDirs, readInstalledSkillVersion } =
+  const { resolveOpenClawBinary, resolveSkillInstallArgs, runSkillInstallWithRetry, findInstalledSkillDirs, readInstalledSkillVersion } =
     await import('../setup/openclaw.js');
   if (findInstalledSkillDirs(home).length === 0) {
     return await step('OpenClaw skill', async () => ({
@@ -612,10 +660,10 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
     const bin = resolveOpenClawBinary(home);
     if (!bin) return { status: 'warn' as const, summary: 'openclaw binary not found — run `shieldcortex openclaw skill install`' };
     try {
-      await runQuiet(bin, resolveSkillInstallArgs(bin, { home }), {
+      await runSkillInstallWithRetry(resolveSkillInstallArgs(bin, { home }), (args) => runQuiet(bin, args, {
         timeout: 120000,
         env: { ...process.env, HOME: home },
-      });
+      }));
       const dirs = findInstalledSkillDirs(home);
       const v = dirs.length > 0 ? readInstalledSkillVersion(dirs[0]) : null;
       return v ? `v${v} installed` : { status: 'warn' as const, summary: 'installed but version unreadable' };
@@ -812,41 +860,57 @@ export async function stepVerifyProtection(home: string): Promise<StepResult> {
 
 export async function runUpdate(): Promise<void> {
   const home = homedir();
-  const currentVersion = readPackageVersion();
+  const currentVersion = IN_PROCESS_VERSION;
+  const fromVersion = process.env.SHIELDCORTEX_UPDATE_FROM_VERSION || currentVersion;
   const flowStart = Date.now();
   const force = process.argv.includes('--force') || process.argv.includes('-f');
 
   // Header — show current version immediately, then update with latest once we know it.
   // (We resolve `latest` before drawing the arrow so the banner is correct.)
   const latest = await fetchLatestVersion();
-  header(currentVersion, latest.version);
-  if (force) {
-    process.stdout.write(`  ${paint('yellow', '!')}  ${paint('gray', '--force: reinstall everything regardless of version')}\n\n`);
+  const reexeced = process.env.SHIELDCORTEX_UPDATE_REEXEC === '1';
+  if (!reexeced) {
+    header(currentVersion, latest.version);
+    if (force) {
+      process.stdout.write(`  ${paint('yellow', '!')}  ${paint('gray', '--force: reinstall everything regardless of version')}\n\n`);
+    }
   }
 
-  let mainUpdated = false;
+  let mainUpdated = reexeced;
   let npmStatus: StepResult['status'] = 'ok';
   try {
-    const npmStep = await stepNpmPackage(currentVersion, latest, force);
-    mainUpdated = npmStep.updated;
-    npmStatus = npmStep.result?.status ?? 'ok';
+    // The parent already installed npm; even --force must not install twice.
+    if (!reexeced) {
+      const npmStep = await stepNpmPackage(currentVersion, latest, force);
+      mainUpdated = npmStep.updated;
+      npmStatus = npmStep.result?.status ?? 'ok';
+    }
   } catch {
     // npm failure already surfaced by step(); continue with reconcile.
     npmStatus = 'failed';
+  }
+
+  let reexecFailed = false;
+  if (mainUpdated) {
+    const handoff = await reexecUpdatedCli(currentVersion);
+    if (typeof handoff === 'number') process.exit(handoff);
+    reexecFailed = handoff === 'failed';
   }
 
   // Verify (and self-heal) the native DB binding after the install completes.
   // Runs unconditionally: a pre-existing broken binding heals on any update.
   const engineResult = await stepVerifyEngine();
 
-  await stepOpenClawPlugin(home);
-  await stepOpenClawSkill(home);
+  const pluginResult = await stepOpenClawPlugin(home);
+  const skillResult = await stepOpenClawSkill(home);
   await stepClaudeHooks();
   await stepStatePermissions();
 
   footer(Date.now() - flowStart, mainUpdated, latest);
 
-  const protection = await stepVerifyProtection(home);
+  const protection: StepResult = reexecFailed
+    ? { status: 'unproven', summary: 'protection unproven', detail: ['New CLI could not be started; re-run update before verifying protection.', 'next: shieldcortex update'] }
+    : await stepVerifyProtection(home);
 
   // If the binding couldn't be auto-healed, print the exact copy-paste fix.
   // Headline and panel detail come from renderEngineFailure so they can never
@@ -888,7 +952,7 @@ export async function runUpdate(): Promise<void> {
     /* update must not fail on allowlist scan */
   }
 
-  maybePrint411Notice(currentVersion, mainUpdated);
+  maybePrint411Notice(fromVersion, mainUpdated);
   maybePrintActionGuardDefaultOffNotice(mainUpdated);
   await maybePrintDashboardHint();
 
@@ -896,6 +960,8 @@ export async function runUpdate(): Promise<void> {
   const rows: UpdatePanelRow[] = [
     { label: 'package', status: npmStatus === 'failed' ? 'failed' : npmStatus === 'warn' ? 'warn' : 'ok' },
     { label: 'engine', status: engineResult.remediation ? 'warn' : 'ok' },
+    { label: 'plugin', status: pluginResult.status === 'warn' ? 'warn' : pluginResult.status === 'skip' ? 'skipped' : 'ok' },
+    { label: 'skill', status: skillResult.status === 'warn' ? 'warn' : skillResult.status === 'skip' ? 'skipped' : 'ok' },
     {
       label: 'guard',
       status:
@@ -920,12 +986,15 @@ export async function runUpdate(): Promise<void> {
   const failed = protection.status === 'failed' || npmStatus === 'failed';
   const attention =
     keyAttention ||
+    pluginResult.status === 'warn' ||
+    skillResult.status === 'warn' ||
     Boolean(engineResult.remediation) ||
     protection.status === 'unproven' ||
     protection.status === 'warn' ||
     protection.status === 'blocked';
 
   if (failed) process.exitCode = 1;
+  else process.exitCode = 0;
   const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
   const verdict: VerdictKind = deriveUpdateVerdict({
     exitCode,
@@ -950,7 +1019,7 @@ export async function runUpdate(): Promise<void> {
   const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
   const panel = renderUpdatePanel(
     {
-      fromVersion: currentVersion,
+      fromVersion,
       toVersion: latest.version || currentVersion,
       verdict,
       rows,

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import semver from 'semver';
 
 /**
  * Reading the OpenClaw realtime plugin's *actually-installed* version.
@@ -26,6 +27,51 @@ function installsJsonPath(home: string): string {
 
 function hasPackageJson(installPath: string): boolean {
   return fs.existsSync(path.join(installPath, 'package.json'));
+}
+
+function readPackageVersionAt(installPath: string): string | null {
+  try {
+    const pj = JSON.parse(fs.readFileSync(path.join(installPath, 'package.json'), 'utf-8')) as { version?: unknown };
+    return typeof pj.version === 'string' && pj.version.trim() ? pj.version.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Every on-disk realtime install under `~/.openclaw/npm/projects`. */
+function scanRealtimeInstalls(home: string): Array<{ path: string; version: string | null }> {
+  const out: Array<{ path: string; version: string | null }> = [];
+  try {
+    const projects = path.join(home, '.openclaw', 'npm', 'projects');
+    for (const dir of fs.readdirSync(projects)) {
+      if (!dir.includes(PLUGIN_ID)) continue;
+      const p = path.join(projects, dir, PKG_SUBPATH);
+      if (!hasPackageJson(p)) continue;
+      out.push({ path: p, version: readPackageVersionAt(p) });
+    }
+  } catch {
+    // no projects dir
+  }
+  return out;
+}
+
+function newestRealtimeInstall(home: string): string | null {
+  const installs = scanRealtimeInstalls(home);
+  let best: { path: string; version: string | null } | null = null;
+  for (const inst of installs) {
+    if (!best) {
+      best = inst;
+      continue;
+    }
+    const a = best.version && semver.valid(best.version);
+    const b = inst.version && semver.valid(inst.version);
+    if (a && b) {
+      if (semver.gt(inst.version!, best.version!)) best = inst;
+    } else if (b && !a) {
+      best = inst;
+    }
+  }
+  return best?.path ?? null;
 }
 
 /**
@@ -90,8 +136,11 @@ export function readLocalExtensionPluginVersion(home: string): string | null {
  * its package.json), or null when no install can be found.
  */
 export function resolveRealtimePluginInstallPath(home: string): string | null {
-  // 1. installPath recorded in installs.json — reliable even when the sibling
-  //    `version` field is stale (the path still points at the active install).
+  const newest = newestRealtimeInstall(home);
+  // 1. installPath recorded in installs.json — use it only when it is the
+  //    newest on-disk build. A leftover generation dir (4.54.15) sitting
+  //    next to a 5.0.0 install is how doctor reported "v5.0.0 running,
+  //    v4.54.15 on disk" after OpenClaw hashed a new project.
   try {
     const file = installsJsonPath(home);
     if (fs.existsSync(file)) {
@@ -99,26 +148,23 @@ export function resolveRealtimePluginInstallPath(home: string): string | null {
         installRecords?: Record<string, { installPath?: unknown }>;
       };
       const p = json.installRecords?.[PLUGIN_ID]?.installPath;
-      if (typeof p === 'string' && hasPackageJson(p)) return p;
+      if (typeof p === 'string' && hasPackageJson(p)) {
+        if (!newest) return p;
+        const recorded = readPackageVersionAt(p);
+        const latest = readPackageVersionAt(newest);
+        if (
+          recorded && latest && semver.valid(recorded) && semver.valid(latest) &&
+          semver.gte(recorded, latest)
+        ) {
+          return p;
+        }
+      }
     }
   } catch {
-    // fall through to the filesystem scan
+    // fall through to the newest on-disk install
   }
 
-  // 2. Scan OpenClaw's npm projects dir for the installed package (covers boxes
-  //    whose authoritative state is SQLite-only, with no legacy installs.json).
-  try {
-    const projects = path.join(home, '.openclaw', 'npm', 'projects');
-    for (const dir of fs.readdirSync(projects)) {
-      if (!dir.includes(PLUGIN_ID)) continue;
-      const p = path.join(projects, dir, PKG_SUBPATH);
-      if (hasPackageJson(p)) return p;
-    }
-  } catch {
-    // no projects dir
-  }
-
-  return null;
+  return newest;
 }
 
 /**

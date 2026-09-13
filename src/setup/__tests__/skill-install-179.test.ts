@@ -22,6 +22,8 @@ import {
   readInstalledSkillVersion,
   LEGACY_CLAWHUB_ACK_FLAG,
   INSTALL_POLICY_ACK_FLAG,
+  runSkillInstallWithRetry,
+  readConfiguredAgentIds,
 } from '../openclaw.js';
 import { checkOpenClawSkillVersion } from '../../cli/doctor.js';
 
@@ -133,6 +135,54 @@ describe('#179 — the command the operator typed now exists', () => {
 });
 
 describe('#456 — skills install args are feature-detected, never a bet on a version', () => {
+  it('multi-agent help selects main, otherwise the first configured agent', () => {
+    const probe = () => 'Options:\n  --agent <id>  Target agent\n  --force\n';
+    for (const [agents, selected] of [[['mc-watchdog', 'main'], 'main'], [['other', 'watchdog'], 'other']] as const) {
+      const resolved = resolveSkillInstallArgs('/fake/openclaw', { probe, readAgents: () => [...agents] });
+      expect(resolved.slice(-2)).toEqual(['--agent', selected]);
+    }
+  });
+
+  it('unknown/single agent or prose-only agent mention leaves the bare install', () => {
+    for (const agents of [null, [], ['main']]) {
+      expect(resolveSkillInstallArgs('/fake/openclaw', {
+        probe: () => 'Options:\n  --agent <id>\n', readAgents: () => agents,
+      })).not.toContain('--agent');
+    }
+    expect(resolveSkillInstallArgs('/fake/openclaw', {
+      probe: () => 'Note: use --agent on newer builds', readAgents: () => ['main', 'watchdog'],
+    })).not.toContain('--agent');
+  });
+
+  it('discovers configured agents and doctor prints a complete multi-agent fix', async () => {
+    const home = fakeHome('4.54.15');
+    try {
+      fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ agents: { list: [{ id: 'mc-watchdog' }, { id: 'main' }] } }));
+      expect(readConfiguredAgentIds(home)).toEqual(['mc-watchdog', 'main']);
+      expect((await checkOpenClawSkillVersion(home, '5.0.0')).fix).toContain('--agent main');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('retries a rejected flag once, including its value, without changing other args', async () => {
+    const calls: string[][] = [];
+    await runSkillInstallWithRetry([...BASE, '--agent', 'main', INSTALL_POLICY_ACK_FLAG], async (args) => {
+      calls.push(args);
+      if (calls.length === 1) throw { stderr: 'OpenClaw does not recognize option "--agent"' };
+      return { stderr: '' };
+    });
+    expect(calls).toEqual([[...BASE, '--agent', 'main', INSTALL_POLICY_ACK_FLAG], [...BASE, INSTALL_POLICY_ACK_FLAG]]);
+  });
+
+  it('sync-result rejection strips the dead ack and never loops on a second rejection', async () => {
+    const calls: string[][] = [];
+    const result = await runSkillInstallWithRetry([...BASE, LEGACY_CLAWHUB_ACK_FLAG], async (args) => {
+      calls.push(args);
+      return { status: 1, stderr: `OpenClaw does not recognize option "${LEGACY_CLAWHUB_ACK_FLAG}"` };
+    });
+    expect(result.status).toBe(1);
+    expect(calls).toEqual([[...BASE, LEGACY_CLAWHUB_ACK_FLAG], BASE]);
+  });
+
   // OpenClaw 2026.8.1 removed --acknowledge-clawhub-risk; passing it fails
   // every install. The helper probes the installed binary's own help.
   const BASE = ['skills', 'install', 'shieldcortex', '--force'];

@@ -55,7 +55,9 @@ describe('reconcileOpenClawPluginState', () => {
       runCommand: (argv) => { calls.push(argv); return { status: 0, output: '' }; },
       selfCheck: async () => passingSelfCheck,
     });
-    expect(res.verdict.state).toBe('enabled-not-loaded');
+    // An index-only omission is attention, not proof of a live unload.
+    expect(res.verdict.state).toBe('load-unproven');
+    expect(res.verdict.severity).toBe('warn');
     expect(res.plan.some((s) => s.kind === 'openclaw-update')).toBe(true);
     expect(res.applied).toBe(false);
     expect(calls).toHaveLength ? expect(calls.length).toBe(0) : expect(calls.length).toBe(0);

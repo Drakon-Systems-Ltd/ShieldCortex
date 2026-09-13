@@ -69,12 +69,12 @@ describe('checkOpenClawPluginLoadState', () => {
     expect(r.status).toBe('info');
   });
 
-  it('FAILS when enabled in config but absent from the loaded roster (#74 silent drop)', async () => {
+  it('WARNS when only the install index omits the plugin and live logs are unread', async () => {
     setup({ enabled: true, roster: [{ pluginId: 'brave', enabled: true }], onDisk: '4.47.2', recordVersion: '4.47.2' });
     const r = await checkOpenClawPluginLoadState(home, '4.47.2');
-    expect(r.status).toBe('fail');
-    expect(r.message).toMatch(/not loaded|roster|unprotected/i);
-    expect(r.fix).toMatch(/repair/i);
+    expect(r.status).toBe('warn');
+    expect(r.message).toMatch(/unproven|roster/i);
+    expect(r.message).not.toMatch(/UNPROTECTED/);
   });
 
   it('passes when enabled and present + enabled in the roster', async () => {

@@ -490,14 +490,15 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
     return { ...base, state: 'index-unreadable', severity: 'warn', recommendedAction: 'none', reasons };
   }
 
-  // 4. THE #74 silent drop: enabled in config but missing from a READABLE index.
-  if (enabledInConfig && !loadedInIndex) {
-    reasons.push('enabled:true in config but ABSENT from the loaded roster (plugins_json) — interceptor not loaded, host unprotected while status reports ON');
+  // 4. A readable INSTALL index still is not the live roster. It can lag the
+  // gateway on systemd hosts. Only rule 2's fresh live absence may convict.
+  if (enabledInConfig && !loadedInIndex && loadedInLiveRoster !== true) {
+    reasons.push('enabled:true in config but missing from the install index; the running gateway roster could not be read — load state is UNPROVEN, not known absent');
     if (indexWarnsConflict) reasons.push('index reports conflicting install metadata for this plugin');
     return {
       ...base,
-      state: 'enabled-not-loaded',
-      severity: 'fail',
+      state: 'load-unproven',
+      severity: 'warn',
       recommendedAction: openClawTracked ? 'update-openclaw-tracked' : 'reinstall-pinned',
       reasons,
     };
@@ -878,7 +879,7 @@ export function gatherReconcileInput(home: string, options: GatherOptions): Reco
       if (!proc) return null;
       gatewayPid = proc.pid;
       processStartedAtMs = proc.startedAtMs;
-      const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs });
+      const boot = readLatestBootRoster({ processStartedAtMs: proc.startedAtMs, gatewayPid: proc.pid });
       bootAtMs = boot?.atMs ?? null;
       return boot?.plugins ?? null;
     });

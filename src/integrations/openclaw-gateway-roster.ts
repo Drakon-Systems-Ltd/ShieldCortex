@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 
 /**
  * Reading the LIVE gateway plugin roster.
@@ -111,6 +112,8 @@ export function rosterContains(roster: BootRoster, pluginId: string): boolean {
 }
 
 export interface ReadBootRosterOptions {
+  gatewayPid?: number;
+  readJournal?: (sinceMs: number, gatewayPid: number) => { text: string; preBounded: boolean } | null;
   /**
    * Directory the gateway writes its log files to. OpenClaw uses
    * `/tmp/openclaw` by default and announces it at boot ("log file: …").
@@ -130,6 +133,42 @@ export interface ReadBootRosterOptions {
 
 const DEFAULT_LOG_DIR = '/tmp/openclaw';
 
+/** The user unit journal is a live-load channel too. Request precise ISO
+ * dates AND bind the query to this process, never another boot or a CLI PID. */
+export function readSystemdGatewayJournal(
+  sinceMs: number,
+  gatewayPid: number,
+  deps: {
+    platform?: NodeJS.Platform;
+    run?: (cmd: string, args: string[], opts: { encoding: 'utf8'; stdio: ['ignore', 'pipe', 'ignore']; timeout: number }) => string;
+  } = {},
+): { text: string; preBounded: boolean } | null {
+  if ((deps.platform ?? process.platform) !== 'linux') return null;
+  if (!deps.run && process.env.JEST_WORKER_ID !== undefined) return null;
+  if (!Number.isFinite(sinceMs) || !Number.isInteger(gatewayPid) || gatewayPid <= 0) return null;
+  try {
+    const run: NonNullable<typeof deps.run> = deps.run ?? ((cmd, args, opts) => execFileSync(cmd, args, opts));
+    const text = run('journalctl', [
+      '--user', '-u', 'openclaw-gateway', '--no-pager', '-n', '2000',
+      '-o', 'short-iso-precise', `--since=@${sinceMs / 1000}`, `_PID=${gatewayPid}`,
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
+    return text.trim() ? { text, preBounded: true } : null;
+  } catch { return null; }
+}
+
+/** Source-bounded journald text may omit the year. Raw log lines never get
+ * that exemption: undated/stale or explicitly foreign-PID lines prove nothing. */
+function freshJournalLines(
+  journal: { text: string; preBounded: boolean }, sinceMs: number, gatewayPid: number,
+): string[] {
+  return journal.text.split('\n').filter((line) => {
+    const pid = parseLogLinePid(line);
+    const atMs = parseTimestamp(line);
+    return (pid == null || pid === gatewayPid) &&
+      (atMs == null ? journal.preBounded : atMs >= sinceMs);
+  }).map((line) => parseTimestamp(line) == null ? `${new Date(sinceMs).toISOString()} ${line}` : line);
+}
+
 /**
  * Read the newest boot roster the gateway has written.
  *
@@ -138,6 +177,15 @@ const DEFAULT_LOG_DIR = '/tmp/openclaw';
  * must treat null as absence of evidence, NEVER as evidence of health.
  */
 export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootRoster | null {
+  if (options.processStartedAtMs != null && options.gatewayPid != null) {
+    const journal = (options.readJournal ?? readSystemdGatewayJournal)(options.processStartedAtMs, options.gatewayPid);
+    if (journal) {
+      const roster = parseLatestBootRoster(freshJournalLines(journal, options.processStartedAtMs, options.gatewayPid).join('\n'));
+      if (roster && roster.declaredCount === roster.plugins.length) {
+        return { ...roster, source: 'journalctl --user -u openclaw-gateway' };
+      }
+    }
+  }
   const logDir = options.logDir ?? DEFAULT_LOG_DIR;
   const readDir = options.readDir ?? ((d: string) => fs.readdirSync(d));
   const readFile = options.readFile ?? ((f: string) => fs.readFileSync(f, 'utf-8'));
@@ -176,14 +224,13 @@ export function readLatestBootRoster(options: ReadBootRosterOptions = {}): BootR
       continue;
     }
     const roster = parseLatestBootRoster(text);
-    if (!roster) continue;
+    if (!roster || roster.declaredCount !== roster.plugins.length) continue;
     // A line from a previous process proves nothing about this one.
     if (
       options.processStartedAtMs != null &&
-      roster.atMs != null &&
-      roster.atMs < options.processStartedAtMs
+      (roster.atMs == null || roster.atMs < options.processStartedAtMs)
     ) {
-      return null;
+      continue;
     }
     return { ...roster, source: file };
   }
@@ -284,6 +331,13 @@ export function findGatewayAttributedRegistrationSince(
   options: ReadBootRosterOptions = {},
 ): RegistrationSighting | null {
   if (!Number.isInteger(gatewayPid) || gatewayPid <= 0) return null;
+
+  const journal = (options.readJournal ?? readSystemdGatewayJournal)(sinceMs, gatewayPid);
+  if (journal) {
+    const sightings = parseRegistrationsSince(freshJournalLines(journal, sinceMs, gatewayPid).join('\n'), sinceMs)
+      .filter((sighting) => sighting.pid === gatewayPid);
+    if (sightings.length > 0) return sightings[sightings.length - 1];
+  }
 
   const logDir = options.logDir ?? DEFAULT_LOG_DIR;
   const readDir = options.readDir ?? ((d: string) => fs.readdirSync(d));

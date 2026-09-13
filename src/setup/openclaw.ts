@@ -2456,15 +2456,74 @@ function helpOffersFlag(help: string, flag: string): boolean {
 
 export function resolveSkillInstallArgs(
   bin: string,
-  opts: { home?: string; probe?: (bin: string, home: string) => string | null } = {},
+  opts: {
+    home?: string;
+    probe?: (bin: string, home: string) => string | null;
+    readAgents?: (home: string) => string[] | null;
+    agent?: string;
+  } = {},
 ): string[] {
   const home = opts.home ?? os.homedir();
   const help = (opts.probe ?? probeSkillInstallHelp)(bin, home);
   const base = ['skills', 'install', 'shieldcortex', '--force'];
   if (help === null) return [...base, INSTALL_POLICY_ACK_FLAG];
-  if (helpOffersFlag(help, INSTALL_POLICY_ACK_FLAG)) return [...base, INSTALL_POLICY_ACK_FLAG];
-  if (helpOffersFlag(help, LEGACY_CLAWHUB_ACK_FLAG)) return [...base, LEGACY_CLAWHUB_ACK_FLAG];
+  if (helpOffersFlag(help, INSTALL_POLICY_ACK_FLAG)) base.push(INSTALL_POLICY_ACK_FLAG);
+  else if (helpOffersFlag(help, LEGACY_CLAWHUB_ACK_FLAG)) base.push(LEGACY_CLAWHUB_ACK_FLAG);
+  if (helpOffersFlag(help, '--agent')) {
+    const agents = (opts.readAgents ?? readConfiguredAgentIds)(home);
+    const agent = opts.agent ?? preferredSkillAgent(agents);
+    if (agent) base.push('--agent', agent);
+  }
   return base;
+}
+
+/** Read only agent identifiers; unreadable configuration is not a default agent. */
+export function readConfiguredAgentIds(home: string): string[] | null {
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(home, '.openclaw', 'openclaw.json'), 'utf8'));
+    const agents: unknown = config?.agents?.list;
+    if (!Array.isArray(agents)) return null;
+    return [...new Set(agents.flatMap((agent) =>
+      typeof agent?.id === 'string' && agent.id.trim() ? [agent.id] : []))];
+  } catch { return null; }
+}
+
+export function preferredSkillAgent(agents: string[] | null): string | null {
+  return agents && agents.length > 1 ? (agents.includes('main') ? 'main' : agents[0]) : null;
+}
+
+function rejectedFlagFromText(text: unknown): string | null {
+  if (typeof text !== 'string') return null;
+  const flag = /does not recognize option\s+["'`]?([\w-]+)/i.exec(text)?.[1];
+  return flag?.startsWith('--') ? flag : null;
+}
+
+function argsWithoutRejectedFlag(args: string[], stderr: unknown, extra?: unknown): string[] | null {
+  const flag = rejectedFlagFromText(stderr) ?? rejectedFlagFromText(extra);
+  if (!flag) return null;
+  const at = args.indexOf(flag);
+  if (at < 0) return null;
+  const count = args[at + 1] && !args[at + 1].startsWith('-') ? 2 : 1;
+  return [...args.slice(0, at), ...args.slice(at + count)];
+}
+
+/** Trust a live rejection over help. Retry once, removing the flag and its
+ * value. Shared by update's captured runner and the standalone sync runner. */
+export async function runSkillInstallWithRetry<T extends { stderr?: string | null; stdout?: string | null }>(
+  args: string[],
+  run: (args: string[]) => Promise<T>,
+): Promise<T> {
+  let result: T;
+  try {
+    result = await run(args);
+  } catch (err) {
+    const e = err as { stderr?: unknown; stdout?: unknown; message?: unknown };
+    const retryArgs = argsWithoutRejectedFlag(args, e.stderr, `${e.stdout ?? ''}\n${e.message ?? ''}`);
+    if (retryArgs) return run(retryArgs);
+    throw err;
+  }
+  const retryArgs = argsWithoutRejectedFlag(args, result.stderr, result.stdout);
+  return retryArgs ? run(retryArgs) : result;
 }
 
 /**
@@ -2480,18 +2539,19 @@ export function resolveSkillInstallArgs(
  * and it VERIFIES: the installed SKILL.md version must match this CLI's
  * version, or it says so plainly instead of printing a green line.
  */
-export async function installOpenClawSkill(home: string = os.homedir()): Promise<boolean> {
+export async function installOpenClawSkill(home: string = os.homedir(), agent?: string): Promise<boolean> {
   const bin = resolveOpenClawBinary(home);
   if (!bin) {
     console.log('✗ Could not find the `openclaw` binary (PATH or known install locations).');
     console.log('  Install OpenClaw first, or run: openclaw skills install shieldcortex --force');
     return false;
   }
-  const r = spawnSync(bin, resolveSkillInstallArgs(bin, { home }), {
+  const r = await runSkillInstallWithRetry(resolveSkillInstallArgs(bin, { home, agent }), async (args) => spawnSync(bin, args, {
     encoding: 'utf-8',
     timeout: 120000,
     env: { ...process.env, HOME: home },
-  });
+    shell: false,
+  }));
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   if (r.status !== 0) {
     console.log('✗ ClawHub skill install failed:');
@@ -2592,7 +2652,13 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       // for an operator to guess wrong.
       const verb = extraArgs[0] || '';
       if (verb === 'install' || verb === 'update') {
-        const ok = await installOpenClawSkill();
+        const agentAt = extraArgs.indexOf('--agent');
+        const agent = agentAt >= 0 ? extraArgs[agentAt + 1] : undefined;
+        if (agentAt >= 0 && (!agent || agent.startsWith('-'))) {
+          console.error('--agent requires an agent id');
+          process.exit(1);
+        }
+        const ok = await installOpenClawSkill(os.homedir(), agent);
         if (!ok) process.exit(1);
       } else if (verb === 'uninstall') {
         uninstallOpenClawSkill();

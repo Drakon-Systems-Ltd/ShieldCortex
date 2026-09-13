@@ -85,6 +85,14 @@ describe('openclaw-plugin-state — on-disk version is ground truth', () => {
     expect(() => readInstalledRealtimePluginVersion(home)).not.toThrow();
     expect(readInstalledRealtimePluginVersion(home)).toBeNull();
   });
+
+  it('prefers the newest generation when two project dirs exist (#501)', () => {
+    const stale = writeInstalledPackage(home, '4.54.15', 'aaaa');
+    writeInstalledPackage(home, '5.0.0', 'zzzz');
+    writeInstalls(home, { installRecords: { 'shieldcortex-realtime': { version: '4.54.15', installPath: stale } } });
+    expect(readInstalledRealtimePluginVersion(home)).toBe('5.0.0');
+    expect(resolveRealtimePluginInstallPath(home)).toContain('zzzz');
+  });
 });
 
 // ── EOVERRIDE drift detection (v4.33.0 auto-repair) ─────────────────────────

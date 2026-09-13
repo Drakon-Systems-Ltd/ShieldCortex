@@ -246,7 +246,10 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
   const mayHaveDuplicateDirs =
     verdict.state === 'duplicate-install' ||
     verdict.state === 'conflicted-metadata' ||
-    verdict.state === 'enabled-not-loaded';
+    verdict.state === 'enabled-not-loaded' ||
+    // #501: index-only omission is now unproven, but its existing metadata
+    // repair still needs the same index-attested duplicate-dir safety check.
+    (verdict.state === 'load-unproven' && verdict.recommendedAction !== 'none');
   let dupDirs: string[] = [];
   if (mayHaveDuplicateDirs) {
     const liveDir = canonicalProjectDirFromIndex(input.index, pluginId);
@@ -465,6 +468,8 @@ export function formatReconcileReport(
   // Always compute the English headline first (#156).
   const summary = summariseRepair({
     applied: result.applied,
+    onDiskVersion: (result.postVerdict ?? result.verdict).onDiskVersion,
+    expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion,
     canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
     readinessUnproven: result.stepResults.some(s => s.kind === 'gateway-reload' && /readiness (timed out|could not be observed)/.test(s.detail)),
     ...(result.selfCheck
@@ -566,6 +571,8 @@ export function protectionLedgerFromReconcile(result: ReconcileExecResult): {
 } {
   const summary = summariseRepair({
     applied: result.applied,
+    onDiskVersion: (result.postVerdict ?? result.verdict).onDiskVersion,
+    expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion,
     canaryConsented: process.env.SHIELDCORTEX_ALLOW_GATEWAY_CANARY === '1' || Boolean(process.stdin.isTTY),
     readinessUnproven: result.stepResults.some(s => s.kind === 'gateway-reload' && /readiness (timed out|could not be observed)/.test(s.detail)),
     ...(result.selfCheck
