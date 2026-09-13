@@ -284,4 +284,26 @@ describe('#310 — approve --denial', () => {
     // Looking still does not grant.
     expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeUndefined();
   });
+
+  it('--reauth after expiry grants the same identity; live card refuses TTY', () => {
+    denial();
+    const live = claimCardLaunch(
+      { id: fingerprintId(HASH, canonicaliseCwd(cwd)) },
+      { home, now: t0, windowStartMs: t0, windowMs: 900_000 },
+    );
+    expect(live.ok).toBe(true);
+    const blocked = sink();
+    expect(runApprove(['--denial', ACTION_ID, '--reauth'], {
+      home, now: t0 + 1_000, interactive: true, log: blocked.write, error: blocked.write,
+    })).toBe(1);
+    expect(blocked.text()).toMatch(/live approval card/i);
+    expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeUndefined();
+
+    const after = t0 + 10 * 60 * 1000 + 1;
+    const ok = sink();
+    expect(runApprove(['--denial', ACTION_ID, '--reauth'], {
+      home, now: after, interactive: true, log: ok.write, error: ok.write,
+    })).toBe(0);
+    expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeDefined();
+  });
 });

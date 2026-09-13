@@ -53,6 +53,8 @@ function catastrophicInput(over: Partial<BrokerInput['verdict']> = {}): BrokerIn
 
 function notification(event: OperatorNotification['event']): OperatorNotification {
   const shortHash = 'abcdef012345';
+  const denied = event === 'denied_no_prompt_surface';
+  const actionId = 'act-abcdef0123456789';
   return {
     event,
     hash: `${shortHash}${'0'.repeat(52)}`,
@@ -63,7 +65,10 @@ function notification(event: OperatorNotification['event']): OperatorNotificatio
     severity: 'dangerous',
     reason: 'external egress held for review',
     judge: null,
-    fallbackHint: `shieldcortex approve ${shortHash}`,
+    ...(denied ? { actionId } : {}),
+    fallbackHint: denied
+      ? `shieldcortex approve --denial ${actionId}`
+      : `shieldcortex approve ${shortHash}`,
   };
 }
 
@@ -128,7 +133,7 @@ describe('denied_no_prompt_surface → approve_once + honest_tty', () => {
 
   it('denial notification points at YOUR terminal and drops the dead Deny half', () => {
     const text = formatOperatorNotification(notification('denied_no_prompt_surface'));
-    expect(text).toMatch(/shieldcortex approve abcdef012345/);
+    expect(text).toMatch(/shieldcortex approve --denial act-abcdef0123456789/);
     expect(text).toMatch(/YOUR terminal/);
     expect(text).not.toMatch(/\[Deny\]/);
   });

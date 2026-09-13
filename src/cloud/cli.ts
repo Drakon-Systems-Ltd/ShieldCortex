@@ -1,3 +1,5 @@
+import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
+import type { OpenClawPluginGuardSync } from '../setup/openclaw-plugin-guard-sync.js';
 import {
   getCloudConfig,
   setCloudConfig,
@@ -369,28 +371,32 @@ export function handleCloudConfig(args: string[]): void {
   // so advisory writes an explicit false.
 
   if (args.includes('--action-guard-enable')) {
-    setActionGuardCoreConfig({ enabled: true });
+    const pluginSync = setActionGuardCoreConfig({ enabled: true });
     console.log('Action Guard enabled — tool calls are gated on both surfaces.');
+    noticeOpenClawPluginGuardSync(pluginSync);
     changed = true;
   }
 
   if (args.includes('--action-guard-disable')) {
-    setActionGuardCoreConfig({ enabled: false });
+    const pluginSync = setActionGuardCoreConfig({ enabled: false });
     console.log('Action Guard DISABLED — tool calls are NOT gated on either surface, and catastrophic checks may not fire while the guard is off entirely. Re-enable with --action-guard-enable.');
+    noticeOpenClawPluginGuardSync(pluginSync);
     changed = true;
   }
 
   if (args.includes('--action-guard-enforce')) {
     // Enforce implies enabled: enforcing a disabled guard is nonsense, so this
     // flag also switches the guard on rather than writing a dead enforce key.
-    setActionGuardCoreConfig({ enabled: true, enforce: true });
+    const pluginSync = setActionGuardCoreConfig({ enabled: true, enforce: true });
     console.log('Action Guard ENFORCE — dangerous ops require approval / block.');
+    noticeOpenClawPluginGuardSync(pluginSync);
     changed = true;
   }
 
   if (args.includes('--action-guard-advisory')) {
-    setActionGuardCoreConfig({ enforce: false });
+    const pluginSync = setActionGuardCoreConfig({ enforce: false });
     console.log('Action Guard ADVISORY (warn-mode) — dangerous ops log but are not gated (catastrophic still blocks when enabled).');
+    noticeOpenClawPluginGuardSync(pluginSync);
     changed = true;
   }
 
@@ -645,4 +651,18 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
   }
 
   console.log('Usage: shieldcortex cloud sync --full');
+}
+
+function noticeOpenClawPluginGuardSync(sync: OpenClawPluginGuardSync): void {
+  if (sync.status === 'applied') {
+    console.log(`OpenClaw plugin Action Guard keys synced. Restart the gateway before the interceptor matches: ${gatewayRestartAdvice()}`);
+    return;
+  }
+  if (sync.reason === 'missing-config' || sync.reason === 'no-entry') {
+    console.log('OpenClaw plugin entry not present — signed config wrote; plugin plane unchanged (no entry invented).');
+    return;
+  }
+  if (sync.reason === 'malformed' || sync.reason === 'unreadable' || sync.reason === 'unwritable') {
+    console.log('OpenClaw plugin Action Guard could not be synced (config unreadable or unwritable). Signed config still wrote. Do not hand-edit openclaw.json.');
+  }
 }

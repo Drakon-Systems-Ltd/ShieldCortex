@@ -355,7 +355,8 @@ describe('#310 retry control — the one lock plane', () => {
 
   it('one identity gets ONE live card, and a live unspent grant blocks a second (R3 rule 5)', () => {
     denial();
-    expect(claim().ok).toBe(true);
+    const first = claim();
+    expect(first.ok).toBe(true);
     const second = claim({ now: t0 + 1_000 });
     expect(second.ok).toBe(false);
     expect(second.ok === false && second.reason).toBe('already-claimed');
@@ -363,9 +364,8 @@ describe('#310 retry control — the one lock plane', () => {
     const c = claimCardLaunch({ hash: HASH, cwd }, { home, now: t0, windowStartMs: t0, windowMs: 900_000 });
     expect(c.ok).toBe(false);
 
-    // Now tap it, then try again: a live unspent grant also blocks a card.
-    const row = getRetryRow({ hash: HASH, cwd }, { home })!;
-    const nonceOk = grantRetry({ id: row.id }, { isInteractive: true }, { home, now: t0 + 2_000 });
+    // Spend the live card (nonce), not TTY — one door. Then a live unspent grant blocks a second card.
+    const nonceOk = grantRetry({ hash: HASH, cwd }, { nonce: first.ok ? first.nonce : '' }, { home, now: t0 + 2_000 });
     expect(nonceOk.ok).toBe(true);
     denial({ now: t0 + 3_000, actionId: 'act-000000000000001a' });
     const third = claim({ now: t0 + 3_000 });
@@ -764,6 +764,43 @@ describe('#310 retry control — the one lock plane', () => {
     restoreLostActionIds(drained, { home });
     const again = drainLostActionIds({ home });
     expect(again.sort()).toEqual([...new Set(drained)].sort());
+  });
+
+  it('TTY grant refuses while an unanswered card is live — one door', () => {
+    denial();
+    const c = claim();
+    expect(c.ok).toBe(true);
+    const tty = grantRetry({ hash: HASH, cwd }, { isInteractive: true }, { home, now: t0 + 1_000 });
+    expect(tty).toEqual({ ok: false, reason: 'card-live' });
+    expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeUndefined();
+    expect(grantRetry({ hash: HASH, cwd }, { nonce: c.ok ? c.nonce : '' }, { home, now: t0 + 2_000 }).ok).toBe(true);
+  });
+
+  it('expired unanswered card is a no-op; --reauth TTY then grants the same fingerprint', () => {
+    denial();
+    const c = claim();
+    const nonce = c.ok ? c.nonce : '';
+    const after = t0 + RETRY_CARD_LIFETIME_MS + 1;
+    pruneRetryControl({ home, now: after });
+    expect(grantRetry({ hash: HASH, cwd }, { nonce }, { home, now: after }).ok).toBe(false);
+    const reauth = grantRetry({ hash: HASH, cwd }, { isInteractive: true }, { home, now: after + 1_000 });
+    expect(reauth.ok).toBe(true);
+    expect(consumeRetryGrant(
+      { hash: HASH, origin: { cwd, tool: 'Bash' } },
+      { home, now: after + 2_000 },
+    )).not.toBeNull();
+  });
+
+  it('a mutated command cannot spend a reauth grant', () => {
+    denial();
+    const after = t0 + RETRY_CARD_LIFETIME_MS + 1;
+    pruneRetryControl({ home, now: after });
+    expect(grantRetry({ hash: HASH, cwd }, { isInteractive: true }, { home, now: after }).ok).toBe(true);
+    const other = hashToolCall('Bash', { command: 'sudo modprobe softdog\nwhoami' });
+    expect(consumeRetryGrant(
+      { hash: other, origin: { cwd, tool: 'Bash' } },
+      { home, now: after + 1_000 },
+    )).toBeNull();
   });
 
 });
