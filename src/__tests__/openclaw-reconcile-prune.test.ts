@@ -72,7 +72,9 @@ function setupTwoDirHost(opts: {
   db.exec(`CREATE TABLE installed_plugin_index (index_key TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL, host_contract_version TEXT NOT NULL, compat_registry_version TEXT NOT NULL, migration_version INTEGER NOT NULL, policy_hash TEXT NOT NULL, generated_at_ms INTEGER NOT NULL, refresh_reason TEXT, install_records_json TEXT NOT NULL, plugins_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL, warning TEXT, updated_at_ms INTEGER NOT NULL);`);
   db.prepare(`INSERT INTO installed_plugin_index VALUES ('k',1,'v','x',1,'h',1,'r',@ir,@pj,'[]',NULL,1)`).run({
     ir: JSON.stringify({ [PLUGIN]: { source: 'npm', version: '4.47.2', resolvedVersion: '4.47.2', installPath: opts.indexInstallPath } }),
-    pj: JSON.stringify(opts.rosterEntries),
+    // OpenClaw requires enabled/origin/rootDir; the default rootDir sits outside
+    // npm/projects so only an explicit rootDir can name the live dir.
+    pj: JSON.stringify(opts.rosterEntries.map((e) => ({ origin: 'global', rootDir: `/fixture/extensions/${String(e.pluginId)}`, ...e }))),
   });
   db.close();
 }

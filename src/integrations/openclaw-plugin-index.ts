@@ -37,7 +37,12 @@ export const REALTIME_PLUGIN_ID = 'shieldcortex-realtime';
 
 // ── Parsed shapes of the three layers ──────────────────────────────────────
 
-/** One entry from `installed_plugin_index.install_records_json`. */
+/**
+ * One entry from `installed_plugin_index.install_records_json`.
+ *
+ * Fields are optional in the type so injected test indexes stay terse; the
+ * SQLite reader only returns records whose `source` is a host-valid value.
+ */
 export interface IndexInstallRecord {
   source?: string;
   version?: string;
@@ -45,7 +50,10 @@ export interface IndexInstallRecord {
   installPath?: string;
 }
 
-/** One entry from `installed_plugin_index.plugins_json` — the LOADED roster. */
+/**
+ * One entry from `installed_plugin_index.plugins_json` — the LOADED roster.
+ * The SQLite reader guarantees `enabled`/`origin`/`rootDir` (host-required).
+ */
 export interface IndexPluginEntry {
   pluginId: string;
   enabled?: boolean;
@@ -261,7 +269,7 @@ export function reconcilePluginState(input: ReconcileInput): ReconcileVerdict {
   const projectDirs = input.projectDirs ?? [];
   const reasons: string[] = [];
 
-  const indexRecord = index?.installRecords?.[pluginId] ?? null;
+  const indexRecord = ownEntry(index?.installRecords, pluginId) ?? null;
   const openClawTracked = Boolean(indexRecord && indexRecord.source === 'npm');
 
   const enabledInConfig =
@@ -819,9 +827,12 @@ function isOptionalString(value: unknown): value is string | undefined {
 /**
  * Strict projection of the index fields ShieldCortex consumes (`IndexPluginEntry`,
  * `IndexInstallRecord`). Not full host-schema parity — OpenClaw's
- * `installed-plugin-index-store.ts` validates many more fields we never read —
- * but every field WE read is type-checked on EVERY element, and any malformed
- * element rejects the whole index (null = "no evidence"). Rationale: a `null`
+ * `installed-plugin-index-store.ts` validates many more fields we never read, and
+ * those are tolerated here whatever they contain — but every field WE read is
+ * checked on EVERY element against the host contract (2026.9.4: plugin
+ * `enabled`/`origin`/`rootDir` and record `source` required, `source` an enum,
+ * `origin` any string), and any malformed element rejects the whole index
+ * (null = "no evidence"). Rationale: a `null`
  * plugin entry threw `TypeError … reading 'pluginId'` in the reconciler, and
  * `enabled: 'true'` was accepted as "present but not enabled" → a manufactured
  * `enabled-not-loaded` FAIL from invalid state. Applied to BOTH the migrated row
@@ -836,35 +847,57 @@ function projectIndexShape(
   const outPlugins: IndexPluginEntry[] = [];
   for (const entry of plugins) {
     if (!isPlainObject(entry)) return null;
-    if (typeof entry.pluginId !== 'string' || entry.pluginId.length === 0) return null;
-    if (entry.enabled !== undefined && typeof entry.enabled !== 'boolean') return null;
-    if (!isOptionalString(entry.origin) || !isOptionalString(entry.rootDir)) return null;
+    // The host schema requires all four. Omitting `enabled` used to read as
+    // "present but not enabled" → a manufactured enabled-not-loaded FAIL.
+    // `pluginId` may be empty upstream; an empty id never matches a lookup, so
+    // it is accepted rather than making a host-valid index unreadable.
+    if (typeof entry.pluginId !== 'string' || typeof entry.enabled !== 'boolean') return null;
+    if (typeof entry.origin !== 'string' || typeof entry.rootDir !== 'string') return null;
     outPlugins.push({
       pluginId: entry.pluginId,
-      ...(entry.enabled !== undefined ? { enabled: entry.enabled } : {}),
-      ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
-      ...(entry.rootDir !== undefined ? { rootDir: entry.rootDir } : {}),
+      enabled: entry.enabled,
+      origin: entry.origin,
+      rootDir: entry.rootDir,
     });
   }
-  const outRecords: Record<string, IndexInstallRecord> = {};
+  // Plugin ids are arbitrary JSON keys. Assigning `out['__proto__'] = rec` on an
+  // ordinary object swaps its prototype instead of storing a record, and an
+  // ordinary object answers `out['constructor']` for a plugin that has no record.
+  // Null prototype + defineProperty stores every id as an own enumerable key,
+  // matching OpenClaw's own install-record map.
+  const outRecords: Record<string, IndexInstallRecord> = Object.create(null);
   for (const [id, rec] of Object.entries(installRecords)) {
     if (!isPlainObject(rec)) return null;
-    if (
-      !isOptionalString(rec.source) ||
-      !isOptionalString(rec.version) ||
-      !isOptionalString(rec.resolvedVersion) ||
-      !isOptionalString(rec.installPath)
-    ) {
+    // `source` is required and decides remediation routing (npm ⇒ OpenClaw-tracked).
+    if (typeof rec.source !== 'string' || !INDEX_INSTALL_SOURCES.has(rec.source)) return null;
+    if (!isOptionalString(rec.version) || !isOptionalString(rec.resolvedVersion) || !isOptionalString(rec.installPath)) {
       return null;
     }
-    outRecords[id] = {
-      ...(rec.source !== undefined ? { source: rec.source } : {}),
-      ...(rec.version !== undefined ? { version: rec.version } : {}),
-      ...(rec.resolvedVersion !== undefined ? { resolvedVersion: rec.resolvedVersion } : {}),
-      ...(rec.installPath !== undefined ? { installPath: rec.installPath } : {}),
-    };
+    Object.defineProperty(outRecords, id, {
+      value: {
+        source: rec.source,
+        ...(rec.version !== undefined ? { version: rec.version } : {}),
+        ...(rec.resolvedVersion !== undefined ? { resolvedVersion: rec.resolvedVersion } : {}),
+        ...(rec.installPath !== undefined ? { installPath: rec.installPath } : {}),
+      },
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return { installRecords: outRecords, plugins: outPlugins };
+}
+
+/** OpenClaw 2026.9.4 `PluginInstallSourceSchema`: the generic install sources plus `marketplace`. */
+const INDEX_INSTALL_SOURCES: ReadonlySet<string> = new Set(['npm', 'archive', 'path', 'clawhub', 'git', 'marketplace']);
+
+/**
+ * Own-property lookup for a map keyed by plugin id. `map[id]` on an ordinary
+ * object reads `constructor`/`toString` off Object.prototype — a phantom
+ * "installed" record for a plugin that has none.
+ */
+function ownEntry<T>(map: Record<string, T> | null | undefined, id: string): T | undefined {
+  return map != null && Object.prototype.hasOwnProperty.call(map, id) ? map[id] : undefined;
 }
 
 
@@ -931,7 +964,7 @@ export function readConfigEnable(home: string, pluginId: string): ConfigEnableSt
     if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
       return { enabled: null, inAllow: false, readable: false, present: true };
     }
-    const entry = cfg.plugins?.entries?.[pluginId];
+    const entry = ownEntry(cfg.plugins?.entries, pluginId);
     const enabled = entry && typeof entry.enabled === 'boolean' ? entry.enabled : null;
     const allow = Array.isArray(cfg.plugins?.allow) ? (cfg.plugins!.allow as unknown[]) : [];
     const inAllow = allow.some(
@@ -952,7 +985,7 @@ function readInstallsJsonRecord(home: string, pluginId: string): InstallsJsonRec
     const json = JSON.parse(
       fs.readFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'), 'utf-8'),
     ) as { installRecords?: Record<string, { version?: unknown; installPath?: unknown }> };
-    const rec = json.installRecords?.[pluginId];
+    const rec = ownEntry(json.installRecords, pluginId);
     if (!rec) return null;
     return {
       version: typeof rec.version === 'string' ? rec.version : null,
@@ -1154,6 +1187,6 @@ export function canonicalProjectDirFromIndex(
   const rosterRootDir = index.plugins?.find((p) => p.pluginId === pluginId)?.rootDir ?? null;
   const fromRoster = projectDirNameFromPath(rosterRootDir);
   if (fromRoster) return fromRoster;
-  const recordPath = index.installRecords?.[pluginId]?.installPath ?? null;
+  const recordPath = ownEntry(index.installRecords, pluginId)?.installPath ?? null;
   return projectDirNameFromPath(recordPath);
 }

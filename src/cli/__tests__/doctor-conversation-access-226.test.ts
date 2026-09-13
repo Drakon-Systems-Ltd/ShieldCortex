@@ -95,7 +95,7 @@ function healthyInstall(entry: Record<string, unknown>): void {
   db.prepare(INDEX_DDL).run();
   db.prepare(INDEX_INSERT).run({
     ir: JSON.stringify({ [PLUGIN]: { source: 'npm', version: '4.47.35', installPath: pkgDir } }),
-    pj: JSON.stringify([{ pluginId: PLUGIN, enabled: true }]),
+    pj: JSON.stringify([{ pluginId: PLUGIN, enabled: true, origin: 'global', rootDir: pkgDir }]),
   });
   db.close();
 }

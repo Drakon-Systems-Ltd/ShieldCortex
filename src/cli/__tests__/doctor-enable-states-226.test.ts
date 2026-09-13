@@ -51,7 +51,8 @@ function writeIndex(roster: Array<{ pluginId: string; enabled: boolean }>, insta
   db.exec(INDEX_DDL);
   db.prepare(INDEX_INSERT).run({
     ir: JSON.stringify({ [PLUGIN]: { source: 'npm', version: '4.47.35', installPath } }),
-    pj: JSON.stringify(roster),
+    // OpenClaw requires origin/rootDir on every roster entry.
+    pj: JSON.stringify(roster.map((e) => ({ origin: 'global', rootDir: `/fixture/extensions/${e.pluginId}`, ...e }))),
   });
   db.close();
 }

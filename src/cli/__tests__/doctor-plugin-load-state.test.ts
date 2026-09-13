@@ -58,7 +58,8 @@ function setup(opts: { enabled: boolean; roster: Array<{ pluginId: string; enabl
     diagnostics_json TEXT NOT NULL, warning TEXT, updated_at_ms INTEGER NOT NULL);`);
   db.prepare(`INSERT INTO installed_plugin_index VALUES ('k',1,'v','x',1,'h',1,'r',@ir,@pj,'[]',NULL,1)`).run({
     ir: JSON.stringify({ [PLUGIN]: { source: 'npm', version: opts.recordVersion, installPath: pkgDir } }),
-    pj: JSON.stringify(opts.roster),
+    // OpenClaw requires origin/rootDir on every roster entry.
+    pj: JSON.stringify(opts.roster.map((e) => ({ origin: 'global', rootDir: `/fixture/extensions/${e.pluginId}`, ...e }))),
   });
   db.close();
 }

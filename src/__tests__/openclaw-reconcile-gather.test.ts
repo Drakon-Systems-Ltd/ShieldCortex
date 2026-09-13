@@ -18,6 +18,11 @@ import {
 const PLUGIN = 'shieldcortex-realtime';
 const PKG_SUBPATH = path.join('node_modules', '@drakon-systems', 'shieldcortex-realtime');
 
+/** A host-valid roster entry: OpenClaw 2026.9.4 requires enabled, origin and rootDir. */
+function entry(pluginId: string, enabled: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { pluginId, enabled, origin: 'global', rootDir: `/fixture/extensions/${pluginId}`, ...extra };
+}
+
 let home: string;
 
 beforeEach(() => {
@@ -137,7 +142,7 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('reads install records + loaded roster from a real index DB', () => {
     writeIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath: '/x' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [entry(PLUGIN, true)],
       warning: 'DO NOT EDIT',
     });
     const idx = readPluginInstallIndex(home);
@@ -147,10 +152,10 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   });
 
   it('returns the most recent row when several exist', () => {
-    writeIndex({ installRecords: {}, plugins: [{ pluginId: PLUGIN, enabled: false }], generatedAtMs: 1000 });
+    writeIndex({ installRecords: {}, plugins: [entry(PLUGIN, false)], generatedAtMs: 1000 });
     const db = new Database(path.join(home, '.openclaw', 'state', 'openclaw.sqlite'));
     db.prepare(`INSERT INTO installed_plugin_index VALUES ('newer',1,'v','x',1,'h',9999,'r',@ir,@pj,'[]',NULL,9999)`)
-      .run({ ir: JSON.stringify({ [PLUGIN]: { source: 'npm', version: '4.47.2' } }), pj: JSON.stringify([{ pluginId: PLUGIN, enabled: true }]) });
+      .run({ ir: JSON.stringify({ [PLUGIN]: { source: 'npm', version: '4.47.2' } }), pj: JSON.stringify([entry(PLUGIN, true)]) });
     db.close();
     const idx = readPluginInstallIndex(home);
     expect(idx!.plugins.find((p) => p.pluginId === PLUGIN)?.enabled).toBe(true);
@@ -163,7 +168,7 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('legacy layout: a DB with ONLY installed_plugin_index still reads the row', () => {
     writeIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: '/legacy' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [entry(PLUGIN, true)],
       warning: 'legacy-warning',
       generatedAtMs: 4242,
     });
@@ -178,7 +183,7 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('OpenClaw 2026.9.4: reads the migrated config_machine_state row when installed_plugin_index is gone', () => {
     writeMigratedIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: '/migrated' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'npm' }],
+      plugins: [entry(PLUGIN, true, { origin: 'npm' })],
       warning: 'migrated-warning',
       generatedAtMs: 5151,
     });
@@ -192,7 +197,7 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   });
 
   it('OpenClaw 2026.9.4: falls back to updated_at_ms when the migrated index carries no generatedAtMs', () => {
-    writeMigratedIndex({ installRecords: {}, plugins: [{ pluginId: PLUGIN, enabled: true }], updatedAtMs: 6161 });
+    writeMigratedIndex({ installRecords: {}, plugins: [entry(PLUGIN, true)], updatedAtMs: 6161 });
     const idx = readPluginInstallIndex(home);
     expect(idx).not.toBeNull();
     expect(idx!.generatedAtMs).toBe(6161);
@@ -202,12 +207,12 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('both layouts present: the migrated config_machine_state row wins', () => {
     writeIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath: '/legacy' } },
-      plugins: [{ pluginId: PLUGIN, enabled: false }],
+      plugins: [entry(PLUGIN, false)],
       generatedAtMs: 9999999,
     });
     writeMigratedIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', installPath: '/migrated' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [entry(PLUGIN, true)],
       generatedAtMs: 1,
     });
     const idx = readPluginInstallIndex(home);
@@ -231,17 +236,28 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
     ['plugin pluginId is a number', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: 1 }] } })],
     ['plugin pluginId missing', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ enabled: true }] } })],
     ['plugin enabled is the string "true"', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: 'shieldcortex-realtime', enabled: 'true' }] } })],
-    ['plugin rootDir is a number', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: 'shieldcortex-realtime', enabled: true, rootDir: 7 }] } })],
+    ['plugin rootDir is a number', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [entry(PLUGIN, true, { rootDir: 7 })] } })],
+    // Host-REQUIRED fields (OpenClaw 2026.9.4 InstalledPluginIndexRecordSchema): absent is invalid, not "unset".
+    ['plugin enabled missing', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: PLUGIN, origin: 'global', rootDir: '/r' }] } })],
+    ['plugin origin missing', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: PLUGIN, enabled: true, rootDir: '/r' }] } })],
+    ['plugin rootDir missing', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'global' }] } })],
+    ['plugin origin is a number', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [entry(PLUGIN, true, { origin: 1 })] } })],
     ['install record is null', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': null }, plugins: [] } })],
     ['install record is an array', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': [] }, plugins: [] } })],
-    ['install record version is a number', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { version: 5 } }, plugins: [] } })],
-    ['install record installPath is an object', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { installPath: {} } }, plugins: [] } })],
+    ['install record version is a number', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { source: 'npm', version: 5 } }, plugins: [] } })],
+    ['install record installPath is an object', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { source: 'npm', installPath: {} } }, plugins: [] } })],
+    // `source` is required and an enum (PluginInstallSourceSchema); it routes remediation.
+    ['install record source missing', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { version: '5.0.0' } }, plugins: [] } })],
+    ['install record source outside the host enum', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { source: 'npmjs', version: '5.0.0' } }, plugins: [] } })],
+    ['install record source is a number', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { source: 1 } }, plugins: [] } })],
+    // Raw JSON: a `__proto__` record is an ordinary id and is validated like any other.
+    ['__proto__ install record missing source', '{"revision":2000,"index":{"installRecords":{"__proto__":{"version":"5.0.0"}},"plugins":[]}}'],
   ];
 
   it.each(MALFORMED)('malformed migrated row (%s) alongside a valid legacy row → legacy row is read, not a readable empty index', (_label, valueJson) => {
     writeIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath: '/legacy' } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [entry(PLUGIN, true)],
       generatedAtMs: 4242,
     });
     writeMigratedRaw(valueJson);
@@ -298,7 +314,7 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('legacy row with malformed nested entries is unreadable too (same projection on both layouts)', () => {
     writeIndex({
       installRecords: { [PLUGIN]: null as unknown as Record<string, unknown> },
-      plugins: [null, { pluginId: PLUGIN, enabled: true }],
+      plugins: [null, entry(PLUGIN, true)],
       generatedAtMs: 4242,
     });
     expect(readPluginInstallIndex(home)).toBeNull();
@@ -318,6 +334,156 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
       generatedAtMs: 77,
     });
   });
+
+  const LEGACY_INVALID: Array<[string, Record<string, unknown>, unknown[]]> = [
+    ['plugin enabled missing', { [PLUGIN]: { source: 'npm' } }, [{ pluginId: PLUGIN, origin: 'global', rootDir: '/r' }]],
+    ['plugin origin missing', { [PLUGIN]: { source: 'npm' } }, [{ pluginId: PLUGIN, enabled: true, rootDir: '/r' }]],
+    ['plugin rootDir missing', { [PLUGIN]: { source: 'npm' } }, [{ pluginId: PLUGIN, enabled: true, origin: 'global' }]],
+    ['install record source missing', { [PLUGIN]: { version: '5.0.0' } }, [entry(PLUGIN, true)]],
+    ['install record source outside the host enum', { [PLUGIN]: { source: 'registry' } }, [entry(PLUGIN, true)]],
+  ];
+
+  it.each(LEGACY_INVALID)('legacy-only row with %s → null (unreadable), same contract as the migrated row', (_label, installRecords, plugins) => {
+    writeIndex({ installRecords, plugins, generatedAtMs: 4242 });
+    expect(readPluginInstallIndex(home)).toBeNull();
+  });
+
+  it.each(['npm', 'archive', 'path', 'clawhub', 'git', 'marketplace'])('accepts host install source %s', (source) => {
+    writeMigratedIndex({ installRecords: { [PLUGIN]: { source } }, plugins: [entry(PLUGIN, true)], generatedAtMs: 1 });
+    expect(readPluginInstallIndex(home)?.installRecords[PLUGIN]).toEqual({ source });
+  });
+
+  it('accepts what the host accepts: empty pluginId, any origin string, unknown host metadata', () => {
+    writeMigratedIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', spec: 'x', integrity: 'sha', acceptedSurface: { channels: [] } } },
+      plugins: [
+        entry('', false),
+        entry(PLUGIN, true, { origin: 'workspace-custom', manifestPath: '/m', startup: { sidecar: false }, compat: [] }),
+      ],
+      generatedAtMs: 1,
+    });
+    const idx = readPluginInstallIndex(home);
+    expect(idx).not.toBeNull();
+    expect(idx!.plugins.map((p) => p.pluginId)).toEqual(['', PLUGIN]);
+    expect(idx!.plugins[1]).toEqual({ pluginId: PLUGIN, enabled: true, origin: 'workspace-custom', rootDir: `/fixture/extensions/${PLUGIN}` });
+    expect(idx!.installRecords[PLUGIN]).toEqual({ source: 'npm' });
+  });
+
+  it('migrated-only row missing plugin `enabled` reconciles to index-unreadable (warn), never enabled-not-loaded (fail)', () => {
+    writeConfig(true, true);
+    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.0.0');
+    writeMigratedIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0' } },
+      plugins: [{ pluginId: PLUGIN, origin: 'global', rootDir: '/r' }],
+      generatedAtMs: 1,
+    });
+    const verdict = reconcilePluginState(
+      gatherReconcileInput(home, { expectedVersion: '5.0.0', readLiveRoster: () => null }),
+    );
+    expect(verdict.indexReadable).toBe(false);
+    expect(verdict.state).toBe('index-unreadable');
+    expect(verdict.recommendedAction).toBe('none');
+  });
+
+  it('migrated-only record missing `source` is unreadable, not a readable untracked record routed to reinstall', () => {
+    writeConfig(true, true);
+    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.0.0');
+    writeMigratedIndex({
+      installRecords: { [PLUGIN]: { version: '5.0.0' } },
+      plugins: [entry('brave', true)],
+      generatedAtMs: 1,
+    });
+    const verdict = reconcilePluginState(
+      gatherReconcileInput(home, { expectedVersion: '5.0.0', readLiveRoster: () => null }),
+    );
+    expect(verdict.state).toBe('index-unreadable');
+    expect(verdict.recommendedAction).not.toBe('reinstall-pinned');
+  });
+
+  it('migrated row missing `enabled` + valid legacy row → the legacy row decides the verdict', () => {
+    writeConfig(true, true);
+    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.0.0');
+    writeIndex({ installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0' } }, plugins: [entry(PLUGIN, true)], generatedAtMs: 4242 });
+    writeMigratedIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0' } },
+      plugins: [{ pluginId: PLUGIN, origin: 'global', rootDir: '/r' }],
+      generatedAtMs: 1,
+    });
+    const input = gatherReconcileInput(home, { expectedVersion: '5.0.0', readLiveRoster: () => null });
+    expect(input.index?.generatedAtMs).toBe(4242);
+    const verdict = reconcilePluginState(input);
+    expect(verdict.indexReadable).toBe(true);
+    expect(verdict.loadedInIndex).toBe(true);
+    expect(verdict.state).toBe('healthy');
+  });
+
+  describe('reserved plugin ids are ordinary own keys', () => {
+    const rec = (v: string): string => `{"source":"npm","version":"${v}","installPath":"/p/${v}"}`;
+    const plug = (id: string): string => JSON.stringify(entry(id, true));
+    // Raw JSON text: an object literal `{ __proto__: … }` would not create an own key.
+    const RESERVED_ROW =
+      `{"revision":1,"index":{"generatedAtMs":5,"installRecords":{"__proto__":${rec('1.0.0')},"constructor":${rec('2.0.0')},"toString":${rec('3.0.0')}},` +
+      `"plugins":[${plug('__proto__')},${plug('constructor')},${plug('toString')}]}}`;
+
+    it('__proto__/constructor/toString records round-trip as own enumerable keys without touching the prototype', () => {
+      writeMigratedRaw(RESERVED_ROW);
+      const idx = readPluginInstallIndex(home);
+      expect(idx).not.toBeNull();
+      const records = idx!.installRecords;
+      expect(Object.getPrototypeOf(records)).toBeNull();
+      expect(Object.keys(records)).toEqual(['__proto__', 'constructor', 'toString']);
+      expect(Object.keys(records).map((k) => records[k].version)).toEqual(['1.0.0', '2.0.0', '3.0.0']);
+      expect(JSON.stringify(records)).toContain('"__proto__":{"source":"npm","version":"1.0.0"');
+      expect(idx!.plugins.map((p) => p.pluginId)).toEqual(['__proto__', 'constructor', 'toString']);
+    });
+
+    it('end-to-end: an installed `__proto__` plugin reads its own record and verdict', () => {
+      writeMigratedRaw(RESERVED_ROW);
+      const verdict = reconcilePluginState({
+        ...gatherReconcileInput(home, { pluginId: '__proto__', expectedVersion: '1.0.0', readLiveRoster: () => null }),
+        config: { enabled: true, inAllow: true },
+      });
+      expect(verdict.indexReadable).toBe(true);
+      expect(verdict.openClawTracked).toBe(true);
+      expect(verdict.indexVersion).toBe('1.0.0');
+      expect(verdict.state).toBe('healthy');
+    });
+
+    it('absent reserved ids never resolve to an inherited phantom record', () => {
+      writeMigratedIndex({ installRecords: { [PLUGIN]: { source: 'npm' } }, plugins: [entry(PLUGIN, true)], generatedAtMs: 1 });
+      const records = readPluginInstallIndex(home)!.installRecords;
+      for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        expect(records[id]).toBeUndefined();
+      }
+    });
+
+    it.each(['constructor', 'toString', '__proto__'])(
+      'reconciler: config enables absent `%s` with nothing installed → enabled-not-installed, not a phantom-installed FAIL',
+      (id) => {
+        const verdict = reconcilePluginState({
+          pluginId: id,
+          expectedVersion: '5.0.0',
+          config: { enabled: true, inAllow: true },
+          installsJson: null,
+          // An ordinary object, as injected indexes are.
+          index: { installRecords: {}, plugins: [] },
+          onDiskVersion: null,
+          liveRoster: null,
+        });
+        expect(verdict.state).toBe('enabled-not-installed');
+        expect(verdict.recommendedAction).toBe('install');
+      },
+    );
+
+    it('gather: installs.json and openclaw.json lookups for an absent `constructor` find nothing', () => {
+      fs.mkdirSync(path.join(home, '.openclaw', 'plugins'), { recursive: true });
+      fs.writeFileSync(path.join(home, '.openclaw', 'plugins', 'installs.json'), JSON.stringify({ installRecords: {} }));
+      fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({ plugins: { entries: {}, allow: [] } }));
+      const input = gatherReconcileInput(home, { pluginId: 'constructor', expectedVersion: '5.0.0', readLiveRoster: () => null });
+      expect(input.installsJson).toBeNull();
+      expect(input.config.enabled).toBeNull();
+    });
+  });
 });
 
 describe('gatherReconcileInput — reads all three layers off disk', () => {
@@ -328,7 +494,7 @@ describe('gatherReconcileInput — reads all three layers off disk', () => {
     writeInstallsJson('4.47.2', installPath);
     writeIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath } },
-      plugins: [{ pluginId: PLUGIN, enabled: true }],
+      plugins: [entry(PLUGIN, true)],
     });
 
     const input = gatherReconcileInput(home, { expectedVersion: '4.47.2' });
@@ -348,7 +514,7 @@ describe('gatherReconcileInput — reads all three layers off disk', () => {
     // Roster omits shieldcortex-realtime — the drop.
     writeIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '4.47.2', installPath } },
-      plugins: [{ pluginId: 'brave', enabled: true }],
+      plugins: [entry('brave', true)],
     });
 
     const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion: '4.47.2' }));
