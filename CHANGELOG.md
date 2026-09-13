@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
+- (none yet)
+
+## [5.0.3] - 2026-09-13
+
+Patch on 5.0.2. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`).
+
+### Fixed
 - **`shieldcortex update` skill step:** OpenClaw 2026.9 stores agents as `agents.entries`, not `agents.list`. Jarvis's 5.0.2 update therefore never passed `--agent main` and died with `Multiple agents are configured`. `update` now reads both shapes and still prefers `main`. Empty/unreadable config still does not invent an agent. Guard stays off.
 
 ## [5.0.2] - 2026-09-13
