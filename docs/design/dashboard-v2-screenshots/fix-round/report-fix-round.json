@@ -1,0 +1,90 @@
+[
+  {
+    "label": "fix-round",
+    "theme": "light",
+    "viewport": "1440x900",
+    "route": "/overview",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/overview--light--1440x900.png",
+    "residualLegacyTokens": []
+  },
+  {
+    "label": "fix-round",
+    "theme": "light",
+    "viewport": "1440x900",
+    "route": "/memory?tab=graph",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/memory_tab_graph--light--1440x900.png",
+    "residualLegacyTokens": []
+  },
+  {
+    "label": "fix-round",
+    "theme": "light",
+    "viewport": "390x844",
+    "route": "/overview",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/overview--light--390x844.png",
+    "residualLegacyTokens": []
+  },
+  {
+    "label": "fix-round",
+    "theme": "light",
+    "viewport": "390x844",
+    "route": "/memory?tab=graph",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/memory_tab_graph--light--390x844.png",
+    "residualLegacyTokens": []
+  },
+  {
+    "label": "fix-round",
+    "theme": "dark",
+    "viewport": "1440x900",
+    "route": "/overview",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/overview--dark--1440x900.png",
+    "residualLegacyTokens": []
+  },
+  {
+    "label": "fix-round",
+    "theme": "dark",
+    "viewport": "1440x900",
+    "route": "/memory?tab=graph",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/memory_tab_graph--dark--1440x900.png",
+    "residualLegacyTokens": []
+  },
+  {
+    "label": "fix-round",
+    "theme": "dark",
+    "viewport": "390x844",
+    "route": "/overview",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/overview--dark--390x844.png",
+    "residualLegacyTokens": []
+  },
+  {
+    "label": "fix-round",
+    "theme": "dark",
+    "viewport": "390x844",
+    "route": "/memory?tab=graph",
+    "ok": true,
+    "consoleErrors": [],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/fix-round/memory_tab_graph--dark--390x844.png",
+    "residualLegacyTokens": []
+  }
+]
