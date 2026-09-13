@@ -65,7 +65,7 @@ export function FindingActions({ findingId, status, hasFile, compact = false }: 
   // After acting, show a brief confirmation then the card will disappear on next query refresh
   if (acted) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-[var(--sc-cyan)] italic animate-pulse">
+      <span className="inline-flex items-center gap-1.5 text-xs text-[var(--sc-ok)] italic animate-pulse">
         <Check size={12} /> Done — removing from list...
       </span>
     );
@@ -73,7 +73,7 @@ export function FindingActions({ findingId, status, hasFile, compact = false }: 
 
   if (status === 'resolved') {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-[var(--sc-cyan)]">
+      <span className="inline-flex items-center gap-1.5 text-xs text-[var(--sc-ok)]">
         <Check size={12} /> Resolved
       </span>
     );
@@ -127,7 +127,7 @@ export function FindingActions({ findingId, status, hasFile, compact = false }: 
             value={note}
             onChange={(e) => setNote(e.target.value)}
             placeholder="What did you do about it? (optional)"
-            className="flex-1 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-3 py-1.5 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
+            className="flex-1 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-3 py-1.5 text-xs text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
             aria-label="Resolution note"
             onKeyDown={(e) => { if (e.key === 'Enter') handleAction('resolved'); }}
           />

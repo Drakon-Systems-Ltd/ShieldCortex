@@ -1,25 +1,32 @@
 'use client';
 
+import { useState } from 'react';
+import { TabBar } from '@/components/ds/TabBar';
+import { CustomPatternsPanel } from '@/components/dome/CustomPatternsPanel';
 import { CustomPoliciesPanel } from '@/components/dome/CustomPoliciesPanel';
 import { CustomFirewallRulesPanel } from '@/components/shield/CustomFirewallRulesPanel';
 
-export function PolicyManagementView() {
-  return (
-    <div className="h-full overflow-y-auto bg-[var(--sc-bg-deep)]">
-      <div className="mx-auto max-w-7xl space-y-6 p-6">
-        <section className="rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-surface)]/70 p-6">
-          <div className="text-[11px] uppercase tracking-[0.2em] text-[var(--sc-cyan)]">Protection / Policies</div>
-          <h2 className="mt-3 text-3xl font-semibold text-[var(--sc-text-primary)]">Policy management</h2>
-          <p className="mt-2 max-w-3xl text-sm text-[var(--sc-text-secondary)]">
-            Keep operator-tuned controls in one place. Firewall rules and Iron Dome policies should not be buried inside larger screens when they directly shape blocking, quarantine, and approval behavior.
-          </p>
-        </section>
+type PolicyTab = 'patterns' | 'firewall' | 'dome';
 
-        <div className="grid gap-6 xl:grid-cols-2">
-          <CustomFirewallRulesPanel />
-          <CustomPoliciesPanel />
-        </div>
-      </div>
+const TABS = [
+  { id: 'patterns', label: 'Custom Patterns' },
+  { id: 'firewall', label: 'Firewall Rules' },
+  { id: 'dome', label: 'Iron Dome Policies' },
+];
+
+/** Policies & Rules (brief §8): custom patterns, firewall rules, and Iron
+ *  Dome policies in one page with three tabs, on the shared DS TabBar —
+ *  replaces the bespoke hero-header two-panel layout, which buried Custom
+ *  Patterns back inside the Status tab instead of here. */
+export function PolicyManagementView() {
+  const [tab, setTab] = useState<PolicyTab>('patterns');
+
+  return (
+    <div className="space-y-4">
+      <TabBar tabs={TABS} activeTab={tab} onChange={(id) => setTab(id as PolicyTab)} />
+      {tab === 'patterns' && <CustomPatternsPanel />}
+      {tab === 'firewall' && <CustomFirewallRulesPanel />}
+      {tab === 'dome' && <CustomPoliciesPanel />}
     </div>
   );
 }

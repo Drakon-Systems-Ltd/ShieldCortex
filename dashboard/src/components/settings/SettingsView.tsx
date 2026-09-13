@@ -15,7 +15,6 @@ import { DedupePanel } from '@/components/settings/DedupePanel';
 import { LicenseStatusCard } from '@/components/shield/LicenseStatusCard';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_LABELS } from '@/lib/license';
-import { loadIntensity, saveIntensity, type IntensityLevel } from '@/components/graph/constellation/intensity';
 
 type SettingsTab = 'cloud' | 'integrations' | 'licence' | 'admin';
 
@@ -26,11 +25,9 @@ function SettingsContent() {
   const [userTab, setTab] = useState<SettingsTab>('cloud');
   const tab = validUrlTab ?? userTab;
   const { data: license } = useLicenseStatus();
-  const [intensity, setIntensity] = useState<IntensityLevel>(() => loadIntensity());
-  const onIntensityChange = (next: IntensityLevel) => {
-    setIntensity(next);
-    saveIntensity(next);
-  };
+  // v2: the CIC "graph motion intensity" control was removed with the
+  // constellation renderer — the v2 graph has no ambient motion to tune and
+  // honours prefers-reduced-motion directly.
 
   const tabs = [
     { id: 'cloud', label: 'Cloud Sync', icon: <Cloud size={14} /> },
@@ -63,10 +60,10 @@ function SettingsContent() {
             <div className="space-y-6">
               <LicenseStatusCard />
               <GlassCard className="p-6">
-                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Enterprise</h3>
-                <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
+                <h3 className="text-lg font-semibold text-[var(--sc-text)]">Enterprise</h3>
+                <p className="mt-2 text-sm text-[var(--sc-text-dim)]">
                   Cloud replication, team management, shared patterns, self-hosted deployments, and fleets:{' '}
-                  <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-accent-cyan)] hover:underline">
+                  <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-ok)] hover:underline">
                     sales@drakonsystems.com
                   </a>
                 </p>
@@ -79,56 +76,22 @@ function SettingsContent() {
               <PrunePanel />
               <DedupePanel />
               <GlassCard className="p-6">
-                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Graph Motion</h3>
-                <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
-                  How lively the knowledge graph feels. Per-browser.
-                </p>
-                <div
-                  role="radiogroup"
-                  aria-label="Graph motion intensity"
-                  className="mt-4 flex gap-2"
-                >
-                  {(['subtle', 'moderate', 'strong'] as const).map((level) => (
-                    <label
-                      key={level}
-                      className={`flex flex-1 cursor-pointer items-center gap-2 rounded-lg border px-4 py-3 transition-colors ${
-                        intensity === level
-                          ? 'border-[var(--sc-accent-cyan)] bg-[var(--sc-bg-elevated)]'
-                          : 'border-transparent bg-[var(--sc-bg-elevated)] hover:border-[var(--sc-border-subtle)]'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="graph-intensity"
-                        value={level}
-                        checked={intensity === level}
-                        onChange={() => onIntensityChange(level)}
-                        className="accent-[var(--sc-accent-cyan)]"
-                      />
-                      <span className="text-sm text-[var(--sc-text-primary)]">
-                        {level[0].toUpperCase() + level.slice(1)}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </GlassCard>
-              <GlassCard className="p-6">
-                <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">System Information</h3>
+                <h3 className="text-lg font-semibold text-[var(--sc-text)]">System Information</h3>
                 <div className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Dashboard</span>
-                    <span className="font-mono text-sm text-[var(--sc-text-primary)]">localhost:3030</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Dashboard</span>
+                    <span className="font-mono text-sm text-[var(--sc-text)]">localhost:3030</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">API Server</span>
-                    <span className="font-mono text-sm text-[var(--sc-text-primary)]">localhost:3001</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">API Server</span>
+                    <span className="font-mono text-sm text-[var(--sc-text)]">localhost:3001</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Database</span>
-                    <span className="font-mono text-sm text-[var(--sc-text-primary)]">~/.shieldcortex/memories.db</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Database</span>
+                    <span className="font-mono text-sm text-[var(--sc-text)]">~/.shieldcortex/memories.db</span>
                   </div>
-                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-bg-elevated)] px-4 py-3">
-                    <span className="text-sm text-[var(--sc-text-secondary)]">Licence Tier</span>
+                  <div className="flex items-center justify-between rounded-lg bg-[var(--sc-surface-2)] px-4 py-3">
+                    <span className="text-sm text-[var(--sc-text-dim)]">Licence Tier</span>
                     <Badge variant={license?.tier === 'pro' ? 'cyan' : license?.tier === 'team' ? 'coral' : 'muted'}>
                       {TIER_LABELS[license?.tier ?? 'free']}
                     </Badge>

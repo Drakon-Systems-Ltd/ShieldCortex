@@ -1,0 +1,1262 @@
+[
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/overview",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Cs8YuMD6Xcz5Mwf4FCXvz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Cs8YuMD6Xcz5Mwf4FCXvz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Cs8YuMD6Xcz5Mwf4FCXvz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Cs8YuMD6Xcz5Mwf4FCXvz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/overview--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/memory",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=CkCycOF8lu2_rjOhuGcTi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=CkCycOF8lu2_rjOhuGcTi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=CkCycOF8lu2_rjOhuGcTi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=CkCycOF8lu2_rjOhuGcTi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/memory?tab=graph",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9qSWn0n3rSCGc5U4tOb24' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9qSWn0n3rSCGc5U4tOb24' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9qSWn0n3rSCGc5U4tOb24' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9qSWn0n3rSCGc5U4tOb24' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_graph--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/memory?tab=recall",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YyhgasdbDg-9t-k8Tjbxf' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YyhgasdbDg-9t-k8Tjbxf' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YyhgasdbDg-9t-k8Tjbxf' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YyhgasdbDg-9t-k8Tjbxf' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_recall--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/memory?tab=review",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PfeBNSre6s_B8bHydoLXw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PfeBNSre6s_B8bHydoLXw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PfeBNSre6s_B8bHydoLXw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PfeBNSre6s_B8bHydoLXw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_review--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/memory?tab=timeline",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Xjbl0UxQK7P49nEFLllYK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Xjbl0UxQK7P49nEFLllYK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Xjbl0UxQK7P49nEFLllYK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Xjbl0UxQK7P49nEFLllYK' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_timeline--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/memory?tab=files",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nyx2knSzIExOHnhuUSIAY' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nyx2knSzIExOHnhuUSIAY' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nyx2knSzIExOHnhuUSIAY' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nyx2knSzIExOHnhuUSIAY' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_files--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/memory/replay",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9SKg9_8uCa7ts3WLGVMh8' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9SKg9_8uCa7ts3WLGVMh8' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9SKg9_8uCa7ts3WLGVMh8' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9SKg9_8uCa7ts3WLGVMh8' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_replay--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/protection",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zFXFZAJCNt6XDVIf0FF5o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zFXFZAJCNt6XDVIf0FF5o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zFXFZAJCNt6XDVIf0FF5o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zFXFZAJCNt6XDVIf0FF5o' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/protection/intercepts",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=8uDS2KhauP8uubsZlanOv' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=8uDS2KhauP8uubsZlanOv' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=8uDS2KhauP8uubsZlanOv' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=8uDS2KhauP8uubsZlanOv' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_intercepts--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/protection/audit",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zdPJrLqzjIlVYThBUxlJF' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zdPJrLqzjIlVYThBUxlJF' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zdPJrLqzjIlVYThBUxlJF' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zdPJrLqzjIlVYThBUxlJF' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_audit--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/protection/quarantine",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=01XLG6YkIb_xGqle5hSQs' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=01XLG6YkIb_xGqle5hSQs' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=01XLG6YkIb_xGqle5hSQs' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=01XLG6YkIb_xGqle5hSQs' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_quarantine--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/protection/policies",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=ii4G9mDRwYg7wJG63sCRR' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=ii4G9mDRwYg7wJG63sCRR' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=ii4G9mDRwYg7wJG63sCRR' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=ii4G9mDRwYg7wJG63sCRR' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_policies--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/xray",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5rt4LVBwIVsEOcOyxbVsZ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5rt4LVBwIVsEOcOyxbVsZ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5rt4LVBwIVsEOcOyxbVsZ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5rt4LVBwIVsEOcOyxbVsZ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/xray--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "1440x900",
+    "route": "/settings",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vKIl3uu_5qEZQ2BqT9g2C' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vKIl3uu_5qEZQ2BqT9g2C' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vKIl3uu_5qEZQ2BqT9g2C' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vKIl3uu_5qEZQ2BqT9g2C' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/settings--terminal--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/overview",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=gOw3HH6TUCTpGJ-o2wSS6' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=gOw3HH6TUCTpGJ-o2wSS6' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=gOw3HH6TUCTpGJ-o2wSS6' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=gOw3HH6TUCTpGJ-o2wSS6' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/overview--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/memory",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=58tnHuVosOuGN_Rit76oi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=58tnHuVosOuGN_Rit76oi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=58tnHuVosOuGN_Rit76oi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=58tnHuVosOuGN_Rit76oi' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/memory?tab=graph",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5yfFBQPtgtiUbRZ8x3rn9' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5yfFBQPtgtiUbRZ8x3rn9' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5yfFBQPtgtiUbRZ8x3rn9' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=5yfFBQPtgtiUbRZ8x3rn9' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_graph--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/memory?tab=recall",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=V_twYqzq8qAY7v_XcWbKQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=V_twYqzq8qAY7v_XcWbKQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=V_twYqzq8qAY7v_XcWbKQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=V_twYqzq8qAY7v_XcWbKQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_recall--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/memory?tab=review",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nYu2DfDcqpWkQlzFhLDTm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nYu2DfDcqpWkQlzFhLDTm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nYu2DfDcqpWkQlzFhLDTm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=nYu2DfDcqpWkQlzFhLDTm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_review--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/memory?tab=timeline",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=paAYR6Rlhb5b-NFJ1YkE4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=paAYR6Rlhb5b-NFJ1YkE4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=paAYR6Rlhb5b-NFJ1YkE4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=paAYR6Rlhb5b-NFJ1YkE4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_timeline--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/memory?tab=files",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=pPXaY37QGMnTBf-shGIzW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=pPXaY37QGMnTBf-shGIzW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=pPXaY37QGMnTBf-shGIzW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=pPXaY37QGMnTBf-shGIzW' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_files--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/memory/replay",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vOxY39YWVoZt0dXu2v5OJ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vOxY39YWVoZt0dXu2v5OJ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vOxY39YWVoZt0dXu2v5OJ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vOxY39YWVoZt0dXu2v5OJ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_replay--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/protection",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=7yKXvGEB2H0NqYftzR41J' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=7yKXvGEB2H0NqYftzR41J' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=7yKXvGEB2H0NqYftzR41J' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=7yKXvGEB2H0NqYftzR41J' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/protection/intercepts",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=d1PAjV5kSjqCVjeu27DdB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=d1PAjV5kSjqCVjeu27DdB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=d1PAjV5kSjqCVjeu27DdB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=d1PAjV5kSjqCVjeu27DdB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_intercepts--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/protection/audit",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vsXgqKBvrasG1n6GE3Tdw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vsXgqKBvrasG1n6GE3Tdw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vsXgqKBvrasG1n6GE3Tdw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vsXgqKBvrasG1n6GE3Tdw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_audit--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/protection/quarantine",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=P40I3xzHHTgXTCxvaJyA5' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=P40I3xzHHTgXTCxvaJyA5' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=P40I3xzHHTgXTCxvaJyA5' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=P40I3xzHHTgXTCxvaJyA5' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_quarantine--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/protection/policies",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jVnSOIlu1qap83WBWjLod' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jVnSOIlu1qap83WBWjLod' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jVnSOIlu1qap83WBWjLod' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jVnSOIlu1qap83WBWjLod' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_policies--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/xray",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=O2iKd_86_YhZSiuJ32bdn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=O2iKd_86_YhZSiuJ32bdn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=O2iKd_86_YhZSiuJ32bdn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=O2iKd_86_YhZSiuJ32bdn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/xray--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "terminal",
+    "viewport": "390x844",
+    "route": "/settings",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=eQlZ_Gh5we0xtUZWc5oPn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=eQlZ_Gh5we0xtUZWc5oPn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=eQlZ_Gh5we0xtUZWc5oPn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=eQlZ_Gh5we0xtUZWc5oPn' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/settings--terminal--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/overview",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Vgv4o7zt0xAl-niKw0kGQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Vgv4o7zt0xAl-niKw0kGQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Vgv4o7zt0xAl-niKw0kGQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Vgv4o7zt0xAl-niKw0kGQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/overview--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/memory",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=UdZ3BZWk6xlUyQrnZ1qF3' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=UdZ3BZWk6xlUyQrnZ1qF3' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=UdZ3BZWk6xlUyQrnZ1qF3' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=UdZ3BZWk6xlUyQrnZ1qF3' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/memory?tab=graph",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=09q2y4c9wd6pUKlHEJW1B' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=09q2y4c9wd6pUKlHEJW1B' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=09q2y4c9wd6pUKlHEJW1B' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=09q2y4c9wd6pUKlHEJW1B' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_graph--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/memory?tab=recall",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3ctQ_WU48q3ztgVZpgxPV' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3ctQ_WU48q3ztgVZpgxPV' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3ctQ_WU48q3ztgVZpgxPV' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3ctQ_WU48q3ztgVZpgxPV' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_recall--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/memory?tab=review",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DGUEec19fO3ty71kZhmA_' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DGUEec19fO3ty71kZhmA_' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DGUEec19fO3ty71kZhmA_' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DGUEec19fO3ty71kZhmA_' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_review--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/memory?tab=timeline",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=uGR7lHfSBkzvnnq7_QOeq' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=uGR7lHfSBkzvnnq7_QOeq' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=uGR7lHfSBkzvnnq7_QOeq' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=uGR7lHfSBkzvnnq7_QOeq' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_timeline--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/memory?tab=files",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=okBfAtZJ1OXuXa7trNsTj' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=okBfAtZJ1OXuXa7trNsTj' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=okBfAtZJ1OXuXa7trNsTj' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=okBfAtZJ1OXuXa7trNsTj' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_files--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/memory/replay",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jEtk6N7rxpqjxLb5teaCw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jEtk6N7rxpqjxLb5teaCw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jEtk6N7rxpqjxLb5teaCw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=jEtk6N7rxpqjxLb5teaCw' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_replay--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/protection",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=fGk_AsX7YPGtoIwaKNEeA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=fGk_AsX7YPGtoIwaKNEeA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=fGk_AsX7YPGtoIwaKNEeA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=fGk_AsX7YPGtoIwaKNEeA' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/protection/intercepts",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YZG3OEdKknDJRuhRS3wiG' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YZG3OEdKknDJRuhRS3wiG' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YZG3OEdKknDJRuhRS3wiG' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=YZG3OEdKknDJRuhRS3wiG' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_intercepts--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/protection/audit",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9NmQjklCgYwsXGJj7EQ65' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9NmQjklCgYwsXGJj7EQ65' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9NmQjklCgYwsXGJj7EQ65' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=9NmQjklCgYwsXGJj7EQ65' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_audit--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/protection/quarantine",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=l_JAptv8w1xRDYYjWh3_r' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=l_JAptv8w1xRDYYjWh3_r' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=l_JAptv8w1xRDYYjWh3_r' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=l_JAptv8w1xRDYYjWh3_r' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_quarantine--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/protection/policies",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=1YVM8Re6l_o7BquxuVSKM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=1YVM8Re6l_o7BquxuVSKM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=1YVM8Re6l_o7BquxuVSKM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=1YVM8Re6l_o7BquxuVSKM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_policies--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/xray",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zBVXMffZ0A8KO0kn4r5S1' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zBVXMffZ0A8KO0kn4r5S1' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zBVXMffZ0A8KO0kn4r5S1' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=zBVXMffZ0A8KO0kn4r5S1' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/xray--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "1440x900",
+    "route": "/settings",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DjDex-z_hNUys5Swh3V35' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DjDex-z_hNUys5Swh3V35' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DjDex-z_hNUys5Swh3V35' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=DjDex-z_hNUys5Swh3V35' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/settings--glass--1440x900.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/overview",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Bm6iX-PtNy2BFKY1eNPZ4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Bm6iX-PtNy2BFKY1eNPZ4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Bm6iX-PtNy2BFKY1eNPZ4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Bm6iX-PtNy2BFKY1eNPZ4' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/overview--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/memory",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=lYWZp1KaHJ_pOMyanKpX-' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=lYWZp1KaHJ_pOMyanKpX-' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=lYWZp1KaHJ_pOMyanKpX-' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=lYWZp1KaHJ_pOMyanKpX-' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/memory?tab=graph",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=c__YP2RU8O0QWZfwoXucl' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=c__YP2RU8O0QWZfwoXucl' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=c__YP2RU8O0QWZfwoXucl' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=c__YP2RU8O0QWZfwoXucl' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_graph--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/memory?tab=recall",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=VkPMW7AprxzNuvqVPOfSa' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=VkPMW7AprxzNuvqVPOfSa' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=VkPMW7AprxzNuvqVPOfSa' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=VkPMW7AprxzNuvqVPOfSa' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_recall--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/memory?tab=review",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=70XZxBYMj5oay2PrXyiZz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=70XZxBYMj5oay2PrXyiZz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=70XZxBYMj5oay2PrXyiZz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=70XZxBYMj5oay2PrXyiZz' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_review--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/memory?tab=timeline",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Q4eq_EBBVSYcovTk2GFXM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Q4eq_EBBVSYcovTk2GFXM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Q4eq_EBBVSYcovTk2GFXM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=Q4eq_EBBVSYcovTk2GFXM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_timeline--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/memory?tab=files",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PTLU81BbJZloZgEREiQYg' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PTLU81BbJZloZgEREiQYg' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PTLU81BbJZloZgEREiQYg' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PTLU81BbJZloZgEREiQYg' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_tab_files--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/memory/replay",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2HleDwD6yS7I9baUwzRgE' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2HleDwD6yS7I9baUwzRgE' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2HleDwD6yS7I9baUwzRgE' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2HleDwD6yS7I9baUwzRgE' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/memory_replay--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/protection",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2-Uby7V2GxPpkoMi9Sf9E' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2-Uby7V2GxPpkoMi9Sf9E' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2-Uby7V2GxPpkoMi9Sf9E' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=2-Uby7V2GxPpkoMi9Sf9E' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/protection/intercepts",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vRzyXL_r60J54dCqqW7vQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vRzyXL_r60J54dCqqW7vQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vRzyXL_r60J54dCqqW7vQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=vRzyXL_r60J54dCqqW7vQ' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_intercepts--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/protection/audit",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3q6BA1ecbSXS66vhuAPSc' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3q6BA1ecbSXS66vhuAPSc' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3q6BA1ecbSXS66vhuAPSc' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=3q6BA1ecbSXS66vhuAPSc' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_audit--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/protection/quarantine",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=cb3GtZxXe--DLkDPvpf41' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=cb3GtZxXe--DLkDPvpf41' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=cb3GtZxXe--DLkDPvpf41' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=cb3GtZxXe--DLkDPvpf41' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_quarantine--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/protection/policies",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PQpduzcubMYim8AhjISyM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PQpduzcubMYim8AhjISyM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PQpduzcubMYim8AhjISyM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=PQpduzcubMYim8AhjISyM' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/protection_policies--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/xray",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=qVZtFJfh6y-0eVS-4m7UB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=qVZtFJfh6y-0eVS-4m7UB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=qVZtFJfh6y-0eVS-4m7UB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=qVZtFJfh6y-0eVS-4m7UB' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/xray--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  },
+  {
+    "label": "baseline",
+    "theme": "glass",
+    "viewport": "390x844",
+    "route": "/settings",
+    "ok": false,
+    "consoleErrors": [
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=OMGadLwLOjb7pIGrahfbm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=OMGadLwLOjb7pIGrahfbm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=OMGadLwLOjb7pIGrahfbm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE",
+      "WebSocket connection to 'ws://127.0.0.1:3030/_next/webpack-hmr?id=OMGadLwLOjb7pIGrahfbm' failed: Error during WebSocket handshake: net::ERR_INVALID_HTTP_RESPONSE"
+    ],
+    "failedRequests": [],
+    "screenshot": "/home/ubuntu/clawd/sc-wt-dashboard/docs/design/dashboard-v2-screenshots/baseline/settings--glass--390x844.png",
+    "residualLegacyTokens": [
+      "--cic-void",
+      "--cic-cyan",
+      "--term-bg",
+      "--term-electric"
+    ]
+  }
+]

@@ -5,6 +5,7 @@ import { Search } from 'lucide-react';
 import { GlassCard } from '@/components/ds/GlassCard';
 import { Badge } from '@/components/ds/Badge';
 import { Button } from '@/components/ds/Button';
+import { CardError } from '@/components/ds/CardError';
 import {
   useMemoryCandidates,
   useRecallExplain,
@@ -28,12 +29,12 @@ function RelevanceBar({ score }: { score: number }) {
   const pct = Math.round(score * 100);
   return (
     <div className="mt-2 flex items-center gap-2">
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--sc-bg-deep)]">
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--sc-bg)]">
         <div
           className="h-full rounded-full transition-all"
           style={{
             width: `${pct}%`,
-            background: `linear-gradient(90deg, var(--sc-cyan), var(--sc-coral))`,
+            background: `linear-gradient(90deg, var(--sc-ok), var(--sc-danger))`,
           }}
         />
       </div>
@@ -54,7 +55,7 @@ function ResultCard({ result }: { result: RecallExplanationResult }) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold text-[var(--sc-text-primary)]">
+          <div className="text-sm font-semibold text-[var(--sc-text)]">
             {memory.title}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
@@ -66,8 +67,8 @@ function ResultCard({ result }: { result: RecallExplanationResult }) {
           </div>
           <RelevanceBar score={result.relevanceScore} />
         </div>
-        <div className="shrink-0 rounded-lg bg-[var(--sc-cyan)]/10 px-2.5 py-1.5 text-center">
-          <span className="text-sm font-semibold tabular-nums text-[var(--sc-cyan)]">
+        <div className="shrink-0 rounded-lg bg-[var(--sc-ok)]/10 px-2.5 py-1.5 text-center">
+          <span className="text-sm font-semibold tabular-nums text-[var(--sc-ok)]">
             {result.relevanceScore.toFixed(2)}
           </span>
         </div>
@@ -98,7 +99,7 @@ export function RecallWorkspace() {
         : null,
     [submittedQuery, projectFilter, expectedId],
   );
-  const { data, isLoading } = useRecallExplain(explainQuery);
+  const { data, isLoading, isError, error, refetch } = useRecallExplain(explainQuery);
   const { data: candidates = [] } = useMemoryCandidates(expectedSearch, projectFilter);
 
   const avgRelevance =
@@ -124,7 +125,7 @@ export function RecallWorkspace() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Why did we choose PostgreSQL over SQLite?"
-              className="h-10 w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] pl-10 pr-4 text-sm text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
+              className="h-10 w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] pl-10 pr-4 text-sm text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
             />
           </div>
           <Button type="submit" variant="coral" size="md">
@@ -148,8 +149,16 @@ export function RecallWorkspace() {
         </div>
       )}
 
+      {/* Error state — a failed fetch must never look identical to "no results" */}
+      {!isLoading && isError && (
+        <CardError
+          message={`Recall failed: ${error instanceof Error ? error.message : 'fetch failed'}`}
+          onRetry={() => refetch()}
+        />
+      )}
+
       {/* Empty state */}
-      {!isLoading && !data && !submittedQuery && (
+      {!isLoading && !isError && !data && !submittedQuery && (
         <div className="py-8 text-center text-sm text-[var(--sc-text-muted)]">
           Type a query to see what the agent would remember
         </div>
@@ -182,14 +191,14 @@ export function RecallWorkspace() {
             <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
               Expected memory
             </div>
-            <p className="mt-1 text-xs text-[var(--sc-text-secondary)]">
+            <p className="mt-1 text-xs text-[var(--sc-text-dim)]">
               Search for a memory you expected to appear, then compare its rank.
             </p>
             <input
               value={expectedSearch}
               onChange={(e) => setExpectedSearch(e.target.value)}
               placeholder="Search a memory to compare..."
-              className="mt-3 h-9 w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-3 text-sm text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
+              className="mt-3 h-9 w-full rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-3 text-sm text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus-ring-cyan"
             />
             <div className="mt-3 space-y-2">
               {candidates.map((memory) => (
@@ -201,8 +210,8 @@ export function RecallWorkspace() {
                   }}
                   className={`block w-full rounded-lg border px-3 py-2 text-left text-sm ${
                     expectedId === memory.id
-                      ? 'border-[var(--sc-cyan)]/50 bg-[var(--sc-cyan)]/10 text-[var(--sc-text-primary)]'
-                      : 'border-[var(--sc-border)] bg-[var(--sc-bg-surface)] text-[var(--sc-text-primary)] hover:border-[var(--sc-text-muted)]'
+                      ? 'border-[var(--sc-ok)]/50 bg-[var(--sc-ok)]/10 text-[var(--sc-text)]'
+                      : 'border-[var(--sc-border)] bg-[var(--sc-surface)] text-[var(--sc-text)] hover:border-[var(--sc-text-muted)]'
                   }`}
                 >
                   <div className="font-medium">{memory.title}</div>
@@ -220,9 +229,9 @@ export function RecallWorkspace() {
               <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
                 Eligibility breakdown
               </div>
-              <div className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/60 p-3 text-sm text-[var(--sc-text-primary)]">
+              <div className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-3 text-sm text-[var(--sc-text)]">
                 <div className="text-base font-medium">{data.expectedMemory.title}</div>
-                <div className="mt-2 space-y-1 text-xs text-[var(--sc-text-secondary)]">
+                <div className="mt-2 space-y-1 text-xs text-[var(--sc-text-dim)]">
                   <div>Rank: {data.expectedMemory.rank ?? 'not returned'}</div>
                   <div>Status: {data.expectedMemory.status}</div>
                   <div>
@@ -239,7 +248,7 @@ export function RecallWorkspace() {
                   {data.expectedMemory.reasons.map((reason) => (
                     <div
                       key={reason}
-                      className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/60 px-3 py-2 text-xs text-[var(--sc-text-secondary)]"
+                      className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 px-3 py-2 text-xs text-[var(--sc-text-dim)]"
                     >
                       {reason}
                     </div>
@@ -259,15 +268,15 @@ export function RecallWorkspace() {
                 {data.misses.map((miss) => (
                   <div
                     key={miss.id}
-                    className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/60 p-3"
+                    className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-3"
                   >
-                    <div className="text-sm font-medium text-[var(--sc-text-primary)]">
+                    <div className="text-sm font-medium text-[var(--sc-text)]">
                       {miss.title}
                     </div>
                     <div className="mt-1 text-xs text-[var(--sc-text-muted)]">
                       {miss.captureMethod} · salience {miss.salience.toFixed(2)}
                     </div>
-                    <ul className="mt-2 space-y-1 text-xs text-[var(--sc-text-secondary)]">
+                    <ul className="mt-2 space-y-1 text-xs text-[var(--sc-text-dim)]">
                       {miss.whyNotRecalled.map((reason) => (
                         <li key={reason}>• {reason}</li>
                       ))}
@@ -279,7 +288,7 @@ export function RecallWorkspace() {
           )}
 
           {!data && (
-            <div className="text-sm text-[var(--sc-text-secondary)]">
+            <div className="text-sm text-[var(--sc-text-dim)]">
               Run a recall query first, then use this section to debug ranking and misses.
             </div>
           )}

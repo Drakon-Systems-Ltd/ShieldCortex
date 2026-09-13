@@ -5,6 +5,7 @@ import { useState, Suspense, useCallback } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import dynamic from 'next/dynamic';
 import {
+  Clock,
   Database,
   FileText,
   GitBranch,
@@ -20,26 +21,27 @@ import { RecallWorkspace } from '@/components/recall/RecallWorkspace';
 import { ReviewQueueView } from '@/components/review/ReviewQueueView';
 import { MemoriesView } from '@/components/memories/MemoriesView';
 import { MemoryFilesView } from '@/components/memories/MemoryFilesView';
+import { MemoryTimeline } from '@/components/timeline/MemoryTimeline';
 
-const UnifiedGraph = dynamic(
-  () => import('@/components/graph/UnifiedGraph'),
+const MemoryGraph = dynamic(
+  () => import('@/components/graph/MemoryGraph'),
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-[600px] items-center justify-center text-[var(--sc-text-muted)]">
-        Loading graph...
+      <div className="flex h-[480px] items-center justify-center text-[var(--sc-text-muted)]">
+        Loading graph…
       </div>
     ),
   },
 );
 
-type MemoryTab = 'library' | 'files' | 'recall' | 'review' | 'graph';
+type MemoryTab = 'library' | 'files' | 'recall' | 'review' | 'timeline' | 'graph';
+
+const MEMORY_TABS: MemoryTab[] = ['library', 'files', 'recall', 'review', 'timeline', 'graph'];
 
 function normaliseTab(tab: string | null): MemoryTab | null {
   if (tab === 'capture') return 'library';
-  return tab && ['library', 'files', 'recall', 'review', 'graph'].includes(tab)
-    ? (tab as MemoryTab)
-    : null;
+  return tab && MEMORY_TABS.includes(tab as MemoryTab) ? (tab as MemoryTab) : null;
 }
 
 function MemoryContent() {
@@ -83,10 +85,11 @@ function MemoryContent() {
 
   const tabs = [
     { id: 'library', label: 'Library', icon: <Database size={14} />, count: totalMemories || undefined },
-    { id: 'files', label: 'Files', icon: <FileText size={14} /> },
+    { id: 'graph', label: 'Graph', icon: <GitBranch size={14} /> },
     { id: 'recall', label: 'Recall', icon: <Search size={14} /> },
     { id: 'review', label: 'Review', count: reviewTotal || undefined },
-    { id: 'graph', label: 'Graph', icon: <GitBranch size={14} /> },
+    { id: 'timeline', label: 'Timeline', icon: <Clock size={14} /> },
+    { id: 'files', label: 'Files', icon: <FileText size={14} /> },
   ];
 
   return (
@@ -110,22 +113,11 @@ function MemoryContent() {
 
         <div>
           {tab === 'library' && <MemoriesView />}
-          {tab === 'files' && <MemoryFilesView />}
+          {tab === 'graph' && <MemoryGraph />}
           {tab === 'recall' && <RecallWorkspace />}
           {tab === 'review' && <ReviewQueueView />}
-          {tab === 'graph' && (
-            <div className="rounded-md border border-[var(--term-border)] bg-[var(--term-surface)] overflow-hidden flex flex-col">
-              <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--term-border)] bg-[var(--term-surface-2)] font-mono">
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-red)]" />
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-yellow)]" />
-                <span aria-hidden className="w-2.5 h-2.5 rounded-full bg-[var(--term-light-green)]" />
-                <span className="ml-2 text-xs text-[var(--term-text-muted)] select-none">knowledge-graph</span>
-              </div>
-              <div className="h-[600px]">
-                <UnifiedGraph />
-              </div>
-            </div>
-          )}
+          {tab === 'timeline' && <MemoryTimeline />}
+          {tab === 'files' && <MemoryFilesView />}
         </div>
       </div>
     </div>

@@ -67,8 +67,8 @@ export function MemoriesViewGlass() {
             onClick={() => setViewTab('sessions')}
             className={`px-3 py-1.5 text-xs font-medium transition-colors ${
               viewTab === 'sessions'
-                ? 'bg-[var(--sc-border)] text-[var(--sc-text-primary)]'
-                : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
+                ? 'bg-[var(--sc-border)] text-[var(--sc-text)]'
+                : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)]'
             }`}
           >
             Sessions{' '}
@@ -78,8 +78,8 @@ export function MemoriesViewGlass() {
             onClick={() => setViewTab('all')}
             className={`px-3 py-1.5 text-xs font-medium transition-colors ${
               viewTab === 'all'
-                ? 'bg-[var(--sc-border)] text-[var(--sc-text-primary)]'
-                : 'text-[var(--sc-text-secondary)] hover:text-[var(--sc-text-primary)]'
+                ? 'bg-[var(--sc-border)] text-[var(--sc-text)]'
+                : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)]'
             }`}
           >
             All{' '}
@@ -90,7 +90,7 @@ export function MemoriesViewGlass() {
         <select
           value={sortKey}
           onChange={(e) => setSortKey(e.target.value as SortKey)}
-          className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-2 py-1.5 text-xs text-[var(--sc-text-primary)]"
+          className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 py-1.5 text-xs text-[var(--sc-text)]"
         >
           <option value="salience">Salience</option>
           <option value="recent">Recent</option>
@@ -102,7 +102,7 @@ export function MemoriesViewGlass() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search memories..."
-          className="ml-auto w-56 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-elevated)] px-3 py-1.5 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:border-[var(--sc-cyan)] focus:outline-none"
+          className="ml-auto w-56 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-3 py-1.5 text-xs text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus:border-[var(--sc-ok)] focus:outline-none"
         />
       </div>
 
@@ -111,7 +111,7 @@ export function MemoriesViewGlass() {
         <div className="space-y-3">
           {sessions.length === 0 && (
             <GlassCard className="p-6">
-              <p className="text-sm text-[var(--sc-text-secondary)]">
+              <p className="text-sm text-[var(--sc-text-dim)]">
                 No OpenClaw sessions found. Sessions appear after OpenClaw hooks capture memories.
               </p>
             </GlassCard>
@@ -132,7 +132,7 @@ export function MemoriesViewGlass() {
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
           {sorted.length === 0 && (
             <GlassCard className="col-span-full p-6">
-              <p className="text-sm text-[var(--sc-text-secondary)]">
+              <p className="text-sm text-[var(--sc-text-dim)]">
                 {search ? 'No memories match your search.' : 'No memories found.'}
               </p>
             </GlassCard>

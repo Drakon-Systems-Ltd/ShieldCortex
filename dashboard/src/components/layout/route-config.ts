@@ -2,7 +2,6 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Database,
   Home,
-  PlayCircle,
   ScanSearch,
   Settings,
   Shield,
@@ -14,10 +13,11 @@ export interface NavItem {
   icon: LucideIcon;
 }
 
+// Five top-level sections (brief §4). Replay lives under Memory
+// (/memory/replay stays routable; it is reached from the Memory tabs).
 export const NAV_ITEMS: NavItem[] = [
   { href: '/overview', label: 'Overview', icon: Home },
   { href: '/memory', label: 'Memory', icon: Database },
-  { href: '/memory/replay', label: 'Replay', icon: PlayCircle },
   { href: '/protection', label: 'Protection', icon: Shield },
   { href: '/xray', label: 'X-Ray', icon: ScanSearch },
   { href: '/settings', label: 'Settings', icon: Settings },

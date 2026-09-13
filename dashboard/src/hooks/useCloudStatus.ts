@@ -80,7 +80,7 @@ function normalizeCloudConfig(raw: Partial<CloudConfig> & Record<string, unknown
   };
 }
 
-const API_URL = 'http://localhost:3001';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export function useCloudStatus() {
   return useQuery<CloudConfig>({

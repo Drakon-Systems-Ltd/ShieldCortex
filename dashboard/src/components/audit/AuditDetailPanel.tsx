@@ -135,7 +135,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
   }, [blockedPatterns, entry, explainMutation, threats]);
 
   return (
-    <Card className="bg-[var(--sc-bg-surface)] border-[var(--sc-border)] overflow-hidden">
+    <Card className="bg-[var(--sc-surface)] border-[var(--sc-border)] overflow-hidden">
       <CardHeader className="border-b border-[var(--sc-border)] pb-3">
         <div className="flex items-start justify-between gap-2">
           {/* Result badge */}
@@ -157,12 +157,12 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             variant="ghost"
             size="sm"
             onClick={onClose}
-            className="text-[var(--sc-text-secondary)] hover:text-white -mt-1"
+            className="text-[var(--sc-text-dim)] hover:text-white -mt-1"
           >
             ✕
           </Button>
         </div>
-        <div className="text-xs text-[var(--sc-text-secondary)] mt-2">
+        <div className="text-xs text-[var(--sc-text-dim)] mt-2">
           {new Date(entry.timestamp).toLocaleString()}
         </div>
         {entry.project && (
@@ -175,15 +175,15 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
       <CardContent className="p-4 space-y-4">
         {/* Source */}
         <div>
-          <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-2">Source</h4>
-          <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
+          <h4 className="text-xs font-medium text-[var(--sc-text-dim)] mb-2">Source</h4>
+          <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
             <div className="flex items-center gap-2 mb-1">
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]">
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]">
                 {entry.source_type}
               </span>
             </div>
             {entry.source_identifier && (
-              <div className="text-xs text-[var(--sc-text-primary)] mt-1 font-mono break-all">
+              <div className="text-xs text-[var(--sc-text)] mt-1 font-mono break-all">
                 {entry.source_identifier}
               </div>
             )}
@@ -192,15 +192,15 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
 
         {/* Scores */}
         <div>
-          <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-2">Scores</h4>
+          <h4 className="text-xs font-medium text-[var(--sc-text-dim)] mb-2">Scores</h4>
           <div className="grid grid-cols-2 gap-2">
             {/* Trust */}
-            <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
+            <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
               <div className="text-[10px] text-[var(--sc-text-muted)]">Trust</div>
               <div className="text-lg font-bold" style={{ color: getTrustColor(entry.trust_score) }}>
                 {(entry.trust_score * 100).toFixed(0)}%
               </div>
-              <div className="mt-1 h-1.5 bg-[var(--sc-bg-elevated)] rounded-full overflow-hidden">
+              <div className="mt-1 h-1.5 bg-[var(--sc-surface-2)] rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full transition-all"
                   style={{
@@ -212,12 +212,12 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             </div>
 
             {/* Anomaly */}
-            <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
+            <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
               <div className="text-[10px] text-[var(--sc-text-muted)]">Anomaly</div>
               <div className="text-lg font-bold" style={{ color: getAnomalyColor(entry.anomaly_score) }}>
                 {(entry.anomaly_score * 100).toFixed(0)}%
               </div>
-              <div className="mt-1 h-1.5 bg-[var(--sc-bg-elevated)] rounded-full overflow-hidden">
+              <div className="mt-1 h-1.5 bg-[var(--sc-surface-2)] rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full transition-all"
                   style={{
@@ -230,12 +230,12 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
 
             {/* Fragmentation */}
             {entry.fragmentation_score !== null && (
-              <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
+              <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
                 <div className="text-[10px] text-[var(--sc-text-muted)]">Fragmentation</div>
-                <div className="text-lg font-bold text-[var(--sc-text-primary)]">
+                <div className="text-lg font-bold text-[var(--sc-text)]">
                   {(entry.fragmentation_score * 100).toFixed(0)}%
                 </div>
-                <div className="mt-1 h-1.5 bg-[var(--sc-bg-elevated)] rounded-full overflow-hidden">
+                <div className="mt-1 h-1.5 bg-[var(--sc-surface-2)] rounded-full overflow-hidden">
                   <div
                     className="h-full rounded-full bg-purple-500 transition-all"
                     style={{ width: `${entry.fragmentation_score * 100}%` }}
@@ -246,9 +246,9 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
 
             {/* Pipeline Duration */}
             {entry.pipeline_duration_ms !== null && (
-              <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
+              <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
                 <div className="text-[10px] text-[var(--sc-text-muted)]">Pipeline</div>
-                <div className="text-lg font-bold text-[var(--sc-text-primary)]">
+                <div className="text-lg font-bold text-[var(--sc-text)]">
                   {entry.pipeline_duration_ms}ms
                 </div>
               </div>
@@ -258,7 +258,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
 
         {/* Threat Indicators */}
         <div>
-          <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-2">Threat Indicators</h4>
+          <h4 className="text-xs font-medium text-[var(--sc-text-dim)] mb-2">Threat Indicators</h4>
           {threats.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {threats.map((threat, i) => {
@@ -282,10 +282,10 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
         {/* Blocked Patterns */}
         {blockedPatterns.length > 0 && (
           <div>
-            <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-2">Blocked Patterns</h4>
-            <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3 max-h-32 overflow-y-auto">
+            <h4 className="text-xs font-medium text-[var(--sc-text-dim)] mb-2">Blocked Patterns</h4>
+            <div className="bg-[var(--sc-surface-2)] rounded-lg p-3 max-h-32 overflow-y-auto">
               {blockedPatterns.map((pattern, i) => (
-                <div key={i} className="text-[11px] text-[var(--sc-text-primary)] font-mono break-all mb-1 last:mb-0">
+                <div key={i} className="text-[11px] text-[var(--sc-text)] font-mono break-all mb-1 last:mb-0">
                   {pattern}
                 </div>
               ))}
@@ -296,9 +296,9 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
         {/* Reason */}
         {entry.reason && (
           <div>
-            <h4 className="text-xs font-medium text-[var(--sc-text-secondary)] mb-2">Reason</h4>
-            <div className="bg-[var(--sc-bg-elevated)] rounded-lg p-3">
-              <p className="text-xs text-[var(--sc-text-primary)] whitespace-pre-wrap leading-relaxed">
+            <h4 className="text-xs font-medium text-[var(--sc-text-dim)] mb-2">Reason</h4>
+            <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
+              <p className="text-xs text-[var(--sc-text)] whitespace-pre-wrap leading-relaxed">
                 {entry.reason}
               </p>
             </div>
@@ -330,7 +330,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
         )}
 
         {explainMutation.error && (
-          <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-xs text-[var(--sc-coral)]">
+          <div className="rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 p-3 text-xs text-[var(--sc-danger)]">
             {explainMutation.error instanceof Error ? explainMutation.error.message : 'Local explanation failed'}
           </div>
         )}
@@ -352,7 +352,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             size="sm"
             onClick={handleExplain}
             disabled={explainMutation.isPending}
-            className={`flex-1 border-[var(--sc-border)] text-[var(--sc-text-primary)] hover:text-white ${explainMutation.isPending ? 'glow-cyan-pulse' : ''}`}
+            className={`flex-1 border-[var(--sc-border)] text-[var(--sc-text)] hover:text-white ${explainMutation.isPending ? 'glow-cyan-pulse' : ''}`}
           >
             {explainMutation.isPending ? <Loader2 size={13} className="mr-1 animate-spin" /> : <Sparkles size={13} className="mr-1" />}
             Explain
@@ -362,7 +362,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             size="sm"
             onClick={handleCopyJson}
             className={`flex-1 border-[var(--sc-border)] transition-all ${
-              copied ? 'bg-[var(--sc-cyan)]/20 text-[var(--sc-cyan)] border-[var(--sc-cyan)]/50' : 'text-[var(--sc-text-primary)] hover:text-white'
+              copied ? 'bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] border-[var(--sc-ok)]/50' : 'text-[var(--sc-text)] hover:text-white'
             }`}
           >
             {copied ? 'Copied' : 'Copy JSON'}

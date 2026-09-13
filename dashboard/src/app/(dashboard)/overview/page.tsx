@@ -1,8 +1,7 @@
 'use client';
 
-// Glass-only after the 2026-06 theme cleanup.
-import { OverviewGlass } from './OverviewGlass';
+import { OverviewV2 } from '@/components/overview/OverviewV2';
 
 export default function OverviewPage() {
-  return <OverviewGlass />;
+  return <OverviewV2 />;
 }

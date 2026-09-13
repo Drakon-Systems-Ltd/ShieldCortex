@@ -68,3 +68,6 @@ benchmark/longmemeval/report.json
 .batch-*.md
 BRIEF-*.md
 REPORT-*.md
+
+# dashboard v2 fixture runtime (synthetic, disposable)
+.dashv2/

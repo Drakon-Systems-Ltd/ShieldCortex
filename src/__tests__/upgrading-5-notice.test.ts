@@ -53,7 +53,7 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     expect(readme.slice(req, install)).toMatch(/Node 20 is not supported/);
   });
 
-  it('CHANGELOG 5.0.0 section opens with Breaking, and Unreleased is empty', () => {
+  it('CHANGELOG 5.0.0 section opens with Breaking, below the Unreleased section', () => {
     const log = read('CHANGELOG.md');
     const five = log.indexOf('## [5.0.0]');
     const four = log.indexOf('## [4.54.15]');
@@ -65,7 +65,12 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     expect(added).toBeGreaterThan(breaking);
     expect(log.slice(breaking, added)).toMatch(/Node 20 is no longer supported/);
     expect(log.slice(breaking, added)).toMatch(/docs\/UPGRADING-5\.md/);
-    expect(log.slice(log.indexOf('## [Unreleased]'), five)).toMatch(/\(none yet\)/);
+    // Unreleased sits above 5.0.0 (asserted above). Its contents are whatever
+    // has landed since the release — "(none yet)" at release time, real
+    // entries afterwards — so only its shape is asserted, not emptiness
+    // (the emptiness check failed the moment the first post-5.0.0 entry landed).
+    const unreleased = log.slice(log.indexOf('## [Unreleased]'), five);
+    expect(unreleased).toMatch(/\(none yet\)|^- /m);
   });
 
   it('postinstall banner names 5.0, the Node floor, Guard-off, and the upgrade URL', () => {

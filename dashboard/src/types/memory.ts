@@ -48,9 +48,9 @@ export interface Memory {
   scope?: 'project' | 'global';
   transferable?: boolean;
   cloudExcluded?: boolean;
-  // Graph entity ids attached by GET /api/memories (snake_case on the wire) so
-  // the constellation client can map list rows to nodes; also on memory_created
-  // / memory_accessed WS events. Consumed by useGraphPulse.
+  // Graph entity ids attached by GET /api/memories (snake_case on the wire);
+  // also on memory_created / memory_accessed WS events, where the v2 graph's
+  // live pulse reads them.
   entity_ids?: number[];
 }
 

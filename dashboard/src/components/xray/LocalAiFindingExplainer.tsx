@@ -253,17 +253,17 @@ function ExplainerError({ message }: { message: string }) {
 
   if (!isOptIn) {
     return (
-      <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">
+      <div className="rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 p-3 text-sm text-[var(--sc-danger)]">
         {message}
       </div>
     );
   }
 
   return (
-    <div className="space-y-2 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)]/40 p-3 text-sm text-[var(--sc-text-secondary)]">
-      <p className="font-medium text-[var(--sc-text-primary)]">{message}</p>
+    <div className="space-y-2 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)]/40 p-3 text-sm text-[var(--sc-text-dim)]">
+      <p className="font-medium text-[var(--sc-text)]">{message}</p>
       <p>The Local AI Explainer is opt-in. Enable it from a terminal:</p>
-      <pre className="overflow-x-auto rounded bg-black/30 p-2 text-xs text-[var(--sc-text-primary)]">shieldcortex review-copilot enable --accept-download</pre>
+      <pre className="overflow-x-auto rounded bg-black/30 p-2 text-xs text-[var(--sc-text)]">shieldcortex review-copilot enable --accept-download</pre>
       <p className="text-xs text-[var(--sc-text-muted)]">
         Runs a small local model (Qwen2.5-0.5B) on this machine — nothing leaves your device. Requires a Pro licence.
       </p>

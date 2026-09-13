@@ -14,8 +14,8 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 /**
  * Binds the command registry's {@link CommandContext} to the dashboard's real
- * hooks/endpoints. This is what makes the command rail actually do things; the
- * rail component itself stays presentational + testable (it mocks this hook).
+ * hooks/endpoints. This is what makes the command palette actually do things;
+ * the palette component stays presentational + testable (it mocks this hook).
  */
 export function useCommandContext(): CommandContext {
   const router = useRouter();

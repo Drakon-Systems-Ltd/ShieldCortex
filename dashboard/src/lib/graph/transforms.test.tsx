@@ -1,0 +1,187 @@
+import {
+  buildFocusData,
+  buildMapData,
+  buildPathData,
+  computeDefaultMinMentions,
+  hiddenBreakdown,
+  linkTooltip,
+  linkWidth,
+  MAP_DEFAULT_TARGET_MAX,
+  MAP_DEFAULT_TARGET_MIN,
+  withPreservedPositions,
+  type NeighbourhoodPayload,
+  type OverviewPayload,
+} from './transforms';
+
+const overview: OverviewPayload = {
+  entities: [
+    { id: 1, name: 'alpha', type: 'tool', memoryCount: 10 },
+    { id: 2, name: 'beta', type: 'concept', memoryCount: 5 },
+    { id: 3, name: 'gamma', type: 'tool', memoryCount: 2 },
+  ],
+  triples: [
+    { id: 11, subjectId: 1, objectId: 2, predicate: 'uses', confidence: 0.9, disputed: false },
+    { id: 12, subjectId: 2, objectId: 1, predicate: 'configures', confidence: 0.7, disputed: true },
+    { id: 13, subjectId: 1, objectId: 3, predicate: 'related_to', confidence: 0.5, disputed: false },
+    { id: 14, subjectId: 2, objectId: 99, predicate: 'uses', confidence: 0.8, disputed: false },
+  ],
+  counts: { byType: {}, byPredicate: {}, totalEntities: 3, totalEdges: 4, omittedEntities: 0, omittedEdges: 0 },
+};
+
+describe('buildMapData', () => {
+  it('namespaces ids, bundles parallel triples into one link with real per-predicate data', () => {
+    const data = buildMapData(overview);
+    expect(data.nodes.map((n) => n.id)).toEqual(['e:1', 'e:2', 'e:3']);
+    // 1↔2 has two triples in opposite directions → ONE drawn link, two entries.
+    const bundle = data.links.find((l) => l.id === 'e:1|e:2');
+    expect(bundle?.triples).toHaveLength(2);
+    expect(bundle?.triples?.map((t) => t.predicate).sort()).toEqual(['configures', 'uses']);
+    expect(bundle?.triples?.find((t) => t.predicate === 'configures')).toMatchObject({ disputed: true, direction: 'reverse' });
+    expect(bundle?.weakOnly).toBe(false);
+    // Edge to entity 99 (not in the node set) is dropped: both endpoints rule.
+    expect(data.links).toHaveLength(2);
+  });
+
+  it('marks related_to-only bundles weak and can drop them', () => {
+    const all = buildMapData(overview);
+    expect(all.links.find((l) => l.id === 'e:1|e:3')?.weakOnly).toBe(true);
+    const strong = buildMapData(overview, { hideWeakLinks: true });
+    expect(strong.links.map((l) => l.id)).toEqual(['e:1|e:2']);
+  });
+
+  it('applies type and min-mention filters, dropping stranded links with the nodes', () => {
+    const noTools = buildMapData(overview, { hiddenTypes: new Set(['tool']) });
+    expect(noTools.nodes.map((n) => n.label)).toEqual(['beta']);
+    expect(noTools.links).toHaveLength(0);
+    const min5 = buildMapData(overview, { minMentions: 5 });
+    expect(min5.nodes.map((n) => n.label).sort()).toEqual(['alpha', 'beta']);
+  });
+});
+
+const nbhd: NeighbourhoodPayload = {
+  focal: { id: 1, name: 'alpha', type: 'tool', memoryCount: 10 },
+  neighbours: [{ id: 2, name: 'beta', type: 'concept', memoryCount: 5, depth: 1 }],
+  triples: [{ id: 11, subject_id: 1, object_id: 2, predicate: 'uses', confidence: 0.9, disputed: false }],
+  memories: [
+    { id: 7, title: 'note A', type: 'long_term', category: 'error', salience: 0.8, trust_score: 1, status: 'active', pinned: 1, project: null, created_at: '2026-08-01 00:00:00' },
+    { id: 8, title: 'note B', type: 'short_term', category: 'note', salience: 0.3, trust_score: 1, status: 'archived', pinned: 0, project: 'atlas', created_at: '2026-08-02 00:00:00' },
+  ],
+  memoryEntities: [
+    { memory_id: 7, entity_id: 1, role: 'subject' },
+    { memory_id: 8, entity_id: 1, role: 'mention' },
+    { memory_id: 7, entity_id: 42, role: 'mention' }, // entity 42 not loaded → dropped
+  ],
+  memoryLinks: [
+    { id: 91, source_id: 7, target_id: 8, relationship: 'conflicts', strength: 0.9 },
+    { id: 92, source_id: 7, target_id: 999, relationship: 'supports', strength: 0.5 }, // 999 not loaded → dropped
+  ],
+  counts: { totalNeighbours: 1, omittedNeighbours: 0, totalEdges: 1, omittedEdges: 0, totalMemories: 2, omittedMemories: 0 },
+};
+
+describe('buildFocusData', () => {
+  it('renders all three edge families with endpoint checks', () => {
+    const data = buildFocusData(nbhd, true);
+    expect(data.nodes.map((n) => n.id).sort()).toEqual(['e:1', 'e:2', 'm:7', 'm:8']);
+    expect(data.nodes.find((n) => n.id === 'e:1')?.isFocal).toBe(true);
+    const kinds = data.links.map((l) => l.kind).sort();
+    expect(kinds).toEqual(['memory-entity', 'memory-entity', 'memory-link', 'triple']);
+    expect(data.links.find((l) => l.kind === 'memory-link')).toMatchObject({ relationship: 'conflicts', strength: 0.9 });
+  });
+
+  it('hides memories and their edges when showMemories is off', () => {
+    const data = buildFocusData(nbhd, false);
+    expect(data.nodes).toHaveLength(2);
+    expect(data.links.every((l) => l.kind === 'triple')).toBe(true);
+  });
+});
+
+describe('withPreservedPositions', () => {
+  it('clones nodes (cache safety) while carrying x/y/pins over by id', () => {
+    const base = buildMapData(overview);
+    const prev = [{ ...base.nodes[0], x: 10, y: 20, fx: 10, fy: 20 }];
+    const next = withPreservedPositions(base, prev);
+    expect(next.nodes[0]).toMatchObject({ x: 10, y: 20, fx: 10, fy: 20 });
+    expect(next.nodes[0]).not.toBe(base.nodes[0]); // fresh clone, cache untouched
+    expect(base.nodes[0].x).toBeUndefined();
+    expect(next.nodes[1].x).toBeUndefined();
+  });
+});
+
+describe('computeDefaultMinMentions', () => {
+  it('shows everything when the loaded set is already within the target band', () => {
+    expect(computeDefaultMinMentions(overview.entities)).toBe(1);
+    const exactlyMax = Array.from({ length: MAP_DEFAULT_TARGET_MAX }, (_, i) => ({ memoryCount: i + 1 }));
+    expect(computeDefaultMinMentions(exactlyMax)).toBe(1);
+  });
+
+  it('picks a real distribution value that lands the default inside the target band', () => {
+    // 400 entities, memoryCount uniformly spread 1..40 (10 entities per value)
+    // — a stand-in for the shipped fixture's roughly-bell-shaped mention counts.
+    const entities = Array.from({ length: 400 }, (_, i) => ({ memoryCount: 1 + (i % 40) }));
+    const threshold = computeDefaultMinMentions(entities);
+    const visible = entities.filter((e) => e.memoryCount >= threshold).length;
+    expect(visible).toBeGreaterThanOrEqual(MAP_DEFAULT_TARGET_MIN);
+    expect(visible).toBeLessThanOrEqual(MAP_DEFAULT_TARGET_MAX + 10); // ties can overshoot slightly
+    // The threshold must be a value that actually occurs in the data (never invented).
+    expect(entities.some((e) => e.memoryCount === threshold)).toBe(true);
+  });
+});
+
+describe('link width and tooltip honesty', () => {
+  it('width grows with the REAL bundled count / strength, never invented weight', () => {
+    const data = buildMapData(overview);
+    const two = data.links.find((l) => l.id === 'e:1|e:2')!;
+    const one = data.links.find((l) => l.id === 'e:1|e:3')!;
+    expect(linkWidth(two)).toBeGreaterThan(linkWidth(one));
+  });
+
+  it('tooltip lists each predicate with confidence and dispute, oriented correctly', () => {
+    const data = buildMapData(overview);
+    const two = data.links.find((l) => l.id === 'e:1|e:2')!;
+    const text = linkTooltip(two, (id) => (id === 'e:1' ? 'alpha' : 'beta'));
+    expect(text).toContain('alpha uses beta (90%)');
+    expect(text).toContain('beta configures alpha (70%, disputed)');
+  });
+});
+
+describe('buildPathData (review item 4)', () => {
+  it('adds every hop entity the Map omitted and draws a real-data link per hop', () => {
+    // Map filtered to alpha only (minMentions 10): beta and the never-loaded
+    // #7 must still land on the canvas when a path runs through them.
+    const base = buildMapData(overview, { minMentions: 10 });
+    expect(base.nodes.map((n) => n.id)).toEqual(['e:1']);
+    const out = buildPathData(base, [
+      { entity: 'alpha', entityId: 1, predicate: '', direction: '' },
+      { entity: 'beta', entityId: 2, predicate: 'uses', direction: 'forward', entityType: 'concept', memoryCount: 5, confidence: 0.9, disputed: false },
+      { entity: 'omega', entityId: 7, predicate: '~monitors', direction: 'reverse', entityType: 'tool', memoryCount: 1, confidence: 0.6, disputed: true },
+    ]);
+    expect(out.nodes.map((n) => n.id)).toEqual(['e:1', 'e:2', 'e:7']);
+    expect(out.nodes[2]).toMatchObject({ label: 'omega', subtype: 'tool', size: 1 });
+    expect(out.links.map((l) => l.id)).toEqual(['e:1|e:2', 'e:2|e:7']);
+    // reverse hop: omega monitors beta → subject is omega (e:7, the hi end) → 'reverse' relative to lo→hi
+    expect(out.links[1].triples?.[0]).toEqual({ predicate: 'monitors', confidence: 0.6, disputed: true, direction: 'reverse' });
+    expect(out.links[0].triples?.[0]).toMatchObject({ predicate: 'uses', direction: 'forward' });
+  });
+
+  it('keeps existing nodes/links and never duplicates a pair already drawn', () => {
+    const base = buildMapData(overview);
+    const out = buildPathData(base, [
+      { entity: 'alpha', entityId: 1, predicate: '', direction: '' },
+      { entity: 'beta', entityId: 2, predicate: 'uses', direction: 'forward' },
+    ]);
+    expect(out.nodes).toHaveLength(base.nodes.length);
+    expect(out.links).toHaveLength(base.links.length);
+    // The already-bundled alpha↔beta link keeps both of its real predicates.
+    expect(out.links.find((l) => l.id === 'e:1|e:2')?.triples).toHaveLength(2);
+    expect(buildPathData(base, [])).toBe(base);
+  });
+});
+
+describe('hiddenBreakdown (review item 9)', () => {
+  it('splits hidden-by-type from below-threshold, counting a doubly-hidden entity once under type', () => {
+    const out = hiddenBreakdown(overview.entities, new Set(['tool']), 6);
+    // alpha(tool,10) + gamma(tool,2) hidden by type; beta(concept,5) below 6.
+    expect(out).toEqual({ hiddenByType: 2, belowThreshold: 1 });
+    expect(hiddenBreakdown(overview.entities, new Set(), 1)).toEqual({ hiddenByType: 0, belowThreshold: 0 });
+  });
+});

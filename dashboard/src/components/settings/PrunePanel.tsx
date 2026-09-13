@@ -57,10 +57,10 @@ export function PrunePanel() {
   return (
     <GlassCard className="p-6">
       <div className="flex items-center gap-2">
-        <Trash2 size={16} className="text-[var(--sc-coral)]" />
-        <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Threshold Prune</h3>
+        <Trash2 size={16} className="text-[var(--sc-danger)]" />
+        <h3 className="text-lg font-semibold text-[var(--sc-text)]">Threshold Prune</h3>
       </div>
-      <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
+      <p className="mt-2 text-sm text-[var(--sc-text-dim)]">
         Permanently delete memories below a salience threshold older than N days. Always preview
         first; backup is automatic before any delete.
       </p>
@@ -70,13 +70,13 @@ export function PrunePanel() {
         <div>
           <div className="flex items-center justify-between text-xs">
             <span className="text-[var(--sc-text-muted)]">Salience ≤</span>
-            <span className="font-mono text-[var(--sc-text-primary)]">{salienceLte.toFixed(2)}</span>
+            <span className="font-mono text-[var(--sc-text)]">{salienceLte.toFixed(2)}</span>
           </div>
           <input
             type="range" min={0} max={0.5} step={0.05}
             value={salienceLte}
             onChange={(e) => setSalienceLte(parseFloat(e.target.value))}
-            className="mt-1 w-full accent-[var(--sc-coral)]"
+            className="mt-1 w-full accent-[var(--sc-danger)]"
             aria-label="Salience threshold"
           />
           <div className="mt-1 flex gap-1">
@@ -87,8 +87,8 @@ export function PrunePanel() {
                 onClick={() => setSalienceLte(v)}
                 className={`rounded border px-1.5 py-0.5 text-[10px] transition ${
                   salienceLte === v
-                    ? 'border-[var(--sc-coral)] text-[var(--sc-coral)]'
-                    : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)]'
+                    ? 'border-[var(--sc-danger)] text-[var(--sc-danger)]'
+                    : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text)]'
                 }`}
               >
                 {v}
@@ -100,13 +100,13 @@ export function PrunePanel() {
         <div>
           <div className="flex items-center justify-between text-xs">
             <span className="text-[var(--sc-text-muted)]">Older than (days)</span>
-            <span className="font-mono text-[var(--sc-text-primary)]">{ageDaysGte}</span>
+            <span className="font-mono text-[var(--sc-text)]">{ageDaysGte}</span>
           </div>
           <input
             type="range" min={1} max={365} step={1}
             value={ageDaysGte}
             onChange={(e) => setAgeDaysGte(parseInt(e.target.value, 10))}
-            className="mt-1 w-full accent-[var(--sc-coral)]"
+            className="mt-1 w-full accent-[var(--sc-danger)]"
             aria-label="Age threshold"
           />
           <div className="mt-1 flex gap-1">
@@ -117,8 +117,8 @@ export function PrunePanel() {
                 onClick={() => setAgeDaysGte(v)}
                 className={`rounded border px-1.5 py-0.5 text-[10px] transition ${
                   ageDaysGte === v
-                    ? 'border-[var(--sc-coral)] text-[var(--sc-coral)]'
-                    : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)]'
+                    ? 'border-[var(--sc-danger)] text-[var(--sc-danger)]'
+                    : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] hover:text-[var(--sc-text)]'
                 }`}
               >
                 {v}d
@@ -136,7 +136,7 @@ export function PrunePanel() {
           onClick={() => setScope('all')}
           className={`rounded-md border px-2 py-1 ${
             scope === 'all'
-              ? 'border-[var(--sc-cyan)] text-[var(--sc-cyan)]'
+              ? 'border-[var(--sc-ok)] text-[var(--sc-ok)]'
               : 'border-[var(--sc-border)] text-[var(--sc-text-muted)]'
           }`}
         >
@@ -148,19 +148,19 @@ export function PrunePanel() {
           onClick={() => setScope('current')}
           className={`rounded-md border px-2 py-1 disabled:opacity-40 ${
             scope === 'current'
-              ? 'border-[var(--sc-cyan)] text-[var(--sc-cyan)]'
+              ? 'border-[var(--sc-ok)] text-[var(--sc-ok)]'
               : 'border-[var(--sc-border)] text-[var(--sc-text-muted)]'
           }`}
         >
           Current ({projectFilter ?? 'none selected'})
         </button>
 
-        <label className="ml-auto inline-flex items-center gap-2 text-[var(--sc-text-secondary)]">
+        <label className="ml-auto inline-flex items-center gap-2 text-[var(--sc-text-dim)]">
           <input
             type="checkbox"
             checked={excludePinned}
             onChange={(e) => setExcludePinned(e.target.checked)}
-            className="accent-[var(--sc-cyan)]"
+            className="accent-[var(--sc-ok)]"
           />
           Exclude pinned
         </label>
@@ -168,9 +168,9 @@ export function PrunePanel() {
 
       {/* Preview output */}
       {preview && (
-        <div className="mt-4 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+        <div className="mt-4 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-[var(--sc-text-primary)]">
+            <span className="text-sm font-semibold text-[var(--sc-text)]">
               {preview.matched} memories match
             </span>
             <span className="text-[10px] text-[var(--sc-text-muted)]">
@@ -182,9 +182,9 @@ export function PrunePanel() {
           ) : (
             <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-xs">
               {preview.sample.map((s) => (
-                <li key={s.id} className="flex items-baseline gap-2 text-[var(--sc-text-secondary)]">
+                <li key={s.id} className="flex items-baseline gap-2 text-[var(--sc-text-dim)]">
                   <span className="font-mono text-[10px] text-[var(--sc-text-muted)]">#{s.id}</span>
-                  <span className="truncate flex-1 text-[var(--sc-text-primary)]">{s.title}</span>
+                  <span className="truncate flex-1 text-[var(--sc-text)]">{s.title}</span>
                   <span className="text-[10px] text-[var(--sc-text-muted)]">
                     {s.project ?? '(no project)'} · sal {s.salience.toFixed(2)} · {s.ageDays}d
                   </span>

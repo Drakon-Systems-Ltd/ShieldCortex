@@ -15,7 +15,7 @@ export function LicenseStatusCard() {
 
   if (isLoading || !license) {
     return (
-      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-4 mb-4">
+      <div className="bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-xl p-4 mb-4">
         <div className="flex items-center gap-2">
           <Shield size={16} className="text-[var(--sc-text-muted)]" />
           <span className="text-xs text-[var(--sc-text-muted)] animate-pulse">Loading licence...</span>
@@ -46,22 +46,22 @@ export function LicenseStatusCard() {
   // ── Free tier: everything local is included; key activation for Enterprise/legacy keys ──
   if (!isPaid) {
     return (
-      <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-border)] rounded-xl p-5 mb-4">
+      <div className="bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-xl p-5 mb-4">
         <div className="flex items-start justify-between mb-3">
           <div className="flex items-center gap-2">
-            <Shield size={16} className="text-[var(--sc-cyan)]" />
-            <h3 className="text-sm font-semibold text-[var(--sc-text-primary)]">Licence</h3>
+            <Shield size={16} className="text-[var(--sc-ok)]" />
+            <h3 className="text-sm font-semibold text-[var(--sc-text)]">Licence</h3>
           </div>
-          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[var(--sc-bg-elevated)] text-[var(--sc-text-secondary)] border border-[var(--sc-border)]">
+          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-[var(--sc-surface-2)] text-[var(--sc-text-dim)] border border-[var(--sc-border)]">
             Free
           </span>
         </div>
 
-        <p className="text-xs text-[var(--sc-text-secondary)] mb-4">
+        <p className="text-xs text-[var(--sc-text-dim)] mb-4">
           Every local feature is included on the Free tier — custom patterns, policies, firewall
           rules, audit export, deep scanning, and Cortex. Enterprise adds cloud replication, team
           management, and shared patterns:{' '}
-          <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-cyan)] hover:underline">
+          <a href="mailto:sales@drakonsystems.com" className="text-[var(--sc-ok)] hover:underline">
             sales@drakonsystems.com
           </a>
         </p>
@@ -74,26 +74,26 @@ export function LicenseStatusCard() {
                 placeholder="sc_ent_..."
                 value={keyInput}
                 onChange={(e) => setKeyInput(e.target.value)}
-                className="flex-1 bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs text-[var(--sc-text-primary)] placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-cyan)]"
+                className="flex-1 bg-[var(--sc-surface-2)] border border-[var(--sc-border)] rounded-lg px-3 py-2 text-xs text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--sc-ok)]"
                 autoFocus
               />
               <button
                 type="submit"
                 disabled={activateMutation.isPending || !keyInput.trim()}
-                className="px-4 py-2 text-xs font-medium bg-[var(--sc-cyan)] hover:bg-[var(--sc-cyan-mid)] disabled:opacity-50 text-[var(--sc-text-primary)] rounded-lg transition-colors"
+                className="px-4 py-2 text-xs font-medium bg-[var(--sc-ok)] hover:bg-[var(--sc-ok)] disabled:opacity-50 text-[var(--sc-text)] rounded-lg transition-colors"
               >
                 {activateMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Activate'}
               </button>
               <button
                 type="button"
                 onClick={() => { setShowActivate(false); setKeyInput(''); activateMutation.reset(); }}
-                className="px-3 py-2 text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors"
+                className="px-3 py-2 text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] transition-colors"
               >
                 Back
               </button>
             </form>
             {activateMutation.isError && (
-              <p className="text-xs text-[var(--sc-coral)]">
+              <p className="text-xs text-[var(--sc-danger)]">
                 {activateMutation.error instanceof Error ? activateMutation.error.message : 'Activation failed'}
               </p>
             )}
@@ -102,7 +102,7 @@ export function LicenseStatusCard() {
           <button
             type="button"
             onClick={() => setShowActivate(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-[var(--sc-bg-elevated)] hover:bg-[var(--sc-bg-elevated)] text-[var(--sc-text-primary)] rounded-lg transition-colors border border-[var(--sc-border)]"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium bg-[var(--sc-surface-2)] hover:bg-[var(--sc-surface-2)] text-[var(--sc-text)] rounded-lg transition-colors border border-[var(--sc-border)]"
           >
             <Key size={12} />
             I Have a Key
@@ -117,12 +117,12 @@ export function LicenseStatusCard() {
   const totalCount = license.features.length;
 
   return (
-    <div className="bg-[var(--sc-bg-surface)] border border-[var(--sc-cyan)]/40 rounded-xl p-4 mb-4">
+    <div className="bg-[var(--sc-surface)] border border-[var(--sc-ok)]/40 rounded-xl p-4 mb-4">
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Shield size={16} className={TIER_COLOURS[tier]} />
-          <h3 className="text-sm font-medium text-[var(--sc-text-primary)]">Licence</h3>
+          <h3 className="text-sm font-medium text-[var(--sc-text)]">Licence</h3>
           <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${TIER_COLOURS[tier]} ${TIER_BG[tier]}`}>
             {TIER_LABELS[tier]}
           </span>
@@ -137,13 +137,13 @@ export function LicenseStatusCard() {
         {license.email && (
           <div className="flex items-center justify-between text-xs">
             <span className="text-[var(--sc-text-muted)]">Email</span>
-            <span className="text-[var(--sc-text-primary)]">{license.email}</span>
+            <span className="text-[var(--sc-text)]">{license.email}</span>
           </div>
         )}
         {license.daysUntilExpiry !== null && (
           <div className="flex items-center justify-between text-xs">
             <span className="text-[var(--sc-text-muted)]">Expires</span>
-            <span className={license.daysUntilExpiry <= 7 ? 'text-[var(--sc-amber)]' : 'text-[var(--sc-text-primary)]'}>
+            <span className={license.daysUntilExpiry <= 7 ? 'text-[var(--sc-amber)]' : 'text-[var(--sc-text)]'}>
               {license.daysUntilExpiry <= 0
                 ? 'Expired (grace period)'
                 : `${license.daysUntilExpiry} days`}
@@ -155,7 +155,7 @@ export function LicenseStatusCard() {
       {/* Feature list toggle */}
       <button
         onClick={() => setShowFeatures(!showFeatures)}
-        className="flex items-center gap-1 text-[10px] text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors mb-2"
+        className="flex items-center gap-1 text-[10px] text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] transition-colors mb-2"
       >
         {showFeatures ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
         {showFeatures ? 'Hide features' : 'Show features'}
@@ -166,11 +166,11 @@ export function LicenseStatusCard() {
           {license.features.map((f) => (
             <div key={f.feature} className="flex items-center gap-2 text-xs">
               {f.enabled ? (
-                <CheckCircle2 size={12} className="text-[var(--sc-cyan)] shrink-0" />
+                <CheckCircle2 size={12} className="text-[var(--sc-ok)] shrink-0" />
               ) : (
                 <XCircle size={12} className="text-[var(--sc-text-muted)] shrink-0" />
               )}
-              <span className={f.enabled ? 'text-[var(--sc-text-primary)]' : 'text-[var(--sc-text-muted)]'}>
+              <span className={f.enabled ? 'text-[var(--sc-text)]' : 'text-[var(--sc-text-muted)]'}>
                 {f.description.split('.')[0]}
               </span>
               {!f.enabled && (
@@ -187,7 +187,7 @@ export function LicenseStatusCard() {
       <button
         onClick={handleDeactivate}
         disabled={deactivateMutation.isPending}
-        className="text-[10px] text-[var(--sc-text-muted)] hover:text-[var(--sc-coral)] transition-colors"
+        className="text-[10px] text-[var(--sc-text-muted)] hover:text-[var(--sc-danger)] transition-colors"
       >
         Deactivate
       </button>

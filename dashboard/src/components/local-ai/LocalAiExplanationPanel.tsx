@@ -24,7 +24,7 @@ export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplana
   const visibleActions = actions?.filter(Boolean) ?? [];
 
   return (
-    <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/70 p-3">
+    <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={explanation.synthetic ? 'amber' : 'cyan'}>
           {explanation.synthetic ? 'Fallback' : 'Local AI'}
@@ -32,15 +32,15 @@ export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplana
         <Badge variant="muted">{Math.round(explanation.confidence * 100)}% confidence</Badge>
       </div>
 
-      <p className="mt-3 text-sm font-semibold text-[var(--sc-text-primary)]">{explanation.summary}</p>
-      <p className="mt-1 text-sm leading-6 text-[var(--sc-text-secondary)]">{explanation.whyItMatters}</p>
+      <p className="mt-3 text-sm font-semibold text-[var(--sc-text)]">{explanation.summary}</p>
+      <p className="mt-1 text-sm leading-6 text-[var(--sc-text-dim)]">{explanation.whyItMatters}</p>
 
       {explanation.riskSignals.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {explanation.riskSignals.map((signal) => (
             <span
               key={signal}
-              className="rounded bg-[var(--sc-bg-elevated)] px-2 py-1 text-[11px] text-[var(--sc-text-secondary)]"
+              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-[11px] text-[var(--sc-text-dim)]"
             >
               {signal}
             </span>
@@ -51,9 +51,9 @@ export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplana
       {explanation.evidence.length > 0 && (
         <div className="mt-3 space-y-2">
           {explanation.evidence.map((entry, index) => (
-            <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] px-2 py-1.5">
+            <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-surface)] px-2 py-1.5">
               <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">{entry.reason}</div>
-              <div className="mt-1 break-words text-xs text-[var(--sc-text-primary)]">&quot;{entry.snippet}&quot;</div>
+              <div className="mt-1 break-words text-xs text-[var(--sc-text)]">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>
@@ -64,7 +64,7 @@ export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplana
           <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Next steps</div>
           <div className="mt-2 space-y-1">
             {explanation.nextSteps.map((step) => (
-              <div key={step} className="text-xs leading-5 text-[var(--sc-text-secondary)]">
+              <div key={step} className="text-xs leading-5 text-[var(--sc-text-dim)]">
                 {step}
               </div>
             ))}

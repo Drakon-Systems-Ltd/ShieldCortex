@@ -35,7 +35,7 @@ export interface RouteRef {
 /** The live capabilities a command can use, supplied by CommandRail from real hooks. */
 export interface CommandContext {
   navigate: (path: string) => void;
-  setTheme: (theme: 'terminal' | 'glass') => void;
+  setTheme: (theme: 'light' | 'dark' | 'system') => void;
   recall: (query: string, project?: string) => Promise<RecallHit[]>;
   scan: (target: string, deep: boolean) => Promise<ScanSummary>;
   forget: (id: number) => Promise<void>;
@@ -82,11 +82,13 @@ const go: Command = {
 
 const theme: Command = {
   name: 'theme',
-  usage: 'theme <terminal|glass>',
+  usage: 'theme <light|dark|system>',
   summary: 'switch the dashboard theme',
   run: (ctx, { args }) => {
     const t = args[0]?.toLowerCase();
-    if (t !== 'terminal' && t !== 'glass') return err(["theme: choose 'terminal' or 'glass'"]);
+    if (t !== 'light' && t !== 'dark' && t !== 'system') {
+      return err(["theme: choose 'light', 'dark' or 'system'"]);
+    }
     ctx.setTheme(t);
     return ok([`▸ theme → ${t}`]);
   },

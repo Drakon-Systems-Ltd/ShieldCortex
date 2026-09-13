@@ -218,17 +218,50 @@ function isRedactableMemoryObject(o: Record<string, unknown>): boolean {
  * sensitivity label (the contradictions endpoints, the `memory_deleted` event) —
  * those are scrubbed at their own surface.
  */
-export function deepRedactRestrictedContent<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+export function deepRedactRestrictedContent<T>(value: T, seen: WeakMap<object, unknown> = new WeakMap()): T {
   if (value === null || typeof value !== 'object') return value;
-  if (seen.has(value as object)) return value; // cycle guard
-  seen.add(value as object);
+  // A Date has no enumerable own properties, so the generic-object branch
+  // below (`Object.keys(obj)` -> rebuild) silently turned every createdAt/
+  // lastAccessed/updatedAt in every JSON response into `{}`. Normalise to a
+  // PLAIN Date carrying only the timestamp: a decorated Date (extra own
+  // properties) or a subclass with a custom `toJSON` could otherwise smuggle
+  // arbitrary data past the walk. An invalid Date stays invalid.
+  if (value instanceof Date) return new Date(value.getTime()) as unknown as T;
+  // Binary views carry bytes, not memory rows: pass through unchanged.
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
 
+  // `seen` maps each ORIGINAL object to its sanitised copy. Returning the copy
+  // on a repeat visit both breaks cycles and closes the aliasing bypass where
+  // the second occurrence of the same RESTRICTED row (`{a: row, b: row}`)
+  // used to be returned unredacted.
+  const prior = seen.get(value as object);
+  if (prior !== undefined) return prior as T;
+
+  // Map/Set are not JSON-serialisable as-is (they stringify to `{}`), so they
+  // are materialised explicitly — Map → plain object (String keys), Set →
+  // array — and then redacted like any other container.
+  if (value instanceof Map) {
+    const copy: Record<string, unknown> = {};
+    seen.set(value as object, copy);
+    for (const [k, v] of value) copy[String(k)] = deepRedactRestrictedContent(v, seen);
+    return copy as unknown as T;
+  }
+  if (value instanceof Set) {
+    const copy: unknown[] = [];
+    seen.set(value as object, copy);
+    for (const v of value) copy.push(deepRedactRestrictedContent(v, seen));
+    return copy as unknown as T;
+  }
   if (Array.isArray(value)) {
-    return value.map((item) => deepRedactRestrictedContent(item, seen)) as unknown as T;
+    const copy: unknown[] = [];
+    seen.set(value as object, copy);
+    for (const item of value) copy.push(deepRedactRestrictedContent(item, seen));
+    return copy as unknown as T;
   }
 
   const obj = value as Record<string, unknown>;
   const copy: Record<string, unknown> = {};
+  seen.set(value as object, copy);
   for (const key of Object.keys(obj)) {
     copy[key] = deepRedactRestrictedContent(obj[key], seen);
     // Mask credential spans in any title-bearing string field, wherever it sits —

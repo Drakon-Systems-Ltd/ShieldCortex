@@ -5,6 +5,7 @@ import { CheckCircle2, Layers, ShieldAlert } from 'lucide-react';
 import { useBulkReview, useMergeMemories, useReviewAction, useReviewQueue } from '@/hooks/useReviewQueue';
 import { useDashboardStore } from '@/lib/store';
 import { Button } from '@/components/ds/Button';
+import { CardError } from '@/components/ds/CardError';
 import { ReviewCard, type ReviewCardAction } from './ReviewCard';
 import type { Memory } from '@/types/memory';
 
@@ -64,7 +65,7 @@ function actionToApi(action: ReviewCardAction, memory: Memory): string {
 
 export function ReviewQueueView() {
   const { projectFilter, selectedMemory, setSelectedMemory, reviewFocus, setReviewFocus } = useDashboardStore();
-  const { data, isLoading } = useReviewQueue(projectFilter);
+  const { data, isLoading, isError, error, refetch } = useReviewQueue(projectFilter);
   const reviewAction = useReviewAction();
   const mergeMutation = useMergeMemories();
   const bulkReview = useBulkReview();
@@ -229,8 +230,17 @@ export function ReviewQueueView() {
   if (isLoading) {
     return (
       <div className="space-y-6">
-        <div className="text-sm text-[var(--sc-text-secondary)]">Loading review queue…</div>
+        <div className="text-sm text-[var(--sc-text-dim)]">Loading review queue…</div>
       </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <CardError
+        message={`Failed to load the review queue: ${error instanceof Error ? error.message : 'fetch failed'}`}
+        onRetry={() => refetch()}
+      />
     );
   }
 
@@ -238,9 +248,9 @@ export function ReviewQueueView() {
     return (
       <div className="space-y-6">
         <div className="glass-card-strong flex flex-col items-center justify-center p-12 text-center">
-          <CheckCircle2 className="h-12 w-12 text-[var(--sc-cyan)]" />
-          <h3 className="mt-4 text-xl font-semibold text-[var(--sc-text-primary)]">All caught up</h3>
-          <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">No memories need review right now.</p>
+          <CheckCircle2 className="h-12 w-12 text-[var(--sc-ok)]" />
+          <h3 className="mt-4 text-xl font-semibold text-[var(--sc-text)]">All caught up</h3>
+          <p className="mt-2 text-sm text-[var(--sc-text-dim)]">No memories need review right now.</p>
         </div>
       </div>
     );
@@ -263,8 +273,8 @@ export function ReviewQueueView() {
                 onClick={() => switchQueue(key)}
                 className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
                   isActive
-                    ? 'border-[var(--sc-coral)]/50 bg-[var(--sc-coral)] text-white'
-                    : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-secondary)] hover:border-[var(--sc-text-muted)]'
+                    ? 'border-[var(--sc-danger)]/50 bg-[var(--sc-danger)] text-white'
+                    : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-dim)] hover:border-[var(--sc-text-muted)]'
                 }`}
               >
                 {meta.label} {count}
@@ -274,7 +284,7 @@ export function ReviewQueueView() {
         </div>
         <button
           onClick={() => { setBulkMode((m) => !m); clearSelection(); }}
-          className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-3 py-1.5 text-xs font-semibold text-[var(--sc-text-secondary)] transition-colors hover:border-[var(--sc-text-muted)]"
+          className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] px-3 py-1.5 text-xs font-semibold text-[var(--sc-text-dim)] transition-colors hover:border-[var(--sc-text-muted)]"
         >
           {bulkMode ? 'Single card' : 'Bulk select'}
         </button>
@@ -284,8 +294,8 @@ export function ReviewQueueView() {
       {feedback && (
         <div className={`rounded-2xl border px-4 py-3 text-sm ${
           feedback.kind === 'error'
-            ? 'border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 text-[var(--sc-coral)]'
-            : 'border-[var(--sc-cyan)]/30 bg-[var(--sc-cyan)]/10 text-[var(--sc-cyan)]'
+            ? 'border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 text-[var(--sc-danger)]'
+            : 'border-[var(--sc-ok)]/30 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
         }`}>
           <div className="flex items-start gap-2">
             {feedback.kind === 'success' && <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />}
@@ -302,7 +312,7 @@ export function ReviewQueueView() {
               type="button"
               onClick={() => (selectedIds.size === items.length && items.length > 0 ? clearSelection() : setSelectedIds(new Set(items.map((m) => m.id))))}
               disabled={items.length === 0}
-              className="rounded-full border border-[var(--sc-border)] px-3 py-1 text-xs font-semibold text-[var(--sc-text-secondary)] transition-colors hover:border-[var(--sc-text-muted)] disabled:opacity-30"
+              className="rounded-full border border-[var(--sc-border)] px-3 py-1 text-xs font-semibold text-[var(--sc-text-dim)] transition-colors hover:border-[var(--sc-text-muted)] disabled:opacity-30"
             >
               {selectedIds.size === items.length && items.length > 0 ? 'Clear all' : `Select all ${items.length}`}
             </button>
@@ -316,7 +326,7 @@ export function ReviewQueueView() {
 
           {bulkConfirm && (
             <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--sc-amber)]/30 bg-[var(--sc-amber)]/10 px-4 py-3 text-sm">
-              <span className="text-[var(--sc-text-primary)]">
+              <span className="text-[var(--sc-text)]">
                 {bulkConfirm.label} {selectedIds.size} {selectedIds.size === 1 ? 'memory' : 'memories'}? This is reversible.
               </span>
               <div className="ml-auto flex gap-2">
@@ -328,28 +338,28 @@ export function ReviewQueueView() {
 
           {items.length === 0 ? (
             <div className="glass-card-strong p-8 text-center">
-              <p className="text-sm text-[var(--sc-text-secondary)]">No {QUEUE_META[activeQueue].label.toLowerCase()} memories to review.</p>
+              <p className="text-sm text-[var(--sc-text-dim)]">No {QUEUE_META[activeQueue].label.toLowerCase()} memories to review.</p>
             </div>
           ) : (
-            <div className="max-h-[60vh] space-y-1.5 overflow-y-auto rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/40 p-2">
+            <div className="max-h-[60vh] space-y-1.5 overflow-y-auto rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/40 p-2">
               {items.map((m) => {
                 const checked = selectedIds.has(m.id);
                 return (
                   <label
                     key={m.id}
                     className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition-colors ${
-                      checked ? 'border-[var(--sc-cyan)]/50 bg-[var(--sc-cyan)]/5' : 'border-transparent hover:bg-[var(--sc-surface-interactive)]'
+                      checked ? 'border-[var(--sc-ok)]/50 bg-[var(--sc-ok)]/5' : 'border-transparent hover:bg-[var(--sc-surface-interactive)]'
                     }`}
                   >
                     <input
                       type="checkbox"
                       checked={checked}
                       onChange={() => toggleSelected(m.id)}
-                      className="mt-1 h-4 w-4 shrink-0 accent-[var(--sc-cyan)]"
+                      className="mt-1 h-4 w-4 shrink-0 accent-[var(--sc-ok)]"
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-[var(--sc-text-primary)]">{m.title}</div>
-                      <div className="mt-0.5 line-clamp-1 text-xs text-[var(--sc-text-secondary)]">{m.content}</div>
+                      <div className="truncate text-sm font-medium text-[var(--sc-text)]">{m.title}</div>
+                      <div className="mt-0.5 line-clamp-1 text-xs text-[var(--sc-text-dim)]">{m.content}</div>
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         {buildReasons(m, activeQueue).map((r, i) => (
                           <span key={i} className="rounded-full bg-[var(--sc-surface-interactive)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--sc-text-muted)]">
@@ -375,7 +385,7 @@ export function ReviewQueueView() {
                   type="button"
                   disabled={currentIndex === 0}
                   onClick={() => setCurrentIndex((i) => Math.max(0, i - 1))}
-                  className="rounded px-2 py-0.5 text-[var(--sc-text-secondary)] transition-colors hover:bg-[var(--sc-surface-interactive)] disabled:opacity-30"
+                  className="rounded px-2 py-0.5 text-[var(--sc-text-dim)] transition-colors hover:bg-[var(--sc-surface-interactive)] disabled:opacity-30"
                 >
                   ← Prev
                 </button>
@@ -383,15 +393,15 @@ export function ReviewQueueView() {
                   type="button"
                   disabled={currentIndex >= total - 1}
                   onClick={() => setCurrentIndex((i) => Math.min(total - 1, i + 1))}
-                  className="rounded px-2 py-0.5 text-[var(--sc-text-secondary)] transition-colors hover:bg-[var(--sc-surface-interactive)] disabled:opacity-30"
+                  className="rounded px-2 py-0.5 text-[var(--sc-text-dim)] transition-colors hover:bg-[var(--sc-surface-interactive)] disabled:opacity-30"
                 >
                   Next →
                 </button>
               </div>
             </div>
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--sc-bg-elevated)]">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--sc-surface-2)]">
               <div
-                className="h-full rounded-full bg-[var(--sc-cyan)] transition-all"
+                className="h-full rounded-full bg-[var(--sc-ok)] transition-all"
                 style={{ width: `${progressPct}%` }}
               />
             </div>
@@ -412,7 +422,7 @@ export function ReviewQueueView() {
         </>
       ) : (
         <div className="glass-card-strong p-8 text-center">
-          <p className="text-sm text-[var(--sc-text-secondary)]">
+          <p className="text-sm text-[var(--sc-text-dim)]">
             No {QUEUE_META[activeQueue].label.toLowerCase()} memories to review.
           </p>
         </div>
@@ -422,37 +432,37 @@ export function ReviewQueueView() {
       <div ref={contradictionsRef} className="glass-card-strong p-5">
         <div className="flex items-center gap-2">
           <ShieldAlert size={16} className="text-[var(--sc-amber)]" />
-          <h3 className="text-base font-semibold text-[var(--sc-text-primary)]">
+          <h3 className="text-base font-semibold text-[var(--sc-text)]">
             Contradictions ({contradictions.length})
           </h3>
         </div>
 
         {contradictions.length === 0 ? (
-          <p className="mt-3 text-sm text-[var(--sc-text-secondary)]">No contradictions detected.</p>
+          <p className="mt-3 text-sm text-[var(--sc-text-dim)]">No contradictions detected.</p>
         ) : (
           <div className="mt-4 space-y-4">
             {contradictions.slice(0, 8).map((item) => (
-              <div key={`${item.memoryA.id}-${item.memoryB.id}`} className="rounded-xl border border-[var(--sc-amber)]/20 bg-[var(--sc-bg-deep)]/60 p-4">
+              <div key={`${item.memoryA.id}-${item.memoryB.id}`} className="rounded-xl border border-[var(--sc-amber)]/20 bg-[var(--sc-bg)]/60 p-4">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">Score</div>
-                    <div className="text-lg font-semibold text-[var(--sc-text-primary)]">{Math.round(item.score * 100)}%</div>
+                    <div className="text-lg font-semibold text-[var(--sc-text)]">{Math.round(item.score * 100)}%</div>
                   </div>
                   <div className="text-right text-xs text-[var(--sc-text-muted)]">
                     {item.sharedTopics.length ? item.sharedTopics.join(' · ') : 'No shared topic'}
                   </div>
                 </div>
-                <div className="mt-3 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-surface)]/60 p-3 text-sm text-[var(--sc-text-primary)]">
+                <div className="mt-3 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)]/60 p-3 text-sm text-[var(--sc-text)]">
                   {item.reason}
                 </div>
                 <div className="mt-4 grid gap-3 md:grid-cols-2">
                   {[item.memoryA, item.memoryB].map((memory, idx) => {
                     const other = idx === 0 ? item.memoryB : item.memoryA;
                     return (
-                      <div key={memory.id} className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-surface)]/70 p-3">
+                      <div key={memory.id} className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)]/70 p-3">
                         <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">{idx === 0 ? 'A' : 'B'}</div>
-                        <div className="mt-1 text-sm font-medium text-[var(--sc-text-primary)]">{memory.title}</div>
-                        <div className="mt-1 line-clamp-2 text-xs text-[var(--sc-text-secondary)]">{memory.content}</div>
+                        <div className="mt-1 text-sm font-medium text-[var(--sc-text)]">{memory.title}</div>
+                        <div className="mt-1 line-clamp-2 text-xs text-[var(--sc-text-dim)]">{memory.content}</div>
                         <div className="mt-2 text-xs text-[var(--sc-text-muted)]">
                           trust {(memory.trustScore ?? 1).toFixed(2)} · {memory.captureMethod || 'manual'}
                         </div>
@@ -477,24 +487,24 @@ export function ReviewQueueView() {
       {/* Duplicates */}
       <div ref={duplicatesRef} className="glass-card-strong p-5">
         <div className="flex items-center gap-2">
-          <Layers size={16} className="text-[var(--sc-cyan)]" />
-          <h3 className="text-base font-semibold text-[var(--sc-text-primary)]">
+          <Layers size={16} className="text-[var(--sc-ok)]" />
+          <h3 className="text-base font-semibold text-[var(--sc-text)]">
             Duplicates ({duplicates.length})
           </h3>
         </div>
 
         {duplicates.length === 0 ? (
-          <p className="mt-3 text-sm text-[var(--sc-text-secondary)]">No duplicate candidates detected.</p>
+          <p className="mt-3 text-sm text-[var(--sc-text-dim)]">No duplicate candidates detected.</p>
         ) : (
           <div className="mt-4 space-y-3">
             {duplicates.slice(0, 8).map((pair) => {
               const keep = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryA : pair.memoryB;
               const remove = pair.recommendedKeepId === pair.memoryA.id ? pair.memoryB : pair.memoryA;
               return (
-                <div key={`${pair.memoryA.id}-${pair.memoryB.id}`} className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/60 p-4">
+                <div key={`${pair.memoryA.id}-${pair.memoryB.id}`} className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <div className="text-sm font-medium text-[var(--sc-text-primary)]">
+                      <div className="text-sm font-medium text-[var(--sc-text)]">
                         &ldquo;{pair.memoryA.title}&rdquo; vs &ldquo;{pair.memoryB.title}&rdquo;
                       </div>
                       <div className="mt-1 text-xs text-[var(--sc-text-muted)]">

@@ -56,10 +56,10 @@ export function DedupePanel() {
   return (
     <GlassCard className="p-6">
       <div className="flex items-center gap-2">
-        <GitMerge size={16} className="text-[var(--sc-cyan)]" />
-        <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Project Dedupe</h3>
+        <GitMerge size={16} className="text-[var(--sc-ok)]" />
+        <h3 className="text-lg font-semibold text-[var(--sc-text)]">Project Dedupe</h3>
       </div>
-      <p className="mt-2 text-sm text-[var(--sc-text-secondary)]">
+      <p className="mt-2 text-sm text-[var(--sc-text-dim)]">
         Find clusters of near-duplicate long-term memories (text similarity: title overlap + content
         Jaccard). Merging keeps the highest-salience representative and deletes the rest. Backup
         auto-saved before any merge.
@@ -73,7 +73,7 @@ export function DedupePanel() {
           onClick={() => setScope('all')}
           className={`rounded-md border px-2 py-1 ${
             scope === 'all'
-              ? 'border-[var(--sc-cyan)] text-[var(--sc-cyan)]'
+              ? 'border-[var(--sc-ok)] text-[var(--sc-ok)]'
               : 'border-[var(--sc-border)] text-[var(--sc-text-muted)]'
           }`}
         >
@@ -85,7 +85,7 @@ export function DedupePanel() {
           onClick={() => setScope('current')}
           className={`rounded-md border px-2 py-1 disabled:opacity-40 ${
             scope === 'current'
-              ? 'border-[var(--sc-cyan)] text-[var(--sc-cyan)]'
+              ? 'border-[var(--sc-ok)] text-[var(--sc-ok)]'
               : 'border-[var(--sc-border)] text-[var(--sc-text-muted)]'
           }`}
         >
@@ -95,9 +95,9 @@ export function DedupePanel() {
 
       {/* Preview output */}
       {preview && (
-        <div className="mt-4 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg-deep)]/50 p-3">
+        <div className="mt-4 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-[var(--sc-text-primary)]">
+            <span className="text-sm font-semibold text-[var(--sc-text)]">
               {preview.groups.length} cluster(s) · {totalToRemove} removable
             </span>
             <span className="text-[10px] text-[var(--sc-text-muted)]">{preview.pairsFound} pairs scanned</span>
@@ -107,12 +107,12 @@ export function DedupePanel() {
           ) : (
             <ul className="mt-2 max-h-64 space-y-2 overflow-y-auto text-xs">
               {preview.groups.map((g) => (
-                <li key={g.keepId} className="rounded border border-[var(--sc-border)] bg-[var(--sc-bg-surface)] p-2">
+                <li key={g.keepId} className="rounded border border-[var(--sc-border)] bg-[var(--sc-surface)] p-2">
                   <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">
                     Keep #{g.keepId} · remove {g.removeIds.length} · {g.similarity}
                   </div>
-                  <div className="mt-1 font-semibold text-[var(--sc-text-primary)] truncate">{g.keepTitle}</div>
-                  <div className="mt-0.5 text-[var(--sc-text-secondary)]">
+                  <div className="mt-1 font-semibold text-[var(--sc-text)] truncate">{g.keepTitle}</div>
+                  <div className="mt-0.5 text-[var(--sc-text-dim)]">
                     Will delete: {g.removeIds.map((id) => `#${id}`).join(', ')}
                   </div>
                 </li>

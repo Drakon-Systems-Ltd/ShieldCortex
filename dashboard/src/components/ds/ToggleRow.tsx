@@ -7,6 +7,8 @@ import { cn } from '@/lib/utils';
 export interface ToggleRowProps {
   label: string;
   description: ReactNode;
+  /** One line stating what flipping this off/on actually means (brief §3.4). */
+  consequence?: ReactNode;
   checked: boolean;
   pending?: boolean;
   disabled?: boolean;
@@ -14,9 +16,11 @@ export interface ToggleRowProps {
   onChange: (next: boolean) => void;
 }
 
+/** Settings toggle: label, one-line description, consequence line, slider. */
 export function ToggleRow({
   label,
   description,
+  consequence,
   checked,
   pending = false,
   disabled = false,
@@ -27,16 +31,15 @@ export function ToggleRow({
   return (
     <label
       className={cn(
-        'flex items-start gap-4 border border-[var(--term-border)] bg-[var(--term-surface)] p-4 rounded-md transition-colors',
-        isInteractive && 'cursor-pointer hover:border-[var(--term-electric)]',
-        !isInteractive && 'opacity-70 cursor-not-allowed',
+        'flex items-start gap-4 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)] p-4 transition-colors',
+        isInteractive && 'cursor-pointer hover:border-[var(--sc-border-strong)]',
+        !isInteractive && 'cursor-not-allowed opacity-70',
+        'focus-within:outline-2 focus-within:outline-[var(--sc-focus)]',
       )}
     >
       <div className="min-w-0 flex-1">
-        <div className="text-sm text-[var(--term-text)]">
-          <span className="text-[var(--term-text-muted)]" aria-hidden>›</span> {label}
-        </div>
-        <div className="mt-1 text-xs leading-5 text-[var(--term-text-muted)]">
+        <div className="text-sm font-medium text-[var(--sc-text)]">{label}</div>
+        <div className="mt-1 text-xs leading-5 text-[var(--sc-text-muted)]">
           {description}
           {docsUrl && (
             <>
@@ -45,7 +48,7 @@ export function ToggleRow({
                 href={docsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[var(--term-electric-fg)] hover:underline"
+                className="text-[var(--sc-primary)] hover:underline"
                 onClick={(e) => e.stopPropagation()}
               >
                 docs →
@@ -53,37 +56,24 @@ export function ToggleRow({
             </>
           )}
         </div>
-      </div>
-
-      {/* Terminal: [on]/[off] text pill. */}
-      <div className="flex shrink-0 items-center gap-2 self-start pt-0.5 theme-glass:hidden">
-        {pending && (
-          <Loader2 size={12} className="animate-spin text-[var(--term-text-muted)]" aria-hidden />
+        {consequence && (
+          <div className="mt-1 text-xs leading-5 text-[var(--sc-text-dim)]">{consequence}</div>
         )}
-        <span
-          className={cn(
-            'font-mono text-xs uppercase tracking-wider',
-            checked ? 'text-[var(--term-neon-fg)]' : 'text-[var(--term-text-muted)]',
-          )}
-        >
-          {checked ? '[on]' : '[off]'}
-        </span>
       </div>
 
-      {/* Glass: original animated slider toggle. */}
-      <div className="relative hidden h-6 w-11 shrink-0 items-center theme-glass:flex" aria-hidden="true">
+      <div className="relative flex h-6 w-11 shrink-0 items-center self-start" aria-hidden="true">
         {pending && (
-          <Loader2 size={12} className="absolute -left-5 top-1.5 animate-spin text-[var(--sc-text-muted)]" />
+          <Loader2 size={12} className="absolute -left-5 top-1.5 animate-spin text-[var(--sc-text-muted)] motion-reduce:animate-none" />
         )}
         <span
           className={cn(
             'absolute inset-0 rounded-full transition-colors',
-            checked ? 'bg-[var(--sc-cyan)]' : 'bg-[var(--sc-bg-elevated)] border border-[var(--sc-border)]',
+            checked ? 'bg-[var(--sc-primary)]' : 'border border-[var(--sc-border)] bg-[var(--sc-surface-2)]',
           )}
         />
         <span
           className={cn(
-            'absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform',
+            'absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform motion-reduce:transition-none',
             checked ? 'translate-x-5' : 'translate-x-0.5',
           )}
         />

@@ -1,7 +1,7 @@
 'use client';
 
-import { cn } from '@/lib/utils';
 import { Lock } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 export interface TabItem {
   id: string;
@@ -18,55 +18,42 @@ interface TabBarProps {
   className?: string;
 }
 
+/** Underline tabs — section tabs live inside pages, not the sidebar. */
 export function TabBar({ tabs, activeTab, onChange, className }: TabBarProps) {
   return (
     <div
-      className={cn(
-        'flex items-center gap-4 overflow-x-auto border-b border-[var(--term-border)] px-1 scrollbar-hide',
-        // Glass restores the rounded-pill container background.
-        'theme-glass:gap-1 theme-glass:rounded-xl theme-glass:border-0 theme-glass:bg-[var(--sc-bg-surface)] theme-glass:p-1',
-        className,
-      )}
       role="tablist"
+      className={cn('flex items-center gap-1 overflow-x-auto border-b border-[var(--sc-border)] scrollbar-hide', className)}
     >
       {tabs.map((tab) => {
         const active = tab.id === activeTab;
         return (
           <button
             key={tab.id}
-            type="button"
             role="tab"
-            aria-selected={active ? 'true' : 'false'}
+            type="button"
+            aria-selected={active}
             onClick={() => onChange(tab.id)}
             className={cn(
-              'relative flex shrink-0 items-center gap-2 px-1 py-2 text-xs font-mono transition-colors',
-              'focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[var(--term-electric)]',
+              '-mb-px flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--sc-focus)]',
               active
-                ? 'text-[var(--term-electric-fg)]'
-                : 'text-[var(--term-text-muted)] hover:text-[var(--term-text)]',
-              // Glass: rounded-pill chrome, system font, semibold.
-              'theme-glass:font-medium theme-glass:font-sans theme-glass:rounded-lg theme-glass:px-3 theme-glass:py-2 sm:theme-glass:px-4 sm:theme-glass:text-sm',
-              active && 'theme-glass:bg-[var(--sc-bg-elevated)] theme-glass:text-[var(--sc-text-primary)]',
-              !active && 'theme-glass:hover:text-[var(--sc-text-secondary)]',
+                ? 'border-[var(--sc-primary)] font-medium text-[var(--sc-text)]'
+                : 'border-transparent text-[var(--sc-text-muted)] hover:text-[var(--sc-text)]',
             )}
           >
             {tab.icon}
-            <span>{tab.label}</span>
-            {tab.locked && <Lock size={11} className="text-[var(--term-warn)] theme-glass:text-[var(--sc-coral)]" />}
-            {tab.count !== undefined && tab.count > 0 && (
-              <span className="text-[var(--term-text-muted)] theme-glass:ml-0.5 theme-glass:rounded-full theme-glass:bg-[var(--sc-coral)]/15 theme-glass:px-1.5 theme-glass:py-0.5 theme-glass:text-[10px] theme-glass:font-bold theme-glass:text-[var(--sc-coral)]">
-                <span className="theme-glass:hidden">({tab.count})</span>
-                <span className="hidden theme-glass:inline">{tab.count}</span>
+            {tab.label}
+            {typeof tab.count === 'number' && (
+              <span
+                className={cn(
+                  'rounded-full px-1.5 text-[10px] tabular-nums',
+                  active ? 'bg-[var(--sc-primary-soft)] text-[var(--sc-primary)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]',
+                )}
+              >
+                {tab.count}
               </span>
             )}
-            {/* Terminal: bottom underline indicator. Glass mode hides it
-                because the active state is conveyed by the pill background. */}
-            {active && (
-              <span
-                aria-hidden
-                className="absolute -bottom-px left-0 right-0 h-px bg-[var(--term-electric)] theme-glass:hidden"
-              />
-            )}
+            {tab.locked && <Lock size={11} aria-label="Requires a Pro licence" className="text-[var(--sc-text-muted)]" />}
           </button>
         );
       })}

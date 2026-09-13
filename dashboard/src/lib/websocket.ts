@@ -10,7 +10,12 @@ import { useQueryClient } from '@tanstack/react-query';
 import { getApiToken, invalidateApiToken } from './auth';
 import { shouldInvalidateTokenOnClose } from './ws-helpers';
 
-const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws/events';
+// One source of truth for the backend origin: derive the WS endpoint from the
+// API base unless NEXT_PUBLIC_WS_URL explicitly overrides it. Prevents the API
+// and the socket silently pointing at two different servers.
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const WS_BASE_URL =
+  process.env.NEXT_PUBLIC_WS_URL || `${API_BASE.replace(/^http/, 'ws')}/ws/events`;
 
 export type WebSocketEventType =
   | 'initial_state'

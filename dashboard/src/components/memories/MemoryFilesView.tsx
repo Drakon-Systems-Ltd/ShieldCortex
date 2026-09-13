@@ -85,9 +85,9 @@ function MemoryFileCard({
             <Badge variant="muted">{file.source}</Badge>
           </div>
           <div className="mt-3 flex min-w-0 items-start gap-2">
-            <FileText size={16} className="mt-0.5 shrink-0 text-[var(--sc-cyan)]" />
+            <FileText size={16} className="mt-0.5 shrink-0 text-[var(--sc-ok)]" />
             <div className="min-w-0">
-              <h3 className="truncate text-sm font-semibold text-[var(--sc-text-primary)]">
+              <h3 className="truncate text-sm font-semibold text-[var(--sc-text)]">
                 {fileName(file.path)}
               </h3>
               <p className="mt-1 break-all text-xs text-[var(--sc-text-muted)]">{file.path}</p>
@@ -108,14 +108,14 @@ function MemoryFileCard({
         </div>
       </div>
 
-      <p className="mt-4 text-sm leading-6 text-[var(--sc-text-secondary)]">{file.reason}</p>
+      <p className="mt-4 text-sm leading-6 text-[var(--sc-text-dim)]">{file.reason}</p>
 
       {file.threatIndicators.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {file.threatIndicators.map((indicator) => (
             <span
               key={indicator}
-              className="rounded bg-[var(--sc-bg-elevated)] px-2 py-1 text-[11px] text-[var(--sc-text-secondary)]"
+              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-[11px] text-[var(--sc-text-dim)]"
             >
               {indicator}
             </span>
@@ -127,8 +127,8 @@ function MemoryFileCard({
         <div className="mt-4 space-y-2 border-t border-[var(--sc-border)] pt-3">
           {file.evidence.map((entry, index) => (
             <div key={`${entry.reason}-${index}`} className="text-xs leading-5">
-              <div className="font-semibold text-[var(--sc-text-primary)]">{entry.reason}</div>
-              <div className="mt-0.5 break-words text-[var(--sc-text-secondary)]">&quot;{entry.snippet}&quot;</div>
+              <div className="font-semibold text-[var(--sc-text)]">{entry.reason}</div>
+              <div className="mt-0.5 break-words text-[var(--sc-text-dim)]">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>
@@ -154,7 +154,7 @@ function MemoryFileCard({
             />
           )}
           {Boolean(explainError) && (
-            <div className="rounded-lg border border-[var(--sc-coral)]/30 bg-[var(--sc-coral)]/10 p-3 text-sm text-[var(--sc-coral)]">
+            <div className="rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 p-3 text-sm text-[var(--sc-danger)]">
               {explainError instanceof Error ? explainError.message : 'Local explanation failed'}
             </div>
           )}
@@ -230,8 +230,8 @@ export function MemoryFilesView() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <div className="flex items-center gap-2">
-              <ScanLine size={17} className="text-[var(--sc-cyan)]" />
-              <h2 className="text-base font-semibold text-[var(--sc-text-primary)]">Memory Files</h2>
+              <ScanLine size={17} className="text-[var(--sc-ok)]" />
+              <h2 className="text-base font-semibold text-[var(--sc-text)]">Memory Files</h2>
             </div>
             {data && (
               <p className="mt-1 text-xs text-[var(--sc-text-muted)]">
@@ -248,31 +248,31 @@ export function MemoryFilesView() {
 
         {data && (
           <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-5">
-            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+            <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
               <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Total</div>
-              <div className="mt-1 text-xl font-semibold text-[var(--sc-text-primary)]">{data.summary.total}</div>
+              <div className="mt-1 text-xl font-semibold text-[var(--sc-text)]">{data.summary.total}</div>
             </div>
-            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+            <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
               <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Safe</div>
-              <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-cyan)]">
+              <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-ok)]">
                 <CheckCircle2 size={16} />
                 {data.summary.safe}
               </div>
             </div>
-            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+            <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
               <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Flagged</div>
               <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-amber)]">
                 <AlertTriangle size={16} />
                 {data.summary.flagged}
               </div>
             </div>
-            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+            <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
               <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">High</div>
-              <div className="mt-1 text-xl font-semibold text-[var(--sc-coral-mid)]">{data.summary.high}</div>
+              <div className="mt-1 text-xl font-semibold text-[var(--sc-danger)]">{data.summary.high}</div>
             </div>
-            <div className="rounded-lg bg-[var(--sc-bg-deep)]/60 p-3">
+            <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
               <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Critical</div>
-              <div className="mt-1 text-xl font-semibold text-[var(--sc-coral)]">{data.summary.critical}</div>
+              <div className="mt-1 text-xl font-semibold text-[var(--sc-danger)]">{data.summary.critical}</div>
             </div>
           </div>
         )}
@@ -285,8 +285,8 @@ export function MemoryFilesView() {
       </GlassCard>
 
       {scanMutation.error && (
-        <GlassCard className="border-[var(--sc-coral)]/30 p-4">
-          <p className="text-sm text-[var(--sc-coral)]">
+        <GlassCard className="border-[var(--sc-danger)]/30 p-4">
+          <p className="text-sm text-[var(--sc-danger)]">
             {scanMutation.error instanceof Error ? scanMutation.error.message : 'Memory file scan failed'}
           </p>
         </GlassCard>
@@ -294,8 +294,8 @@ export function MemoryFilesView() {
 
       {data && files.length === 0 && (
         <GlassCard className="p-8 text-center">
-          <CheckCircle2 size={24} className="mx-auto text-[var(--sc-cyan)]" />
-          <p className="mt-3 text-sm text-[var(--sc-text-secondary)]">No memory files found.</p>
+          <CheckCircle2 size={24} className="mx-auto text-[var(--sc-ok)]" />
+          <p className="mt-3 text-sm text-[var(--sc-text-dim)]">No memory files found.</p>
         </GlassCard>
       )}
 

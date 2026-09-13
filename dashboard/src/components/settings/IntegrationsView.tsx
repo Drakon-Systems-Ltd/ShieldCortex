@@ -33,7 +33,7 @@ export function IntegrationsView() {
   if (error || !data) {
     return (
       <GlassCard className="p-6">
-        <p className="text-sm text-[var(--sc-coral)]">
+        <p className="text-sm text-[var(--sc-danger)]">
           Failed to load integration toggles: {error instanceof Error ? error.message : 'Unknown error'}
         </p>
       </GlassCard>
@@ -46,8 +46,8 @@ export function IntegrationsView() {
   return (
     <div className="space-y-4">
       <GlassCard className="p-6">
-        <h3 className="text-lg font-semibold text-[var(--sc-text-primary)]">Integrations</h3>
-        <p className="mt-1 text-sm text-[var(--sc-text-secondary)]">
+        <h3 className="text-lg font-semibold text-[var(--sc-text)]">Integrations</h3>
+        <p className="mt-1 text-sm text-[var(--sc-text-dim)]">
           Both toggles are off by default. They were turned off in v4.11.0 after fleet evidence
           showed they hurt fast agent loops; turn them on if you run interactive sessions or want
           richer memory capture.

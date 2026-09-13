@@ -1,28 +1,34 @@
 'use client';
 
-import { Monitor, Terminal } from 'lucide-react';
-import { useTheme } from '@/hooks/useTheme';
+import { Monitor, Moon, Sun } from 'lucide-react';
+import { useTheme, type ThemePreference } from '@/hooks/useTheme';
+
+const ORDER: ThemePreference[] = ['light', 'dark', 'system'];
+const META: Record<ThemePreference, { label: string; Icon: typeof Sun }> = {
+  light: { label: 'Light', Icon: Sun },
+  dark: { label: 'Dark', Icon: Moon },
+  system: { label: 'System', Icon: Monitor },
+};
 
 /**
- * Theme toggle — switches between the CIC `terminal` console and the `glass`
- * shell. Rendered in BOTH shells' chrome so the choice is always reversible:
- * without this, a user whose `sc-theme` is persisted to `glass` has no UI path
- * back to terminal (the `theme` command lives only in the terminal rail).
+ * Theme toggle — cycles light → dark → system. `system` follows the OS
+ * preference live. Rendered in the top bar.
  */
 export function ThemeToggle({ className = '' }: { className?: string }) {
-  const [theme, setTheme] = useTheme();
-  const next = theme === 'terminal' ? 'glass' : 'terminal';
+  const [pref, setPref] = useTheme();
+  const next = ORDER[(ORDER.indexOf(pref) + 1) % ORDER.length];
+  const { label, Icon } = META[pref];
 
   return (
     <button
       type="button"
-      onClick={() => setTheme(next)}
-      aria-label={`Switch to ${next} theme`}
-      title={`Theme: ${theme} — click to switch to ${next}`}
-      className={`inline-flex items-center gap-1.5 px-1.5 py-0.5 text-[11px] font-mono text-[var(--sc-text-muted)] hover:text-[var(--sc-text-primary)] transition-colors ${className}`}
+      onClick={() => setPref(next)}
+      aria-label={`Theme: ${label}. Switch to ${META[next].label}`}
+      title={`Theme: ${label} — click for ${META[next].label}`}
+      className={`inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs text-[var(--sc-text-muted)] transition-colors hover:bg-[var(--sc-surface-2)] hover:text-[var(--sc-text)] focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)] ${className}`}
     >
-      {theme === 'terminal' ? <Terminal size={12} /> : <Monitor size={12} />}
-      <span>{theme === 'terminal' ? 'TERM' : 'GLASS'}</span>
+      <Icon size={14} aria-hidden />
+      <span>{label}</span>
     </button>
   );
 }

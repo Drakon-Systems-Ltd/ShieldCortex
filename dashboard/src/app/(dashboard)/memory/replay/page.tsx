@@ -111,14 +111,14 @@ function ReplayContent() {
       />
 
       {importStatus && (
-        <div className="rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)] px-3 py-2 text-xs font-mono text-[var(--term-text-muted)]">
+        <div className="rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] px-3 py-2 text-xs font-mono text-[var(--sc-text-muted)]">
           {importStatus}
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)_minmax(0,360px)]">
         {/* Left rail: session list */}
-        <div className="rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] h-[640px] overflow-hidden">
+        <div className="rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] h-[640px] overflow-hidden">
           <SessionList
             sessions={sessions}
             selectedSessionId={urlSession}
@@ -139,19 +139,19 @@ function ReplayContent() {
           />
           <PlayControls playback={playback} />
           {eventsQuery.isError && (
-            <div className="rounded border border-[var(--term-danger)]/40 bg-[var(--term-danger)]/10 px-3 py-2 text-xs font-mono text-[var(--term-danger)]">
+            <div className="rounded border border-[var(--sc-danger)]/40 bg-[var(--sc-danger)]/10 px-3 py-2 text-xs font-mono text-[var(--sc-danger)]">
               {(eventsQuery.error as Error).message}
             </div>
           )}
           {!urlSession && (
-            <div className="rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)] p-6 text-center text-xs font-mono text-[var(--term-text-muted)]">
+            <div className="rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] p-6 text-center text-xs font-mono text-[var(--sc-text-muted)]">
               Pick a session from the list on the left to start replaying.
             </div>
           )}
         </div>
 
         {/* Right rail: focused event */}
-        <div className="rounded border border-[var(--term-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] h-[640px] overflow-hidden">
+        <div className="rounded border border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] theme-glass:bg-[var(--sc-surface-glass)] h-[640px] overflow-hidden">
           <EventDetail
             event={playback.current}
             indexLabel={
@@ -169,14 +169,14 @@ function ReplayContent() {
       </div>
 
       {/* Keyboard hint */}
-      <div className="text-[10px] font-mono text-[var(--term-text-dim)]">
+      <div className="text-[10px] font-mono text-[var(--sc-text-dim)]">
         Shortcuts:
-        <kbd className="mx-1 rounded border border-[var(--term-border)] px-1">space</kbd>play/pause ·
-        <kbd className="mx-1 rounded border border-[var(--term-border)] px-1">←</kbd>
-        <kbd className="rounded border border-[var(--term-border)] px-1">→</kbd>step ·
-        <kbd className="mx-1 rounded border border-[var(--term-border)] px-1">shift</kbd>+arrows jump ·
-        <kbd className="mx-1 rounded border border-[var(--term-border)] px-1">[</kbd>
-        <kbd className="rounded border border-[var(--term-border)] px-1">]</kbd>speed
+        <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">space</kbd>play/pause ·
+        <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">←</kbd>
+        <kbd className="rounded border border-[var(--sc-border)] px-1">→</kbd>step ·
+        <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">shift</kbd>+arrows jump ·
+        <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">[</kbd>
+        <kbd className="rounded border border-[var(--sc-border)] px-1">]</kbd>speed
       </div>
     </div>
   );
