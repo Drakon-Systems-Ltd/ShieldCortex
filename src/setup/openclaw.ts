@@ -184,8 +184,8 @@ function openClawChildEnv(extra: NodeJS.ProcessEnv = {}, home = resolveUserHome(
 }
 
 /** Test seam: the env native `openclaw` would inherit. */
-export function __openClawChildEnvForTest(): NodeJS.ProcessEnv {
-  return openClawChildEnv();
+export function __openClawChildEnvForTest(home?: string): NodeJS.ProcessEnv {
+  return home === undefined ? openClawChildEnv() : openClawChildEnv({}, home);
 }
 
 /**
@@ -2074,7 +2074,7 @@ export async function repairOpenClawManagedPins(homeArg?: string): Promise<Manag
   } catch {
     return { status: 'failed', message: 'Manifest reconciled, but `openclaw` is not on PATH to reinstall. Run `openclaw plugins install --force ' + pluginSpec + '` then `openclaw gateway restart`.' };
   }
-  const spawnEnv = openClawChildEnv();
+  const spawnEnv = openClawChildEnv({}, home);
 
   // 4. Re-enable if it was auto-disabled.
   if (disabled) {
@@ -2257,7 +2257,7 @@ export async function repairOpenClawPlugin(): Promise<void> {
     process.exit(1);
   }
 
-  const spawnEnv = openClawChildEnv();
+  const spawnEnv = openClawChildEnv({}, home);
 
   // Step 3: Uninstall the plugin. The uninstall command requires interactive
   // confirmation by default; pipe `y\n` via stdin to auto-confirm.

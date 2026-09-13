@@ -13,7 +13,7 @@
  * process cwd.
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { join, isAbsolute } from 'path';
 
@@ -112,7 +112,9 @@ describe('OPENCLAW_HOME override (#472)', () => {
 
   it('skill install defaults follow OPENCLAW_HOME, not os.homedir()', () => {
     const isolated = join(tmp, 'oc-home');
-    mkdirSync(join(isolated, '.openclaw'), { recursive: true });
+    const skillDir = join(isolated, '.openclaw', 'workspace', 'skills', 'shieldcortex');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: shieldcortex\n---\n');
     process.env.OPENCLAW_HOME = isolated;
     const seen: string[] = [];
     const args = openclaw.resolveSkillInstallArgs('/fake/openclaw', {
@@ -124,7 +126,17 @@ describe('OPENCLAW_HOME override (#472)', () => {
     });
     expect(seen).toEqual([isolated]);
     expect(args).toEqual(['skills', 'install', 'shieldcortex', '--force']);
-    expect(openclaw.findInstalledSkillDirs().every((d) => d.startsWith(isolated))).toBe(true);
-    expect(openclaw.findInstalledSkillDirs().some((d) => d.includes(homedir()))).toBe(false);
+    expect(openclaw.findInstalledSkillDirs()).toEqual([skillDir]);
+  });
+
+  it('explicit repair home wins over OPENCLAW_HOME in child env', () => {
+    const envHome = join(tmp, 'env-home');
+    const argHome = join(tmp, 'arg-home');
+    mkdirSync(envHome, { recursive: true });
+    mkdirSync(argHome, { recursive: true });
+    process.env.OPENCLAW_HOME = envHome;
+    const child = openclaw.__openClawChildEnvForTest(argHome);
+    expect(child.HOME).toBe(argHome);
+    expect(child.OPENCLAW_HOME).toBe(argHome);
   });
 });
