@@ -10,6 +10,12 @@ All notable changes to this project will be documented in this file.
 ### Added
 - (none yet)
 
+### Fixed
+- **#475:** `POST /api/memories/:id/quarantine` now writes `firewall_result='QUARANTINE'`. The column is `NOT NULL` with no default, so the dashboard "quarantine this memory" action 500'd on every call and never moved the row.
+- **#476:** `POST /api/sessions/import-jsonl` 404s no longer echo the resolved filesystem glob. An empty body used to return the server's absolute `$HOME` in the JSON error.
+- **#477:** `POST /api/version/restart` requires `{"confirm":"restart"}`. An empty body no longer schedules `process.exit`. Action Guard being off by default is not treated as consent.
+- **#478:** `POST /api/version/update` requires `{"confirm":"update"}` before `npm update -g`. EACCES no longer advises `sudo`. PATH-resolved `npm` is unchanged.
+
 ## [5.0.0] - 2026-09-12
 
 **Breaking major.** Node 20 is gone. Read [docs/UPGRADING-5.md](docs/UPGRADING-5.md) *before* `npm install -g shieldcortex`. Stay on 4.x with `npm install -g shieldcortex@4` (last 4.x is 4.54.15). Action Guard stays off by default.

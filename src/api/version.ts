@@ -169,7 +169,7 @@ export function performUpdate(): Promise<UpdateResult> {
 
           if (errorMessage.includes('EACCES') || errorMessage.includes('permission denied')) {
             userFriendlyError =
-              'Permission denied. Try running with sudo: sudo npm update -g shieldcortex';
+              'Permission denied writing the npm prefix. Update from a terminal with the right privileges, not via the dashboard.';
           } else if (errorMessage.includes('ENOENT')) {
             userFriendlyError = 'npm not found. Make sure Node.js is installed.';
           } else if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('network')) {

@@ -206,7 +206,14 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
         throw err;
       }
       if (files.length === 0) {
-        res.status(404).json({ error: `no JSONL files matched: ${target}` });
+        // Never echo the resolved filesystem path. For the default glob that
+        // is the server's $HOME; even an explicit path is layout the caller
+        // already knows and does not belong in the JSON error body (#476).
+        res.status(404).json({
+          error: explicit
+            ? 'no JSONL files matched the requested path'
+            : 'no JSONL files matched the default import location',
+        });
         return;
       }
 
@@ -241,7 +248,7 @@ export function registerSessionRoutes(app: Express, requireNotLocked: Middleware
         errors.length === 1 &&
         /not found|ENOENT/i.test(errors[0].error)
       ) {
-        res.status(404).json({ error: errors[0].error });
+        res.status(404).json({ error: 'no JSONL files matched the requested path' });
         return;
       }
 

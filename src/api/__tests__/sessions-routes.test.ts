@@ -16,7 +16,7 @@ import { recordEvent, recordEvents } from '../../sessions/capture.js';
 import { registerSessionRoutes } from '../routes/sessions.js';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
+import { tmpdir, homedir } from 'os';
 
 type Handler = (req: any, res: any, next: (err?: unknown) => void) => unknown;
 
@@ -246,6 +246,10 @@ describe('POST /api/sessions/import-jsonl', () => {
       body: { path: join(tempDir, 'nope.jsonl') },
     });
     expect(res.statusCode).toBe(404);
+    const error = String((res.body as { error?: string }).error ?? '');
+    expect(error).toBe('no JSONL files matched the requested path');
+    expect(error).not.toContain(tempDir);
+    expect(error).not.toContain(homedir());
   });
 
   it('imports a valid JSONL transcript and returns the result envelope', async () => {
@@ -307,6 +311,9 @@ describe('POST /api/sessions/import-jsonl', () => {
       body: { path: join(tempDir, 'never-matches-*.jsonl') },
     });
     expect(res.statusCode).toBe(404);
+    const error = String((res.body as { error?: string }).error ?? '');
+    expect(error).toBe('no JSONL files matched the requested path');
+    expect(error).not.toContain(tempDir);
   });
 
   // Defence-in-depth: the dashboard binds to localhost, but if it gets exposed

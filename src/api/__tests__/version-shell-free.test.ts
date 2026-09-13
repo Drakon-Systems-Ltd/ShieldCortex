@@ -100,7 +100,8 @@ describe('performUpdate (#429)', () => {
     const result = await version.performUpdate();
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('sudo npm update -g shieldcortex');
+    expect(result.error).toMatch(/Permission denied writing the npm prefix/i);
+    expect(result.error).not.toMatch(/sudo/i);
     expect(execMock).not.toHaveBeenCalled();
     expect(execSyncMock).not.toHaveBeenCalled();
   });
