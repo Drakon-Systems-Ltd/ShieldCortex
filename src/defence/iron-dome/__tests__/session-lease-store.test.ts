@@ -148,6 +148,14 @@ describe('acquire / refresh / release / crash recovery', () => {
     expect(isHolderPidAlive(unusedDeadPid())).toBe(false);
   });
 
+  it('#438: missing /proc after kill(0) stays alive; Z/X reaps', () => {
+    expect(isHolderPidAlive(process.pid, () => null)).toBe(true);
+    expect(isHolderPidAlive(process.pid, () => '1 (node) R 1')).toBe(true);
+    expect(isHolderPidAlive(process.pid, () => '1 (node) S 1')).toBe(true);
+    expect(isHolderPidAlive(process.pid, () => '1 (node) Z 1')).toBe(false);
+    expect(isHolderPidAlive(process.pid, () => '1 (node) X 1')).toBe(false);
+  });
+
   it('release frees the lease for the holder only', () => {
     const a = acquireOrRefreshLease({ dir, scope: 'install', self: 'session-a', nowMs: NOW });
     // Another identity cannot release someone else's lease.

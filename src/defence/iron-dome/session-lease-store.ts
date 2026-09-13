@@ -140,11 +140,29 @@ function liveRecord(rec: StoredLease | undefined, nowMs: number): StoredLease | 
 
 /**
  * Same-host liveness of a recorded holder PID.
- *   - false: confirmed dead (ESRCH, or Linux zombie)
+ *   - false: confirmed dead (ESRCH, or Linux zombie /proc state Z/X)
  *   - true: process table has a live (or permission-denied) entry
  *   - undefined: no PID we can trust — caller must fail closed
+ *
+ * After kill(pid,0) succeeds, missing /proc/<pid>/stat is NOT death
+ * (#438 GPT-6): an empty /proc dir, a PID-namespace mismatch, or macOS
+ * can all ENOENT a living process. Only a positively observed Z/X
+ * state reaps a still-signallable pid.
  */
-export function isHolderPidAlive(pid: number | null | undefined): boolean | undefined {
+export type ProcStatRead = (pid: number) => string | null;
+
+function defaultProcStat(pid: number): string | null {
+  try {
+    return fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+export function isHolderPidAlive(
+  pid: number | null | undefined,
+  readProcStat: ProcStatRead = defaultProcStat,
+): boolean | undefined {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return undefined;
   try {
     process.kill(pid, 0);
@@ -154,21 +172,11 @@ export function isHolderPidAlive(pid: number | null | undefined): boolean | unde
     // EPERM: the pid exists but we cannot signal it. That is "alive", not dead.
     return true;
   }
-  // kill(pid, 0) succeeded — including zombies. On Linux a zombie still
-  // occupies the pid; it is not a live holder. macOS has no /proc: success
-  // stays alive (fail closed).
-  try {
-    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const rparen = stat.lastIndexOf(')');
-    const state = rparen >= 0 ? stat.slice(rparen + 2, rparen + 3) : '';
-    if (state === 'Z' || state === 'X') return false;
-  } catch (err) {
-    // macOS has no /proc: ENOENT there must NOT look like a dead pid.
-    // Only treat missing /proc/<pid> as dead when /proc itself exists.
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT' && fs.existsSync('/proc')) {
-      return false;
-    }
-  }
+  const stat = readProcStat(pid);
+  if (stat == null) return true;
+  const rparen = stat.lastIndexOf(')');
+  const state = rparen >= 0 ? stat.slice(rparen + 2, rparen + 3) : '';
+  if (state === 'Z' || state === 'X') return false;
   return true;
 }
 

@@ -157,6 +157,25 @@ describe('checkSessionLease — mutual exclusion', () => {
   });
 });
 
+describe('checkSessionLease — freeze outranks dead PID', () => {
+  it('#438: a confirmed-dead holder on a FROZEN scope is still frozen', () => {
+    const d = checkSessionLease({
+      scope: 'npm-publish',
+      ledger: LEDGER,
+      held: {
+        holder: 'session-B',
+        pid: 160367,
+        acquiredAtMs: NOW - 30_000,
+        expiresAtMs: NOW + 600_000,
+      },
+      self: 'session-A',
+      nowMs: NOW,
+      holderAlive: false,
+    });
+    expect(d.verdict).toBe('frozen');
+  });
+});
+
 describe('checkSessionLease — fails closed', () => {
   it('an unreadable ledger REFUSES: "cannot know" must never behave like "nothing is frozen"', () => {
     const d = checkSessionLease({ scope: 'npm-publish', ledger: null, held: null, self: 'A', nowMs: NOW });
