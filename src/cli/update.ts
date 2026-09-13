@@ -683,7 +683,17 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
   });
 }
 
-async function stepClaudeHooks(): Promise<StepResult> {
+async function stepClaudeHooks(home: string): Promise<StepResult> {
+  const { scanHostTable } = await import('../setup/host-table.js');
+  const claude = scanHostTable(home).rows.find((r) => r.id === 'claude');
+  if (!claude?.wired) {
+    return await step('Claude Code hooks', async () => ({
+      status: 'skip' as const,
+      summary: claude?.present
+        ? 'present but not wired — `shieldcortex setup` asks first'
+        : 'not installed',
+    }));
+  }
   return await step('Claude Code hooks', async () => {
     // setupHooks logs its own progress; capture it so we can summarise.
     const logBuffer: string[] = [];
@@ -903,7 +913,7 @@ export async function runUpdate(): Promise<void> {
 
   const pluginResult = await stepOpenClawPlugin(home);
   const skillResult = await stepOpenClawSkill(home);
-  await stepClaudeHooks();
+  await stepClaudeHooks(home);
   await stepStatePermissions();
 
   footer(Date.now() - flowStart, mainUpdated, latest);

@@ -94,3 +94,19 @@ describe('#171 — update ends by verifying protection, like repair', () => {
     expect(body).toMatch(/protection check skipped/);
   });
 });
+
+describe('update does not silent-wire Claude on first contact', () => {
+  it('stepClaudeHooks skips unless Claude is already wired', () => {
+    const body = bodyOf('stepClaudeHooks');
+    expect(body).toMatch(/scanHostTable/);
+    expect(body).toMatch(/present but not wired/);
+    expect(body).toMatch(/status: 'skip'/);
+    expect(body).toMatch(/setupHooks\(\)/);
+  });
+
+  it('runUpdate passes home into the Claude-hook step', () => {
+    const body = bodyOf('runUpdate');
+    expect(body).toMatch(/await stepClaudeHooks\(home\)/);
+    expect(body).not.toMatch(/await stepClaudeHooks\(\)/);
+  });
+});

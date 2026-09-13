@@ -77,4 +77,16 @@ describe('host table', () => {
     writeFileSync(join(h, '.codex', 'config.toml'), '[mcp_servers.shieldcortex-memory]\ncommand = "shieldcortex"\n');
     expect(scanHostTable(h).rows.find((r) => r.id === 'codex')).toMatchObject({ present: true, wired: true });
   });
+
+  it('Claude is present-unwired without PreToolUse, wired only with a shieldcortex pre-tool hook', () => {
+    const h = home();
+    mkdirSync(join(h, '.claude'), { recursive: true });
+    writeFileSync(join(h, '.claude', 'settings.json'), '{"hooks":{}}\n');
+    expect(scanHostTable(h).rows.find((r) => r.id === 'claude')).toMatchObject({ present: true, wired: false });
+    writeFileSync(
+      join(h, '.claude', 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'shieldcortex hook pre-tool' }] }] } }),
+    );
+    expect(scanHostTable(h).rows.find((r) => r.id === 'claude')).toMatchObject({ present: true, wired: true });
+  });
 });
