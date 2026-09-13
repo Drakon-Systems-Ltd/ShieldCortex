@@ -225,6 +225,17 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
     ['warning has the wrong type', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [], warning: 7 } })],
     ['generatedAtMs has the wrong type', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [], generatedAtMs: 'x' } })],
     ['value_json is not JSON', '{not json'],
+    // Nested entries — OpenClaw's parser validates every element; so do we for every field we read.
+    ['plugin entry is null', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [null] } })],
+    ['plugin entry is an array', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [[]] } })],
+    ['plugin pluginId is a number', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: 1 }] } })],
+    ['plugin pluginId missing', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ enabled: true }] } })],
+    ['plugin enabled is the string "true"', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: 'shieldcortex-realtime', enabled: 'true' }] } })],
+    ['plugin rootDir is a number', JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: 'shieldcortex-realtime', enabled: true, rootDir: 7 }] } })],
+    ['install record is null', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': null }, plugins: [] } })],
+    ['install record is an array', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': [] }, plugins: [] } })],
+    ['install record version is a number', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { version: 5 } }, plugins: [] } })],
+    ['install record installPath is an object', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { installPath: {} } }, plugins: [] } })],
   ];
 
   it.each(MALFORMED)('malformed migrated row (%s) alongside a valid legacy row → legacy row is read, not a readable empty index', (_label, valueJson) => {
@@ -258,6 +269,54 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
     expect(verdict.state).toBe('index-unreadable');
     expect(verdict.severity).toBe('warn');
     expect(verdict.state).not.toBe('enabled-not-loaded');
+  });
+
+  it('migrated-only `plugins:[null]` does not throw in the reconciler and is index-unreadable, not FAIL', () => {
+    writeConfig(true, true);
+    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.0.0');
+    writeMigratedRaw(JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [null] } }));
+    const verdict = reconcilePluginState(
+      gatherReconcileInput(home, { expectedVersion: '5.0.0', readLiveRoster: () => null }),
+    );
+    expect(verdict.indexReadable).toBe(false);
+    expect(verdict.state).toBe('index-unreadable');
+  });
+
+  it('migrated-only `enabled:"true"` is not read as "present but disabled" → never enabled-not-loaded', () => {
+    writeConfig(true, true);
+    writeProjectDir('drakon-systems-shieldcortex-realtime-abc', '5.0.0');
+    writeMigratedRaw(
+      JSON.stringify({ revision: 2000, index: { installRecords: {}, plugins: [{ pluginId: PLUGIN, enabled: 'true' }] } }),
+    );
+    const verdict = reconcilePluginState(
+      gatherReconcileInput(home, { expectedVersion: '5.0.0', readLiveRoster: () => null }),
+    );
+    expect(verdict.state).toBe('index-unreadable');
+    expect(verdict.recommendedAction).not.toBe('reinstall-pinned');
+  });
+
+  it('legacy row with malformed nested entries is unreadable too (same projection on both layouts)', () => {
+    writeIndex({
+      installRecords: { [PLUGIN]: null as unknown as Record<string, unknown> },
+      plugins: [null, { pluginId: PLUGIN, enabled: true }],
+      generatedAtMs: 4242,
+    });
+    expect(readPluginInstallIndex(home)).toBeNull();
+  });
+
+  it('well-formed entries survive the projection with every consumed field intact', () => {
+    writeMigratedIndex({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', resolvedVersion: '5.0.0', installPath: '/p', extra: 1 } },
+      plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'global', rootDir: '/p', manifestPath: '/m' }],
+      generatedAtMs: 77,
+    });
+    const idx = readPluginInstallIndex(home);
+    expect(idx).toEqual({
+      installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', resolvedVersion: '5.0.0', installPath: '/p' } },
+      plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'global', rootDir: '/p' }],
+      warning: null,
+      generatedAtMs: 77,
+    });
   });
 });
 

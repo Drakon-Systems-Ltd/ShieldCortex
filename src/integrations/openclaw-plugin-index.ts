@@ -748,9 +748,15 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
       | { install_records_json: string; plugins_json: string; warning: string | null; generated_at_ms: number }
       | undefined;
     if (!row) return null;
+    // Same strict projection as the migrated row: a legacy row whose JSON
+    // columns are malformed is "unreadable" (null), never a readable empty index.
+    const shape = projectIndexShape(
+      safeParse<unknown>(row.install_records_json, null),
+      safeParse<unknown>(row.plugins_json, null),
+    );
+    if (!shape) return null;
     return {
-      installRecords: safeParse<Record<string, IndexInstallRecord>>(row.install_records_json, {}),
-      plugins: safeParse<IndexPluginEntry[]>(row.plugins_json, []),
+      ...shape,
       warning: row.warning ?? null,
       generatedAtMs: row.generated_at_ms,
     };
@@ -786,13 +792,12 @@ function readMigratedIndexRow(db: import('better-sqlite3').Database): PluginInde
     // (FAIL, "index omits the plugin") out of unreadable state. Null here means
     // "no evidence", which the reconciler already handles as index-unreadable.
     if (!isPlainObject(index)) return null;
-    if (!isPlainObject(index.installRecords)) return null;
-    if (!Array.isArray(index.plugins)) return null;
     if (index.warning !== undefined && index.warning !== null && typeof index.warning !== 'string') return null;
     if (index.generatedAtMs !== undefined && typeof index.generatedAtMs !== 'number') return null;
+    const shape = projectIndexShape(index.installRecords, index.plugins);
+    if (!shape) return null;
     return {
-      installRecords: index.installRecords as Record<string, IndexInstallRecord>,
-      plugins: index.plugins as IndexPluginEntry[],
+      ...shape,
       warning: typeof index.warning === 'string' ? index.warning : null,
       generatedAtMs: typeof index.generatedAtMs === 'number' ? index.generatedAtMs : (row.updated_at_ms ?? undefined),
     };
@@ -806,6 +811,62 @@ function readMigratedIndexRow(db: import('better-sqlite3').Database): PluginInde
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === 'string';
+}
+
+/**
+ * Strict projection of the index fields ShieldCortex consumes (`IndexPluginEntry`,
+ * `IndexInstallRecord`). Not full host-schema parity — OpenClaw's
+ * `installed-plugin-index-store.ts` validates many more fields we never read —
+ * but every field WE read is type-checked on EVERY element, and any malformed
+ * element rejects the whole index (null = "no evidence"). Rationale: a `null`
+ * plugin entry threw `TypeError … reading 'pluginId'` in the reconciler, and
+ * `enabled: 'true'` was accepted as "present but not enabled" → a manufactured
+ * `enabled-not-loaded` FAIL from invalid state. Applied to BOTH the migrated row
+ * and the legacy `installed_plugin_index` columns so the two layouts cannot
+ * disagree about what "readable" means.
+ */
+function projectIndexShape(
+  installRecords: unknown,
+  plugins: unknown,
+): { installRecords: Record<string, IndexInstallRecord>; plugins: IndexPluginEntry[] } | null {
+  if (!isPlainObject(installRecords) || !Array.isArray(plugins)) return null;
+  const outPlugins: IndexPluginEntry[] = [];
+  for (const entry of plugins) {
+    if (!isPlainObject(entry)) return null;
+    if (typeof entry.pluginId !== 'string' || entry.pluginId.length === 0) return null;
+    if (entry.enabled !== undefined && typeof entry.enabled !== 'boolean') return null;
+    if (!isOptionalString(entry.origin) || !isOptionalString(entry.rootDir)) return null;
+    outPlugins.push({
+      pluginId: entry.pluginId,
+      ...(entry.enabled !== undefined ? { enabled: entry.enabled } : {}),
+      ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
+      ...(entry.rootDir !== undefined ? { rootDir: entry.rootDir } : {}),
+    });
+  }
+  const outRecords: Record<string, IndexInstallRecord> = {};
+  for (const [id, rec] of Object.entries(installRecords)) {
+    if (!isPlainObject(rec)) return null;
+    if (
+      !isOptionalString(rec.source) ||
+      !isOptionalString(rec.version) ||
+      !isOptionalString(rec.resolvedVersion) ||
+      !isOptionalString(rec.installPath)
+    ) {
+      return null;
+    }
+    outRecords[id] = {
+      ...(rec.source !== undefined ? { source: rec.source } : {}),
+      ...(rec.version !== undefined ? { version: rec.version } : {}),
+      ...(rec.resolvedVersion !== undefined ? { resolvedVersion: rec.resolvedVersion } : {}),
+      ...(rec.installPath !== undefined ? { installPath: rec.installPath } : {}),
+    };
+  }
+  return { installRecords: outRecords, plugins: outPlugins };
+}
+
 
 function createRequireSafe(): NodeRequire {
   return createRequire(import.meta.url);
