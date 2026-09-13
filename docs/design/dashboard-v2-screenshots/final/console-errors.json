@@ -1,0 +1,368 @@
+{
+  "totalPages": 60,
+  "pagesWithConsoleErrors": 0,
+  "pagesWithResidualLegacyTokens": 0,
+  "pagesWithFailedRequests": 0,
+  "entries": [
+    {
+      "route": "/overview",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=graph",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=recall",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=review",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=timeline",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=files",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory/replay",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/intercepts",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/audit",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/quarantine",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/policies",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/xray",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/settings",
+      "theme": "light",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/overview",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=graph",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=recall",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=review",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=timeline",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=files",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory/replay",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/intercepts",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/audit",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/quarantine",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/policies",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/xray",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/settings",
+      "theme": "light",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/overview",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=graph",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=recall",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=review",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=timeline",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=files",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory/replay",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/intercepts",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/audit",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/quarantine",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/policies",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/xray",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/settings",
+      "theme": "dark",
+      "viewport": "1440x900",
+      "consoleErrors": []
+    },
+    {
+      "route": "/overview",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=graph",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=recall",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=review",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=timeline",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory?tab=files",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/memory/replay",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/intercepts",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/audit",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/quarantine",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/protection/policies",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/xray",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    },
+    {
+      "route": "/settings",
+      "theme": "dark",
+      "viewport": "390x844",
+      "consoleErrors": []
+    }
+  ]
+}

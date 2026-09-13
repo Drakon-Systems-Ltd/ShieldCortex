@@ -8,7 +8,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- (none yet)
+- **Dashboard v2**: the local dashboard (`shieldcortex --dashboard`) is rebuilt on one shell, one `--sc-*` token set (light/dark/system), and a shared design system (`dashboard/src/components/ds/*`) — the CIC "starship" terminal shell and the Glass shell are retired (`dashboard/legacy-v1/`, recoverable, not deleted). The memory graph is real now: entities and memories as actual nodes (not a nebula of scatter dots), all three edge families (entity↔entity, memory→entity, memory↔memory) drawn with real predicates/relationships, Map/Focus/Path modes, a default Map threshold computed from the real mention-count distribution so it opens readable instead of a 400-node hairball. Overview, Memory (Library/Graph/Recall/Review/Timeline/Files/Replay), Protection (Status/Quarantine/Audit/Intercepts/Policies & Rules), X-Ray, and Settings are restyled onto the DS with honest states throughout (`off`/`unknown`/`unavailable`/`on` — a disabled control never renders as if it were protecting you, and a failed fetch never renders identically to "no data"). New bounded, project-scoped graph endpoints (`GET /api/graph/overview`, `GET /api/graph/entities/:id/neighbourhood`) back the graph; existing routes are unchanged. See `docs/design/2026-09-13-dashboard-v2-ux.md` for the brief and `docs/design/dashboard-v2-final-report.md` for the verification record.
+
+### Fixed
+- The dashboard API's RESTRICTED-content redactor (`deepRedactRestrictedContent`, installed on every `/api/*` JSON response) rebuilt every plain object via `Object.keys()` — a `Date` instance has no enumerable own properties, so every `createdAt`/`lastAccessed`/`updatedAt` in every response silently collapsed to `{}`, rendering as "NaNw ago" / "Invalid Date" across the dashboard. Dates now pass through untouched (they never carry redactable content).
+- Root Jest's `jest.config.js` `roots` still pointed at a `dashboard/src/components/graph/constellation/__tests__` path deleted months earlier — this failed Jest's own config validation outright and silently blocked every root-suite run before a single test executed.
 
 ### Fixed
 - **#438:** a session lease whose recorded holder PID is confirmed dead no longer wedges the scope until TTL. Blank / non-positive / unconfirmed PIDs still fail closed — a missing pid is not a skeleton key. Freeze semantics unchanged.
