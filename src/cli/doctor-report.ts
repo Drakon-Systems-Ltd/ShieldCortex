@@ -33,6 +33,10 @@ export interface FormatDoctorReportOpts {
    * doctor.ts colour constants.
    */
   style?: DoctorReportStyle;
+  /** Same host table setup/update/uninstall print. */
+  hostTableLines?: string[];
+  /** Single next command. Empty when the box is OK. */
+  nextCommand?: string | null;
 }
 
 export interface DoctorReportStyle {
@@ -482,6 +486,24 @@ export function formatDoctorReport(
   // All clear
   if (fails.length === 0 && warns.length === 0) {
     lines.push(`${style.green}All clear.${style.reset}`);
+    lines.push('');
+  }
+
+  if (opts.hostTableLines && opts.hostTableLines.length > 0) {
+    lines.push(`${style.bold}HOSTS${style.reset}`);
+    for (const hl of opts.hostTableLines) lines.push(hl);
+    lines.push('');
+  }
+
+  if (fails.length === 0 && warns.length > 0) {
+    const note = 'Honesty warnings are not unprotected. Do not run repair / import-native / Guard enable from a warn.';
+    lines.push(...wrapLine(note, width, 0, 2).map((l) => `${style.dim}${l}${style.reset}`));
+    lines.push('');
+  }
+
+  if (opts.nextCommand) {
+    lines.push(`${style.bold}NEXT${style.reset}`);
+    lines.push(`$ ${opts.nextCommand}`);
     lines.push('');
   }
 

@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- (none yet)
+- **One host table** for `setup` / `update` / `uninstall` / `doctor`. Detects Claude Code, OpenClaw, Hermes, Codex, and Cursor/VS Code. `setup` (and `quickstart`) prints the table and asks before wiring present-but-unwired hosts. `update` refreshes what is already wired, then asks about newly present hosts (non-TTY prints the ask and does not wire). `uninstall` now removes the Hermes plugin and Copilot/Cursor MCP entries. `doctor` prints the same table plus one NEXT command; `--repair` is TTY-only named jobs; `--repair --agent` writes a bounded brief and does not spawn an agent. Guard stays off. Conversation access is not granted.
 
 ### Fixed
 - (none yet)

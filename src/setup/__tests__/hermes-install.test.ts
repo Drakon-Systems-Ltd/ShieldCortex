@@ -21,4 +21,20 @@ describe('hermes install', () => {
     await uninstallHermes(home);
     expect(hermesPluginInstalled(home)).toBe(false);
   });
+
+  it('install copy does not claim Guard is on by default', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'sc-hermes-'));
+    homes.push(home);
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+    try {
+      await installHermes(home);
+    } finally {
+      console.log = orig;
+    }
+    const text = logs.join('\n');
+    expect(text).toMatch(/Action Guard stays off/);
+    expect(text).not.toMatch(/Enforce is ON by default/);
+  });
 });

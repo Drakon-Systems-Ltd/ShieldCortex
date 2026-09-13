@@ -733,7 +733,17 @@ ${bold}DOCS${reset}
     }
     const { parseHookOptInFlags } = await import('./setup/settings-hooks.js');
     const { setupClaudeMd } = await import('./setup/claude-md.js');
-    await setupClaudeMd(parseHookOptInFlags(process.argv));
+    // `setup` with no extra flags is the host-table wizard. `install` stays
+    // Claude Code only so existing scripts do not grow OpenClaw/Hermes
+    // installs. Explicit hook flags on setup also stay Claude-only.
+    const hookFlags = parseHookOptInFlags(process.argv);
+    const hasHookFlag = process.argv.some((a) => a.startsWith('--with-') || a.startsWith('--no-'));
+    if (process.argv[2] === 'install' || hasHookFlag) {
+      await setupClaudeMd(hookFlags);
+    } else {
+      const { handleQuickstartCommand } = await import('./setup/quickstart.js');
+      await handleQuickstartCommand(process.argv[3]);
+    }
     return;
   }
 

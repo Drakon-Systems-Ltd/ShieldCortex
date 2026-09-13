@@ -76,6 +76,17 @@ describe('#197 — the manifest rule: exactly one fate per artifact', () => {
     expect(codex?.removedBy).toBe('uninstallCodex');
   });
 
+  it('the Hermes plugin and Copilot MCP are in the manifest and on the full uninstall path', () => {
+    expect(UNINSTALL_MANIFEST.find((a) => a.id === 'hermes-plugin')?.removedBy).toBe('uninstallHermes');
+    expect(UNINSTALL_MANIFEST.find((a) => a.id === 'copilot-mcp')?.removedBy).toBe('uninstallCopilot');
+    const src = fs.readFileSync(path.join(repoRoot, 'src', 'setup', 'uninstall.ts'), 'utf-8');
+    const start = src.indexOf('export async function uninstallAll');
+    const next = src.indexOf('\nexport ', start + 1);
+    const body = next === -1 ? src.slice(start) : src.slice(start, next);
+    expect(body).toContain('await uninstallHermes();');
+    expect(body).toContain('await uninstallCopilot();');
+  });
+
   it('the full uninstall path itself removes the Codex MCP block — the standalone verb alone is not parity', () => {
     const src = fs.readFileSync(path.join(repoRoot, 'src', 'setup', 'uninstall.ts'), 'utf-8');
     const start = src.indexOf('export async function uninstallAll');

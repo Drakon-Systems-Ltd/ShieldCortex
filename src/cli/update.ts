@@ -956,6 +956,21 @@ export async function runUpdate(): Promise<void> {
   maybePrintActionGuardDefaultOffNotice(mainUpdated);
   await maybePrintDashboardHint();
 
+  try {
+    const { offerUnwiredHosts, formatHostTable, scanHostTable } = await import('../setup/host-table.js');
+    const table = scanHostTable(home);
+    const todo = table.rows.filter((r) => r.present && !r.wired);
+    if (todo.length > 0) {
+      process.stdout.write('\n');
+      for (const line of formatHostTable(table, currentVersion)) {
+        process.stdout.write(`${line}\n`);
+      }
+      await offerUnwiredHosts({ mode: 'update', home });
+    }
+  } catch {
+    /* update must not fail on the host table */
+  }
+
   // Closing panel — last write (design lock v3).
   const rows: UpdatePanelRow[] = [
     { label: 'package', status: npmStatus === 'failed' ? 'failed' : npmStatus === 'warn' ? 'warn' : 'ok' },
