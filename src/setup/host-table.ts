@@ -101,9 +101,29 @@ function claudePresent(home: string): boolean {
 }
 
 function claudeWired(home: string): boolean {
-  const settings = readText(path.join(home, '.claude', 'settings.json'));
-  if (!settings) return false;
-  return /pre-tool|PreToolUse/i.test(settings) && /shieldcortex/i.test(settings);
+  const raw = readText(path.join(home, '.claude', 'settings.json'));
+  if (!raw) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object') return false;
+  const hooks = (parsed as { hooks?: unknown }).hooks;
+  if (!hooks || typeof hooks !== 'object') return false;
+  const pre = (hooks as { PreToolUse?: unknown }).PreToolUse;
+  if (!Array.isArray(pre)) return false;
+  return pre.some((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const inner = (entry as { hooks?: unknown }).hooks;
+    if (!Array.isArray(inner)) return false;
+    return inner.some((h) => {
+      if (!h || typeof h !== 'object') return false;
+      const cmd = (h as { command?: unknown }).command;
+      return typeof cmd === 'string' && cmd.includes('shieldcortex');
+    });
+  });
 }
 
 function openclawPresent(home: string): boolean {

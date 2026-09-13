@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - Doctor honesty warnings no longer print `$ shieldcortex config --action-guard-enable` or `$ shieldcortex openclaw install --allow-conversation-access`. Guard-off and SCAN-off stay informational. The SCAN footnote no longer tells operators to invent a plugin `allowConversationAccess` key.
 - `shieldcortex update` no longer silent-wires Claude Code hooks on a present-but-unwired box. Refresh stays for already-wired installs; first-time wiring goes through the host-table ask (non-TTY prints the ask and does not wire).
+- Claude “wired” now requires a ShieldCortex-owned `PreToolUse` hook. Empty `PreToolUse` plus stray `shieldcortex` text (permissions allowlist) is not wired.
 
 ## [5.0.4] - 2026-09-13
 

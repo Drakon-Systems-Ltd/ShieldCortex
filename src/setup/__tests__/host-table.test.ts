@@ -89,4 +89,17 @@ describe('host table', () => {
     );
     expect(scanHostTable(h).rows.find((r) => r.id === 'claude')).toMatchObject({ present: true, wired: true });
   });
+
+  it('does not treat stray shieldcortex text plus empty PreToolUse as wired', () => {
+    const h = home();
+    mkdirSync(join(h, '.claude'), { recursive: true });
+    writeFileSync(
+      join(h, '.claude', 'settings.json'),
+      JSON.stringify({
+        permissions: { allow: ['Bash(shieldcortex *)'] },
+        hooks: { PreToolUse: [] },
+      }),
+    );
+    expect(scanHostTable(h).rows.find((r) => r.id === 'claude')).toMatchObject({ present: true, wired: false });
+  });
 });
