@@ -13,6 +13,7 @@ import {
   findGatewayAttributedRegistrationSince,
 } from './openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from './openclaw-gateway-process.js';
+import { parseHostPersistedInstalledPluginIndexRow } from './openclaw-installed-plugin-index-schema.js';
 
 /**
  * Reconciling OpenClaw plugin-install state across its three authoritative
@@ -780,9 +781,21 @@ export function readPluginInstallIndex(home: string): PluginIndexRow | null {
 }
 
 /**
- * The OpenClaw 2026.9.4 `config_machine_state` shape. Returns null when the
- * table or row is absent (pre-migration host) or the JSON does not carry an
- * `index` object, so the caller can fall back to the legacy table.
+ * The OpenClaw 2026.9.4 `config_machine_state` row. Returns null when the table
+ * or row is absent (pre-migration host) OR when OpenClaw's own parser would
+ * reject the row, so the caller can fall back to the legacy table — and, with
+ * no legacy table, report index-unreadable.
+ *
+ * The gate is the PINNED v2026.9.4 parser (`openclaw-installed-plugin-index-schema.ts`),
+ * not a projection of the fields ShieldCortex consumes: wrapper `revision`
+ * numeric; index `version`/`migrationVersion` literal 1, `hostContractVersion`,
+ * `compatRegistryVersion`, `policyHash`, `generatedAtMs`, `plugins`, `diagnostics`
+ * required, `warning` an optional string (never null); every plugin entry with
+ * `manifestPath`, `manifestHash`, `rootDir`, `origin`, `enabled`, `startup`,
+ * `compat`; every install record with an enum `source`. A row the host rejects is
+ * one the host regenerates rather than trusts — reading it anyway let the
+ * reconciler manufacture `enabled-not-loaded` (FAIL) + `reinstall-pinned` out of
+ * unreadable state (PR #480 review). Null here means "no evidence".
  */
 function readMigratedIndexRow(db: import('better-sqlite3').Database): PluginIndexRow | null {
   try {
@@ -790,24 +803,16 @@ function readMigratedIndexRow(db: import('better-sqlite3').Database): PluginInde
       .prepare("SELECT value_json, updated_at_ms FROM config_machine_state WHERE state_key = 'plugins.installedIndex'")
       .get() as { value_json: string; updated_at_ms: number | null } | undefined;
     if (!row) return null;
-    const parsed = safeParse<unknown>(row.value_json, null);
-    if (!isPlainObject(parsed)) return null;
-    const index = parsed.index;
-    // Strict shape check, mirroring OpenClaw's own Zod-validated parser which
-    // returns null on an invalid index. A malformed migrated row must NOT be
-    // coerced into a readable EMPTY index: that would both suppress a valid
-    // legacy fallback and let the reconciler manufacture `enabled-not-loaded`
-    // (FAIL, "index omits the plugin") out of unreadable state. Null here means
-    // "no evidence", which the reconciler already handles as index-unreadable.
-    if (!isPlainObject(index)) return null;
-    if (index.warning !== undefined && index.warning !== null && typeof index.warning !== 'string') return null;
-    if (index.generatedAtMs !== undefined && typeof index.generatedAtMs !== 'number') return null;
-    const shape = projectIndexShape(index.installRecords, index.plugins);
+    const host = parseHostPersistedInstalledPluginIndexRow(safeParse<unknown>(row.value_json, null));
+    if (!host) return null;
+    // Host-valid. Project down to the consumed fields with the same reserved-key
+    // hardening the legacy path gets (null-prototype record map, own keys only).
+    const shape = projectIndexShape(host.installRecords, host.plugins);
     if (!shape) return null;
     return {
       ...shape,
-      warning: typeof index.warning === 'string' ? index.warning : null,
-      generatedAtMs: typeof index.generatedAtMs === 'number' ? index.generatedAtMs : (row.updated_at_ms ?? undefined),
+      warning: host.warning ?? null,
+      generatedAtMs: host.generatedAtMs,
     };
   } catch {
     // No such table (pre-2026.9.4) or any other read failure: fall back.

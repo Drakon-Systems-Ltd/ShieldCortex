@@ -18,9 +18,86 @@ import {
 const PLUGIN = 'shieldcortex-realtime';
 const PKG_SUBPATH = path.join('node_modules', '@drakon-systems', 'shieldcortex-realtime');
 
-/** A host-valid roster entry: OpenClaw 2026.9.4 requires enabled, origin and rootDir. */
+/**
+ * A host-valid roster entry. OpenClaw 2026.9.4 `InstalledPluginIndexRecordSchema`
+ * REQUIRES pluginId, manifestPath, manifestHash, rootDir, origin, enabled, startup
+ * (sidecar, memory, agentHarnesses) and compat; everything else is optional.
+ */
 function entry(pluginId: string, enabled: boolean, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { pluginId, enabled, origin: 'global', rootDir: `/fixture/extensions/${pluginId}`, ...extra };
+  return {
+    pluginId,
+    enabled,
+    origin: 'global',
+    rootDir: `/fixture/extensions/${pluginId}`,
+    manifestPath: `/fixture/extensions/${pluginId}/openclaw.plugin.json`,
+    manifestHash: 'sha256:m',
+    startup: { sidecar: false, memory: false, agentHarnesses: [] },
+    compat: [],
+    ...extra,
+  };
+}
+
+/**
+ * A host-valid 2026.9.4 index object (`InstalledPluginIndexSchema`): version and
+ * migrationVersion are literal 1; hostContractVersion, compatRegistryVersion,
+ * policyHash, generatedAtMs, plugins and diagnostics are required; warning is an
+ * optional STRING (null is rejected). Tests break exactly one field at a time.
+ */
+function hostIndex(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    warning: 'DO NOT EDIT',
+    hostContractVersion: '2026.9.4',
+    compatRegistryVersion: 'x',
+    migrationVersion: 1,
+    policyHash: 'h',
+    generatedAtMs: 5,
+    workspaceDir: '/w',
+    refreshReason: 'r',
+    installRecords: {},
+    plugins: [],
+    diagnostics: [],
+    ...overrides,
+  };
+}
+
+/** Host `InstalledPluginIndexContributionSchema`: eight string arrays + `contracts` record. */
+const CONTRIBUTIONS_EMPTY = {
+  channels: [],
+  channelConfigs: [],
+  providers: [],
+  modelCatalogProviders: [],
+  modelSupportPrefixes: [],
+  modelSupportPatterns: [],
+  autoEnableProviderIds: [],
+  commandAliases: [],
+  contracts: {},
+};
+
+/** Host `acceptedSurface` is `.strict()`: all ten arrays, nothing else. */
+const FULL_ACCEPTED_SURFACE = {
+  channels: [],
+  providers: [],
+  tools: [],
+  contracts: [],
+  hooks: [],
+  mcpServers: [],
+  cliCommands: [],
+  cliBackends: [],
+  skills: [],
+  dangerousConfigFlags: [],
+};
+
+/** A host-valid `config_machine_state` wrapper: numeric `revision` + `index`. */
+function wrap(index: unknown, revision: unknown = 2000): string {
+  return JSON.stringify({ revision, index });
+}
+
+/** `hostIndex()` with one key removed. */
+function hostIndexWithout(key: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const idx = hostIndex(overrides);
+  delete idx[key];
+  return idx;
 }
 
 let home: string;
@@ -106,20 +183,15 @@ function writeMigratedIndex(row: {
   db.exec(`CREATE TABLE IF NOT EXISTS config_machine_state (
     state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);`);
   const updatedAtMs = row.updatedAtMs ?? 1757980800000;
-  const index: Record<string, unknown> = {
-    version: 1,
-    warning: row.warning ?? null,
-    hostContractVersion: '2026.9.4',
-    compatRegistryVersion: 'x',
-    migrationVersion: 13,
-    policyHash: 'h',
-    workspaceDir: '/w',
-    refreshReason: 'r',
+  // Host-valid wrapper (the live 2026.9.4 row: version 1, migrationVersion 1,
+  // warning a string when present, generatedAtMs always a number).
+  const index = hostIndex({
     installRecords: row.installRecords,
     plugins: row.plugins,
-    diagnostics: [],
-  };
-  if (row.generatedAtMs !== undefined) index.generatedAtMs = row.generatedAtMs;
+    generatedAtMs: row.generatedAtMs ?? 1757980800000,
+  });
+  if (typeof row.warning === 'string') index.warning = row.warning;
+  else delete index.warning;
   db.prepare(`INSERT INTO config_machine_state VALUES ('plugins.installedIndex', @v, @u)`).run({
     v: JSON.stringify({ revision: updatedAtMs, index }),
     u: updatedAtMs,
@@ -196,12 +268,38 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
     expect(idx!.generatedAtMs).toBe(5151);
   });
 
-  it('OpenClaw 2026.9.4: falls back to updated_at_ms when the migrated index carries no generatedAtMs', () => {
-    writeMigratedIndex({ installRecords: {}, plugins: [entry(PLUGIN, true)], updatedAtMs: 6161 });
+  it('OpenClaw 2026.9.4: a migrated index without generatedAtMs is host-invalid → unreadable, not "fall back to updated_at_ms"', () => {
+    writeMigratedRaw(wrap(hostIndexWithout('generatedAtMs', { plugins: [entry(PLUGIN, true)] })), 6161);
+    expect(readPluginInstallIndex(home)).toBeNull();
+  });
+
+  it('OpenClaw 2026.9.4: an index with no `warning` key reads with warning null', () => {
+    writeMigratedRaw(wrap(hostIndexWithout('warning', { plugins: [entry(PLUGIN, true)], generatedAtMs: 6161 })));
     const idx = readPluginInstallIndex(home);
     expect(idx).not.toBeNull();
     expect(idx!.generatedAtMs).toBe(6161);
     expect(idx!.warning).toBeNull();
+  });
+
+  it('OpenClaw 2026.9.4: no `installRecords` key → records rebuilt from each plugin `installRecord` (host fallback)', () => {
+    writeMigratedRaw(
+      wrap(
+        hostIndexWithout('installRecords', {
+          plugins: [entry(PLUGIN, true, { installRecord: { source: 'npm', version: '5.0.0', installPath: ' /p ' } })],
+        }),
+      ),
+    );
+    const idx = readPluginInstallIndex(home);
+    expect(idx).not.toBeNull();
+    // Host normalisation trims string fields.
+    expect(idx!.installRecords[PLUGIN]).toEqual({ source: 'npm', version: '5.0.0', installPath: '/p' });
+  });
+
+  it('OpenClaw 2026.9.4: no `installRecords` key + an invalid plugin `installRecord` → unreadable', () => {
+    writeMigratedRaw(
+      wrap(hostIndexWithout('installRecords', { plugins: [entry(PLUGIN, true, { installRecord: { version: '5.0.0' } })] })),
+    );
+    expect(readPluginInstallIndex(home)).toBeNull();
   });
 
   it('both layouts present: the migrated config_machine_state row wins', () => {
@@ -252,6 +350,64 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
     ['install record source is a number', JSON.stringify({ revision: 2000, index: { installRecords: { 'shieldcortex-realtime': { source: 1 } }, plugins: [] } })],
     // Raw JSON: a `__proto__` record is an ordinary id and is validated like any other.
     ['__proto__ install record missing source', '{"revision":2000,"index":{"installRecords":{"__proto__":{"version":"5.0.0"}},"plugins":[]}}'],
+    // ---- Full host contract (OpenClaw v2026.9.4 parser), one layer / one field at a time ----
+    // The review probe: no wrapper revision, index missing every host-required field.
+    ['review probe: no revision + host-required index fields missing', JSON.stringify({ index: { installRecords: {}, plugins: [], generatedAtMs: 1 } })],
+    // Wrapper (`readPersistedInstalledPluginIndexSync`).
+    ['wrapper: revision missing', JSON.stringify({ index: hostIndex() })],
+    ['wrapper: revision is a string', wrap(hostIndex(), '2000')],
+    ['wrapper: revision is null', wrap(hostIndex(), null)],
+    ['wrapper: index key absent', JSON.stringify({ revision: 2000 })],
+    ['wrapper: is an array', JSON.stringify([{ revision: 2000, index: hostIndex() }])],
+    // Index (`InstalledPluginIndexSchema`).
+    ['index: version is 2', wrap(hostIndex({ version: 2 }))],
+    ['index: version missing', wrap(hostIndexWithout('version'))],
+    ['index: migrationVersion is 13', wrap(hostIndex({ migrationVersion: 13 }))],
+    ['index: migrationVersion missing', wrap(hostIndexWithout('migrationVersion'))],
+    ['index: warning is null', wrap(hostIndex({ warning: null }))],
+    ['index: hostContractVersion missing', wrap(hostIndexWithout('hostContractVersion'))],
+    ['index: hostContractVersion is a number', wrap(hostIndex({ hostContractVersion: 2026 }))],
+    ['index: compatRegistryVersion missing', wrap(hostIndexWithout('compatRegistryVersion'))],
+    ['index: policyHash missing', wrap(hostIndexWithout('policyHash'))],
+    ['index: generatedAtMs missing', wrap(hostIndexWithout('generatedAtMs'))],
+    ['index: plugins missing', wrap(hostIndexWithout('plugins'))],
+    ['index: diagnostics missing', wrap(hostIndexWithout('diagnostics'))],
+    ['index: diagnostics is not an array', wrap(hostIndex({ diagnostics: {} }))],
+    ['index: diagnostic level outside warn|error', wrap(hostIndex({ diagnostics: [{ level: 'info', message: 'm' }] }))],
+    ['index: diagnostic message missing', wrap(hostIndex({ diagnostics: [{ level: 'warn' }] }))],
+    ['index: workspaceDir is a number', wrap(hostIndex({ workspaceDir: 1 }))],
+    ['index: refreshReason is an object', wrap(hostIndex({ refreshReason: {} }))],
+    ['index: installRecords is null', wrap(hostIndex({ installRecords: null }))],
+    ['index: installRecords is a string', wrap(hostIndex({ installRecords: 'x' }))],
+    // Plugin entry (`InstalledPluginIndexRecordSchema`).
+    ['plugin: manifestPath missing', wrap(hostIndex({ plugins: [(() => { const e = entry(PLUGIN, true); delete e.manifestPath; return e; })()] }))],
+    ['plugin: manifestHash missing', wrap(hostIndex({ plugins: [(() => { const e = entry(PLUGIN, true); delete e.manifestHash; return e; })()] }))],
+    ['plugin: startup missing', wrap(hostIndex({ plugins: [(() => { const e = entry(PLUGIN, true); delete e.startup; return e; })()] }))],
+    ['plugin: compat missing', wrap(hostIndex({ plugins: [(() => { const e = entry(PLUGIN, true); delete e.compat; return e; })()] }))],
+    ['plugin: startup.memory missing', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { startup: { sidecar: false, agentHarnesses: [] } })] }))],
+    ['plugin: startup.sidecar is a string', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { startup: { sidecar: 'no', memory: false, agentHarnesses: [] } })] }))],
+    ['plugin: startup.agentHarnesses holds a number', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { startup: { sidecar: false, memory: false, agentHarnesses: [1] } })] }))],
+    ['plugin: startup.configPaths is a string', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { startup: { sidecar: false, memory: false, agentHarnesses: [], configPaths: 'x' } })] }))],
+    ['plugin: compat holds a number', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { compat: [1] })] }))],
+    ['plugin: manifestPath is a number', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { manifestPath: 1 })] }))],
+    ['plugin: installOwnerAmbiguous is false', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { installOwnerAmbiguous: false })] }))],
+    ['plugin: packageJson missing hash', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { packageJson: { path: '/p' } })] }))],
+    ['plugin: manifestFile.size is a string', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { manifestFile: { size: '1', mtimeMs: 1 } })] }))],
+    ['plugin: enabledByDefault is a string', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { enabledByDefault: 'yes' })] }))],
+    ['plugin: contributions missing contracts', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { contributions: { channels: [], channelConfigs: [], providers: [], modelCatalogProviders: [], modelSupportPrefixes: [], modelSupportPatterns: [], autoEnableProviderIds: [], commandAliases: [] } })] }))],
+    ['plugin: installRecord source missing', wrap(hostIndex({ plugins: [entry(PLUGIN, true, { installRecord: { version: '1' } })] }))],
+    // Install record (`PluginInstallRecordShape`): optional fields are still typed.
+    ['record: spec is a number', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'npm', spec: 1 } } }))],
+    ['record: clawhubFamily outside the enum', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'clawhub', clawhubFamily: 'skill' } } }))],
+    ['record: clawhubChannel outside the enum', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'clawhub', clawhubChannel: 'beta' } } }))],
+    ['record: clawhubTrustReasons holds a number', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'clawhub', clawhubTrustReasons: [1] } } }))],
+    ['record: clawpackSize negative', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'archive', clawpackSize: -1 } } }))],
+    ['record: clawpackSpecVersion fractional', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'archive', clawpackSpecVersion: 1.5 } } }))],
+    ['record: artifactKind outside the enum', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'archive', artifactKind: 'tar' } } }))],
+    ['record: acceptedSurface missing keys', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'npm', acceptedSurface: { channels: [] } } } }))],
+    ['record: acceptedSurface has an unknown key (strict)', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'npm', acceptedSurface: { ...FULL_ACCEPTED_SURFACE, extra: [] } } } }))],
+    ['record: acceptedSurface.tools holds an empty string', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'npm', acceptedSurface: { ...FULL_ACCEPTED_SURFACE, tools: [''] } } } }))],
+    ['record: one valid + one invalid → whole map rejected', wrap(hostIndex({ installRecords: { [PLUGIN]: { source: 'npm' }, other: { source: 'nope' } } }))],
   ];
 
   it.each(MALFORMED)('malformed migrated row (%s) alongside a valid legacy row → legacy row is read, not a readable empty index', (_label, valueJson) => {
@@ -323,7 +479,7 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
   it('well-formed entries survive the projection with every consumed field intact', () => {
     writeMigratedIndex({
       installRecords: { [PLUGIN]: { source: 'npm', version: '5.0.0', resolvedVersion: '5.0.0', installPath: '/p', extra: 1 } },
-      plugins: [{ pluginId: PLUGIN, enabled: true, origin: 'global', rootDir: '/p', manifestPath: '/m' }],
+      plugins: [entry(PLUGIN, true, { rootDir: '/p', manifestPath: '/m', packageName: '@x/y' })],
       generatedAtMs: 77,
     });
     const idx = readPluginInstallIndex(home);
@@ -355,10 +511,19 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
 
   it('accepts what the host accepts: empty pluginId, any origin string, unknown host metadata', () => {
     writeMigratedIndex({
-      installRecords: { [PLUGIN]: { source: 'npm', spec: 'x', integrity: 'sha', acceptedSurface: { channels: [] } } },
+      installRecords: {
+        [PLUGIN]: { source: 'npm', spec: 'x', integrity: 'sha', acceptedSurface: FULL_ACCEPTED_SURFACE, unknownHostField: { a: 1 } },
+      },
       plugins: [
         entry('', false),
-        entry(PLUGIN, true, { origin: 'workspace-custom', manifestPath: '/m', startup: { sidecar: false }, compat: [] }),
+        entry(PLUGIN, true, {
+          origin: 'workspace-custom',
+          manifestPath: '/m',
+          startup: { sidecar: true, memory: true, agentHarnesses: ['claude'], configPaths: ['/c'] },
+          compat: ['2026.9'],
+          contributions: { ...CONTRIBUTIONS_EMPTY, providers: ['p'] },
+          diagnosticsIgnoredUnknownKey: 1,
+        }),
       ],
       generatedAtMs: 1,
     });
@@ -421,9 +586,13 @@ describe('readPluginInstallIndex — parses the latest SQLite row', () => {
     const rec = (v: string): string => `{"source":"npm","version":"${v}","installPath":"/p/${v}"}`;
     const plug = (id: string): string => JSON.stringify(entry(id, true));
     // Raw JSON text: an object literal `{ __proto__: … }` would not create an own key.
-    const RESERVED_ROW =
-      `{"revision":1,"index":{"generatedAtMs":5,"installRecords":{"__proto__":${rec('1.0.0')},"constructor":${rec('2.0.0')},"toString":${rec('3.0.0')}},` +
-      `"plugins":[${plug('__proto__')},${plug('constructor')},${plug('toString')}]}}`;
+    // Host-valid index around the reserved ids; `installRecords` spliced in as raw text.
+    const RESERVED_ROW = wrap(
+      hostIndex({ installRecords: '__RAW_RECORDS__', plugins: [] }),
+      1,
+    )
+      .replace('"__RAW_RECORDS__"', `{"__proto__":${rec('1.0.0')},"constructor":${rec('2.0.0')},"toString":${rec('3.0.0')}}`)
+      .replace('"plugins":[]', `"plugins":[${plug('__proto__')},${plug('constructor')},${plug('toString')}]`);
 
     it('__proto__/constructor/toString records round-trip as own enumerable keys without touching the prototype', () => {
       writeMigratedRaw(RESERVED_ROW);
