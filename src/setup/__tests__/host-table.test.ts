@@ -30,11 +30,19 @@ describe('host table', () => {
     expect(presentUnwired(table)).toHaveLength(0);
   });
 
+  function fakeOpenClawBin(h: string): void {
+    const binDir = join(h, '.npm-global', 'bin');
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, 'openclaw'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  }
+
   it('sees Hermes present but not wired, and OpenClaw wired from a plugin dir', () => {
     const h = home();
     mkdirSync(join(h, '.hermes'), { recursive: true });
     writeFileSync(join(h, '.hermes', 'config.yaml'), 'model: test\n');
     mkdirSync(join(h, '.openclaw', 'extensions', 'shieldcortex-realtime'), { recursive: true });
+    writeFileSync(join(h, '.openclaw', 'openclaw.json'), '{}\n');
+    fakeOpenClawBin(h);
     const table = scanHostTable(h);
     const hermes = table.rows.find((r) => r.id === 'hermes')!;
     const oc = table.rows.find((r) => r.id === 'openclaw')!;
@@ -110,5 +118,44 @@ describe('host table', () => {
     mkdirSync(join(h, '.hermes', 'ekho-state'), { recursive: true });
     expect(scanHostTable(h).rows.find((r) => r.id === 'hermes')).toMatchObject({ present: false, wired: false });
     expect(presentUnwired(scanHostTable(h)).map((r) => r.id)).not.toContain('hermes');
+  });
+
+  it('does not treat leftover ~/.openclaw without a binary as OpenClaw present', () => {
+    const h = home();
+    const prevPath = process.env.PATH;
+    process.env.PATH = '/nonexistent-sc-openclaw-path';
+    try {
+      mkdirSync(join(h, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
+      writeFileSync(join(h, '.openclaw', 'openclaw.json'), '{"plugins":{"entries":{}}}\n');
+      const oc = scanHostTable(h).rows.find((r) => r.id === 'openclaw')!;
+      expect(oc).toMatchObject({ present: false, wired: false });
+      const text = formatHostTable(scanHostTable(h), '5.0.5').join('\n');
+      expect(text).not.toMatch(/openclaw install/i);
+      expect(presentUnwired(scanHostTable(h)).map((r) => r.id)).not.toContain('openclaw');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  });
+
+  it('does not treat leftover cortex-memory hook as OpenClaw wired', () => {
+    const h = home();
+    mkdirSync(join(h, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
+    writeFileSync(join(h, '.openclaw', 'openclaw.json'), '{"plugins":{"entries":{}}}\n');
+    fakeOpenClawBin(h);
+    const oc = scanHostTable(h).rows.find((r) => r.id === 'openclaw')!;
+    expect(oc).toMatchObject({ present: true, wired: false });
+    expect(presentUnwired(scanHostTable(h)).map((r) => r.id)).toContain('openclaw');
+  });
+
+  it('wires OpenClaw from shieldcortex-realtime in openclaw.json, not from cortex-memory', () => {
+    const h = home();
+    mkdirSync(join(h, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
+    writeFileSync(
+      join(h, '.openclaw', 'openclaw.json'),
+      '{"plugins":{"entries":{"shieldcortex-realtime":{"enabled":true}}}}\n',
+    );
+    fakeOpenClawBin(h);
+    expect(scanHostTable(h).rows.find((r) => r.id === 'openclaw')).toMatchObject({ present: true, wired: true });
+    expect(presentUnwired(scanHostTable(h)).map((r) => r.id)).not.toContain('openclaw');
   });
 });

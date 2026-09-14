@@ -1,12 +1,15 @@
 /**
  * One host table for setup, update, uninstall, and doctor.
  *
- * Presence is a home-dir probe. Wired is an artefact probe. Bound vs
- * memory-only is a product fact, not a live Guard measurement.
+ * Presence is a home-dir probe, except OpenClaw also requires a real
+ * `openclaw` binary — leftover ~/.openclaw after migrating off OpenClaw
+ * is not an install. Wired is an artefact probe. Bound vs memory-only
+ * is a product fact, not a live Guard measurement.
  *
  * Never enables Action Guard. Never grants conversation access. Never
  * invents an OpenClaw plugin entry. Never imports native memory.
  */
+import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -126,13 +129,36 @@ function claudeWired(home: string): boolean {
   });
 }
 
+/**
+ * Same candidate set as resolveOpenClawBinary, kept local so doctor table
+ * scan does not load the OpenClaw installer. A leftover ~/.openclaw after
+ * migrating to Hermes is not OpenClaw — TARS has the dir and no binary.
+ */
+function openclawBinaryPresent(home: string): boolean {
+  const candidates = [
+    path.join(home, '.npm-global', 'bin', 'openclaw'),
+    '/usr/local/bin/openclaw',
+    '/opt/homebrew/bin/openclaw',
+    path.join(home, '.local', 'bin', 'openclaw'),
+  ];
+  if (candidates.some(dirExists)) return true;
+  try {
+    const found = execSync('which openclaw', { encoding: 'utf8', timeout: 5000 }).trim();
+    return Boolean(found && dirExists(found));
+  } catch {
+    return false;
+  }
+}
+
 function openclawPresent(home: string): boolean {
-  return dirExists(openclawHome(home));
+  const oc = openclawHome(home);
+  if (!dirExists(path.join(oc, 'openclaw.json'))) return false;
+  return openclawBinaryPresent(home);
 }
 
 function openclawWired(home: string): boolean {
   const oc = openclawHome(home);
-  if (dirExists(path.join(oc, 'hooks', 'cortex-memory'))) return true;
+  // cortex-memory is a leftover capture hook, not the bound tool-gate plugin.
   if (dirExists(path.join(oc, 'extensions', 'shieldcortex-realtime'))) return true;
   const cfg = readText(path.join(oc, 'openclaw.json'));
   return /shieldcortex-realtime/.test(cfg);
