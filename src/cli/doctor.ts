@@ -1376,7 +1376,14 @@ export function runMemoryStatsCheck(dbPath: string): CheckResult {
         ? `${total} total (${stm} STM, ${ltm} LTM) — ${warnings.join('; ')}`
         : `${total} total (${stm} STM, ${ltm} LTM)`;
 
-      return { label: 'Memories', status, message };
+      return {
+        label: 'Memories',
+        status,
+        message,
+        ...(status === 'warn'
+          ? { fix: 'Housekeeping. STM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the worker does it. No action needed unless recall feels stale.' }
+          : {}),
+      };
     } finally {
       db.close();
     }
@@ -6144,18 +6151,13 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         fix: 'If that was not intentional, set plugins.entries["shieldcortex-realtime"].enabled = true in ~/.openclaw/openclaw.json and restart the gateway — the package is already installed, nothing needs reinstalling. To make a disabled host fail a pipeline, run `shieldcortex doctor --strict` (⚠️ becomes exit 1); plain `doctor` exits 0 on a deliberate disable by design.',
       };
     case 'index-unreadable':
-      // DIAGNOSTIC-UNAVAILABLE, not a security fail-open: a broken better-sqlite3
-      // binding, a locked DB, or a pre-2026.6.1 OpenClaw with no
-      // installed_plugin_index table all make the roster unreadable. We CANNOT
-      // confirm the plugin is loaded — but reporting "UNPROTECTED" here would be a
-      // false alarm on a healthy box whose only fault is the DB engine. Warn and
-      // point at repair (whose pass-1 rebuilds the binding), never fail. (#74 finding 2)
+      // DIAGNOSTIC-UNAVAILABLE, not a security fail-open.
       return {
         label,
         status: 'warn',
         message:
           'cannot read OpenClaw\'s plugin roster (SQLite index unreadable — broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw) — cannot confirm the realtime plugin is loaded; NOT necessarily unprotected',
-        fix,
+        fix: 'Cannot read OpenClaw\'s plugin roster file. Not unprotected if the plugin is already loaded. Do not run repair from this warning.',
       };
     case 'load-unproven':
       // #142: the boot roster snapshot races plugin registration, and a

@@ -83,8 +83,7 @@ export const DUAL_LEGACY_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 
 const RESIDUAL_DOC = 'docs/design/2026-08-22-memory-sota-track-a-residual.md';
 const DUAL_LEGACY_FIX =
-  'Time-box dual_legacy: land the host contract and run `shieldcortex memories import-native` while native SoT is still growing. '
-  + 'Do not flip memory.plane to import_only until that growth has stopped — dual_legacy is a migration escape, not steady state';
+  'Native memory is still the brain. Expected on dual_legacy. Do not run memories import-native from this warning. dual_legacy is a migration escape, not a tidy-up.';
 const NATIVE_SOT_FIX =
   'Stop native MEMORY.md / memory-store growth as the agent brain — import it through the defended path '
   + `(\`shieldcortex memories import-native\`) or archive it. Flipping memory.plane does not stop native writes (${RESIDUAL_DOC})`;

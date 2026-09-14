@@ -243,7 +243,10 @@ describe('formatDoctorReport — Edith case', () => {
     ).join('\n');
     expect(text).not.toMatch(/\$ shieldcortex memories import-native/);
     expect(text).not.toMatch(/\$ shieldcortex repair/);
+    expect(text).not.toMatch(/no single copy-paste command/);
     expect(text).toMatch(/Honesty warnings are not unprotected/);
+    expect(text).toMatch(/Native memory is still the brain/);
+    expect(text).toMatch(/Do not run repair from this warning/);
   });
 
   it('warn-only NEXT does not print $ repair or $ import-native', () => {
@@ -266,6 +269,38 @@ describe('formatDoctorReport — Edith case', () => {
       { width: 80, color: false, nextCommand: 'shieldcortex setup' },
     ).join('\n');
     expect(setup).toMatch(/\$ shieldcortex setup/);
+  });
+
+  it('Jarvis-class honesty warns print a next step, not a shrug', () => {
+    const text = formatDoctorReport(
+      [
+        {
+          label: 'Memories',
+          status: 'warn',
+          message: '432 total (99 STM, 331 LTM) — 99/100 STM — consolidation needed',
+          fix: 'Housekeeping. STM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the worker does it. No action needed unless recall feels stale.',
+        },
+        {
+          label: 'Disk',
+          status: 'warn',
+          message: '84.3 MB / 100 MB limit — approaching limit (DB 47.7 MB · logs 35.0 MB)',
+          fix: '35.0 MB is audit/log files — safe to rotate or clear under ~/.shieldcortex/{logs,audit}/.',
+        },
+        {
+          label: 'Action Guard notify',
+          status: 'warn',
+          message: 'Action Guard signed config says Enforce, but the OpenClaw plugin is off, notify.openclaw only',
+          fix: 'Do not add a webhook and do not enable Action Guard from this line.',
+        },
+      ],
+      { width: 80, color: false },
+    ).join('\n');
+    expect(text).not.toMatch(/no single copy-paste command/);
+    expect(text).toMatch(/\$ shieldcortex consolidate/);
+    expect(text).toMatch(/safe to rotate or clear/);
+    expect(text).toMatch(/Do not add a webhook/);
+    expect(text).not.toMatch(/\$ shieldcortex memories/);
+    expect(text).not.toMatch(/\$ shieldcortex repair/);
   });
 
   it('failures section precedes warnings', () => {
