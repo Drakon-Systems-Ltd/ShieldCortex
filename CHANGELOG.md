@@ -12,7 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Host table no longer treats a leftover `~/.hermes` directory (for example `ekho-state` with no Hermes config) as a present Hermes install. Doctor therefore does not print `shieldcortex hermes install` on boxes that do not run Hermes.
-- Doctor honesty warnings no longer print `$ shieldcortex memories import-native` or `$ shieldcortex repair`. Those stay for real failures. Warn-only NEXT is filtered the same way. Honesty warns print a next step or “no action needed” instead of `(no single copy-paste command)`. Guard stays off.
+- Doctor honesty warnings no longer print `$ shieldcortex memories import-native` or `$ shieldcortex repair`. Those stay for real failures. Warn-only NEXT is filtered the same way. Honesty warns print a next step or “no action needed” instead of `(no single copy-paste command)`. Guard-off NOTIFY no longer prints `$ --action-guard-notify-webhook`. Guard stays off.
 
 ## [5.0.5] - 2026-09-13
 

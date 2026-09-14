@@ -202,7 +202,7 @@ function unique(xs: string[]): string[] {
 
 /** Honesty-warn `$` must not prescribe these. Fail rows may still print them. */
 export function isHonestyForbiddenCommand(cmd: string): boolean {
-  return /action-guard-enable|action-guard-enforce|allow-conversation-access|import-native|shieldcortex repair\b/i.test(cmd);
+  return /action-guard-enable|action-guard-enforce|action-guard-notify-webhook|allow-conversation-access|import-native|shieldcortex repair\b/i.test(cmd);
 }
 
 /** Collapse whitespace and strip backticks — never ellipsizes. */
@@ -299,7 +299,7 @@ export function honestyGuidance(g: {
   if (/index unreadable|cannot read openclaw|plugin roster|sqlite index unreadable/.test(blob)) {
     return "Cannot read OpenClaw's plugin roster file. Not unprotected if the plugin is already loaded. Do not run repair from this warning.";
   }
-  if (/webhook|notify\.openclaw|denial-capable|notify\.enabled/.test(blob)) {
+  if (/webhook|notify\.openclaw|denial-capable|notify\.enabled|action-guard-notify/.test(blob)) {
     return 'Guard is off or the plugin is off. Headless denials staying local is expected. Do not add a webhook and do not enable Action Guard from this warning.';
   }
   if (g.fixNote && !isHonestyForbiddenCommand(g.fixNote)) {

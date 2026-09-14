@@ -303,6 +303,20 @@ describe('formatDoctorReport — Edith case', () => {
     expect(text).not.toMatch(/\$ shieldcortex repair/);
   });
 
+  it('warn-only NOTIFY does not print $ webhook', () => {
+    const text = formatDoctorReport(
+      [{
+        label: 'Action Guard notify',
+        status: 'warn',
+        message: 'Action Guard is disabled and, when re-enabled, would run with no denial-capable notify sink',
+        fix: 'Run `shieldcortex config --action-guard-notify-webhook <https-url>` so denials reach a human.',
+      }],
+      { width: 80, color: false },
+    ).join('\n');
+    expect(text).not.toMatch(/\$ shieldcortex config --action-guard-notify-webhook/);
+    expect(text).toMatch(/Do not add a webhook/);
+  });
+
   it('failures section precedes warnings', () => {
     const lines = formatDoctorReport(
       [

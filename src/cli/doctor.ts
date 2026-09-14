@@ -3040,7 +3040,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
             : `${prefix} no denial-capable notify sink (actionGuard.notify.webhookUrl unset` +
               `${notifyOn ? '' : ', notify.enabled is not true'}) — unattended denials stay in the ` +
               `audit log and session-guard index only. The #242 cron incidents were this shape.`,
-          fix: pluginOff ? pluginOffFix : webhookFix,
+          fix: (pluginOff || !armed) ? pluginOffFix : webhookFix,
         });
       }
 
