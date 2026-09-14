@@ -200,6 +200,11 @@ function unique(xs: string[]): string[] {
   return out;
 }
 
+/** Honesty-warn `$` must not prescribe these. Fail rows may still print them. */
+export function isHonestyForbiddenCommand(cmd: string): boolean {
+  return /action-guard-enable|action-guard-enforce|allow-conversation-access|import-native|shieldcortex repair\b/i.test(cmd);
+}
+
 /** Collapse whitespace and strip backticks — never ellipsizes. */
 export function cleanWhy(message: string): string {
   return message
@@ -366,7 +371,7 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
   } else {
     const cmds = g.status === 'warn'
-      ? g.fixCommands.filter((c) => !/action-guard-enable|action-guard-enforce|allow-conversation-access|import-native|shieldcortex repair\b/i.test(c))
+      ? g.fixCommands.filter((c) => !isHonestyForbiddenCommand(c))
       : g.fixCommands;
     if (cmds.length === 0) {
       lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
@@ -500,9 +505,12 @@ export function formatDoctorReport(
   }
 
   if (opts.nextCommand) {
-    lines.push(`${style.bold}NEXT${style.reset}`);
-    lines.push(`$ ${opts.nextCommand}`);
-    lines.push('');
+    const warnOnly = fails.length === 0 && warns.length > 0;
+    if (!(warnOnly && isHonestyForbiddenCommand(opts.nextCommand))) {
+      lines.push(`${style.bold}NEXT${style.reset}`);
+      lines.push(`$ ${opts.nextCommand}`);
+      lines.push('');
+    }
   }
 
   // Drop trailing blank

@@ -246,6 +246,28 @@ describe('formatDoctorReport — Edith case', () => {
     expect(text).toMatch(/Honesty warnings are not unprotected/);
   });
 
+  it('warn-only NEXT does not print $ repair or $ import-native', () => {
+    const repair = formatDoctorReport(
+      [{ label: 'OpenClaw plugin loaded', status: 'warn', message: 'roster unread' }],
+      { width: 80, color: false, nextCommand: 'shieldcortex repair' },
+    ).join('\n');
+    expect(repair).not.toMatch(/\$ shieldcortex repair/);
+    expect(repair).not.toMatch(/^NEXT$/m);
+
+    const native = formatDoctorReport(
+      [{ label: 'Memory plane', status: 'warn', message: 'dual_legacy' }],
+      { width: 80, color: false, nextCommand: 'shieldcortex memories import-native' },
+    ).join('\n');
+    expect(native).not.toMatch(/\$ shieldcortex memories import-native/);
+    expect(native).not.toMatch(/^NEXT$/m);
+
+    const setup = formatDoctorReport(
+      [{ label: 'NOTIFY', status: 'warn', message: 'plugin off' }],
+      { width: 80, color: false, nextCommand: 'shieldcortex setup' },
+    ).join('\n');
+    expect(setup).toMatch(/\$ shieldcortex setup/);
+  });
+
   it('failures section precedes warnings', () => {
     const lines = formatDoctorReport(
       [
