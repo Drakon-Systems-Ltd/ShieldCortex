@@ -223,6 +223,29 @@ describe('formatDoctorReport — Edith case', () => {
     expect(fail).toMatch(/\$ shieldcortex repair/);
   });
 
+  it('honesty warns do not print $ import-native or $ repair', () => {
+    const text = formatDoctorReport(
+      [
+        {
+          label: 'Memory plane (dual-plane drift)',
+          status: 'warn',
+          message: 'dual_legacy dual-plane drift',
+          fix: 'Run `shieldcortex memories import-native`',
+        },
+        {
+          label: 'OpenClaw plugin loaded',
+          status: 'warn',
+          message: 'cannot read OpenClaw plugin roster',
+          fix: 'Run `shieldcortex repair`',
+        },
+      ],
+      { width: 80, color: false },
+    ).join('\n');
+    expect(text).not.toMatch(/\$ shieldcortex memories import-native/);
+    expect(text).not.toMatch(/\$ shieldcortex repair/);
+    expect(text).toMatch(/Honesty warnings are not unprotected/);
+  });
+
   it('failures section precedes warnings', () => {
     const lines = formatDoctorReport(
       [

@@ -139,7 +139,15 @@ function openclawWired(home: string): boolean {
 }
 
 function hermesPresent(home: string): boolean {
-  return dirExists(path.join(home, '.hermes'));
+  const root = path.join(home, '.hermes');
+  if (!dirExists(root)) return false;
+  // A leftover ~/.hermes/ekho-state dir is not Hermes. Require a real
+  // agent home (config, profiles, or SOUL.md). Jarvis 5.0.5 false-presented
+  // from ekho-state alone with no hermes binary.
+  return dirExists(path.join(root, 'config.yaml'))
+    || dirExists(path.join(root, 'config.yml'))
+    || dirExists(path.join(root, 'profiles'))
+    || dirExists(path.join(root, 'SOUL.md'));
 }
 
 function hermesWired(home: string): boolean {

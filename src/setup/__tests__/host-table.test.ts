@@ -33,6 +33,7 @@ describe('host table', () => {
   it('sees Hermes present but not wired, and OpenClaw wired from a plugin dir', () => {
     const h = home();
     mkdirSync(join(h, '.hermes'), { recursive: true });
+    writeFileSync(join(h, '.hermes', 'config.yaml'), 'model: test\n');
     mkdirSync(join(h, '.openclaw', 'extensions', 'shieldcortex-realtime'), { recursive: true });
     const table = scanHostTable(h);
     const hermes = table.rows.find((r) => r.id === 'hermes')!;
@@ -59,6 +60,7 @@ describe('host table', () => {
   it('repair brief names only the jobs and forbids Guard / conversation / import', () => {
     const h = home();
     mkdirSync(join(h, '.hermes'), { recursive: true });
+    writeFileSync(join(h, '.hermes', 'config.yaml'), 'model: test\n');
     const jobs = repairJobsFor(scanHostTable(h));
     expect(jobs).toEqual(['wire-hermes']);
     const dest = join(h, '.shieldcortex', 'repair-brief.md');
@@ -101,5 +103,12 @@ describe('host table', () => {
       }),
     );
     expect(scanHostTable(h).rows.find((r) => r.id === 'claude')).toMatchObject({ present: true, wired: false });
+  });
+
+  it('does not treat leftover ~/.hermes/ekho-state as Hermes present', () => {
+    const h = home();
+    mkdirSync(join(h, '.hermes', 'ekho-state'), { recursive: true });
+    expect(scanHostTable(h).rows.find((r) => r.id === 'hermes')).toMatchObject({ present: false, wired: false });
+    expect(presentUnwired(scanHostTable(h)).map((r) => r.id)).not.toContain('hermes');
   });
 });

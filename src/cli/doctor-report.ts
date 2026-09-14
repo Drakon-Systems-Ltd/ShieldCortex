@@ -366,7 +366,7 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
   } else {
     const cmds = g.status === 'warn'
-      ? g.fixCommands.filter((c) => !/action-guard-enable|action-guard-enforce|allow-conversation-access/i.test(c))
+      ? g.fixCommands.filter((c) => !/action-guard-enable|action-guard-enforce|allow-conversation-access|import-native|shieldcortex repair\b/i.test(c))
       : g.fixCommands;
     if (cmds.length === 0) {
       lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
