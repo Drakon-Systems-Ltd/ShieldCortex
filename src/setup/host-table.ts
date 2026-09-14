@@ -34,6 +34,10 @@ export interface HostTable {
   rows: HostRow[];
 }
 
+export interface HostTableDeps {
+  openclawBinaryPresent?: (home: string) => boolean;
+}
+
 function labelFor(id: HostId): string {
   switch (id) {
     case 'claude': return 'Claude Code';
@@ -156,25 +160,76 @@ function openclawBinaryPresent(home: string): boolean {
   ];
   if (candidates.some(dirExists)) return true;
   try {
-    const found = execSync('which openclaw', { encoding: 'utf8', timeout: 5000 }).trim();
+    const found = execSync('which openclaw', {
+      encoding: 'utf8',
+      timeout: 5000,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
     return Boolean(found && dirExists(found));
   } catch {
     return false;
   }
 }
 
-function openclawPresent(home: string): boolean {
+function openclawPresent(home: string, deps: HostTableDeps): boolean {
   const oc = openclawHome(home);
   if (!dirExists(path.join(oc, 'openclaw.json'))) return false;
-  return openclawBinaryPresent(openclawOperatorHome(home));
+  const probe = deps.openclawBinaryPresent ?? openclawBinaryPresent;
+  return probe(openclawOperatorHome(home));
+}
+
+const OPENCLAW_PLUGIN_ID = 'shieldcortex-realtime';
+
+function openclawPluginEnabled(config: unknown): boolean {
+  if (!config || typeof config !== 'object') return false;
+  const plugins = (config as { plugins?: unknown }).plugins;
+  if (!plugins || typeof plugins !== 'object') return false;
+  const entries = (plugins as { entries?: unknown }).entries;
+  const allow = (plugins as { allow?: unknown }).allow;
+  if (!entries || typeof entries !== 'object' || !Array.isArray(allow)) return false;
+  const entry = (entries as Record<string, unknown>)[OPENCLAW_PLUGIN_ID];
+  return Boolean(
+    entry
+    && typeof entry === 'object'
+    && (entry as { enabled?: unknown }).enabled === true
+    && allow.some((id) => id === OPENCLAW_PLUGIN_ID),
+  );
+}
+
+function openclawPluginArtifactPresent(oc: string): boolean {
+  const local = path.join(oc, 'extensions', OPENCLAW_PLUGIN_ID);
+  if (
+    dirExists(path.join(local, 'index.js'))
+    && dirExists(path.join(local, 'openclaw.plugin.json'))
+  ) return true;
+
+  const projects = path.join(oc, 'npm', 'projects');
+  try {
+    return fs.readdirSync(projects).some((project) => dirExists(path.join(
+      projects,
+      project,
+      'node_modules',
+      '@drakon-systems',
+      OPENCLAW_PLUGIN_ID,
+      'package.json',
+    )));
+  } catch {
+    return false;
+  }
 }
 
 function openclawWired(home: string): boolean {
   const oc = openclawHome(home);
-  // cortex-memory is a leftover capture hook, not the bound tool-gate plugin.
-  if (dirExists(path.join(oc, 'extensions', 'shieldcortex-realtime'))) return true;
-  const cfg = readText(path.join(oc, 'openclaw.json'));
-  return /shieldcortex-realtime/.test(cfg);
+  let config: unknown;
+  try {
+    config = JSON.parse(readText(path.join(oc, 'openclaw.json')));
+  } catch {
+    return false;
+  }
+  // cortex-memory is a capture hook, not the tool gate. Require OpenClaw's
+  // explicit enable+allow contract and plugin bytes it can actually resolve.
+  return openclawPluginEnabled(config) && openclawPluginArtifactPresent(oc);
 }
 
 function hermesPresent(home: string): boolean {
@@ -239,10 +294,10 @@ function copilotWired(home: string): boolean {
   });
 }
 
-function row(id: HostId, home: string): HostRow {
+function row(id: HostId, home: string, deps: HostTableDeps): HostRow {
   const present =
     id === 'claude' ? claudePresent(home) :
-    id === 'openclaw' ? openclawPresent(home) :
+    id === 'openclaw' ? openclawPresent(home, deps) :
     id === 'hermes' ? hermesPresent(home) :
     id === 'codex' ? codexPresent(home) :
     copilotPresent(home);
@@ -265,9 +320,9 @@ function row(id: HostId, home: string): HostRow {
 
 export const HOST_IDS: readonly HostId[] = ['claude', 'openclaw', 'hermes', 'codex', 'copilot'];
 
-export function scanHostTable(homeArg?: string): HostTable {
+export function scanHostTable(homeArg?: string, deps: HostTableDeps = {}): HostTable {
   const home = resolveTableHome(homeArg);
-  return { home, rows: HOST_IDS.map((id) => row(id, home)) };
+  return { home, rows: HOST_IDS.map((id) => row(id, home, deps)) };
 }
 
 export function presentUnwired(table: HostTable): HostRow[] {
