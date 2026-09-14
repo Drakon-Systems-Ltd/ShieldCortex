@@ -223,6 +223,100 @@ describe('formatDoctorReport — Edith case', () => {
     expect(fail).toMatch(/\$ shieldcortex repair/);
   });
 
+  it('honesty warns do not print $ import-native or $ repair', () => {
+    const text = formatDoctorReport(
+      [
+        {
+          label: 'Memory plane (dual-plane drift)',
+          status: 'warn',
+          message: 'dual_legacy dual-plane drift',
+          fix: 'Run `shieldcortex memories import-native`',
+        },
+        {
+          label: 'OpenClaw plugin loaded',
+          status: 'warn',
+          message: 'cannot read OpenClaw plugin roster',
+          fix: 'Run `shieldcortex repair`',
+        },
+      ],
+      { width: 80, color: false },
+    ).join('\n');
+    expect(text).not.toMatch(/\$ shieldcortex memories import-native/);
+    expect(text).not.toMatch(/\$ shieldcortex repair/);
+    expect(text).not.toMatch(/no single copy-paste command/);
+    expect(text).toMatch(/Honesty warnings are not unprotected/);
+    expect(text).toMatch(/Native memory is still the brain/);
+    expect(text).toMatch(/Do not run repair from this warning/);
+  });
+
+  it('warn-only NEXT does not print $ repair or $ import-native', () => {
+    const repair = formatDoctorReport(
+      [{ label: 'OpenClaw plugin loaded', status: 'warn', message: 'roster unread' }],
+      { width: 80, color: false, nextCommand: 'shieldcortex repair' },
+    ).join('\n');
+    expect(repair).not.toMatch(/\$ shieldcortex repair/);
+    expect(repair).not.toMatch(/^NEXT$/m);
+
+    const native = formatDoctorReport(
+      [{ label: 'Memory plane', status: 'warn', message: 'dual_legacy' }],
+      { width: 80, color: false, nextCommand: 'shieldcortex memories import-native' },
+    ).join('\n');
+    expect(native).not.toMatch(/\$ shieldcortex memories import-native/);
+    expect(native).not.toMatch(/^NEXT$/m);
+
+    const setup = formatDoctorReport(
+      [{ label: 'NOTIFY', status: 'warn', message: 'plugin off' }],
+      { width: 80, color: false, nextCommand: 'shieldcortex setup' },
+    ).join('\n');
+    expect(setup).toMatch(/\$ shieldcortex setup/);
+  });
+
+  it('Jarvis-class honesty warns print a next step, not a shrug', () => {
+    const text = formatDoctorReport(
+      [
+        {
+          label: 'Memories',
+          status: 'warn',
+          message: '432 total (99 STM, 331 LTM) — 99/100 STM — consolidation needed',
+          fix: 'Housekeeping. STM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the worker does it. No action needed unless recall feels stale.',
+        },
+        {
+          label: 'Disk',
+          status: 'warn',
+          message: '84.3 MB / 100 MB limit — approaching limit (DB 47.7 MB · logs 35.0 MB)',
+          fix: '35.0 MB is audit/log files — safe to rotate or clear under ~/.shieldcortex/{logs,audit}/.',
+        },
+        {
+          label: 'Action Guard notify',
+          status: 'warn',
+          message: 'Action Guard signed config says Enforce, but the OpenClaw plugin is off, notify.openclaw only',
+          fix: 'Do not add a webhook and do not enable Action Guard from this line.',
+        },
+      ],
+      { width: 80, color: false },
+    ).join('\n');
+    expect(text).not.toMatch(/no single copy-paste command/);
+    expect(text).toMatch(/\$ shieldcortex consolidate/);
+    expect(text).toMatch(/safe to rotate or clear/);
+    expect(text).toMatch(/Do not add a webhook/);
+    expect(text).not.toMatch(/\$ shieldcortex memories/);
+    expect(text).not.toMatch(/\$ shieldcortex repair/);
+  });
+
+  it('warn-only NOTIFY does not print $ webhook', () => {
+    const text = formatDoctorReport(
+      [{
+        label: 'Action Guard notify',
+        status: 'warn',
+        message: 'Action Guard is disabled and, when re-enabled, would run with no denial-capable notify sink',
+        fix: 'Run `shieldcortex config --action-guard-notify-webhook <https-url>` so denials reach a human.',
+      }],
+      { width: 80, color: false },
+    ).join('\n');
+    expect(text).not.toMatch(/\$ shieldcortex config --action-guard-notify-webhook/);
+    expect(text).toMatch(/Do not add a webhook/);
+  });
+
   it('failures section precedes warnings', () => {
     const lines = formatDoctorReport(
       [

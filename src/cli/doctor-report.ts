@@ -200,6 +200,11 @@ function unique(xs: string[]): string[] {
   return out;
 }
 
+/** Honesty-warn `$` must not prescribe these. Fail rows may still print them. */
+export function isHonestyForbiddenCommand(cmd: string): boolean {
+  return /action-guard-enable|action-guard-enforce|action-guard-notify-webhook|allow-conversation-access|import-native|shieldcortex repair\b/i.test(cmd);
+}
+
 /** Collapse whitespace and strip backticks — never ellipsizes. */
 export function cleanWhy(message: string): string {
   return message
@@ -271,8 +276,36 @@ interface ThemeGroup {
   what: string;
   why: string;
   fixCommands: string[];
+  /** Original English `fix` — printed as a note when no safe `$` remains. */
+  fixNote: string;
   count: number;
   labels: string[];
+}
+
+/** Plain-English next step when a warn has no safe copy-paste command. */
+export function honestyGuidance(g: {
+  theme: string;
+  what: string;
+  why: string;
+  fixNote: string;
+}): string {
+  const blob = `${g.theme} ${g.what} ${g.why} ${g.fixNote}`.toLowerCase();
+  if (g.theme === 'SCAN' || /conversation scanning/.test(blob)) {
+    return '';
+  }
+  if (/import-native|dual.plane|dual_legacy|native agent sot|native memory bus/.test(blob)) {
+    return 'Native memory is still the brain. Expected on dual_legacy. Do not run memories import-native from this warning.';
+  }
+  if (/index unreadable|cannot read openclaw|plugin roster|sqlite index unreadable/.test(blob)) {
+    return "Cannot read OpenClaw's plugin roster file. Not unprotected if the plugin is already loaded. Do not run repair from this warning.";
+  }
+  if (/webhook|notify\.openclaw|denial-capable|notify\.enabled|action-guard-notify/.test(blob)) {
+    return 'Guard is off or the plugin is off. Headless denials staying local is expected. Do not add a webhook and do not enable Action Guard from this warning.';
+  }
+  if (g.fixNote && !isHonestyForbiddenCommand(g.fixNote)) {
+    return cleanWhy(g.fixNote);
+  }
+  return 'No action needed. This is attention, not unprotected.';
 }
 
 function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] {
@@ -283,6 +316,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       what: shortWhat(it),
       why: it.message.replace(/\s+/g, ' ').trim(),
       fixCommands: extractFixCommands(it.fix),
+      fixNote: it.fix ?? '',
       count: 1,
       labels: [it.label],
     }));
@@ -300,6 +334,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
         what: shortWhat(it),
         why: it.message.replace(/\s+/g, ' ').trim(),
         fixCommands: extractFixCommands(it.fix),
+        fixNote: it.fix ?? '',
         count: 1,
         labels: [it.label],
       };
@@ -313,6 +348,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       // Prefer a non-empty fix
       const cmds = extractFixCommands(it.fix);
       for (const c of cmds) if (!existing.fixCommands.includes(c)) existing.fixCommands.push(c);
+      if (!existing.fixNote && it.fix) existing.fixNote = it.fix;
       // Prefer the dedicated conversation-scanning label over plugin-loaded note
       if (/conversation scanning/i.test(it.label) && !/conversation scanning/i.test(existing.what)) {
         existing.what = shortWhat(it);
@@ -361,24 +397,25 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
   // Why: full text, wrapped. Ellipsis here is what made full-screen doctor look "cut off".
   const why = cleanWhy(g.why);
   lines.push(...wrapLine(why, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
-  // Fix commands — all of them. `$` only on a real binary. English notes stay notes.
-  if (g.fixCommands.length === 0) {
-    lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
-  } else {
-    const cmds = g.status === 'warn'
-      ? g.fixCommands.filter((c) => !/action-guard-enable|action-guard-enforce|allow-conversation-access/i.test(c))
-      : g.fixCommands;
-    if (cmds.length === 0) {
-      lines.push(`${style.dim}    (no single copy-paste command)${style.reset}`);
-    } else {
-      for (const cmd of cmds) {
-        const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
-          || cmd.startsWith('SHIELDCORTEX_');
-        const prefixed = runnable ? `$ ${cmd}` : cmd;
-        for (const wl of wrapLine(prefixed, width, 4, 6)) {
-          lines.push(runnable ? `${style.bold}${wl}${style.reset}` : `${style.dim}${wl}${style.reset}`);
-        }
+  // `$` only on a real, allowed binary. English notes stay notes.
+  const cmds = g.status === 'warn'
+    ? g.fixCommands.filter((c) => !isHonestyForbiddenCommand(c))
+    : g.fixCommands;
+  if (cmds.length > 0) {
+    for (const cmd of cmds) {
+      const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
+        || cmd.startsWith('SHIELDCORTEX_');
+      const prefixed = runnable ? `$ ${cmd}` : cmd;
+      for (const wl of wrapLine(prefixed, width, 4, 6)) {
+        lines.push(runnable ? `${style.bold}${wl}${style.reset}` : `${style.dim}${wl}${style.reset}`);
       }
+    }
+  } else {
+    const guidance = g.status === 'warn'
+      ? honestyGuidance(g)
+      : (g.fixNote ? cleanWhy(g.fixNote) : 'No single copy-paste command — see the why line.');
+    if (guidance) {
+      lines.push(...wrapLine(guidance, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
     }
   }
   if (g.theme === 'SCAN') {
@@ -500,9 +537,12 @@ export function formatDoctorReport(
   }
 
   if (opts.nextCommand) {
-    lines.push(`${style.bold}NEXT${style.reset}`);
-    lines.push(`$ ${opts.nextCommand}`);
-    lines.push('');
+    const warnOnly = fails.length === 0 && warns.length > 0;
+    if (!(warnOnly && isHonestyForbiddenCommand(opts.nextCommand))) {
+      lines.push(`${style.bold}NEXT${style.reset}`);
+      lines.push(`$ ${opts.nextCommand}`);
+      lines.push('');
+    }
   }
 
   // Drop trailing blank

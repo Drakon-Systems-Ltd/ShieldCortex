@@ -213,7 +213,8 @@ describe('#441 plane-remedy commands must not loop WARN -> FAIL -> WARN', () => 
     const failCmds = extractFixCommands(fail.fix);
     expect(warnCmds.join(' ')).not.toMatch(/--memory-plane\s+import_only/);
     expect(failCmds.join(' ')).not.toMatch(/--memory-plane\s+dual_legacy/);
-    expect(warnCmds).toEqual(['shieldcortex memories import-native']);
+    expect(warnCmds).toEqual([]);
     expect(failCmds).toEqual(['shieldcortex memories import-native']);
+    expect(warn.fix).toMatch(/Do not run memories import-native/);
   });
 });

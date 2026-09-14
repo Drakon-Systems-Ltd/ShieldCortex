@@ -206,7 +206,8 @@ describe('doctor — Action Guard notify channel (#242)', () => {
     expect(warn).toBeDefined();
     expect(warn!.status).toBe('warn');
     expect(warn!.message).toMatch(/webhookUrl/i);
-    expect(warn!.fix ?? '').toMatch(/notify/i);
+    expect(warn!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
+    expect(warn!.fix ?? '').toMatch(/do not add a webhook/i);
   });
 
   it('does not warn when a webhook is configured and notify is enabled', async () => {
@@ -436,9 +437,10 @@ describe('doctor — Action Guard notify fix is a signed CLI command (#275)', ()
   };
 
   it('prescribes `shieldcortex config` with a real flag, not bare key paths', async () => {
-    writeConfig({});
+    writeConfig({ actionGuard: { enabled: true, enforce: true, notify: { enabled: true } } });
     const warn = await findNotifyWarn();
     expect(warn).toBeDefined();
+    expect(warn!.status).toBe('fail');
     // #354: webhook is the denial sink; openclaw is not prescribed as the unattended fix.
     expect(warn!.fix).toMatch(/shieldcortex config --action-guard-notify-webhook/);
     // The bare key-path prescription must no longer lead the fix.
@@ -446,14 +448,24 @@ describe('doctor — Action Guard notify fix is a signed CLI command (#275)', ()
   });
 
   it('leads with the runnable command and never recommends hand-editing config.json', async () => {
-    writeConfig({});
+    writeConfig({ actionGuard: { enabled: true, enforce: true, notify: { enabled: true } } });
     const warn = await findNotifyWarn();
     expect(warn).toBeDefined();
+    expect(warn!.status).toBe('fail');
     expect(warn!.fix!.startsWith('Run `shieldcortex config')).toBe(true);
     // If config.json is mentioned at all it must be as a warning against
     // editing it, never as an instruction: no sentence may open with an
     // imperative Edit/Add/Set (the old fix began "Set `actionGuard...`").
     expect(warn!.fix).not.toMatch(/(^|\.\s)(Edit|Add|Set)\b/);
+  });
+
+  it('Guard-off NOTIFY warn does not prescribe a webhook (signed off, plugin unproven)', async () => {
+    writeConfig({ actionGuard: { enabled: false } });
+    const row = await findNotifyWarn();
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('warn');
+    expect(row!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
+    expect(row!.fix ?? '').toMatch(/do not add a webhook/i);
   });
 
   it('openclaw-only CLI enable does NOT clear the unattended-notify warn (#354)', async () => {
