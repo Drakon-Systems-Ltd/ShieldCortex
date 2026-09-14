@@ -12,9 +12,14 @@ import {
 
 describe('host table', () => {
   const homes: string[] = [];
+  const previousHome = process.env.HOME;
+  const previousOpenClawHome = process.env.OPENCLAW_HOME;
   afterEach(() => {
     for (const home of homes) rmSync(home, { recursive: true, force: true });
     homes.length = 0;
+    process.env.HOME = previousHome;
+    if (previousOpenClawHome === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = previousOpenClawHome;
   });
 
   function home(): string {
@@ -157,5 +162,35 @@ describe('host table', () => {
     fakeOpenClawBin(h);
     expect(scanHostTable(h).rows.find((r) => r.id === 'openclaw')).toMatchObject({ present: true, wired: true });
     expect(presentUnwired(scanHostTable(h)).map((r) => r.id)).not.toContain('openclaw');
+  });
+
+  it('uses an absolute OPENCLAW_HOME as the operator home for config and binary probes', () => {
+    const tableHome = home();
+    const openclawHome = home();
+    process.env.OPENCLAW_HOME = openclawHome;
+    mkdirSync(join(openclawHome, '.openclaw', 'extensions', 'shieldcortex-realtime'), { recursive: true });
+    writeFileSync(join(openclawHome, '.openclaw', 'openclaw.json'), '{}\n');
+    fakeOpenClawBin(openclawHome);
+
+    expect(scanHostTable(tableHome).rows.find((r) => r.id === 'openclaw')).toMatchObject({
+      present: true,
+      wired: true,
+    });
+  });
+
+  it('expands ~/… OPENCLAW_HOME once against an absolute HOME', () => {
+    const tableHome = home();
+    const operatorHome = home();
+    const openclawHome = join(operatorHome, 'isolated');
+    process.env.HOME = operatorHome;
+    process.env.OPENCLAW_HOME = '~/isolated';
+    mkdirSync(join(openclawHome, '.openclaw'), { recursive: true });
+    writeFileSync(join(openclawHome, '.openclaw', 'openclaw.json'), '{}\n');
+    fakeOpenClawBin(openclawHome);
+
+    expect(scanHostTable(tableHome).rows.find((r) => r.id === 'openclaw')).toMatchObject({
+      present: true,
+      wired: false,
+    });
   });
 });

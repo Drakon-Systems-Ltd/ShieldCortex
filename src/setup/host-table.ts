@@ -77,10 +77,23 @@ export function resolveTableHome(homeArg?: string): string {
   return os.homedir();
 }
 
+function openclawOperatorHome(home: string): string {
+  const explicit = process.env.OPENCLAW_HOME?.trim();
+  if (explicit) {
+    if (/^~($|[\\/])/.test(explicit)) {
+      const fallback = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || home;
+      if (fallback && path.isAbsolute(fallback)) {
+        return path.resolve(explicit.replace(/^~(?=$|[\\/])/, fallback));
+      }
+    } else if (path.isAbsolute(explicit)) {
+      return path.resolve(explicit);
+    }
+  }
+  return home;
+}
+
 function openclawHome(home: string): string {
-  const raw = process.env.OPENCLAW_HOME;
-  if (raw && raw.trim() && !raw.startsWith('~')) return path.resolve(raw);
-  return path.join(home, '.openclaw');
+  return path.join(openclawOperatorHome(home), '.openclaw');
 }
 
 function dirExists(p: string): boolean {
@@ -153,7 +166,7 @@ function openclawBinaryPresent(home: string): boolean {
 function openclawPresent(home: string): boolean {
   const oc = openclawHome(home);
   if (!dirExists(path.join(oc, 'openclaw.json'))) return false;
-  return openclawBinaryPresent(home);
+  return openclawBinaryPresent(openclawOperatorHome(home));
 }
 
 function openclawWired(home: string): boolean {
