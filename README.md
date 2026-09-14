@@ -17,7 +17,7 @@
   <a href="https://github.com/Drakon-Systems-Ltd/ShieldCortex/stargazers"><img src="https://img.shields.io/github/stars/Drakon-Systems-Ltd/ShieldCortex.svg?style=social" alt="GitHub stars"></a>
 </p>
 
-Your AI agent forgets useful context, stores untrusted context, and then confidently builds on both. ShieldCortex fixes that by giving agents memory you can inspect, review, and defend before it poisons future decisions.
+Your AI agent stores untrusted context and then confidently builds on it. ShieldCortex sits on the door: scan what native memory writes, gate what the agent does, inspect what was stored. It does not replace OpenClaw, Hermes, or Claude memory.
 
 > [!WARNING]
 > **ShieldCortex 5.0 requires Node 22.14+ or Node 24.** Node 20 is no longer supported — `npm install` will refuse. Read [Upgrading to 5.0](docs/UPGRADING-5.md) **before** you update. Action Guard stays off by default; enable it deliberately.
@@ -50,7 +50,7 @@ Memory security is portable. Runtime enforcement is not. `shieldcortex doctor` a
 
 ---
 
-**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing](#-licensing) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Threat Graph](#%EF%B8%8F-threat-graph) · [Environment Firewall](#-environment-firewall) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Proactive Recall](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
+**Contents:** [The Problem](#-the-problem) · [What You Get](#-what-you-get) · [Quick Start](#-quick-start) · [X-Ray Scanner](#-x-ray-scanner) · [Licensing](#-licensing) · [Connect Servers to Cloud](#-connect-servers-to-cloud) · [Ecosystem Quickstarts](#-ecosystem-quickstarts) · [How It Compares](#-how-it-compares) · [Iron Dome](#%EF%B8%8F-iron-dome) · [Threat Graph](#%EF%B8%8F-threat-graph) · [Environment Firewall](#-environment-firewall) · [Dream Mode](#-dream-mode--background-consolidation) · [Cortex](#-cortex--systematic-mistake-learning) · [OpenClaw](#-openclaw-integration) · [Recall (off by default)](#proactive-recall-v470) · [Dashboard](#-dashboard) · [Integrations](#-integrations) · [CLI](#-cli) · [Configuration](#%EF%B8%8F-configuration)
 
 ---
 
@@ -64,7 +64,7 @@ AI agents are stateless. Every session starts from zero. Teams work around this 
 - can I trust where it came from?
 - what happens if someone poisons the memory layer?
 
-ShieldCortex replaces all of that with one install command.
+ShieldCortex does not replace the host's native memory files. It scans writes that go through it, gates tools on bound hosts, and gives you an inspectable store.
 
 ## 🔒 What ShieldCortex Is Best At
 
@@ -79,7 +79,7 @@ The core workflow is:
 
 That is the real product:
 
-**persistent memory for AI agents, with built-in poisoning defence and operator review**
+**a door on the native brain: scan writes, gate tools, inspect stored memory**
 
 <br>
 
@@ -688,25 +688,21 @@ Configure via `~/.shieldcortex/config.json`:
 | Deduplication | None | Novelty gate with configurable similarity threshold |
 | Audit | None | Full forensic log of every operation |
 
-OpenClaw handles agent orchestration. ShieldCortex handles what the agent remembers, why it remembers it, and whether it is safe to keep. Together, you get persistent, inspectable, secure memory without inventing your own memory layer.
+OpenClaw handles agent orchestration and native memory. ShieldCortex scans writes that go through it, gates tools on bound hosts, and gives you an inspectable store. It does not replace MEMORY.md.
 
-### Proactive Recall (v4.7.0)
+### Recall (v4.7.0 hook — off as a product claim)
 
-Every time you type a message, ShieldCortex automatically recalls relevant memories and injects them into the conversation — before the model even starts thinking.
+Automatic inject into every conversation is **off**. Native OpenClaw / Hermes / Claude memory stays the brain. ShieldCortex can search what it captured; it does not own the prompt.
+
+The optional Claude `UserPromptSubmit` / OpenClaw cortex-memory inject path exists in the package. Do not turn it on from this README. Leave it false:
 
 ```bash
-# You type: "fix the auth bug"
-# ShieldCortex automatically injects:
-# 🧠 Recalled from memory:
-# - **API key bcrypt mismatch bug**: Keys created from dashboard had different hash...
-# - **Auth middleware rewrite**: Legal flagged session token storage...
+npx shieldcortex config --proactive-recall false
 ```
 
-- **<100ms** — FTS5 + category boost, no external API calls
-- **Smart skip** — ignores "yes", "do it", and other trivial confirmations
-- **Category boost** — error prompts surface error memories, deploy prompts surface architecture decisions
-- **Works everywhere** — Claude Code (UserPromptSubmit hook) + OpenClaw (cortex-memory hook)
-- **Configurable** — `npx shieldcortex config --proactive-recall false`
+- Search (FTS5) is operator-facing, not a second MemGPT
+- Bound hosts get a **tool gate**, not a replacement MEMORY.md
+- `memory.inject` stays frozen until an explicit operator decision after the effect exam
 
 **New in the local dashboard:** OpenClaw activity is no longer just a background hook. The Capture workflow includes a dedicated session view with:
 
