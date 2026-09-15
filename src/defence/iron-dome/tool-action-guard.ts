@@ -4485,31 +4485,6 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
   return out;
 }
 
-/**
- * #444 -- the surface a shell-grammar disposer should read when folded
- * interpreter source is present. Comment and string-literal CONTENT inside a
- * non-`sh` region is prose to the interpreter; to a shell tokeniser a
- * backtick-quoted `npm i -g openclaw` in a Python docstring is a command
- * substitution. Blank those ranges (length-preserving) so the disposer sees
- * only code. Literals whose own line calls a shell-out sink are KEPT -- that
- * literal is the sink's argument and must still confirm the invocation.
- * Shell regions and an over-cap surface (no regions) are returned unchanged.
- */
-function blankScriptProse(text: string, regions: readonly ScanRegion[]): string {
-  const scriptRegions = regions.filter(r => r.lang !== 'sh');
-  if (scriptRegions.length === 0) return text;
-  const chars = text.split('');
-  for (const r of scriptRegions) {
-    for (const [lo, hi] of scriptDataRanges(text, r)) {
-      const lineStart = Math.max(r.start, text.lastIndexOf('\n', lo) + 1);
-      let lineEnd = text.indexOf('\n', hi);
-      if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
-      if (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang)) continue;
-      for (let k = lo; k < hi; k++) if (chars[k] !== '\n') chars[k] = ' ';
-    }
-  }
-  return chars.join('');
-}
 
 // ── Write-content payload scan (issue #93) ───────────────────────────────────
 
@@ -5178,17 +5153,6 @@ function evaluateToolCallCore(
   // evasion is confirmed rather than slipped.
   if (dangerSignals.includes('git-delete-branch') && !gitDeleteBranchInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'git-delete-branch');
-  }
-  // #444: a global install must be an INVOCATION on the exec surface too, not
-  // vocabulary. #386 gave the write path this disposer; the exec path kept the
-  // raw table match, so `python3 patch.py` whose DOCSTRING says "re-run after
-  // `npm i -g openclaw`" was hard-denied unattended -- the very script that
-  // repairs a broken install. Same disposer function: sink-aware (os.system /
-  // subprocess / child_process still gate), command-position only, recursing
-  // into bash -c / inline programs, fail-closed on eval / $.
-  if (dangerSignals.includes('install-package-global')
-      && !packageInstallGlobalInvoked(blankScriptProse(scanSurface, regions))) {
-    dangerSignals = dangerSignals.filter(sig => sig !== 'install-package-global');
   }
   // Reading the firewall's state changes nothing (issue #193). The rule matched
   // the tool and never the verb, so a status sweep gated as hard as a flush.
