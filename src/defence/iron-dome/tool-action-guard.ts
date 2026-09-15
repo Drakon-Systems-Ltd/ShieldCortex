@@ -2440,16 +2440,25 @@ const EXEC_COMMAND_WORD =
 const SHELL_OUT_SINK =
   /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
 /**
- * #444 -- backtick command execution is a REAL sink only where the language
- * executes it (Ruby / Perl `cmd`). Everywhere else a backtick is Markdown
- * prose in a docstring or comment (`re-run after `npm i -g x``), and treating
- * it as a shell-out sink turned every well-documented repair script into a
- * hard deny. Kept out of SHELL_OUT_SINK so Python/JS/PHP prose never arms it.
+ * #444 -- a bare backtick is a REAL shell-out sink only where the language
+ * executes it: Ruby, Perl, PHP. In Python and JavaScript a backtick is
+ * Markdown prose in a docstring or comment, or an inert template literal, and
+ * treating it as a sink turned every well-documented repair script into a
+ * hard deny. Kept out of SHELL_OUT_SINK so Python/JS prose never arms it.
+ *
+ * JavaScript exception: a TAGGED template runs the tag function, and the
+ * shell-tag libraries (zx / execa / dax `$`, sh, exec, execa) execute their
+ * template as a command. tag-adjoining-backtick is a sink; a bare backtick
+ * is not. The tag must be an identifier / member chain touching the backtick
+ * (no whitespace) so prose with a space before the backtick stays prose.
  */
-const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl']);
+const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php']);
+const JS_SHELL_TAG = /(?:^|[^\w$.])(?:\$|\$\$|sh|exec|execa|execaCommand|spawn|run|shell|cmd|zx)(?:\.\w+)*`/;
 function hasShellOutSink(text: string, lang: ScriptLang): boolean {
   if (SHELL_OUT_SINK.test(text)) return true;
-  return BACKTICK_EXEC_LANGS.has(lang) && text.includes('`');
+  if (BACKTICK_EXEC_LANGS.has(lang)) return text.includes('`');
+  if (lang === 'node') return JS_SHELL_TAG.test(text);
+  return false;
 }
 
 /** How each interpreter language delimits comments and string literals. */

@@ -123,7 +123,39 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
   // Pre-existing folded-file gaps, red on main BEFORE this PR (proved by
   // running this file against origin/main's guard). Tracked separately so
   // this PR stays the docstring fix and nothing else.
-  it.todo('folded Ruby/Perl backtick command runs a global install (sink recognised, disposer cannot resolve)');
+  it.todo('folded Ruby/Perl backtick command runs a global install (hasSink true, but a folded backtick body is payload-tier, not executed)');
   it.todo('folded .py: sink argument on a different line from os.system(');
   it.todo('folded .py: cmd = "..."; os.system(cmd) variable indirection');
+
+  // GPT-6 r2: PHP backtick executes. Inline php -r region gets lang=php.
+  it('still gates a PHP backtick install (inline php -r)', () => {
+    const cmd = `php -r '${bt}${NPM} ${INST} ${G} openclaw${bt};'`;
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+    expect(v.decision).toBe('require_approval');
+  });
+
+  // GPT-6 r2: a TAGGED JS template (zx / execa $) executes; a bare one does not.
+  it('still gates a zx $-tagged template install in a folded .mjs', () => {
+    const body = ["import { $ } from 'zx';", `await $${bt}${NPM} ${INST} ${G} openclaw${bt};`].join(nl);
+    const v = verdictOf('node scripts/boot.mjs', { 'scripts/boot.mjs': body });
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+    expect(v.decision).toBe('require_approval');
+  });
+
+  it('still gates an inline node -e zx $-tagged template', () => {
+    const cmd = `node -e "await $${bt}${NPM} ${INST} ${G} openclaw${bt}"`;
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+  });
+
+  it('an untagged JS template literal that merely names the install stays prose', () => {
+    const body = [`const hint = ${bt}see ${NPM} ${INST} ${G} openclaw${bt};`, 'console.log(hint);'].join(nl);
+    const v = verdictOf('node scripts/notes.mjs', { 'scripts/notes.mjs': body });
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity).not.toBe('dangerous');
+  });
 });
