@@ -278,6 +278,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
 
   test('OpenClaw installed with NO readable cron source is visible and exits 1', async () => {
     mkdirSync(join(dir, '.openclaw'), { recursive: true });
+    writeFileSync(join(dir, '.openclaw', 'openclaw.json'), '{}\n');
 
     const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
     expect(found.sources.openclaw.status).toBe('absent');
@@ -288,6 +289,20 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     expect(code).toBe(1);
     expectLogPath([...logs, ...errs], dbPath);
     expect(`${logs.join('\n')}\n${errs.join('\n')}`).toMatch(/could not look|not readable|incomplete/i);
+  });
+
+  test('a leftover empty ~/.openclaw without openclaw.json is empty-ok, not unverifiable', async () => {
+    mkdirSync(join(dir, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
+
+    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    expect(found.sources.openclaw.status).toBe('absent');
+    expect(found.sources.openclawDb.status).toBe('absent');
+    expect(found.sources.openclawCronUnverifiable).toBe(false);
+
+    const code = await runAllowlistScan([], deps());
+    expect(code).toBe(0);
+    expect(errs).toEqual([]);
+    expect(`${logs.join('\n')}\n${errs.join('\n')}`).not.toMatch(/OpenClaw is installed/i);
   });
 
   test('a host with no ~/.openclaw at all stays empty-ok', async () => {

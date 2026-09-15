@@ -318,26 +318,27 @@ export interface CronSources {
    * is readable — the JSON is gone and the SQLite store is not there either.
    * That is "we could not look", not "no crons": on the host this issue was
    * proven against, exactly this state hid 63 live jobs. Reported visibly and
-   * exits 1. A host with no `~/.openclaw` at all stays empty-ok.
+   * exits 1. A leftover empty `~/.openclaw` (no `openclaw.json`) is not an
+   * install — same class as host-table #496 — and stays empty-ok.
    */
   openclawCronUnverifiable: boolean;
 }
 
-/** Installed-ness, not cron-ness: the directory or its config file. Probed
- *  only to decide whether two absent cron sources are suspicious. */
+/** Installed-ness, not cron-ness: a real `openclaw.json`, not a leftover
+ *  empty `~/.openclaw` after migrating off OpenClaw. Probed only to decide
+ *  whether two absent cron sources are suspicious. Non-ENOENT stat errors
+ *  fail closed as present so an unreadable config cannot look like "no
+ *  OpenClaw here". */
 function openclawHostPresent(home: string): boolean {
-  for (const p of [join(home, '.openclaw'), join(home, '.openclaw', 'openclaw.json')]) {
-    try {
-      statSync(p);
-      return true;
-    } catch (e) {
-      const err = e as NodeJS.ErrnoException;
-      // Something is there that we cannot stat — treat OpenClaw as present so
-      // the pair is reported rather than silently dismissed.
-      if (err && err.code !== 'ENOENT') return true;
-    }
+  const json = join(home, '.openclaw', 'openclaw.json');
+  try {
+    statSync(json);
+    return true;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err && err.code !== 'ENOENT') return true;
+    return false;
   }
-  return false;
 }
 
 function sourcesBroken(sources: CronSources): CronSourceReport[] {
