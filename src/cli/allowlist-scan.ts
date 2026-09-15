@@ -318,27 +318,39 @@ export interface CronSources {
    * is readable — the JSON is gone and the SQLite store is not there either.
    * That is "we could not look", not "no crons": on the host this issue was
    * proven against, exactly this state hid 63 live jobs. Reported visibly and
-   * exits 1. A leftover empty `~/.openclaw` (no `openclaw.json`) is not an
+   * exits 1. A leftover empty `~/.openclaw` (no current/legacy config) is not an
    * install — same class as host-table #496 — and stays empty-ok.
    */
   openclawCronUnverifiable: boolean;
 }
 
-/** Installed-ness, not cron-ness: a real `openclaw.json`, not a leftover
- *  empty `~/.openclaw` after migrating off OpenClaw. Probed only to decide
- *  whether two absent cron sources are suspicious. Non-ENOENT stat errors
- *  fail closed as present so an unreadable config cannot look like "no
- *  OpenClaw here". */
+// Keep in lockstep with doctor's OPENCLAW_LEGACY_CONFIG_FILENAMES. Importing
+// doctor here would drag the full diagnostic/database graph into allowlist scan.
+const OPENCLAW_CONFIG_FILENAMES = ['openclaw.json', 'clawdbot.json', 'moldbot.json', 'moltbot.json'] as const;
+
+/** Installed-ness, not cron-ness: a real current/legacy config (including an
+ *  explicit OPENCLAW_CONFIG_PATH), not a leftover empty `~/.openclaw` after
+ *  migrating off OpenClaw. Probed only to decide whether two absent cron
+ *  sources are suspicious. Non-ENOENT stat errors and relative explicit paths
+ *  fail closed as present so an unreadable/unresolvable config cannot look
+ *  like "no OpenClaw here". */
 function openclawHostPresent(home: string): boolean {
-  const json = join(home, '.openclaw', 'openclaw.json');
-  try {
-    statSync(json);
-    return true;
-  } catch (e) {
-    const err = e as NodeJS.ErrnoException;
-    if (err && err.code !== 'ENOENT') return true;
-    return false;
+  const explicit = process.env.OPENCLAW_CONFIG_PATH?.trim();
+  const candidates = explicit
+    ? [explicit.startsWith('~/') ? join(home, explicit.slice(2)) : explicit]
+    : OPENCLAW_CONFIG_FILENAMES.map((name) => join(home, '.openclaw', name));
+
+  if (explicit && !isAbsolute(candidates[0])) return true;
+  for (const candidate of candidates) {
+    try {
+      statSync(candidate);
+      return true;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      if (err && err.code !== 'ENOENT') return true;
+    }
   }
+  return false;
 }
 
 function sourcesBroken(sources: CronSources): CronSourceReport[] {

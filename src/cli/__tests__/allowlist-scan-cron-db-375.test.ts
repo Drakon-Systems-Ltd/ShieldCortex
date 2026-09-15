@@ -144,6 +144,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
   let stored: unknown[];
   let logs: string[];
   let errs: string[];
+  let previousOpenClawConfigPath: string | undefined;
 
   const deps = (over: Record<string, unknown> = {}) => ({
     home: dir,
@@ -173,6 +174,8 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
   };
 
   beforeEach(() => {
+    previousOpenClawConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+    delete process.env.OPENCLAW_CONFIG_PATH;
     dir = mkdtempSync(join(tmpdir(), 'sc-375-scan-'));
     dbPath = join(dir, '.openclaw', 'state', 'openclaw.sqlite');
     denialsPath = join(dir, '.shieldcortex', 'denials.jsonl');
@@ -182,7 +185,11 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     logs = [];
     errs = [];
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => {
+    if (previousOpenClawConfigPath === undefined) delete process.env.OPENCLAW_CONFIG_PATH;
+    else process.env.OPENCLAW_CONFIG_PATH = previousOpenClawConfigPath;
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   // -- Discovery ------------------------------------------------
 
@@ -289,6 +296,29 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     expect(code).toBe(1);
     expectLogPath([...logs, ...errs], dbPath);
     expect(`${logs.join('\n')}\n${errs.join('\n')}`).toMatch(/could not look|not readable|incomplete/i);
+  });
+
+  test.each(['clawdbot.json', 'moldbot.json', 'moltbot.json'])(
+    'OpenClaw legacy config %s keeps absent cron stores fail-closed',
+    async (filename) => {
+      mkdirSync(join(dir, '.openclaw'), { recursive: true });
+      writeFileSync(join(dir, '.openclaw', filename), '{}\n');
+
+      const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+      expect(found.sources.openclawCronUnverifiable).toBe(true);
+      expect(await runAllowlistScan([], deps())).toBe(1);
+    },
+  );
+
+  test('OPENCLAW_CONFIG_PATH keeps absent cron stores fail-closed', async () => {
+    const configPath = join(dir, 'profiles', 'openclaw.json');
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, '{}\n');
+    process.env.OPENCLAW_CONFIG_PATH = configPath;
+
+    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    expect(found.sources.openclawCronUnverifiable).toBe(true);
+    expect(await runAllowlistScan([], deps())).toBe(1);
   });
 
   test('a leftover empty ~/.openclaw without openclaw.json is empty-ok, not unverifiable', async () => {
