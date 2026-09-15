@@ -2438,7 +2438,28 @@ const EXEC_COMMAND_WORD =
 // executed be dropped. `getattr(`/`__import__` are included because they are the
 // standard ways to reach `os.system` without naming it.
 const SHELL_OUT_SINK =
-  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b|`/;
+  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
+/**
+ * #444 -- a bare backtick is a REAL shell-out sink only where the language
+ * executes it: Ruby, Perl, PHP. In Python and JavaScript a backtick is
+ * Markdown prose in a docstring or comment, or an inert template literal, and
+ * treating it as a sink turned every well-documented repair script into a
+ * hard deny. Kept out of SHELL_OUT_SINK so Python/JS prose never arms it.
+ *
+ * JavaScript exception: a TAGGED template runs the tag function, and the
+ * shell-tag libraries (zx / execa / dax `$`, sh, exec, execa) execute their
+ * template as a command. tag-adjoining-backtick is a sink; a bare backtick
+ * is not. The tag must be an identifier / member chain touching the backtick
+ * (no whitespace) so prose with a space before the backtick stays prose.
+ */
+const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php']);
+const JS_SHELL_TAG = /(?:^|[^\w$.])(?:\$|\$\$|sh|exec|execa|execaCommand|spawn|run|shell|cmd|zx)(?:\.\w+)*`/;
+function hasShellOutSink(text: string, lang: ScriptLang): boolean {
+  if (SHELL_OUT_SINK.test(text)) return true;
+  if (BACKTICK_EXEC_LANGS.has(lang)) return text.includes('`');
+  if (lang === 'node') return JS_SHELL_TAG.test(text);
+  return false;
+}
 
 /** How each interpreter language delimits comments and string literals. */
 interface ScriptLangRules {
@@ -2622,7 +2643,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
       const lineStart = Math.max(r.start, text.lastIndexOf('\n', range[0]) + 1);
       let lineEnd = text.indexOf('\n', range[1]);
       if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
-      (SHELL_OUT_SINK.test(text.slice(lineStart, lineEnd)) ? sinkArgLiterals : scriptLiterals).push(range);
+      (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang) ? sinkArgLiterals : scriptLiterals).push(range);
     }
   }
 
@@ -4036,7 +4057,7 @@ function foldScriptSources(
       start: cursor,
       end: cursor + scan.length,
       lang: next.lang,
-      hasSink: SHELL_OUT_SINK.test(scan),
+      hasSink: hasShellOutSink(scan, next.lang),
       folded: true,
       // #184: path + chain so a match inside this region names its origin.
       sourcePath: next.path,
@@ -4302,7 +4323,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
     if (clean) candidateFiles.push(clean);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: SHELL_OUT_SINK.test(m[3]), folded: false },
+      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
       outFile: clean,
     });
   }
@@ -4352,7 +4373,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
           // output into the shell (`| bash`, `>> ~/.zshrc`). The last is not a
           // property of the body at all, which is exactly why the body-local
           // test missed it.
-          hasSink: SHELL_OUT_SINK.test(w.body)
+          hasSink: hasShellOutSink(w.body, runs[0].lang)
             // A file write matters when what it writes can later RUN — see
             // `fileWriteIsSink`. `writeFileSync('/tmp/report.json', …)` in a
             // probe is data; `'/tmp/g.sh'` or `~/.zshrc` is a command in
@@ -4413,11 +4434,11 @@ function inlineProgramRegions(text: string): ScanRegion[] {
         j++;
       }
       progEnd = Math.min(j, text.length);
-      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: SHELL_OUT_SINK.test(text.slice(progStart + 1, progEnd)), folded: false });
+      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang), folded: false });
     } else {
       const nl = text.indexOf('\n', progStart);
       progEnd = nl < 0 ? text.length : nl;
-      out.push({ start: progStart, end: progEnd, lang, hasSink: SHELL_OUT_SINK.test(text.slice(progStart, progEnd)), folded: false });
+      out.push({ start: progStart, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart, progEnd), lang), folded: false });
     }
     INLINE_PROGRAM_RE.lastIndex = Math.max(progEnd, m.index + m[0].length);
   }
@@ -4472,6 +4493,7 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
   if (at < length) out.push({ start: at, end: length, lang: 'sh', hasSink: false, folded: false });
   return out;
 }
+
 
 // ── Write-content payload scan (issue #93) ───────────────────────────────────
 
