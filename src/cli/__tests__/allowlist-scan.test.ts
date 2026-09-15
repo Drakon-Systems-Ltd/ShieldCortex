@@ -75,6 +75,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
 
   const deps = (over: Record<string, unknown> = {}) => ({
     home: dir,
+    env: {},
     cwd: dir,
     interactive: false,
     log: (m: string) => logs.push(m),

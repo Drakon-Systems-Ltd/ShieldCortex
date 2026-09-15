@@ -71,6 +71,8 @@ export interface ScanDeps extends AllowlistDeps {
   /** Injected home for tests — default `os.homedir()`. Real ~/.hermes and
    *  ~/.openclaw must never be read under test. */
   home?: string;
+  /** Injected environment for config-path discovery. Defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
   cwd?: string;
   hermesCronPath?: string;
   openclawCronPath?: string;
@@ -304,7 +306,9 @@ export function discoverScripts(deps: ScanDeps = {}): {
       openclaw: { path: openclawPath, status: openclaw.status },
       openclawDb: { path: openclawDbPath, status: db.status },
       openclawCronUnverifiable:
-        openclaw.status === 'absent' && db.status === 'absent' && openclawHostPresent(home),
+        openclaw.status === 'absent' &&
+        db.status === 'absent' &&
+        openclawHostPresent(home, deps.env ?? process.env),
     },
   };
 }
@@ -318,22 +322,33 @@ export interface CronSources {
    * is readable — the JSON is gone and the SQLite store is not there either.
    * That is "we could not look", not "no crons": on the host this issue was
    * proven against, exactly this state hid 63 live jobs. Reported visibly and
-   * exits 1. A host with no `~/.openclaw` at all stays empty-ok.
+   * exits 1. A leftover empty `~/.openclaw` (no current/legacy config) is not an
+   * install — same class as host-table #496 — and stays empty-ok.
    */
   openclawCronUnverifiable: boolean;
 }
 
-/** Installed-ness, not cron-ness: the directory or its config file. Probed
- *  only to decide whether two absent cron sources are suspicious. */
-function openclawHostPresent(home: string): boolean {
-  for (const p of [join(home, '.openclaw'), join(home, '.openclaw', 'openclaw.json')]) {
+// Keep in lockstep with doctor's OPENCLAW_LEGACY_CONFIG_FILENAMES. Importing
+// doctor here would drag the full diagnostic/database graph into allowlist scan.
+const OPENCLAW_CONFIG_FILENAMES = ['openclaw.json', 'clawdbot.json', 'moldbot.json', 'moltbot.json'] as const;
+
+/** Installed-ness, not cron-ness: an explicit OPENCLAW_CONFIG_PATH or a real
+ *  current/legacy config, not a leftover empty `~/.openclaw` after migrating
+ *  off OpenClaw. An explicit override is itself host intent and therefore
+ *  fails closed even when stale, missing, relative, or otherwise unresolvable.
+ *  Non-ENOENT stat errors also fail closed as present so an unreadable config
+ *  cannot look like "no OpenClaw here". */
+function openclawHostPresent(home: string, env: NodeJS.ProcessEnv): boolean {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (explicit) return true;
+
+  for (const name of OPENCLAW_CONFIG_FILENAMES) {
+    const candidate = join(home, '.openclaw', name);
     try {
-      statSync(p);
+      statSync(candidate);
       return true;
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
-      // Something is there that we cannot stat — treat OpenClaw as present so
-      // the pair is reported rather than silently dismissed.
       if (err && err.code !== 'ENOENT') return true;
     }
   }
