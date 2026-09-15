@@ -2438,7 +2438,19 @@ const EXEC_COMMAND_WORD =
 // executed be dropped. `getattr(`/`__import__` are included because they are the
 // standard ways to reach `os.system` without naming it.
 const SHELL_OUT_SINK =
-  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b|`/;
+  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
+/**
+ * #444 -- backtick command execution is a REAL sink only where the language
+ * executes it (Ruby / Perl `cmd`). Everywhere else a backtick is Markdown
+ * prose in a docstring or comment (`re-run after `npm i -g x``), and treating
+ * it as a shell-out sink turned every well-documented repair script into a
+ * hard deny. Kept out of SHELL_OUT_SINK so Python/JS/PHP prose never arms it.
+ */
+const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl']);
+function hasShellOutSink(text: string, lang: ScriptLang): boolean {
+  if (SHELL_OUT_SINK.test(text)) return true;
+  return BACKTICK_EXEC_LANGS.has(lang) && text.includes('`');
+}
 
 /** How each interpreter language delimits comments and string literals. */
 interface ScriptLangRules {
@@ -2622,7 +2634,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
       const lineStart = Math.max(r.start, text.lastIndexOf('\n', range[0]) + 1);
       let lineEnd = text.indexOf('\n', range[1]);
       if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
-      (SHELL_OUT_SINK.test(text.slice(lineStart, lineEnd)) ? sinkArgLiterals : scriptLiterals).push(range);
+      (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang) ? sinkArgLiterals : scriptLiterals).push(range);
     }
   }
 
@@ -4036,7 +4048,7 @@ function foldScriptSources(
       start: cursor,
       end: cursor + scan.length,
       lang: next.lang,
-      hasSink: SHELL_OUT_SINK.test(scan),
+      hasSink: hasShellOutSink(scan, next.lang),
       folded: true,
       // #184: path + chain so a match inside this region names its origin.
       sourcePath: next.path,
@@ -4302,7 +4314,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
     if (clean) candidateFiles.push(clean);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: SHELL_OUT_SINK.test(m[3]), folded: false },
+      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
       outFile: clean,
     });
   }
@@ -4352,7 +4364,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
           // output into the shell (`| bash`, `>> ~/.zshrc`). The last is not a
           // property of the body at all, which is exactly why the body-local
           // test missed it.
-          hasSink: SHELL_OUT_SINK.test(w.body)
+          hasSink: hasShellOutSink(w.body, runs[0].lang)
             // A file write matters when what it writes can later RUN — see
             // `fileWriteIsSink`. `writeFileSync('/tmp/report.json', …)` in a
             // probe is data; `'/tmp/g.sh'` or `~/.zshrc` is a command in
@@ -4413,11 +4425,11 @@ function inlineProgramRegions(text: string): ScanRegion[] {
         j++;
       }
       progEnd = Math.min(j, text.length);
-      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: SHELL_OUT_SINK.test(text.slice(progStart + 1, progEnd)), folded: false });
+      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang), folded: false });
     } else {
       const nl = text.indexOf('\n', progStart);
       progEnd = nl < 0 ? text.length : nl;
-      out.push({ start: progStart, end: progEnd, lang, hasSink: SHELL_OUT_SINK.test(text.slice(progStart, progEnd)), folded: false });
+      out.push({ start: progStart, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart, progEnd), lang), folded: false });
     }
     INLINE_PROGRAM_RE.lastIndex = Math.max(progEnd, m.index + m[0].length);
   }
@@ -4471,6 +4483,32 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
   }
   if (at < length) out.push({ start: at, end: length, lang: 'sh', hasSink: false, folded: false });
   return out;
+}
+
+/**
+ * #444 -- the surface a shell-grammar disposer should read when folded
+ * interpreter source is present. Comment and string-literal CONTENT inside a
+ * non-`sh` region is prose to the interpreter; to a shell tokeniser a
+ * backtick-quoted `npm i -g openclaw` in a Python docstring is a command
+ * substitution. Blank those ranges (length-preserving) so the disposer sees
+ * only code. Literals whose own line calls a shell-out sink are KEPT -- that
+ * literal is the sink's argument and must still confirm the invocation.
+ * Shell regions and an over-cap surface (no regions) are returned unchanged.
+ */
+function blankScriptProse(text: string, regions: readonly ScanRegion[]): string {
+  const scriptRegions = regions.filter(r => r.lang !== 'sh');
+  if (scriptRegions.length === 0) return text;
+  const chars = text.split('');
+  for (const r of scriptRegions) {
+    for (const [lo, hi] of scriptDataRanges(text, r)) {
+      const lineStart = Math.max(r.start, text.lastIndexOf('\n', lo) + 1);
+      let lineEnd = text.indexOf('\n', hi);
+      if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
+      if (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang)) continue;
+      for (let k = lo; k < hi; k++) if (chars[k] !== '\n') chars[k] = ' ';
+    }
+  }
+  return chars.join('');
 }
 
 // ── Write-content payload scan (issue #93) ───────────────────────────────────
@@ -5140,6 +5178,17 @@ function evaluateToolCallCore(
   // evasion is confirmed rather than slipped.
   if (dangerSignals.includes('git-delete-branch') && !gitDeleteBranchInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'git-delete-branch');
+  }
+  // #444: a global install must be an INVOCATION on the exec surface too, not
+  // vocabulary. #386 gave the write path this disposer; the exec path kept the
+  // raw table match, so `python3 patch.py` whose DOCSTRING says "re-run after
+  // `npm i -g openclaw`" was hard-denied unattended -- the very script that
+  // repairs a broken install. Same disposer function: sink-aware (os.system /
+  // subprocess / child_process still gate), command-position only, recursing
+  // into bash -c / inline programs, fail-closed on eval / $.
+  if (dangerSignals.includes('install-package-global')
+      && !packageInstallGlobalInvoked(blankScriptProse(scanSurface, regions))) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'install-package-global');
   }
   // Reading the firewall's state changes nothing (issue #193). The rule matched
   // the tool and never the verb, so a status sweep gated as hard as a flush.
