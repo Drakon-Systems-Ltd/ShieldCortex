@@ -144,10 +144,10 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
   let stored: unknown[];
   let logs: string[];
   let errs: string[];
-  let previousOpenClawConfigPath: string | undefined;
 
   const deps = (over: Record<string, unknown> = {}) => ({
     home: dir,
+    env: {},
     cwd: dir,
     interactive: false,
     openclawDbPath: dbPath,
@@ -162,6 +162,9 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     ...over,
   });
 
+  const discover = (env: NodeJS.ProcessEnv = {}) =>
+    discoverScripts({ home: dir, openclawDbPath: dbPath, env });
+
   const answers = (list: string[]) => {
     const queue = [...list];
     return async () => queue.shift() ?? '';
@@ -174,8 +177,6 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
   };
 
   beforeEach(() => {
-    previousOpenClawConfigPath = process.env.OPENCLAW_CONFIG_PATH;
-    delete process.env.OPENCLAW_CONFIG_PATH;
     dir = mkdtempSync(join(tmpdir(), 'sc-375-scan-'));
     dbPath = join(dir, '.openclaw', 'state', 'openclaw.sqlite');
     denialsPath = join(dir, '.shieldcortex', 'denials.jsonl');
@@ -186,8 +187,6 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     errs = [];
   });
   afterEach(() => {
-    if (previousOpenClawConfigPath === undefined) delete process.env.OPENCLAW_CONFIG_PATH;
-    else process.env.OPENCLAW_CONFIG_PATH = previousOpenClawConfigPath;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -198,7 +197,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
       jobs: [{ job_id: JOB_A, name: 'sentry', payload_message: `python3 ${scriptPath}` }],
     });
 
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     expect(found.scripts.map((s) => s.path)).toContain(scriptPath);
     expect(found.sources.openclawDb).toMatchObject({ path: dbPath, status: 'ok' });
 
@@ -217,7 +216,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
       jobs: [{ job_id: JOB_A, name: 'sentry', payload_message: `python3 ${scriptPath}` }],
     });
 
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     const bySource = new Map(found.scripts.map((s) => [s.path, s.sources]));
     expect(bySource.get(jsonScript)).toEqual(['openclaw-cron']);
     expect(bySource.get(scriptPath)).toEqual(['openclaw-cron-db']);
@@ -228,7 +227,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     buildStore(dbPath, {
       jobs: [{ job_id: JOB_A, name: 'sentry', payload_message: `python3 ${scriptPath}` }],
     });
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     const entry = found.scripts.find((s) => s.path === scriptPath);
     expect(entry?.sources.sort()).toEqual(['openclaw-cron', 'openclaw-cron-db']);
   });
@@ -245,7 +244,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
       jobs: [{ job_id: JOB_A, name: 'sentry', payload_message: `python3 ${scriptPath}` }],
     });
 
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     expect(found.scripts.map((s) => s.path)).toEqual([scriptPath]);
     expect(found.sources.openclaw.status).toBe('absent');
     expect(found.sources.openclawCronUnverifiable).toBe(false);
@@ -269,7 +268,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
       ],
     });
 
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     expect(found.sources.openclawDb).toMatchObject({ path: dbPath, status: 'ok' });
     expect(found.scripts.map((s) => s.path)).toContain(scriptPath);
 
@@ -287,7 +286,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     mkdirSync(join(dir, '.openclaw'), { recursive: true });
     writeFileSync(join(dir, '.openclaw', 'openclaw.json'), '{}\n');
 
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     expect(found.sources.openclaw.status).toBe('absent');
     expect(found.sources.openclawDb.status).toBe('absent');
     expect(found.sources.openclawCronUnverifiable).toBe(true);
@@ -304,7 +303,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
       mkdirSync(join(dir, '.openclaw'), { recursive: true });
       writeFileSync(join(dir, '.openclaw', filename), '{}\n');
 
-      const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+      const found = discover();
       expect(found.sources.openclawCronUnverifiable).toBe(true);
       expect(await runAllowlistScan([], deps())).toBe(1);
     },
@@ -314,28 +313,28 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     const configPath = join(dir, 'profiles', 'openclaw.json');
     mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(configPath, '{}\n');
-    process.env.OPENCLAW_CONFIG_PATH = configPath;
+    const env = { OPENCLAW_CONFIG_PATH: configPath };
 
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover(env);
     expect(found.sources.openclawCronUnverifiable).toBe(true);
-    expect(await runAllowlistScan([], deps())).toBe(1);
+    expect(await runAllowlistScan([], deps({ env }))).toBe(1);
   });
 
   test.each([join('/missing', 'openclaw.json'), 'profiles/openclaw.json'])(
     'OPENCLAW_CONFIG_PATH intent stays fail-closed when unresolvable: %s',
     async (configPath) => {
-      process.env.OPENCLAW_CONFIG_PATH = configPath;
+      const env = { OPENCLAW_CONFIG_PATH: configPath };
 
-      const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+      const found = discover(env);
       expect(found.sources.openclawCronUnverifiable).toBe(true);
-      expect(await runAllowlistScan([], deps())).toBe(1);
+      expect(await runAllowlistScan([], deps({ env }))).toBe(1);
     },
   );
 
   test('a leftover empty ~/.openclaw without any current/legacy config is empty-ok', async () => {
     mkdirSync(join(dir, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
 
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     expect(found.sources.openclaw.status).toBe('absent');
     expect(found.sources.openclawDb.status).toBe('absent');
     expect(found.sources.openclawCronUnverifiable).toBe(false);
@@ -349,7 +348,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
   test('a host with no ~/.openclaw at all stays empty-ok', async () => {
     const code = await runAllowlistScan([], deps());
     expect(code).toBe(0);
-    expect(discoverScripts({ home: dir, openclawDbPath: dbPath }).sources.openclawCronUnverifiable).toBe(
+    expect(discover().sources.openclawCronUnverifiable).toBe(
       false,
     );
     expect(errs).toEqual([]);
@@ -357,7 +356,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
 
   test('a readable JSON store keeps an absent SQLite store quiet', async () => {
     writeOpenClawJson({ version: 1, jobs: [] });
-    const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+    const found = discover();
     expect(found.sources.openclawCronUnverifiable).toBe(false);
     expect(await runAllowlistScan([], deps())).toBe(0);
   });
@@ -380,7 +379,7 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
 
     const code = await runAllowlistScan([], deps());
     expect(code).toBe(1);
-    expect(discoverScripts({ home: dir, openclawDbPath: dbPath }).sources.openclawDb.status).toBe(
+    expect(discover().sources.openclawDb.status).toBe(
       'schema_mismatch',
     );
     expect(logs.join('\n')).toContain('SCHEMA MISMATCH');

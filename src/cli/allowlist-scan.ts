@@ -71,6 +71,8 @@ export interface ScanDeps extends AllowlistDeps {
   /** Injected home for tests — default `os.homedir()`. Real ~/.hermes and
    *  ~/.openclaw must never be read under test. */
   home?: string;
+  /** Injected environment for config-path discovery. Defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
   cwd?: string;
   hermesCronPath?: string;
   openclawCronPath?: string;
@@ -304,7 +306,9 @@ export function discoverScripts(deps: ScanDeps = {}): {
       openclaw: { path: openclawPath, status: openclaw.status },
       openclawDb: { path: openclawDbPath, status: db.status },
       openclawCronUnverifiable:
-        openclaw.status === 'absent' && db.status === 'absent' && openclawHostPresent(home),
+        openclaw.status === 'absent' &&
+        db.status === 'absent' &&
+        openclawHostPresent(home, deps.env ?? process.env),
     },
   };
 }
@@ -334,8 +338,8 @@ const OPENCLAW_CONFIG_FILENAMES = ['openclaw.json', 'clawdbot.json', 'moldbot.js
  *  fails closed even when stale, missing, relative, or otherwise unresolvable.
  *  Non-ENOENT stat errors also fail closed as present so an unreadable config
  *  cannot look like "no OpenClaw here". */
-function openclawHostPresent(home: string): boolean {
-  const explicit = process.env.OPENCLAW_CONFIG_PATH?.trim();
+function openclawHostPresent(home: string, env: NodeJS.ProcessEnv): boolean {
+  const explicit = env.OPENCLAW_CONFIG_PATH?.trim();
   if (explicit) return true;
 
   for (const name of OPENCLAW_CONFIG_FILENAMES) {
