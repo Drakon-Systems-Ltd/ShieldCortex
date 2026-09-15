@@ -328,20 +328,18 @@ export interface CronSources {
 // doctor here would drag the full diagnostic/database graph into allowlist scan.
 const OPENCLAW_CONFIG_FILENAMES = ['openclaw.json', 'clawdbot.json', 'moldbot.json', 'moltbot.json'] as const;
 
-/** Installed-ness, not cron-ness: a real current/legacy config (including an
- *  explicit OPENCLAW_CONFIG_PATH), not a leftover empty `~/.openclaw` after
- *  migrating off OpenClaw. Probed only to decide whether two absent cron
- *  sources are suspicious. Non-ENOENT stat errors and relative explicit paths
- *  fail closed as present so an unreadable/unresolvable config cannot look
- *  like "no OpenClaw here". */
+/** Installed-ness, not cron-ness: an explicit OPENCLAW_CONFIG_PATH or a real
+ *  current/legacy config, not a leftover empty `~/.openclaw` after migrating
+ *  off OpenClaw. An explicit override is itself host intent and therefore
+ *  fails closed even when stale, missing, relative, or otherwise unresolvable.
+ *  Non-ENOENT stat errors also fail closed as present so an unreadable config
+ *  cannot look like "no OpenClaw here". */
 function openclawHostPresent(home: string): boolean {
   const explicit = process.env.OPENCLAW_CONFIG_PATH?.trim();
-  const candidates = explicit
-    ? [explicit.startsWith('~/') ? join(home, explicit.slice(2)) : explicit]
-    : OPENCLAW_CONFIG_FILENAMES.map((name) => join(home, '.openclaw', name));
+  if (explicit) return true;
 
-  if (explicit && !isAbsolute(candidates[0])) return true;
-  for (const candidate of candidates) {
+  for (const name of OPENCLAW_CONFIG_FILENAMES) {
+    const candidate = join(home, '.openclaw', name);
     try {
       statSync(candidate);
       return true;

@@ -321,7 +321,18 @@ describe('allowlist scan: OpenClaw SQLite cron source (#375)', () => {
     expect(await runAllowlistScan([], deps())).toBe(1);
   });
 
-  test('a leftover empty ~/.openclaw without openclaw.json is empty-ok, not unverifiable', async () => {
+  test.each([join('/missing', 'openclaw.json'), 'profiles/openclaw.json'])(
+    'OPENCLAW_CONFIG_PATH intent stays fail-closed when unresolvable: %s',
+    async (configPath) => {
+      process.env.OPENCLAW_CONFIG_PATH = configPath;
+
+      const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
+      expect(found.sources.openclawCronUnverifiable).toBe(true);
+      expect(await runAllowlistScan([], deps())).toBe(1);
+    },
+  );
+
+  test('a leftover empty ~/.openclaw without any current/legacy config is empty-ok', async () => {
     mkdirSync(join(dir, '.openclaw', 'hooks', 'cortex-memory'), { recursive: true });
 
     const found = discoverScripts({ home: dir, openclawDbPath: dbPath });
