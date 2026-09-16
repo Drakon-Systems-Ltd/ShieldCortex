@@ -50,7 +50,7 @@
 
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
-import { basename, dirname, join, resolve, sep } from 'path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -65,11 +65,149 @@ const DEFAULT_ACTION_GUARD = { enabled: false, enforce: true, autoApprove: [], a
 /** #224 binding module, loaded once in main. Null when dist predates it. */
 let bindingMod = null;
 
-function loadActionGuardConfig() {
+/**
+ * The config directory this hook reads (#501).
+ *
+ * `SHIELDCORTEX_CONFIG_DIR` is honoured here for the same reason
+ * `src/cloud/config.ts:getConfigDir()` honours it: the hook must grade the SAME
+ * file the `shieldcortex config` setters write and every other reader reads.
+ * Until now it hard-coded `~/.shieldcortex`, so on any box using the override —
+ * including every hermetic test of the built artefact — the hook was silently
+ * enforcing against a different config from the rest of the product.
+ */
+function hookConfigDir() {
+  const override = process.env.SHIELDCORTEX_CONFIG_DIR?.trim();
+  if (override) return override;
+  return join(homedir(), '.shieldcortex');
+}
+
+// ==================== POLICY LOCK (#501) ====================
+
+/**
+ * The canonical protected root, duplicated as a literal.
+ *
+ * It has to be: this constant is used by the INLINE PROBE below, whose entire
+ * job is to be right when `dist` is missing. Importing it from the module the
+ * probe exists to survive the absence of would defeat the probe. Kept in step
+ * with `src/defence/iron-dome/protected-root.ts` by the enforcement-surface
+ * parity test.
+ */
+const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
+const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
+
+/** The exact posture an unverifiable-or-unreadable lock forces. Mirrors STRICT_FAILCLOSED_POSTURE. */
+const INLINE_STRICT_POSTURE = {
+  actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false } },
+  defenceMode: 'strict',
+};
+
+/**
+ * Does a policy lock FILE exist, judged without importing anything from dist?
+ *
+ * Mirrors `resolveProtectedRoot`'s ordering, including the rule that makes the
+ * test override non-loosening: the canonical root is probed first, and the
+ * environment variable is only consulted on a host that has no canonical root
+ * at all. So this probe can never be pointed away from a real lock.
+ */
+function inlinePolicyLockPresent() {
+  if (process.platform === 'win32') return false;
   try {
-    const configPath = join(homedir(), '.shieldcortex', 'config.json');
-    if (!existsSync(configPath)) return { ...DEFAULT_ACTION_GUARD };
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    let root = INLINE_PROTECTED_ROOT;
+    const canonicalLock = join(INLINE_PROTECTED_ROOT, INLINE_POLICY_LOCK_FILENAME);
+    if (!existsSync(canonicalLock) && !existsSync(INLINE_PROTECTED_ROOT)) {
+      const override = process.env.SHIELDCORTEX_PROTECTED_ROOT?.trim();
+      if (override && isAbsolute(override)) root = override;
+    }
+    return existsSync(join(root, INLINE_POLICY_LOCK_FILENAME));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load the policy-lock reader from dist. Null when the build predates #501 or
+ * is incomplete — which is exactly the case {@link inlinePolicyLockPresent}
+ * exists to cover.
+ */
+async function loadPolicyLock() {
+  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'policy-lock.js')).href
+    );
+    return typeof mod.readPolicyLock === 'function' && typeof mod.applyPolicyLock === 'function' ? mod : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Apply the OS-owned policy lock to the RAW parsed config, before the #209
+ * merge flattens it.
+ *
+ * Applying it to the raw shape is the point: `applyPolicyLock` in dist is the
+ * ONE implementation of the precedence rules, and re-deriving them over this
+ * hook's flattened `{enabled, enforce, autoApprove, …}` shape would be a second
+ * implementation to keep in step — the exact failure mode #160 and #209 were
+ * both about.
+ *
+ * The fail-open case is handled deliberately: a missing dist normally degrades
+ * to the inline catastrophic fallback (see the header), because turning every
+ * tool call into a denial whenever the build is stale breaks unattended agents.
+ * But a host with a LOCK FILE is a host whose operator has been told the guard
+ * cannot be switched off. Failing open there would make "delete dist" the
+ * bypass. So a present lock plus an unavailable reader forces the strict
+ * posture, which is the same answer the reader would have given for a lock it
+ * could not verify.
+ */
+async function applyHookPolicyLock(config) {
+  const mod = await loadPolicyLock();
+  if (!mod) {
+    if (!inlinePolicyLockPresent()) return config;
+    process.stderr.write(
+      '[shieldcortex] a policy lock is present but the dist policy reader could not be loaded — ' +
+      'enforcing the strict fail-closed posture (Action Guard on + enforcing, no auto-approve, broker off). ' +
+      'Run `shieldcortex repair` to restore the build.\n',
+    );
+    return {
+      ...config,
+      actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
+      defenceMode: INLINE_STRICT_POSTURE.defenceMode,
+    };
+  }
+  try {
+    // `audit` stays off: the audit logger is SQLite-backed and this runs on
+    // every tool call. The src-side reader records the row.
+    return mod.applyPolicyLock(config, mod.readPolicyLock({ audit: false }));
+  } catch {
+    // A reader that throws is treated exactly like a lock that cannot be
+    // verified, for the same reason: we cannot tell what the operator pinned.
+    return inlinePolicyLockPresent()
+      ? {
+          ...config,
+          actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
+          defenceMode: INLINE_STRICT_POSTURE.defenceMode,
+        }
+      : config;
+  }
+}
+
+async function loadActionGuardConfig() {
+  let parsed = null;
+  try {
+    const configPath = join(hookConfigDir(), 'config.json');
+    if (existsSync(configPath)) parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
+  } catch {
+    // Unreadable/corrupt config → the guard's own defaults, exactly as before.
+    // Enforce-by-default means a corrupt config must not silently disable it.
+    parsed = null;
+  }
+  const config = await applyHookPolicyLock(parsed ?? {});
+  return flattenActionGuardConfig(config);
+}
+
+function flattenActionGuardConfig(config) {
+  try {
     // #209: single source of truth. Top-level `actionGuard` governs every
     // surface; `interceptor.actionGuard` is a deprecated alias that fills
     // per-key gaps so pre-#209 configs keep their posture. On a conflicting
@@ -2021,7 +2159,10 @@ process.stdin.on('readable', () => {
 process.stdin.on('end', async () => {
   try {
     bindingMod = await loadBinding();
-    const cfg = loadActionGuardConfig();
+    // #501: async now — the policy lock is read through the same dist module
+    // the plugin uses, with an inline probe behind it so a missing dist cannot
+    // fail OPEN on a host that has a lock file.
+    const cfg = await loadActionGuardConfig();
     if (!cfg.enabled) process.exit(0);
 
     let hookData;

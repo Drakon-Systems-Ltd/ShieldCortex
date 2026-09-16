@@ -10,10 +10,30 @@
  * Fail closed: missing/malformed/unreadable config does not invent an entry,
  * does not grant conversation access, does not flip `entries.*.enabled`,
  * does not restart the gateway.
+ *
+ * #501 — this mirror does NOT out-rank the OS-owned policy lock, in either
+ * direction:
+ *
+ *   - On READ, the plugin applies the lock AFTER merging the entry over the
+ *     shield config (`applyPolicyLockToPluginConfig` in plugins/openclaw/index.ts),
+ *     so an entry that says `enabled: false` under a lock that pins it on is
+ *     simply not the last word any more. That is the important half — the entry
+ *     is an unsigned, same-UID file, and before #501 it was authoritative.
+ *   - On WRITE, a loosening value is refused here as well as at
+ *     `setActionGuardCoreConfig`. The setter is the only production caller
+ *     today, so this is belt-and-braces; it is here because the next caller
+ *     will not remember, and a mirror that writes `enabled: false` into the
+ *     entry under a lock leaves a file that contradicts the enforced posture
+ *     for anyone reading it by hand.
  */
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 
 import { openClawConfigPath } from './openclaw.js';
+import {
+  assertPolicyLockAllows,
+  PolicyLockRefusal,
+  readPolicyLock,
+} from '../defence/iron-dome/policy-lock.js';
 
 const PLUGIN_ID = 'shieldcortex-realtime';
 
@@ -23,7 +43,9 @@ export type OpenClawPluginGuardSyncSkip =
   | 'no-entry'
   | 'malformed'
   | 'unreadable'
-  | 'unwritable';
+  | 'unwritable'
+  /** #501: the write would loosen a key the OS-owned policy lock covers. */
+  | 'policy-locked';
 
 export type OpenClawPluginGuardSync =
   | { status: 'applied'; path: string }
@@ -35,6 +57,20 @@ export function syncOpenClawPluginActionGuard(updates: {
 }): OpenClawPluginGuardSync {
   if (updates.enabled === undefined && updates.enforce === undefined) {
     return { status: 'skipped', reason: 'noop' };
+  }
+
+  // #501: never mirror a value the policy lock forbids into the plugin entry.
+  // A skip, not a throw: this writer's whole contract is best-effort, and the
+  // caller that had a reason to refuse has already thrown a PolicyLockRefusal
+  // with the operator-facing message.
+  try {
+    assertPolicyLockAllows(readPolicyLock({ audit: false }), [
+      ...(updates.enabled !== undefined ? [{ key: 'actionGuard.enabled' as const, value: updates.enabled }] : []),
+      ...(updates.enforce !== undefined ? [{ key: 'actionGuard.enforce' as const, value: updates.enforce }] : []),
+    ]);
+  } catch (err) {
+    if (err instanceof PolicyLockRefusal) return { status: 'skipped', reason: 'policy-locked' };
+    return { status: 'skipped', reason: 'unreadable' };
   }
 
   let configPath: string;

@@ -662,6 +662,13 @@ function noticeOpenClawPluginGuardSync(sync: OpenClawPluginGuardSync): void {
     console.log('OpenClaw plugin entry not present — signed config wrote; plugin plane unchanged (no entry invented).');
     return;
   }
+  if (sync.reason === 'policy-locked') {
+    // Unreachable via the CLI flags today — setActionGuardCoreConfig refuses
+    // the same write first — but the mirror is a separate writer and says so
+    // for itself rather than going quiet.
+    console.log('OpenClaw plugin Action Guard was NOT synced: the OS-owned policy lock forbids that value.');
+    return;
+  }
   if (sync.reason === 'malformed' || sync.reason === 'unreadable' || sync.reason === 'unwritable') {
     console.log('OpenClaw plugin Action Guard could not be synced (config unreadable or unwritable). Signed config still wrote. Do not hand-edit openclaw.json.');
   }

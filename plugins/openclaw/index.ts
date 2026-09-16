@@ -60,6 +60,11 @@ type OpenClawRuntime = {
 // `before_tool_call` interceptor (runDefencePipeline) and realtime scanning
 // (scanToolResponse) load from the SAME module via getDefenceModule().
 type DefenceModule = {
+  /** #501 policy lock. Optional exactly like every other member: an older
+   *  installed dist does not have it, and its absence is covered by the inline
+   *  probe in {@link inlinePolicyLockPresent} rather than by failing open. */
+  readPolicyLock?: (options?: { audit?: boolean; warn?: boolean }) => unknown;
+  applyPolicyLock?: (raw: Record<string, unknown>, state: unknown) => Record<string, unknown>;
   runDefencePipeline?: (...args: any[]) => any;
   scanToolResponse?: (
     toolName: string,
@@ -1885,6 +1890,115 @@ function noteL2Degraded(reason: string): void {
   );
 }
 
+// ==================== POLICY LOCK (#501) ====================
+
+/**
+ * The canonical protected root, duplicated as a literal — and it has to be.
+ *
+ * This constant backs the INLINE PROBE, whose whole job is to be right when the
+ * `shieldcortex/defence` module cannot be resolved. Importing it from the module
+ * the probe exists to survive the absence of would defeat the probe. Same
+ * duplication, same reason, as the script-source resolver (#160): a real build
+ * boundary, stated at the copy, held in step by the enforcement-surface parity
+ * test rather than by hope.
+ */
+const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
+const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
+
+/** The posture an unverifiable-or-unreadable lock forces. Mirrors STRICT_FAILCLOSED_POSTURE. */
+const INLINE_STRICT_GUARD_POSTURE = {
+  enabled: true,
+  enforce: true,
+  autoApprove: [] as string[],
+  broker: { enabled: false },
+};
+
+/**
+ * Does a policy lock FILE exist, judged without resolving anything from dist?
+ *
+ * Mirrors `resolveProtectedRoot`'s ordering, including the rule that keeps the
+ * test override non-loosening: the canonical root is probed first, and the
+ * environment variable only consulted on a host that has no canonical root at
+ * all. So the probe can never be pointed away from a real lock.
+ */
+function inlinePolicyLockPresent(): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    let root = INLINE_PROTECTED_ROOT;
+    const canonicalLock = path.join(INLINE_PROTECTED_ROOT, INLINE_POLICY_LOCK_FILENAME);
+    if (!existsSync(canonicalLock) && !existsSync(INLINE_PROTECTED_ROOT)) {
+      const override = process.env.SHIELDCORTEX_PROTECTED_ROOT?.trim();
+      if (override && path.isAbsolute(override)) root = override;
+    }
+    return existsSync(path.join(root, INLINE_POLICY_LOCK_FILENAME));
+  } catch {
+    return false;
+  }
+}
+
+function withGuardPosture(config: SCConfig, guard: Record<string, unknown>): SCConfig {
+  return {
+    ...config,
+    interceptor: {
+      ...(config.interceptor ?? {}),
+      actionGuard: { ...(config.interceptor?.actionGuard ?? {}), ...guard } as NonNullable<InterceptorUserConfig['actionGuard']>,
+    },
+  };
+}
+
+/**
+ * Apply the OS-owned policy lock to the plugin's EFFECTIVE Action Guard config.
+ *
+ * Applied AFTER `mergeConfigs`, not before, and that ordering is the whole
+ * point: the `openclaw.json` plugin entry deep-merges OVER the shield config, so
+ * applying the lock to the shield config alone would leave a plugin entry saying
+ * `actionGuard.enabled: false` as the last word — which is precisely the
+ * unsigned, same-UID file the lock exists to stop being authoritative. The
+ * `src/setup/openclaw-plugin-guard-sync.ts` mirror writes into that same entry,
+ * so it too is now out-ranked by the lock rather than able to out-rank it.
+ *
+ * The precedence rules themselves come from dist (`applyPolicyLock`) so there is
+ * exactly ONE implementation of them across both enforcement surfaces.
+ */
+async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig> {
+  const mod = await getDefenceModule().catch(() => null);
+  const failClosed = () => {
+    if (!_policyLockDegradedLogged) {
+      _policyLockDegradedLogged = true;
+      console.warn(
+        '[shieldcortex] ⚠️ a policy lock is present but the ShieldCortex defence module could not be ' +
+        'loaded to read it — enforcing the strict fail-closed posture (Action Guard on + enforcing, ' +
+        'no auto-approve, broker off). Run `shieldcortex repair` to restore the install.',
+      );
+    }
+    return withGuardPosture(config, INLINE_STRICT_GUARD_POSTURE);
+  };
+
+  if (!mod || typeof mod.readPolicyLock !== 'function' || typeof mod.applyPolicyLock !== 'function') {
+    // A missing reader on a host with NO lock is today's behaviour: the plugin
+    // runs on the config it has. A missing reader on a host WITH a lock would
+    // make "break the install" the bypass, so that one fails closed.
+    return inlinePolicyLockPresent() ? failClosed() : config;
+  }
+  try {
+    // `audit` off: the SQLite audit logger belongs to the src-side reader, not
+    // to a plugin load. Shaped as a raw config view so the ONE precedence
+    // implementation in dist does the work.
+    const view = { actionGuard: { ...(config.interceptor?.actionGuard ?? {}) } } as Record<string, unknown>;
+    const locked = mod.applyPolicyLock(view, mod.readPolicyLock({ audit: false }));
+    const guard = locked.actionGuard;
+    if (!guard || typeof guard !== 'object' || Array.isArray(guard)) return config;
+    return withGuardPosture(config, guard as Record<string, unknown>);
+  } catch {
+    // A reader that throws is treated exactly like a lock that cannot be
+    // verified, for the same reason: we cannot tell what the operator pinned.
+    return inlinePolicyLockPresent() ? failClosed() : config;
+  }
+}
+
+/** One warning per plugin load, like every other degrade note in this file. */
+let _policyLockDegradedLogged = false;
+
 async function loadConfig(): Promise<SCConfig> {
   let shieldConfigRaw: unknown;
   try {
@@ -1901,8 +2015,10 @@ async function loadConfig(): Promise<SCConfig> {
       );
     }
     // A fresh object every time: `_configOverride` is module state and callers
-    // must not be handed something they could mutate.
-    return mergeConfigs({}, _configOverride ?? {});
+    // must not be handed something they could mutate. The policy lock still
+    // applies — a shield config we could not read is exactly when the plugin
+    // entry is the only thing talking, and the entry is the unsigned file.
+    return applyPolicyLockToPluginConfig(mergeConfigs({}, _configOverride ?? {}));
   }
   // A load that succeeds after a failure re-arms the warning, so a SECOND
   // outage is reported rather than swallowed by the first one's flag. Set
@@ -1912,8 +2028,12 @@ async function loadConfig(): Promise<SCConfig> {
   if (_config && shieldConfigRaw === _lastShieldConfigRef) return _config;
   _lastShieldConfigRef = shieldConfigRaw;
   // Plugin config (openclaw.json) deep-merges over the shield config file —
-  // see mergeConfigs() for the per-key semantics.
-  _config = mergeConfigs(normaliseConfig(shieldConfigRaw), _configOverride ?? {});
+  // see mergeConfigs() for the per-key semantics. The #501 policy lock is then
+  // applied over BOTH, because the plugin entry is an unsigned, same-UID file
+  // and must not be the last word on the Action Guard's own switches.
+  _config = await applyPolicyLockToPluginConfig(
+    mergeConfigs(normaliseConfig(shieldConfigRaw), _configOverride ?? {}),
+  );
   return _config;
 }
 

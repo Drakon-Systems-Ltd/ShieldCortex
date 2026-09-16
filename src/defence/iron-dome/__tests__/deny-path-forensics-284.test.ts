@@ -22,7 +22,10 @@ function runHook(payload: Record<string, unknown>, home: string) {
   const res = spawnSync(process.execPath, [hookPath], {
     input: JSON.stringify(payload),
     encoding: 'utf8',
-    env: { ...process.env, HOME: home, USERPROFILE: home },
+    // #501: the hook honours SHIELDCORTEX_CONFIG_DIR now, and the Jest sandbox
+    // sets it per worker — pin it at this run's home or the hook grades the
+    // worker's config instead of the fixture's.
+    env: { ...process.env, HOME: home, USERPROFILE: home, SHIELDCORTEX_CONFIG_DIR: path.join(home, '.shieldcortex') },
     timeout: 15_000,
   });
   return res;

@@ -90,7 +90,14 @@ describe('#59 — Claude Code hook: dangerous degraded op is gated (ask), never 
     return new Promise((res, rej) => {
       const child = spawn(process.execPath, [HOOK_PATH], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, HOME: tempHome, SHIELDCORTEX_DIST_ROOT: emptyDist },
+        // #501: the hook honours SHIELDCORTEX_CONFIG_DIR now, and the Jest
+        // sandbox sets it per worker — pin it at this run's home.
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          SHIELDCORTEX_DIST_ROOT: emptyDist,
+          SHIELDCORTEX_CONFIG_DIR: path.join(tempHome, '.shieldcortex'),
+        },
       });
       let stdout = '';
       child.stdout.on('data', (c) => { stdout += c.toString(); });

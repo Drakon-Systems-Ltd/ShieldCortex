@@ -204,6 +204,71 @@ describe('#189 — the two reviewed-script-check copies are held together the sa
   });
 });
 
+describe('#501 — both enforcement surfaces read the OS-owned policy lock', () => {
+  // The #160 lesson, applied to the lock: a lock only one surface consults is a
+  // lock that protects neither, because an agent picks the surface that does
+  // not. The plugin's config path lives in index.ts (loadConfig/normaliseConfig),
+  // not in interceptor.ts, so this block reads that file too.
+  const pluginIndexSrc = fs.readFileSync(path.join(repoRoot, 'plugins', 'openclaw', 'index.ts'), 'utf-8');
+
+  it('the Claude Code hook reads the lock through the dist module', () => {
+    expect(hookSrc).toMatch(/readPolicyLock/);
+    expect(hookSrc).toMatch(/applyPolicyLock/);
+    // Through the built module, not a second copy of the precedence rules.
+    expect(hookSrc).toMatch(/iron-dome['"],\s*['"]policy-lock\.js['"]/);
+  });
+
+  it('the OpenClaw plugin reads the lock through the same dist module', () => {
+    expect(pluginIndexSrc).toMatch(/readPolicyLock/);
+    expect(pluginIndexSrc).toMatch(/applyPolicyLock/);
+  });
+
+  it('the plugin applies the lock AFTER merging the openclaw.json entry', () => {
+    // Ordering is the defect: the plugin entry deep-merges OVER the shield
+    // config, so a lock applied before the merge leaves an unsigned, same-UID
+    // `enabled: false` as the last word — the exact bypass #501 closes.
+    const merge = pluginIndexSrc.indexOf('mergeConfigs(normaliseConfig(shieldConfigRaw)');
+    const apply = pluginIndexSrc.indexOf('applyPolicyLockToPluginConfig(\n');
+    expect(merge).toBeGreaterThan(0);
+    expect(apply).toBeGreaterThan(0);
+    expect(apply).toBeLessThan(merge);
+  });
+
+  it('both surfaces carry an INLINE probe, so a missing dist cannot fail open under a lock', () => {
+    for (const [name, src] of [['hook', hookSrc], ['plugin', pluginIndexSrc]] as const) {
+      expect({ surface: name, probes: /inlinePolicyLockPresent/.test(src) })
+        .toEqual({ surface: name, probes: true });
+      // The probe must not depend on the module it exists to survive.
+      expect({ surface: name, root: src.includes("'/etc/shieldcortex'") })
+        .toEqual({ surface: name, root: true });
+    }
+  });
+
+  it('the inline strict posture matches STRICT_FAILCLOSED_POSTURE on both surfaces', async () => {
+    const { STRICT_FAILCLOSED_POSTURE } = await import('../defence/iron-dome/policy-lock.js');
+    const expected = STRICT_FAILCLOSED_POSTURE.actionGuard;
+    // Text-match the four values at each copy. A drifting fail-closed posture
+    // is a surface that is quietly less safe than its sibling.
+    for (const [name, src] of [['hook', hookSrc], ['plugin', pluginIndexSrc]] as const) {
+      const block = src.slice(src.indexOf('INLINE_STRICT'), src.indexOf('INLINE_STRICT') + 400);
+      expect({ surface: name, enabled: /enabled:\s*true/.test(block) }).toEqual({ surface: name, enabled: expected.enabled });
+      expect({ surface: name, enforce: /enforce:\s*true/.test(block) }).toEqual({ surface: name, enforce: expected.enforce });
+      expect({ surface: name, auto: /autoApprove:\s*\[\]/.test(block) }).toEqual({ surface: name, auto: expected.autoApprove.length === 0 });
+      expect({ surface: name, broker: /broker:\s*\{\s*enabled:\s*false\s*\}/.test(block) })
+        .toEqual({ surface: name, broker: expected.broker.enabled === false });
+    }
+  });
+
+  it('the shared lock reader carries its safety rails with the implementation', () => {
+    const shared = fs.readFileSync(path.join(repoRoot, 'src', 'defence', 'iron-dome', 'policy-lock.ts'), 'utf-8');
+    expect(shared).toMatch(/export function readPolicyLock/);
+    expect(shared).toMatch(/export function applyPolicyLock/);
+    expect(shared).toMatch(/STRICT_FAILCLOSED_POSTURE/);
+    // Never throws — a reader that throws takes the guard down with it.
+    expect(shared).toMatch(/Never throws/);
+  });
+});
+
 describe('#227 — both enforcement surfaces consult the session action lease', () => {
   it('the Claude Code hook calls evaluateToolCallLease before the allow branch', () => {
     expect(hookSrc).toMatch(/evaluateToolCallLease/);

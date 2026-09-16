@@ -70,16 +70,24 @@ function decisionOf(stdout: string): { permissionDecision?: string; permissionDe
 
 describe('pre-tool hook — WS1 enforce-by-default on Claude Code', () => {
   const originalHome = process.env.HOME;
+  const originalConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
   let tempHome: string;
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-pretool-'));
     process.env.HOME = tempHome;
+    // #501: the hook now honours SHIELDCORTEX_CONFIG_DIR, like every other
+    // reader. The Jest sandbox sets that variable per worker, so pinning HOME
+    // alone would leave the hook grading the worker's config rather than this
+    // test's. Same pin the other hook suites already use.
+    process.env.SHIELDCORTEX_CONFIG_DIR = path.join(tempHome, '.shieldcortex');
     writeActionGuardConfig({});
   });
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalConfigDir === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
+    else process.env.SHIELDCORTEX_CONFIG_DIR = originalConfigDir;
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 

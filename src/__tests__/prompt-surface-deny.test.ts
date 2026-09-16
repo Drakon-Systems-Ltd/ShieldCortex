@@ -69,15 +69,21 @@ function decisionOf(stdout: string): { permissionDecision?: string; permissionDe
 
 describe('Action Guard hook — prompt-surface rule', () => {
   const originalHome = process.env.HOME;
+  const originalConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
   let tempHome: string;
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-prompt-surface-'));
     process.env.HOME = tempHome;
+    // #501: the hook honours SHIELDCORTEX_CONFIG_DIR now; the Jest sandbox sets
+    // it per worker, so HOME alone no longer decides which config is graded.
+    process.env.SHIELDCORTEX_CONFIG_DIR = path.join(tempHome, '.shieldcortex');
     writeActionGuardConfig({});
   });
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalConfigDir === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
+    else process.env.SHIELDCORTEX_CONFIG_DIR = originalConfigDir;
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
