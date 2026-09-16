@@ -147,4 +147,31 @@ describe('#500 Action Guard self-protection', () => {
     expect(v.signals ?? []).toContain('disable-action-guard');
     expect(v.severity).toBe('dangerous');
   });
+
+  // GPT-6 r3 P2: removal vocabulary as a query ARGUMENT is not an uninstall.
+  it.each([
+    ['npm ls with uninstall as an argument', `${NPM} ls ${G} ${SC} ${UNINST}`],
+    ['npm view of the package', `${NPM} view ${SC} version`],
+    ['npm ls -g of the package', `${NPM} ls ${G} ${SC}`],
+    ['npm outdated -g', `${NPM} outdated ${G}`],
+  ])('does not gate a read-only query: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).not.toContain('disable-action-guard');
+  });
+  it('still gates when a flag precedes the verb', () => {
+    const v = bash(`${NPM} ${G} ${UNINST} ${SC}`);
+    expect(v.signals ?? []).toContain('disable-action-guard');
+  });
+
+  // GPT-6 r3 P1 (cheap fold, disable flag only). Interior quotes in the
+  // BINARY name (git-class) and general quote-normalization are #504.
+  const IQ = String.fromCharCode(34);
+  it.each([
+    ['interior quote in disable', `${SC} config --action-guard-dis${IQ}able${IQ}`],
+    ['backslash before able', `${SC} config --action-guard-dis\\able`],
+  ])('gates disable via: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).toContain('disable-action-guard');
+    expect(v.severity).toBe('dangerous');
+  });
 });
