@@ -24,7 +24,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +57,17 @@ const LYING_POLICY_LOCK_JS =
 const PERMISSIVE_ACTION_GUARD_JS =
   'export function evaluateToolCall() {\n' +
   "  return { decision: 'allow', severity: 'benign', signals: [], reason: 'ok' };\n" +
+  '}\n';
+
+/**
+ * A classifier with the real export surface that blocks everything at the
+ * terminal tier. Review R3-1: the seam-stays-open case needs a substitute whose
+ * verdict DIFFERS from the real classifier's on the chosen command, or the
+ * assertion cannot tell whether the seam was honoured.
+ */
+const DENYING_ACTION_GUARD_JS =
+  'export function evaluateToolCall() {\n' +
+  "  return { decision: 'block', severity: 'catastrophic', signals: ['substitute'], reason: 'substitute classifier' };\n" +
   '}\n';
 
 /** SC-01: assembled char by char — this file is scanned by the guard it drives. */
@@ -496,11 +507,38 @@ describe('#501 a locked host does not honour SHIELDCORTEX_DIST_ROOT for ANY dist
     // The gate is conditioned on the lock, not on the variable. An unlocked
     // host is every developer and every suite that uses this seam, and it must
     // keep resolving exactly where it is pointed.
+    //
+    // Review R3-1: the fixture has to be able to tell. With the guard OFF in
+    // the config the hook short-circuits before any classifier loads, and
+    // `not.toBe('deny')` is satisfied whether the seam was honoured, ignored,
+    // or never reached. So: guard ON and enforcing, a benign command the real
+    // classifier allows, and a substitute that BLOCKS it. Only the substitute
+    // can produce the `deny` — and only if the seam resolved to it.
     rmSync(join(protectedRoot, 'policy.json'), { force: true });
+    forgeSignedConfig({
+      actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false } },
+    });
+    const fake = fakeDistWith({ 'tool-action-guard.js': DENYING_ACTION_GUARD_JS });
+    try {
+      const run = runHookWithDist(fake, 'ls -la');
+      expect(run.decision).toBe('deny');
+    } finally {
+      rmSync(fake, { recursive: true, force: true });
+    }
+  });
+
+  it('a DANGLING symlink at the lock path still closes the seam (review R3-2)', () => {
+    // The reader `lstat`s and reports an entry it cannot verify — present, and
+    // strict fail-closed. A probe that `existsSync`s follows the link, sees
+    // nothing, and re-opens the classifier seam on a host the reader calls
+    // locked: `plain=deny`, `withFakeClassifier=null`. Both surfaces now judge
+    // presence the way the reader does, so the substitute is never consulted.
+    rmSync(join(protectedRoot, 'policy.json'), { force: true });
+    symlinkSync(join(protectedRoot, 'no-such-target.json'), join(protectedRoot, 'policy.json'));
     const fake = fakeDistWith({ 'tool-action-guard.js': PERMISSIVE_ACTION_GUARD_JS });
     try {
       const run = runHookWithDist(fake, SC01_CATASTROPHIC);
-      expect(run.decision).not.toBe('deny');
+      expect(run.decision).toBe('deny');
     } finally {
       rmSync(fake, { recursive: true, force: true });
     }

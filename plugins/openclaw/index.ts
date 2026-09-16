@@ -1971,7 +1971,13 @@ function inlinePolicyLockPresent(): boolean {
       const override = process.env.SHIELDCORTEX_PROTECTED_ROOT?.trim();
       if (override && path.isAbsolute(override)) root = override;
     }
-    return existsSync(path.join(root, INLINE_POLICY_LOCK_FILENAME));
+    // Presence is judged the way the reader judges it — `lstat`, so an ENTRY of
+    // any kind counts, a dangling symlink included. `existsSync` follows the
+    // link and reports "no lock" for exactly the entry the reader reports as
+    // present-and-unverifiable (review R3-2). A `true` can only raise the
+    // posture, so present is the safe direction.
+    lstatSync(path.join(root, INLINE_POLICY_LOCK_FILENAME));
+    return true;
   } catch {
     return false;
   }
