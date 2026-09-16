@@ -2459,6 +2459,27 @@ const SHELL_OUT_SINK =
  * Only languages with NO backtick execution semantics are relaxed: Python
  * (the #444 shape). Shell regions are a different path and untouched.
  */
+/**
+ * True when `pos` sits inside an outer double-quoted shell span (e.g. the
+ * argument of bash -c "..."). The OUTER shell expands backticks and $(...)
+ * inside that span before the inner command ever runs, so an inner
+ * single-quoted delimiter or single-quoted -c arg cannot make it opaque
+ * (GPT-6 r8). Walks shell quoting from the start of the text: single
+ * quotes are literal, backslash escapes one char outside single quotes.
+ */
+function insideOuterDoubleQuote(text: string, pos: number): boolean {
+  let inS = false;
+  let inD = false;
+  for (let i = 0; i < pos && i < text.length; i++) {
+    const c = text[i];
+    if (inS) { if (c === "'") inS = false; continue; }
+    if (c === '\\') { i++; continue; }
+    if (inD) { if (c === '"') inD = false; continue; }
+    if (c === "'") inS = true;
+    else if (c === '"') inD = true;
+  }
+  return inD;
+}
 const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node']);
 /**
  * @param shellExpands true when the OUTER shell substitutes backticks in
@@ -4319,7 +4340,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
       const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
       if (cleaned) {
         const s = m.index + nlEarly + 1;
-        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, shellExpands: m[1] === '' });
+        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, shellExpands: m[1] === '' || insideOuterDoubleQuote(text, m.index) });
       }
       continue;                                         // nothing executes it as code
     }
@@ -4336,7 +4357,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
     if (clean) candidateFiles.push(clean);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang, m[1] === ''), folded: false },
+      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang, m[1] === '' || insideOuterDoubleQuote(text, m.index)), folded: false },
       outFile: clean,
     });
   }
@@ -4447,7 +4468,7 @@ function inlineProgramRegions(text: string): ScanRegion[] {
         j++;
       }
       progEnd = Math.min(j, text.length);
-      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang, q === '"'), folded: false });
+      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang, q === '"' || insideOuterDoubleQuote(text, progStart)), folded: false });
     } else {
       const nl = text.indexOf('\n', progStart);
       progEnd = nl < 0 ? text.length : nl;

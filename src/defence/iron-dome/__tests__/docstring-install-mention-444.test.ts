@@ -231,4 +231,26 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).not.toContain('install-package-global');
     expect(v.severity).not.toBe('dangerous');
   });
+
+  // GPT-6 r8: an OUTER double-quoted shell arg (bash -c "...") expands
+  // backticks before the inner command runs; an inner <<'PY' or '-c arg'
+  // cannot make it opaque.
+  it('still blocks a backtick in a quoted-delimiter heredoc nested inside bash -c "..."', () => {
+    const cmd = ['bash -c "python3 - <<\'PY\'', `print(\'${bt}${DEL} ${RF} /${bt}\')`, 'PY"'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.severity).toBe('catastrophic');
+    expect(v.decision).toBe('block');
+  });
+  it('still gates a backtick in a single-quoted -c arg nested inside bash -c "..."', () => {
+    const cmd = `bash -c "python3 -c 'print(${bt}${NPM} ${INST} ${G} cowsay${bt})'"`;
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+  });
+  it('a quoted-delimiter heredoc nested inside bash -c \'...\' (single) stays opaque', () => {
+    const cmd = ["bash -c 'python3 - <<\"PY\"", `"""re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after"""`, 'print(1)', "PY'"].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity).not.toBe('dangerous');
+  });
 });
