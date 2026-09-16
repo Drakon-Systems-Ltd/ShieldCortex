@@ -69,6 +69,7 @@ import {
   type PlaneDriftCounts,
 } from '../memory/plane-drift.js';
 import {
+  applyPolicyLock,
   describePolicyLock,
   readPolicyLock,
   PROTECT_HINT,
@@ -2931,11 +2932,19 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // against the SAME file the `shieldcortex config` setters write and the
     // runtime accessors read — including the SHIELDCORTEX_CONFIG_DIR override.
     const configPath = path.join(getConfigDir(), 'config.json');
-    const raw = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+    const onDisk = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+    // #501: report the posture that is ENFORCED, not the one the file asks for.
+    // This stayed a bare parse so the deprecated-alias inspection below can see
+    // `interceptor.actionGuard` — but a bare parse is also how doctor came to
+    // report "Action Guard is disabled in config" on a box where the policy
+    // lock had it on and enforcing. Reading the file and grading the file is
+    // exactly the gap #501 closes everywhere else.
+    const raw = applyPolicyLock(onDisk, readPolicyLock({ audit: false, warn: false }));
     const isBlock = isConfigBlock;
     const top = isBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
-    const alias = isBlock(raw?.interceptor?.actionGuard)
-      ? (raw.interceptor.actionGuard as Record<string, unknown>)
+    const interceptor = isBlock(raw?.interceptor) ? (raw.interceptor as Record<string, unknown>) : null;
+    const alias = isBlock(interceptor?.actionGuard)
+      ? (interceptor!.actionGuard as Record<string, unknown>)
       : null;
     const merged = { ...(alias ?? {}), ...(top ?? {}) };
     const effective = { enabled: merged.enabled === true, enforce: merged.enforce !== false };
@@ -7181,6 +7190,25 @@ export async function runDoctor(
       ?? 'shieldcortex doctor --verbose';
   } else if (unwired.length > 0) {
     nextCommand = 'shieldcortex setup';
+  }
+
+  // `--json`: the same `visible` set the human report and the exit code are
+  // computed from, emitted verbatim. Added for #501's built-artefact
+  // regression, which has to assert on a REAL `dist/index.js doctor` run and
+  // cannot do that by pattern-matching a width-wrapped, colour-coded, mobile
+  // report. Deliberately the same array — a second derivation could be green
+  // where the report is red, which is the failure mode doctor exists to avoid.
+  // Returns before the human report so the output is parseable on its own.
+  if (args.includes('--json')) {
+    console.log(JSON.stringify({
+      version: String(pkg.version ?? ''),
+      passed, warnings, failures, infos, total,
+      exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
+      results: visible.map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })),
+    }, null, 2));
+    const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
+    if (jsonExit !== 0) process.exitCode = jsonExit;
+    return { passed, warnings, failures, infos, total, exitCode: jsonExit };
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
