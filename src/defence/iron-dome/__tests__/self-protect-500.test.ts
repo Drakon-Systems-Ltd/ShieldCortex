@@ -127,4 +127,24 @@ describe('#500 Action Guard self-protection', () => {
     const v = bash(`${NPM} ${UNINST} ${SC}`);
     expect(v.signals ?? []).not.toContain('disable-action-guard');
   });
+
+  // GPT-6 r2: shell quotes around the subcommand / flag reach npm as the same argv.
+  it.each([
+    ['quoted uninstall verb', `${NPM} "${UNINST}" ${G} ${SC}`],
+    ['single-quoted uninstall verb', `${NPM} '${UNINST}' ${G} ${SC}`],
+    ['quoted package', `${NPM} ${UNINST} ${G} "${SC}"`],
+    ['quoted global flag', `${NPM} ${UNINST} "${G}" ${SC}`],
+  ])('gates global uninstall via: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).toContain('disable-action-guard');
+    expect(v.severity).toBe('dangerous');
+  });
+  it.each([
+    ['quoted disable flag', `${SC} config "${DISABLE}"`],
+    ['quoted deactivate', `${SC} 'iron-dome' 'deactivate'`],
+  ])('gates disable via: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).toContain('disable-action-guard');
+    expect(v.severity).toBe('dangerous');
+  });
 });
