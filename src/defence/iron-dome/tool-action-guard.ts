@@ -2459,48 +2459,21 @@ const SHELL_OUT_SINK =
  * Only languages with NO backtick execution semantics are relaxed: Python
  * (the #444 shape). Shell regions are a different path and untouched.
  */
-/**
- * True when `pos` sits inside an outer double-quoted shell span (e.g. the
- * argument of bash -c "..."). The OUTER shell expands backticks and $(...)
- * inside that span before the inner command ever runs, so an inner
- * single-quoted delimiter or single-quoted -c arg cannot make it opaque
- * (GPT-6 r8). Walks shell quoting from the start of the text: single
- * quotes are literal, backslash escapes one char outside single quotes.
- */
-function insideOuterDoubleQuote(text: string, pos: number): boolean {
-  let inS = false;   // '...'  -- literal, no escapes
-  let inA = false;   // $'...' -- ANSI-C, backslash escapes one char (GPT-6 r9)
-  let inD = false;   // "..."  -- backslash escapes one char
-  for (let i = 0; i < pos && i < text.length; i++) {
-    const c = text[i];
-    if (inS) { if (c === "'") inS = false; continue; }
-    if (inA) { if (c === '\\') { i++; continue; } if (c === "'") inA = false; continue; }
-    if (c === '\\') { i++; continue; }
-    if (inD) { if (c === '"') inD = false; continue; }
-    if (c === '$' && text[i + 1] === "'") { inA = true; i++; continue; }
-    if (c === "'") inS = true;
-    else if (c === '"') inD = true;
-  }
-  // Inside '...' the shell is genuinely opaque -- that is the ONE context
-  // where an inner quoted delimiter can be trusted. Inside "..." it expands.
-  // Inside $'...' it does not expand backticks either, but ANSI-C escapes
-  // make the boundary hard to prove; fail closed there.
-  return inD || inA;
-}
 const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node']);
 /**
- * @param shellExpands true when the OUTER shell substitutes backticks in
- *   this text before the interpreter sees it: an inline program in a
- *   double-quoted or unquoted argument, or a heredoc whose delimiter is
- *   unquoted. Then a backtick is a live shell sink regardless of language
- *   (GPT-6 r6: python3 -c "print('<backtick>cmd<backtick>')" runs cmd).
- *   Single-quoted inline args, quoted-delimiter heredocs and folded files
- *   are opaque to the shell, so only the language semantics apply.
+ * @param folded true ONLY for a script folded from DISK (the #444 shape:
+ *   `python3 scripts/patch_x.py`). Disk bytes are never expanded by the
+ *   invoking shell, so a backtick in Python prose there is inert text.
+ *   Everything that lives in the command itself -- inline -c programs,
+ *   heredocs of any delimiter, write-then-run bodies -- keeps the
+ *   any-backtick sink exactly as on main: the outer shell MAY expand it
+ *   and five review rounds (r6-r10) showed the shell-quoting context cannot
+ *   be proven from a partial parse. Fail closed there.
  */
-function hasShellOutSink(text: string, lang: ScriptLang, shellExpands = false): boolean {
+function hasShellOutSink(text: string, lang: ScriptLang, folded = false): boolean {
   if (SHELL_OUT_SINK.test(text)) return true;
   if (!text.includes('`')) return false;
-  return shellExpands || BACKTICK_EXEC_LANGS.has(lang);
+  return !folded || BACKTICK_EXEC_LANGS.has(lang);
 }
 /** How each interpreter language delimits comments and string literals. */
 interface ScriptLangRules {
@@ -2684,7 +2657,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
       const lineStart = Math.max(r.start, text.lastIndexOf('\n', range[0]) + 1);
       let lineEnd = text.indexOf('\n', range[1]);
       if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
-      (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang) ? sinkArgLiterals : scriptLiterals).push(range);
+      (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang, r.folded) ? sinkArgLiterals : scriptLiterals).push(range);
     }
   }
 
@@ -4098,7 +4071,7 @@ function foldScriptSources(
       start: cursor,
       end: cursor + scan.length,
       lang: next.lang,
-      hasSink: hasShellOutSink(scan, next.lang),
+      hasSink: hasShellOutSink(scan, next.lang, true),
       folded: true,
       // #184: path + chain so a match inside this region names its origin.
       sourcePath: next.path,
@@ -4331,7 +4304,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
    * consumes the heredoc) returned benign, while the same literals written to a
    * file and executed returned catastrophic.
    */
-  const written: Array<{ start: number; end: number; body: string; outFile: string; shellExpands: boolean }> = [];
+  const written: Array<{ start: number; end: number; body: string; outFile: string }> = [];
   const candidateFiles: string[] = [];
   ANY_HEREDOC_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -4347,7 +4320,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
       const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
       if (cleaned) {
         const s = m.index + nlEarly + 1;
-        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, shellExpands: m[1] === '' || insideOuterDoubleQuote(text, m.index) });
+        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, });
       }
       continue;                                         // nothing executes it as code
     }
@@ -4364,7 +4337,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
     if (clean) candidateFiles.push(clean);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang, m[1] === '' || insideOuterDoubleQuote(text, m.index)), folded: false },
+      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
       outFile: clean,
     });
   }
@@ -4414,7 +4387,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
           // output into the shell (`| bash`, `>> ~/.zshrc`). The last is not a
           // property of the body at all, which is exactly why the body-local
           // test missed it.
-          hasSink: hasShellOutSink(w.body, runs[0].lang, w.shellExpands)
+          hasSink: hasShellOutSink(w.body, runs[0].lang)
             // A file write matters when what it writes can later RUN — see
             // `fileWriteIsSink`. `writeFileSync('/tmp/report.json', …)` in a
             // probe is data; `'/tmp/g.sh'` or `~/.zshrc` is a command in
@@ -4475,11 +4448,11 @@ function inlineProgramRegions(text: string): ScanRegion[] {
         j++;
       }
       progEnd = Math.min(j, text.length);
-      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang, q === '"' || insideOuterDoubleQuote(text, progStart)), folded: false });
+      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang), folded: false });
     } else {
       const nl = text.indexOf('\n', progStart);
       progEnd = nl < 0 ? text.length : nl;
-      out.push({ start: progStart, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart, progEnd), lang, true), folded: false });
+      out.push({ start: progStart, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart, progEnd), lang), folded: false });
     }
     INLINE_PROGRAM_RE.lastIndex = Math.max(progEnd, m.index + m[0].length);
   }

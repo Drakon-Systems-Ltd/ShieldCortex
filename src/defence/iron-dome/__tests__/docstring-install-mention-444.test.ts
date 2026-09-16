@@ -204,17 +204,17 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).toContain('install-package-global');
     expect(v.severity).toBe('dangerous');
   });
-  it('a single-quoted python -c arg is opaque to the shell: backtick mention stays prose', () => {
+  it('a single-quoted python -c arg keeps the any-backtick sink (same as main; in-command text is not disk)', () => {
     const cmd = `python3 -c 'print("re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after")'`;
     const v = evaluateToolCall('Bash', { command: cmd }, cfg);
-    expect(v.signals ?? []).not.toContain('install-package-global');
-    expect(v.severity).not.toBe('dangerous');
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
   });
-  it('a quoted-delimiter python heredoc is opaque to the shell: backtick mention stays prose', () => {
+  it('a quoted-delimiter python heredoc keeps the any-backtick sink (same as main)', () => {
     const cmd = ["python3 - <<'PY'", `"""re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after"""`, 'print(1)', 'PY'].join(nl);
     const v = evaluateToolCall('Bash', { command: cmd }, cfg);
-    expect(v.signals ?? []).not.toContain('install-package-global');
-    expect(v.severity).not.toBe('dangerous');
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
   });
 
   // Grok r7: written-then-executed heredoc with an UNQUOTED delimiter is
@@ -225,11 +225,11 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).toContain('install-package-global');
     expect(v.severity).toBe('dangerous');
   });
-  it('a quoted-delimiter write-then-run python heredoc keeps docstring relief', () => {
+  it('a quoted-delimiter write-then-run heredoc keeps the any-backtick sink (same as main)', () => {
     const cmd = ["cat > /tmp/s.py <<'PY'", `"""re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after"""`, 'print(1)', 'PY', 'python3 /tmp/s.py'].join(nl);
     const v = evaluateToolCall('Bash', { command: cmd }, cfg);
-    expect(v.signals ?? []).not.toContain('install-package-global');
-    expect(v.severity).not.toBe('dangerous');
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
   });
 
   // GPT-6 r8: an OUTER double-quoted shell arg (bash -c "...") expands
@@ -247,11 +247,11 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).toContain('install-package-global');
     expect(v.severity).toBe('dangerous');
   });
-  it('a quoted-delimiter heredoc nested inside bash -c \'...\' (single) stays opaque', () => {
+  it('a quoted-delimiter heredoc nested inside bash -c \'...\' keeps the sink (same as main)', () => {
     const cmd = ["bash -c 'python3 - <<\"PY\"", `"""re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after"""`, 'print(1)', "PY'"].join(nl);
     const v = evaluateToolCall('Bash', { command: cmd }, cfg);
-    expect(v.signals ?? []).not.toContain('install-package-global');
-    expect(v.severity).not.toBe('dangerous');
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
   });
 
   // GPT-6 r9: $'\'' ANSI-C escaped apostrophe must not desync the walker.
@@ -265,5 +265,20 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     const cmd = ['echo "unterminated', "python3 - <<'PY'", `x = "${bt}${NPM} ${INST} ${G} cowsay${bt}"`, 'PY'].join(nl);
     const v = evaluateToolCall('Bash', { command: cmd }, cfg);
     expect(v.signals ?? []).toContain('install-package-global');
+  });
+
+  // GPT-6 r10 reproducers: heredoc body containing a bare apostrophe, and a
+  // quoted intro whose body actually belongs to the OUTER shell.
+  it('still blocks when a preceding unquoted heredoc body contains an apostrophe', () => {
+    const cmd = ['cat <<EOF', "'", 'EOF', `bash -c " python3 -c 'print(${bt}${DEL} ${RF} /${bt})'"`].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.severity).toBe('catastrophic');
+    expect(v.decision).toBe('block');
+  });
+  it('still blocks when a quoted heredoc intro is inside bash -c and the body is outer-shell', () => {
+    const cmd = ["bash -c 'python3 - <<\"PY\"'", `x="${bt}${DEL} ${RF} /${bt}"`, 'PY'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.severity).toBe('catastrophic');
+    expect(v.decision).toBe('block');
   });
 });
