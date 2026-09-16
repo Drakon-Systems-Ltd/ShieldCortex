@@ -14,6 +14,7 @@ import {
   PROTECTED_ROOT_POINTER,
   describeProtectedFailure,
   resolveProtectedRoot,
+  verifyProtectedDirectoryChain,
   verifyProtectedFile,
   type ProtectedFsSeam,
   type ProtectedStat,
@@ -32,9 +33,17 @@ type Entry = { uid?: number; gid?: number; mode?: number; kind?: 'file' | 'dir' 
  */
 function seamOf(
   entries: Record<string, Entry>,
-  opts: { platform?: NodeJS.Platform; euid?: number | null; files?: Record<string, string>; env?: Record<string, string> } = {},
+  opts: {
+    platform?: NodeJS.Platform;
+    euid?: number | null;
+    files?: Record<string, string>;
+    env?: Record<string, string>;
+    /** Every path the verifier asked about, in order — so a test can prove a path was examined. */
+    touched?: string[];
+  } = {},
 ): ProtectedFsSeam {
   const stat = (path: string, follow: boolean): ProtectedStat | null => {
+    opts.touched?.push(path);
     const e = entries[path];
     if (!e) return null;
     const kind = e.kind ?? 'file';
@@ -53,6 +62,10 @@ function seamOf(
   return {
     lstat: (p) => stat(p, false),
     stat: (p) => stat(p, true),
+    readlink: (p) => {
+      const e = entries[p];
+      return e?.kind === 'symlink' && e.target ? e.target : null;
+    },
     readFile: (p) => opts.files?.[p] ?? null,
     geteuid: () => (opts.euid === undefined ? AGENT_UID : opts.euid),
     platform: opts.platform ?? 'linux',
@@ -88,16 +101,149 @@ describe('#501 verifyProtectedFile — the positive case', () => {
     expect(v.ok).toBe(true);
   });
 
-  it('accepts a root-owned symlinked ancestor (macOS /etc -> /private/etc)', () => {
-    const v = verifyProtectedFile('/etc/shieldcortex/policy.json', seamOf({
+  /** macOS layout: /etc is a root-owned symlink into /private. */
+  function macHost(extra: Record<string, Entry> = {}): Record<string, Entry> {
+    return {
       '/': { kind: 'dir', mode: 0o40755 },
       '/private': { kind: 'dir', mode: 0o40755 },
       '/private/etc': { kind: 'dir', mode: 0o40755 },
       '/etc': { kind: 'symlink', target: '/private/etc', uid: ROOT_UID },
       '/etc/shieldcortex': { kind: 'dir', mode: 0o40755 },
       '/etc/shieldcortex/policy.json': { kind: 'file', mode: 0o100644 },
-    }));
+      ...extra,
+    };
+  }
+
+  it('accepts a root-owned symlinked ancestor (macOS /etc -> /private/etc) — and PROVES it examined the target chain', () => {
+    // Review of #522: the previous form of this test named `/private` in the
+    // table but nothing asserted the verifier ever looked at it, so it was
+    // green by construction. The verdict alone is not the property; the
+    // target ancestry being examined is.
+    const touched: string[] = [];
+    const v = verifyProtectedFile('/etc/shieldcortex/policy.json', seamOf(macHost(), { touched }));
     expect(v.ok).toBe(true);
+    expect(touched).toEqual(expect.arrayContaining(['/private/etc', '/private']));
+  });
+
+  it('negative control for the above: an agent-owned /private fails the SAME layout', () => {
+    const v = verifyProtectedFile('/etc/shieldcortex/policy.json', seamOf(macHost({
+      '/private': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+    })));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/etc -> /private/etc');
+    expect(v.detail).toContain('/private is owned by this agent');
+  });
+});
+
+describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is agent-writable', () => {
+  // `/protected -> /agent-parent/safe`, symlink root-owned, `safe` root-owned
+  // 0755, but `/agent-parent` is the agent's. The agent renames `safe` aside,
+  // re-creates it, and writes its own policy.json. The old walk `stat`ed the
+  // symlink (reporting the root-owned `safe`), then continued from `/` — it
+  // never asked about `/agent-parent` at all.
+  function symlinkedHost(agentParent: Entry): Record<string, Entry> {
+    return {
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/agent-parent': agentParent,
+      '/agent-parent/safe': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: '/agent-parent/safe', uid: ROOT_UID },
+      '/protected/policy.json': { kind: 'file', mode: 0o100644 },
+    };
+  }
+
+  it('refuses when the symlink target\'s parent is agent-OWNED (the exact review probe)', () => {
+    const touched: string[] = [];
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf(
+      symlinkedHost({ kind: 'dir', uid: AGENT_UID, mode: 0o40755 }),
+      { touched },
+    ));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/protected -> /agent-parent/safe');
+    expect(touched).toContain('/agent-parent');
+  });
+
+  it('refuses the same through verifyProtectedFile on the lock file itself', () => {
+    const v = verifyProtectedFile('/protected/policy.json', seamOf(
+      symlinkedHost({ kind: 'dir', uid: AGENT_UID, mode: 0o40755 }),
+    ));
+    expect(v.reason).toBe('parent-owned-by-agent');
+  });
+
+  it('refuses when the symlink target\'s parent is root-owned but world-WRITABLE', () => {
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf(
+      symlinkedHost({ kind: 'dir', mode: 0o40777 }),
+    ));
+    expect(v.reason).toBe('parent-group-or-other-writable');
+    expect(v.detail).toContain('/agent-parent');
+  });
+
+  it('positive control: the identical layout with a root-owned 0755 parent is accepted', () => {
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf(
+      symlinkedHost({ kind: 'dir', mode: 0o40755 }),
+    ));
+    expect(v).toEqual({ ok: true, reason: null, detail: expect.any(String) });
+  });
+
+  it('resolves a RELATIVE symlink target against the symlink\'s own directory', () => {
+    // /opt/protected -> ../agent-parent/safe, i.e. /agent-parent/safe.
+    const v = verifyProtectedDirectoryChain('/opt/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/protected': { kind: 'symlink', target: '../agent-parent/safe', uid: ROOT_UID },
+      '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-parent/safe': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/opt/protected -> /agent-parent/safe');
+  });
+
+  it('still walks the LEXICAL chain above a symlink whose target is impeccable', () => {
+    // /agent-dir/link -> /safe; /safe chain is fine, but /agent-dir CONTAINS
+    // the symlink, so the agent can re-point it. The target check must not
+    // replace the lexical check — both chains.
+    const v = verifyProtectedDirectoryChain('/agent-dir/link', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/agent-dir': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-dir/link': { kind: 'symlink', target: '/safe', uid: ROOT_UID },
+    }));
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/agent-dir is owned by this agent');
+  });
+
+  it('follows a symlink whose target is itself under another symlink (chained)', () => {
+    // /a -> /b/x, /b -> /agent-parent/c. The agent-owned parent is two hops away.
+    const v = verifyProtectedDirectoryChain('/a', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/a': { kind: 'symlink', target: '/b/x', uid: ROOT_UID },
+      '/b': { kind: 'symlink', target: '/agent-parent/c', uid: ROOT_UID },
+      '/b/x': { kind: 'dir', mode: 0o40755 },
+      '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-parent/c': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/agent-parent');
+  });
+
+  it('fails closed on a symlink whose target cannot be read', () => {
+    const seam = seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', uid: ROOT_UID }, // no target: readlink -> null
+    });
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seam);
+    expect(v.reason).toBe('parent-symlink-unresolvable');
+  });
+
+  it('fails closed on a symlink LOOP instead of recursing forever', () => {
+    const v = verifyProtectedDirectoryChain('/a', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/a': { kind: 'symlink', target: '/b', uid: ROOT_UID },
+      '/b': { kind: 'symlink', target: '/a', uid: ROOT_UID },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-symlink-cycle');
   });
 });
 
@@ -198,6 +344,7 @@ describe('#501 verifyProtectedFile — every way it must fail closed', () => {
       'unsupported-platform', 'euid-unavailable', 'running-as-root', 'missing', 'symlink',
       'not-regular-file', 'owned-by-agent', 'group-or-other-writable', 'parent-missing',
       'parent-not-directory', 'parent-owned-by-agent', 'parent-group-or-other-writable',
+      'parent-symlink-unresolvable', 'parent-symlink-cycle',
     ] as const;
     for (const r of reasons) {
       expect(describeProtectedFailure(r)).toEqual(expect.stringMatching(/\S/));

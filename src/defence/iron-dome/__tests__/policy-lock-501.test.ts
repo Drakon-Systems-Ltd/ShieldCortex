@@ -52,6 +52,10 @@ function seamOf(
   return {
     lstat: (p) => stat(p, false),
     stat: (p) => stat(p, true),
+    readlink: (p) => {
+      const e = entries[p];
+      return e?.kind === 'symlink' && e.target ? e.target : null;
+    },
     readFile: (p) => files[p] ?? null,
     geteuid: () => (opts.euid === undefined ? AGENT_UID : opts.euid),
     platform: opts.platform ?? 'linux',
@@ -165,6 +169,7 @@ describe('#501 readPolicyLock — what the host actually is', () => {
     const hostile: ProtectedFsSeam = {
       lstat() { throw new Error('exploding seam'); },
       stat() { throw new Error('exploding seam'); },
+      readlink() { throw new Error('exploding seam'); },
       readFile() { throw new Error('exploding seam'); },
       geteuid: () => AGENT_UID,
       platform: 'linux',

@@ -21,7 +21,7 @@
  * #500 (self-protection of hook wiring, expected hashes, install-root pin) is
  * expected to build on the same two functions.
  */
-import { lstatSync, readFileSync, statSync } from 'fs';
+import { lstatSync, readFileSync, readlinkSync, statSync } from 'fs';
 import { dirname, isAbsolute, resolve as resolvePath } from 'path';
 
 // ── Audit vocabulary ──────────────────────────────────
@@ -107,6 +107,13 @@ export interface ProtectedFsSeam {
   lstat(path: string): ProtectedStat | null;
   /** stat, following symlinks. null when absent or unstattable. */
   stat(path: string): ProtectedStat | null;
+  /**
+   * The raw target of a symlink, exactly as `fs.readlink` returns it (may be
+   * relative to the symlink's own directory). null when not a symlink or
+   * unreadable. The directory-chain walk needs this to verify a symlinked
+   * ancestor's REAL ancestry, not just the lexical path that named it.
+   */
+  readlink(path: string): string | null;
   /** File contents as utf-8, or null when unreadable. */
   readFile(path: string): string | null;
   /** Effective uid, or null where the platform has no such concept. */
@@ -138,6 +145,9 @@ export function defaultProtectedFsSeam(): ProtectedFsSeam {
     },
     stat(path) {
       try { return toProtectedStat(statSync(path)); } catch { return null; }
+    },
+    readlink(path) {
+      try { return readlinkSync(path, 'utf-8'); } catch { return null; }
     },
     readFile(path) {
       try { return readFileSync(path, 'utf-8'); } catch { return null; }
@@ -318,7 +328,9 @@ export type ProtectedFileFailure =
   | 'parent-missing'
   | 'parent-not-directory'
   | 'parent-owned-by-agent'
-  | 'parent-group-or-other-writable';
+  | 'parent-group-or-other-writable'
+  | 'parent-symlink-unresolvable'
+  | 'parent-symlink-cycle';
 
 export interface ProtectedFileVerdict {
   ok: boolean;
@@ -356,10 +368,15 @@ function fail(reason: ProtectedFileFailure, detail: string): ProtectedFileVerdic
  *     agent-writable `/etc/shieldcortex` regardless of that directory's own
  *     mode.
  *
- * Directories are checked with `stat` for ownership and mode, plus an `lstat`
- * symlink-owner check. `/etc` is a symlink to `/private/etc` on macOS, so an
- * lstat-only directory rule would refuse every Mac; an agent-owned SYMLINK in
- * the chain is still refused, which is the case the lstat rule was there for.
+ * Directories are checked with `lstat`. A symlinked ancestor is allowed only
+ * when the SYMLINK is not agent-owned AND its resolved target's whole
+ * directory chain passes the same rules. `/etc` is a symlink to
+ * `/private/etc` on macOS, so refusing symlinked ancestors outright would
+ * refuse every Mac; but a root-owned `/x -> /agent-owned/safe` is exactly as
+ * agent-replaceable as `/agent-owned/safe` itself (the agent renames `safe`
+ * aside and re-creates it). The lexical chain above the symlink is walked
+ * too: an agent-writable directory that CONTAINS the symlink can replace the
+ * symlink. Both chains must pass.
  */
 export function verifyProtectedFile(
   path: string,
@@ -402,46 +419,130 @@ export function verifyProtectedFile(
  * Walk a directory and every ancestor, applying the ownership rules. Exported
  * because #500's artefacts (an install-root pin, an expected-hashes file) need
  * to ask the same question about a directory on its own.
+ *
+ * Two chains are walked, and both must pass:
+ *
+ *   - the LEXICAL chain: `startDir`, its `dirname`, and so on up to `/`.
+ *   - for every symlink met on the way, the RESOLVED chain: the link's target
+ *     and every ancestor of the target, recursively (the target may itself
+ *     pass through further symlinks).
+ *
+ * The lexical chain alone was the PR #522 review blocker: a root-owned
+ * `/protected -> /agent-parent/safe` passed, because `stat` reported the
+ * root-owned `safe` and the walk then continued from `/`, never examining
+ * `/agent-parent`. A symlink's `stat` says what the target IS, not who can
+ * replace it.
  */
 export function verifyProtectedDirectoryChain(
   startDir: string,
   euid: number,
   seam: ProtectedFsSeam = defaultProtectedFsSeam(),
 ): ProtectedFileVerdict {
-  let dir = resolvePath(startDir);
-  // Bounded: dirname('/') === '/', so the loop terminates at the filesystem
-  // root. The cap is belt-and-braces against a pathological seam.
-  for (let depth = 0; depth < 64; depth += 1) {
-    const link = seam.lstat(dir);
-    if (link === null) return fail('parent-missing', `${dir} does not exist.`);
-    if (link.isSymbolicLink && link.uid === euid) {
+  return walkDirectoryChain(resolvePath(startDir), euid, seam, {
+    active: [],
+    verified: new Set(),
+    budget: MAX_CHAIN_STEPS,
+  });
+}
+
+/**
+ * Belt-and-braces bound on the total number of directories examined across
+ * both chains. `active` catches genuine symlink loops exactly; the budget
+ * exists for a pathological seam that never reaches `/`.
+ */
+const MAX_CHAIN_STEPS = 256;
+
+interface ChainWalk {
+  /** Directories whose verification is in progress (a stack) — re-entry is a loop. */
+  active: string[];
+  /** Directories already verified on another path; no need to walk twice. */
+  verified: Set<string>;
+  budget: number;
+}
+
+function walkDirectoryChain(
+  startDir: string,
+  euid: number,
+  seam: ProtectedFsSeam,
+  walk: ChainWalk,
+): ProtectedFileVerdict {
+  let dir = startDir;
+  // Bounded: dirname('/') === '/', so the lexical loop terminates at the
+  // filesystem root; `active` terminates the symlink recursion.
+  for (;;) {
+    if (walk.budget <= 0) {
       return fail(
-        'parent-owned-by-agent',
-        `${dir} is a symlink owned by this agent's uid (${euid}); it can re-point the whole directory.`,
+        'parent-symlink-cycle',
+        `${dir}: the directory chain did not terminate within ${MAX_CHAIN_STEPS} steps.`,
       );
     }
-    const st = seam.stat(dir);
-    if (st === null) return fail('parent-missing', `${dir} could not be stat'd.`);
-    if (!st.isDirectory) return fail('parent-not-directory', `${dir} is not a directory.`);
-    if (st.uid === euid) {
-      return fail(
-        'parent-owned-by-agent',
-        `${dir} is owned by this agent's own uid (${euid}); it can unlink and re-create anything inside it, ` +
-        'whoever owns the file.',
-      );
+    walk.budget -= 1;
+
+    if (walk.active.includes(dir)) {
+      return fail('parent-symlink-cycle', `${dir} is reached again through its own symlink chain; a loop cannot be verified.`);
     }
-    if ((st.mode & GROUP_OR_OTHER_WRITE) !== 0) {
-      return fail(
-        'parent-group-or-other-writable',
-        `${dir} is group- or other-writable (mode ${(st.mode & 0o7777).toString(8)}); this agent can unlink and ` +
-        're-create the files inside it.',
-      );
+    if (!walk.verified.has(dir)) {
+      walk.active.push(dir);
+      const verdict = verifyOneDirectory(dir, euid, seam, walk);
+      walk.active.pop();
+      if (!verdict.ok) return verdict;
+      walk.verified.add(dir);
     }
+
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
   return { ok: true, reason: null, detail: 'verified: owned by another uid, in a directory chain this agent cannot write.' };
+}
+
+/** The rules for ONE directory in the chain, recursing into a symlink's target chain. */
+function verifyOneDirectory(
+  dir: string,
+  euid: number,
+  seam: ProtectedFsSeam,
+  walk: ChainWalk,
+): ProtectedFileVerdict {
+  const link = seam.lstat(dir);
+  if (link === null) return fail('parent-missing', `${dir} does not exist.`);
+
+  if (link.isSymbolicLink) {
+    if (link.uid === euid) {
+      return fail(
+        'parent-owned-by-agent',
+        `${dir} is a symlink owned by this agent's uid (${euid}); it can re-point the whole directory.`,
+      );
+    }
+    const target = seam.readlink(dir);
+    if (target === null) {
+      return fail('parent-symlink-unresolvable', `${dir} is a symlink whose target could not be read.`);
+    }
+    // A symlink target is relative to the directory that CONTAINS the link.
+    const resolved = resolvePath(dirname(dir), target);
+    const targetVerdict = walkDirectoryChain(resolved, euid, seam, walk);
+    if (!targetVerdict.ok) {
+      return fail(targetVerdict.reason ?? 'parent-symlink-unresolvable', `${dir} -> ${resolved}: ${targetVerdict.detail}`);
+    }
+    // The target chain vouches for what the link points at today; the lexical
+    // walk continuing above `dir` vouches for who can re-point it tomorrow.
+    return { ok: true, reason: null, detail: `${dir} -> ${resolved}: target chain verified.` };
+  }
+
+  if (!link.isDirectory) return fail('parent-not-directory', `${dir} is not a directory.`);
+  if (link.uid === euid) {
+    return fail(
+      'parent-owned-by-agent',
+      `${dir} is owned by this agent's own uid (${euid}); it can replace anything inside it, whoever owns the file.`,
+    );
+  }
+  if ((link.mode & GROUP_OR_OTHER_WRITE) !== 0) {
+    return fail(
+      'parent-group-or-other-writable',
+      `${dir} is group- or other-writable (mode ${(link.mode & 0o7777).toString(8)}); this agent can replace ` +
+      'the files inside it.',
+    );
+  }
+  return { ok: true, reason: null, detail: `${dir}: verified.` };
 }
 
 /**
@@ -466,6 +567,8 @@ export function describeProtectedFailure(reason: ProtectedFileFailure | string):
     case 'parent-not-directory': return 'parent path is not a directory';
     case 'parent-owned-by-agent': return 'parent directory owned by the agent uid';
     case 'parent-group-or-other-writable': return 'parent directory is group/other writable';
+    case 'parent-symlink-unresolvable': return 'a symlinked parent directory could not be resolved';
+    case 'parent-symlink-cycle': return 'the parent directory chain loops or does not terminate';
     default: return reason;
   }
 }
