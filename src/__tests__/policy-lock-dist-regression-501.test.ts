@@ -170,7 +170,7 @@ describe('#501 the forge itself — the signature is not the control', () => {
     // baseline the lock has to change. The hook exits silently.
     expect(runHook(SC01_CATASTROPHIC).stdout).toBe('');
   });
-}, 120_000);
+});
 
 describe('#501 with a forged same-UID policy lock, the built artefacts fail closed', () => {
   beforeEach(() => {
@@ -234,7 +234,7 @@ describe('#501 with a forged same-UID policy lock, the built artefacts fail clos
     const result = runCli(['config', '--action-guard-enforce']);
     expect(result.status).toBe(0);
   });
-}, 300_000);
+});
 
 describe('#501 a MISSING dist cannot fail open while a lock exists', () => {
   it('the hook enforces the strict posture when its dist policy reader is gone', () => {
@@ -283,4 +283,4 @@ describe('#501 a MISSING dist cannot fail open while a lock exists', () => {
       rmSync(emptyDist, { recursive: true, force: true });
     }
   });
-}, 180_000);
+});
