@@ -58,6 +58,11 @@ describe('#501 policy-lock paths — reads are not the access', () => {
     `ls -la ${ROOT}/`,
     `git diff -- ${SETTINGS}`,
     `git show HEAD:${SETTINGS}`,
+    // #522 G2 regression guards: the token test must not swallow ordinary
+    // read flags that merely begin with the same letters.
+    `git log --oneline --format=%H -- ${SETTINGS}`,
+    `git diff --stat -- ${SETTINGS}`,
+    `git log -n 5 -- ${LOCK}`,
     `cat ${LOCK} | jq .actionGuard`,
     `grep -c enforce ${LOCK} && echo present`,
     `test -f ${LOCK} && cat ${LOCK}`,
@@ -110,6 +115,16 @@ describe('#501 policy-lock paths — every write shape keeps the gate', () => {
     ['Bash', { command: `git checkout -- ${SETTINGS}` }],
     ['Bash', { command: `git log --output=${HOME}/${SETTINGS} -- x` }],
     ['Bash', { command: `git -C ${HOME} log -- ${SETTINGS}` }],
+    // #522 G2 — the flag is argv, not prose. Quoting it put a `"` where the
+    // old pattern demanded whitespace, so every one of these read as pure
+    // inspection and the write rode through the carve-out.
+    ['Bash', { command: `git diff "--output=${HOME}/${SETTINGS}" -- README.md` }],
+    ['Bash', { command: `git diff '--output=${HOME}/${SETTINGS}' -- README.md` }],
+    ['Bash', { command: `git diff "--ext-diff" -- ${SETTINGS}` }],
+    ['Bash', { command: `git diff --output "${HOME}/${SETTINGS}" -- x` }],
+    // Short form, spaced and glued.
+    ['Bash', { command: `git log -o ${HOME}/${SETTINGS} -- x` }],
+    ['Bash', { command: `git log -o${HOME}/${SETTINGS} -- ${SETTINGS}` }],
     // Nested execution and interpreters fail closed.
     ['Bash', { command: `echo ${SUBSH}cat ${LOCK})` }],
     ['Bash', { command: `${PY} -c "open('${LOCK}','${W}').write('{}')"` }],
@@ -138,5 +153,17 @@ describe('policyLockAccessIsReadOnly', () => {
     expect(policyLockAccessIsReadOnly(`cat ${LOCK} && ${DEL} ${LOCK}`)).toBe(false);
     expect(policyLockAccessIsReadOnly(`git checkout -- ${SETTINGS}`)).toBe(false);
     expect(policyLockAccessIsReadOnly(`vi ${LOCK}`)).toBe(false);
+  });
+  it('#522 G2 — a QUOTED write flag is still a write flag', () => {
+    expect(policyLockAccessIsReadOnly(`git diff "--output=${HOME}/${SETTINGS}" -- README.md`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff '--output=${HOME}/${SETTINGS}' -- README.md`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff "--ext-diff" -- ${SETTINGS}`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff --output "${HOME}/${SETTINGS}" -- x`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git log -o ${HOME}/${SETTINGS} -- x`)).toBe(false);
+  });
+  it('#522 G2 — read flags that merely start alike are untouched', () => {
+    expect(policyLockAccessIsReadOnly(`git diff -- ${SETTINGS}`)).toBe(true);
+    expect(policyLockAccessIsReadOnly(`git log --oneline --format=%H -- ${SETTINGS}`)).toBe(true);
+    expect(policyLockAccessIsReadOnly(`git diff --stat -- ${SETTINGS}`)).toBe(true);
   });
 });

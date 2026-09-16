@@ -3165,8 +3165,37 @@ const STORE_READONLY_VERB_RE = new RegExp(`^(?:${STORE_READONLY_VERBS.join('|')}
 const LOCK_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'jq'].join('|')})$`, 'i');
 /** `git <sub>` stages that only read the working tree / history. */
 const GIT_READONLY_SUBCOMMAND_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
-/** `--output=` writes a file; `--ext-diff` runs a configured driver. Fail closed. */
-const GIT_STAGE_WRITES_OR_EXECS_RE = /\s--(?:output\b|ext-diff\b)/i;
+/**
+ * `--output` writes a file; `--ext-diff` runs a configured driver. Fail closed.
+ *
+ * Matched per ARGV TOKEN, with shell quoting stripped first — NOT against the
+ * raw stage text. The previous form was `/\s--(?:output\b|ext-diff\b)/i`, which
+ * required whitespace IMMEDIATELY before the `--`. A shell-quoted token puts a
+ * quote character there instead, so `git diff "--output=<settings>" -- x` never
+ * matched and rode straight through the read-only carve-out as an inspection
+ * (#522 GitHub round-2, G2). Quoting the flag is the whole bypass.
+ *
+ * `-o` is included because it is the short form parse-options accepts for
+ * `--output`, glued value and all (`-o<file>`). Over-gating a `git ls-files -o`
+ * that also names a lock path costs an approval card on a rare shape; missing a
+ * write costs the lock.
+ */
+const GIT_WRITE_OR_EXEC_FLAG_RE = /^(?:--(?:output|ext-diff)(?:=|$)|-o(?:$|[^-]))/i;
+
+/**
+ * Shell quoting removed so a quoted flag is still recognised as that flag.
+ * Every quote character goes, not just a surrounding pair: `--out"put"=x` is
+ * the same argv word to the shell, and this test only ever asks "is this word
+ * a write flag", so stripping too much can only fail closed.
+ */
+function dequoteArgvToken(token: string): string {
+  return token.replace(/["']/g, '');
+}
+
+/** True when any token of a `git` stage writes a file or runs a diff driver. */
+function gitStageWritesOrExecs(tokens: readonly string[]): boolean {
+  return tokens.some(t => GIT_WRITE_OR_EXEC_FLAG_RE.test(dequoteArgvToken(t)));
+}
 /** Either #501 path rule. Built from the same constants the DANGEROUS row uses. */
 const POLICY_LOCK_PATH_RE = new RegExp(`${PROTECTED_ROOT_PATH_RE.source}|${CLAUDE_SETTINGS_PATH_RE.source}`, 'i');
 
@@ -3283,7 +3312,7 @@ function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolea
         // fails closed (`dir` is not a read-only subcommand) — by design.
         const sub = toks.slice(1).find(t => !t.startsWith('-')) ?? '';
         if (!GIT_READONLY_SUBCOMMAND_RE.test(sub)) return false;
-        if (GIT_STAGE_WRITES_OR_EXECS_RE.test(stage)) return false;
+        if (gitStageWritesOrExecs(toks)) return false;
         continue;
       }
       if (!opts.verbRe.test(base)) return false;
