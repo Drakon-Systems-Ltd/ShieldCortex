@@ -22,13 +22,14 @@
  * enforced, the hook DENYING the catastrophic payload, and the signed CLI
  * refusing to disable the guard.
  */
-import { spawnSync, execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
+import { ensureFreshBuiltArtefacts } from './built-artefact-freshness.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST_ENTRY = join(repoRoot, 'dist', 'index.js');
@@ -53,19 +54,21 @@ const SOURCES_UNDER_TEST = [
 ];
 
 beforeAll(() => {
-  const artefacts = [
-    DIST_ENTRY,
-    join(repoRoot, 'dist', 'defence', 'iron-dome', 'policy-lock.js'),
-    join(repoRoot, 'dist', 'cli', 'protect.js'),
-  ];
   // Missing OR stale. The usual probe-for-existence (pre-tool-hook-retry-310)
   // is not enough for a REGRESSION proof: a dist left over from before the fix
   // exists, so the suite would drive the old build and report green about code
   // that is not the code under review. Freshness is the property that matters.
-  const newestSource = Math.max(...SOURCES_UNDER_TEST.map((p) => statSync(p).mtimeMs));
-  const stale = !artefacts.every((p) => existsSync(p))
-    || artefacts.some((p) => statSync(p).mtimeMs < newestSource);
-  if (stale) execSync('npm run build:ts', { cwd: repoRoot, stdio: 'ignore' });
+  // Shared with `policy-lock-chain-e2e-501` through a cross-process lock, so
+  // two parallel workers cannot each delete the dist the other is driving.
+  ensureFreshBuiltArtefacts({
+    repoRoot,
+    sources: SOURCES_UNDER_TEST,
+    artefacts: [
+      DIST_ENTRY,
+      join(repoRoot, 'dist', 'defence', 'iron-dome', 'policy-lock.js'),
+      join(repoRoot, 'dist', 'cli', 'protect.js'),
+    ],
+  });
 }, 600_000);
 
 /**
