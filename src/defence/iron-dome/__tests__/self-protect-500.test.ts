@@ -174,4 +174,32 @@ describe('#500 Action Guard self-protection', () => {
     expect(v.signals ?? []).toContain('disable-action-guard');
     expect(v.severity).toBe('dangerous');
   });
+
+  // GPT-6 r4: value-taking options before the verb; explicit --global=false.
+  it.each([
+    ['--loglevel silent before verb', `${NPM} --loglevel silent ${G} ${UNINST} ${SC}`],
+    ['--prefix /opt before verb', `${NPM} --prefix /opt/n ${G} ${UNINST} ${SC}`],
+    ['--global=true', `${NPM} ${UNINST} --global=true ${SC}`],
+  ])('gates global uninstall via: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).toContain('disable-action-guard');
+    expect(v.severity).toBe('dangerous');
+  });
+  it.each([
+    ['--global=false', `${NPM} ${UNINST} --global=false ${SC}`],
+    ['--location=project', `${NPM} ${UNINST} --location=project ${SC}`],
+  ])('does not gate an explicitly local uninstall: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).not.toContain('disable-action-guard');
+  });
+
+  // r5 ReDoS tripwire: a (flag value?)* pre-verb group blew up to >60s on
+  // this shape. Rule must stay linear on many flag/value pairs with no verb.
+  it('stays fast on thousands of flag/value pairs before the package (ReDoS tripwire)', () => {
+    const pairs = Array.from({ length: 4000 }, (_, i) => `--opt${i} val${i}`).join(' ');
+    const t0 = Date.now();
+    bash(`${NPM} ${pairs} ${G} ${SC}`);
+    bash(`${NPM} ${'-a b '.repeat(10000)}${SC} ${G}`);
+    expect(Date.now() - t0).toBeLessThan(300);
+  });
 });

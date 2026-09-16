@@ -920,7 +920,7 @@ const DANGEROUS: Pattern[] = [
   // rewrite its own config. Same-UID filesystem writes outside the tool
   // surface remain a later OS lock (#501). This rule is the tool-call gate.
   { re: /(?:^|[;&|\n]|\$\()[^|;&\n]*\bshieldcortex(?:\.js|\.mjs|\.cjs)?\b[^|;&\n]*(?:['\"]?--action-guard-dis['"\\]*able\b|['\"]?--action-guard-ad['"\\]*visory\b|['\"]?iron-dome['\"]?\s+['\"]?deactivate\b)/i, signal: 'disable-action-guard' },
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['\"]?-g\b['\"]?|['\"]?--global(?![\w-])|['\"]?--location=global(?![\w-])|\s['\"]?global['\"]?\s))(?=[^|;&\n]*\s['\"]?(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)(?:@[^\s'"]+)?['\"]?(?=\s|$|[|;&\n]))(?:\s+-{1,2}\S+)*\s+(?:['\"]?global['\"]?\s+)?['\"]?(?:uninstall|remove|rm|r|un|unlink)['\"]?(?=\s|$|[|;&\n])/i, signal: 'disable-action-guard' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['\"]?-g\b['\"]?|['\"]?--global(?!=(?:false|0|no)\b)(?![\w-])|['\"]?--location=global(?![\w-])|\s['\"]?global['\"]?\s))(?![^|;&\n]*--global=(?:false|0|no)\b)(?![^|;&\n]*--location=(?!global\b)\w)(?=[^|;&\n]*\s['\"]?(?:uninstall|remove|rm|r|un|unlink)['\"]?(?=\s|$|[|;&\n])[^|;&\n]*\s['\"]?(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)(?:@[^\s'"]+)?['\"]?(?=\s|$|[|;&\n]))(?![^|;&\n]*\s(?:ls|list|ll|la|view|info|show|v|search|s|se|find|outdated|audit|explain|why|ping|help|doctor|query|pack|test|t|run|exec|x)(?=\s|$|[|;&\n]))/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
