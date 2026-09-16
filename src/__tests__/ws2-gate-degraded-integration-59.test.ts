@@ -184,7 +184,7 @@ describe('#59 — drift guard: fallbacks cover the guard\'s full DANGEROUS signa
     // token fragments guaranteed present in the ported patterns (note the guard
     // spells chmod/chown as `ch(?:mod|own)`, so check `recursive` for that one)
     for (const verb of ['rm', 'sudo', 'push', 'systemctl', 'iptables', 'install', 'crontab',
-      'dd', 'recursive', 'truncate', 'history', 'id_rsa', 'uvx', 'dlx', 'base64']) {
+      'dd', 'recursive', 'truncate', 'history', 'id_rsa', 'uvx', 'dlx', 'base64', 'deactivate', 'action-guard']) {
       expect(dangBlock.includes(verb)).toBe(true);
     }
   });
