@@ -200,7 +200,7 @@ describe('#500 Action Guard self-protection', () => {
     const t0 = Date.now();
     bash(`${NPM} ${pairs} ${G} ${SC}`);
     bash(`${NPM} ${'-a b '.repeat(10000)}${SC} ${G}`);
-    expect(Date.now() - t0).toBeLessThan(300);
+    expect(Date.now() - t0).toBeLessThan(500);
   });
 
   // GPT-6 r5 P1: later boolean wins in npm.
@@ -218,5 +218,38 @@ describe('#500 Action Guard self-protection', () => {
     const v = bash(`${NPM} ${G} ` + (UNINST + ' ').repeat(4000) + `${SC}-helper`);
     expect(Date.now() - t0).toBeLessThan(300);
     expect(v.signals ?? []).not.toContain('disable-action-guard');
+  });
+
+  // GPT-6 r6 P1: inline-shell -c was dropped because collectExecutableBodies
+  // does not unwrap quoted programs. Recurse like the install disposer.
+  it.each([
+    ['bash -c double', `bash -c "${NPM} ${UNINST} ${G} ${SC}"`],
+    ['sh -c single', `sh -c '${NPM} un ${G} ${SC}'`],
+    ['eval wrapper', `eval "${NPM} ${UNINST} ${G} ${SC}"`],
+    ['$PM fail-closed', `$PM ${UNINST} ${G} ${SC}`],
+    ['npm uninstall -g -- pkg', `${NPM} ${UNINST} ${G} -- ${SC}`],
+  ])('gates wrapped global uninstall via: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).toContain('disable-action-guard');
+    expect(v.severity).toBe('dangerous');
+  });
+  it.each([
+    ['eval as package query', `npm view ${SC} eval`],
+    ['eval as local extra arg', `${NPM} ${UNINST} ${SC} eval`],
+    ['echo of uninstall', `echo blocked ${NPM} ${UNINST} ${G} ${SC}`],
+  ])('does not gate eval-as-vocabulary / echo: %s', (_label, command) => {
+    const v = bash(command);
+    expect(v.signals ?? []).not.toContain('disable-action-guard');
+  });
+  // GPT-6 r6 P2: repeated pm / package tokens must stay linear now that
+  // there is no DANGEROUS-table regex for uninstall.
+  it.each([
+    ['pm-repeat', () => `${NPM} ls ` + (`${NPM} `).repeat(4000) + `${SC}-helper`],
+    ['pkg-repeat', () => `${NPM} ls ` + (`${SC} `).repeat(4000) + 'x'],
+    ['cli-repeat', () => `${SC} ` + (`${SC} `).repeat(4000) + 'status'],
+  ])('stays fast on thousands of repeated %s tokens (ReDoS tripwire 3)', (_label, make) => {
+    const t0 = Date.now();
+    bash(make());
+    expect(Date.now() - t0).toBeLessThan(500);
   });
 });

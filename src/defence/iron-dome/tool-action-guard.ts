@@ -918,9 +918,10 @@ const DANGEROUS: Pattern[] = [
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: Guard must not let a tool call switch Guard off, uninstall it, or
   // rewrite its own config. Same-UID filesystem writes outside the tool
-  // surface remain a later OS lock (#501). This rule is the tool-call gate.
-  { re: /(?:^|[;&|\n]|\$\()[^|;&\n]*\bshieldcortex(?:\.js|\.mjs|\.cjs)?\b[^|;&\n]*(?:['\"]?--action-guard-dis['"\\]*able\b|['\"]?--action-guard-ad['"\\]*visory\b|['\"]?iron-dome['\"]?\s+['\"]?deactivate\b)/i, signal: 'disable-action-guard' },
-  { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\s['\"]?(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)(?:@[^\s'"]+)?['\"]?(?=\s|$|[|;&\n])/i, signal: 'disable-action-guard' },
+  // surface remain a later OS lock (#501). The tool-call gate is
+  // `guardDisableInvoked` (proposer+disposer, no DANGEROUS-table regex --
+  // five regex rounds traded a bypass for a false deny for a backtracking
+  // path). Config-path stays a PATH_TARGET rule.
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
@@ -1390,62 +1391,105 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
 }
 
 /**
- * #500 -- global uninstall of ShieldCortex must be an INVOCATION, argv-parsed.
- * The proposer above is deliberately loose (pm + package token). This walks
- * the tokens once: subcommand = first non-flag token after the pm (skipping
- * value-taking npm options), global = last-wins over -g / --global[=bool] /
- * --location=..., package = a whole argv token. Read-only verbs, workspace
- * uninstalls, explicit --global=false, and shared-prefix packages all
- * return false. Linear in token count; no regex over the statement.
+ * #500 -- self-protection is an INVOCATION, argv-parsed. No DANGEROUS-table
+ * regex for disable/uninstall: the proposer IS this walk (same pattern as
+ * systemInstallInvoked). One pass over tokens per statement.
+ *
+ * CLI disable: command-position shieldcortex (or npx/node wrapper, or $var
+ * fail-closed) plus a disable/advisory/deactivate flag in the rest.
+ * Global uninstall: command-position npm-family (or $var fail-closed) plus
+ * uninstall-class verb as the first non-flag, last-wins global, whole-token
+ * package. Recurses into bash -c / collectExecutableBodies. eval is a
+ * command, not vocabulary (GPT-6 r6).
  */
-const GUARD_CLI_DISABLE = /\bshieldcortex(?:\.js|\.mjs|\.cjs)?\b[^|;&\n]*(?:['\"]?--action-guard-dis['"\\]*able\b|['\"]?--action-guard-ad['"\\]*visory\b|['\"]?iron-dome['\"]?\s+['\"]?deactivate\b)/i;
-function guardDisableInvoked(text: string): boolean {
-  return GUARD_CLI_DISABLE.test(text) || guardUninstallInvoked(text);
-}
 const GUARD_PKG = /^(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)(?:@.+)?$/i;
+const GUARD_BIN = /^(?:shieldcortex)(?:\.(?:js|mjs|cjs))?$/i;
 const GUARD_UNINSTALL_VERB = /^(?:uninstall|remove|rm|r|un|unlink)$/i;
 const NPM_VALUE_OPTION = /^(?:--loglevel|--prefix|--registry|--userconfig|--globalconfig|--cache|--scope|--tag|--otp|--workspace|-w|--location|--include|--omit|--access|--audit-level|--depth|--fetch-retries|--maxsockets|--proxy|--https-proxy|--script-shell|--shell)$/i;
-function guardUninstallInvoked(text: string, depth = 0): boolean {
+function stripTokDecor(tok: string): string {
+  if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) tok = tok.slice(1, -1);
+  return tok.replace(/['"\\]/g, '');
+}
+function isGuardDisableFlag(tok: string): boolean {
+  const t = stripTokDecor(tok);
+  return /^--action-guard-(?:disable|advisory)$/i.test(t);
+}
+function argvIsGlobalUninstallOfGuard(rest: readonly string[], base: string): boolean {
+  let verb: string | null = null;
+  let isGlobal = false;
+  let yarnGlobal = false;
+  let pkgHit = false;
+  for (let j = 0; j < rest.length; j++) {
+    const a = rest[j];
+    if (a === '--') { for (let k = j + 1; k < rest.length; k++) if (GUARD_PKG.test(stripTokDecor(rest[k]))) pkgHit = true; break; }
+    if (a === '-g' || /^-[a-z]*g[a-z]*$/i.test(a)) { isGlobal = true; continue; }
+    if (/^--global(?:=|$)/i.test(a)) { const v = a.split('=')[1]; isGlobal = v === undefined || !/^(?:false|0|no)$/i.test(v); continue; }
+    if (/^--no-global$/i.test(a)) { isGlobal = false; continue; }
+    if (/^--location=/i.test(a)) { isGlobal = /^--location=global$/i.test(a); continue; }
+    if (NPM_VALUE_OPTION.test(a)) { if (a.toLowerCase() === '--location') isGlobal = /^global$/i.test(rest[j + 1] ?? ''); j++; continue; }
+    if (a.startsWith('-')) continue;
+    if (verb === null) {
+      if (a.toLowerCase() === 'global' && /^(?:yarn|pnpm|bun)$/i.test(base)) { yarnGlobal = true; continue; }
+      verb = a;
+      continue;
+    }
+    if (GUARD_PKG.test(stripTokDecor(a))) pkgHit = true;
+  }
+  return verb !== null && GUARD_UNINSTALL_VERB.test(verb) && (isGlobal || yarnGlobal) && pkgHit;
+}
+function walkInlineShell(tokens: readonly string[], depth: number, fn: (body: string, d: number) => boolean): boolean {
+  if (depth >= MAX_INLINE_RECURSION) return false;
+  for (let i = 0; i < tokens.length; i++) {
+    const b = commandBaseName(tokens[i]);
+    if (!/^(?:bash|sh|zsh|ksh|dash|ash)$/.test(b)) continue;
+    for (let j = i + 1; j < tokens.length; j++) {
+      if (isInlineProgramFlag(b, tokens[j])) {
+        if (fn(tokens[j + 1] ?? '', depth + 1)) return true;
+        break;
+      }
+      if (BASH_VALUE_OPTION.test(tokens[j])) { j++; continue; }
+      if (!tokens[j].startsWith('-')) break;
+    }
+  }
+  return false;
+}
+function guardDisableInvoked(text: string, depth = 0): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
+  // Cheap reject: every claimed surface names the package or binary. The
+  // wrapper-dense ReDoS corpus (`nice env nohup` x 1100) has neither, and
+  // walking it as argv is O(statements x tokens) for no gain. $PM uninstall
+  // of a non-literal package is #504-adjacent and already un-gated.
+  if (depth === 0 && !/shieldcortex/i.test(text)) return false;
   if (depth < MAX_INLINE_RECURSION) {
     for (const body of collectExecutableBodies(text)) {
-      if (body && guardUninstallInvoked(body, depth + 1)) return true;
+      if (body && guardDisableInvoked(body, depth + 1)) return true;
     }
   }
   for (const stmt of disposerStatements(text)) {
-    if (!/\b(?:npm|yarn|pnpm|bun)\b/i.test(stmt)) continue;
-    if (/\beval\b/.test(stmt)) return true;
     const tokens = tokeniseStatement(stmt).map(tok => {
       if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) return tok.slice(1, -1);
       return tok;
     });
+    if (walkInlineShell(tokens, depth, guardDisableInvoked)) return true;
     for (let i = 0; i < tokens.length; i++) {
-      if (tokens[i].startsWith('$') && gitAtCommandPosition(tokens, i)) return true;
-      const base = commandBaseName(tokens[i]);
-      if (!NPM_FAMILY.test(base)) continue;
       if (!gitAtCommandPosition(tokens, i)) continue;
-      const rest = tokens.slice(i + 1);
-      let verb: string | null = null;
-      let isGlobal = false;
-      let yarnGlobal = false;
-      let pkgHit = false;
-      for (let j = 0; j < rest.length; j++) {
-        const a = rest[j];
-        if (a === '--') { for (let k = j + 1; k < rest.length; k++) if (GUARD_PKG.test(rest[k])) pkgHit = true; break; }
-        if (a === '-g' || /^-[a-z]*g[a-z]*$/i.test(a)) { isGlobal = true; continue; }
-        if (/^--global(?:=|$)/i.test(a)) { const v = a.split('=')[1]; isGlobal = v === undefined || !/^(?:false|0|no)$/i.test(v); continue; }
-        if (/^--no-global$/i.test(a)) { isGlobal = false; continue; }
-        if (/^--location=/i.test(a)) { isGlobal = /^--location=global$/i.test(a); continue; }
-        if (NPM_VALUE_OPTION.test(a)) { if (a.toLowerCase() === '--location') isGlobal = /^global$/i.test(rest[j + 1] ?? ''); j++; continue; }
-        if (a.startsWith('-')) continue;
-        if (verb === null) {
-          if (a.toLowerCase() === 'global' && /^(?:yarn|pnpm|bun)$/i.test(base)) { yarnGlobal = true; continue; }
-          verb = a;
-          continue;
-        }
-        if (GUARD_PKG.test(a)) pkgHit = true;
+      const base = commandBaseName(tokens[i]);
+      if (/^eval$/i.test(base)) {
+        if (guardDisableInvoked(tokens.slice(i + 1).join(' '), depth + 1)) return true;
+        continue;
       }
-      if (verb !== null && GUARD_UNINSTALL_VERB.test(verb) && (isGlobal || yarnGlobal) && pkgHit) return true;
+      const rest = tokens.slice(i + 1);
+      const restHasDisable =
+        rest.some(isGuardDisableFlag)
+        || rest.some((a, idx) => /^iron-dome$/i.test(stripTokDecor(a)) && /^deactivate$/i.test(stripTokDecor(rest[idx + 1] ?? '')));
+      const binIsGuard = GUARD_BIN.test(base) || GUARD_BIN.test(commandBaseName(base));
+      const wrapperThenGuard = /^(?:npx|node|env)$/i.test(base) && rest.some(a => GUARD_BIN.test(commandBaseName(a)) || a.startsWith('$') || a.includes('$('));
+      if ((binIsGuard || wrapperThenGuard || tokens[i].startsWith('$')) && restHasDisable) return true;
+      if (NPM_FAMILY.test(base) || /^(?:npx|corepack)$/i.test(base)) {
+        if (argvIsGlobalUninstallOfGuard(rest, base)) return true;
+      } else if (tokens[i].startsWith('$') && argvIsGlobalUninstallOfGuard(rest, 'npm')) {
+        return true;
+      }
     }
   }
   return false;
@@ -4582,7 +4626,6 @@ function scanWriteContentPayload(content: string): {
       if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
       // #386: quoted install vocabulary in scripts/logs is not an install.
       if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
-      if (m.signal === 'disable-action-guard' && !guardDisableInvoked(text)) continue;
       if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;
       if (!seen.has(m.signal)) { seen.add(m.signal); dangerous.push(m); }
     }
@@ -4595,6 +4638,10 @@ function scanWriteContentPayload(content: string): {
     // let alone confirmed, and an install reached only through an interpreter
     // sink is not table vocabulary at all. The confirmations above are the same
     // functions, so nothing widens: this only asks the question on this path.
+    if (!seen.has('disable-action-guard') && guardDisableInvoked(text)) {
+      seen.add('disable-action-guard');
+      dangerous.push({ signal: 'disable-action-guard', span: 'guard self-protection' });
+    }
     if (!seen.has('install-package')
         && systemInstallInvoked(text)
         // #128 stays exactly as strong: an install sealed inside a throwaway
@@ -5207,11 +5254,13 @@ function evaluateToolCallCore(
   // --force` in a commit message or a `--grep` pattern is prose, not a delete.
   // The argv parser also strips flag quoting, so the `git branch "-d" "-f"`
   // evasion is confirmed rather than slipped.
-  // #500: self-protection must be an invocation. The uninstall proposer is
-  // loose (pm + package token) so `npm ls -g shieldcortex uninstall` proposes;
-  // the argv walk drops it. The CLI-disable proposer is already precise.
-  if (dangerSignals.includes('disable-action-guard') && !guardDisableInvoked(scanSurface)) {
-    dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
+  // #500: self-protection is proposed by the argv walk, not a table regex.
+  if (!dangerSignals.includes('disable-action-guard') && guardDisableInvoked(scanSurface)) {
+    dangerSignals.push('disable-action-guard');
+    dangerSpan = dangerSpan ?? 'guard self-protection';
+    if (!dangerEvidence.has('disable-action-guard')) {
+      dangerEvidence.set('disable-action-guard', { signal: 'disable-action-guard', span: 'guard self-protection', tier: 'executed' });
+    }
   }
   if (dangerSignals.includes('git-delete-branch') && !gitDeleteBranchInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'git-delete-branch');
