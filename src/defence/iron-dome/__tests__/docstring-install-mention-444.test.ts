@@ -216,4 +216,19 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).not.toContain('install-package-global');
     expect(v.severity).not.toBe('dangerous');
   });
+
+  // Grok r7: written-then-executed heredoc with an UNQUOTED delimiter is
+  // shell-expanded before cat writes it. Must keep the sink.
+  it('still gates a shell backtick in an unquoted-delimiter write-then-run heredoc', () => {
+    const cmd = ['cat > /tmp/s.py <<PY', `x = "${bt}${NPM} ${INST} ${G} cowsay${bt}"`, 'PY', 'python3 /tmp/s.py'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+  });
+  it('a quoted-delimiter write-then-run python heredoc keeps docstring relief', () => {
+    const cmd = ["cat > /tmp/s.py <<'PY'", `"""re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after"""`, 'print(1)', 'PY', 'python3 /tmp/s.py'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity).not.toBe('dangerous');
+  });
 });

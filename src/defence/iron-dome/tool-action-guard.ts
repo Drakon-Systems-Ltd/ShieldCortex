@@ -4303,7 +4303,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
    * consumes the heredoc) returned benign, while the same literals written to a
    * file and executed returned catastrophic.
    */
-  const written: Array<{ start: number; end: number; body: string; outFile: string }> = [];
+  const written: Array<{ start: number; end: number; body: string; outFile: string; shellExpands: boolean }> = [];
   const candidateFiles: string[] = [];
   ANY_HEREDOC_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -4319,7 +4319,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
       const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
       if (cleaned) {
         const s = m.index + nlEarly + 1;
-        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned });
+        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, shellExpands: m[1] === '' });
       }
       continue;                                         // nothing executes it as code
     }
@@ -4386,7 +4386,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
           // output into the shell (`| bash`, `>> ~/.zshrc`). The last is not a
           // property of the body at all, which is exactly why the body-local
           // test missed it.
-          hasSink: hasShellOutSink(w.body, runs[0].lang)
+          hasSink: hasShellOutSink(w.body, runs[0].lang, w.shellExpands)
             // A file write matters when what it writes can later RUN — see
             // `fileWriteIsSink`. `writeFileSync('/tmp/report.json', …)` in a
             // probe is data; `'/tmp/g.sh'` or `~/.zshrc` is a command in
