@@ -116,6 +116,31 @@ describe('#519 — install-package-global proposer is linear in token count', ()
     } as any);
     expect(v.signals ?? []).not.toContain('install-package-global');
   });
+  // GPT-6 r2: padded interpreter-sink installs must still gate (the r2 walk
+  // skipped Python/JS, so os.system with 600 spaces inside the string slipped).
+  const pyPadded = 'import os' + NL + 'os.system("' + padded + '")' + NL;
+  it('still gates a Write of .py whose os.system string is a whitespace-padded global install', () => {
+    const v = evaluateToolCall('Write', { file_path: '/tmp/run.py', content: pyPadded });
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.decision).not.toBe('allow');
+  });
+  it('still gates python3 <script> whose folded body os.system string is a whitespace-padded global install', () => {
+    const v = evaluateToolCall('Bash', { command: 'python3 /tmp/run.py' }, undefined, {
+      resolveScriptSource: (p: string) => (p.endsWith('run.py') ? pyPadded : null),
+    } as any);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.decision).not.toBe('allow');
+  });
+  // GPT-6 r2: disposer must not independently propose. Quoted documentation
+  // of an install, and a body containing the word eval, stay mentions.
+  it('does not gate a gh --body quoting os.system of a global install', () => {
+    const v = verdict(`gh pr comment 1 --body 'os.system("${PM} ${INST} ${G} foo")'`);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+  });
+  it('does not gate a gh --body containing npm eval notes', () => {
+    const v = verdict(`gh pr comment 1 --body '${PM} eval notes'`);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+  });
 });
 
 describe('#91.2 — install-package-global is quote-tolerant on the -g flag', () => {

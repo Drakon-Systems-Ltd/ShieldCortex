@@ -858,12 +858,11 @@ const DANGEROUS: Pattern[] = [
   // it is npm's own long spelling of `-g`, the first alternative and the argv
   // disposer's GLOBAL_FLAG both already treat the three as one, and omitting it
   // here meant `npm i --location=global pkg` was never even PROPOSED.
-    // #519: bound the statement-wide skips. Unbounded class after a pm
-  // token restarted the scan from every later pm (O(n^2), 1.1s at 8000).
-  // 512 chars is ~80 flags; verb sits next to the pm on a real install.
-  // Interpreter-embedded and echo/comment classification unchanged (span
-  // still starts at the pm token). Padded exec is proposed by the argv walk.
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]{0,512}(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]{0,512}\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]{0,512}(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-]))/i, signal: 'install-package-global' },
+  // #519: proposer is the package-manager token, nothing else. The old
+  // statement-wide lookaheads were O(n^2) in repeated pm tokens. Classification
+  // plus packageInstallGlobalInvoked still decide; the disposer is CONFIRM only
+  // (GPT-6 r2: a gh --body quoting os.system must not bypass mention-class).
+  { re: /\b(?:npm|yarn|pnpm|bun)\b/i, signal: 'install-package-global' },
   // Scheduler MUTATION only: `crontab` in command position that edits/installs
   // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
   // never the bare word mentioned inside an echo/string (issue #89). Env-var and
@@ -1328,6 +1327,38 @@ const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|P
  * gitForcePushInvoked: tokenise, command-position only, recurse into
  * bash -c / os.system string programs; fail closed on eval/$.
  */
+/**
+ * #519: linear "this statement names a global install" check. One scan from
+ * the FIRST package-manager token to end-of-statement -- never restarted per
+ * later pm token (that restart was the O(n^2)). CONFIRM fallback for
+ * interpreter-sink shapes the argv disposer does not parse. Not a proposer.
+ */
+function statementHasGlobalInstallVocabulary(text: string): boolean {
+  // Verb is a whitespace-delimited token, not a word-boundary inside
+  // social-add-on (#90). Only consulted when an interpreter sink is
+  // present, so an echo / forensic string / stored Python string does
+  // not confirm. Not a proposer.
+  if (!INTERPRETER_EXEC_SINK.test(text)
+      && !/__import__\s*\(/.test(text)
+      && !/getattr\s*\(/.test(text)
+      && !/\bphp\s+-r\b/.test(text)
+      && !/(?:^|[^\w$])\$\s*`/.test(text)
+      && !/`/.test(text)) {
+    return false;
+  }
+  const pm = /\b(?:npm|yarn|pnpm|bun)\b/i;
+  const verb = /(?:^|\s)(?:install|add|i|isntall|isnt|in|ins|inst|insta|instal)(?=\s|$|[|;&\n])/i;
+  const flag = /(?:\s-g\b|\s--global(?![\w-])|--location=global|\bglobal\s+add\b)/i;
+  for (const stmt of disposerStatements(text)) {
+    pm.lastIndex = 0;
+    const m = pm.exec(stmt);
+    if (!m) continue;
+    const rest = stmt.slice(m.index + m[0].length);
+    if (verb.test(rest) && flag.test(rest)) return true;
+  }
+  return false;
+}
+
 function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
   // Explicit interpreter / process APIs that run a string or argv containing a
@@ -1352,7 +1383,6 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   }
   for (const stmt of disposerStatements(text)) {
     if (!/\b(?:npm|yarn|pnpm|bun|npx|corepack)\b/i.test(stmt)) continue;
-    if (/\beval\b/.test(stmt)) return true;
     const tokens = tokeniseStatement(stmt).map(tok => {
       if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) {
         return tok.slice(1, -1);
@@ -1376,6 +1406,9 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i].startsWith('$') && gitAtCommandPosition(tokens, i)) return true;
       const base = commandBaseName(tokens[i]);
+      // #519: eval is a command, not vocabulary. Command-position eval still
+      // fail-closes; a quoted body containing the word does not.
+      if (/^eval$/i.test(base) && gitAtCommandPosition(tokens, i)) return true;
       // npx/corepack often wrap package managers — treat as installer family.
       const isNpmFamily = NPM_FAMILY.test(base) || /^(?:npx|corepack)$/i.test(base);
       if (!isNpmFamily) continue;
@@ -4611,36 +4644,23 @@ function maskSinkFreeInlinePrograms(text: string): string {
  * Split `[0, length)` into the shell ranges left over once `carved` regions are
  * removed, so every byte of the scan surface belongs to exactly one region.
  */
-/**
- * #519: the SHELL-language slice of folded script content. Interpreter regions
- * (python / node / ruby / perl / php) are blanked to spaces so an argv walk
- * over the result cannot read a docstring line as a command (#444), while a
- * folded `.sh` body -- which IS shell argv -- is walked exactly like the
- * command line. Length-preserving so no offsets move.
- */
-function shellOnlyFold(content: string, regions: readonly ScanRegion[]): string {
-  if (!content) return '';
-  let out = content;
-  for (const r of regions) {
-    if (r.lang === 'sh') continue;
-    const s = Math.max(0, r.start), e = Math.min(out.length, r.end);
-    if (e <= s) continue;
-    out = out.slice(0, s) + ' '.repeat(e - s) + out.slice(e);
-  }
-  return out;
-}
 
+
+/**
+ * Split `[0, length)` into the shell ranges left over once `carved` regions are
+ * removed, so every byte of the scan surface belongs to exactly one region.
+ */
 function withShellComplement(carved: readonly ScanRegion[], length: number): ScanRegion[] {
   const sorted = [...carved].sort((a, b) => a.start - b.start);
   const out: ScanRegion[] = [];
-  let at = 0;
+  let pos = 0;
   for (const r of sorted) {
-    if (r.start < at) continue;                 // overlapping/nested — the outer region already covers it
-    if (r.start > at) out.push({ start: at, end: r.start, lang: 'sh', hasSink: false, folded: false });
+    if (r.start < pos) continue;
+    if (r.start > pos) out.push({ start: pos, end: r.start, lang: 'sh', hasSink: false, folded: false });
     out.push(r);
-    at = Math.max(at, r.end);
+    pos = Math.max(pos, r.end);
   }
-  if (at < length) out.push({ start: at, end: length, lang: 'sh', hasSink: false, folded: false });
+  if (pos < length) out.push({ start: pos, end: length, lang: 'sh', hasSink: false, folded: false });
   return out;
 }
 
@@ -4663,7 +4683,7 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
  * "git push -f" does not gate at write time when the identical text would not
  * gate at exec time.
  */
-function scanWriteContentPayload(content: string, lang: ScriptLang = 'sh'): {
+function scanWriteContentPayload(content: string): {
   catastrophic: Array<{ signal: string; span: string }>;
   dangerous: Array<{ signal: string; span: string }>;
 } {
@@ -4685,7 +4705,7 @@ function scanWriteContentPayload(content: string, lang: ScriptLang = 'sh'): {
       if (m.signal === 'modify-network-firewall' && firewallCallsAreReadOnly(text)) continue;
       if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
       // #386: quoted install vocabulary in scripts/logs is not an install.
-      if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
+      if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text) && !statementHasGlobalInstallVocabulary(text)) continue;
       if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;
       if (!seen.has(m.signal)) { seen.add(m.signal); dangerous.push(m); }
     }
@@ -4701,14 +4721,6 @@ function scanWriteContentPayload(content: string, lang: ScriptLang = 'sh'): {
     if (!seen.has('disable-action-guard') && guardDisableInvoked(text)) {
       seen.add('disable-action-guard');
       dangerous.push({ signal: 'disable-action-guard', span: 'guard self-protection' });
-    }
-    // #519: a shell script whose global install is padded past the bounded
-    // regex window is still a global install. Shell-language content only --
-    // an interpreter file's docstring must not be read as argv (#444); those
-    // keep the regex-then-confirm path above.
-    if (lang === 'sh' && !seen.has('install-package-global') && packageInstallGlobalInvoked(text)) {
-      seen.add('install-package-global');
-      dangerous.push({ signal: 'install-package-global', span: 'global package install' });
     }
     if (!seen.has('install-package')
         && systemInstallInvoked(text)
@@ -5070,7 +5082,7 @@ function evaluateToolCallCore(
         : writeContent;
       // #519: memory prose is never argv; a script file's language comes from
       // its path (unknown extension fails closed to shell, as for folding).
-      const hits = scanWriteContentPayload(scanBody, memory ? 'python' : langFromPath(path));
+      const hits = scanWriteContentPayload(scanBody);
       if (hits.catastrophic.length > 0) {
         const signals = ['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)];
         const span = hits.catastrophic[0]?.span;
@@ -5320,6 +5332,13 @@ function evaluateToolCallCore(
   if (dangerSignals.includes('git-force-push') && !gitForcePushInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'git-force-push');
   }
+  // #519: the proposer is now the package-manager token (linear). Confirm with
+  // the argv disposer so a read-only query / workspace-local install / quoted
+  // mention do not stay gated. Disposer is CONFIRM only -- never an independent
+  // propose (GPT-6 r2).
+  if (dangerSignals.includes('install-package-global') && !packageInstallGlobalInvoked(scanSurface) && !statementHasGlobalInstallVocabulary(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'install-package-global');
+  }
   // Same discipline for branch/ref deletes (#182): naming `git branch --delete
   // --force` in a commit message or a `--grep` pattern is prose, not a delete.
   // The argv parser also strips flag quoting, so the `git branch "-d" "-f"`
@@ -5330,20 +5349,6 @@ function evaluateToolCallCore(
     dangerSpan = dangerSpan ?? 'guard self-protection';
     if (!dangerEvidence.has('disable-action-guard')) {
       dangerEvidence.set('disable-action-guard', { signal: 'disable-action-guard', span: 'guard self-protection', tier: 'executed' });
-    }
-  }
-  // #519: padded-flag pm (verb past the 512-char regex window) is still an
-  // invocation. Walk the exec surface plus the SHELL slice of folded scripts;
-  // interpreter regions are blanked so a docstring line never reads as argv
-  // (#444). A folded `.sh` body is shell and is walked like the command line.
-  const installWalkSurface = fold.content
-    ? `${execSurface}\n${shellOnlyFold(fold.content, fold.regions)}`
-    : execSurface;
-  if (!dangerSignals.includes('install-package-global') && packageInstallGlobalInvoked(installWalkSurface)) {
-    dangerSignals.push('install-package-global');
-    dangerSpan = dangerSpan ?? 'global package install';
-    if (!dangerEvidence.has('install-package-global')) {
-      dangerEvidence.set('install-package-global', { signal: 'install-package-global', span: 'global package install', tier: 'executed' });
     }
   }
   if (dangerSignals.includes('git-delete-branch') && !gitDeleteBranchInvoked(scanSurface)) {
