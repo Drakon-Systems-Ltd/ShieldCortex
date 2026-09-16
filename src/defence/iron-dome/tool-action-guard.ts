@@ -858,7 +858,12 @@ const DANGEROUS: Pattern[] = [
   // it is npm's own long spelling of `-g`, the first alternative and the argv
   // disposer's GLOBAL_FLAG both already treat the three as one, and omitting it
   // here meant `npm i --location=global pkg` was never even PROPOSED.
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]*\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-]))/i, signal: 'install-package-global' },
+    // #519: bound the statement-wide skips. Unbounded class after a pm
+  // token restarted the scan from every later pm (O(n^2), 1.1s at 8000).
+  // 512 chars is ~80 flags; verb sits next to the pm on a real install.
+  // Interpreter-embedded and echo/comment classification unchanged (span
+  // still starts at the pm token). Padded exec is proposed by the argv walk.
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]{0,512}(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-])|\bglobal\s+add\b))(?=[^|;&\n]{0,512}\s(?:install|add)(?=\s|$|[|;&\n]))|\b(?:npm|pnpm|bun)\s+(?:i(?:n(?:s(?:t(?:a(?:ll?)?)?)?)?)?|isnt(?:all)?)\b[^|;&\n]{0,512}(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-]))/i, signal: 'install-package-global' },
   // Scheduler MUTATION only: `crontab` in command position that edits/installs
   // (`-e`, `-r`, a file, or stdin `-`) — never the read-only `crontab -l`, and
   // never the bare word mentioned inside an echo/string (issue #89). Env-var and
@@ -974,7 +979,7 @@ const SENSITIVE: Pattern[] = [
   // Workspace-local package install (issue #73.3): operator-directed, into the
   // project (node_modules / vendor). Global installs matched install-package-global
   // in DANGEROUS above and are checked first, so this only tags the local case.
-  { re: /\b(?:npm|yarn|pnpm|bun)\b[^|\n]*\b(?:install|add|ci|i)\b/i, signal: 'local-package-install' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b[^|\n]{0,512}\b(?:install|add|ci|i)\b/i, signal: 'local-package-install' },
   // A venv-scoped / explicitly-target-prefixed pip install (issue #89 class 4).
   // The host-mutating shapes matched `install-package` in DANGEROUS above via
   // hasUnscopedPipInstall and are checked first, so this only tags the scoped case.
@@ -5296,6 +5301,16 @@ function evaluateToolCallCore(
     dangerSpan = dangerSpan ?? 'guard self-protection';
     if (!dangerEvidence.has('disable-action-guard')) {
       dangerEvidence.set('disable-action-guard', { signal: 'disable-action-guard', span: 'guard self-protection', tier: 'executed' });
+    }
+  }
+  // #519: padded-flag pm (verb past the 512-char regex window) is still an
+  // invocation. Walk the RAW exec surface only -- folded file bytes would make
+  // a docstring look like a command (#444). Write/fold keeps the bounded regex.
+  if (!dangerSignals.includes('install-package-global') && packageInstallGlobalInvoked(execSurface)) {
+    dangerSignals.push('install-package-global');
+    dangerSpan = dangerSpan ?? 'global package install';
+    if (!dangerEvidence.has('install-package-global')) {
+      dangerEvidence.set('install-package-global', { signal: 'install-package-global', span: 'global package install', tier: 'executed' });
     }
   }
   if (dangerSignals.includes('git-delete-branch') && !gitDeleteBranchInvoked(scanSurface)) {

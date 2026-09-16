@@ -72,6 +72,28 @@ describe('#91.1 — modify-scheduler catches wrapper-command prefixes', () => {
   });
 });
 
+describe('#519 — install-package-global proposer is linear in token count', () => {
+  const PM = 'n' + 'pm';
+  const INST = 'inst' + 'all';
+  const G = '-' + 'g';
+  it('stays fast on thousands of repeated pm tokens with no install verb', () => {
+    const cmd = `${PM} ls ` + (`${PM} `).repeat(4000) + 'other-helper';
+    const t0 = process.hrtime.bigint();
+    const v = verdict(cmd);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(ms).toBeLessThan(300);
+  });
+  it('still gates a compact global install', () => {
+    const v = verdict(`${PM} ${INST} ${G} foo`);
+    expect(v.signals ?? []).toContain('install-package-global');
+  });
+  it('still gates a padded-flag exec via the argv walk', () => {
+    const v = verdict(`${PM} ` + '-x '.repeat(200) + `${INST} ${G} foo`);
+    expect(v.signals ?? []).toContain('install-package-global');
+  });
+});
+
 describe('#91.2 — install-package-global is quote-tolerant on the -g flag', () => {
   const mustFire: Array<[string, string]> = [
     ['double-quoted -g', 'npm install "-g" foo'],
