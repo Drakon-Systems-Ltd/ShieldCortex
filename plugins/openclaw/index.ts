@@ -26,7 +26,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -379,7 +379,7 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
   if (runtime) runtimePromise = null;
 }
 export function __resetConfigStateForTest(): void {
-  _config = null;
+  _mergedConfig = null;
   _configOverride = null;
   _lastShieldConfigRef = null;
   _provenanceUndeclared = 0;
@@ -1433,7 +1433,12 @@ const PLUGIN_CONFIG_JSON_SCHEMA = {
   },
 };
 
-let _config: SCConfig | null = null;
+/**
+ * The cached MERGE — shield config + openclaw.json entry, with the policy lock
+ * deliberately NOT applied. `loadConfig` re-applies the lock to this on every
+ * call; see the comment there for why the two halves cache differently.
+ */
+let _mergedConfig: SCConfig | null = null;
 // Identity of the shield config we last merged from. The runtime's
 // loadShieldConfig() returns the same parsed object until the file's mtime
 // advances; using reference equality lets us re-merge precisely when the
@@ -1801,7 +1806,7 @@ function applyPluginConfigOverride(api: PluginApi): void {
   if (Object.keys(pluginConfig).length === 0) return;
   _configOverride = mergeConfigs(_configOverride ?? {}, pluginConfig);
   // Override changed — invalidate so loadConfig() re-merges with new override.
-  _config = null;
+  _mergedConfig = null;
   _lastShieldConfigRef = null;
 }
 
@@ -1903,6 +1908,7 @@ function noteL2Degraded(reason: string): void {
  * test rather than by hope.
  */
 const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
+const INLINE_PROTECTED_ROOT_POINTER = '/etc/shieldcortex.conf';
 const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
 
 /** The posture an unverifiable-or-unreadable lock forces. Mirrors STRICT_FAILCLOSED_POSTURE. */
@@ -1914,19 +1920,54 @@ const INLINE_STRICT_GUARD_POSTURE = {
 };
 
 /**
+ * The pointed-to protected root, judged inline — mirrors `resolvePointerRoot`.
+ *
+ * Deliberately WITHOUT the full ancestor walk `verifyProtectedFile` runs: this
+ * probe's only output is "is a lock present", and a `true` can only ever raise
+ * the posture. The file-level rules (root-owned, a real regular file, not
+ * group- or other-writable) are the ones that stop an agent-writable pointer
+ * from being read at all, and those are cheap enough to state here.
+ */
+function inlinePointerRoot(): string | null {
+  try {
+    const st = lstatSync(INLINE_PROTECTED_ROOT_POINTER);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
+    if (st.uid !== 0 || (st.mode & 0o022) !== 0) return null;
+    for (const rawLine of readFileSync(INLINE_PROTECTED_ROOT_POINTER, 'utf-8').split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1 || line.slice(0, eq).trim() !== 'root') continue;
+      const value = line.slice(eq + 1).trim();
+      return value && path.isAbsolute(value) ? value : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Does a policy lock FILE exist, judged without resolving anything from dist?
  *
- * Mirrors `resolveProtectedRoot`'s ordering, including the rule that keeps the
- * test override non-loosening: the canonical root is probed first, and the
- * environment variable only consulted on a host that has no canonical root at
- * all. So the probe can never be pointed away from a real lock.
+ * Mirrors `resolveProtectedRoot`'s ordering exactly, including the rule that
+ * keeps the test override non-loosening: BOTH production roots — the canonical
+ * one and the root-owned pointer — are resolved first, and the environment
+ * variable is only consulted on a host where neither answers. So the probe can
+ * never be pointed away from a real lock.
+ *
+ * The pointer half is the #501 review's BLOCK-2: without it, a pointer host
+ * with an unresolvable defence module probed `false` and the plugin failed
+ * OPEN — precisely the "break the install" case this probe exists to close.
  */
 function inlinePolicyLockPresent(): boolean {
   if (process.platform === 'win32') return false;
   try {
-    let root = INLINE_PROTECTED_ROOT;
     const canonicalLock = path.join(INLINE_PROTECTED_ROOT, INLINE_POLICY_LOCK_FILENAME);
-    if (!existsSync(canonicalLock) && !existsSync(INLINE_PROTECTED_ROOT)) {
+    const canonicalOccupied = existsSync(canonicalLock) || existsSync(INLINE_PROTECTED_ROOT);
+    const pointed = inlinePointerRoot();
+    let root = pointed ?? INLINE_PROTECTED_ROOT;
+    if (!canonicalOccupied && pointed === null) {
       const override = process.env.SHIELDCORTEX_PROTECTED_ROOT?.trim();
       if (override && path.isAbsolute(override)) root = override;
     }
@@ -1985,7 +2026,17 @@ async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig
     // to a plugin load. Shaped as a raw config view so the ONE precedence
     // implementation in dist does the work.
     const view = { actionGuard: { ...(config.interceptor?.actionGuard ?? {}) } } as Record<string, unknown>;
-    const locked = mod.applyPolicyLock(view, mod.readPolicyLock({ audit: false }));
+    const verdict = mod.readPolicyLock({ audit: false }) as { status?: string } | undefined;
+    // #501 review BLOCK-1, mirrored from the hook: a reader that LOADS and lies
+    // is treated exactly like one that could not be loaded at all. The hook's
+    // copy of this closed a real `SHIELDCORTEX_DIST_ROOT` bypass; this copy
+    // exists so the two surfaces answer a substituted reader identically, which
+    // is the #160 lesson applied to the lock.
+    const status = verdict?.status;
+    if ((status === undefined || status === 'absent' || status === 'unsupported') && inlinePolicyLockPresent()) {
+      return failClosed();
+    }
+    const locked = mod.applyPolicyLock(view, verdict);
     const guard = locked.actionGuard;
     if (!guard || typeof guard !== 'object' || Array.isArray(guard)) return config;
     return withGuardPosture(config, guard as Record<string, unknown>);
@@ -2025,16 +2076,26 @@ async function loadConfig(): Promise<SCConfig> {
   // before the cache check: a runtime that hands back the same object every
   // call would otherwise take the early return and leave the flag latched.
   _shieldConfigLoadFailureLogged = false;
-  if (_config && shieldConfigRaw === _lastShieldConfigRef) return _config;
-  _lastShieldConfigRef = shieldConfigRaw;
-  // Plugin config (openclaw.json) deep-merges over the shield config file —
-  // see mergeConfigs() for the per-key semantics. The #501 policy lock is then
-  // applied over BOTH, because the plugin entry is an unsigned, same-UID file
-  // and must not be the last word on the Action Guard's own switches.
-  _config = await applyPolicyLockToPluginConfig(
-    mergeConfigs(normaliseConfig(shieldConfigRaw), _configOverride ?? {}),
-  );
-  return _config;
+  // The MERGE is cached; the LOCK is not, and that split is the #501 review's
+  // SHOULD-FIX-4. `policy-lock.ts` states the rule — "no cache on the lock
+  // read. Four `lstat`s per config read on an unlocked host, in exchange for an
+  // operator who has just run `protect` being obeyed by the already-running
+  // agent rather than at its next restart." That held for the hook (a fresh
+  // process per call) and the CLI, and was quietly false here: the effective
+  // config was memoised on the shield config's object IDENTITY, and writing
+  // the lock does not touch `config.json`, so it was read exactly once per
+  // gateway process and never again. An operator who ran `protect` on a live
+  // box was told by doctor the host was locked while this gate was still off.
+  if (!_mergedConfig || shieldConfigRaw !== _lastShieldConfigRef) {
+    _lastShieldConfigRef = shieldConfigRaw;
+    // Plugin config (openclaw.json) deep-merges over the shield config file —
+    // see mergeConfigs() for the per-key semantics.
+    _mergedConfig = mergeConfigs(normaliseConfig(shieldConfigRaw), _configOverride ?? {});
+  }
+  // Applied over BOTH, on every call, because the plugin entry is an unsigned,
+  // same-UID file and must not be the last word on the Action Guard's own
+  // switches — and because a lock written a second ago is still a lock.
+  return applyPolicyLockToPluginConfig(_mergedConfig);
 }
 
 function isAutoMemoryEnabled(config: SCConfig): boolean {
@@ -3880,6 +3941,22 @@ export default {
     // --- Interceptor (lazy init) ---
     let interceptorReady: ReturnType<typeof createInterceptor> | null = null;
     let interceptorInitAttempted = false;
+    /**
+     * The Action Guard posture the live interceptor was BUILT with (#501).
+     *
+     * `createInterceptor` captures `config.actionGuard` once, so a lazily
+     * initialised interceptor is a second cache sitting behind `loadConfig`'s.
+     * Fixing only the first one — which is what the review's SHOULD-FIX-4 asked
+     * for — moved `/shieldcortex-status` to the right answer and left the gate
+     * itself on the posture that was live at gateway start. Both have to go.
+     *
+     * Rebuilding on a posture CHANGE (not on every call) is also the right
+     * semantics rather than merely the cheap one: the per-session deny cache
+     * and rate limiter hold decisions taken under the old posture, and an
+     * allow decided while the host was unlocked must not survive the lock
+     * landing.
+     */
+    let interceptorGuardPosture: string | null = null;
 
     // #134 §2: registered UNCONDITIONALLY, before the try block below that can
     // throw. Previously this command lived inside that try, so a plugin crash
@@ -3988,11 +4065,31 @@ export default {
     applyPluginConfigOverride(api);
 
     async function initInterceptor(): Promise<ReturnType<typeof createInterceptor> | null> {
-      if (interceptorInitAttempted) return interceptorReady;
+      // The lock read happens HERE, on every call, not once per process:
+      // `loadConfig` re-applies it to a cached merge (four `lstat`s, the cost
+      // the design doc already accepted) so an operator who has just run
+      // `protect` is obeyed by the running gateway rather than at its next
+      // restart. Everything downstream is still built once per POSTURE.
+      let scConfig: SCConfig;
+      try {
+        scConfig = await loadConfig();
+      } catch (err) {
+        // `loadConfig` degrades rather than throwing (#226), so this is the
+        // unexpected path. Keep whatever gate we already have — dropping a
+        // working interceptor because a config re-read hiccuped would turn a
+        // transient fault into an unguarded turn.
+        (api.logger as any)?.warn?.(`[shieldcortex] config re-read failed: ${err instanceof Error ? err.message : err}`);
+        return interceptorReady;
+      }
+      const posture = JSON.stringify(scConfig.interceptor?.actionGuard ?? null);
+      if (interceptorInitAttempted && posture === interceptorGuardPosture) return interceptorReady;
       interceptorInitAttempted = true;
+      interceptorGuardPosture = posture;
+      // A rebuild starts from nothing: an `enabled:false` posture, or a failed
+      // rebuild, must not leave the previous interceptor answering for it.
+      interceptorReady = null;
 
       try {
-        const scConfig = await loadConfig();
         // Normalised user config (deep-partial); DEFAULT_INTERCEPTOR_CONFIG
         // fills the gaps below — defaults never override explicit values.
         const rawInterceptorConfig = scConfig.interceptor;

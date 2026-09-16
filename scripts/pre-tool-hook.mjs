@@ -93,6 +93,7 @@ function hookConfigDir() {
  * parity test.
  */
 const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
+const INLINE_PROTECTED_ROOT_POINTER = '/etc/shieldcortex.conf';
 const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
 
 /** The exact posture an unverifiable-or-unreadable lock forces. Mirrors STRICT_FAILCLOSED_POSTURE. */
@@ -102,19 +103,54 @@ const INLINE_STRICT_POSTURE = {
 };
 
 /**
+ * The pointed-to protected root, judged inline — mirrors `resolvePointerRoot`.
+ *
+ * Deliberately WITHOUT the full ancestor walk `verifyProtectedFile` runs: this
+ * probe's only output is "is a lock present", and a `true` can only ever raise
+ * the posture. The file-level rules (root-owned, a real regular file, not
+ * group- or other-writable) are the ones that stop an agent-writable pointer
+ * from being read at all, and those are cheap enough to state here.
+ */
+function inlinePointerRoot() {
+  try {
+    const st = lstatSync(INLINE_PROTECTED_ROOT_POINTER);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
+    if (st.uid !== 0 || (st.mode & 0o022) !== 0) return null;
+    for (const rawLine of readFileSync(INLINE_PROTECTED_ROOT_POINTER, 'utf-8').split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1 || line.slice(0, eq).trim() !== 'root') continue;
+      const value = line.slice(eq + 1).trim();
+      return value && isAbsolute(value) ? value : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Does a policy lock FILE exist, judged without importing anything from dist?
  *
- * Mirrors `resolveProtectedRoot`'s ordering, including the rule that makes the
- * test override non-loosening: the canonical root is probed first, and the
- * environment variable is only consulted on a host that has no canonical root
- * at all. So this probe can never be pointed away from a real lock.
+ * Mirrors `resolveProtectedRoot`'s ordering exactly, including the rule that
+ * makes the test override non-loosening: BOTH production roots — the canonical
+ * one and the root-owned pointer — are resolved first, and the environment
+ * variable is only consulted on a host where neither answers. So this probe can
+ * never be pointed away from a real lock.
+ *
+ * The pointer half is the #501 review's BLOCK-2: without it, a pointer host
+ * with a deleted `dist` probed `false` and the hook failed OPEN — which is
+ * precisely the "delete dist is the bypass" case this probe exists to close.
  */
 function inlinePolicyLockPresent() {
   if (process.platform === 'win32') return false;
   try {
-    let root = INLINE_PROTECTED_ROOT;
     const canonicalLock = join(INLINE_PROTECTED_ROOT, INLINE_POLICY_LOCK_FILENAME);
-    if (!existsSync(canonicalLock) && !existsSync(INLINE_PROTECTED_ROOT)) {
+    const canonicalOccupied = existsSync(canonicalLock) || existsSync(INLINE_PROTECTED_ROOT);
+    const pointed = inlinePointerRoot();
+    let root = pointed ?? INLINE_PROTECTED_ROOT;
+    if (!canonicalOccupied && pointed === null) {
       const override = process.env.SHIELDCORTEX_PROTECTED_ROOT?.trim();
       if (override && isAbsolute(override)) root = override;
     }
@@ -128,9 +164,22 @@ function inlinePolicyLockPresent() {
  * Load the policy-lock reader from dist. Null when the build predates #501 or
  * is incomplete — which is exactly the case {@link inlinePolicyLockPresent}
  * exists to cover.
+ *
+ * `SHIELDCORTEX_DIST_ROOT` is an ungated test seam that pre-dates #501, and on
+ * a LOCKED host it is not honoured for this module: the #501 review's BLOCK-1
+ * was that an agent could point it at two files it owns — a `policy-lock.js`
+ * exporting a `readPolicyLock` that answers `absent` — and take the guard off
+ * entirely with a lock on disk. The variable still works everywhere else, and
+ * still works here on an unlocked host, where it buys nothing.
+ *
+ * This is belt; {@link applyHookPolicyLock}'s contradiction check is braces —
+ * it catches a lying reader arriving by any OTHER route (a tampered install, a
+ * loader hook, a future seam nobody has thought of yet).
  */
 async function loadPolicyLock() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = inlinePolicyLockPresent()
+    ? resolve(here, '..', 'dist')
+    : (process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist'));
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'policy-lock.js')).href
@@ -159,7 +208,29 @@ async function loadPolicyLock() {
  * bypass. So a present lock plus an unavailable reader forces the strict
  * posture, which is the same answer the reader would have given for a lock it
  * could not verify.
+ *
+ * #501 review BLOCK-1: "unavailable" now includes "available and contradicted".
+ * A reader that loads and LIES — answering `absent` on a host where the inline
+ * probe can see the file — used to be believed without a second look, which
+ * made a two-file, one-variable substitution a complete bypass with a lock on
+ * disk. A reader whose answer the probe contradicts is treated exactly like one
+ * that could not be loaded at all, because in both cases we cannot tell what
+ * the operator pinned.
  */
+function inlineStrictPosture(config) {
+  return {
+    ...config,
+    actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
+    defenceMode: INLINE_STRICT_POSTURE.defenceMode,
+  };
+}
+
+/** The lock statuses that mean "there is no lock here to obey". */
+function verdictSaysNoLock(verdict) {
+  const status = verdict?.status;
+  return status === undefined || status === 'absent' || status === 'unsupported';
+}
+
 async function applyHookPolicyLock(config) {
   const mod = await loadPolicyLock();
   if (!mod) {
@@ -169,26 +240,31 @@ async function applyHookPolicyLock(config) {
       'enforcing the strict fail-closed posture (Action Guard on + enforcing, no auto-approve, broker off). ' +
       'Run `shieldcortex repair` to restore the build.\n',
     );
-    return {
-      ...config,
-      actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
-      defenceMode: INLINE_STRICT_POSTURE.defenceMode,
-    };
+    return inlineStrictPosture(config);
   }
   try {
     // `audit` stays off: the audit logger is SQLite-backed and this runs on
     // every tool call. The src-side reader records the row.
-    return mod.applyPolicyLock(config, mod.readPolicyLock({ audit: false }));
+    const verdict = mod.readPolicyLock({ audit: false });
+    // The contradiction check. Cheap (the probe is one or two `existsSync`
+    // calls) and it costs nothing on the overwhelmingly common paths: an
+    // unlocked host makes both sides agree there is no lock, and a locked host
+    // makes the reader answer `locked`/`unverifiable`, which is not a denial
+    // that the lock exists.
+    if (verdictSaysNoLock(verdict) && inlinePolicyLockPresent()) {
+      process.stderr.write(
+        '[shieldcortex] the dist policy reader reports no policy lock, but one is present on disk — ' +
+        'the reader cannot be trusted, so the lock is treated as UNVERIFIABLE and the strict fail-closed ' +
+        'posture is enforced (Action Guard on + enforcing, no auto-approve, broker off). ' +
+        'Run `shieldcortex repair` to restore the build.\n',
+      );
+      return inlineStrictPosture(config);
+    }
+    return mod.applyPolicyLock(config, verdict);
   } catch {
     // A reader that throws is treated exactly like a lock that cannot be
     // verified, for the same reason: we cannot tell what the operator pinned.
-    return inlinePolicyLockPresent()
-      ? {
-          ...config,
-          actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
-          defenceMode: INLINE_STRICT_POSTURE.defenceMode,
-        }
-      : config;
+    return inlinePolicyLockPresent() ? inlineStrictPosture(config) : config;
   }
 }
 
@@ -1751,6 +1827,16 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /--action-guard-(?:disable|advisory)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #501: the policy lock's own attack surface. The two environment seams that
+  // decide WHICH policy-lock reader runs and which root it reads; the protected
+  // root and its pointer; and `~/.claude/settings.json`, whose `env` stanza is
+  // the same-UID file that delivers those variables into the enforcing
+  // process. All at the `disable-action-guard` tier, because that is what they
+  // are. Kept byte-identical with the sibling table by the #501 drift test in
+  // enforcement-surface-parity.
+  { re: /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i, signal: 'disable-action-guard' },
+  { re: /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i, signal: 'disable-action-guard' },
+  { re: /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i, signal: 'disable-action-guard' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },

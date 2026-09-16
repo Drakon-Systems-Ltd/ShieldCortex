@@ -18,6 +18,7 @@ import {
   type ProtectedFsSeam,
   type ProtectedStat,
 } from '../protected-root.js';
+import { readPolicyLock } from '../policy-lock.js';
 
 const AGENT_UID = 1001;
 const ROOT_UID = 0;
@@ -278,5 +279,76 @@ describe(`#501 ${PROTECTED_ROOT_ENV} can only tighten, never loosen`, () => {
   it('ignores a relative override', () => {
     const r = resolveProtectedRoot(seamOf({ '/': { kind: 'dir' } }, { env: { [PROTECTED_ROOT_ENV]: 'relative/path' } }));
     expect(r.root).toBe(DEFAULT_PROTECTED_ROOT);
+  });
+
+  // ── The #501 review's BLOCK-2 ──────────────────────────────────────────────
+  //
+  // Everything above gates the variable on the CANONICAL root, which is sound
+  // only on a host that uses `/etc/shieldcortex`. A POINTER host by definition
+  // keeps policy somewhere else, so `/etc/shieldcortex` does not exist there —
+  // and as first built, one variable walked the resolver straight past a
+  // genuinely root-owned, verified pointer. That is not a stricter outcome:
+  // it is `locked` -> `absent`, i.e. unlocked.
+
+  /** A host whose policy lives at /opt/scpolicy, via the documented pointer. */
+  function pointerHost(): Record<string, Entry> {
+    return {
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/scpolicy': { kind: 'dir', mode: 0o40755 },
+      '/opt/scpolicy/policy.json': { kind: 'file', mode: 0o100644 },
+      [PROTECTED_ROOT_POINTER]: { kind: 'file', mode: 0o100644 },
+    };
+  }
+
+  const POINTER_FILES = { [PROTECTED_ROOT_POINTER]: 'root=/opt/scpolicy\n' };
+
+  it('is IGNORED on a pointer host — a verified pointer out-ranks the variable', () => {
+    const hostile = resolveProtectedRoot(seamOf(pointerHost(), {
+      files: POINTER_FILES,
+      env: { [PROTECTED_ROOT_ENV]: '/tmp/nowhere' },
+    }));
+    expect(hostile).toEqual({ supported: true, root: '/opt/scpolicy', source: 'pointer' });
+    // And it is the SAME answer the host gives with no variable set at all —
+    // which is the property, not merely "not /tmp/nowhere".
+    expect(hostile).toEqual(resolveProtectedRoot(seamOf(pointerHost(), { files: POINTER_FILES })));
+  });
+
+  it('the pointer\'s LOCKED policy survives a hostile override, end to end', () => {
+    // Stated through the reader, because that is where the loosening would have
+    // shown up: before the fix this read `{ status: 'absent' }` at the attacker's
+    // empty directory, which is the unlocked posture on a locked host.
+    const seam = seamOf(pointerHost(), {
+      files: {
+        ...POINTER_FILES,
+        '/opt/scpolicy/policy.json': JSON.stringify({
+          version: 1,
+          actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false } },
+          defenceMode: 'strict',
+        }),
+      },
+      env: { [PROTECTED_ROOT_ENV]: '/tmp/nowhere' },
+    });
+    const state = readPolicyLock({ seam, audit: false, warn: false });
+    expect(state.status).toBe('locked');
+    expect(state.path).toBe('/opt/scpolicy/policy.json');
+    expect(state.status === 'locked' && state.policy.actionGuard?.enforce).toBe(true);
+  });
+
+  it('an UNVERIFIABLE pointer does not block the variable — it was never a root', () => {
+    // The other half of the gate. An agent-owned pointer yields no production
+    // root at all, so the host is unlocked and the test seam stays usable;
+    // gating on the mere EXISTENCE of the pointer file would have let an agent
+    // disable the seam by touching a file it owns.
+    const host = pointerHost();
+    host[PROTECTED_ROOT_POINTER] = { kind: 'file', uid: AGENT_UID, mode: 0o100644 };
+    delete host['/opt/scpolicy'];
+    delete host['/opt/scpolicy/policy.json'];
+    const r = resolveProtectedRoot(seamOf(host, {
+      files: POINTER_FILES,
+      env: { [PROTECTED_ROOT_ENV]: '/tmp/sc-test-root' },
+    }));
+    expect(r).toEqual({ supported: true, root: '/tmp/sc-test-root', source: 'test-override' });
   });
 });

@@ -119,6 +119,56 @@ await new Promise((done) => process.stdout.write(line + '\\n', done));
 process.exit(0);
 `;
 
+/**
+ * The SAME plugin process, across a lock write.
+ *
+ * Every case above spawns a fresh process, so the plugin's config cache is
+ * always cold — which is exactly why the chain suite could not see the #501
+ * review's SHOULD-FIX-4. The plugin memoised its effective config on the shield
+ * config's object IDENTITY, and writing `policy.json` does not touch
+ * `config.json`, so the lock was read once at gateway start and never again:
+ * an operator who ran `protect` on a live box was told the host was locked
+ * while this gate was still off. One process, two `before_tool_call` calls, a
+ * lock written between them.
+ */
+const CACHE_DRIVER = `
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const CATASTROPHIC = ${JSON.stringify(SC01_CATASTROPHIC.split(''))}.join('');
+const plugin = (await import(process.env.SC501_PLUGIN_ENTRY)).default;
+
+const hooks = new Map();
+const commands = new Map();
+console.warn = () => {};
+plugin.register({
+  version: '2026.5.20',
+  config: {},
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  registerCommand: (c) => commands.set(c.name, c),
+  registerHook: () => {},
+  on: (name, fn) => hooks.set(name, fn),
+});
+
+const beforeToolCall = hooks.get('before_tool_call');
+const status = commands.get('shieldcortex-status');
+async function probe() {
+  const verdict = (await beforeToolCall({ toolName: 'Bash', params: { command: CATASTROPHIC } }, { sessionId: 'sc-501-cache' })) ?? null;
+  const text = status ? (await status.handler()).text : '';
+  return {
+    blocked: verdict?.block === true,
+    guardLine: (text.split('\\n').find((l) => l.includes('Action guard')) || '').trim(),
+  };
+}
+
+const before = await probe();
+writeFileSync(join(process.env.SHIELDCORTEX_PROTECTED_ROOT, 'policy.json'), JSON.stringify({ version: 1, actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false } }, defenceMode: 'strict' }));
+const after = await probe();
+
+await new Promise((done) => process.stdout.write('SC501_CACHE_RESULT ' + JSON.stringify({ before, after }) + '\\n', done));
+process.exit(0);
+`;
+
 /** A staged install: the built plugin dist, with or without a resolvable package. */
 function stageInstall(withShieldCortexResolvable: boolean): string {
   const stage = mkdtempSync(join(tmpdir(), 'sc-501-chain-stage-'));
@@ -133,6 +183,7 @@ function stageInstall(withShieldCortexResolvable: boolean): string {
 let installedStage: string;
 let brokenStage: string;
 let driverPath: string;
+let cacheDriverPath: string;
 let driverDir: string;
 
 let home: string;
@@ -140,6 +191,8 @@ let configDir: string;
 let protectedRoot: string;
 
 beforeAll(() => {
+  // ASSERTED, never built here — see `built-artefact-freshness.ts`. `npm test`
+  // builds once, serially, before any worker starts.
   requireFreshBuiltArtefacts({
     repoRoot,
     sources: SOURCES_UNDER_TEST,
@@ -157,6 +210,8 @@ beforeAll(() => {
   driverDir = mkdtempSync(join(tmpdir(), 'sc-501-chain-driver-'));
   driverPath = join(driverDir, 'drive-plugin.mjs');
   writeFileSync(driverPath, DRIVER);
+  cacheDriverPath = join(driverDir, 'drive-plugin-cache.mjs');
+  writeFileSync(cacheDriverPath, CACHE_DRIVER);
 });
 
 afterAll(() => {
@@ -173,8 +228,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
-  rmSync(protectedRoot, { recursive: true, force: true });
+  // Tolerant of an undefined fixture: when the freshness assertion in beforeAll
+  // throws, Jest skips beforeEach and still runs this, and a teardown TypeError
+  // on top of the real message just buries it.
+  for (const dir of [home, protectedRoot]) {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /**
@@ -381,5 +440,39 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     const plugin = runPlugin({ stage: brokenStage });
     expect(plugin.guardLine).toMatch(/Action guard: off/);
     expect(plugin.warnings.join('\n')).not.toMatch(/policy lock is present/);
+  }, 180_000);
+});
+
+describe('#501 the plugin re-reads the lock on every config load (review SHOULD-FIX-4)', () => {
+  interface CacheProbe { blocked: boolean; guardLine: string }
+
+  function runCacheDriver(): { before: CacheProbe; after: CacheProbe } {
+    const run = spawnSync(process.execPath, [cacheDriverPath], {
+      cwd: installedStage,
+      env: env({ SC501_PLUGIN_ENTRY: join(installedStage, 'plugin', 'index.js') }),
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('SC501_CACHE_RESULT '));
+    if (!line) {
+      throw new Error(`#501 cache driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
+    }
+    return JSON.parse(line.slice('SC501_CACHE_RESULT '.length));
+  }
+
+  it('a lock written AFTER the first before_tool_call is enforced on the second', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    const { before, after } = runCacheDriver();
+
+    // Step 1 is the unlocked baseline and has to stay that way, or the row
+    // proves nothing: with no lock the signed config takes the guard off.
+    expect(before.guardLine).toMatch(/Action guard: off/);
+    expect(before.blocked).toBe(false);
+
+    // Step 2, same process, lock now on disk. Before the fix this was still
+    // `off` / `false` — the SC-01 catastrophic payload allowed on the OpenClaw
+    // surface of a host where the hook and the CLI both enforce.
+    expect(after.guardLine).toMatch(/Action guard: enforce/);
+    expect(after.blocked).toBe(true);
   }, 180_000);
 });

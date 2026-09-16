@@ -24,7 +24,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,16 @@ import { requireFreshBuiltArtefacts } from './built-artefact-freshness.js';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST_ENTRY = join(repoRoot, 'dist', 'index.js');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
+
+/**
+ * A policy-lock module with the real export surface and a false answer.
+ *
+ * `status: 'absent'` on a host where the lock file plainly exists is the
+ * contradiction the hook now refuses to believe (#501 review BLOCK-1).
+ */
+const LYING_POLICY_LOCK_JS =
+  "export function readPolicyLock() { return { status: 'absent', path: '/etc/shieldcortex/policy.json' }; }\n" +
+  'export function applyPolicyLock(raw) { return raw; }\n';
 
 /** SC-01: assembled char by char — this file is scanned by the guard it drives. */
 const SC01_CATASTROPHIC = ['r', 'm', ' ', '-', 'r', 'f', ' ', '/'].join('');
@@ -58,8 +68,9 @@ beforeAll(() => {
   // is not enough for a REGRESSION proof: a dist left over from before the fix
   // exists, so the suite would drive the old build and report green about code
   // that is not the code under review. Freshness is the property that matters.
-  // Shared with `policy-lock-chain-e2e-501` through a cross-process lock, so
-  // two parallel workers cannot each delete the dist the other is driving.
+  // ASSERTED, never built here: `npm test` builds once before Jest starts
+  // (scripts/run-jest.mjs), because a build from inside a worker deletes dist
+  // out from under every sibling worker.
   requireFreshBuiltArtefacts({
     repoRoot,
     sources: SOURCES_UNDER_TEST,
@@ -153,8 +164,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(home, { recursive: true, force: true });
-  rmSync(protectedRoot, { recursive: true, force: true });
+  // Tolerant of an undefined fixture: when the freshness assertion in beforeAll
+  // throws, Jest skips beforeEach and still runs this, and a teardown TypeError
+  // on top of the real message just buries it.
+  for (const dir of [home, protectedRoot]) {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 describe('#501 the forge itself — the signature is not the control', () => {
@@ -239,30 +254,55 @@ describe('#501 with a forged same-UID policy lock, the built artefacts fail clos
   });
 });
 
+/**
+ * A hook staged with its OWN sibling `dist`, the way a real install has one.
+ *
+ * The env seam cannot express the cases below. `SHIELDCORTEX_DIST_ROOT` is no
+ * longer honoured for the policy-lock import on a locked host (that is half of
+ * the #501 review's BLOCK-1 fix), so "the reader is broken" and "the reader
+ * lies" have to be staged where the hook actually looks: `<stage>/dist`,
+ * resolved from `<stage>/scripts/pre-tool-hook.mjs`'s own location. Which makes
+ * these the honest shapes anyway — a tampered install, not a variable.
+ */
+function stageHook(dist: 'absent' | 'lying'): string {
+  const stage = mkdtempSync(join(tmpdir(), `sc-501-stage-${dist}-`));
+  cpSync(join(repoRoot, 'scripts'), join(stage, 'scripts'), { recursive: true });
+  if (dist === 'lying') {
+    cpSync(join(repoRoot, 'dist'), join(stage, 'dist'), { recursive: true });
+    // Same export surface as the real module, and it says there is no lock.
+    writeFileSync(join(stage, 'dist', 'defence', 'iron-dome', 'policy-lock.js'), LYING_POLICY_LOCK_JS);
+  }
+  return stage;
+}
+
+function runStagedHook(stage: string, command: string, extraEnv: Record<string, string> = {}) {
+  const run = spawnSync(process.execPath, [join(stage, 'scripts', 'pre-tool-hook.mjs')], {
+    input: JSON.stringify({
+      session_id: 'sc-501-staged', cwd: home, permission_mode: 'default',
+      hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command },
+    }),
+    env: env(extraEnv), encoding: 'utf8', timeout: 60_000,
+  });
+  const stdout = (run.stdout ?? '').trim();
+  return {
+    decision: stdout ? JSON.parse(stdout).hookSpecificOutput?.permissionDecision ?? null : null,
+    stderr: run.stderr ?? '',
+  };
+}
+
 describe('#501 a MISSING dist cannot fail open while a lock exists', () => {
   it('the hook enforces the strict posture when its dist policy reader is gone', () => {
     forgeSignedConfig({ actionGuard: { enabled: false, enforce: false } });
     forgePolicyLock();
-    const emptyDist = mkdtempSync(join(tmpdir(), 'sc-501-empty-dist-'));
+    const stage = stageHook('absent');
     try {
-      const payload = JSON.stringify({
-        session_id: 'sc-501-nodist', cwd: home, permission_mode: 'default',
-        hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: SC01_CATASTROPHIC },
-      });
-      const run = spawnSync(process.execPath, [HOOK], {
-        input: payload,
-        env: env({ SHIELDCORTEX_DIST_ROOT: emptyDist }),
-        encoding: 'utf8',
-        timeout: 60_000,
-      });
       // With no dist the guard degrades to its inline catastrophic fallback —
       // which only runs at all because the policy probe refused to fail open.
-      expect(run.stdout ?? '').not.toBe('');
-      const parsed = JSON.parse(run.stdout!);
-      expect(parsed.hookSpecificOutput?.permissionDecision).toBe('deny');
-      expect(run.stderr ?? '').toMatch(/policy lock is present but the dist policy reader/);
+      const run = runStagedHook(stage, SC01_CATASTROPHIC);
+      expect(run.decision).toBe('deny');
+      expect(run.stderr).toMatch(/policy lock is present but the dist policy reader/);
     } finally {
-      rmSync(emptyDist, { recursive: true, force: true });
+      rmSync(stage, { recursive: true, force: true });
     }
   });
 
@@ -284,6 +324,73 @@ describe('#501 a MISSING dist cannot fail open while a lock exists', () => {
       expect(run.stderr ?? '').not.toMatch(/policy lock is present/);
     } finally {
       rmSync(emptyDist, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('#501 a LYING dist policy reader cannot fail open either (review BLOCK-1)', () => {
+  // The gap the adversarial review found: the suite covered a reader that was
+  // ABSENT and none that resolved and lied. `applyHookPolicyLock` believed a
+  // successful `readPolicyLock()` without a second look, so two files the agent
+  // owns plus one environment variable took the guard off entirely with a lock
+  // on disk — no privilege, no TTY, no change to the ShieldCortex install.
+  beforeEach(() => {
+    forgeSignedConfig({
+      actionGuard: { enabled: false, enforce: false, autoApprove: ['anything'], broker: { enabled: true } },
+      defenceMode: 'permissive',
+    });
+    forgePolicyLock();
+  });
+
+  it('SHIELDCORTEX_DIST_ROOT cannot substitute the lock reader while a lock is present', () => {
+    const fakeDist = mkdtempSync(join(tmpdir(), 'sc-501-lying-dist-'));
+    try {
+      mkdirSync(join(fakeDist, 'defence', 'iron-dome'), { recursive: true });
+      writeFileSync(join(fakeDist, 'defence', 'iron-dome', 'policy-lock.js'), LYING_POLICY_LOCK_JS);
+      const payload = JSON.stringify({
+        session_id: 'sc-501-lying', cwd: home, permission_mode: 'default',
+        hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: SC01_CATASTROPHIC },
+      });
+      const run = spawnSync(process.execPath, [HOOK], {
+        input: payload, env: env({ SHIELDCORTEX_DIST_ROOT: fakeDist }), encoding: 'utf8', timeout: 60_000,
+      });
+      // Before the fix: empty stdout, empty stderr — a silent allow of SC-01.
+      expect(run.stdout ?? '').not.toBe('');
+      expect(JSON.parse(run.stdout!).hookSpecificOutput?.permissionDecision).toBe('deny');
+      // And the operator is told the lock is being honoured, not ignored.
+      expect(run.stderr ?? '').toMatch(/is present but UNVERIFIABLE|reports no policy lock, but one is present/);
+    } finally {
+      rmSync(fakeDist, { recursive: true, force: true });
+    }
+  });
+
+  it("a lying reader in the hook's OWN dist is caught by the probe contradiction", () => {
+    // The other half of the fix, and the one that survives a future seam: a
+    // reader that answers `absent` while the probe can see the file is treated
+    // as UNVERIFIABLE, whatever route it arrived by — here a tampered install,
+    // which no environment gate can help with.
+    const stage = stageHook('lying');
+    try {
+      const run = runStagedHook(stage, SC01_CATASTROPHIC);
+      expect(run.decision).toBe('deny');
+      expect(run.stderr).toMatch(/reports no policy lock, but one is present on disk/);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+
+  it('with NO lock on disk, that same lying reader changes nothing', () => {
+    // The other half of the rule. The probe and the reader agree there is
+    // nothing to obey, so the hook does what it has always done on an unlocked
+    // host — no denial, no narration at an operator who has pinned nothing.
+    rmSync(join(protectedRoot, 'policy.json'), { force: true });
+    const stage = stageHook('lying');
+    try {
+      const run = runStagedHook(stage, 'ls -la');
+      expect(run.decision).not.toBe('deny');
+      expect(run.stderr).not.toMatch(/policy lock/i);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
     }
   });
 });

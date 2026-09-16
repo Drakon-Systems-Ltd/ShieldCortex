@@ -923,6 +923,27 @@ const DANGEROUS: Pattern[] = [
   // five regex rounds traded a bypass for a false deny for a backtracking
   // path). Config-path stays a PATH_TARGET rule.
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #501: the policy LOCK's own attack surface — the three shapes the #501
+  // adversarial review found the guard had no signal for at all.
+  //
+  //   1. `SHIELDCORTEX_DIST_ROOT=` / `SHIELDCORTEX_PROTECTED_ROOT=` — the two
+  //      environment seams that decide which policy-lock reader runs and which
+  //      root it reads. Repointing either is an attempt on the floor itself,
+  //      not an ordinary variable assignment.
+  //   2. The protected root and its pointer file. Deleting the lock used to
+  //      earn a generic `file-delete`; writing one earned nothing at all.
+  //   3. `~/.claude/settings.json`. Its `env` stanza is the same-UID file that
+  //      DELIVERS (1) into the enforcing process's environment, which is how
+  //      the review's BLOCK-1 got the variable there in the first place.
+  //
+  // All three carry the `disable-action-guard` signal rather than a path-touch
+  // one, because that is what they are: the tier #500 established for "this
+  // tool call is trying to take the Guard off". PATH_TARGET, like the rules
+  // above, so naming one of these paths IS the access — in shell text or in a
+  // string literal a script is about to hand to open().
+  { re: /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i, signal: 'disable-action-guard' },
+  { re: /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i, signal: 'disable-action-guard' },
+  { re: /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i, signal: 'disable-action-guard' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
@@ -3207,7 +3228,13 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
   return true;
 }
 
-const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config']);
+// `disable-action-guard` is here for the #501 PATH/env rules only. The #500
+// COMMAND shapes reach the signal through `guardDisableInvoked`, which never
+// goes through `matchSpans`, so this set cannot widen them.
+const PATH_TARGET_SIGNALS = new Set([
+  'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config',
+  'disable-action-guard',
+]);
 
 /** #342 — interpreter-API recursive-delete call spans (not shell verbs). */
 const INTERPRETER_RECURSIVE_DELETE_SPAN =

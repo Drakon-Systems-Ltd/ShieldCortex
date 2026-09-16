@@ -171,11 +171,16 @@ export const PROTECTED_ROOT_POINTER = '/etc/shieldcortex.conf';
  * A TEST seam, and a deliberately non-loosening one.
  *
  * The design rule is "override only via a root-owned file, never env", and this
- * does not break it: the canonical root is probed FIRST, and if a policy
- * artefact exists there the variable is ignored outright. So an agent that sets
- * it can never hide a real lock — the only thing it can do on a host with no
- * lock is introduce one, and a lock it can write is by definition same-UID and
- * therefore unverifiable, which is STRICTER than unlocked, not looser.
+ * does not break it: BOTH production rules — the canonical root and the
+ * root-owned pointer file — are resolved FIRST, and if either answers, the
+ * variable is ignored outright. So an agent that sets it can never hide a real
+ * lock — the only thing it can do on a host with no lock is introduce one, and
+ * a lock it can write is by definition same-UID and therefore unverifiable,
+ * which is STRICTER than unlocked, not looser.
+ *
+ * The pointer half of that sentence is the #501 review's BLOCK-2: gating on
+ * the canonical root alone left a pointer host wide open, because a pointer
+ * host is precisely a host with no `/etc/shieldcortex`.
  *
  * It exists because the regression proof for #501 has to drive the built dist
  * and the built hook as separate processes (see the design doc §6); an
@@ -257,25 +262,46 @@ export function resolveProtectedRoot(seam: ProtectedFsSeam = defaultProtectedFsS
     };
   }
 
-  // Canonical root first, always — see PROTECTED_ROOT_ENV for why order matters.
+  // Both PRODUCTION roots are resolved before the env seam is even read, and
+  // that ordering is the fix for the #501 review's BLOCK-2. The original code
+  // gated the variable on the CANONICAL root alone, which is sound only on a
+  // host that uses `/etc/shieldcortex`. A pointer host by definition keeps
+  // policy elsewhere, so `/etc/shieldcortex` does not exist there — and the
+  // agent could set one variable and walk the resolver away from a genuinely
+  // root-owned, verified pointer root. That is `locked` → `absent`: straight to
+  // unlocked, the one outcome this seam was argued to be incapable of.
   const canonicalLock = `${DEFAULT_PROTECTED_ROOT}/${POLICY_LOCK_FILENAME}`;
   const canonicalOccupied = seam.lstat(canonicalLock) !== null || seam.lstat(DEFAULT_PROTECTED_ROOT) !== null;
+  const pointed = resolvePointerRoot(seam);
 
-  if (!canonicalOccupied) {
+  // "Occupied" therefore means "a production root is resolvable HERE", by
+  // either rule — not merely "`/etc/shieldcortex` exists". The env seam is
+  // consulted last and only on a host where neither production rule answers,
+  // which is exactly the unlocked host where the worst it can do is introduce
+  // a same-UID lock: unverifiable, i.e. STRICTER than unlocked.
+  if (!canonicalOccupied && pointed === null) {
     const override = seam.env(PROTECTED_ROOT_ENV)?.trim();
     if (override && isAbsolute(override)) {
       return { supported: true, root: resolvePath(override), source: 'test-override' };
     }
   }
 
-  const pointer = verifyProtectedFile(PROTECTED_ROOT_POINTER, seam);
-  if (pointer.ok) {
-    const contents = seam.readFile(PROTECTED_ROOT_POINTER);
-    const pointed = contents === null ? null : parsePointerRoot(contents);
-    if (pointed) return { supported: true, root: pointed, source: 'pointer' };
-  }
+  if (pointed !== null) return { supported: true, root: pointed, source: 'pointer' };
 
   return { supported: true, root: DEFAULT_PROTECTED_ROOT, source: 'default' };
+}
+
+/**
+ * The pointed-to root, or null when there is no pointer this host can trust.
+ *
+ * An unverifiable pointer is ignored outright — the file has to pass the same
+ * ownership rules as the lock itself, so it can never move the root somewhere
+ * the agent controls.
+ */
+function resolvePointerRoot(seam: ProtectedFsSeam): string | null {
+  if (!verifyProtectedFile(PROTECTED_ROOT_POINTER, seam).ok) return null;
+  const contents = seam.readFile(PROTECTED_ROOT_POINTER);
+  return contents === null ? null : parsePointerRoot(contents);
 }
 
 // ── Is this file one the agent could not have written? ─

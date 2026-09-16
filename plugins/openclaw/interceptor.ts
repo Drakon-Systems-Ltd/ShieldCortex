@@ -564,6 +564,16 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string }> = [
   { re: /--action-guard-(?:disable|advisory)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #501: the policy lock's own attack surface. The two environment seams that
+  // decide WHICH policy-lock reader runs and which root it reads; the protected
+  // root and its pointer; and `~/.claude/settings.json`, whose `env` stanza is
+  // the same-UID file that delivers those variables into the enforcing
+  // process. All at the `disable-action-guard` tier, because that is what they
+  // are. Kept byte-identical with the sibling table by the #501 drift test in
+  // enforcement-surface-parity.
+  { re: /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i, signal: 'disable-action-guard' },
+  { re: /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i, signal: 'disable-action-guard' },
+  { re: /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i, signal: 'disable-action-guard' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
