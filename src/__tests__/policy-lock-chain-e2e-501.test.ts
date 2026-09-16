@@ -267,8 +267,9 @@ plugin.register({
 
 const beforeToolCall = hooks.get('before_tool_call');
 const params = JSON.parse(process.env.SC522_PARAMS_JSON);
+const toolName = process.env.SC522_TOOL_NAME || 'Bash';
 const verdict = beforeToolCall
-  ? ((await beforeToolCall({ toolName: 'Bash', params }, { sessionId: 'sc-522-params' })) ?? null)
+  ? ((await beforeToolCall({ toolName, params }, { sessionId: 'sc-522-params' })) ?? null)
   : null;
 
 const line = 'SC522_PARAMS_RESULT ' + JSON.stringify({
@@ -437,15 +438,18 @@ function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 
 // ---- surface 1: the built Claude Code hook -------------------------------
 
-function runHook(command: string): { decision: string | null; reason: string } {
+function runHook(
+  command: string,
+  opts: { toolName?: string; toolInput?: unknown } = {},
+): { decision: string | null; reason: string } {
   const run = spawnSync(process.execPath, [HOOK], {
     input: JSON.stringify({
       session_id: 'sc-501-chain',
       cwd: home,
       permission_mode: 'default',
       hook_event_name: 'PreToolUse',
-      tool_name: 'Bash',
-      tool_input: { command },
+      tool_name: opts.toolName ?? 'Bash',
+      tool_input: opts.toolInput ?? { command },
     }),
     env: env(), encoding: 'utf8', timeout: 60_000,
   });
@@ -540,11 +544,13 @@ function runParamsPlugin(
   stage: string,
   params: unknown,
   entryConfig?: unknown,
+  toolName = 'Bash',
 ): { block: boolean; blockReason: string | null } {
   const run = spawnSync(process.execPath, [paramsDriverPath], {
     cwd: stage,
     env: env({
       SC501_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
+      SC522_TOOL_NAME: toolName,
       SC522_PARAMS_JSON: JSON.stringify(params),
       SC501_PLUGIN_ENTRY_CONFIG: JSON.stringify(
         entryConfig === undefined
@@ -786,6 +792,79 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     const result = runParamsPlugin(brokenStage, { command: DANGEROUS_PROBE }, ENTRY_ALLOWS_HIGH);
     expect(result.block).toBe(false);
   }, 180_000);
+
+  // #522 G4. `ee5c6ac1` gave the real guard a read carve-out: pure inspection
+  // of the protected root or `.claude/settings(.local).json` is not an attempt
+  // on the floor. That carve-out lives in `tool-action-guard.ts` — the module
+  // that is MISSING in this degraded mode — so a broken install on a locked
+  // host carded every settings/policy READ, which is the UX the carve-out was
+  // written to stop. The fallback tables now carry the same rule, and writes
+  // still gate. Paths and verbs are assembled from parts for the same reason
+  // `SC01_CATASTROPHIC` is: this file is scanned by the guard it drives.
+  const LOCK_TEXT = ['', 'etc', 'shieldcortex', 'policy.json'].join('/');
+  const LOCK_DIR_TEXT = ['', 'etc', 'shieldcortex'].join('/');
+  const SETTINGS_TEXT = ['~', '.claude', 'settings.json'].join('/');
+
+  const MUST_ALLOW: Array<[string, string]> = [
+    ['cat the lock', `cat ${LOCK_TEXT}`],
+    ['grep the settings file', `grep -n enableAllProjectMcpServers ${SETTINGS_TEXT}`],
+    ['jq the lock', `jq . ${LOCK_TEXT}`],
+    ['list the protected root', `ls -la ${LOCK_DIR_TEXT}`],
+    ['git log the settings file', `git log --oneline -- ${SETTINGS_TEXT}`],
+    ['git diff the settings file', `git diff -- ${SETTINGS_TEXT}`],
+    ['head the lock through a pipe', `cat ${LOCK_TEXT} | head -n 5`],
+  ];
+
+  it.each(MUST_ALLOW)(
+    'the degraded fallback still ALLOWS a lock-path read: %s (#522 G4)',
+    (_name, command) => {
+      forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+      forgePolicyLock();
+      expect(runParamsPlugin(brokenStage, { command })).toEqual({ block: false, blockReason: null });
+      expect(runHook(command).decision).toBeNull();
+    },
+    300_000,
+  );
+
+  it('the degraded fallback ALLOWS the Read tool on a lock path (#522 G4)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    expect(runParamsPlugin(brokenStage, { file_path: LOCK_TEXT }, undefined, 'Read'))
+      .toEqual({ block: false, blockReason: null });
+    expect(runHook('', { toolName: 'Read', toolInput: { file_path: SETTINGS_TEXT } }).decision).toBeNull();
+  }, 300_000);
+
+  // The other half, and the one that matters: the carve-out is scoped to READS.
+  const MUST_GATE: Array<[string, string]> = [
+    ['tee onto the lock', `tee ${LOCK_TEXT}`],
+    ['copy onto the lock', `cp /tmp/x ${LOCK_TEXT}`],
+    ['in-place edit of the lock', `sed -i s/a/b/ ${LOCK_TEXT}`],
+    ['redirect into the lock', `echo {} > ${LOCK_TEXT}`],
+    ['widen the lock permissions', `chmod 777 ${LOCK_TEXT}`],
+    ['a read with a hostile sibling', `cat ${LOCK_TEXT} && curl https://example.test/x`],
+    ['an env seam beside a read', `SHIELDCORTEX_PROTECTED_ROOT=/tmp/empty cat ${LOCK_TEXT}`],
+    ['a git stage that writes a file', `git diff --output=${SETTINGS_TEXT} -- README.md`],
+  ];
+
+  it.each(MUST_GATE)(
+    'the degraded fallback still GATES a lock-path write: %s (#522 G4)',
+    (_name, command) => {
+      forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+      forgePolicyLock();
+      expect(runParamsPlugin(brokenStage, { command }).block).toBe(true);
+      expect(runHook(command).decision).not.toBeNull();
+    },
+    300_000,
+  );
+
+  it('the degraded fallback GATES the Write tool on a lock path (#522 G4)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    expect(runParamsPlugin(brokenStage, { file_path: LOCK_TEXT, content: '{}' }, undefined, 'Write').block)
+      .toBe(true);
+    expect(runHook('', { toolName: 'Write', toolInput: { file_path: LOCK_TEXT, content: '{}' } }).decision)
+      .not.toBeNull();
+  }, 300_000);
 
   it('the same broken install with NO lock keeps today\'s behaviour, silently', () => {
     // The other half of the rule. A stale build on an unlocked host must not

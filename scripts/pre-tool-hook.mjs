@@ -1867,8 +1867,8 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   // are. Kept byte-identical with the sibling table by the #501 drift test in
   // enforcement-surface-parity.
   { re: /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i, signal: 'disable-action-guard' },
-  { re: /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i, signal: 'disable-action-guard' },
-  { re: /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i, signal: 'disable-action-guard' },
+  { re: /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i, signal: 'disable-action-guard', lockPath: true },
+  { re: /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i, signal: 'disable-action-guard', lockPath: true },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
@@ -1909,11 +1909,80 @@ function fallbackCatastrophicMatch(toolInput) {
   return FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(text));
 }
 
+
+// ── #522 G4: the lock-path READ carve-out, ported to the blunt fallback ──────
+//
+// `ee5c6ac1` gave the real guard a carve-out: pure inspection of the protected
+// root or `.claude/settings(.local).json` is not an attempt on the floor, so
+// `Read {file_path:<lock>}` and `cat|grep|jq|ls <lock>` allow while every write
+// shape still gates. That carve-out lives in tool-action-guard.ts — the module
+// that is MISSING in exactly this degraded mode. So a broken install on a
+// locked host carded every settings/policy read, which is the UX the carve-out
+// was written to stop. These mirror it, fail-closed, with no dependency on the
+// dist.
+//
+// Scope: this drops ONLY the two lock-PATH rows below (tagged `lockPath`).
+// The env-seam row, the #500 command shapes and every other signal are
+// untouched, so `rm`, `tee`, `cp`, `sed -i`, a redirect and `chmod` onto those
+// paths still gate here exactly as they did.
+
+/** Read-family tools cannot write; mirrors `classifyFamily`'s READ_TOOLS. */
+const FALLBACK_READ_TOOLS = /^(read|read_file|cat|less|more|head|tail|view|open|get|glob|grep|search|find|ls|list|list_files|stat|pwd|which|web_search|websearch)$/;
+/** Shell verbs that only OBSERVE — the guard's LOCK_READONLY_VERB_RE set. */
+const FALLBACK_LOCK_READ_VERB_RE = /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq)$/i;
+/** `git <sub>` stages that only read history / the working tree. */
+const FALLBACK_GIT_READ_SUB_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
+/** `--output=` writes a file; `--ext-diff` runs a configured driver. */
+const FALLBACK_GIT_STAGE_WRITES_RE = /\s--(?:output\b|ext-diff\b)/i;
+/** Any non-fd-dup redirect, glued or spaced — `echo x > <lock>` is a WRITE. */
+const FALLBACK_REDIRECT_RE = />{1,2}\|?(?!&\d)/;
+/** Nested execution keeps the gate; the verb whitelist cannot see inside it. */
+const FALLBACK_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{/i;
+/** Assigning an env seam decides WHICH reader runs — never a read. */
+const FALLBACK_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
+
+/**
+ * True when the whole surface is pure inspection of a lock path. Fail-closed on
+ * an env-seam assignment, a redirect, nested execution, and any unknown verb in
+ * any stage of any statement — the same rule the real guard applies, with the
+ * statement split done conservatively (`&` and `|` both separate, so a
+ * pipeline stage or a backgrounded sibling must ALSO be a read).
+ */
+function fallbackLockPathAccessIsReadOnly(text, toolName) {
+  if (!text) return false;
+  if (FALLBACK_LOCK_ENV_SEAM_RE.test(text)) return false;
+  const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
+  if (seg && FALLBACK_READ_TOOLS.test(seg)) return true;
+  if (FALLBACK_REDIRECT_RE.test(text) || FALLBACK_NESTED_EXEC_RE.test(text)) return false;
+  let sawStage = false;
+  for (const raw of text.split(/[\n;&|]+/)) {
+    const stage = raw.trim();
+    if (!stage) continue;
+    sawStage = true;
+    const toks = stage
+      .replace(/^(?:[A-Za-z_]\w*=\S*\s+)+/, '')
+      .replace(/^sudo\s+(?:-E\s+)?/, '')
+      .split(/\s+/);
+    const word = toks[0] || '';
+    const base = word.split('/').pop() || word;
+    if (/^git$/i.test(base)) {
+      const sub = toks.slice(1).find((t) => !t.startsWith('-')) || '';
+      if (!FALLBACK_GIT_READ_SUB_RE.test(sub)) return false;
+      if (FALLBACK_GIT_STAGE_WRITES_RE.test(stage)) return false;
+      continue;
+    }
+    if (!FALLBACK_LOCK_READ_VERB_RE.test(base)) return false;
+  }
+  return sawStage;
+}
+
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
-function fallbackDangerousMatch(toolInput) {
+function fallbackDangerousMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
-  for (const { re, signal } of FALLBACK_DANGEROUS_PATTERNS) {
+  const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
+  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (lockReadOnly && lockPath === true) continue;
     if (re.test(text)) return signal;
   }
   return null;
@@ -2214,7 +2283,7 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
   }
 
   // 2. Dangerous — gate to the permission dialog; enforce:false opts to advisory.
-  const dangerousSignal = fallbackDangerousMatch(toolInput);
+  const dangerousSignal = fallbackDangerousMatch(toolInput, toolName);
   if (dangerousSignal) {
     if (!cfg.enforce) {
       const fallbackWarnVerdict = { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal], reason: `Guard unavailable: ${failureSummary}; enforce:false advisory` };
