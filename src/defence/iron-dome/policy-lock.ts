@@ -48,6 +48,8 @@ import {
   type ProtectedFsSeam,
   type ProtectedRootUnsupportedReason,
 } from './protected-root.js';
+import { isAbsolute } from 'node:path';
+import type { ReviewedScriptEntry } from './reviewed-scripts.js';
 
 // ── The protected key set (v1) ────────────────────────
 
@@ -64,6 +66,7 @@ export const PROTECTED_POLICY_KEYS_V1 = [
   'actionGuard.enforce',
   'actionGuard.autoApprove',
   'actionGuard.broker.enabled',
+  'actionGuard.reviewedScripts',
   'defenceMode',
   'memory.hostContract.posture',
   'memory.inject.mode',
@@ -71,12 +74,34 @@ export const PROTECTED_POLICY_KEYS_V1 = [
 
 export type ProtectedPolicyKey = (typeof PROTECTED_POLICY_KEYS_V1)[number];
 
+/** 64 lowercase hex chars — the same shape `reviewed-scripts.ts` requires. */
+const REVIEWED_SCRIPT_SHA256_RE = /^[0-9a-f]{64}$/;
+
+/** Canonical matching key for a reviewed-script entry: the exact (path, sha256) pair. */
+function reviewedScriptKey(path: string, sha256: string): string {
+  return JSON.stringify([path, sha256.toLowerCase()]);
+}
+
+/**
+ * Best-effort (path, sha256) key from an UNVALIDATED config-side entry, for
+ * MATCHING against a lock's ceiling only. Same discipline as `autoApprove`'s
+ * raw-string filter below: a value that does not even look like an entry is
+ * never treated as inside the ceiling.
+ */
+function rawReviewedScriptKey(item: unknown): string | null {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const { path, sha256 } = item as Record<string, unknown>;
+  if (typeof path !== 'string' || typeof sha256 !== 'string') return null;
+  return reviewedScriptKey(path, sha256);
+}
+
 /** The subset of the Action Guard config a lock covers. */
 export interface LockedActionGuard {
   enabled?: boolean;
   enforce?: boolean;
   autoApprove?: string[];
   broker?: { enabled?: boolean };
+  reviewedScripts?: ReviewedScriptEntry[];
 }
 
 export interface LockedPolicy {
@@ -143,6 +168,7 @@ export const STRICT_FAILCLOSED_POSTURE = {
     enforce: true,
     autoApprove: [] as string[],
     broker: { enabled: false },
+    reviewedScripts: [] as ReviewedScriptEntry[],
   },
   defenceMode: 'strict' as LockedDefenceMode,
 } as const;
@@ -285,6 +311,50 @@ function isBlock(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
+type ReviewedScriptsFieldResult =
+  | { ok: true; entries: ReviewedScriptEntry[] }
+  | { ok: false; problem: string };
+
+/**
+ * Validate `actionGuard.reviewedScripts` on a parsed lock. Same discipline as
+ * `autoApprove` just above: an entry that is malformed in ANY field fails the
+ * WHOLE lock (`{ ok: false }`), never a silent per-entry drop. The runtime
+ * allowlist reader (`normaliseReviewedScripts` in `reviewed-scripts.ts`) drops
+ * malformed entries on purpose, because it reads an unprivileged, same-UID
+ * file where the worst case is one dead entry; a lock is the opposite case —
+ * a malformed entry here means we cannot tell what the operator actually
+ * pinned, and guessing at a security allowlist is the one thing this module
+ * exists not to do.
+ */
+function validateReviewedScriptsField(raw: unknown): ReviewedScriptsFieldResult {
+  if (!Array.isArray(raw)) {
+    return { ok: false, problem: '`actionGuard.reviewedScripts` must be an array of {path, sha256} entries' };
+  }
+  const entries: ReviewedScriptEntry[] = [];
+  for (const item of raw) {
+    if (!isBlock(item)) return { ok: false, problem: '`actionGuard.reviewedScripts` entries must be objects' };
+    if (typeof item.path !== 'string' || item.path.trim() === '' || !isAbsolute(item.path)) {
+      return { ok: false, problem: '`actionGuard.reviewedScripts[].path` must be a non-empty absolute path string' };
+    }
+    if (typeof item.sha256 !== 'string' || !REVIEWED_SCRIPT_SHA256_RE.test(item.sha256.trim().toLowerCase())) {
+      return { ok: false, problem: '`actionGuard.reviewedScripts[].sha256` must be a 64-character hex string' };
+    }
+    const entry: ReviewedScriptEntry = { path: item.path, sha256: item.sha256.trim().toLowerCase() };
+    if (item.note !== undefined) {
+      if (typeof item.note !== 'string') return { ok: false, problem: '`actionGuard.reviewedScripts[].note` must be a string' };
+      entry.note = item.note;
+    }
+    if (item.addedAt !== undefined) {
+      if (typeof item.addedAt !== 'number' || !Number.isFinite(item.addedAt)) {
+        return { ok: false, problem: '`actionGuard.reviewedScripts[].addedAt` must be a number' };
+      }
+      entry.addedAt = item.addedAt;
+    }
+    entries.push(entry);
+  }
+  return { ok: true, entries };
+}
+
 /**
  * Validate a parsed lock.
  *
@@ -337,6 +407,11 @@ function validateLockedPolicy(raw: unknown): SchemaResult {
         }
         guard.broker = { enabled: src.broker.enabled };
       }
+    }
+    if (src.reviewedScripts !== undefined) {
+      const result = validateReviewedScriptsField(src.reviewedScripts);
+      if (!result.ok) return result;
+      guard.reviewedScripts = result.entries;
     }
     if (Object.keys(guard).length > 0) policy.actionGuard = guard;
   }
@@ -392,6 +467,7 @@ export function policyLockCoverage(state: PolicyLockState): Map<ProtectedPolicyK
     out.set('actionGuard.enforce', STRICT_FAILCLOSED_POSTURE.actionGuard.enforce);
     out.set('actionGuard.autoApprove', []);
     out.set('actionGuard.broker.enabled', STRICT_FAILCLOSED_POSTURE.actionGuard.broker.enabled);
+    out.set('actionGuard.reviewedScripts', []);
     out.set('defenceMode', STRICT_FAILCLOSED_POSTURE.defenceMode);
     return out;
   }
@@ -401,6 +477,7 @@ export function policyLockCoverage(state: PolicyLockState): Map<ProtectedPolicyK
   if (p.actionGuard?.enforce !== undefined) out.set('actionGuard.enforce', p.actionGuard.enforce);
   if (p.actionGuard?.autoApprove !== undefined) out.set('actionGuard.autoApprove', p.actionGuard.autoApprove);
   if (p.actionGuard?.broker?.enabled !== undefined) out.set('actionGuard.broker.enabled', p.actionGuard.broker.enabled);
+  if (p.actionGuard?.reviewedScripts !== undefined) out.set('actionGuard.reviewedScripts', p.actionGuard.reviewedScripts);
   if (p.defenceMode !== undefined) out.set('defenceMode', p.defenceMode);
   if (p.memory?.hostContract?.posture !== undefined) out.set('memory.hostContract.posture', p.memory.hostContract.posture);
   if (p.memory?.inject?.mode !== undefined) out.set('memory.inject.mode', p.memory.inject.mode);
@@ -434,6 +511,7 @@ export function applyStrictFailClosedPosture(raw: Record<string, unknown>): Reco
   guard.enforce = STRICT_FAILCLOSED_POSTURE.actionGuard.enforce;
   guard.autoApprove = [];
   guard.broker = { ...(isBlock(guard.broker) ? guard.broker : {}), enabled: false };
+  guard.reviewedScripts = [];
   out.actionGuard = guard;
   out.defenceMode = STRICT_FAILCLOSED_POSTURE.defenceMode;
   // The deprecated `interceptor.actionGuard` alias gap-fills per key on both
@@ -448,6 +526,7 @@ export function applyStrictFailClosedPosture(raw: Record<string, unknown>): Reco
     delete alias.enforce;
     delete alias.autoApprove;
     delete alias.broker;
+    delete alias.reviewedScripts;
     interceptor.actionGuard = alias;
     out.interceptor = interceptor;
   }
@@ -494,6 +573,15 @@ export function applyPolicyLock(raw: Record<string, unknown>, state: PolicyLockS
       ? (guard.autoApprove as unknown[]).filter((e): e is string => typeof e === 'string')
       : [];
     guard.autoApprove = configured.filter((e) => ceiling.has(e));
+    guardTouched = true;
+  }
+  if (p.actionGuard?.reviewedScripts !== undefined) {
+    const ceiling = new Set(p.actionGuard.reviewedScripts.map((e) => reviewedScriptKey(e.path, e.sha256)));
+    const configured = Array.isArray(guard.reviewedScripts) ? (guard.reviewedScripts as unknown[]) : [];
+    guard.reviewedScripts = configured.filter((e) => {
+      const key = rawReviewedScriptKey(e);
+      return key !== null && ceiling.has(key);
+    });
     guardTouched = true;
   }
   if (guardTouched) out.actionGuard = guard;
@@ -557,6 +645,18 @@ export function wouldLoosen(key: ProtectedPolicyKey, value: unknown, lockedValue
       if (!Array.isArray(value)) return false;
       const ceiling = new Set(Array.isArray(lockedValue) ? (lockedValue as unknown[]) : []);
       return (value as unknown[]).some((e) => !ceiling.has(e));
+    }
+    case 'actionGuard.reviewedScripts': {
+      if (!Array.isArray(value)) return false;
+      const ceiling = new Set(
+        Array.isArray(lockedValue)
+          ? (lockedValue as ReviewedScriptEntry[]).map((e) => reviewedScriptKey(e.path, e.sha256))
+          : [],
+      );
+      return (value as unknown[]).some((item) => {
+        const key = rawReviewedScriptKey(item);
+        return key === null || !ceiling.has(key);
+      });
     }
     case 'defenceMode': {
       const locked = isLockedDefenceMode(lockedValue) ? DEFENCE_MODE_RANK[lockedValue] : -1;

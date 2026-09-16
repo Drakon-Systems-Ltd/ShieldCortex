@@ -28,7 +28,7 @@
  * posture. A fix that held in only two of them is the defect #501 is about.
  */
 import { spawnSync } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -169,6 +169,42 @@ await new Promise((done) => process.stdout.write('SC501_CACHE_RESULT ' + JSON.st
 process.exit(0);
 `;
 
+/**
+ * A THIRD driver, for #522 item A: does the reviewed-script allowlist honour
+ * the policy lock's ceiling on the built plugin surface? Takes the command to
+ * evaluate from an env var rather than hard-coding one, because this suite
+ * needs to drive the plugin against a real script FILE on disk (the allowlist
+ * mechanism folds file CONTENTS, so a stubbed resolver would not touch the
+ * code path this test exists for).
+ */
+const REVIEWED_SCRIPT_DRIVER = `
+const plugin = (await import(process.env.SC501_PLUGIN_ENTRY)).default;
+
+const hooks = new Map();
+console.warn = () => {};
+plugin.register({
+  version: '2026.5.20',
+  config: {},
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  registerCommand: () => {},
+  registerHook: () => {},
+  on: (name, fn) => hooks.set(name, fn),
+});
+
+const beforeToolCall = hooks.get('before_tool_call');
+const command = process.env.SC522_SCRIPT_COMMAND;
+const verdict = beforeToolCall
+  ? ((await beforeToolCall({ toolName: 'Bash', params: { command } }, { sessionId: 'sc-522-reviewed' })) ?? null)
+  : null;
+
+const line = 'SC522_RESULT ' + JSON.stringify({
+  block: verdict?.block === true,
+  blockReason: verdict?.blockReason ?? null,
+});
+await new Promise((done) => process.stdout.write(line + '\\n', done));
+process.exit(0);
+`;
+
 /** A staged install: the built plugin dist, with or without a resolvable package. */
 function stageInstall(withShieldCortexResolvable: boolean): string {
   const stage = mkdtempSync(join(tmpdir(), 'sc-501-chain-stage-'));
@@ -184,6 +220,7 @@ let installedStage: string;
 let brokenStage: string;
 let driverPath: string;
 let cacheDriverPath: string;
+let reviewedScriptDriverPath: string;
 let driverDir: string;
 
 let home: string;
@@ -212,6 +249,8 @@ beforeAll(() => {
   writeFileSync(driverPath, DRIVER);
   cacheDriverPath = join(driverDir, 'drive-plugin-cache.mjs');
   writeFileSync(cacheDriverPath, CACHE_DRIVER);
+  reviewedScriptDriverPath = join(driverDir, 'drive-plugin-reviewed-script.mjs');
+  writeFileSync(reviewedScriptDriverPath, REVIEWED_SCRIPT_DRIVER);
 });
 
 afterAll(() => {
@@ -333,6 +372,24 @@ function runPlugin(options: { stage?: string; entryConfig?: unknown } = {}): Plu
     throw new Error(`#501 plugin driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
   }
   return JSON.parse(line.slice('SC501_RESULT '.length)) as PluginRun;
+}
+
+/** #522 item A — drives the built plugin against a real script-invoking command. */
+function runReviewedScriptPlugin(command: string): { block: boolean; blockReason: string | null } {
+  const run = spawnSync(process.execPath, [reviewedScriptDriverPath], {
+    cwd: installedStage,
+    env: env({
+      SC501_PLUGIN_ENTRY: join(installedStage, 'plugin', 'index.js'),
+      SC522_SCRIPT_COMMAND: command,
+    }),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('SC522_RESULT '));
+  if (!line) {
+    throw new Error(`#522 reviewed-script plugin driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
+  }
+  return JSON.parse(line.slice('SC522_RESULT '.length));
 }
 
 // -------------------------------------------------------------------------
@@ -485,4 +542,73 @@ describe('#501 the plugin re-reads the lock on every config load (review SHOULD-
     expect(after.guardLine).toMatch(/Action guard: enforce/);
     expect(after.blocked).toBe(true);
   }, 180_000);
+});
+
+describe('#522 A — reviewedScripts is lock-governed, on both built surfaces', () => {
+  let scriptPath: string;
+  let scriptSha256: string;
+
+  beforeEach(() => {
+    scriptPath = join(home, 'reviewed.sh');
+    const body = `#!/bin/bash\n${SC01_CATASTROPHIC}\n`;
+    writeFileSync(scriptPath, body);
+    scriptSha256 = createHash('sha256').update(body, 'utf8').digest('hex');
+  });
+
+  const scriptCommand = () => `bash ${scriptPath}`;
+
+  it('a verified lock with an EMPTY reviewedScripts ceiling still gates a config-side entry', () => {
+    forgePolicyLock({ version: 1, actionGuard: { enabled: true, enforce: true, reviewedScripts: [] } });
+    forgeSignedConfig({
+      actionGuard: { enabled: true, enforce: true, reviewedScripts: [{ path: scriptPath, sha256: scriptSha256 }] },
+    });
+
+    const hook = runHook(scriptCommand());
+    expect(hook.decision).toBe('deny');
+    expect(hook.reason).toMatch(/catastrophic/i);
+
+    const plugin = runReviewedScriptPlugin(scriptCommand());
+    expect(plugin.block).toBe(true);
+  }, 120_000);
+
+  it('an unverifiable lock forces the strict posture, which empties reviewedScripts too', () => {
+    writeFileSync(join(protectedRoot, 'policy.json'), '{ not valid json');
+    forgeSignedConfig({
+      actionGuard: { enabled: true, enforce: true, reviewedScripts: [{ path: scriptPath, sha256: scriptSha256 }] },
+    });
+
+    const hook = runHook(scriptCommand());
+    expect(hook.decision).toBe('deny');
+
+    const plugin = runReviewedScriptPlugin(scriptCommand());
+    expect(plugin.block).toBe(true);
+  }, 120_000);
+
+  // Positive control for the ceiling itself: proven at the unit level in
+  // `policy-lock-501.test.ts` ("treats reviewedScripts as a ceiling", "matches
+  // ... on the exact (path, sha256) pair"), where `applyPolicyLock` can be
+  // driven directly against a genuinely `locked` state. This built-chain
+  // suite cannot reach that state honestly — every lock file a test process
+  // itself writes is same-UID, which `verifyProtectedFile` correctly reports
+  // as `unverifiable` (see the "same-UID lock" describe block above, which is
+  // exercising exactly that path, not a root-verified one) — so a real
+  // root-owned lock that PERMITS an entry is not constructible here without
+  // faking root, which would test a fixture, not the code.
+  //
+  // The honest positive control this harness CAN give: an unlocked host must
+  // still let a reviewed script through exactly as #189 always did. That is
+  // the regression this item must not introduce — the ceiling should only
+  // ever narrow what an operator's lock permits, never break the mechanism
+  // for a host that has no lock at all.
+  it('an absent lock leaves the #189 reviewed-script exemption working exactly as before', () => {
+    forgeSignedConfig({
+      actionGuard: { enabled: true, enforce: true, reviewedScripts: [{ path: scriptPath, sha256: scriptSha256 }] },
+    });
+
+    const hook = runHook(scriptCommand());
+    expect(hook.decision).not.toBe('deny');
+
+    const plugin = runReviewedScriptPlugin(scriptCommand());
+    expect(plugin.block).toBe(false);
+  }, 120_000);
 });

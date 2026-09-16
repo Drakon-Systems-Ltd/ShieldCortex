@@ -79,9 +79,18 @@ function lockedSeam(policy: unknown, overrides: Record<string, Entry> = {}): Pro
 
 const UNLOCKED_SEAM = seamOf({ '/': { kind: 'dir', mode: 0o40755 }, '/etc': { kind: 'dir', mode: 0o40755 } });
 
+const REVIEWED_SCRIPT_SHA = 'a'.repeat(64);
+const REVIEWED_SCRIPT_ENTRY = { path: '/opt/sentry/security-sentry.py', sha256: REVIEWED_SCRIPT_SHA };
+
 const FULL_POLICY = {
   version: 1,
-  actionGuard: { enabled: true, enforce: true, autoApprove: ['ls', 'git status'], broker: { enabled: false } },
+  actionGuard: {
+    enabled: true,
+    enforce: true,
+    autoApprove: ['ls', 'git status'],
+    broker: { enabled: false },
+    reviewedScripts: [REVIEWED_SCRIPT_ENTRY],
+  },
   defenceMode: 'balanced',
   memory: { hostContract: { posture: 'mcp_sidecar_no_inject' }, inject: { mode: 'off' } },
 };
@@ -136,9 +145,43 @@ describe('#501 readPolicyLock — what the host actually is', () => {
     ['a defenceMode of "hasOwnProperty" (Object.prototype key)', JSON.stringify({ defenceMode: 'hasOwnProperty' })],
     ['a defenceMode of "__proto__" (Object.prototype key)', JSON.stringify({ defenceMode: '__proto__' })],
     ['a future policy version', JSON.stringify({ version: 2, actionGuard: { enabled: true } })],
+    // #522 item A: reviewedScripts is schema-validated like autoApprove — a
+    // malformed entry fails the WHOLE lock, it is never silently dropped
+    // (that silent-drop behaviour belongs to the runtime allowlist reader,
+    // which reads an unprivileged file where the worst case is a dead entry).
+    ['a non-array reviewedScripts', JSON.stringify({ actionGuard: { reviewedScripts: '/x' } })],
+    ['a non-object reviewedScripts entry', JSON.stringify({ actionGuard: { reviewedScripts: ['/x'] } })],
+    ['a reviewedScripts entry with a relative path', JSON.stringify({ actionGuard: { reviewedScripts: [{ path: 'rel.sh', sha256: 'a'.repeat(64) }] } })],
+    ['a reviewedScripts entry with an empty path', JSON.stringify({ actionGuard: { reviewedScripts: [{ path: '', sha256: 'a'.repeat(64) }] } })],
+    ['a reviewedScripts entry with a short sha256', JSON.stringify({ actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'a'.repeat(63) }] } })],
+    ['a reviewedScripts entry with a non-hex sha256', JSON.stringify({ actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'g'.repeat(64) }] } })],
+    ['a reviewedScripts entry with a non-string note', JSON.stringify({ actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'a'.repeat(64), note: 7 }] } })],
+    ['a reviewedScripts entry with a non-numeric addedAt', JSON.stringify({ actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'a'.repeat(64), addedAt: '2026' }] } })],
+    // One malformed entry poisons the WHOLE array, even alongside a valid one —
+    // "fails the whole lock" means the whole field, not just the bad entry.
+    ['a reviewedScripts array with one malformed entry beside a valid one', JSON.stringify({ actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'a'.repeat(64) }, { path: 'rel.sh', sha256: 'b'.repeat(64) }] } })],
   ])('reports %s as a schema failure', (_label, body) => {
     const state = silently(() => readPolicyLock({ seam: lockedSeam(body) }));
     expect(state.status === 'unverifiable' && state.reason).toBe('schema-failed');
+  });
+
+  it('accepts a well-formed reviewedScripts entry, note/addedAt included', () => {
+    const state = readPolicyLock({
+      seam: lockedSeam({
+        actionGuard: { reviewedScripts: [{ ...REVIEWED_SCRIPT_ENTRY, note: 'reviewed by ops', addedAt: 1234 }] },
+      }),
+    });
+    expect(state.status).toBe('locked');
+    expect(state.status === 'locked' && state.policy.actionGuard?.reviewedScripts).toEqual([
+      { ...REVIEWED_SCRIPT_ENTRY, note: 'reviewed by ops', addedAt: 1234 },
+    ]);
+  });
+
+  it('lowercases a mixed-case sha256 so matching is not case-sensitive', () => {
+    const state = readPolicyLock({
+      seam: lockedSeam({ actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'A'.repeat(64) }] } }),
+    });
+    expect(state.status === 'locked' && state.policy.actionGuard?.reviewedScripts?.[0].sha256).toBe('a'.repeat(64));
   });
 
   it('IGNORES unknown keys so a newer protect does not brick an older install', () => {
@@ -217,6 +260,40 @@ describe('#501 precedence — the lock wins, config may only tighten', () => {
   it('empties autoApprove when the lock permits nothing', () => {
     const out = applyPolicyLock({ actionGuard: { autoApprove: ['ls'] } }, locked({ actionGuard: { autoApprove: [] } }));
     expect((out.actionGuard as Record<string, unknown>).autoApprove).toEqual([]);
+  });
+
+  it('treats reviewedScripts as a ceiling — config may narrow, never widen', () => {
+    const allowed = { path: '/opt/sentry/security-sentry.py', sha256: 'a'.repeat(64) };
+    const notAllowed = { path: '/tmp/evil.sh', sha256: 'b'.repeat(64) };
+    const out = applyPolicyLock(
+      { actionGuard: { reviewedScripts: [allowed, notAllowed] } },
+      locked({ actionGuard: { reviewedScripts: [allowed] } }),
+    );
+    expect((out.actionGuard as Record<string, unknown>).reviewedScripts).toEqual([allowed]);
+  });
+
+  it('empties reviewedScripts when the lock permits nothing', () => {
+    const out = applyPolicyLock(
+      { actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'a'.repeat(64) }] } },
+      locked({ actionGuard: { reviewedScripts: [] } }),
+    );
+    expect((out.actionGuard as Record<string, unknown>).reviewedScripts).toEqual([]);
+  });
+
+  it('matches reviewedScripts entries on the exact (path, sha256) pair — same path, different hash is NOT in the ceiling', () => {
+    const out = applyPolicyLock(
+      { actionGuard: { reviewedScripts: [{ path: '/opt/sentry/security-sentry.py', sha256: 'c'.repeat(64) }] } },
+      locked({ actionGuard: { reviewedScripts: [{ path: '/opt/sentry/security-sentry.py', sha256: 'a'.repeat(64) }] } }),
+    );
+    expect((out.actionGuard as Record<string, unknown>).reviewedScripts).toEqual([]);
+  });
+
+  it('drops a config-side reviewedScripts entry that is not even shaped like one, rather than crashing', () => {
+    const out = applyPolicyLock(
+      { actionGuard: { reviewedScripts: ['not-an-entry', 42, null] } },
+      locked({ actionGuard: { reviewedScripts: [{ path: '/x.sh', sha256: 'a'.repeat(64) }] } }),
+    );
+    expect((out.actionGuard as Record<string, unknown>).reviewedScripts).toEqual([]);
   });
 
   it('forces the broker OFF when the lock disables it', () => {
@@ -306,7 +383,16 @@ describe('#501 the strict fail-closed posture', () => {
   it('an unverifiable lock forces exactly the documented posture', () => {
     const state = silently(() => readPolicyLock({ seam: lockedSeam(FULL_POLICY, { [LOCK_PATH]: { kind: 'file', uid: AGENT_UID } }) }));
     const out = applyPolicyLock(
-      { actionGuard: { enabled: false, enforce: false, autoApprove: ['anything'], broker: { enabled: true } }, defenceMode: 'permissive' },
+      {
+        actionGuard: {
+          enabled: false,
+          enforce: false,
+          autoApprove: ['anything'],
+          broker: { enabled: true },
+          reviewedScripts: [{ path: '/tmp/whatever.sh', sha256: 'a'.repeat(64) }],
+        },
+        defenceMode: 'permissive',
+      },
       state,
     );
     expect(out.actionGuard).toEqual({
@@ -314,6 +400,7 @@ describe('#501 the strict fail-closed posture', () => {
       enforce: true,
       autoApprove: [],
       broker: { enabled: false },
+      reviewedScripts: [],
     });
     expect(out.defenceMode).toBe('strict');
   });
@@ -326,7 +413,15 @@ describe('#501 the strict fail-closed posture', () => {
 
   it('strips the deprecated interceptor.actionGuard alias for covered keys only', () => {
     const out = applyStrictFailClosedPosture({
-      interceptor: { actionGuard: { enabled: false, autoApprove: ['x'], notify: { enabled: true } }, other: 1 },
+      interceptor: {
+        actionGuard: {
+          enabled: false,
+          autoApprove: ['x'],
+          reviewedScripts: [{ path: '/x.sh', sha256: 'a'.repeat(64) }],
+          notify: { enabled: true },
+        },
+        other: 1,
+      },
     });
     const alias = (out.interceptor as Record<string, Record<string, unknown>>).actionGuard;
     expect(alias).toEqual({ notify: { enabled: true } });
@@ -408,6 +503,27 @@ describe('#501 coverage and refusals', () => {
     ['memory.inject.mode', 'off', 'off', false],
   ] as const)('wouldLoosen(%s, %s) against %s === %s', (key, value, lockedValue, expected) => {
     expect(wouldLoosen(key, value, lockedValue)).toBe(expected);
+  });
+
+  it('treats a reviewedScripts entry outside the ceiling as loosening', () => {
+    const allowed = { path: '/opt/sentry/security-sentry.py', sha256: 'a'.repeat(64) };
+    const outside = { path: '/opt/other/script.sh', sha256: 'b'.repeat(64) };
+    expect(wouldLoosen('actionGuard.reviewedScripts', [allowed, outside], [allowed])).toBe(true);
+    expect(wouldLoosen('actionGuard.reviewedScripts', [allowed], [allowed, outside])).toBe(false);
+    expect(wouldLoosen('actionGuard.reviewedScripts', [], [allowed])).toBe(false);
+  });
+
+  it('treats a same-path different-hash reviewedScripts entry as loosening, never as a bare path allowlist', () => {
+    const path = '/opt/sentry/security-sentry.py';
+    expect(
+      wouldLoosen('actionGuard.reviewedScripts', [{ path, sha256: 'c'.repeat(64) }], [{ path, sha256: 'a'.repeat(64) }]),
+    ).toBe(true);
+  });
+
+  it('treats an unshaped reviewedScripts config entry as loosening, never as harmless junk', () => {
+    const allowed = { path: '/x.sh', sha256: 'a'.repeat(64) };
+    expect(wouldLoosen('actionGuard.reviewedScripts', ['not-an-entry'], [allowed])).toBe(true);
+    expect(wouldLoosen('actionGuard.reviewedScripts', [{ path: '/x.sh' }], [allowed])).toBe(true);
   });
 
   it('treats an autoApprove entry outside the ceiling as loosening', () => {

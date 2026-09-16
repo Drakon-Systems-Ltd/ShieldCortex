@@ -25,6 +25,7 @@ import {
   readPolicyLock,
   type LockedPolicy,
 } from '../defence/iron-dome/policy-lock.js';
+import { normaliseReviewedScripts } from '../defence/iron-dome/reviewed-scripts.js';
 import {
   defaultProtectedFsSeam,
   resolveProtectedRoot,
@@ -109,6 +110,15 @@ export function buildLockedPolicy(raw: Record<string, unknown>, opts: ProtectOpt
       ? (guard.autoApprove as unknown[]).filter((e): e is string => typeof e === 'string')
       : [],
     broker: { enabled: isBlock(guard.broker) ? guard.broker.enabled === true : false },
+    // #522 item A — unlike `autoApprove`, this pins an EMPTY ceiling by
+    // default even without `--from-config`. `autoApprove` entries are
+    // strings an operator can eyeball in the printed lock; a reviewed-script
+    // entry is a path+hash pair pinning trust in a FILE'S CONTENTS, and a
+    // `protect` run that silently carried forward whatever a same-UID config
+    // happened to list would let that same-UID process choose its own future
+    // ceiling. `--from-config` opts in explicitly, same switch as the two
+    // master toggles above.
+    reviewedScripts: opts.fromConfig ? normaliseReviewedScripts(guard.reviewedScripts) : [],
   };
   const policy: LockedPolicy = { version: 1, actionGuard };
 
@@ -134,6 +144,7 @@ function coversKey(policy: LockedPolicy, key: (typeof PROTECTED_POLICY_KEYS_V1)[
     case 'actionGuard.enforce': return policy.actionGuard?.enforce !== undefined;
     case 'actionGuard.autoApprove': return policy.actionGuard?.autoApprove !== undefined;
     case 'actionGuard.broker.enabled': return policy.actionGuard?.broker?.enabled !== undefined;
+    case 'actionGuard.reviewedScripts': return policy.actionGuard?.reviewedScripts !== undefined;
     case 'defenceMode': return policy.defenceMode !== undefined;
     case 'memory.hostContract.posture': return policy.memory?.hostContract?.posture !== undefined;
     case 'memory.inject.mode': return policy.memory?.inject?.mode !== undefined;
