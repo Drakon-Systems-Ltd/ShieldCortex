@@ -240,6 +240,60 @@ describe('#501 a tampered HMAC verdict forces the SAME posture, not just defence
   });
 });
 
+describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIGNED', () => {
+  // The #501 review's SHOULD-FIX-5. Design doc §8.4 told the operator to
+  // hand-edit `config.json` and re-pin a looser lock — and stopped there. Both
+  // of those steps are real; together they do nothing, because a `tampered`
+  // verdict forces the WHOLE fail-closed posture unconditionally and
+  // independently of the lock, and `applyPolicyLock` only ever tightens. The
+  // operator follows the runbook exactly and stays in strict with no visible
+  // reason why. §8.4 now has a step 4 — re-run the corresponding
+  // `shieldcortex config --*` flag so the file is re-signed — and this is it.
+
+  it('re-pinning a looser lock does NOT undo the hand-edit; the re-sign does', async () => {
+    // 1. The locked-box starting point: guard on and enforcing, correctly signed.
+    const start = await freshConfig();
+    start.setActionGuardCoreConfig({ enabled: true, enforce: true });
+    expect(start.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+
+    // 2. Runbook step 2 — hand-edit the source config to the policy you now
+    //    want. This is what invalidates `_sig`.
+    const onDisk = readOnDisk();
+    onDisk.actionGuard = { enabled: true, enforce: false };
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(onDisk, null, 2));
+
+    // 3. Runbook step 3 — re-pin the looser lock. Modelled by the loosest lock
+    //    state that exists: none at all. `applyPolicyLock` only tightens, so no
+    //    lock CONTENT can be gentler than an absent lock — if the loosening
+    //    does not take effect here, no re-pinned lock could have made it.
+    const repinned = await freshConfig();
+    expect(repinned.readRawConfig()).toBeDefined();
+    expect(repinned.isConfigTampered()).toBe(true);
+    expect(repinned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+
+    // 4. Runbook step 4 — the step that was missing. Re-run the corresponding
+    //    setter, which re-signs the file. NOW the loosening is in force.
+    repinned.setActionGuardCoreConfig({ enabled: true, enforce: false });
+    const resigned = await freshConfig();
+    expect(resigned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false });
+    expect(resigned.readRawConfig()).toBeDefined();
+    expect(resigned.isConfigTampered()).toBe(false);
+  });
+
+  it('a lock still out-ranks the re-signed config — step 4 is a re-sign, not an escape', async () => {
+    // The other half, so the new runbook step cannot be read as "re-signing
+    // beats the lock". It does not: the lock is consulted on every read, and a
+    // re-signed config that tries to go below it is pulled back up.
+    const start = await freshConfig();
+    start.setActionGuardCoreConfig({ enabled: true, enforce: false });
+    expect(start.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false });
+
+    writeSameUidLock({ actionGuard: { enabled: true, enforce: true } });
+    const locked = await freshConfig();
+    expect(locked.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+  });
+});
+
 describe('#501 hasTrustedMemorySidecarPosture', () => {
   const SIDECAR = { hostContract: { posture: 'mcp_sidecar_no_inject' }, inject: { mode: 'off' } };
 

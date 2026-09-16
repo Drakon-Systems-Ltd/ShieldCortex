@@ -524,8 +524,12 @@ shieldcortex doctor                   # two rows: policy lock, config integrity
   owned by the agent uid* and you never ran `protect` here, treat it as an
   incident first: something running as the agent wrote that file.
 - **Locked out of a change you need.** Edit your config, then re-pin it as root
-  with `sudo shieldcortex protect --from-config`. You never need this to make a
-  host *stricter* — config may always tighten a pinned key.
+  with `sudo shieldcortex protect --from-config` — and then re-run the matching
+  `shieldcortex config --*` flag to **re-sign** `config.json`. That last step is
+  required: hand-editing the file invalidates its signature, and a `tampered`
+  config holds the strict fail-closed posture whatever the lock says, so
+  re-pinning alone changes nothing. You never need any of this to make a host
+  *stricter* — config may always tighten a pinned key.
 - **No root any more.** The lock is doing its job; recover root the way you
   would for any other root-owned file. The agent cannot help, by construction.
 
