@@ -2438,8 +2438,43 @@ const EXEC_COMMAND_WORD =
 // executed be dropped. `getattr(`/`__import__` are included because they are the
 // standard ways to reach `os.system` without naming it.
 const SHELL_OUT_SINK =
-  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b|`/;
-
+  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
+/**
+ * #444 -- a bare backtick in a PYTHON docstring or comment is Markdown prose,
+ * not a shell-out sink. It was in SHELL_OUT_SINK for every language, so
+ * python3 repair.py whose docstring said "re-run after <global install>" was
+ * hard-denied unattended -- the very script that repairs a broken install.
+ * The backtick alternative is removed from SHELL_OUT_SINK and re-added per
+ * language here.
+ *
+ * Languages where a backtick EXECUTES keep the any-backtick sink: Ruby, Perl,
+ * PHP. JavaScript also keeps it -- deliberately. A JS TAGGED template
+ * (zx / execa $) executes, and five review rounds showed that telling a tag
+ * from an inert literal needs a real lexer (trivia, Unicode identifiers,
+ * member-keywords, nested interpolation, comment-embedded fake openers). Until
+ * that lexer exists, JS behaviour is byte-identical to before this change:
+ * any backtick arms the sink. Relaxing JS is a recorded follow-up, not a
+ * partial heuristic that reviewers can keep breaking.
+ *
+ * Only languages with NO backtick execution semantics are relaxed: Python
+ * (the #444 shape). Shell regions are a different path and untouched.
+ */
+const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node']);
+/**
+ * @param folded true ONLY for a script folded from DISK (the #444 shape:
+ *   `python3 scripts/patch_x.py`). Disk bytes are never expanded by the
+ *   invoking shell, so a backtick in Python prose there is inert text.
+ *   Everything that lives in the command itself -- inline -c programs,
+ *   heredocs of any delimiter, write-then-run bodies -- keeps the
+ *   any-backtick sink exactly as on main: the outer shell MAY expand it
+ *   and five review rounds (r6-r10) showed the shell-quoting context cannot
+ *   be proven from a partial parse. Fail closed there.
+ */
+function hasShellOutSink(text: string, lang: ScriptLang, folded = false): boolean {
+  if (SHELL_OUT_SINK.test(text)) return true;
+  if (!text.includes('`')) return false;
+  return !folded || BACKTICK_EXEC_LANGS.has(lang);
+}
 /** How each interpreter language delimits comments and string literals. */
 interface ScriptLangRules {
   lineComment: readonly string[];
@@ -2622,7 +2657,7 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
       const lineStart = Math.max(r.start, text.lastIndexOf('\n', range[0]) + 1);
       let lineEnd = text.indexOf('\n', range[1]);
       if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
-      (SHELL_OUT_SINK.test(text.slice(lineStart, lineEnd)) ? sinkArgLiterals : scriptLiterals).push(range);
+      (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang, r.folded) ? sinkArgLiterals : scriptLiterals).push(range);
     }
   }
 
@@ -4036,7 +4071,7 @@ function foldScriptSources(
       start: cursor,
       end: cursor + scan.length,
       lang: next.lang,
-      hasSink: SHELL_OUT_SINK.test(scan),
+      hasSink: hasShellOutSink(scan, next.lang, true),
       folded: true,
       // #184: path + chain so a match inside this region names its origin.
       sourcePath: next.path,
@@ -4285,7 +4320,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
       const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
       if (cleaned) {
         const s = m.index + nlEarly + 1;
-        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned });
+        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, });
       }
       continue;                                         // nothing executes it as code
     }
@@ -4302,7 +4337,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
     if (clean) candidateFiles.push(clean);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: SHELL_OUT_SINK.test(m[3]), folded: false },
+      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
       outFile: clean,
     });
   }
@@ -4352,7 +4387,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
           // output into the shell (`| bash`, `>> ~/.zshrc`). The last is not a
           // property of the body at all, which is exactly why the body-local
           // test missed it.
-          hasSink: SHELL_OUT_SINK.test(w.body)
+          hasSink: hasShellOutSink(w.body, runs[0].lang)
             // A file write matters when what it writes can later RUN — see
             // `fileWriteIsSink`. `writeFileSync('/tmp/report.json', …)` in a
             // probe is data; `'/tmp/g.sh'` or `~/.zshrc` is a command in
@@ -4413,11 +4448,11 @@ function inlineProgramRegions(text: string): ScanRegion[] {
         j++;
       }
       progEnd = Math.min(j, text.length);
-      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: SHELL_OUT_SINK.test(text.slice(progStart + 1, progEnd)), folded: false });
+      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang), folded: false });
     } else {
       const nl = text.indexOf('\n', progStart);
       progEnd = nl < 0 ? text.length : nl;
-      out.push({ start: progStart, end: progEnd, lang, hasSink: SHELL_OUT_SINK.test(text.slice(progStart, progEnd)), folded: false });
+      out.push({ start: progStart, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart, progEnd), lang), folded: false });
     }
     INLINE_PROGRAM_RE.lastIndex = Math.max(progEnd, m.index + m[0].length);
   }
@@ -4472,6 +4507,7 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
   if (at < length) out.push({ start: at, end: length, lang: 'sh', hasSink: false, folded: false });
   return out;
 }
+
 
 // ── Write-content payload scan (issue #93) ───────────────────────────────────
 
