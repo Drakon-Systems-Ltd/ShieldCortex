@@ -501,6 +501,40 @@ unlocked: a same-user process can disable the guard.* Windows and agents already
 running as root are reported as having no same-host boundary rather than given a
 fake one.
 
+### If the lock ends up in a bad state
+
+There is deliberately **no `shieldcortex unprotect`**. A command an agent could
+be talked into invoking would hand back exactly the capability the lock removes,
+so recovery is a short runbook for a human at a root shell — written out in full
+in [the design note, §8](docs/design/2026-09-16-501-policy-lock.md#8-recovery--for-a-human-operator-at-a-root-shell).
+
+Start by finding out which state you are in — both commands are unprivileged and
+safe to run at any time:
+
+```bash
+shieldcortex config --policy-status   # headline, lock path, every pinned key
+shieldcortex doctor                   # two rows: policy lock, config integrity
+```
+
+- **UNVERIFIABLE lock** (wrong owner, writable directory, symlink, unparseable).
+  The box is safe, not bricked — strict posture, ordinary tool calls still run.
+  Read the reason in the headline, look at the file's ownership *before* you
+  change anything, then `sudo shieldcortex protect --dry-run` and
+  `sudo shieldcortex protect` to rewrite it atomically. If the reason is *file
+  owned by the agent uid* and you never ran `protect` here, treat it as an
+  incident first: something running as the agent wrote that file.
+- **Locked out of a change you need.** Edit your config, then re-pin it as root
+  with `sudo shieldcortex protect --from-config`. You never need this to make a
+  host *stricter* — config may always tighten a pinned key.
+- **No root any more.** The lock is doing its job; recover root the way you
+  would for any other root-owned file. The agent cannot help, by construction.
+
+Two things not to do: don't delete `~/.shieldcortex` expecting a clean slate —
+the lock lives in `/etc/shieldcortex` and survives, and a missing or `tampered`
+config sits in the *stricter* fail-closed posture. And don't re-own the lock to
+the agent user to make an error go away; that makes it permanently unverifiable,
+which is permanently strict.
+
 <br>
 
 ## 🕸️ Threat Graph
