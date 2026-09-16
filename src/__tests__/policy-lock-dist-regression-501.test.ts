@@ -378,11 +378,18 @@ describe('#501 a LYING dist policy reader cannot fail open either (review BLOCK-
     }
   });
 
-  it("a lying reader in the hook's OWN dist is caught by the probe contradiction", () => {
-    // The other half of the fix, and the one that survives a future seam: a
-    // reader that answers `absent` while the probe can see the file is treated
-    // as UNVERIFIABLE, whatever route it arrived by — here a tampered install,
-    // which no environment gate can help with.
+  it('a reader that DENIES a lock it can see is treated as unverifiable, even from the hook\'s own dist', () => {
+    // The other half of the fix, and the one that does not depend on which
+    // route the module arrived by: a reader answering `absent` while the probe
+    // can see the file is treated as UNVERIFIABLE. Here it arrives as a
+    // tampered install, which no environment gate can reach.
+    //
+    // The BOUND, stated so nobody reads this as more than it is: the check
+    // catches the answers-no-lock lie ONLY. A substituted module that answers
+    // `locked` and then neutralises the policy in its own pass-through
+    // `applyPolicyLock` is NOT caught and cannot be — the whole module is
+    // attacker-controlled at that point, so there is nothing left to check it
+    // against. That is install tampering, out of scope by design note §8.6.
     const stage = stageHook('lying');
     try {
       const run = runStagedHook(stage, SC01_CATASTROPHIC);

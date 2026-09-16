@@ -280,10 +280,21 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     expect(resigned.isConfigTampered()).toBe(false);
   });
 
-  it('a lock still out-ranks the re-signed config — step 4 is a re-sign, not an escape', async () => {
+  it('a lock appearing after step 4 pulls the re-signed config back up — the re-sign is not an escape', async () => {
     // The other half, so the new runbook step cannot be read as "re-signing
     // beats the lock". It does not: the lock is consulted on every read, and a
     // re-signed config that tries to go below it is pulled back up.
+    //
+    // #501 review NEW-5, on what this does and does not prove. The lock written
+    // here is `writeSameUidLock` — same-uid, therefore `unverifiable`, therefore
+    // the strict fail-closed posture. So the assertion below is satisfied by the
+    // FAIL-CLOSED path, not by lock precedence: it would pass identically if
+    // `applyPolicyLock` did nothing. The precedence property itself is real and
+    // is pinned elsewhere — directly against `applyPolicyLock`, and for the
+    // genuinely privileged-owner case through `protected-root-501`'s injected
+    // stat seam plus the privileged CI job in design note §7. What this case
+    // pins is narrower, and is still what the runbook needs: once step 4 has
+    // re-signed the file, a lock on the host still outranks those fresh bytes.
     const start = await freshConfig();
     start.setActionGuardCoreConfig({ enabled: true, enforce: false });
     expect(start.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false });
