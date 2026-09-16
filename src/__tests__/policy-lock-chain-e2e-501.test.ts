@@ -416,21 +416,31 @@ describe('#501 the chain, with a same-UID lock — three processes, one posture'
 });
 
 describe('#501 breaking the install is not a bypass, on the plugin surface either', () => {
-  it('an unresolvable `shieldcortex/defence` plus a lock forces the strict posture', () => {
+  it('an unresolvable `shieldcortex/defence` plus a lock forces the strict posture AND still gates calls (review round-6 F1)', () => {
     forgeSignedConfig(GUARD_OFF_EVERYWHERE);
     forgePolicyLock();
     const plugin = runPlugin({ stage: brokenStage });
 
-    // What this does and does not claim. The inline probe raises the posture
-    // and says so loudly — but the module that IMPLEMENTS the gate is the one
-    // that is missing, so no tool call is blocked here. The honest statement is
-    // that the reported posture is strict and the operator is told the install
-    // is broken; the enforcement itself is restored by `shieldcortex repair`.
+    // The reported posture is strict and the operator is told the install is
+    // broken — unchanged from before.
     expect(plugin.guardLine).toMatch(/Action guard: enforce/);
     expect(plugin.warnings.join('\n')).toMatch(
       /policy lock is present but the ShieldCortex defence module could not be loaded/,
     );
     expect(plugin.warnings.join('\n')).toMatch(/shieldcortex repair/);
+
+    // #522 review round-6 F1: it USED to be true that "no tool call is blocked
+    // here" — `initInterceptor` returned null on a missing `defenceMod`, and
+    // `before_tool_call`'s `if (!interceptor) return;` skipped the gate
+    // entirely, a full bypass distinct from (and worse than) the reported
+    // posture. Fixed by building a DEGRADED interceptor instead of none: the
+    // dependency-free WS2 fallback scan (`handleGuardUnavailable`) now runs in
+    // its place, so "delete/break dist" is no longer a complete Action Guard
+    // bypass on a locked host — a catastrophic command is still denied.
+    expect(plugin.catastrophic?.block).toBe(true);
+    expect(plugin.catastrophic?.blockReason).toMatch(/fallback catastrophic scan matched/i);
+    // A benign call is still allowed — degraded is not bricked.
+    expect(plugin.benign).toBeNull();
   }, 180_000);
 
   it('the same broken install with NO lock keeps today\'s behaviour, silently', () => {

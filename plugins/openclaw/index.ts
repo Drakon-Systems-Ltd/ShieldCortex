@@ -4117,14 +4117,39 @@ export default {
         // specifier so TypeScript doesn't resolve 'shieldcortex/defence' at
         // compile time; it only exists at runtime once the package is installed.
         const defenceMod = await getDefenceModule();
+        // #522 review round-6 follow-up (F1): a missing/incomplete dist used to
+        // `return null` HERE, which made `before_tool_call`'s `if (!interceptor)
+        // return;` skip the gate entirely — a full bypass, not even the
+        // dependency-free WS2 fallback scan (`handleGuardUnavailable` in
+        // interceptor.ts, which already exists for a defence call that throws
+        // at RUNTIME). "Delete/break dist" was therefore a complete Action
+        // Guard bypass on a host with a policy lock on disk — the exact class
+        // of bug #501's review found and fixed in `pre-tool-hook.mjs`
+        // (`applyHookPolicyLock` / `handleDegradedGuard`). The fix is the same
+        // shape here: build a DEGRADED interceptor instead of none. `pipeline`
+        // throws — caught by `handleToolCall`'s existing `failurePolicy.high`
+        // path for memory-write tools — and `evaluateToolCall` is left
+        // undefined, which routes every Action Guard call through the tiered
+        // WS2 fallback scan instead of the real evaluator.
+        // `interceptorConfig.actionGuard.enforce` is already lock-aware
+        // (`loadConfig()` above ran `applyPolicyLockToPluginConfig`), so the
+        // WS2 dangerous tier still denies on a locked host even in this
+        // degraded mode.
+        const canRunPipeline = !!defenceMod && typeof defenceMod.runDefencePipeline === 'function';
         if (!defenceMod) {
-          (api.logger as any)?.warn?.('[shieldcortex] Cannot load defence module — interceptor disabled');
-          return null;
+          (api.logger as any)?.warn?.('[shieldcortex] Cannot load defence module — degraded: dependency-free fallback scan only (WS2), memory-write scanning follows failurePolicy.high');
+        } else if (!canRunPipeline) {
+          (api.logger as any)?.warn?.('[shieldcortex] defence module missing runDefencePipeline — degraded: dependency-free fallback scan only (WS2), memory-write scanning follows failurePolicy.high');
         }
-        if (typeof defenceMod.runDefencePipeline !== 'function') return null;
+        const degradedPipeline: Parameters<typeof createInterceptor>[1] = () => {
+          throw new Error('ShieldCortex: defence pipeline unavailable (dist missing or incomplete)');
+        };
 
-        interceptorReady = createInterceptor(interceptorConfig, defenceMod.runDefencePipeline as Parameters<typeof createInterceptor>[1], {
-          evaluateToolCall: typeof (defenceMod as any).evaluateToolCall === 'function'
+        interceptorReady = createInterceptor(
+          interceptorConfig,
+          canRunPipeline ? (defenceMod!.runDefencePipeline as Parameters<typeof createInterceptor>[1]) : degradedPipeline,
+          {
+          evaluateToolCall: typeof (defenceMod as any)?.evaluateToolCall === 'function'
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
@@ -4139,22 +4164,22 @@ export default {
           // injected through the same runtime seam as evaluateToolCall. Older
           // installed packages without the export simply leave the option
           // undefined (no lease plane — the capability-honesty surface says so).
-          checkActionLease: typeof (defenceMod as any).evaluateToolCallLease === 'function'
+          checkActionLease: typeof (defenceMod as any)?.evaluateToolCallLease === 'function'
             ? (toolName, args, sessionId) =>
                 (defenceMod as any).evaluateToolCallLease(toolName, args, { self: sessionId ?? '' })
             : undefined,
-          releaseActionLease: typeof (defenceMod as any).releaseToolCallLease === 'function'
+          releaseActionLease: typeof (defenceMod as any)?.releaseToolCallLease === 'function'
             ? (toolName, args, sessionId) =>
                 (defenceMod as any).releaseToolCallLease(toolName, args, { self: sessionId ?? '' })
             : undefined,
           // #260: the session-guard index. Same formula as the Claude Code
           // hook. Absent on an older dist — then emitAudit still stamps origin
           // but does not write an index nobody would summarise.
-          sessionGuard: typeof defenceMod.sessionKeyFor === 'function' && typeof defenceMod.appendSessionGuardIndex === 'function'
+          sessionGuard: typeof defenceMod?.sessionKeyFor === 'function' && typeof defenceMod?.appendSessionGuardIndex === 'function'
             ? {
-                keyFor: (sessionId) => defenceMod.sessionKeyFor!(sessionId),
+                keyFor: (sessionId) => defenceMod!.sessionKeyFor!(sessionId),
                 index: (entry) => {
-                  defenceMod.appendSessionGuardIndex!({ entry: { ...entry } as Record<string, unknown> });
+                  defenceMod!.appendSessionGuardIndex!({ entry: { ...entry } as Record<string, unknown> });
                 },
               }
             : undefined,
@@ -4163,7 +4188,7 @@ export default {
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
             cloudEnabled: (scConfig as any).cloudEnabled ?? false,
           }),
-          bindAudit: typeof (defenceMod as any).attachEnforcementBinding === 'function'
+          bindAudit: typeof (defenceMod as any)?.attachEnforcementBinding === 'function'
             ? (entry, args) => (defenceMod as any).attachEnforcementBinding(entry, {
                 plane: 'action_guard',
                 hookName: 'before_tool_call',
@@ -4173,7 +4198,9 @@ export default {
               }) as typeof entry
             : undefined,
         });
-        const guardState = interceptorConfig.actionGuard?.enabled
+        const guardState = !canRunPipeline
+          ? 'Action Guard: DEGRADED (WS2 fallback scan only)'
+          : interceptorConfig.actionGuard?.enabled
           ? (interceptorConfig.actionGuard.enforce ? 'Action Guard: enforce' : 'Action Guard: warn')
           : 'Action Guard: off';
         api.logger?.info?.(`[shieldcortex] Interceptor active — memory writes + ${guardState} (shell/file/network/git)`);
