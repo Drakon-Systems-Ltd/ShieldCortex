@@ -244,12 +244,24 @@ describe('#500 Action Guard self-protection', () => {
   // GPT-6 r6 P2: repeated pm / package tokens must stay linear now that
   // there is no DANGEROUS-table regex for uninstall.
   it.each([
-    ['pm-repeat', () => `${NPM} ls ` + (`${NPM} `).repeat(4000) + `${SC}-helper`],
     ['pkg-repeat', () => `${NPM} ls ` + (`${SC} `).repeat(4000) + 'x'],
     ['cli-repeat', () => `${SC} ` + (`${SC} `).repeat(4000) + 'status'],
   ])('stays fast on thousands of repeated %s tokens (ReDoS tripwire 3)', (_label, make) => {
     const t0 = Date.now();
     bash(make());
-    expect(Date.now() - t0).toBeLessThan(500);
+    expect(Date.now() - t0).toBeLessThan(300);
+  });
+  // pm-repeat is dominated by a PRE-EXISTING quadratic in the shell
+  // tokeniser (`npm ` x 8000 = ~1.1s on main before #518, x4 per doubling).
+  // Measure what THIS walk adds on top: the same input with and without a
+  // guard package token. Absolute wall time on a shared CI runner is not a
+  // property of this code.
+  it('adds no more than a constant on top of the tokeniser for pm-repeat (ReDoS tripwire 3b)', () => {
+    const base = `${NPM} ls ` + (`${NPM} `).repeat(2000);
+    const time = (cmd: string) => { const t0 = process.hrtime.bigint(); bash(cmd); return Number(process.hrtime.bigint() - t0) / 1e6; };
+    time(base + 'warm-helper');
+    const without = Math.min(time(base + 'other-helper'), time(base + 'other-helper'));
+    const withPkg = Math.min(time(base + `${SC}-helper`), time(base + `${SC}-helper`));
+    expect(withPkg - without).toBeLessThan(Math.max(50, without * 0.5));
   });
 });
