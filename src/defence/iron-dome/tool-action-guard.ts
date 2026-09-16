@@ -919,8 +919,8 @@ const DANGEROUS: Pattern[] = [
   // #500: Guard must not let a tool call switch Guard off, uninstall it, or
   // rewrite its own config. Same-UID filesystem writes outside the tool
   // surface remain a later OS lock (#501). This rule is the tool-call gate.
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:(?:npx|pnpm|yarn|bunx)\s+)?shieldcortex\s+(?:config\s+--action-guard-(?:disable|advisory)|iron-dome\s+deactivate)\b/i, signal: 'disable-action-guard' },
-  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*\buninstall\b)(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global))(?=[^|;&\n]*shieldcortex)/i, signal: 'disable-action-guard' },
+  { re: /(?:^|[;&|\n]|\$\()[^|;&\n]*\bshieldcortex(?:\.js|\.mjs|\.cjs)?\b[^|;&\n]*(?:--action-guard-(?:disable|advisory)\b|iron-dome\s+deactivate\b)/i, signal: 'disable-action-guard' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*\s(?:uninstall|remove|rm|r|un|unlink)(?=\s|$|[|;&\n]))(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global(?![\w-])|--location=global(?![\w-])|\bglobal\s+remove\b))(?=[^|;&\n]*\s['"]?(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)(?:@[^\s'"]+)?['"]?(?=\s|$|[|;&\n]))/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
