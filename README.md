@@ -460,6 +460,49 @@ deletes are no longer advisory-only.
 
 <br>
 
+## 🔒 Policy Lock
+
+`~/.shieldcortex/config.json` holds every security switch ShieldCortex has, and
+it is owned by the same user the agent runs as. That file carries an HMAC, but
+the key (`.integrity-key`) sits beside it under the same ownership, so the
+signature is a **corruption / accidental-edit detector, not tamper protection**
+— anything that can edit the config can re-sign it. Doctor now says so in
+those words.
+
+The control that a same-user process *cannot* forge is the operating system's
+own ownership boundary:
+
+```bash
+shieldcortex protect --dry-run   # exactly what would be pinned, no privilege needed
+shieldcortex protect             # run as root: writes /etc/shieldcortex/policy.json
+shieldcortex config --policy-status
+```
+
+- 🔑 **No key material at all** — the lock is a plain root-owned `0644` file in a
+  root-owned `0755` directory. Agent-readable is intended; agent-writable is what
+  is being removed. Nothing to steal, no keyring, no second same-UID file.
+- 📌 **Protected set (v1)** — `actionGuard.enabled`, `actionGuard.enforce`,
+  `actionGuard.autoApprove` (a ceiling), `actionGuard.broker.enabled`,
+  `defenceMode` (a floor), and the two memory sidecar-posture keys.
+- ⬆️ **Config may only tighten** — for every pinned key the tighter of lock and
+  config wins, so you can still make a locked box stricter locally. A write that
+  would loosen one is refused by name, not silently overridden.
+- 🛡️ **Fails closed, precisely** — a lock that exists but cannot be verified
+  (wrong owner, writable directory, symlink, unparseable) forces Action Guard on
+  and enforcing, empties auto-approve, disables the broker and sets strict mode.
+  It never denies every tool call: bricking the agent on a policy read failure
+  just teaches operators to delete the lock.
+- 👀 **Both enforcement surfaces read it** — the Claude Code hook and the OpenClaw
+  interceptor, through the same module, each with an inline probe so a missing
+  build cannot fail open on a host that has a lock.
+
+Unlocked hosts behave exactly as before, and `doctor` says so plainly: *policy
+unlocked: a same-user process can disable the guard.* Windows and agents already
+running as root are reported as having no same-host boundary rather than given a
+fake one.
+
+<br>
+
 ## 🕸️ Threat Graph
 
 Turns the defence audit trail into memory. Every scan ShieldCortex runs is already recorded; the Threat Graph projects that history into a per-source security event graph so the system can *learn* which sources are risky, remember your review decisions, and correlate activity — without ever trusting attacker-controlled content.
@@ -898,6 +941,8 @@ shieldcortex xray <path> --ci     # CI/CD gate (exits non-zero on findings)
 shieldcortex xray <path> --sarif  # SARIF 2.1.0 output (GitHub Code Scanning)
 shieldcortex cortex confirm       # Capture positive feedback
 shieldcortex config --key value   # Update configuration
+shieldcortex protect              # Pin security keys to a root-owned policy lock (needs root)
+shieldcortex config --policy-status  # What the policy lock pins, or why there is none
 ```
 
 </details>
