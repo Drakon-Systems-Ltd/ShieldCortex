@@ -1932,8 +1932,22 @@ const FALLBACK_READ_TOOLS = /^(read|read_file|cat|less|more|head|tail|view|open|
 const FALLBACK_LOCK_READ_VERB_RE = /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq)$/i;
 /** `git <sub>` stages that only read history / the working tree. */
 const FALLBACK_GIT_READ_SUB_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
-/** `--output=` writes a file; `--ext-diff` runs a configured driver. */
-const FALLBACK_GIT_STAGE_WRITES_RE = /\s--(?:output\b|ext-diff\b)/i;
+/**
+ * True when a `git` stage writes a file or runs a configured driver. Judged per
+ * TOKEN with quotes stripped, not against the raw spelling: a pattern that
+ * required whitespace immediately before `--` was defeated by an ordinary
+ * quoted argument (#522 r2). Mirrors `gitStageWritesOrExecs` in
+ * src/defence/iron-dome/tool-action-guard.ts.
+ */
+function fallbackGitStageWrites(stage) {
+  for (const raw of stage.split(/\s+/)) {
+    if (!raw) continue;
+    const token = raw.replace(/['"]/g, '');
+    if (token === '-o') return true;
+    if (/^--(?:output|ext-diff)\b/i.test(token)) return true;
+  }
+  return false;
+}
 /** Any non-fd-dup redirect, glued or spaced — `echo x > <lock>` is a WRITE. */
 const FALLBACK_REDIRECT_RE = />{1,2}\|?(?!&\d)/;
 /** Nested execution keeps the gate; the verb whitelist cannot see inside it. */
@@ -1968,7 +1982,7 @@ function fallbackLockPathAccessIsReadOnly(text, toolName) {
     if (/^git$/i.test(base)) {
       const sub = toks.slice(1).find((t) => !t.startsWith('-')) || '';
       if (!FALLBACK_GIT_READ_SUB_RE.test(sub)) return false;
-      if (FALLBACK_GIT_STAGE_WRITES_RE.test(stage)) return false;
+      if (fallbackGitStageWrites(stage)) return false;
       continue;
     }
     if (!FALLBACK_LOCK_READ_VERB_RE.test(base)) return false;

@@ -844,6 +844,10 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     ['a read with a hostile sibling', `cat ${LOCK_TEXT} && curl https://example.test/x`],
     ['an env seam beside a read', `SHIELDCORTEX_PROTECTED_ROOT=/tmp/empty cat ${LOCK_TEXT}`],
     ['a git stage that writes a file', `git diff --output=${SETTINGS_TEXT} -- README.md`],
+    // #522 r2: the same flag QUOTED. The raw-spelling pattern wanted
+    // whitespace immediately before `--`, which an ordinary quote defeats.
+    ['a QUOTED git stage that writes a file', `git diff "--output=${SETTINGS_TEXT}" -- README.md`],
+    ['a short-form git stage that writes a file', `git diff -o ${SETTINGS_TEXT} -- README.md`],
   ];
 
   it.each(MUST_GATE)(

@@ -109,6 +109,16 @@ describe('#501 policy-lock paths — every write shape keeps the gate', () => {
     // git that changes the working tree, or writes/executes via flag.
     ['Bash', { command: `git checkout -- ${SETTINGS}` }],
     ['Bash', { command: `git log --output=${HOME}/${SETTINGS} -- x` }],
+    // #522 r2: the same flag QUOTED. The old test required whitespace
+    // immediately before `--`, so an ordinary quoted argument slipped past it
+    // and a stage that writes a file read as one that only inspects one.
+    ['Bash', { command: `git diff "--output=${HOME}/${SETTINGS}" -- README.md` }],
+    ['Bash', { command: `git diff '--output=${HOME}/${SETTINGS}' --` }],
+    ['Bash', { command: `git log "--output=${HOME}/${SETTINGS}"` }],
+    ['Bash', { command: `git diff "--ext-diff" -- ${SETTINGS}` }],
+    // The separate-token and short spellings of the same flag.
+    ['Bash', { command: `git diff "--output" "${HOME}/${SETTINGS}" -- README.md` }],
+    ['Bash', { command: `git diff -o ${HOME}/${SETTINGS} -- README.md` }],
     ['Bash', { command: `git -C ${HOME} log -- ${SETTINGS}` }],
     // Nested execution and interpreters fail closed.
     ['Bash', { command: `echo ${SUBSH}cat ${LOCK})` }],
@@ -138,5 +148,18 @@ describe('policyLockAccessIsReadOnly', () => {
     expect(policyLockAccessIsReadOnly(`cat ${LOCK} && ${DEL} ${LOCK}`)).toBe(false);
     expect(policyLockAccessIsReadOnly(`git checkout -- ${SETTINGS}`)).toBe(false);
     expect(policyLockAccessIsReadOnly(`vi ${LOCK}`)).toBe(false);
+  });
+  // #522 r2. The flag is judged per token with quotes stripped now, so the
+  // quoting that hid it no longer does. The last two rows are the controls:
+  // an ordinary read-only `git` stage must not start failing closed.
+  it('is false for a git stage that writes a file, however the flag is quoted', () => {
+    expect(policyLockAccessIsReadOnly(`git diff "--output=${HOME}/${SETTINGS}" -- README.md`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff '--output=${HOME}/${SETTINGS}' --`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git log "--output=${HOME}/${SETTINGS}"`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff "--ext-diff" -- ${SETTINGS}`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff "--output" "${HOME}/${SETTINGS}" -- README.md`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff -o ${HOME}/${SETTINGS} -- README.md`)).toBe(false);
+    expect(policyLockAccessIsReadOnly(`git diff -- ${SETTINGS}`)).toBe(true);
+    expect(policyLockAccessIsReadOnly(`git log --oneline -- ${SETTINGS}`)).toBe(true);
   });
 });
