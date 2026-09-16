@@ -711,6 +711,14 @@ const CATASTROPHIC: Pattern[] = [
 // drifting second copy.
 const SYSTEM_INSTALL_RE = /\b(?:apt|apt-get|yum|dnf|brew|gem|cargo)\b[^|;&\n]*\b(?:install|add)\b/i;
 
+// #501: the policy lock's own three attack-surface rules, named once so the
+// DANGEROUS row and the read-only carve-out (`policyLockAccessIsReadOnly`,
+// below the approval-store one) cannot drift apart: the same regex decides
+// both "this names the path" and "this is the path the carve-out is for".
+const POLICY_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
+const PROTECTED_ROOT_PATH_RE = /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i;
+const CLAUDE_SETTINGS_PATH_RE = /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i;
+
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
   // statement, after a separator/subshell, after sudo/env-assignment prefixes,
@@ -941,9 +949,16 @@ const DANGEROUS: Pattern[] = [
   // tool call is trying to take the Guard off". PATH_TARGET, like the rules
   // above, so naming one of these paths IS the access — in shell text or in a
   // string literal a script is about to hand to open().
-  { re: /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i, signal: 'disable-action-guard' },
-  { re: /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i, signal: 'disable-action-guard' },
-  { re: /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i, signal: 'disable-action-guard' },
+  //
+  // Reads are NOT the access (review r1 blocker): the lock is 0644 root-owned
+  // BY DESIGN — agent-readable is the point — and every Claude Code session
+  // reads ~/.claude/settings.json constantly. Pure shell inspection of these
+  // paths is dropped at the gate site by `policyLockAccessIsReadOnly`, the
+  // same carve-out shape #89 gave the approval store; every write shape
+  // (redirect, tee, sed -i, cp/mv onto, Write/Edit, env assignment) keeps it.
+  { re: POLICY_LOCK_ENV_SEAM_RE, signal: 'disable-action-guard' },
+  { re: PROTECTED_ROOT_PATH_RE, signal: 'disable-action-guard' },
+  { re: CLAUDE_SETTINGS_PATH_RE, signal: 'disable-action-guard' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
@@ -3135,8 +3150,25 @@ function withProvenance(
 const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
 
 /** Verbs that only OBSERVE. No interpreters, editors, find, yq, jq. */
-const STORE_READONLY_VERB_RE =
-  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf)$/i;
+const STORE_READONLY_VERBS = [
+  'ls', 'dir', 'cat', 'head', 'tail', 'less', 'more', 'stat', 'file', 'wc', 'grep', 'egrep', 'fgrep',
+  'rg', 'ag', 'ack', 'realpath', 'readlink', 'basename', 'dirname', 'test', '\\[', 'echo', 'printf',
+];
+const STORE_READONLY_VERB_RE = new RegExp(`^(?:${STORE_READONLY_VERBS.join('|')})$`, 'i');
+
+/**
+ * #501 lock-path inspection: the store verbs plus `jq`, which has no in-place
+ * flag and only ever writes stdout — a redirect after it is STORE_MUTATION_RE's
+ * catch, not the verb's. Kept separate from the #89 store set so this review
+ * round widens nothing for the approval store.
+ */
+const LOCK_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'jq'].join('|')})$`, 'i');
+/** `git <sub>` stages that only read the working tree / history. */
+const GIT_READONLY_SUBCOMMAND_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
+/** `--output=` writes a file; `--ext-diff` runs a configured driver. Fail closed. */
+const GIT_STAGE_WRITES_OR_EXECS_RE = /\s--(?:output\b|ext-diff\b)/i;
+/** Either #501 path rule. Built from the same constants the DANGEROUS row uses. */
+const POLICY_LOCK_PATH_RE = new RegExp(`${PROTECTED_ROOT_PATH_RE.source}|${CLAUDE_SETTINGS_PATH_RE.source}`, 'i');
 
 /**
  * Redirect / tee / noclobber. Glued forms (`echo>path`, `echo>$p`) count —
@@ -3204,15 +3236,38 @@ function splitShellStatements(cmd: string): string[] {
  * any non-readonly pipeline stage.
  */
 export function guardStoreAccessIsReadOnly(text: string): boolean {
+  return shellAccessIsReadOnly(text, { pathRe: GUARD_STORE_PATH_RE, verbRe: STORE_READONLY_VERB_RE });
+}
+
+/**
+ * #501: true when the whole command is pure shell inspection of the protected
+ * root, its pointer file, or `.claude/settings(.local).json`. Same fail-closed
+ * machinery as the store helper, plus `jq` and read-only `git` stages. The
+ * caller must still refuse the carve-out when an env seam is assigned: the
+ * leading-`VAR=` strip below is what lets `cat` be found at all, so it would
+ * otherwise let `SHIELDCORTEX_DIST_ROOT=/x cat <lock>` ride through as a read.
+ */
+export function policyLockAccessIsReadOnly(text: string): boolean {
+  return shellAccessIsReadOnly(text, { pathRe: POLICY_LOCK_PATH_RE, verbRe: LOCK_READONLY_VERB_RE, gitReadOnly: true });
+}
+
+interface ReadOnlyShellOptions {
+  pathRe: RegExp;
+  verbRe: RegExp;
+  /** Accept `git <GIT_READONLY_SUBCOMMAND_RE>` stages. Off for the #89 store set. */
+  gitReadOnly?: boolean;
+}
+
+function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolean {
   const cmd = String(text || '');
-  if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
+  if (!opts.pathRe.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
 
   const parts = splitShellStatements(cmd);
   if (parts.length === 0) return false;
 
-  // When any statement names the store, EVERY statement must be readonly.
+  // When any statement names the path, EVERY statement must be readonly.
   for (const raw of parts) {
     const part = raw.trim();
     if (!part) continue;
@@ -3220,9 +3275,18 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
     s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
     const stages = s.split('|').map(x => x.trim()).filter(Boolean);
     for (const stage of stages) {
-      const word = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/)[0] ?? '';
+      const toks = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/);
+      const word = toks[0] ?? '';
       const base = word.split('/').pop() ?? word;
-      if (!STORE_READONLY_VERB_RE.test(base)) return false;
+      if (opts.gitReadOnly && /^git$/i.test(base)) {
+        // First non-flag token is the subcommand; `git -C dir log` therefore
+        // fails closed (`dir` is not a read-only subcommand) — by design.
+        const sub = toks.slice(1).find(t => !t.startsWith('-')) ?? '';
+        if (!GIT_READONLY_SUBCOMMAND_RE.test(sub)) return false;
+        if (GIT_STAGE_WRITES_OR_EXECS_RE.test(stage)) return false;
+        continue;
+      }
+      if (!opts.verbRe.test(base)) return false;
     }
   }
   return true;
@@ -5342,6 +5406,19 @@ function evaluateToolCallCore(
     dangerSignals = dangerSignals.filter(
       sig => sig !== 'touch-approval-store' && sig !== 'touch-decisions-ledger',
     );
+  }
+  // #501 (review r1 blocker): pure shell inspection of the policy lock, the
+  // pointer file or ~/.claude/settings.json is not an attempt on the floor.
+  // Drop the signal only when (a) every statement is read-only, (b) no env
+  // seam is assigned anywhere on the surface — the helper strips leading
+  // `VAR=` prefixes, so this is checked here, not there — and (c) no #500
+  // command shape is present. Write/Edit never pass (a): their surface is the
+  // target path, which is not a read verb.
+  if (dangerSignals.includes('disable-action-guard')
+      && policyLockAccessIsReadOnly(scanSurface)
+      && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
+      && !guardDisableInvoked(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing
