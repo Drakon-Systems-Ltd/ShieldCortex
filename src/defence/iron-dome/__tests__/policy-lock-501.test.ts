@@ -128,6 +128,13 @@ describe('#501 readPolicyLock — what the host actually is', () => {
     ['a non-array autoApprove', JSON.stringify({ actionGuard: { autoApprove: 'ls' } })],
     ['a non-string autoApprove entry', JSON.stringify({ actionGuard: { autoApprove: ['ls', 7] } })],
     ['an invalid defenceMode', JSON.stringify({ defenceMode: 'paranoid' })],
+    // #522 review round-6 follow-up (F2): `x in DEFENCE_MODE_RANK` used to
+    // answer `true` for any inherited Object.prototype key. These must be
+    // rejected exactly like 'paranoid' — a schema failure, not a mode.
+    ['a defenceMode of "toString" (Object.prototype key)', JSON.stringify({ defenceMode: 'toString' })],
+    ['a defenceMode of "constructor" (Object.prototype key)', JSON.stringify({ defenceMode: 'constructor' })],
+    ['a defenceMode of "hasOwnProperty" (Object.prototype key)', JSON.stringify({ defenceMode: 'hasOwnProperty' })],
+    ['a defenceMode of "__proto__" (Object.prototype key)', JSON.stringify({ defenceMode: '__proto__' })],
     ['a future policy version', JSON.stringify({ version: 2, actionGuard: { enabled: true } })],
   ])('reports %s as a schema failure', (_label, body) => {
     const state = silently(() => readPolicyLock({ seam: lockedSeam(body) }));
@@ -236,6 +243,26 @@ describe('#501 precedence — the lock wins, config may only tighten', () => {
   it('raises an ABSENT defenceMode (default balanced) to a strict floor', () => {
     const out = applyPolicyLock({}, locked({ defenceMode: 'strict' }));
     expect(out.defenceMode).toBe('strict');
+  });
+
+  // #522 review round-6 follow-up (F2). Before the fix, `out.defenceMode in
+  // DEFENCE_MODE_RANK` answered `true` for an inherited Object.prototype key,
+  // so a raw config carrying `defenceMode: "toString"` was accepted as the
+  // "configured" value; comparing its rank (`DEFENCE_MODE_RANK.toString`, a
+  // FUNCTION, not a number) against the locked floor's rank always came out
+  // `false` (NaN-flavoured), so the ternary kept the poisoned string instead
+  // of raising it — and downstream, `getDefenceMode()` (src/cloud/config.ts)
+  // rejects any value outside its own VALID_MODES enum and silently falls
+  // back to 'balanced'. Net effect: a verified `strict` lock, defeated to
+  // 'balanced' by writing one unusual string, with nothing refused or logged.
+  it('an attacker-shaped Object.prototype-key defenceMode is raised to the locked floor, not smuggled through (regression: getDefenceMode must never see it)', () => {
+    const out = applyPolicyLock({ defenceMode: 'toString' as unknown as 'strict' }, locked({ defenceMode: 'strict' }));
+    expect(out.defenceMode).toBe('strict');
+    expect(out.defenceMode).not.toBe('toString');
+    // The value that would reach getDefenceMode()'s own VALID_MODES.includes()
+    // check is now a real mode, so its fallback-to-'balanced' path is never hit.
+    const VALID_MODES = ['strict', 'balanced', 'permissive'];
+    expect(VALID_MODES.includes(out.defenceMode as string)).toBe(true);
   });
 
   it('pins the memory sidecar-posture pair outright', () => {
@@ -371,6 +398,12 @@ describe('#501 coverage and refusals', () => {
     ['actionGuard.broker.enabled', false, false, false],
     ['defenceMode', 'permissive', 'balanced', true],
     ['defenceMode', 'strict', 'balanced', false],
+    // #522 review round-6 follow-up (F2): an Object.prototype-key value must
+    // rank as unrecognised (-1), never as a real mode read off the prototype.
+    // Written as a candidate `value`, it must be treated as loosening (the
+    // conservative, refuse-the-write answer) against any real locked mode.
+    ['defenceMode', 'toString', 'balanced', true],
+    ['defenceMode', 'constructor', 'strict', true],
     ['memory.inject.mode', 'always', 'off', true],
     ['memory.inject.mode', 'off', 'off', false],
   ] as const)('wouldLoosen(%s, %s) against %s === %s', (key, value, lockedValue, expected) => {

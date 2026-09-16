@@ -110,6 +110,23 @@ const DEFENCE_MODE_RANK: Record<LockedDefenceMode, number> = {
   strict: 2,
 };
 
+/**
+ * Is `value` one of the three locked defence modes?
+ *
+ * #522 review round-6 follow-up (F2): every call site here used to ask
+ * `x in DEFENCE_MODE_RANK`. `in` walks the prototype chain, so a string equal
+ * to an inherited `Object.prototype` key — `"toString"`, `"constructor"`,
+ * `"hasOwnProperty"`, `"__proto__"` — answered `true` even though it is not
+ * one of the three modes, and the lookups below it (`DEFENCE_MODE_RANK[x]`)
+ * then read a FUNCTION off the prototype rather than a rank number.
+ * `Object.hasOwn` only ever answers `true` for the object's own keys, so it
+ * cannot be fooled the same way; this is the one place that decides, so a
+ * caller can never re-introduce the `in` form by hand.
+ */
+function isLockedDefenceMode(value: unknown): value is LockedDefenceMode {
+  return typeof value === 'string' && Object.hasOwn(DEFENCE_MODE_RANK, value);
+}
+
 const DEFAULT_DEFENCE_MODE: LockedDefenceMode = 'balanced';
 
 /**
@@ -325,10 +342,10 @@ function validateLockedPolicy(raw: unknown): SchemaResult {
   }
 
   if (raw.defenceMode !== undefined) {
-    if (typeof raw.defenceMode !== 'string' || !(raw.defenceMode in DEFENCE_MODE_RANK)) {
+    if (!isLockedDefenceMode(raw.defenceMode)) {
       return { ok: false, problem: '`defenceMode` must be one of strict | balanced | permissive' };
     }
-    policy.defenceMode = raw.defenceMode as LockedDefenceMode;
+    policy.defenceMode = raw.defenceMode;
   }
 
   if (raw.memory !== undefined) {
@@ -482,9 +499,7 @@ export function applyPolicyLock(raw: Record<string, unknown>, state: PolicyLockS
   if (guardTouched) out.actionGuard = guard;
 
   if (p.defenceMode !== undefined) {
-    const configured = typeof out.defenceMode === 'string' && out.defenceMode in DEFENCE_MODE_RANK
-      ? (out.defenceMode as LockedDefenceMode)
-      : DEFAULT_DEFENCE_MODE;
+    const configured = isLockedDefenceMode(out.defenceMode) ? out.defenceMode : DEFAULT_DEFENCE_MODE;
     out.defenceMode = DEFENCE_MODE_RANK[p.defenceMode] >= DEFENCE_MODE_RANK[configured] ? p.defenceMode : configured;
   }
 
@@ -544,10 +559,8 @@ export function wouldLoosen(key: ProtectedPolicyKey, value: unknown, lockedValue
       return (value as unknown[]).some((e) => !ceiling.has(e));
     }
     case 'defenceMode': {
-      const locked = typeof lockedValue === 'string' && lockedValue in DEFENCE_MODE_RANK
-        ? DEFENCE_MODE_RANK[lockedValue as LockedDefenceMode] : -1;
-      const next = typeof value === 'string' && value in DEFENCE_MODE_RANK
-        ? DEFENCE_MODE_RANK[value as LockedDefenceMode] : -1;
+      const locked = isLockedDefenceMode(lockedValue) ? DEFENCE_MODE_RANK[lockedValue] : -1;
+      const next = isLockedDefenceMode(value) ? DEFENCE_MODE_RANK[value] : -1;
       return next < locked;
     }
     case 'memory.hostContract.posture':
