@@ -433,12 +433,19 @@ export function verifyProtectedFile(
  * `/agent-parent`. A symlink's `stat` says what the target IS, not who can
  * replace it.
  *
- * The target is resolved LEXICALLY (`path.resolve`), which matches the
- * kernel except when a `..` segment in the target traverses a FURTHER
- * symlink — component-at-a-time resolution would be needed to close that,
- * and it is deliberately out of scope here: every symlink on such a path
- * must already be non-agent-owned to reach the divergence, so it is not
- * agent-reachable (round-5 review, FIND-2).
+ * The target is resolved the way the KERNEL resolves it — component at a
+ * time, through {@link resolveTargetRealPath} — and NOT with `path.resolve`.
+ * Round 5 accepted lexical resolution on the argument that every symlink on
+ * such a path must already be non-agent-owned to reach the divergence; the
+ * GitHub round-2 review of #522 showed that argument is the wrong way round.
+ * A target of `safe/jump/../policy-dir` collapses lexically to
+ * `<base>/safe/policy-dir`, which the verifier then blesses, while the kernel
+ * follows the root-owned `jump` symlink FIRST and lands wherever `jump`
+ * points — `..` applies to the link's real parent, not to the text of the
+ * path. If `jump` points into a tree the agent owns, the verified directory
+ * and the directory actually opened are two different places. Node's own
+ * `fs.realpathSync` (the JS implementation) has the same lexical behaviour,
+ * so it is not a substitute either.
  */
 export function verifyProtectedDirectoryChain(
   startDir: string,
@@ -458,6 +465,68 @@ export function verifyProtectedDirectoryChain(
  * exists for a pathological seam that never reaches `/`.
  */
 const MAX_CHAIN_STEPS = 256;
+
+/**
+ * Bound on the work spent resolving ONE symlink target. Deliberately separate
+ * from {@link MAX_CHAIN_STEPS}: a long-but-honest target path must not eat the
+ * directory walk's budget, and a symlink loop reached only through a target
+ * must still terminate on its own.
+ */
+const MAX_TARGET_RESOLUTION_STEPS = 256;
+
+type TargetResolution =
+  | { ok: true; path: string }
+  | { ok: false; reason: 'parent-symlink-unresolvable' | 'parent-symlink-cycle' };
+
+/**
+ * Resolve a symlink target to the real path the KERNEL would open.
+ *
+ * `path.resolve` (and Node's JS `realpathSync`) collapse `..` lexically, which
+ * is only equivalent to the kernel when no component before the `..` is itself
+ * a symlink. The whole point of this module is that the difference between
+ * "the path the verifier blessed" and "the directory the agent can write" is
+ * the attack, so the resolution has to be done properly: walk the components
+ * left to right, follow every symlink met on the way, and apply `..` to the
+ * REAL parent reached so far.
+ *
+ * Every filesystem question goes through the seam, so the unit tests can state
+ * the exact host layout a real-root reproduction would need.
+ */
+function resolveTargetRealPath(
+  base: string,
+  target: string,
+  seam: ProtectedFsSeam,
+  budget: { steps: number },
+): TargetResolution {
+  let current = '/';
+  const startPath = isAbsolute(target) ? target : `${base}/${target}`;
+  for (const component of startPath.split('/')) {
+    if (component === '' || component === '.') continue;
+    if (budget.steps-- <= 0) return { ok: false, reason: 'parent-symlink-cycle' };
+    if (component === '..') {
+      // Applied to where we ACTUALLY are, which is the entire fix.
+      current = dirname(current);
+      continue;
+    }
+    let next = current === '/' ? `/${component}` : `${current}/${component}`;
+    // Resolve a symlink AT this component before moving on: everything that
+    // follows it — including a `..` — is relative to where the link lands.
+    for (;;) {
+      if (budget.steps-- <= 0) return { ok: false, reason: 'parent-symlink-cycle' };
+      const st = seam.lstat(next);
+      if (st === null || !st.isSymbolicLink) break;
+      const linkTarget = seam.readlink(next);
+      if (linkTarget === null || linkTarget === '') {
+        return { ok: false, reason: 'parent-symlink-unresolvable' };
+      }
+      const hop = resolveTargetRealPath(dirname(next), linkTarget, seam, budget);
+      if (!hop.ok) return hop;
+      next = hop.path;
+    }
+    current = next;
+  }
+  return { ok: true, path: current };
+}
 
 interface ChainWalk {
   /** Directories whose verification is in progress (a stack) — re-entry is a loop. */
@@ -524,8 +593,17 @@ function verifyOneDirectory(
     if (target === null || target === '') {
       return fail('parent-symlink-unresolvable', `${dir} is a symlink whose target could not be read.`);
     }
-    // A symlink target is relative to the directory that CONTAINS the link.
-    const resolved = resolvePath(dirname(dir), target);
+    // A symlink target is relative to the directory that CONTAINS the link,
+    // and it is resolved component-by-component rather than by collapsing `..`
+    // lexically — see resolveTargetRealPath.
+    const resolution = resolveTargetRealPath(dirname(dir), target, seam, { steps: MAX_TARGET_RESOLUTION_STEPS });
+    if (!resolution.ok) {
+      const why = resolution.reason === 'parent-symlink-cycle'
+        ? 'its target path loops through symlinks without terminating'
+        : 'a symlink on its target path could not be read';
+      return fail(resolution.reason, `${dir} -> ${target}: ${why}.`);
+    }
+    const resolved = resolution.path;
     const targetVerdict = walkDirectoryChain(resolved, euid, seam, walk);
     if (!targetVerdict.ok) {
       return fail(targetVerdict.reason ?? 'parent-symlink-unresolvable', `${dir} -> ${resolved}: ${targetVerdict.detail}`);

@@ -222,6 +222,11 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
       '/b/x': { kind: 'dir', mode: 0o40755 },
       '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
       '/agent-parent/c': { kind: 'dir', mode: 0o40755 },
+      // `/b` is a symlink to `/agent-parent/c`, so `/b/x` and
+      // `/agent-parent/c/x` are the same directory. The table has to say so:
+      // the walk now resolves the target the way the kernel does and asks
+      // about the real name, not the one the path happened to spell.
+      '/agent-parent/c/x': { kind: 'dir', mode: 0o40755 },
     }));
     expect(v.reason).toBe('parent-owned-by-agent');
     expect(v.detail).toContain('/agent-parent');
@@ -255,6 +260,116 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seam);
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('parent-symlink-unresolvable');
+  });
+
+  it('refuses a target whose `..` is preceded by a symlink into an agent tree (GitHub round-2 probe)', () => {
+    // `/protected -> safe/jump/../policy-dir`, every symlink root-owned.
+    //
+    // Lexically that collapses to `/safe/policy-dir` — root-owned, impeccable,
+    // ok=true. The kernel never computes that path: it follows `jump` first,
+    // lands in `/agent-parent/j`, and applies `..` there, so the directory it
+    // actually opens is `/agent-parent/policy-dir` — inside a tree the agent
+    // owns and can replace wholesale.
+    const touched: string[] = [];
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'safe/jump/../policy-dir', uid: ROOT_UID },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      // The decoy the lexical collapse lands on: perfectly root-owned.
+      '/safe/policy-dir': { kind: 'dir', mode: 0o40755 },
+      '/safe/jump': { kind: 'symlink', target: '/agent-parent/j', uid: ROOT_UID },
+      '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-parent/j': { kind: 'dir', mode: 0o40755 },
+      '/agent-parent/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }, { touched }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/protected -> /agent-parent/policy-dir');
+    expect(touched).toContain('/agent-parent');
+  });
+
+  it('refuses the same probe through verifyProtectedFile on the lock file itself', () => {
+    const v = verifyProtectedFile('/protected/policy.json', seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'safe/jump/../policy-dir', uid: ROOT_UID },
+      '/protected/policy.json': { kind: 'file', mode: 0o100644 },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/policy-dir': { kind: 'dir', mode: 0o40755 },
+      '/safe/jump': { kind: 'symlink', target: '/agent-parent/j', uid: ROOT_UID },
+      '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-parent/j': { kind: 'dir', mode: 0o40755 },
+      '/agent-parent/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+  });
+
+  it('refuses when the same probe lands in a world-WRITABLE parent rather than an agent-owned one', () => {
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'safe/jump/../policy-dir', uid: ROOT_UID },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/policy-dir': { kind: 'dir', mode: 0o40755 },
+      '/safe/jump': { kind: 'symlink', target: '/loose/j', uid: ROOT_UID },
+      '/loose': { kind: 'dir', mode: 0o40777 },
+      '/loose/j': { kind: 'dir', mode: 0o40755 },
+      '/loose/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.reason).toBe('parent-group-or-other-writable');
+    expect(v.detail).toContain('/loose');
+  });
+
+  it('still ACCEPTS a plain `..` target with no intermediate symlink', () => {
+    // The regression guard for the fix: `..` on an ordinary directory resolves
+    // exactly as it always did, and an impeccable chain is still accepted.
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'opt/plain/../policy-dir', uid: ROOT_UID },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/plain': { kind: 'dir', mode: 0o40755 },
+      '/opt/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v).toEqual({ ok: true, reason: null, detail: expect.any(String) });
+  });
+
+  it('refuses a `..` that escapes the containing directory into an agent-owned parent', () => {
+    // No intermediate symlink at all — `..` walks out of `/agent-parent/safe`
+    // and up into `/agent-parent`, which the agent owns.
+    const v = verifyProtectedDirectoryChain('/opt/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/protected': { kind: 'symlink', target: '/agent-parent/safe/../policy-dir', uid: ROOT_UID },
+      '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-parent/safe': { kind: 'dir', mode: 0o40755 },
+      '/agent-parent/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/opt/protected -> /agent-parent/policy-dir');
+  });
+
+  it('fails closed when a symlink INSIDE the target path has an unreadable target', () => {
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'safe/jump/../policy-dir', uid: ROOT_UID },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/policy-dir': { kind: 'dir', mode: 0o40755 },
+      '/safe/jump': { kind: 'symlink', uid: ROOT_UID }, // no target: readlink -> null
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-symlink-unresolvable');
+  });
+
+  it('fails closed on a LOOP reached only through a target component', () => {
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'safe/jump/../policy-dir', uid: ROOT_UID },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/jump': { kind: 'symlink', target: '/ring-a', uid: ROOT_UID },
+      '/ring-a': { kind: 'symlink', target: '/ring-b', uid: ROOT_UID },
+      '/ring-b': { kind: 'symlink', target: '/ring-a', uid: ROOT_UID },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-symlink-cycle');
   });
 
   it('fails closed on a symlink LOOP instead of recursing forever', () => {
