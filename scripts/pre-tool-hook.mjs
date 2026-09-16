@@ -161,25 +161,47 @@ function inlinePolicyLockPresent() {
 }
 
 /**
+ * The ONE place this file decides where `dist` is. Every loader below resolves
+ * through it, so a loader added later inherits the gate instead of needing its
+ * own carve-out.
+ *
+ * `SHIELDCORTEX_DIST_ROOT` is an ungated test seam that pre-dates #501. On a
+ * host with a policy lock on disk it is not honoured AT ALL: the build that
+ * ships beside this script is the only one that decides anything.
+ *
+ * The #501 review's BLOCK-1 was the lock READER half — point the variable at a
+ * `policy-lock.js` that answers `absent` and the lock evaporates. Review NEW-1
+ * was that gating only that module left the seam wide open on the module that
+ * actually decides: a `tool-action-guard.js` whose `evaluateToolCall` returns
+ * `allow` takes the guard off entirely with a lock on disk, and the outcome is
+ * strictly WORSE, because the lock is read correctly, the strict posture is
+ * computed, and is then handed straight to the attacker's classifier. Same
+ * variable, same directory the agent already owns, one file instead of two.
+ *
+ * Conditioned on the lock, not on the variable: on an unlocked host — every
+ * developer, and every suite that uses this seam — it still resolves exactly
+ * where it is pointed, because there it buys an attacker nothing.
+ *
+ * This is belt; {@link applyHookPolicyLock}'s contradiction check is braces —
+ * it catches a reader that denies a lock the probe can see, whatever route the
+ * module arrived by (a tampered install, a loader hook, a seam nobody has
+ * thought of yet). Neither reaches a substituted module that answers `locked`
+ * and neutralises the policy itself; that is install tampering, and #500's
+ * boundary (design note §8.6).
+ */
+function hookDistRoot() {
+  const shipped = resolve(here, '..', 'dist');
+  if (inlinePolicyLockPresent()) return shipped;
+  return process.env.SHIELDCORTEX_DIST_ROOT ?? shipped;
+}
+
+/**
  * Load the policy-lock reader from dist. Null when the build predates #501 or
  * is incomplete — which is exactly the case {@link inlinePolicyLockPresent}
  * exists to cover.
- *
- * `SHIELDCORTEX_DIST_ROOT` is an ungated test seam that pre-dates #501, and on
- * a LOCKED host it is not honoured for this module: the #501 review's BLOCK-1
- * was that an agent could point it at two files it owns — a `policy-lock.js`
- * exporting a `readPolicyLock` that answers `absent` — and take the guard off
- * entirely with a lock on disk. The variable still works everywhere else, and
- * still works here on an unlocked host, where it buys nothing.
- *
- * This is belt; {@link applyHookPolicyLock}'s contradiction check is braces —
- * it catches a lying reader arriving by any OTHER route (a tampered install, a
- * loader hook, a future seam nobody has thought of yet).
  */
 async function loadPolicyLock() {
-  const distRoot = inlinePolicyLockPresent()
-    ? resolve(here, '..', 'dist')
-    : (process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist'));
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'policy-lock.js')).href
@@ -376,10 +398,13 @@ function noPromptSurfaceReason(permissionMode) {
 /**
  * Load the built tool-action-guard from dist. Returns null when the dist build
  * is missing/incomplete → the caller fails OPEN (see failure posture above).
- * SHIELDCORTEX_DIST_ROOT is a test seam, mirroring recall-defence.mjs.
+ *
+ * This is the module that decides `allow`/`deny`, so it is the highest-value
+ * one to substitute: see {@link hookDistRoot} for why `SHIELDCORTEX_DIST_ROOT`
+ * is not honoured here on a locked host (#501 review NEW-1).
  */
 async function loadGuard() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js')).href
@@ -404,7 +429,7 @@ async function loadGuard() {
  * failing on a partial dist.
  */
 async function loadScriptResolver() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'script-source-resolver.js')).href
@@ -425,7 +450,7 @@ async function loadScriptResolver() {
  */
 async function loadReviewedScriptCheck(rawEntries) {
   if (!Array.isArray(rawEntries) || rawEntries.length === 0) return undefined;
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'reviewed-scripts.js')).href
@@ -444,7 +469,7 @@ async function loadReviewedScriptCheck(rawEntries) {
  * existed — refuse and say so — rather than failing open.
  */
 async function loadApprovals() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'action-approvals.js')).href
@@ -468,7 +493,7 @@ async function loadApprovals() {
  * (normaliseRetryControlConfig). Null is only "dist missing/incomplete".
  */
 async function loadRetryControl(rawRetry, digestWindowMs) {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'retry-control.js')).href
@@ -489,7 +514,7 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
 
 /** #224 — optional: stamp binding fields. Missing dist degrades to unbound. */
 async function loadBinding() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'enforcement-binding.js')).href
@@ -507,7 +532,7 @@ async function loadBinding() {
  * the store itself fails closed (verdict 'unknown') for scoped actions.
  */
 async function loadLease() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'session-lease-store.js')).href
@@ -530,7 +555,7 @@ async function loadLease() {
  */
 async function loadBroker(rawBrokerConfig) {
   if (!rawBrokerConfig || rawBrokerConfig.enabled !== true) return null;
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   const load = async (file) => {
     try {
       return await import(pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', file)).href);
@@ -581,7 +606,7 @@ async function loadBroker(rawBrokerConfig) {
  */
 async function loadNotify(rawNotifyConfig) {
   if (!rawNotifyConfig || rawNotifyConfig.enabled !== true) return null;
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   const load = async (file) => {
     try {
       return await import(pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', file)).href);
@@ -1279,7 +1304,7 @@ async function raiseRetryCard(retry, notify, ctx) {
   );
   if (!claim.ok) return { raised: false, reason: claim.reason, lostActionIds: claim.lostActionIds };
 
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   const waiterEntry = resolve(distRoot, 'defence', 'iron-dome', 'dnp-retry-waiter.js');
   const receiptDir = join(tmpdir(), 'shieldcortex-retry-receipts');
   const token = randomBytes(8).toString('hex');
@@ -1414,7 +1439,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   if (outcome === 'denied_no_prompt_surface' && notify && !retrySuppressed) {
     try {
       const dig = await import(
-        pathToFileURL(resolve(process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist'), 'defence', 'iron-dome', 'dnp-digest.js')).href
+        pathToFileURL(resolve(hookDistRoot(), 'defence', 'iron-dome', 'dnp-digest.js')).href
       );
       if (typeof dig.recordDnpDigestEvent === 'function') {
         const context = notificationContext(sessionKey, id);
