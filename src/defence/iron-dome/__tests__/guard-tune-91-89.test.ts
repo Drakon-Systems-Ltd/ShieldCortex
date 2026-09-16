@@ -73,6 +73,7 @@ describe('#91.1 — modify-scheduler catches wrapper-command prefixes', () => {
 });
 
 describe('#519 — install-package-global proposer is linear in token count', () => {
+  const NL = String.fromCharCode(10);
   const PM = 'n' + 'pm';
   const INST = 'inst' + 'all';
   const G = '-' + 'g';
@@ -91,6 +92,29 @@ describe('#519 — install-package-global proposer is linear in token count', ()
   it('still gates a padded-flag exec via the argv walk', () => {
     const v = verdict(`${PM} ` + '-x '.repeat(200) + `${INST} ${G} foo`);
     expect(v.signals ?? []).toContain('install-package-global');
+  });
+  // GPT-6 r1: whitespace padding past the window on the two non-exec surfaces.
+  const padded = `${PM} ${INST} ` + ' '.repeat(600) + `${G} foo`;
+  const sh = '#!/bin/sh' + NL + padded + NL;
+  const TQ = '"' + '"' + '"';
+  it('still gates a Write of a shell script with a whitespace-padded global install', () => {
+    const v = evaluateToolCall('Write', { file_path: '/tmp/bootstrap.sh', content: sh });
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.decision).not.toBe('allow');
+  });
+  it('still gates bash <script> whose folded .sh body has a whitespace-padded global install', () => {
+    const v = evaluateToolCall('Bash', { command: 'bash /tmp/bootstrap.sh' }, undefined, {
+      resolveScriptSource: (p: string) => (p.endsWith('bootstrap.sh') ? sh : null),
+    } as any);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.decision).not.toBe('allow');
+  });
+  it('does not read a folded .py docstring mentioning a padded install as argv', () => {
+    const py = '#!/usr/bin/env python3' + NL + TQ + NL + 'Run: ' + padded + NL + TQ + NL + 'print(1)' + NL;
+    const v = evaluateToolCall('Bash', { command: 'python3 /tmp/note.py' }, undefined, {
+      resolveScriptSource: (p: string) => (p.endsWith('note.py') ? py : null),
+    } as any);
+    expect(v.signals ?? []).not.toContain('install-package-global');
   });
 });
 

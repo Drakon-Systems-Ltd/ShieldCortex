@@ -4611,6 +4611,25 @@ function maskSinkFreeInlinePrograms(text: string): string {
  * Split `[0, length)` into the shell ranges left over once `carved` regions are
  * removed, so every byte of the scan surface belongs to exactly one region.
  */
+/**
+ * #519: the SHELL-language slice of folded script content. Interpreter regions
+ * (python / node / ruby / perl / php) are blanked to spaces so an argv walk
+ * over the result cannot read a docstring line as a command (#444), while a
+ * folded `.sh` body -- which IS shell argv -- is walked exactly like the
+ * command line. Length-preserving so no offsets move.
+ */
+function shellOnlyFold(content: string, regions: readonly ScanRegion[]): string {
+  if (!content) return '';
+  let out = content;
+  for (const r of regions) {
+    if (r.lang === 'sh') continue;
+    const s = Math.max(0, r.start), e = Math.min(out.length, r.end);
+    if (e <= s) continue;
+    out = out.slice(0, s) + ' '.repeat(e - s) + out.slice(e);
+  }
+  return out;
+}
+
 function withShellComplement(carved: readonly ScanRegion[], length: number): ScanRegion[] {
   const sorted = [...carved].sort((a, b) => a.start - b.start);
   const out: ScanRegion[] = [];
@@ -4644,7 +4663,7 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
  * "git push -f" does not gate at write time when the identical text would not
  * gate at exec time.
  */
-function scanWriteContentPayload(content: string): {
+function scanWriteContentPayload(content: string, lang: ScriptLang = 'sh'): {
   catastrophic: Array<{ signal: string; span: string }>;
   dangerous: Array<{ signal: string; span: string }>;
 } {
@@ -4682,6 +4701,14 @@ function scanWriteContentPayload(content: string): {
     if (!seen.has('disable-action-guard') && guardDisableInvoked(text)) {
       seen.add('disable-action-guard');
       dangerous.push({ signal: 'disable-action-guard', span: 'guard self-protection' });
+    }
+    // #519: a shell script whose global install is padded past the bounded
+    // regex window is still a global install. Shell-language content only --
+    // an interpreter file's docstring must not be read as argv (#444); those
+    // keep the regex-then-confirm path above.
+    if (lang === 'sh' && !seen.has('install-package-global') && packageInstallGlobalInvoked(text)) {
+      seen.add('install-package-global');
+      dangerous.push({ signal: 'install-package-global', span: 'global package install' });
     }
     if (!seen.has('install-package')
         && systemInstallInvoked(text)
@@ -5041,7 +5068,9 @@ function evaluateToolCallCore(
       const scanBody = (memory && /\.md$/i.test(path) && !writeContentLooksExecutable(writeContent))
         ? neutralizeMarkdownCommandMentions(writeContent)
         : writeContent;
-      const hits = scanWriteContentPayload(scanBody);
+      // #519: memory prose is never argv; a script file's language comes from
+      // its path (unknown extension fails closed to shell, as for folding).
+      const hits = scanWriteContentPayload(scanBody, memory ? 'python' : langFromPath(path));
       if (hits.catastrophic.length > 0) {
         const signals = ['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)];
         const span = hits.catastrophic[0]?.span;
@@ -5304,9 +5333,13 @@ function evaluateToolCallCore(
     }
   }
   // #519: padded-flag pm (verb past the 512-char regex window) is still an
-  // invocation. Walk the RAW exec surface only -- folded file bytes would make
-  // a docstring look like a command (#444). Write/fold keeps the bounded regex.
-  if (!dangerSignals.includes('install-package-global') && packageInstallGlobalInvoked(execSurface)) {
+  // invocation. Walk the exec surface plus the SHELL slice of folded scripts;
+  // interpreter regions are blanked so a docstring line never reads as argv
+  // (#444). A folded `.sh` body is shell and is walked like the command line.
+  const installWalkSurface = fold.content
+    ? `${execSurface}\n${shellOnlyFold(fold.content, fold.regions)}`
+    : execSurface;
+  if (!dangerSignals.includes('install-package-global') && packageInstallGlobalInvoked(installWalkSurface)) {
     dangerSignals.push('install-package-global');
     dangerSpan = dangerSpan ?? 'global package install';
     if (!dangerEvidence.has('install-package-global')) {
