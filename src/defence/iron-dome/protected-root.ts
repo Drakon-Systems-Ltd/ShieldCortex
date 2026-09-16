@@ -432,6 +432,13 @@ export function verifyProtectedFile(
  * root-owned `safe` and the walk then continued from `/`, never examining
  * `/agent-parent`. A symlink's `stat` says what the target IS, not who can
  * replace it.
+ *
+ * The target is resolved LEXICALLY (`path.resolve`), which matches the
+ * kernel except when a `..` segment in the target traverses a FURTHER
+ * symlink — component-at-a-time resolution would be needed to close that,
+ * and it is deliberately out of scope here: every symlink on such a path
+ * must already be non-agent-owned to reach the divergence, so it is not
+ * agent-reachable (round-5 review, FIND-2).
  */
 export function verifyProtectedDirectoryChain(
   startDir: string,
@@ -514,7 +521,7 @@ function verifyOneDirectory(
       );
     }
     const target = seam.readlink(dir);
-    if (target === null) {
+    if (target === null || target === '') {
       return fail('parent-symlink-unresolvable', `${dir} is a symlink whose target could not be read.`);
     }
     // A symlink target is relative to the directory that CONTAINS the link.

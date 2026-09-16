@@ -236,6 +236,27 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     expect(v.reason).toBe('parent-symlink-unresolvable');
   });
 
+  it('fails closed on a symlink whose readlink returns an EMPTY string (review round 5, FIND-1)', () => {
+    // `null` (target unresolvable) and `''` (target resolved to nothing) are
+    // distinct seam answers; `seamOf`'s falsy check collapses them, so this
+    // case builds a bare seam that returns '' specifically, to prove the
+    // guard checks the value and not just truthiness.
+    const seam: ProtectedFsSeam = {
+      lstat: (p) => (p === '/protected' ? {
+        uid: ROOT_UID, gid: 0, mode: 0o120777, isFile: false, isDirectory: false, isSymbolicLink: true,
+      } : p === '/' ? { uid: ROOT_UID, gid: 0, mode: 0o40755, isFile: false, isDirectory: true, isSymbolicLink: false } : null),
+      stat: () => null,
+      readlink: (p) => (p === '/protected' ? '' : null),
+      readFile: () => null,
+      geteuid: () => AGENT_UID,
+      platform: 'linux',
+      env: () => undefined,
+    };
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seam);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-symlink-unresolvable');
+  });
+
   it('fails closed on a symlink LOOP instead of recursing forever', () => {
     const v = verifyProtectedDirectoryChain('/a', AGENT_UID, seamOf({
       '/': { kind: 'dir', mode: 0o40755 },
