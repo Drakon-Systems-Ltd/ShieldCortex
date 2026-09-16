@@ -68,6 +68,11 @@ import {
   type NativeSotEvidence,
   type PlaneDriftCounts,
 } from '../memory/plane-drift.js';
+import {
+  describePolicyLock,
+  readPolicyLock,
+  PROTECT_HINT,
+} from '../defence/iron-dome/policy-lock.js';
 import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
@@ -87,8 +92,10 @@ import {
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
 import {
+  getActionGuardCoreConfig,
   getConfigDir,
   hasTrustedMemorySidecarPosture,
+  isConfigTampered,
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
@@ -3105,7 +3112,103 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // Unreadable config resolves to defaults on both runtime surfaces — nothing to warn about here.
   }
 
+  // 3. Policy lock (#501) and the integrity verdict (two rows, always).
+  results.push(...policyLockRows());
+
   return results;
+}
+
+/**
+ * The two rows #501 adds: what the OS-owned policy lock is, and what the
+ * config's own integrity signature says.
+ *
+ * They are separate rows on purpose. They answer different questions and a
+ * single "config security" row would let a green half hide a red one — the
+ * exact shape of the 5.0.1 report where signed Enforce sat beside a disarmed
+ * plugin and the summary read fine.
+ */
+export function policyLockRows(): CheckResult[] {
+  const rows: CheckResult[] = [];
+  const label = 'Action guard';
+
+  const state = readPolicyLock({ audit: false, warn: false });
+  const summary = describePolicyLock(state);
+  const guardOn = (() => {
+    try { return getActionGuardCoreConfig().enabled; } catch { return false; }
+  })();
+
+  switch (summary.status) {
+    case 'locked':
+      rows.push({
+        label: `${label} policy lock`,
+        status: 'pass',
+        message: summary.headline,
+      });
+      break;
+    case 'unverifiable':
+      rows.push({
+        label: `${label} policy lock`,
+        status: 'fail',
+        message:
+          `${summary.headline}. A lock that exists but cannot be verified is indistinguishable from one the ` +
+          'agent wrote for itself, so the guard is forced on and enforcing, auto-approve is empty, the broker ' +
+          'is off and defence mode is strict.',
+        fix: `${PROTECT_HINT} to rewrite the lock, or remove the file to run unlocked (and unprotected).`,
+      });
+      break;
+    case 'absent':
+      // FAIL when the guard is ON, WARN when it is off. An operator who has
+      // enabled the guard believes tool calls are gated; that belief is what an
+      // unlocked config falsifies, because any same-user process can undo it
+      // with a one-line edit. With the guard off there is nothing yet to
+      // protect, so the same fact is advice rather than a failure.
+      rows.push({
+        label: `${label} policy lock`,
+        status: guardOn ? 'fail' : 'warn',
+        message:
+          `${summary.headline}${guardOn
+            ? ' — Action Guard is enabled, but a one-line edit to config.json switches it off and nothing would notice'
+            : ' (Action Guard is off, so there is nothing pinned to lose yet)'}`,
+        fix: `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`,
+      });
+      break;
+    case 'unsupported':
+      rows.push({
+        label: `${label} policy lock`,
+        status: 'warn',
+        message: summary.headline,
+        // No fix line: there is nothing to run. Offering one would imply this
+        // is fixable locally, and inventing a boundary that does not exist is
+        // worse than saying so.
+      });
+      break;
+  }
+
+  // The integrity signature, described for what it is.
+  const tampered = isConfigTampered();
+  rows.push(
+    tampered
+      ? {
+          label: `${label} config integrity`,
+          status: 'fail',
+          message:
+            'config.json does not match its integrity signature — corruption, a torn write, or a hand edit. ' +
+            'The strict fail-closed posture is in force (guard on + enforcing, no auto-approve, broker off, ' +
+            'defence mode strict). Note this HMAC is a CORRUPTION detector, not tamper protection: its key ' +
+            'lives beside the file it signs and under the same uid, so anything that can edit the config can ' +
+            're-sign it. The policy lock is the control that a same-user process cannot forge.',
+          fix: 'Re-write the affected settings with the `shieldcortex config --*` flags (they re-sign), then re-run doctor.',
+        }
+      : {
+          label: `${label} config integrity`,
+          status: 'pass',
+          message:
+            'config.json matches its integrity signature (a corruption / accidental-edit check — the key is ' +
+            'co-located and same-uid, so it is not tamper protection; the policy lock row above is).',
+        },
+  );
+
+  return rows;
 }
 
 /**

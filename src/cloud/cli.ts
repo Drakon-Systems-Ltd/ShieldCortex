@@ -46,6 +46,8 @@ import { isFeatureEnabled } from '../license/gate.js';
 import { initDatabase } from '../database/init.js';
 import { reconcileSyncQueue } from './sync-queue.js';
 import { setUpsellState } from '../cli/upsell-state.js';
+import { policyStatusLines } from '../cli/protect.js';
+import { PolicyLockRefusal } from '../defence/iron-dome/policy-lock.js';
 
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
@@ -363,6 +365,14 @@ export function handleCloudConfig(args: string[]): void {
     changed = true;
   }
 
+  // ── Policy lock status (#501) ──
+  // A READ-ONLY flag, deliberately placed before the writers: an operator
+  // checking what is pinned should never have to risk a write to find out.
+  if (args.includes('--policy-status')) {
+    for (const line of policyStatusLines()) console.log(line);
+    return;
+  }
+
   // ── Action Guard core switches (enable/enforce) ──
   // The SIGNED path for actionGuard.enabled / actionGuard.enforce, same reason
   // the notify flags exist: hand-editing config.json for these keys invalidates
@@ -371,32 +381,30 @@ export function handleCloudConfig(args: string[]): void {
   // so advisory writes an explicit false.
 
   if (args.includes('--action-guard-enable')) {
-    const pluginSync = setActionGuardCoreConfig({ enabled: true });
-    console.log('Action Guard enabled — tool calls are gated on both surfaces.');
-    noticeOpenClawPluginGuardSync(pluginSync);
+    applyActionGuardCore({ enabled: true }, 'Action Guard enabled — tool calls are gated on both surfaces.');
     changed = true;
   }
 
   if (args.includes('--action-guard-disable')) {
-    const pluginSync = setActionGuardCoreConfig({ enabled: false });
-    console.log('Action Guard DISABLED — tool calls are NOT gated on either surface, and catastrophic checks may not fire while the guard is off entirely. Re-enable with --action-guard-enable.');
-    noticeOpenClawPluginGuardSync(pluginSync);
+    applyActionGuardCore(
+      { enabled: false },
+      'Action Guard DISABLED — tool calls are NOT gated on either surface, and catastrophic checks may not fire while the guard is off entirely. Re-enable with --action-guard-enable.',
+    );
     changed = true;
   }
 
   if (args.includes('--action-guard-enforce')) {
     // Enforce implies enabled: enforcing a disabled guard is nonsense, so this
     // flag also switches the guard on rather than writing a dead enforce key.
-    const pluginSync = setActionGuardCoreConfig({ enabled: true, enforce: true });
-    console.log('Action Guard ENFORCE — dangerous ops require approval / block.');
-    noticeOpenClawPluginGuardSync(pluginSync);
+    applyActionGuardCore({ enabled: true, enforce: true }, 'Action Guard ENFORCE — dangerous ops require approval / block.');
     changed = true;
   }
 
   if (args.includes('--action-guard-advisory')) {
-    const pluginSync = setActionGuardCoreConfig({ enforce: false });
-    console.log('Action Guard ADVISORY (warn-mode) — dangerous ops log but are not gated (catastrophic still blocks when enabled).');
-    noticeOpenClawPluginGuardSync(pluginSync);
+    applyActionGuardCore(
+      { enforce: false },
+      'Action Guard ADVISORY (warn-mode) — dangerous ops log but are not gated (catastrophic still blocks when enabled).',
+    );
     changed = true;
   }
 
@@ -587,6 +595,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --tool-firewall-advisory  Log tool-output threats but deliver intact (default)');
     console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
     console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
+    console.log('  --policy-status          Show the OS-owned policy lock: pinned keys, or why there is none');
     console.log('  --action-guard-enable    Enable Action Guard tool-call gating (default: on)');
     console.log('  --action-guard-disable   Disable Action Guard entirely — tool calls are NOT gated');
     console.log('  --action-guard-enforce   Gate dangerous ops (approval/block); also enables the guard');
@@ -651,6 +660,32 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
   }
 
   console.log('Usage: shieldcortex cloud sync --full');
+}
+
+/**
+ * Write the Action Guard core switches, or explain why the OS refused.
+ *
+ * A `PolicyLockRefusal` is an ordinary, expected outcome on a locked box, not a
+ * crash: it exits 1 with the refusal message — which already names the lock file
+ * and how to change it — instead of a stack trace. Every other error keeps
+ * propagating, because a genuinely broken config should still be loud.
+ */
+function applyActionGuardCore(
+  updates: { enabled?: boolean; enforce?: boolean },
+  successLine: string,
+): void {
+  let pluginSync: OpenClawPluginGuardSync;
+  try {
+    pluginSync = setActionGuardCoreConfig(updates);
+  } catch (err) {
+    if (err instanceof PolicyLockRefusal) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+  console.log(successLine);
+  noticeOpenClawPluginGuardSync(pluginSync);
 }
 
 function noticeOpenClawPluginGuardSync(sync: OpenClawPluginGuardSync): void {
