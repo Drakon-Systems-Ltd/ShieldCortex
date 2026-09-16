@@ -266,6 +266,68 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('parent-symlink-cycle');
   });
+
+  // #522 r2 P1. `path.resolve` (and `fs.realpathSync`) collapse `..` LEXICALLY.
+  // The kernel does not: it follows each intermediate symlink FIRST and applies
+  // `..` to the directory that link really lands in. So a root-owned link whose
+  // target puts a `..` behind a symlink was verified against a path no reader
+  // ever opens, while the path a reader DOES open sat under an agent-owned
+  // directory.
+  it('applies a `..` inside a symlink target to the REAL parent, not the lexical one', () => {
+    // /protected -> safe/jump/../policy-dir, resolved from `/`.
+    //   lexical : /safe/policy-dir            (root-owned, impeccable — the decoy)
+    //   kernel  : /safe/jump -> /agent-parent/hop, `..` -> /agent-parent,
+    //             then policy-dir -> /agent-parent/policy-dir
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'safe/jump/../policy-dir', uid: ROOT_UID },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/policy-dir': { kind: 'dir', mode: 0o40755 },
+      '/safe/jump': { kind: 'symlink', target: '/agent-parent/hop', uid: ROOT_UID },
+      '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-parent/hop': { kind: 'dir', mode: 0o40755 },
+      '/agent-parent/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/agent-parent');
+    // The decoy really was impeccable — otherwise this would pass for the
+    // wrong reason and the lexical bug would still be invisible.
+    expect(verifyProtectedDirectoryChain('/safe/policy-dir', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/policy-dir': { kind: 'dir', mode: 0o40755 },
+    })).ok).toBe(true);
+  });
+
+  it('a plain `..` with NO intermediate symlink still resolves lexically and passes', () => {
+    // /protected -> safe/sub/../policy-dir. `sub` is an ordinary directory, so
+    // lexical and kernel agree on /safe/policy-dir and the chain is clean. The
+    // fix must not start refusing an ordinary relative target.
+    const v = verifyProtectedDirectoryChain('/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/protected': { kind: 'symlink', target: 'safe/sub/../policy-dir', uid: ROOT_UID },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/sub': { kind: 'dir', mode: 0o40755 },
+      '/safe/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(true);
+  });
+
+  it('a `..` that escapes the containing directory into an agent-owned parent fails', () => {
+    // No symlink trickery at all — lexical and kernel agree — but the target
+    // climbs out of /safe into /agent-parent, which the agent owns.
+    const v = verifyProtectedDirectoryChain('/safe/protected', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/safe': { kind: 'dir', mode: 0o40755 },
+      '/safe/protected': { kind: 'symlink', target: '../agent-parent/policy-dir', uid: ROOT_UID },
+      '/agent-parent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/agent-parent/policy-dir': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/agent-parent');
+  });
 });
 
 describe('#501 verifyProtectedFile — every way it must fail closed', () => {
