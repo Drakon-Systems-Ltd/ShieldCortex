@@ -1994,7 +1994,20 @@ function withGuardPosture(config: SCConfig, guard: Record<string, unknown>): SCC
       // Leaving an unsigned same-UID `interceptor.enabled:false` to stand
       // while the lock says `actionGuard.enabled:true` made the precedence
       // rule decorative.
-      ...(guard.enabled === true ? { enabled: true } : {}),
+      // #522 G3: `failurePolicy.high` is the same story one layer down. It is
+      // the "cannot obtain a verdict" policy, and a degraded guard is exactly
+      // that — so on a broken install `handleGuardUnavailable` asked the
+      // unsigned `openclaw.json` whether to deny the DANGEROUS tier, and
+      // `failurePolicy.high:"allow"` there let it through while the lock said
+      // the guard was on and enforcing. With the lock's guard enabled, the
+      // lock owns that answer too. `severityActions` and the other severities
+      // are left alone: this is the one key that decides the degraded tier.
+      ...(guard.enabled === true
+        ? {
+            enabled: true,
+            failurePolicy: { ...(config.interceptor?.failurePolicy ?? {}), high: 'deny' as const },
+          }
+        : {}),
       actionGuard: { ...(config.interceptor?.actionGuard ?? {}), ...guard } as NonNullable<InterceptorUserConfig['actionGuard']>,
     },
   };

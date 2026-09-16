@@ -1248,7 +1248,15 @@ export function createInterceptor(
         log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — advisory (enforce:false), allowing dangerous ${context.toolName} [${dangerousSignal}]`);
         return;
       }
-      const failAction = config.failurePolicy.high;
+      // #522 G3: only an explicit, recognised `allow` permits a dangerous op
+      // through a degraded guard. `failurePolicy` arrives from config files
+      // including the unsigned same-UID `openclaw.json`, and the old
+      // `=== 'deny'` test made every OTHER value — a typo, a null, an object,
+      // anything a schema did not catch — fail OPEN on the one tier this
+      // branch exists to hold. On a locked host the value is pinned to `deny`
+      // upstream by the policy lock (`withGuardPosture`); this is the floor
+      // for the value that actually arrives.
+      const failAction: FailureAction = config.failurePolicy.high === 'allow' ? 'allow' : 'deny';
       emitAudit({ ...dBase, action: 'gate_degraded', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
       if (failAction === 'deny') {
         log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback matched a DANGEROUS op [${dangerousSignal}] — DENYING ${context.toolName} (fail-closed, failure policy: deny)`);

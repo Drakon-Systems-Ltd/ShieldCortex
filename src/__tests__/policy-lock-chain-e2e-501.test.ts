@@ -258,7 +258,7 @@ const hooks = new Map();
 console.warn = () => {};
 plugin.register({
   version: '2026.5.20',
-  config: {},
+  config: JSON.parse(process.env.SC501_PLUGIN_ENTRY_CONFIG || '{}'),
   logger: { info: () => {}, warn: () => {}, error: () => {} },
   registerCommand: () => {},
   registerHook: () => {},
@@ -536,12 +536,21 @@ function runConcurrentBurst(stage: string, n = 24): { blocked: number; allowed: 
 }
 
 /** #522 r7 FIND-4 — drives a single Bash call with an arbitrary `params` shape. */
-function runParamsPlugin(stage: string, params: unknown): { block: boolean; blockReason: string | null } {
+function runParamsPlugin(
+  stage: string,
+  params: unknown,
+  entryConfig?: unknown,
+): { block: boolean; blockReason: string | null } {
   const run = spawnSync(process.execPath, [paramsDriverPath], {
     cwd: stage,
     env: env({
       SC501_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
       SC522_PARAMS_JSON: JSON.stringify(params),
+      SC501_PLUGIN_ENTRY_CONFIG: JSON.stringify(
+        entryConfig === undefined
+          ? {}
+          : { plugins: { entries: { 'shieldcortex-realtime': { config: entryConfig } } } },
+      ),
     }),
     encoding: 'utf8',
     timeout: 120_000,
@@ -745,6 +754,37 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     expect(plugin.logs.join('\n')).toMatch(/disagreed with the on-disk policy lock/);
     // Still not bricked: the blunt fallback lets an ordinary command through.
     expect(plugin.benign).toBeNull();
+  }, 180_000);
+
+  // #522 G3. `failurePolicy.high` is the "cannot obtain a verdict" policy, and
+  // a degraded guard is exactly that — so `handleGuardUnavailable` asked the
+  // UNSIGNED `openclaw.json` whether to deny the DANGEROUS tier on a locked,
+  // broken-dist host, and `"allow"` there let it straight through. The
+  // catastrophic tier already denied unconditionally, which is why this probe
+  // is deliberately dangerous-and-not-catastrophic. The lock now owns that key.
+  // Assembled from parts for the same reason `SC01_CATASTROPHIC` is: this file
+  // is itself scanned by the guard it drives.
+  const DANGEROUS_PROBE = ['cron' + 'tab', '-e'].join(' ');
+  const ENTRY_ALLOWS_HIGH = { interceptor: { failurePolicy: { high: 'allow' } } };
+
+  it('a lock denies the DANGEROUS tier even when the entry says failurePolicy.high:allow (#522 G3)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const result = runParamsPlugin(brokenStage, { command: DANGEROUS_PROBE }, ENTRY_ALLOWS_HIGH);
+    expect(result.block).toBe(true);
+    expect(result.blockReason ?? '').toMatch(/dangerous fallback match/);
+  }, 180_000);
+
+  it('…and with NO lock the entry still decides, unchanged (#522 G3 control)', () => {
+    // The scope statement. Without a lock nothing is pinned, so an operator's
+    // own `failurePolicy.high:"allow"` on a broken install still allows —
+    // exactly today's behaviour, and the reason the fix lives in the LOCK path.
+    forgeSignedConfig({
+      actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false } },
+      interceptor: { enabled: true, actionGuard: { enabled: true, enforce: true, autoApprove: [] } },
+    });
+    const result = runParamsPlugin(brokenStage, { command: DANGEROUS_PROBE }, ENTRY_ALLOWS_HIGH);
+    expect(result.block).toBe(false);
   }, 180_000);
 
   it('the same broken install with NO lock keeps today\'s behaviour, silently', () => {
