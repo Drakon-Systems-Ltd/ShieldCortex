@@ -1892,6 +1892,13 @@ function fallbackExecSurface(toolInput) {
   for (const k of FALLBACK_SURFACE_KEYS) {
     const v = toolInput?.[k];
     if (typeof v === 'string' && v.length > 0) parts.push(v);
+    // Kept in sync with plugins/openclaw/interceptor.ts: an ARGV ARRAY under
+    // one of these keys is read by the real guard (`rawStringArgs` joins
+    // string arrays), so the degraded scan must read it too (#522 r7 FIND-4).
+    else if (Array.isArray(v)) {
+      const joined = v.filter((e) => typeof e === 'string').join(' ');
+      if (joined.length > 0) parts.push(joined);
+    }
   }
   return parts.join('   ').slice(0, FALLBACK_SCAN_CAP);
 }

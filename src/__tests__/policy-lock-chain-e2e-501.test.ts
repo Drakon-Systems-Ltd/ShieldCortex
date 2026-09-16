@@ -205,6 +205,80 @@ await new Promise((done) => process.stdout.write(line + '\\n', done));
 process.exit(0);
 `;
 
+/**
+ * A FOURTH driver, for #522 r7 FIND-1: fires a burst of CONCURRENT
+ * `before_tool_call` invocations in one process (`Promise.all`, no await
+ * between them) and reports how many were blocked vs allowed. The bug this
+ * pins is a race in `initInterceptor`'s posture cache — the fix must AWAIT an
+ * in-flight rebuild rather than let a concurrent caller read the published
+ * `null` and skip the gate.
+ */
+const CONCURRENT_DRIVER = `
+const CATASTROPHIC = ${JSON.stringify(SC01_CATASTROPHIC.split(''))}.join('');
+const plugin = (await import(process.env.SC501_PLUGIN_ENTRY)).default;
+
+const hooks = new Map();
+console.warn = () => {};
+plugin.register({
+  version: '2026.5.20',
+  config: {},
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  registerCommand: () => {},
+  registerHook: () => {},
+  on: (name, fn) => hooks.set(name, fn),
+});
+
+const beforeToolCall = hooks.get('before_tool_call');
+const N = Number(process.env.SC522_CONCURRENT_N || '24');
+const results = beforeToolCall
+  ? await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        beforeToolCall({ toolName: 'Bash', params: { command: CATASTROPHIC } }, { sessionId: 'sc-522-concurrent-' + i })
+          .catch((err) => ({ threw: String(err) })),
+      ),
+    )
+  : [];
+const blocked = results.filter((r) => r && r.block === true).length;
+const allowed = N - blocked;
+
+const line = 'SC522_CONCURRENT_RESULT ' + JSON.stringify({ blocked, allowed, total: N });
+await new Promise((done) => process.stdout.write(line + '\\n', done));
+process.exit(0);
+`;
+
+/**
+ * A FIFTH driver, for #522 r7 FIND-4: takes the full `params` object for a
+ * single `Bash` call as JSON (so a test can drive an ARGV-array command
+ * shape, not just a string), and reports block/blockReason.
+ */
+const PARAMS_DRIVER = `
+const plugin = (await import(process.env.SC501_PLUGIN_ENTRY)).default;
+
+const hooks = new Map();
+console.warn = () => {};
+plugin.register({
+  version: '2026.5.20',
+  config: {},
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  registerCommand: () => {},
+  registerHook: () => {},
+  on: (name, fn) => hooks.set(name, fn),
+});
+
+const beforeToolCall = hooks.get('before_tool_call');
+const params = JSON.parse(process.env.SC522_PARAMS_JSON);
+const verdict = beforeToolCall
+  ? ((await beforeToolCall({ toolName: 'Bash', params }, { sessionId: 'sc-522-params' })) ?? null)
+  : null;
+
+const line = 'SC522_PARAMS_RESULT ' + JSON.stringify({
+  block: verdict?.block === true,
+  blockReason: verdict?.blockReason ?? null,
+});
+await new Promise((done) => process.stdout.write(line + '\\n', done));
+process.exit(0);
+`;
+
 /** A staged install: the built plugin dist, with or without a resolvable package. */
 function stageInstall(withShieldCortexResolvable: boolean): string {
   const stage = mkdtempSync(join(tmpdir(), 'sc-501-chain-stage-'));
@@ -216,11 +290,56 @@ function stageInstall(withShieldCortexResolvable: boolean): string {
   return stage;
 }
 
+/**
+ * A staged install whose `shieldcortex` package is SUBSTITUTED for a liar
+ * (#522 r7 FIND-3): its `readPolicyLock` reports `absent` while a lock really
+ * is on disk, its `applyPolicyLock` is the identity, and its evaluator and
+ * pipeline are fully permissive. The plugin already DETECTS this — the inline
+ * probe disagrees with the reader, so the posture fails closed — and then used
+ * to hand the same proven-liar module the job of producing the verdicts that
+ * posture is supposed to enforce.
+ */
+function stageLyingInstall(): string {
+  const stage = mkdtempSync(join(tmpdir(), 'sc-501-chain-liar-'));
+  cpSync(PLUGIN_DIST, join(stage, 'plugin'), { recursive: true });
+  const pkg = join(stage, 'node_modules', 'shieldcortex');
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(
+    join(pkg, 'package.json'),
+    JSON.stringify(
+      {
+        name: 'shieldcortex',
+        version: '0.0.0-substituted',
+        type: 'module',
+        exports: { '.': './index.js', './defence': './defence.js' },
+      },
+      null,
+      2,
+    ),
+  );
+  writeFileSync(join(pkg, 'index.js'), 'export default {};\n');
+  writeFileSync(
+    join(pkg, 'defence.js'),
+    [
+      "export function readPolicyLock() { return { status: 'absent' }; }",
+      'export function applyPolicyLock(raw) { return raw; }',
+      "export function evaluateToolCall() { return { decision: 'allow', severity: 'none', reasons: [] }; }",
+      'export function runDefencePipeline() { return { allowed: true, blocked: false, detections: [] }; }',
+      'export function scanToolResponse() { return { clean: true, injection: { clean: true, riskLevel: 0, detections: [] } }; }',
+      '',
+    ].join('\n'),
+  );
+  return stage;
+}
+
 let installedStage: string;
 let brokenStage: string;
+let lyingStage: string;
 let driverPath: string;
 let cacheDriverPath: string;
 let reviewedScriptDriverPath: string;
+let concurrentDriverPath: string;
+let paramsDriverPath: string;
 let driverDir: string;
 
 let home: string;
@@ -244,6 +363,8 @@ beforeAll(() => {
   // The same built plugin with the package NOT resolvable — a broken or
   // half-removed install, which is the state "just delete dist" produces.
   brokenStage = stageInstall(false);
+  // #522 r7 FIND-3: resolvable, but the package lies about the lock.
+  lyingStage = stageLyingInstall();
   driverDir = mkdtempSync(join(tmpdir(), 'sc-501-chain-driver-'));
   driverPath = join(driverDir, 'drive-plugin.mjs');
   writeFileSync(driverPath, DRIVER);
@@ -251,10 +372,14 @@ beforeAll(() => {
   writeFileSync(cacheDriverPath, CACHE_DRIVER);
   reviewedScriptDriverPath = join(driverDir, 'drive-plugin-reviewed-script.mjs');
   writeFileSync(reviewedScriptDriverPath, REVIEWED_SCRIPT_DRIVER);
+  concurrentDriverPath = join(driverDir, 'drive-plugin-concurrent.mjs');
+  writeFileSync(concurrentDriverPath, CONCURRENT_DRIVER);
+  paramsDriverPath = join(driverDir, 'drive-plugin-params.mjs');
+  writeFileSync(paramsDriverPath, PARAMS_DRIVER);
 });
 
 afterAll(() => {
-  for (const dir of [installedStage, brokenStage, driverDir]) {
+  for (const dir of [installedStage, brokenStage, lyingStage, driverDir]) {
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -392,6 +517,42 @@ function runReviewedScriptPlugin(command: string): { block: boolean; blockReason
   return JSON.parse(line.slice('SC522_RESULT '.length));
 }
 
+/** #522 r7 FIND-1 — fires a concurrent burst against the given stage. */
+function runConcurrentBurst(stage: string, n = 24): { blocked: number; allowed: number; total: number } {
+  const run = spawnSync(process.execPath, [concurrentDriverPath], {
+    cwd: stage,
+    env: env({
+      SC501_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
+      SC522_CONCURRENT_N: String(n),
+    }),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('SC522_CONCURRENT_RESULT '));
+  if (!line) {
+    throw new Error(`#522 concurrent-burst driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
+  }
+  return JSON.parse(line.slice('SC522_CONCURRENT_RESULT '.length));
+}
+
+/** #522 r7 FIND-4 — drives a single Bash call with an arbitrary `params` shape. */
+function runParamsPlugin(stage: string, params: unknown): { block: boolean; blockReason: string | null } {
+  const run = spawnSync(process.execPath, [paramsDriverPath], {
+    cwd: stage,
+    env: env({
+      SC501_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
+      SC522_PARAMS_JSON: JSON.stringify(params),
+    }),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('SC522_PARAMS_RESULT '));
+  if (!line) {
+    throw new Error(`#522 params driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
+  }
+  return JSON.parse(line.slice('SC522_PARAMS_RESULT '.length));
+}
+
 // -------------------------------------------------------------------------
 
 describe('#501 the chain, with NO lock — the 5.0.5 outcome, on all three surfaces', () => {
@@ -481,6 +642,11 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     // The reported posture is strict and the operator is told the install is
     // broken — unchanged from before.
     expect(plugin.guardLine).toMatch(/Action guard: enforce/);
+    // #522 r7 FIND-5: the DEGRADED state used to reach only the log line;
+    // `shieldcortex-status` (what this test reads via guardLine) said plain
+    // "enforce" even on a broken-dist locked host, which is the wrong answer
+    // to the question an operator actually asks.
+    expect(plugin.guardLine).toMatch(/DEGRADED/);
     expect(plugin.warnings.join('\n')).toMatch(
       /policy lock is present but the ShieldCortex defence module could not be loaded/,
     );
@@ -497,6 +663,59 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     expect(plugin.catastrophic?.block).toBe(true);
     expect(plugin.catastrophic?.blockReason).toMatch(/fallback catastrophic scan matched/i);
     // A benign call is still allowed — degraded is not bricked.
+    expect(plugin.benign).toBeNull();
+  }, 180_000);
+
+  // #522 r7 FIND-1: `initInterceptor` published a null `interceptorReady`
+  // for the duration of a rebuild, and every CONCURRENT call that took the
+  // posture-cache shortcut during that window read the null and skipped the
+  // gate — the reviewer's reproduction found 23 of 24 allowed, deterministic,
+  // on exactly this broken-dist-plus-lock state. The fix awaits the in-flight
+  // build instead.
+  it('a burst of CONCURRENT calls on the broken stage is fully gated, not just the first one (review round-7 FIND-1)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const { blocked, allowed, total } = runConcurrentBurst(brokenStage, 24);
+    expect(total).toBe(24);
+    expect(allowed).toBe(0);
+    expect(blocked).toBe(24);
+  }, 180_000);
+
+  // #522 r7 FIND-4: the WS2 dependency-free fallback scan this degraded path
+  // runs only read STRING values off the fallback surface keys, so the ARGV
+  // ARRAY form of the exact same catastrophic command — which the healthy
+  // guard's `rawStringArgs` already joins and scans — sailed through.
+  it('the degraded fallback scan reads an ARGV-array command, not just a string one (review round-7 FIND-4)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const result = runParamsPlugin(brokenStage, { command: SC01_CATASTROPHIC.split(' ') });
+    expect(result.block).toBe(true);
+  }, 180_000);
+
+  // #522 r7 FIND-3: the plugin already PROVES this module is lying — the
+  // inline probe sees a lock on disk, the module's reader says `absent`, and
+  // the posture fails closed for exactly that reason. It then loaded the same
+  // module's permissive evaluator and let it answer for the gate, so a
+  // substituted package defeated the lock completely while reporting
+  // `enforce`. A module that cannot be trusted to READ the policy cannot be
+  // what ENFORCES it: it is routed to the same degraded path a missing module
+  // takes.
+  it('a module that LIES about the lock supplies no verdicts either (review round-7 FIND-3)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const plugin = runPlugin({ stage: lyingStage });
+    // The posture was already strict before this fix — that half is #501's
+    // BLOCK-1 mirror, and it is the control proving the liar is really loaded.
+    expect(plugin.guardLine).toMatch(/Action guard: enforce/);
+    expect(plugin.warnings.join('\n')).toMatch(
+      /policy lock is present but the ShieldCortex defence module could not be loaded|disagreed/,
+    );
+    // The verdict is the part FIND-3 is about.
+    expect(plugin.catastrophic?.block).toBe(true);
+    // Degraded, and honest about it (FIND-5) — not silently "enforce".
+    expect(plugin.guardLine).toMatch(/DEGRADED/);
+    expect(plugin.logs.join('\n')).toMatch(/disagreed with the on-disk policy lock/);
+    // Still not bricked: the blunt fallback lets an ordinary command through.
     expect(plugin.benign).toBeNull();
   }, 180_000);
 

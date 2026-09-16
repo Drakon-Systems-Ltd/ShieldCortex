@@ -598,6 +598,17 @@ function fallbackExecSurface(args: Record<string, unknown> | undefined): string 
   for (const k of FALLBACK_SURFACE_KEYS) {
     const v = args?.[k];
     if (typeof v === 'string' && v.length > 0) parts.push(v);
+    // #522 r7 FIND-4: an ARGV ARRAY under one of these keys is a real host
+    // shape, and the guard this fallback stands in for already reads it —
+    // `rawStringArgs` in tool-action-guard.ts joins string arrays, and the
+    // catastrophic tier blocks the array form of a recursive root delete.
+    // Skipping arrays here made the degraded scan strictly weaker than the
+    // evaluator it replaces, on exactly the tier documented as an
+    // unconditional deny.
+    else if (Array.isArray(v)) {
+      const joined = v.filter((e) => typeof e === 'string').join(' ');
+      if (joined.length > 0) parts.push(joined);
+    }
   }
   return parts.join('   ').slice(0, FALLBACK_SCAN_CAP);
 }
