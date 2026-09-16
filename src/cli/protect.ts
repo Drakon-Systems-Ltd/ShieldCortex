@@ -30,6 +30,7 @@ import {
   resolveProtectedRoot,
   verifyProtectedFile,
   type ProtectedFsSeam,
+  type ProtectedRootResolution,
 } from '../defence/iron-dome/protected-root.js';
 
 export interface ProtectOptions {
@@ -155,19 +156,42 @@ export interface ProtectResult {
  * weakened check — it is the only way to assert the property that matters, that
  * the file just written will verify for the user the agent runs as.
  */
-function verifyAsAgent(path: string): ReturnType<typeof verifyProtectedFile> {
+function agentSeam(): ProtectedFsSeam {
   const invokingUid = Number.parseInt(process.env.SUDO_UID ?? '', 10);
   const asUid = Number.isInteger(invokingUid) && invokingUid > 0 ? invokingUid : 65534;
-  const base = defaultProtectedFsSeam();
-  const seam: ProtectedFsSeam = { ...base, geteuid: () => asUid };
-  return verifyProtectedFile(path, seam);
+  return { ...defaultProtectedFsSeam(), geteuid: () => asUid };
+}
+
+function verifyAsAgent(path: string): ReturnType<typeof verifyProtectedFile> {
+  return verifyProtectedFile(path, agentSeam());
+}
+
+/**
+ * Resolve the root the AGENT will read — which is the only root worth writing.
+ *
+ * Same seam, same reason as {@link verifyAsAgent}, and the #501 review's
+ * SHOULD-FIX-6. `protect`'s real mode is privileged, and privileged is exactly
+ * the mode in which `resolveProtectedRoot()` answers `running-as-root`, so the
+ * old code fell through to `DEFAULT_PROTECTED_ROOT` every time and never
+ * consulted the pointer file. `readPolicyLockInner` DOES honour the pointer,
+ * unconditionally and in preference to the default — so on a pointer host a
+ * privileged `shieldcortex protect` wrote `/etc/shieldcortex/policy.json`,
+ * printed uid/mode evidence and a green verify, and the runtime went on reading
+ * the old lock at the pointed-to path. The new lock was inert and the operator
+ * was told it was not.
+ *
+ * The unprivileged (`--dry-run`) path resolves through the same function, so
+ * what the dry run prints is what the privileged write does.
+ */
+function resolveRootForProtect(): ProtectedRootResolution {
+  return resolveProtectedRoot(agentSeam());
 }
 
 export function runProtect(args: string[] = []): ProtectResult {
   const opts = parseProtectArgs(args);
   const lines: string[] = [];
 
-  const root = resolveProtectedRoot();
+  const root = resolveRootForProtect();
   if (!root.supported && root.reason !== 'running-as-root') {
     // Running privileged is the NORMAL state for `protect` itself. The resolver
     // refuses that state because an AGENT running privileged has no boundary,

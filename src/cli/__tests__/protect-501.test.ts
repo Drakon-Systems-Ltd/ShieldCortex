@@ -183,6 +183,66 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
   });
 });
 
+describe('#501 protect writes to the root the RUNTIME reads (review SHOULD-FIX-6)', () => {
+  /**
+   * Pretend to be the privileged process `protect` is actually run as.
+   *
+   * This is the mode the defect lived in, and the only mode that matters:
+   * `resolveProtectedRoot()` answers `running-as-root` for a euid-0 caller —
+   * correct for an AGENT, useless for `protect` — so the old code fell through
+   * to `DEFAULT_PROTECTED_ROOT` every time and never consulted the pointer file
+   * that `readPolicyLockInner` DOES honour. On a pointer host that wrote a lock
+   * nobody reads, with uid/mode evidence and a green verify printed next to it.
+   *
+   * `SUDO_UID` is set for the same reason `verifyAsAgent` reads it: the root
+   * `protect` should resolve is the root the unprivileged agent will resolve.
+   */
+  function asPrivileged<T>(run: () => T): T {
+    const prevSudoUid = process.env.SUDO_UID;
+    process.env.SUDO_UID = String(typeof process.geteuid === 'function' ? process.geteuid() : 1001);
+    const spy = jest.spyOn(process, 'geteuid').mockReturnValue(0);
+    try {
+      return run();
+    } finally {
+      spy.mockRestore();
+      if (prevSudoUid === undefined) delete process.env.SUDO_UID;
+      else process.env.SUDO_UID = prevSudoUid;
+    }
+  }
+
+  it('the privileged DRY RUN resolves the same root as the unprivileged one', () => {
+    // The parity the README promises at `protect --dry-run`: "exactly what would
+    // be pinned". Before the fix the two halves disagreed — the unprivileged
+    // dry run printed the resolved root and the privileged write used
+    // /etc/shieldcortex.
+    const wouldWrite = (lines: string[]) => lines.find((l) => l.startsWith('Would write')) ?? '';
+    const unprivileged = wouldWrite(runProtect(['--dry-run']).lines);
+    const privileged = wouldWrite(asPrivileged(() => runProtect(['--dry-run']).lines));
+    expect(privileged).toBe(unprivileged);
+    expect(privileged).toContain(path.join(protectedRoot, POLICY_LOCK_FILENAME));
+  });
+
+  it('the privileged WRITE lands in that same root, not in the default one', () => {
+    // The consequence, stated where it bites. Before the fix this ran against
+    // /etc/shieldcortex and failed with "Could not create" — or, on a host where
+    // that directory happens to exist, succeeded at a path the runtime is not
+    // reading. The seam stands in for the pointer file a real pointer host has:
+    // what is under test is that `protect` resolves the root the AGENT resolves,
+    // whichever rule produced it.
+    const result = asPrivileged(() => runProtect([]));
+    const lockPath = path.join(protectedRoot, POLICY_LOCK_FILENAME);
+    expect(fs.existsSync(lockPath)).toBe(true);
+    expect(result.lines.join('\n')).toContain(lockPath);
+    expect(result.lines.join('\n')).not.toMatch(/Could not create/);
+    // Written by this uid, so it cannot verify FOR this uid — and `protect`
+    // says so rather than reporting success. That half is pre-existing
+    // behaviour; it is asserted here because it is what makes the write path
+    // safe to exercise in an unprivileged suite at all.
+    expect(result.lines.join('\n')).toMatch(/will NOT verify for the agent/);
+    expect(result.code).toBe(1);
+  });
+});
+
 describe('#501 config --policy-status', () => {
   it('names the risk when the host is unlocked, and what to run', () => {
     const text = policyStatusLines().join('\n');
