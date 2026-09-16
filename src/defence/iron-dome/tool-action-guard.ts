@@ -2454,12 +2454,11 @@ const SHELL_OUT_SINK =
  * aliases all bypass a name list). The rule is structural: a backtick
  * preceded (after optional whitespace) by an identifier char, `$`, `)` or `]`
  * is a tag; a backtick preceded by an operator, `(`, `,`, `=`, `:`, start of
- * line, or a keyword-only position is a bare literal. Markdown prose in a
- * comment like `run x` has a space before the backtick after a word -- that
- * IS the tag shape, so a comment mentioning a command with the word
- * touching the backtick re-arms. Conservative on purpose; the common
- * docstring shape ("after `cmd`") sits behind a space and a quote/word and
- * is handled by the comment/string ranges in scriptDataRanges.
+ * line, or a keyword-only position is a bare literal. Line and block
+ * comments are skipped entirely so Markdown in a comment never counts.
+ * Member access (obj.return then template) is a tag even when the property is a keyword.
+ * Trivia (whitespace and block comments) between tag and template is skipped.
+ * Nested tagged templates inside interpolations are walked, not skipped.
  */
 const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php']);
 const JS_TAG_KEYWORDS = new Set([
@@ -2475,42 +2474,68 @@ const JS_TAG_KEYWORDS = new Set([
  * (indexed) -- and that identifier is not a keyword. Line and block
  * comments are skipped so Markdown in a comment never counts.
  */
+function isJsIdChar(ch: string): boolean {
+  if (!ch) return false;
+  if (/[\w$]/.test(ch)) return true;
+  const code = ch.charCodeAt(0);
+  return code > 127 && code !== 0x00A0;
+}
+function skipJsTriviaBack(text: string, p: number): number {
+  while (p >= 0) {
+    while (p >= 0 && (text[p] === ' ' || text[p] === '\t' || text[p] === '\r' || text[p] === '\n')) p--;
+    if (p >= 1 && text[p] === '/' && text[p - 1] === '*') {
+      p -= 2;
+      while (p >= 1 && !(text[p] === '*' && text[p - 1] === '/')) p--;
+      p -= 2;
+      continue;
+    }
+    break;
+  }
+  return p;
+}
 function jsHasTaggedTemplate(text: string): boolean {
   let i = 0;
   const n = text.length;
   while (i < n) {
     const c = text[i];
-    // Skip comments.
     if (c === '/' && text[i + 1] === '/') { const e = text.indexOf('\n', i); i = e < 0 ? n : e + 1; continue; }
     if (c === '/' && text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue; }
-    // Skip ordinary strings.
     if (c === '"' || c === "'") {
       let k = i + 1;
       while (k < n && text[k] !== c) { if (text[k] === '\\') k++; k++; }
       i = k + 1; continue;
     }
     if (c === '`') {
-      // Decide tag-ness from what precedes this OPENING backtick.
-      let p = i - 1;
-      while (p >= 0 && (text[p] === ' ' || text[p] === '\t' || text[p] === '\r' || text[p] === '\n')) p--;
+      let p = skipJsTriviaBack(text, i - 1);
       if (p >= 0) {
         const prev = text[p];
         if (prev === ')' || prev === ']') return true;
-        if (/[\w$]/.test(prev)) {
+        if (isJsIdChar(prev)) {
           let s = p;
-          while (s >= 0 && /[\w$]/.test(text[s])) s--;
+          while (s >= 0 && isJsIdChar(text[s])) s--;
           const word = text.slice(s + 1, p + 1);
-          if (!JS_TAG_KEYWORDS.has(word)) return true;
+          const member = s >= 0 && text[s] === '.';
+          if (member || !JS_TAG_KEYWORDS.has(word)) return true;
         }
       }
-      // Skip to the matching closing backtick (handles ${...} nesting shallowly).
       let k = i + 1;
       let depth = 0;
+      let interpStart = -1;
       while (k < n) {
         const d = text[k];
         if (d === '\\') { k += 2; continue; }
-        if (d === '$' && text[k + 1] === '{') { depth++; k += 2; continue; }
-        if (d === '}' && depth > 0) { depth--; k++; continue; }
+        if (d === '$' && text[k + 1] === '{') {
+          if (depth === 0) interpStart = k + 2;
+          depth++; k += 2; continue;
+        }
+        if (d === '}' && depth > 0) {
+          depth--;
+          if (depth === 0 && interpStart >= 0) {
+            if (jsHasTaggedTemplate(text.slice(interpStart, k))) return true;
+            interpStart = -1;
+          }
+          k++; continue;
+        }
         if (d === '`' && depth === 0) break;
         k++;
       }

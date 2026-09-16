@@ -126,6 +126,7 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
   it.todo('folded Ruby/Perl backtick command runs a global install (hasSink true, but a folded backtick body is payload-tier, not executed)');
   it.todo('folded .py: sink argument on a different line from os.system(');
   it.todo('folded .py: cmd = "..."; os.system(cmd) variable indirection');
+  it.todo('JS tagged template nested inside a bare-template interpolation');
 
   // GPT-6 r2: PHP backtick executes. Inline php -r region gets lang=php.
   it('still gates a PHP backtick install (inline php -r)', () => {
@@ -190,5 +191,16 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     const v = verdictOf('node scripts/notes.mjs', { 'scripts/notes.mjs': body });
     expect(v.signals ?? []).not.toContain('install-package-global');
     expect(v.severity).not.toBe('dangerous');
+  });
+
+  // GPT-6 r4: trivia, unicode identifiers, member-keyword, nested interpolation.
+  it.each([
+    ['block comment between tag and template', `const $ = require("zx").$; $ /* c */ \`${NPM} ${INST} ${G} cowsay\`;`],
+    ['unicode identifier tag', `const 执行 = require("zx").$; 执行\`${NPM} ${INST} ${G} cowsay\`;`],
+    ['member named return', `const t = { return: require("zx").$ }; t.return\`${NPM} ${INST} ${G} cowsay\`;`],
+  ])('still gates a JS tagged template: %s', (_label, body) => {
+    const v = verdictOf('node scripts/boot.mjs', { 'scripts/boot.mjs': body });
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
   });
 });
