@@ -2446,18 +2446,84 @@ const SHELL_OUT_SINK =
  * treating it as a sink turned every well-documented repair script into a
  * hard deny. Kept out of SHELL_OUT_SINK so Python/JS prose never arms it.
  *
- * JavaScript exception: a TAGGED template runs the tag function, and the
- * shell-tag libraries (zx / execa / dax `$`, sh, exec, execa) execute their
- * template as a command. tag-adjoining-backtick is a sink; a bare backtick
- * is not. The tag must be an identifier / member chain touching the backtick
- * (no whitespace) so prose with a space before the backtick stays prose.
+ * JavaScript exception: a TAGGED template is a function call. Any expression
+ * immediately before the backtick -- identifier, member chain, call result,
+ * with optional whitespace between (legal) -- is a tag, and the
+ * shell-tag libraries (zx / execa / dax `$`) execute their template as a
+ * command. We do not allowlist tag names (GPT-6 r3: `$ `, `zx.$`, `$({..})`,
+ * aliases all bypass a name list). The rule is structural: a backtick
+ * preceded (after optional whitespace) by an identifier char, `$`, `)` or `]`
+ * is a tag; a backtick preceded by an operator, `(`, `,`, `=`, `:`, start of
+ * line, or a keyword-only position is a bare literal. Markdown prose in a
+ * comment like `run x` has a space before the backtick after a word -- that
+ * IS the tag shape, so a comment mentioning a command with the word
+ * touching the backtick re-arms. Conservative on purpose; the common
+ * docstring shape ("after `cmd`") sits behind a space and a quote/word and
+ * is handled by the comment/string ranges in scriptDataRanges.
  */
 const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php']);
-const JS_SHELL_TAG = /(?:^|[^\w$.])(?:\$|\$\$|sh|exec|execa|execaCommand|spawn|run|shell|cmd|zx)(?:\.\w+)*`/;
+const JS_TAG_KEYWORDS = new Set([
+  'return', 'typeof', 'void', 'delete', 'throw', 'await', 'yield', 'case',
+  'in', 'of', 'instanceof', 'new', 'else', 'do', 'export', 'default',
+]);
+/**
+ * Does any template literal in this JS text sit in TAG position? Walks the
+ * text tracking quote state so only OPENING backticks are examined (the
+ * closing backtick of a bare literal is always preceded by content and must
+ * not count). A backtick is a tag when the previous non-space token is a
+ * callee shape: identifier / `$` / member chain, `)` (call result) or `]`
+ * (indexed) -- and that identifier is not a keyword. Line and block
+ * comments are skipped so Markdown in a comment never counts.
+ */
+function jsHasTaggedTemplate(text: string): boolean {
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    // Skip comments.
+    if (c === '/' && text[i + 1] === '/') { const e = text.indexOf('\n', i); i = e < 0 ? n : e + 1; continue; }
+    if (c === '/' && text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue; }
+    // Skip ordinary strings.
+    if (c === '"' || c === "'") {
+      let k = i + 1;
+      while (k < n && text[k] !== c) { if (text[k] === '\\') k++; k++; }
+      i = k + 1; continue;
+    }
+    if (c === '`') {
+      // Decide tag-ness from what precedes this OPENING backtick.
+      let p = i - 1;
+      while (p >= 0 && (text[p] === ' ' || text[p] === '\t' || text[p] === '\r' || text[p] === '\n')) p--;
+      if (p >= 0) {
+        const prev = text[p];
+        if (prev === ')' || prev === ']') return true;
+        if (/[\w$]/.test(prev)) {
+          let s = p;
+          while (s >= 0 && /[\w$]/.test(text[s])) s--;
+          const word = text.slice(s + 1, p + 1);
+          if (!JS_TAG_KEYWORDS.has(word)) return true;
+        }
+      }
+      // Skip to the matching closing backtick (handles ${...} nesting shallowly).
+      let k = i + 1;
+      let depth = 0;
+      while (k < n) {
+        const d = text[k];
+        if (d === '\\') { k += 2; continue; }
+        if (d === '$' && text[k + 1] === '{') { depth++; k += 2; continue; }
+        if (d === '}' && depth > 0) { depth--; k++; continue; }
+        if (d === '`' && depth === 0) break;
+        k++;
+      }
+      i = k + 1; continue;
+    }
+    i++;
+  }
+  return false;
+}
 function hasShellOutSink(text: string, lang: ScriptLang): boolean {
   if (SHELL_OUT_SINK.test(text)) return true;
   if (BACKTICK_EXEC_LANGS.has(lang)) return text.includes('`');
-  if (lang === 'node') return JS_SHELL_TAG.test(text);
+  if (lang === 'node') return jsHasTaggedTemplate(text);
   return false;
 }
 

@@ -158,4 +158,37 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).not.toContain('install-package-global');
     expect(v.severity).not.toBe('dangerous');
   });
+
+  // GPT-6 r3: tag recognition must be structural, not a name allowlist.
+  it.each([
+    ['whitespace between tag and template', 'import {$} from "zx";' + nl + `await $ ${bt}${NPM} ${INST} ${G} cowsay${bt}`],
+    ['namespace member tag', 'import * as zx from "zx";' + nl + `await zx.$${bt}${NPM} ${INST} ${G} cowsay${bt};`],
+    ['configured tag (call result)', 'import {$} from "zx";' + nl + `await $({quiet:true})${bt}${NPM} ${INST} ${G} cowsay${bt};`],
+    ['aliased tag', 'import {$ as run} from "zx";' + nl + `await run${bt}${NPM} ${INST} ${G} cowsay${bt};`],
+    ['bracket-indexed tag', 'const t = {sh: $};' + nl + `await t['sh']${bt}${NPM} ${INST} ${G} cowsay${bt};`],
+  ])('still gates a JS tagged template: %s', (_label, body) => {
+    const v = verdictOf('node scripts/boot.mjs', { 'scripts/boot.mjs': body });
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+    expect(v.decision).toBe('require_approval');
+  });
+
+  it('still gates an inline node -e tag with whitespace', () => {
+    const cmd = `node --input-type=module -e 'import {$} from "zx"; await $ ${bt}${NPM} ${INST} ${G} cowsay${bt}'`;
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+  });
+
+  it.each([
+    ['assigned bare literal', `const hint = ${bt}see ${NPM} ${INST} ${G} openclaw${bt};`],
+    ['returned bare literal', `function h() { return ${bt}see ${NPM} ${INST} ${G} openclaw${bt}; }`],
+    ['argument bare literal', `console.log(${bt}see ${NPM} ${INST} ${G} openclaw${bt});`],
+    ['array element bare literal', `const hints = [${bt}see ${NPM} ${INST} ${G} openclaw${bt}];`],
+    ['line comment with spaced backtick', `// re-run after ${bt}${NPM} ${INST} ${G} openclaw${bt}` + nl + 'export const x = 1;'],
+  ])('an untagged JS template / comment stays prose: %s', (_label, body) => {
+    const v = verdictOf('node scripts/notes.mjs', { 'scripts/notes.mjs': body });
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity).not.toBe('dangerous');
+  });
 });
