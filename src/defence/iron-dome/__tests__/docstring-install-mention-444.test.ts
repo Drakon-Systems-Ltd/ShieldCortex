@@ -180,4 +180,40 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).toContain('install-package-global');
     expect(v.severity).toBe('dangerous');
   });
+
+  // GPT-6 r6: the OUTER shell substitutes backticks in a double-quoted or
+  // unquoted inline arg, and in an unquoted-delimiter heredoc, before the
+  // interpreter runs. Those must keep the sink regardless of language.
+  const DEL = 'r' + 'm';
+  const RF = '-' + 'rf';
+  it('still blocks a shell backtick inside a double-quoted python -c arg', () => {
+    const cmd = `python3 -c "print('${bt}${DEL} ${RF} /${bt}')"`;
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.severity).toBe('catastrophic');
+    expect(v.decision).toBe('block');
+  });
+  it('still gates a shell backtick install inside an unquoted python -c arg', () => {
+    const cmd = `python3 -c print(${bt}${NPM} ${INST} ${G} cowsay${bt})`;
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+  });
+  it('still gates a shell backtick inside an unquoted-delimiter python heredoc', () => {
+    const cmd = ['python3 - <<PY', `x = "${bt}${NPM} ${INST} ${G} cowsay${bt}"`, 'PY'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+    expect(v.severity).toBe('dangerous');
+  });
+  it('a single-quoted python -c arg is opaque to the shell: backtick mention stays prose', () => {
+    const cmd = `python3 -c 'print("re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after")'`;
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity).not.toBe('dangerous');
+  });
+  it('a quoted-delimiter python heredoc is opaque to the shell: backtick mention stays prose', () => {
+    const cmd = ["python3 - <<'PY'", `"""re-run ${bt}${NPM} ${INST} ${G} cowsay${bt} after"""`, 'print(1)', 'PY'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).not.toContain('install-package-global');
+    expect(v.severity).not.toBe('dangerous');
+  });
 });

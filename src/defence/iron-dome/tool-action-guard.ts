@@ -2460,9 +2460,19 @@ const SHELL_OUT_SINK =
  * (the #444 shape). Shell regions are a different path and untouched.
  */
 const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node']);
-function hasShellOutSink(text: string, lang: ScriptLang): boolean {
+/**
+ * @param shellExpands true when the OUTER shell substitutes backticks in
+ *   this text before the interpreter sees it: an inline program in a
+ *   double-quoted or unquoted argument, or a heredoc whose delimiter is
+ *   unquoted. Then a backtick is a live shell sink regardless of language
+ *   (GPT-6 r6: python3 -c "print('<backtick>cmd<backtick>')" runs cmd).
+ *   Single-quoted inline args, quoted-delimiter heredocs and folded files
+ *   are opaque to the shell, so only the language semantics apply.
+ */
+function hasShellOutSink(text: string, lang: ScriptLang, shellExpands = false): boolean {
   if (SHELL_OUT_SINK.test(text)) return true;
-  return BACKTICK_EXEC_LANGS.has(lang) && text.includes('`');
+  if (!text.includes('`')) return false;
+  return shellExpands || BACKTICK_EXEC_LANGS.has(lang);
 }
 /** How each interpreter language delimits comments and string literals. */
 interface ScriptLangRules {
@@ -4326,7 +4336,7 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
     const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
     if (clean) candidateFiles.push(clean);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
+      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang, m[1] === ''), folded: false },
       outFile: clean,
     });
   }
@@ -4437,11 +4447,11 @@ function inlineProgramRegions(text: string): ScanRegion[] {
         j++;
       }
       progEnd = Math.min(j, text.length);
-      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang), folded: false });
+      out.push({ start: progStart + 1, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart + 1, progEnd), lang, q === '"'), folded: false });
     } else {
       const nl = text.indexOf('\n', progStart);
       progEnd = nl < 0 ? text.length : nl;
-      out.push({ start: progStart, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart, progEnd), lang), folded: false });
+      out.push({ start: progStart, end: progEnd, lang, hasSink: hasShellOutSink(text.slice(progStart, progEnd), lang, true), folded: false });
     }
     INLINE_PROGRAM_RE.lastIndex = Math.max(progEnd, m.index + m[0].length);
   }
