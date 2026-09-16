@@ -418,8 +418,15 @@ export function verifyProtectedDirectoryChain(
   return { ok: true, reason: null, detail: 'verified: owned by another uid, in a directory chain this agent cannot write.' };
 }
 
-/** A one-line, operator-facing sentence for a failure reason. */
-export function describeProtectedFailure(reason: ProtectedFileFailure): string {
+/**
+ * A one-line, operator-facing sentence for a failure reason.
+ *
+ * Takes a plain `string`, not just {@link ProtectedFileFailure}: callers layer
+ * their own reasons on top of these (policy-lock adds `parse-failed`,
+ * `schema-failed`), and an unrecognised reason must render as ITSELF rather
+ * than as `undefined` in an operator's doctor output.
+ */
+export function describeProtectedFailure(reason: ProtectedFileFailure | string): string {
   switch (reason) {
     case 'unsupported-platform': return 'platform has no POSIX ownership boundary';
     case 'euid-unavailable': return 'effective uid unavailable';
@@ -433,5 +440,6 @@ export function describeProtectedFailure(reason: ProtectedFileFailure): string {
     case 'parent-not-directory': return 'parent path is not a directory';
     case 'parent-owned-by-agent': return 'parent directory owned by the agent uid';
     case 'parent-group-or-other-writable': return 'parent directory is group/other writable';
+    default: return reason;
   }
 }

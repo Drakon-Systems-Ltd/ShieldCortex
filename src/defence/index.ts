@@ -92,6 +92,59 @@ export {
   IRON_DOME_PROFILES,
   DEFAULT_IRON_DOME_CONFIG,
 } from './iron-dome/index.js';
+// Policy lock (#501) — the OS-owned floor under the security-critical config.
+// Exported HERE, from the package's `./defence` entry point, because that is the
+// one module specifier the OpenClaw plugin can resolve: it builds standalone and
+// cannot import from src/. Both enforcement surfaces must read the same lock or
+// the lock protects neither.
+export {
+  resolveProtectedRoot,
+  verifyProtectedFile,
+  verifyProtectedDirectoryChain,
+  describeProtectedFailure,
+  emitProtectedAudit,
+  defaultProtectedFsSeam,
+  DEFAULT_PROTECTED_ROOT,
+  PROTECTED_ROOT_POINTER,
+  PROTECTED_AUDIT_ACTION,
+  PROTECTED_AUDIT_OUTCOMES,
+} from './iron-dome/protected-root.js';
+export type {
+  ProtectedFsSeam,
+  ProtectedStat,
+  ProtectedFileVerdict,
+  ProtectedFileFailure,
+  ProtectedRootResolution,
+  ProtectedAuditOutcome,
+  ProtectedAuditEvent,
+} from './iron-dome/protected-root.js';
+export {
+  readPolicyLock,
+  policyLockPath,
+  policyLockCoverage,
+  isPolicyKeyLocked,
+  applyPolicyLock,
+  applyStrictFailClosedPosture,
+  assertPolicyLockAllows,
+  wouldLoosen,
+  describePolicyLock,
+  clearPolicyLockReportState,
+  PolicyLockRefusal,
+  PROTECTED_POLICY_KEYS_V1,
+  STRICT_FAILCLOSED_POSTURE,
+  POLICY_LOCK_FILENAME,
+  PROTECT_HINT,
+} from './iron-dome/policy-lock.js';
+export type {
+  PolicyLockState,
+  PolicyLockOptions,
+  PolicyLockSummary,
+  LockedPolicy,
+  LockedActionGuard,
+  LockedDefenceMode,
+  ProtectedPolicyKey,
+} from './iron-dome/policy-lock.js';
+
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
