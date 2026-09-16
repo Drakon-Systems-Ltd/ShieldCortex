@@ -93,13 +93,6 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.severity).toBe('dangerous');
   });
 
-  it('a JS template-literal MENTION is prose (backtick does not execute in JS)', () => {
-    const v = verdictOf('node scripts/notes.mjs', {
-      'scripts/notes.mjs': `const hint = ${bt}re-run after ${NPM} ${I} ${G} openclaw${bt};` + nl + 'console.log(hint);',
-    });
-    expect(v.signals ?? []).not.toContain('install-package-global');
-  });
-
   // GPT-6 r1 bypass 1: sink the classifier knows but the disposer cannot resolve.
   it.each([
     ['__import__ spelling', `__import__('os').system("${NPM} ${INST} ${G} openclaw")`],
@@ -126,7 +119,10 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
   it.todo('folded Ruby/Perl backtick command runs a global install (hasSink true, but a folded backtick body is payload-tier, not executed)');
   it.todo('folded .py: sink argument on a different line from os.system(');
   it.todo('folded .py: cmd = "..."; os.system(cmd) variable indirection');
-  it.todo('JS tagged template nested inside a bare-template interpolation');
+  // JS relief withdrawn after five review rounds: JS keeps the any-backtick
+  // sink, byte-identical to main. Relaxing JS needs a real lexer.
+  it.todo('JS: untagged template literal / comment that merely names an install stays prose');
+  it.todo('JS: tagged template nested inside a bare-template interpolation (lexer)');
 
   // GPT-6 r2: PHP backtick executes. Inline php -r region gets lang=php.
   it('still gates a PHP backtick install (inline php -r)', () => {
@@ -153,13 +149,6 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.severity).toBe('dangerous');
   });
 
-  it('an untagged JS template literal that merely names the install stays prose', () => {
-    const body = [`const hint = ${bt}see ${NPM} ${INST} ${G} openclaw${bt};`, 'console.log(hint);'].join(nl);
-    const v = verdictOf('node scripts/notes.mjs', { 'scripts/notes.mjs': body });
-    expect(v.signals ?? []).not.toContain('install-package-global');
-    expect(v.severity).not.toBe('dangerous');
-  });
-
   // GPT-6 r3: tag recognition must be structural, not a name allowlist.
   it.each([
     ['whitespace between tag and template', 'import {$} from "zx";' + nl + `await $ ${bt}${NPM} ${INST} ${G} cowsay${bt}`],
@@ -179,18 +168,6 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     const v = evaluateToolCall('Bash', { command: cmd }, cfg);
     expect(v.signals ?? []).toContain('install-package-global');
     expect(v.severity).toBe('dangerous');
-  });
-
-  it.each([
-    ['assigned bare literal', `const hint = ${bt}see ${NPM} ${INST} ${G} openclaw${bt};`],
-    ['returned bare literal', `function h() { return ${bt}see ${NPM} ${INST} ${G} openclaw${bt}; }`],
-    ['argument bare literal', `console.log(${bt}see ${NPM} ${INST} ${G} openclaw${bt});`],
-    ['array element bare literal', `const hints = [${bt}see ${NPM} ${INST} ${G} openclaw${bt}];`],
-    ['line comment with spaced backtick', `// re-run after ${bt}${NPM} ${INST} ${G} openclaw${bt}` + nl + 'export const x = 1;'],
-  ])('an untagged JS template / comment stays prose: %s', (_label, body) => {
-    const v = verdictOf('node scripts/notes.mjs', { 'scripts/notes.mjs': body });
-    expect(v.signals ?? []).not.toContain('install-package-global');
-    expect(v.severity).not.toBe('dangerous');
   });
 
   // GPT-6 r4: trivia, unicode identifiers, member-keyword, nested interpolation.

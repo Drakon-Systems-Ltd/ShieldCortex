@@ -2440,118 +2440,30 @@ const EXEC_COMMAND_WORD =
 const SHELL_OUT_SINK =
   /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
 /**
- * #444 -- a bare backtick is a REAL shell-out sink only where the language
- * executes it: Ruby, Perl, PHP. In Python and JavaScript a backtick is
- * Markdown prose in a docstring or comment, or an inert template literal, and
- * treating it as a sink turned every well-documented repair script into a
- * hard deny. Kept out of SHELL_OUT_SINK so Python/JS prose never arms it.
+ * #444 -- a bare backtick in a PYTHON docstring or comment is Markdown prose,
+ * not a shell-out sink. It was in SHELL_OUT_SINK for every language, so
+ * python3 repair.py whose docstring said "re-run after <global install>" was
+ * hard-denied unattended -- the very script that repairs a broken install.
+ * The backtick alternative is removed from SHELL_OUT_SINK and re-added per
+ * language here.
  *
- * JavaScript exception: a TAGGED template is a function call. Any expression
- * immediately before the backtick -- identifier, member chain, call result,
- * with optional whitespace between (legal) -- is a tag, and the
- * shell-tag libraries (zx / execa / dax `$`) execute their template as a
- * command. We do not allowlist tag names (GPT-6 r3: `$ `, `zx.$`, `$({..})`,
- * aliases all bypass a name list). The rule is structural: a backtick
- * preceded (after optional whitespace) by an identifier char, `$`, `)` or `]`
- * is a tag; a backtick preceded by an operator, `(`, `,`, `=`, `:`, start of
- * line, or a keyword-only position is a bare literal. Line and block
- * comments are skipped entirely so Markdown in a comment never counts.
- * Member access (obj.return then template) is a tag even when the property is a keyword.
- * Trivia (whitespace and block comments) between tag and template is skipped.
- * Nested tagged templates inside interpolations are walked, not skipped.
+ * Languages where a backtick EXECUTES keep the any-backtick sink: Ruby, Perl,
+ * PHP. JavaScript also keeps it -- deliberately. A JS TAGGED template
+ * (zx / execa $) executes, and five review rounds showed that telling a tag
+ * from an inert literal needs a real lexer (trivia, Unicode identifiers,
+ * member-keywords, nested interpolation, comment-embedded fake openers). Until
+ * that lexer exists, JS behaviour is byte-identical to before this change:
+ * any backtick arms the sink. Relaxing JS is a recorded follow-up, not a
+ * partial heuristic that reviewers can keep breaking.
+ *
+ * Only languages with NO backtick execution semantics are relaxed: Python
+ * (the #444 shape). Shell regions are a different path and untouched.
  */
-const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php']);
-const JS_TAG_KEYWORDS = new Set([
-  'return', 'typeof', 'void', 'delete', 'throw', 'await', 'yield', 'case',
-  'in', 'of', 'instanceof', 'new', 'else', 'do', 'export', 'default',
-]);
-/**
- * Does any template literal in this JS text sit in TAG position? Walks the
- * text tracking quote state so only OPENING backticks are examined (the
- * closing backtick of a bare literal is always preceded by content and must
- * not count). A backtick is a tag when the previous non-space token is a
- * callee shape: identifier / `$` / member chain, `)` (call result) or `]`
- * (indexed) -- and that identifier is not a keyword. Line and block
- * comments are skipped so Markdown in a comment never counts.
- */
-function isJsIdChar(ch: string): boolean {
-  if (!ch) return false;
-  if (/[\w$]/.test(ch)) return true;
-  const code = ch.charCodeAt(0);
-  return code > 127 && code !== 0x00A0;
-}
-function skipJsTriviaBack(text: string, p: number): number {
-  while (p >= 0) {
-    while (p >= 0 && (text[p] === ' ' || text[p] === '\t' || text[p] === '\r' || text[p] === '\n')) p--;
-    if (p >= 1 && text[p] === '/' && text[p - 1] === '*') {
-      p -= 2;
-      while (p >= 1 && !(text[p] === '*' && text[p - 1] === '/')) p--;
-      p -= 2;
-      continue;
-    }
-    break;
-  }
-  return p;
-}
-function jsHasTaggedTemplate(text: string): boolean {
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    if (c === '/' && text[i + 1] === '/') { const e = text.indexOf('\n', i); i = e < 0 ? n : e + 1; continue; }
-    if (c === '/' && text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue; }
-    if (c === '"' || c === "'") {
-      let k = i + 1;
-      while (k < n && text[k] !== c) { if (text[k] === '\\') k++; k++; }
-      i = k + 1; continue;
-    }
-    if (c === '`') {
-      let p = skipJsTriviaBack(text, i - 1);
-      if (p >= 0) {
-        const prev = text[p];
-        if (prev === ')' || prev === ']') return true;
-        if (isJsIdChar(prev)) {
-          let s = p;
-          while (s >= 0 && isJsIdChar(text[s])) s--;
-          const word = text.slice(s + 1, p + 1);
-          const member = s >= 0 && text[s] === '.';
-          if (member || !JS_TAG_KEYWORDS.has(word)) return true;
-        }
-      }
-      let k = i + 1;
-      let depth = 0;
-      let interpStart = -1;
-      while (k < n) {
-        const d = text[k];
-        if (d === '\\') { k += 2; continue; }
-        if (d === '$' && text[k + 1] === '{') {
-          if (depth === 0) interpStart = k + 2;
-          depth++; k += 2; continue;
-        }
-        if (d === '}' && depth > 0) {
-          depth--;
-          if (depth === 0 && interpStart >= 0) {
-            if (jsHasTaggedTemplate(text.slice(interpStart, k))) return true;
-            interpStart = -1;
-          }
-          k++; continue;
-        }
-        if (d === '`' && depth === 0) break;
-        k++;
-      }
-      i = k + 1; continue;
-    }
-    i++;
-  }
-  return false;
-}
+const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node']);
 function hasShellOutSink(text: string, lang: ScriptLang): boolean {
   if (SHELL_OUT_SINK.test(text)) return true;
-  if (BACKTICK_EXEC_LANGS.has(lang)) return text.includes('`');
-  if (lang === 'node') return jsHasTaggedTemplate(text);
-  return false;
+  return BACKTICK_EXEC_LANGS.has(lang) && text.includes('`');
 }
-
 /** How each interpreter language delimits comments and string literals. */
 interface ScriptLangRules {
   lineComment: readonly string[];
