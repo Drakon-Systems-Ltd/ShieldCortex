@@ -29,7 +29,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
-import { ensureFreshBuiltArtefacts } from './built-artefact-freshness.js';
+import { requireFreshBuiltArtefacts } from './built-artefact-freshness.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST_ENTRY = join(repoRoot, 'dist', 'index.js');
@@ -60,7 +60,7 @@ beforeAll(() => {
   // that is not the code under review. Freshness is the property that matters.
   // Shared with `policy-lock-chain-e2e-501` through a cross-process lock, so
   // two parallel workers cannot each delete the dist the other is driving.
-  ensureFreshBuiltArtefacts({
+  requireFreshBuiltArtefacts({
     repoRoot,
     sources: SOURCES_UNDER_TEST,
     artefacts: [
@@ -69,7 +69,7 @@ beforeAll(() => {
       join(repoRoot, 'dist', 'cli', 'protect.js'),
     ],
   });
-}, 600_000);
+});
 
 /**
  * Write a config.json whose embedded `_sig` GENUINELY verifies.

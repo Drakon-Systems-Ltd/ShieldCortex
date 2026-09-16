@@ -34,7 +34,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from '@jest/globals';
-import { ensureFreshBuiltArtefacts } from './built-artefact-freshness.js';
+import { requireFreshBuiltArtefacts } from './built-artefact-freshness.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST_ENTRY = join(repoRoot, 'dist', 'index.js');
@@ -140,7 +140,7 @@ let configDir: string;
 let protectedRoot: string;
 
 beforeAll(() => {
-  ensureFreshBuiltArtefacts({
+  requireFreshBuiltArtefacts({
     repoRoot,
     sources: SOURCES_UNDER_TEST,
     artefacts: [
@@ -157,7 +157,7 @@ beforeAll(() => {
   driverDir = mkdtempSync(join(tmpdir(), 'sc-501-chain-driver-'));
   driverPath = join(driverDir, 'drive-plugin.mjs');
   writeFileSync(driverPath, DRIVER);
-}, 600_000);
+});
 
 afterAll(() => {
   for (const dir of [installedStage, brokenStage, driverDir]) {
