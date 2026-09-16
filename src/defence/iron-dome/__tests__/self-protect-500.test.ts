@@ -202,4 +202,21 @@ describe('#500 Action Guard self-protection', () => {
     bash(`${NPM} ${'-a b '.repeat(10000)}${SC} ${G}`);
     expect(Date.now() - t0).toBeLessThan(300);
   });
+
+  // GPT-6 r5 P1: later boolean wins in npm.
+  it('gates when --global=false is overridden by a later --global=true', () => {
+    const v = bash(`${NPM} ${UNINST} --global=false --global=true ${SC}`);
+    expect(v.signals ?? []).toContain('disable-action-guard');
+  });
+  it('does not gate when --global=true is overridden by a later --global=false', () => {
+    const v = bash(`${NPM} ${UNINST} --global=true --global=false ${SC}`);
+    expect(v.signals ?? []).not.toContain('disable-action-guard');
+  });
+  // GPT-6 r5 P2: repeated verb with a non-matching package must stay linear.
+  it('stays fast on thousands of repeated verbs with a shared-prefix package (ReDoS tripwire 2)', () => {
+    const t0 = Date.now();
+    const v = bash(`${NPM} ${G} ` + (UNINST + ' ').repeat(4000) + `${SC}-helper`);
+    expect(Date.now() - t0).toBeLessThan(300);
+    expect(v.signals ?? []).not.toContain('disable-action-guard');
+  });
 });
