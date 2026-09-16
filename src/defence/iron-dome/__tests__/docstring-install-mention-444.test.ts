@@ -253,4 +253,17 @@ describe('#444 — docstring mention of a global install in a folded .py is pros
     expect(v.signals ?? []).not.toContain('install-package-global');
     expect(v.severity).not.toBe('dangerous');
   });
+
+  // GPT-6 r9: $'\'' ANSI-C escaped apostrophe must not desync the walker.
+  it('still blocks when an ANSI-C escaped apostrophe precedes a nested bash -c "..." heredoc', () => {
+    const cmd = [": $'\\''", 'bash -c "python3 - <<\'PY\'', `print(\'${bt}${DEL} ${RF} /${bt}\')`, 'PY"'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.severity).toBe('catastrophic');
+    expect(v.decision).toBe('block');
+  });
+  it('an unterminated double quote before the heredoc fails closed (sink kept)', () => {
+    const cmd = ['echo "unterminated', "python3 - <<'PY'", `x = "${bt}${NPM} ${INST} ${G} cowsay${bt}"`, 'PY'].join(nl);
+    const v = evaluateToolCall('Bash', { command: cmd }, cfg);
+    expect(v.signals ?? []).toContain('install-package-global');
+  });
 });

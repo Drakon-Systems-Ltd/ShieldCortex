@@ -2468,17 +2468,24 @@ const SHELL_OUT_SINK =
  * quotes are literal, backslash escapes one char outside single quotes.
  */
 function insideOuterDoubleQuote(text: string, pos: number): boolean {
-  let inS = false;
-  let inD = false;
+  let inS = false;   // '...'  -- literal, no escapes
+  let inA = false;   // $'...' -- ANSI-C, backslash escapes one char (GPT-6 r9)
+  let inD = false;   // "..."  -- backslash escapes one char
   for (let i = 0; i < pos && i < text.length; i++) {
     const c = text[i];
     if (inS) { if (c === "'") inS = false; continue; }
+    if (inA) { if (c === '\\') { i++; continue; } if (c === "'") inA = false; continue; }
     if (c === '\\') { i++; continue; }
     if (inD) { if (c === '"') inD = false; continue; }
+    if (c === '$' && text[i + 1] === "'") { inA = true; i++; continue; }
     if (c === "'") inS = true;
     else if (c === '"') inD = true;
   }
-  return inD;
+  // Inside '...' the shell is genuinely opaque -- that is the ONE context
+  // where an inner quoted delimiter can be trusted. Inside "..." it expands.
+  // Inside $'...' it does not expand backticks either, but ANSI-C escapes
+  // make the boundary hard to prove; fail closed there.
+  return inD || inA;
 }
 const BACKTICK_EXEC_LANGS = new Set<ScriptLang>(['ruby', 'perl', 'php', 'node']);
 /**
