@@ -38,8 +38,6 @@ npm-debug.log*
 # Test coverage
 coverage/
 .jest-localstorage*
-# Cross-worker mutex for the suites that rebuild dist/ (see
-# src/__tests__/built-artefact-freshness.ts).
 
 # Local config
 .mcp.json
