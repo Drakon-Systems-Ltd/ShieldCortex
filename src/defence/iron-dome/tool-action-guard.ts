@@ -916,6 +916,12 @@ const DANGEROUS: Pattern[] = [
   // calls cannot be prevented from userspace, and claiming otherwise would be
   // the over-claiming this feature was review-blocked for.
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
+  // #500: Guard must not let a tool call switch Guard off, uninstall it, or
+  // rewrite its own config. Same-UID filesystem writes outside the tool
+  // surface remain a later OS lock (#501). This rule is the tool-call gate.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:(?:npx|pnpm|yarn|bunx)\s+)?shieldcortex\s+(?:config\s+--action-guard-(?:disable|advisory)|iron-dome\s+deactivate)\b/i, signal: 'disable-action-guard' },
+  { re: /\b(?:npm|yarn|pnpm|bun)\b(?=[^|;&\n]*\buninstall\b)(?=[^|;&\n]*(?:\s['"]?-g\b['"]?|--global))(?=[^|;&\n]*shieldcortex)/i, signal: 'disable-action-guard' },
+  { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
@@ -3060,7 +3066,7 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
   return true;
 }
 
-const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger']);
+const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config']);
 
 /** #342 — interpreter-API recursive-delete call spans (not shell verbs). */
 const INTERPRETER_RECURSIVE_DELETE_SPAN =
