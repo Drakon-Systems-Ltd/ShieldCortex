@@ -631,6 +631,34 @@ describe('#501 the chain, with a same-UID lock — three processes, one posture'
     expect(plugin.guardLine).toMatch(/Action guard: enforce/);
     expect(plugin.catastrophic?.block).toBe(true);
   }, 180_000);
+
+  // #522 r7 FIND-2. The entry could switch off the guard's own knobs and lose
+  // (the case above) — but `interceptor.enabled:false` in the same unsigned,
+  // same-UID file skipped `api.on('before_tool_call')` altogether, so there
+  // was no gate to out-rank. One un-gated `Edit` of that file guaranteed the
+  // next gateway start had no Action Guard at all, on a locked host. The lock
+  // now out-ranks the entry for REGISTRATION and for the merged
+  // `interceptor.enabled`, not only for the guard's switches.
+  it('the lock out-ranks an entry that disables the interceptor OUTRIGHT (review round-7 FIND-2)', () => {
+    const entryConfig = { interceptor: { enabled: false } };
+    for (const stage of [installedStage, brokenStage]) {
+      const plugin = runPlugin({ stage, entryConfig });
+      expect(plugin.catastrophic?.unregistered).toBeUndefined();
+      expect(plugin.catastrophic?.block).toBe(true);
+      expect(plugin.guardLine).toMatch(/Action guard: enforce/);
+      expect(plugin.guardLine).not.toMatch(/not registered/);
+    }
+  }, 300_000);
+
+  it('…and with NO lock the entry still wins outright, so #112 is untouched (review round-7 FIND-2)', () => {
+    // The other half. #112 gave operators this flag for hosts that have pinned
+    // nothing, and that is every host it was written for — the lock is the
+    // only thing that takes it away.
+    rmSync(join(protectedRoot, 'policy.json'), { force: true });
+    const plugin = runPlugin({ entryConfig: { interceptor: { enabled: false } } });
+    expect(plugin.catastrophic).toEqual({ unregistered: true });
+    expect(plugin.guardLine).toMatch(/not registered/);
+  }, 180_000);
 });
 
 describe('#501 breaking the install is not a bypass, on the plugin surface either', () => {

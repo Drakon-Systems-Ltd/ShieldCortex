@@ -1988,6 +1988,13 @@ function withGuardPosture(config: SCConfig, guard: Record<string, unknown>): SCC
     ...config,
     interceptor: {
       ...(config.interceptor ?? {}),
+      // #522 r7 FIND-2: the interceptor is only the CARRIER of the gate the
+      // lock pins — `initInterceptor` returns null outright on
+      // `enabled:false`, and `before_tool_call` reads that as no gate at all.
+      // Leaving an unsigned same-UID `interceptor.enabled:false` to stand
+      // while the lock says `actionGuard.enabled:true` made the precedence
+      // rule decorative.
+      ...(guard.enabled === true ? { enabled: true } : {}),
       actionGuard: { ...(config.interceptor?.actionGuard ?? {}), ...guard } as NonNullable<InterceptorUserConfig['actionGuard']>,
     },
   };
@@ -4281,7 +4288,17 @@ export default {
     // immediately and never requests approval — covered by regression tests.
     // Note: re-enabling the interceptor from openclaw.json requires a gateway
     // restart, since registration happens once at plugin load.
-    const interceptorDisabledInHostConfig = _configOverride?.interceptor?.enabled === false;
+    // #522 r7 FIND-2: `openclaw.json` is an UNSIGNED, same-UID file that the
+    // Action Guard does not itself gate writes to — so `interceptor.enabled:
+    // false` there was a one-key, unprivileged, silent way to take the whole
+    // gate off a host carrying a root-owned policy lock, which is exactly the
+    // defect #501 exists to close. The lock out-ranks the entry for the
+    // guard's own switches (`applyPolicyLockToPluginConfig`); it must out-rank
+    // it for whether the gate is REGISTERED too, or the precedence rule is
+    // decorative. #112's reason for the flag survives intact on an UNLOCKED
+    // host, which is every host the flag was written for.
+    const interceptorDisabledInHostConfig =
+      _configOverride?.interceptor?.enabled === false && !inlinePolicyLockPresent();
 
     if (!interceptorDisabledInHostConfig) {
       // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
