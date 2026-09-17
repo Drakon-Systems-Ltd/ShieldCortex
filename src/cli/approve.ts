@@ -19,9 +19,16 @@
  * refuse to run unless stdin and stdout are both TTYs, so an agent shelling out
  * cannot approve its own blocked command. There is no env-var escape hatch: one
  * would be indistinguishable from the bypass this exists to prevent.
+ *
+ * #502: the TTY check alone was defeated by `script -qec '…' /dev/null` (any
+ * pty wrapper). Both grant paths now ALSO require operator provenance — no
+ * agent-host environment marker, no agent process in the ancestry, and a
+ * session led by a shell rather than a pty tool. See approve-provenance.ts.
  */
 
 import { existsSync, readSync } from 'node:fs';
+
+import { describeProvenanceRefusal, operatorProvenance, type ProvenanceVerdict } from './approve-provenance.js';
 
 import {
   approveRequest,
@@ -143,6 +150,8 @@ export interface ApproveDeps {
   error?: (msg: string) => void;
   /** Injected by tests; the real one reads a line from the operator's TTY. */
   confirm?: (question: string) => boolean;
+  /** #502 — injected by tests; the real one walks env + /proc. */
+  provenance?: () => ProvenanceVerdict;
 }
 
 /**
@@ -189,7 +198,7 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
   if (denialIndex >= 0) {
     return runDenialRetry(
       { actionId: positional[0], ttlMs: ttlGiven ? ttlMs : DEFAULT_RETRY_GRANT_TTL_MS, anyOrigin, overrideDeny, reauth },
-      { now, home, log, err, interactive: deps.interactive, confirm: deps.confirm ?? defaultConfirm },
+      { now, home, log, err, interactive: deps.interactive, confirm: deps.confirm ?? defaultConfirm, provenance: deps.provenance ?? operatorProvenance },
     );
   }
 
@@ -210,6 +219,12 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
   if (!interactive) {
     err('shieldcortex approve must be run by a human in an interactive terminal.');
     err('Refusing: stdin/stdout are not TTYs, so this could be the agent approving its own blocked command.');
+    return 1;
+  }
+  // #502: a TTY is one syscall away; provenance is not.
+  const prov = (deps.provenance ?? operatorProvenance)();
+  if (!prov.ok) {
+    for (const line of describeProvenanceRefusal(prov)) err(line);
     return 1;
   }
 
@@ -246,6 +261,7 @@ interface DenialRetryDeps {
   err: (msg: string) => void;
   interactive?: boolean;
   confirm: (question: string) => boolean;
+  provenance: () => ProvenanceVerdict;
 }
 
 /**
@@ -280,6 +296,12 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
   if (!interactive) {
     err('shieldcortex approve --denial must be run by a human in an interactive terminal.');
     err('Refusing: stdin/stdout are not TTYs, so this could be the agent authorising its own retry.');
+    return 1;
+  }
+  // #502: same provenance bar as the held-call path.
+  const prov = deps.provenance();
+  if (!prov.ok) {
+    for (const line of describeProvenanceRefusal(prov)) err(line);
     return 1;
   }
 
