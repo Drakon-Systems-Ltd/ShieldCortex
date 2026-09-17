@@ -96,9 +96,20 @@ const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
 const INLINE_PROTECTED_ROOT_POINTER = '/etc/shieldcortex.conf';
 const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
 
-/** The exact posture an unverifiable-or-unreadable lock forces. Mirrors STRICT_FAILCLOSED_POSTURE. */
+/**
+ * The exact posture an unverifiable-or-unreadable lock forces. Mirrors
+ * STRICT_FAILCLOSED_POSTURE, key for key.
+ *
+ * `reviewedScripts` is here because of #522 (GPT-6 round-6, item 1): the
+ * evaluator and the reviewed-script checker load from `dist` INDEPENDENTLY of
+ * the policy reader, so with only the reader broken — absent, or contradicted
+ * by the inline probe — this posture was computed and then handed to a
+ * checker that still honoured the same-UID config's `reviewedScripts` entry.
+ * The lock's own `reviewedScripts: []` ceiling never applied, because the
+ * module that applies it is the one that is broken. No lying module needed.
+ */
 const INLINE_STRICT_POSTURE = {
-  actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false } },
+  actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false }, reviewedScripts: [] },
   defenceMode: 'strict',
 };
 
@@ -247,11 +258,25 @@ async function loadPolicyLock() {
  * the operator pinned.
  */
 function inlineStrictPosture(config) {
-  return {
+  const out = {
     ...config,
     actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
     defenceMode: INLINE_STRICT_POSTURE.defenceMode,
   };
+  // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
+  // `interceptor.actionGuard` alias gap-fills per key in
+  // flattenActionGuardConfig (#209). Every pinned key is now present on the
+  // top-level block, so the alias cannot win any of them through that merge —
+  // but strip its copies anyway, exactly as `applyStrictFailClosedPosture`
+  // does in dist, so the two implementations cannot drift into disagreeing
+  // about which spelling the merge consults.
+  const isBlock = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
+    const alias = { ...out.interceptor.actionGuard };
+    for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
+    out.interceptor = { ...out.interceptor, actionGuard: alias };
+  }
+  return out;
 }
 
 /** The lock statuses that mean "there is no lock here to obey". */

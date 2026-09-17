@@ -286,8 +286,10 @@ describe('#501 — both enforcement surfaces read the OS-owned policy lock', () 
   it('the inline strict posture matches STRICT_FAILCLOSED_POSTURE on both surfaces', async () => {
     const { STRICT_FAILCLOSED_POSTURE } = await import('../defence/iron-dome/policy-lock.js');
     const expected = STRICT_FAILCLOSED_POSTURE.actionGuard;
-    // Text-match the four values at each copy. A drifting fail-closed posture
-    // is a surface that is quietly less safe than its sibling.
+    // Text-match the five values at each copy. A drifting fail-closed posture
+    // is a surface that is quietly less safe than its sibling — #522 (GPT-6
+    // round-6, item 1) was exactly that: both inline copies pinned four keys
+    // while the dist constant pinned five.
     for (const [name, src] of [['hook', hookSrc], ['plugin', pluginIndexSrc]] as const) {
       const block = src.slice(src.indexOf('INLINE_STRICT'), src.indexOf('INLINE_STRICT') + 400);
       expect({ surface: name, enabled: /enabled:\s*true/.test(block) }).toEqual({ surface: name, enabled: expected.enabled });
@@ -295,6 +297,8 @@ describe('#501 — both enforcement surfaces read the OS-owned policy lock', () 
       expect({ surface: name, auto: /autoApprove:\s*\[\]/.test(block) }).toEqual({ surface: name, auto: expected.autoApprove.length === 0 });
       expect({ surface: name, broker: /broker:\s*\{\s*enabled:\s*false\s*\}/.test(block) })
         .toEqual({ surface: name, broker: expected.broker.enabled === false });
+      expect({ surface: name, reviewed: /reviewedScripts:\s*\[\]/.test(block) })
+        .toEqual({ surface: name, reviewed: expected.reviewedScripts.length === 0 });
     }
   });
 

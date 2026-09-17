@@ -1911,12 +1911,22 @@ const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
 const INLINE_PROTECTED_ROOT_POINTER = '/etc/shieldcortex.conf';
 const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
 
-/** The posture an unverifiable-or-unreadable lock forces. Mirrors STRICT_FAILCLOSED_POSTURE. */
+/**
+ * The posture an unverifiable-or-unreadable lock forces. Mirrors
+ * STRICT_FAILCLOSED_POSTURE, key for key — including `reviewedScripts`
+ * (#522, GPT-6 round-6, item 1), so the two inline copies and the dist
+ * constant can never disagree about which keys a fail-closed posture pins.
+ * On this surface a module that proved unusable for the policy READ is
+ * already distrusted for VERDICTS too (#522 r7 FIND-3), so the pin is parity
+ * rather than a reachable behavioural change today; the enforcement-surface
+ * parity test holds it in step.
+ */
 const INLINE_STRICT_GUARD_POSTURE = {
   enabled: true,
   enforce: true,
   autoApprove: [] as string[],
   broker: { enabled: false },
+  reviewedScripts: [] as unknown[],
 };
 
 /**

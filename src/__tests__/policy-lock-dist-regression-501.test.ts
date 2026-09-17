@@ -23,7 +23,7 @@
  * refusing to disable the guard.
  */
 import { spawnSync } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -289,13 +289,19 @@ describe('#501 with a forged same-UID policy lock, the built artefacts fail clos
  * resolved from `<stage>/scripts/pre-tool-hook.mjs`'s own location. Which makes
  * these the honest shapes anyway — a tampered install, not a variable.
  */
-function stageHook(dist: 'absent' | 'lying'): string {
+function stageHook(dist: 'absent' | 'lying' | 'reader-absent'): string {
   const stage = mkdtempSync(join(tmpdir(), `sc-501-stage-${dist}-`));
   cpSync(join(repoRoot, 'scripts'), join(stage, 'scripts'), { recursive: true });
   if (dist === 'lying') {
     cpSync(join(repoRoot, 'dist'), join(stage, 'dist'), { recursive: true });
     // Same export surface as the real module, and it says there is no lock.
     writeFileSync(join(stage, 'dist', 'defence', 'iron-dome', 'policy-lock.js'), LYING_POLICY_LOCK_JS);
+  } else if (dist === 'reader-absent') {
+    // The PARTIAL dist (#522, GPT-6 round-6, item 1): only the policy reader
+    // is gone; the evaluator, the script resolver and the reviewed-script
+    // checker are all still there and still load.
+    cpSync(join(repoRoot, 'dist'), join(stage, 'dist'), { recursive: true });
+    rmSync(join(stage, 'dist', 'defence', 'iron-dome', 'policy-lock.js'), { force: true });
   }
   return stage;
 }
@@ -419,6 +425,78 @@ describe('#501 a LYING dist policy reader cannot fail open either (review BLOCK-
     const stage = stageHook('lying');
     try {
       const run = runStagedHook(stage, 'ls -la');
+      expect(run.decision).not.toBe('deny');
+      expect(run.stderr).not.toMatch(/policy lock/i);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * #522 (GPT-6 round-6, item 1) — the inline strict posture empties
+ * `reviewedScripts` too.
+ *
+ * The "missing dist" suite above covers the FULL-dist-gone case, where the
+ * guard itself is absent and the inline catastrophic fallback never folds a
+ * script at all. This is the PARTIAL case: only `policy-lock.js` is gone (or
+ * lies), while the evaluator, the script resolver and the reviewed-script
+ * checker are present and load independently of it. The hook then computes
+ * the inline strict posture — which pinned enabled/enforce/autoApprove/broker
+ * and NOT `reviewedScripts` — and hands `cfg.reviewedScripts`, straight from
+ * the unsigned same-UID config, to `loadReviewedScriptCheck`. A path+hash
+ * entry there exempted that file's body, catastrophic scan included, with a
+ * lock on disk and nothing lying about the verdict. The lock's own empty
+ * ceiling never applied because the module that applies it is the broken one.
+ */
+describe('#522 the inline strict posture empties reviewedScripts too (GPT-6 round-6, item 1)', () => {
+  let scriptPath: string;
+  let scriptSha256: string;
+
+  beforeEach(() => {
+    scriptPath = join(home, 'reviewed.sh');
+    const body = `#!/bin/bash\n${SC01_CATASTROPHIC}\n`;
+    writeFileSync(scriptPath, body);
+    scriptSha256 = createHash('sha256').update(body, 'utf8').digest('hex');
+    forgeSignedConfig({
+      actionGuard: { enabled: true, enforce: true, reviewedScripts: [{ path: scriptPath, sha256: scriptSha256 }] },
+    });
+  });
+
+  const scriptCommand = () => `bash ${scriptPath}`;
+
+  it('with the reader ABSENT and a lock on disk, a same-UID reviewed entry does not exempt the body', () => {
+    forgePolicyLock({ version: 1, actionGuard: { enabled: true, enforce: true, reviewedScripts: [] } });
+    const stage = stageHook('reader-absent');
+    try {
+      const run = runStagedHook(stage, scriptCommand());
+      expect(run.decision).toBe('deny');
+      expect(run.stderr).toMatch(/policy lock is present but the dist policy reader could not be loaded/);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+
+  it('with the reader LYING and a lock on disk, the same entry still does not exempt the body', () => {
+    forgePolicyLock({ version: 1, actionGuard: { enabled: true, enforce: true, reviewedScripts: [] } });
+    const stage = stageHook('lying');
+    try {
+      const run = runStagedHook(stage, scriptCommand());
+      expect(run.decision).toBe('deny');
+      expect(run.stderr).toMatch(/reports no policy lock, but one is present on disk/);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+
+  it('with NO lock, that same partial dist still honours the entry — the fixture has teeth', () => {
+    // The positive control: the reviewed-script exemption (#189) works on the
+    // staged partial dist exactly as on a healthy one when there is no lock
+    // to obey, so the two denials above are the posture, not a broken stage.
+    rmSync(join(protectedRoot, 'policy.json'), { force: true });
+    const stage = stageHook('reader-absent');
+    try {
+      const run = runStagedHook(stage, scriptCommand());
       expect(run.decision).not.toBe('deny');
       expect(run.stderr).not.toMatch(/policy lock/i);
     } finally {

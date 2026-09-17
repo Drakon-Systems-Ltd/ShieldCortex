@@ -4294,6 +4294,12 @@ function foldScriptSources(
       ? commandScanText(deobfuscateIfs(src))
       : deobfuscateIfs(src);
     if (isReviewed) {
+      // #522 (GPT-6 round-6) residual, NAMED rather than closed: a reviewed
+      // entry skips this file's body — catastrophic scan included — before
+      // anything below runs. That is #189's design (review relieves the
+      // FILE, never the invoking command line), and since #522 item A the set
+      // of entries that can reach here is bounded by the root-owned lock's
+      // ceiling rather than by the same-UID config alone.
       const nestedOfReviewed = next.lang === 'sh' ? detectScriptInvocations(reviewedScan) : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
