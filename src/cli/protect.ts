@@ -29,7 +29,9 @@ import { normaliseReviewedScripts } from '../defence/iron-dome/reviewed-scripts.
 import {
   defaultProtectedFsSeam,
   resolveProtectedRoot,
+  verifyProtectedDirectoryChain,
   verifyProtectedFile,
+  type ProtectedFileVerdict,
   type ProtectedFsSeam,
   type ProtectedRootResolution,
 } from '../defence/iron-dome/protected-root.js';
@@ -178,6 +180,50 @@ function verifyAsAgent(path: string): ReturnType<typeof verifyProtectedFile> {
 }
 
 /**
+ * Verify the DESTINATION before anything is created there (#522, GPT-6
+ * round-6, item 2).
+ *
+ * `protect` used to mkdir, chmod, write and rename first and ask
+ * {@link verifyAsAgent} afterwards. The post-write check is honest about the
+ * result, but by then a privileged process had already created directories,
+ * dropped a file and chmodded a directory at a path whose ancestry the AGENT
+ * uid controls — on that uid's terms (a symlinked or agent-writable root is
+ * exactly the shape `verifyProtectedDirectoryChain` exists to refuse). The
+ * lock cannot yet be verified as a file, because it does not exist; what CAN
+ * be verified is the directory chain it will land in, from the deepest
+ * ancestor that exists up to `/`, under the same rules the runtime reader
+ * applies. A chain that fails here would fail the post-write check too, so
+ * refusing now loses nothing and touches nothing.
+ *
+ * Judged as the agent, like every other check in this file. Exported for the
+ * seam-driven unit tests; the CLI never passes a seam.
+ */
+export function preflightLockDestination(
+  lockPath: string,
+  seam: ProtectedFsSeam = agentSeam(),
+): ProtectedFileVerdict {
+  const euid = seam.geteuid();
+  if (euid === null) {
+    return { ok: false, reason: 'euid-unavailable', detail: 'This runtime exposes no effective uid, so ownership cannot be compared.' };
+  }
+  const existing = seam.lstat(lockPath);
+  if (existing !== null && existing.isDirectory) {
+    return { ok: false, reason: 'not-regular-file', detail: `${lockPath} is a directory; refusing to replace it.` };
+  }
+  // The deepest EXISTING directory on the lexical chain. `protect` may be
+  // creating the protected root itself, in which case the chain that decides
+  // who could replace it starts at the root's first existing ancestor.
+  let dir = dirname(lockPath);
+  for (;;) {
+    if (seam.lstat(dir) !== null) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return verifyProtectedDirectoryChain(dir, euid, seam);
+}
+
+/**
  * Resolve the root the AGENT will read — which is the only root worth writing.
  *
  * Same seam, same reason as {@link verifyAsAgent}, and the #501 review's
@@ -236,6 +282,10 @@ export function runProtect(args: string[] = []): ProtectResult {
     lines.push('');
     lines.push(`Pinned keys: ${pinned}`);
     lines.push('config.json may only TIGHTEN these; it can never loosen them.');
+    const preflight = preflightLockDestination(lockPath);
+    lines.push(preflight.ok
+      ? `Destination ${dirname(lockPath)} verifies for the agent: ${preflight.detail}`
+      : `WARNING: the real write would be REFUSED — ${dirname(lockPath)} would not verify for the agent: ${preflight.detail}`);
     return { code: 0, lines };
   }
 
@@ -247,6 +297,18 @@ export function runProtect(args: string[] = []): ProtectResult {
       `${euid ?? 'unknown'} would produce a file that looks like a lock and protects nothing.`,
     );
     lines.push(`${PROTECT_HINT}. Add --dry-run to see exactly what it would write first.`);
+    return { code: 1, lines };
+  }
+
+  // #522 (GPT-6 round-6, item 2): the destination is judged BEFORE the first
+  // mutation. Everything below this line creates, chmods, writes or renames.
+  const preflight = preflightLockDestination(lockPath);
+  if (!preflight.ok) {
+    lines.push(`Refusing to write the policy lock: ${dirname(lockPath)} would not verify for the agent — ${preflight.detail}`);
+    lines.push(
+      'Nothing was written. A lock in a directory chain the agent uid could replace would protect nothing; ' +
+      'make that chain root-owned, not group- or other-writable, with no agent-owned symlinks, and re-run.',
+    );
     return { code: 1, lines };
   }
 

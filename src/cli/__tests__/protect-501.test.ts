@@ -19,11 +19,12 @@ import {
   buildLockedPolicy,
   parseProtectArgs,
   policyStatusLines,
+  preflightLockDestination,
   resolveSourceConfigPath,
   runProtect,
 } from '../protect.js';
 import { POLICY_LOCK_FILENAME, clearPolicyLockReportState } from '../../defence/iron-dome/policy-lock.js';
-import { PROTECTED_ROOT_ENV } from '../../defence/iron-dome/protected-root.js';
+import { PROTECTED_ROOT_ENV, type ProtectedFsSeam, type ProtectedStat } from '../../defence/iron-dome/protected-root.js';
 
 const OPTS = { dryRun: false, fromConfig: false } as const;
 
@@ -181,6 +182,14 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
     expect(result.lines.join('\n')).toMatch(/could not be parsed — pinning defaults/);
     expect(result.code).toBe(0);
   });
+
+  it('--dry-run reports whether the destination would verify for the agent', () => {
+    // The suite's tmp root is owned by this very uid, which is the agent uid
+    // the seam reports — so the honest answer is "would be refused".
+    const text = runProtect(['--dry-run']).lines.join('\n');
+    expect(text).toMatch(/would be REFUSED/);
+    expect(text).toMatch(/would not verify for the agent/);
+  });
 });
 
 describe('#501 protect writes to the root the RUNTIME reads (review SHOULD-FIX-6)', () => {
@@ -222,24 +231,139 @@ describe('#501 protect writes to the root the RUNTIME reads (review SHOULD-FIX-6
     expect(privileged).toContain(path.join(protectedRoot, POLICY_LOCK_FILENAME));
   });
 
-  it('the privileged WRITE lands in that same root, not in the default one', () => {
-    // The consequence, stated where it bites. Before the fix this ran against
-    // /etc/shieldcortex and failed with "Could not create" — or, on a host where
-    // that directory happens to exist, succeeded at a path the runtime is not
-    // reading. The seam stands in for the pointer file a real pointer host has:
-    // what is under test is that `protect` resolves the root the AGENT resolves,
-    // whichever rule produced it.
+  it('the privileged WRITE targets that same root, not the default one — and is judged there', () => {
+    // The consequence, stated where it bites. Before SHOULD-FIX-6 this ran
+    // against /etc/shieldcortex; the seam stands in for the pointer file a real
+    // pointer host has, and what is under test is that `protect` resolves the
+    // root the AGENT resolves. The root it resolves to here is owned by this
+    // uid, which is exactly the destination #522 (GPT-6 round-6, item 2) says
+    // must be refused BEFORE anything is created — the old assertion at this
+    // spot enshrined write-then-fail.
     const result = asPrivileged(() => runProtect([]));
     const lockPath = path.join(protectedRoot, POLICY_LOCK_FILENAME);
-    expect(fs.existsSync(lockPath)).toBe(true);
-    expect(result.lines.join('\n')).toContain(lockPath);
-    expect(result.lines.join('\n')).not.toMatch(/Could not create/);
-    // Written by this uid, so it cannot verify FOR this uid — and `protect`
-    // says so rather than reporting success. That half is pre-existing
-    // behaviour; it is asserted here because it is what makes the write path
-    // safe to exercise in an unprivileged suite at all.
-    expect(result.lines.join('\n')).toMatch(/will NOT verify for the agent/);
+    const text = result.lines.join('\n');
+    expect(text).toContain(path.dirname(lockPath));
+    expect(text).not.toMatch(/\/etc\/shieldcortex/);
+    expect(text).toMatch(/Refusing to write the policy lock/);
+    expect(text).toMatch(/would not verify for the agent/);
+    expect(text).toMatch(/Nothing was written/);
+    expect(text).not.toMatch(/WROTE/);
     expect(result.code).toBe(1);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+});
+
+describe('#522 protect judges the destination BEFORE touching the disk (GPT-6 round-6, item 2)', () => {
+  function asPrivileged<T>(run: () => T): T {
+    const prevSudoUid = process.env.SUDO_UID;
+    process.env.SUDO_UID = String(typeof process.geteuid === 'function' ? process.geteuid() : 1001);
+    const spy = jest.spyOn(process, 'geteuid').mockReturnValue(0);
+    try {
+      return run();
+    } finally {
+      spy.mockRestore();
+      if (prevSudoUid === undefined) delete process.env.SUDO_UID;
+      else process.env.SUDO_UID = prevSudoUid;
+    }
+  }
+
+  /**
+   * The zero-mutation canary. `code: 1` and a refusal LINE are not the claim
+   * #522 item 2 makes — the claim is that the privileged run touched nothing,
+   * and the old write-then-fail path returned `code: 1` too. So snapshot the
+   * destination's own metadata as well as its contents: `mkdirSync` would add
+   * an entry, `chmodSync(protectedRoot, 0o755)` would change `mode`, and
+   * `writeFileSync`/`renameSync` of the temp file would move `mtimeMs`.
+   */
+  const snapshot = (dir: string) => {
+    const st = fs.statSync(dir);
+    return { entries: fs.readdirSync(dir).sort(), mode: st.mode, uid: st.uid, gid: st.gid, mtimeMs: st.mtimeMs };
+  };
+
+  it('an agent-owned EXISTING root is refused with nothing created, chmodded or renamed inside it', () => {
+    const before = snapshot(protectedRoot);
+    const result = asPrivileged(() => runProtect([]));
+    expect(result.code).toBe(1);
+    expect(result.lines.join('\n')).toMatch(/Nothing was written/);
+    expect(snapshot(protectedRoot)).toEqual(before);
+  });
+
+  it('a MISSING root under an agent-owned parent is refused and the root is not created', () => {
+    const nested = path.join(protectedRoot, 'nested', 'deeper');
+    process.env[PROTECTED_ROOT_ENV] = nested;
+    const result = asPrivileged(() => runProtect([]));
+    expect(result.code).toBe(1);
+    expect(result.lines.join('\n')).toMatch(/Refusing to write the policy lock/);
+    expect(fs.existsSync(nested)).toBe(false);
+    expect(fs.existsSync(path.join(protectedRoot, 'nested'))).toBe(false);
+  });
+
+  describe('preflightLockDestination, against an injected seam', () => {
+    const AGENT = 1001;
+    const ROOT_DIR: ProtectedStat = { uid: 0, gid: 0, mode: 0o40755, isFile: false, isDirectory: true, isSymbolicLink: false };
+    const AGENT_DIR: ProtectedStat = { ...ROOT_DIR, uid: AGENT };
+    const WORLD_WRITABLE_DIR: ProtectedStat = { ...ROOT_DIR, mode: 0o40777 };
+
+    /** Unknown paths are root-owned 0755 directories; `null` means absent. */
+    function seam(entries: Record<string, ProtectedStat | null>): ProtectedFsSeam {
+      const lstat = (p: string): ProtectedStat | null => (p in entries ? entries[p] : ROOT_DIR);
+      return {
+        lstat,
+        stat: lstat,
+        readlink: () => null,
+        readFile: () => null,
+        geteuid: () => AGENT,
+        platform: 'linux',
+        env: () => undefined,
+      };
+    }
+
+    it('passes a root-owned chain whose root already exists', () => {
+      const v = preflightLockDestination('/etc/shieldcortex/policy.json', seam({ '/etc/shieldcortex/policy.json': null }));
+      expect(v.ok).toBe(true);
+    });
+
+    it('passes a MISSING root whose first existing ancestor chain is root-owned', () => {
+      const v = preflightLockDestination(
+        '/etc/shieldcortex/policy.json',
+        seam({ '/etc/shieldcortex/policy.json': null, '/etc/shieldcortex': null }),
+      );
+      expect(v.ok).toBe(true);
+    });
+
+    it('refuses an existing root owned by the agent', () => {
+      const v = preflightLockDestination(
+        '/etc/shieldcortex/policy.json',
+        seam({ '/etc/shieldcortex/policy.json': null, '/etc/shieldcortex': AGENT_DIR }),
+      );
+      expect(v).toMatchObject({ ok: false, reason: 'parent-owned-by-agent' });
+    });
+
+    it("refuses a MISSING root whose parent the agent owns — the mkdir would be on the agent's terms", () => {
+      const v = preflightLockDestination(
+        '/home/agent/.protected/policy.json',
+        seam({ '/home/agent/.protected/policy.json': null, '/home/agent/.protected': null, '/home/agent': AGENT_DIR }),
+      );
+      expect(v).toMatchObject({ ok: false, reason: 'parent-owned-by-agent' });
+    });
+
+    it('refuses a world-writable ancestor anywhere on the chain', () => {
+      const v = preflightLockDestination(
+        '/etc/shieldcortex/policy.json',
+        seam({ '/etc/shieldcortex/policy.json': null, '/etc': WORLD_WRITABLE_DIR }),
+      );
+      expect(v).toMatchObject({ ok: false, reason: 'parent-group-or-other-writable' });
+    });
+
+    it('refuses to replace a directory sitting at the lock path', () => {
+      const v = preflightLockDestination('/etc/shieldcortex/policy.json', seam({ '/etc/shieldcortex/policy.json': ROOT_DIR }));
+      expect(v).toMatchObject({ ok: false, reason: 'not-regular-file' });
+    });
+
+    it('refuses when the runtime has no effective uid to compare against', () => {
+      const s = { ...seam({}), geteuid: () => null };
+      expect(preflightLockDestination('/etc/shieldcortex/policy.json', s)).toMatchObject({ ok: false, reason: 'euid-unavailable' });
+    });
   });
 });
 
