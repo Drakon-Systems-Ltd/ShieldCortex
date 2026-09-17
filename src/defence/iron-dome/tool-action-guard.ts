@@ -2561,6 +2561,22 @@ const EVAL_REACTIVATOR = /\beval\b/;
 // `awk` are deliberately excluded — `s///e` and `system()` execute their data.
 const DATA_COMMAND = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log)\b)/i;
 
+/**
+ * The exception to `git log`/`git grep`'s quoted-argument-is-data rule.
+ *
+ * A pattern argument to a searcher is the thing being looked for. `--output=`
+ * and `--ext-diff` are not patterns: one names a file the stage WRITES, the
+ * other a program it runs. Quoting one of them therefore turned a write into a
+ * data mention, and the path rules dropped the signal entirely (#522 r2).
+ * Narrow on purpose — only those two long forms, only on a `git` statement, in
+ * either of the two spellings (glued value inside the quote, or the flag in the
+ * prefix with the path quoted after it).
+ */
+function gitQuotedArgIsWriteFlag(bare: string, quoted: string): boolean {
+  if (!/^git\s/i.test(bare)) return false;
+  return /(?:^|\s)--(?:output|ext-diff)\b/i.test(bare) || /^--(?:output|ext-diff)\b/i.test(quoted);
+}
+
 // Long-form flags whose value is human TEXT, for any command (issue #89 classes
 // 3 and 7). `openclaw message send --text "…"`, `gh pr comment --body "…"` and
 // `gh issue create --title/--body "…"` were gated — and, for a body quoting
@@ -2874,7 +2890,8 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
           // A quote in command position, in assignment position, inside a
           // command substitution, or after any other command, stays executed.
           const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
-          const isDataCommand = !truncated && DATA_COMMAND.test(bare);
+          const isDataCommand = !truncated && DATA_COMMAND.test(bare)
+            && !gitQuotedArgIsWriteFlag(bare, text.slice(open + 1, i));
           const isTextFlag = !truncated && TEXT_FLAG.test(prefix)
             && !EXEC_COMMAND_WORD.test(bare.trim().split(/\s+/)[0] ?? '');
           if (!evalPresent && depth === 0 && !isAssignment && (isDataCommand || isTextFlag)) {
@@ -3166,35 +3183,22 @@ const LOCK_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'jq'].
 /** `git <sub>` stages that only read the working tree / history. */
 const GIT_READONLY_SUBCOMMAND_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
 /**
- * `--output` writes a file; `--ext-diff` runs a configured driver. Fail closed.
+ * `--output=` writes a file; `--ext-diff` runs a configured driver. Fail closed.
  *
- * Matched per ARGV TOKEN, with shell quoting stripped first — NOT against the
- * raw stage text. The previous form was `/\s--(?:output\b|ext-diff\b)/i`, which
- * required whitespace IMMEDIATELY before the `--`. A shell-quoted token puts a
- * quote character there instead, so `git diff "--output=<settings>" -- x` never
- * matched and rode straight through the read-only carve-out as an inspection
- * (#522 GitHub round-2, G2). Quoting the flag is the whole bypass.
- *
- * `-o` is included because it is the short form parse-options accepts for
- * `--output`, glued value and all (`-o<file>`). Over-gating a `git ls-files -o`
- * that also names a lock path costs an approval card on a rare shape; missing a
- * write costs the lock.
+ * Judged per TOKEN, with quotes stripped, rather than against the raw spelling:
+ * the previous pattern required whitespace immediately before `--`, so an
+ * ordinary quoted argument slipped past it and a stage that writes a file read
+ * as a stage that only inspects one (#522 r2). The separate-token spelling
+ * (`--output <file>`) and the short form are covered for the same reason.
  */
-const GIT_WRITE_OR_EXEC_FLAG_RE = /^(?:--(?:output|ext-diff)(?:=|$)|-o(?:$|[^-]))/i;
-
-/**
- * Shell quoting removed so a quoted flag is still recognised as that flag.
- * Every quote character goes, not just a surrounding pair: `--out"put"=x` is
- * the same argv word to the shell, and this test only ever asks "is this word
- * a write flag", so stripping too much can only fail closed.
- */
-function dequoteArgvToken(token: string): string {
-  return token.replace(/["']/g, '');
-}
-
-/** True when any token of a `git` stage writes a file or runs a diff driver. */
-function gitStageWritesOrExecs(tokens: readonly string[]): boolean {
-  return tokens.some(t => GIT_WRITE_OR_EXEC_FLAG_RE.test(dequoteArgvToken(t)));
+function gitStageWritesOrExecs(stage: string): boolean {
+  for (const raw of stage.split(/\s+/)) {
+    if (!raw) continue;
+    const token = raw.replace(/['"]/g, '');
+    if (token === '-o') return true;
+    if (/^--(?:output|ext-diff)\b/i.test(token)) return true;
+  }
+  return false;
 }
 /** Either #501 path rule. Built from the same constants the DANGEROUS row uses. */
 const POLICY_LOCK_PATH_RE = new RegExp(`${PROTECTED_ROOT_PATH_RE.source}|${CLAUDE_SETTINGS_PATH_RE.source}`, 'i');
@@ -3312,7 +3316,7 @@ function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolea
         // fails closed (`dir` is not a read-only subcommand) — by design.
         const sub = toks.slice(1).find(t => !t.startsWith('-')) ?? '';
         if (!GIT_READONLY_SUBCOMMAND_RE.test(sub)) return false;
-        if (gitStageWritesOrExecs(toks)) return false;
+        if (gitStageWritesOrExecs(stage)) return false;
         continue;
       }
       if (!opts.verbRe.test(base)) return false;

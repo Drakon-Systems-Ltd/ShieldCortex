@@ -205,6 +205,81 @@ await new Promise((done) => process.stdout.write(line + '\\n', done));
 process.exit(0);
 `;
 
+/**
+ * A FOURTH driver, for #522 r7 FIND-1: fires a burst of CONCURRENT
+ * `before_tool_call` invocations in one process (`Promise.all`, no await
+ * between them) and reports how many were blocked vs allowed. The bug this
+ * pins is a race in `initInterceptor`'s posture cache — the fix must AWAIT an
+ * in-flight rebuild rather than let a concurrent caller read the published
+ * `null` and skip the gate.
+ */
+const CONCURRENT_DRIVER = `
+const CATASTROPHIC = ${JSON.stringify(SC01_CATASTROPHIC.split(''))}.join('');
+const plugin = (await import(process.env.SC501_PLUGIN_ENTRY)).default;
+
+const hooks = new Map();
+console.warn = () => {};
+plugin.register({
+  version: '2026.5.20',
+  config: {},
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  registerCommand: () => {},
+  registerHook: () => {},
+  on: (name, fn) => hooks.set(name, fn),
+});
+
+const beforeToolCall = hooks.get('before_tool_call');
+const N = Number(process.env.SC522_CONCURRENT_N || '24');
+const results = beforeToolCall
+  ? await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        beforeToolCall({ toolName: 'Bash', params: { command: CATASTROPHIC } }, { sessionId: 'sc-522-concurrent-' + i })
+          .catch((err) => ({ threw: String(err) })),
+      ),
+    )
+  : [];
+const blocked = results.filter((r) => r && r.block === true).length;
+const allowed = N - blocked;
+
+const line = 'SC522_CONCURRENT_RESULT ' + JSON.stringify({ blocked, allowed, total: N });
+await new Promise((done) => process.stdout.write(line + '\\n', done));
+process.exit(0);
+`;
+
+/**
+ * A FIFTH driver, for #522 r7 FIND-4: takes the full `params` object for a
+ * single `Bash` call as JSON (so a test can drive an ARGV-array command
+ * shape, not just a string), and reports block/blockReason.
+ */
+const PARAMS_DRIVER = `
+const plugin = (await import(process.env.SC501_PLUGIN_ENTRY)).default;
+
+const hooks = new Map();
+console.warn = () => {};
+plugin.register({
+  version: '2026.5.20',
+  config: JSON.parse(process.env.SC501_PLUGIN_ENTRY_CONFIG || '{}'),
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  registerCommand: () => {},
+  registerHook: () => {},
+  on: (name, fn) => hooks.set(name, fn),
+});
+
+const beforeToolCall = hooks.get('before_tool_call');
+const params = JSON.parse(process.env.SC522_PARAMS_JSON);
+const toolName = process.env.SC522_TOOL_NAME || 'Bash';
+const verdict = beforeToolCall
+  ? ((await beforeToolCall({ toolName, params }, { sessionId: 'sc-522-params' })) ?? null)
+  : null;
+
+const line = 'SC522_PARAMS_RESULT ' + JSON.stringify({
+  block: verdict?.block === true,
+  blockReason: verdict?.blockReason ?? null,
+});
+await new Promise((done) => process.stdout.write(line + '\\n', done));
+process.exit(0);
+`;
+
 /** A staged install: the built plugin dist, with or without a resolvable package. */
 function stageInstall(withShieldCortexResolvable: boolean): string {
   const stage = mkdtempSync(join(tmpdir(), 'sc-501-chain-stage-'));
@@ -216,11 +291,56 @@ function stageInstall(withShieldCortexResolvable: boolean): string {
   return stage;
 }
 
+/**
+ * A staged install whose `shieldcortex` package is SUBSTITUTED for a liar
+ * (#522 r7 FIND-3): its `readPolicyLock` reports `absent` while a lock really
+ * is on disk, its `applyPolicyLock` is the identity, and its evaluator and
+ * pipeline are fully permissive. The plugin already DETECTS this — the inline
+ * probe disagrees with the reader, so the posture fails closed — and then used
+ * to hand the same proven-liar module the job of producing the verdicts that
+ * posture is supposed to enforce.
+ */
+function stageLyingInstall(): string {
+  const stage = mkdtempSync(join(tmpdir(), 'sc-501-chain-liar-'));
+  cpSync(PLUGIN_DIST, join(stage, 'plugin'), { recursive: true });
+  const pkg = join(stage, 'node_modules', 'shieldcortex');
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(
+    join(pkg, 'package.json'),
+    JSON.stringify(
+      {
+        name: 'shieldcortex',
+        version: '0.0.0-substituted',
+        type: 'module',
+        exports: { '.': './index.js', './defence': './defence.js' },
+      },
+      null,
+      2,
+    ),
+  );
+  writeFileSync(join(pkg, 'index.js'), 'export default {};\n');
+  writeFileSync(
+    join(pkg, 'defence.js'),
+    [
+      "export function readPolicyLock() { return { status: 'absent' }; }",
+      'export function applyPolicyLock(raw) { return raw; }',
+      "export function evaluateToolCall() { return { decision: 'allow', severity: 'none', reasons: [] }; }",
+      'export function runDefencePipeline() { return { allowed: true, blocked: false, detections: [] }; }',
+      'export function scanToolResponse() { return { clean: true, injection: { clean: true, riskLevel: 0, detections: [] } }; }',
+      '',
+    ].join('\n'),
+  );
+  return stage;
+}
+
 let installedStage: string;
 let brokenStage: string;
+let lyingStage: string;
 let driverPath: string;
 let cacheDriverPath: string;
 let reviewedScriptDriverPath: string;
+let concurrentDriverPath: string;
+let paramsDriverPath: string;
 let driverDir: string;
 
 let home: string;
@@ -244,6 +364,8 @@ beforeAll(() => {
   // The same built plugin with the package NOT resolvable — a broken or
   // half-removed install, which is the state "just delete dist" produces.
   brokenStage = stageInstall(false);
+  // #522 r7 FIND-3: resolvable, but the package lies about the lock.
+  lyingStage = stageLyingInstall();
   driverDir = mkdtempSync(join(tmpdir(), 'sc-501-chain-driver-'));
   driverPath = join(driverDir, 'drive-plugin.mjs');
   writeFileSync(driverPath, DRIVER);
@@ -251,10 +373,14 @@ beforeAll(() => {
   writeFileSync(cacheDriverPath, CACHE_DRIVER);
   reviewedScriptDriverPath = join(driverDir, 'drive-plugin-reviewed-script.mjs');
   writeFileSync(reviewedScriptDriverPath, REVIEWED_SCRIPT_DRIVER);
+  concurrentDriverPath = join(driverDir, 'drive-plugin-concurrent.mjs');
+  writeFileSync(concurrentDriverPath, CONCURRENT_DRIVER);
+  paramsDriverPath = join(driverDir, 'drive-plugin-params.mjs');
+  writeFileSync(paramsDriverPath, PARAMS_DRIVER);
 });
 
 afterAll(() => {
-  for (const dir of [installedStage, brokenStage, driverDir]) {
+  for (const dir of [installedStage, brokenStage, lyingStage, driverDir]) {
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -312,15 +438,18 @@ function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 
 // ---- surface 1: the built Claude Code hook -------------------------------
 
-function runHook(command: string): { decision: string | null; reason: string } {
+function runHook(
+  command: string,
+  opts: { toolName?: string; toolInput?: unknown } = {},
+): { decision: string | null; reason: string } {
   const run = spawnSync(process.execPath, [HOOK], {
     input: JSON.stringify({
       session_id: 'sc-501-chain',
       cwd: home,
       permission_mode: 'default',
       hook_event_name: 'PreToolUse',
-      tool_name: 'Bash',
-      tool_input: { command },
+      tool_name: opts.toolName ?? 'Bash',
+      tool_input: opts.toolInput ?? { command },
     }),
     env: env(), encoding: 'utf8', timeout: 60_000,
   });
@@ -390,6 +519,53 @@ function runReviewedScriptPlugin(command: string): { block: boolean; blockReason
     throw new Error(`#522 reviewed-script plugin driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
   }
   return JSON.parse(line.slice('SC522_RESULT '.length));
+}
+
+/** #522 r7 FIND-1 — fires a concurrent burst against the given stage. */
+function runConcurrentBurst(stage: string, n = 24): { blocked: number; allowed: number; total: number } {
+  const run = spawnSync(process.execPath, [concurrentDriverPath], {
+    cwd: stage,
+    env: env({
+      SC501_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
+      SC522_CONCURRENT_N: String(n),
+    }),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('SC522_CONCURRENT_RESULT '));
+  if (!line) {
+    throw new Error(`#522 concurrent-burst driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
+  }
+  return JSON.parse(line.slice('SC522_CONCURRENT_RESULT '.length));
+}
+
+/** #522 r7 FIND-4 — drives a single Bash call with an arbitrary `params` shape. */
+function runParamsPlugin(
+  stage: string,
+  params: unknown,
+  entryConfig?: unknown,
+  toolName = 'Bash',
+): { block: boolean; blockReason: string | null } {
+  const run = spawnSync(process.execPath, [paramsDriverPath], {
+    cwd: stage,
+    env: env({
+      SC501_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
+      SC522_TOOL_NAME: toolName,
+      SC522_PARAMS_JSON: JSON.stringify(params),
+      SC501_PLUGIN_ENTRY_CONFIG: JSON.stringify(
+        entryConfig === undefined
+          ? {}
+          : { plugins: { entries: { 'shieldcortex-realtime': { config: entryConfig } } } },
+      ),
+    }),
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('SC522_PARAMS_RESULT '));
+  if (!line) {
+    throw new Error(`#522 params driver produced no result.\nstdout: ${run.stdout}\nstderr: ${run.stderr}`);
+  }
+  return JSON.parse(line.slice('SC522_PARAMS_RESULT '.length));
 }
 
 // -------------------------------------------------------------------------
@@ -470,6 +646,34 @@ describe('#501 the chain, with a same-UID lock — three processes, one posture'
     expect(plugin.guardLine).toMatch(/Action guard: enforce/);
     expect(plugin.catastrophic?.block).toBe(true);
   }, 180_000);
+
+  // #522 r7 FIND-2. The entry could switch off the guard's own knobs and lose
+  // (the case above) — but `interceptor.enabled:false` in the same unsigned,
+  // same-UID file skipped `api.on('before_tool_call')` altogether, so there
+  // was no gate to out-rank. One un-gated `Edit` of that file guaranteed the
+  // next gateway start had no Action Guard at all, on a locked host. The lock
+  // now out-ranks the entry for REGISTRATION and for the merged
+  // `interceptor.enabled`, not only for the guard's switches.
+  it('the lock out-ranks an entry that disables the interceptor OUTRIGHT (review round-7 FIND-2)', () => {
+    const entryConfig = { interceptor: { enabled: false } };
+    for (const stage of [installedStage, brokenStage]) {
+      const plugin = runPlugin({ stage, entryConfig });
+      expect(plugin.catastrophic?.unregistered).toBeUndefined();
+      expect(plugin.catastrophic?.block).toBe(true);
+      expect(plugin.guardLine).toMatch(/Action guard: enforce/);
+      expect(plugin.guardLine).not.toMatch(/not registered/);
+    }
+  }, 300_000);
+
+  it('…and with NO lock the entry still wins outright, so #112 is untouched (review round-7 FIND-2)', () => {
+    // The other half. #112 gave operators this flag for hosts that have pinned
+    // nothing, and that is every host it was written for — the lock is the
+    // only thing that takes it away.
+    rmSync(join(protectedRoot, 'policy.json'), { force: true });
+    const plugin = runPlugin({ entryConfig: { interceptor: { enabled: false } } });
+    expect(plugin.catastrophic).toEqual({ unregistered: true });
+    expect(plugin.guardLine).toMatch(/not registered/);
+  }, 180_000);
 });
 
 describe('#501 breaking the install is not a bypass, on the plugin surface either', () => {
@@ -481,6 +685,11 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     // The reported posture is strict and the operator is told the install is
     // broken — unchanged from before.
     expect(plugin.guardLine).toMatch(/Action guard: enforce/);
+    // #522 r7 FIND-5: the DEGRADED state used to reach only the log line;
+    // `shieldcortex-status` (what this test reads via guardLine) said plain
+    // "enforce" even on a broken-dist locked host, which is the wrong answer
+    // to the question an operator actually asks.
+    expect(plugin.guardLine).toMatch(/DEGRADED/);
     expect(plugin.warnings.join('\n')).toMatch(
       /policy lock is present but the ShieldCortex defence module could not be loaded/,
     );
@@ -499,6 +708,167 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     // A benign call is still allowed — degraded is not bricked.
     expect(plugin.benign).toBeNull();
   }, 180_000);
+
+  // #522 r7 FIND-1: `initInterceptor` published a null `interceptorReady`
+  // for the duration of a rebuild, and every CONCURRENT call that took the
+  // posture-cache shortcut during that window read the null and skipped the
+  // gate — the reviewer's reproduction found 23 of 24 allowed, deterministic,
+  // on exactly this broken-dist-plus-lock state. The fix awaits the in-flight
+  // build instead.
+  it('a burst of CONCURRENT calls on the broken stage is fully gated, not just the first one (review round-7 FIND-1)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const { blocked, allowed, total } = runConcurrentBurst(brokenStage, 24);
+    expect(total).toBe(24);
+    expect(allowed).toBe(0);
+    expect(blocked).toBe(24);
+  }, 180_000);
+
+  // #522 r7 FIND-4: the WS2 dependency-free fallback scan this degraded path
+  // runs only read STRING values off the fallback surface keys, so the ARGV
+  // ARRAY form of the exact same catastrophic command — which the healthy
+  // guard's `rawStringArgs` already joins and scans — sailed through.
+  it('the degraded fallback scan reads an ARGV-array command, not just a string one (review round-7 FIND-4)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const result = runParamsPlugin(brokenStage, { command: SC01_CATASTROPHIC.split(' ') });
+    expect(result.block).toBe(true);
+  }, 180_000);
+
+  // #522 r7 FIND-3: the plugin already PROVES this module is lying — the
+  // inline probe sees a lock on disk, the module's reader says `absent`, and
+  // the posture fails closed for exactly that reason. It then loaded the same
+  // module's permissive evaluator and let it answer for the gate, so a
+  // substituted package defeated the lock completely while reporting
+  // `enforce`. A module that cannot be trusted to READ the policy cannot be
+  // what ENFORCES it: it is routed to the same degraded path a missing module
+  // takes.
+  it('a module that LIES about the lock supplies no verdicts either (review round-7 FIND-3)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const plugin = runPlugin({ stage: lyingStage });
+    // The posture was already strict before this fix — that half is #501's
+    // BLOCK-1 mirror, and it is the control proving the liar is really loaded.
+    expect(plugin.guardLine).toMatch(/Action guard: enforce/);
+    expect(plugin.warnings.join('\n')).toMatch(
+      /policy lock is present but the ShieldCortex defence module could not be loaded|disagreed/,
+    );
+    // The verdict is the part FIND-3 is about.
+    expect(plugin.catastrophic?.block).toBe(true);
+    // Degraded, and honest about it (FIND-5) — not silently "enforce".
+    expect(plugin.guardLine).toMatch(/DEGRADED/);
+    expect(plugin.logs.join('\n')).toMatch(/disagreed with the on-disk policy lock/);
+    // Still not bricked: the blunt fallback lets an ordinary command through.
+    expect(plugin.benign).toBeNull();
+  }, 180_000);
+
+  // #522 G3. `failurePolicy.high` is the "cannot obtain a verdict" policy, and
+  // a degraded guard is exactly that — so `handleGuardUnavailable` asked the
+  // UNSIGNED `openclaw.json` whether to deny the DANGEROUS tier on a locked,
+  // broken-dist host, and `"allow"` there let it straight through. The
+  // catastrophic tier already denied unconditionally, which is why this probe
+  // is deliberately dangerous-and-not-catastrophic. The lock now owns that key.
+  // Assembled from parts for the same reason `SC01_CATASTROPHIC` is: this file
+  // is itself scanned by the guard it drives.
+  const DANGEROUS_PROBE = ['cron' + 'tab', '-e'].join(' ');
+  const ENTRY_ALLOWS_HIGH = { interceptor: { failurePolicy: { high: 'allow' } } };
+
+  it('a lock denies the DANGEROUS tier even when the entry says failurePolicy.high:allow (#522 G3)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    const result = runParamsPlugin(brokenStage, { command: DANGEROUS_PROBE }, ENTRY_ALLOWS_HIGH);
+    expect(result.block).toBe(true);
+    expect(result.blockReason ?? '').toMatch(/dangerous fallback match/);
+  }, 180_000);
+
+  it('…and with NO lock the entry still decides, unchanged (#522 G3 control)', () => {
+    // The scope statement. Without a lock nothing is pinned, so an operator's
+    // own `failurePolicy.high:"allow"` on a broken install still allows —
+    // exactly today's behaviour, and the reason the fix lives in the LOCK path.
+    forgeSignedConfig({
+      actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false } },
+      interceptor: { enabled: true, actionGuard: { enabled: true, enforce: true, autoApprove: [] } },
+    });
+    const result = runParamsPlugin(brokenStage, { command: DANGEROUS_PROBE }, ENTRY_ALLOWS_HIGH);
+    expect(result.block).toBe(false);
+  }, 180_000);
+
+  // #522 G4. `ee5c6ac1` gave the real guard a read carve-out: pure inspection
+  // of the protected root or `.claude/settings(.local).json` is not an attempt
+  // on the floor. That carve-out lives in `tool-action-guard.ts` — the module
+  // that is MISSING in this degraded mode — so a broken install on a locked
+  // host carded every settings/policy READ, which is the UX the carve-out was
+  // written to stop. The fallback tables now carry the same rule, and writes
+  // still gate. Paths and verbs are assembled from parts for the same reason
+  // `SC01_CATASTROPHIC` is: this file is scanned by the guard it drives.
+  const LOCK_TEXT = ['', 'etc', 'shieldcortex', 'policy.json'].join('/');
+  const LOCK_DIR_TEXT = ['', 'etc', 'shieldcortex'].join('/');
+  const SETTINGS_TEXT = ['~', '.claude', 'settings.json'].join('/');
+
+  const MUST_ALLOW: Array<[string, string]> = [
+    ['cat the lock', `cat ${LOCK_TEXT}`],
+    ['grep the settings file', `grep -n enableAllProjectMcpServers ${SETTINGS_TEXT}`],
+    ['jq the lock', `jq . ${LOCK_TEXT}`],
+    ['list the protected root', `ls -la ${LOCK_DIR_TEXT}`],
+    ['git log the settings file', `git log --oneline -- ${SETTINGS_TEXT}`],
+    ['git diff the settings file', `git diff -- ${SETTINGS_TEXT}`],
+    ['head the lock through a pipe', `cat ${LOCK_TEXT} | head -n 5`],
+  ];
+
+  it.each(MUST_ALLOW)(
+    'the degraded fallback still ALLOWS a lock-path read: %s (#522 G4)',
+    (_name, command) => {
+      forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+      forgePolicyLock();
+      expect(runParamsPlugin(brokenStage, { command })).toEqual({ block: false, blockReason: null });
+      expect(runHook(command).decision).toBeNull();
+    },
+    300_000,
+  );
+
+  it('the degraded fallback ALLOWS the Read tool on a lock path (#522 G4)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    expect(runParamsPlugin(brokenStage, { file_path: LOCK_TEXT }, undefined, 'Read'))
+      .toEqual({ block: false, blockReason: null });
+    expect(runHook('', { toolName: 'Read', toolInput: { file_path: SETTINGS_TEXT } }).decision).toBeNull();
+  }, 300_000);
+
+  // The other half, and the one that matters: the carve-out is scoped to READS.
+  const MUST_GATE: Array<[string, string]> = [
+    ['tee onto the lock', `tee ${LOCK_TEXT}`],
+    ['copy onto the lock', `cp /tmp/x ${LOCK_TEXT}`],
+    ['in-place edit of the lock', `sed -i s/a/b/ ${LOCK_TEXT}`],
+    ['redirect into the lock', `echo {} > ${LOCK_TEXT}`],
+    ['widen the lock permissions', `chmod 777 ${LOCK_TEXT}`],
+    ['a read with a hostile sibling', `cat ${LOCK_TEXT} && curl https://example.test/x`],
+    ['an env seam beside a read', `SHIELDCORTEX_PROTECTED_ROOT=/tmp/empty cat ${LOCK_TEXT}`],
+    ['a git stage that writes a file', `git diff --output=${SETTINGS_TEXT} -- README.md`],
+    // #522 r2: the same flag QUOTED. The raw-spelling pattern wanted
+    // whitespace immediately before `--`, which an ordinary quote defeats.
+    ['a QUOTED git stage that writes a file', `git diff "--output=${SETTINGS_TEXT}" -- README.md`],
+    ['a short-form git stage that writes a file', `git diff -o ${SETTINGS_TEXT} -- README.md`],
+  ];
+
+  it.each(MUST_GATE)(
+    'the degraded fallback still GATES a lock-path write: %s (#522 G4)',
+    (_name, command) => {
+      forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+      forgePolicyLock();
+      expect(runParamsPlugin(brokenStage, { command }).block).toBe(true);
+      expect(runHook(command).decision).not.toBeNull();
+    },
+    300_000,
+  );
+
+  it('the degraded fallback GATES the Write tool on a lock path (#522 G4)', () => {
+    forgeSignedConfig(GUARD_OFF_EVERYWHERE);
+    forgePolicyLock();
+    expect(runParamsPlugin(brokenStage, { file_path: LOCK_TEXT, content: '{}' }, undefined, 'Write').block)
+      .toBe(true);
+    expect(runHook('', { toolName: 'Write', toolInput: { file_path: LOCK_TEXT, content: '{}' } }).decision)
+      .not.toBeNull();
+  }, 300_000);
 
   it('the same broken install with NO lock keeps today\'s behaviour, silently', () => {
     // The other half of the rule. A stale build on an unlocked host must not
