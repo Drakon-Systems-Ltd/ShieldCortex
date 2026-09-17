@@ -281,8 +281,6 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
 
   const chain: string[] = [];
   let cur: ProcInfo | null = self;
-  let leader: ProcInfo | null = null;
-  let leaderParent: ProcInfo | null = null;
 
   for (let i = 0; cur && i < MAX_WALK; i += 1) {
     chain.push(cur.comm);
@@ -294,19 +292,32 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
         chain,
       };
     }
-    if (leader === null && cur.pid === cur.sid) {
-      leader = cur;
-      leaderParent = cur.ppid > 0 ? seam.proc(cur.ppid) : null;
-    }
     if (cur.ppid <= 0 || cur.ppid === cur.pid) break;
     cur = seam.proc(cur.ppid);
   }
 
+  // The session leader is the process whose pid === OUR sid. Look it up
+  // DIRECTLY — not "the first ancestor that happens to lead some session".
+  // GPT-6 r3, reproduced live: python takes a fresh pty as leader, then
+  // double-forks the leaf so the leaf is adopted by init while KEEPING
+  // python's sid. The parent chain is node → systemd; the old walk picked
+  // systemd's session and never saw python. self.sid does.
+  const leader: ProcInfo | null = self.sid > 0 ? seam.proc(self.sid) : null;
   if (leader === null) {
     return {
       ok: false,
       reason: 'no-session-leader',
-      detail: 'no session leader found in this process\'s ancestry — not an interactive login session.',
+      detail: `this process's session leader (pid ${self.sid}) is gone — an interactive login session's leader is the shell a human is typing into, and it outlives every command it runs.`,
+      chain,
+    };
+  }
+  if (!chain.includes(leader.comm)) chain.push(`[leader ${leader.comm}]`);
+  const leaderParent: ProcInfo | null = leader.ppid > 0 ? seam.proc(leader.ppid) : null;
+  if (nameIn(leader.comm, AGENT_PROCESS_NAMES)) {
+    return {
+      ok: false,
+      reason: 'agent-ancestor',
+      detail: `this session is led by "${leader.comm}" (pid ${leader.pid}), an agent host.`,
       chain,
     };
   }

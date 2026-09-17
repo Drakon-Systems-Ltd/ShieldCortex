@@ -109,9 +109,28 @@ describe('#502 operator provenance — must REFUSE', () => {
     expect(operatorProvenance(s).reason).toBe('pty-interpreter-leader');
   });
 
-  it('a walk that never reaches a pid===sid process refuses (no session leader)', () => {
-    // No init, no pid matching sid — the only way this reason fires on Linux.
-    const s = seam([[40, 39, 99, 'bash'], [41, 40, 99, 'node']], 41);
+  it('GPT-6 r3: leader is python OUTSIDE the parent chain (leaf double-forked, adopted by init, keeps python sid)', () => {
+    // Live: leader python pid=214294 sid=214294; leaf pid=214296 ppid=1 sid=214294.
+    // Old walk picked systemd's session; self.sid finds python.
+    const s = seam([INIT, [70, 1, 70, 'python3'], [71, 1, 70, 'node']], 71);
+    const v = operatorProvenance(s);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('pty-interpreter-leader');
+  });
+
+  it('leader outside the chain that is a pty tool still refuses', () => {
+    const s = seam([INIT, [70, 1, 70, 'script'], [71, 1, 70, 'node']], 71);
+    expect(operatorProvenance(s).reason).toBe('pty-tool-session-leader');
+  });
+
+  it('leader outside the chain that is an agent refuses', () => {
+    const s = seam([INIT, [70, 1, 70, 'hermes'], [71, 1, 70, 'node']], 71);
+    expect(operatorProvenance(s).reason).toBe('agent-ancestor');
+  });
+
+  it('a dead session leader refuses (no session leader)', () => {
+    // sid points at a pid that no longer exists.
+    const s = seam([INIT, [41, 1, 99, 'node']], 41);
     expect(operatorProvenance(s).reason).toBe('no-session-leader');
   });
 });
