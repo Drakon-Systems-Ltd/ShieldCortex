@@ -39,6 +39,10 @@ describe('#310 — approve --denial', () => {
     const lines: string[] = [];
     return { lines, write: (m: string) => { lines.push(m); }, text: () => lines.join('\n') };
   };
+  // #502: grant paths now require provenance as well as a TTY. Tests that
+  // already inject `interactive: true, provenance: human` (a human at a keyboard) also inject
+  // a passing provenance so they still exercise the grant, not the new gate.
+  const human = () => ({ ok: true as const, reason: null, detail: 'ok', chain: [] as string[] });
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'sc-approve-denial-'));
@@ -98,7 +102,7 @@ describe('#310 — approve --denial', () => {
     denial();
     const out = sink();
     const code = runApprove(['--denial', ACTION_ID, '--ttl', '20'], {
-      home, now: t0, interactive: true, log: out.write, error: out.write,
+      home, now: t0, interactive: true, provenance: human, log: out.write, error: out.write,
     });
 
     expect(code).toBe(0);
@@ -120,10 +124,10 @@ describe('#310 — approve --denial', () => {
 
   it('does not extend a live grant on a second run', () => {
     denial();
-    runApprove(['--denial', ACTION_ID], { home, now: t0, interactive: true, log: () => {}, error: () => {} });
+    runApprove(['--denial', ACTION_ID], { home, now: t0, interactive: true, provenance: human, log: () => {}, error: () => {} });
     const out = sink();
     const code = runApprove(['--denial', ACTION_ID], {
-      home, now: t0 + 60_000, interactive: true, log: out.write, error: out.write,
+      home, now: t0 + 60_000, interactive: true, provenance: human, log: out.write, error: out.write,
     });
 
     expect(code).toBe(0);
@@ -136,7 +140,7 @@ describe('#310 — approve --denial', () => {
     denial({ cwd: null });
     const out = sink();
     const code = runApprove(['--denial', ACTION_ID], {
-      home, now: t0, interactive: true, log: out.write, error: out.write,
+      home, now: t0, interactive: true, provenance: human, log: out.write, error: out.write,
     });
 
     expect(code).toBe(1);
@@ -152,7 +156,7 @@ describe('#310 — approve --denial', () => {
     const code = runApprove(['--denial', ACTION_ID, '--any-origin'], {
       home,
       now: t0,
-      interactive: true,
+      interactive: true, provenance: human,
       log: refused.write,
       error: refused.write,
       confirm: (q) => { asked.push(q); return false; },
@@ -165,7 +169,7 @@ describe('#310 — approve --denial', () => {
 
     const ok = sink();
     expect(runApprove(['--denial', ACTION_ID, '--any-origin'], {
-      home, now: t0, interactive: true, log: ok.write, error: ok.write, confirm: () => true,
+      home, now: t0, interactive: true, provenance: human, log: ok.write, error: ok.write, confirm: () => true,
     })).toBe(0);
     expect(ok.text()).toContain('Scope: ANY directory');
     expect(getRetryRow({ id: fingerprintId(HASH, undefined) }, { home })!.grant!.origin.anyOrigin).toBe(true);
@@ -176,7 +180,7 @@ describe('#310 — approve --denial', () => {
     recordDenySuppression({ hash: HASH, cwd }, { home, now: t0, suppressionMs: 900_000, via: 'card' });
     const out = sink();
     const code = runApprove(['--denial', ACTION_ID], {
-      home, now: t0 + 1_000, interactive: true, log: out.write, error: out.write,
+      home, now: t0 + 1_000, interactive: true, provenance: human, log: out.write, error: out.write,
     });
 
     expect(code).toBe(1);
@@ -194,7 +198,7 @@ describe('#310 — approve --denial', () => {
     expect(runApprove(['--denial', ACTION_ID, '--override-deny'], {
       home,
       now: t0 + 1_000,
-      interactive: true,
+      interactive: true, provenance: human,
       log: refused.write,
       error: refused.write,
       confirm: (q) => { asked.push(q); return false; },
@@ -206,7 +210,7 @@ describe('#310 — approve --denial', () => {
 
     const ok = sink();
     expect(runApprove(['--denial', ACTION_ID, '--override-deny'], {
-      home, now: t0 + 2_000, interactive: true, log: ok.write, error: ok.write, confirm: () => true,
+      home, now: t0 + 2_000, interactive: true, provenance: human, log: ok.write, error: ok.write, confirm: () => true,
     })).toBe(0);
     expect(getRetryRow({ hash: HASH, cwd }, { home })!.grant!.via).toBe('tty');
     // The silence it overrode is lifted with it — otherwise the very retry
@@ -218,7 +222,7 @@ describe('#310 — approve --denial', () => {
     denial();
     const out = sink();
     const code = runApprove(['--denial', ACTION_ID, '--ttl', '120'], {
-      home, now: t0, interactive: true, log: out.write, error: out.write,
+      home, now: t0, interactive: true, provenance: human, log: out.write, error: out.write,
     });
 
     expect(code).toBe(1);
@@ -228,7 +232,7 @@ describe('#310 — approve --denial', () => {
 
   it('rejects the widening flags outside --denial rather than silently ignoring them', () => {
     const out = sink();
-    expect(runApprove(['--any-origin'], { home, now: t0, interactive: true, log: out.write, error: out.write })).toBe(1);
+    expect(runApprove(['--any-origin'], { home, now: t0, interactive: true, provenance: human, log: out.write, error: out.write })).toBe(1);
     expect(out.text()).toContain('only apply to');
   });
 
@@ -236,7 +240,7 @@ describe('#310 — approve --denial', () => {
     denial();
     const out = sink();
     const code = runApprove(['--denial', 'act-0000000000000fff'], {
-      home, now: t0, interactive: true, log: out.write, error: out.write,
+      home, now: t0, interactive: true, provenance: human, log: out.write, error: out.write,
     });
 
     expect(code).toBe(1);
@@ -294,7 +298,7 @@ describe('#310 — approve --denial', () => {
     expect(live.ok).toBe(true);
     const blocked = sink();
     expect(runApprove(['--denial', ACTION_ID, '--reauth'], {
-      home, now: t0 + 1_000, interactive: true, log: blocked.write, error: blocked.write,
+      home, now: t0 + 1_000, interactive: true, provenance: human, log: blocked.write, error: blocked.write,
     })).toBe(1);
     expect(blocked.text()).toMatch(/live approval card/i);
     expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeUndefined();
@@ -302,7 +306,7 @@ describe('#310 — approve --denial', () => {
     const after = t0 + 10 * 60 * 1000 + 1;
     const ok = sink();
     expect(runApprove(['--denial', ACTION_ID, '--reauth'], {
-      home, now: after, interactive: true, log: ok.write, error: ok.write,
+      home, now: after, interactive: true, provenance: human, log: ok.write, error: ok.write,
     })).toBe(0);
     expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeDefined();
   });
