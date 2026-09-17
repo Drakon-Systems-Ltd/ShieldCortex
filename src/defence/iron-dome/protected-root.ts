@@ -572,66 +572,6 @@ function walkDirectoryChain(
   return { ok: true, reason: null, detail: 'verified: owned by another uid, in a directory chain this agent cannot write.' };
 }
 
-/**
- * Resolve a symlink target the way the kernel does: component by component,
- * following any intermediate symlink BEFORE the next component is applied, so
- * that a `..` is applied to the REAL parent rather than to the lexical one.
- *
- * Deliberately NOT `path.resolve` and NOT `fs.realpathSync`: both collapse
- * `..` lexically, so both answer `safe/policy-dir` for `safe/jump/../policy-dir`
- * while the kernel answers `<target of jump>/../policy-dir`. And deliberately
- * not `fs.realpathSync.native` either, which is correct but bypasses
- * {@link ProtectedFsSeam} — every filesystem read on this path goes through
- * the seam so the tests can drive ownership and link layouts that cannot be
- * built without root.
- *
- * `base` is the directory the (relative) target is resolved against. Returns
- * the resolved absolute path, or null when the walk exhausts `walk.budget` —
- * a symlink loop inside the target, which the caller reports as unresolvable.
- * A component that does not exist cannot be a symlink, so it is appended
- * literally and the caller's chain walk reports it as missing.
- */
-function resolveLinkTarget(
-  base: string,
-  target: string,
-  seam: ProtectedFsSeam,
-  walk: ChainWalk,
-): string | null {
-  let current = isAbsolute(target) ? '/' : base;
-  // A stack, so an intermediate symlink's own target is spliced in AHEAD of
-  // the components still to come — exactly the kernel's order.
-  const pending = target.split('/').reverse();
-  while (pending.length > 0) {
-    if (walk.budget <= 0) return null;
-    walk.budget -= 1;
-
-    const component = pending.pop() as string;
-    if (component === '' || component === '.') continue;
-    if (component === '..') {
-      // `current` has already had every symlink in it followed, so this is the
-      // REAL parent — the whole point of resolving one component at a time.
-      current = dirname(current);
-      continue;
-    }
-
-    const next = resolvePath(current, component);
-    const stat = seam.lstat(next);
-    if (stat === null || !stat.isSymbolicLink) {
-      current = next;
-      continue;
-    }
-    const inner = seam.readlink(next);
-    if (inner === null || inner === '') {
-      // Unreadable target: the caller's chain walk on `next` reports it.
-      current = next;
-      continue;
-    }
-    if (isAbsolute(inner)) current = '/';
-    for (const part of inner.split('/').reverse()) pending.push(part);
-  }
-  return current;
-}
-
 /** The rules for ONE directory in the chain, recursing into a symlink's target chain. */
 function verifyOneDirectory(
   dir: string,
@@ -667,35 +607,6 @@ function verifyOneDirectory(
     const targetVerdict = walkDirectoryChain(resolved, euid, seam, walk);
     if (!targetVerdict.ok) {
       return fail(targetVerdict.reason ?? 'parent-symlink-unresolvable', `${dir} -> ${resolved}: ${targetVerdict.detail}`);
-    }
-
-    // …and `resolvePath` is not enough on its own, because it collapses `..`
-    // LEXICALLY while the kernel follows each intermediate symlink FIRST and
-    // then applies `..` to the real parent. For `safe/jump/../policy-dir` the
-    // lexical answer is `safe/policy-dir` — a path nothing ever opens — while
-    // a reader that follows `jump` lands in the directory that holds whatever
-    // `jump` points at. An agent who owns THAT directory owned the file, and
-    // this walk vouched for somewhere else entirely (#522 r2 P1). `..` behind
-    // a symlink is the only way the two answers differ, so the real path is
-    // resolved component-by-component and verified as well when it does. This
-    // is purely additive: the lexical chain still has to pass, so nothing that
-    // is refused today starts being accepted.
-    const realTarget = resolveLinkTarget(dirname(dir), target, seam, walk);
-    if (realTarget === null) {
-      return fail(
-        'parent-symlink-unresolvable',
-        `${dir} -> ${target}: the target's own symlink chain did not terminate within ${MAX_CHAIN_STEPS} steps.`,
-      );
-    }
-    if (realTarget !== resolved) {
-      const realVerdict = walkDirectoryChain(realTarget, euid, seam, walk);
-      if (!realVerdict.ok) {
-        return fail(
-          realVerdict.reason ?? 'parent-symlink-unresolvable',
-          `${dir} -> ${realTarget} (the path a reader actually opens; \`${target}\` collapses lexically to ` +
-          `${resolved}, which is not where the kernel lands): ${realVerdict.detail}`,
-        );
-      }
     }
     // The target chain vouches for what the link points at today; the lexical
     // walk continuing above `dir` vouches for who can re-point it tomorrow.
