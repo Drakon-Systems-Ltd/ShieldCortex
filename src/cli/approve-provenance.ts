@@ -118,6 +118,19 @@ export const PTY_INTERPRETER_NAMES: readonly string[] = [
   'perl', 'ruby', 'php',
 ];
 
+/** Shells that a human's session is led by. An orphaned one (parent is init)
+ *  is the shape of "daemonise, take a fresh pty, exec bash". */
+export const SHELL_NAMES: readonly string[] = [
+  'bash', 'sh', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh',
+];
+
+/** Process names of init. A session leader whose parent is one of these was
+ *  re-parented — the honest login path always has a terminal provider
+ *  (sshd, login, tmux, gnome-terminal-server, …) as the leader's parent. */
+export const INIT_NAMES: readonly string[] = [
+  'systemd', 'init', 'systemd-init',
+];
+
 // ── Process tree ──────────────────────────────────────
 
 export interface ProcInfo {
@@ -202,6 +215,7 @@ export type ProvenanceReason =
   | 'pty-tool-session-leader'
   | 'pty-interpreter-parent'
   | 'no-controlling-terminal'
+  | 'pty-interpreter-leader'
   | 'no-session-leader';
 
 export interface ProvenanceVerdict {
@@ -327,6 +341,25 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
       chain,
     };
   }
+
+  // GPT-6 r2: daemonise, openpty, TIOCSCTTY, keep the interpreter as leader
+  // (or exec bash so the leader IS the shell and its parent is init). Live
+  // on this box: node → python3 → systemd, isTTY true, tty_nr nonzero,
+  // every earlier check passed. A human's leader-parent is sshd / login /
+  // tmux / a terminal emulator, never init.
+  if (nameIn(leader.comm, PTY_INTERPRETER_NAMES)) {
+    return {
+      ok: false,
+      reason: 'pty-interpreter-leader',
+      detail: `this session is led by "${leader.comm}" (pid ${leader.pid}), an interpreter, not a login shell — the shape of a process that allocated its own pseudo-terminal.`,
+      chain,
+    };
+  }
+
+  // Residual, not refused: a SHELL leader whose parent is init. That is
+  // both "daemonise, openpty, exec bash" (GPT-6 r2) AND a WSL / console
+  // login (bash's parent is init). Refusing it cards every WSL user.
+  // Documented on the issue; the OS-owned lock (#501) is the next bar.
 
   return { ok: true, reason: null, detail: 'interactive session led by a shell with no agent ancestor.', chain };
 }

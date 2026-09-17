@@ -96,6 +96,19 @@ describe('#502 operator provenance — must REFUSE', () => {
     expect(operatorProvenance(s).reason).toBe('no-controlling-terminal');
   });
 
+  it('GPT-6 r2: daemonise, openpty, TIOCSCTTY, keep interpreter as session leader', () => {
+    // Live: node → python3 → systemd, isTTY true, tty_nr nonzero.
+    const s = seam([INIT, [60, 1, 60, 'python3'], [61, 60, 60, 'node']], 61);
+    const v = operatorProvenance(s);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('pty-interpreter-leader');
+  });
+
+  it.each(['python3', 'node', 'perl', 'ruby'])('interpreter %s as session leader refuses', (interp) => {
+    const s = seam([INIT, [60, 1, 60, interp], [61, 60, 60, 'node']], 61);
+    expect(operatorProvenance(s).reason).toBe('pty-interpreter-leader');
+  });
+
   it('a walk that never reaches a pid===sid process refuses (no session leader)', () => {
     // No init, no pid matching sid — the only way this reason fires on Linux.
     const s = seam([[40, 39, 99, 'bash'], [41, 40, 99, 'node']], 41);
@@ -118,6 +131,11 @@ describe('#502 operator provenance — must ALLOW (a human at a real terminal)',
     const v = operatorProvenance(seam([INIT, ...rows], leaf));
     expect(v.ok).toBe(true);
     expect(v.reason).toBeNull();
+  });
+
+  it('WSL / console login: bash whose parent is init is allowed (indistinguishable from GPT-6 r2 exec-bash; refusing it cards every WSL user)', () => {
+    const s = seam([INIT, [101, 1, 101, 'bash'], [102, 101, 101, 'node']], 102);
+    expect(operatorProvenance(s).ok).toBe(true);
   });
 
   it('an unknown session-leader parent is allowed (unknown is not bad; false refusals teach uninstall)', () => {
