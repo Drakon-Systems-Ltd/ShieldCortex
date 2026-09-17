@@ -28,15 +28,23 @@
  *      in a session whose leader is a login shell; the agent's cannot, because
  *      the agent's shell tool is a descendant of the agent.
  *
- * `env -i` defeats (1); (2) still sees the ancestry. `setsid -f` re-parents to
- * init and defeats (2)'s agent-ancestor half; but a re-parented process has no
- * controlling terminal, so to pass the TTY check it must allocate one — and
- * the thing that allocates it becomes the session leader, which (2) then
- * refuses. Neither half is a cryptographic boundary. Together they turn "one
- * syscall" into "impersonate a login shell's ancestry under a clean
- * environment", which is the honest bar a same-UID control can set. The
- * OS-owned lock (#501) is where a stronger boundary lives; on a locked host
- * an operator can additionally pin approvals to the notify card (#143).
+ * `env -i` defeats (1); (2) still sees the ancestry. `setsid -f` re-parents
+ * to init and defeats (2)'s agent-ancestor half. If it detaches BEFORE
+ * allocating a pty, the thing that then allocates one becomes the session
+ * leader or its parent, which (2) refuses. If it detaches AFTER — allocate
+ * with `script`, then `setsid -f` a child that keeps the inherited fds —
+ * the child still passes `isTTY` but has NO controlling terminal
+ * (`setsid` drops it; fds are not the same thing). A human's shell always
+ * has one, so:
+ *
+ *   3. **Controlling terminal.** `/proc/self/stat` tty_nr must be non-zero
+ *      (`ps -o tty=` not `??` on macOS). Checked before the walk.
+ *
+ * None of this is a cryptographic boundary. Together they turn "one syscall"
+ * into "forge a login shell's ancestry AND acquire a controlling terminal
+ * under a clean environment", which is the honest bar a same-UID control can
+ * set. The OS-owned lock (#501) is where a stronger boundary lives; on a
+ * locked host an operator can additionally pin approvals to the card (#143).
  *
  * ## Unknowns
  *
@@ -119,6 +127,8 @@ export interface ProcInfo {
   sid: number;
   /** Short executable name, as `/proc/<pid>/comm` or `ps -o comm=` basename. */
   comm: string;
+  /** Controlling terminal device number; 0 when the process has none. */
+  tty: number;
 }
 
 /** The injectable seam — tests hand in a synthetic tree. */
@@ -150,8 +160,8 @@ function readProcLinux(pid: number): ProcInfo | null {
     const open = stat.indexOf('(');
     const comm = stat.slice(open + 1, close);
     const rest = stat.slice(close + 2).split(' ');
-    // fields after comm: state(0) ppid(1) pgrp(2) session(3)
-    return { pid, ppid: Number(rest[1]), sid: Number(rest[3]), comm };
+    // fields after comm: state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
+    return { pid, ppid: Number(rest[1]), sid: Number(rest[3]), comm, tty: Number(rest[4]) };
   } catch {
     return null;
   }
@@ -159,15 +169,15 @@ function readProcLinux(pid: number): ProcInfo | null {
 
 function readProcDarwin(pid: number): ProcInfo | null {
   try {
-    const out = execFileSync('ps', ['-o', 'ppid=,sess=,comm=', '-p', String(pid)], {
+    const out = execFileSync('ps', ['-o', 'ppid=,sess=,tty=,comm=', '-p', String(pid)], {
       encoding: 'utf8',
       timeout: 2000,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     if (!out) return null;
-    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(out);
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(out);
     if (!m) return null;
-    return { pid, ppid: Number(m[1]), sid: Number(m[2]), comm: m[3].trim() };
+    return { pid, ppid: Number(m[1]), sid: Number(m[2]), comm: m[4].trim(), tty: m[3] === '??' || m[3] === '-' ? 0 : 1 };
   } catch {
     return null;
   }
@@ -191,6 +201,7 @@ export type ProvenanceReason =
   | 'agent-ancestor'
   | 'pty-tool-session-leader'
   | 'pty-interpreter-parent'
+  | 'no-controlling-terminal'
   | 'no-session-leader';
 
 export interface ProvenanceVerdict {
@@ -235,6 +246,22 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
       reason: null,
       detail: 'process tree unreadable on this platform; environment check only.',
       chain: [],
+    };
+  }
+
+  // A process can hold TTY file descriptors without a CONTROLLING terminal:
+  // `setsid()` drops the controlling terminal but does not close inherited
+  // fds. That is the shape of "allocate a pty with script, detach a child
+  // that keeps the fds, let the launcher exit" — the chain then reads
+  // node → systemd, every ancestry check passes, and isTTY is still true.
+  // A human's interactive shell ALWAYS has a controlling terminal, so its
+  // absence is decisive on its own. (GPT-6 review of #523, r1.)
+  if (self.tty === 0) {
+    return {
+      ok: false,
+      reason: 'no-controlling-terminal',
+      detail: `this process has terminal file descriptors but no controlling terminal — the shape of a detached child that inherited a manufactured pty, not of a shell a human is typing into.`,
+      chain: [self.comm],
     };
   }
 

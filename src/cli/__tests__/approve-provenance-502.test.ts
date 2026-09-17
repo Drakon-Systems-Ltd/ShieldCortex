@@ -16,10 +16,11 @@ import {
 } from '../approve-provenance.js';
 import { runApprove } from '../approve.js';
 
-type Row = [pid: number, ppid: number, sid: number, comm: string];
+type Row = [pid: number, ppid: number, sid: number, comm: string, tty?: number];
 
 function seam(rows: Row[], leafPid: number, env: NodeJS.ProcessEnv = {}): ProvenanceSeam {
-  const map = new Map<number, ProcInfo>(rows.map(([pid, ppid, sid, comm]) => [pid, { pid, ppid, sid, comm }]));
+  // tty defaults to 1 (has a controlling terminal); 0 models a detached child.
+  const map = new Map<number, ProcInfo>(rows.map(([pid, ppid, sid, comm, tty]) => [pid, { pid, ppid, sid, comm, tty: tty ?? 1 }]));
   return { pid: leafPid, env, platform: 'linux', proc: (pid) => map.get(pid) ?? null };
 }
 
@@ -79,6 +80,20 @@ describe('#502 operator provenance — must REFUSE', () => {
   it.each(['node', 'python3.12', 'python', 'perl', 'ruby'])('interpreter %s as leader parent refuses', (interp) => {
     const s = seam([INIT, [30, 1, 30, interp], [31, 30, 31, 'bash'], [32, 31, 31, 'node']], 32);
     expect(operatorProvenance(s).reason).toBe('pty-interpreter-parent');
+  });
+
+  it('GPT-6 r1: pty allocated with script, THEN setsid -f a child that keeps the fds and outlives its launcher', () => {
+    // Live on the TARS box: isTTY true, chain node → systemd, every ancestry
+    // check passed. The tell is tty_nr === 0 — fds without a controlling tty.
+    const s = seam([INIT, [50, 1, 50, 'node', 0]], 50);
+    const v = operatorProvenance(s);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('no-controlling-terminal');
+  });
+
+  it('no-controlling-terminal is checked BEFORE ancestry, so a clean tree does not rescue it', () => {
+    const s = seam([INIT, [100, 1, 100, 'sshd'], [101, 100, 101, 'bash'], [102, 101, 101, 'node', 0]], 102);
+    expect(operatorProvenance(s).reason).toBe('no-controlling-terminal');
   });
 
   it('a walk that never reaches a pid===sid process refuses (no session leader)', () => {
