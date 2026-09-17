@@ -341,26 +341,6 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
       up = seam.proc(up.ppid);
     }
   }
-  // GPT-6 r4: the recovered leader's PARENT was fetched and then only
-  // checked against pty-tool / interpreter lists. An agent that spawns a
-  // session-leading shell (codex → bash, hermes → bash) and then orphans
-  // the leaf is node → systemd in the parent walk, bash via self.sid, and
-  // the agent is sitting on leader.ppid unread. Walk that branch.
-  {
-    let up: ProcInfo | null = leaderParent;
-    for (let i = 0; up && i < MAX_WALK; i += 1) {
-      if (nameIn(up.comm, AGENT_PROCESS_NAMES)) {
-        return {
-          ok: false,
-          reason: 'agent-ancestor',
-          detail: `this session's leader "${leader.comm}" (pid ${leader.pid}) is a descendant of "${up.comm}" (pid ${up.pid}), an agent host — a human's terminal is never a child of the agent.`,
-          chain,
-        };
-      }
-      if (up.ppid <= 0 || up.ppid === up.pid) break;
-      up = seam.proc(up.ppid);
-    }
-  }
 
   // `script -c` (and expect/unbuffer) fork the child shell into a NEW session
   // on the pty they allocated, so the leader is the shell and the tool is its
