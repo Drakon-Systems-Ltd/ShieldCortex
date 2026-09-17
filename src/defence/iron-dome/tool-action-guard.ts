@@ -3190,12 +3190,18 @@ const GIT_READONLY_SUBCOMMAND_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
  * ordinary quoted argument slipped past it and a stage that writes a file read
  * as a stage that only inspects one (#522 r2). The separate-token spelling
  * (`--output <file>`) and the short form are covered for the same reason.
+ *
+ * The short form is matched GLUED as well as bare — `-o<file>` is what
+ * parse-options accepts, so pinning the token to exactly `-o` left
+ * `git log -o/home/u/.claude/settings.json` reading as an inspection. Over-
+ * gating a `git ls-files -o` that also names a lock path costs one approval
+ * card; missing a write costs the lock.
  */
 function gitStageWritesOrExecs(stage: string): boolean {
   for (const raw of stage.split(/\s+/)) {
     if (!raw) continue;
     const token = raw.replace(/['"]/g, '');
-    if (token === '-o') return true;
+    if (/^-o(?:$|[^-])/.test(token)) return true;
     if (/^--(?:output|ext-diff)\b/i.test(token)) return true;
   }
   return false;

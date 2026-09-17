@@ -646,14 +646,15 @@ const FALLBACK_GIT_READ_SUB_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
  * True when a `git` stage writes a file or runs a configured driver. Judged per
  * TOKEN with quotes stripped, not against the raw spelling: a pattern that
  * required whitespace immediately before `--` was defeated by an ordinary
- * quoted argument (#522 r2). Mirrors `gitStageWritesOrExecs` in
- * src/defence/iron-dome/tool-action-guard.ts.
+ * quoted argument (#522 r2). The short form is matched GLUED as well as bare
+ * (`-o<file>` is what parse-options accepts). Mirrors `gitStageWritesOrExecs`
+ * in src/defence/iron-dome/tool-action-guard.ts — keep the three in lockstep.
  */
 function fallbackGitStageWrites(stage: string): boolean {
   for (const raw of stage.split(/\s+/)) {
     if (!raw) continue;
     const token = raw.replace(/['"]/g, '');
-    if (token === '-o') return true;
+    if (/^-o(?:$|[^-])/.test(token)) return true;
     if (/^--(?:output|ext-diff)\b/i.test(token)) return true;
   }
   return false;

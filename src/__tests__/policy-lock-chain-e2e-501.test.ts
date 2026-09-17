@@ -848,6 +848,10 @@ describe('#501 breaking the install is not a bypass, on the plugin surface eithe
     // whitespace immediately before `--`, which an ordinary quote defeats.
     ['a QUOTED git stage that writes a file', `git diff "--output=${SETTINGS_TEXT}" -- README.md`],
     ['a short-form git stage that writes a file', `git diff -o ${SETTINGS_TEXT} -- README.md`],
+    // …and the GLUED short form, `-o<file>`, which is what parse-options
+    // accepts. Pinning the token to exactly `-o` missed it on all three
+    // copies of the check; this row keeps the fallback surfaces honest.
+    ['a GLUED short-form git stage that writes a file', `git diff -o${SETTINGS_TEXT} -- README.md`],
   ];
 
   it.each(MUST_GATE)(
