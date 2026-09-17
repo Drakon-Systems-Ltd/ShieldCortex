@@ -128,6 +128,19 @@ describe('#502 operator provenance — must REFUSE', () => {
     expect(operatorProvenance(s).reason).toBe('agent-ancestor');
   });
 
+  it('GPT-6 r4: recovered leader is a shell whose PARENT is an agent (orphaned leaf keeps bash sid)', () => {
+    // systemd ← agent(sid 10) ← bash(sid 20, leader) ; leaf node parent=1 sid=20
+    const s = seam([INIT, [10, 1, 10, 'hermes'], [20, 10, 20, 'bash'], [30, 1, 20, 'node']], 30);
+    const v = operatorProvenance(s);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('agent-ancestor');
+  });
+
+  it('GPT-6 r4: agent is two hops above the recovered leader', () => {
+    const s = seam([INIT, [10, 1, 10, 'claude'], [15, 10, 10, 'bash'], [20, 15, 20, 'bash'], [30, 1, 20, 'node']], 30);
+    expect(operatorProvenance(s).reason).toBe('agent-ancestor');
+  });
+
   it('a dead session leader refuses (no session leader)', () => {
     // sid points at a pid that no longer exists.
     const s = seam([INIT, [41, 1, 99, 'node']], 41);
