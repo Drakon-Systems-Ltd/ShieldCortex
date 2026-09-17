@@ -312,7 +312,7 @@ describe('action approvals (#118)', () => {
     it('grants when a human is at the keyboard', () => {
       const pending = request();
       const out = sink();
-      const code = runApprove([pending.hash], { home, now: T0, interactive: true, log: out.write, error: out.write });
+      const code = runApprove([pending.hash], { home, now: T0, interactive: true, provenance: () => ({ ok: true, reason: null, detail: "ok", chain: [] }), log: out.write, error: out.write });
 
       expect(code).toBe(0);
       expect(consumeApproval('Bash', SUDO, { home, now: T0 })).not.toBeNull();
@@ -330,7 +330,7 @@ describe('action approvals (#118)', () => {
     it('rejects a nonsense --ttl instead of silently defaulting', () => {
       const pending = request();
       const out = sink();
-      const code = runApprove([pending.hash, '--ttl', 'soon'], { home, now: T0, interactive: true, log: out.write, error: out.write });
+      const code = runApprove([pending.hash, '--ttl', 'soon'], { home, now: T0, interactive: true, provenance: () => ({ ok: true, reason: null, detail: "ok", chain: [] }), log: out.write, error: out.write });
 
       expect(code).toBe(1);
       expect(consumeApproval('Bash', SUDO, { home, now: T0 })).toBeNull();
@@ -369,7 +369,7 @@ describe('action approvals (#118)', () => {
     it('denies when a human is at the keyboard, one tap', () => {
       const pending = request();
       const out = sink();
-      const code = runDeny([pending.hash], { home, now: T0, interactive: true, log: out.write, error: out.write });
+      const code = runDeny([pending.hash], { home, now: T0, interactive: true, provenance: () => ({ ok: true, reason: null, detail: "ok", chain: [] }), log: out.write, error: out.write });
 
       expect(code).toBe(0);
       expect(approveRequest(pending.hash, { home, now: T0 })).toEqual({ ok: false, reason: 'not-found' });
@@ -378,7 +378,7 @@ describe('action approvals (#118)', () => {
 
     it('reports a clear error for an unknown hash rather than silently succeeding', () => {
       const out = sink();
-      const code = runDeny(['deadbeef'], { home, now: T0, interactive: true, log: out.write, error: out.write });
+      const code = runDeny(['deadbeef'], { home, now: T0, interactive: true, provenance: () => ({ ok: true, reason: null, detail: "ok", chain: [] }), log: out.write, error: out.write });
       expect(code).toBe(1);
       expect(out.lines.join('\n')).toMatch(/no pending/i);
     });
@@ -387,7 +387,7 @@ describe('action approvals (#118)', () => {
       const pending = request();
       approveRequest(pending.hash, { home, now: T0 });
       const out = sink();
-      const code = runDeny([pending.hash], { home, now: T0, interactive: true, log: out.write, error: out.write });
+      const code = runDeny([pending.hash], { home, now: T0, interactive: true, provenance: () => ({ ok: true, reason: null, detail: "ok", chain: [] }), log: out.write, error: out.write });
       expect(code).toBe(1);
       expect(consumeApproval('Bash', SUDO, { home, now: T0 })).not.toBeNull();
     });

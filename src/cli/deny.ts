@@ -14,6 +14,8 @@
  * its own pending request non-interactively could quietly wipe a suspicious
  * refusal from the operator's queue before they ever saw it. There is no
  * env-var escape hatch, matching approve.ts.
+ *
+ * #502: same provenance bar as approve — a TTY is one syscall away.
  */
 
 import {
@@ -23,6 +25,7 @@ import {
   type ApprovalRecord,
 } from '../defence/iron-dome/action-approvals.js';
 import { isInteractive } from './approve.js';
+import { describeProvenanceRefusal, operatorProvenance, type ProvenanceVerdict } from './approve-provenance.js';
 
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
@@ -59,6 +62,7 @@ export interface DenyDeps {
   interactive?: boolean;
   log?: (msg: string) => void;
   error?: (msg: string) => void;
+  provenance?: () => ProvenanceVerdict;
 }
 
 /**
@@ -85,6 +89,11 @@ export function runDeny(argv: string[], deps: DenyDeps = {}): number {
   if (!interactive) {
     err('shieldcortex deny must be run by a human in an interactive terminal.');
     err('Refusing: stdin/stdout are not TTYs, so this could be the agent denying its own pending request.');
+    return 1;
+  }
+  const prov = (deps.provenance ?? operatorProvenance)();
+  if (!prov.ok) {
+    for (const line of describeProvenanceRefusal(prov)) err(line);
     return 1;
   }
 
