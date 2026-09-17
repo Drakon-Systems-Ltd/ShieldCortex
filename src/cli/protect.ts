@@ -17,6 +17,7 @@ import { dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 
 import {
+  DEFAULT_DEFENCE_MODE,
   DEFAULT_PROTECTED_ROOT,
   POLICY_LOCK_FILENAME,
   PROTECT_HINT,
@@ -42,10 +43,13 @@ export interface ProtectOptions {
   /**
    * Pin exactly what config.json says, including an Action Guard that is OFF.
    *
-   * Without it, `protect` pins `enabled: true, enforce: true` regardless: a
-   * command called `protect` that quietly froze the guard in the OFF position
-   * because that happened to be today's config would be a trap, and the lock is
-   * a FLOOR — pinning the guard on never stops an operator making it stricter.
+   * Without it, `protect` does not read config.json AT ALL and pins the safe
+   * posture (#522, GPT-6 round-6, item 3): a command called `protect` that
+   * quietly froze the guard in the OFF position because that happened to be
+   * today's config would be a trap — and one that carried today's same-UID
+   * `autoApprove`, broker, `defenceMode` or memory values into the root-owned
+   * lock would let the agent uid choose its own future ceiling. The lock is a
+   * FLOOR — pinning the safe posture never stops an operator making it stricter.
    */
   fromConfig: boolean;
   /** Read the source config from here instead of the resolved default. */
@@ -91,36 +95,61 @@ export function resolveSourceConfigPath(opts: ProtectOptions): string {
 }
 
 /**
- * Build the policy to pin from a raw config object.
+ * The policy a flag-less `shieldcortex protect` pins, with no config consulted.
  *
- * Reads the config's own values for every protected key, then — unless
- * `--from-config` — forces the two Action Guard master switches on. Keys the
- * config never mentions are left out: a lock does not have to have an opinion
- * about everything, and one that invented a `memory` posture nobody configured
- * would be pinning a value the operator never chose.
+ * #522 (GPT-6 round-6, item 3). Item A had already stopped the default run
+ * carrying a same-UID `reviewedScripts` list into the lock; the same argument
+ * applied to every other pinned key and the code only made it for that one.
+ * `autoApprove` and `broker.enabled` came straight out of config.json, and so
+ * did `defenceMode` and the memory posture — so a same-UID process that
+ * seeded a dangerous `autoApprove` entry and `broker.enabled: true` before the
+ * operator's one privileged run got those values into a root-owned file
+ * whose whole purpose is to be the thing that uid cannot choose.
+ *
+ * Every value here is the tighter end of its key's own order: the guard on
+ * and enforcing, both ceilings empty, the broker off, the `defenceMode` FLOOR
+ * at the product default (config may still raise it to `strict`). `memory` is
+ * deliberately NOT pinned: it has no tightness order, only one legal posture
+ * value, and an `inject.mode` pin of `off` would be a behaviour change rather
+ * than a floor — so a lock that invented one would be pinning a value the
+ * operator never chose. `--from-config` is the only path that pins it.
+ */
+export function safeDefaultPolicy(): LockedPolicy {
+  return {
+    version: 1,
+    actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false }, reviewedScripts: [] },
+    defenceMode: DEFAULT_DEFENCE_MODE,
+  };
+}
+
+/**
+ * Build the policy to pin.
+ *
+ * Without `--from-config` the raw config is ignored entirely — see
+ * {@link safeDefaultPolicy}. With it, the config's own values are pinned for
+ * every protected key, including an Action Guard that is OFF. Keys the config
+ * never mentions are left out: a lock does not have to have an opinion about
+ * everything, and one that invented a `memory` posture nobody configured would
+ * be pinning a value the operator never chose.
  */
 export function buildLockedPolicy(raw: Record<string, unknown>, opts: ProtectOptions): LockedPolicy {
+  if (!opts.fromConfig) return safeDefaultPolicy();
+
   const guardTop = isBlock(raw.actionGuard) ? raw.actionGuard : {};
   const alias = isBlock(raw.interceptor) && isBlock(raw.interceptor.actionGuard) ? raw.interceptor.actionGuard : {};
   // The same #209 merge every other surface applies: top-level wins, alias gap-fills.
   const guard = { ...alias, ...guardTop };
 
   const actionGuard: NonNullable<LockedPolicy['actionGuard']> = {
-    enabled: opts.fromConfig ? guard.enabled === true : true,
-    enforce: opts.fromConfig ? guard.enforce !== false : true,
+    enabled: guard.enabled === true,
+    enforce: guard.enforce !== false,
     autoApprove: Array.isArray(guard.autoApprove)
       ? (guard.autoApprove as unknown[]).filter((e): e is string => typeof e === 'string')
       : [],
     broker: { enabled: isBlock(guard.broker) ? guard.broker.enabled === true : false },
-    // #522 item A — unlike `autoApprove`, this pins an EMPTY ceiling by
-    // default even without `--from-config`. `autoApprove` entries are
-    // strings an operator can eyeball in the printed lock; a reviewed-script
-    // entry is a path+hash pair pinning trust in a FILE'S CONTENTS, and a
-    // `protect` run that silently carried forward whatever a same-UID config
-    // happened to list would let that same-UID process choose its own future
-    // ceiling. `--from-config` opts in explicitly, same switch as the two
-    // master toggles above.
-    reviewedScripts: opts.fromConfig ? normaliseReviewedScripts(guard.reviewedScripts) : [],
+    // #522 item A: a reviewed-script entry is a path+hash pair pinning trust in
+    // a FILE'S CONTENTS; it reaches the lock only through this explicit opt-in.
+    reviewedScripts: normaliseReviewedScripts(guard.reviewedScripts),
   };
   const policy: LockedPolicy = { version: 1, actionGuard };
 
@@ -259,17 +288,25 @@ export function runProtect(args: string[] = []): ProtectResult {
   const protectedRoot = root.supported ? root.root : DEFAULT_PROTECTED_ROOT;
   const lockPath = join(protectedRoot, POLICY_LOCK_FILENAME);
 
-  const sourcePath = resolveSourceConfigPath(opts);
+  // #522 (GPT-6 round-6, item 3): the same-UID config is read ONLY when the
+  // operator asked for its values. A flag-less run pins the safe posture and
+  // never opens the file, so nothing in it can reach the lock.
   let raw: Record<string, unknown> = {};
-  if (existsSync(sourcePath)) {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(sourcePath, 'utf-8'));
-      if (isBlock(parsed)) raw = parsed;
-    } catch {
-      lines.push(`Warning: ${sourcePath} could not be parsed — pinning defaults instead of its values.`);
+  if (opts.fromConfig) {
+    const sourcePath = resolveSourceConfigPath(opts);
+    if (existsSync(sourcePath)) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(sourcePath, 'utf-8'));
+        if (isBlock(parsed)) raw = parsed;
+      } catch {
+        lines.push(`Warning: ${sourcePath} could not be parsed — pinning defaults instead of its values.`);
+      }
+    } else {
+      lines.push(`No config at ${sourcePath} — pinning defaults.`);
     }
   } else {
-    lines.push(`No config at ${sourcePath} — pinning defaults.`);
+    lines.push('Pinning the safe posture; config.json is not read (add --from-config to pin its values instead).');
+    if (opts.sourceConfig) lines.push('Note: --config is only read together with --from-config.');
   }
 
   const policy = buildLockedPolicy(raw, opts);

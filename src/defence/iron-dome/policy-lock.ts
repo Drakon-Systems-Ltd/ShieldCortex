@@ -152,7 +152,12 @@ function isLockedDefenceMode(value: unknown): value is LockedDefenceMode {
   return typeof value === 'string' && Object.hasOwn(DEFENCE_MODE_RANK, value);
 }
 
-const DEFAULT_DEFENCE_MODE: LockedDefenceMode = 'balanced';
+/**
+ * The product default, and (#522, GPT-6 round-6, item 3) the `defenceMode`
+ * FLOOR a flag-less `shieldcortex protect` pins: config may raise it to
+ * `strict`, never lower it to `permissive`.
+ */
+export const DEFAULT_DEFENCE_MODE: LockedDefenceMode = 'balanced';
 
 /**
  * The exact posture an unverifiable lock (or a tampered config) forces.

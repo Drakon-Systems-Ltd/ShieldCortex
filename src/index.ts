@@ -666,6 +666,8 @@ ${bold}COMMANDS${reset}
                                Pass either to opt in; re-run without to opt out.
   ${cyan}protect${reset}               Pin the security-critical config to a root-owned
                         policy lock the agent uid cannot write (needs root).
+                        Pins the safe posture without reading config.json;
+                        --from-config pins config.json's values instead.
                         Flags: --dry-run, --from-config, --config <path>
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration

@@ -22,11 +22,31 @@ import {
   preflightLockDestination,
   resolveSourceConfigPath,
   runProtect,
+  safeDefaultPolicy,
 } from '../protect.js';
-import { POLICY_LOCK_FILENAME, clearPolicyLockReportState } from '../../defence/iron-dome/policy-lock.js';
+import { DEFAULT_DEFENCE_MODE, POLICY_LOCK_FILENAME, clearPolicyLockReportState } from '../../defence/iron-dome/policy-lock.js';
 import { PROTECTED_ROOT_ENV, type ProtectedFsSeam, type ProtectedStat } from '../../defence/iron-dome/protected-root.js';
 
 const OPTS = { dryRun: false, fromConfig: false } as const;
+const FROM_CONFIG = { dryRun: false, fromConfig: true } as const;
+
+/**
+ * Everything a same-UID process could seed into config.json to loosen the
+ * lock it is about to be given. Each value is the loose end of its key's
+ * order, so the default run's output can be compared against it wholesale.
+ */
+const LOOSE_CONFIG = {
+  actionGuard: {
+    enabled: false,
+    enforce: false,
+    autoApprove: ['anything-goes'],
+    broker: { enabled: true },
+    reviewedScripts: [{ path: '/tmp/x.sh', sha256: 'a'.repeat(64) }],
+  },
+  interceptor: { actionGuard: { autoApprove: ['alias-loosening'] } },
+  defenceMode: 'permissive',
+  memory: { hostContract: { posture: 'mcp_sidecar_no_inject' }, inject: { mode: 'off' } },
+};
 
 let protectedRoot: string;
 let configDir: string;
@@ -77,57 +97,84 @@ describe('#501 buildLockedPolicy — what protect would pin', () => {
   });
 
   it('--from-config pins exactly what the config says, including off', () => {
-    const policy = buildLockedPolicy(
-      { actionGuard: { enabled: false, enforce: false } },
-      { ...OPTS, fromConfig: true },
-    );
+    const policy = buildLockedPolicy({ actionGuard: { enabled: false, enforce: false } }, FROM_CONFIG);
     expect(policy.actionGuard).toMatchObject({ enabled: false, enforce: false });
   });
 
-  it('carries autoApprove through as the ceiling, dropping non-strings', () => {
-    const policy = buildLockedPolicy({ actionGuard: { autoApprove: ['ls', 7, 'git status'] } }, OPTS);
+  // #522 (GPT-6 round-6, item 3): the default run must not carry ANY
+  // same-UID value into the root-owned lock. Item A had made that argument
+  // for reviewedScripts; autoApprove, the broker switch, defenceMode and the
+  // memory posture were still read straight out of config.json.
+  it('the default pins the safe posture and nothing from a loosened config reaches it', () => {
+    expect(buildLockedPolicy(LOOSE_CONFIG, OPTS)).toEqual(safeDefaultPolicy());
+    expect(safeDefaultPolicy()).toEqual({
+      version: 1,
+      actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false }, reviewedScripts: [] },
+      defenceMode: DEFAULT_DEFENCE_MODE,
+    });
+  });
+
+  it('the default pins the same thing for an empty config as for a loosened one', () => {
+    expect(buildLockedPolicy({}, OPTS)).toEqual(buildLockedPolicy(LOOSE_CONFIG, OPTS));
+  });
+
+  it('--from-config carries autoApprove through as the ceiling, dropping non-strings', () => {
+    const policy = buildLockedPolicy({ actionGuard: { autoApprove: ['ls', 7, 'git status'] } }, FROM_CONFIG);
     expect(policy.actionGuard?.autoApprove).toEqual(['ls', 'git status']);
   });
 
-  it('pins an empty ceiling when the config has no autoApprove', () => {
+  it('the default pins an empty autoApprove ceiling even when the config lists entries', () => {
     expect(buildLockedPolicy({}, OPTS).actionGuard?.autoApprove).toEqual([]);
+    expect(buildLockedPolicy({ actionGuard: { autoApprove: ['ls'] } }, OPTS).actionGuard?.autoApprove).toEqual([]);
   });
 
-  it('pins the broker off unless the config explicitly enabled it', () => {
+  it('the default pins the broker off even when the config enabled it; --from-config may pin it on', () => {
     expect(buildLockedPolicy({}, OPTS).actionGuard?.broker).toEqual({ enabled: false });
     expect(buildLockedPolicy({ actionGuard: { broker: { enabled: true } } }, OPTS).actionGuard?.broker)
+      .toEqual({ enabled: false });
+    expect(buildLockedPolicy({ actionGuard: { broker: { enabled: true } } }, FROM_CONFIG).actionGuard?.broker)
       .toEqual({ enabled: true });
   });
 
-  it('applies the #209 alias merge — top-level wins, alias gap-fills', () => {
+  it('--from-config applies the #209 alias merge — top-level wins, alias gap-fills', () => {
     const policy = buildLockedPolicy({
       actionGuard: { autoApprove: ['top'] },
       interceptor: { actionGuard: { autoApprove: ['alias'], broker: { enabled: true } } },
-    }, OPTS);
+    }, FROM_CONFIG);
     expect(policy.actionGuard?.autoApprove).toEqual(['top']);
     expect(policy.actionGuard?.broker).toEqual({ enabled: true });
   });
 
-  it('pins defenceMode when the config sets a valid one, and omits junk', () => {
-    expect(buildLockedPolicy({ defenceMode: 'strict' }, OPTS).defenceMode).toBe('strict');
-    expect(buildLockedPolicy({ defenceMode: 'paranoid' }, OPTS).defenceMode).toBeUndefined();
+  it('the default pins the defenceMode FLOOR at the product default, whatever the config says', () => {
+    expect(buildLockedPolicy({}, OPTS).defenceMode).toBe(DEFAULT_DEFENCE_MODE);
+    expect(buildLockedPolicy({ defenceMode: 'permissive' }, OPTS).defenceMode).toBe(DEFAULT_DEFENCE_MODE);
+    expect(buildLockedPolicy({ defenceMode: 'strict' }, OPTS).defenceMode).toBe(DEFAULT_DEFENCE_MODE);
   });
 
-  it('omits the memory block entirely when nothing is configured', () => {
+  it('--from-config pins defenceMode when the config sets a valid one, and omits junk', () => {
+    expect(buildLockedPolicy({ defenceMode: 'strict' }, FROM_CONFIG).defenceMode).toBe('strict');
+    expect(buildLockedPolicy({ defenceMode: 'paranoid' }, FROM_CONFIG).defenceMode).toBeUndefined();
+  });
+
+  it('the default omits the memory block entirely, even when the config declares one', () => {
     // A lock that invented a posture nobody chose would be pinning the
-    // operator's config to a value they never set.
+    // operator's config to a value they never set — and one that copied a
+    // same-UID posture would be pinning a value the agent chose.
     expect(buildLockedPolicy({}, OPTS).memory).toBeUndefined();
+    expect(buildLockedPolicy(LOOSE_CONFIG, OPTS).memory).toBeUndefined();
+    expect(buildLockedPolicy({}, FROM_CONFIG).memory).toBeUndefined();
   });
 
-  it('pins the sidecar-posture pair when the config declares it', () => {
+  it('--from-config pins the sidecar-posture pair when the config declares it', () => {
     const policy = buildLockedPolicy({
       memory: { hostContract: { posture: 'mcp_sidecar_no_inject' }, inject: { mode: 'off' } },
-    }, OPTS);
+    }, FROM_CONFIG);
     expect(policy.memory).toEqual({ hostContract: { posture: 'mcp_sidecar_no_inject' }, inject: { mode: 'off' } });
   });
 
   it('stamps the schema version, so a later reader knows what it has', () => {
     expect(buildLockedPolicy({}, OPTS).version).toBe(1);
+    expect(buildLockedPolicy({}, FROM_CONFIG).version).toBe(1);
   });
 });
 
@@ -167,20 +214,44 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
     const text = result.lines.join('\n');
     expect(text).toMatch(/Would write/);
     expect(text).toMatch(/"enabled": true/);
-    expect(text).toMatch(/"ls"/);
     expect(text).toMatch(/only TIGHTEN/);
+    // #522 (GPT-6 round-6, item 3): the default run does not read the file, so
+    // its autoApprove entry is not in the printed policy — and the operator is
+    // told which switch WOULD pin it.
+    expect(text).not.toMatch(/"ls"/);
+    expect(text).toMatch(/config\.json is not read/);
+    expect(text).toMatch(/--from-config/);
     expect(fs.existsSync(path.join(protectedRoot, POLICY_LOCK_FILENAME))).toBe(false);
   });
 
-  it('--dry-run says so plainly when there is no config to read', () => {
-    expect(runProtect(['--dry-run']).lines.join('\n')).toMatch(/No config at .* — pinning defaults/);
+  it("--dry-run --from-config shows the config's own values, including the ceiling entries", () => {
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({
+      actionGuard: { enabled: false, autoApprove: ['ls'] },
+      defenceMode: 'balanced',
+    }));
+    const text = runProtect(['--dry-run', '--from-config']).lines.join('\n');
+    expect(text).toMatch(/"enabled": false/);
+    expect(text).toMatch(/"ls"/);
+    expect(text).not.toMatch(/config\.json is not read/);
   });
 
-  it('--dry-run warns rather than guessing when the config is corrupt', () => {
+  it('--dry-run --from-config says so plainly when there is no config to read', () => {
+    expect(runProtect(['--dry-run', '--from-config']).lines.join('\n')).toMatch(/No config at .* — pinning defaults/);
+  });
+
+  it('--dry-run --from-config warns rather than guessing when the config is corrupt', () => {
     fs.writeFileSync(path.join(configDir, 'config.json'), '{ not json');
-    const result = runProtect(['--dry-run']);
+    const result = runProtect(['--dry-run', '--from-config']);
     expect(result.lines.join('\n')).toMatch(/could not be parsed — pinning defaults/);
     expect(result.code).toBe(0);
+  });
+
+  it('a --config path without --from-config is noted and not read', () => {
+    const explicit = path.join(configDir, 'explicit.json');
+    fs.writeFileSync(explicit, JSON.stringify({ actionGuard: { autoApprove: ['from-explicit'] } }));
+    const text = runProtect(['--dry-run', '--config', explicit]).lines.join('\n');
+    expect(text).toMatch(/--config is only read together with --from-config/);
+    expect(text).not.toMatch(/from-explicit/);
   });
 
   it('--dry-run reports whether the destination would verify for the agent', () => {
