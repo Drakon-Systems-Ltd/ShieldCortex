@@ -11,7 +11,7 @@
  * that fell back to writing somewhere the agent could reach would produce an
  * artefact that looks like a lock, reads like a lock, and protects nothing.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
 import { randomBytes } from 'crypto';
@@ -54,14 +54,28 @@ export interface ProtectOptions {
   fromConfig: boolean;
   /** Read the source config from here instead of the resolved default. */
   sourceConfig?: string;
+  /**
+   * The uid the AGENT runs as, stated explicitly (`--agent-uid <uid>`).
+   *
+   * Every check in this file is judged as that uid. `SUDO_UID` supplies it when
+   * present; a privileged invocation without `SUDO_UID` (a system service, or
+   * an already-privileged shell) has no source for it, and `protect` refuses
+   * rather than guess (#522, Tars r7, P1). Kept as the raw argument so a
+   * malformed value is refused by name.
+   */
+  agentUid?: string;
 }
 
 export function parseProtectArgs(args: string[]): ProtectOptions {
   const idx = args.indexOf('--config');
+  const uidIdx = args.indexOf('--agent-uid');
   return {
     dryRun: args.includes('--dry-run'),
     fromConfig: args.includes('--from-config'),
     sourceConfig: idx !== -1 && args[idx + 1] && !args[idx + 1].startsWith('--') ? args[idx + 1] : undefined,
+    // A missing value (a trailing `--agent-uid`) is kept as '' so it is refused
+    // as malformed rather than silently ignored.
+    agentUid: uidIdx !== -1 ? (args[uidIdx + 1] ?? '') : undefined,
   };
 }
 
@@ -189,23 +203,88 @@ export interface ProtectResult {
 }
 
 /**
- * Verify the artefact we just wrote the way the AGENT will read it.
+ * Which uid the lock is FOR — resolved, never guessed (#522, Tars r7, P1).
  *
  * A privileged process is the wrong reader: the real verifier answers
  * `running-as-root` for every path, which is correct for a running agent and
- * useless as a post-write check. So the check runs against a seam reporting the
- * unprivileged uid this lock is FOR (`SUDO_UID`, else nobody). That is not a
- * weakened check — it is the only way to assert the property that matters, that
- * the file just written will verify for the user the agent runs as.
+ * useless as a check of the lock we are writing. So every check in this file
+ * runs against a seam reporting the unprivileged uid the lock is for — and that
+ * uid has to be KNOWN. The previous seam fell back to `nobody` (65534) when
+ * `SUDO_UID` was absent, which is exactly the state a system service or an
+ * already-privileged shell is in. Judged as nobody, an agent-owned 0755
+ * directory is "owned by another uid": the lock was written there, reported
+ * protected, and the directory's owner could replace it.
+ *
+ * Precedence: `--agent-uid` (explicit), then `SUDO_UID` (which records who
+ * invoked the privileged run), then — only when this process is itself
+ * unprivileged, i.e. a `--dry-run` by the agent user — this process's own uid.
+ * Privileged with no source is refused before anything is resolved or written;
+ * a uid of 0 from any source is refused too, because an agent with no
+ * same-host boundary cannot be locked.
  */
-function agentSeam(): ProtectedFsSeam {
-  const invokingUid = Number.parseInt(process.env.SUDO_UID ?? '', 10);
-  const asUid = Number.isInteger(invokingUid) && invokingUid > 0 ? invokingUid : 65534;
-  return { ...defaultProtectedFsSeam(), geteuid: () => asUid };
+export type AgentUidResolution =
+  | { ok: true; uid: number; source: 'flag' | 'env' | 'self'; via: string }
+  | { ok: false; detail: string };
+
+function parseUid(raw: string): number | null {
+  return /^\d{1,10}$/.test(raw) ? Number.parseInt(raw, 10) : null;
 }
 
-function verifyAsAgent(path: string): ReturnType<typeof verifyProtectedFile> {
-  return verifyProtectedFile(path, agentSeam());
+function currentEuid(): number | null {
+  return typeof process.geteuid === 'function' ? process.geteuid() : null;
+}
+
+export function resolveAgentUid(
+  opts: Pick<ProtectOptions, 'agentUid'>,
+  env: NodeJS.ProcessEnv = process.env,
+  euid: number | null = currentEuid(),
+): AgentUidResolution {
+  if (opts.agentUid !== undefined) {
+    const uid = parseUid(opts.agentUid);
+    if (uid === null) {
+      return { ok: false, detail: `--agent-uid ${JSON.stringify(opts.agentUid)} is not a uid (expected a non-negative integer).` };
+    }
+    if (uid === 0) {
+      return { ok: false, detail: '--agent-uid 0 names uid 0; an agent with no same-host boundary cannot be locked.' };
+    }
+    return { ok: true, uid, source: 'flag', via: 'from --agent-uid' };
+  }
+  // The env var can name whoever launched this run rather than this run's own
+  // identity — a targeted launch, or a value inherited from an unrelated
+  // earlier context, leaves it set while this process is really someone else.
+  // It only means what it says while this process's own identity is elevated
+  // and so cannot answer the question itself. When this process's own identity
+  // is already ordinary, that direct reading always outranks the env var
+  // (review of #522 Tars r7).
+  if (euid !== null && euid !== 0) {
+    return { ok: true, uid: euid, source: 'self', via: "this process's own uid; pass --agent-uid if the agent runs as another user" };
+  }
+  if (env.SUDO_UID !== undefined) {
+    const uid = parseUid(env.SUDO_UID);
+    if (uid === null) {
+      return { ok: false, detail: `SUDO_UID=${JSON.stringify(env.SUDO_UID)} is not a uid; pass --agent-uid <uid> explicitly.` };
+    }
+    if (uid === 0) {
+      return { ok: false, detail: 'SUDO_UID is 0 (the invoking shell was already elevated), which says nothing about the agent; pass --agent-uid <uid>.' };
+    }
+    return { ok: true, uid, source: 'env', via: 'from SUDO_UID' };
+  }
+  return {
+    ok: false,
+    detail: euid === null
+      ? 'this runtime exposes no effective uid, and neither SUDO_UID nor --agent-uid names one.'
+      : 'running with no SUDO_UID (a system service, or an already-elevated shell), so nothing says which uid ' +
+        "the agent runs as; pass --agent-uid <uid> with the agent user's numeric uid.",
+  };
+}
+
+/** The seam every check in this file is judged through: the agent's uid, not ours. */
+function agentSeam(agentUid: number): ProtectedFsSeam {
+  return { ...defaultProtectedFsSeam(), geteuid: () => agentUid };
+}
+
+function verifyAsAgent(path: string, agentUid: number): ReturnType<typeof verifyProtectedFile> {
+  return verifyProtectedFile(path, agentSeam(agentUid));
 }
 
 /**
@@ -224,13 +303,10 @@ function verifyAsAgent(path: string): ReturnType<typeof verifyProtectedFile> {
  * applies. A chain that fails here would fail the post-write check too, so
  * refusing now loses nothing and touches nothing.
  *
- * Judged as the agent, like every other check in this file. Exported for the
- * seam-driven unit tests; the CLI never passes a seam.
+ * Judged as the agent, like every other check in this file. The CLI passes the
+ * seam built from the resolved agent uid; the unit tests inject their own.
  */
-export function preflightLockDestination(
-  lockPath: string,
-  seam: ProtectedFsSeam = agentSeam(),
-): ProtectedFileVerdict {
+export function preflightLockDestination(lockPath: string, seam: ProtectedFsSeam): ProtectedFileVerdict {
   const euid = seam.geteuid();
   if (euid === null) {
     return { ok: false, reason: 'euid-unavailable', detail: 'This runtime exposes no effective uid, so ownership cannot be compared.' };
@@ -269,15 +345,63 @@ export function preflightLockDestination(
  * The unprivileged (`--dry-run`) path resolves through the same function, so
  * what the dry run prints is what the privileged write does.
  */
-function resolveRootForProtect(): ProtectedRootResolution {
-  return resolveProtectedRoot(agentSeam());
+function resolveRootForProtect(seam: ProtectedFsSeam): ProtectedRootResolution {
+  return resolveProtectedRoot(seam);
+}
+
+/**
+ * The source config, read for `--from-config` only — and only if it is
+ * actually there, a plain file the same account wrote, and parseable.
+ *
+ * This read runs with elevated rights, at a path built from the operator's
+ * OWN account (`resolveSourceConfigPath`) — an account that fully controls
+ * what lands there. Reading it unconditionally would follow a symlink dropped
+ * at that same path to any other file readable by this process, elevated
+ * rights included, and a parse failure's message can surface a fragment of
+ * whatever got read. `lstat`, not `stat`: refusing before the link is ever
+ * opened, not after. The failure text below never repeats what the parser
+ * said, so nothing read from an unexpected target reaches the operator either
+ * way.
+ */
+function readSourceConfig(sourcePath: string): { ok: true; raw: Record<string, unknown> } | { ok: false; detail: string } {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(sourcePath);
+  } catch {
+    return { ok: false, detail: 'there is no config there.' };
+  }
+  if (st.isSymbolicLink()) {
+    return { ok: false, detail: 'it is a symlink, and an elevated read only follows a plain file the operator actually wrote.' };
+  }
+  if (!st.isFile()) {
+    return { ok: false, detail: 'it is not a plain file.' };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(sourcePath, 'utf-8'));
+  } catch {
+    return { ok: false, detail: 'it could not be parsed as JSON.' };
+  }
+  if (!isBlock(parsed)) return { ok: false, detail: 'it is not a JSON object.' };
+  return { ok: true, raw: parsed };
 }
 
 export function runProtect(args: string[] = []): ProtectResult {
   const opts = parseProtectArgs(args);
   const lines: string[] = [];
 
-  const root = resolveRootForProtect();
+  // #522 (Tars r7, P1): who the lock is for is decided first, and decided
+  // explicitly. Nothing below is resolved, judged or written for a guessed uid.
+  const agent = resolveAgentUid(opts);
+  if (!agent.ok) {
+    lines.push(`Refusing to write the policy lock: cannot tell which uid the agent runs as — ${agent.detail}`);
+    if (!opts.dryRun) lines.push('Nothing was written.');
+    lines.push("The lock is judged for the AGENT's uid; judged for a guessed one, an agent-owned directory reads as protected.");
+    return { code: 1, lines };
+  }
+  const seam = agentSeam(agent.uid);
+
+  const root = resolveRootForProtect(seam);
   if (!root.supported && root.reason !== 'running-as-root') {
     // Running privileged is the NORMAL state for `protect` itself. The resolver
     // refuses that state because an AGENT running privileged has no boundary,
@@ -291,19 +415,27 @@ export function runProtect(args: string[] = []): ProtectResult {
   // #522 (GPT-6 round-6, item 3): the same-UID config is read ONLY when the
   // operator asked for its values. A flag-less run pins the safe posture and
   // never opens the file, so nothing in it can reach the lock.
+  //
+  // And when it IS asked for, it has to be there (#522, Tars r7, P2). With the
+  // source absent or unparseable the old code carried on with `{}`, and an
+  // empty config maps to an Action Guard that is OFF — so a privileged run
+  // printed "pinning defaults" and froze the guard off. The safe posture is
+  // one flag away; an explicit request for values that do not exist is refused.
   let raw: Record<string, unknown> = {};
   if (opts.fromConfig) {
     const sourcePath = resolveSourceConfigPath(opts);
-    if (existsSync(sourcePath)) {
-      try {
-        const parsed: unknown = JSON.parse(readFileSync(sourcePath, 'utf-8'));
-        if (isBlock(parsed)) raw = parsed;
-      } catch {
-        lines.push(`Warning: ${sourcePath} could not be parsed — pinning defaults instead of its values.`);
-      }
-    } else {
-      lines.push(`No config at ${sourcePath} — pinning defaults.`);
+    const source = readSourceConfig(sourcePath);
+    if (!source.ok) {
+      lines.push(`Refusing to write the policy lock: --from-config pins the values in ${sourcePath}, and ${source.detail}`);
+      if (!opts.dryRun) lines.push('Nothing was written.');
+      lines.push(
+        'A config that says nothing has the Action Guard OFF, so "defaults" here would freeze it off. ' +
+        'Run protect without --from-config to pin the safe posture instead.',
+      );
+      return { code: 1, lines };
     }
+    raw = source.raw;
+    lines.push(`Pinning the values in ${sourcePath} verbatim (--from-config).`);
   } else {
     lines.push('Pinning the safe posture; config.json is not read (add --from-config to pin its values instead).');
     if (opts.sourceConfig) lines.push('Note: --config is only read together with --from-config.');
@@ -313,13 +445,15 @@ export function runProtect(args: string[] = []): ProtectResult {
   const body = `${JSON.stringify(policy, null, 2)}\n`;
   const pinned = PROTECTED_POLICY_KEYS_V1.filter((k) => coversKey(policy, k)).join(', ');
 
+  lines.push(`Judging the destination as agent uid ${agent.uid} (${agent.via}).`);
+
   if (opts.dryRun) {
     lines.push(`Would write ${lockPath}, owned by uid 0, mode 0644, in a uid-0 0755 directory:`);
     lines.push(body.trimEnd());
     lines.push('');
     lines.push(`Pinned keys: ${pinned}`);
     lines.push('config.json may only TIGHTEN these; it can never loosen them.');
-    const preflight = preflightLockDestination(lockPath);
+    const preflight = preflightLockDestination(lockPath, seam);
     lines.push(preflight.ok
       ? `Destination ${dirname(lockPath)} verifies for the agent: ${preflight.detail}`
       : `WARNING: the real write would be REFUSED — ${dirname(lockPath)} would not verify for the agent: ${preflight.detail}`);
@@ -339,7 +473,7 @@ export function runProtect(args: string[] = []): ProtectResult {
 
   // #522 (GPT-6 round-6, item 2): the destination is judged BEFORE the first
   // mutation. Everything below this line creates, chmods, writes or renames.
-  const preflight = preflightLockDestination(lockPath);
+  const preflight = preflightLockDestination(lockPath, seam);
   if (!preflight.ok) {
     lines.push(`Refusing to write the policy lock: ${dirname(lockPath)} would not verify for the agent — ${preflight.detail}`);
     lines.push(
@@ -370,7 +504,7 @@ export function runProtect(args: string[] = []): ProtectResult {
     return { code: 1, lines };
   }
 
-  const verdict = verifyAsAgent(lockPath);
+  const verdict = verifyAsAgent(lockPath, agent.uid);
   if (!verdict.ok) {
     // Written, but it will not verify for the agent — say so loudly rather than
     // report success. An unverifiable lock forces the strict posture, so the box

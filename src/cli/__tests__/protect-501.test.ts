@@ -20,6 +20,7 @@ import {
   parseProtectArgs,
   policyStatusLines,
   preflightLockDestination,
+  resolveAgentUid,
   resolveSourceConfigPath,
   runProtect,
   safeDefaultPolicy,
@@ -235,15 +236,27 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
     expect(text).not.toMatch(/config\.json is not read/);
   });
 
-  it('--dry-run --from-config says so plainly when there is no config to read', () => {
-    expect(runProtect(['--dry-run', '--from-config']).lines.join('\n')).toMatch(/No config at .* — pinning defaults/);
+  it('--dry-run --from-config with no config to read is REFUSED, not pinned as "defaults" (#522 Tars r7, P2)', () => {
+    // An empty config maps to an Action Guard that is OFF, so "defaults" here
+    // would have frozen the guard off under the word "defaults". The full
+    // privileged/no-write assertions are in the r7 block below.
+    const result = runProtect(['--dry-run', '--from-config']);
+    const text = result.lines.join('\n');
+    expect(result.code).toBe(1);
+    expect(text).toMatch(/Refusing to write the policy lock: --from-config pins the values in .* and there is no config there/);
+    expect(text).not.toMatch(/Would write/);
+    expect(text).not.toMatch(/"enabled": false/);
+    expect(text).not.toMatch(/pinning defaults/);
   });
 
-  it('--dry-run --from-config warns rather than guessing when the config is corrupt', () => {
+  it('--dry-run --from-config with a corrupt config is REFUSED, not guessed (#522 Tars r7, P2)', () => {
     fs.writeFileSync(path.join(configDir, 'config.json'), '{ not json');
     const result = runProtect(['--dry-run', '--from-config']);
-    expect(result.lines.join('\n')).toMatch(/could not be parsed — pinning defaults/);
-    expect(result.code).toBe(0);
+    const text = result.lines.join('\n');
+    expect(result.code).toBe(1);
+    expect(text).toMatch(/--from-config pins the values in .* and it could not be parsed/);
+    expect(text).not.toMatch(/Would write/);
+    expect(text).not.toMatch(/"enabled": false/);
   });
 
   it('a --config path without --from-config is noted and not read', () => {
@@ -256,10 +269,24 @@ describe('#501 runProtect refuses to write a lock it could rewrite', () => {
 
   it('--dry-run reports whether the destination would verify for the agent', () => {
     // The suite's tmp root is owned by this very uid, which is the agent uid
-    // the seam reports — so the honest answer is "would be refused".
-    const text = runProtect(['--dry-run']).lines.join('\n');
-    expect(text).toMatch(/would be REFUSED/);
-    expect(text).toMatch(/would not verify for the agent/);
+    // the seam reports — so the honest answer is "would be refused". The
+    // identity line is asserted too: before #522 r7 an unprivileged run with no
+    // SUDO_UID was judged as `nobody`, and on macOS CI (a 0700 per-user temp
+    // root, no world-writable ancestor) that reported the destination as
+    // verifying — the Linux pass was /tmp's 1777 refusing for the wrong reason.
+    const self = typeof process.geteuid === 'function' ? process.geteuid() : null;
+    const prevSudoUid = process.env.SUDO_UID;
+    delete process.env.SUDO_UID;
+    try {
+      const text = runProtect(['--dry-run']).lines.join('\n');
+      expect(text).toMatch(/would be REFUSED/);
+      expect(text).toMatch(/would not verify for the agent/);
+      if (self !== null && self !== 0) {
+        expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${self} \\(this process's own uid`));
+      }
+    } finally {
+      if (prevSudoUid !== undefined) process.env.SUDO_UID = prevSudoUid;
+    }
   });
 });
 
@@ -502,5 +529,265 @@ describe('#501 doctor rows', () => {
     const labels = (await rows()).map((r) => r.label);
     expect(labels.filter((l) => l.includes('policy lock'))).toHaveLength(1);
     expect(labels.filter((l) => l.includes('config integrity'))).toHaveLength(1);
+  });
+});
+
+describe('#522 r7 (Tars) — the agent uid is resolved, never guessed; --from-config needs a real source', () => {
+  const SELF = typeof process.geteuid === 'function' ? process.geteuid() : 1001;
+  const lockPath = () => path.join(protectedRoot, POLICY_LOCK_FILENAME);
+
+  /** Same zero-mutation canary as the item-2 block: entries, mode, owner and mtime of the destination. */
+  const snapshot = (dir: string) => {
+    const st = fs.statSync(dir);
+    return { entries: fs.readdirSync(dir).sort(), mode: st.mode, uid: st.uid, gid: st.gid, mtimeMs: st.mtimeMs };
+  };
+
+  /**
+   * Run with `SUDO_UID` set to `sudoUid`, or absent when `undefined` — the
+   * state a system service or an already-privileged shell invokes `protect`
+   * in — and, when `privileged`, with `geteuid` answering 0 the way the real
+   * `protect` sees it.
+   */
+  function withIdentity<T>(privileged: boolean, sudoUid: string | undefined, run: () => T): T {
+    const prev = process.env.SUDO_UID;
+    if (sudoUid === undefined) delete process.env.SUDO_UID;
+    else process.env.SUDO_UID = sudoUid;
+    const spy = privileged ? jest.spyOn(process, 'geteuid').mockReturnValue(0) : null;
+    try {
+      return run();
+    } finally {
+      spy?.mockRestore();
+      if (prev === undefined) delete process.env.SUDO_UID;
+      else process.env.SUDO_UID = prev;
+    }
+  }
+
+  describe('resolveAgentUid', () => {
+    it('--agent-uid wins over SUDO_UID', () => {
+      expect(resolveAgentUid({ agentUid: '1234' }, { SUDO_UID: '999' }, 0)).toMatchObject({ ok: true, uid: 1234, source: 'flag' });
+    });
+
+    it('SUDO_UID names the agent when there is no flag', () => {
+      expect(resolveAgentUid({}, { SUDO_UID: '999' }, 0)).toMatchObject({ ok: true, uid: 999, source: 'env' });
+    });
+
+    it('an unprivileged process with no other source is its own agent', () => {
+      expect(resolveAgentUid({}, {}, 1001)).toMatchObject({ ok: true, uid: 1001, source: 'self' });
+    });
+
+    it('an unprivileged process trusts its own uid over a stale or foreign SUDO_UID (code review, #522 r7)', () => {
+      // SUDO_UID names whoever launched the run, not necessarily this process:
+      // a launch targeted at a different account, or a value left over from an
+      // unrelated earlier context, can leave it set on a process that is really
+      // someone else. That is only ambiguous while this process cannot answer
+      // for itself; here it can, and its own identity is what gets judged.
+      expect(resolveAgentUid({}, { SUDO_UID: '999' }, 1001)).toMatchObject({ ok: true, uid: 1001, source: 'self' });
+    });
+
+    it('a privileged process with nothing to go on is refused — never judged as nobody', () => {
+      const v = resolveAgentUid({}, {}, 0);
+      expect(v.ok).toBe(false);
+      if (!v.ok) expect(v.detail).toMatch(/no SUDO_UID/);
+    });
+
+    it('a runtime with no euid and no source is refused', () => {
+      expect(resolveAgentUid({}, {}, null)).toMatchObject({ ok: false });
+    });
+
+    it('uid 0 is refused from either source', () => {
+      expect(resolveAgentUid({ agentUid: '0' }, {}, 0)).toMatchObject({ ok: false });
+      expect(resolveAgentUid({}, { SUDO_UID: '0' }, 0)).toMatchObject({ ok: false });
+    });
+
+    it.each(['abc', '', '-1', '1.5', '12abc'])('a malformed --agent-uid %j is refused by name', (raw) => {
+      const v = resolveAgentUid({ agentUid: raw }, { SUDO_UID: '999' }, 0);
+      expect(v.ok).toBe(false);
+      if (!v.ok) expect(v.detail).toMatch(/--agent-uid/);
+    });
+
+    it('a malformed SUDO_UID is refused rather than falling through to a guess', () => {
+      expect(resolveAgentUid({}, { SUDO_UID: 'x' }, 0)).toMatchObject({ ok: false });
+    });
+
+    it('parseProtectArgs keeps the raw --agent-uid value, and a trailing flag as the empty string', () => {
+      expect(parseProtectArgs(['--agent-uid', '1001']).agentUid).toBe('1001');
+      expect(parseProtectArgs(['--agent-uid']).agentUid).toBe('');
+      expect(parseProtectArgs([]).agentUid).toBeUndefined();
+    });
+  });
+
+  describe('P1 — a privileged run with no SUDO_UID', () => {
+    it('is REFUSED before anything is resolved, judged or written', () => {
+      // Before the fix this run was judged as uid 65534. The suite root is
+      // owned by SELF, so to "nobody" it is owned by another uid — and on a
+      // chain with no world-writable ancestor the old code went on to mkdir,
+      // write and print "Policy lock written" into a directory SELF owns.
+      const before = snapshot(protectedRoot);
+      const result = withIdentity(true, undefined, () => runProtect([]));
+      const text = result.lines.join('\n');
+      expect(result.code).toBe(1);
+      expect(text).toMatch(/Refusing to write the policy lock: cannot tell which uid the agent runs as/);
+      expect(text).toMatch(/no SUDO_UID/);
+      expect(text).toMatch(/--agent-uid/);
+      expect(text).toMatch(/Nothing was written/);
+      expect(text).not.toMatch(/Judging the destination/);
+      expect(text).not.toMatch(/verifies for the agent/);
+      expect(text).not.toMatch(/WROTE|Policy lock written/);
+      expect(fs.existsSync(lockPath())).toBe(false);
+      expect(snapshot(protectedRoot)).toEqual(before);
+    });
+
+    it('is refused as --dry-run too, with no policy printed and no false "verifies"', () => {
+      const result = withIdentity(true, undefined, () => runProtect(['--dry-run']));
+      const text = result.lines.join('\n');
+      expect(result.code).toBe(1);
+      expect(text).toMatch(/cannot tell which uid the agent runs as/);
+      expect(text).not.toMatch(/Would write/);
+      expect(text).not.toMatch(/verifies for the agent/);
+    });
+
+    it('SUDO_UID=0 is refused: it says nothing about the agent', () => {
+      const before = snapshot(protectedRoot);
+      const result = withIdentity(true, '0', () => runProtect([]));
+      expect(result.code).toBe(1);
+      expect(result.lines.join('\n')).toMatch(/SUDO_UID is 0/);
+      expect(snapshot(protectedRoot)).toEqual(before);
+    });
+
+    it('a malformed --agent-uid is refused with nothing written', () => {
+      const before = snapshot(protectedRoot);
+      const result = withIdentity(true, undefined, () => runProtect(['--agent-uid', 'agent']));
+      expect(result.code).toBe(1);
+      expect(result.lines.join('\n')).toMatch(/--agent-uid "agent" is not a uid/);
+      expect(snapshot(protectedRoot)).toEqual(before);
+    });
+
+    it('--agent-uid names the agent, and the destination is then judged for THAT uid', () => {
+      // The positive control for the flag: the same run, now told the agent
+      // is SELF, gets as far as the destination — and refuses it for the right
+      // reason, because SELF owns it. Judged as nobody it would have "verified".
+      const before = snapshot(protectedRoot);
+      const result = withIdentity(true, undefined, () => runProtect(['--agent-uid', String(SELF)]));
+      const text = result.lines.join('\n');
+      expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${SELF} \\(from --agent-uid\\)`));
+      expect(text).toMatch(/would not verify for the agent/);
+      expect(text).toMatch(/Nothing was written/);
+      expect(result.code).toBe(1);
+      expect(snapshot(protectedRoot)).toEqual(before);
+    });
+
+    it('--agent-uid overrides a SUDO_UID that names someone else', () => {
+      const text = withIdentity(true, String(SELF + 1), () => runProtect(['--dry-run', '--agent-uid', String(SELF)])).lines.join('\n');
+      expect(text).toMatch(new RegExp(`agent uid ${SELF} \\(from --agent-uid\\)`));
+      expect(text).not.toMatch(new RegExp(`agent uid ${SELF + 1}`));
+    });
+
+    it('SUDO_UID positive control: the invoking uid is the agent, and is named as such', () => {
+      const text = withIdentity(true, String(SELF), () => runProtect(['--dry-run'])).lines.join('\n');
+      expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${SELF} \\(from SUDO_UID\\)`));
+      expect(text).toMatch(/would be REFUSED/);
+    });
+
+    it('an unprivileged --dry-run with no SUDO_UID is judged as its own uid — the macOS CI case', () => {
+      // macOS CI failed at "reports whether the destination would verify": its
+      // per-user temp root has no world-writable ancestor, so judged as nobody
+      // the SELF-owned root "verified". Judged as SELF it is refused everywhere.
+      const text = withIdentity(false, undefined, () => runProtect(['--dry-run'])).lines.join('\n');
+      expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${SELF} \\(this process's own uid`));
+      expect(text).toMatch(/would be REFUSED/);
+      expect(text).toMatch(/would not verify for the agent/);
+    });
+
+    it('an unprivileged --dry-run judges itself even with a stale/foreign SUDO_UID set (code review, #522 r7)', () => {
+      // SUDO_UID is whoever launched the run, not this process. Left set from
+      // some other context on an otherwise-ordinary run it must not steer the
+      // check onto a uid this process is not — that would be exactly the false
+      // "verifies" this whole file exists to close, one env var later.
+      const text = withIdentity(false, String(SELF + 1), () => runProtect(['--dry-run'])).lines.join('\n');
+      expect(text).toMatch(new RegExp(`Judging the destination as agent uid ${SELF} \\(this process's own uid`));
+      expect(text).not.toMatch(new RegExp(`agent uid ${SELF + 1}`));
+    });
+  });
+
+  describe('P2 — --from-config with no usable source', () => {
+    const refusedWithNothingWritten = (args: string[], reason: RegExp) => {
+      const before = snapshot(protectedRoot);
+      const result = withIdentity(true, String(SELF), () => runProtect(args));
+      const text = result.lines.join('\n');
+      expect(result.code).toBe(1);
+      expect(text).toMatch(/Refusing to write the policy lock: --from-config pins the values in/);
+      expect(text).toMatch(reason);
+      expect(text).toMatch(/Nothing was written/);
+      expect(text).not.toMatch(/"enabled": false/);
+      expect(text).not.toMatch(/pinning defaults/);
+      expect(text).not.toMatch(/WROTE|Policy lock written/);
+      expect(fs.existsSync(lockPath())).toBe(false);
+      expect(snapshot(protectedRoot)).toEqual(before);
+      return text;
+    };
+
+    it('no config: the privileged run is refused, nothing written, the guard not pinned OFF', () => {
+      // Before the fix: exit 0, "No config … pinning defaults", and a lock with
+      // actionGuard.enabled:false — the guard frozen off under that prose.
+      refusedWithNothingWritten(['--from-config'], /there is no config there/);
+    });
+
+    it('corrupt config: refused the same way', () => {
+      fs.writeFileSync(path.join(configDir, 'config.json'), '{ not json');
+      refusedWithNothingWritten(['--from-config'], /it could not be parsed/);
+    });
+
+    it('a config that is not a JSON object: refused the same way', () => {
+      fs.writeFileSync(path.join(configDir, 'config.json'), '[]');
+      refusedWithNothingWritten(['--from-config'], /it is not a JSON object/);
+    });
+
+    it('the refusal comes BEFORE the destination is judged, so it is not masked by a bad root', () => {
+      const text = refusedWithNothingWritten(['--from-config'], /there is no config there/);
+      expect(text).not.toMatch(/would not verify for the agent/);
+    });
+
+    it('--dry-run --from-config refuses the same way and prints no policy', () => {
+      const result = withIdentity(true, String(SELF), () => runProtect(['--dry-run', '--from-config']));
+      expect(result.code).toBe(1);
+      expect(result.lines.join('\n')).not.toMatch(/Would write|"enabled"/);
+    });
+
+    it('positive control: a present config is pinned verbatim, including an Action Guard that is OFF', () => {
+      fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
+      const result = withIdentity(true, String(SELF), () => runProtect(['--dry-run', '--from-config']));
+      const text = result.lines.join('\n');
+      expect(result.code).toBe(0);
+      expect(text).toMatch(/Pinning the values in .*config\.json verbatim \(--from-config\)/);
+      expect(text).toMatch(/"enabled": false/);
+    });
+
+    it('a symlinked config.json is refused without ever being followed — an elevated run must not chase a same-account link (code review, #522 r7)', () => {
+      // The account that owns config.json also owns the whole read path, and
+      // could point it anywhere this process can read. Following it would let
+      // that account use an elevated read to reach a file it cannot read
+      // itself; the target here is deliberately something ordinary, because
+      // the point is that the link is refused BEFORE its target is ever
+      // resolved, whatever that target is.
+      const target = path.join(os.tmpdir(), `sc-501-protect-cfg-target-${process.pid}-${Date.now()}`);
+      fs.writeFileSync(target, 'ACTUALLY-SECRET-CONTENT-MUST-NOT-APPEAR-IN-OUTPUT');
+      try {
+        fs.symlinkSync(target, path.join(configDir, 'config.json'));
+        const text = refusedWithNothingWritten(['--from-config'], /it is a symlink/);
+        expect(text).not.toMatch(/ACTUALLY-SECRET-CONTENT-MUST-NOT-APPEAR-IN-OUTPUT/);
+      } finally {
+        fs.rmSync(target, { force: true });
+      }
+    });
+
+    it('a parse failure never echoes the parser message, so a symlinked or foreign file cannot leak a fragment through it', () => {
+      // V8's own JSON.parse error message quotes back (up to 10 chars of) the
+      // leading token it choked on ("Unexpected token 'S', \"SECRETXYZ \"...
+      // is not valid JSON") — real content, not a generic description. That is
+      // the fragment this refusal must never repeat.
+      fs.writeFileSync(path.join(configDir, 'config.json'), 'SECRETXYZ garbage, not json at all');
+      const text = refusedWithNothingWritten(['--from-config'], /it could not be parsed as JSON/);
+      expect(text).not.toMatch(/SECRETXYZ/);
+    });
   });
 });

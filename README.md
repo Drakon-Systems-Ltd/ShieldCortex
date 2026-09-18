@@ -478,6 +478,14 @@ shieldcortex protect             # run as root: writes /etc/shieldcortex/policy.
 shieldcortex config --policy-status
 ```
 
+`protect` judges the destination for the uid the **agent** runs as, and it has
+to know that uid: under `sudo` it is `SUDO_UID`; from a system service or an
+already-privileged shell (no `SUDO_UID`) pass `--agent-uid <uid>` with the agent
+user's numeric uid, or the command refuses rather than guess. `--from-config`
+pins the config's own values and refuses when the file is missing or
+unparseable — it never pins an absent config's "defaults", which would freeze
+Action Guard OFF.
+
 - 🔑 **No key material at all** — the lock is a plain root-owned `0644` file in a
   root-owned `0755` directory. Agent-readable is intended; agent-writable is what
   is being removed. Nothing to steal, no keyring, no second same-UID file.
