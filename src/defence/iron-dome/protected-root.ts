@@ -475,7 +475,7 @@ const MAX_CHAIN_STEPS = 256;
 const MAX_TARGET_RESOLUTION_STEPS = 256;
 
 type TargetResolution =
-  | { ok: true; path: string }
+  | { ok: true; path: string; hops: string[] }
   | { ok: false; reason: 'parent-symlink-unresolvable' | 'parent-symlink-cycle' };
 
 /**
@@ -499,6 +499,7 @@ function resolveTargetRealPath(
   budget: { steps: number },
 ): TargetResolution {
   let current = '/';
+  const hops: string[] = [];
   const startPath = isAbsolute(target) ? target : `${base}/${target}`;
   for (const component of startPath.split('/')) {
     if (component === '' || component === '.') continue;
@@ -515,17 +516,23 @@ function resolveTargetRealPath(
       if (budget.steps-- <= 0) return { ok: false, reason: 'parent-symlink-cycle' };
       const st = seam.lstat(next);
       if (st === null || !st.isSymbolicLink) break;
+      // Nested hops are discarded from the returned path; the caller must
+      // still walk them. Without that, a root-owned /protected ->
+      // /agent/hop -> /srv/locked blesses the final ancestry and never
+      // looks at /agent (#522 r8, GPT-6).
+      hops.push(next);
       const linkTarget = seam.readlink(next);
       if (linkTarget === null || linkTarget === '') {
         return { ok: false, reason: 'parent-symlink-unresolvable' };
       }
       const hop = resolveTargetRealPath(dirname(next), linkTarget, seam, budget);
       if (!hop.ok) return hop;
+      hops.push(...hop.hops);
       next = hop.path;
     }
     current = next;
   }
-  return { ok: true, path: current };
+  return { ok: true, path: current, hops };
 }
 
 interface ChainWalk {
@@ -604,12 +611,23 @@ function verifyOneDirectory(
       return fail(resolution.reason, `${dir} -> ${target}: ${why}.`);
     }
     const resolved = resolution.path;
+    // Nested hops taken while resolving the target are not on the lexical
+    // chain of `resolved`. Walk each so an agent-owned parent of an
+    // intermediate redirect cannot be discarded (#522 r8, GPT-6).
+    for (const hop of resolution.hops) {
+      if (hop === dir) continue;
+      const hopVerdict = walkDirectoryChain(hop, euid, seam, walk);
+      if (!hopVerdict.ok) {
+        return fail(hopVerdict.reason ?? 'parent-symlink-unresolvable', `${dir} -> ${hop}: ${hopVerdict.detail}`);
+      }
+    }
     const targetVerdict = walkDirectoryChain(resolved, euid, seam, walk);
     if (!targetVerdict.ok) {
       return fail(targetVerdict.reason ?? 'parent-symlink-unresolvable', `${dir} -> ${resolved}: ${targetVerdict.detail}`);
     }
     // The target chain vouches for what the link points at today; the lexical
     // walk continuing above `dir` vouches for who can re-point it tomorrow.
+    // Nested hops (above) vouch for every redirect taken on the way.
     return { ok: true, reason: null, detail: `${dir} -> ${resolved}: target chain verified.` };
   }
 

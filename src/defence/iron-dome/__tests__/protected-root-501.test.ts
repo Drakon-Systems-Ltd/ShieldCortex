@@ -232,6 +232,39 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     expect(v.detail).toContain('/agent-parent');
   });
 
+  it('refuses a nested hop whose parent the agent owns even when the final target is root-owned (#522 r8, GPT-6)', () => {
+    // /etc/shieldcortex -> /home/agent/hop -> /srv/locked. The resolver used
+    // to return only /srv/locked, then walk that ancestry and /etc, never
+    // looking at /home/agent. The agent unlinks the hop it owns; the
+    // canonical path goes missing; the lock reads as absent.
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/home/agent/hop', uid: ROOT_UID },
+      '/home': { kind: 'dir', mode: 0o40755 },
+      '/home/agent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/home/agent/hop': { kind: 'symlink', target: '/srv/locked', uid: ROOT_UID },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/home/agent');
+  });
+
+  it('the same nested hop still verifies when every component is root-owned', () => {
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/opt/hop', uid: ROOT_UID },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/hop': { kind: 'symlink', target: '/srv/locked', uid: ROOT_UID },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v).toEqual({ ok: true, reason: null, detail: expect.any(String) });
+  });
+
   it('fails closed on a symlink whose target cannot be read', () => {
     const seam = seamOf({
       '/': { kind: 'dir', mode: 0o40755 },
@@ -284,7 +317,10 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     }, { touched }));
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('parent-owned-by-agent');
-    expect(v.detail).toContain('/protected -> /agent-parent/policy-dir');
+    // r8 walks the nested hop first, so the refusal names /safe/jump rather
+    // than only the final /agent-parent/policy-dir. Either naming is a
+    // refuse; the load-bearing claim is that /agent-parent was examined.
+    expect(v.detail).toContain('/agent-parent');
     expect(touched).toContain('/agent-parent');
   });
 
