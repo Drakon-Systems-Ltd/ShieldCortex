@@ -265,6 +265,87 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     expect(v).toEqual({ ok: true, reason: null, detail: expect.any(String) });
   });
 
+  it('refuses a three-level nested hop whose middle parent the agent owns', () => {
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/root/h1', uid: ROOT_UID },
+      '/root': { kind: 'dir', mode: 0o40755 },
+      '/root/h1': { kind: 'symlink', target: '/home/agent/h2', uid: ROOT_UID },
+      '/home': { kind: 'dir', mode: 0o40755 },
+      '/home/agent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/home/agent/h2': { kind: 'symlink', target: '/srv/locked', uid: ROOT_UID },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/home/agent');
+  });
+
+  it('refuses a nested hop whose parent is world-writable', () => {
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/var/hop', uid: ROOT_UID },
+      '/var': { kind: 'dir', mode: 0o41777 },
+      '/var/hop': { kind: 'symlink', target: '/srv/locked', uid: ROOT_UID },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-group-or-other-writable');
+    expect(v.detail).toContain('/var');
+  });
+
+  it('refuses a RELATIVE nested hop into an agent tree', () => {
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '../home/agent/hop', uid: ROOT_UID },
+      '/home': { kind: 'dir', mode: 0o40755 },
+      '/home/agent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/home/agent/hop': { kind: 'symlink', target: '/srv/locked', uid: ROOT_UID },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/home/agent');
+  });
+
+  it('refuses when the nested hop symlink inode itself is agent-owned', () => {
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/opt/hop', uid: ROOT_UID },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/hop': { kind: 'symlink', target: '/srv/locked', uid: AGENT_UID },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/opt/hop');
+  });
+
+  it('refuses the GPT-6 nested hop through verifyProtectedFile on the canonical lock path', () => {
+    const v = verifyProtectedFile('/etc/shieldcortex/policy.json', seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/home/agent/hop', uid: ROOT_UID },
+      '/etc/shieldcortex/policy.json': { kind: 'file', mode: 0o100644 },
+      '/home': { kind: 'dir', mode: 0o40755 },
+      '/home/agent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/home/agent/hop': { kind: 'symlink', target: '/srv/locked', uid: ROOT_UID },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/home/agent');
+  });
+
   it('fails closed on a symlink whose target cannot be read', () => {
     const seam = seamOf({
       '/': { kind: 'dir', mode: 0o40755 },
