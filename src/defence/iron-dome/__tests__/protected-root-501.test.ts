@@ -131,7 +131,6 @@ describe('#501 verifyProtectedFile — the positive case', () => {
     })));
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('parent-owned-by-agent');
-    expect(v.detail).toContain('/etc -> /private/etc');
     expect(v.detail).toContain('/private is owned by this agent');
   });
 });
@@ -160,7 +159,7 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     ));
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('parent-owned-by-agent');
-    expect(v.detail).toContain('/protected -> /agent-parent/safe');
+    expect(v.detail).toContain('/agent-parent');
     expect(touched).toContain('/agent-parent');
   });
 
@@ -196,7 +195,7 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
       '/agent-parent/safe': { kind: 'dir', mode: 0o40755 },
     }));
     expect(v.reason).toBe('parent-owned-by-agent');
-    expect(v.detail).toContain('/opt/protected -> /agent-parent/safe');
+    expect(v.detail).toContain('/agent-parent');
   });
 
   it('still walks the LEXICAL chain above a symlink whose target is impeccable', () => {
@@ -346,6 +345,54 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
     expect(v.detail).toContain('/home/agent');
   });
 
+  it('refuses a `..` that discards an ordinary agent-owned directory on the way to a root-owned final path (#522 r8, GPT-6 patrol)', () => {
+    // /etc/shieldcortex -> /opt/hop -> /home/agent/transit/../../../srv/locked.
+    // Both symlinks root-owned; final /srv/locked root-owned. The resolver
+    // used to return only /srv/locked and record /opt/hop, never
+    // /home/agent/transit, so /home/agent was never ownership-checked.
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/opt/hop', uid: ROOT_UID },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/hop': { kind: 'symlink', target: '/home/agent/transit/../../../srv/locked', uid: ROOT_UID },
+      '/home': { kind: 'dir', mode: 0o40755 },
+      '/home/agent': { kind: 'dir', uid: AGENT_UID, mode: 0o40755 },
+      '/home/agent/transit': { kind: 'dir', mode: 0o40755 },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-owned-by-agent');
+    expect(v.detail).toContain('/home/agent');
+  });
+
+  it('the same `..` discard still verifies when every traversed directory is root-owned', () => {
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/opt/hop', uid: ROOT_UID },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/hop': { kind: 'symlink', target: '/opt/transit/../../../srv/locked', uid: ROOT_UID },
+      '/opt/transit': { kind: 'dir', mode: 0o40755 },
+      '/srv': { kind: 'dir', mode: 0o40755 },
+      '/srv/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v).toEqual({ ok: true, reason: null, detail: expect.any(String) });
+  });
+
+  it('fails closed when a `..` would climb out of a missing traversal component', () => {
+    const v = verifyProtectedDirectoryChain('/etc/shieldcortex', AGENT_UID, seamOf({
+      '/': { kind: 'dir', mode: 0o40755 },
+      '/etc': { kind: 'dir', mode: 0o40755 },
+      '/etc/shieldcortex': { kind: 'symlink', target: '/opt/ghost/../locked', uid: ROOT_UID },
+      '/opt': { kind: 'dir', mode: 0o40755 },
+      '/opt/locked': { kind: 'dir', mode: 0o40755 },
+    }));
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('parent-missing');
+  });
+
   it('fails closed on a symlink whose target cannot be read', () => {
     const seam = seamOf({
       '/': { kind: 'dir', mode: 0o40755 },
@@ -461,7 +508,7 @@ describe('#522 review blocker — a root-owned symlink whose TARGET ancestry is 
       '/agent-parent/policy-dir': { kind: 'dir', mode: 0o40755 },
     }));
     expect(v.reason).toBe('parent-owned-by-agent');
-    expect(v.detail).toContain('/opt/protected -> /agent-parent/policy-dir');
+    expect(v.detail).toContain('/agent-parent');
   });
 
   it('fails closed when a symlink INSIDE the target path has an unreadable target', () => {

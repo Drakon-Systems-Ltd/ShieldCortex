@@ -476,7 +476,7 @@ const MAX_TARGET_RESOLUTION_STEPS = 256;
 
 type TargetResolution =
   | { ok: true; path: string; hops: string[] }
-  | { ok: false; reason: 'parent-symlink-unresolvable' | 'parent-symlink-cycle' };
+  | { ok: false; reason: 'parent-symlink-unresolvable' | 'parent-symlink-cycle' | 'parent-missing' | 'parent-not-directory' };
 
 /**
  * Resolve a symlink target to the real path the KERNEL would open.
@@ -530,6 +530,16 @@ function resolveTargetRealPath(
       hops.push(...hop.hops);
       next = hop.path;
     }
+    // Kernel will not traverse a missing or non-directory component, and
+    // `..` after one must not be applied lexically to a ghost path.
+    // Ordinary directories consumed by a later `..` are also discarded from
+    // `path`; record them so the caller walks their ancestry. Without that,
+    // `/opt/hop -> /home/agent/transit/../../../srv/locked` blesses
+    // /srv/locked and never looks at /home/agent (#522 r8, GPT-6 patrol).
+    const landed = seam.lstat(next);
+    if (landed === null) return { ok: false, reason: 'parent-missing' };
+    if (!landed.isDirectory) return { ok: false, reason: 'parent-not-directory' };
+    hops.push(next);
     current = next;
   }
   return { ok: true, path: current, hops };
@@ -607,7 +617,11 @@ function verifyOneDirectory(
     if (!resolution.ok) {
       const why = resolution.reason === 'parent-symlink-cycle'
         ? 'its target path loops through symlinks without terminating'
-        : 'a symlink on its target path could not be read';
+        : resolution.reason === 'parent-missing'
+          ? 'a component of its target path does not exist'
+          : resolution.reason === 'parent-not-directory'
+            ? 'a component of its target path is not a directory'
+            : 'a symlink on its target path could not be read';
       return fail(resolution.reason, `${dir} -> ${target}: ${why}.`);
     }
     const resolved = resolution.path;
