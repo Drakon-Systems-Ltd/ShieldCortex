@@ -68,6 +68,12 @@ import {
   type NativeSotEvidence,
   type PlaneDriftCounts,
 } from '../memory/plane-drift.js';
+import {
+  applyPolicyLock,
+  describePolicyLock,
+  readPolicyLock,
+  PROTECT_HINT,
+} from '../defence/iron-dome/policy-lock.js';
 import { getCanonicalSchema } from '../database/init.js';
 import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
@@ -87,8 +93,10 @@ import {
 // loaded with a runtime `import()` inside runDoctorAiSection() below, so a
 // plain `shieldcortex doctor` never touches either module.
 import {
+  getActionGuardCoreConfig,
   getConfigDir,
   hasTrustedMemorySidecarPosture,
+  isConfigTampered,
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
@@ -2924,11 +2932,19 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // against the SAME file the `shieldcortex config` setters write and the
     // runtime accessors read — including the SHIELDCORTEX_CONFIG_DIR override.
     const configPath = path.join(getConfigDir(), 'config.json');
-    const raw = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+    const onDisk = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+    // #501: report the posture that is ENFORCED, not the one the file asks for.
+    // This stayed a bare parse so the deprecated-alias inspection below can see
+    // `interceptor.actionGuard` — but a bare parse is also how doctor came to
+    // report "Action Guard is disabled in config" on a box where the policy
+    // lock had it on and enforcing. Reading the file and grading the file is
+    // exactly the gap #501 closes everywhere else.
+    const raw = applyPolicyLock(onDisk, readPolicyLock({ audit: false, warn: false }));
     const isBlock = isConfigBlock;
     const top = isBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
-    const alias = isBlock(raw?.interceptor?.actionGuard)
-      ? (raw.interceptor.actionGuard as Record<string, unknown>)
+    const interceptor = isBlock(raw?.interceptor) ? (raw.interceptor as Record<string, unknown>) : null;
+    const alias = isBlock(interceptor?.actionGuard)
+      ? (interceptor!.actionGuard as Record<string, unknown>)
       : null;
     const merged = { ...(alias ?? {}), ...(top ?? {}) };
     const effective = { enabled: merged.enabled === true, enforce: merged.enforce !== false };
@@ -3105,7 +3121,103 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // Unreadable config resolves to defaults on both runtime surfaces — nothing to warn about here.
   }
 
+  // 3. Policy lock (#501) and the integrity verdict (two rows, always).
+  results.push(...policyLockRows());
+
   return results;
+}
+
+/**
+ * The two rows #501 adds: what the OS-owned policy lock is, and what the
+ * config's own integrity signature says.
+ *
+ * They are separate rows on purpose. They answer different questions and a
+ * single "config security" row would let a green half hide a red one — the
+ * exact shape of the 5.0.1 report where signed Enforce sat beside a disarmed
+ * plugin and the summary read fine.
+ */
+export function policyLockRows(): CheckResult[] {
+  const rows: CheckResult[] = [];
+  const label = 'Action guard';
+
+  const state = readPolicyLock({ audit: false, warn: false });
+  const summary = describePolicyLock(state);
+  const guardOn = (() => {
+    try { return getActionGuardCoreConfig().enabled; } catch { return false; }
+  })();
+
+  switch (summary.status) {
+    case 'locked':
+      rows.push({
+        label: `${label} policy lock`,
+        status: 'pass',
+        message: summary.headline,
+      });
+      break;
+    case 'unverifiable':
+      rows.push({
+        label: `${label} policy lock`,
+        status: 'fail',
+        message:
+          `${summary.headline}. A lock that exists but cannot be verified is indistinguishable from one the ` +
+          'agent wrote for itself, so the guard is forced on and enforcing, auto-approve is empty, the broker ' +
+          'is off and defence mode is strict.',
+        fix: `${PROTECT_HINT} to rewrite the lock, or remove the file to run unlocked (and unprotected).`,
+      });
+      break;
+    case 'absent':
+      // FAIL when the guard is ON, WARN when it is off. An operator who has
+      // enabled the guard believes tool calls are gated; that belief is what an
+      // unlocked config falsifies, because any same-user process can undo it
+      // with a one-line edit. With the guard off there is nothing yet to
+      // protect, so the same fact is advice rather than a failure.
+      rows.push({
+        label: `${label} policy lock`,
+        status: guardOn ? 'fail' : 'warn',
+        message:
+          `${summary.headline}${guardOn
+            ? ' — Action Guard is enabled, but a one-line edit to config.json switches it off and nothing would notice'
+            : ' (Action Guard is off, so there is nothing pinned to lose yet)'}`,
+        fix: `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`,
+      });
+      break;
+    case 'unsupported':
+      rows.push({
+        label: `${label} policy lock`,
+        status: 'warn',
+        message: summary.headline,
+        // No fix line: there is nothing to run. Offering one would imply this
+        // is fixable locally, and inventing a boundary that does not exist is
+        // worse than saying so.
+      });
+      break;
+  }
+
+  // The integrity signature, described for what it is.
+  const tampered = isConfigTampered();
+  rows.push(
+    tampered
+      ? {
+          label: `${label} config integrity`,
+          status: 'fail',
+          message:
+            'config.json does not match its integrity signature — corruption, a torn write, or a hand edit. ' +
+            'The strict fail-closed posture is in force (guard on + enforcing, no auto-approve, broker off, ' +
+            'defence mode strict). Note this HMAC is a CORRUPTION detector, not tamper protection: its key ' +
+            'lives beside the file it signs and under the same uid, so anything that can edit the config can ' +
+            're-sign it. The policy lock is the control that a same-user process cannot forge.',
+          fix: 'Re-write the affected settings with the `shieldcortex config --*` flags (they re-sign), then re-run doctor.',
+        }
+      : {
+          label: `${label} config integrity`,
+          status: 'pass',
+          message:
+            'config.json matches its integrity signature (a corruption / accidental-edit check — the key is ' +
+            'co-located and same-uid, so it is not tamper protection; the policy lock row above is).',
+        },
+  );
+
+  return rows;
 }
 
 /**
@@ -7078,6 +7190,25 @@ export async function runDoctor(
       ?? 'shieldcortex doctor --verbose';
   } else if (unwired.length > 0) {
     nextCommand = 'shieldcortex setup';
+  }
+
+  // `--json`: the same `visible` set the human report and the exit code are
+  // computed from, emitted verbatim. Added for #501's built-artefact
+  // regression, which has to assert on a REAL `dist/index.js doctor` run and
+  // cannot do that by pattern-matching a width-wrapped, colour-coded, mobile
+  // report. Deliberately the same array — a second derivation could be green
+  // where the report is red, which is the failure mode doctor exists to avoid.
+  // Returns before the human report so the output is parseable on its own.
+  if (args.includes('--json')) {
+    console.log(JSON.stringify({
+      version: String(pkg.version ?? ''),
+      passed, warnings, failures, infos, total,
+      exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
+      results: visible.map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })),
+    }, null, 2));
+    const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
+    if (jsonExit !== 0) process.exitCode = jsonExit;
+    return { passed, warnings, failures, infos, total, exitCode: jsonExit };
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };

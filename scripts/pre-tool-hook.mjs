@@ -50,7 +50,7 @@
 
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
-import { basename, dirname, join, resolve, sep } from 'path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -65,11 +65,279 @@ const DEFAULT_ACTION_GUARD = { enabled: false, enforce: true, autoApprove: [], a
 /** #224 binding module, loaded once in main. Null when dist predates it. */
 let bindingMod = null;
 
-function loadActionGuardConfig() {
+/**
+ * The config directory this hook reads (#501).
+ *
+ * `SHIELDCORTEX_CONFIG_DIR` is honoured here for the same reason
+ * `src/cloud/config.ts:getConfigDir()` honours it: the hook must grade the SAME
+ * file the `shieldcortex config` setters write and every other reader reads.
+ * Until now it hard-coded `~/.shieldcortex`, so on any box using the override —
+ * including every hermetic test of the built artefact — the hook was silently
+ * enforcing against a different config from the rest of the product.
+ */
+function hookConfigDir() {
+  const override = process.env.SHIELDCORTEX_CONFIG_DIR?.trim();
+  if (override) return override;
+  return join(homedir(), '.shieldcortex');
+}
+
+// ==================== POLICY LOCK (#501) ====================
+
+/**
+ * The canonical protected root, duplicated as a literal.
+ *
+ * It has to be: this constant is used by the INLINE PROBE below, whose entire
+ * job is to be right when `dist` is missing. Importing it from the module the
+ * probe exists to survive the absence of would defeat the probe. Kept in step
+ * with `src/defence/iron-dome/protected-root.ts` by the enforcement-surface
+ * parity test.
+ */
+const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
+const INLINE_PROTECTED_ROOT_POINTER = '/etc/shieldcortex.conf';
+const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
+
+/**
+ * The exact posture an unverifiable-or-unreadable lock forces. Mirrors
+ * STRICT_FAILCLOSED_POSTURE, key for key.
+ *
+ * `reviewedScripts` is here because of #522 (GPT-6 round-6, item 1): the
+ * evaluator and the reviewed-script checker load from `dist` INDEPENDENTLY of
+ * the policy reader, so with only the reader broken — absent, or contradicted
+ * by the inline probe — this posture was computed and then handed to a
+ * checker that still honoured the same-UID config's `reviewedScripts` entry.
+ * The lock's own `reviewedScripts: []` ceiling never applied, because the
+ * module that applies it is the one that is broken. No lying module needed.
+ */
+const INLINE_STRICT_POSTURE = {
+  actionGuard: { enabled: true, enforce: true, autoApprove: [], broker: { enabled: false }, reviewedScripts: [] },
+  defenceMode: 'strict',
+};
+
+/**
+ * The pointed-to protected root, judged inline — mirrors `resolvePointerRoot`.
+ *
+ * Deliberately WITHOUT the full ancestor walk `verifyProtectedFile` runs: this
+ * probe's only output is "is a lock present", and a `true` can only ever raise
+ * the posture. The file-level rules (root-owned, a real regular file, not
+ * group- or other-writable) are the ones that stop an agent-writable pointer
+ * from being read at all, and those are cheap enough to state here.
+ */
+function inlinePointerRoot() {
   try {
-    const configPath = join(homedir(), '.shieldcortex', 'config.json');
-    if (!existsSync(configPath)) return { ...DEFAULT_ACTION_GUARD };
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const st = lstatSync(INLINE_PROTECTED_ROOT_POINTER);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
+    if (st.uid !== 0 || (st.mode & 0o022) !== 0) return null;
+    for (const rawLine of readFileSync(INLINE_PROTECTED_ROOT_POINTER, 'utf-8').split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1 || line.slice(0, eq).trim() !== 'root') continue;
+      const value = line.slice(eq + 1).trim();
+      return value && isAbsolute(value) ? value : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does a policy lock FILE exist, judged without importing anything from dist?
+ *
+ * Mirrors `resolveProtectedRoot`'s ordering exactly, including the rule that
+ * makes the test override non-loosening: BOTH production roots — the canonical
+ * one and the root-owned pointer — are resolved first, and the environment
+ * variable is only consulted on a host where neither answers. So this probe can
+ * never be pointed away from a real lock.
+ *
+ * The pointer half is the #501 review's BLOCK-2: without it, a pointer host
+ * with a deleted `dist` probed `false` and the hook failed OPEN — which is
+ * precisely the "delete dist is the bypass" case this probe exists to close.
+ */
+function inlinePolicyLockPresent() {
+  if (process.platform === 'win32') return false;
+  try {
+    const canonicalLock = join(INLINE_PROTECTED_ROOT, INLINE_POLICY_LOCK_FILENAME);
+    const canonicalOccupied = existsSync(canonicalLock) || existsSync(INLINE_PROTECTED_ROOT);
+    const pointed = inlinePointerRoot();
+    let root = pointed ?? INLINE_PROTECTED_ROOT;
+    if (!canonicalOccupied && pointed === null) {
+      const override = process.env.SHIELDCORTEX_PROTECTED_ROOT?.trim();
+      if (override && isAbsolute(override)) root = override;
+    }
+    // Presence is judged the way the reader judges it — `lstat`, so an ENTRY of
+    // any kind counts, a dangling symlink included. `existsSync` follows the
+    // link and reports "no lock" for exactly the entry the reader reports as
+    // present-and-unverifiable, and {@link hookDistRoot} hangs the classifier
+    // seam off this answer with no second check behind it (review R3-2). A
+    // `true` can only raise the posture, so present is the safe direction.
+    lstatSync(join(root, INLINE_POLICY_LOCK_FILENAME));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The ONE place this file decides where `dist` is. Every loader below resolves
+ * through it, so a loader added later inherits the gate instead of needing its
+ * own carve-out.
+ *
+ * `SHIELDCORTEX_DIST_ROOT` is an ungated test seam that pre-dates #501. On a
+ * host with a policy lock on disk it is not honoured AT ALL: the build that
+ * ships beside this script is the only one that decides anything.
+ *
+ * The #501 review's BLOCK-1 was the lock READER half — point the variable at a
+ * `policy-lock.js` that answers `absent` and the lock evaporates. Review NEW-1
+ * was that gating only that module left the seam wide open on the module that
+ * actually decides: a `tool-action-guard.js` whose `evaluateToolCall` returns
+ * `allow` takes the guard off entirely with a lock on disk, and the outcome is
+ * strictly WORSE, because the lock is read correctly, the strict posture is
+ * computed, and is then handed straight to the attacker's classifier. Same
+ * variable, same directory the agent already owns, one file instead of two.
+ *
+ * Conditioned on the lock, not on the variable: on an unlocked host — every
+ * developer, and every suite that uses this seam — it still resolves exactly
+ * where it is pointed, because there it buys an attacker nothing.
+ *
+ * This is belt; {@link applyHookPolicyLock}'s contradiction check is braces —
+ * it catches a reader that denies a lock the probe can see, whatever route the
+ * module arrived by (a tampered install, a loader hook, a seam nobody has
+ * thought of yet). Neither reaches a substituted module that answers `locked`
+ * and neutralises the policy itself; that is install tampering, and #500's
+ * boundary (design note §8.6).
+ */
+function hookDistRoot() {
+  const shipped = resolve(here, '..', 'dist');
+  if (inlinePolicyLockPresent()) return shipped;
+  return process.env.SHIELDCORTEX_DIST_ROOT ?? shipped;
+}
+
+/**
+ * Load the policy-lock reader from dist. Null when the build predates #501 or
+ * is incomplete — which is exactly the case {@link inlinePolicyLockPresent}
+ * exists to cover.
+ */
+async function loadPolicyLock() {
+  const distRoot = hookDistRoot();
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'policy-lock.js')).href
+    );
+    return typeof mod.readPolicyLock === 'function' && typeof mod.applyPolicyLock === 'function' ? mod : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Apply the OS-owned policy lock to the RAW parsed config, before the #209
+ * merge flattens it.
+ *
+ * Applying it to the raw shape is the point: `applyPolicyLock` in dist is the
+ * ONE implementation of the precedence rules, and re-deriving them over this
+ * hook's flattened `{enabled, enforce, autoApprove, …}` shape would be a second
+ * implementation to keep in step — the exact failure mode #160 and #209 were
+ * both about.
+ *
+ * The fail-open case is handled deliberately: a missing dist normally degrades
+ * to the inline catastrophic fallback (see the header), because turning every
+ * tool call into a denial whenever the build is stale breaks unattended agents.
+ * But a host with a LOCK FILE is a host whose operator has been told the guard
+ * cannot be switched off. Failing open there would make "delete dist" the
+ * bypass. So a present lock plus an unavailable reader forces the strict
+ * posture, which is the same answer the reader would have given for a lock it
+ * could not verify.
+ *
+ * #501 review BLOCK-1: "unavailable" now includes "available and contradicted".
+ * A reader that loads and LIES — answering `absent` on a host where the inline
+ * probe can see the file — used to be believed without a second look, which
+ * made a two-file, one-variable substitution a complete bypass with a lock on
+ * disk. A reader whose answer the probe contradicts is treated exactly like one
+ * that could not be loaded at all, because in both cases we cannot tell what
+ * the operator pinned.
+ */
+function inlineStrictPosture(config) {
+  const out = {
+    ...config,
+    actionGuard: { ...(config.actionGuard ?? {}), ...INLINE_STRICT_POSTURE.actionGuard },
+    defenceMode: INLINE_STRICT_POSTURE.defenceMode,
+  };
+  // #522 (GPT-6 round-6, item 1), the second spelling. The deprecated
+  // `interceptor.actionGuard` alias gap-fills per key in
+  // flattenActionGuardConfig (#209). Every pinned key is now present on the
+  // top-level block, so the alias cannot win any of them through that merge —
+  // but strip its copies anyway, exactly as `applyStrictFailClosedPosture`
+  // does in dist, so the two implementations cannot drift into disagreeing
+  // about which spelling the merge consults.
+  const isBlock = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  if (isBlock(out.interceptor) && isBlock(out.interceptor.actionGuard)) {
+    const alias = { ...out.interceptor.actionGuard };
+    for (const key of Object.keys(INLINE_STRICT_POSTURE.actionGuard)) delete alias[key];
+    out.interceptor = { ...out.interceptor, actionGuard: alias };
+  }
+  return out;
+}
+
+/** The lock statuses that mean "there is no lock here to obey". */
+function verdictSaysNoLock(verdict) {
+  const status = verdict?.status;
+  return status === undefined || status === 'absent' || status === 'unsupported';
+}
+
+async function applyHookPolicyLock(config) {
+  const mod = await loadPolicyLock();
+  if (!mod) {
+    if (!inlinePolicyLockPresent()) return config;
+    process.stderr.write(
+      '[shieldcortex] a policy lock is present but the dist policy reader could not be loaded — ' +
+      'enforcing the strict fail-closed posture (Action Guard on + enforcing, no auto-approve, broker off). ' +
+      'Run `shieldcortex repair` to restore the build.\n',
+    );
+    return inlineStrictPosture(config);
+  }
+  try {
+    // `audit` stays off: the audit logger is SQLite-backed and this runs on
+    // every tool call. The src-side reader records the row.
+    const verdict = mod.readPolicyLock({ audit: false });
+    // The contradiction check. Cheap (the probe is one or two `existsSync`
+    // calls) and it costs nothing on the overwhelmingly common paths: an
+    // unlocked host makes both sides agree there is no lock, and a locked host
+    // makes the reader answer `locked`/`unverifiable`, which is not a denial
+    // that the lock exists.
+    if (verdictSaysNoLock(verdict) && inlinePolicyLockPresent()) {
+      process.stderr.write(
+        '[shieldcortex] the dist policy reader reports no policy lock, but one is present on disk — ' +
+        'the reader cannot be trusted, so the lock is treated as UNVERIFIABLE and the strict fail-closed ' +
+        'posture is enforced (Action Guard on + enforcing, no auto-approve, broker off). ' +
+        'Run `shieldcortex repair` to restore the build.\n',
+      );
+      return inlineStrictPosture(config);
+    }
+    return mod.applyPolicyLock(config, verdict);
+  } catch {
+    // A reader that throws is treated exactly like a lock that cannot be
+    // verified, for the same reason: we cannot tell what the operator pinned.
+    return inlinePolicyLockPresent() ? inlineStrictPosture(config) : config;
+  }
+}
+
+async function loadActionGuardConfig() {
+  let parsed = null;
+  try {
+    const configPath = join(hookConfigDir(), 'config.json');
+    if (existsSync(configPath)) parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
+  } catch {
+    // Unreadable/corrupt config → the guard's own defaults, exactly as before.
+    // Enforce-by-default means a corrupt config must not silently disable it.
+    parsed = null;
+  }
+  const config = await applyHookPolicyLock(parsed ?? {});
+  return flattenActionGuardConfig(config);
+}
+
+function flattenActionGuardConfig(config) {
+  try {
     // #209: single source of truth. Top-level `actionGuard` governs every
     // surface; `interceptor.actionGuard` is a deprecated alias that fills
     // per-key gaps so pre-#209 configs keep their posture. On a conflicting
@@ -162,10 +430,13 @@ function noPromptSurfaceReason(permissionMode) {
 /**
  * Load the built tool-action-guard from dist. Returns null when the dist build
  * is missing/incomplete → the caller fails OPEN (see failure posture above).
- * SHIELDCORTEX_DIST_ROOT is a test seam, mirroring recall-defence.mjs.
+ *
+ * This is the module that decides `allow`/`deny`, so it is the highest-value
+ * one to substitute: see {@link hookDistRoot} for why `SHIELDCORTEX_DIST_ROOT`
+ * is not honoured here on a locked host (#501 review NEW-1).
  */
 async function loadGuard() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'tool-action-guard.js')).href
@@ -190,7 +461,7 @@ async function loadGuard() {
  * failing on a partial dist.
  */
 async function loadScriptResolver() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'script-source-resolver.js')).href
@@ -211,7 +482,7 @@ async function loadScriptResolver() {
  */
 async function loadReviewedScriptCheck(rawEntries) {
   if (!Array.isArray(rawEntries) || rawEntries.length === 0) return undefined;
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'reviewed-scripts.js')).href
@@ -230,7 +501,7 @@ async function loadReviewedScriptCheck(rawEntries) {
  * existed — refuse and say so — rather than failing open.
  */
 async function loadApprovals() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'action-approvals.js')).href
@@ -254,7 +525,7 @@ async function loadApprovals() {
  * (normaliseRetryControlConfig). Null is only "dist missing/incomplete".
  */
 async function loadRetryControl(rawRetry, digestWindowMs) {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'retry-control.js')).href
@@ -275,7 +546,7 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
 
 /** #224 — optional: stamp binding fields. Missing dist degrades to unbound. */
 async function loadBinding() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'enforcement-binding.js')).href
@@ -293,7 +564,7 @@ async function loadBinding() {
  * the store itself fails closed (verdict 'unknown') for scoped actions.
  */
 async function loadLease() {
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'session-lease-store.js')).href
@@ -316,7 +587,7 @@ async function loadLease() {
  */
 async function loadBroker(rawBrokerConfig) {
   if (!rawBrokerConfig || rawBrokerConfig.enabled !== true) return null;
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   const load = async (file) => {
     try {
       return await import(pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', file)).href);
@@ -367,7 +638,7 @@ async function loadBroker(rawBrokerConfig) {
  */
 async function loadNotify(rawNotifyConfig) {
   if (!rawNotifyConfig || rawNotifyConfig.enabled !== true) return null;
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   const load = async (file) => {
     try {
       return await import(pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', file)).href);
@@ -1065,7 +1336,7 @@ async function raiseRetryCard(retry, notify, ctx) {
   );
   if (!claim.ok) return { raised: false, reason: claim.reason, lostActionIds: claim.lostActionIds };
 
-  const distRoot = process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist');
+  const distRoot = hookDistRoot();
   const waiterEntry = resolve(distRoot, 'defence', 'iron-dome', 'dnp-retry-waiter.js');
   const receiptDir = join(tmpdir(), 'shieldcortex-retry-receipts');
   const token = randomBytes(8).toString('hex');
@@ -1200,7 +1471,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   if (outcome === 'denied_no_prompt_surface' && notify && !retrySuppressed) {
     try {
       const dig = await import(
-        pathToFileURL(resolve(process.env.SHIELDCORTEX_DIST_ROOT ?? resolve(here, '..', 'dist'), 'defence', 'iron-dome', 'dnp-digest.js')).href
+        pathToFileURL(resolve(hookDistRoot(), 'defence', 'iron-dome', 'dnp-digest.js')).href
       );
       if (typeof dig.recordDnpDigestEvent === 'function') {
         const context = notificationContext(sessionKey, id);
@@ -1613,6 +1884,16 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /--action-guard-(?:disable|advisory)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #501: the policy lock's own attack surface. The two environment seams that
+  // decide WHICH policy-lock reader runs and which root it reads; the protected
+  // root and its pointer; and `~/.claude/settings.json`, whose `env` stanza is
+  // the same-UID file that delivers those variables into the enforcing
+  // process. All at the `disable-action-guard` tier, because that is what they
+  // are. Kept byte-identical with the sibling table by the #501 drift test in
+  // enforcement-surface-parity.
+  { re: /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i, signal: 'disable-action-guard' },
+  { re: /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i, signal: 'disable-action-guard', lockPath: true },
+  { re: /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i, signal: 'disable-action-guard', lockPath: true },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b/i, signal: 'registry-code-exec' },
   { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b/i, signal: 'registry-code-exec' },
   { re: /\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)/i, signal: 'decode-pipe-to-shell' },
@@ -1636,6 +1917,13 @@ function fallbackExecSurface(toolInput) {
   for (const k of FALLBACK_SURFACE_KEYS) {
     const v = toolInput?.[k];
     if (typeof v === 'string' && v.length > 0) parts.push(v);
+    // Kept in sync with plugins/openclaw/interceptor.ts: an ARGV ARRAY under
+    // one of these keys is read by the real guard (`rawStringArgs` joins
+    // string arrays), so the degraded scan must read it too (#522 r7 FIND-4).
+    else if (Array.isArray(v)) {
+      const joined = v.filter((e) => typeof e === 'string').join(' ');
+      if (joined.length > 0) parts.push(joined);
+    }
   }
   return parts.join('   ').slice(0, FALLBACK_SCAN_CAP);
 }
@@ -1646,11 +1934,95 @@ function fallbackCatastrophicMatch(toolInput) {
   return FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(text));
 }
 
+
+// ── #522 G4: the lock-path READ carve-out, ported to the blunt fallback ──────
+//
+// `ee5c6ac1` gave the real guard a carve-out: pure inspection of the protected
+// root or `.claude/settings(.local).json` is not an attempt on the floor, so
+// `Read {file_path:<lock>}` and `cat|grep|jq|ls <lock>` allow while every write
+// shape still gates. That carve-out lives in tool-action-guard.ts — the module
+// that is MISSING in exactly this degraded mode. So a broken install on a
+// locked host carded every settings/policy read, which is the UX the carve-out
+// was written to stop. These mirror it, fail-closed, with no dependency on the
+// dist.
+//
+// Scope: this drops ONLY the two lock-PATH rows below (tagged `lockPath`).
+// The env-seam row, the #500 command shapes and every other signal are
+// untouched, so `rm`, `tee`, `cp`, `sed -i`, a redirect and `chmod` onto those
+// paths still gate here exactly as they did.
+
+/** Read-family tools cannot write; mirrors `classifyFamily`'s READ_TOOLS. */
+const FALLBACK_READ_TOOLS = /^(read|read_file|cat|less|more|head|tail|view|open|get|glob|grep|search|find|ls|list|list_files|stat|pwd|which|web_search|websearch)$/;
+/** Shell verbs that only OBSERVE — the guard's LOCK_READONLY_VERB_RE set. */
+const FALLBACK_LOCK_READ_VERB_RE = /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq)$/i;
+/** `git <sub>` stages that only read history / the working tree. */
+const FALLBACK_GIT_READ_SUB_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
+/**
+ * True when a `git` stage writes a file or runs a configured driver. Judged per
+ * TOKEN with quotes stripped, not against the raw spelling: a pattern that
+ * required whitespace immediately before `--` was defeated by an ordinary
+ * quoted argument (#522 r2). The short form is matched GLUED as well as bare
+ * (`-o<file>` is what parse-options accepts). Mirrors `gitStageWritesOrExecs`
+ * in src/defence/iron-dome/tool-action-guard.ts — keep the three in lockstep.
+ */
+function fallbackGitStageWrites(stage) {
+  for (const raw of stage.split(/\s+/)) {
+    if (!raw) continue;
+    const token = raw.replace(/['"]/g, '');
+    if (/^-o(?:$|[^-])/.test(token)) return true;
+    if (/^--(?:output|ext-diff)\b/i.test(token)) return true;
+  }
+  return false;
+}
+/** Any non-fd-dup redirect, glued or spaced — `echo x > <lock>` is a WRITE. */
+const FALLBACK_REDIRECT_RE = />{1,2}\|?(?!&\d)/;
+/** Nested execution keeps the gate; the verb whitelist cannot see inside it. */
+const FALLBACK_NESTED_EXEC_RE = /\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+\/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{/i;
+/** Assigning an env seam decides WHICH reader runs — never a read. */
+const FALLBACK_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
+
+/**
+ * True when the whole surface is pure inspection of a lock path. Fail-closed on
+ * an env-seam assignment, a redirect, nested execution, and any unknown verb in
+ * any stage of any statement — the same rule the real guard applies, with the
+ * statement split done conservatively (`&` and `|` both separate, so a
+ * pipeline stage or a backgrounded sibling must ALSO be a read).
+ */
+function fallbackLockPathAccessIsReadOnly(text, toolName) {
+  if (!text) return false;
+  if (FALLBACK_LOCK_ENV_SEAM_RE.test(text)) return false;
+  const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
+  if (seg && FALLBACK_READ_TOOLS.test(seg)) return true;
+  if (FALLBACK_REDIRECT_RE.test(text) || FALLBACK_NESTED_EXEC_RE.test(text)) return false;
+  let sawStage = false;
+  for (const raw of text.split(/[\n;&|]+/)) {
+    const stage = raw.trim();
+    if (!stage) continue;
+    sawStage = true;
+    const toks = stage
+      .replace(/^(?:[A-Za-z_]\w*=\S*\s+)+/, '')
+      .replace(/^sudo\s+(?:-E\s+)?/, '')
+      .split(/\s+/);
+    const word = toks[0] || '';
+    const base = word.split('/').pop() || word;
+    if (/^git$/i.test(base)) {
+      const sub = toks.slice(1).find((t) => !t.startsWith('-')) || '';
+      if (!FALLBACK_GIT_READ_SUB_RE.test(sub)) return false;
+      if (fallbackGitStageWrites(stage)) return false;
+      continue;
+    }
+    if (!FALLBACK_LOCK_READ_VERB_RE.test(base)) return false;
+  }
+  return sawStage;
+}
+
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
-function fallbackDangerousMatch(toolInput) {
+function fallbackDangerousMatch(toolInput, toolName) {
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
-  for (const { re, signal } of FALLBACK_DANGEROUS_PATTERNS) {
+  const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
+  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (lockReadOnly && lockPath === true) continue;
     if (re.test(text)) return signal;
   }
   return null;
@@ -1951,7 +2323,7 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
   }
 
   // 2. Dangerous — gate to the permission dialog; enforce:false opts to advisory.
-  const dangerousSignal = fallbackDangerousMatch(toolInput);
+  const dangerousSignal = fallbackDangerousMatch(toolInput, toolName);
   if (dangerousSignal) {
     if (!cfg.enforce) {
       const fallbackWarnVerdict = { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal], reason: `Guard unavailable: ${failureSummary}; enforce:false advisory` };
@@ -2021,7 +2393,10 @@ process.stdin.on('readable', () => {
 process.stdin.on('end', async () => {
   try {
     bindingMod = await loadBinding();
-    const cfg = loadActionGuardConfig();
+    // #501: async now — the policy lock is read through the same dist module
+    // the plugin uses, with an inline probe behind it so a missing dist cannot
+    // fail OPEN on a host that has a lock file.
+    const cfg = await loadActionGuardConfig();
     if (!cfg.enabled) process.exit(0);
 
     let hookData;

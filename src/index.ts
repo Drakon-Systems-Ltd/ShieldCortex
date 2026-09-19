@@ -664,6 +664,13 @@ ${bold}COMMANDS${reset}
                                --without-stop-hook / --without-session-end (opt out)
                                (absent flags leave existing opt-ins unchanged)
                                Pass either to opt in; re-run without to opt out.
+  ${cyan}protect${reset}               Pin the security-critical config to a root-owned
+                        policy lock the agent uid cannot write (needs root).
+                        Pins the safe posture without reading config.json;
+                        --from-config pins config.json's values instead.
+                        Flags: --dry-run, --from-config, --config <path>,
+                               --agent-uid <uid> (needed when the invoking
+                               shell gives protect no other way to learn it)
   ${cyan}uninstall${reset}             Remove ShieldCortex from your project
   ${cyan}openclaw${reset} <action>     Manage OpenClaw hook integration
   ${cyan}copilot${reset} <action>      Set up VS Code / Cursor MCP integration
@@ -715,6 +722,16 @@ ${bold}DOCS${reset}
     const { runDoctor } = await import('./cli/doctor.js');
     await runDoctor(process.argv.slice(3));
     return;
+  }
+
+  // Handle "protect" subcommand (#501) — write the OS-owned policy lock. The
+  // one privileged act in the product; it refuses to run unprivileged rather
+  // than writing a lock the agent could rewrite.
+  if (process.argv[2] === 'protect') {
+    const { runProtect } = await import('./cli/protect.js');
+    const result = runProtect(process.argv.slice(3));
+    for (const line of result.lines) (result.code === 0 ? console.log : console.error)(line);
+    process.exit(result.code);
   }
 
   // Handle "quickstart" subcommand
@@ -1444,7 +1461,7 @@ ${bold}DOCS${reset}
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
 
-    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair',
+    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair', 'protect',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',

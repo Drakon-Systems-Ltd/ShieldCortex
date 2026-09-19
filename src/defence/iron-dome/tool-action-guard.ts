@@ -711,6 +711,14 @@ const CATASTROPHIC: Pattern[] = [
 // drifting second copy.
 const SYSTEM_INSTALL_RE = /\b(?:apt|apt-get|yum|dnf|brew|gem|cargo)\b[^|;&\n]*\b(?:install|add)\b/i;
 
+// #501: the policy lock's own three attack-surface rules, named once so the
+// DANGEROUS row and the read-only carve-out (`policyLockAccessIsReadOnly`,
+// below the approval-store one) cannot drift apart: the same regex decides
+// both "this names the path" and "this is the path the carve-out is for".
+const POLICY_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
+const PROTECTED_ROOT_PATH_RE = /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i;
+const CLAUDE_SETTINGS_PATH_RE = /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i;
+
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
   // statement, after a separator/subshell, after sudo/env-assignment prefixes,
@@ -923,6 +931,34 @@ const DANGEROUS: Pattern[] = [
   // five regex rounds traded a bypass for a false deny for a backtracking
   // path). Config-path stays a PATH_TARGET rule.
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
+  // #501: the policy LOCK's own attack surface — the three shapes the #501
+  // adversarial review found the guard had no signal for at all.
+  //
+  //   1. `SHIELDCORTEX_DIST_ROOT=` / `SHIELDCORTEX_PROTECTED_ROOT=` — the two
+  //      environment seams that decide which policy-lock reader runs and which
+  //      root it reads. Repointing either is an attempt on the floor itself,
+  //      not an ordinary variable assignment.
+  //   2. The protected root and its pointer file. Deleting the lock used to
+  //      earn a generic `file-delete`; writing one earned nothing at all.
+  //   3. `~/.claude/settings.json`. Its `env` stanza is the same-UID file that
+  //      DELIVERS (1) into the enforcing process's environment, which is how
+  //      the review's BLOCK-1 got the variable there in the first place.
+  //
+  // All three carry the `disable-action-guard` signal rather than a path-touch
+  // one, because that is what they are: the tier #500 established for "this
+  // tool call is trying to take the Guard off". PATH_TARGET, like the rules
+  // above, so naming one of these paths IS the access — in shell text or in a
+  // string literal a script is about to hand to open().
+  //
+  // Reads are NOT the access (review r1 blocker): the lock is 0644 root-owned
+  // BY DESIGN — agent-readable is the point — and every Claude Code session
+  // reads ~/.claude/settings.json constantly. Pure shell inspection of these
+  // paths is dropped at the gate site by `policyLockAccessIsReadOnly`, the
+  // same carve-out shape #89 gave the approval store; every write shape
+  // (redirect, tee, sed -i, cp/mv onto, Write/Edit, env assignment) keeps it.
+  { re: POLICY_LOCK_ENV_SEAM_RE, signal: 'disable-action-guard' },
+  { re: PROTECTED_ROOT_PATH_RE, signal: 'disable-action-guard' },
+  { re: CLAUDE_SETTINGS_PATH_RE, signal: 'disable-action-guard' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
@@ -2525,6 +2561,22 @@ const EVAL_REACTIVATOR = /\beval\b/;
 // `awk` are deliberately excluded — `s///e` and `system()` execute their data.
 const DATA_COMMAND = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log)\b)/i;
 
+/**
+ * The exception to `git log`/`git grep`'s quoted-argument-is-data rule.
+ *
+ * A pattern argument to a searcher is the thing being looked for. `--output=`
+ * and `--ext-diff` are not patterns: one names a file the stage WRITES, the
+ * other a program it runs. Quoting one of them therefore turned a write into a
+ * data mention, and the path rules dropped the signal entirely (#522 r2).
+ * Narrow on purpose — only those two long forms, only on a `git` statement, in
+ * either of the two spellings (glued value inside the quote, or the flag in the
+ * prefix with the path quoted after it).
+ */
+function gitQuotedArgIsWriteFlag(bare: string, quoted: string): boolean {
+  if (!/^git\s/i.test(bare)) return false;
+  return /(?:^|\s)--(?:output|ext-diff)\b/i.test(bare) || /^--(?:output|ext-diff)\b/i.test(quoted);
+}
+
 // Long-form flags whose value is human TEXT, for any command (issue #89 classes
 // 3 and 7). `openclaw message send --text "…"`, `gh pr comment --body "…"` and
 // `gh issue create --title/--body "…"` were gated — and, for a body quoting
@@ -2838,7 +2890,8 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
           // A quote in command position, in assignment position, inside a
           // command substitution, or after any other command, stays executed.
           const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
-          const isDataCommand = !truncated && DATA_COMMAND.test(bare);
+          const isDataCommand = !truncated && DATA_COMMAND.test(bare)
+            && !gitQuotedArgIsWriteFlag(bare, text.slice(open + 1, i));
           const isTextFlag = !truncated && TEXT_FLAG.test(prefix)
             && !EXEC_COMMAND_WORD.test(bare.trim().split(/\s+/)[0] ?? '');
           if (!evalPresent && depth === 0 && !isAssignment && (isDataCommand || isTextFlag)) {
@@ -3114,8 +3167,47 @@ function withProvenance(
 const GUARD_STORE_PATH_RE = /\.shieldcortex[\\/]+(?:approvals\b|DECISIONS\.md\b|leases\b)/i;
 
 /** Verbs that only OBSERVE. No interpreters, editors, find, yq, jq. */
-const STORE_READONLY_VERB_RE =
-  /^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf)$/i;
+const STORE_READONLY_VERBS = [
+  'ls', 'dir', 'cat', 'head', 'tail', 'less', 'more', 'stat', 'file', 'wc', 'grep', 'egrep', 'fgrep',
+  'rg', 'ag', 'ack', 'realpath', 'readlink', 'basename', 'dirname', 'test', '\\[', 'echo', 'printf',
+];
+const STORE_READONLY_VERB_RE = new RegExp(`^(?:${STORE_READONLY_VERBS.join('|')})$`, 'i');
+
+/**
+ * #501 lock-path inspection: the store verbs plus `jq`, which has no in-place
+ * flag and only ever writes stdout — a redirect after it is STORE_MUTATION_RE's
+ * catch, not the verb's. Kept separate from the #89 store set so this review
+ * round widens nothing for the approval store.
+ */
+const LOCK_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'jq'].join('|')})$`, 'i');
+/** `git <sub>` stages that only read the working tree / history. */
+const GIT_READONLY_SUBCOMMAND_RE = /^(?:log|show|diff|status|blame|ls-files)$/i;
+/**
+ * `--output=` writes a file; `--ext-diff` runs a configured driver. Fail closed.
+ *
+ * Judged per TOKEN, with quotes stripped, rather than against the raw spelling:
+ * the previous pattern required whitespace immediately before `--`, so an
+ * ordinary quoted argument slipped past it and a stage that writes a file read
+ * as a stage that only inspects one (#522 r2). The separate-token spelling
+ * (`--output <file>`) and the short form are covered for the same reason.
+ *
+ * The short form is matched GLUED as well as bare — `-o<file>` is what
+ * parse-options accepts, so pinning the token to exactly `-o` left
+ * `git log -o/home/u/.claude/settings.json` reading as an inspection. Over-
+ * gating a `git ls-files -o` that also names a lock path costs one approval
+ * card; missing a write costs the lock.
+ */
+function gitStageWritesOrExecs(stage: string): boolean {
+  for (const raw of stage.split(/\s+/)) {
+    if (!raw) continue;
+    const token = raw.replace(/['"]/g, '');
+    if (/^-o(?:$|[^-])/.test(token)) return true;
+    if (/^--(?:output|ext-diff)\b/i.test(token)) return true;
+  }
+  return false;
+}
+/** Either #501 path rule. Built from the same constants the DANGEROUS row uses. */
+const POLICY_LOCK_PATH_RE = new RegExp(`${PROTECTED_ROOT_PATH_RE.source}|${CLAUDE_SETTINGS_PATH_RE.source}`, 'i');
 
 /**
  * Redirect / tee / noclobber. Glued forms (`echo>path`, `echo>$p`) count —
@@ -3183,15 +3275,38 @@ function splitShellStatements(cmd: string): string[] {
  * any non-readonly pipeline stage.
  */
 export function guardStoreAccessIsReadOnly(text: string): boolean {
+  return shellAccessIsReadOnly(text, { pathRe: GUARD_STORE_PATH_RE, verbRe: STORE_READONLY_VERB_RE });
+}
+
+/**
+ * #501: true when the whole command is pure shell inspection of the protected
+ * root, its pointer file, or `.claude/settings(.local).json`. Same fail-closed
+ * machinery as the store helper, plus `jq` and read-only `git` stages. The
+ * caller must still refuse the carve-out when an env seam is assigned: the
+ * leading-`VAR=` strip below is what lets `cat` be found at all, so it would
+ * otherwise let `SHIELDCORTEX_DIST_ROOT=/x cat <lock>` ride through as a read.
+ */
+export function policyLockAccessIsReadOnly(text: string): boolean {
+  return shellAccessIsReadOnly(text, { pathRe: POLICY_LOCK_PATH_RE, verbRe: LOCK_READONLY_VERB_RE, gitReadOnly: true });
+}
+
+interface ReadOnlyShellOptions {
+  pathRe: RegExp;
+  verbRe: RegExp;
+  /** Accept `git <GIT_READONLY_SUBCOMMAND_RE>` stages. Off for the #89 store set. */
+  gitReadOnly?: boolean;
+}
+
+function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolean {
   const cmd = String(text || '');
-  if (!GUARD_STORE_PATH_RE.test(cmd)) return false;
+  if (!opts.pathRe.test(cmd)) return false;
   if (STORE_MUTATION_RE.test(cmd)) return false;
   if (STORE_NESTED_EXEC_RE.test(cmd)) return false;
 
   const parts = splitShellStatements(cmd);
   if (parts.length === 0) return false;
 
-  // When any statement names the store, EVERY statement must be readonly.
+  // When any statement names the path, EVERY statement must be readonly.
   for (const raw of parts) {
     const part = raw.trim();
     if (!part) continue;
@@ -3199,15 +3314,30 @@ export function guardStoreAccessIsReadOnly(text: string): boolean {
     s = s.replace(/^sudo\s+(?:-E\s+)?/, '');
     const stages = s.split('|').map(x => x.trim()).filter(Boolean);
     for (const stage of stages) {
-      const word = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/)[0] ?? '';
+      const toks = stage.replace(/^(?:[A-Za-z_][\w]*=([^\s]*)\s+)+/, '').split(/\s+/);
+      const word = toks[0] ?? '';
       const base = word.split('/').pop() ?? word;
-      if (!STORE_READONLY_VERB_RE.test(base)) return false;
+      if (opts.gitReadOnly && /^git$/i.test(base)) {
+        // First non-flag token is the subcommand; `git -C dir log` therefore
+        // fails closed (`dir` is not a read-only subcommand) — by design.
+        const sub = toks.slice(1).find(t => !t.startsWith('-')) ?? '';
+        if (!GIT_READONLY_SUBCOMMAND_RE.test(sub)) return false;
+        if (gitStageWritesOrExecs(stage)) return false;
+        continue;
+      }
+      if (!opts.verbRe.test(base)) return false;
     }
   }
   return true;
 }
 
-const PATH_TARGET_SIGNALS = new Set(['touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config']);
+// `disable-action-guard` is here for the #501 PATH/env rules only. The #500
+// COMMAND shapes reach the signal through `guardDisableInvoked`, which never
+// goes through `matchSpans`, so this set cannot widen them.
+const PATH_TARGET_SIGNALS = new Set([
+  'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config',
+  'disable-action-guard',
+]);
 
 /** #342 — interpreter-API recursive-delete call spans (not shell verbs). */
 const INTERPRETER_RECURSIVE_DELETE_SPAN =
@@ -4164,6 +4294,12 @@ function foldScriptSources(
       ? commandScanText(deobfuscateIfs(src))
       : deobfuscateIfs(src);
     if (isReviewed) {
+      // #522 (GPT-6 round-6) residual, NAMED rather than closed: a reviewed
+      // entry skips this file's body — catastrophic scan included — before
+      // anything below runs. That is #189's design (review relieves the
+      // FILE, never the invoking command line), and since #522 item A the set
+      // of entries that can reach here is bounded by the root-owned lock's
+      // ceiling rather than by the same-UID config alone.
       const nestedOfReviewed = next.lang === 'sh' ? detectScriptInvocations(reviewedScan) : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
@@ -5315,6 +5451,19 @@ function evaluateToolCallCore(
     dangerSignals = dangerSignals.filter(
       sig => sig !== 'touch-approval-store' && sig !== 'touch-decisions-ledger',
     );
+  }
+  // #501 (review r1 blocker): pure shell inspection of the policy lock, the
+  // pointer file or ~/.claude/settings.json is not an attempt on the floor.
+  // Drop the signal only when (a) every statement is read-only, (b) no env
+  // seam is assigned anywhere on the surface — the helper strips leading
+  // `VAR=` prefixes, so this is checked here, not there — and (c) no #500
+  // command shape is present. Write/Edit never pass (a): their surface is the
+  // target path, which is not a read verb.
+  if (dangerSignals.includes('disable-action-guard')
+      && policyLockAccessIsReadOnly(scanSurface)
+      && !POLICY_LOCK_ENV_SEAM_RE.test(scanSurface)
+      && !guardDisableInvoked(scanSurface)) {
+    dangerSignals = dangerSignals.filter(sig => sig !== 'disable-action-guard');
   }
   // External egress is a potential exfil vector — but only when the call carries
   // a payload OFF-host. A read-only GET (docs / releases fetch) leaves nothing

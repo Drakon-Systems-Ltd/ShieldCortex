@@ -30,11 +30,15 @@ describe('action-guard hook install (PreToolUse)', () => {
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
     process.env.SHIELDCORTEX_CONFIG_DIR = tmpScDir;
+    const guardOn = JSON.stringify({ actionGuard: { enabled: true, enforce: true } });
     fs.mkdirSync(path.join(tmpHome, '.shieldcortex'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpHome, '.shieldcortex', 'config.json'),
-      JSON.stringify({ actionGuard: { enabled: true, enforce: true } }),
-    );
+    fs.writeFileSync(path.join(tmpHome, '.shieldcortex', 'config.json'), guardOn);
+    // #501: the PreToolUse hook honours SHIELDCORTEX_CONFIG_DIR now, like every
+    // other reader, so the fixture has to put the config where the product
+    // actually looks. Writing only the HOME copy left this suite passing on the
+    // AMBIENT ~/.shieldcortex of whatever machine ran it — green on a developer
+    // box with the guard on, and green for the wrong reason.
+    fs.writeFileSync(path.join(tmpScDir, 'config.json'), guardOn);
     jest.resetModules();
     jest.spyOn(console, 'log').mockImplementation(() => {});
   });

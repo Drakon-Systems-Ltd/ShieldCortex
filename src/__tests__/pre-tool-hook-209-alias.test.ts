@@ -57,15 +57,21 @@ function bashCall(command: string): Record<string, unknown> {
 
 describe('pre-tool hook — #209 interceptor.actionGuard alias resolution', () => {
   const originalHome = process.env.HOME;
+  const originalConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
   let tempHome: string;
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'shieldcortex-209-'));
     process.env.HOME = tempHome;
+    // #501: the hook honours SHIELDCORTEX_CONFIG_DIR now; the Jest sandbox sets
+    // it per worker, so HOME alone no longer decides which config is graded.
+    process.env.SHIELDCORTEX_CONFIG_DIR = path.join(tempHome, '.shieldcortex');
   });
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    if (originalConfigDir === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
+    else process.env.SHIELDCORTEX_CONFIG_DIR = originalConfigDir;
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 

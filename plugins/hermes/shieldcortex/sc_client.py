@@ -120,7 +120,21 @@ def fallback_surface(args: dict) -> str:
     """
     if not isinstance(args, dict):
         return ""
-    parts = [args[k] for k in _FALLBACK_SURFACE_KEYS if isinstance(args.get(k), str) and args[k]]
+    parts = []
+    for k in _FALLBACK_SURFACE_KEYS:
+        v = args.get(k)
+        if isinstance(v, str) and v:
+            parts.append(v)
+        # Kept in sync with plugins/openclaw/interceptor.ts and
+        # scripts/pre-tool-hook.mjs: an ARGV ARRAY under one of these keys is a
+        # real host shape the guard this fallback stands in for already reads
+        # (`rawStringArgs` joins string arrays), so the degraded scan must read
+        # it too, or it is strictly weaker than the evaluator it replaces on the
+        # tier documented as an unconditional deny (#522 r7 FIND-4).
+        elif isinstance(v, (list, tuple)):
+            joined = " ".join(e for e in v if isinstance(e, str))
+            if joined:
+                parts.append(joined)
     return "   ".join(parts)[:4096]
 
 

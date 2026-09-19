@@ -8,6 +8,17 @@ import {
   syncOpenClawPluginActionGuard,
   type OpenClawPluginGuardSync,
 } from '../setup/openclaw-plugin-guard-sync.js';
+import {
+  applyPolicyLock,
+  applyStrictFailClosedPosture,
+  assertPolicyLockAllows,
+  policyLockCoverage,
+  readPolicyLock,
+  PolicyLockRefusal,
+  type PolicyLockState,
+  type ProtectedPolicyKey,
+} from '../defence/iron-dome/policy-lock.js';
+import { emitProtectedAudit } from '../defence/iron-dome/protected-root.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -351,8 +362,15 @@ interface RawConfigState {
  * write) from "file present but unparseable" (must stay read-only). Backed by
  * an mtime cache so a hot path (per-scan getDefenceMode) doesn't re-read,
  * re-parse and re-HMAC the file on every call.
+ *
+ * **Unlocked** (#501): this returns what `config.json` SAYS, with the policy
+ * lock not yet applied. {@link readRawConfigState} is the reader every accessor
+ * should use; this one exists for {@link mutateRawConfig}, which must write back
+ * what the operator configured and never bake a lock-derived value into the file
+ * (that would silently turn a temporary OS-owned floor into a permanent local
+ * setting, and would survive removing the lock).
  */
-function readRawConfigState(): RawConfigState {
+function readRawConfigStateUnlocked(): RawConfigState {
   const configFile = getConfigFile();
 
   // mtime cache: if the file is unchanged since the last successful read,
@@ -403,9 +421,18 @@ function readRawConfigState(): RawConfigState {
       const verdict = checkConfigIntegrity(data, content);
       if (verdict === 'tampered') {
         configTampered = true;
-        console.error('[ShieldCortex] WARNING: Config file integrity check failed — possible tampering detected. Falling back to strict mode.');
-        // Force strict mode on tampered config
-        data.defenceMode = 'strict';
+        console.error(
+          '[ShieldCortex] WARNING: config integrity check failed — the file does not match its signature ' +
+          '(corruption, a torn write, or a hand edit). Falling back to the strict fail-closed posture.',
+        );
+        // #501: a tampered verdict now forces the WHOLE fail-closed posture,
+        // not just `defenceMode`. Before this, `actionGuard.enabled` was still
+        // read straight out of the bytes the integrity check had just called
+        // untrustworthy — so the one scenario the check exists to catch was
+        // also the scenario in which the guard stayed off. Same posture the
+        // policy lock uses for an unverifiable lock, from the same constant, so
+        // the two cannot drift.
+        data = applyStrictFailClosedPosture(data);
       }
 
       // `_sig` is an integrity artefact, never config data — strip it so it
@@ -447,8 +474,70 @@ function readRawConfigState(): RawConfigState {
   return { data: {}, parseFailed: false };
 }
 
+/**
+ * The raw config as it is actually IN FORCE — `config.json` with the OS-owned
+ * policy lock applied on top (#501).
+ *
+ * Every reader goes through here, which is the whole point: before #501 the
+ * security switches were read straight out of a same-UID file, so "what the
+ * config says" and "what is enforced" were the same sentence and a one-line
+ * edit changed both. Now the lock is the floor and the file may only tighten it.
+ *
+ * The lock is re-read on every call rather than cached alongside the config
+ * mtime. That is four `lstat`s on an unlocked host, and it buys the property
+ * that an operator who has just run `protect` is obeyed by the already-running
+ * agent instead of at its next restart. A stale security policy is the worse
+ * trade.
+ */
+function readRawConfigState(): RawConfigState {
+  const state = readRawConfigStateUnlocked();
+  const lock = getPolicyLockState();
+  const locked = applyPolicyLock(state.data, lock);
+  return locked === state.data ? state : { ...state, data: locked };
+}
+
+/**
+ * The live policy-lock state. `audit: true` — this is the src-side runtime,
+ * where the SQLite audit logger is already available, and an unverifiable lock
+ * is exactly the thing that has to leave a forensic trace.
+ */
+export function getPolicyLockState(): PolicyLockState {
+  return readPolicyLock({ audit: true });
+}
+
 export function readRawConfig(): Record<string, unknown> {
   return readRawConfigState().data;
+}
+
+/**
+ * Refuse a signed write that would LOOSEN a key the policy lock covers (#501).
+ *
+ * The refusal is the whole point of the lock on the write side: without it, a
+ * locked host would let `--action-guard-disable` write `enabled: false` into
+ * config.json, the lock would silently put it back on every read, and the
+ * operator's `config --status` would disagree with the file they just wrote.
+ * Saying no — naming the file that is saying it — is the honest behaviour.
+ *
+ * Throws {@link PolicyLockRefusal}; callers surface `err.message`, which already
+ * names the lock path and how to change it. The refusal is audited as
+ * `policy_refused` before it is thrown, so a repeated attempt to disable the
+ * guard on a locked box leaves a trail even if nobody reads the terminal.
+ */
+function refuseIfPolicyLockForbids(updates: Array<{ key: ProtectedPolicyKey; value: unknown }>): void {
+  if (updates.length === 0) return;
+  try {
+    assertPolicyLockAllows(getPolicyLockState(), updates);
+  } catch (err) {
+    if (err instanceof PolicyLockRefusal) {
+      emitProtectedAudit({
+        outcome: 'policy_refused',
+        path: err.lockPath,
+        reason: err.key,
+        detail: `refused a write of ${JSON.stringify(err.key)} that would loosen the locked value ${JSON.stringify(err.lockedValue)}`,
+      });
+    }
+    throw err;
+  }
 }
 
 /**
@@ -460,6 +549,16 @@ export function readRawConfig(): Record<string, unknown> {
  * compatibility trust for ordinary config reads but is not proof that the
  * signed posture setter created this operator-intent declaration. External
  * legacy signatures therefore never certify the sidecar exemption.
+ *
+ * #501: on a host that HAS a policy lock, the `_sig` path is not consulted at
+ * all — the lock has to declare the posture itself. The HMAC is a corruption
+ * detector whose key sits beside the file it signs, so on a locked box it would
+ * be the weakest link certifying the strongest claim; and this is the one place
+ * a signature has ever gated a security decision, which is precisely the
+ * decision the lock exists to take over. A locked host whose lock says nothing
+ * about the memory keys therefore answers `false`: silence from the authority
+ * is not permission. `protect` writes the whole protected set, so that state
+ * only arises from a hand-written partial lock. Unlocked hosts are unchanged.
  */
 export function hasTrustedMemorySidecarPosture(
   raw: Record<string, unknown>,
@@ -468,6 +567,15 @@ export function hasTrustedMemorySidecarPosture(
   try {
     const effectivePath = getConfigFile();
     if (resolve(configPath) !== resolve(effectivePath)) return false;
+
+    const lock = getPolicyLockState();
+    if (lock.status === 'locked' || lock.status === 'unverifiable') {
+      const coverage = policyLockCoverage(lock);
+      return (
+        coverage.get('memory.hostContract.posture') === 'mcp_sidecar_no_inject' &&
+        coverage.get('memory.inject.mode') === 'off'
+      );
+    }
 
     const content = readFileSync(effectivePath, 'utf-8');
     const parsed = JSON.parse(content) as Record<string, unknown>;
@@ -630,7 +738,11 @@ function mutateRawConfig(
   fn: (raw: Record<string, unknown>) => void,
   onParseFail: 'throw' | 'skip' = 'throw',
 ): boolean {
-  const { data, parseFailed } = readRawConfigState();
+  // Deliberately the UNLOCKED read: a write must persist what the operator
+  // configured, not the values the policy lock is currently forcing on top of
+  // it. Writing the locked view back would freeze an OS-owned floor into the
+  // local file, where it would outlive the lock that produced it.
+  const { data, parseFailed } = readRawConfigStateUnlocked();
   if (parseFailed) {
     console.error('[ShieldCortex] config.json is unreadable — refusing to overwrite (would wipe settings incl. cloudApiKey). Fix or remove the file.');
     if (onParseFail === 'throw') {
@@ -828,6 +940,10 @@ export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
  * and migration is `doctor --fix-action-guard`'s job.
  */
 export function setActionGuardCoreConfig(updates: Partial<ActionGuardCoreConfig>): OpenClawPluginGuardSync {
+  refuseIfPolicyLockForbids([
+    ...(updates.enabled !== undefined ? [{ key: 'actionGuard.enabled' as const, value: updates.enabled }] : []),
+    ...(updates.enforce !== undefined ? [{ key: 'actionGuard.enforce' as const, value: updates.enforce }] : []),
+  ]);
   mutateRawConfig((raw) => {
     const guard = actionGuardBlock(raw);
     if (updates.enabled !== undefined) guard.enabled = updates.enabled;
@@ -987,6 +1103,9 @@ export function setDefenceMode(mode: DefenceMode): void {
   if (!VALID_MODES.includes(mode)) {
     throw new Error(`Invalid defence mode: ${mode}. Must be one of: ${VALID_MODES.join(', ')}`);
   }
+  // #501: `defenceMode` is a FLOOR in the protected key set. A write that goes
+  // below it is refused rather than accepted-and-silently-overridden.
+  refuseIfPolicyLockForbids([{ key: 'defenceMode', value: mode }]);
   mutateRawConfig((raw) => {
     raw.defenceMode = mode;
   });
@@ -1437,6 +1556,14 @@ export function setMemoryHostPosture(value: string): void {
       `Invalid memory host posture "${value}". Legal values: ${MEMORY_HOST_POSTURES.join(', ')}.`,
     );
   }
+  // #501: the sidecar-posture PAIR is in the protected key set, and this setter
+  // writes both halves (`bus_contract` clears the posture, `mcp_sidecar_no_inject`
+  // also forces `inject.mode = 'off'`). Check both against the lock: changing
+  // either half away from a locked value is a change the lock forbids.
+  refuseIfPolicyLockForbids([
+    { key: 'memory.hostContract.posture', value: value === 'bus_contract' ? undefined : value },
+    ...(value === 'mcp_sidecar_no_inject' ? [{ key: 'memory.inject.mode' as const, value: 'off' }] : []),
+  ]);
   mutateRawConfig((raw) => {
     const memory = raw.memory && typeof raw.memory === 'object' && !Array.isArray(raw.memory)
       ? raw.memory as Record<string, unknown>

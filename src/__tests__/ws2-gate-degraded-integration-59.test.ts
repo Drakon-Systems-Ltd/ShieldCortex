@@ -86,11 +86,18 @@ describe('#59 — Claude Code hook: dangerous degraded op is gated (ask), never 
     fs.rmSync(emptyDist, { recursive: true, force: true });
   });
 
-  function runHook(command: string): Promise<{ stdout: string; code: number }> {
+  function runHook(command: unknown): Promise<{ stdout: string; code: number }> {
     return new Promise((res, rej) => {
       const child = spawn(process.execPath, [HOOK_PATH], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, HOME: tempHome, SHIELDCORTEX_DIST_ROOT: emptyDist },
+        // #501: the hook honours SHIELDCORTEX_CONFIG_DIR now, and the Jest
+        // sandbox sets it per worker — pin it at this run's home.
+        env: {
+          ...process.env,
+          HOME: tempHome,
+          SHIELDCORTEX_DIST_ROOT: emptyDist,
+          SHIELDCORTEX_CONFIG_DIR: path.join(tempHome, '.shieldcortex'),
+        },
       });
       let stdout = '';
       child.stdout.on('data', (c) => { stdout += c.toString(); });
@@ -134,6 +141,26 @@ describe('#59 — Claude Code hook: dangerous degraded op is gated (ask), never 
       expect(stdout).toBe(''); // benign fails open (no decision)
       expect(lastAudit().action).toBe('gate_degraded'); // …but the outage is auditable
     }
+  });
+
+  // #522 r7 FIND-4: `fallbackExecSurface` read only STRING values off the
+  // surface keys, so the ARGV-ARRAY spelling of the same catastrophic command
+  // produced an empty scan text and sailed straight through — on the one tier
+  // documented as an unconditional deny. The real guard this fallback stands
+  // in for joins string arrays (`rawStringArgs`), so the degraded scan was
+  // strictly weaker than the evaluator it replaces. Pinned on the HOOK copy as
+  // well as the interceptor copy: the two are kept in lockstep by hand.
+  it('catastrophic: the ARGV-ARRAY spelling is read, not just the string one', async () => {
+    const argv = ['r' + 'm', '-rf', '/'];
+    const { stdout, code } = await runHook(argv);
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(lastAudit().outcome).toBe('auto_denied');
+  });
+
+  it('benign: an ARGV-ARRAY of an ordinary command still fails open', async () => {
+    const { stdout } = await runHook(['ls', '-la']);
+    expect(stdout).toBe('');
   });
 });
 

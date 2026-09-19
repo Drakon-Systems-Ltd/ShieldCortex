@@ -130,6 +130,9 @@ describe('#436 — shell control through the real Claude Code hook', () => {
         USERPROFILE: home,
         SHIELDCORTEX_DIST_ROOT: distRoot,
         SHIELDCORTEX_OPENCLAW_BIN: openclawBin,
+        // #501: the hook honours SHIELDCORTEX_CONFIG_DIR now, and the Jest
+        // sandbox sets it per worker — pin it at this run's home.
+        SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'),
       } as NodeJS.ProcessEnv,
       timeout: 30_000,
       encoding: 'utf8',

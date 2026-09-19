@@ -142,6 +142,10 @@ describe('#143 — the operator-notify transport through the real Claude Code ho
     });
     const env: Record<string, string | undefined> = {
       ...process.env, HOME: home, USERPROFILE: home, SHIELDCORTEX_DIST_ROOT: distRoot,
+      // #501: the hook honours SHIELDCORTEX_CONFIG_DIR now, and the Jest
+      // sandbox sets it per worker — pin it at this run's home or the hook
+      // grades the worker's config instead of the fixture's.
+      SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'),
     };
 
     const run = spawnSync('node', [HOOK], {

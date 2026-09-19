@@ -26,7 +26,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { homedir, hostname } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -60,6 +60,11 @@ type OpenClawRuntime = {
 // `before_tool_call` interceptor (runDefencePipeline) and realtime scanning
 // (scanToolResponse) load from the SAME module via getDefenceModule().
 type DefenceModule = {
+  /** #501 policy lock. Optional exactly like every other member: an older
+   *  installed dist does not have it, and its absence is covered by the inline
+   *  probe in {@link inlinePolicyLockPresent} rather than by failing open. */
+  readPolicyLock?: (options?: { audit?: boolean; warn?: boolean }) => unknown;
+  applyPolicyLock?: (raw: Record<string, unknown>, state: unknown) => Record<string, unknown>;
   runDefencePipeline?: (...args: any[]) => any;
   scanToolResponse?: (
     toolName: string,
@@ -374,7 +379,7 @@ export function __setRuntimeForTest(runtime: OpenClawRuntime | null): void {
   if (runtime) runtimePromise = null;
 }
 export function __resetConfigStateForTest(): void {
-  _config = null;
+  _mergedConfig = null;
   _configOverride = null;
   _lastShieldConfigRef = null;
   _provenanceUndeclared = 0;
@@ -1428,7 +1433,12 @@ const PLUGIN_CONFIG_JSON_SCHEMA = {
   },
 };
 
-let _config: SCConfig | null = null;
+/**
+ * The cached MERGE — shield config + openclaw.json entry, with the policy lock
+ * deliberately NOT applied. `loadConfig` re-applies the lock to this on every
+ * call; see the comment there for why the two halves cache differently.
+ */
+let _mergedConfig: SCConfig | null = null;
 // Identity of the shield config we last merged from. The runtime's
 // loadShieldConfig() returns the same parsed object until the file's mtime
 // advances; using reference equality lets us re-merge precisely when the
@@ -1796,7 +1806,7 @@ function applyPluginConfigOverride(api: PluginApi): void {
   if (Object.keys(pluginConfig).length === 0) return;
   _configOverride = mergeConfigs(_configOverride ?? {}, pluginConfig);
   // Override changed — invalidate so loadConfig() re-merges with new override.
-  _config = null;
+  _mergedConfig = null;
   _lastShieldConfigRef = null;
 }
 
@@ -1885,6 +1895,219 @@ function noteL2Degraded(reason: string): void {
   );
 }
 
+// ==================== POLICY LOCK (#501) ====================
+
+/**
+ * The canonical protected root, duplicated as a literal — and it has to be.
+ *
+ * This constant backs the INLINE PROBE, whose whole job is to be right when the
+ * `shieldcortex/defence` module cannot be resolved. Importing it from the module
+ * the probe exists to survive the absence of would defeat the probe. Same
+ * duplication, same reason, as the script-source resolver (#160): a real build
+ * boundary, stated at the copy, held in step by the enforcement-surface parity
+ * test rather than by hope.
+ */
+const INLINE_PROTECTED_ROOT = '/etc/shieldcortex';
+const INLINE_PROTECTED_ROOT_POINTER = '/etc/shieldcortex.conf';
+const INLINE_POLICY_LOCK_FILENAME = 'policy.json';
+
+/**
+ * The posture an unverifiable-or-unreadable lock forces. Mirrors
+ * STRICT_FAILCLOSED_POSTURE, key for key — including `reviewedScripts`
+ * (#522, GPT-6 round-6, item 1), so the two inline copies and the dist
+ * constant can never disagree about which keys a fail-closed posture pins.
+ * On this surface a module that proved unusable for the policy READ is
+ * already distrusted for VERDICTS too (#522 r7 FIND-3), so the pin is parity
+ * rather than a reachable behavioural change today; the enforcement-surface
+ * parity test holds it in step.
+ */
+const INLINE_STRICT_GUARD_POSTURE = {
+  enabled: true,
+  enforce: true,
+  autoApprove: [] as string[],
+  broker: { enabled: false },
+  reviewedScripts: [] as unknown[],
+};
+
+/**
+ * The pointed-to protected root, judged inline — mirrors `resolvePointerRoot`.
+ *
+ * Deliberately WITHOUT the full ancestor walk `verifyProtectedFile` runs: this
+ * probe's only output is "is a lock present", and a `true` can only ever raise
+ * the posture. The file-level rules (root-owned, a real regular file, not
+ * group- or other-writable) are the ones that stop an agent-writable pointer
+ * from being read at all, and those are cheap enough to state here.
+ */
+function inlinePointerRoot(): string | null {
+  try {
+    const st = lstatSync(INLINE_PROTECTED_ROOT_POINTER);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
+    if (st.uid !== 0 || (st.mode & 0o022) !== 0) return null;
+    for (const rawLine of readFileSync(INLINE_PROTECTED_ROOT_POINTER, 'utf-8').split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1 || line.slice(0, eq).trim() !== 'root') continue;
+      const value = line.slice(eq + 1).trim();
+      return value && path.isAbsolute(value) ? value : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does a policy lock FILE exist, judged without resolving anything from dist?
+ *
+ * Mirrors `resolveProtectedRoot`'s ordering exactly, including the rule that
+ * keeps the test override non-loosening: BOTH production roots — the canonical
+ * one and the root-owned pointer — are resolved first, and the environment
+ * variable is only consulted on a host where neither answers. So the probe can
+ * never be pointed away from a real lock.
+ *
+ * The pointer half is the #501 review's BLOCK-2: without it, a pointer host
+ * with an unresolvable defence module probed `false` and the plugin failed
+ * OPEN — precisely the "break the install" case this probe exists to close.
+ */
+function inlinePolicyLockPresent(): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    const canonicalLock = path.join(INLINE_PROTECTED_ROOT, INLINE_POLICY_LOCK_FILENAME);
+    const canonicalOccupied = existsSync(canonicalLock) || existsSync(INLINE_PROTECTED_ROOT);
+    const pointed = inlinePointerRoot();
+    let root = pointed ?? INLINE_PROTECTED_ROOT;
+    if (!canonicalOccupied && pointed === null) {
+      const override = process.env.SHIELDCORTEX_PROTECTED_ROOT?.trim();
+      if (override && path.isAbsolute(override)) root = override;
+    }
+    // Presence is judged the way the reader judges it — `lstat`, so an ENTRY of
+    // any kind counts, a dangling symlink included. `existsSync` follows the
+    // link and reports "no lock" for exactly the entry the reader reports as
+    // present-and-unverifiable (review R3-2). A `true` can only raise the
+    // posture, so present is the safe direction.
+    lstatSync(path.join(root, INLINE_POLICY_LOCK_FILENAME));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function withGuardPosture(config: SCConfig, guard: Record<string, unknown>): SCConfig {
+  return {
+    ...config,
+    interceptor: {
+      ...(config.interceptor ?? {}),
+      // #522 r7 FIND-2: the interceptor is only the CARRIER of the gate the
+      // lock pins — `initInterceptor` returns null outright on
+      // `enabled:false`, and `before_tool_call` reads that as no gate at all.
+      // Leaving an unsigned same-UID `interceptor.enabled:false` to stand
+      // while the lock says `actionGuard.enabled:true` made the precedence
+      // rule decorative.
+      // #522 G3: `failurePolicy.high` is the same story one layer down. It is
+      // the "cannot obtain a verdict" policy, and a degraded guard is exactly
+      // that — so on a broken install `handleGuardUnavailable` asked the
+      // unsigned `openclaw.json` whether to deny the DANGEROUS tier, and
+      // `failurePolicy.high:"allow"` there let it through while the lock said
+      // the guard was on and enforcing. With the lock's guard enabled, the
+      // lock owns that answer too. `severityActions` and the other severities
+      // are left alone: this is the one key that decides the degraded tier.
+      ...(guard.enabled === true
+        ? {
+            enabled: true,
+            failurePolicy: { ...(config.interceptor?.failurePolicy ?? {}), high: 'deny' as const },
+          }
+        : {}),
+      actionGuard: { ...(config.interceptor?.actionGuard ?? {}), ...guard } as NonNullable<InterceptorUserConfig['actionGuard']>,
+    },
+  };
+}
+
+/**
+ * Apply the OS-owned policy lock to the plugin's EFFECTIVE Action Guard config.
+ *
+ * Applied AFTER `mergeConfigs`, not before, and that ordering is the whole
+ * point: the `openclaw.json` plugin entry deep-merges OVER the shield config, so
+ * applying the lock to the shield config alone would leave a plugin entry saying
+ * `actionGuard.enabled: false` as the last word — which is precisely the
+ * unsigned, same-UID file the lock exists to stop being authoritative. The
+ * `src/setup/openclaw-plugin-guard-sync.ts` mirror writes into that same entry,
+ * so it too is now out-ranked by the lock rather than able to out-rank it.
+ *
+ * The precedence rules themselves come from dist (`applyPolicyLock`) so there is
+ * exactly ONE implementation of them across both enforcement surfaces.
+ */
+async function applyPolicyLockToPluginConfig(config: SCConfig): Promise<SCConfig> {
+  const mod = await getDefenceModule().catch(() => null);
+  const failClosed = () => {
+    // #522 r7 FIND-3: this module just proved unusable for the policy READ
+    // while a lock is on disk — absent, unloadable, throwing, or lying. Its
+    // VERDICTS cannot then be what enforces that policy: a substituted
+    // module whose `readPolicyLock` answers 'absent' and whose
+    // `evaluateToolCall` answers 'allow' reported `enforce` and gated
+    // nothing at all.
+    _defenceModuleDistrusted = true;
+    if (!_policyLockDegradedLogged) {
+      _policyLockDegradedLogged = true;
+      console.warn(
+        '[shieldcortex] ⚠️ a policy lock is present but the ShieldCortex defence module could not be ' +
+        'loaded to read it — enforcing the strict fail-closed posture (Action Guard on + enforcing, ' +
+        'no auto-approve, broker off). Run `shieldcortex repair` to restore the install.',
+      );
+    }
+    return withGuardPosture(config, INLINE_STRICT_GUARD_POSTURE);
+  };
+
+  if (!mod || typeof mod.readPolicyLock !== 'function' || typeof mod.applyPolicyLock !== 'function') {
+    if (!inlinePolicyLockPresent()) _defenceModuleDistrusted = false;
+    // A missing reader on a host with NO lock is today's behaviour: the plugin
+    // runs on the config it has. A missing reader on a host WITH a lock would
+    // make "break the install" the bypass, so that one fails closed.
+    return inlinePolicyLockPresent() ? failClosed() : config;
+  }
+  try {
+    // `audit` off: the SQLite audit logger belongs to the src-side reader, not
+    // to a plugin load. Shaped as a raw config view so the ONE precedence
+    // implementation in dist does the work.
+    const view = { actionGuard: { ...(config.interceptor?.actionGuard ?? {}) } } as Record<string, unknown>;
+    const verdict = mod.readPolicyLock({ audit: false }) as { status?: string } | undefined;
+    // #501 review BLOCK-1, mirrored from the hook: a reader that LOADS and lies
+    // is treated exactly like one that could not be loaded at all. The hook's
+    // copy of this closed a real `SHIELDCORTEX_DIST_ROOT` bypass; this copy
+    // exists so the two surfaces answer a substituted reader identically, which
+    // is the #160 lesson applied to the lock.
+    const status = verdict?.status;
+    if ((status === undefined || status === 'absent' || status === 'unsupported') && inlinePolicyLockPresent()) {
+      return failClosed();
+    }
+    const locked = mod.applyPolicyLock(view, verdict);
+    // The reader answered, and it agreed with the inline probe. Trust
+    // restored (a `repair` mid-process must not stay latched into the
+    // degraded path).
+    _defenceModuleDistrusted = false;
+    const guard = locked.actionGuard;
+    if (!guard || typeof guard !== 'object' || Array.isArray(guard)) return config;
+    return withGuardPosture(config, guard as Record<string, unknown>);
+  } catch {
+    // A reader that throws is treated exactly like a lock that cannot be
+    // verified, for the same reason: we cannot tell what the operator pinned.
+    if (!inlinePolicyLockPresent()) {
+      _defenceModuleDistrusted = false;
+      return config;
+    }
+    return failClosed();
+  }
+}
+
+/** #522 r7 FIND-3: the defence module disagreed with the on-disk lock (or
+ *  could not be loaded to read it) while a lock is present. Re-evaluated on
+ *  every config read, so `shieldcortex repair` clears it without a gateway
+ *  restart. */
+let _defenceModuleDistrusted = false;
+
+/** One warning per plugin load, like every other degrade note in this file. */
+let _policyLockDegradedLogged = false;
+
 async function loadConfig(): Promise<SCConfig> {
   let shieldConfigRaw: unknown;
   try {
@@ -1901,20 +2124,36 @@ async function loadConfig(): Promise<SCConfig> {
       );
     }
     // A fresh object every time: `_configOverride` is module state and callers
-    // must not be handed something they could mutate.
-    return mergeConfigs({}, _configOverride ?? {});
+    // must not be handed something they could mutate. The policy lock still
+    // applies — a shield config we could not read is exactly when the plugin
+    // entry is the only thing talking, and the entry is the unsigned file.
+    return applyPolicyLockToPluginConfig(mergeConfigs({}, _configOverride ?? {}));
   }
   // A load that succeeds after a failure re-arms the warning, so a SECOND
   // outage is reported rather than swallowed by the first one's flag. Set
   // before the cache check: a runtime that hands back the same object every
   // call would otherwise take the early return and leave the flag latched.
   _shieldConfigLoadFailureLogged = false;
-  if (_config && shieldConfigRaw === _lastShieldConfigRef) return _config;
-  _lastShieldConfigRef = shieldConfigRaw;
-  // Plugin config (openclaw.json) deep-merges over the shield config file —
-  // see mergeConfigs() for the per-key semantics.
-  _config = mergeConfigs(normaliseConfig(shieldConfigRaw), _configOverride ?? {});
-  return _config;
+  // The MERGE is cached; the LOCK is not, and that split is the #501 review's
+  // SHOULD-FIX-4. `policy-lock.ts` states the rule — "no cache on the lock
+  // read. Four `lstat`s per config read on an unlocked host, in exchange for an
+  // operator who has just run `protect` being obeyed by the already-running
+  // agent rather than at its next restart." That held for the hook (a fresh
+  // process per call) and the CLI, and was quietly false here: the effective
+  // config was memoised on the shield config's object IDENTITY, and writing
+  // the lock does not touch `config.json`, so it was read exactly once per
+  // gateway process and never again. An operator who ran `protect` on a live
+  // box was told by doctor the host was locked while this gate was still off.
+  if (!_mergedConfig || shieldConfigRaw !== _lastShieldConfigRef) {
+    _lastShieldConfigRef = shieldConfigRaw;
+    // Plugin config (openclaw.json) deep-merges over the shield config file —
+    // see mergeConfigs() for the per-key semantics.
+    _mergedConfig = mergeConfigs(normaliseConfig(shieldConfigRaw), _configOverride ?? {});
+  }
+  // Applied over BOTH, on every call, because the plugin entry is an unsigned,
+  // same-UID file and must not be the last word on the Action Guard's own
+  // switches — and because a lock written a second ago is still a lock.
+  return applyPolicyLockToPluginConfig(_mergedConfig);
 }
 
 function isAutoMemoryEnabled(config: SCConfig): boolean {
@@ -3760,6 +3999,33 @@ export default {
     // --- Interceptor (lazy init) ---
     let interceptorReady: ReturnType<typeof createInterceptor> | null = null;
     let interceptorInitAttempted = false;
+    /** #522 r7 FIND-5: the live interceptor is the DEGRADED one (WS2 fallback only). */
+    let interceptorDegraded = false;
+    /**
+     * The build in flight for `interceptorGuardPosture`, if any (#522 r7 FIND-1).
+     * `interceptorReady` is deliberately null for the duration of a rebuild, and
+     * `before_tool_call` reads null as "no gate at all" — so every concurrent
+     * call that took the posture-cache shortcut during that window was
+     * ungated: the same full bypass F1 closed for the serial case, still open
+     * for concurrent ones (23 of 24 in the reviewer's reproduction).
+     */
+    let interceptorBuild: Promise<ReturnType<typeof createInterceptor> | null> | null = null;
+    /**
+     * The Action Guard posture the live interceptor was BUILT with (#501).
+     *
+     * `createInterceptor` captures `config.actionGuard` once, so a lazily
+     * initialised interceptor is a second cache sitting behind `loadConfig`'s.
+     * Fixing only the first one — which is what the review's SHOULD-FIX-4 asked
+     * for — moved `/shieldcortex-status` to the right answer and left the gate
+     * itself on the posture that was live at gateway start. Both have to go.
+     *
+     * Rebuilding on a posture CHANGE (not on every call) is also the right
+     * semantics rather than merely the cheap one: the per-session deny cache
+     * and rate limiter hold decisions taken under the old posture, and an
+     * allow decided while the host was unlocked must not survive the lock
+     * landing.
+     */
+    let interceptorGuardPosture: string | null = null;
 
     // #134 §2: registered UNCONDITIONALLY, before the try block below that can
     // throw. Previously this command lived inside that try, so a plugin crash
@@ -3802,7 +4068,7 @@ export default {
             ? "off (before_tool_call not registered — interceptor disabled in plugin config)"
             : !interceptorOn || !guardCfg.enabled
               ? "off"
-              : `${guardCfg.enforce ? "enforce" : "warn"}${autoApproved > 0 ? ` (${autoApproved} auto-approved)` : ""}${interceptorReady ? "" : " — not yet initialised this session"}`;
+              : `${guardCfg.enforce ? "enforce" : "warn"}${autoApproved > 0 ? ` (${autoApproved} auto-approved)` : ""}${interceptorReady ? (interceptorDegraded ? " — DEGRADED: dependency-free fallback scan only (WS2); run `shieldcortex repair`" : "") : " — not yet initialised this session"}`;
           const hooksLine = _beforeToolCallRegistered
             ? "llm_input (scan), llm_output (memory), before_tool_call (action guard), session_end (cache reset)"
             // #226: session_end is registered even with the interceptor off —
@@ -3868,11 +4134,38 @@ export default {
     applyPluginConfigOverride(api);
 
     async function initInterceptor(): Promise<ReturnType<typeof createInterceptor> | null> {
-      if (interceptorInitAttempted) return interceptorReady;
-      interceptorInitAttempted = true;
-
+      // The lock read happens HERE, on every call, not once per process:
+      // `loadConfig` re-applies it to a cached merge (four `lstat`s, the cost
+      // the design doc already accepted) so an operator who has just run
+      // `protect` is obeyed by the running gateway rather than at its next
+      // restart. Everything downstream is still built once per POSTURE.
+      let scConfig: SCConfig;
       try {
-        const scConfig = await loadConfig();
+        scConfig = await loadConfig();
+      } catch (err) {
+        // `loadConfig` degrades rather than throwing (#226), so this is the
+        // unexpected path. Keep whatever gate we already have — dropping a
+        // working interceptor because a config re-read hiccuped would turn a
+        // transient fault into an unguarded turn.
+        (api.logger as any)?.warn?.(`[shieldcortex] config re-read failed: ${err instanceof Error ? err.message : err}`);
+        return interceptorReady;
+      }
+      const posture = JSON.stringify(scConfig.interceptor?.actionGuard ?? null);
+      if (interceptorInitAttempted && posture === interceptorGuardPosture) {
+        // #522 r7 FIND-1: a build already in flight for THIS posture is
+        // AWAITED, never shortcut past — handing back the null
+        // `interceptorReady` held during a rebuild gave a concurrent call an
+        // unguarded turn.
+        return interceptorBuild ? await interceptorBuild : interceptorReady;
+      }
+      interceptorInitAttempted = true;
+      interceptorGuardPosture = posture;
+      // A rebuild starts from nothing: an `enabled:false` posture, or a failed
+      // rebuild, must not leave the previous interceptor answering for it.
+      interceptorReady = null;
+
+      const build = (async () => {
+      try {
         // Normalised user config (deep-partial); DEFAULT_INTERCEPTOR_CONFIG
         // fills the gaps below — defaults never override explicit values.
         const rawInterceptorConfig = scConfig.interceptor;
@@ -3893,15 +4186,49 @@ export default {
         // uses — see getDefenceModule). Loaded via a string-concatenated
         // specifier so TypeScript doesn't resolve 'shieldcortex/defence' at
         // compile time; it only exists at runtime once the package is installed.
-        const defenceMod = await getDefenceModule();
-        if (!defenceMod) {
-          (api.logger as any)?.warn?.('[shieldcortex] Cannot load defence module — interceptor disabled');
-          return null;
+        const defenceModRaw = await getDefenceModule();
+        // #522 r7 FIND-3: a module whose policy READ was just proven to
+        // disagree with the on-disk lock (absent, unloadable, throwing, or
+        // lying) must not then supply the VERDICTS that lock is supposed to
+        // enforce — `applyPolicyLockToPluginConfig` already fails the
+        // POSTURE closed for this module; distrust it here too.
+        const defenceMod = _defenceModuleDistrusted ? null : defenceModRaw;
+        // #522 review round-6 follow-up (F1): a missing/incomplete dist used to
+        // `return null` HERE, which made `before_tool_call`'s `if (!interceptor)
+        // return;` skip the gate entirely — a full bypass, not even the
+        // dependency-free WS2 fallback scan (`handleGuardUnavailable` in
+        // interceptor.ts, which already exists for a defence call that throws
+        // at RUNTIME). "Delete/break dist" was therefore a complete Action
+        // Guard bypass on a host with a policy lock on disk — the exact class
+        // of bug #501's review found and fixed in `pre-tool-hook.mjs`
+        // (`applyHookPolicyLock` / `handleDegradedGuard`). The fix is the same
+        // shape here: build a DEGRADED interceptor instead of none. `pipeline`
+        // throws — caught by `handleToolCall`'s existing `failurePolicy.high`
+        // path for memory-write tools — and `evaluateToolCall` is left
+        // undefined, which routes every Action Guard call through the tiered
+        // WS2 fallback scan instead of the real evaluator.
+        // `interceptorConfig.actionGuard.enforce` is already lock-aware
+        // (`loadConfig()` above ran `applyPolicyLockToPluginConfig`), so the
+        // WS2 dangerous tier still denies on a locked host even in this
+        // degraded mode.
+        const canRunPipeline = !!defenceMod && typeof defenceMod.runDefencePipeline === 'function';
+        interceptorDegraded = !canRunPipeline;
+        if (_defenceModuleDistrusted && defenceModRaw) {
+          (api.logger as any)?.warn?.('[shieldcortex] the loaded defence module disagreed with the on-disk policy lock — distrusted: dependency-free fallback scan only (WS2). Run `shieldcortex repair`.');
+        } else if (!defenceMod) {
+          (api.logger as any)?.warn?.('[shieldcortex] Cannot load defence module — degraded: dependency-free fallback scan only (WS2), memory-write scanning follows failurePolicy.high');
+        } else if (!canRunPipeline) {
+          (api.logger as any)?.warn?.('[shieldcortex] defence module missing runDefencePipeline — degraded: dependency-free fallback scan only (WS2), memory-write scanning follows failurePolicy.high');
         }
-        if (typeof defenceMod.runDefencePipeline !== 'function') return null;
+        const degradedPipeline: Parameters<typeof createInterceptor>[1] = () => {
+          throw new Error('ShieldCortex: defence pipeline unavailable (dist missing or incomplete)');
+        };
 
-        interceptorReady = createInterceptor(interceptorConfig, defenceMod.runDefencePipeline as Parameters<typeof createInterceptor>[1], {
-          evaluateToolCall: typeof (defenceMod as any).evaluateToolCall === 'function'
+        interceptorReady = createInterceptor(
+          interceptorConfig,
+          canRunPipeline ? (defenceMod!.runDefencePipeline as Parameters<typeof createInterceptor>[1]) : degradedPipeline,
+          {
+          evaluateToolCall: typeof (defenceMod as any)?.evaluateToolCall === 'function'
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
@@ -3916,22 +4243,22 @@ export default {
           // injected through the same runtime seam as evaluateToolCall. Older
           // installed packages without the export simply leave the option
           // undefined (no lease plane — the capability-honesty surface says so).
-          checkActionLease: typeof (defenceMod as any).evaluateToolCallLease === 'function'
+          checkActionLease: typeof (defenceMod as any)?.evaluateToolCallLease === 'function'
             ? (toolName, args, sessionId) =>
                 (defenceMod as any).evaluateToolCallLease(toolName, args, { self: sessionId ?? '' })
             : undefined,
-          releaseActionLease: typeof (defenceMod as any).releaseToolCallLease === 'function'
+          releaseActionLease: typeof (defenceMod as any)?.releaseToolCallLease === 'function'
             ? (toolName, args, sessionId) =>
                 (defenceMod as any).releaseToolCallLease(toolName, args, { self: sessionId ?? '' })
             : undefined,
           // #260: the session-guard index. Same formula as the Claude Code
           // hook. Absent on an older dist — then emitAudit still stamps origin
           // but does not write an index nobody would summarise.
-          sessionGuard: typeof defenceMod.sessionKeyFor === 'function' && typeof defenceMod.appendSessionGuardIndex === 'function'
+          sessionGuard: typeof defenceMod?.sessionKeyFor === 'function' && typeof defenceMod?.appendSessionGuardIndex === 'function'
             ? {
-                keyFor: (sessionId) => defenceMod.sessionKeyFor!(sessionId),
+                keyFor: (sessionId) => defenceMod!.sessionKeyFor!(sessionId),
                 index: (entry) => {
-                  defenceMod.appendSessionGuardIndex!({ entry: { ...entry } as Record<string, unknown> });
+                  defenceMod!.appendSessionGuardIndex!({ entry: { ...entry } as Record<string, unknown> });
                 },
               }
             : undefined,
@@ -3940,7 +4267,7 @@ export default {
             cloudBaseUrl: (scConfig as any).cloudBaseUrl ?? 'https://api.shieldcortex.ai',
             cloudEnabled: (scConfig as any).cloudEnabled ?? false,
           }),
-          bindAudit: typeof (defenceMod as any).attachEnforcementBinding === 'function'
+          bindAudit: typeof (defenceMod as any)?.attachEnforcementBinding === 'function'
             ? (entry, args) => (defenceMod as any).attachEnforcementBinding(entry, {
                 plane: 'action_guard',
                 hookName: 'before_tool_call',
@@ -3950,7 +4277,9 @@ export default {
               }) as typeof entry
             : undefined,
         });
-        const guardState = interceptorConfig.actionGuard?.enabled
+        const guardState = !canRunPipeline
+          ? 'Action Guard: DEGRADED (WS2 fallback scan only)'
+          : interceptorConfig.actionGuard?.enabled
           ? (interceptorConfig.actionGuard.enforce ? 'Action Guard: enforce' : 'Action Guard: warn')
           : 'Action Guard: off';
         api.logger?.info?.(`[shieldcortex] Interceptor active — memory writes + ${guardState} (shell/file/network/git)`);
@@ -3958,6 +4287,13 @@ export default {
       } catch (err) {
         (api.logger as any)?.warn?.(`[shieldcortex] Interceptor init failed: ${err instanceof Error ? err.message : err}`);
         return null;
+      }
+      })();
+      interceptorBuild = build;
+      try {
+        return await build;
+      } finally {
+        if (interceptorBuild === build) interceptorBuild = null;
       }
     }
 
@@ -3975,7 +4311,17 @@ export default {
     // immediately and never requests approval — covered by regression tests.
     // Note: re-enabling the interceptor from openclaw.json requires a gateway
     // restart, since registration happens once at plugin load.
-    const interceptorDisabledInHostConfig = _configOverride?.interceptor?.enabled === false;
+    // #522 r7 FIND-2: `openclaw.json` is an UNSIGNED, same-UID file that the
+    // Action Guard does not itself gate writes to — so `interceptor.enabled:
+    // false` there was a one-key, unprivileged, silent way to take the whole
+    // gate off a host carrying a root-owned policy lock, which is exactly the
+    // defect #501 exists to close. The lock out-ranks the entry for the
+    // guard's own switches (`applyPolicyLockToPluginConfig`); it must out-rank
+    // it for whether the gate is REGISTERED too, or the precedence rule is
+    // decorative. #112's reason for the flag survives intact on an UNLOCKED
+    // host, which is every host the flag was written for.
+    const interceptorDisabledInHostConfig =
+      _configOverride?.interceptor?.enabled === false && !inlinePolicyLockPresent();
 
     if (!interceptorDisabledInHostConfig) {
       // Typed before_tool_call hook: this is the OpenClaw agent-loop gate that
