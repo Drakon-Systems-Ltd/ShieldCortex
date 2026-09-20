@@ -93,7 +93,12 @@ worth knowing before you update a box that runs OpenClaw:
   exists and a previous `cortex-memory` hook or `shieldcortex-realtime` plugin is
   on disk, it spawns `shieldcortex openclaw install` (or, for a plugin with no
   hook, re-copies the plugin files) so the file-copied hook and plugin do not go
-  stale behind the new package version.
+  stale behind the new package version. That command is the **full installer**,
+  not a file copy: it snapshots and edits the OpenClaw configuration to register
+  the plugin and, by default, restarts the OpenClaw gateway — so a package update
+  can briefly interrupt a running gateway. If the plugin-only re-copy fails, it
+  falls back to the same full installer, which can add the hook that was not
+  there before.
 - It never wires OpenClaw for the first time. OpenClaw present but no earlier
   ShieldCortex hook or plugin means nothing under `~/.openclaw` is touched; run
   the install commands above yourself.
@@ -102,9 +107,15 @@ worth knowing before you update a box that runs OpenClaw:
 - A failed refresh is non-fatal and prints the manual command.
 - Separately from OpenClaw, on macOS it restarts a ShieldCortex dashboard
   service that is still serving the previous build.
+- Also separately from OpenClaw, on a machine with no
+  `~/.shieldcortex/config.json` it **creates one** with
+  `openclawAutoMemory: true` and `proactiveRecall: true`. An existing config file
+  is never overwritten. This write is not part of the OpenClaw refresh, so it
+  still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` and inside Docker; only
+  `--ignore-scripts` avoids it.
 
-To update the package without touching OpenClaw at all, set
-`SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` for the install, then refresh when you are
+To update the package without touching OpenClaw at all (no configuration edit,
+no gateway restart), set `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` for the install, then refresh when you are
 ready with `shieldcortex openclaw install`. npm's `--ignore-scripts` also skips
 it, but that skips the native-module check too — prefer the variable.
 
