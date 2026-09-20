@@ -254,6 +254,17 @@ interface ExactSpecialSchema {
    */
   inert?: Set<string>;
   family: 'read' | 'network' | 'exec';
+  /**
+   * Per-field primitive type for DECLARED fields whose live contract is not a
+   * string — the same discipline `ShellControlSchema` uses for `TaskOutput`'s
+   * `{block: boolean, timeout: number}`. Unlike the control bag there is NO
+   * `'string'` default here: an exact-special contract may legitimately declare
+   * an array field (`process.keys`, `process.hex`), so an undeclared type means
+   * "shape-checked by `validateNested` as before", not "must be a string".
+   * A declared type stays EXACT — a coerced `'true'` or a `['x']` in a boolean
+   * field is a shape the host cannot send, and fails closed.
+   */
+  fieldTypes?: Record<string, 'string' | 'boolean' | 'number'>;
   /** Stable label for the contract-drift observation. Never a payload value. */
   contract: string;
 }
@@ -331,6 +342,57 @@ const OPENCLAW_EXEC_KEYS = new Set<string>([
 
 const OPENCLAW_EXEC_ALIASES = new Set(['exec']);
 
+/**
+ * #524 — the LIVE OpenClaw `process` bag (`src/agents/bash-tools.process.ts`,
+ * `processSchema`). The whole declared field set, measured against the host
+ * source: `action` (required) plus the per-action payload fields.
+ *
+ * Before this contract existed, `process` fell to `schemaFamilyForTool`'s exec
+ * vocabulary — `process` is an EXEC_WORD and an EXEC_ANCHORED_WORD — so every
+ * live call was matched against EXEC_KEYS, where `action`/`sessionId`/`keys`/
+ * `hex`/`bracketed`/`eof`/`offset`/`limit` are all UNKNOWN_KEYS. The result was
+ * `invalid_tool_input` on an ordinary `{action:'list'}`: a card that named a
+ * field rather than the work, and that an operator could only answer once
+ * because allow-once teaches nothing.
+ *
+ * The bag is CLOSED and carries NO command key. `family: 'read'` is about
+ * SCHEMA ROUTING only — it keeps the name out of EXEC_KEYS so the declared
+ * fields are recognised — and it is deliberately NOT the last word on what a
+ * call does: `evaluateToolCallCore` reads `action` and gates every mutating
+ * verb (`kill`/`write`/`send-keys`/`submit`/`paste`/`clear`/`remove`) at the
+ * dangerous tier regardless of this family.
+ *
+ * `data`, `text` and `literal` ARE declared here even though `data`/`text` sit
+ * in `GUARD_EVIDENCE_KEYS` — declared, so they are never dropped as drift, and
+ * the guard scans them itself on the action branch.
+ */
+const OPENCLAW_PROCESS_KEYS = new Set<string>([
+  'action', 'sessionId', 'data', 'keys', 'hex', 'literal', 'text',
+  'bracketed', 'eof', 'offset', 'limit', 'timeout',
+]);
+
+/**
+ * The non-string half of the live `processSchema`. `keys`/`hex` are string
+ * ARRAYS and are deliberately absent: they carry no declared primitive type, so
+ * `validateNested` shape-checks them exactly as it did before (flat array of
+ * primitives, no nested objects, bounded depth).
+ */
+const OPENCLAW_PROCESS_FIELD_TYPES: Record<string, 'string' | 'boolean' | 'number'> = {
+  bracketed: 'boolean',
+  eof: 'boolean',
+  offset: 'number',
+  limit: 'number',
+  timeout: 'number',
+};
+
+/**
+ * EXACT native spelling only. `mcp__openclaw__process` does NOT inherit this
+ * contract, for the same reason `mcp__openclaw__exec` does not: an MCP-fronted
+ * name is caller-supplied identity, and granting it a reviewed bag would let
+ * any server that picks the name `process` hand itself a closed contract.
+ */
+const OPENCLAW_PROCESS_ALIASES = new Set(['process']);
+
 const OPENCLAW_SPAWN_INERT = new Set<string>(['outputSchema']);
 
 function exactSpecialSchemaFor(toolName: string): ExactSpecialSchema | null {
@@ -358,6 +420,14 @@ function exactSpecialSchemaFor(toolName: string): ExactSpecialSchema | null {
       allowed: OPENCLAW_EXEC_KEYS,
       family: 'exec',
       contract: 'openclaw.exec',
+    };
+  }
+  if (OPENCLAW_PROCESS_ALIASES.has(exact)) {
+    return {
+      allowed: OPENCLAW_PROCESS_KEYS,
+      fieldTypes: OPENCLAW_PROCESS_FIELD_TYPES,
+      family: 'read',
+      contract: 'openclaw.process',
     };
   }
   return null;
@@ -722,7 +792,12 @@ export function validateToolInput(
     // its `timeout` a number. Anything else is not a shape the host ever sends,
     // so it fails closed rather than reaching the extractors. Widening the bag
     // must never widen the shapes it accepts.
-    const expected = control ? (control.fieldTypes?.[key] ?? 'string') : null;
+    // A control bag types EVERY field ('string' by default). An exact-special
+    // contract types only the fields it declares a type for, because its live
+    // shape includes arrays the control bag never has to express.
+    const expected = control
+      ? (control.fieldTypes?.[key] ?? 'string')
+      : (special?.fieldTypes?.[key] ?? null);
     if (expected !== null && typeof value !== expected) {
       return {
         ok: false,
