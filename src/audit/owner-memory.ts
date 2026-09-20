@@ -38,6 +38,12 @@ const MAX_FRONTMATTER_LINES = 64;
 const YAML_KEY_LINE = /^[A-Za-z_][\w.-]*:(?:[ \t].*)?$/;
 const YAML_CHILD_LINE = /^[ \t]+(?:-[ \t]+\S.*|[A-Za-z_][\w.-]*:(?:[ \t].*)?)$/;
 const YAML_COMMENT_LINE = /^[ \t]*#.*$/;
+/** `key: |` or `key: >`, with the optional chomping (`-`/`+`) and indent-digit indicators. */
+const YAML_BLOCK_SCALAR_KEY = /^[A-Za-z_][\w.-]*:[ \t]+[|>](?:[-+][1-9]?|[1-9][-+]?)?[ \t]*(?:#.*)?$/;
+/** `key:` with nothing after it: what follows may be its list. */
+const YAML_EMPTY_VALUE_KEY = /^[A-Za-z_][\w.-]*:[ \t]*(?:#.*)?$/;
+/** A list item at column 0. Only accepted directly under an empty-value key. */
+const YAML_TOP_LEVEL_ITEM = /^-[ \t]+\S.*$/;
 
 /**
  * Offset of the `---` that closes strict leading YAML frontmatter, or -1.
@@ -52,13 +58,35 @@ export function strictFrontmatterCloserOffset(content: string): number {
   const lines = text.split('\n');
   if (lines.length < 3 || lines[0].replace(/\r$/, '').trimEnd() !== '---') return -1;
 
+  // What the previous top-level key opened, because two valid YAML shapes are
+  // only recognisable from the key above them:
+  //   'block' -- `description: |` / `>` : INDENTED lines below are free text;
+  //   'list'  -- `tags:` with no value  : column-0 `- item` lines are its list.
+  // Both end at the first line that is not theirs, and that line is then held
+  // to the ordinary rules, so column-0 prose still ends the attempt.
+  let open: 'none' | 'block' | 'list' = 'none';
+
   let offset = lines[0].length + 1;
   for (let i = 1; i < lines.length && i <= MAX_FRONTMATTER_LINES + 1; i++) {
     const line = lines[i].replace(/\r$/, '');
     if (line.trimEnd() === '---') return i === 1 ? -1 : shift + offset;
-    const yaml = i === 1
-      ? YAML_KEY_LINE.test(line)
-      : YAML_KEY_LINE.test(line) || YAML_CHILD_LINE.test(line) || YAML_COMMENT_LINE.test(line);
+    if (line.trim() === '') return -1;
+
+    const indented = /^[ \t]/.test(line);
+    let yaml: boolean;
+    if (open === 'block' && indented) {
+      yaml = true;
+    } else if (open === 'list' && YAML_TOP_LEVEL_ITEM.test(line)) {
+      yaml = true;
+    } else if (YAML_KEY_LINE.test(line)) {
+      yaml = true;
+      open = YAML_BLOCK_SCALAR_KEY.test(line) ? 'block' : YAML_EMPTY_VALUE_KEY.test(line) ? 'list' : 'none';
+    } else {
+      // A child or comment line leaves `open` as it is: a comment inside a
+      // list does not end the list.
+      yaml = i > 1 && (YAML_CHILD_LINE.test(line) || YAML_COMMENT_LINE.test(line));
+      if (yaml && !indented) open = open === 'list' ? 'list' : 'none';
+    }
     if (!yaml) return -1;
     offset += lines[i].length + 1;
   }

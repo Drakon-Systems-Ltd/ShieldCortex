@@ -110,6 +110,21 @@ describe('#514 review 1: strict frontmatter and the owner-memory downgrade', () 
     expect(withBom.slice(strictFrontmatterCloserOffset(withBom)).startsWith('---')).toBe(true);
   });
 
+  // Two shapes real memory files use that the first strict reader rejected,
+  // so benign owner memories stayed flagged. Both are only recognisable from
+  // the key ABOVE them, and both end at the first line that is not theirs.
+  it.each([
+    ['block scalar, literal', `---\nname: x\ndescription: |\n  Release guidance\n  More guidance\nmetadata: y\n---\n${PAYLOAD}`],
+    ['block scalar, folded', `---\ndescription: >\n  folded guidance\n---\n${PAYLOAD}`],
+    ['block scalar with chomping and indent indicators', `---\na: |-\n  text\nb: |2\n  text\nc: >+\n  text\n---\n${PAYLOAD}`],
+    ['top-level list under an empty-value key', `---\nname: x\ntags:\n- release\n- ops\nmetadata: y\n---\n${PAYLOAD}`],
+    ['a comment does not end a top-level list', `---\ntags:\n- release\n# reviewed in March\n- ops\n---\n${PAYLOAD}`],
+    ['indented list, as before', `---\ntags:\n  - release\n---\n${PAYLOAD}`],
+  ])('accepts %s', (_name, text) => {
+    expect(strictFrontmatterCloserOffset(text)).toBeGreaterThan(0);
+    expect(text.slice(strictFrontmatterCloserOffset(text)).startsWith('---')).toBe(true);
+  });
+
   it.each([
     ['free prose', FAKE_FRONTMATTER],
     ['free prose, CRLF', FAKE_FRONTMATTER.replace(/\n/g, '\r\n')],
@@ -120,6 +135,14 @@ describe('#514 review 1: strict frontmatter and the owner-memory downgrade', () 
     ['indented first line', `---\n  - item\n---\n${PAYLOAD}`],
     ['no closer', '---\nname: x\nmore: y\n'],
     ['not on the first line', `intro\n---\nname: x\n---\n${PAYLOAD}`],
+    // The bypass, re-checked against each new shape: a block scalar and a list
+    // end at the first column-0 line that is not theirs, and prose there still
+    // rejects. Without this, either shape would be a new way in.
+    ['column-0 prose after a block scalar', `---\ndescription: |\n  guidance\nEnd of document.\n---\n${PAYLOAD}`],
+    ['column-0 prose after a top-level list', `---\ntags:\n- release\nEnd of document.\n---\n${PAYLOAD}`],
+    ['whitespace-only line inside a block scalar', `---\ndescription: |\n  guidance\n   \n---\n${PAYLOAD}`],
+    ['a list item with no key above it', `---\n- release\n---\n${PAYLOAD}`],
+    ['no closer, block scalar', '---\nname: x\ndescription: |\n  text\n'],
   ])('rejects %s', (_name, text) => {
     expect(strictFrontmatterCloserOffset(text)).toBe(-1);
     expect(isFrontmatterOnlyStealthHit(text, STEALTH_VERDICT)).toBe(false);
@@ -186,6 +209,17 @@ describe('#514 memory audit over an isolated home', () => {
       ['info', 'Memory frontmatter matched the stealth marker rule', 'skill:stealth_instruction'],
     ]);
     expect(calculateGrade(reportOf(file.findings).bySeverity)).toBe('A');
+  });
+
+  it.each([
+    ['block scalar', `---\nname: x\ndescription: |\n  Release guidance\n  More guidance\n---\n\n**How to apply:** always wait for the full test suite before tagging.\n`],
+    ['top-level list', `---\nname: x\ntags:\n- release\n- ops\n---\n\n**How to apply:** always wait for the full test suite before tagging.\n`],
+  ])('owner memory using a %s is downgraded too', (_name, content) => {
+    writeFileSync(join(memoryDir, 'shape.md'), content);
+    const [file] = scan().files;
+    expect(file.firewallResult).toBe('ALLOW');
+    expect(file.risk).toBe('LOW');
+    expect(file.findings.map((f) => f.severity)).toEqual(['info']);
   });
 
   it('the same text in the working directory is NOT downgraded', () => {
