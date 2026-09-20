@@ -393,6 +393,24 @@ describe('#510 review round 5: identifiers held outside the field being written'
     expect(row.metadata).toContain('[REDACTED:email]');
   });
 
+  it('merging RESTRICTED rows that redact never downgrades the survivor', async () => {
+    const { addMemory, mergeMemories } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const a = addMemory({ title: 'pay a', content: 'Pat Example salary 55000' }, undefined, user);
+    const b = addMemory({ title: 'pay b', content: 'Sam Example salary 61000, reach sam@example.com' }, undefined, user);
+    const db = getDatabase();
+    db.prepare("UPDATE memories SET sensitivity_level = 'RESTRICTED' WHERE id IN (?, ?)").run(a.id, b.id);
+
+    mergeMemories(a.id, b.id);
+    const level = () => (db.prepare('SELECT sensitivity_level FROM memories WHERE id = ?').get(a.id) as { sensitivity_level: string }).sensitivity_level;
+    expect(level()).toBe('RESTRICTED');
+
+    // One RESTRICTED row is enough, whichever side it is on.
+    const c = addMemory({ title: 'pay c', content: 'Lee Example salary 47000' }, undefined, user);
+    mergeMemories(c.id, a.id);
+    expect((db.prepare('SELECT sensitivity_level FROM memories WHERE id = ?').get(c.id) as { sensitivity_level: string }).sensitivity_level).toBe('RESTRICTED');
+  });
+
   it('an identifier token marks the record, and still exempts nothing', () => {
     const result = redactForPersistence({ content: 'pay [REDACTED:salary], reach pat@example.com' });
     expect(result.redacted).toBe(true);

@@ -1494,7 +1494,7 @@ export function updateMemory(
         ...(updates.metadata !== undefined || changed(redaction.fields.metadata, existing.metadata) ? { metadata: redaction.fields.metadata } : {}),
       };
       // Never let the row sit below CONFIDENTIAL while it names an identifier.
-      if (existing.sensitivityLevel !== 'RESTRICTED' && existing.sensitivityLevel !== 'CONFIDENTIAL') {
+      if (!existing.sensitivityLevel || existing.sensitivityLevel === 'PUBLIC' || existing.sensitivityLevel === 'INTERNAL') {
         fields.push('sensitivity_level = ?');
         values.push('CONFIDENTIAL');
       }
@@ -1811,11 +1811,19 @@ export function mergeMemories(
       Math.max(new Date(kept.lastAccessed).getTime(), new Date(removed.lastAccessed).getTime()),
     ).toISOString();
     const mergedReviewedBy = options?.reviewedBy ?? kept.reviewedBy ?? 'review-merge';
-    const mergedSensitivity = kept.sensitivityLevel === 'SECRET' || removed.sensitivityLevel === 'SECRET'
-      ? 'SECRET'
-      : kept.sensitivityLevel === 'CONFIDENTIAL' || removed.sensitivityLevel === 'CONFIDENTIAL' || mergeRedaction.redacted
-        ? 'CONFIDENTIAL'
-        : kept.sensitivityLevel ?? removed.sensitivityLevel ?? 'INTERNAL';
+    // The survivor keeps the HIGHEST level either row held; redaction only
+    // raises the floor to CONFIDENTIAL — it must never pull a RESTRICTED row
+    // down (that would open it to readers checkAccess refused before the merge).
+    const sensitivityRank = (level: string | null | undefined): number =>
+      ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
+    const mergedSensitivity = [
+      kept.sensitivityLevel,
+      removed.sensitivityLevel,
+      mergeRedaction.redacted ? 'CONFIDENTIAL' : undefined,
+    ].reduce<string | null | undefined>(
+      (highest, level) => (sensitivityRank(level) > sensitivityRank(highest) ? level : highest),
+      undefined,
+    ) ?? 'INTERNAL';
 
     db.prepare(`
       UPDATE memories
