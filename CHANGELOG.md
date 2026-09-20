@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Dashboard production audit is clean (was 1 critical + 4 high): `next` 16.2.12 → 16.3.5 inside the same major pulls patched `postcss` and `sharp`, and `nanoid` / `lodash-es` move off their vulnerable ranges; root dev-tree advisories (`js-yaml`, `browserslist`, `brace-expansion`) fixed too. The root `sharp` waiver stays — it now needs a Transformers major, noted in `docs/security/audit-waivers.md`. What the global postinstall does to an existing OpenClaw integration, and `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` to stop it, is documented in `docs/openclaw-integration.md` (#513).
+- **#532** A comment in folded JavaScript or Python source stays non-executable even when the command pipes, redirects, or sequences its output. The repo's own test runner was denied as a recursive workspace wipe solely because a prose comment mentioned a historical delete in backticks, and a trailing output pipe withdrew the workspace-confinement exemption that had been hiding the misclassification. Folded scripts that actually delete still hard-block with the same pipe present. Guard stays off by default.
 
 ## [5.0.7] - 2026-09-20
 
