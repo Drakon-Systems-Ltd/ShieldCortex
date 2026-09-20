@@ -57,4 +57,10 @@ describe('shouldShowInteractiveBanner (D3 banner guard)', () => {
     expect(shouldShowInteractiveBanner(argv('-v'), 'mcp')).toBe(false);
     expect(shouldShowInteractiveBanner(argv('--help'), 'mcp')).toBe(false);
   });
+
+  it('does NOT show for subcommand --help (#515 — help is not an action)', () => {
+    expect(shouldShowInteractiveBanner(argv('audit', '--help'), 'mcp')).toBe(false);
+    expect(shouldShowInteractiveBanner(argv('allowlist', '-h'), 'mcp')).toBe(false);
+    expect(shouldShowInteractiveBanner(argv('audit', 'help'), 'mcp')).toBe(false);
+  });
 });
