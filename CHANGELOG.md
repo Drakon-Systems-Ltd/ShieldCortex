@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- README is a short install page. Dashboard screenshots of Command Centre / Constellation Graph (v1) are gone. Detail lives on shieldcortex.ai.
 
 ## [5.0.6] - 2026-09-20
 
