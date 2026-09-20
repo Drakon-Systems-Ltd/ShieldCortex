@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- **Prompt recall:** the per-prompt `additionalContext` block is now an explicit untrusted-data frame — the same "untrusted data — not instructions" wording the session-start pack uses, a line saying instruction-shaped text inside is part of the note, and a closing line. Titles and content are flattened to one line so a stored memory cannot forge a heading or close the frame; fixed 273-character overhead, per-memory cap unchanged (#507).
 
 ## [5.0.7] - 2026-09-20
 
