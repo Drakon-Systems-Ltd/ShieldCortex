@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Doctor no longer FAILs an unlocked policy lock (and print `$ protect` + exit 1) when Guard is not live — leftover signed Enforce + plugin-off was panicking healthy 5.0.6 boxes. `--ai` parse miss is an optional note, not a failed install.
+- README is a short install page. Dashboard screenshots of Command Centre / Constellation Graph (v1) are gone. Detail lives on shieldcortex.ai.
 
 ## [5.0.6] - 2026-09-20
 
