@@ -8,6 +8,16 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- (none yet)
+
+### Fixed
+- (none yet)
+
+## [5.0.6] - 2026-09-20
+
+Patch on 5.0.5. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`). Cloud pin stays `^5.0.0`.
+
+### Added
 - **#501 OS-owned policy lock.** `shieldcortex protect` (run as root) pins the security-critical config subset to `/etc/shieldcortex/policy.json` — a root-owned `0644` file in a root-owned `0755` directory, with no key material of any kind. Protected set v1: `actionGuard.enabled`, `actionGuard.enforce`, `actionGuard.autoApprove` (a ceiling), `actionGuard.broker.enabled`, `defenceMode` (a floor), `memory.hostContract.posture`, `memory.inject.mode`. For every pinned key the tighter of lock and `config.json` wins, so a locked box can still be made stricter locally but never looser; a write that would loosen one is refused by name and audited (`policy_refused`) rather than accepted and silently overridden. Both enforcement surfaces — the Claude Code hook and the OpenClaw interceptor — read the lock through the same module, each with an inline probe so a missing `dist` cannot fail open on a host that has a lock. New: `shieldcortex config --policy-status`, `shieldcortex doctor --json`, and two doctor rows (lock state; integrity verdict). Unlocked hosts behave exactly as before; Windows and agents already running as root are reported as having no same-host boundary rather than given a fake one. See `docs/design/2026-09-16-501-policy-lock.md`.
 - **#501 Operator recovery runbook.** There is deliberately no `shieldcortex unprotect` — a command an agent could be talked into invoking would hand back exactly the capability the lock removes — so recovery is documented for a human at a root shell instead: §8 of the design note, plus a short *If the lock ends up in a bad state* section in the README. Covers identifying the state (`config --policy-status`, the two doctor rows, and the `<reason>` vocabulary in an UNVERIFIABLE headline), rewriting or removing a root-owned lock, re-pinning a policy you need to loosen (`protect --from-config`, then re-running the matching `shieldcortex config --*` flag so the hand-edited `config.json` is re-signed — a `tampered` config holds the strict fail-closed posture whatever the lock says), the `unsupported` case, and losing root. Also the things that make it worse: deleting `~/.shieldcortex` does not remove a lock that lives in `/etc/shieldcortex` and leaves a *stricter* fail-closed posture behind, and re-owning the lock to the agent user makes it permanently unverifiable, hence permanently strict.
 
