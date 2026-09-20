@@ -46,6 +46,43 @@ function safeRegexTest(pattern: RegExp, text: string): boolean {
 }
 
 /**
+ * "Content after a `---` end-of-document marker" — text a reader is meant to
+ * take as past the end of the file.
+ *
+ * Hoisted so `runPatternGroups` can recognise it by identity: it is the one
+ * pattern that must not see a YAML frontmatter closer (issue #514).
+ */
+const END_OF_DOCUMENT_MARKER =
+  /\n---\s*\n[\s\S]{0,500}?(always|never|must|ignore|execute|run|send|read)/i;
+
+/**
+ * A frontmatter block: `---` on the FIRST line, then 1-64 non-blank lines, then
+ * the closing `---`. Deliberately strict. A blank line ends the block, so
+ * "---, some text, a gap, ---" is two document markers and not frontmatter, and
+ * the 64-line cap keeps the match bounded.
+ */
+const LEADING_FRONTMATTER = /^\uFEFF?---[ \t]*\r?\n(?:[^\r\n]+\r?\n){1,64}?---[ \t]*(?:\r?\n|$)/;
+
+/**
+ * Blank the `---` that CLOSES leading frontmatter, length-for-length.
+ *
+ * Claude Code memory files, skill files and .mdc rules all open with
+ * frontmatter, and their bodies are standing guidance ("always ...", "never
+ * ..."). The marker rule read that closer as a hidden end-of-document marker
+ * and flagged every such file: 288 hits over 147 owner-authored files in the
+ * 15 Sep 2026 audit run, none of them real. What follows frontmatter is the
+ * visible body of the document -- the opposite of hidden -- and every other
+ * group still scans it unchanged. Only the closer is blanked, and only for this
+ * one pattern; a later `---` in the same file is still a marker.
+ */
+function neutraliseFrontmatterCloser(content: string): string {
+  const block = LEADING_FRONTMATTER.exec(content);
+  if (!block) return content;
+  const closer = block[0].lastIndexOf('---');
+  return `${content.slice(0, closer)}   ${content.slice(closer + 3)}`;
+}
+
+/**
  * Run a set of pattern groups against content and return a SkillThreatResult.
  *
  * Confidence = max matched group weight + 0.1 bonus per additional group,
@@ -55,9 +92,16 @@ function runPatternGroups(content: string, groups: PatternGroup[]): SkillThreatR
   const matchedThreats: string[] = [];
   let maxWeight = 0;
 
+  // Built lazily and at most once: only the end-of-document marker rule reads
+  // this view, and most content never reaches that pattern.
+  let bodyView: string | undefined;
+
   for (const group of groups) {
     for (const pattern of group.patterns) {
-      if (safeRegexTest(pattern, content)) {
+      const text = pattern === END_OF_DOCUMENT_MARKER
+        ? (bodyView ??= neutraliseFrontmatterCloser(content))
+        : content;
+      if (safeRegexTest(pattern, text)) {
         matchedThreats.push(group.name);
         if (group.weight > maxWeight) {
           maxWeight = group.weight;
@@ -203,7 +247,7 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
       // Buried after excessive whitespace (length-capped)
       /\n{10,}[\s\S]{0,200}(always|never|must|ignore|execute|run|send|read)/i,
       // Content after --- end-of-document marker with actionable words
-      /\n---\s*\n[\s\S]{0,500}?(always|never|must|ignore|execute|run|send|read)/i,
+      END_OF_DOCUMENT_MARKER,
       // Unicode direction overrides in instruction context
       /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/,
     ],

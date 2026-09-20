@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- **Audit:** `shieldcortex audit` groups findings per file and prints the rule id, the matching line and the one command to run next; every memory finding now carries a non-empty `matchedText`, and `--json` keeps the same keys. `stealth_instruction` no longer reads a YAML frontmatter closer as a hidden end-of-document marker, which had flagged every owner-authored Claude Code memory file (#514).
 
 ## [5.0.7] - 2026-09-20
 

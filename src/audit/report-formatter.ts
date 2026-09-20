@@ -10,6 +10,7 @@
  */
 
 import type { AuditReport, AuditFinding, AuditGrade, AuditSeverity, ScannerResult } from './types.js';
+import { getFindingDetail } from './finding-detail.js';
 
 // ── ANSI Colours ──
 
@@ -163,26 +164,53 @@ export function formatTerminalReport(report: AuditReport): string {
     lines.push(`  ${c.bold}Findings${c.reset}`);
     lines.push(`  ${'─'.repeat(60)}`);
 
-    for (const severity of severityOrder) {
-      const findings = report.findings.filter(f => f.severity === severity);
-      if (findings.length === 0) continue;
+    // Skip info findings in the detailed view (they're noise)
+    const printable = report.findings.filter(f => f.severity !== 'info');
+    const rank = (f: AuditFinding) => severityOrder.indexOf(f.severity);
 
-      // Skip info findings in the detailed view (they're noise)
-      if (severity === 'info') continue;
-
-      for (const finding of findings) {
-        const sc = severityColour(finding.severity);
-        const icon = severityIcon(finding.severity);
-        lines.push(`  ${sc}[${icon}] ${finding.severity.toUpperCase().padEnd(8)}${c.reset} ${finding.title}`);
-        lines.push(`     ${c.dim}${finding.description}${c.reset}`);
-        if (finding.filePath) {
-          lines.push(`     ${c.dim}File: ${finding.filePath}${c.reset}`);
+    const pushFinding = (finding: AuditFinding, indent: string) => {
+      const sc = severityColour(finding.severity);
+      const icon = severityIcon(finding.severity);
+      const detail = getFindingDetail(finding);
+      lines.push(`${indent}${sc}[${icon}] ${finding.severity.toUpperCase().padEnd(8)}${c.reset} ${finding.title}`);
+      lines.push(`${indent}   ${c.dim}${finding.description}${c.reset}`);
+      if (detail) {
+        lines.push(`${indent}   ${c.dim}Rule: ${detail.ruleIds.join(', ')}${c.reset}`);
+        if (detail.line !== undefined && detail.excerpt) {
+          lines.push(`${indent}   ${c.dim}Line ${detail.line}: ${detail.excerpt}${c.reset}`);
         }
-        if (finding.matchedText) {
-          lines.push(`     ${c.dim}Match: ${finding.matchedText}${c.reset}`);
-        }
-        lines.push('');
       }
+      // `Match:` repeats the rule ids for most memory findings; print it only
+      // when it says something the Rule line did not (a credential fragment).
+      if (finding.matchedText && finding.matchedText !== detail?.ruleIds.join(', ').slice(0, 120)) {
+        lines.push(`${indent}   ${c.dim}Match: ${finding.matchedText}${c.reset}`);
+      }
+    };
+
+    // Findings that name a file are grouped under it, worst file first: a file
+    // with five findings is one thing to go and look at, not five (issue #514).
+    const byFile = new Map<string, AuditFinding[]>();
+    for (const finding of printable) {
+      if (!finding.filePath) continue;
+      const group = byFile.get(finding.filePath);
+      if (group) group.push(finding);
+      else byFile.set(finding.filePath, [finding]);
+    }
+    const files = [...byFile.entries()]
+      .map(([filePath, group]) => ({ filePath, group: group.sort((a, b) => rank(a) - rank(b)) }))
+      .sort((a, b) => rank(a.group[0]) - rank(b.group[0]) || a.filePath.localeCompare(b.filePath));
+
+    for (const { filePath, group } of files) {
+      lines.push(`  ${c.bold}File: ${filePath}${c.reset}`);
+      for (const finding of group) pushFinding(finding, '    ');
+      const next = group.map(f => getFindingDetail(f)?.nextCommand).find(Boolean);
+      if (next) lines.push(`    ${c.cyan}Next: ${next}${c.reset}`);
+      lines.push('');
+    }
+
+    for (const finding of printable.filter(f => !f.filePath).sort((a, b) => rank(a) - rank(b))) {
+      pushFinding(finding, '  ');
+      lines.push('');
     }
   }
 
