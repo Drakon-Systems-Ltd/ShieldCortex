@@ -724,10 +724,80 @@ export function summariseToolArgs(args: Record<string, unknown> | undefined): st
   return parts.join(' ').slice(0, 160);
 }
 
+/**
+ * #524 — the operator-facing half of the native `process` contract.
+ *
+ * DUPLICATED from `tool-action-guard.ts`'s `OPENCLAW_PROCESS_INSPECT` /
+ * `OPENCLAW_PROCESS_MUTATE` on purpose, the same discipline as
+ * `FALLBACK_CATASTROPHIC_PATTERNS` above: this file carries no compile-time
+ * dependency on the main package, and the card must still read in English when
+ * the guard is loaded through the injected-evaluator seam. Kept in sync there;
+ * a verb that drifts out of sync falls back to the generic lead below rather
+ * than inventing a sentence.
+ */
+const NATIVE_PROCESS_PHRASE: Record<string, string> = {
+  list: 'see what commands are running',
+  poll: 'check a running command',
+  log: "read a running command's output",
+  kill: 'stop a running command',
+  write: 'type into a running command',
+  'send-keys': 'press keys in a running command',
+  submit: 'submit input to a running command',
+  paste: 'paste text into a running command',
+  clear: "clear a running command's input",
+  remove: "remove a running command's session",
+};
+
+/** EXACT native spelling only — `mcp__openclaw__process` is not this contract. */
+function isNativeProcessTool(toolName: string): boolean {
+  return String(toolName || '').trim().toLowerCase() === 'process';
+}
+
+/**
+ * The plain sentence the card LEADS with.
+ *
+ * The operator's complaint was not that the card was wrong, it was that
+ * `invalid_tool_input / unknown field action` is not a question a person can
+ * answer. So the headline is what the agent is trying to do, in words, and the
+ * `Tool:`/`Action:`/`Signals:` block below it keeps the machine-readable
+ * detail — including for the secret-egress filter in `index.ts`, which forwards
+ * those label lines and drops everything else.
+ *
+ * Every sentence says what allow-once buys, because that is the other half of
+ * what went wrong: a Telegram allow-once looked like it taught the tool, and it
+ * did not. It never will — no card mints a standing grant.
+ */
+function actionGuardLead(
+  toolName: string,
+  v: ToolGuardVerdictLike,
+  args?: Record<string, unknown>,
+): string {
+  const rawAction = args?.action;
+  const verb = typeof rawAction === 'string'
+    ? rawAction.trim().toLowerCase().replace(/_/g, '-')
+    : '';
+  const phrase = isNativeProcessTool(toolName) ? NATIVE_PROCESS_PHRASE[verb] : undefined;
+  if (phrase) {
+    return `Jarvis wants to ${phrase} (${verb}). Allow once is this call only.`;
+  }
+  if (isSchemaInvalid(v)) {
+    return `Jarvis used ${toolName}, which ShieldCortex does not fully recognise yet. `
+      + 'Allow once lets this one call through. It does not teach the tool.';
+  }
+  return `Jarvis wants to use ${toolName}, and ShieldCortex rated this call ${v.severity}. `
+    + 'Allow once is this call only.';
+}
+
 /** Operator-facing approval prompt for a gated action (not a memory write). */
-export function formatActionGuardPrompt(toolName: string, v: ToolGuardVerdictLike): string {
+export function formatActionGuardPrompt(
+  toolName: string,
+  v: ToolGuardVerdictLike,
+  args?: Record<string, unknown>,
+): string {
   return [
-    '🛡️ ShieldCortex — Action Intercepted',
+    '🛡️ ShieldCortex needs a yes',
+    '',
+    actionGuardLead(toolName, v, args),
     '',
     `Tool:       ${toolName}`,
     `Action:     ${v.action}`,
@@ -735,7 +805,7 @@ export function formatActionGuardPrompt(toolName: string, v: ToolGuardVerdictLik
     `Signals:    ${v.signals.join(', ') || 'none'}`,
     `Reason:     ${v.reason}`,
     '',
-    '[Approve]  [Deny]',
+    '[Allow once]  [Deny]',
   ].join('\n');
 }
 
@@ -1620,7 +1690,7 @@ export function createInterceptor(
     let approved: boolean;
     try {
       approved = await withApprovalDeadline(
-        context.requireApproval(formatActionGuardPrompt(context.toolName, v)),
+        context.requireApproval(formatActionGuardPrompt(context.toolName, v, context.arguments)),
         brokered ? brokerApprovalTimeoutMs(v.severity) : 0,
       );
     } catch (err) {

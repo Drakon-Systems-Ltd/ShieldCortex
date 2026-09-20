@@ -3801,7 +3801,10 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean)
-    .filter((line) => !/^\[(?:Approve|Deny)\]/i.test(line));
+    // #524: the action-guard card's button row is now `[Allow once]  [Deny]`.
+    // The old pattern needed the label to be exactly `Approve`/`Deny`, so the
+    // new row fell through and rendered as the first line of the description.
+    .filter((line) => !/^\[(?:Approve|Allow[^\]]*|Deny)\]/i.test(line));
   const rawTitle = (lines[0] || "ShieldCortex approval required").replace(/^🛡️\s*/u, "");
   const detailLines = lines.slice(1);
   const withholdPayload = SECRET_EGRESS_PROMPT.test(message);

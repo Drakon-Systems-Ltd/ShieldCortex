@@ -6,6 +6,7 @@ import plugin, {
   __buildTypedApprovalRequestForTest,
 } from '../index.js';
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
+import { formatActionGuardPrompt } from '../interceptor.js';
 
 /**
  * Issue #112 — live incident (Edith, shieldcortex-realtime 4.47.12 + OpenClaw
@@ -256,5 +257,40 @@ describe('#310 — OpenClaw native approval cards', () => {
     expect(req.allowedDecisions).toEqual(['allow-once', 'deny']);
     expect(req.timeoutBehavior).toBe('deny');
     expect(req.timeoutMs).toBe(600000);
+  });
+
+  it('#524 process inspect is allow — the interceptor should not card list/poll/log', () => {
+    expect(evaluateToolCall('process', { action: 'poll', sessionId: 's1' })).toMatchObject({
+      decision: 'allow',
+      severity: 'benign',
+    });
+  });
+
+  it('#524 mutate card leads in English, not invalid_tool_input', () => {
+    const v = evaluateToolCall('process', { action: 'write', sessionId: 's1', data: 'x' });
+    const text = formatActionGuardPrompt('process', v, { action: 'write', sessionId: 's1', data: 'x' });
+    expect(text).toMatch(/^🛡️ ShieldCortex needs a yes/m);
+    expect(text).toContain('Jarvis wants to type into a running command (write)');
+    expect(text).toContain('Allow once is this call only');
+    expect(text).toContain('[Allow once]  [Deny]');
+    expect(text.split('\n')[0]).not.toMatch(/invalid_tool_input/);
+    const req = __buildTypedApprovalRequestForTest(text);
+    expect(req.title).toContain('ShieldCortex needs a yes');
+    expect(req.description).not.toMatch(/invalid_tool_input/);
+  });
+
+  it('#524 leftover schema-invalid card says the tool is unrecognised, not the field name as the headline', () => {
+    const v = {
+      decision: 'require_approval' as const,
+      severity: 'dangerous' as const,
+      family: 'exec',
+      action: 'invalid_tool_input',
+      reason: 'tool input rejected: Unknown tool input field "action" rejected',
+      signals: ['invalid-tool-input', 'unknown-keys'],
+    };
+    const text = formatActionGuardPrompt('mystery', v, { action: 'list' });
+    expect(text).toContain('Jarvis used mystery, which ShieldCortex does not fully recognise yet');
+    expect(text).toContain('It does not teach the tool');
+    expect(text.split('\n')[0]).not.toMatch(/invalid_tool_input/);
   });
 });

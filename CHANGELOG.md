@@ -8,6 +8,24 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- (none yet)
+
+### Fixed
+- **#515** `shieldcortex audit --help` (and `-h`) now prints usage and exits without scanning memories, env files, or MCP configs. `shieldcortex allowlist --help` prints usage instead of "Unknown subcommand". Top-level usage is `shieldcortex <subcommand> [options]` so a literal `command` is not advertised.
+
+## [5.0.7] - 2026-09-20
+
+Patch on 5.0.6. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`). Cloud pin stays `^5.0.0`.
+
+### Fixed
+- Doctor no longer FAILs an unlocked policy lock (and print `$ protect` + exit 1) when Guard is not live — leftover signed Enforce + plugin-off was panicking healthy 5.0.6 boxes. `--ai` parse miss is an optional note, not a failed install.
+- README is a short install page. Dashboard screenshots of Command Centre / Constellation Graph (v1) are gone. Detail lives on shieldcortex.ai.
+
+## [5.0.6] - 2026-09-20
+
+Patch on 5.0.5. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`). Cloud pin stays `^5.0.0`.
+
+### Added
 - **#501 OS-owned policy lock.** `shieldcortex protect` (run as root) pins the security-critical config subset to `/etc/shieldcortex/policy.json` — a root-owned `0644` file in a root-owned `0755` directory, with no key material of any kind. Protected set v1: `actionGuard.enabled`, `actionGuard.enforce`, `actionGuard.autoApprove` (a ceiling), `actionGuard.broker.enabled`, `defenceMode` (a floor), `memory.hostContract.posture`, `memory.inject.mode`. For every pinned key the tighter of lock and `config.json` wins, so a locked box can still be made stricter locally but never looser; a write that would loosen one is refused by name and audited (`policy_refused`) rather than accepted and silently overridden. Both enforcement surfaces — the Claude Code hook and the OpenClaw interceptor — read the lock through the same module, each with an inline probe so a missing `dist` cannot fail open on a host that has a lock. New: `shieldcortex config --policy-status`, `shieldcortex doctor --json`, and two doctor rows (lock state; integrity verdict). Unlocked hosts behave exactly as before; Windows and agents already running as root are reported as having no same-host boundary rather than given a fake one. See `docs/design/2026-09-16-501-policy-lock.md`.
 - **#501 Operator recovery runbook.** There is deliberately no `shieldcortex unprotect` — a command an agent could be talked into invoking would hand back exactly the capability the lock removes — so recovery is documented for a human at a root shell instead: §8 of the design note, plus a short *If the lock ends up in a bad state* section in the README. Covers identifying the state (`config --policy-status`, the two doctor rows, and the `<reason>` vocabulary in an UNVERIFIABLE headline), rewriting or removing a root-owned lock, re-pinning a policy you need to loosen (`protect --from-config`, then re-running the matching `shieldcortex config --*` flag so the hand-edited `config.json` is re-signed — a `tampered` config holds the strict fail-closed posture whatever the lock says), the `unsupported` case, and losing root. Also the things that make it worse: deleting `~/.shieldcortex` does not remove a lock that lives in `/etc/shieldcortex` and leaves a *stricter* fail-closed posture behind, and re-owning the lock to the agent user makes it permanently unverifiable, hence permanently strict.
 
@@ -17,7 +35,7 @@ All notable changes to this project will be documented in this file.
 - **#501** The config integrity HMAC is now described as what it is: a **corruption / accidental-edit detector, not tamper protection**. `.integrity-key` sits beside the file it signs under the same ownership, so anything that can edit the config can re-sign it. `.integrity-key`, the embedded `_sig`, the legacy `.config-sig` and the `self-heal` verdict are otherwise unchanged — not relocated, not migrated. Doctor and the README say so in those words.
 
 ### Fixed
-- **#515** `shieldcortex audit --help` (and `-h`) now prints usage and exits without scanning memories, env files, or MCP configs. `shieldcortex allowlist --help` prints usage instead of "Unknown subcommand". Top-level usage is `shieldcortex <subcommand> [options]` so a literal `command` is not advertised.
+- **#524** OpenClaw's native `process` tool is a reviewed contract, not an unknown exec bag. `list` / `poll` / `log` allow (they only inspect a running command). `kill` / `write` / `send-keys` / `submit` / `paste` / `clear` / `remove` still card, in plain English ("Jarvis wants to stop a running command"), not `invalid_tool_input` / unknown field `action`. Allow-once is still this call only — it does not teach the tool. MCP wrappers do not inherit the contract. Guard stays off by default.
 - **#522** The protected-root verifier now walks every nested symlink hop taken while resolving a target, not only the final real path. A root-owned `/etc/shieldcortex` pointing at `/home/agent/hop` pointing at a root-owned `/srv/locked` previously verified: the resolver discarded the hop, so `/home/agent` was never ownership-checked. The agent could unlink the hop it owned; the canonical lock path then read as absent. Same layout with every hop root-owned still verifies.
 - **#522** The same walker now records ordinary directories consumed by a later `..`, not only symlink hops, and refuses a missing or non-directory traversal component instead of applying `..` to a ghost path. `/opt/hop -> /home/agent/transit/../../../srv/locked` previously verified: both symlinks and the final path were root-owned, so `/home/agent` was never checked. Same layout with every traversed directory root-owned still verifies.
 - **#522** The Claude Code hook's inline strict posture — the one that applies when a lock is on disk but the `dist` policy reader is missing or contradicted — now empties `reviewedScripts` as well, on both the top-level `actionGuard` block and the deprecated `interceptor.actionGuard` alias, and the OpenClaw plugin's inline posture pins the same key. The evaluator, the script resolver and the reviewed-script checker load from `dist` independently of the policy reader, so with only the reader broken the strict posture was computed and a same-UID config's path+hash entry still exempted that file's body from the scan, catastrophic tier included; the lock's own empty ceiling never applied because the module that applies it was the broken one. The enforcement-surface parity test now text-matches all five pinned keys on both inline copies.

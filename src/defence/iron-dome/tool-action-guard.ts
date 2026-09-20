@@ -4830,6 +4830,157 @@ function scanWriteContentPayload(content: string): {
   return { catastrophic, dangerous };
 }
 
+// ── OpenClaw native `process` control plane (#524) ──────────────────────
+
+/**
+ * The live `process` tool (`openclaw/src/agents/bash-tools.process.ts`) is ONE
+ * tool name covering ten different operations, selected by its `action` field.
+ * `list`/`poll`/`log` read the state of an already-running command. `kill`,
+ * `write`, `send-keys`, `submit`, `paste`, `clear` and `remove` reach into that
+ * running command and change it.
+ *
+ * Both halves resolve to the same `read` SCHEMA family — that family exists
+ * only to keep `process` out of EXEC_KEYS so its declared fields are recognised
+ * at all (see `OPENCLAW_PROCESS_KEYS`). Left there, the generic read
+ * short-circuit in `evaluateToolCallCore` would answer `allow`/`benign` to a
+ * `kill`, which is the opposite mistake to the one #524 is fixing.
+ *
+ * So the verb is read HERE, after the schema has closed the bag and before that
+ * short-circuit. The phrasing beside each verb is the operator-facing sentence:
+ * a card that says "stop a running command (kill)" is answerable, and
+ * "invalid_tool_input / unknown field action" — what the operator actually got
+ * — is not.
+ */
+const OPENCLAW_PROCESS_INSPECT: ReadonlyMap<string, string> = new Map([
+  ['list', 'see what commands are running'],
+  ['poll', 'check a running command'],
+  ['log', "read a running command's output"],
+]);
+
+/**
+ * Every verb that reaches into a live process. NONE of these is ever allowed
+ * without an operator, whatever the payload scans like: the product law is that
+ * a hijack gets a card, and a card is only answerable for the call in front of
+ * the operator.
+ */
+const OPENCLAW_PROCESS_MUTATE: ReadonlyMap<string, string> = new Map([
+  ['kill', 'stop a running command'],
+  ['write', 'type into a running command'],
+  ['send-keys', 'press keys in a running command'],
+  ['submit', 'submit input to a running command'],
+  ['paste', 'paste text into a running command'],
+  ['clear', "clear a running command's input"],
+  ['remove', "remove a running command's session"],
+]);
+
+/**
+ * Declared `process` fields that carry caller-authored TEXT into the running
+ * command. Not one of them is a surface `commandEvidenceSurfaces` walks — that
+ * pass reads `COMMAND_KEYS` and `args`/`argv` — so without this a wipe would
+ * ride in under a declared field and never be scanned at all.
+ */
+const OPENCLAW_PROCESS_PAYLOAD_KEYS = ['data', 'text', 'literal'] as const;
+
+/**
+ * The declared `action`, normalised, or null when the field is missing or is
+ * not a string.
+ *
+ * `_` folds to `-` so `send_keys` is the same verb as `send-keys`. That can
+ * only ever move a spelling INTO the mutate set (no inspect verb contains a
+ * separator), so the normalisation cannot turn a mutation into an allow.
+ */
+function openclawProcessAction(args: Record<string, unknown>): string | null {
+  const raw = args?.action;
+  if (typeof raw !== 'string') return null;
+  return raw.trim().toLowerCase().replace(/_/g, '-') || null;
+}
+
+/**
+ * The verdict for a native `process` call whose bag the schema already closed.
+ *
+ * Payload first: `data`/`text`/`literal` are scanned with the SAME catastrophic
+ * pass the write-content path uses (`scanWriteContentPayload`) — no new
+ * scanner, no new table. It runs for every verb rather than the mutating ones
+ * alone, because a payload field on an inspect verb is a shape the host does
+ * not send, and answering `allow` to it would rest on ShieldCortex guessing
+ * which fields that host ignores.
+ */
+function openclawProcessVerdict(args: Record<string, unknown>): ToolGuardVerdict {
+  for (const key of OPENCLAW_PROCESS_PAYLOAD_KEYS) {
+    const payload = args[key];
+    if (typeof payload !== 'string' || payload === '') continue;
+    const hits = scanWriteContentPayload(payload);
+    if (hits.catastrophic.length === 0) continue;
+    const signals = [...new Set(['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)])];
+    return verdict(
+      'block',
+      'catastrophic',
+      'exec',
+      'execute_command',
+      buildReason(
+        `OpenClaw process ${key} payload is a catastrophic command`,
+        signals,
+        hits.catastrophic[0]?.span,
+      ),
+      signals,
+      hits.catastrophic.map(m => ({ signal: m.signal, span: m.span })),
+    );
+  }
+
+  const action = openclawProcessAction(args);
+
+  const inspect = action ? OPENCLAW_PROCESS_INSPECT.get(action) : undefined;
+  if (inspect) {
+    return verdict(
+      'allow',
+      'benign',
+      'read',
+      'read_file',
+      `OpenClaw process inspect (${action}) — ${inspect}; reads a running command and starts nothing`,
+      ['openclaw-process-inspect'],
+    );
+  }
+
+  const mutate = action ? OPENCLAW_PROCESS_MUTATE.get(action) : undefined;
+  if (mutate) {
+    // `exec` family / `execute_command`: the SCHEMA routes this name as read,
+    // but what a `kill` does to a live process is an execution effect, and
+    // every downstream reader of `family`/`action` (audit rows, the operator's
+    // own allowlist) is asking about the effect.
+    //
+    // The verb is carried in the REASON, never as its own signal. A signal is
+    // substring-matched by `autoApprove`, so minting `openclaw-process-write`
+    // would hand an operator who once wrote `write` in that list a standing
+    // yes to typing into live processes — the durable grant this issue exists
+    // to refuse.
+    return verdict(
+      'require_approval',
+      'dangerous',
+      'exec',
+      'execute_command',
+      `OpenClaw process ${action} — ${mutate}; this changes a running command, so it needs an operator's yes`,
+      ['openclaw-process-mutate'],
+    );
+  }
+
+  // Missing or unreviewed verb. `invalid_tool_input` + `invalid-tool-input` is
+  // the guard's word for "this bag was never fully understood", and every plane
+  // keys its non-widenable property off exactly that pair — so `autoApprove`,
+  // `enforce:false` advisory mode and broker pre-clear all stay inert here.
+  // The unreviewed verb itself is NOT echoed: it is caller-chosen text on its
+  // way to an operator's log.
+  return verdict(
+    'require_approval',
+    'dangerous',
+    'exec',
+    'invalid_tool_input',
+    action
+      ? 'tool input rejected: OpenClaw process was given an action ShieldCortex has not reviewed'
+      : 'tool input rejected: OpenClaw process names no action, so what it would do is unknown',
+    ['invalid-tool-input', 'openclaw-process-unknown-action'],
+  );
+}
+
 // ── Main entry point ─────────────────────────────────────────────────────────
 
 // A command this long is already anomalous for an interactive tool call — cap
@@ -5145,6 +5296,21 @@ function evaluateToolCallCore(
   // merely *mentions* "rm -rf" is not an action. Short-circuit before scanning.
   // A rejected exact special bag is rescanned with extractor evidence retained.
   // Do not let its normal read-only classification hide a hostile sibling.
+  // #524 — OpenClaw's native `process` plane. The schema has already closed the
+  // bag, so `action` is the only thing left that decides what the call does —
+  // and the generic read short-circuit immediately below would answer
+  // `allow`/`benign` to every verb, `kill` included. Asked here: after a
+  // successful validation, before that short-circuit.
+  //
+  // `skipSchema` passes are deliberately excluded. Those are the raw-evidence
+  // rescans, whose bag is `{command: <surface>}` and carries no `action` at
+  // all; answering "no action" there would shadow a catastrophic command
+  // smuggled onto this name under an undeclared key, which is the one thing
+  // that path exists to catch.
+  if (!skipSchema && exactSpecialContractName(toolName) === 'openclaw.process') {
+    return openclawProcessVerdict(args);
+  }
+
   if (family === 'read' && !(skipSchema && hasExactSpecialToolSchema(toolName))) {
     return verdict('allow', 'benign', family, 'read_file', 'read-only operation', []);
   }
