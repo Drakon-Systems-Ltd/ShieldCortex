@@ -2749,8 +2749,14 @@ function scriptDataRanges(text: string, region: ScanRegion): ScriptDataRange[] {
     if (!starters.has(text[i]!)) { i++; continue; }
     const lc = rules.lineComment.find(c => startsWith(i, c));
     if (lc !== undefined) {
-      const nl = text.indexOf('\n', i);
-      const stop = nl < 0 || nl > end ? end : nl;
+      // JS line comments also end at CR / LS / PS, not only LF. Ending only
+      // at LF made `// harmless\rexecSync(...)` look like one comment, and
+      // #532 blanking then deleted the executed call (GPT-6 r1).
+      let stop = end;
+      for (let j = i + lc.length; j < end; j++) {
+        const c = text[j];
+        if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') { stop = j; break; }
+      }
       out.push({ range: [i, stop], comment: true });
       i = stop;
       continue;
@@ -2845,18 +2851,37 @@ function blankInterpreterComments(src: string, lang: ScriptLang): string {
   if (!openers.some(o => src.includes(o))) return src;    // no comment can exist
   const region: ScanRegion = { start: 0, end: src.length, lang, hasSink: false, folded: true };
   const parts: string[] = [];
-  let at = 0;
+  let cursor = 0;
   for (const { range, comment } of scriptDataRanges(src, region)) {
     if (!comment) continue;                       // ranges arrive in order, non-overlapping
-    const [a, b] = range;
-    if (a < at) continue;                         // defensive: never rewind
-    parts.push(src.slice(at, a));
-    parts.push(blankedRun(src, a, b));
-    at = b;
+    const [lo, hi] = range;
+    if (lo < cursor) continue;                    // defensive: never rewind
+    // #532 r2: only blank a comment that STARTS A LINE (optional indent).
+    // Mid-line // after ), a nested template, or a regex character class is
+    // where this lexer's comment/regex/template heuristics disagree with the
+    // language — and blanking those ranges deleted real execSync that
+    // origin/main still blocked. A whole-line JS/Python comment is the
+    // product bug (run-jest.mjs line 17); keep that relief, refuse the rest.
+    if (!commentStartsLine(src, lo, region.start)) continue;
+    parts.push(src.slice(cursor, lo));
+    parts.push(blankedRun(src, lo, hi));
+    cursor = hi;
   }
-  if (at === 0) return src;                       // openers present, but all inside literals
-  parts.push(src.slice(at));
+  if (cursor === 0) return src;                   // none of the comments were line-start
+  parts.push(src.slice(cursor));
   return parts.join('');
+}
+
+/** True when pos is the first non-space/tab of its line (or of the region). */
+function commentStartsLine(src: string, pos: number, regionStart: number): boolean {
+  let i = pos - 1;
+  while (i >= regionStart) {
+    const c = src[i]!;
+    if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') return true;
+    if (c !== ' ' && c !== '\t') return false;
+    i--;
+  }
+  return true;
 }
 
 /** `src[a,b)` with every byte but a line break replaced by a space. */

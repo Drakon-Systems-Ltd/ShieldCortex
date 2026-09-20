@@ -214,4 +214,44 @@ describe('#532 — what the relief must not reach', () => {
     expect(v.decision).toBe('block');
     expect(v.severity).toBe('catastrophic');
   });
+
+  // GPT-6 r1 live A/B vs origin/main: blanking every lexer-labelled comment
+  // deleted real execSync that main still blocked. These three must stay
+  // catastrophic WITH the pipe that originally surfaced #532.
+  it.each(TAILS)('CR after a line comment does not hide the next statement: %s', (_label, tail) => {
+    const cr = String.fromCharCode(13);
+    const v = verdictOf(`node scripts/payload.mjs${tail}`, {
+      'scripts/payload.mjs': [
+        "import { execSync } from 'child_process';",
+        `// harmless${cr}execSync('${WIPE} /');`,
+      ].join(nl),
+    });
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('catastrophic');
+    expect(v.signals ?? []).toContain('recursive-force-delete');
+  });
+
+  it.each(TAILS)('a nested template containing // does not blank a following interpolation: %s', (_label, tail) => {
+    const v = verdictOf(`node scripts/payload.mjs${tail}`, {
+      'scripts/payload.mjs': [
+        "import { execSync } from 'child_process';",
+        'const s = `${`//`}${execSync(\'' + WIPE + ' /\')}`;',
+      ].join(nl),
+    });
+    // Lexer still cannot parse nested templates; the interpolation must not
+    // become allow. A card is a door, not fail-open.
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals ?? []).toContain('recursive-force-delete');
+  });
+
+  it.each(TAILS)('a regex character class containing // does not blank the next statement: %s', (_label, tail) => {
+    const v = verdictOf(`node scripts/payload.mjs${tail}`, {
+      'scripts/payload.mjs': [
+        "import { execSync } from 'child_process';",
+        `if (true) /[//]/.test('/'); execSync('${WIPE} /');`,
+      ].join(nl),
+    });
+    expect(v.decision).not.toBe('allow');
+    expect(v.signals ?? []).toContain('recursive-force-delete');
+  });
 });
