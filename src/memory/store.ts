@@ -66,6 +66,7 @@ import {
 } from '../defence/pipeline.js';
 import { resolveDispositionV2, type DispositionV2 } from '../defence/disposition.js';
 import { classifyContentForm } from '../defence/form-classifier.js';
+import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { sweepClusterQuarantine } from '../defence/cluster-quarantine.js';
 import type { SanitisationResult } from '../defence/input-sanitisation/index.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
@@ -81,7 +82,7 @@ import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult, AuditOperation } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
-import { logAudit, createContentHash, attestedFlag } from '../defence/audit/logger.js';
+import { logAudit, createContentHash, createAuditContentHash, attestedFlag } from '../defence/audit/logger.js';
 import { dispatchWebhook } from '../events/webhooks.js';
 import { safeJsonParse } from './fts.js';
 // Internal use of the link API. links.ts also imports from store.ts (getMemoryById,
@@ -588,12 +589,15 @@ function quarantineMemory(
     const db = getDatabase();
     // Defensive: coerce firewall_result if content was blocked but result is still ALLOW
     const firewallResult = result.firewall.result === 'ALLOW' ? 'BLOCK' : result.firewall.result;
+    // #510: the held copy is evidence of the ATTACK shape, not of the person in
+    // it — PII identifiers are redacted here exactly as on an admitted row.
+    const held = redactForPersistence({ title: input.title, content: input.content }).fields;
     db.prepare(`INSERT INTO quarantine (original_title, original_content, project, source_type, source_identifier, reason, threat_indicators, anomaly_score, firewall_result, audit_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
-      .run(input.title, input.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, firewallResult, result.auditId);
+      .run(held.title, held.content, input.project ?? null, source.type, source.identifier, result.firewall.reason, JSON.stringify(result.firewall.threatIndicators), result.firewall.anomalyScore, firewallResult, result.auditId);
 
     // Webhook notification (fire-and-forget)
     runMemoryEffect(deferredEffects, () => {
-      dispatchWebhook('memory_quarantined', { id: null, title: input.title, reason: result.firewall.reason });
+      dispatchWebhook('memory_quarantined', { id: null, title: held.title, reason: result.firewall.reason });
     });
 
     // Cloud quarantine sync is handled upstream:
@@ -632,7 +636,7 @@ function assessMemoryAdmissionInternal(
       effectiveSource,
       undefined,
       input.project,
-      { sourceAttested },
+      { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } },
       sanitiseInputForTest,
     )
     : sideEffects === 'transactional'
@@ -643,10 +647,10 @@ function assessMemoryAdmissionInternal(
         deferredEffects ?? [],
         undefined,
         input.project,
-        { sourceAttested },
+        { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } },
         sanitiseInputForTest,
       )
-      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested });
+      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } });
   const disposition = resolveDispositionV2({
     allowed: result.allowed,
     firewallResult: result.firewall.result,
@@ -845,6 +849,19 @@ export function addMemory(
 
   const db = getDatabase();
 
+  // #510: the defence scan above saw the submitted text; everything from here
+  // on (row, FTS, embedding, outbox, extraction) sees PII identifiers redacted.
+  // content_hash is the hash of the SUBMITTED content (matching the audit row)
+  // UNLESS the record was redacted: an unsalted SHA-256 of a low-entropy
+  // identifier is a guessing oracle, so a redacted row hashes what it stores.
+  const persisted = redactForPersistence(input);
+  const submittedContentHash = createContentHash(persisted.redacted ? persisted.fields.content : input.content);
+  input = persisted.fields;
+  const scannedSensitivity = defenceResult.sensitivity.level;
+  const stampedSensitivity = persisted.redacted && (scannedSensitivity === 'PUBLIC' || scannedSensitivity === 'INTERNAL')
+    ? 'CONFIDENTIAL'
+    : scannedSensitivity;
+
   // Calculate salience if not provided
   const salience = input.salience ?? calculateSalience(input);
 
@@ -940,7 +957,9 @@ export function addMemory(
       // >10KB memories too (where the STORED content is truncated).
       // #402 admit-low-trust: clamp the stamped trust below the inject floor
       // (trustClamp is already min(trust, LOW_TRUST_CLAMP) — it never raises).
-      .run(stampedTrust, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
+      // #510: the classifier only reads title + content; an identifier (or an
+      // unscanned subtree) found in tags/metadata still makes the row CONFIDENTIAL.
+      .run(stampedTrust, stampedSensitivity, sourceDetails.sourceValue, submittedContentHash, result.lastInsertRowid);
 
     const id = result.lastInsertRowid as number;
     if (isFeatureEnabled('cloud_sync')) {
@@ -1267,7 +1286,9 @@ export function createNativeImportAdmissionSessionInternal(
             sensitivity_level: assessment.result.sensitivity.level,
             firewall_result: 'QUARANTINE',
             operation: 'write',
-            content_hash: assessment.contentHash,
+            // #510: assessment.contentHash is the raw in-memory replay check; the
+            // audit row gets the redacted-text hash when the fragment names PII.
+            content_hash: createAuditContentHash(input.content, input.title, { tags: input.tags, metadata: input.metadata }),
             anomaly_score: 0.9,
             threat_indicators: JSON.stringify(['class_b_cluster']),
             blocked_patterns: '[]',
@@ -1276,9 +1297,10 @@ export function createNativeImportAdmissionSessionInternal(
             pipeline_duration_ms: 0,
             source_attested: 0,
           });
+          const held = redactForPersistence({ title: input.title, content: input.content }).fields;
           quarantineInsert.run(
-            input.title,
-            input.content,
+            held.title,
+            held.content,
             input.project ?? null,
             source.type,
             source.identifier,
@@ -1438,7 +1460,9 @@ export function updateMemory(
   if (updates.content !== undefined || updates.title !== undefined) {
     const scanContent = updates.content !== undefined ? updates.content : existing.content;
     const scanTitle = updates.title !== undefined ? updates.title : existing.title;
-    const defenceResult = runDefencePipeline(scanContent, scanTitle, UNATTRIBUTED_SOURCE, undefined, existing.project ?? undefined);
+    const defenceResult = runDefencePipeline(scanContent, scanTitle, UNATTRIBUTED_SOURCE, undefined, existing.project ?? undefined, {
+      redactionSiblings: { tags: updates.tags ?? existing.tags, metadata: updates.metadata ?? existing.metadata },
+    });
     if (defenceResult.firewall.result !== 'ALLOW') {
       throw new MemoryBlockedError(defenceResult.firewall.reason);
     }
@@ -1446,6 +1470,36 @@ export function updateMemory(
 
   const fields: string[] = [];
   const values: unknown[] = [];
+
+  // #510: an update is a write too. Redact the record the row WILL hold
+  // (submitted fields over existing ones) and always store the redacted value
+  // of every submitted text field — a repeat of an already-redacted input must
+  // not fall through as raw text. Untouched fields are rewritten only when
+  // redaction changes them (legacy plaintext, or contacts next to a new identifier).
+  if (updates.content !== undefined || updates.title !== undefined || updates.tags !== undefined || updates.metadata !== undefined) {
+    const effective = {
+      title: updates.title ?? existing.title,
+      content: updates.content ?? existing.content,
+      tags: updates.tags ?? existing.tags,
+      metadata: updates.metadata ?? existing.metadata,
+    };
+    const redaction = redactForPersistence(effective);
+    if (redaction.redacted) {
+      const changed = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+      updates = {
+        ...updates,
+        ...(updates.title !== undefined || redaction.fields.title !== existing.title ? { title: redaction.fields.title } : {}),
+        ...(updates.content !== undefined || redaction.fields.content !== existing.content ? { content: redaction.fields.content } : {}),
+        ...(updates.tags !== undefined || changed(redaction.fields.tags, existing.tags) ? { tags: redaction.fields.tags } : {}),
+        ...(updates.metadata !== undefined || changed(redaction.fields.metadata, existing.metadata) ? { metadata: redaction.fields.metadata } : {}),
+      };
+      // Never let the row sit below CONFIDENTIAL while it names an identifier.
+      if (!existing.sensitivityLevel || existing.sensitivityLevel === 'PUBLIC' || existing.sensitivityLevel === 'INTERNAL') {
+        fields.push('sensitivity_level = ?');
+        values.push('CONFIDENTIAL');
+      }
+    }
+  }
 
   if (updates.title !== undefined) {
     fields.push('title = ?');
@@ -1677,7 +1731,7 @@ export function mergeMemories(
     if (!kept || !removed) return null;
 
     const mergedSnippets = uniqueSentencesFrom(removed.content, kept.content);
-    const mergedContent = mergedSnippets.length > 0
+    const rawMergedContent = mergedSnippets.length > 0
       ? `${kept.content}\n\nMerged from duplicate (${removed.title}):\n${mergedSnippets.join('. ')}.`
       : kept.content;
 
@@ -1688,22 +1742,29 @@ export function mergeMemories(
     // rows — without this re-scan the "every byte in `memories` has been
     // scanned" invariant is broken. Throwing here rolls back the transaction
     // so neither the kept row nor the removed row changes.
-    const mergedTitle = kept.title;
     const defenceResult = runDefencePipeline(
-      mergedContent,
-      mergedTitle,
+      rawMergedContent,
+      kept.title,
       source,
       undefined,
       kept.project ?? removed.project ?? undefined,
       // Mechanical re-scan of two already-scanned rows under a system-constant
       // identity (default cli:merge) — attested by construction.
-      { sourceAttested: true },
+      {
+        sourceAttested: true,
+        // #510: everything the merged row will carry beside its content, so the
+        // audit hash is taken over the text the row stores.
+        redactionSiblings: {
+          tags: [...(kept.tags ?? []), ...(removed.tags ?? [])],
+          metadata: { ...kept.metadata, mergedFrom: [removed.title] },
+        },
+      },
     );
     if (defenceResult.firewall.result !== 'ALLOW') {
       throw new MemoryBlockedError(defenceResult.firewall.reason);
     }
 
-    const mergedTags = Array.from(new Set([...(kept.tags ?? []), ...(removed.tags ?? [])]));
+    const rawMergedTags = Array.from(new Set([...(kept.tags ?? []), ...(removed.tags ?? [])]));
     const mergedFrom = Array.isArray(kept.metadata?.mergedFrom)
       ? [...kept.metadata.mergedFrom as unknown[]]
       : [];
@@ -1714,11 +1775,22 @@ export function mergeMemories(
       mergedAt: new Date().toISOString(),
     });
 
-    const mergedMetadata = {
-      ...kept.metadata,
-      mergedFrom,
-      mergedFromCount: mergedFrom.length,
-    };
+    // #510: a merge re-copies both rows — including legacy rows written before
+    // write-time redaction — so the merged record goes through the redactor too.
+    const mergeRedaction = redactForPersistence({
+      title: kept.title,
+      content: rawMergedContent,
+      tags: rawMergedTags,
+      metadata: {
+        ...kept.metadata,
+        mergedFrom,
+        mergedFromCount: mergedFrom.length,
+      } as Record<string, unknown>,
+    });
+    const mergedTitle = mergeRedaction.fields.title;
+    const mergedContent = mergeRedaction.fields.content;
+    const mergedTags = mergeRedaction.fields.tags;
+    const mergedMetadata = mergeRedaction.fields.metadata;
 
     const mergedStatus: MemoryStatus =
       kept.status === 'canonical' || removed.status === 'canonical'
@@ -1739,15 +1811,24 @@ export function mergeMemories(
       Math.max(new Date(kept.lastAccessed).getTime(), new Date(removed.lastAccessed).getTime()),
     ).toISOString();
     const mergedReviewedBy = options?.reviewedBy ?? kept.reviewedBy ?? 'review-merge';
-    const mergedSensitivity = kept.sensitivityLevel === 'SECRET' || removed.sensitivityLevel === 'SECRET'
-      ? 'SECRET'
-      : kept.sensitivityLevel === 'CONFIDENTIAL' || removed.sensitivityLevel === 'CONFIDENTIAL'
-        ? 'CONFIDENTIAL'
-        : kept.sensitivityLevel ?? removed.sensitivityLevel ?? 'INTERNAL';
+    // The survivor keeps the HIGHEST level either row held; redaction only
+    // raises the floor to CONFIDENTIAL — it must never pull a RESTRICTED row
+    // down (that would open it to readers checkAccess refused before the merge).
+    const sensitivityRank = (level: string | null | undefined): number =>
+      ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
+    const mergedSensitivity = [
+      kept.sensitivityLevel,
+      removed.sensitivityLevel,
+      mergeRedaction.redacted ? 'CONFIDENTIAL' : undefined,
+    ].reduce<string | null | undefined>(
+      (highest, level) => (sensitivityRank(level) > sensitivityRank(highest) ? level : highest),
+      undefined,
+    ) ?? 'INTERNAL';
 
     db.prepare(`
       UPDATE memories
-      SET content = ?,
+      SET title = ?,
+          content = ?,
           content_hash = ?,
           content_form = ?,
           tags = ?,
@@ -1769,6 +1850,7 @@ export function mergeMemories(
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
+      mergedTitle,
       mergedContent,
       createContentHash(mergedContent),
       classifyContentForm(mergedContent),

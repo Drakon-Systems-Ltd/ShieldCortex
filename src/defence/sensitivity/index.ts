@@ -7,6 +7,8 @@ import { classifyContent } from './classifier.js';
 
 export { redactContent, redactForDisplay } from './redaction.js';
 export { classifyContent } from './classifier.js';
+export { PII_KINDS, detectPII, redactPII, isPIIRedactionEnabled, redactForPersistence, redactJsonForPersistence, hasRedactionToken } from './pii.js';
+export type { PIIFinding, PIIKind, PIIRedactionResult, PersistableFields, PersistenceRedaction } from './pii.js';
 
 /**
  * Classify content sensitivity — convenience wrapper around classifyContent.

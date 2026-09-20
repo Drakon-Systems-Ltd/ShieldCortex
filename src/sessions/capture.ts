@@ -13,6 +13,7 @@
  */
 
 import { getDatabase } from '../database/init.js';
+import { redactJsonForPersistence } from '../defence/sensitivity/pii.js';
 
 /**
  * Six kinds the schema CHECK constraint enforces. Keeping these in
@@ -51,8 +52,10 @@ export interface SessionEventInput {
  * reader's `JSON.parse` with raw-string fallback.
  */
 function serialisePayload(payload: unknown): string {
-  if (typeof payload === 'string') return payload;
-  return JSON.stringify(payload ?? null);
+  // #510: prompts and tool output are persisted here — same redactor as memory rows.
+  const safe = redactJsonForPersistence(payload);
+  if (typeof safe === 'string') return safe;
+  return JSON.stringify(safe ?? null);
 }
 
 const INSERT_SQL = `

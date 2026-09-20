@@ -33,6 +33,7 @@ import { openSync, readSync, closeSync, existsSync } from 'fs';
 import { StringDecoder } from 'string_decoder';
 import { createHash } from 'crypto';
 import { getDatabase } from '../database/init.js';
+import { redactJsonForPersistence } from '../defence/sensitivity/pii.js';
 import type { SessionEventInput, SessionEventKind } from './capture.js';
 
 export interface TranscriptLine {
@@ -298,7 +299,10 @@ export function importJsonlTranscript(path: string): ImportResult {
       sessionId = events[0].session_id;
     }
     for (const event of events) {
-      pending.push({ ...event, content_hash: hashEvent(event.kind, event.payload) });
+      // #510: redact BEFORE hashing, so neither the stored payload nor its
+      // content_hash is derived from raw PII (still deterministic → idempotent re-import).
+      const payload = redactJsonForPersistence(event.payload);
+      pending.push({ ...event, payload, content_hash: hashEvent(event.kind, payload) });
       eventCount++;
     }
   };

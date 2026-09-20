@@ -42,6 +42,7 @@ import { createMemoryLink } from './links.js';
 import type { DefenceSource } from '../defence/types.js';
 import { runDefencePipeline } from '../defence/index.js';
 import { createContentHash } from '../defence/audit/logger.js';
+import { redactForPersistence } from '../defence/sensitivity/pii.js';
 
 // Enrichment text is recall-query / caller-derived (attacker-influenced); scan
 // it before persisting. Trust doesn't matter here (the row keeps its own) — we
@@ -278,15 +279,25 @@ export function enrichMemory(
     return { enriched: false, reason: `Enrichment blocked by defence: ${defenceResult.firewall.reason}` };
   }
 
+  // #510: the appended context is caller text — redact it (and any legacy
+  // plaintext already in the row) before it is persisted.
+  const redaction = redactForPersistence({ title: memory.title, content: newContent });
+  const storedContent = redaction.fields.content;
+
   // Update memory (recompute content_hash — the integrity snapshot must track
   // the enriched content, not the pre-enrichment original).
   db.prepare(`
     UPDATE memories
-    SET content = ?,
+    SET title = ?,
+        content = ?,
         content_hash = ?,
+        sensitivity_level = CASE
+          WHEN ? = 1 AND COALESCE(sensitivity_level, 'INTERNAL') IN ('PUBLIC', 'INTERNAL') THEN 'CONFIDENTIAL'
+          ELSE sensitivity_level
+        END,
         last_accessed = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(newContent, createContentHash(newContent), memoryId);
+  `).run(redaction.fields.title, storedContent, createContentHash(storedContent), redaction.redacted ? 1 : 0, memoryId);
 
   // Update cooldown timestamp
   enrichmentTimestamps.set(memoryId, now);
