@@ -396,19 +396,45 @@ describe('#510 review round 5: identifiers held outside the field being written'
   it('merging RESTRICTED rows that redact never downgrades the survivor', async () => {
     const { addMemory, mergeMemories } = await import('../store.js');
     const { getDatabase } = await import('../../database/init.js');
+    const { checkAccess } = await import('../../defence/trust/access-control.js');
     const a = addMemory({ title: 'pay a', content: 'Pat Example salary 55000' }, undefined, user);
     const b = addMemory({ title: 'pay b', content: 'Sam Example salary 61000, reach sam@example.com' }, undefined, user);
     const db = getDatabase();
     db.prepare("UPDATE memories SET sensitivity_level = 'RESTRICTED' WHERE id IN (?, ?)").run(a.id, b.id);
 
+    // #538: the stored label is not the whole story — what matters is that a
+    // high-trust PEER (not the owner, not the human operator) still cannot read
+    // the survivor. Credential isolation across agents (SCOPE P4).
+    const peer = { type: 'cli' as const, identifier: 'review-peer' };
+    const peerCanRead = (id: number) => {
+      const row = db
+        .prepare('SELECT id, source, sensitivity_level FROM memories WHERE id = ?')
+        .get(id) as { id: number; source: string | null; sensitivity_level: string };
+      return checkAccess(row, peer, 'read').canRead;
+    };
+    const level = (id: number) =>
+      (db.prepare('SELECT sensitivity_level FROM memories WHERE id = ?').get(id) as { sensitivity_level: string }).sensitivity_level;
+
+    // Positive control: a CONFIDENTIAL redacted row IS readable by the same peer,
+    // so a `false` below is isolation, not a peer that cannot read anything.
+    const control = addMemory({ title: 'pay control', content: 'Kim Example salary 39000' }, undefined, user);
+    expect(level(control.id)).toBe('CONFIDENTIAL');
+    expect(peerCanRead(control.id)).toBe(true);
+
+    expect(peerCanRead(a.id)).toBe(false);
+    expect(peerCanRead(b.id)).toBe(false);
+
     mergeMemories(a.id, b.id);
-    const level = () => (db.prepare('SELECT sensitivity_level FROM memories WHERE id = ?').get(a.id) as { sensitivity_level: string }).sensitivity_level;
-    expect(level()).toBe('RESTRICTED');
+    expect(level(a.id)).toBe('RESTRICTED');
+    expect(peerCanRead(a.id)).toBe(false);
 
     // One RESTRICTED row is enough, whichever side it is on.
     const c = addMemory({ title: 'pay c', content: 'Lee Example salary 47000' }, undefined, user);
+    expect(level(c.id)).toBe('CONFIDENTIAL');
+    expect(peerCanRead(c.id)).toBe(true);
     mergeMemories(c.id, a.id);
-    expect((db.prepare('SELECT sensitivity_level FROM memories WHERE id = ?').get(c.id) as { sensitivity_level: string }).sensitivity_level).toBe('RESTRICTED');
+    expect(level(c.id)).toBe('RESTRICTED');
+    expect(peerCanRead(c.id)).toBe(false);
   });
 
   it('an identifier token marks the record, and still exempts nothing', () => {

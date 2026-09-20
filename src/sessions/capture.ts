@@ -46,10 +46,16 @@ export interface SessionEventInput {
 }
 
 /**
- * Serialise payload to text. Objects/arrays go through JSON.stringify;
- * strings pass through. This keeps the column NOT NULL constraint
- * satisfied even for empty-object payloads and matches the timeline
- * reader's `JSON.parse` with raw-string fallback.
+ * Redact, then serialise payload to text. Objects/arrays go through
+ * JSON.stringify; strings pass through. This keeps the column NOT NULL
+ * constraint satisfied even for empty-object payloads and matches the
+ * timeline reader's `JSON.parse` with raw-string fallback.
+ *
+ * This is the persistence boundary for every session event written from
+ * TypeScript; the hook-side twin is `persistable` in
+ * `scripts/lib/session-capture.mjs`, which additionally carries the
+ * missing/stale-dist fail-safe (this module imports the redactor directly,
+ * so it has no such gap).
  */
 function serialisePayload(payload: unknown): string {
   // #510: prompts and tool output are persisted here — same redactor as memory rows.
