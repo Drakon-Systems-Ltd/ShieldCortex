@@ -2454,7 +2454,7 @@ function secretHintExecutedIn(text: string, region: ScanRegion): boolean {
     // identifier so the opener quote does not poke out of the data range.
     const ident = m[0].search(/(?:password|secret)/i);
     const identStart = a + (ident >= 0 ? ident : 0);
-    if (assignment && data.some(([s, e]) => identStart >= s && b <= e)) continue;
+    if (assignment && data.some(({ range: [s, e] }) => identStart >= s && b <= e)) continue;
     return true;
   }
   return false;
@@ -2661,6 +2661,30 @@ const SCRIPT_LANG_RULES: Record<Exclude<ScriptLang, 'sh'>, ScriptLangRules> = {
   perl: { lineComment: ['#'], quotes: ['"', "'"], escapes: true },
   php: { lineComment: ['//', '#'], blockComment: ['/*', '*/'], quotes: ['"', "'"], escapes: true },
 };
+/**
+ * The only bytes that can OPEN a comment or a literal in each language.
+ *
+ * Every branch of `scriptDataRanges`'s scan keys off one of these, so a byte in
+ * none of them cannot start any of them and the loop can skip it with a single
+ * Set lookup instead of two `Array.find` closures and ~8 `startsWith` calls.
+ * Since #532 the pass runs twice over every folded interpreter source — once to
+ * blank its comments, once to classify its spans — so trimming its per-byte
+ * work pays twice. Measured on the 256 KB `MAX_FOLDED_BYTES` worst case:
+ * 44.4ms without this early-out, 41.2ms with it.
+ */
+const SCRIPT_SCAN_STARTERS = ((): Record<Exclude<ScriptLang, 'sh'>, ReadonlySet<string>> => {
+  const out = {} as Record<Exclude<ScriptLang, 'sh'>, ReadonlySet<string>>;
+  for (const key of Object.keys(SCRIPT_LANG_RULES) as Array<Exclude<ScriptLang, 'sh'>>) {
+    const rules = SCRIPT_LANG_RULES[key];
+    out[key] = new Set([
+      ...rules.lineComment.map(c => c[0]!),
+      ...(rules.blockComment ? [rules.blockComment[0][0]!] : []),
+      ...rules.quotes.map(q => q[0]!),
+      ...(rules.regexLiterals ? ['/'] : []),
+    ]);
+  }
+  return out;
+})();
 
 /**
  * A contiguous slice of the scan surface and what KIND of text it is.
@@ -2696,28 +2720,51 @@ interface ScanRegion {
   chain?: string;
 }
 
+/**
+ * One non-command range inside an interpreter-source region.
+ *
+ * `comment` separates the two kinds the callers must treat differently. A
+ * string literal can still reach a shell — that is what a sink argument IS — so
+ * it is only ever DEMOTED. A comment cannot: no interpreter passes it to
+ * anything, so nothing downstream may read it as a command (#532).
+ */
+interface ScriptDataRange {
+  range: [number, number];
+  comment: boolean;
+}
+
 /** Comment and string-literal CONTENT ranges inside one interpreter-source region. */
-function scriptDataRanges(text: string, region: ScanRegion): Array<[number, number]> {
+function scriptDataRanges(text: string, region: ScanRegion): ScriptDataRange[] {
   if (region.lang === 'sh') return [];
   const rules = SCRIPT_LANG_RULES[region.lang];
-  const out: Array<[number, number]> = [];
+  const out: ScriptDataRange[] = [];
   let i = region.start;
   const end = region.end;
   const startsWith = (at: number, s: string): boolean => text.startsWith(s, at);
+  const starters = SCRIPT_SCAN_STARTERS[region.lang];
 
   while (i < end) {
+    // Ordinary code byte: it opens nothing, so none of the branches below can
+    // fire. Checked first because it is the overwhelming majority of a file.
+    if (!starters.has(text[i]!)) { i++; continue; }
     const lc = rules.lineComment.find(c => startsWith(i, c));
     if (lc !== undefined) {
-      const nl = text.indexOf('\n', i);
-      const stop = nl < 0 || nl > end ? end : nl;
-      out.push([i, stop]);
+      // JS line comments also end at CR / LS / PS, not only LF. Ending only
+      // at LF made `// harmless\rexecSync(...)` look like one comment, and
+      // #532 blanking then deleted the executed call (GPT-6 r1).
+      let stop = end;
+      for (let j = i + lc.length; j < end; j++) {
+        const c = text[j];
+        if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') { stop = j; break; }
+      }
+      out.push({ range: [i, stop], comment: true });
       i = stop;
       continue;
     }
     if (rules.blockComment && startsWith(i, rules.blockComment[0])) {
       const close = text.indexOf(rules.blockComment[1], i + rules.blockComment[0].length);
       const stop = close < 0 || close > end ? end : close + rules.blockComment[1].length;
-      out.push([i, stop]);
+      out.push({ range: [i, stop], comment: true });
       i = stop;
       continue;
     }
@@ -2746,7 +2793,7 @@ function scriptDataRanges(text: string, region: ScanRegion): Array<[number, numb
           j++;
         }
         if (j < end && text[j] === '/') {
-          out.push([i + 1, j]);
+          out.push({ range: [i + 1, j], comment: false });
           i = j + 1;
           continue;
         }
@@ -2764,13 +2811,92 @@ function scriptDataRanges(text: string, region: ScanRegion): Array<[number, numb
       // An unterminated literal runs to the end of the region — treat the rest
       // as literal, which is what the interpreter would report as a syntax error
       // anyway and is the conservative read for a truncated fold.
-      out.push([contentStart, Math.min(j, end)]);
+      out.push({ range: [contentStart, Math.min(j, end)], comment: false });
       i = Math.min(j + q.length, end);
       continue;
     }
     i++;
   }
   return out;
+}
+
+/** Spaces to overwrite a comment with, sized for the common one-line case. */
+const BLANKING_PAD = ' '.repeat(512);
+
+/**
+ * Blank the COMMENT bytes of an interpreter source folded from disk (#532).
+ *
+ * Every other byte — code, string literals, regex literals — is preserved
+ * exactly, so nothing an interpreter can execute leaves the surface. Only what
+ * it discards does.
+ *
+ * Length is preserved to the byte (newlines kept, everything else spaced out)
+ * because the fold's `ScanRegion` offsets, the #184 `file:line` provenance and
+ * the evidence spans are all indices into this text. A shorter string would
+ * silently renumber all three.
+ *
+ * Safe only for DISK bytes: the invoking shell never expands them. Inline
+ * programs are the caller's own text and keep every comment (#444's floor).
+ *
+ * Cost, measured on this box at the global `MAX_FOLDED_BYTES` worst case of
+ * 256 KB: 22ms when the file holds no comment at all (it leaves on the
+ * `includes` scan, against a 20ms pre-#532 baseline) and 41ms when half the
+ * file is prose. The lexer pass is nearly all of it — the rewrite is a
+ * pad-and-join, because a regex per comment cost 14ms of that on its own.
+ */
+function blankInterpreterComments(src: string, lang: ScriptLang): string {
+  if (lang === 'sh' || !src) return src;
+  const rules = SCRIPT_LANG_RULES[lang];
+  const openers = [...rules.lineComment, ...(rules.blockComment ? [rules.blockComment[0]] : [])];
+  if (!openers.some(o => src.includes(o))) return src;    // no comment can exist
+  const region: ScanRegion = { start: 0, end: src.length, lang, hasSink: false, folded: true };
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const { range, comment } of scriptDataRanges(src, region)) {
+    if (!comment) continue;                       // ranges arrive in order, non-overlapping
+    const [lo, hi] = range;
+    if (lo < cursor) continue;                    // defensive: never rewind
+    // #532 r2: only blank a comment that STARTS A LINE (optional indent).
+    // Mid-line // after ), a nested template, or a regex character class is
+    // where this lexer's comment/regex/template heuristics disagree with the
+    // language — and blanking those ranges deleted real execSync that
+    // origin/main still blocked. A whole-line JS/Python comment is the
+    // product bug (run-jest.mjs line 17); keep that relief, refuse the rest.
+    if (!commentStartsLine(src, lo, region.start)) continue;
+    parts.push(src.slice(cursor, lo));
+    parts.push(blankedRun(src, lo, hi));
+    cursor = hi;
+  }
+  if (cursor === 0) return src;                   // none of the comments were line-start
+  parts.push(src.slice(cursor));
+  return parts.join('');
+}
+
+/** True when pos is the first non-space/tab of its line (or of the region). */
+function commentStartsLine(src: string, pos: number, regionStart: number): boolean {
+  let i = pos - 1;
+  while (i >= regionStart) {
+    const c = src[i]!;
+    if (c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029') return true;
+    if (c !== ' ' && c !== '\t') return false;
+    i--;
+  }
+  return true;
+}
+
+/** `src[a,b)` with every byte but a line break replaced by a space. */
+function blankedRun(src: string, a: number, b: number): string {
+  const len = b - a;
+  const run = src.slice(a, b);
+  // A line comment ends AT its newline, so the common case holds no line break
+  // at all and can be served from the pad. The line-break search is over the
+  // RUN, never the rest of the file: a whole-source `indexOf` for a character
+  // that never appears re-scans to the end once per comment, which on a 256 KB
+  // comment-dense fold is quadratic (measured: it doubled the whole call).
+  if (len <= BLANKING_PAD.length && run.indexOf('\n') < 0 && run.indexOf('\r') < 0) {
+    return BLANKING_PAD.slice(0, len);
+  }
+  return run.replace(/[^\n\r]/g, ' ');
 }
 
 // Precomputed mention regions for one `text`, built ONCE (O(n)) so per-match
@@ -2811,17 +2937,25 @@ function buildSpanCtx(text: string, regions: readonly ScanRegion[] = []): SpanCt
   const scriptLiterals: Array<[number, number]> = [];
   const sinkArgLiterals: Array<[number, number]> = [];
   for (const r of scriptRegions) {
-    for (const range of scriptDataRanges(text, r)) {
+    for (const { range, comment } of scriptDataRanges(text, r)) {
       // A literal that IS a shell-out call's argument stays a command:
       // `os.system('rm -rf /')` is the textbook shape and must keep hard-
       // blocking. Attribution is by line, deliberately — it is the cheap,
       // conservative half of the problem. When it misses (the call split over
       // lines, or the string bound to a variable first) the literal falls back
       // to the payload tier, which still gates; it never becomes an allow.
+      //
+      // #532: a COMMENT is never any call's argument, so line attribution must
+      // not claim it. In JS one backtick of Markdown prose arms the sink for
+      // the line, which was enough to file a whole English comment as a sink
+      // ARGUMENT — read as a command, from a line that calls nothing. Folded
+      // comments are already neutralised at the fold seam; this keeps the rule
+      // true for the inline regions that are not.
       const lineStart = Math.max(r.start, text.lastIndexOf('\n', range[0]) + 1);
       let lineEnd = text.indexOf('\n', range[1]);
       if (lineEnd < 0 || lineEnd > r.end) lineEnd = r.end;
-      (hasShellOutSink(text.slice(lineStart, lineEnd), r.lang, r.folded) ? sinkArgLiterals : scriptLiterals).push(range);
+      const sinkArg = !comment && hasShellOutSink(text.slice(lineStart, lineEnd), r.lang, r.folded);
+      (sinkArg ? sinkArgLiterals : scriptLiterals).push(range);
     }
   }
 
@@ -4159,7 +4293,9 @@ const MAX_SCRIPT_BYTES = 262_144;
 /** Total folded content per tool call — the global bound on worst-case scan
  *  work, so the guard can never stall the host gateway (zeroth law). Measured
  *  on the ARM box: a full 256KB fold costs ~22ms of synchronous scanning; a
- *  real-world script (a few KB) is sub-millisecond. */
+ *  real-world script (a few KB) is sub-millisecond. Re-measured for #532's
+ *  comment-blanking pass: 22ms for a comment-free 256KB fold (an `includes`
+ *  early-out), ~41ms when half the file is prose. Bounded by the same cap. */
 const MAX_FOLDED_BYTES = 262_144;
 /** A script that invokes a script is followed, bounded. */
 const MAX_SCRIPT_DEPTH = 3;
@@ -4287,12 +4423,26 @@ function foldScriptSources(
     // `commandScanText` only strips SHELL constructs (pure prints, `#` comments,
     // quoted heredocs). For interpreter source those are the wrong rules — a `#`
     // comment strip is harmless, but a Python `'…#…'` literal must not lose its
-    // tail — so non-shell sources are folded verbatim and classified instead.
+    // tail — so a non-shell source keeps its CODE verbatim and is classified
+    // instead, and only its comments are neutralised, by the language lexer
+    // that already knows where they end (#532).
+    //
+    // Why the comments go before the scan rather than after it: a folded shell
+    // script's comments never reach the surface at all, an interpreter's did,
+    // and only SOME readers of that surface consult the span classifier.
+    // `matchFindDelete` and the delete-confinement accounting read it raw, so
+    // `/* … find / -delete … */` was a catastrophic block and an `rm` in prose
+    // could withdraw a real delete's confinement exemption. Classifying harder
+    // would have fixed the readers one at a time; not putting prose on a
+    // command surface fixes all of them at once — which is what the shell fold
+    // has always done. The relief is folded-only: a comment inside an inline
+    // `-c` program or heredoc is text the invoking shell may still expand
+    // before the interpreter sees it, and stays exactly as strict as before.
     // Computed even for a reviewed file, because its children still have to be
     // discovered from it.
     const reviewedScan = next.lang === 'sh'
       ? commandScanText(deobfuscateIfs(src))
-      : deobfuscateIfs(src);
+      : blankInterpreterComments(deobfuscateIfs(src), next.lang);
     if (isReviewed) {
       // #522 (GPT-6 round-6) residual, NAMED rather than closed: a reviewed
       // entry skips this file's body — catastrophic scan included — before
