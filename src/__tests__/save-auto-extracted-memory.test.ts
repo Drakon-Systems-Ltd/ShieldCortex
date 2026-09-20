@@ -125,6 +125,22 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(['CONFIDENTIAL', 'RESTRICTED', 'SECRET']).toContain(rows[0].sensitivity_level);
   });
 
+  it('#510: two DISTINCT people whose memories redact to the same text both persist', async () => {
+    // Identical after redaction, so exact-title and near-duplicate dedupe would both drop the second.
+    for (const ni of ['QQ123456C', 'QQ654321A']) {
+      await saveAutoExtractedMemory(
+        db,
+        makeMemory({ title: `Payroll record NI ${ni}`, content: `Starter on the payroll has National Insurance ${ni}.` }),
+        'p',
+        { source: 'session-end-hook' },
+      );
+    }
+    const rows = db.prepare('SELECT title, content FROM memories').all() as Array<{ title: string; content: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(rows[1]);
+    expect(JSON.stringify(rows)).not.toMatch(/QQ123456C|QQ654321A/);
+  });
+
   it('#402: stamps content_form=fact for a hook-captured work fact (injectable via two-key)', async () => {
     await saveAutoExtractedMemory(
       db,

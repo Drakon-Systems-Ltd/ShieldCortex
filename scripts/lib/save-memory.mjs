@@ -245,7 +245,7 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     const sensitivityLevel = pii.raiseSensitivity
       ? atLeastConfidential(result.sensitivity?.level)
       : result.sensitivity?.level;
-    const memoryId = insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, sensitivityLevel, contentForm);
+    const memoryId = insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, sensitivityLevel, contentForm, pii.redacted);
     // #458: embed HERE, awaited, not scheduled. See embedStoredRow().
     if (memoryId !== null) {
       await embedStoredRow(db, memoryId, `${memory.title} ${memory.content}`);
@@ -287,13 +287,14 @@ function redactCandidate(defence, memory) {
       return {
         memory: { ...memory, title: redaction.fields.title, content: redaction.fields.content, tags: redaction.fields.tags },
         raiseSensitivity: redaction.redacted === true,
+        redacted: redaction.redacted === true,
       };
     } catch {
       // fall through to the fail-safe
     }
   }
   process.stderr.write('[shieldcortex save-memory] PII redactor unavailable — storing unredacted at raised sensitivity\n');
-  return { memory, raiseSensitivity: true };
+  return { memory, raiseSensitivity: true, redacted: false };
 }
 
 function atLeastConfidential(level) {
@@ -330,14 +331,8 @@ function screenMemoryCandidate(defence, content, title) {
 
 // ==================== Internal: writes ====================
 
-/**
- * @returns {number|null} the new `memories.id`, or null when the write was
- *   skipped as a duplicate. The caller needs the id to attach an embedding
- *   (#458), and a skip must not be mistaken for a stored row.
- */
-function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel, contentForm) {
-  const timestamp = new Date().toISOString();
-
+/** True (and says so on stderr) when the candidate repeats a stored memory. */
+function isDuplicateWrite(db, memory, project) {
   // Cross-call, CROSS-PATH exact-title dedup: the hook fires repeatedly (per
   // turn, or per salience bypass) over overlapping transcript windows, so the
   // same regex match tends to surface multiple times across calls. The
@@ -354,7 +349,7 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
   ).get(memory.title, project || null, project || null);
   if (existing) {
     process.stderr.write(`[shieldcortex save-memory] skipped duplicate: ${memory.title}\n`);
-    return null;
+    return true;
   }
 
   // Near-duplicate dedup: exact-title only catches verbatim re-saves. Reworded
@@ -381,10 +376,26 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
       process.stderr.write(
         `[shieldcortex save-memory] skipped near-duplicate (combined=${combined.toFixed(2)}): ${memory.title}\n`,
       );
-      return null;
+      return true;
     }
   }
+  return false;
+}
 
+/**
+ * @returns {number|null} the new `memories.id`, or null when the write was
+ *   skipped as a duplicate. The caller needs the id to attach an embedding
+ *   (#458), and a skip must not be mistaken for a stored row.
+ */
+function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel, contentForm, redacted = false) {
+  // #510: redaction makes DISTINCT records identical ("NI number
+  // [REDACTED:ni-number]" for two different people), so a redacted candidate is
+  // never discarded as a duplicate — similarity over tokens proves nothing
+  // (same rule as consolidate.ts). The cost is that a re-extracted redacted
+  // memory can be stored twice; losing a distinct person's record is worse.
+  if (!redacted && isDuplicateWrite(db, memory, project)) return null;
+
+  const timestamp = new Date().toISOString();
   const scope = resolveScopeIds();
   const captureLayer = memory.capture_layer || memory.captureLayer || 'L0';
   // host_id/agent_id may be missing on pre-migration DBs — try/catch insert with fallback.

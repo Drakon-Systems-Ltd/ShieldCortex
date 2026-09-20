@@ -82,7 +82,7 @@ import { isFeatureEnabled } from '../license/gate.js';
 import type { DefenceSource, DefencePipelineResult, AuditOperation } from '../defence/types.js';
 import { checkAccess } from '../defence/trust/access-control.js';
 import { scoreSource } from '../defence/trust/source-scorer.js';
-import { logAudit, createContentHash, attestedFlag } from '../defence/audit/logger.js';
+import { logAudit, createContentHash, createAuditContentHash, attestedFlag } from '../defence/audit/logger.js';
 import { dispatchWebhook } from '../events/webhooks.js';
 import { safeJsonParse } from './fts.js';
 // Internal use of the link API. links.ts also imports from store.ts (getMemoryById,
@@ -857,6 +857,10 @@ export function addMemory(
   const persisted = redactForPersistence(input);
   const submittedContentHash = createContentHash(persisted.redacted ? persisted.fields.content : input.content);
   input = persisted.fields;
+  const scannedSensitivity = defenceResult.sensitivity.level;
+  const stampedSensitivity = persisted.redacted && (scannedSensitivity === 'PUBLIC' || scannedSensitivity === 'INTERNAL')
+    ? 'CONFIDENTIAL'
+    : scannedSensitivity;
 
   // Calculate salience if not provided
   const salience = input.salience ?? calculateSalience(input);
@@ -953,7 +957,9 @@ export function addMemory(
       // >10KB memories too (where the STORED content is truncated).
       // #402 admit-low-trust: clamp the stamped trust below the inject floor
       // (trustClamp is already min(trust, LOW_TRUST_CLAMP) — it never raises).
-      .run(stampedTrust, defenceResult.sensitivity.level, sourceDetails.sourceValue, submittedContentHash, result.lastInsertRowid);
+      // #510: the classifier only reads title + content; an identifier (or an
+      // unscanned subtree) found in tags/metadata still makes the row CONFIDENTIAL.
+      .run(stampedTrust, stampedSensitivity, sourceDetails.sourceValue, submittedContentHash, result.lastInsertRowid);
 
     const id = result.lastInsertRowid as number;
     if (isFeatureEnabled('cloud_sync')) {
@@ -1280,7 +1286,9 @@ export function createNativeImportAdmissionSessionInternal(
             sensitivity_level: assessment.result.sensitivity.level,
             firewall_result: 'QUARANTINE',
             operation: 'write',
-            content_hash: assessment.contentHash,
+            // #510: assessment.contentHash is the raw in-memory replay check; the
+            // audit row gets the redacted-text hash when the fragment names PII.
+            content_hash: createAuditContentHash(input.content, input.title),
             anomaly_score: 0.9,
             threat_indicators: JSON.stringify(['class_b_cluster']),
             blocked_patterns: '[]',

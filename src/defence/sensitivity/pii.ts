@@ -15,7 +15,14 @@
  * shares characters with its neighbour is bounded.
  */
 
-export type PIIKind = 'ni-number' | 'ssn' | 'tax-id' | 'salary' | 'email' | 'phone';
+/**
+ * Every kind a `[REDACTED:<kind>]` token can carry — the one source of truth
+ * for the detector and for anything that recognises a stored token.
+ * `unscanned` marks a metadata subtree dropped at the depth/size bound.
+ */
+export const PII_KINDS = ['ni-number', 'ssn', 'tax-id', 'salary', 'email', 'phone', 'unscanned'] as const;
+
+export type PIIKind = (typeof PII_KINDS)[number];
 
 export interface PIIFinding {
   kind: PIIKind;
@@ -276,9 +283,15 @@ export function isPIIRedactionEnabled(): boolean {
   return flag !== 'off' && flag !== '0' && flag !== 'false';
 }
 
-/** True when stored text already carries a write-time redaction token. */
+const REDACTION_TOKEN = new RegExp(String.raw`\[REDACTED:(?:${PII_KINDS.join('|')})\]`);
+
+/**
+ * True when stored text already carries a write-time redaction token. Only a
+ * COMPLETE token of a kind the detector emits counts — a typed `[REDACTED:fake`
+ * is ordinary text.
+ */
 export function hasRedactionToken(text: string | null | undefined): boolean {
-  return typeof text === 'string' && text.includes('[REDACTED:');
+  return typeof text === 'string' && REDACTION_TOKEN.test(text);
 }
 
 // ── Persistence boundary ─────────────────────────────────
@@ -301,44 +314,98 @@ export interface PersistenceRedaction<T> {
 
 const MAX_METADATA_DEPTH = 8;
 const MAX_METADATA_NODES = 5000;
-const SALARY_KEY = /^(?:salary|salaries|wages?|compensation|remuneration|stipend|pay[ _-]?rate|base[ _-]?pay|annual[ _-]?pay)$/i;
+
+// Metadata keys that NAME the kind of their value (matched lower-cased with
+// spaces, underscores and hyphens removed, so `tax_id`, `Tax-ID` and `taxId` agree).
+const IDENTIFIER_KEYS: Array<[PIIKind, RegExp]> = [
+  ['ni-number', /^(?:ni|nino|ni(?:number|no)|nationalinsurance(?:number|no)?)$/],
+  ['ssn', /^(?:ssn|socialsecurity(?:number|no)?)$/],
+  ['tax-id', /^(?:utr|uniquetaxpayerreference|ein|employeridentificationnumber|tin|tax(?:payer)?id(?:entification)?(?:number|no)?)$/],
+  ['salary', /^(?:salary|salaries|pay|wages?|compensation|remuneration|stipend|payrate|basepay|annualpay)$/],
+];
+
+function identifierKeyKind(key: string): PIIKind | undefined {
+  const bare = key.toLowerCase().replace(/[\s_-]+/g, '');
+  return IDENTIFIER_KEYS.find(([, pattern]) => pattern.test(bare))?.[0];
+}
 
 type LeafVisitor = (value: string, label?: string) => string;
 
-/** Rebuild a JSON value with every string (keys included) passed through `visit`. */
-function mapJsonStrings(value: unknown, visit: LeafVisitor, budget: { nodes: number }, depth = 0, label?: string): unknown {
-  if (typeof value === 'string') return visit(value, label);
-  if (typeof value === 'number' && label && SALARY_KEY.test(label)) {
-    const asText = visit(String(value), label);
-    return asText === String(value) ? value : asText;
+interface JsonWalker {
+  visit: LeafVisitor;
+  /** The value is redacted whole: an identifier by its key alone, or a subtree past the scan bounds. */
+  force: (kind: PIIKind) => string;
+}
+
+interface WalkState {
+  nodes: number;
+  depth: number;
+  label?: string;
+  /** Kind named by the nearest identifier key above this value. */
+  keyKind?: PIIKind;
+}
+
+/**
+ * Rebuild a JSON value with every string (keys included) passed through the
+ * walker. Values under an identifier key are redacted whatever their type.
+ * FAIL SAFE at the depth/size bound: the unscanned subtree is replaced, never
+ * passed through. Date, Buffer/typed arrays, Map and Set keep their type.
+ */
+function mapJsonStrings(value: unknown, walker: JsonWalker, state: WalkState): unknown {
+  const { label, keyKind } = state;
+  if (typeof value === 'string') {
+    if (keyKind && !REDACTION_TOKEN.test(value) && /\p{Nd}/u.test(value)
+      && !detectPII(value, label).some(f => f.identifier)) return walker.force(keyKind);
+    return walker.visit(value, label);
   }
+  if (typeof value === 'number' || typeof value === 'bigint') return keyKind ? walker.force(keyKind) : value;
   if (value === null || typeof value !== 'object') return value;
-  if (depth >= MAX_METADATA_DEPTH || budget.nodes <= 0) {
-    // Out of budget: scan the subtree as one string; a hit collapses it to that string.
-    let flat: string;
-    try { flat = JSON.stringify(value) ?? ''; } catch { return '[REDACTED:unscannable]'; }
-    const scanned = visit(flat);
-    return scanned === flat ? value : scanned;
+
+  // A Date has no enumerable own properties (it would rebuild as {}): keep it a
+  // Date — the stores JSON.stringify it to the same ISO string as before.
+  if (value instanceof Date) return new Date(value.getTime());
+  // Binary data carries no scannable text; rebuilding it by index would corrupt it.
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+
+  if (state.depth >= MAX_METADATA_DEPTH || state.nodes <= 0) return walker.force('unscanned');
+  state.nodes--;
+
+  const child = (item: unknown, key?: string): unknown => {
+    const next: WalkState = {
+      nodes: state.nodes,
+      depth: state.depth + 1,
+      label: key ?? label,
+      keyKind: (key !== undefined ? identifierKeyKind(key) : undefined) ?? keyKind,
+    };
+    const mapped = mapJsonStrings(item, walker, next);
+    state.nodes = next.nodes;
+    return mapped;
+  };
+  const mapKey = (key: unknown): unknown => (typeof key === 'string' ? walker.visit(key) : key);
+
+  if (Array.isArray(value)) return value.map(item => child(item));
+  if (value instanceof Set) return new Set([...value].map(item => child(item)));
+  if (value instanceof Map) {
+    return new Map([...value].map(([key, item]) => [mapKey(key), child(item, typeof key === 'string' ? key : undefined)]));
   }
-  budget.nodes--;
-  if (Array.isArray(value)) return value.map(item => mapJsonStrings(item, visit, budget, depth + 1, label));
   const out: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    out[visit(key)] = mapJsonStrings(child, visit, budget, depth + 1, key);
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    out[walker.visit(key)] = child(item, key);
   }
   return out;
 }
 
-/** Apply `visit` inside a value that may be JSON-encoded, keeping its encoding. */
-function mapJsonish(value: unknown, visit: LeafVisitor): unknown {
+/** Apply the walker inside a value that may be JSON-encoded, keeping its encoding. */
+function mapJsonish(value: unknown, walker: JsonWalker): unknown {
   if (value === undefined || value === null) return value;
+  const fresh = (): WalkState => ({ nodes: MAX_METADATA_NODES, depth: 0 });
   if (typeof value === 'string') {
     let parsed: unknown;
-    try { parsed = JSON.parse(value); } catch { return visit(value); }
-    if (parsed === null || typeof parsed !== 'object') return visit(value);
-    return JSON.stringify(mapJsonStrings(parsed, visit, { nodes: MAX_METADATA_NODES }));
+    try { parsed = JSON.parse(value); } catch { return walker.visit(value); }
+    if (parsed === null || typeof parsed !== 'object') return walker.visit(value);
+    return JSON.stringify(mapJsonStrings(parsed, walker, fresh()));
   }
-  return mapJsonStrings(value, visit, { nodes: MAX_METADATA_NODES });
+  return mapJsonStrings(value, walker, fresh());
 }
 
 /**
@@ -353,28 +420,34 @@ export function redactForPersistence<T extends PersistableFields>(fields: T): Pe
 
   const kinds = new Set<PIIKind>();
   let identifierFound = false;
-  const survey: LeafVisitor = (value, label) => {
-    for (const finding of detectPII(value, label)) {
-      if (finding.identifier) { identifierFound = true; kinds.add(finding.kind); }
-    }
-    return value;
+  const survey: JsonWalker = {
+    visit: (value, label) => {
+      for (const finding of detectPII(value, label)) {
+        if (finding.identifier) { identifierFound = true; kinds.add(finding.kind); }
+      }
+      return value;
+    },
+    force: kind => { identifierFound = true; kinds.add(kind); return ''; },
   };
-  const walk = (visit: LeafVisitor): T => {
+  const walk = (walker: JsonWalker): T => {
     const out = { ...fields };
-    if (typeof fields.title === 'string') out.title = visit(fields.title);
-    if (typeof fields.content === 'string') out.content = visit(fields.content);
-    if (fields.tags !== undefined && fields.tags !== null) out.tags = mapJsonish(fields.tags, visit) as T['tags'];
-    if (fields.metadata !== undefined && fields.metadata !== null) out.metadata = mapJsonish(fields.metadata, visit);
+    if (typeof fields.title === 'string') out.title = walker.visit(fields.title);
+    if (typeof fields.content === 'string') out.content = walker.visit(fields.content);
+    if (fields.tags !== undefined && fields.tags !== null) out.tags = mapJsonish(fields.tags, walker) as T['tags'];
+    if (fields.metadata !== undefined && fields.metadata !== null) out.metadata = mapJsonish(fields.metadata, walker);
     return out;
   };
 
   walk(survey);
   if (!identifierFound) return { fields, redacted: false, kinds: [] };
 
-  const redacted = walk((value, label) => {
-    const result = redactPII(value, { identifierElsewhere: true, label });
-    for (const kind of result.kinds) kinds.add(kind);
-    return result.text;
+  const redacted = walk({
+    visit: (value, label) => {
+      const result = redactPII(value, { identifierElsewhere: true, label });
+      for (const kind of result.kinds) kinds.add(kind);
+      return result.text;
+    },
+    force: kind => `[REDACTED:${kind}]`,
   });
   return { fields: redacted, redacted: true, kinds: [...kinds].sort() };
 }

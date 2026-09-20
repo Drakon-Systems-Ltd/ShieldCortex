@@ -142,8 +142,9 @@ function migrateOne(
     const txn = target.transaction(() => {
       for (const row of memories) {
         // #510: legacy rows predate write-time redaction — redact on the way in.
-        // A redacted row drops its legacy vector (computed over the raw text);
-        // `memories embed-backfill` recomputes it from the stored text.
+        // A row whose EMBEDDED text (title + content) changed drops its legacy
+        // vector (computed over the raw text); `memories embed-backfill`
+        // recomputes it. Redaction in tags/metadata alone leaves the vector valid.
         const redaction = redactForPersistence({
           title: row.title,
           content: row.content,
@@ -151,6 +152,7 @@ function migrateOne(
           metadata: row.metadata ?? '{}',
         });
         const safe = redaction.fields;
+        const embeddedTextChanged = safe.title !== row.title || safe.content !== row.content;
         const result = insertMemory.run({
           uuid: randomUUID(),
           type: row.type,
@@ -166,7 +168,7 @@ function migrateOne(
           created_at: row.created_at,
           updated_at: row.created_at,
           metadata: safe.metadata,
-          embedding: redaction.redacted ? null : row.embedding,
+          embedding: embeddedTextChanged ? null : row.embedding,
           scope: row.scope ?? 'project',
           transferable: row.transferable ?? 0,
           source: `legacy:${sourceLabel}`,

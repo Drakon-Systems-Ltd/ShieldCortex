@@ -4,6 +4,7 @@
 
 import { createHash } from 'crypto';
 import { getDatabase, isDatabaseInitialized } from '../../database/init.js';
+import { redactForPersistence } from '../sensitivity/pii.js';
 import type { AuditEntry } from '../types.js';
 
 /**
@@ -78,4 +79,16 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
  */
 export function createContentHash(content: string): string {
   return createHash('sha256').update(content, 'utf-8').digest('hex');
+}
+
+/**
+ * #510: the content hash an audit row may hold. An unsalted SHA-256 of a
+ * low-entropy identifier ("salary 55000") is a guessing oracle, so a record
+ * that names a PII identifier hashes its REDACTED content — the same text the
+ * memory row stores and hashes. Anything else hashes byte-identically to
+ * {@link createContentHash}, so existing audit correlation is unchanged.
+ */
+export function createAuditContentHash(content: string, title?: string): string {
+  const redaction = redactForPersistence({ title: title ?? '', content });
+  return createContentHash(redaction.redacted ? redaction.fields.content : content);
 }

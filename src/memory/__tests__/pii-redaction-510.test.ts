@@ -7,7 +7,7 @@
  * SSA specimen SSN, Ofcom drama-reserved phone numbers, example.com).
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { detectPII, redactForPersistence, redactPII } from '../../defence/sensitivity/pii.js';
+import { PII_KINDS, detectPII, hasRedactionToken, redactForPersistence, redactPII } from '../../defence/sensitivity/pii.js';
 import { classifyContent } from '../../defence/sensitivity/classifier.js';
 
 const user = { type: 'user' as const, identifier: 'pii-510-test' };
@@ -127,6 +127,33 @@ describe('#510 store funnel redacts PII on write', () => {
     expect(row.content_hash).not.toBe(createContentHash(raw));
   });
 
+  it('audit content_hash is over the redacted text for PII, byte-identical otherwise', async () => {
+    const { addMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const { createContentHash } = await import('../../defence/audit/logger.js');
+    const hashes = () => (getDatabase().prepare('SELECT content_hash FROM defence_audit').all() as Array<{ content_hash: string }>)
+      .map(r => r.content_hash);
+
+    addMemory({ title: 'Pay review', content: 'salary 55000' }, undefined, user);
+    expect(hashes()).not.toContain(createContentHash('salary 55000'));
+    expect(hashes()).toContain(createContentHash('salary [REDACTED:salary]'));
+
+    const plain = 'The deploy script lives in scripts/deploy.sh';
+    addMemory({ title: 'Deploy note', content: plain }, undefined, user);
+    expect(hashes()).toContain(createContentHash(plain));
+  });
+
+  it('an identifier found only in metadata still raises the row to CONFIDENTIAL', async () => {
+    const { addMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const created = addMemory({ title: 'Supplier record', content: 'Details are in the metadata.', metadata: { utr: 1234567890 } }, undefined, user);
+    const row = getDatabase()
+      .prepare('SELECT metadata, sensitivity_level FROM memories WHERE id = ?')
+      .get(created.id) as { metadata: string; sensitivity_level: string };
+    expect(JSON.parse(row.metadata)).toEqual({ utr: '[REDACTED:tax-id]' });
+    expect(row.sensitivity_level).toBe('CONFIDENTIAL');
+  });
+
   it('leaves a contact-only memory intact (labelled, not redacted)', async () => {
     const { addMemory } = await import('../store.js');
     const content = 'Vendor support is support@example.com, escalate by phone on 020 7946 0958.';
@@ -234,6 +261,86 @@ describe('#510 redactForPersistence', () => {
     for (let i = 0; i < 40; i++) deep = { child: deep };
     const out = JSON.stringify(redactForPersistence({ metadata: deep }).fields.metadata);
     expect(out).not.toContain('QQ123456C');
+  });
+
+  const nest = (levels: number, leaf: unknown): unknown => (levels === 0 ? leaf : { child: nest(levels - 1, leaf) });
+
+  it('fails SAFE at the depth bound: the unscanned subtree is replaced, never passed through', () => {
+    const result = redactForPersistence({ metadata: nest(8, { salary: 55000 }) });
+    const out = JSON.stringify(result.fields.metadata);
+    expect(out).not.toContain('55000');
+    expect(out).toContain('"[REDACTED:unscanned]"');
+    expect(JSON.parse(out)).toBeTruthy();
+    expect(result.redacted).toBe(true); // callers raise a redacted row to CONFIDENTIAL
+    expect(result.kinds).toEqual(['unscanned']);
+    // One level shallower is scanned normally.
+    expect(JSON.stringify(redactForPersistence({ metadata: nest(6, { salary: 55000 }) }).fields.metadata))
+      .toContain('"salary":"[REDACTED:salary]"');
+  });
+
+  it('fails SAFE when the size budget runs out', () => {
+    const metadata = { filler: Array.from({ length: 5001 }, () => ({})), late: { salary: 55000 } };
+    const result = redactForPersistence({ metadata });
+    expect((result.fields.metadata as { late: unknown }).late).toBe('[REDACTED:unscanned]');
+    expect(JSON.stringify(result.fields.metadata)).not.toContain('55000');
+    expect(result.redacted).toBe(true);
+  });
+
+  it('keeps Date, Buffer, Map and Set intact while redacting around them', () => {
+    const when = new Date('2026-09-20T10:00:00.000Z');
+    const blob = Buffer.from([0, 1, 2, 250]);
+    const { fields } = redactForPersistence({
+      metadata: { when, blob, lookup: new Map<string, unknown>([['utr', 1234567890], ['colour', 'red']]), seen: new Set(['a', 'b']), note: 'NI QQ123456C' },
+    });
+    const out = fields.metadata as { when: Date; blob: Buffer; lookup: Map<string, unknown>; seen: Set<string>; note: string };
+    expect(out.when).toBeInstanceOf(Date);
+    expect(out.when.getTime()).toBe(when.getTime());
+    expect(JSON.stringify({ when: out.when })).toBe(JSON.stringify({ when }));
+    expect(Buffer.isBuffer(out.blob)).toBe(true);
+    expect([...out.blob]).toEqual([0, 1, 2, 250]);
+    expect([...out.lookup]).toEqual([['utr', '[REDACTED:tax-id]'], ['colour', 'red']]);
+    expect([...out.seen]).toEqual(['a', 'b']);
+    expect(out.note).toBe('NI [REDACTED:ni-number]');
+  });
+
+  it('a key that names an identifier redacts its value whatever the type', () => {
+    const { fields, kinds } = redactForPersistence({
+      metadata: { utr: 1234567890, ssn: 78051120, Tax_ID: '12 of 2026', 'national-insurance': 'qq123456c', pay: 'weekly', wage: 31.5, count: 3 },
+    });
+    expect(fields.metadata).toEqual({
+      utr: '[REDACTED:tax-id]',
+      ssn: '[REDACTED:ssn]',
+      Tax_ID: '[REDACTED:tax-id]',
+      'national-insurance': '[REDACTED:ni-number]',
+      pay: 'weekly',
+      wage: '[REDACTED:salary]',
+      count: 3,
+    });
+    expect(kinds).toEqual(['ni-number', 'salary', 'ssn', 'tax-id']);
+    // Already-redacted input is left alone.
+    expect(redactForPersistence({ metadata: { utr: '[REDACTED:tax-id]' } }).redacted).toBe(false);
+  });
+});
+
+describe('#510 redaction tokens', () => {
+  it('only a complete token of an emitted kind counts', () => {
+    expect(PII_KINDS).toContain('unscanned');
+    for (const kind of PII_KINDS) expect(hasRedactionToken(`x [REDACTED:${kind}] y`)).toBe(true);
+    for (const spoof of ['[REDACTED:fake', '[REDACTED:fake]', '[REDACTED:', '[REDACTED:ssn', 'REDACTED:ssn]', '', null, undefined]) {
+      expect(hasRedactionToken(spoof)).toBe(false);
+    }
+  });
+});
+
+describe('#510 accepted residuals (D1): unlabelled look-alikes stay, labelled ones go', () => {
+  it.each([
+    ['ab123456c', 'NI number ab123456c'],
+    ['AB123456a', 'national insurance AB123456a'],
+    ['078051120', 'SSN 078051120'],
+  ])('%s', (bare, labelled) => {
+    const unlabelled = `value ${bare} recorded`;
+    expect(redactPII(unlabelled).text).toBe(unlabelled);
+    expect(redactPII(labelled).text).not.toContain(bare);
   });
 });
 
