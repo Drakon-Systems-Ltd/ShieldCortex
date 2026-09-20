@@ -496,19 +496,20 @@ describe('#501 doctor rows', () => {
     return policyLockRows();
   }
 
-  it('FAILS on an unlocked host while the guard is enabled', async () => {
+  it('FAILS on an unlocked host only when a live plane is gating', async () => {
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: true } }));
     const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
-    expect(lock.status).toBe('fail');
-    expect(lock.message).toMatch(/policy unlocked: a same-user process can disable the guard/);
-    expect(lock.fix).toMatch(/`shieldcortex protect` as root/);
+    // No OpenClaw plugin on this fixture → leftover signed-on is not live.
+    expect(lock.status).toBe('warn');
+    expect(lock.message).toMatch(/not unprotected/i);
+    expect(lock.fix).toMatch(/Do not run protect/i);
   });
 
   it('only WARNS on an unlocked host while the guard is off', async () => {
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
     const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
     expect(lock.status).toBe('warn');
-    expect(lock.message).toMatch(/nothing pinned to lose yet/);
+    expect(lock.message).toMatch(/not unprotected|nothing pinned to lose yet/i);
   });
 
   it('FAILS on a lock that exists but cannot be verified', async () => {

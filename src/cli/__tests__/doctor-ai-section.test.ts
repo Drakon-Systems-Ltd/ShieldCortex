@@ -70,14 +70,15 @@ describe('formatAiSection — pure rendering, no verdict language ever appears',
     expect(lines.join('\n')).not.toMatch(/hypothesis/i);
   });
 
-  it('renders "no AI analysis available" on any failure, not a guess', () => {
+  it('renders a skipped --ai as optional, not a failed install', () => {
     const outcome: DoctorExplainerOutcome = {
       attempted: true,
       result: null,
-      reason: 'no AI analysis available (model timed out)',
+      reason: 'no AI analysis available (response could not be parsed)',
     };
-    const lines = formatAiSection(outcome);
-    expect(lines.join('\n')).toMatch(/no ai analysis available/i);
+    const text = formatAiSection(outcome).join('\n');
+    expect(text).toMatch(/optional --ai note skipped/i);
+    expect(text).toMatch(/not a failed install/i);
   });
 
   it('renders a successful hypothesis clearly labelled as a hypothesis, with the suggested command and a disclaimer', () => {
