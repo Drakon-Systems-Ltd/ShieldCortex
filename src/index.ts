@@ -74,6 +74,7 @@ import fs from 'fs';
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { SCAN_EXIT, formatScanToolFailure } from './cli/scan-exit.js';
+import { wantsHelp } from './cli/wants-help.js';
 
 // Heavy modules (MCP server, visualization API + express/cors/ws, embedding
 // model, brain worker, installer handlers) are loaded lazily via `await import`
@@ -155,6 +156,8 @@ const __dirname = path.dirname(__filename);
 export function shouldShowInteractiveBanner(argv: string[], mode: ServerMode): boolean {
   const first = argv[2];
   if (!first) return false; // bare invocation → MCP stdio server
+  // --help / -h must not query the live DB via the stats banner (#515).
+  if (wantsHelp(argv.slice(2))) return false;
   // A positional (non-flag) first arg means a CLI subcommand was given.
   const hasPositionalCommand = !first.startsWith('-');
   if (hasPositionalCommand) {
@@ -626,7 +629,7 @@ async function main() {
 ${bold}ShieldCortex${reset} v${pkg.version} — AI Agent Memory Security
 
 ${bold}USAGE${reset}
-  shieldcortex [command] [options]
+  shieldcortex <subcommand> [options]
 
 ${bold}COMMANDS${reset}
   ${cyan}remember${reset} <title>       Write a memory (via the defence pipeline)
