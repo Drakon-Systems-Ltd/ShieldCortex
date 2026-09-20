@@ -45,6 +45,16 @@ import {
   linkContradictions,
 } from './contradiction.js';
 import { jaccardSimilarity } from './similarity.js';
+import { hasRedactionToken, redactForPersistence } from '../defence/sensitivity/pii.js';
+
+/**
+ * #510: write-time redaction makes DISTINCT records look alike ("salary
+ * [REDACTED:salary]" for two different people), so a row carrying a redaction
+ * token is never a dedupe/merge candidate — similarity over it proves nothing.
+ */
+function dedupeCandidates(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return rows.filter(row => !hasRedactionToken(row.title as string) && !hasRedactionToken(row.content as string));
+}
 import { pruneActivationCache } from './activation.js';
 // Static import of the shared effective-salience helper. Every other src/ file
 // (cli/memory.ts, the recall hook) reaches salience.mjs via a relative path
@@ -275,13 +285,14 @@ export function findDuplicateMemoryPairs(options?: {
 }): DuplicateMemoryPair[] {
   const db = getDatabase();
   const limit = options?.limit ?? 20;
-  const rows = options?.project
+  const allRows = options?.project
     ? db.prepare(
       "SELECT * FROM memories WHERE type = 'long_term' AND project = ? AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed') ORDER BY created_at ASC",
     ).all(options.project) as Record<string, unknown>[]
     : db.prepare(
       "SELECT * FROM memories WHERE type = 'long_term' AND COALESCE(status, 'active') NOT IN ('archived', 'suppressed') ORDER BY created_at ASC",
     ).all() as Record<string, unknown>[];
+  const rows = dedupeCandidates(allRows);
 
   const groups = new Map<string, Record<string, unknown>[]>();
   for (const mem of rows) {
@@ -417,7 +428,7 @@ export function deduplicateMemories(options?: { dryRun?: boolean }): {
 
       if (!dryRun) {
         // Union the loser's tags onto the kept row (metadata only, non-lossy).
-        const mergedTags = [...new Set([...kept.tags, ...loser.tags])];
+        const mergedTags = redactForPersistence({ tags: [...new Set([...kept.tags, ...loser.tags])] }).fields.tags;
         db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
           .run(JSON.stringify(mergedTags), kept.id);
 
@@ -779,7 +790,7 @@ export function mergeSimilarMemories(
     }
     sql += ' ORDER BY created_at ASC';
 
-    const memories = db.prepare(sql).all(...params) as Record<string, unknown>[];
+    const memories = dedupeCandidates(db.prepare(sql).all(...params) as Record<string, unknown>[]);
 
     // Step 2: Group by project|category
     const groups = new Map<string, Record<string, unknown>[]>();
@@ -878,7 +889,7 @@ export function mergeSimilarMemories(
               access_count = ?
           WHERE id = ?
         `).run(
-          JSON.stringify([...allTags]),
+          JSON.stringify(redactForPersistence({ tags: [...allTags] }).fields.tags),
           totalAccessCount,
           kept.id as number
         );
@@ -1349,7 +1360,7 @@ export function consolidateMemories(): DreamModeResult {
         const removed = keepA ? memB : memA;
 
         // Merge tags from both onto the kept row (metadata only, non-lossy).
-        const mergedTags = [...new Set([...kept.tags, ...removed.tags])];
+        const mergedTags = redactForPersistence({ tags: [...new Set([...kept.tags, ...removed.tags])] }).fields.tags;
         db.prepare('UPDATE memories SET tags = ? WHERE id = ?')
           .run(JSON.stringify(mergedTags), kept.id);
 

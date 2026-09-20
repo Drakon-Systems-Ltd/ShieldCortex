@@ -224,6 +224,12 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     reason: result.firewall.reason,
   });
 
+  // #510: the pipeline above judged the SUBMITTED text; everything persisted
+  // from here on (row, dedup keys, embedding input, quarantine copy, stderr)
+  // is the redacted record.
+  const pii = redactCandidate(defence, memory);
+  memory = pii.memory;
+
   if (disposition.action === 'store') {
     // Persist the COMPUTED trust + sensitivity from the scan — not the schema
     // DEFAULT (trust 1.0 / INTERNAL). The INSERT used to omit these columns, so
@@ -236,7 +242,10 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     const contentForm = typeof defence.classifyContentForm === 'function'
       ? defence.classifyContentForm(memory.content)
       : null;
-    const memoryId = insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, result.sensitivity?.level, contentForm);
+    const sensitivityLevel = pii.raiseSensitivity
+      ? atLeastConfidential(result.sensitivity?.level)
+      : result.sensitivity?.level;
+    const memoryId = insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, sensitivityLevel, contentForm);
     // #458: embed HERE, awaited, not scheduled. See embedStoredRow().
     if (memoryId !== null) {
       await embedStoredRow(db, memoryId, `${memory.title} ${memory.content}`);
@@ -255,6 +264,40 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     : db;
   insertQuarantineRow(quarantineDb, memory, project, source, result);
   process.stderr.write(`[shieldcortex save-memory] ${disposition.firewallResult.toLowerCase()} (held): ${memory.title} — ${disposition.reason}\n`);
+}
+
+// ==================== Internal: PII redaction (#510) ====================
+
+/**
+ * Run the candidate through the ONE shared write-time redactor from dist.
+ *
+ * FAIL SAFE: when the redactor is missing (older dist) or throws, the memory is
+ * still stored — a packaging fault must not stop a host remembering — but it is
+ * stored at CONFIDENTIAL or above and the gap is reported on stderr, never
+ * silently stored as ordinary INTERNAL text.
+ */
+function redactCandidate(defence, memory) {
+  if (typeof defence.redactForPersistence === 'function') {
+    try {
+      const redaction = defence.redactForPersistence({
+        title: memory.title,
+        content: memory.content,
+        tags: Array.isArray(memory.tags) ? memory.tags : [],
+      });
+      return {
+        memory: { ...memory, title: redaction.fields.title, content: redaction.fields.content, tags: redaction.fields.tags },
+        raiseSensitivity: redaction.redacted === true,
+      };
+    } catch {
+      // fall through to the fail-safe
+    }
+  }
+  process.stderr.write('[shieldcortex save-memory] PII redactor unavailable — storing unredacted at raised sensitivity\n');
+  return { memory, raiseSensitivity: true };
+}
+
+function atLeastConfidential(level) {
+  return level === 'RESTRICTED' || level === 'SECRET' || level === 'CONFIDENTIAL' ? level : 'CONFIDENTIAL';
 }
 
 // ==================== Internal: provenance floor ====================
@@ -830,8 +873,9 @@ async function loadDefenceModules(db) {
     const provenanceUrl = pathToFileURL(
       resolve(distRoot, 'defence', 'firewall', 'provenance-policy.js'),
     ).href;
+    const piiUrl = pathToFileURL(resolve(distRoot, 'defence', 'sensitivity', 'pii.js')).href;
 
-    const [pipelineMod, initMod, dispositionMod, formMod, provenanceMod] = await Promise.all([
+    const [pipelineMod, initMod, dispositionMod, formMod, provenanceMod, piiMod] = await Promise.all([
       import(pipelineUrl),
       import(initUrl),
       import(dispositionUrl),
@@ -841,6 +885,9 @@ async function loadDefenceModules(db) {
       // L2 provenance policy; same tolerance. Absent on an older dist means no
       // candidate screen, i.e. exactly the behaviour before this round.
       import(provenanceUrl).catch(() => ({})),
+      // #510 write-time PII redactor. Absence is NOT tolerated silently: the
+      // caller fails safe (see redactCandidate) rather than storing raw.
+      import(piiUrl).catch(() => ({})),
     ]);
 
     if (typeof pipelineMod.runDefencePipeline !== 'function') return null;
@@ -855,6 +902,7 @@ async function loadDefenceModules(db) {
         typeof provenanceMod.detectNonAuthoritativeInstruction === 'function'
           ? provenanceMod.detectNonAuthoritativeInstruction
           : null,
+      redactForPersistence: typeof piiMod.redactForPersistence === 'function' ? piiMod.redactForPersistence : null,
       initDatabase: initMod.initDatabase,
       isDatabaseInitialized: initMod.isDatabaseInitialized,
       getDatabase: initMod.getDatabase,

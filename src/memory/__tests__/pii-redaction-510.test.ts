@@ -7,7 +7,7 @@
  * SSA specimen SSN, Ofcom drama-reserved phone numbers, example.com).
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { detectPII, redactPII } from '../../defence/sensitivity/pii.js';
+import { detectPII, redactForPersistence, redactPII } from '../../defence/sensitivity/pii.js';
 import { classifyContent } from '../../defence/sensitivity/classifier.js';
 
 const user = { type: 'user' as const, identifier: 'pii-510-test' };
@@ -71,6 +71,60 @@ describe('#510 store funnel redacts PII on write', () => {
     const updated = updateMemory(created.id, { content: 'New starter UTR 12345 67890, salary £48,500 per year.' });
     expect(updated?.content).not.toContain('12345 67890');
     expect(updated?.content).not.toContain('48,500');
+  });
+
+  it('repeat update with identical raw input does not write the raw text', async () => {
+    const { addMemory, updateMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const created = addMemory({ title: 'Pay', content: 'salary 55000' }, undefined, user);
+    expect(created.content).not.toContain('55000');
+    updateMemory(created.id, { title: 'Pay', content: 'salary 55000' });
+    const row = getDatabase()
+      .prepare('SELECT title, content, content_hash FROM memories WHERE id = ?')
+      .get(created.id) as { title: string; content: string; content_hash: string };
+    expect(row.content).toBe('salary [REDACTED:salary]');
+    const fts = getDatabase()
+      .prepare("SELECT COUNT(*) AS n FROM memories_fts WHERE memories_fts MATCH '55000'")
+      .get() as { n: number };
+    expect(fts.n).toBe(0);
+  });
+
+  it('redacts tags and metadata strings, keeping JSON structure', async () => {
+    const { addMemory, updateMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const created = addMemory({
+      title: 'Starter pack',
+      content: 'Onboarding paperwork was filed.',
+      tags: ['hr', 'NI QQ123456C'],
+      metadata: { salary: 55000, nested: { note: 'SSN 078-05-1120', keep: 'plain text' } },
+    }, undefined, user);
+    const read = () => getDatabase()
+      .prepare('SELECT tags, metadata FROM memories WHERE id = ?')
+      .get(created.id) as { tags: string; metadata: string };
+
+    let row = read();
+    expect(row.tags).not.toContain('QQ123456C');
+    expect(JSON.parse(row.tags)).toEqual(['hr', 'NI [REDACTED:ni-number]']);
+    expect(row.metadata).not.toContain('55000');
+    expect(row.metadata).not.toContain('078-05-1120');
+    expect(JSON.parse(row.metadata).nested.keep).toBe('plain text');
+
+    updateMemory(created.id, { tags: ['hr', 'NINO QQ654321A'] });
+    row = read();
+    expect(row.tags).not.toContain('QQ654321A');
+    expect(Array.isArray(JSON.parse(row.tags))).toBe(true);
+  });
+
+  it('content_hash of a redacted row is not the hash of the raw identifier text', async () => {
+    const { addMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const { createContentHash } = await import('../../defence/audit/logger.js');
+    const raw = 'NI QQ123456C';
+    const created = addMemory({ title: 'Hash oracle', content: raw }, undefined, user);
+    const row = getDatabase()
+      .prepare('SELECT content_hash FROM memories WHERE id = ?')
+      .get(created.id) as { content_hash: string };
+    expect(row.content_hash).not.toBe(createContentHash(raw));
   });
 
   it('leaves a contact-only memory intact (labelled, not redacted)', async () => {
@@ -140,6 +194,49 @@ describe('#510 detector — formats', () => {
   });
 });
 
+describe('#510 detector — evasions', () => {
+  const evasions: Array<[string, string]> = [
+    ['fullwidth digits', 'NI QQ１２３４５６C'],
+    ['Arabic-Indic digits', 'salary ٥٥٠٠٠'],
+    ['zero-width split', 'NI QQ12​34‍56C'],
+    ['Unicode dashes', 'SSN 078‑05–1120'],
+    ['dotted SSN with a label', 'ssn 078.05.1120'],
+    ['double-spaced NI', 'NINO QQ  12  34  56  C'],
+  ];
+  it.each(evasions)('%s', (_name, text) => {
+    const result = redactPII(text);
+    expect(result.redacted).toBe(true);
+    expect(result.text).not.toMatch(/[0-9０-９٠-٩]{2}/);
+  });
+
+  it('replaces the span in the ORIGINAL text and keeps the rest byte-for-byte', () => {
+    expect(redactPII('café — NI QQ１２３４５６C — naïve').text).toBe('café — NI [REDACTED:ni-number] — naïve');
+  });
+});
+
+describe('#510 redactForPersistence', () => {
+  it('an identifier in any field takes contacts in every field', () => {
+    const { fields, redacted, kinds } = redactForPersistence({
+      title: 'Contact pat@example.com',
+      content: 'Nothing sensitive here.',
+      tags: ['NI QQ123456C'],
+      metadata: '{"phone":"07700900123","count":3}',
+    });
+    expect(redacted).toBe(true);
+    expect(fields.title).toBe('Contact [REDACTED:email]');
+    expect(fields.tags).toEqual(['NI [REDACTED:ni-number]']);
+    expect(JSON.parse(fields.metadata as string)).toEqual({ phone: '[REDACTED:phone]', count: 3 });
+    expect(kinds).toEqual(['email', 'ni-number', 'phone']);
+  });
+
+  it('survives hostile metadata: deep nesting stays valid and scanned', () => {
+    let deep: unknown = 'NI QQ123456C';
+    for (let i = 0; i < 40; i++) deep = { child: deep };
+    const out = JSON.stringify(redactForPersistence({ metadata: deep }).fields.metadata);
+    expect(out).not.toContain('QQ123456C');
+  });
+});
+
 describe('#510 detector — false positives', () => {
   const clean = [
     'Order number 1234567890 shipped on 2026-09-15.',
@@ -155,6 +252,10 @@ describe('#510 detector — false positives', () => {
     'Part AB123456 rev C, model QX1234567.',
     'Tax year 2025-26 starts 6 April; the tax rate is 20 percent.',
     'ISBN 978-3-16-148410-0, tracking 9400111899223100012345.',
+    'Order ref 123-45-6789 was refunded.',
+    'Ticket number 078-05-1120 is closed.',
+    'Fixture ID DF123456A loaded, slot QQ123456C free.',
+    'Test vector 000-12-3456 and 666-12-3456 and 900-12-3456.',
   ];
   it.each(clean)('no identifier hit: %s', (text) => {
     expect(detectPII(text).filter(f => f.identifier)).toEqual([]);

@@ -15,6 +15,7 @@
  */
 
 import type BetterSqlite3 from 'better-sqlite3';
+import { redactForPersistence } from './sensitivity/pii.js';
 
 export interface ClusterQuarantineOptions {
   /** memories.source of the triggering row, e.g. 'agent:openclaw' or 'user:cap-5'. */
@@ -102,9 +103,11 @@ export function sweepClusterQuarantine(
     const ids: number[] = [];
     const move = db.transaction(() => {
       for (const r of rows) {
+        // #510: rows written before write-time redaction are redacted as they move.
+        const held = redactForPersistence({ title: r.title, content: r.content }).fields;
         insert.run(
-          r.title,
-          r.content,
+          held.title,
+          held.content,
           r.project ?? null,
           sourceType,
           sourceIdentifier,

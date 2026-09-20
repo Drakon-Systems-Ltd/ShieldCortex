@@ -101,6 +101,30 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(['PUBLIC', 'INTERNAL']).toContain(row!.sensitivity_level);
   });
 
+  it('#510: the hook path redacts PII in title, content and tags before the row is written', async () => {
+    // Synthetic values: HMRC-invalid "QQ" prefix, Ofcom drama-reserved phone, example.com.
+    await saveAutoExtractedMemory(
+      db,
+      makeMemory({
+        title: 'Payroll note NI QQ123456C',
+        content: 'New starter Pat Example, salary 55000, email pat@example.com phone 07700900123.',
+        tags: ['auto-extracted', 'NINO QQ123456C'],
+      }),
+      'p',
+      { source: 'session-end-hook' },
+    );
+    const rows = db.prepare('SELECT title, content, tags, sensitivity_level FROM memories')
+      .all() as Array<{ title: string; content: string; tags: string; sensitivity_level: string }>;
+    expect(rows).toHaveLength(1);
+    const stored = JSON.stringify(rows[0]);
+    for (const plaintext of ['QQ123456C', '55000', 'pat@example.com', '07700900123']) {
+      expect(stored).not.toContain(plaintext);
+    }
+    expect(rows[0].content).toContain('Pat Example');
+    expect(Array.isArray(JSON.parse(rows[0].tags))).toBe(true);
+    expect(['CONFIDENTIAL', 'RESTRICTED', 'SECRET']).toContain(rows[0].sensitivity_level);
+  });
+
   it('#402: stamps content_form=fact for a hook-captured work fact (injectable via two-key)', async () => {
     await saveAutoExtractedMemory(
       db,
