@@ -3142,9 +3142,19 @@ export function policyLockRows(): CheckResult[] {
 
   const state = readPolicyLock({ audit: false, warn: false });
   const summary = describePolicyLock(state);
-  const guardOn = (() => {
+  // Signed leftover Enforce is not a live gate. Jarvis 5.0.6: HOSTS said
+  // Guard off, the OpenClaw plugin was off, and this row still FAILed because
+  // config.json said enabled:true. FAIL only when a live plane is actually
+  // gating — otherwise operators panic-uninstall a healthy box.
+  const signedOn = (() => {
     try { return getActionGuardCoreConfig().enabled; } catch { return false; }
   })();
+  const pluginLive = readOpenClawPluginGuardLive();
+  const pluginOff = pluginPlaneDisarmed(pluginLive);
+  // Unreadable roster is not proof of a live gate (same class as NOTIFY:
+  // pluginOff === false is not armed). FAIL the lock only when we can see
+  // a live OpenClaw plane that is actually gating.
+  const liveGating = signedOn && pluginLive.readable && !pluginOff;
 
   switch (summary.status) {
     case 'locked':
@@ -3166,19 +3176,20 @@ export function policyLockRows(): CheckResult[] {
       });
       break;
     case 'absent':
-      // FAIL when the guard is ON, WARN when it is off. An operator who has
-      // enabled the guard believes tool calls are gated; that belief is what an
-      // unlocked config falsifies, because any same-user process can undo it
-      // with a one-line edit. With the guard off there is nothing yet to
-      // protect, so the same fact is advice rather than a failure.
+      // FAIL only when a live plane is gating without a lock. Signed leftover
+      // Enforce + plugin-off is the Jarvis 5.0.6 paste: HOSTS said Guard off,
+      // doctor still FAILed and printed `$ protect` + exit 1. That looks like
+      // a crash. Warn, no copy-paste protect, until something is actually on.
       rows.push({
         label: `${label} policy lock`,
-        status: guardOn ? 'fail' : 'warn',
+        status: liveGating ? 'fail' : 'warn',
         message:
-          `${summary.headline}${guardOn
-            ? ' — Action Guard is enabled, but a one-line edit to config.json switches it off and nothing would notice'
-            : ' (Action Guard is off, so there is nothing pinned to lose yet)'}`,
-        fix: `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`,
+          `${summary.headline}${liveGating
+            ? ' — Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice'
+            : ' — Guard is off on this host. A lock is optional. This is not unprotected.'}`,
+        fix: liveGating
+          ? `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`
+          : 'Do not run protect from this warning. A root lock is optional while Guard is off. Do not uninstall.',
       });
       break;
     case 'unsupported':
@@ -6949,7 +6960,7 @@ export function formatAiSection(outcome: DoctorExplainerOutcome): string[] {
   }
 
   if (!outcome.result) {
-    lines.push(`  ${dim}${outcome.reason ?? 'no AI analysis available'}${reset}`);
+    lines.push(`  ${dim}Optional --ai note skipped (${outcome.reason ?? 'no AI analysis available'}). The report above is complete. This is not a failed install.${reset}`);
     return lines;
   }
 

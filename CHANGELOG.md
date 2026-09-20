@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- Doctor no longer FAILs an unlocked policy lock (and print `$ protect` + exit 1) when Guard is not live — leftover signed Enforce + plugin-off was panicking healthy 5.0.6 boxes. `--ai` parse miss is an optional note, not a failed install.
 
 ## [5.0.6] - 2026-09-20
 
