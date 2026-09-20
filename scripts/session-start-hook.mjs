@@ -27,7 +27,7 @@ import { truncatePreservingWords } from './lib/truncate.mjs';
 import { orderByEffectiveSalience } from './lib/session-context.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
 import { buildStartPack, readInjectConfig, selectInjectCandidates, PACK_HEADER } from './lib/inject-pack.mjs';
-import { flattenRecallField, RECALL_FRAME } from './lib/recall-frame.mjs';
+import { flattenRecallField, recallFrameTail } from './lib/recall-frame.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -133,7 +133,10 @@ function getProjectContext(db, project) {
 function formatContext(memories, project, heading = `# Project Context: ${project}`) {
   if (memories.length === 0) return null;
 
-  const lines = [heading, ''];
+  // One id per emission, carried by the notice and the closing line (#507):
+  // stored text cannot contain a closing line it could not predict.
+  const frame = recallFrameTail();
+  const lines = [heading, frame.NOTICE, ''];
   const byCategory = {};
   for (const mem of memories) {
     const cat = mem.category || 'note';
@@ -161,8 +164,9 @@ function formatContext(memories, project, heading = `# Project Context: ${projec
     lines.push('');
   }
 
-  // The heading opens the untrusted block; this closes it (#507).
-  lines.push(RECALL_FRAME.CLOSE);
+  // The heading opens the untrusted block; this closes it (#507). Every field
+  // above was capped before this line is added, so the frame is never left open.
+  lines.push(frame.CLOSE);
   return lines.join('\n');
 }
 
