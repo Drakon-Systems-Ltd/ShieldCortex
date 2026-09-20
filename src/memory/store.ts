@@ -66,6 +66,7 @@ import {
 } from '../defence/pipeline.js';
 import { resolveDispositionV2, type DispositionV2 } from '../defence/disposition.js';
 import { classifyContentForm } from '../defence/form-classifier.js';
+import { detectPII, redactMemoryPII } from '../defence/sensitivity/pii.js';
 import { sweepClusterQuarantine } from '../defence/cluster-quarantine.js';
 import type { SanitisationResult } from '../defence/input-sanitisation/index.js';
 import { syncQuarantineToCloud } from '../cloud/quarantine-sync.js';
@@ -845,6 +846,12 @@ export function addMemory(
 
   const db = getDatabase();
 
+  // #510: the defence scan above saw the submitted text; everything from here
+  // on (row, FTS, embedding, outbox, extraction) sees PII identifiers redacted.
+  // content_hash stays the hash of the SUBMITTED content, matching the audit row.
+  const submittedContentHash = createContentHash(input.content);
+  input = redactMemoryPII(input);
+
   // Calculate salience if not provided
   const salience = input.salience ?? calculateSalience(input);
 
@@ -940,7 +947,7 @@ export function addMemory(
       // >10KB memories too (where the STORED content is truncated).
       // #402 admit-low-trust: clamp the stamped trust below the inject floor
       // (trustClamp is already min(trust, LOW_TRUST_CLAMP) — it never raises).
-      .run(stampedTrust, defenceResult.sensitivity.level, sourceDetails.sourceValue, createContentHash(input.content), result.lastInsertRowid);
+      .run(stampedTrust, defenceResult.sensitivity.level, sourceDetails.sourceValue, submittedContentHash, result.lastInsertRowid);
 
     const id = result.lastInsertRowid as number;
     if (isFeatureEnabled('cloud_sync')) {
@@ -1446,6 +1453,27 @@ export function updateMemory(
 
   const fields: string[] = [];
   const values: unknown[] = [];
+
+  // #510: an update is a write too — redact identifiers it introduces, and
+  // never let it lower the row below CONFIDENTIAL while it names one.
+  if (updates.content !== undefined || updates.title !== undefined) {
+    const scanned = `${updates.title ?? existing.title}\n${updates.content ?? existing.content}`;
+    if (detectPII(scanned).some(f => f.identifier)) {
+      const redacted = redactMemoryPII({
+        title: updates.title ?? existing.title,
+        content: updates.content ?? existing.content,
+      });
+      updates = {
+        ...updates,
+        ...(redacted.title !== existing.title ? { title: redacted.title } : {}),
+        ...(redacted.content !== existing.content ? { content: redacted.content } : {}),
+      };
+      if (existing.sensitivityLevel !== 'RESTRICTED' && existing.sensitivityLevel !== 'CONFIDENTIAL') {
+        fields.push('sensitivity_level = ?');
+        values.push('CONFIDENTIAL');
+      }
+    }
+  }
 
   if (updates.title !== undefined) {
     fields.push('title = ?');

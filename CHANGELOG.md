@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- #510: PII identifiers are redacted on memory write, not just flagged at audit time. UK NI numbers, US SSNs, labelled tax ids (UTR/EIN/TIN) and salary figures become `[REDACTED:<kind>]` in the stored title, content, FTS index and sync payload; email/phone go too when the same memory holds an identifier (a bare vendor contact stays readable). Such content is classified at least CONFIDENTIAL with `pii:*` labels. PII never blocks a write. `SHIELDCORTEX_PII_REDACTION=off` stores verbatim but keeps the labels.
 
 ## [5.0.7] - 2026-09-20
 
