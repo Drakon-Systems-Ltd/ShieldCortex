@@ -83,6 +83,31 @@ wrapper also installs both components:
   build that first declares the gate — see
   [Conversation firewall](../plugins/openclaw/README.md#conversation-firewall)
 
+## Install-time refresh (postinstall)
+
+Installing or updating the `shieldcortex` package globally runs
+`scripts/postinstall.mjs`, and that script can write into `~/.openclaw`. It is
+worth knowing before you update a box that runs OpenClaw:
+
+- It only **refreshes an integration that is already there**. If `~/.openclaw`
+  exists and a previous `cortex-memory` hook or `shieldcortex-realtime` plugin is
+  on disk, it spawns `shieldcortex openclaw install` (or, for a plugin with no
+  hook, re-copies the plugin files) so the file-copied hook and plugin do not go
+  stale behind the new package version.
+- It never wires OpenClaw for the first time. OpenClaw present but no earlier
+  ShieldCortex hook or plugin means nothing under `~/.openclaw` is touched; run
+  the install commands above yourself.
+- It does nothing to OpenClaw for local (non-global) installs, when `CI=true`,
+  or inside Docker/containers (it prints the manual command instead).
+- A failed refresh is non-fatal and prints the manual command.
+- Separately from OpenClaw, on macOS it restarts a ShieldCortex dashboard
+  service that is still serving the previous build.
+
+To update the package without touching OpenClaw at all, set
+`SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` for the install, then refresh when you are
+ready with `shieldcortex openclaw install`. npm's `--ignore-scripts` also skips
+it, but that skips the native-module check too — prefer the variable.
+
 ## Default behavior (safe complement mode)
 
 Enabled by default:

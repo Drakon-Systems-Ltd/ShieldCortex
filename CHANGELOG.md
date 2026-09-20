@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- Dashboard production audit is clean (was 1 critical + 4 high): `next` 16.2.12 → 16.3.5 inside the same major pulls patched `postcss` and `sharp`, and `nanoid` / `lodash-es` move off their vulnerable ranges; root dev-tree advisories (`js-yaml`, `browserslist`, `brace-expansion`) fixed too. The root `sharp` waiver stays — it now needs a Transformers major, noted in `docs/security/audit-waivers.md`. What the global postinstall does to an existing OpenClaw integration, and `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` to stop it, is documented in `docs/openclaw-integration.md` (#513).
 
 ## [5.0.7] - 2026-09-20
 
