@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 /**
  * #510: the ONE shared write-time PII redactor, from dist. Resolved once when
  * this module loads so both writers stay synchronous for their hook callers.
- * `null` when dist is missing or predates the redactor — see serialisePayload
+ * `null` when dist is missing or predates the redactor — see persistable
  * for the fail-safe.
  */
 const redactJsonForPersistence = await (async () => {
