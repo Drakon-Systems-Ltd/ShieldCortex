@@ -126,4 +126,20 @@ describe('recordSessionEvents (batch, mjs wrapper)', () => {
   it('returns [] for empty input without opening a transaction', () => {
     expect(recordSessionEvents(getDatabase(), [])).toEqual([]);
   });
+  it('#510: both hook writers redact PII before the row is written', () => {
+    const db = getDatabase();
+    const text = 'Pat Example, National Insurance QQ123456C, reach alice@corp.example';
+    const base = { session_id: 'pii-510', ts: '2026-09-20T10:00:00.000Z', kind: 'prompt' };
+    recordSessionEvent(db, { ...base, payload: { text } });
+    recordSessionEvent(db, { ...base, ts: '2026-09-20T10:00:01.000Z', payload: text });
+    recordSessionEvents(db, [{ ...base, ts: '2026-09-20T10:00:02.000Z', payload: { text } }]);
+
+    const rows = db.prepare("SELECT payload FROM session_events WHERE session_id = 'pii-510'").all() as Array<{ payload: string }>;
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.payload).not.toContain('QQ123456C');
+      expect(row.payload).not.toContain('alice@corp.example');
+      expect(row.payload).toContain('[REDACTED:ni-number]');
+    }
+  });
 });
