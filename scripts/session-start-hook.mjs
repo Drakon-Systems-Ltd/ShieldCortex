@@ -27,6 +27,7 @@ import { truncatePreservingWords } from './lib/truncate.mjs';
 import { orderByEffectiveSalience } from './lib/session-context.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
 import { buildStartPack, readInjectConfig, selectInjectCandidates, PACK_HEADER } from './lib/inject-pack.mjs';
+import { flattenRecallField, RECALL_FRAME } from './lib/recall-frame.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -150,13 +151,18 @@ function formatContext(memories, project, heading = `# Project Context: ${projec
 
     for (const mem of byCategory[cat]) {
       const salience = Math.round(mem.salience * 100);
-      lines.push(`- **${mem.title}** (${salience}% salience)`);
-      const content = truncatePreservingWords(mem.content, 200);
+      // Fields are flattened and cannot spell a frame marker (#507): the
+      // heading says "untrusted data", and a raw multi-line field could put a
+      // heading of its own underneath it.
+      lines.push(`- **${flattenRecallField(mem.title)}** (${salience}% salience)`);
+      const content = truncatePreservingWords(flattenRecallField(mem.content), 200);
       lines.push(`  ${content}`);
     }
     lines.push('');
   }
 
+  // The heading opens the untrusted block; this closes it (#507).
+  lines.push(RECALL_FRAME.CLOSE);
   return lines.join('\n');
 }
 

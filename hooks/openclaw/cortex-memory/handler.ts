@@ -942,6 +942,44 @@ async function checkAndSaveKeywordTrigger(messageText, event) {
 }
 
 /**
+ * The shared untrusted-data frame (scripts/lib/recall-frame.mjs), resolved the
+ * same way the start pack resolves inject-pack.mjs: beside this hook, then the
+ * owning package, then the global install.
+ *
+ * Returns null when it cannot be found, and the caller then surfaces NOTHING.
+ * Recall is best-effort; pushing stored text into the conversation without the
+ * frame is the defect #507 closed, so a missing helper fails closed.
+ */
+let recallFramePromise: Promise<((body: string) => string | null) | null> | null = null;
+function loadRecallFrame(): Promise<((body: string) => string | null) | null> {
+  if (recallFramePromise) return recallFramePromise;
+  recallFramePromise = (async () => {
+    const fsSync = await import("node:fs");
+    const hookDir = path.dirname(fileURLToPath(import.meta.url));
+    let packageRoot: string | null = null;
+    try { packageRoot = await resolvePackageRoot(); } catch { /* fall through to the fixed candidates */ }
+    const candidates = [
+      path.join(hookDir, "recall-frame.mjs"),
+      ...(packageRoot ? [path.join(packageRoot, "scripts", "lib", "recall-frame.mjs")] : []),
+      path.join(hookDir, "..", "..", "..", "scripts", "lib", "recall-frame.mjs"),
+      path.join(homedir(), ".npm-global", "lib", "node_modules", "shieldcortex", "scripts", "lib", "recall-frame.mjs"),
+    ];
+    for (const candidate of candidates) {
+      try {
+        const helperPath = path.resolve(candidate);
+        if (!fsSync.existsSync(helperPath)) continue;
+        const mod = await import(pathToFileURL(helperPath).href);
+        if (typeof mod.frameRecallBlock === "function") return mod.frameRecallBlock;
+      } catch {
+        /* try next */
+      }
+    }
+    return null;
+  })();
+  return recallFramePromise;
+}
+
+/**
  * Proactive recall — query memory on every user message and surface relevant context
  */
 async function proactiveRecall(event) {
@@ -973,7 +1011,12 @@ async function proactiveRecall(event) {
       const m = result.match(/^Found\s+(\d+)\s+memor/m);
       const count = m ? Number(m[1]) : 0;
       if (count >= 1 && event.messages) {
-        event.messages.push(`🧠 ${result}`);
+        // Framed as untrusted data (#507). The MCP server frames its own
+        // recall output too; frameRecallBlock unwraps an existing frame and
+        // re-neutralises the body, so this never nests.
+        const frame = await loadRecallFrame();
+        const framed = frame ? frame(result) : null;
+        if (framed) event.messages.push(framed);
       }
     }
   } catch {
