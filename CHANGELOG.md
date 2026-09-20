@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **#515** `shieldcortex audit --help` (and `-h`) now prints usage and exits without scanning memories, env files, or MCP configs. `shieldcortex allowlist --help` prints usage instead of "Unknown subcommand". Top-level usage is `shieldcortex <subcommand> [options]` so a literal `command` is not advertised.
+- **#532** A comment in folded JavaScript or Python source stays non-executable even when the command pipes, redirects, or sequences its output. The repo's own test runner was denied as a recursive workspace wipe solely because a prose comment mentioned a historical delete in backticks, and a trailing output pipe withdrew the workspace-confinement exemption that had been hiding the misclassification. Folded scripts that actually delete still hard-block with the same pipe present. Guard stays off by default.
 
 ## [5.0.7] - 2026-09-20
 
