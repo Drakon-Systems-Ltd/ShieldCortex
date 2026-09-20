@@ -125,16 +125,37 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(['CONFIDENTIAL', 'RESTRICTED', 'SECRET']).toContain(rows[0].sensitivity_level);
   });
 
-  it('#510: two DISTINCT people whose memories redact to the same text both persist', async () => {
-    // Identical after redaction, so exact-title and near-duplicate dedupe would both drop the second.
-    for (const ni of ['QQ123456C', 'QQ654321A']) {
-      await saveAutoExtractedMemory(
-        db,
-        makeMemory({ title: `Payroll record NI ${ni}`, content: `Starter on the payroll has National Insurance ${ni}.` }),
-        'p',
-        { source: 'session-end-hook' },
-      );
+  // #510 bounded dedupe of redacted candidates: identical redacted text is a
+  // duplicate inside 24 h, or once the project holds 3 such rows at any age.
+  const captureNi = (ni: string) => saveAutoExtractedMemory(
+    db,
+    makeMemory({ title: `Payroll record NI ${ni}`, content: `Starter on the payroll has National Insurance ${ni}.` }),
+    'p',
+    { source: 'session-end-hook' },
+  );
+  const ageAllRows = (hours: number) => {
+    const aged = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    db.prepare('UPDATE memories SET created_at = ?').run(aged);
+  };
+  const redactedRowCount = () => (db.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n;
+
+  it('#510: the same redacted capture repeated 20 times inside 24 h stores one row', async () => {
+    for (let i = 0; i < 20; i++) await captureNi('QQ123456C');
+    expect(redactedRowCount()).toBe(1);
+  });
+
+  it('#510: repeated redacted captures aged past 24 h stop at the cap of 3', async () => {
+    for (let i = 0; i < 20; i++) {
+      await captureNi('QQ123456C');
+      ageAllRows(25);
     }
+    expect(redactedRowCount()).toBe(3);
+  });
+
+  it('#510: two DISTINCT people whose memories redact identically, captured over 24 h apart, both persist', async () => {
+    await captureNi('QQ123456C');
+    ageAllRows(25);
+    await captureNi('QQ654321A');
     const rows = db.prepare('SELECT title, content FROM memories').all() as Array<{ title: string; content: string }>;
     expect(rows).toHaveLength(2);
     expect(rows[0]).toEqual(rows[1]);

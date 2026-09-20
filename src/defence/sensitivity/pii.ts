@@ -324,8 +324,17 @@ const IDENTIFIER_KEYS: Array<[PIIKind, RegExp]> = [
   ['salary', /^(?:salary|salaries|pay|wages?|compensation|remuneration|stipend|payrate|basepay|annualpay)$/],
 ];
 
+// Child keys that DESCRIBE an identifier rather than hold it: the parent's kind
+// is not inherited into them (`{salary:{amount, year, currency}}` loses only
+// `amount`). Their strings are still pattern-scanned like any other value.
+const DESCRIPTOR_KEYS = /^(?:year|date|period|frequency|currency|band|grade|type|id|notes?|source|updated|created)$/;
+
+function bareKey(key: string): string {
+  return key.toLowerCase().replace(/[\s_-]+/g, '');
+}
+
 function identifierKeyKind(key: string): PIIKind | undefined {
-  const bare = key.toLowerCase().replace(/[\s_-]+/g, '');
+  const bare = bareKey(key);
   return IDENTIFIER_KEYS.find(([, pattern]) => pattern.test(bare))?.[0];
 }
 
@@ -354,8 +363,10 @@ interface WalkState {
 function mapJsonStrings(value: unknown, walker: JsonWalker, state: WalkState): unknown {
   const { label, keyKind } = state;
   if (typeof value === 'string') {
-    if (keyKind && !REDACTION_TOKEN.test(value) && /\p{Nd}/u.test(value)
-      && !detectPII(value, label).some(f => f.identifier)) return walker.force(keyKind);
+    // Under an identifier key any digit takes the WHOLE value. A redaction token
+    // in the input exempts nothing ("[REDACTED:salary] 1234567890" is still raw);
+    // a bare token has no digit, so an already-redacted value is left alone.
+    if (keyKind && /\p{Nd}/u.test(value)) return walker.force(keyKind);
     return walker.visit(value, label);
   }
   if (typeof value === 'number' || typeof value === 'bigint') return keyKind ? walker.force(keyKind) : value;
@@ -364,8 +375,9 @@ function mapJsonStrings(value: unknown, walker: JsonWalker, state: WalkState): u
   // A Date has no enumerable own properties (it would rebuild as {}): keep it a
   // Date — the stores JSON.stringify it to the same ISO string as before.
   if (value instanceof Date) return new Date(value.getTime());
-  // Binary data carries no scannable text; rebuilding it by index would corrupt it.
-  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  // Binary data carries no scannable text; rebuilding it by index would corrupt
+  // it. Under an identifier key it IS the identifier, so it goes whole.
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return keyKind ? walker.force(keyKind) : value;
 
   if (state.depth >= MAX_METADATA_DEPTH || state.nodes <= 0) return walker.force('unscanned');
   state.nodes--;
@@ -375,7 +387,9 @@ function mapJsonStrings(value: unknown, walker: JsonWalker, state: WalkState): u
       nodes: state.nodes,
       depth: state.depth + 1,
       label: key ?? label,
-      keyKind: (key !== undefined ? identifierKeyKind(key) : undefined) ?? keyKind,
+      keyKind: key === undefined
+        ? keyKind
+        : identifierKeyKind(key) ?? (DESCRIPTOR_KEYS.test(bareKey(key)) ? undefined : keyKind),
     };
     const mapped = mapJsonStrings(item, walker, next);
     state.nodes = next.nodes;

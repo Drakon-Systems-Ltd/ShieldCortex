@@ -108,6 +108,20 @@ const DEDUP_TITLE_JACCARD = pickNumber('SHIELDCORTEX_DEDUP_TITLE_JACCARD', 0.6);
 // consolidate false-merge only concatenates two existing rows (recoverable),
 // so it can afford to be more aggressive. Do not lower this to match consolidate.
 const DEDUP_COMBINED = pickNumber('SHIELDCORTEX_DEDUP_COMBINED', 0.5);
+
+// #510 — dedupe of REDACTED candidates. Redaction makes distinct records
+// identical ("NI number [REDACTED:ni-number]" for two different people), so
+// similarity proves nothing and the ordinary title/near-duplicate checks are
+// not applied to them. But "never a duplicate" lets a hook that re-extracts the
+// same memory every turn grow the table without bound, so the rule is bounded
+// instead: a redacted candidate is a duplicate when the project already holds a
+// row with the IDENTICAL redacted title and content created inside the window
+// below (the re-extraction loop), or already holds the cap of such rows at any
+// age. TRADE-OFF, accepted: two distinct records that redact identically and
+// are captured within the window of each other collapse to one, and no more
+// than the cap of them are ever kept.
+const REDACTED_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+const REDACTED_DEDUP_MAX_ROWS = 3;
 const DEDUP_CANDIDATE_LIMIT = 200; // bound the candidate scan per write
 
 // Hook identities shipped IN THIS PACKAGE — string literals at the three hook
@@ -382,18 +396,50 @@ function isDuplicateWrite(db, memory, project) {
   return false;
 }
 
+/** `created_at` as epoch ms, or NaN. SQLite's own `YYYY-MM-DD HH:MM:SS` is UTC. */
+function parseCreatedAt(value) {
+  if (typeof value !== 'string' || value.length === 0) return NaN;
+  const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  return Date.parse(iso);
+}
+
+/**
+ * The bounded rule for a REDACTED candidate (see REDACTED_DEDUP_WINDOW_MS):
+ * identical redacted title + content in the same project, either recent or
+ * already at the cap. An unreadable `created_at` counts as old — the cap still
+ * bounds the growth, and a distinct person's record is not dropped on a guess.
+ */
+function isRedactedDuplicateWrite(db, memory, project, now = Date.now()) {
+  const rows = db.prepare(
+    `SELECT created_at FROM memories
+       WHERE title = ?
+         AND content = ?
+         AND (project IS ? OR (project IS NULL AND ? IS NULL))
+       ORDER BY created_at DESC
+       LIMIT ?`,
+  ).all(memory.title, memory.content, project || null, project || null, REDACTED_DEDUP_MAX_ROWS);
+
+  const recent = rows.some(row => {
+    const createdAt = parseCreatedAt(row.created_at);
+    return Number.isFinite(createdAt) && now - createdAt < REDACTED_DEDUP_WINDOW_MS;
+  });
+  if (!recent && rows.length < REDACTED_DEDUP_MAX_ROWS) return false;
+  process.stderr.write(
+    `[shieldcortex save-memory] skipped redacted duplicate (${recent ? 'recent' : 'cap'}): ${memory.title}\n`,
+  );
+  return true;
+}
+
 /**
  * @returns {number|null} the new `memories.id`, or null when the write was
  *   skipped as a duplicate. The caller needs the id to attach an embedding
  *   (#458), and a skip must not be mistaken for a stored row.
  */
 function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel, contentForm, redacted = false) {
-  // #510: redaction makes DISTINCT records identical ("NI number
-  // [REDACTED:ni-number]" for two different people), so a redacted candidate is
-  // never discarded as a duplicate — similarity over tokens proves nothing
-  // (same rule as consolidate.ts). The cost is that a re-extracted redacted
-  // memory can be stored twice; losing a distinct person's record is worse.
-  if (!redacted && isDuplicateWrite(db, memory, project)) return null;
+  // #510: a redacted candidate gets the bounded identical-text rule, never the
+  // title/near-duplicate similarity checks — similarity over tokens proves
+  // nothing (consolidate.ts excludes such rows from merging for the same reason).
+  if (redacted ? isRedactedDuplicateWrite(db, memory, project) : isDuplicateWrite(db, memory, project)) return null;
 
   const timestamp = new Date().toISOString();
   const scope = resolveScopeIds();

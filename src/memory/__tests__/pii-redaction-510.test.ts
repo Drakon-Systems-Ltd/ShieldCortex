@@ -320,6 +320,50 @@ describe('#510 redactForPersistence', () => {
     // Already-redacted input is left alone.
     expect(redactForPersistence({ metadata: { utr: '[REDACTED:tax-id]' } }).redacted).toBe(false);
   });
+
+  it('a redaction token in the input does not exempt a value under an identifier key', () => {
+    const { fields, redacted } = redactForPersistence({
+      metadata: { utr: '[REDACTED:salary] 1234567890', nino: 'see [REDACTED:email] ref 4471' },
+    });
+    expect(fields.metadata).toEqual({ utr: '[REDACTED:tax-id]', nino: '[REDACTED:ni-number]' });
+    expect(redacted).toBe(true);
+  });
+
+  it('binary under an identifier key is redacted whole; elsewhere it passes through', () => {
+    const blob = Buffer.from('1234567890');
+    const { fields } = redactForPersistence({
+      metadata: { utr: Buffer.from('1234567890'), ssn: new Uint8Array([7, 8, 0, 5]), ni: new ArrayBuffer(4), blob },
+    });
+    const out = fields.metadata as Record<string, unknown>;
+    expect(out.utr).toBe('[REDACTED:tax-id]');
+    expect(out.ssn).toBe('[REDACTED:ssn]');
+    expect(out.ni).toBe('[REDACTED:ni-number]');
+    expect(out.blob).toBe(blob);
+  });
+
+  it('an identifier key is not inherited into descriptor children', () => {
+    const { fields } = redactForPersistence({
+      metadata: {
+        salary: { amount: 55000, year: 2026, currency: 'GBP', Period: 12, history: [41000, { amount: 48000, updated: 2025 }] },
+      },
+    });
+    expect(fields.metadata).toEqual({
+      salary: {
+        amount: '[REDACTED:salary]',
+        year: 2026,
+        currency: 'GBP',
+        Period: 12,
+        history: ['[REDACTED:salary]', { amount: '[REDACTED:salary]', updated: 2025 }],
+      },
+    });
+  });
+
+  it('look-alike keys are not identifier keys', () => {
+    const metadata = { pay_period: 12, payload: 'v2 chunk 7', display: 1080, einstein: 1879, nino_checked: true, salary_band: 'B' };
+    const result = redactForPersistence({ metadata });
+    expect(result.redacted).toBe(false);
+    expect(result.fields.metadata).toEqual(metadata);
+  });
 });
 
 describe('#510 redaction tokens', () => {
