@@ -636,7 +636,7 @@ function assessMemoryAdmissionInternal(
       effectiveSource,
       undefined,
       input.project,
-      { sourceAttested },
+      { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } },
       sanitiseInputForTest,
     )
     : sideEffects === 'transactional'
@@ -647,10 +647,10 @@ function assessMemoryAdmissionInternal(
         deferredEffects ?? [],
         undefined,
         input.project,
-        { sourceAttested },
+        { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } },
         sanitiseInputForTest,
       )
-      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested });
+      : runDefencePipeline(input.content, input.title, effectiveSource, undefined, input.project, { sourceAttested, redactionSiblings: { tags: input.tags, metadata: input.metadata } });
   const disposition = resolveDispositionV2({
     allowed: result.allowed,
     firewallResult: result.firewall.result,
@@ -1288,7 +1288,7 @@ export function createNativeImportAdmissionSessionInternal(
             operation: 'write',
             // #510: assessment.contentHash is the raw in-memory replay check; the
             // audit row gets the redacted-text hash when the fragment names PII.
-            content_hash: createAuditContentHash(input.content, input.title),
+            content_hash: createAuditContentHash(input.content, input.title, { tags: input.tags, metadata: input.metadata }),
             anomaly_score: 0.9,
             threat_indicators: JSON.stringify(['class_b_cluster']),
             blocked_patterns: '[]',
@@ -1460,7 +1460,9 @@ export function updateMemory(
   if (updates.content !== undefined || updates.title !== undefined) {
     const scanContent = updates.content !== undefined ? updates.content : existing.content;
     const scanTitle = updates.title !== undefined ? updates.title : existing.title;
-    const defenceResult = runDefencePipeline(scanContent, scanTitle, UNATTRIBUTED_SOURCE, undefined, existing.project ?? undefined);
+    const defenceResult = runDefencePipeline(scanContent, scanTitle, UNATTRIBUTED_SOURCE, undefined, existing.project ?? undefined, {
+      redactionSiblings: { tags: updates.tags ?? existing.tags, metadata: updates.metadata ?? existing.metadata },
+    });
     if (defenceResult.firewall.result !== 'ALLOW') {
       throw new MemoryBlockedError(defenceResult.firewall.reason);
     }
@@ -1748,7 +1750,15 @@ export function mergeMemories(
       kept.project ?? removed.project ?? undefined,
       // Mechanical re-scan of two already-scanned rows under a system-constant
       // identity (default cli:merge) — attested by construction.
-      { sourceAttested: true },
+      {
+        sourceAttested: true,
+        // #510: everything the merged row will carry beside its content, so the
+        // audit hash is taken over the text the row stores.
+        redactionSiblings: {
+          tags: [...(kept.tags ?? []), ...(removed.tags ?? [])],
+          metadata: { ...kept.metadata, mergedFrom: [removed.title] },
+        },
+      },
     );
     if (defenceResult.firewall.result !== 'ALLOW') {
       throw new MemoryBlockedError(defenceResult.firewall.reason);

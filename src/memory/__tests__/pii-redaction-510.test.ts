@@ -366,6 +366,59 @@ describe('#510 redactForPersistence', () => {
   });
 });
 
+describe('#510 review round 5: identifiers held outside the field being written', () => {
+  beforeEach(async () => {
+    const { closeDatabase, initDatabase } = await import('../../database/init.js');
+    closeDatabase();
+    initDatabase(':memory:');
+    delete process.env.SHIELDCORTEX_PII_REDACTION;
+  });
+
+  afterEach(async () => {
+    const { closeDatabase } = await import('../../database/init.js');
+    closeDatabase();
+  });
+
+  it('a contact added by a later update is redacted beside an already-redacted identifier', async () => {
+    const { addMemory, updateMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const created = addMemory({ title: 'staff pay', content: 'Pat Example salary 55000' }, undefined, user);
+    updateMemory(created.id, { metadata: { contact: 'pat@example.com' } });
+
+    const row = getDatabase()
+      .prepare('SELECT content, metadata FROM memories WHERE id = ?')
+      .get(created.id) as { content: string; metadata: string };
+    expect(row.content).toContain('[REDACTED:salary]');
+    expect(row.metadata).not.toContain('pat@example.com');
+    expect(row.metadata).toContain('[REDACTED:email]');
+  });
+
+  it('an identifier token marks the record, and still exempts nothing', () => {
+    const result = redactForPersistence({ content: 'pay [REDACTED:salary], reach pat@example.com' });
+    expect(result.redacted).toBe(true);
+    expect(result.fields.content).toBe('pay [REDACTED:salary], reach [REDACTED:email]');
+    // A contact-kind token alone is not an identifier.
+    expect(redactForPersistence({ content: '[REDACTED:email] or pat@example.com' }).redacted).toBe(false);
+  });
+
+  it('the audit hash is never the raw-content hash when the identifier sits in metadata', async () => {
+    const { addMemory } = await import('../store.js');
+    const { getDatabase } = await import('../../database/init.js');
+    const { createContentHash } = await import('../../defence/audit/logger.js');
+    const content = 'reach pat@example.com about the review';
+    const created = addMemory({ title: 'contact', content, metadata: { salary: 55000 } }, undefined, user);
+
+    const db = getDatabase();
+    const row = db.prepare('SELECT content FROM memories WHERE id = ?').get(created.id) as { content: string };
+    expect(row.content).not.toContain('pat@example.com');
+    const hashes = (db.prepare('SELECT content_hash FROM defence_audit').all() as Array<{ content_hash: string }>)
+      .map(r => r.content_hash);
+    expect(hashes.length).toBeGreaterThan(0);
+    expect(hashes).not.toContain(createContentHash(content));
+    expect(hashes).toContain(createContentHash(row.content));
+  });
+});
+
 describe('#510 redaction tokens', () => {
   it('only a complete token of an emitted kind counts', () => {
     expect(PII_KINDS).toContain('unscanned');

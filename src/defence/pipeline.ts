@@ -57,6 +57,12 @@ export interface PipelineRunOptions {
    * config-file `threatGraph.trustModifier` (advisory). Test seam.
    */
   trustModifierMode?: TrustModifierMode;
+  /**
+   * #510: the tags/metadata persisted beside this content. Never scanned or
+   * stored by the pipeline — only lets the audit content hash see an identifier
+   * held outside title/content, so it hashes what the row will store.
+   */
+  redactionSiblings?: { tags?: string[] | string | null; metadata?: unknown };
 }
 
 type DeferredPipelineEffect = () => void;
@@ -88,6 +94,7 @@ function publicPipelineOptions(options?: PipelineRunOptions): PipelineRunOptions
   return {
     sourceAttested: options?.sourceAttested,
     trustModifierMode: options?.trustModifierMode,
+    redactionSiblings: options?.redactionSiblings,
   };
 }
 
@@ -359,7 +366,7 @@ function runDefencePipelineInternal(
       firewall_result: firewall.result,
       operation: 'write',
       // #510: redacted-text hash when the record names a PII identifier (no guessing oracle).
-      content_hash: createAuditContentHash(content, title),
+      content_hash: createAuditContentHash(content, title, options.redactionSiblings),
       anomaly_score: firewall.anomalyScore,
       threat_indicators: JSON.stringify(firewall.threatIndicators),
       blocked_patterns: JSON.stringify(firewall.blockedPatterns),

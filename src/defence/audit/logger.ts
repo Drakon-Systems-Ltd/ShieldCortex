@@ -88,7 +88,13 @@ export function createContentHash(content: string): string {
  * memory row stores and hashes. Anything else hashes byte-identically to
  * {@link createContentHash}, so existing audit correlation is unchanged.
  */
-export function createAuditContentHash(content: string, title?: string): string {
-  const redaction = redactForPersistence({ title: title ?? '', content });
+export function createAuditContentHash(
+  content: string,
+  title?: string,
+  siblings?: { tags?: string[] | string | null; metadata?: unknown },
+): string {
+  // Tags and metadata are redacted together with title/content on the row, so
+  // an identifier that lives only there still takes the contact details here.
+  const redaction = redactForPersistence({ title: title ?? '', content, tags: siblings?.tags, metadata: siblings?.metadata });
   return createContentHash(redaction.redacted ? redaction.fields.content : content);
 }

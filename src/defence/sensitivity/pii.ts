@@ -283,6 +283,9 @@ export function isPIIRedactionEnabled(): boolean {
   return flag !== 'off' && flag !== '0' && flag !== 'false';
 }
 
+/** Kinds the detector treats as identifiers (plus the fail-safe `unscanned`). */
+const IDENTIFIER_TOKEN = /\[REDACTED:(?:ni-number|ssn|tax-id|salary|unscanned)\]/;
+
 const REDACTION_TOKEN = new RegExp(String.raw`\[REDACTED:(?:${PII_KINDS.join('|')})\]`);
 
 /**
@@ -434,11 +437,16 @@ export function redactForPersistence<T extends PersistableFields>(fields: T): Pe
 
   const kinds = new Set<PIIKind>();
   let identifierFound = false;
+  let identifierTokenFound = false;
   const survey: JsonWalker = {
     visit: (value, label) => {
       for (const finding of detectPII(value, label)) {
         if (finding.identifier) { identifierFound = true; kinds.add(finding.kind); }
       }
+      // An identifier redacted on an earlier write still marks this record as
+      // identifier-bearing: contact details added beside it later go too. A
+      // token exempts nothing — it can only widen what is redacted.
+      if (IDENTIFIER_TOKEN.test(value)) identifierTokenFound = true;
       return value;
     },
     force: kind => { identifierFound = true; kinds.add(kind); return ''; },
@@ -453,7 +461,7 @@ export function redactForPersistence<T extends PersistableFields>(fields: T): Pe
   };
 
   walk(survey);
-  if (!identifierFound) return { fields, redacted: false, kinds: [] };
+  if (!identifierFound && !identifierTokenFound) return { fields, redacted: false, kinds: [] };
 
   const redacted = walk({
     visit: (value, label) => {
@@ -463,6 +471,8 @@ export function redactForPersistence<T extends PersistableFields>(fields: T): Pe
     },
     force: kind => `[REDACTED:${kind}]`,
   });
+  // Only a token, and nothing beside it to redact: the record is already clean.
+  if (!identifierFound && kinds.size === 0) return { fields, redacted: false, kinds: [] };
   return { fields: redacted, redacted: true, kinds: [...kinds].sort() };
 }
 
