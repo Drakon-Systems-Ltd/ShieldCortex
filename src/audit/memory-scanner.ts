@@ -19,7 +19,8 @@ import { getDatabase, withTransaction } from '../database/init.js';
 import { detectInstructions } from '../defence/firewall/instruction-detector.js';
 import { detectPrivilegeEscalation } from '../defence/firewall/privilege-detector.js';
 import { detectSkillThreats } from '../defence/skill-scanner/patterns.js';
-import { attachFindingDetail, locateFirstMatch } from './finding-detail.js';
+import { attachFindingDetail, locateFirstMatch, shellQuoteArg } from './finding-detail.js';
+import { isFrontmatterOnlyStealthHit } from './owner-memory.js';
 
 const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/memory-poisoning';
 
@@ -452,6 +453,13 @@ export function discoverMemoryFiles(options: MemoryFileDiscoveryOptions = {}): D
 
 // ── Finding attribution (issue #514) ──
 
+/** The re-check command for a file, or undefined when its name cannot be quoted for display. */
+function nextCommandFor(filePath: string | undefined): string | undefined {
+  if (!filePath) return undefined;
+  const quoted = shellQuoteArg(filePath);
+  return quoted ? `shieldcortex scan-skill ${quoted}` : undefined;
+}
+
 /** "Does this text fire that rule?" — resolved from the rule id's namespace. */
 function ruleProbe(ruleId: string): (text: string) => boolean {
   if (ruleId.startsWith('skill:')) {
@@ -495,7 +503,7 @@ function attributeFinding(
     ruleIds: ids,
     line: located?.line,
     excerpt: located?.excerpt,
-    nextCommand: finding.filePath ? `shieldcortex scan-skill "${finding.filePath}"` : undefined,
+    nextCommand: nextCommandFor(finding.filePath),
   });
 }
 
@@ -515,9 +523,26 @@ function verdictRuleIds(firewall: { blockedPatterns: string[]; threatIndicators:
 }
 
 /**
+ * The INFO finding an owner memory file gets when the marker rule hit nothing
+ * but its own frontmatter closer. See owner-memory.ts for the conditions.
+ */
+function frontmatterOnlyFinding(filePath: string, content: string): AuditFinding {
+  return attributeFinding({
+    scanner: 'memory',
+    severity: 'info',
+    title: 'Memory frontmatter matched the stealth marker rule',
+    description: 'stealth_instruction matched only the line that closes this file\'s YAML frontmatter. Informational: nothing is hidden after it.',
+    filePath,
+    matchedText: 'skill:stealth_instruction',
+    learnMoreUrl: LEARN_MORE,
+  }, content, ['skill:stealth_instruction']);
+}
+
+/**
  * Scan a single memory file through the defence pipeline.
  */
-function scanMemoryFile(filePath: string): AuditFinding[] {
+function scanMemoryFile(file: DiscoveredMemoryFile): AuditFinding[] {
+  const filePath = file.path;
   const findings: AuditFinding[] = [];
 
   let content: string;
@@ -535,7 +560,15 @@ function scanMemoryFile(filePath: string): AuditFinding[] {
     // construction; a hostile memory file's BLOCK accrues to the audit channel.
     const result = runDefencePipeline(content, `audit:${filePath}`, AUDIT_SOURCE, undefined, undefined, { sourceAttested: true });
 
-    if (result.firewall.result === 'BLOCK') {
+    if (result.firewall.result !== 'ALLOW' && isFrontmatterOnlyStealthHit(content, {
+      discoverySource: file.source,
+      reason: result.firewall.reason,
+      blockedPatterns: result.firewall.blockedPatterns,
+    })) {
+      // Not an early return: the indicator and credential checks below still
+      // run, so anything else in the file is reported at its own severity.
+      findings.push(frontmatterOnlyFinding(filePath, content));
+    } else if (result.firewall.result === 'BLOCK') {
       findings.push(attributeFinding({
         scanner: 'memory',
         severity: 'critical',
@@ -662,7 +695,21 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
     reason = result.firewall.reason;
     threatIndicators = result.firewall.threatIndicators;
 
-    if (firewallResult === 'BLOCK') {
+    const frontmatterOnly = firewallResult !== 'ALLOW' && isFrontmatterOnlyStealthHit(content, {
+      discoverySource: file.source,
+      reason: result.firewall.reason,
+      blockedPatterns: result.firewall.blockedPatterns,
+    });
+
+    if (frontmatterOnly) {
+      // Recorded as ALLOW/LOW so the review queue, which keys on the firewall
+      // result, does not fill with the owner's own memory files. The reason
+      // keeps the pipeline's words so the downgrade is visible, not silent.
+      findings.push(frontmatterOnlyFinding(file.path, content));
+      reason = `Informational (frontmatter closer only): ${result.firewall.reason}`;
+      firewallResult = 'ALLOW';
+      risk = 'LOW';
+    } else if (firewallResult === 'BLOCK') {
       risk = 'CRITICAL';
       findings.push(attributeFinding({
         scanner: 'memory',
@@ -815,7 +862,7 @@ export function scanMemories(): ScannerResult {
   for (const file of files) {
     // Skip ShieldCortex's own hook/plugin files to avoid false positives (#14)
     if (isShieldCortexOwnMemoryPath(file.path)) continue;
-    allFindings.push(...scanMemoryFile(file.path));
+    allFindings.push(...scanMemoryFile(file));
   }
 
   return {

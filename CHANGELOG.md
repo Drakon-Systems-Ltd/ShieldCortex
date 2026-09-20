@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- **Audit:** `shieldcortex audit` groups findings per file and prints the rule id, the matching line and the one command to run next; every memory finding now carries a non-empty `matchedText`, and `--json` keeps the same keys. `stealth_instruction` no longer reads a YAML frontmatter closer as a hidden end-of-document marker, which had flagged every owner-authored Claude Code memory file (#514).
+- **Audit:** `shieldcortex audit` groups findings per file and prints the rule id, the matching line and a paste-safe (single-quoted) command to run next; every memory finding carries a non-empty `matchedText`, untrusted text is stripped of terminal control sequences before it is printed, and `--json` keeps the same keys. An owner memory file under `~/.claude` whose only hit is `stealth_instruction` on the line closing its strict YAML frontmatter is graded INFO instead of HIGH; the detector itself is unchanged, so skills, tool output and working-directory files keep full detection (#514).
 
 ## [5.0.7] - 2026-09-20
 

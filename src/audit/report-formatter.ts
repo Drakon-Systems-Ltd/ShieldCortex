@@ -11,6 +11,15 @@
 
 import type { AuditReport, AuditFinding, AuditGrade, AuditSeverity, ScannerResult } from './types.js';
 import { getFindingDetail } from './finding-detail.js';
+import { sanitiseDisplayField } from '../cli/term-ui.js';
+
+/**
+ * Every string below that came from a scanned file, its name, or a config the
+ * audit read is attacker-influenced. It is sanitised BEFORE the formatter adds
+ * its own ANSI, so an escape sequence in a memory file cannot clear the screen
+ * and a newline in a file name cannot forge a finding line (issue #514).
+ */
+const safe = sanitiseDisplayField;
 
 // ── ANSI Colours ──
 
@@ -149,9 +158,9 @@ export function formatTerminalReport(report: AuditReport): string {
     const scannedStr = scanner.skipped ? '' : ` (${scanner.itemsScanned} scanned)`;
     const timeStr = `${c.dim}${scanner.durationMs}ms${c.reset}`;
 
-    lines.push(`  ${icon}  ${scanner.name.padEnd(25)} ${countStr}${scannedStr}  ${timeStr}`);
+    lines.push(`  ${icon}  ${safe(scanner.name).padEnd(25)} ${countStr}${scannedStr}  ${timeStr}`);
     if (scanner.skipped && scanner.skipReason) {
-      lines.push(`     ${c.dim}${scanner.skipReason}${c.reset}`);
+      lines.push(`     ${c.dim}${safe(scanner.skipReason)}${c.reset}`);
     }
   }
   lines.push('');
@@ -172,18 +181,18 @@ export function formatTerminalReport(report: AuditReport): string {
       const sc = severityColour(finding.severity);
       const icon = severityIcon(finding.severity);
       const detail = getFindingDetail(finding);
-      lines.push(`${indent}${sc}[${icon}] ${finding.severity.toUpperCase().padEnd(8)}${c.reset} ${finding.title}`);
-      lines.push(`${indent}   ${c.dim}${finding.description}${c.reset}`);
+      lines.push(`${indent}${sc}[${icon}] ${finding.severity.toUpperCase().padEnd(8)}${c.reset} ${safe(finding.title)}`);
+      lines.push(`${indent}   ${c.dim}${safe(finding.description)}${c.reset}`);
       if (detail) {
-        lines.push(`${indent}   ${c.dim}Rule: ${detail.ruleIds.join(', ')}${c.reset}`);
+        lines.push(`${indent}   ${c.dim}Rule: ${safe(detail.ruleIds.join(', '))}${c.reset}`);
         if (detail.line !== undefined && detail.excerpt) {
-          lines.push(`${indent}   ${c.dim}Line ${detail.line}: ${detail.excerpt}${c.reset}`);
+          lines.push(`${indent}   ${c.dim}Line ${detail.line}: ${safe(detail.excerpt)}${c.reset}`);
         }
       }
       // `Match:` repeats the rule ids for most memory findings; print it only
       // when it says something the Rule line did not (a credential fragment).
       if (finding.matchedText && finding.matchedText !== detail?.ruleIds.join(', ').slice(0, 120)) {
-        lines.push(`${indent}   ${c.dim}Match: ${finding.matchedText}${c.reset}`);
+        lines.push(`${indent}   ${c.dim}Match: ${safe(finding.matchedText)}${c.reset}`);
       }
     };
 
@@ -201,10 +210,17 @@ export function formatTerminalReport(report: AuditReport): string {
       .sort((a, b) => rank(a.group[0]) - rank(b.group[0]) || a.filePath.localeCompare(b.filePath));
 
     for (const { filePath, group } of files) {
-      lines.push(`  ${c.bold}File: ${filePath}${c.reset}`);
+      lines.push(`  ${c.bold}File: ${safe(filePath)}${c.reset}`);
       for (const finding of group) pushFinding(finding, '    ');
       const next = group.map(f => getFindingDetail(f)?.nextCommand).find(Boolean);
-      if (next) lines.push(`    ${c.cyan}Next: ${next}${c.reset}`);
+      // A command is only worth printing if pasting it does what it shows. If
+      // sanitising would alter it, the name holds something that cannot be
+      // displayed faithfully, so say that instead of offering a near-miss.
+      if (next && safe(next) === next) {
+        lines.push(`    ${c.cyan}Next: ${next}${c.reset}`);
+      } else if (group.some(f => getFindingDetail(f))) {
+        lines.push(`    ${c.cyan}Next: shieldcortex scan-skill <this file>${c.reset}${c.dim}  (the name has characters that cannot be shown safely, so no paste-ready command is offered)${c.reset}`);
+      }
       lines.push('');
     }
 
@@ -263,9 +279,9 @@ export function formatMarkdownReport(report: AuditReport): string {
       const icon = finding.severity === 'critical' ? '🔴' :
                    finding.severity === 'high' ? '🟠' :
                    finding.severity === 'medium' ? '🟡' : '🔵';
-      lines.push(`- ${icon} **${finding.title}**`);
-      lines.push(`  ${finding.description}`);
-      if (finding.filePath) lines.push(`  📄 \`${finding.filePath}\``);
+      lines.push(`- ${icon} **${safe(finding.title)}**`);
+      lines.push(`  ${safe(finding.description)}`);
+      if (finding.filePath) lines.push(`  📄 \`${safe(finding.filePath)}\``);
       lines.push('');
     }
   }
