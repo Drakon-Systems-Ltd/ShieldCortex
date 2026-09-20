@@ -178,6 +178,16 @@ Tuning bounds:
 
 All memory writes routed through ShieldCortex are scanned by the defence pipeline and recorded in audit logs. Threat detections from the real-time plugin can also sync to cloud when configured.
 
+### PII redaction on the hook write path
+
+Hook-captured memories go through the same write-time PII redactor as every other write: UK NI numbers, US SSNs, labelled tax ids and salary figures are stored as `[REDACTED:<kind>]`.
+
+The hook loads that redactor from the installed package's compiled `dist`. If it is missing or stale (for example straight after an upgrade), the hook **still stores the memory, unredacted, at CONFIDENTIAL or above** and says so on stderr: `PII redactor unavailable — storing unredacted at raised sensitivity`. This is deliberate — a packaging fault must not stop a host remembering — but it means raw identifiers can be stored until `dist` is fresh. Run `shieldcortex doctor` after every upgrade to confirm it is.
+
+Hook memories that redact to the same text (two people's NI numbers) are deduplicated by a bounded rule, not by similarity: a redacted candidate is skipped when the project already holds a row with the identical redacted title and content created in the last 24 hours, or already holds 3 such rows of any age. So a hook that re-extracts the same memory every turn stores it once, two people's records captured more than 24 hours apart are both kept (up to 3), and two distinct records that redact identically within 24 hours of each other collapse to one.
+
+Known limits: an unlabelled lowercase or lowercase-suffixed NI number (`ab123456c`, `AB123456a`) and an unlabelled undashed SSN (`078051120`) are not redacted — without a label they are indistinguishable from hex digests and ids; all three are redacted when labelled ("NI number …", "SSN …"). Names and postal addresses are not detected.
+
 Optional cloud config example:
 
 ```json

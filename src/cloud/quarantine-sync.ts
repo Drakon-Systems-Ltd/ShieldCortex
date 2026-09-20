@@ -8,6 +8,7 @@ import {
 } from './config.js';
 import { enqueueFailedQuarantineSync } from './sync-queue.js';
 import { redactCredentials } from '../defence/credential-leak/index.js';
+import { redactForPersistence } from '../defence/sensitivity/pii.js';
 
 /**
  * Fire-and-forget: sends quarantined content to ShieldCortex cloud.
@@ -47,14 +48,16 @@ export function syncQuarantineToCloud(entry: {
   const metadataOnly = controls.contentMode === 'metadata';
 
   // Always redact credentials; metadata-only mode replaces content entirely.
+  // #510: PII identifiers never leave the device either.
+  const pii = redactForPersistence({ title: entry.original_title, content: entry.original_content }).fields;
   const safeContent = metadataOnly
     ? '[ShieldCortex] Quarantine content redacted by local sync policy.'
-    : redactCredentials(entry.original_content);
+    : redactCredentials(pii.content ?? '');
   const safeTitle = metadataOnly
     ? '[Metadata only]'
-    : entry.original_title
-      ? redactCredentials(entry.original_title)
-      : entry.original_title;
+    : pii.title
+      ? redactCredentials(pii.title)
+      : pii.title;
 
   const payload = {
     ...entry,
