@@ -35,7 +35,7 @@ const DANGER_TOKENS = [String.fromCharCode(115, 117, 100, 111), 'id'];
 const EXEC_NAMES = [
   // whole name is one exec word
   'run', 'command', 'bash', 'sh', 'zsh', 'cmd', 'exec', 'shell', 'powershell',
-  'terminal', 'script', 'eval', 'spawn', 'process', 'system',
+  'terminal', 'script', 'eval', 'spawn', 'system',
   // whole name is exec words, every separator style
   'run_command', 'runCommand', 'runcommand', 'RunCommand', 'run-command',
   'run_terminal', 'runTerminal', 'execute_command', 'ExecuteCommand',
@@ -104,6 +104,13 @@ describe('schema family — weak exec words need the whole name', () => {
 
   it.each(EXEC_NAMES)('%s still allows its own declared shape', (tool) => {
     expect(evaluateToolCall(tool, { command: 'printf ok' }).decision).toBe('allow');
+  });
+
+  it('#524 native process is the reviewed OpenClaw contract, not generic exec schema', () => {
+    expect(schemaFamilyForTool('process')).toBe('read');
+    expect(hasExactSpecialToolSchema('process')).toBe(true);
+    expect(evaluateToolCall('process', { action: 'list' }).decision).toBe('allow');
+    expect(evaluateToolCall('process', { command: 'printf ok' }).decision).not.toBe('allow');
   });
 });
 
@@ -184,5 +191,6 @@ describe('schema family — the narrowing removes the DENY, never the SCAN', () 
     expect(schemaFamilyForTool('sessions_spawn')).toBe('read');
     expect(schemaFamilyForTool('web.run')).toBe('network');
     expect(schemaFamilyForTool('collaboration.spawn_agent')).toBe('read');
+    expect(schemaFamilyForTool('process')).toBe('read');
   });
 });
