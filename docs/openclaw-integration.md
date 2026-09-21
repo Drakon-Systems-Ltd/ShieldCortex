@@ -83,6 +83,42 @@ wrapper also installs both components:
   build that first declares the gate — see
   [Conversation firewall](../plugins/openclaw/README.md#conversation-firewall)
 
+## Install-time refresh (postinstall)
+
+Installing or updating the `shieldcortex` package globally runs
+`scripts/postinstall.mjs`, and that script can write into `~/.openclaw`. It is
+worth knowing before you update a box that runs OpenClaw:
+
+- It only **refreshes an integration that is already there**. If `~/.openclaw`
+  exists and a previous `cortex-memory` hook or `shieldcortex-realtime` plugin is
+  on disk, it spawns `shieldcortex openclaw install` (or, for a plugin with no
+  hook, re-copies the plugin files) so the file-copied hook and plugin do not go
+  stale behind the new package version. That command is the **full installer**,
+  not a file copy: it snapshots and edits the OpenClaw configuration to register
+  the plugin and, by default, restarts the OpenClaw gateway — so a package update
+  can briefly interrupt a running gateway. If the plugin-only re-copy fails, it
+  falls back to the same full installer, which can add the hook that was not
+  there before.
+- It never wires OpenClaw for the first time. OpenClaw present but no earlier
+  ShieldCortex hook or plugin means nothing under `~/.openclaw` is touched; run
+  the install commands above yourself.
+- It does nothing to OpenClaw for local (non-global) installs, when `CI=true`,
+  or inside Docker/containers (it prints the manual command instead).
+- A failed refresh is non-fatal and prints the manual command.
+- Separately from OpenClaw, on macOS it restarts a ShieldCortex dashboard
+  service that is still serving the previous build.
+- Also separately from OpenClaw, on a machine with no
+  `~/.shieldcortex/config.json` it **creates one** with
+  `openclawAutoMemory: true` and `proactiveRecall: true`. An existing config file
+  is never overwritten. This write is not part of the OpenClaw refresh, so it
+  still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` and inside Docker; only
+  `--ignore-scripts` avoids it.
+
+To update the package without touching OpenClaw at all (no configuration edit,
+no gateway restart), set `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` for the install, then refresh when you are
+ready with `shieldcortex openclaw install`. npm's `--ignore-scripts` also skips
+it, but that skips the native-module check too — prefer the variable.
+
 ## Default behavior (safe complement mode)
 
 Enabled by default:
@@ -141,6 +177,16 @@ Tuning bounds:
 ## Security and audit
 
 All memory writes routed through ShieldCortex are scanned by the defence pipeline and recorded in audit logs. Threat detections from the real-time plugin can also sync to cloud when configured.
+
+### PII redaction on the hook write path
+
+Hook-captured memories go through the same write-time PII redactor as every other write: UK NI numbers, US SSNs, labelled tax ids and salary figures are stored as `[REDACTED:<kind>]`.
+
+The hook loads that redactor from the installed package's compiled `dist`. If it is missing or stale (for example straight after an upgrade), the hook **still stores the memory, unredacted, at CONFIDENTIAL or above** and says so on stderr: `PII redactor unavailable — storing unredacted at raised sensitivity`. This is deliberate — a packaging fault must not stop a host remembering — but it means raw identifiers can be stored until `dist` is fresh. Run `shieldcortex doctor` after every upgrade to confirm it is.
+
+Hook memories that redact to the same text (two people's NI numbers) are deduplicated by a bounded rule, not by similarity: a redacted candidate is skipped when the project already holds a row with the identical redacted title and content created in the last 24 hours, or already holds 3 such rows of any age. So a hook that re-extracts the same memory every turn stores it once, two people's records captured more than 24 hours apart are both kept (up to 3), and two distinct records that redact identically within 24 hours of each other collapse to one.
+
+Known limits: an unlabelled lowercase or lowercase-suffixed NI number (`ab123456c`, `AB123456a`) and an unlabelled undashed SSN (`078051120`) are not redacted — without a label they are indistinguishable from hex digests and ids; all three are redacted when labelled ("NI number …", "SSN …"). Names and postal addresses are not detected.
 
 Optional cloud config example:
 

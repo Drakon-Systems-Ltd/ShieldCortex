@@ -21,6 +21,7 @@ import { detectPrivilegeEscalation } from '../defence/firewall/privilege-detecto
 import { detectSkillThreats } from '../defence/skill-scanner/patterns.js';
 import { attachFindingDetail, locateFirstMatch, shellQuoteArg } from './finding-detail.js';
 import { isFrontmatterOnlyStealthHit } from './owner-memory.js';
+import { redactForPersistence } from '../defence/sensitivity/pii.js';
 
 const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/memory-poisoning';
 
@@ -278,9 +279,17 @@ export function queueMemoryFileScanFindings(result: DetailedMemoryFileScanResult
         continue;
       }
 
-      const title = buildQuarantineTitle(file);
-      const content = buildQuarantineContent(file);
-      const reason = file.reason || 'Memory file scan finding';
+      // #510: a quarantine row is a persistence boundary too — the excerpt and
+      // evidence snippets are file text. Redact ONCE here so the reviewed-content
+      // comparison, the pending update and the insert all see the same stored form.
+      const held = redactForPersistence({
+        title: buildQuarantineTitle(file),
+        content: buildQuarantineContent(file),
+        metadata: { reason: file.reason || 'Memory file scan finding' },
+      }).fields;
+      const title = held.title;
+      const content = held.content;
+      const reason = (held.metadata as { reason: string }).reason;
       const threatIndicators = JSON.stringify(file.threatIndicators);
       const anomalyScore = file.anomalyScore || riskToAnomalyScore(file.risk);
       const firewallResult = queueFirewallResult(file);

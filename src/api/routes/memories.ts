@@ -34,6 +34,7 @@ import { detectContradictions, getContradictionsFor } from '../../memory/contrad
 import { emitConsolidation } from '../events.js';
 import { guardDashboardContextSummary, RESTRICTED_CONTENT_PLACEHOLDER } from '../../defence/trust/read-guard.js';
 import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
+import { redactForPersistence } from '../../defence/sensitivity/pii.js';
 
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
 
@@ -1468,12 +1469,14 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
       }
 
       const db = getDatabase();
+      // #510: rows written before write-time redaction are redacted as they move.
+      const held = redactForPersistence({ title: memory.title, content: memory.content }).fields;
       db.prepare(
         `INSERT INTO quarantine (original_title, original_content, source_type, source_identifier, reason, project, status, firewall_result, created_at)
          VALUES (?, ?, ?, ?, ?, ?, 'pending', 'QUARANTINE', ?)`,
       ).run(
-        memory.title,
-        memory.content,
+        held.title,
+        held.content,
         'dashboard',
         'brain-control',
         req.body.reason || 'Manually quarantined from Brain dashboard',

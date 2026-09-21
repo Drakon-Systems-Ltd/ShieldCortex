@@ -35,6 +35,25 @@ import {
 } from '../audit/index.js';
 import type { AuditReport, AuditSeverity, ScannerResult, AuditFinding } from '../audit/types.js';
 import { toSarif } from '../xray/sarif.js';
+import { wantsHelp } from './wants-help.js';
+
+export const AUDIT_HELP = `Usage: shieldcortex audit [options]
+
+Run a full security audit of the agent environment.
+
+Options:
+  --json              JSON output
+  --markdown, --md    Markdown output
+  --sarif             SARIF 2.1.0 (GitHub Code Scanning)
+  --ci                CI mode (JSON; exit 1 on critical/high)
+  --deps              Also scan ./node_modules
+  --deps-global       Also scan global npm node_modules
+  --deps-path <path>  Scan a specific node_modules path
+  --quarantine        Quarantine CRITICAL/HIGH deps (implies --deps)
+  --clean --force     Permanently delete CRITICAL deps
+  --auto-protect      Auto-quarantine CRITICAL deps
+  -h, --help          Show this help (never runs the scan)
+`;
 
 interface AuditOptions {
   format: 'terminal' | 'json' | 'markdown' | 'sarif';
@@ -114,6 +133,11 @@ function parseAuditArgs(args: string[]): AuditOptions {
  * Run the full audit.
  */
 export async function handleAuditCommand(args: string[]): Promise<void> {
+  if (wantsHelp(args)) {
+    console.log(AUDIT_HELP);
+    return;
+  }
+
   const options = parseAuditArgs(args);
   const start = Date.now();
 

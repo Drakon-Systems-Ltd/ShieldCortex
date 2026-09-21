@@ -29,6 +29,17 @@ import {
   type ReviewedScriptEntry,
 } from '../defence/iron-dome/reviewed-scripts.js';
 import { getReviewedScriptsRaw, setReviewedScripts } from '../cloud/config.js';
+import { wantsHelp } from './wants-help.js';
+
+export const ALLOWLIST_HELP = `Usage: shieldcortex allowlist [list|add|remove|verify|scan]
+
+  list                         Show pinned scripts and drift (default)
+  add <path> [--note "why"]    Pin a reviewed script (TTY required)
+  remove <path>                Unpin (TTY required)
+  verify                       Exit 1 if any pinned file drifted
+  scan                         Discover cron scripts and TTY-batch-review
+  -h, --help                   Show this help
+`;
 
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
@@ -172,6 +183,12 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number |
 
   const args = argv.filter((a) => a !== '--');
   const sub = args[0];
+
+  // --help / -h must not list, pin, or scan. Check before any config read.
+  if (wantsHelp(args)) {
+    log(ALLOWLIST_HELP);
+    return 0;
+  }
 
   // Scan (#309) dispatches before the entries read: it does its own read, and
   // the dynamic import keeps the module edge one-directional (scan imports

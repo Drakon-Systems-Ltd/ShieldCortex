@@ -9,6 +9,7 @@ import {
   INTERNAL_PATTERNS,
   type SensitivityPattern,
 } from './patterns.js';
+import { detectPII } from './pii.js';
 
 function matchPatterns(
   text: string,
@@ -58,6 +59,17 @@ export function classifyContent(
   } else if (internal.labels.length > 0) {
     level = 'INTERNAL';
     confidence = internal.maxWeight;
+  }
+
+  // #510: identifier-grade PII (NI number, SSN, tax id, salary) is at least
+  // CONFIDENTIAL. It never raises to RESTRICTED — PII is redacted, not blocked.
+  const piiKinds = [...new Set(detectPII(text).filter(f => f.identifier).map(f => f.kind))];
+  if (piiKinds.length > 0) {
+    allLabels.push(...piiKinds.map(kind => `pii:${kind}`));
+    if (level === 'PUBLIC' || level === 'INTERNAL') {
+      level = 'CONFIDENTIAL';
+      confidence = 0.85;
+    }
   }
 
   return {
