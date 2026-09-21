@@ -211,10 +211,23 @@ function matchIsWellKnownNonSecret(content: string, start: number, end: number):
   const tokenChar = /[A-Za-z0-9-]/;
   let s = start;
   let e = end;
-  while (s > 0 && tokenChar.test(content[s - 1])) s--;
-  while (e < content.length && tokenChar.test(content[e])) e++;
+  // The longest token the allowlist accepts is 64 characters, so the walk
+  // stops as soon as the token is longer than that: a run of 80,000
+  // alphanumerics (space-separated keys in the collapsed view, #544 F4) used
+  // to be walked whole for every match, which made the pass quadratic.
+  while (s > 0 && tokenChar.test(content[s - 1])) {
+    s--;
+    if (e - s > MAX_WELL_KNOWN_TOKEN) return false;
+  }
+  while (e < content.length && tokenChar.test(content[e])) {
+    e++;
+    if (e - s > MAX_WELL_KNOWN_TOKEN) return false;
+  }
   return isWellKnownNonSecret(content.slice(s, e));
 }
+
+/** SHA-256 hex is the longest form `isWellKnownNonSecret` accepts. */
+const MAX_WELL_KNOWN_TOKEN = 64;
 
 // ── #543: separator-split evasion ──
 //
@@ -500,15 +513,24 @@ function matchesSpanExactly(compiled: CompiledPattern, text: string, start: numb
 
 /**
  * A fragment of a collapsed hit: `[cs, ce)` is the part inside the hit,
- * `[fullCs, fullCe)` the whole run between separators it belongs to. They
- * differ only for the first and last fragment when the hit starts or ends
- * mid-run (`SALE|S`): prose-ness is judged on the whole word, counts use the
- * part inside the hit.
+ * `[fullCs, fullCe)` the whole word it belongs to. They differ only for the
+ * first and last fragment when the hit starts or ends mid-word (`SALE|S`):
+ * prose-ness is judged on the whole word, counts use the part inside the hit.
+ *
+ * The word is extended outward across alphanumerics only, never across the
+ * punctuation that wraps it (`"…"`, `**…**`, `(…)`, a trailing `:` or `,`,
+ * a JSON string's closing quote). Extending across the whole run between
+ * separators made `"ASIA Q3 GDP GROWTH FORECAST"` a key while the bare
+ * heading was clean: the boundary word became `FORECAST"`, which is neither a
+ * word nor letters-only (#544 F3). The hit's own characters are untouched —
+ * a `-` or `_` inside a key prefix stays inside its fragment.
  */
 interface Fragment { cs: number; ce: number; fullCs: number; fullCe: number }
 
 /** Longest run still judged as a possible word; beyond it a fragment is OTHER. */
 const MAX_WORD_FRAGMENT = 48;
+
+const WORD_CHAR = /[A-Za-z0-9]/;
 
 function fragmentsOf(view: CollapsedView, cStart: number, cEnd: number): Fragment[] {
   const { text, map } = view;
@@ -521,9 +543,19 @@ function fragmentsOf(view: CollapsedView, cStart: number, cEnd: number): Fragmen
   if (frags.length === 0) return frags;
   for (const f of frags) f.fullCe = f.ce;
   const first = frags[0];
-  while (first.fullCs > 0 && first.ce - first.fullCs <= MAX_WORD_FRAGMENT && map[first.fullCs] === map[first.fullCs - 1] + 1) first.fullCs--;
+  while (
+    first.fullCs > 0
+    && first.ce - first.fullCs <= MAX_WORD_FRAGMENT
+    && map[first.fullCs] === map[first.fullCs - 1] + 1
+    && WORD_CHAR.test(text[first.fullCs - 1])
+  ) first.fullCs--;
   const last = frags[frags.length - 1];
-  while (last.fullCe < text.length && last.fullCe - last.cs <= MAX_WORD_FRAGMENT && map[last.fullCe] === map[last.fullCe - 1] + 1) last.fullCe++;
+  while (
+    last.fullCe < text.length
+    && last.fullCe - last.cs <= MAX_WORD_FRAGMENT
+    && map[last.fullCe] === map[last.fullCe - 1] + 1
+    && WORD_CHAR.test(text[last.fullCe])
+  ) last.fullCe++;
   return frags;
 }
 
@@ -560,8 +592,10 @@ function fullText(text: string, f: Fragment): string {
  * question with no structural answer (round 4 of #544). So the window itself
  * is judged instead:
  *
- *   - a hit that starts or ends inside a letters-only fragment (`FOREC|AST`,
- *     `EUR|ASIA`) is a heading cut mid-word, not a key;
+ *   - a hit that starts or ends inside a letters-only word (`FOREC|AST`,
+ *     `EUR|ASIA`) is a heading cut mid-word, not a key. The word is the
+ *     alphanumeric run around the boundary, so quoting, bold or bracketing the
+ *     heading, or ending it with `:` or `,`, changes nothing (#544 F3);
  *   - an aligned hit is a key only if some fragment beyond the literal prefix
  *     is key material — mixes letters and digits, is punctuated or mixed
  *     case, or is a digit run that is no period token — or the hit holds two
@@ -573,8 +607,10 @@ function fullText(text: string, f: Fragment): string {
  * after every 1, 4, 5 or 8 characters, once in the middle, or across newlines
  * is found for 99.9–100% of ids; split after every 3, for 98.3%; after every
  * 2, for 89.7%. On the generated heading corpus in the #543 test (6,000
- * headings led by `ASIA`/`AKIA`, all-caps, Title and lower case) the rule
- * fires on none.
+ * headings led by `ASIA`/`AKIA`, all-caps, Title and lower case, each also
+ * wrapped thirteen ways: double or single quotes, `**`, `_`, backticks,
+ * parentheses, brackets, a `# ` or `- ` prefix, a trailing `:` `.` `,`, and
+ * as a JSON string value; 78,000 texts) the rule fires on none.
  *
  * Residual, by design and measured: an attacker who chooses the split points
  * AND glues one letter onto either end of the id evades this rule for every
@@ -826,8 +862,13 @@ class CoverageIndex {
  *        at redaction time.
  *
  * Measured on N AWS ids each split after every 4 characters (the round-4
- * reviewer's shape): 1k / 2k / 4k / 8k ids took 23 / 120 / 393 / 2404 ms
- * before this change and grow linearly after it (see the #543 test).
+ * reviewer's shape): 1k / 2k / 4k / 8k ids joined by ` | ` took 23 / 120 /
+ * 393 / 2404 ms before this change and grow linearly after it (see the #543
+ * test). Joined by a single space the whole input is one alphanumeric run in
+ * the collapsed view, and the well-known-identifier check walked that run
+ * whole for every hit: 800 / 1600 / 3200 ids took 415 / 1704 / 6551 ms. The
+ * walk now stops past the longest token the allowlist accepts (#544 F4), and
+ * that shape is linear too.
  */
 function scanCollapsedView(
   view: CollapsedView,

@@ -18,7 +18,9 @@
  * the review-round-3 blockers (B1 severity-safe resolution, B2 innermost-first
  * trimming, B3 linear trim cost, B4 structural headings and dilution) and the
  * round-4 findings (F1 the heading precision class, judged on a generated
- * corpus; F2 linear cost in the number of split keys).
+ * corpus; F2 linear cost in the number of split keys; F3 a heading wrapped in
+ * quotes, Markdown or JSON is judged like the bare heading; F4 linear cost
+ * when the split keys are separated by spaces only).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
@@ -623,6 +625,76 @@ describe('#544 F1: the reviewer\'s headings, in every case shape', () => {
   }
 });
 
+/**
+ * Formatting a heading may wrap it (F3). Each wrapper is applied to a whole
+ * heading; the JSON case embeds it as a string value.
+ */
+const WRAPPERS: Array<[string, (s: string) => string]> = [
+  ['double quotes', s => `"${s}"`],
+  ['single quotes', s => `'${s}'`],
+  ['Markdown bold', s => `**${s}**`],
+  ['Markdown italic', s => `_${s}_`],
+  ['backticks', s => `\`${s}\``],
+  ['parentheses', s => `(${s})`],
+  ['square brackets', s => `[${s}]`],
+  ['heading prefix', s => `# ${s}`],
+  ['list prefix', s => `- ${s}`],
+  ['trailing colon', s => `${s}:`],
+  ['trailing full stop', s => `${s}.`],
+  ['trailing comma', s => `${s},`],
+  ['JSON string value', s => JSON.stringify({ title: s })],
+];
+
+describe('#544 F3: a wrapped heading is judged like the bare heading', () => {
+  // At aad81abb the bare control was clean but the three wrappings below were
+  // AWS critical/blocked: the boundary word was extended across the closing
+  // quote or asterisks (`REPORT"`), which is neither a word nor letters-only.
+  // The word is now the alphanumeric run only.
+  const CONTROL = 'ASIA 2026 REGIONAL SALES REPORT';
+  it.each([
+    ['double-quoted', `"${CONTROL}"`],
+    ['Markdown-bold', `**${CONTROL}**`],
+    ['JSON title', `{"title": "${CONTROL}"}`],
+  ])('reviewer case, %s: no finding', (_name, text) => {
+    const result = scanForCredentials(text);
+    expect(result.findings).toHaveLength(0);
+    expect(result.leaked).toBe(false);
+  });
+
+  // The same class WITHOUT a 0/1/8/9 in the window, so the base-32 fact does
+  // not clear it: only the boundary-word rule does.
+  const NO_BASE32_HELP = [
+    'ASIA Q3 GDP GROWTH FORECAST',
+    'ASIA Q3 REGIONAL SALES REPORT',
+    'ASIA FY26 BUDGET REVIEW BY REGION',
+    'ASIA Q3 PROJECT STATUS UPDATE',
+  ];
+  for (const heading of NO_BASE32_HELP) {
+    for (const [name, wrap] of WRAPPERS) {
+      it(`${name}: no finding for ${JSON.stringify(wrap(heading))}`, () => {
+        expect(splitFindings(wrap(heading))).toHaveLength(0);
+      });
+    }
+  }
+
+  it('wrapping a split key does not hide it', () => {
+    const split = splitEvery(KEYS[3].key, ' ', 4);
+    for (const [name, wrap] of WRAPPERS) {
+      const hits = splitFindings(wrap(split));
+      expect({ wrapper: name, hits: hits.length, provider: hits[0]?.provider }).toEqual({ wrapper: name, hits: 1, provider: 'aws' });
+    }
+  });
+
+  it('the hit\'s own punctuation stays inside its fragment', () => {
+    // `sk-proj-` holds `-`; only the extension OUTWARD stops at punctuation.
+    const split = splitEvery(KEYS[1].key, ' ', 6);
+    for (const [name, wrap] of WRAPPERS) {
+      const hits = splitFindings(wrap(split));
+      expect({ wrapper: name, hits: hits.length }).toEqual({ wrapper: name, hits: 1 });
+    }
+  });
+});
+
 describe('#544 F1: a generated heading corpus produces no split finding', () => {
   // ~150 common report words, abbreviations, years and period tokens, mixed at
   // random behind an `ASIA` / `AKIA` leader. Digit-bearing abbreviations
@@ -693,6 +765,17 @@ describe('#544 F1: a generated heading corpus produces no split finding', () => 
     const offenders: string[] = [];
     for (const heading of CORPUS) {
       if (splitFindings(heading).length > 0) offenders.push(heading);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the same 6,000 headings, each wrapped 13 ways (78,000 texts) → zero separator_split findings', () => {
+    const offenders: string[] = [];
+    for (const heading of CORPUS) {
+      for (const [, wrap] of WRAPPERS) {
+        const text = wrap(heading);
+        if (splitFindings(text).length > 0) offenders.push(text);
+      }
     }
     expect(offenders).toEqual([]);
   });
@@ -790,10 +873,10 @@ describe('#544 F1: alignment and key material for fixed-length single-case patte
   });
 });
 
-describe('#544 F2: cost is linear in the number of split keys', () => {
-  const timeScan = (n: number): number => {
+describe('#544 F2 / F4: cost is linear in the number of split keys', () => {
+  const timeScan = (n: number, joiner: string): number => {
     const rnd = mulberry32(7);
-    const text = Array.from({ length: n }, () => splitEvery(randomAwsId(rnd), ' ', 4)).join(' | ');
+    const text = Array.from({ length: n }, () => splitEvery(randomAwsId(rnd), ' ', 4)).join(joiner);
     let best = Infinity;
     for (let i = 0; i < 3; i++) {
       const t0 = performance.now();
@@ -805,16 +888,28 @@ describe('#544 F2: cost is linear in the number of split keys', () => {
     return best;
   };
 
-  it('8k split ids cost at most a generous linear multiple of 1k', () => {
+  it('F2: 8k split ids joined by " | " cost at most a generous linear multiple of 1k', () => {
     // Previous head: 23 / 120 / 393 / 2404 ms for 1k / 2k / 4k / 8k ids
     // (resolution filtered every candidate against every candidate, and the
     // redaction spliced the content once per finding). Now 14 / 25 / 47 / 92
     // ms on the development box. The bound is on the RATIO so a slow CI box
     // passes; the old code's ratio was over 100.
-    const t1k = timeScan(1000);
-    const t8k = timeScan(8000);
+    const t1k = timeScan(1000, ' | ');
+    const t8k = timeScan(8000, ' | ');
     expect(t8k).toBeLessThan(20 * t1k + 200);
     expect(t8k).toBeLessThan(4000);
+  });
+
+  it('F4: 3200 split ids joined by a single space cost at most a generous linear multiple of 800', () => {
+    // With spaces only the collapsed view is ONE alphanumeric run, and the
+    // well-known-identifier check walked it whole for every hit: 415 / 1704 /
+    // 6551 ms for 800 / 1600 / 3200 ids at the previous head (comma-joined
+    // controls 12 / 22 / 56 ms). Now 14 / 30 / 46 ms. Same ratio bound as F2;
+    // the old ratio was about 16 for a 4x input.
+    const t800 = timeScan(800, ' ');
+    const t3200 = timeScan(3200, ' ');
+    expect(t3200).toBeLessThan(10 * t800 + 200);
+    expect(t3200).toBeLessThan(4000);
   });
 });
 
