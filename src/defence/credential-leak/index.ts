@@ -610,7 +610,12 @@ function fullText(text: string, f: Fragment): string {
  * headings led by `ASIA`/`AKIA`, all-caps, Title and lower case, each also
  * wrapped thirteen ways: double or single quotes, `**`, `_`, backticks,
  * parentheses, brackets, a `# ` or `- ` prefix, a trailing `:` `.` `,`, and
- * as a JSON string value; 78,000 texts) the rule fires on none.
+ * as a JSON string value; 78,000 texts) the rule fires on none. The price
+ * of judging the boundary word on its letters is that a delimiter no longer
+ * rescues an id whose fragments all read as words or period tokens:
+ * comma-delimited every-4 splits went from 100% to 99.89% found, the plain
+ * space rate. Counting the delimiter as evidence would fire on 1,564 of the
+ * 78,000 wrapped headings, so it is not done.
  *
  * Residual, by design and measured: an attacker who chooses the split points
  * AND glues one letter onto either end of the id evades this rule for every

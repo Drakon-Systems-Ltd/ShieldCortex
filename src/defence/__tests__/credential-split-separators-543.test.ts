@@ -685,6 +685,34 @@ describe('#544 F3: a wrapped heading is judged like the bare heading', () => {
     }
   });
 
+  it('a comma-delimited split id whose fragments carry key material is still found', () => {
+    const split = splitEvery(KEYS[3].key, ' ', 4); // `Z7Q3`, `F6XM`, `2K5V`, `4B3T`
+    for (const text of [`${split}, ${split}`, `ids: ${split},${split}`, `[${split}, ${split}]`]) {
+      const hits = splitFindings(text);
+      expect(hits).toHaveLength(2);
+      expect(hits.every(h => h.provider === 'aws')).toBe(true);
+    }
+  });
+
+  it('documented residual: a delimiter no longer rescues an id whose fragments all read as words or periods', () => {
+    // `7733` is a period token and `RNCN`, `QADT`, `EBPO` are letters-only, so
+    // this split id is dismissed with plain spaces (the documented 0.1%
+    // every-4 residual). At 61f11ac3 a trailing comma glued onto `EBPO`
+    // made that fragment key material by accident and the id was found;
+    // the boundary word is now the alphanumeric run, so it is not. Measured
+    // on 20,000 random ids split every 4 and comma-delimited: 100% found at
+    // 61f11ac3, 99.89% now — the same rate as with spaces alone. Treating the
+    // delimiter as evidence would recover them but fires on 1,564 of the
+    // 78,000 wrapped headings, so it is not done. This test pins the
+    // residual so a change that moves it is visible.
+    const RESIDUAL = 'AKIA 7733 RNCN QADT EBPO';
+    expect(splitFindings(`id: ${RESIDUAL} end`)).toHaveLength(0);
+    expect(splitFindings(`id: ${RESIDUAL}, end`)).toHaveLength(0);
+    expect(splitFindings(`${RESIDUAL}, ${RESIDUAL}`)).toHaveLength(0);
+    // Contiguous, the direct pass still blocks it.
+    expect(providerFindings(scanForCredentials(`id: ${rejoin(RESIDUAL)} end`).findings, 'aws')).toHaveLength(1);
+  });
+
   it('the hit\'s own punctuation stays inside its fragment', () => {
     // `sk-proj-` holds `-`; only the extension OUTWARD stops at punctuation.
     const split = splitEvery(KEYS[1].key, ' ', 6);
