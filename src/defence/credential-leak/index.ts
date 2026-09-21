@@ -377,14 +377,19 @@ const FUNCTION_WORDS_2 = new Set([
  */
 const PERIOD_TOKEN = /^(?:\d{1,4}|(?:[QHWMYDPT]|FY|CY|WK|[qhwmydpt]|fy|cy|wk)\d{1,4}|\d{1,2}(?:[QHWMYD]|ST|ND|RD|TH|[qhwmyd]|st|nd|rd|th))$/;
 
-type FragmentClass = 'word' | 'period' | 'other';
+type FragmentClass = 'word' | 'period' | 'letters' | 'other';
+
+/** Letters only, in one case or Capitalised: `GDP`, `HR`, `Headcount`, `q`. */
+const LETTERS_ONLY = /^(?:[A-Z]+|[a-z]+|[A-Z][a-z]+)$/;
 
 /**
  * Classify one whole fragment (the run between two separators) for the prose
  * decision below. WORD: reads as an English word (`fragmentReadsAsProse`), or
  * a two-letter function word in one case or Capitalised. PERIOD: a short
- * period token. OTHER: everything else — a lone letter, a digit-and-letter
- * mix, punctuation, mixed case.
+ * period token. LETTERS: letters only, one case or Capitalised, but not a
+ * word by the letter-pair test — an abbreviation (`GDP`, `HR`), a word with a
+ * pair English rarely uses (`BUDGET`, `PROJECT`), or a lone letter. OTHER:
+ * everything else — a digit-and-letter mix, punctuation, mixed case.
  */
 function classifyFragment(fragment: string): FragmentClass {
   if (fragmentReadsAsProse(fragment)) return 'word';
@@ -398,6 +403,7 @@ function classifyFragment(fragment: string): FragmentClass {
     }
   }
   if (PERIOD_TOKEN.test(fragment)) return 'period';
+  if (LETTERS_ONLY.test(fragment)) return 'letters';
   return 'other';
 }
 
@@ -440,9 +446,23 @@ interface CompiledPattern {
   /** Sticky copy for exact-span checks; compiled once per pattern (#544 B3). */
   sticky: RegExp;
   prefixLength: number;
+  /**
+   * Fixed length in one letter case (`A[KS]IA[0-9A-Z]{16}`): no open-ended
+   * quantifier, and the letters it admits are upper OR lower, not both. Such
+   * a pattern cuts a 20-character window out of any shouted heading, so its
+   * collapsed hits are judged by the window's alignment (see `hitReadsAsProse`).
+   */
+  fixedSingleCase: boolean;
 }
 
 const COMPILED_PATTERNS = new WeakMap<CredentialPattern, CompiledPattern>();
+
+/** No `{n,}` / `{n,m}` / `+` / `*` outside look-arounds, and not both `a-z` and `A-Z`. */
+function isFixedSingleCase(source: string): boolean {
+  const body = source.replace(/\(\?<?[=!][^)]*\)/g, '');
+  if (/\{\d+,\d*\}/.test(body) || /(?<!\\)[+*]/.test(body)) return false;
+  return !(/a-z/.test(body) && /A-Z/.test(body));
+}
 
 function compilePattern(pattern: CredentialPattern): CompiledPattern {
   let compiled = COMPILED_PATTERNS.get(pattern);
@@ -452,6 +472,7 @@ function compilePattern(pattern: CredentialPattern): CompiledPattern {
       global: new RegExp(pattern.regex.source, flags + 'g'),
       sticky: new RegExp(pattern.regex.source, flags + 'y'),
       prefixLength: literalPrefixLength(pattern.regex.source),
+      fixedSingleCase: isFixedSingleCase(pattern.regex.source),
     };
     COMPILED_PATTERNS.set(pattern, compiled);
   }
@@ -511,30 +532,79 @@ function fullText(text: string, f: Fragment): string {
 }
 
 /**
- * Does a collapsed hit read as a numbered heading or sentence rather than a
- * key? Structural, not a threshold over a soup of characters (#544 B4):
+ * Does a collapsed hit read as a heading or a sentence rather than a key?
+ * Two structural rules, chosen by the shape of the pattern; neither consults
+ * a vocabulary beyond the letter-pair test in `fragmentReadsAsProse`.
  *
- *   - every fragment must be a WORD or a PERIOD token — one OTHER fragment
- *     (a lone letter, `4K2M`, `Ab1C`) and the hit is a key. A fragment that
- *     lies wholly inside the pattern's literal prefix (`sk-proj-`) is exempt;
- *   - at least one WORD of three or more letters must sit beyond that prefix
- *     (`ASIA` alone is the pattern, `REVENUE` is the heading);
+ * Open-ended or mixed-case patterns (`sk-…{20,}`, `AIza` + 35 of base-62,
+ * `ghp_…`), the strict rule (#544 B4):
+ *
+ *   - every fragment must be a WORD or a PERIOD token — one fragment that is
+ *     neither (a lone letter, an abbreviation, `4K2M`, `Ab1C`) and the hit is
+ *     a key. A fragment that lies wholly inside the pattern's literal prefix
+ *     (`sk-proj-`) is exempt;
+ *   - at least one WORD of three or more letters must sit beyond that prefix;
  *   - WORD characters must make up half the hit or more.
  *
- * The decision cannot be diluted: an attacker who pads a split key with
- * filler still has the key's own fragments in the hit, and a real key body
- * does not partition into words and period tokens. Residual, measured with an
- * exact attacker-optimal split (dynamic programme over every partition and
- * every continuation of the last fragment) over 20,000 random ids per class,
- * each predicted evasion re-run through the scanner: an upper-case base-32
- * AWS id body (16 of [A-Z2-7]) is dismissed for 1.4% of ids, because a random
- * run of capitals sometimes passes the letter-pair test (`LDLNER`, `OHNHEI`);
- * the 60% character-share rule this replaces was dismissed for 27.1%. A
- * mixed-case base-62 body (`sk-…` open-ended with word padding, `AIza…` fixed
- * length) is dismissed for none of 20,000.
+ * The decision cannot be diluted: filler around a split key leaves the key's
+ * own fragments in the hit, and a random mixed-case body does not partition
+ * into words. Measured with the exact attacker-optimal split (dynamic
+ * programme over every partition, plus a glued letter at either end) in
+ * `scripts/lab/credential-split-evasion.mts`: 0 of 20,000 random `sk-` and
+ * 0 of 20,000 `AIza` bodies can be dismissed.
+ *
+ * Fixed-length single-case patterns (`A[KS]IA[0-9A-Z]{16}`), the alignment
+ * rule. Such a pattern cuts a window of fixed width out of any shouted
+ * heading, and with a `Q3` or an `FY26` in the window the strict rule has to
+ * decide whether `GDP`, `PROJECT` or `HEADCOUNT` is a word — a vocabulary
+ * question with no structural answer (round 4 of #544). So the window itself
+ * is judged instead:
+ *
+ *   - a hit that starts or ends inside a letters-only fragment (`FOREC|AST`,
+ *     `EUR|ASIA`) is a heading cut mid-word, not a key;
+ *   - an aligned hit is a key only if some fragment beyond the literal prefix
+ *     is key material — mixes letters and digits, is punctuated or mixed
+ *     case, or is a digit run that is no period token — or the hit holds two
+ *     or more lone letters (a key split after every character).
+ *
+ * A split key keeps its own fragments, and a fragment of a random base-32 body
+ * is key material unless the split happens to isolate letters from digits.
+ * Measured (same script, 19,312 random AWS ids that hold a digit): a key split
+ * after every 1, 4, 5 or 8 characters, once in the middle, or across newlines
+ * is found for 99.9–100% of ids; split after every 3, for 98.3%; after every
+ * 2, for 89.7%. On the generated heading corpus in the #543 test (6,000
+ * headings led by `ASIA`/`AKIA`, all-caps, Title and lower case) the rule
+ * fires on none.
+ *
+ * Residual, by design and measured: an attacker who chooses the split points
+ * AND glues one letter onto either end of the id evades this rule for every
+ * id, and one who only inserts whitespace evades it for 94.2% of ids (the
+ * strict rule, which cannot clear the heading corpus, is evaded for 1.7% but
+ * blocks about one all-caps heading in ten of that corpus). The
+ * collapsed pass therefore catches an AWS id that was wrapped, tabulated or
+ * spaced out — not one hidden by an adversary who knows this rule. A heading
+ * whose abbreviation carries a digit (`B2B`, `B2C`, `3PL`) is key material
+ * by this rule and still fires when the window lands on it.
  */
-function hitReadsAsProse(text: string, frags: Fragment[], cStart: number, cEnd: number, prefixLength: number): boolean {
-  const prefixEnd = cStart + prefixLength;
+function hitReadsAsProse(text: string, frags: Fragment[], cStart: number, cEnd: number, compiled: CompiledPattern): boolean {
+  const prefixEnd = cStart + compiled.prefixLength;
+
+  if (compiled.fixedSingleCase) {
+    const first = frags[0];
+    const last = frags[frags.length - 1];
+    if (first.cs > first.fullCs && LETTERS_ONLY.test(fullText(text, first))) return true;
+    if (last.ce < last.fullCe && LETTERS_ONLY.test(fullText(text, last))) return true;
+    let lone = 0;
+    for (const f of frags) {
+      if (f.ce <= prefixEnd) continue;
+      const full = fullText(text, f);
+      const cls = classifyFragment(full);
+      if (cls === 'other') return false;
+      if (cls === 'letters' && full.length === 1 && ++lone >= 2) return false;
+    }
+    return true;
+  }
+
   let wordChars = 0;
   let bodyWord = false;
   for (const f of frags) {
@@ -543,7 +613,7 @@ function hitReadsAsProse(text: string, frags: Fragment[], cStart: number, cEnd: 
     if (cls === 'word') {
       wordChars += inHit;
       if (inHit >= 3 && f.cs >= prefixEnd) bodyWord = true;
-    } else if (cls === 'other' && f.ce > prefixEnd) {
+    } else if (cls !== 'period' && f.ce > prefixEnd) {
       return false;
     }
   }
@@ -601,7 +671,9 @@ function validateCandidate(
   const isProse = (f: Fragment) => fragmentReadsAsProse(fullText(text, f));
   const valueGates = (m: RegExpExecArray): boolean => {
     const v = m[1] ?? m[0];
-    return !(pattern.minLength && v.length < pattern.minLength) && collapsedValueLooksLikeKeyMaterial(v);
+    return !(pattern.minLength && v.length < pattern.minLength)
+      && collapsedValueLooksLikeKeyMaterial(v)
+      && (!pattern.collapsedValuePattern || pattern.collapsedValuePattern.test(v));
   };
 
   // Trailing trim.
@@ -643,7 +715,10 @@ function validateCandidate(
   if (isAllowlisted(secretValue, cfg.allowlist)) return null;
   if (pattern.type === 'env_secret' && isDocumentationPlaceholder(secretValue)) return null;
   if (!collapsedValueLooksLikeKeyMaterial(secretValue)) return null;
-  if (hitReadsAsProse(text, frags, cStart, cEnd, compiled.prefixLength)) return null;
+  // A fact about issued values the discovery regex is looser than (AWS ids
+  // are base-32). Collapsed pass only; the direct pass never consults it.
+  if (pattern.collapsedValuePattern && !pattern.collapsedValuePattern.test(secretValue)) return null;
+  if (hitReadsAsProse(text, frags, cStart, cEnd, compiled)) return null;
   // Git SHA / UUID with a separator inside is still a public identifier.
   // The token is only contiguous in the collapsed view, so test it there.
   if (matchIsWellKnownNonSecret(text, cStart, cEnd)) return null;
@@ -671,6 +746,52 @@ function collapsedIndexAtOrAfter(map: number[], cStart: number, cEnd: number, at
   return lo;
 }
 
+/** First index in `sorted` (ascending by `key`) whose key is >= `at`. */
+function lowerBound<T>(sorted: T[], key: (x: T) => number, at: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (key(sorted[mid]) < at) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * "Is `[start, end)` covered whole by a recorded range of severity >= rank?"
+ * answered in O(log n) (#544 round 4). Starts are discretised up front; one
+ * Fenwick tree per severity level holds, per start, the furthest end recorded
+ * at or before it, so a query is a prefix maximum over the levels that count.
+ */
+class CoverageIndex {
+  private readonly starts: number[];
+  private readonly trees: Int32Array[];
+
+  constructor(starts: Iterable<number>) {
+    this.starts = [...new Set(starts)].sort((a, b) => a - b);
+    this.trees = Object.keys(SEVERITY_RANK).map(() => new Int32Array(this.starts.length + 1).fill(-1));
+  }
+
+  add(start: number, end: number, severity: CredentialSeverity): void {
+    const tree = this.trees[SEVERITY_RANK[severity]];
+    for (let i = lowerBound(this.starts, x => x, start) + 1; i < tree.length; i += i & -i) {
+      if (tree[i] < end) tree[i] = end;
+    }
+  }
+
+  covers(start: number, end: number, rank: number): boolean {
+    const upto = lowerBound(this.starts, x => x, start + 1);
+    for (let level = rank; level < this.trees.length; level++) {
+      const tree = this.trees[level];
+      for (let i = upto; i > 0; i -= i & -i) {
+        if (tree[i] >= end) return true;
+      }
+    }
+    return false;
+  }
+}
+
 /**
  * Second pattern pass over the collapsed view. Each hit is mapped back to its
  * original span, which is what gets recorded (position) and redacted (range).
@@ -684,7 +805,8 @@ function collapsedIndexAtOrAfter(map: number[], cStart: number, cEnd: number, at
  * is the rest of the key, redacting the head has already destroyed it); and a
  * direct range that begins strictly inside the run says where a token starts,
  * so the run is cut there when the pattern still matches the cut span
- * (`sk-… and ghp_…` is two keys and a word, not one key).
+ * (`sk-… and ghp_…` is two keys and a word, not one key). Both lookups bisect
+ * the direct ranges sorted by start.
  *
  * Resolution then works over the whole candidate set (#544 B1):
  *
@@ -692,13 +814,20 @@ function collapsedIndexAtOrAfter(map: number[], cStart: number, cEnd: number, at
  *        another pattern's candidate strictly inside it is cut at that start
  *        if the cut span still matches and re-validates; otherwise it stays
  *        whole. An open-ended pattern therefore cannot swallow a neighbour
- *        (`sk_test_… AIza…` is a Stripe key and a Google key);
+ *        (`sk_test_… AIza…` is a Stripe key and a Google key). The inner
+ *        starts are read off the candidates sorted by start, so the pass is
+ *        linear in the candidates plus the containments, not quadratic;
  *   (ii) coverage suppression only ever goes downward: candidates are taken
  *        by severity, then length, and one is dropped only when an already
- *        accepted range of equal or higher severity covers it whole. Nothing
- *        already found — by the direct pass or here — is ever removed, so a
- *        lower-severity finding can never hide a higher one. Overlapping
- *        ranges are merged at redaction time.
+ *        accepted range of equal or higher severity covers it whole
+ *        (`CoverageIndex`, logarithmic per candidate). Nothing already found
+ *        — by the direct pass or here — is ever removed, so a lower-severity
+ *        finding can never hide a higher one. Overlapping ranges are merged
+ *        at redaction time.
+ *
+ * Measured on N AWS ids each split after every 4 characters (the round-4
+ * reviewer's shape): 1k / 2k / 4k / 8k ids took 23 / 120 / 393 / 2404 ms
+ * before this change and grow linearly after it (see the #543 test).
  */
 function scanCollapsedView(
   view: CollapsedView,
@@ -709,6 +838,8 @@ function scanCollapsedView(
 ): { findings: CredentialFinding[]; matchedRanges: MatchedRange[] } {
   const { text, map } = view;
   const candidates: CollapsedCandidate[] = [];
+  const direct = [...matchedRanges].sort((a, b) => a.start - b.start || a.end - b.end);
+  const directStart = (r: MatchedRange) => r.start;
 
   // ── Discovery ──
   for (const pattern of patterns) {
@@ -731,18 +862,19 @@ function scanCollapsedView(
       const spanStart = map[cStart];
       const spanEnd = map[cEnd - 1] + 1;
 
-      const anchored = matchedRanges.find(r => r.start === spanStart && r.end < spanEnd);
+      // Direct ranges starting at `spanStart`, then the first starting inside.
+      let i = lowerBound(direct, directStart, spanStart);
+      let anchored: MatchedRange | undefined;
+      for (; i < direct.length && direct[i].start === spanStart; i++) {
+        if (direct[i].end < spanEnd) anchored = direct[i];
+      }
       if (anchored) {
         regex.lastIndex = collapsedIndexAtOrAfter(map, cStart, cEnd, anchored.end);
         continue;
       }
 
-      let cutAt = -1;
-      for (const r of matchedRanges) {
-        if (r.start > spanStart && r.start < spanEnd && (cutAt === -1 || r.start < cutAt)) cutAt = r.start;
-      }
-      if (cutAt !== -1) {
-        const cc = collapsedIndexAtOrAfter(map, cStart, cEnd, cutAt);
+      if (i < direct.length && direct[i].start < spanEnd) {
+        const cc = collapsedIndexAtOrAfter(map, cStart, cEnd, direct[i].start);
         const m = matchesSpanExactly(compiled, text, cStart, cc);
         if (m) {
           regex.lastIndex = cc;
@@ -757,15 +889,16 @@ function scanCollapsedView(
   }
 
   // ── Resolution (i): cut at another pattern's token start ──
+  const byStart = [...candidates].sort((a, b) => a.start - b.start);
+  const candidateStart = (c: CollapsedCandidate) => c.start;
   for (let idx = 0; idx < candidates.length; idx++) {
     const x = candidates[idx];
-    const innerStarts = [...new Set(
-      candidates
-        .filter(y => y.pattern !== x.pattern && y.start > x.start && y.start < x.end)
-        .map(y => y.start),
-    )].sort((a, b) => a - b);
-    for (const at of innerStarts) {
-      const cc = collapsedIndexAtOrAfter(map, x.cStart, x.cEnd, at);
+    let lastAt = -1;
+    for (let j = lowerBound(byStart, candidateStart, x.start + 1); j < byStart.length && byStart[j].start < x.end; j++) {
+      const y = byStart[j];
+      if (y.pattern === x.pattern || y.start === lastAt) continue;
+      lastAt = y.start;
+      const cc = collapsedIndexAtOrAfter(map, x.cStart, x.cEnd, y.start);
       if (cc <= x.cStart) continue;
       const m = matchesSpanExactly(x.compiled, text, x.cStart, cc);
       if (!m) continue;
@@ -783,11 +916,11 @@ function scanCollapsedView(
     || (b.end - b.start) - (a.end - a.start)
     || a.start - b.start);
 
+  const coverage = new CoverageIndex([...direct.map(r => r.start), ...candidates.map(c => c.start)]);
+  for (const r of direct) coverage.add(r.start, r.end, r.severity ?? 'low');
+
   for (const c of candidates) {
-    const rank = SEVERITY_RANK[c.pattern.severity];
-    const covered = matchedRanges.some(r =>
-      c.start >= r.start && c.end <= r.end && SEVERITY_RANK[r.severity ?? 'low'] >= rank);
-    if (covered) continue;
+    if (coverage.covers(c.start, c.end, SEVERITY_RANK[c.pattern.severity])) continue;
 
     findings.push({
       type: c.pattern.type,
@@ -805,10 +938,25 @@ function scanCollapsedView(
       replacement: `[REDACTED-${c.pattern.type}${c.pattern.provider ? `-${c.pattern.provider}` : ''}]`,
       severity: c.pattern.severity,
     });
+    coverage.add(c.start, c.end, c.pattern.severity);
   }
 
   return { findings, matchedRanges };
 }
+
+/**
+ * Building blocks of the collapsed-pass prose decision, exported for the
+ * measurement script (`scripts/lab/credential-split-evasion.mts`) and tests.
+ * Not part of the public API.
+ */
+export const collapsedPassInternals = {
+  classifyFragment,
+  fragmentReadsAsProse,
+  hitReadsAsProse,
+  literalPrefixLength,
+  PERIOD_TOKEN,
+  RARE_BIGRAMS,
+};
 
 // ── Scanner ──
 
@@ -1018,13 +1166,18 @@ function buildRedactedContent(
   ranges: Array<{ start: number; end: number; replacement: string }>,
 ): string {
   const merged = mergeOverlappingRanges(ranges);
-  // Sort by start position descending to replace from end to start
-  const sorted = [...merged].sort((a, b) => b.start - a.start);
-  let result = content;
+  // One left-to-right pass over the merged, disjoint ranges: splicing the
+  // content once per range copied the whole string each time, which made
+  // redacting N findings cost N × content length (#544 round 4).
+  const sorted = [...merged].sort((a, b) => a.start - b.start);
+  const parts: string[] = [];
+  let cursor = 0;
   for (const range of sorted) {
-    result = result.slice(0, range.start) + range.replacement + result.slice(range.end);
+    parts.push(content.slice(cursor, range.start), range.replacement);
+    cursor = range.end;
   }
-  return result;
+  parts.push(content.slice(cursor));
+  return parts.join('');
 }
 
 /**

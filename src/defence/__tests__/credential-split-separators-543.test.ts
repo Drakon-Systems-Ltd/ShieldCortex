@@ -16,7 +16,9 @@
  * `scanForCredentials`; the precision cases fail if the pass is added without
  * the letter+digit gate and the structural prose gate. The `#544` blocks are
  * the review-round-3 blockers (B1 severity-safe resolution, B2 innermost-first
- * trimming, B3 linear trim cost, B4 structural headings and dilution).
+ * trimming, B3 linear trim cost, B4 structural headings and dilution) and the
+ * round-4 findings (F1 the heading precision class, judged on a generated
+ * corpus; F2 linear cost in the number of split keys).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
@@ -38,7 +40,8 @@ const KEYS: Array<{ provider: string; key: string; severity: 'critical' | 'high'
   { provider: 'openai', key: k('sk-', 'T3stK3yAbCdEfGh1JkLmN0pQrStUv2WxYz'), severity: 'critical' },
   { provider: 'openai', key: k('sk-proj-', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv'), severity: 'critical' },
   { provider: 'anthropic', key: k('sk-ant-api03-', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9'), severity: 'critical' },
-  { provider: 'aws', key: k('AKIA', 'Z7Q3F9XM2K8V4B1T'), severity: 'critical' },
+  // Base-32 body ([A-Z2-7]) like every issued AWS access key id (#544 round 4).
+  { provider: 'aws', key: k('AKIA', 'Z7Q3F6XM2K5V4B3T'), severity: 'critical' },
   { provider: 'github', key: k('ghp_', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2'), severity: 'critical' },
   { provider: 'stripe', key: k('sk_live_', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8'), severity: 'critical' },
   { provider: 'google', key: k('AIza', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx'), severity: 'critical' },
@@ -520,7 +523,7 @@ describe('#544 B4: numbered headings are dismissed structurally; split keys are 
 
   const AWS_IDS = [
     KEYS[3].key,
-    k('ASIA', '7XQ4KZ2M9VB3TW6N'),
+    k('ASIA', '7XQ4KZ2M6VB3TW5N'),
     k('AKIA', 'J5R2WP7QX3ZK4M6T'),
   ];
   for (const id of AWS_IDS) {
@@ -552,6 +555,266 @@ describe('#544 B4: numbered headings are dismissed structurally; split keys are 
       expect(hits[0].position).toBe(0);
       expect(rejoin(result.redactedContent ?? '')).not.toContain(KEYS[1].key);
     }
+  });
+});
+
+// ── #544 review round 4 ─────────────────────────────────────────────────────
+
+/** Deterministic PRNG (mulberry32) so the generated corpus is the same on every run. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+/** A random synthetic AWS access key id with a base-32 body, as issued ids have. */
+function randomAwsId(rnd: () => number): string {
+  let body = '';
+  for (let i = 0; i < 16; i++) body += BASE32[Math.floor(rnd() * 32)];
+  return `AKIA${body}`;
+}
+
+function splitFindings(text: string): CredentialFinding[] {
+  return scanForCredentials(text).findings.filter(f => f.evasion === 'separator_split');
+}
+
+describe('#544 F1: the reviewer\'s headings, in every case shape', () => {
+  // Each string is clean on main and produced an AWS critical/blocked finding
+  // at the previous head. The first four end the 20-character AWS window
+  // mid-word (FOREC|AST, HEAD|COUNT, STATU|S, ACQU|ISITION); `GDP`, `HEADCOUNT`,
+  // `PROJECT` and `ACQUISITION` all fail the letter-pair test, which is why a
+  // rule that judges words could not clear them without a vocabulary.
+  const REVIEWER = [
+    'ASIA Q1 GDP GROWTH FORECAST',
+    'ASIA 2026 EMPLOYEE HEADCOUNT REPORT',
+    'ASIA 2026 PROJECT STATUS UPDATE',
+    'ASIA 2026 CUSTOMER ACQUISITION REPORT',
+    'ASIA Q1 Q2 Q3 Q4 REVENUE BY REGION',
+    'ASIA 2026 REGIONAL SALES REPORT',
+    // The same class without a 0/1/8/9 in the window, so the base-32 fact
+    // alone does not clear them: alignment does.
+    'ASIA Q3 GDP GROWTH FORECAST',
+    'ASIA Q3 EMPLOYEE HEADCOUNT REPORT',
+    'ASIA Q3 PROJECT STATUS UPDATE',
+    'ASIA H2 CUSTOMER ACQUISITION REPORT',
+    'ASIA FY26 BUDGET REVIEW BY REGION',
+    'ASIA Q3 GDP KPI COGS OPEX REVIEW',
+  ];
+  const shapes: Array<[string, (s: string) => string]> = [
+    ['ALL CAPS', s => s],
+    ['Title Case', s => s.split(' ').map(w => /^[A-Z]{2,3}\d*$|^\d/.test(w) && w.length <= 4 ? w : w[0] + w.slice(1).toLowerCase()).join(' ')],
+    ['lower case', s => s.toLowerCase()],
+  ];
+  for (const heading of REVIEWER) {
+    for (const [shape, fn] of shapes) {
+      it(`${shape}: no finding for ${JSON.stringify(fn(heading))}`, () => {
+        const result = scanForCredentials(fn(heading));
+        expect(result.findings).toHaveLength(0);
+        expect(result.leaked).toBe(false);
+      });
+    }
+  }
+});
+
+describe('#544 F1: a generated heading corpus produces no split finding', () => {
+  // ~150 common report words, abbreviations, years and period tokens, mixed at
+  // random behind an `ASIA` / `AKIA` leader. Digit-bearing abbreviations
+  // (`B2B`, `3PL`) are deliberately absent: a fragment that mixes letters and
+  // digits IS key material by the rule under test, and a heading that holds
+  // one still fires when the 20-character window lands on it (documented
+  // residual in the CHANGELOG).
+  const WORDS = `revenue sales report regional quarterly annual growth forecast outlook summary review update status
+    project employee headcount customer acquisition retention pipeline budget actual variance margin gross net
+    operating profit loss cost expense capital spend plan target results performance metrics dashboard analysis
+    overview market segment region country territory account channel partner product portfolio service pricing
+    volume units demand supply inventory logistics shipping orders backlog bookings billing collections
+    receivables payables cash flow balance sheet income statement audit compliance risk controls governance
+    strategy priorities roadmap initiatives objectives milestones deliverables timeline schedule launch rollout
+    adoption engagement satisfaction churn renewal upsell expansion enterprise commercial consumer retail
+    wholesale digital online offline marketing campaign leads conversion funnel traffic brand awareness
+    advertising promotion discount rebate operations manufacturing production quality defects returns warranty
+    maintenance facilities fleet energy workforce staffing hiring attrition training development compensation
+    benefits payroll headline highlights lowlights issues actions decisions notes minutes meeting agenda
+    attendees deck slides appendix draft final version approved pending open closed total subtotal average
+    median peak trough weekly monthly yearly comparison trend baseline benchmark index ranking share mix rate
+    ratio percent change delta by and for of the in to on with versus per top bottom north south east west
+    central pacific europe america africa china india japan korea australia singapore vietnam thailand
+    indonesia philippines malaysia taiwan`.split(/\s+/).filter(Boolean);
+  const ACRONYMS = ('GDP KPI HR EBITDA YOY QOQ SKU CAGR ROI ARR MRR NPS CAC LTV COGS SGA OPEX CAPEX FTE PNL SLA '
+    + 'OKR EMEA APAC LATAM CFO CEO CRM ERP SAAS IT AI ML FX USD EUR JPY CNY').split(' ');
+  const PERIODS = ['2024', '2025', '2026', '2027', '2028', '2029', '2030', '2031', '2032', '2033', 'Q1', 'Q2', 'Q3', 'Q4',
+    'H1', 'H2', 'FY24', 'FY25', 'FY26', 'FY27', 'FY2026', 'W12', 'W7', 'M3', '1H', '2H', '3Q', '1st', '2nd', '3rd', '4th',
+    '7', '5', '12', '25', '33', '66'];
+  const LEADERS = ['ASIA', 'AKIA'];
+
+  function generateHeadings(n: number, seed: number): string[] {
+    const rnd = mulberry32(seed);
+    const pick = <T,>(a: T[]): T => a[Math.floor(rnd() * a.length)];
+    const out: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const tokens = [pick(LEADERS)];
+      const len = 2 + Math.floor(rnd() * 5);
+      let hasPeriod = false;
+      for (let t = 0; t < len; t++) {
+        const x = rnd();
+        if (x < 0.20) { tokens.push(pick(PERIODS)); hasPeriod = true; }
+        else if (x < 0.35) tokens.push(pick(ACRONYMS));
+        else tokens.push(pick(WORDS));
+      }
+      // Every heading carries a digit somewhere, or it could never match.
+      if (!hasPeriod) tokens.splice(1 + Math.floor(rnd() * len), 0, pick(PERIODS));
+      const shape = i % 3;
+      out.push(tokens.map(w => {
+        if (shape === 0) return w.toUpperCase();
+        if (shape === 2) return w.toLowerCase();
+        return /^[A-Z0-9]+$/.test(w) && w.length <= 6 ? w : w[0].toUpperCase() + w.slice(1).toLowerCase();
+      }).join(' '));
+    }
+    return out;
+  }
+
+  const CORPUS = generateHeadings(6000, 543);
+
+  it('the corpus exercises the AWS window shape', () => {
+    // Sanity: a large share of the all-caps headings collapse into text the
+    // AWS regex matches, so a clean result below is not vacuous.
+    const windowed = CORPUS.filter(h => /A[KS]IA[0-9A-Z]{16}/.test(h.replace(/\s+/g, '')));
+    expect(windowed.length).toBeGreaterThan(1000);
+  });
+
+  it('6,000 generated headings (all-caps, Title, lower) → zero separator_split findings', () => {
+    const offenders: string[] = [];
+    for (const heading of CORPUS) {
+      if (splitFindings(heading).length > 0) offenders.push(heading);
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('#544 F1: the base-32 fact is consulted by the collapsed pass only', () => {
+  // Body holds 9, 8 and 1: not an alphabet an issued id can carry.
+  const NOT_BASE32 = k('AKIA', 'Z7Q3F9XM2K8V4B1T');
+
+  it('the direct pass still blocks a contiguous id outside the alphabet (unchanged behaviour)', () => {
+    const result = scanForCredentials(`id: ${NOT_BASE32} end`);
+    const aws = providerFindings(result.findings, 'aws');
+    expect(aws).toHaveLength(1);
+    expect(aws[0].action).toBe('blocked');
+    expect(aws[0].evasion).toBeUndefined();
+    expect(result.redactedContent).toBe('id: [REDACTED-api_key-aws] end');
+  });
+
+  it('the collapsed pass does not claim a split value outside the alphabet', () => {
+    expect(splitFindings(`id: ${splitEvery(NOT_BASE32, ' ', 4)} end`)).toHaveLength(0);
+  });
+
+  it('the collapsed pass claims the same split shape inside the alphabet', () => {
+    const hits = splitFindings(`id: ${splitEvery(KEYS[3].key, ' ', 4)} end`);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].provider).toBe('aws');
+    expect(hits[0].action).toBe('blocked');
+  });
+});
+
+describe('#544 F1: alignment and key material for fixed-length single-case patterns', () => {
+  const key = KEYS[3].key;
+
+  it('a window that ends inside a word is a heading, not a key', () => {
+    // `ASIAQ3SALESFORECASTR|EVIEW`: the boundary fragment is letters only.
+    expect(splitFindings('ASIA Q3 SALES FORECAST REVIEW')).toHaveLength(0);
+  });
+
+  it('a window that starts inside a word is a heading, not a key', () => {
+    expect(splitFindings('EURASIA Q3 REGIONAL SALES REPORT FOR MANAGEMENT')).toHaveLength(0);
+  });
+
+  it('punctuation after a split key does not misalign it', () => {
+    for (const tail of ['.', ',', ')', '";', "'s"]) {
+      const hits = splitFindings(`id: ${splitEvery(key, ' ', 4)}${tail}`);
+      expect(hits).toHaveLength(1);
+      expect(hits[0].provider).toBe('aws');
+    }
+  });
+
+  it('a split key keeps its own digit-and-letter fragments, so it is key material', () => {
+    for (const every of [1, 2, 3, 4, 5, 8]) {
+      const hits = splitFindings(`note ${splitEvery(key, '\n', every)} end`);
+      expect(hits).toHaveLength(1);
+      expect(hits[0].provider).toBe('aws');
+      expect(hits[0].position).toBe('note '.length);
+    }
+  });
+
+  it('a random id split naively is found (seeded sample; measured 100% / 90% over 20,000 in the lab script)', () => {
+    const rnd = mulberry32(99);
+    const splits: Array<[string, (id: string) => string, number]> = [
+      ['every 1', id => splitEvery(id, ' ', 1), 1],
+      ['every 2', id => splitEvery(id, ' ', 2), 0.8],
+      ['every 4', id => splitEvery(id, ' ', 4), 1],
+      ['every 5', id => splitEvery(id, ' ', 5), 1],
+      ['once', id => splitOnce(id, ' '), 1],
+      ['newline every 4', id => splitEvery(id, '\n', 4), 1],
+    ];
+    const ids: string[] = [];
+    while (ids.length < 500) {
+      const id = randomAwsId(rnd);
+      if (/[0-9]/.test(id.slice(4))) ids.push(id); // an id without a digit is the documented letter+digit residual
+    }
+    for (const [name, fn, floor] of splits) {
+      const found = ids.filter(id => splitFindings(`id: ${fn(id)} end`).some(f => f.provider === 'aws')).length;
+      expect({ split: name, recall: found / ids.length >= floor }).toEqual({ split: name, recall: true });
+    }
+  });
+
+  it('documented residual: a letter glued onto a letters-only tail fragment misaligns the window', () => {
+    // `4B3` then `TING`: the id's last character `T` now sits inside a
+    // letters-only fragment that continues past the window. The rule cannot
+    // tell this from `FOREC|AST`, so a deliberate attacker who knows it evades
+    // it; this test pins the residual so the CHANGELOG stays honest.
+    expect(splitFindings('id: AKIA Z7Q3 F6XM 2K5V 4B3 TING')).toHaveLength(0);
+  });
+
+  it('open-ended and mixed-case patterns keep the strict rule', () => {
+    // Filler that would satisfy the alignment rule's "no key material" test
+    // still cannot dismiss an sk- key: one Ab1C fragment is a key.
+    const result = scanForCredentials(`sk-proj- ${splitEvery(KEYS[1].key.slice(8), ' ', 4)} yes`);
+    expect(providerFindings(result.findings, 'openai')).toHaveLength(1);
+    expect(splitFindings('sk-proj- keys replaced the legacy format in 2024')).toHaveLength(0);
+  });
+});
+
+describe('#544 F2: cost is linear in the number of split keys', () => {
+  const timeScan = (n: number): number => {
+    const rnd = mulberry32(7);
+    const text = Array.from({ length: n }, () => splitEvery(randomAwsId(rnd), ' ', 4)).join(' | ');
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      const result = scanForCredentials(text);
+      best = Math.min(best, performance.now() - t0);
+      // ~96% of ids carry a digit and are found; none may be lost to resolution.
+      expect(providerFindings(result.findings, 'aws').length).toBeGreaterThan(n * 0.9);
+    }
+    return best;
+  };
+
+  it('8k split ids cost at most a generous linear multiple of 1k', () => {
+    // Previous head: 23 / 120 / 393 / 2404 ms for 1k / 2k / 4k / 8k ids
+    // (resolution filtered every candidate against every candidate, and the
+    // redaction spliced the content once per finding). Now 14 / 25 / 47 / 92
+    // ms on the development box. The bound is on the RATIO so a slow CI box
+    // passes; the old code's ratio was over 100.
+    const t1k = timeScan(1000);
+    const t8k = timeScan(8000);
+    expect(t8k).toBeLessThan(20 * t1k + 200);
+    expect(t8k).toBeLessThan(4000);
   });
 });
 
