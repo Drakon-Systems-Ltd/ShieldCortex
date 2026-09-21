@@ -17,6 +17,7 @@ import {
   isIsolatedSensitivity,
   normaliseSensitivityLabel,
   sharedSensitivitySqlPredicate,
+  LABEL_WHITESPACE_CODE_POINTS,
 } from '../sensitivity/isolation.js';
 import { checkAccess, type AccessCheckMemory } from '../trust/access-control.js';
 import {
@@ -214,5 +215,56 @@ describe('#542 doctor counting predicate mirrors the TypeScript helper', () => {
     // The SQL predicate and the TypeScript helper agree on every label.
     for (const label of labels) expect([label, isIsolatedSensitivity(label)]).toEqual([label, !['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', ' confidential ', null, '', '  '].includes(label)]);
     db.close();
+  });
+});
+
+describe('#542 one normalisation for the TypeScript helper, the SQL predicate and the inject pack (#545 review)', () => {
+  // Same row base the inject-pack block uses: injectable at INTERNAL, so the
+  // only thing deciding eligibility below is the label.
+  const scope = { hostId: 'tars', agentId: 'hermes', project: 'ShieldCortex' };
+  const injectable = {
+    id: 1, title: 'Fact', content: 'Open Day is Fri 25 Sep.', salience: 0.8, trust_score: 0.9, status: 'active',
+    host_id: 'tars', agent_id: 'hermes', project: 'ShieldCortex', source: 'agent:openclaw', pinned: false, content_form: 'fact',
+  };
+  const sharedAt = (label: unknown): { ts: boolean; mjs: boolean } => ({
+    ts: !isIsolatedSensitivity(label),
+    mjs: isInjectEligible({ ...injectable, sensitivity_level: label }, scope),
+  });
+
+  it('SQL, TypeScript and mjs agree on every label, for every whitespace character String.trim strips', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE memories (id INTEGER PRIMARY KEY, sensitivity_level)');
+    const insert = db.prepare('INSERT INTO memories (sensitivity_level) VALUES (?)');
+    const sqlShared = db.prepare(`SELECT (${sharedSensitivitySqlPredicate()}) AS s FROM memories WHERE id = ?`);
+
+    const labels: unknown[] = [null, '', 'ınternal', 'İNTERNAL', 'internal', 'Secret', 'INTERNAL​', 'INTER NAL', 0, 1, 0.5];
+    for (const cp of LABEL_WHITESPACE_CODE_POINTS) {
+      const ws = String.fromCodePoint(cp);
+      // The set must be exactly what trim() strips, or the two sides drift again.
+      expect([cp, ws.trim()]).toEqual([cp, '']);
+      labels.push(ws, ws + ws, `${ws}INTERNAL${ws}`, `${ws}confidential`, `public${ws}`, `${ws}SECRET${ws}`, `${ws}RESTRICTED`, `${ws}nonsense${ws}`);
+    }
+    labels.push('\tINTERNAL\n', ' \t\r\n', ' ﻿PUBLIC　');
+
+    expect(sharedAt('\tINTERNAL\n')).toEqual({ ts: true, mjs: true });
+    expect(sharedAt('ınternal')).toEqual({ ts: false, mjs: false });
+    expect(sharedAt(0)).toEqual({ ts: false, mjs: false });
+    expect(sharedAt(' \t\r\n')).toEqual({ ts: true, mjs: true });
+
+    for (const label of labels) {
+      const { lastInsertRowid } = insert.run(label as never);
+      const sql = (sqlShared.get(lastInsertRowid) as { s: number }).s === 1;
+      const { ts, mjs } = sharedAt(label);
+      expect([JSON.stringify(label), sql, mjs]).toEqual([JSON.stringify(label), ts, ts]);
+    }
+    db.close();
+  });
+
+  it('no character outside the set is stripped by trim(), so the set is complete', () => {
+    const known = new Set(LABEL_WHITESPACE_CODE_POINTS);
+    for (let cp = 0; cp <= 0xffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (String.fromCodePoint(cp).trim() === '') expect(known.has(cp)).toBe(true);
+    }
   });
 });

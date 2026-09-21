@@ -319,7 +319,11 @@ export function isInjectEligible(row, scope = {}) {
   if (dbBooleanTrue(row.quarantined) || dbBooleanTrue(row.in_quarantine)) return false;
   // #542: only the shared tiers are injectable. RESTRICTED, SECRET and any
   // label outside the ladder fail closed (mirrors src/defence/sensitivity/isolation.ts).
-  const sens = String(row.sensitivity_level || row.sensitivity || 'INTERNAL').trim().toUpperCase() || 'INTERNAL';
+  // Same normalisation as that helper and its SQL predicate: only null/undefined
+  // or a blank string is "unlabelled"; upper-casing is ASCII-only, so `ınternal`
+  // stays unknown; a non-string label (0, false) is a label, not an absence.
+  const rawSens = row.sensitivity_level ?? row.sensitivity;
+  const sens = (rawSens == null ? '' : String(rawSens).trim().replace(/[a-z]+/g, (m) => m.toUpperCase())) || 'INTERNAL';
   if (!SHARED_SENSITIVITY_LEVELS.has(sens)) return false;
 
   // #402 TWO-KEY inject: the form key is required IN ADDITION to the
