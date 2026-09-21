@@ -90,8 +90,12 @@ describe('#542 checkAccess read: SECRET and unknown labels are isolated like RES
   });
 
   it('keeps the RESTRICTED exemptions for SECRET: the operator and the owner may read', () => {
-    expect(checkAccess(row('SECRET'), OPERATOR, 'read')).toMatchObject({ canRead: true, reason: 'Operator credential access' });
+    // A row the operator does NOT own (source cli:mcp): the operator exemption, not ownership, admits it.
+    expect(checkAccess(row('SECRET', 'cli:mcp'), OPERATOR, 'read')).toMatchObject({ canRead: true, reason: 'Operator credential access' });
+    // The owner (cli:mcp reading its own row) is admitted as owner.
     expect(checkAccess(row('SECRET', 'cli:mcp'), PEER, 'read')).toMatchObject({ canRead: true, reason: 'Owner access' });
+    // And ownership by the operator also reads as owner (source user:direct = the operator key).
+    expect(checkAccess(row('SECRET'), OPERATOR, 'read')).toMatchObject({ canRead: true, reason: 'Owner access' });
   });
 });
 
