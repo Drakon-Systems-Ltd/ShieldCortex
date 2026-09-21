@@ -21,6 +21,7 @@
 
 import { checkAccess } from './access-control.js';
 import { redactContent } from '../sensitivity/redaction.js';
+import { isIsolatedSensitivity } from '../sensitivity/isolation.js';
 import { isUntrustedInboundSourceString } from './source-scorer.js';
 import type { DefenceSource } from '../types.js';
 import type { Memory, ContextSummary } from '../../memory/types.js';
@@ -98,7 +99,7 @@ function isUntrustedInboundSource(source: string | null | undefined): boolean {
 export function guardReadBySensitivity(memories: Memory[]): Memory[] {
   return memories.filter((m) =>
     m.trustScore !== 0
-    && m.sensitivityLevel !== 'RESTRICTED'
+    && !isIsolatedSensitivity(m.sensitivityLevel) // RESTRICTED, SECRET, unknown (#542)
     && !isUntrustedInboundSource(m.source),
   );
 }
@@ -162,7 +163,7 @@ function redactRestrictedMemory(m: Memory): Memory {
   // classified RESTRICTED via the title alone, and titles are shown for
   // manageability, so this closes the secret-in-title leak without hiding labels.
   const title = redactContent(m.title);
-  if (m.sensitivityLevel !== 'RESTRICTED') {
+  if (!isIsolatedSensitivity(m.sensitivityLevel)) {
     return title === m.title ? m : { ...m, title };
   }
   const metadata =
@@ -199,7 +200,7 @@ export function guardDashboardContextSummary(summary: ContextSummary): ContextSu
  */
 function isRedactableMemoryObject(o: Record<string, unknown>): boolean {
   const level = (o.sensitivityLevel ?? o.sensitivity_level) as unknown;
-  return level === 'RESTRICTED' && typeof o.content === 'string';
+  return isIsolatedSensitivity(level) && typeof o.content === 'string';
 }
 
 /**

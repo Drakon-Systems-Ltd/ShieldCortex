@@ -24,6 +24,9 @@ export const NATIVE_INJECT_CONTRACT = Object.freeze({
 /** The runtime candidate window. Selection happens before eligibility. */
 export const INJECT_CANDIDATE_LIMIT = 64;
 
+/** Sensitivity tiers a pack may carry (#542). Anything else is isolated like RESTRICTED. */
+export const SHARED_SENSITIVITY_LEVELS = Object.freeze(new Set(['PUBLIC', 'INTERNAL', 'CONFIDENTIAL']));
+
 /**
  * One DB row shape for every automatic-start consumer and doctor. Missing
  * legacy columns are projected as NULL so `isInjectEligible` always sees the
@@ -314,8 +317,10 @@ export function isInjectEligible(row, scope = {}) {
     return false;
   }
   if (dbBooleanTrue(row.quarantined) || dbBooleanTrue(row.in_quarantine)) return false;
-  const sens = String(row.sensitivity_level || row.sensitivity || 'INTERNAL').toUpperCase();
-  if (sens === 'RESTRICTED') return false;
+  // #542: only the shared tiers are injectable. RESTRICTED, SECRET and any
+  // label outside the ladder fail closed (mirrors src/defence/sensitivity/isolation.ts).
+  const sens = String(row.sensitivity_level || row.sensitivity || 'INTERNAL').trim().toUpperCase() || 'INTERNAL';
+  if (!SHARED_SENSITIVITY_LEVELS.has(sens)) return false;
 
   // #402 TWO-KEY inject: the form key is required IN ADDITION to the
   // provenance/trust key below. A row reaches a pack only if BOTH agree — a
