@@ -14,7 +14,9 @@
  *
  * Every "split" case fails if the collapsed pass is removed from
  * `scanForCredentials`; the precision cases fail if the pass is added without
- * the letter+digit gate and the prose-share gate.
+ * the letter+digit gate and the structural prose gate. The `#544` blocks are
+ * the review-round-3 blockers (B1 severity-safe resolution, B2 innermost-first
+ * trimming, B3 linear trim cost, B4 structural headings and dilution).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
@@ -230,15 +232,17 @@ describe('#543 separator-split keys are detected and redacted', () => {
     }
   });
 
-  it('leaves a 3+ letter word after a finely split key outside the redaction', () => {
-    // Residual, by design: the attacker picks the split points, so a trailing
-    // run of same-case alphabetic fragments that holds a 3+ letter word cannot
-    // be told from following prose, and the whole run is trimmed as far as the
-    // pattern allows — here the key's last letter `z` stays outside the span.
-    // The finding still blocks; only the redaction span is affected.
+  it('trims a 3+ letter word after a finely split key but keeps the key\'s own tail (#544 B2)', () => {
+    // The trailing run of letter-only fragments is `z yes`; the word is `yes`
+    // and `z` is the key's last character. Trimming stops at the innermost
+    // word, so the whole key — including `z` — is redacted.
     const result = scanForCredentials(`k ${splitEvery(KEYS[0].key, ' ', 2)} yes`);
-    expect(providerFindings(result.findings, 'openai')[0].action).toBe('blocked');
-    expect(result.redactedContent).toBe('k [REDACTED-api_key-openai] z yes');
+    const hits = providerFindings(result.findings, 'openai');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].action).toBe('blocked');
+    expect(hits[0].position).toBe(2);
+    expect(result.redactedContent).toBe('k [REDACTED-api_key-openai] yes');
+    expect(rejoin(result.redactedContent ?? '')).not.toContain(KEYS[0].key);
   });
 
   it('does not swallow the words after a split key', () => {
@@ -336,6 +340,221 @@ describe('#543 precision: the collapsed pass does not fire on prose', () => {
   });
 });
 
+// ── #544 review round 3 ─────────────────────────────────────────────────────
+
+/** Stripe TEST key: medium severity, open-ended `{24,}` body. */
+const STRIPE_TEST = k('sk_test_', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8');
+/** Google key: critical, fixed-length body. */
+const GOOGLE = k('AIza', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx');
+
+describe('#544 B1: a weaker finding never suppresses a stronger one', () => {
+  it('control: the split Google key alone is critical/blocked', () => {
+    const result = scanForCredentials(splitEvery(GOOGLE, ' ', 4));
+    const google = providerFindings(result.findings, 'google');
+    expect(google).toHaveLength(1);
+    expect(google[0].severity).toBe('critical');
+    expect(google[0].action).toBe('blocked');
+  });
+
+  it('split Stripe test key followed by split Google key: both reported, Google still blocked', () => {
+    // On the previous head the open-ended Stripe pattern swallowed the Google
+    // key in the collapsed view and the Google hit was dropped as "already
+    // covered": one medium/warned finding for a critical leak.
+    const a = splitEvery(STRIPE_TEST, ' ', 4);
+    const b = splitEvery(GOOGLE, ' ', 4);
+    const result = scanForCredentials(`${a} ${b}`);
+
+    const stripe = providerFindings(result.findings, 'stripe');
+    const google = providerFindings(result.findings, 'google');
+    expect(stripe).toHaveLength(1);
+    expect(stripe[0].severity).toBe('medium');
+    expect(stripe[0].position).toBe(0);
+    expect(google).toHaveLength(1);
+    expect(google[0].severity).toBe('critical');
+    expect(google[0].action).toBe('blocked');
+    expect(google[0].position).toBe(a.length + 1);
+    expect(result.findings.some(f => f.action === 'blocked')).toBe(true);
+    expect(result.redactedContent).toBe('[REDACTED-api_key-stripe] [REDACTED-api_key-google]');
+  });
+
+  it('contiguous Stripe test key followed by a split Google key', () => {
+    const result = scanForCredentials(`${STRIPE_TEST} ${splitEvery(GOOGLE, ' ', 4)}`);
+    expect(providerFindings(result.findings, 'stripe')).toHaveLength(1);
+    const google = providerFindings(result.findings, 'google');
+    expect(google).toHaveLength(1);
+    expect(google[0].action).toBe('blocked');
+    expect(google[0].evasion).toBe('separator_split');
+    expect(result.redactedContent).toBe('[REDACTED-api_key-stripe] [REDACTED-api_key-google]');
+  });
+
+  it('split Stripe test key followed by a contiguous Google key: the direct finding survives', () => {
+    // The collapsed Stripe run flows through the Google key; the direct pass
+    // already placed the Google key, so the run is cut there. The former
+    // "supersede narrower pattern-layer hits" filter would have deleted the
+    // direct critical finding had the cut not applied.
+    const result = scanForCredentials(`${splitEvery(STRIPE_TEST, ' ', 4)} ${GOOGLE}`);
+    expect(providerFindings(result.findings, 'stripe')).toHaveLength(1);
+    const google = providerFindings(result.findings, 'google');
+    expect(google).toHaveLength(1);
+    expect(google[0].action).toBe('blocked');
+    expect(google[0].evasion).toBeUndefined();
+    expect(result.redactedContent).toBe('[REDACTED-api_key-stripe] [REDACTED-api_key-google]');
+  });
+
+  it('when the cut span cannot re-validate, the outer hit stays whole and the inner critical finding is still reported', () => {
+    // `sk_test_Ab1C` is too short for the Stripe pattern on its own, so the
+    // Stripe hit cannot be cut at the Google start and stays whole (medium).
+    // Coverage suppression only goes downward: the critical Google finding
+    // inside it is kept.
+    const result = scanForCredentials(`sk_t est_ Ab1C ${splitEvery(GOOGLE, ' ', 4)}`);
+    const google = providerFindings(result.findings, 'google');
+    expect(google).toHaveLength(1);
+    expect(google[0].severity).toBe('critical');
+    expect(google[0].action).toBe('blocked');
+    expect(result.findings.some(f => f.action === 'blocked')).toBe(true);
+    expect(rejoin(result.redactedContent ?? '')).not.toContain(GOOGLE);
+  });
+});
+
+describe('#544 B2: trimming never turns a finding into no finding', () => {
+  const K = k('sk-', 'A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWx');
+
+  it('control: the key split after every character is blocked', () => {
+    const result = scanForCredentials(K.split('').join(' '));
+    const hits = providerFindings(result.findings, 'openai');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].action).toBe('blocked');
+  });
+
+  it('the same key followed by a word is still blocked, and the word is left outside the redaction', () => {
+    // On the previous head the trailing trim walked back through the
+    // single-letter fragments `S t U v W x` while the regex kept matching,
+    // fell under `minLength`, and the whole candidate was discarded:
+    // `leaked === false` for a key that had just been blocked.
+    const text = `${K.split('').join(' ')} end`;
+    const result = scanForCredentials(text);
+    expect(result.leaked).toBe(true);
+    const hits = providerFindings(result.findings, 'openai');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].severity).toBe('critical');
+    expect(hits[0].action).toBe('blocked');
+    expect(hits[0].position).toBe(0);
+    expect(result.redactedContent).toBe('[REDACTED-api_key-openai] end');
+    expect(rejoin(result.redactedContent ?? '')).not.toContain(K);
+  });
+
+  it('with words on both sides', () => {
+    const result = scanForCredentials(`note ${K.split('').join(' ')} and rotate it`);
+    const hits = providerFindings(result.findings, 'openai');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].action).toBe('blocked');
+    expect(hits[0].position).toBe('note '.length);
+    expect(result.redactedContent).toBe('note [REDACTED-api_key-openai] and rotate it');
+  });
+
+  it('a two-letter fragment after a finely split key cannot be told from the key\'s tail and stays inside the redaction', () => {
+    // Documented residual: the finding is unaffected; only `ok` is redacted too.
+    const result = scanForCredentials(`${splitEvery(K, ' ', 2)} ok`);
+    const hits = providerFindings(result.findings, 'openai');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].action).toBe('blocked');
+    expect(result.redactedContent).toBe('[REDACTED-api_key-openai]');
+  });
+});
+
+describe('#544 B3: trimming cost is linear in the words after a split key', () => {
+  const timeScan = (n: number): number => {
+    const text = `${splitEvery(KEYS[1].key, ' ', 4)}${' word'.repeat(n)}`;
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      const result = scanForCredentials(text);
+      best = Math.min(best, performance.now() - t0);
+      expect(providerFindings(result.findings, 'openai')).toHaveLength(1);
+      expect(result.redactedContent).toBe(`[REDACTED-api_key-openai]${' word'.repeat(n)}`);
+    }
+    return best;
+  };
+
+  it('16k trailing words scan in bounded time and grow roughly linearly from 4k', () => {
+    // Previous head: ~97 / 344 / 1339 ms for 4k / 8k / 16k (one regex compile
+    // and a `slice(0, end)` per trimmed fragment). Now one exact-span check
+    // per hit; measured ~5 / 12 / 21 ms. Bounds are generous for CI noise.
+    const t4k = timeScan(4000);
+    const t16k = timeScan(16000);
+    expect(t16k).toBeLessThan(250);
+    expect(t16k).toBeLessThan(6 * t4k + 50);
+  });
+});
+
+describe('#544 B4: numbered headings are dismissed structurally; split keys are not', () => {
+  const HEADINGS = [
+    // The three already-fixed sentences.
+    'ASIA 2026 REGIONAL SALES REPORT',
+    'ASIA Q3 REGIONAL SALES MEETING NOTES',
+    'sk-proj- keys replaced the legacy format in 2024',
+    // The reviewer's heading: collapses to `ASIAQ1Q2Q3Q4REVENUEB`, a
+    // well-formed AWS id in which only 11 of 20 characters sit in words.
+    'ASIA Q1 Q2 Q3 Q4 REVENUE BY REGION',
+    // More of the same class.
+    'ASIA FY26 H1 H2 TOTALS BY COUNTRY',
+    'ASIA 2025 Q4 SALES BY REGION',
+    'ASIA H1 2026 REVENUE BY SEGMENT',
+    'ASIA 2026 Q1 Q2 REGIONAL HEADCOUNT',
+    'ASIA 1H 2H 2026 NET SALES BY MARKET',
+    'ASIA Q4 2025 TOTAL REVENUE AND MARGIN',
+    'ASIA Q2 GROSS MARGIN BY PRODUCT LINE',
+    'ASIA FY2026 W12 PIPELINE BY OWNER',
+    'ASIA Q3 EMEA APAC SALES 2026 UPDATE',
+    'Asia Q1 Q2 Q3 Q4 Revenue By Region',
+    'asia fy26 h1 h2 totals by country',
+  ];
+
+  for (const heading of HEADINGS) {
+    it(`no finding for: ${JSON.stringify(heading)}`, () => {
+      const result = scanForCredentials(heading);
+      expect(result.findings).toHaveLength(0);
+      expect(result.leaked).toBe(false);
+    });
+  }
+
+  const AWS_IDS = [
+    KEYS[3].key,
+    k('ASIA', '7XQ4KZ2M9VB3TW6N'),
+    k('AKIA', 'J5R2WP7QX3ZK4M6T'),
+  ];
+  for (const id of AWS_IDS) {
+    for (const every of [1, 2, 4]) {
+      for (const tail of ['', ' REGION', ' end']) {
+        it(`${id.slice(0, 4)}… split every ${every}${tail ? ` + ${JSON.stringify(tail)}` : ''} is blocked`, () => {
+          const result = scanForCredentials(`id: ${splitEvery(id, ' ', every)}${tail}`);
+          const aws = providerFindings(result.findings, 'aws');
+          expect(aws).toHaveLength(1);
+          expect(aws[0].severity).toBe('critical');
+          expect(aws[0].action).toBe('blocked');
+          expect(aws[0].position).toBe('id: '.length);
+          expect(result.redactedContent).toBe(`id: [REDACTED-api_key-aws]${tail}`);
+        });
+      }
+    }
+  }
+
+  it('the prose decision cannot be diluted with interleaved filler after a split key', () => {
+    // On the previous head the 60% share was computed over the whole swallowed
+    // run, so filler that defeats trimming (`hello x9`: a word, then key
+    // material) pushed a real split key over the threshold and dismissed it.
+    const key = splitEvery(KEYS[1].key, ' ', 4);
+    for (const filler of [' hello x9', ' by in to on', ' Q1 2026 by']) {
+      const result = scanForCredentials(`${key}${filler.repeat(50)}`);
+      const hits = providerFindings(result.findings, 'openai');
+      expect(hits).toHaveLength(1);
+      expect(hits[0].action).toBe('blocked');
+      expect(hits[0].position).toBe(0);
+      expect(rejoin(result.redactedContent ?? '')).not.toContain(KEYS[1].key);
+    }
+  });
+});
+
 // ── Consumer — the defence pipeline blocks a split key on memory write ──────
 
 describe('#543 pipeline consumer', () => {
@@ -369,6 +588,19 @@ describe('#543 pipeline consumer', () => {
     expect(result.firewall.result).toBe('BLOCK');
     expect(result.firewall.threatIndicators).toContain('credential_leak');
     expect(result.credentialScan?.leaked).toBe(true);
+  });
+
+  it('blocks a memory write carrying a split Stripe test key followed by a split Google key (#544 B1)', async () => {
+    const { runDefencePipeline } = await import('../pipeline.js');
+    const result = runDefencePipeline(
+      `${splitEvery(STRIPE_TEST, ' ', 4)} ${splitEvery(GOOGLE, ' ', 4)}`,
+      'keys note',
+      { type: 'agent', identifier: 'test-agent' },
+      testConfig,
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.firewall.threatIndicators).toContain('credential_leak');
+    expect(result.credentialScan?.findings.some(f => f.provider === 'google' && f.action === 'blocked')).toBe(true);
   });
 
   it('blocks a memory write carrying a newline-split AWS access key id', async () => {
