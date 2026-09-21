@@ -867,7 +867,7 @@ const SAFE_SIGNALS = new Set([
   'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
   'decode-pipe-to-shell', 'change-permissions', 'git-mutate',
   'recursive-find-delete', 'external-egress', 'oversized-command',
-  'opaque-script-invocation', 'opaque-script', 'secret-egress-fold',
+  'opaque-script-invocation', 'opaque-script', 'opaque-command-substitution', 'secret-egress-fold',
   'force-push', 'force-push-invocation',
   // #436: schema-rejection (#412) and the other verdicts that were reaching
   // denials.jsonl as "redacted-signal" — none of these carry operator data,
@@ -2180,6 +2180,12 @@ function writeAuditEntry(toolName, verdict, args, action, outcome, extra = {}) {
       // apart from an allow that scanned everything.
       ...(verdict.reviewedScripts && verdict.reviewedScripts.length > 0
         ? { reviewedScripts: verdict.reviewedScripts }
+        : {}),
+      // #517: which files a `$(cat …)` substitution spliced into the scanned
+      // command — a matched token that came from one of them is tellable
+      // from the typed command line.
+      ...(verdict.expandedSubstitutions && verdict.expandedSubstitutions.length > 0
+        ? { expandedSubstitutions: verdict.expandedSubstitutions }
         : {}),
       // #143's broker verdict arrives through here as `{ broker: … }`, so
       // "was a model consulted, and what did it say?" stays answerable from the

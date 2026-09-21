@@ -90,6 +90,14 @@ export interface ToolGuardVerdict {
    */
   reviewedScripts?: string[];
   /**
+   * Files whose contents a command substitution spliced into the scanned
+   * command (#517): `$(cat f)`, `$(< f)`, `` `cat f` ``. Paths as written in
+   * the command. Present only when an expansion happened, so a denial whose
+   * matched token came from a file rather than the typed command line is
+   * tellable from the record; absent means "nothing was expanded".
+   */
+  expandedSubstitutions?: string[];
+  /**
    * A reviewed native contract grew a field ShieldCortex does not read. The
    * field was DROPPED before nested validation and before any extractor, and
    * the call was evaluated without it — this is an observation, never a
@@ -3620,6 +3628,7 @@ const REMEDIATION: Record<string, string> = {
   'truncate-to-zero': 'confirm the target file before truncating — this discards its contents',
   'dd-overwrite': 'confirm the destination before running dd — it overwrites the target without confirmation',
   'opaque-script-invocation': 'the guard could not read the invoked script, so its contents were not scanned — inspect the file before running it',
+  'opaque-command-substitution': 'the guard could not read the file a $(cat …) / $(< …) substitution splices into this command, so that text was not scanned — inspect the file before running it',
 };
 
 /** Compose a reason string that names the rule, the matched span, and a fix hint. */
@@ -4349,6 +4358,7 @@ function foldScriptSources(
   execCommand: string,
   resolveScriptSource?: (scriptPath: string) => string | null,
   isReviewedScript?: (scriptPath: string, source: string) => boolean,
+  subst?: SubstitutionState,
 ): ScriptFold {
   const roots = detectScriptInvocations(execCommand);
   if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [] };
@@ -4440,9 +4450,18 @@ function foldScriptSources(
     // before the interpreter sees it, and stays exactly as strict as before.
     // Computed even for a reviewed file, because its children still have to be
     // discovered from it.
+    // #517: a folded SHELL script's `$(cat f)` splices f into the script the
+    // same way it does on the command line, so it is expanded here by the
+    // same walker before the scan text is derived — the fold would otherwise
+    // be one `bash -c "$(cat …)"` away from the same bypass one level down.
+    // A reviewed file's body is exempt from scanning, so nothing is read on
+    // its behalf; its children are still discovered from the unexpanded text.
+    const expandedSrc = next.lang === 'sh' && subst && !isReviewed
+      ? expandFileSubstitutions(deobfuscateIfs(src), resolveScriptSource, subst, 1)
+      : deobfuscateIfs(src);
     const reviewedScan = next.lang === 'sh'
-      ? commandScanText(deobfuscateIfs(src))
-      : blankInterpreterComments(deobfuscateIfs(src), next.lang);
+      ? commandScanText(expandedSrc)
+      : blankInterpreterComments(expandedSrc, next.lang);
     if (isReviewed) {
       // #522 (GPT-6 round-6) residual, NAMED rather than closed: a reviewed
       // entry skips this file's body — catastrophic scan included — before
@@ -4492,6 +4511,213 @@ function foldScriptSources(
   }
 
   return { content: parts.join('\n'), opaque, regions, reviewed };
+}
+
+// ── Command-substitution expansion (#517) ────────────────────────────────────
+//
+// `$(cat FILE)`, `$(< FILE)` and `` `cat FILE` `` splice a file's bytes into the
+// command line before anything runs. Every rule in this file scans the command
+// STRING, so the engine saw `cat prompt.md` — a read — where the shell would
+// see the file's text. The live finding (#517): a launcher handed a quoted
+// prompt that merely mentioned catastrophic commands was denied on several
+// categories; the identical text launched as `"$(cat prompt.md)"` was allowed.
+// Same bytes, same destination, opposite decisions — and the same hole turned
+// the script-file fold (#4) into a one-line bypass: `bash payload.sh` was
+// folded and blocked, `bash -c "$(cat payload.sh)"` ran unscanned, with no
+// opaque signal to say so.
+//
+// The repair is the shell's own semantics: expand the substitution IN PLACE,
+// so the scan surface is the command the shell will actually run, and every
+// existing rule — quoted-data classification, inline-program regions, pure
+// prints, comment/heredoc stripping, the disposers — judges the substituted
+// spelling exactly as it judges the literal one. Consistency by construction,
+// not by a second rule set. What this deliberately does NOT do is decide
+// whether the expanded text is data or code: that is the literal form's
+// question and it stays there (#517's "quoted data argument to a known
+// launcher" ask is a separate change; whichever way it goes, both spellings
+// follow it together).
+//
+// Only a substitution whose WHOLE effect is to read files is expanded: one
+// plain statement, `cat` with file operands (flags skipped, behind env
+// assignments / wrappers) or the `< FILE` builtin form. Anything else —
+// `$(cat f | wc -l)`, `$(date)`, `$(curl …)`, `$(cat -)` — keeps today's
+// treatment: the body is scanned as an executed command. Single-quoted text is
+// literal in the shell and is never a substitution; `$((…))` is arithmetic.
+//
+// Reads go through the caller-supplied `resolveScriptSource` — same purity
+// contract, same rails, same byte caps as the script fold. A file that cannot
+// be read (no resolver, missing, binary, over the cap, a path behind a
+// variable, a nested read past the depth bound) is RECORDED as
+// `opaque-command-substitution` at the lowest surfaced tier, exactly as an
+// unreadable script is, rather than silently unscanned. A file that IS read is
+// named on the verdict (`expandedSubstitutions`), so a denial whose matched
+// token came from a file is tellable from the record.
+//
+// Expanded text is escaped for the quoting context it lands in (`"` and `\`
+// inside double quotes; those plus `'` outside quotes) so it cannot close the
+// operator's own quote and re-parse the tail of the command. `$`, backticks,
+// `#` and newlines are left as-is: the shell does not re-expand substitution
+// output, but reading them live is the fail-closed direction (more scanning,
+// never less), an inner `bash -c` really would expand them, and it is exactly
+// how the literal spelling is read. A spliced file is itself walked for
+// further file reads, bounded by the fold depth and a visited set.
+
+/** Nothing to expand without `$(` or a backtick. */
+const SUBSTITUTION_HINT_RE = /\$\(|`/;
+
+/** Shared bounds and record for one tool call's expansions. */
+interface SubstitutionState {
+  /** Paths whose contents were spliced in, as written in the command. */
+  expanded: string[];
+  /** A file-reading substitution was recognised but could not be expanded. */
+  opaque: boolean;
+  /** Bytes spliced so far — bounded by the script fold's total cap. */
+  total: number;
+  /** Files already spliced on the current path — a file that reads itself terminates. */
+  visited: Set<string>;
+}
+
+function newSubstitutionState(): SubstitutionState {
+  return { expanded: [], opaque: false, total: 0, visited: new Set() };
+}
+
+/**
+ * The file operands of a substitution body whose WHOLE effect is to read
+ * files, or `null` for anything else. `cat [flags] FILE…` behind env
+ * assignments / exec wrappers, or the `< FILE` builtin form. A pipe, a
+ * separator, a nested substitution, a redirect, a second command, `cat -`
+ * (stdin) or `cat` with no operand all answer `null`.
+ */
+function fileReadSubstitutionTargets(body: string): string[] | null {
+  let s = body.trim();
+  if (!s) return null;
+  const viaRedirect = s.startsWith('<');
+  if (viaRedirect) s = s.slice(1).trim();
+  // One plain statement: nothing the shell would run or route besides the read.
+  if (/[|;&`\n\r<>()]|\$\(/.test(s)) return null;
+  const tokens = tokeniseStatement(s);
+  if (tokens.length === 0) return null;
+  if (viaRedirect) return tokens.length === 1 ? tokens : null;
+  const i = commandWordIndex(tokens);
+  if (i >= tokens.length || commandBaseName(tokens[i]) !== 'cat') return null;
+  const files: string[] = [];
+  let endOfFlags = false;
+  for (let j = i + 1; j < tokens.length; j++) {
+    const t = tokens[j];
+    if (t === '-') return null;                                    // stdin, not a file
+    if (!endOfFlags && t === '--') { endOfFlags = true; continue; }
+    if (!endOfFlags && t.startsWith('-')) continue;                // a cat flag
+    files.push(t);
+  }
+  return files.length > 0 ? files : null;
+}
+
+/** Escape spliced text for the quoting context it lands in — see the section note. */
+function escapeSpliced(content: string, inDoubleQuotes: boolean): string {
+  return inDoubleQuotes ? content.replace(/[\\"]/g, '\\$&') : content.replace(/[\\"']/g, '\\$&');
+}
+
+/**
+ * Read one substituted file under the fold's caps. `null` means "could not
+ * be expanded" and has already set `state.opaque`; the caller keeps the raw
+ * `$(…)` text so the body is still scanned as a command, exactly as before.
+ */
+function readSubstitutedFile(
+  path: string,
+  resolveScriptSource: ((scriptPath: string) => string | null) | undefined,
+  state: SubstitutionState,
+): string | null {
+  if (typeof resolveScriptSource !== 'function') { state.opaque = true; return null; }
+  let src: string | null = null;
+  try {
+    src = resolveScriptSource(path);
+  } catch {
+    src = null;                                       // a resolver must never break the call
+  }
+  if (typeof src !== 'string') { state.opaque = true; return null; }          // missing / unreadable
+  if (src.includes('\0')) { state.opaque = true; return null; }                // binary
+  if (src.length > MAX_SCRIPT_BYTES || state.total + src.length > MAX_FOLDED_BYTES) {
+    state.opaque = true;                              // over the cap — never truncate past a signal
+    return null;
+  }
+  if (!state.expanded.includes(path)) {
+    // Same per-call file bound as the script fold (zeroth law: bounded work).
+    if (state.expanded.length >= MAX_SCRIPTS_PER_CALL) { state.opaque = true; return null; }
+    state.expanded.push(path);
+  }
+  state.total += src.length;
+  return src;
+}
+
+/**
+ * Expand every file-reading command substitution in `text` in place. Pure
+ * apart from the injected resolver; linear in the text; never throws.
+ * `depth` counts how many splices deep this text already is.
+ */
+function expandFileSubstitutions(
+  text: string,
+  resolveScriptSource: ((scriptPath: string) => string | null) | undefined,
+  state: SubstitutionState,
+  depth = 0,
+): string {
+  if (!text || !SUBSTITUTION_HINT_RE.test(text)) return text;
+  let out = '';
+  let quote: string | null = null;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '\\' && quote !== "'" && i + 1 < text.length) { out += c + text[i + 1]; i += 2; continue; }
+    if (quote === "'") { if (c === "'") quote = null; out += c; i++; continue; }
+    if (quote === '"') {
+      if (c === '"') { quote = null; out += c; i++; continue; }
+    } else if (c === "'" || c === '"') {
+      quote = c; out += c; i++; continue;
+    }
+
+    // Locate a substitution: `$(…)` (not `$((…))`) or `…` — in unquoted and
+    // double-quoted text, the same two shapes `collectExecutableBodies` walks.
+    let body: string | null = null;
+    let end = i;                                      // index just past the substitution
+    if (c === '$' && text[i + 1] === '(' && text[i + 2] !== '(') {
+      const taken = takeParenBody(text, i + 2, i + 2);
+      body = taken.body;
+      end = Math.min(taken.end + 1, text.length);
+    } else if (c === '`') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '`') {
+        if (text[j] === '\\' && j + 1 < text.length) { j += 2; continue; }
+        j++;
+      }
+      body = text.slice(i + 1, j);
+      end = Math.min(j + 1, text.length);
+    }
+    if (body === null) { out += c; i++; continue; }
+
+    const raw = text.slice(i, end);
+    const targets = fileReadSubstitutionTargets(body);
+    if (targets === null) { out += raw; i = end; continue; }         // not a plain file read — scanned as before
+
+    // Past the depth bound the read is not followed. Say so: the text that
+    // would have been spliced is unscanned.
+    if (depth >= MAX_SCRIPT_DEPTH) { state.opaque = true; out += raw; i = end; continue; }
+
+    let spliced = '';
+    let complete = true;
+    for (const path of targets) {
+      // A file that reads itself: its text is already on the surface once, so
+      // the cycle ends here without a second copy and without an opaque mark.
+      if (state.visited.has(path)) continue;
+      const src = readSubstitutedFile(path, resolveScriptSource, state);
+      if (src === null) { complete = false; break; }
+      state.visited.add(path);
+      spliced += expandFileSubstitutions(deobfuscateIfs(src), resolveScriptSource, state, depth + 1);
+      state.visited.delete(path);
+    }
+    if (!complete) { out += raw; i = end; continue; }                 // opaque already recorded; body scanned as before
+    out += escapeSpliced(spliced, quote === '"');
+    i = end;
+  }
+  return out;
 }
 
 // ── Interpreter heredocs (issue #89) ─────────────────────────────────────────
@@ -5434,7 +5660,18 @@ function evaluateToolCallCore(
   }
 
   const family = classifyFamily(toolName);
-  const command = deobfuscateIfs(extractCommand(args));
+  const typedCommand = deobfuscateIfs(extractCommand(args));
+  // #517: `$(cat f)` / `$(< f)` / `` `cat f` `` are expanded in place BEFORE any
+  // rule runs, so the surface every rule below scans is the command the shell
+  // will actually execute and the substituted spelling gets the literal
+  // spelling's verdict. Bounded by the fold's byte caps; an unreadable file is
+  // recorded (`opaque-command-substitution`) rather than silently unscanned.
+  // An oversized command is already flagged and its fold is skipped — same
+  // here: nothing is spliced into 50k+ chars that will not be tokenised anyway.
+  const subst = newSubstitutionState();
+  const command = typedCommand.length > OVERSIZED_COMMAND_LENGTH
+    ? typedCommand
+    : expandFileSubstitutions(typedCommand, options?.resolveScriptSource, subst);
   const path = extractPath(args);
   const url = extractUrl(args, toolName);
 
@@ -5541,14 +5778,19 @@ function evaluateToolCallCore(
   // work rather than tokenise 50k+ chars of it.
   const fold: ScriptFold = command.length > OVERSIZED_COMMAND_LENGTH
     ? { content: '', opaque: false, regions: [], reviewed: [] }
-    : foldScriptSources(execCommand, options?.resolveScriptSource, options?.isReviewedScript);
+    : foldScriptSources(execCommand, options?.resolveScriptSource, options?.isReviewedScript, subst);
 
   // #189: every verdict minted past this point records which files the
   // reviewed-script allowlist exempted from folding — including a `block`
   // from the command line itself, so a post-incident reading of the audit
   // row can see review was in play even when it didn't change the outcome.
-  const withReview = (v: ToolGuardVerdict): ToolGuardVerdict =>
-    fold.reviewed.length > 0 ? { ...v, reviewedScripts: [...fold.reviewed] } : v;
+  // #517: likewise which files a command substitution spliced into the
+  // surface, so a matched token that came from a file is tellable from the
+  // typed command line.
+  const withReview = (v: ToolGuardVerdict): ToolGuardVerdict => {
+    const out = fold.reviewed.length > 0 ? { ...v, reviewedScripts: [...fold.reviewed] } : v;
+    return subst.expanded.length > 0 ? { ...out, expandedSubstitutions: [...subst.expanded] } : out;
+  };
   // Folded script source is appended, never substituted: the command surface is
   // scanned exactly as before, so no existing verdict can change direction.
   const scanSurface = fold.content ? `${execSurface}\n${fold.content}` : execSurface;
@@ -5577,7 +5819,10 @@ function evaluateToolCallCore(
   // Recorded at the lowest surfaced tier when a script's contents could not be
   // read (no resolver, unreadable, oversized, binary, too deep). Never a gate on
   // its own — the doctor/selfcheck probes and plenty of legitimate calls hit it.
-  const opaqueSignals = fold.opaque ? ['opaque-script-invocation'] : [];
+  const opaqueSignals = [
+    ...(fold.opaque ? ['opaque-script-invocation'] : []),
+    ...(subst.opaque ? ['opaque-command-substitution'] : []),
+  ];
 
   // 1) Catastrophic — hard block, cannot fail open, ignores config.
   // Span-classified (#84): a catastrophic token inside a URL or a quoted DATA

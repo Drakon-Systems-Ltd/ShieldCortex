@@ -74,6 +74,8 @@ export interface ToolGuardVerdictLike {
   }>;
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
+  /** Files a `$(cat …)` substitution spliced into the scanned command (#517). */
+  expandedSubstitutions?: string[];
 }
 /** Optional 4th-parameter seam on the real evaluator (issue #4): the guard core
  *  stays pure/synchronous and asks the CALLER to resolve an invoked script's
@@ -287,6 +289,8 @@ export interface InterceptAuditEntry {
   escalated?: { by: 'session-taint'; from: string; to: string; reason: string };
   /** Files the reviewed-script allowlist exempted from folding (#189). */
   reviewedScripts?: string[];
+  /** Files a `$(cat …)` substitution spliced into the scanned command (#517). */
+  expandedSubstitutions?: string[];
   /**
    * Native contract drift: a reviewed exact-name host contract carried fields
    * ShieldCortex does not read, which the guard dropped before validation and
@@ -1254,6 +1258,8 @@ export function createInterceptor(
       ...(v.matches && v.matches.length > 0 ? { matches: v.matches } : {}),
       // #189: an allow that leaned on the reviewed-script allowlist says so.
       ...(v.reviewedScripts && v.reviewedScripts.length > 0 ? { reviewedScripts: v.reviewedScripts } : {}),
+      // #517: files a `$(cat …)` substitution spliced into the scanned command.
+      ...(v.expandedSubstitutions && v.expandedSubstitutions.length > 0 ? { expandedSubstitutions: v.expandedSubstitutions } : {}),
     };
   }
 
