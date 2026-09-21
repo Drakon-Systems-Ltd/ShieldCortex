@@ -20,7 +20,9 @@
  * round-4 findings (F1 the heading precision class, judged on a generated
  * corpus; F2 linear cost in the number of split keys; F3 a heading wrapped in
  * quotes, Markdown or JSON is judged like the bare heading; F4 linear cost
- * when the split keys are separated by spaces only).
+ * when the split keys are separated by spaces only) and the round-5 policy:
+ * an AWS id split by visible whitespace alone is a stated gap, never a
+ * finding; a hit split by an invisible character gets no prose escape.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
@@ -52,21 +54,39 @@ const KEYS: Array<{ provider: string; key: string; severity: 'critical' | 'high'
   { provider: 'huggingface', key: k('hf_', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1W'), severity: 'critical' },
 ];
 
-/** Separators an attacker (or a line-wrapping transport) can insert. */
-const SEPARATORS: Array<{ name: string; sep: string }> = [
-  { name: 'space', sep: ' ' },
-  { name: 'double space', sep: '  ' },
-  { name: 'tab', sep: '\t' },
-  { name: 'newline', sep: '\n' },
-  { name: 'CRLF', sep: '\r\n' },
-  { name: 'NBSP', sep: ' ' },
-  { name: 'zero-width space', sep: '​' },
-  { name: 'zero-width joiner', sep: '‍' },
-  { name: 'word joiner', sep: '⁠' },
-  { name: 'BOM / ZWNBSP', sep: '﻿' },
-  { name: 'soft hyphen', sep: '­' },
-  { name: 'space + newline + space', sep: ' \n ' },
+/**
+ * Separators an attacker (or a line-wrapping transport) can insert, in the two
+ * classes the scanner distinguishes (#544 round 5): VISIBLE whitespace, which
+ * ordinary formatting inserts, and INVISIBLE format characters, which nothing
+ * but deliberate splitting does.
+ */
+const SEPARATORS: Array<{ name: string; sep: string; invisible: boolean }> = [
+  { name: 'space', sep: ' ', invisible: false },
+  { name: 'double space', sep: '  ', invisible: false },
+  { name: 'tab', sep: '\t', invisible: false },
+  { name: 'newline', sep: '\n', invisible: false },
+  { name: 'CRLF', sep: '\r\n', invisible: false },
+  { name: 'NBSP', sep: '\u00a0', invisible: false },
+  { name: 'space + newline + space', sep: ' \n ', invisible: false },
+  { name: 'zero-width space', sep: '\u200b', invisible: true },
+  { name: 'zero-width non-joiner', sep: '\u200c', invisible: true },
+  { name: 'zero-width joiner', sep: '\u200d', invisible: true },
+  { name: 'word joiner', sep: '\u2060', invisible: true },
+  { name: 'BOM / ZWNBSP', sep: '\ufeff', invisible: true },
+  { name: 'soft hyphen', sep: '\u00ad', invisible: true },
+  { name: 'left-to-right mark', sep: '\u200e', invisible: true },
+  { name: 'right-to-left override', sep: '\u202e', invisible: true },
+  { name: 'first strong isolate', sep: '\u2068', invisible: true },
+  { name: 'space + zero-width space', sep: ' \u200b', invisible: true },
 ];
+
+const ZWSP = '\u200b';
+
+/**
+ * Heading-shaped patterns (the AWS id) are never claimed from a hit split by
+ * visible whitespace alone (#544 round 5); every other provider is.
+ */
+const WHITESPACE_GAP = new Set(['aws']);
 
 /** Insert `sep` after every `every` characters of `key` (never at index 0). */
 function splitEvery(key: string, sep: string, every: number): string {
@@ -83,7 +103,7 @@ function splitOnce(key: string, sep: string): string {
 
 /** The attacker's re-join: what a model or downstream consumer would do. */
 function rejoin(text: string): string {
-  return text.replace(/[\s­​-‍⁠﻿]/g, '');
+  return text.replace(/[\s\u00ad\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, '');
 }
 
 function providerFindings(findings: CredentialFinding[], provider: string): CredentialFinding[] {
@@ -110,12 +130,20 @@ describe('#543 positive controls (contiguous)', () => {
 
 describe('#543 separator-split keys are detected and redacted', () => {
   for (const { provider, key, severity } of KEYS) {
-    for (const { name, sep } of SEPARATORS) {
+    for (const { name, sep, invisible } of SEPARATORS) {
       for (const [variant, text] of [
         ['split once', splitOnce(key, sep)],
         ['split every 4', splitEvery(key, sep, 4)],
         ['split every 2', splitEvery(key, sep, 2)],
       ] as const) {
+        if (WHITESPACE_GAP.has(provider) && !invisible) {
+          it(`${provider} / ${name} / ${variant}: stated gap — not claimed from visible whitespace alone`, () => {
+            const result = scanForCredentials(`Store this for later: ${text} — thanks`);
+            expect(providerFindings(result.findings, provider)).toHaveLength(0);
+            expect(result.leaked).toBe(false);
+          });
+          continue;
+        }
         it(`${provider} / ${name} / ${variant}`, () => {
           const prefix = 'Store this for later: ';
           const suffix = ' — thanks';
@@ -182,7 +210,7 @@ describe('#543 separator-split keys are detected and redacted', () => {
 
   it('finds every split key when several are present', () => {
     const a = splitEvery(KEYS[0].key, ' ', 5);
-    const b = splitEvery(KEYS[3].key, '\n', 4);
+    const b = splitEvery(KEYS[3].key, ZWSP, 4);
     const result = scanForCredentials(`openai: ${a}\naws: ${b}\n`);
     expect(providerFindings(result.findings, 'openai')).toHaveLength(1);
     expect(providerFindings(result.findings, 'aws')).toHaveLength(1);
@@ -531,8 +559,8 @@ describe('#544 B4: numbered headings are dismissed structurally; split keys are 
   for (const id of AWS_IDS) {
     for (const every of [1, 2, 4]) {
       for (const tail of ['', ' REGION', ' end']) {
-        it(`${id.slice(0, 4)}… split every ${every}${tail ? ` + ${JSON.stringify(tail)}` : ''} is blocked`, () => {
-          const result = scanForCredentials(`id: ${splitEvery(id, ' ', every)}${tail}`);
+        it(`${id.slice(0, 4)}… ZWSP-split every ${every}${tail ? ` + ${JSON.stringify(tail)}` : ''} is blocked`, () => {
+          const result = scanForCredentials(`id: ${splitEvery(id, ZWSP, every)}${tail}`);
           const aws = providerFindings(result.findings, 'aws');
           expect(aws).toHaveLength(1);
           expect(aws[0].severity).toBe('critical');
@@ -678,39 +706,20 @@ describe('#544 F3: a wrapped heading is judged like the bare heading', () => {
   }
 
   it('wrapping a split key does not hide it', () => {
-    const split = splitEvery(KEYS[3].key, ' ', 4);
+    const split = splitEvery(KEYS[3].key, ZWSP, 4);
     for (const [name, wrap] of WRAPPERS) {
       const hits = splitFindings(wrap(split));
       expect({ wrapper: name, hits: hits.length, provider: hits[0]?.provider }).toEqual({ wrapper: name, hits: 1, provider: 'aws' });
     }
   });
 
-  it('a comma-delimited split id whose fragments carry key material is still found', () => {
-    const split = splitEvery(KEYS[3].key, ' ', 4); // `Z7Q3`, `F6XM`, `2K5V`, `4B3T`
+  it('a comma-delimited ZWSP-split id is still found', () => {
+    const split = splitEvery(KEYS[3].key, ZWSP, 4);
     for (const text of [`${split}, ${split}`, `ids: ${split},${split}`, `[${split}, ${split}]`]) {
       const hits = splitFindings(text);
       expect(hits).toHaveLength(2);
       expect(hits.every(h => h.provider === 'aws')).toBe(true);
     }
-  });
-
-  it('documented residual: a delimiter no longer rescues an id whose fragments all read as words or periods', () => {
-    // `7733` is a period token and `RNCN`, `QADT`, `EBPO` are letters-only, so
-    // this split id is dismissed with plain spaces (the documented 0.1%
-    // every-4 residual). At 61f11ac3 a trailing comma glued onto `EBPO`
-    // made that fragment key material by accident and the id was found;
-    // the boundary word is now the alphanumeric run, so it is not. Measured
-    // on 20,000 random ids split every 4 and comma-delimited: 100% found at
-    // 61f11ac3, 99.89% now — the same rate as with spaces alone. Treating the
-    // delimiter as evidence would recover them but fires on 1,564 of the
-    // 78,000 wrapped headings, so it is not done. This test pins the
-    // residual so a change that moves it is visible.
-    const RESIDUAL = 'AKIA 7733 RNCN QADT EBPO';
-    expect(splitFindings(`id: ${RESIDUAL} end`)).toHaveLength(0);
-    expect(splitFindings(`id: ${RESIDUAL}, end`)).toHaveLength(0);
-    expect(splitFindings(`${RESIDUAL}, ${RESIDUAL}`)).toHaveLength(0);
-    // Contiguous, the direct pass still blocks it.
-    expect(providerFindings(scanForCredentials(`id: ${rejoin(RESIDUAL)} end`).findings, 'aws')).toHaveLength(1);
   });
 
   it('the hit\'s own punctuation stays inside its fragment', () => {
@@ -823,95 +832,220 @@ describe('#544 F1: the base-32 fact is consulted by the collapsed pass only', ()
   });
 
   it('the collapsed pass does not claim a split value outside the alphabet', () => {
-    expect(splitFindings(`id: ${splitEvery(NOT_BASE32, ' ', 4)} end`)).toHaveLength(0);
+    expect(splitFindings(`id: ${splitEvery(NOT_BASE32, ZWSP, 4)} end`)).toHaveLength(0);
   });
 
   it('the collapsed pass claims the same split shape inside the alphabet', () => {
-    const hits = splitFindings(`id: ${splitEvery(KEYS[3].key, ' ', 4)} end`);
+    const hits = splitFindings(`id: ${splitEvery(KEYS[3].key, ZWSP, 4)} end`);
     expect(hits).toHaveLength(1);
     expect(hits[0].provider).toBe('aws');
     expect(hits[0].action).toBe('blocked');
   });
 });
 
-describe('#544 F1: alignment and key material for fixed-length single-case patterns', () => {
+describe('#544 round 5: policy by separator class for the AWS id', () => {
   const key = KEYS[3].key;
+  const REPRO = k('AKIA', 'AB2CD3EF4GH5JK6L');
 
-  it('a window that ends inside a word is a heading, not a key', () => {
-    // `ASIAQ3SALESFORECASTR|EVIEW`: the boundary fragment is letters only.
-    expect(splitFindings('ASIA Q3 SALES FORECAST REVIEW')).toHaveLength(0);
+  it('stated gap: an AWS id split by visible whitespace alone is not claimed', () => {
+    // Every rule tried for this window (rounds 3–4) was either evaded by an
+    // attacker choosing the split points (94–100%) or blocked an ordinary
+    // heading; a rule with both properties buys nothing. The direct pass on
+    // the contiguous id is unchanged.
+    for (const text of [splitEvery(key, ' ', 4), splitEvery(key, '\n', 4), splitEvery(key, '\t', 1), `X${splitEvery(REPRO, ' ', 4)}`]) {
+      expect(splitFindings(`id: ${text} end`)).toHaveLength(0);
+    }
+    expect(providerFindings(scanForCredentials(`id: ${key} end`).findings, 'aws')).toHaveLength(1);
   });
 
-  it('a window that starts inside a word is a heading, not a key', () => {
-    expect(splitFindings('EURASIA Q3 REGIONAL SALES REPORT FOR MANAGEMENT')).toHaveLength(0);
+  it('the gap is the AWS shape only: a fixed-length hex key split by spaces is still found', () => {
+    const twilio = k('SK', '0a1b2c3d4e5f60718293a4b5c6d7e8f9');
+    const hits = splitFindings(`sid ${splitEvery(twilio, ' ', 4)} end`);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].provider).toBe('twilio');
   });
 
-  it('punctuation after a split key does not misalign it', () => {
-    for (const tail of ['.', ',', ')', '";', "'s"]) {
-      const hits = splitFindings(`id: ${splitEvery(key, ' ', 4)}${tail}`);
+  it('reviewer repro: ZWSP-split id is found, and prepending a letter no longer hides it', () => {
+    for (const text of [splitEvery(REPRO, ZWSP, 4), `X${splitEvery(REPRO, ZWSP, 4)}`, `X${splitEvery(REPRO, ZWSP, 4)}Y`]) {
+      const hits = splitFindings(text);
       expect(hits).toHaveLength(1);
       expect(hits[0].provider).toBe('aws');
+      expect(hits[0].action).toBe('blocked');
+      expect(rejoin(scanForCredentials(text).redactedContent ?? '')).not.toContain(REPRO);
     }
   });
 
-  it('a split key keeps its own digit-and-letter fragments, so it is key material', () => {
-    for (const every of [1, 2, 3, 4, 5, 8]) {
-      const hits = splitFindings(`note ${splitEvery(key, '\n', every)} end`);
-      expect(hits).toHaveLength(1);
-      expect(hits[0].provider).toBe('aws');
-      expect(hits[0].position).toBe('note '.length);
+  it('a hit with one invisible separator among visible ones is judged as invisible', () => {
+    const mixed = `${key.slice(0, 8)} ${key.slice(8, 12)}${ZWSP}${key.slice(12, 16)} ${key.slice(16)}`;
+    const hits = splitFindings(`id: ${mixed} end`);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].provider).toBe('aws');
+  });
+
+  it('an invisible-split id inside quotes or Markdown is found', () => {
+    const split = splitEvery(REPRO, ZWSP, 4);
+    for (const text of [`"${split}"`, `**${split}**`, `\`${split}\``, JSON.stringify({ id: split }), `- ${split}:`]) {
+      const hits = splitFindings(text);
+      expect({ text, hits: hits.length }).toEqual({ text, hits: 1 });
     }
   });
 
-  it('a random id split naively is found (seeded sample; measured 100% / 90% over 20,000 in the lab script)', () => {
+  it('an invisible-split id with words around it is found and only the id is redacted', () => {
+    const result = scanForCredentials(`the id ${splitEvery(REPRO, ZWSP, 4)} rotates soon`);
+    const hits = providerFindings(result.findings, 'aws');
+    expect(hits).toHaveLength(1);
+    expect(hits[0].evasion).toBe('separator_split');
+    expect(result.redactedContent).toBe('the id [REDACTED-api_key-aws] rotates soon');
+  });
+
+  it('no prose escape for invisible separators: a heading-shaped split with ZWSP inside the window fires', () => {
+    // Nothing a person types puts a zero-width space between `Q3` and `GDP`;
+    // this is the intended behaviour of the invisible class.
+    expect(splitFindings(`ASIA${ZWSP}Q3${ZWSP}GDP${ZWSP}GROWTH${ZWSP}FORECAST`)).toHaveLength(1);
+  });
+
+  it('an invisible character at the text edge, outside the window, leaves a heading clean', () => {
+    for (const heading of ['ASIA Q3 GDP GROWTH FORECAST', 'ASIA B2B SALES FORECAST', 'ASIA 2026 REGIONAL SALES REPORT']) {
+      for (const edge of [ZWSP, '\ufeff', '\u200c', '\u00ad', '\u200e']) {
+        for (const text of [`${edge}${heading}`, `${heading}${edge}`, `${edge}${heading}${edge}`, `${heading}${edge}\n`]) {
+          expect({ text, hits: splitFindings(text).length }).toEqual({ text, hits: 0 });
+        }
+      }
+    }
+  });
+
+  it('a random id split by an invisible separator is found whatever the split (seeded sample)', () => {
     const rnd = mulberry32(99);
-    const splits: Array<[string, (id: string) => string, number]> = [
-      ['every 1', id => splitEvery(id, ' ', 1), 1],
-      ['every 2', id => splitEvery(id, ' ', 2), 0.8],
-      ['every 4', id => splitEvery(id, ' ', 4), 1],
-      ['every 5', id => splitEvery(id, ' ', 5), 1],
-      ['once', id => splitOnce(id, ' '), 1],
-      ['newline every 4', id => splitEvery(id, '\n', 4), 1],
+    const splits: Array<[string, (id: string) => string]> = [
+      ['every 1', id => splitEvery(id, ZWSP, 1)],
+      ['every 2', id => splitEvery(id, '\u200d', 2)],
+      ['every 4', id => splitEvery(id, ZWSP, 4)],
+      ['every 5', id => splitEvery(id, '\u2060', 5)],
+      ['once', id => splitOnce(id, '\ufeff')],
+      ['glued letter + every 4', id => `X${splitEvery(id, ZWSP, 4)}Y`],
     ];
     const ids: string[] = [];
     while (ids.length < 500) {
       const id = randomAwsId(rnd);
       if (/[0-9]/.test(id.slice(4))) ids.push(id); // an id without a digit is the documented letter+digit residual
     }
-    for (const [name, fn, floor] of splits) {
+    for (const [name, fn] of splits) {
       const found = ids.filter(id => splitFindings(`id: ${fn(id)} end`).some(f => f.provider === 'aws')).length;
-      expect({ split: name, recall: found / ids.length >= floor }).toEqual({ split: name, recall: true });
+      expect({ split: name, found }).toEqual({ split: name, found: ids.length });
     }
   });
 
-  it('documented residual: a letter glued onto a letters-only tail fragment misaligns the window', () => {
-    // `4B3` then `TING`: the id's last character `T` now sits inside a
-    // letters-only fragment that continues past the window. The rule cannot
-    // tell this from `FOREC|AST`, so a deliberate attacker who knows it evades
-    // it; this test pins the residual so the CHANGELOG stays honest.
-    expect(splitFindings('id: AKIA Z7Q3 F6XM 2K5V 4B3 TING')).toHaveLength(0);
-  });
-
-  it('open-ended and mixed-case patterns keep the strict rule', () => {
-    // Filler that would satisfy the alignment rule's "no key material" test
-    // still cannot dismiss an sk- key: one Ab1C fragment is a key.
+  it('open-ended and mixed-case patterns keep the strict rule for visible whitespace', () => {
     const result = scanForCredentials(`sk-proj- ${splitEvery(KEYS[1].key.slice(8), ' ', 4)} yes`);
     expect(providerFindings(result.findings, 'openai')).toHaveLength(1);
     expect(splitFindings('sk-proj- keys replaced the legacy format in 2024')).toHaveLength(0);
   });
+
+  it('open-ended patterns get no prose escape for invisible separators either', () => {
+    // A sentence the strict rule dismisses when split by spaces …
+    const sentence = 'sk-proj- keys replaced the legacy format in 2024';
+    expect(splitFindings(sentence)).toHaveLength(0);
+    // … is a key when the same gaps hold a zero-width space.
+    expect(splitFindings(sentence.replace(/ /g, ZWSP))).toHaveLength(1);
+  });
+});
+
+describe('#544 round 5: the reviewer\'s digit-abbreviation headings', () => {
+  // `ASIA B2B SALES FORECAST` collapses to `ASIAB2BSALESFORECAST`: a well-formed
+  // AWS window with `B2B` as key material by any letter-and-digit rule. It
+  // was CRITICAL/blocked at 41ee77de; documenting it as a residual does not
+  // pass the precision gate. Under the whitespace policy it is not judged.
+  const HEADINGS = [
+    'ASIA B2B SALES FORECAST',
+    'ASIA 3PL COST REVIEW',
+    'ASIA B2C P2P 4G 5G ROLLOUT',
+    'ASIA 2FA K12 W2 401K REVIEW',
+    'ASIA Q1 B2B GROWTH FORECAST',
+    'ASIA FY26 H1 3PL LOGISTICS',
+  ];
+  for (const heading of HEADINGS) {
+    for (const [shape, fn] of [['bare', (s: string) => s], ['double-quoted', (s: string) => `"${s}"`], ['lower', (s: string) => s.toLowerCase()]] as const) {
+      it(`${shape}: no finding for ${JSON.stringify(fn(heading))}`, () => {
+        const result = scanForCredentials(fn(heading));
+        expect(result.findings).toHaveLength(0);
+        expect(result.leaked).toBe(false);
+      });
+    }
+  }
+});
+
+describe('#544 round 5: a generated digit-abbreviation corpus produces no split finding', () => {
+  const DIGIT_ABBREVIATIONS = ['B2B', 'B2C', 'C2C', 'P2P', 'D2C', 'O2O', '3PL', '4PL', '4G', '5G', '2FA', 'MFA2', 'K12', 'W2', '1099',
+    '401K', 'S3', 'EC2', 'H1B', 'G7', 'G20', 'COVID19', 'Y2K', '3D', '2D', '24X7', '9TO5', '1ST', '2ND', 'TOP10', 'A1', 'B2', 'C3',
+    'Q1', 'Q2', 'Q3', 'Q4', 'H1', 'H2', 'FY26', 'FY2026', 'CY25', 'W12', 'M3', '1H', '2H', 'V2', 'V3', 'X1', 'MK2', 'T2', 'E3'];
+  const WORDS = 'sales forecast cost review report growth revenue rollout logistics platform strategy pricing budget pipeline'.split(' ');
+  const ACRONYMS = 'GDP KPI HR EBITDA YOY SKU ROI ARR NPS COGS OPEX CAPEX EMEA APAC CRM ERP'.split(' ');
+
+  function generate(n: number, seed: number): string[] {
+    const rnd = mulberry32(seed);
+    const pick = <T,>(a: T[]): T => a[Math.floor(rnd() * a.length)];
+    const out: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const tokens = [pick(['ASIA', 'AKIA'])];
+      const len = 2 + Math.floor(rnd() * 5);
+      let hasAbbrev = false;
+      for (let t = 0; t < len; t++) {
+        const x = rnd();
+        if (x < 0.35) { tokens.push(pick(DIGIT_ABBREVIATIONS)); hasAbbrev = true; }
+        else if (x < 0.5) tokens.push(pick(ACRONYMS));
+        else tokens.push(pick(WORDS));
+      }
+      if (!hasAbbrev) tokens.splice(1 + Math.floor(rnd() * len), 0, pick(DIGIT_ABBREVIATIONS));
+      const shape = i % 3;
+      out.push(tokens.map(w => shape === 0 ? w.toUpperCase() : shape === 2 ? w.toLowerCase() : (/^[A-Z0-9]+$/.test(w) && w.length <= 6 ? w : w[0].toUpperCase() + w.slice(1).toLowerCase())).join(' '));
+    }
+    return out;
+  }
+
+  const CORPUS = generate(3000, 544);
+
+  it('the corpus exercises the AWS window shape', () => {
+    const windowed = CORPUS.filter(h => /A[KS]IA[0-9A-Z]{16}/.test(h.replace(/\s+/g, '')));
+    expect(windowed.length).toBeGreaterThan(500);
+  });
+
+  it('3,000 digit-abbreviation headings, bare → zero separator_split findings', () => {
+    expect(CORPUS.filter(h => splitFindings(h).length > 0)).toEqual([]);
+  });
+
+  it('the same headings wrapped 13 ways (39,000 texts) → zero separator_split findings', () => {
+    const offenders: string[] = [];
+    for (const heading of CORPUS) for (const [, wrap] of WRAPPERS) { const t = wrap(heading); if (splitFindings(t).length > 0) offenders.push(t); }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the same headings with an invisible character at either edge (18,000 texts) → zero separator_split findings', () => {
+    const offenders: string[] = [];
+    for (const heading of CORPUS) {
+      for (const edge of [ZWSP, '\ufeff', '\u00ad']) {
+        for (const t of [`${edge}${heading}`, `${heading}${edge}`]) if (splitFindings(t).length > 0) offenders.push(t);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe('#544 F2 / F4: cost is linear in the number of split keys', () => {
-  const timeScan = (n: number, joiner: string): number => {
+  // Two separators per shape: the reviewer's space-split ids (no finding by
+  // the whitespace policy, so this is the pure cost of discovering and
+  // dismissing N candidates) and the same ids ZWSP-split (N findings).
+  const timeScan = (n: number, joiner: string, sep = ' '): number => {
     const rnd = mulberry32(7);
-    const text = Array.from({ length: n }, () => splitEvery(randomAwsId(rnd), ' ', 4)).join(joiner);
+    const text = Array.from({ length: n }, () => splitEvery(randomAwsId(rnd), sep, 4)).join(joiner);
     let best = Infinity;
     for (let i = 0; i < 3; i++) {
       const t0 = performance.now();
       const result = scanForCredentials(text);
       best = Math.min(best, performance.now() - t0);
-      // ~96% of ids carry a digit and are found; none may be lost to resolution.
-      expect(providerFindings(result.findings, 'aws').length).toBeGreaterThan(n * 0.9);
+      const found = providerFindings(result.findings, 'aws').length;
+      // ~96% of ids carry a digit; with an invisible separator all of those are found.
+      if (sep === ' ') expect(found).toBe(0);
+      else expect(found).toBeGreaterThan(n * 0.9);
     }
     return best;
   };
@@ -922,10 +1056,12 @@ describe('#544 F2 / F4: cost is linear in the number of split keys', () => {
     // redaction spliced the content once per finding). Now 14 / 25 / 47 / 92
     // ms on the development box. The bound is on the RATIO so a slow CI box
     // passes; the old code's ratio was over 100.
-    const t1k = timeScan(1000, ' | ');
-    const t8k = timeScan(8000, ' | ');
-    expect(t8k).toBeLessThan(20 * t1k + 200);
-    expect(t8k).toBeLessThan(4000);
+    for (const sep of [' ', ZWSP]) {
+      const t1k = timeScan(1000, ' | ', sep);
+      const t8k = timeScan(8000, ' | ', sep);
+      expect(t8k).toBeLessThan(20 * t1k + 200);
+      expect(t8k).toBeLessThan(4000);
+    }
   });
 
   it('F4: 3200 split ids joined by a single space cost at most a generous linear multiple of 800', () => {
@@ -934,10 +1070,12 @@ describe('#544 F2 / F4: cost is linear in the number of split keys', () => {
     // 6551 ms for 800 / 1600 / 3200 ids at the previous head (comma-joined
     // controls 12 / 22 / 56 ms). Now 14 / 30 / 46 ms. Same ratio bound as F2;
     // the old ratio was about 16 for a 4x input.
-    const t800 = timeScan(800, ' ');
-    const t3200 = timeScan(3200, ' ');
-    expect(t3200).toBeLessThan(10 * t800 + 200);
-    expect(t3200).toBeLessThan(4000);
+    for (const sep of [' ', ZWSP]) {
+      const t800 = timeScan(800, ' ', sep);
+      const t3200 = timeScan(3200, ' ', sep);
+      expect(t3200).toBeLessThan(10 * t800 + 200);
+      expect(t3200).toBeLessThan(4000);
+    }
   });
 });
 
@@ -989,10 +1127,10 @@ describe('#543 pipeline consumer', () => {
     expect(result.credentialScan?.findings.some(f => f.provider === 'google' && f.action === 'blocked')).toBe(true);
   });
 
-  it('blocks a memory write carrying a newline-split AWS access key id', async () => {
+  it('blocks a memory write carrying a zero-width-space-split AWS access key id', async () => {
     const { runDefencePipeline } = await import('../pipeline.js');
     const result = runDefencePipeline(
-      `aws id:\n${splitEvery(KEYS[3].key, '\n', 4)}\n`,
+      `aws id:\n${splitEvery(KEYS[3].key, ZWSP, 4)}\n`,
       'cloud note',
       { type: 'agent', identifier: 'test-agent' },
       testConfig,

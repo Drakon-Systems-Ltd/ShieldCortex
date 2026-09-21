@@ -5,12 +5,20 @@
  *
  *   npx tsx scripts/lab/credential-split-evasion.mts [ids-per-class]
  *
- * Attacker-optimal figures come from an exact search: a dynamic programme over
- * every partition of the collapsed key into whitespace-separated fragments,
- * plus a letter glued onto the first or last fragment, evaluated against the
- * same fragment classifier the scanner uses. Every predicted evasion is then
- * re-run through `scanForCredentials`, and only confirmed evasions are counted.
- * Naive-split recall runs the scanner directly.
+ * Attacker-optimal figures for the strict rule come from an exact search: a
+ * dynamic programme over every partition of the collapsed key into
+ * whitespace-separated fragments, plus a letter glued onto the first or last
+ * fragment, evaluated against the same fragment classifier the scanner uses.
+ * Every predicted evasion is then re-run through `scanForCredentials`, and
+ * only confirmed evasions are counted. Naive-split recall runs the scanner
+ * directly.
+ *
+ * The AWS id (round 5 policy) has no partition-dependent rule: split by
+ * visible whitespace alone it is never claimed (the stated gap — reported
+ * here as 0% recall), and split by an invisible separator it gets no prose
+ * escape, so the split points cannot matter and the search does not apply.
+ * Its recall is measured directly for every naive shape, with and without a
+ * glued letter.
  *
  * Numbers quoted in the CHANGELOG and in `hitReadsAsProse` come from this
  * script at 20,000 ids per class.
@@ -41,12 +49,12 @@ interface KeyClass {
   alphabet: string;
   bodyLength: number;
   provider: string;
-  /** Which rule the scanner applies to this pattern's collapsed hits. */
-  rule: 'strict' | 'aligned-key-material';
+  /** Which policy the scanner applies to this pattern's collapsed hits. */
+  rule: 'strict' | 'whitespace-gap';
 }
 
 const CLASSES: KeyClass[] = [
-  { name: 'AWS access key id (AKIA + 16 base-32)', prefix: 'AKIA', prefixLength: 1, alphabet: BASE32, bodyLength: 16, provider: 'aws', rule: 'aligned-key-material' },
+  { name: 'AWS access key id (AKIA + 16 base-32)', prefix: 'AKIA', prefixLength: 1, alphabet: BASE32, bodyLength: 16, provider: 'aws', rule: 'whitespace-gap' },
   { name: 'OpenAI legacy (sk- + 48 base-62)', prefix: 'sk-', prefixLength: 3, alphabet: BASE62, bodyLength: 48, provider: 'openai', rule: 'strict' },
   { name: 'Google (AIza + 35 base-62)', prefix: 'AIza', prefixLength: 4, alphabet: BASE62, bodyLength: 35, provider: 'google', rule: 'strict' },
 ];
@@ -161,11 +169,6 @@ function strictDismisses(f: State, n: number): boolean {
   return !f.nonProse && f.bodyWord && f.wordChars * 2 >= n;
 }
 
-function alignedKeyMaterialDismisses(f: State, allowGlue: boolean): boolean {
-  if (f.misaligned) return allowGlue;
-  return !f.other && f.lone < 2;
-}
-
 function witness(s: string, f: State): string {
   const parts: string[] = [];
   let prev = 0;
@@ -185,9 +188,9 @@ const rnd = mulberry32(543);
 for (const cls of CLASSES) {
   let matched = 0;
   let strictEvade = 0;
-  let noGlueEvade = 0;
-  let glueEvade = 0;
   const naive: Record<string, number> = { 'every 1': 0, 'every 2': 0, 'every 3': 0, 'every 4': 0, 'every 5': 0, 'every 8': 0, 'once': 0, 'newline every 4': 0 };
+  const ZWSP = '\u200b';
+  const invisible: Record<string, number> = { 'ZWSP every 1': 0, 'ZWSP every 2': 0, 'ZWSP every 3': 0, 'ZWSP every 4': 0, 'ZWSP every 8': 0, 'BOM once': 0, 'soft hyphen every 4': 0, 'X + ZWSP every 4 + Y': 0, 'ZWSP every 4 in quotes': 0, 'space + ZWSP mixed': 0 };
   const splitEvery = (k: string, sep: string, e: number) => k.match(new RegExp(`.{1,${e}}`, 'g'))!.join(sep);
   const t0 = performance.now();
   for (let i = 0; i < N; i++) {
@@ -197,14 +200,23 @@ for (const cls of CLASSES) {
     matched++;
     const key = cls.prefix + body;
 
-    const states = reachable(key, cls.prefixLength);
-    const strictHit = states.find(f => strictDismisses(f, key.length));
-    if (strictHit && (cls.rule !== 'strict' || confirmed(witness(key, strictHit), cls.provider))) strictEvade++;
-    if (cls.rule === 'aligned-key-material') {
-      const ng = states.find(f => alignedKeyMaterialDismisses(f, false));
-      if (ng && confirmed(witness(key, ng), cls.provider)) noGlueEvade++;
-      const g = states.find(f => alignedKeyMaterialDismisses(f, true));
-      if (g && confirmed(witness(key, g), cls.provider)) glueEvade++;
+    if (cls.rule === 'strict') {
+      const states = reachable(key, cls.prefixLength);
+      const strictHit = states.find(f => strictDismisses(f, key.length));
+      if (strictHit && confirmed(witness(key, strictHit), cls.provider)) strictEvade++;
+    } else {
+      const shapes: Record<string, string> = {
+        'ZWSP every 1': splitEvery(key, ZWSP, 1), 'ZWSP every 2': splitEvery(key, ZWSP, 2), 'ZWSP every 3': splitEvery(key, ZWSP, 3),
+        'ZWSP every 4': splitEvery(key, ZWSP, 4), 'ZWSP every 8': splitEvery(key, ZWSP, 8),
+        'BOM once': key.slice(0, key.length >> 1) + '\ufeff' + key.slice(key.length >> 1),
+        'soft hyphen every 4': splitEvery(key, '\u00ad', 4),
+        'X + ZWSP every 4 + Y': `X${splitEvery(key, ZWSP, 4)}Y`,
+        'ZWSP every 4 in quotes': `"${splitEvery(key, ZWSP, 4)}"`,
+        'space + ZWSP mixed': `${key.slice(0, 8)} ${key.slice(8, 12)}${ZWSP}${key.slice(12, 16)} ${key.slice(16)}`,
+      };
+      for (const [name, text] of Object.entries(shapes)) {
+        if (scanForCredentials(`id: ${text} end`).findings.some(f => f.provider === cls.provider && f.evasion === 'separator_split')) invisible[name]++;
+      }
     }
 
     const shapes: Record<string, string> = {
@@ -221,10 +233,9 @@ for (const cls of CLASSES) {
   console.log(`\n${cls.name} — rule: ${cls.rule}; ${matched} of ${N} random ids pass the letter+digit gate; ${((performance.now() - t0) / 1000).toFixed(0)}s`);
   if (cls.rule === 'strict') {
     console.log(`  attacker-optimal split (whitespace and a glued letter), strict rule dismisses: ${pct(strictEvade)}`);
+    console.log('  naive whitespace splits found:', Object.entries(naive).map(([k, v]) => `${k} ${pct(v)}`).join('; '));
   } else {
-    console.log(`  attacker-optimal split, whitespace only:              dismissed for ${pct(noGlueEvade)}`);
-    console.log(`  attacker-optimal split plus one glued letter:         dismissed for ${pct(glueEvade)}`);
-    console.log(`  (for reference, the strict rule would be dismissed for ${pct(strictEvade)} — but it cannot clear the heading corpus)`);
+    console.log('  visible whitespace splits found (stated gap, never claimed):', Object.entries(naive).map(([k, v]) => `${k} ${pct(v)}`).join('; '));
+    console.log('  invisible-separator splits found (no prose escape):', Object.entries(invisible).map(([k, v]) => `${k} ${pct(v)}`).join('; '));
   }
-  console.log('  naive splits found:', Object.entries(naive).map(([k, v]) => `${k} ${pct(v)}`).join('; '));
 }

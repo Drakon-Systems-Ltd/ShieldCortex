@@ -240,18 +240,29 @@ const MAX_WELL_KNOWN_TOKEN = 64;
 // character came from, and act on the original span.
 
 /**
- * Characters treated as separators: every Unicode whitespace (`\s`), the soft
- * hyphen, zero-width space / non-joiner / joiner, the word joiner and the BOM
- * (zero-width no-break space). Visible punctuation is deliberately excluded —
- * `sk-abc.def` reads as a different value; `sk-abc def` does not.
+ * Characters treated as separators, in two classes.
+ *
+ * VISIBLE: every Unicode whitespace (`\s`). A line wrap, a tab, a run of
+ * spaces — the separators ordinary formatting inserts.
+ *
+ * INVISIBLE: the soft hyphen, zero-width space / non-joiner / joiner, the
+ * word joiner, the BOM (zero-width no-break space) and the bidi controls
+ * (LRM/RLM, LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI). Nothing a person types
+ * into a heading; a key split by one of these was split on purpose.
+ *
+ * Visible punctuation is deliberately excluded — `sk-abc.def` reads as a
+ * different value; `sk-abc def` does not.
  */
-const SEPARATOR_CHAR = /[\s­​-‍⁠﻿]/;
+const INVISIBLE_SEPARATOR_CHAR = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/;
+const SEPARATOR_CHAR = /[\s\u00AD\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/;
 
 interface CollapsedView {
   /** `content` with every separator removed. */
   text: string;
   /** `map[i]` is the offset in the original content of `text[i]`. */
   map: number[];
+  /** `invisibleBefore[i]` is the number of INVISIBLE separators before `text[i]` in the original. */
+  invisibleBefore: number[];
 }
 
 /**
@@ -261,14 +272,20 @@ interface CollapsedView {
 function buildCollapsedView(content: string): CollapsedView | null {
   const chars: string[] = [];
   const map: number[] = [];
+  const invisibleBefore: number[] = [];
+  let invisible = 0;
   for (let i = 0; i < content.length; i++) {
     const ch = content[i];
-    if (SEPARATOR_CHAR.test(ch)) continue;
+    if (SEPARATOR_CHAR.test(ch)) {
+      if (INVISIBLE_SEPARATOR_CHAR.test(ch)) invisible++;
+      continue;
+    }
     chars.push(ch);
     map.push(i);
+    invisibleBefore.push(invisible);
   }
   if (chars.length === content.length) return null;
-  return { text: chars.join(''), map };
+  return { text: chars.join(''), map, invisibleBefore };
 }
 
 /**
@@ -460,21 +477,29 @@ interface CompiledPattern {
   sticky: RegExp;
   prefixLength: number;
   /**
-   * Fixed length in one letter case (`A[KS]IA[0-9A-Z]{16}`): no open-ended
-   * quantifier, and the letters it admits are upper OR lower, not both. Such
-   * a pattern cuts a 20-character window out of any shouted heading, so its
-   * collapsed hits are judged by the window's alignment (see `hitReadsAsProse`).
+   * Heading-shaped (`A[KS]IA[0-9A-Z]{16}`): fixed length — no open-ended
+   * quantifier — and a body that admits every letter of one case. Such a
+   * pattern cuts a 20-character window out of any shouted heading, so a hit
+   * split by visible whitespace alone is never claimed (see
+   * `validateCandidate`). A fixed-length HEX pattern (`SK[a-fA-F0-9]{32}`,
+   * a UUID) is not heading-shaped: no run of words fits its alphabet.
    */
-  fixedSingleCase: boolean;
+  headingShaped: boolean;
 }
 
 const COMPILED_PATTERNS = new WeakMap<CredentialPattern, CompiledPattern>();
 
-/** No `{n,}` / `{n,m}` / `+` / `*` outside look-arounds, and not both `a-z` and `A-Z`. */
-function isFixedSingleCase(source: string): boolean {
+/**
+ * No `{n,}` / `{n,m}` / `+` / `*` outside look-arounds, a full `A-Z` or `a-z`
+ * range, and not both. Of the built-in patterns only the AWS access key id
+ * qualifies; the fixed-length hex patterns admit `a-f` and no more.
+ */
+function isHeadingShaped(source: string): boolean {
   const body = source.replace(/\(\?<?[=!][^)]*\)/g, '');
   if (/\{\d+,\d*\}/.test(body) || /(?<!\\)[+*]/.test(body)) return false;
-  return !(/a-z/.test(body) && /A-Z/.test(body));
+  const upper = /A-Z/.test(body);
+  const lower = /a-z/.test(body);
+  return upper !== lower;
 }
 
 function compilePattern(pattern: CredentialPattern): CompiledPattern {
@@ -485,7 +510,7 @@ function compilePattern(pattern: CredentialPattern): CompiledPattern {
       global: new RegExp(pattern.regex.source, flags + 'g'),
       sticky: new RegExp(pattern.regex.source, flags + 'y'),
       prefixLength: literalPrefixLength(pattern.regex.source),
-      fixedSingleCase: isFixedSingleCase(pattern.regex.source),
+      headingShaped: isHeadingShaped(pattern.regex.source),
     };
     COMPILED_PATTERNS.set(pattern, compiled);
   }
@@ -564,12 +589,14 @@ function fullText(text: string, f: Fragment): string {
 }
 
 /**
- * Does a collapsed hit read as a heading or a sentence rather than a key?
- * Two structural rules, chosen by the shape of the pattern; neither consults
- * a vocabulary beyond the letter-pair test in `fragmentReadsAsProse`.
+ * Does a collapsed hit split by VISIBLE whitespace read as a heading or a
+ * sentence rather than a key? Consulted only for open-ended or mixed-case
+ * patterns (`sk-…{20,}`, `AIza` + 35 of base-62, `ghp_…`); a hit split by an
+ * invisible separator is never asked (see `validateCandidate`), and a hit of a
+ * heading-shaped pattern (the AWS id) split by whitespace is never claimed.
  *
- * Open-ended or mixed-case patterns (`sk-…{20,}`, `AIza` + 35 of base-62,
- * `ghp_…`), the strict rule (#544 B4):
+ * The strict rule (#544 B4), which consults no vocabulary beyond the
+ * letter-pair test in `fragmentReadsAsProse`:
  *
  *   - every fragment must be a WORD or a PERIOD token — one fragment that is
  *     neither (a lone letter, an abbreviation, `4K2M`, `Ab1C`) and the hit is
@@ -578,73 +605,29 @@ function fullText(text: string, f: Fragment): string {
  *   - at least one WORD of three or more letters must sit beyond that prefix;
  *   - WORD characters must make up half the hit or more.
  *
+ * A boundary fragment is judged on the alphanumeric run around the boundary,
+ * so quoting, bold or bracketing the text changes nothing (#544 F3).
+ *
  * The decision cannot be diluted: filler around a split key leaves the key's
  * own fragments in the hit, and a random mixed-case body does not partition
  * into words. Measured with the exact attacker-optimal split (dynamic
- * programme over every partition, plus a glued letter at either end) in
+ * programme over every partition, plus a letter glued onto either end) in
  * `scripts/lab/credential-split-evasion.mts`: 0 of 20,000 random `sk-` and
  * 0 of 20,000 `AIza` bodies can be dismissed.
  *
- * Fixed-length single-case patterns (`A[KS]IA[0-9A-Z]{16}`), the alignment
- * rule. Such a pattern cuts a window of fixed width out of any shouted
- * heading, and with a `Q3` or an `FY26` in the window the strict rule has to
- * decide whether `GDP`, `PROJECT` or `HEADCOUNT` is a word — a vocabulary
- * question with no structural answer (round 4 of #544). So the window itself
- * is judged instead:
- *
- *   - a hit that starts or ends inside a letters-only word (`FOREC|AST`,
- *     `EUR|ASIA`) is a heading cut mid-word, not a key. The word is the
- *     alphanumeric run around the boundary, so quoting, bold or bracketing the
- *     heading, or ending it with `:` or `,`, changes nothing (#544 F3);
- *   - an aligned hit is a key only if some fragment beyond the literal prefix
- *     is key material — mixes letters and digits, is punctuated or mixed
- *     case, or is a digit run that is no period token — or the hit holds two
- *     or more lone letters (a key split after every character).
- *
- * A split key keeps its own fragments, and a fragment of a random base-32 body
- * is key material unless the split happens to isolate letters from digits.
- * Measured (same script, 19,312 random AWS ids that hold a digit): a key split
- * after every 1, 4, 5 or 8 characters, once in the middle, or across newlines
- * is found for 99.9–100% of ids; split after every 3, for 98.3%; after every
- * 2, for 89.7%. On the generated heading corpus in the #543 test (6,000
- * headings led by `ASIA`/`AKIA`, all-caps, Title and lower case, each also
- * wrapped thirteen ways: double or single quotes, `**`, `_`, backticks,
- * parentheses, brackets, a `# ` or `- ` prefix, a trailing `:` `.` `,`, and
- * as a JSON string value; 78,000 texts) the rule fires on none. The price
- * of judging the boundary word on its letters is that a delimiter no longer
- * rescues an id whose fragments all read as words or period tokens:
- * comma-delimited every-4 splits went from 100% to 99.89% found, the plain
- * space rate. Counting the delimiter as evidence would fire on 1,564 of the
- * 78,000 wrapped headings, so it is not done.
- *
- * Residual, by design and measured: an attacker who chooses the split points
- * AND glues one letter onto either end of the id evades this rule for every
- * id, and one who only inserts whitespace evades it for 94.2% of ids (the
- * strict rule, which cannot clear the heading corpus, is evaded for 1.7% but
- * blocks about one all-caps heading in ten of that corpus). The
- * collapsed pass therefore catches an AWS id that was wrapped, tabulated or
- * spaced out — not one hidden by an adversary who knows this rule. A heading
- * whose abbreviation carries a digit (`B2B`, `B2C`, `3PL`) is key material
- * by this rule and still fires when the window lands on it.
+ * Why the AWS id is not judged here at all (#544 rounds 3–5): its pattern,
+ * `A[KS]IA` + 16 capitals or digits, cuts a window of fixed width out of any
+ * shouted heading, and every rule tried for that window failed one side of
+ * the gate. The strict rule blocked about one all-caps heading in ten of the
+ * generated corpus; an alignment rule cleared the corpus but was evaded by an
+ * attacker choosing the split points for 94% of ids (100% with one glued
+ * letter) and still blocked `ASIA B2B SALES FORECAST`. A rule that is both
+ * evadable and blocks headings buys nothing, so an AWS id split by
+ * whitespace alone is left to the direct pass (which requires it contiguous)
+ * and the gap is stated in the CHANGELOG.
  */
 function hitReadsAsProse(text: string, frags: Fragment[], cStart: number, cEnd: number, compiled: CompiledPattern): boolean {
   const prefixEnd = cStart + compiled.prefixLength;
-
-  if (compiled.fixedSingleCase) {
-    const first = frags[0];
-    const last = frags[frags.length - 1];
-    if (first.cs > first.fullCs && LETTERS_ONLY.test(fullText(text, first))) return true;
-    if (last.ce < last.fullCe && LETTERS_ONLY.test(fullText(text, last))) return true;
-    let lone = 0;
-    for (const f of frags) {
-      if (f.ce <= prefixEnd) continue;
-      const full = fullText(text, f);
-      const cls = classifyFragment(full);
-      if (cls === 'other') return false;
-      if (cls === 'letters' && full.length === 1 && ++lone >= 2) return false;
-    }
-    return true;
-  }
 
   let wordChars = 0;
   let bodyWord = false;
@@ -759,7 +742,20 @@ function validateCandidate(
   // A fact about issued values the discovery regex is looser than (AWS ids
   // are base-32). Collapsed pass only; the direct pass never consults it.
   if (pattern.collapsedValuePattern && !pattern.collapsedValuePattern.test(secretValue)) return null;
-  if (hitReadsAsProse(text, frags, cStart, cEnd, compiled)) return null;
+
+  // Policy by separator class (#544 round 5). A hit split by an INVISIBLE
+  // character was split on purpose: no prose escape of any kind. A hit split
+  // by visible whitespace alone is judged as prose — and for a heading-shaped
+  // pattern (the AWS id: fixed length, one case, every letter admitted) it is
+  // never claimed at all: such a pattern cuts a window out of any shouted
+  // heading, every rule that tried
+  // to tell the window from a key was either evaded by an attacker choosing
+  // the split points (94–100%) or blocked ordinary headings (`ASIA B2B SALES
+  // FORECAST`), and a rule with both properties buys nothing.
+  if (!spanHasInvisibleSeparator(view, cStart, cEnd)) {
+    if (compiled.headingShaped) return null;
+    if (hitReadsAsProse(text, frags, cStart, cEnd, compiled)) return null;
+  }
   // Git SHA / UUID with a separator inside is still a public identifier.
   // The token is only contiguous in the collapsed view, so test it there.
   if (matchIsWellKnownNonSecret(text, cStart, cEnd)) return null;
@@ -773,6 +769,11 @@ function validateCandidate(
     start: map[cStart],
     end: map[cEnd - 1] + 1,
   };
+}
+
+/** Does the original span behind collapsed `[cStart, cEnd)` hold an invisible separator? */
+function spanHasInvisibleSeparator(view: CollapsedView, cStart: number, cEnd: number): boolean {
+  return view.invisibleBefore[cEnd - 1] > view.invisibleBefore[cStart];
 }
 
 /** First collapsed index in `[cStart, cEnd)` whose original offset is >= `at`. */
