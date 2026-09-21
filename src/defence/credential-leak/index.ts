@@ -247,8 +247,12 @@ const MAX_WELL_KNOWN_TOKEN = 64;
  *
  * INVISIBLE: the soft hyphen, zero-width space / non-joiner / joiner, the
  * word joiner, the BOM (zero-width no-break space) and the bidi controls
- * (LRM/RLM, LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI). Nothing a person types
- * into a heading; a key split by one of these was split on purpose.
+ * (LRM/RLM, LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI). These do not establish
+ * intent: soft hyphens and bidi marks arrive in ordinary pasted text. They are
+ * treated as a formatting risk, because a reader cannot see that the value was
+ * split, so no prose test is applied to a hit they divide. The cost is a
+ * disclosed false positive: a heading holding one inside a pattern's window
+ * (a soft hyphen inside one of the heading's words) is claimed.
  *
  * Visible punctuation is deliberately excluded — `sk-abc.def` reads as a
  * different value; `sk-abc def` does not.

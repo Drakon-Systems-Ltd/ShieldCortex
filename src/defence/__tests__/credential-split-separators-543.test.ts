@@ -57,8 +57,9 @@ const KEYS: Array<{ provider: string; key: string; severity: 'critical' | 'high'
 /**
  * Separators an attacker (or a line-wrapping transport) can insert, in the two
  * classes the scanner distinguishes (#544 round 5): VISIBLE whitespace, which
- * ordinary formatting inserts, and INVISIBLE format characters, which nothing
- * but deliberate splitting does.
+ * ordinary formatting inserts, and INVISIBLE format characters, which a reader
+ * cannot see. Invisible characters are a formatting risk, not proof of intent:
+ * pasted text carries soft hyphens and bidi marks too.
  */
 const SEPARATORS: Array<{ name: string; sep: string; invisible: boolean }> = [
   { name: 'space', sep: ' ', invisible: false },
@@ -899,8 +900,9 @@ describe('#544 round 5: policy by separator class for the AWS id', () => {
   });
 
   it('no prose escape for invisible separators: a heading-shaped split with ZWSP inside the window fires', () => {
-    // Nothing a person types puts a zero-width space between `Q3` and `GDP`;
-    // this is the intended behaviour of the invisible class.
+    // The invisible class applies no prose test, so this heading is claimed.
+    // That is a disclosed false positive (pasted text can carry invisible
+    // characters), accepted because the reader cannot see the split.
     expect(splitFindings(`ASIA${ZWSP}Q3${ZWSP}GDP${ZWSP}GROWTH${ZWSP}FORECAST`)).toHaveLength(1);
   });
 
