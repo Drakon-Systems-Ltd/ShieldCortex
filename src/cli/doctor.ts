@@ -104,6 +104,7 @@ import { validateOpenClawConfig } from '../integrations/openclaw-config-validate
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
+import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
   shouldColorDoctor,
@@ -3694,7 +3695,7 @@ export async function checkMemoryPlaneEmptyBrain(): Promise<CheckResult> {
     const admitted = countOf(
       `SELECT COUNT(*) AS c FROM memories
        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed')
-         AND COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'`,
+         AND ${sharedSensitivitySqlPredicate()}`,
     );
     const total = countOf(`SELECT COUNT(*) AS c FROM memories`);
     let sessionEvents = 0;
@@ -4118,7 +4119,7 @@ export function readPlaneDriftCounts(
     ? `COALESCE(status, 'active') NOT IN ('archived', 'suppressed', 'deleted', 'forgotten')`
     : '1=1';
   const sensClause = cols.has('sensitivity_level')
-    ? `COALESCE(sensitivity_level, 'INTERNAL') != 'RESTRICTED'`
+    ? sharedSensitivitySqlPredicate() // RESTRICTED, SECRET and unknown labels are not injectable (#542)
     : '1=1';
   const hasScopeCols = cols.has('host_id') && cols.has('agent_id');
 

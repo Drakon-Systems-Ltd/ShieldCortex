@@ -9,9 +9,14 @@
  * RESTRICTED is owner (trust ≥ 0.7) or `user` (human operator). A peer
  * high-trust cli/agent is not the operator — credential isolation holds
  * across agents (SCOPE P4).
+ *
+ * #542: `SECRET` and any label outside the defined ladder are isolated exactly
+ * like RESTRICTED. The read check fails closed on an unknown label instead of
+ * falling through to the shared branch (see sensitivity/isolation.ts).
  */
 
 import type { DefenceSource } from '../types.js';
+import { isIsolatedSensitivity } from '../sensitivity/isolation.js';
 import { isClaimStampedIdentifier, scoreSource } from './source-scorer.js';
 
 export interface AccessPolicy {
@@ -48,7 +53,8 @@ export function checkAccess(
   const memorySource = memory.source || '__system:unattributed';
   const callerKey = `${source.type}:${source.identifier}`;
   const isOwner = memorySource === callerKey;
-  const isRestricted = memory.sensitivity_level === 'RESTRICTED';
+  // RESTRICTED, SECRET, or any label that is not a shared tier (#542).
+  const isRestricted = isIsolatedSensitivity(memory.sensitivity_level);
 
   if (operation === 'read') {
     // RESTRICTED: credential isolation holds ACROSS agents (SCOPE P4).
