@@ -16,6 +16,11 @@ import type { AuditFinding, AuditSeverity, ScannerResult } from './types.js';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import type { DefenceSource } from '../defence/types.js';
 import { getDatabase, withTransaction } from '../database/init.js';
+import { detectInstructions } from '../defence/firewall/instruction-detector.js';
+import { detectPrivilegeEscalation } from '../defence/firewall/privilege-detector.js';
+import { detectSkillThreats } from '../defence/skill-scanner/patterns.js';
+import { attachFindingDetail, locateFirstMatch, shellQuoteArg } from './finding-detail.js';
+import { isFrontmatterOnlyStealthHit } from './owner-memory.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 
 const LEARN_MORE = 'https://shieldcortex.ai/docs/threats/memory-poisoning';
@@ -455,10 +460,98 @@ export function discoverMemoryFiles(options: MemoryFileDiscoveryOptions = {}): D
   return [...files.values()];
 }
 
+// ── Finding attribution (issue #514) ──
+
+/** The re-check command for a file, or undefined when its name cannot be quoted for display. */
+function nextCommandFor(filePath: string | undefined): string | undefined {
+  if (!filePath) return undefined;
+  const quoted = shellQuoteArg(filePath);
+  return quoted ? `shieldcortex scan-skill ${quoted}` : undefined;
+}
+
+/** "Does this text fire that rule?" — resolved from the rule id's namespace. */
+function ruleProbe(ruleId: string): (text: string) => boolean {
+  if (ruleId.startsWith('skill:')) {
+    const name = ruleId.slice('skill:'.length);
+    return (text) => detectSkillThreats(text).threats.includes(name);
+  }
+  return (text) =>
+    detectInstructions(text).patterns.includes(ruleId) ||
+    detectPrivilegeEscalation(text).indicators.includes(ruleId);
+}
+
+/**
+ * Give a memory finding its rule ids, a non-empty `matchedText`, and — for the
+ * terminal report only — the first line the rule fires on plus the command to
+ * run next.
+ *
+ * `matchedText` was absent on the injection and privilege findings and could be
+ * an empty string on the block/quarantine ones, so an operator got a CRITICAL
+ * with nothing to search for. The rule id is the floor: it always exists, and
+ * it is what `scan-skill` and the firewall log name too.
+ */
+function attributeFinding(
+  finding: AuditFinding,
+  content: string,
+  ruleIds: string[],
+  literal?: string,
+): AuditFinding {
+  const ids = ruleIds.filter((id) => id.trim().length > 0);
+  if (ids.length === 0) ids.push(`audit:${finding.title.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`);
+  if (!finding.matchedText || !finding.matchedText.trim()) {
+    finding.matchedText = ids.join(', ').slice(0, 120);
+  }
+
+  let located = literal ? locateFirstMatch(content, (text) => text.includes(literal)) : undefined;
+  for (const id of ids) {
+    if (located) break;
+    located = locateFirstMatch(content, ruleProbe(id));
+  }
+
+  return attachFindingDetail(finding, {
+    ruleIds: ids,
+    line: located?.line,
+    excerpt: located?.excerpt,
+    nextCommand: nextCommandFor(finding.filePath),
+  });
+}
+
+/** Rule ids behind one firewall indicator, re-derived from the file itself. */
+function indicatorRuleIds(indicator: 'instruction_injection' | 'privilege_escalation', content: string): string[] {
+  const ids = indicator === 'instruction_injection'
+    ? detectInstructions(content).patterns
+    : detectPrivilegeEscalation(content).indicators;
+  // The pipeline scans a sanitised copy, so a re-run on the raw file can come
+  // back empty. The indicator name is still a true answer to "which rule".
+  return ids.length > 0 ? ids : [indicator];
+}
+
+/** Rule ids behind a BLOCK/QUARANTINE verdict; the indicators when no pattern was named. */
+function verdictRuleIds(firewall: { blockedPatterns: string[]; threatIndicators: string[] }): string[] {
+  return firewall.blockedPatterns.length > 0 ? firewall.blockedPatterns : firewall.threatIndicators;
+}
+
+/**
+ * The INFO finding an owner memory file gets when the marker rule hit nothing
+ * but its own frontmatter closer. See owner-memory.ts for the conditions.
+ */
+function frontmatterOnlyFinding(filePath: string, content: string): AuditFinding {
+  return attributeFinding({
+    scanner: 'memory',
+    severity: 'info',
+    title: 'Memory frontmatter matched the stealth marker rule',
+    description: 'stealth_instruction matched only the line that closes this file\'s YAML frontmatter. Informational: nothing is hidden after it.',
+    filePath,
+    matchedText: 'skill:stealth_instruction',
+    learnMoreUrl: LEARN_MORE,
+  }, content, ['skill:stealth_instruction']);
+}
+
 /**
  * Scan a single memory file through the defence pipeline.
  */
-function scanMemoryFile(filePath: string): AuditFinding[] {
+function scanMemoryFile(file: DiscoveredMemoryFile): AuditFinding[] {
+  const filePath = file.path;
   const findings: AuditFinding[] = [];
 
   let content: string;
@@ -476,8 +569,16 @@ function scanMemoryFile(filePath: string): AuditFinding[] {
     // construction; a hostile memory file's BLOCK accrues to the audit channel.
     const result = runDefencePipeline(content, `audit:${filePath}`, AUDIT_SOURCE, undefined, undefined, { sourceAttested: true });
 
-    if (result.firewall.result === 'BLOCK') {
-      findings.push({
+    if (result.firewall.result !== 'ALLOW' && isFrontmatterOnlyStealthHit(content, {
+      discoverySource: file.source,
+      reason: result.firewall.reason,
+      blockedPatterns: result.firewall.blockedPatterns,
+    })) {
+      // Not an early return: the indicator and credential checks below still
+      // run, so anything else in the file is reported at its own severity.
+      findings.push(frontmatterOnlyFinding(filePath, content));
+    } else if (result.firewall.result === 'BLOCK') {
+      findings.push(attributeFinding({
         scanner: 'memory',
         severity: 'critical',
         title: 'Blocked content in memory file',
@@ -485,9 +586,9 @@ function scanMemoryFile(filePath: string): AuditFinding[] {
         filePath,
         matchedText: result.firewall.blockedPatterns.join(', ').slice(0, 120),
         learnMoreUrl: LEARN_MORE,
-      });
+      }, content, verdictRuleIds(result.firewall)));
     } else if (result.firewall.result === 'QUARANTINE') {
-      findings.push({
+      findings.push(attributeFinding({
         scanner: 'memory',
         severity: 'high',
         title: 'Suspicious content in memory file',
@@ -495,36 +596,36 @@ function scanMemoryFile(filePath: string): AuditFinding[] {
         filePath,
         matchedText: result.firewall.blockedPatterns.join(', ').slice(0, 120),
         learnMoreUrl: LEARN_MORE,
-      });
+      }, content, verdictRuleIds(result.firewall)));
     }
 
     // Check for specific threat indicators
     for (const indicator of result.firewall.threatIndicators) {
       if (indicator === 'instruction_injection') {
-        findings.push({
+        findings.push(attributeFinding({
           scanner: 'memory',
           severity: 'critical',
           title: 'Prompt injection detected in memory',
           description: 'This memory file contains instruction injection patterns that could hijack agent behaviour.',
           filePath,
           learnMoreUrl: LEARN_MORE,
-        });
+        }, content, indicatorRuleIds(indicator, content)));
       } else if (indicator === 'privilege_escalation') {
-        findings.push({
+        findings.push(attributeFinding({
           scanner: 'memory',
           severity: 'high',
           title: 'Privilege escalation in memory',
           description: 'This memory file references sensitive system paths or elevated permissions.',
           filePath,
           learnMoreUrl: LEARN_MORE,
-        });
+        }, content, indicatorRuleIds(indicator, content)));
       }
     }
 
     // Check for credential leaks in memory
     if (result.credentialScan && result.credentialScan.findings.length > 0) {
       for (const cf of result.credentialScan.findings) {
-        findings.push({
+        findings.push(attributeFinding({
           scanner: 'memory',
           severity: cf.severity === 'critical' ? 'critical' : cf.severity === 'high' ? 'high' : 'medium',
           title: `Credential leaked in memory: ${cf.provider || cf.type}`,
@@ -532,7 +633,7 @@ function scanMemoryFile(filePath: string): AuditFinding[] {
           filePath,
           matchedText: cf.match,
           learnMoreUrl: 'https://shieldcortex.ai/docs/threats/credential-leak',
-        });
+        }, content, [`credential:${cf.type}`], cf.match));
       }
     }
   } catch {
@@ -603,9 +704,23 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
     reason = result.firewall.reason;
     threatIndicators = result.firewall.threatIndicators;
 
-    if (firewallResult === 'BLOCK') {
+    const frontmatterOnly = firewallResult !== 'ALLOW' && isFrontmatterOnlyStealthHit(content, {
+      discoverySource: file.source,
+      reason: result.firewall.reason,
+      blockedPatterns: result.firewall.blockedPatterns,
+    });
+
+    if (frontmatterOnly) {
+      // Recorded as ALLOW/LOW so the review queue, which keys on the firewall
+      // result, does not fill with the owner's own memory files. The reason
+      // keeps the pipeline's words so the downgrade is visible, not silent.
+      findings.push(frontmatterOnlyFinding(file.path, content));
+      reason = `Informational (frontmatter closer only): ${result.firewall.reason}`;
+      firewallResult = 'ALLOW';
+      risk = 'LOW';
+    } else if (firewallResult === 'BLOCK') {
       risk = 'CRITICAL';
-      findings.push({
+      findings.push(attributeFinding({
         scanner: 'memory',
         severity: 'critical',
         title: 'Blocked content in memory file',
@@ -613,10 +728,10 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
         filePath: file.path,
         matchedText: result.firewall.blockedPatterns.join(', ').slice(0, 120),
         learnMoreUrl: LEARN_MORE,
-      });
+      }, content, verdictRuleIds(result.firewall)));
     } else if (firewallResult === 'QUARANTINE') {
       risk = 'HIGH';
-      findings.push({
+      findings.push(attributeFinding({
         scanner: 'memory',
         severity: 'high',
         title: 'Suspicious content in memory file',
@@ -624,29 +739,29 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
         filePath: file.path,
         matchedText: result.firewall.blockedPatterns.join(', ').slice(0, 120),
         learnMoreUrl: LEARN_MORE,
-      });
+      }, content, verdictRuleIds(result.firewall)));
     }
 
     for (const indicator of result.firewall.threatIndicators) {
       if (indicator === 'instruction_injection') {
-        findings.push({
+        findings.push(attributeFinding({
           scanner: 'memory',
           severity: 'critical',
           title: 'Prompt injection detected in memory',
           description: 'This memory file contains instruction injection patterns that could hijack agent behaviour.',
           filePath: file.path,
           learnMoreUrl: LEARN_MORE,
-        });
+        }, content, indicatorRuleIds(indicator, content)));
         risk = mergeRisk(risk, 'CRITICAL');
       } else if (indicator === 'privilege_escalation') {
-        findings.push({
+        findings.push(attributeFinding({
           scanner: 'memory',
           severity: 'high',
           title: 'Privilege escalation in memory',
           description: 'This memory file references sensitive system paths or elevated permissions.',
           filePath: file.path,
           learnMoreUrl: LEARN_MORE,
-        });
+        }, content, indicatorRuleIds(indicator, content)));
         risk = mergeRisk(risk, 'HIGH');
       }
     }
@@ -654,7 +769,7 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
     if (result.credentialScan && result.credentialScan.findings.length > 0) {
       for (const cf of result.credentialScan.findings) {
         const severity: AuditSeverity = cf.severity === 'critical' ? 'critical' : cf.severity === 'high' ? 'high' : 'medium';
-        findings.push({
+        findings.push(attributeFinding({
           scanner: 'memory',
           severity,
           title: `Credential leaked in memory: ${cf.provider || cf.type}`,
@@ -662,7 +777,7 @@ function scanMemoryFileDetailed(file: DiscoveredMemoryFile): MemoryFileScanRecor
           filePath: file.path,
           matchedText: cf.match,
           learnMoreUrl: 'https://shieldcortex.ai/docs/threats/credential-leak',
-        });
+        }, content, [`credential:${cf.type}`], cf.match));
         risk = mergeRisk(risk, severityToRisk(severity));
       }
     }
@@ -756,7 +871,7 @@ export function scanMemories(): ScannerResult {
   for (const file of files) {
     // Skip ShieldCortex's own hook/plugin files to avoid false positives (#14)
     if (isShieldCortexOwnMemoryPath(file.path)) continue;
-    allFindings.push(...scanMemoryFile(file.path));
+    allFindings.push(...scanMemoryFile(file));
   }
 
   return {
