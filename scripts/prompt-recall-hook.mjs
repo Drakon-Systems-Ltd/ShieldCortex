@@ -19,7 +19,7 @@ import { deriveProjectKey } from './lib/project-key.mjs';
 import { sanitisePromptForRecall } from './lib/prompt-sanitiser.mjs';
 import { recordSessionEvent } from './lib/session-capture.mjs';
 import { captureForSessionEvent } from './lib/capture-prompt.mjs';
-import { truncatePreservingWords } from './lib/truncate.mjs';
+import { formatRecallContext } from './lib/recall-frame.mjs';
 import { compareRecallResults } from './lib/recall-rank.mjs';
 import { computeEffectiveSalience } from './lib/salience.mjs';
 import { writeRecallLog } from './lib/recall-log.mjs';
@@ -345,20 +345,8 @@ function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, ded
 
 // ==================== FORMAT ====================
 
-function formatRecallContext(memories) {
-  if (memories.length === 0) return null;
-
-  const lines = ['🧠 Recalled from memory:'];
-  for (const m of memories) {
-    const content = truncatePreservingWords(m.content, MAX_CONTENT_LENGTH);
-    // v4.24.3: append a source ref so the operator can grep / inspect
-    // the backing memory. Uses memory ID (always available); a future
-    // schema change could store the source_file path for clickability.
-    const source = m.id != null ? ` _[mem #${m.id}]_` : '';
-    lines.push(`- **${m.title}**: ${content}${source}`);
-  }
-  return lines.join('\n');
-}
+// Recall is rendered inside an explicit untrusted-data frame (issue #507); the
+// formatter lives in lib/recall-frame.mjs so it can be tested without a DB.
 
 // ==================== TELEMETRY (#253) ====================
 
@@ -613,7 +601,7 @@ process.stdin.on('end', async () => {
       }
     }
 
-    const context = formatRecallContext(memories);
+    const context = formatRecallContext(memories, MAX_CONTENT_LENGTH);
 
     // Update the session ring with the hashes of what we just injected.
     if (sessionId && dedupState) {

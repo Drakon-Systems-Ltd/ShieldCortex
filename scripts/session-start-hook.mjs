@@ -27,6 +27,7 @@ import { truncatePreservingWords } from './lib/truncate.mjs';
 import { orderByEffectiveSalience } from './lib/session-context.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
 import { buildStartPack, readInjectConfig, selectInjectCandidates, PACK_HEADER } from './lib/inject-pack.mjs';
+import { flattenRecallField, recallFrameTail } from './lib/recall-frame.mjs';
 
 const NEW_DB_DIR = join(homedir(), '.shieldcortex');
 const LEGACY_DB_DIR = join(homedir(), '.claude-cortex');
@@ -132,7 +133,10 @@ function getProjectContext(db, project) {
 function formatContext(memories, project, heading = `# Project Context: ${project}`) {
   if (memories.length === 0) return null;
 
-  const lines = [heading, ''];
+  // One id per emission, carried by the notice and the closing line (#507):
+  // stored text cannot contain a closing line it could not predict.
+  const frame = recallFrameTail();
+  const lines = [heading, frame.NOTICE, ''];
   const byCategory = {};
   for (const mem of memories) {
     const cat = mem.category || 'note';
@@ -150,13 +154,19 @@ function formatContext(memories, project, heading = `# Project Context: ${projec
 
     for (const mem of byCategory[cat]) {
       const salience = Math.round(mem.salience * 100);
-      lines.push(`- **${mem.title}** (${salience}% salience)`);
-      const content = truncatePreservingWords(mem.content, 200);
+      // Fields are flattened and cannot spell a frame marker (#507): the
+      // heading says "untrusted data", and a raw multi-line field could put a
+      // heading of its own underneath it.
+      lines.push(`- **${flattenRecallField(mem.title)}** (${salience}% salience)`);
+      const content = truncatePreservingWords(flattenRecallField(mem.content), 200);
       lines.push(`  ${content}`);
     }
     lines.push('');
   }
 
+  // The heading opens the untrusted block; this closes it (#507). Every field
+  // above was capped before this line is added, so the frame is never left open.
+  lines.push(frame.CLOSE);
   return lines.join('\n');
 }
 

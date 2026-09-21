@@ -25,6 +25,8 @@ import { Memory, ContextSummary, ConsolidationResult } from '../memory/types.js'
 import { resolveProject } from '../context/project-context.js';
 import { guardReadBySensitivity, guardContextSummary } from '../defence/trust/read-guard.js';
 import type { DefenceSource } from '../defence/types.js';
+// @ts-expect-error — importing a .mjs hook util that has no .d.ts
+import { recallFrameFields } from '../../scripts/lib/recall-frame.mjs';
 
 // Input schema for getting context
 export const getContextSchema = strictObject({
@@ -75,7 +77,14 @@ export async function executeGetContext(input: GetContextInput & { sourceAtteste
     let context: string;
     switch (input.format) {
       case 'raw':
-        context = JSON.stringify({ summary, relevantMemories }, null, 2);
+        // Structured output carries the untrusted-data frame as FIELDS (#507).
+        // Prose lines around it, or any rewrite of the stored strings, would
+        // stop it parsing — so the MCP server emits this format as it is.
+        context = JSON.stringify(
+          { ...(recallFrameFields() as { untrusted_data_notice: string; frame_id: string }), summary, relevantMemories },
+          null,
+          2,
+        );
         break;
       case 'detailed':
         context = formatDetailedContext(summary, relevantMemories);

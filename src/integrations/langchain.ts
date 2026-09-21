@@ -21,6 +21,8 @@
  *   if (!result.allowed) { ... }
  */
 
+// @ts-expect-error — importing a .mjs hook util that has no .d.ts
+import { flattenRecallField, frameRecallBlock } from '../../scripts/lib/recall-frame.mjs';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';
 import type {
@@ -110,16 +112,19 @@ export class ShieldCortexMemory {
         project: this.project,
       });
       text = results
-        .map((r) => `[${r.memory.title}] ${r.memory.content}`)
+        .map((r) => `[${flattenRecallField(r.memory.title)}] ${flattenRecallField(r.memory.content)}`)
         .join('\n');
     } else {
       const recent = getRecentMemories(this.maxResults);
       text = recent
-        .map((m) => `[${m.title}] ${m.content}`)
+        .map((m) => `[${flattenRecallField(m.title)}] ${flattenRecallField(m.content)}`)
         .join('\n');
     }
 
-    return { [this._memoryKey]: text };
+    // The variable is interpolated into the chain's prompt, so it carries the
+    // same untrusted-data frame as every other recall surface (#507). An empty
+    // result stays an empty string: there is nothing to frame.
+    return { [this._memoryKey]: frameRecallBlock(text) ?? '' };
   }
 
   /**
