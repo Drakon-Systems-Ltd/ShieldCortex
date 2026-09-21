@@ -299,6 +299,68 @@ function fragmentLooksLikeKeyMaterial(fragment: string): boolean {
   return false;
 }
 
+/**
+ * Letter pairs that English words almost never contain: the pairs making up
+ * the rarest 1% of adjacent-letter occurrences in a 100k-word list (310 of the
+ * 676). 93% of dictionary words hold none of them; a random three-letter run
+ * avoids them 29% of the time, a six-letter run 5%. Keyed by first letter.
+ */
+const RARE_BIGRAMS: Record<string, string> = {
+  a: 'ajoq',
+  b: 'cdfghjkmnpqtvwxz',
+  c: 'bdfgjmnpqvwxz',
+  d: 'cfhjkpqtxz',
+  e: 'j',
+  f: 'bcdghjkmnpqvwxz',
+  g: 'bcdfjkpqtvwxz',
+  h: 'bcdfghjkpqvxz',
+  i: 'hijwy',
+  j: 'bcdfghjklmnpqrstvwxyz',
+  k: 'bcdfgjkmpqtvwxz',
+  l: 'hjqrwxz',
+  m: 'cdfghjklqrtvwxz',
+  n: 'xz',
+  o: 'jq',
+  p: 'bcdfgjkmnqvwxz',
+  q: 'abcdefghijklmnopqrstvwxyz',
+  r: 'jqxz',
+  s: 'dgjrvxz',
+  t: 'dgjkpqvx',
+  u: 'hjquvwxy',
+  v: 'bcdfghjklmnpqrstuvwxyz',
+  w: 'bcdfgjkmpqtuvwxyz',
+  x: 'bdfghjklmnoqrsuvwxyz',
+  y: 'fghjkquvwxyz',
+  z: 'bcdfghjklmnpqrstuvwxy',
+};
+
+/**
+ * A fragment that reads as an English word: three or more letters, one case or
+ * Capitalised, and no letter pair that English does not use. `REGIONAL`,
+ * `legacy`, `Store` are words; `QXZJ`, `IOSF`, `Ab1C`, `sk-` are not.
+ */
+function fragmentReadsAsProse(fragment: string): boolean {
+  if (fragment.length < 3 || fragmentLooksLikeKeyMaterial(fragment)) return false;
+  const lower = fragment.toLowerCase();
+  for (let i = 0; i < lower.length - 1; i++) {
+    if (RARE_BIGRAMS[lower[i]]?.includes(lower[i + 1])) return false;
+  }
+  return true;
+}
+
+/**
+ * Share of a collapsed hit that must sit in word-reading fragments for the hit
+ * to be dismissed as prose. A year or a quarter gives a sentence the digit the
+ * key-material gate asks for — `ASIA 2026 REGIONAL SALES REPORT` collapses to
+ * a well-formed AWS id — but most of such a hit is still words. Everything
+ * that is not a word counts against: digits, punctuation, one- and two-letter
+ * pieces. An attacker picks the split points, not the characters, and cannot
+ * make a random key read as words: for mixed-case key bodies the odds are
+ * negligible; for the upper-case base-32 AWS id a chosen split gets past this
+ * a few percent of the time (disclosed residual).
+ */
+const PROSE_SHARE_TO_DISMISS = 0.6;
+
 /** Does `pattern` match `text` starting exactly at `start` and ending exactly at `end`? */
 function matchesSpanExactly(pattern: CredentialPattern, text: string, start: number, end: number): RegExpExecArray | null {
   const sticky = new RegExp(pattern.regex.source, pattern.regex.flags.replace(/[gy]/g, '') + 'y');
@@ -358,6 +420,21 @@ function scanCollapsedView(
       // inside it and resume scanning from there afterwards.
       const spanStart = map[cStart];
       const spanEnd = map[cEnd - 1] + 1;
+
+      // A recorded range that BEGINS where this run begins means the pattern
+      // layer already matched — and redacts — a valid value here. Gluing on
+      // whatever follows would swallow a neighbour (`sk-… customer123`, or a
+      // second, finely split token) into it. If what follows really is the
+      // rest of the same key, redacting the head has already destroyed the
+      // credential. Leave that range alone and resume scanning after it.
+      const anchored = matchedRanges.find(r => r.start === spanStart && r.end < spanEnd);
+      if (anchored) {
+        let cc = cStart;
+        while (cc < cEnd && map[cc] < anchored.end) cc++;
+        regex.lastIndex = cc;
+        continue;
+      }
+
       let cutAt = -1;
       for (const r of matchedRanges) {
         if (r.start > spanStart && r.start < spanEnd && (cutAt === -1 || r.start < cutAt)) cutAt = r.start;
@@ -416,6 +493,12 @@ function scanCollapsedView(
         }
       }
       if (fe - fs < 2) continue;
+
+      let proseChars = 0;
+      for (let i = fs; i < fe; i++) {
+        if (fragmentReadsAsProse(text.slice(frags[i].cs, frags[i].ce))) proseChars += frags[i].ce - frags[i].cs;
+      }
+      if (proseChars >= (cEnd - cStart) * PROSE_SHARE_TO_DISMISS) continue;
 
       const fullMatch = exact[0];
       const secretValue = exact[1] ?? fullMatch;

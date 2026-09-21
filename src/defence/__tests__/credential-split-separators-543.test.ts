@@ -14,7 +14,7 @@
  *
  * Every "split" case fails if the collapsed pass is removed from
  * `scanForCredentials`; the precision cases fail if the pass is added without
- * the letter+digit gate.
+ * the letter+digit gate and the prose-share gate.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
@@ -137,18 +137,40 @@ describe('#543 separator-split keys are detected and redacted', () => {
     }
   }
 
-  it('reports one finding per secret when a split leaves a fragment the direct pass already matched', () => {
+  it('leaves a direct match alone when a split leaves a head the direct pass already matched', () => {
     // 27 contiguous chars after `sk-` satisfy the legacy OpenAI rule on their
-    // own; the collapsed pass must supersede that partial hit with the full
-    // span, not add a second finding for the same secret.
+    // own, so the direct pass has already recorded and redacts the head. The
+    // collapsed pass must not widen that range: what follows a complete match
+    // may be a neighbour, not the rest of the key (#544 review), and a key
+    // whose head is redacted is no longer a credential.
     const key = KEYS[0].key;
     const content = `key: ${key.slice(0, 30)} ${key.slice(30)} and`;
     const result = scanForCredentials(content);
     const hits = providerFindings(result.findings, 'openai');
     expect(hits).toHaveLength(1);
-    expect(hits[0].evasion).toBe('separator_split');
+    expect(hits[0].evasion).toBeUndefined();
+    expect(hits[0].position).toBe('key: '.length);
+    expect(result.redactedContent).not.toContain(key.slice(0, 30));
+    expect(rejoin(result.redactedContent ?? '')).not.toContain(key);
+  });
+
+  it('does not swallow an unrelated identifier after a contiguous key (#544 review)', () => {
+    const key = KEYS[1].key;
+    const result = scanForCredentials(`${key} customer123`);
     expect(result.findings).toHaveLength(1);
-    expect(result.redactedContent).toBe('key: [REDACTED-api_key-openai] and');
+    expect(result.findings[0].evasion).toBeUndefined();
+    expect(result.redactedContent).toBe('[REDACTED-api_key-openai] customer123');
+  });
+
+  it('reports a contiguous key and a following finely split key of another provider separately (#544 review)', () => {
+    const a = KEYS[1].key;
+    const b = splitEvery(KEYS[4].key, ' ', 4);
+    const result = scanForCredentials(`${a} ${b}`);
+    expect(providerFindings(result.findings, 'openai')).toHaveLength(1);
+    const gh = providerFindings(result.findings, 'github');
+    expect(gh).toHaveLength(1);
+    expect(gh[0].evasion).toBe('separator_split');
+    expect(result.redactedContent).toBe('[REDACTED-api_key-openai] [REDACTED-api_key-github]');
   });
 
   it('finds every split key when several are present', () => {
@@ -270,6 +292,11 @@ describe('#543 precision: the collapsed pass does not fire on prose', () => {
     ['openai', 'I like to sk-etch drawings of the beautiful landscape near the river'],
     // A key PREFIX followed by a space and normal words.
     ['openai', 'sk-proj- keys replaced the legacy format in twenty twenty four'],
+    // #544 review: a year or a quarter hands prose the digit the key-material
+    // gate asks for. Most of the hit still reads as words, so it is dismissed.
+    ['aws', 'ASIA 2026 REGIONAL SALES REPORT'],
+    ['aws', 'ASIA Q3 REGIONAL SALES MEETING NOTES'],
+    ['openai', 'sk-proj- keys replaced the legacy format in 2024'],
     ['github', 'ghp_ tokens are personal access tokens for the platform please rotate'],
     // Line-wrapped prose where a line ends in `sk-`.
     ['openai', 'the doctor asked me to sk-\nip the second appointment because of the strike'],
