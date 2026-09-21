@@ -2,6 +2,8 @@
  * Recall filter — filters recall results by trust score and sensitivity.
  */
 
+import { isIsolatedSensitivity } from '../sensitivity/isolation.js';
+
 export function filterByTrust<
   T extends {
     trust_score?: number;
@@ -35,8 +37,8 @@ export function filterByTrust<
       const score = item.trust_score ?? 0;
       let result = item;
 
-      // RESTRICTED: redact content
-      if (item.sensitivity_level === 'RESTRICTED') {
+      // RESTRICTED (or SECRET / any label outside the ladder, #542): redact content
+      if (isIsolatedSensitivity(item.sensitivity_level)) {
         result = { ...result, content: '[REDACTED - RESTRICTED]' };
       }
 
