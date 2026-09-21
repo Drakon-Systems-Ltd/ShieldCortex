@@ -103,9 +103,14 @@ export function sanitiseDisplayField(s: string): string {
     .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)?/g, '')
     .replace(/\u001b./g, '')
-    .replace(/[\r\n]/g, '⏎')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/g, '');
+    // U+0085, U+2028 and U+2029 break a line as surely as a newline does, so
+    // they get the same visible mark rather than a silent strip (issue #514).
+    .replace(/\r\n|[\r\n\u0085\u2028\u2029]/g, '⏎')
+    // C1 goes with C0: U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and a
+    // terminal that honours them never sees an ESC byte for the rules above.
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
+    // Zero-width, bidi embeddings/overrides AND the isolates (U+2066-U+2069).
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '');
 }
 
 export function ellipsize(s: string, max: number): string {
