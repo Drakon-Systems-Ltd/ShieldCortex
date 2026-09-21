@@ -15,6 +15,15 @@ export interface CredentialPattern {
   confidence: number;
   /** Minimum match length to avoid false positives */
   minLength?: number;
+  /**
+   * #543 — consulted by the separator-collapsed pass ONLY. A value rebuilt
+   * from fragments must also satisfy this expression to count; the direct
+   * (contiguous) pass never looks at it. Use it to state a fact about issued
+   * values that the discovery regex is looser than — an alphabet, a checksum
+   * shape — so that prose which merely collapses into the regex's shape is
+   * not reported as a split key.
+   */
+  collapsedValuePattern?: RegExp;
 }
 
 export type CredentialType =
@@ -91,6 +100,11 @@ export const API_KEY_PATTERNS: CredentialPattern[] = [
     regex: /A[KS]IA[0-9A-Z]{16}/g,
     severity: 'critical',
     confidence: 0.97,
+    // Issued access key ids are base-32: the 16-character body is drawn from
+    // [A-Z2-7] and never holds 0, 1, 8 or 9. The direct regex stays loose (a
+    // documentation sample with a `0` is still worth flagging); a value that
+    // only exists once separators are removed must respect the alphabet.
+    collapsedValuePattern: /^A[KS]IA[A-Z2-7]{16}$/,
   },
   // AWS Secret Key (typically base64-like, 40 chars)
   {
