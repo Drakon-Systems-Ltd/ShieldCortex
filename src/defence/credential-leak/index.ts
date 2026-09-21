@@ -27,6 +27,13 @@ export interface CredentialFinding {
   /** Char offset in content */
   position: number;
   action: 'blocked' | 'warned' | 'logged';
+  /**
+   * #543 — set when the value only matched after separators (whitespace,
+   * zero-width / format characters) were collapsed out of the text. `position`
+   * and the redaction range still refer to the ORIGINAL content and span the
+   * inserted separators too.
+   */
+  evasion?: 'separator_split';
 }
 
 export interface CredentialScanResult {
@@ -209,6 +216,250 @@ function matchIsWellKnownNonSecret(content: string, start: number, end: number):
   return isWellKnownNonSecret(content.slice(s, e));
 }
 
+// ── #543: separator-split evasion ──
+//
+// The provider patterns match contiguous text only. Writing a key as
+// `sk-T3st K3yA bCdE …` — or splitting it with a tab, newline, NBSP or a
+// zero-width character — produced zero findings, yet removing the separators
+// rebuilds the identical value. The fix is NOT to strip whitespace and rescan
+// (that loses match positions, so the redaction range would land on the wrong
+// bytes) but to scan a collapsed VIEW that remembers where each surviving
+// character came from, and act on the original span.
+
+/**
+ * Characters treated as separators: every Unicode whitespace (`\s`), the soft
+ * hyphen, zero-width space / non-joiner / joiner, the word joiner and the BOM
+ * (zero-width no-break space). Visible punctuation is deliberately excluded —
+ * `sk-abc.def` reads as a different value; `sk-abc def` does not.
+ */
+const SEPARATOR_CHAR = /[\s­​-‍⁠﻿]/;
+
+interface CollapsedView {
+  /** `content` with every separator removed. */
+  text: string;
+  /** `map[i]` is the offset in the original content of `text[i]`. */
+  map: number[];
+}
+
+/**
+ * Build the separator-collapsed view. Returns null when the content has no
+ * separators at all — the direct pass has already seen everything.
+ */
+function buildCollapsedView(content: string): CollapsedView | null {
+  const chars: string[] = [];
+  const map: number[] = [];
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i];
+    if (SEPARATOR_CHAR.test(ch)) continue;
+    chars.push(ch);
+    map.push(i);
+  }
+  if (chars.length === content.length) return null;
+  return { text: chars.join(''), map };
+}
+
+/**
+ * Precision gate for the collapsed pass only. Collapsing whitespace turns
+ * ordinary prose into key-shaped runs — `ASIA PACIFIC REGIONAL SALES` becomes
+ * `ASIA` + 21 capitals, `key-value pairs are stored …` becomes the Mailgun
+ * shape, a line ending in `sk-` glues onto the next sentence. Issued key
+ * material of every format the patterns cover carries digits as well as
+ * letters (the odds of a 16-char base-32 body with no digit at all are ~4%;
+ * for the base-62 bodies they are negligible), while prose has letters only.
+ * Requiring both classes in the collapsed value keeps the direct pass exactly
+ * as it was and stops the collapsed pass from firing on words.
+ */
+function collapsedValueLooksLikeKeyMaterial(value: string): boolean {
+  return /[0-9]/.test(value) && /[A-Za-z]/.test(value);
+}
+
+type MatchedRange = { start: number; end: number; replacement: string };
+
+/**
+ * Patterns that consult whitespace themselves (`\s*` around an `=`, a
+ * `[^\s"']+` value class, `BEGIN\s+RSA`) define their own token boundaries;
+ * collapsing the separators out from under them changes what they mean, so
+ * they take no part in the collapsed pass. The provider key formats — the
+ * subject of #543 — are all contiguous-alphabet patterns.
+ */
+function patternConsultsWhitespace(pattern: CredentialPattern): boolean {
+  return /\\s/.test(pattern.regex.source);
+}
+
+/**
+ * A run of characters between separators that reads as key material rather
+ * than as a word: it carries a digit, a non-letter (`_ - . / + =`), or mixed
+ * case that is not merely Capitalised. `ASIA`, `PACIFIC`, `end`, `Store` are
+ * words; `Ab1C`, `sk-`, `WxYz`, `4B1T` are not.
+ */
+function fragmentLooksLikeKeyMaterial(fragment: string): boolean {
+  if (/[0-9]/.test(fragment)) return true;
+  if (/[^A-Za-z]/.test(fragment)) return true;
+  if (/[A-Z]/.test(fragment) && /[a-z]/.test(fragment) && !/^[A-Z][a-z]+$/.test(fragment)) return true;
+  return false;
+}
+
+/** Does `pattern` match `text` starting exactly at `start` and ending exactly at `end`? */
+function matchesSpanExactly(pattern: CredentialPattern, text: string, start: number, end: number): RegExpExecArray | null {
+  const sticky = new RegExp(pattern.regex.source, pattern.regex.flags.replace(/[gy]/g, '') + 'y');
+  sticky.lastIndex = start;
+  // Slicing keeps the characters BEFORE `start` so lookbehinds see context,
+  // and makes `end` the end of input so a greedy quantifier stops there.
+  const m = sticky.exec(text.slice(0, end));
+  return m !== null && m.index === start && m[0].length === end - start ? m : null;
+}
+
+/**
+ * Second pattern pass over the collapsed view. Each hit is mapped back to its
+ * original span, which is what gets recorded (position) and redacted (range).
+ *
+ * Collapsing also glues a key to the words around it, and an open-ended
+ * pattern (`{20,}`) happily swallows `end` in `sk-… end`. So a hit is first
+ * trimmed at both ends: a leading or trailing fragment that reads as a word
+ * is dropped as long as the pattern still matches what is left. Fragments in
+ * the middle are never dropped — an attacker chooses the split points, and
+ * the only thing they cannot choose is the key's own characters.
+ *
+ * A trimmed hit whose original span holds no separator is the direct pass's
+ * business and is skipped; a hit that widens a partial direct match (a split
+ * that left one fragment long enough to match on its own) supersedes it, so
+ * one secret still yields one finding and one redaction covering the whole
+ * value.
+ */
+function scanCollapsedView(
+  view: CollapsedView,
+  patterns: CredentialPattern[],
+  cfg: CredentialDetectionConfig,
+  findings: CredentialFinding[],
+  matchedRanges: MatchedRange[],
+): { findings: CredentialFinding[]; matchedRanges: MatchedRange[] } {
+  const { text, map } = view;
+
+  for (const pattern of patterns) {
+    if (patternConsultsWhitespace(pattern)) continue;
+
+    const regex = new RegExp(pattern.regex.source, pattern.regex.flags.includes('g') ? pattern.regex.flags : pattern.regex.flags + 'g');
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(text)) !== null) {
+      if (match[0].length === 0) {
+        regex.lastIndex++;
+        continue;
+      }
+
+      let cStart = match.index;
+      let cEnd = cStart + match[0].length;
+      let exact: RegExpExecArray | null = match;
+
+      // A range the direct pass (or an earlier collapsed hit) already recorded
+      // says where a token BEGINS. The collapsed run may not flow through such
+      // a start: `sk-… and ghp_…` collapses to one run, but it is two keys and
+      // a word, not one key. Cut the run at the first recorded start strictly
+      // inside it and resume scanning from there afterwards.
+      const spanStart = map[cStart];
+      const spanEnd = map[cEnd - 1] + 1;
+      let cutAt = -1;
+      for (const r of matchedRanges) {
+        if (r.start > spanStart && r.start < spanEnd && (cutAt === -1 || r.start < cutAt)) cutAt = r.start;
+      }
+      if (cutAt !== -1) {
+        let cc = cStart;
+        while (cc < cEnd && map[cc] < cutAt) cc++;
+        regex.lastIndex = cc;
+        exact = matchesSpanExactly(pattern, text, cStart, cc);
+        if (!exact) continue;
+        cEnd = cc;
+      }
+
+      // Fragments of the hit, in collapsed coordinates. A new fragment starts
+      // wherever the original offsets stop being consecutive.
+      const frags: Array<{ cs: number; ce: number }> = [];
+      for (let c = cStart; c < cEnd; c++) {
+        const last = frags[frags.length - 1];
+        if (last && map[c] === map[c - 1] + 1) last.ce = c + 1;
+        else frags.push({ cs: c, ce: c + 1 });
+      }
+      // Single fragment: no separator inside, the direct pass owns it.
+      if (frags.length < 2) continue;
+
+      // Trim the run of word-like fragments off the end, then off the start,
+      // as far as the pattern keeps matching. A run made only of 1–2 letter
+      // fragments is left alone unless what remains is a single contiguous
+      // fragment: `Uv` or `z` at the end of a key split every two characters
+      // is the key's own tail, while `ok` after a contiguous key is a word
+      // the direct pass has already excluded.
+      const isWord = (f: { cs: number; ce: number }) => !fragmentLooksLikeKeyMaterial(text.slice(f.cs, f.ce));
+      const hasWord3 = (run: Array<{ cs: number; ce: number }>) => run.some(f => f.ce - f.cs >= 3);
+      let fs = 0;
+      let fe = frags.length;
+
+      let k = fe;
+      while (k > 1 && isWord(frags[k - 1])) k--;
+      if (k < fe && (k === 1 || hasWord3(frags.slice(k, fe)))) {
+        for (let i = fe - 1; i >= k; i--) {
+          const m = matchesSpanExactly(pattern, text, cStart, frags[i - 1].ce);
+          if (!m) break;
+          exact = m;
+          fe = i;
+          cEnd = frags[i - 1].ce;
+        }
+      }
+      let j = 0;
+      while (j < fe - 1 && isWord(frags[j])) j++;
+      if (j > 0 && (fe - j === 1 || hasWord3(frags.slice(0, j)))) {
+        for (let i = 0; i < j; i++) {
+          const m = matchesSpanExactly(pattern, text, frags[i + 1].cs, cEnd);
+          if (!m) break;
+          exact = m;
+          fs = i + 1;
+          cStart = frags[i + 1].cs;
+        }
+      }
+      if (fe - fs < 2) continue;
+
+      const fullMatch = exact[0];
+      const secretValue = exact[1] ?? fullMatch;
+
+      if (pattern.minLength && secretValue.length < pattern.minLength) continue;
+      if (isAllowlisted(secretValue, cfg.allowlist)) continue;
+      if (pattern.type === 'env_secret' && isDocumentationPlaceholder(secretValue)) continue;
+      if (!collapsedValueLooksLikeKeyMaterial(secretValue)) continue;
+
+      const start = map[cStart];
+      const end = map[cEnd - 1] + 1;
+
+      // Already covered (by the direct pass or an earlier collapsed hit).
+      if (matchedRanges.some(r => start >= r.start && end <= r.end)) continue;
+      // Git SHA / UUID with a separator inside is still a public identifier.
+      // The token is only contiguous in the collapsed view, so test it there.
+      if (matchIsWellKnownNonSecret(text, cStart, cEnd)) continue;
+
+      // Supersede narrower pattern-layer hits that sit inside this span: they
+      // are fragments of the same secret, not additional secrets.
+      findings = findings.filter(f => !(f.position >= start && f.position < end));
+      matchedRanges = matchedRanges.filter(r => !(r.start >= start && r.end <= end));
+
+      findings.push({
+        type: pattern.type,
+        provider: pattern.provider,
+        confidence: pattern.confidence,
+        severity: pattern.severity,
+        match: redactMatch(secretValue, pattern.type),
+        position: start,
+        action: actionForSeverity(pattern.severity, cfg),
+        evasion: 'separator_split',
+      });
+      matchedRanges.push({
+        start,
+        end,
+        replacement: `[REDACTED-${pattern.type}${pattern.provider ? `-${pattern.provider}` : ''}]`,
+      });
+    }
+  }
+
+  return { findings, matchedRanges };
+}
+
 // ── Scanner ──
 
 /**
@@ -231,8 +482,8 @@ export function scanForCredentials(
     return { leaked: false, findings: [] };
   }
 
-  const findings: CredentialFinding[] = [];
-  let matchedRanges: Array<{ start: number; end: number; replacement: string }> = [];
+  let findings: CredentialFinding[] = [];
+  let matchedRanges: MatchedRange[] = [];
 
   const patterns = [...ALL_CREDENTIAL_PATTERNS, ...cfg.customPatterns];
 
@@ -284,6 +535,16 @@ export function scanForCredentials(
       const replacement = `[REDACTED-${pattern.type}${pattern.provider ? `-${pattern.provider}` : ''}]`;
       matchedRanges.push({ start, end, replacement });
     }
+  }
+
+  // #543: second pattern pass over the separator-collapsed view, before the
+  // entropy net so a split key's fragments are inside a range by the time the
+  // tokeniser sees them.
+  const collapsed = buildCollapsedView(content);
+  if (collapsed) {
+    ({ findings, matchedRanges } = scanCollapsedView(
+      collapsed, patterns, cfg, findings, matchedRanges,
+    ));
   }
 
   // Run entropy-based detection for anything not already caught.
