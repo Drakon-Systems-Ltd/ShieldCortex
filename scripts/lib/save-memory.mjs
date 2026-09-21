@@ -108,6 +108,20 @@ const DEDUP_TITLE_JACCARD = pickNumber('SHIELDCORTEX_DEDUP_TITLE_JACCARD', 0.6);
 // consolidate false-merge only concatenates two existing rows (recoverable),
 // so it can afford to be more aggressive. Do not lower this to match consolidate.
 const DEDUP_COMBINED = pickNumber('SHIELDCORTEX_DEDUP_COMBINED', 0.5);
+
+// #510 — dedupe of REDACTED candidates. Redaction makes distinct records
+// identical ("NI number [REDACTED:ni-number]" for two different people), so
+// similarity proves nothing and the ordinary title/near-duplicate checks are
+// not applied to them. But "never a duplicate" lets a hook that re-extracts the
+// same memory every turn grow the table without bound, so the rule is bounded
+// instead: a redacted candidate is a duplicate when the project already holds a
+// row with the IDENTICAL redacted title and content created inside the window
+// below (the re-extraction loop), or already holds the cap of such rows at any
+// age. TRADE-OFF, accepted: two distinct records that redact identically and
+// are captured within the window of each other collapse to one, and no more
+// than the cap of them are ever kept.
+const REDACTED_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+const REDACTED_DEDUP_MAX_ROWS = 3;
 const DEDUP_CANDIDATE_LIMIT = 200; // bound the candidate scan per write
 
 // Hook identities shipped IN THIS PACKAGE — string literals at the three hook
@@ -224,6 +238,12 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     reason: result.firewall.reason,
   });
 
+  // #510: the pipeline above judged the SUBMITTED text; everything persisted
+  // from here on (row, dedup keys, embedding input, quarantine copy, stderr)
+  // is the redacted record.
+  const pii = redactCandidate(defence, memory);
+  memory = pii.memory;
+
   if (disposition.action === 'store') {
     // Persist the COMPUTED trust + sensitivity from the scan — not the schema
     // DEFAULT (trust 1.0 / INTERNAL). The INSERT used to omit these columns, so
@@ -236,7 +256,10 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     const contentForm = typeof defence.classifyContentForm === 'function'
       ? defence.classifyContentForm(memory.content)
       : null;
-    const memoryId = insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, result.sensitivity?.level, contentForm);
+    const sensitivityLevel = pii.raiseSensitivity
+      ? atLeastConfidential(result.sensitivity?.level)
+      : result.sensitivity?.level;
+    const memoryId = insertMemoryRow(db, memory, project, sourceIdentifier, result.trust?.score, sensitivityLevel, contentForm, pii.redacted);
     // #458: embed HERE, awaited, not scheduled. See embedStoredRow().
     if (memoryId !== null) {
       await embedStoredRow(db, memoryId, `${memory.title} ${memory.content}`);
@@ -255,6 +278,41 @@ export async function saveAutoExtractedMemory(db, memory, project, opts = {}) {
     : db;
   insertQuarantineRow(quarantineDb, memory, project, source, result);
   process.stderr.write(`[shieldcortex save-memory] ${disposition.firewallResult.toLowerCase()} (held): ${memory.title} — ${disposition.reason}\n`);
+}
+
+// ==================== Internal: PII redaction (#510) ====================
+
+/**
+ * Run the candidate through the ONE shared write-time redactor from dist.
+ *
+ * FAIL SAFE: when the redactor is missing (older dist) or throws, the memory is
+ * still stored — a packaging fault must not stop a host remembering — but it is
+ * stored at CONFIDENTIAL or above and the gap is reported on stderr, never
+ * silently stored as ordinary INTERNAL text.
+ */
+function redactCandidate(defence, memory) {
+  if (typeof defence.redactForPersistence === 'function') {
+    try {
+      const redaction = defence.redactForPersistence({
+        title: memory.title,
+        content: memory.content,
+        tags: Array.isArray(memory.tags) ? memory.tags : [],
+      });
+      return {
+        memory: { ...memory, title: redaction.fields.title, content: redaction.fields.content, tags: redaction.fields.tags },
+        raiseSensitivity: redaction.redacted === true,
+        redacted: redaction.redacted === true,
+      };
+    } catch {
+      // fall through to the fail-safe
+    }
+  }
+  process.stderr.write('[shieldcortex save-memory] PII redactor unavailable — storing unredacted at raised sensitivity\n');
+  return { memory, raiseSensitivity: true, redacted: false };
+}
+
+function atLeastConfidential(level) {
+  return level === 'RESTRICTED' || level === 'SECRET' || level === 'CONFIDENTIAL' ? level : 'CONFIDENTIAL';
 }
 
 // ==================== Internal: provenance floor ====================
@@ -287,14 +345,8 @@ function screenMemoryCandidate(defence, content, title) {
 
 // ==================== Internal: writes ====================
 
-/**
- * @returns {number|null} the new `memories.id`, or null when the write was
- *   skipped as a duplicate. The caller needs the id to attach an embedding
- *   (#458), and a skip must not be mistaken for a stored row.
- */
-function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel, contentForm) {
-  const timestamp = new Date().toISOString();
-
+/** True (and says so on stderr) when the candidate repeats a stored memory. */
+function isDuplicateWrite(db, memory, project) {
   // Cross-call, CROSS-PATH exact-title dedup: the hook fires repeatedly (per
   // turn, or per salience bypass) over overlapping transcript windows, so the
   // same regex match tends to surface multiple times across calls. The
@@ -311,7 +363,7 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
   ).get(memory.title, project || null, project || null);
   if (existing) {
     process.stderr.write(`[shieldcortex save-memory] skipped duplicate: ${memory.title}\n`);
-    return null;
+    return true;
   }
 
   // Near-duplicate dedup: exact-title only catches verbatim re-saves. Reworded
@@ -338,10 +390,58 @@ function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sens
       process.stderr.write(
         `[shieldcortex save-memory] skipped near-duplicate (combined=${combined.toFixed(2)}): ${memory.title}\n`,
       );
-      return null;
+      return true;
     }
   }
+  return false;
+}
 
+/** `created_at` as epoch ms, or NaN. SQLite's own `YYYY-MM-DD HH:MM:SS` is UTC. */
+function parseCreatedAt(value) {
+  if (typeof value !== 'string' || value.length === 0) return NaN;
+  const iso = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+  return Date.parse(iso);
+}
+
+/**
+ * The bounded rule for a REDACTED candidate (see REDACTED_DEDUP_WINDOW_MS):
+ * identical redacted title + content in the same project, either recent or
+ * already at the cap. An unreadable `created_at` counts as old — the cap still
+ * bounds the growth, and a distinct person's record is not dropped on a guess.
+ */
+function isRedactedDuplicateWrite(db, memory, project, now = Date.now()) {
+  const rows = db.prepare(
+    `SELECT created_at FROM memories
+       WHERE title = ?
+         AND content = ?
+         AND (project IS ? OR (project IS NULL AND ? IS NULL))
+       ORDER BY created_at DESC
+       LIMIT ?`,
+  ).all(memory.title, memory.content, project || null, project || null, REDACTED_DEDUP_MAX_ROWS);
+
+  const recent = rows.some(row => {
+    const createdAt = parseCreatedAt(row.created_at);
+    return Number.isFinite(createdAt) && now - createdAt < REDACTED_DEDUP_WINDOW_MS;
+  });
+  if (!recent && rows.length < REDACTED_DEDUP_MAX_ROWS) return false;
+  process.stderr.write(
+    `[shieldcortex save-memory] skipped redacted duplicate (${recent ? 'recent' : 'cap'}): ${memory.title}\n`,
+  );
+  return true;
+}
+
+/**
+ * @returns {number|null} the new `memories.id`, or null when the write was
+ *   skipped as a duplicate. The caller needs the id to attach an embedding
+ *   (#458), and a skip must not be mistaken for a stored row.
+ */
+function insertMemoryRow(db, memory, project, sourceIdentifier, trustScore, sensitivityLevel, contentForm, redacted = false) {
+  // #510: a redacted candidate gets the bounded identical-text rule, never the
+  // title/near-duplicate similarity checks — similarity over tokens proves
+  // nothing (consolidate.ts excludes such rows from merging for the same reason).
+  if (redacted ? isRedactedDuplicateWrite(db, memory, project) : isDuplicateWrite(db, memory, project)) return null;
+
+  const timestamp = new Date().toISOString();
   const scope = resolveScopeIds();
   const captureLayer = memory.capture_layer || memory.captureLayer || 'L0';
   // host_id/agent_id may be missing on pre-migration DBs — try/catch insert with fallback.
@@ -830,8 +930,9 @@ async function loadDefenceModules(db) {
     const provenanceUrl = pathToFileURL(
       resolve(distRoot, 'defence', 'firewall', 'provenance-policy.js'),
     ).href;
+    const piiUrl = pathToFileURL(resolve(distRoot, 'defence', 'sensitivity', 'pii.js')).href;
 
-    const [pipelineMod, initMod, dispositionMod, formMod, provenanceMod] = await Promise.all([
+    const [pipelineMod, initMod, dispositionMod, formMod, provenanceMod, piiMod] = await Promise.all([
       import(pipelineUrl),
       import(initUrl),
       import(dispositionUrl),
@@ -841,6 +942,9 @@ async function loadDefenceModules(db) {
       // L2 provenance policy; same tolerance. Absent on an older dist means no
       // candidate screen, i.e. exactly the behaviour before this round.
       import(provenanceUrl).catch(() => ({})),
+      // #510 write-time PII redactor. Absence is NOT tolerated silently: the
+      // caller fails safe (see redactCandidate) rather than storing raw.
+      import(piiUrl).catch(() => ({})),
     ]);
 
     if (typeof pipelineMod.runDefencePipeline !== 'function') return null;
@@ -855,6 +959,7 @@ async function loadDefenceModules(db) {
         typeof provenanceMod.detectNonAuthoritativeInstruction === 'function'
           ? provenanceMod.detectNonAuthoritativeInstruction
           : null,
+      redactForPersistence: typeof piiMod.redactForPersistence === 'function' ? piiMod.redactForPersistence : null,
       initDatabase: initMod.initDatabase,
       isDatabaseInitialized: initMod.isDatabaseInitialized,
       getDatabase: initMod.getDatabase,

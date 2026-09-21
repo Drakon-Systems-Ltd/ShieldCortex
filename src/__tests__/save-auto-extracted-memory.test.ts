@@ -101,6 +101,67 @@ describe('saveAutoExtractedMemory — auto-extract write path', () => {
     expect(['PUBLIC', 'INTERNAL']).toContain(row!.sensitivity_level);
   });
 
+  it('#510: the hook path redacts PII in title, content and tags before the row is written', async () => {
+    // Synthetic values: HMRC-invalid "QQ" prefix, Ofcom drama-reserved phone, example.com.
+    await saveAutoExtractedMemory(
+      db,
+      makeMemory({
+        title: 'Payroll note NI QQ123456C',
+        content: 'New starter Pat Example, salary 55000, email pat@example.com phone 07700900123.',
+        tags: ['auto-extracted', 'NINO QQ123456C'],
+      }),
+      'p',
+      { source: 'session-end-hook' },
+    );
+    const rows = db.prepare('SELECT title, content, tags, sensitivity_level FROM memories')
+      .all() as Array<{ title: string; content: string; tags: string; sensitivity_level: string }>;
+    expect(rows).toHaveLength(1);
+    const stored = JSON.stringify(rows[0]);
+    for (const plaintext of ['QQ123456C', '55000', 'pat@example.com', '07700900123']) {
+      expect(stored).not.toContain(plaintext);
+    }
+    expect(rows[0].content).toContain('Pat Example');
+    expect(Array.isArray(JSON.parse(rows[0].tags))).toBe(true);
+    expect(['CONFIDENTIAL', 'RESTRICTED', 'SECRET']).toContain(rows[0].sensitivity_level);
+  });
+
+  // #510 bounded dedupe of redacted candidates: identical redacted text is a
+  // duplicate inside 24 h, or once the project holds 3 such rows at any age.
+  const captureNi = (ni: string) => saveAutoExtractedMemory(
+    db,
+    makeMemory({ title: `Payroll record NI ${ni}`, content: `Starter on the payroll has National Insurance ${ni}.` }),
+    'p',
+    { source: 'session-end-hook' },
+  );
+  const ageAllRows = (hours: number) => {
+    const aged = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    db.prepare('UPDATE memories SET created_at = ?').run(aged);
+  };
+  const redactedRowCount = () => (db.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n;
+
+  it('#510: the same redacted capture repeated 20 times inside 24 h stores one row', async () => {
+    for (let i = 0; i < 20; i++) await captureNi('QQ123456C');
+    expect(redactedRowCount()).toBe(1);
+  });
+
+  it('#510: repeated redacted captures aged past 24 h stop at the cap of 3', async () => {
+    for (let i = 0; i < 20; i++) {
+      await captureNi('QQ123456C');
+      ageAllRows(25);
+    }
+    expect(redactedRowCount()).toBe(3);
+  });
+
+  it('#510: two DISTINCT people whose memories redact identically, captured over 24 h apart, both persist', async () => {
+    await captureNi('QQ123456C');
+    ageAllRows(25);
+    await captureNi('QQ654321A');
+    const rows = db.prepare('SELECT title, content FROM memories').all() as Array<{ title: string; content: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(rows[1]);
+    expect(JSON.stringify(rows)).not.toMatch(/QQ123456C|QQ654321A/);
+  });
+
   it('#402: stamps content_form=fact for a hook-captured work fact (injectable via two-key)', async () => {
     await saveAutoExtractedMemory(
       db,

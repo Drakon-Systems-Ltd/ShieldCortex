@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import readline from 'readline';
 import Database from 'better-sqlite3';
 import { deriveProjectKey } from '../context/derive-project-key.js';
+import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
 
 interface LegacyMemoryRow {
@@ -121,12 +122,12 @@ function migrateOne(
         uuid, type, category, title, content, project, tags, salience,
         decayed_score, access_count, last_accessed, created_at, updated_at,
         metadata, embedding, scope, transferable, source, source_kind, capture_method,
-        trust_score, defence_verdict
+        trust_score, defence_verdict, sensitivity_level
       ) VALUES (
         @uuid, @type, @category, @title, @content, @project, @tags, @salience,
         @decayed_score, @access_count, @last_accessed, @created_at, @updated_at,
         @metadata, @embedding, @scope, @transferable, @source, @source_kind, @capture_method,
-        @trust_score, 'legacy'
+        @trust_score, 'legacy', @sensitivity_level
       )
     `);
 
@@ -140,28 +141,41 @@ function migrateOne(
 
     const txn = target.transaction(() => {
       for (const row of memories) {
+        // #510: legacy rows predate write-time redaction — redact on the way in.
+        // A row whose EMBEDDED text (title + content) changed drops its legacy
+        // vector (computed over the raw text); `memories embed-backfill`
+        // recomputes it. Redaction in tags/metadata alone leaves the vector valid.
+        const redaction = redactForPersistence({
+          title: row.title,
+          content: row.content,
+          tags: row.tags ?? '[]',
+          metadata: row.metadata ?? '{}',
+        });
+        const safe = redaction.fields;
+        const embeddedTextChanged = safe.title !== row.title || safe.content !== row.content;
         const result = insertMemory.run({
           uuid: randomUUID(),
           type: row.type,
           category: row.category,
-          title: row.title,
-          content: row.content,
+          title: safe.title,
+          content: safe.content,
           project: row.project,
-          tags: row.tags ?? '[]',
+          tags: safe.tags,
           salience: row.salience ?? 0.5,
           decayed_score: row.decayed_score,
           access_count: row.access_count ?? 0,
           last_accessed: row.last_accessed,
           created_at: row.created_at,
           updated_at: row.created_at,
-          metadata: row.metadata ?? '{}',
-          embedding: row.embedding,
+          metadata: safe.metadata,
+          embedding: embeddedTextChanged ? null : row.embedding,
           scope: row.scope ?? 'project',
           transferable: row.transferable ?? 0,
           source: `legacy:${sourceLabel}`,
           source_kind: 'legacy-import',
           capture_method: 'legacy-migrate',
           trust_score: (row as { trust_score?: number }).trust_score ?? 0.7,
+          sensitivity_level: redaction.redacted ? 'CONFIDENTIAL' : 'INTERNAL',
         });
         idMap.set(row.id, Number(result.lastInsertRowid));
         report.memoriesImported++;

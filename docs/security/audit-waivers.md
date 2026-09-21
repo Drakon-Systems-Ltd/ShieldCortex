@@ -116,6 +116,15 @@ What that leaves:
 
 #### What retires this waiver
 
+> **2026-09-20 (#513): the first trigger below has fired.**
+> `@huggingface/transformers@4.3.0` now declares `sharp: ^0.35.4`, so a patched
+> tree is reachable — but only through the 3.x → 4.x major, which changes the
+> embedding stack (tokenizers, `onnxruntime-node`). That bump needs its own
+> embedding-parity run and was deliberately left out of the #513 dependency
+> pass; the waiver stays in force until it lands or the expiry date, whichever
+> is first. The "no patch is reachable" measurements above are dated 2026-09-12
+> and no longer describe the registry.
+
 Delete this entry and the JSON record below as soon as **any one** of these is
 true:
 
