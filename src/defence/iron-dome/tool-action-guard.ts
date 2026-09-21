@@ -4456,12 +4456,18 @@ function foldScriptSources(
     // be one `bash -c "$(cat …)"` away from the same bypass one level down.
     // A reviewed file's body is exempt from scanning, so nothing is read on
     // its behalf; its children are still discovered from the unexpanded text.
+    // The expanded copy is APPENDED to the file's own text, never substituted
+    // for it (review r1 of #548): the script is scanned exactly as it was
+    // before this change, and the expansion can only add to that.
+    const plainSrc = deobfuscateIfs(src);
     const expandedSrc = next.lang === 'sh' && subst && !isReviewed
-      ? expandFileSubstitutions(deobfuscateIfs(src), resolveScriptSource, subst, 1)
-      : deobfuscateIfs(src);
-    const reviewedScan = next.lang === 'sh'
-      ? commandScanText(expandedSrc)
-      : blankInterpreterComments(expandedSrc, next.lang);
+      ? expandFileSubstitutions(plainSrc, resolveScriptSource, subst, 1)
+      : plainSrc;
+    const reviewedScan = next.lang !== 'sh'
+      ? blankInterpreterComments(plainSrc, next.lang)
+      : expandedSrc === plainSrc
+        ? commandScanText(plainSrc)
+        : `${commandScanText(plainSrc)}\n${commandScanText(expandedSrc)}`;
     if (isReviewed) {
       // #522 (GPT-6 round-6) residual, NAMED rather than closed: a reviewed
       // entry skips this file's body — catastrophic scan included — before
@@ -4537,6 +4543,19 @@ function foldScriptSources(
 // launcher" ask is a separate change; whichever way it goes, both spellings
 // follow it together).
 //
+// The expanded text is a SECOND surface, never a replacement (review r1 of
+// #548, P1). The typed command is scanned first, exactly as it was before this
+// change — its own `cat ~/.ssh/id_rsa` read, its `sudo` wrapper, and every
+// statement after the substitution — and the expanded command is scanned as a
+// second pass only when something was actually spliced. The two verdicts are
+// merged MONOTONE (`mergeSurfaceVerdicts`): the answer is never weaker than
+// either surface alone, so no verdict the typed spelling used to get can be
+// lost to the expansion. In-place replacement alone was not conservative: the
+// spliced bytes were re-read as shell SYNTAX by the comment and heredoc
+// strippers, and a file holding `<<'EOF'` or a line starting with `#` erased
+// the independently executed tail of the typed command from the surface (the
+// shell never re-parses substitution output, so that tail still ran).
+//
 // Only a substitution whose WHOLE effect is to read files is expanded: one
 // plain statement, `cat` with file operands (flags skipped, behind env
 // assignments / wrappers) or the `< FILE` builtin form. Anything else —
@@ -4553,14 +4572,16 @@ function foldScriptSources(
 // named on the verdict (`expandedSubstitutions`), so a denial whose matched
 // token came from a file is tellable from the record.
 //
-// Expanded text is escaped for the quoting context it lands in (`"` and `\`
-// inside double quotes; those plus `'` outside quotes) so it cannot close the
-// operator's own quote and re-parse the tail of the command. `$`, backticks,
-// `#` and newlines are left as-is: the shell does not re-expand substitution
-// output, but reading them live is the fail-closed direction (more scanning,
-// never less), an inner `bash -c` really would expand them, and it is exactly
-// how the literal spelling is read. A spliced file is itself walked for
-// further file reads, bounded by the fold depth and a visited set.
+// Spliced text is DATA, and is escaped so that it stays data on the scan
+// surface (`escapeSpliced`): the shell never re-parses substitution output,
+// so nothing in a file can close the operator's quote, open a substitution,
+// start a heredoc, comment out the rest of the line or separate a statement.
+// The escape set is the union of what the shell itself treats as active in
+// that quoting context and what this file's own strippers read without
+// tracking quotes (`#`, `<<`). Newlines are kept: they are word separators in
+// the shell and statement separators to the scanner, which is the more-
+// scanning direction. A spliced file is itself walked for further file reads,
+// bounded by the fold depth and a visited set, before it is escaped.
 
 /** Nothing to expand without `$(` or a backtick. */
 const SUBSTITUTION_HINT_RE = /\$\(|`/;
@@ -4612,9 +4633,23 @@ function fileReadSubstitutionTargets(body: string): string[] | null {
   return files.length > 0 ? files : null;
 }
 
-/** Escape spliced text for the quoting context it lands in — see the section note. */
+/**
+ * Escape spliced text so it is read as DATA in the quoting context it lands in
+ * — see the section note.
+ *
+ * Inside double quotes the shell's four active characters (`\` `"` `$` `` ` ``)
+ * are made literal; unquoted, every operator the shell would otherwise parse
+ * is too (`'` `;` `&` `|` `<` `>` `(` `)`). In BOTH contexts `#` and `<` are
+ * escaped as well: `stripComments` and `stripQuotedHeredocs` do not track
+ * quotes, so an unescaped `# …` or `<<'EOF'` inside the splice would erase the
+ * typed command's tail from the surface (review r1 of #548). An escaped byte
+ * is still on the surface for every rule that reads text, so this is never
+ * less scanning — only never more syntax.
+ */
 function escapeSpliced(content: string, inDoubleQuotes: boolean): string {
-  return inDoubleQuotes ? content.replace(/[\\"]/g, '\\$&') : content.replace(/[\\"']/g, '\\$&');
+  return inDoubleQuotes
+    ? content.replace(/[\\"$`#<]/g, '\\$&')
+    : content.replace(/[\\"'$`#<>|&;()]/g, '\\$&');
 }
 
 /**
@@ -5571,12 +5606,62 @@ export function evaluateToolCall(
   return drift ? { ...v, contractDrift: drift } : v;
 }
 
+/**
+ * #517: the second scan surface of one call — the typed command with its
+ * file-reading substitutions spliced in — and the expansion record for that
+ * pass's own script fold. Supplied only by the recursive second pass in
+ * `evaluateToolCallCore`; the outer call derives its command from `args`.
+ */
+interface ExpandedSurface {
+  command: string;
+  subst: SubstitutionState;
+}
+
+/** Signals that record a scan gap rather than a recognised operation. Every
+ *  tier carries them (see `opaqueSignals`), so they ride across a merge of
+ *  two surfaces whatever tier wins. */
+const OPAQUE_SIGNALS = new Set(['opaque-script-invocation', 'opaque-command-substitution']);
+
+/**
+ * Merge the typed-surface verdict with the expanded-surface verdict of the
+ * same call (#517, review r1 of #548). MONOTONE, like the evidence merge in
+ * `evaluateToolCall`: the stronger verdict wins outright (severity first,
+ * decision as tie-break), the typed spelling keeps ties, and a tier is never
+ * lowered. Signals from the losing surface are carried only at the SAME
+ * severity — one surface's `touch-sensitive-path` and the other's
+ * `external-egress` are both dangerous reasons on one row, exactly as a single
+ * surface would list them — while a lower-tier signal is not lifted onto a
+ * higher-tier verdict, because the planes' `autoApprove` matches on ANY
+ * signal and a sensitive-tier name must not open a dangerous door. The
+ * scan-gap signals and the two file-provenance fields are unioned regardless:
+ * they are audit record, never a gate.
+ */
+function mergeSurfaceVerdicts(typed: ToolGuardVerdict, expanded: ToolGuardVerdict): ToolGuardVerdict {
+  const [winner, loser] = outranks(expanded, typed) ? [expanded, typed] : [typed, expanded];
+  const carried = loser.severity === winner.severity
+    ? loser.signals
+    : loser.signals.filter(s => OPAQUE_SIGNALS.has(s));
+  const signals = [...new Set([...winner.signals, ...carried])];
+  const out: ToolGuardVerdict = { ...winner, signals };
+  if (loser.severity === winner.severity && loser.matches && loser.matches.length > 0) {
+    const seen = new Set((winner.matches ?? []).map(m => `${m.signal}\u0000${m.span}`));
+    const extra = loser.matches.filter(m => !seen.has(`${m.signal}\u0000${m.span}`));
+    if (extra.length > 0) out.matches = [...(winner.matches ?? []), ...extra];
+  }
+  const reviewed = [...new Set([...(typed.reviewedScripts ?? []), ...(expanded.reviewedScripts ?? [])])];
+  if (reviewed.length > 0) out.reviewedScripts = reviewed;
+  const spliced = [...new Set([...(typed.expandedSubstitutions ?? []), ...(expanded.expandedSubstitutions ?? [])])];
+  if (spliced.length > 0) out.expandedSubstitutions = spliced;
+  return out;
+}
+
 function evaluateToolCallCore(
   toolName: string,
   args: Record<string, unknown> = {},
   config?: IronDomeConfig,
   options?: ToolGuardOptions,
   skipSchema = false,
+  surface?: ExpandedSurface,
 ): ToolGuardVerdict {
   // #412 — close the tool-input bag before extractors run.
   // Exec/git: enforce (unknown keys fail closed — smuggled payloads cannot hide).
@@ -5661,16 +5746,24 @@ function evaluateToolCallCore(
 
   const family = classifyFamily(toolName);
   const typedCommand = deobfuscateIfs(extractCommand(args));
-  // #517: `$(cat f)` / `$(< f)` / `` `cat f` `` are expanded in place BEFORE any
-  // rule runs, so the surface every rule below scans is the command the shell
-  // will actually execute and the substituted spelling gets the literal
-  // spelling's verdict. Bounded by the fold's byte caps; an unreadable file is
-  // recorded (`opaque-command-substitution`) rather than silently unscanned.
-  // An oversized command is already flagged and its fold is skipped — same
-  // here: nothing is spliced into 50k+ chars that will not be tokenised anyway.
-  const subst = newSubstitutionState();
-  const command = typedCommand.length > OVERSIZED_COMMAND_LENGTH
-    ? typedCommand
+  // #517: `$(cat f)` / `$(< f)` / `` `cat f` `` are expanded so the guard also
+  // scans the command the shell will actually execute, and the substituted
+  // spelling is judged at least as hard as the literal spelling. Bounded by
+  // the fold's byte caps; an unreadable file is recorded
+  // (`opaque-command-substitution`) rather than silently unscanned. An
+  // oversized command is already flagged and its fold is skipped — same here:
+  // nothing is spliced into 50k+ chars that will not be tokenised anyway.
+  //
+  // Two surfaces, one verdict (review r1 of #548): THIS pass scans the typed
+  // command exactly as it did before #517 — the substitution's own read, its
+  // wrapper, and every statement around it — and, when something was spliced,
+  // recurses once with the expanded command as a second surface. The merge at
+  // the end is monotone, so the expansion can only ever add to the answer.
+  // The recursive pass carries its surface in and does not expand again.
+  const subst = surface?.subst ?? newSubstitutionState();
+  const command = surface?.command ?? typedCommand;
+  const expandedCommand = (surface || typedCommand.length > OVERSIZED_COMMAND_LENGTH)
+    ? command
     : expandFileSubstitutions(typedCommand, options?.resolveScriptSource, subst);
   const path = extractPath(args);
   const url = extractUrl(args, toolName);
@@ -5760,6 +5853,19 @@ function evaluateToolCallCore(
       }
       writeContentScannedClean = true;
     }
+  }
+
+  // #517 second surface. Everything above this line is independent of the
+  // command text (the schema gate, the family short-circuits, the write-content
+  // scan), so the recursive pass reaches here with the same `args` and only
+  // the surface differs. `skipSchema` is passed as true: the bag was closed by
+  // this call already, and the two `skipSchema`-gated short-circuits above
+  // (`openclaw.process`, exact-special read tools) have either returned
+  // already or do not apply to this tool name.
+  if (!surface && expandedCommand !== typedCommand) {
+    const typed = evaluateToolCallCore(toolName, args, config, options, true, { command: typedCommand, subst });
+    const expanded = evaluateToolCallCore(toolName, args, config, options, true, { command: expandedCommand, subst: newSubstitutionState() });
+    return mergeSurfaceVerdicts(typed, expanded);
   }
 
   // Field discipline: danger patterns scan the EXECUTION SURFACE
