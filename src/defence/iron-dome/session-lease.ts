@@ -394,7 +394,12 @@ const IN_PLACE_FLAG_RE = /^(?:-[a-zA-Z]*i\S*|--in-place(?:=.*)?|--inplace)$/;
  * `'a\'` is CLOSED). Double quotes: `\` escapes the next character; `'` is
  * text. `$'…'`: `\` escapes, `'` closes. Bare: `\` escapes the next
  * character. Expanding heredoc body: there is no quoting at all — quotes are
- * text — and `\` escapes only `$`, `` ` `` and `\`.
+ * text — and `\` escapes only `$`, `` ` ``, `\` and a newline.
+ *
+ * A backslash-newline is a LINE CONTINUATION wherever the backslash is an
+ * escape (bare, double quotes, an expanding heredoc body): bash removes both
+ * characters, so the next line belongs to the same statement. Single and
+ * `$'…'` quotes keep it literal (see lineEnd).
  */
 type ShellQuote = 'none' | 'single' | 'double' | 'ansi';
 type CharRole = 'bare' | 'expanding' | 'text';
@@ -407,7 +412,7 @@ class ShellLexer {
   step(text: string, i: number): { role: CharRole; next: number } {
     const c = text[i]!;
     if (this.context === 'heredoc-body') {
-      if (c === '\\' && (text[i + 1] === '$' || text[i + 1] === '`' || text[i + 1] === '\\')) {
+      if (c === '\\' && (text[i + 1] === '$' || text[i + 1] === '`' || text[i + 1] === '\\' || text[i + 1] === '\n')) {
         return { role: 'text', next: i + 2 };
       }
       return { role: 'expanding', next: i + 1 };
@@ -446,13 +451,23 @@ class ShellLexer {
   }
 }
 
-/** The quote open at the end of `text` (`'` or `"`), or null. */
-function openQuoteAtEnd(text: string): string | null {
+/**
+ * How `text` ends, for the line joiner: the quote still open (`'` or `"`),
+ * and whether the last character is an ESCAPING backslash — a line
+ * continuation. Only the bare and double-quoted contexts continue: inside
+ * `'…'` a backslash is literal, and inside `$'…'` bash keeps `\⏎` as text.
+ */
+function lineEnd(text: string): { quote: string | null; continues: boolean } {
   const lx = new ShellLexer();
-  for (let i = 0; i < text.length; ) i = lx.step(text, i).next;
-  if (lx.quote === 'double') return '"';
-  if (lx.quote === 'single' || lx.quote === 'ansi') return "'";
-  return null;
+  let continues = false;
+  for (let i = 0; i < text.length; ) {
+    const before = lx.quote;
+    const { next } = lx.step(text, i);
+    continues = i === text.length - 1 && text[i] === '\\' && next === i + 2 && (before === 'none' || before === 'double');
+    i = next;
+  }
+  const quote = lx.quote === 'double' ? '"' : lx.quote === 'single' || lx.quote === 'ansi' ? "'" : null;
+  return { quote, continues };
 }
 
 /** Cut an unquoted `#` comment (at a word start) off a line. */
@@ -483,6 +498,12 @@ function parseHeredocWord(text: string, at: number): { tag: string; quoted: bool
   let quoted = false;
   for (; i < text.length; ) {
     const c = text[i]!;
+    // `$'…'` and `$"…"` are quotes of the same word; the `$` is not delimiter
+    // text. (ANSI-C escapes inside `$'…'` are not expanded here.)
+    if (c === '$' && (text[i + 1] === "'" || text[i + 1] === '"')) {
+      i++;
+      continue;
+    }
     if (c === "'") {
       const close = text.indexOf("'", i + 1);
       if (close < 0) return null;
@@ -494,7 +515,9 @@ function parseHeredocWord(text: string, at: number): { tag: string; quoted: bool
     if (c === '"') {
       let j = i + 1;
       for (; j < text.length && text[j] !== '"'; j++) {
-        if (text[j] === '\\' && j + 1 < text.length) {
+        // Inside double quotes only `\$`, `` \` ``, `\"` and `\\` are escapes;
+        // any other backslash is part of the word (`"E\OF"` ends on `E\OF`).
+        if (text[j] === '\\' && j + 1 < text.length && '$`"\\'.includes(text[j + 1]!)) {
           tag += text[j + 1]!;
           j++;
         } else tag += text[j]!;
@@ -600,7 +623,9 @@ function splitLineOnSeparators(line: string): string[] {
  * EXECUTE wherever the character is `bare` or `expanding` (double quotes,
  * an expanding heredoc body); only `text` (single quotes, `$'…'`, an escape)
  * keeps them literal. `$(( … ))` is arithmetic and holds no command. Nested
- * substitutions are found when the body is judged.
+ * substitutions are found when the body is judged. A process substitution
+ * `<( … )` / `>( … )` executes too, but only where it is `bare` — inside
+ * double quotes it is text.
  *
  * `context` says what `text` is: shell surface (quotes act) or the body of
  * an unquoted heredoc (quotes are text; only `\$`, `` \` `` and `\\` escape).
@@ -615,7 +640,9 @@ function commandSubstitutionBodies(text: string, context: 'shell' | 'heredoc-bod
       continue;
     }
     const c = text[i]!;
-    if (c === '$' && text[i + 1] === '(' && text[i + 2] !== '(') {
+    const commandSub = c === '$' && text[i + 1] === '(' && text[i + 2] !== '(';
+    const processSub = role === 'bare' && (c === '<' || c === '>') && text[i + 1] === '(';
+    if (commandSub || processSub) {
       // The body is shell text of its own: track its quotes so a `)` inside
       // `'…'` or `"…"` does not close it, and balance bare parentheses.
       const inner = new ShellLexer();
@@ -635,11 +662,23 @@ function commandSubstitutionBodies(text: string, context: 'shell' | 'heredoc-bod
       continue;
     }
     if (c === '`') {
-      // Inside backticks `\` escapes `` ` ``, `$` and `\`; the first
-      // unescaped backtick closes.
+      // Inside backticks `\` escapes `` ` ``, `$` and `\` — bash STRIPS that
+      // backslash before running the body, so `` `echo \$(cmd)` `` runs
+      // `echo $(cmd)`. Any other backslash stays literal (`\>` is no
+      // redirect). The first unescaped backtick closes.
       let j = i + 1;
-      while (j < text.length && text[j] !== '`') j += text[j] === '\\' ? 2 : 1;
-      out.push(text.slice(i + 1, Math.min(j, text.length)));
+      let body = '';
+      while (j < text.length && text[j] !== '`') {
+        if (text[j] === '\\' && j + 1 < text.length) {
+          const n = text[j + 1]!;
+          body += n === '$' || n === '`' || n === '\\' ? n : `\\${n}`;
+          j += 2;
+          continue;
+        }
+        body += text[j]!;
+        j++;
+      }
+      out.push(body);
       i = Math.min(j, text.length) + 1;
       continue;
     }
@@ -663,7 +702,16 @@ function splitStatementsHeredocAware(command: string): string[] {
   while (i < lines.length) {
     let logical = lines[i]!;
     let j = i;
-    while (openQuoteAtEnd(logical) !== null && j + 1 < lines.length) {
+    while (j + 1 < lines.length) {
+      const end = lineEnd(logical);
+      if (end.continues) {
+        // Backslash-newline: bash drops both characters, so `tee \⏎<file>` is
+        // one statement whose operand is on the second line.
+        j++;
+        logical = logical.slice(0, -1) + lines[j]!;
+        continue;
+      }
+      if (end.quote === null) break;
       j++;
       logical += `\n${lines[j]!}`;
     }

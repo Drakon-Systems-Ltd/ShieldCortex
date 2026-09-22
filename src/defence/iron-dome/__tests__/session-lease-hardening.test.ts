@@ -440,6 +440,53 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash("cat <<-'EOF'\n\t$(printf changed > ~/.openclaw/openclaw.json)\n\tEOF")).toBeNull();
   });
 
+  it('a backslash-newline is a line continuation in every expanding context: the next line is the same statement (#552 r5)', () => {
+    // bash removes `\⏎` where the backslash is an escape (bare, "…", an
+    // expanding heredoc body), so the operand on the next line is this verb's.
+    expect(bash('tee \\\n~/.openclaw/openclaw.json < /tmp/x')).toBe('security-config');
+    expect(bash('printf x > \\\n~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('printf x >\\\n~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('echo "$(tee \\\n~/.openclaw/openclaw.json < /tmp/x)"')).toBe('security-config');
+    // A continued heredoc HEADER: the pipeline stage on the next line is real.
+    expect(bash('cat <<EOF \\\n| tee ~/.openclaw/openclaw.json\nbody\nEOF')).toBe('security-config');
+    // In an expanding heredoc body the continuation joins the substitution's lines.
+    expect(bash('cat <<EOF\n$(tee \\\n~/.openclaw/openclaw.json < /tmp/x)\nEOF')).toBe('security-config');
+    // An escaped backslash before the newline is NOT a continuation: `\\⏎` ends the line.
+    expect(bash('echo a\\\\\ntee ~/.openclaw/openclaw.json < /tmp/x')).toBe('security-config');
+    expect(bash('echo a\\\\\ncat ~/.openclaw/openclaw.json')).toBeNull();
+    // Inside single quotes a backslash is literal; the quote continues the line as text.
+    expect(bash("echo 'a\\\n$(printf x > ~/.openclaw/openclaw.json)'")).toBeNull();
+    // A continued read is still a read.
+    expect(bash('cat \\\n~/.openclaw/openclaw.json')).toBeNull();
+  });
+
+  it('process substitution and backtick escapes are expansion contexts: `<( … )`, `>( … )` run bare; `\\$` inside backticks is `$` (#552 r5)', () => {
+    // `<( … )` / `>( … )` execute their body where they are bare.
+    expect(bash('cat <(tee ~/.openclaw/openclaw.json < /tmp/x)')).toBe('security-config');
+    expect(bash('echo hi > >(tee ~/.openclaw/openclaw.json > /dev/null)')).toBe('security-config');
+    expect(bash('diff <(cat ~/.openclaw/openclaw.json) /tmp/x')).toBeNull();
+    // Inside double or single quotes `<(` is text.
+    expect(bash('echo "<(printf x > ~/.openclaw/openclaw.json)"')).toBeNull();
+    expect(bash("echo '<(printf x > ~/.openclaw/openclaw.json)'")).toBeNull();
+    // Inside backticks bash strips the backslash before `$`, `` ` `` and `\`
+    // before running the body, so `\$(` there IS a substitution.
+    expect(bash('echo `echo \\$(tee ~/.openclaw/openclaw.json < /tmp/x)`')).toBe('security-config');
+    expect(bash('echo "`echo \\$(tee ~/.openclaw/openclaw.json < /tmp/x)`"')).toBe('security-config');
+    // Any other backslash stays: `\>` inside backticks is a literal `>`, not a redirect.
+    expect(bash('echo `printf x \\> ~/.openclaw/openclaw.json`')).toBeNull();
+  });
+
+  it("a `$'…'` or `$\"…\"` heredoc delimiter is quoted: the body is literal and the terminator is the inner word (#552 r5)", () => {
+    expect(bash("cat <<$'EOF'\n$(printf x > ~/.openclaw/openclaw.json)\nEOF")).toBeNull();
+    expect(bash("cat <<$'EOF'\n$(printf x > ~/.openclaw/openclaw.json)\nEOF\ntee ~/.openclaw/openclaw.json < /tmp/x")).toBe('security-config');
+    expect(bash('cat <<$"EOF"\n$(printf x > ~/.openclaw/openclaw.json)\nEOF\ntee ~/.openclaw/openclaw.json < /tmp/x')).toBe('security-config');
+    expect(bash('cat <<$"EOF"\n$(printf x > ~/.openclaw/openclaw.json)\nEOF\ncat ~/.openclaw/openclaw.json')).toBeNull();
+    // Inside a double-quoted delimiter only `\$`, `` \` ``, `\"` and `\\` are
+    // escapes: `"E\OF"` is the delimiter `E\OF`, so a bare `EOF` line is body
+    // and the literal substitution after it is still body.
+    expect(bash('cat <<"E\\OF"\nEOF\n$(printf x > ~/.openclaw/openclaw.json)\nE\\OF')).toBeNull();
+  });
+
   it('a lone `-` is stdin, an operand; grep -o is only-matching (#552 r3)', () => {
     expect(bash('xxd -r - ~/.claude/settings.json < /tmp/in.hex')).toBe('security-config');
     expect(bash('uniq - ~/.openclaw/openclaw.json < /tmp/in')).toBe('security-config');
