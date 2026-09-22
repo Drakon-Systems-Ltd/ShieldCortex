@@ -43,14 +43,67 @@
  * Round-4 M2 — three independent lifecycles per actionId, each with its own
  * final state: ENFORCEMENT (the last DECISION row; the writer's final
  * notification copy of a denial — same event, outcome and signals, only the
- * notify object differs — is NEVER a new decision), RETRY (`retry_granted` /
- * `retry_denied` / `retry_grant_failed` → granted / denied / failed; a
- * revocation is only ever written inside `reason` text, which this tool never
- * reads, so `revoked` is structurally 0 from the current writer) and
- * NOTIFICATION (the last row that CARRIES a notify object; a retry row without
- * one does not reset it). "Actually stopped" = enforcement final is a stop
- * outcome AND the retry lifecycle did not end in a grant. A retry GRANT is NOT
- * proof of execution (finding 5).
+ * notify object differs — is NEVER a new decision), RETRY (see round-5 M2
+ * below) and NOTIFICATION (the last row that CARRIES a notify object; a retry
+ * row without one does not reset it). A retry GRANT is NOT proof of execution
+ * (finding 5).
+ *
+ * Round-5 M1 — INPUT ACCOUNTING and the declared-pair rule.
+ *   (a) One input row is counted exactly once: `rows.total` is the number of
+ *       non-blank lines and equals `rows.parsed + rows.malformed`; blank lines
+ *       are counted separately (`rows.lines = total + blankLines`). Retaining a
+ *       malformed object as a `malformed` record for correlation never adds a
+ *       second count.
+ *   (b) There is NO declared-pair shortcut. A retry row is validated against
+ *       the SAME pinned schema as an enforcement row: `event` must be present,
+ *       a string, and exactly `action_guard_denial` (the only event the retry
+ *       writer emits). A retry row with a missing event is MALFORMED
+ *       (`missing-event`); with a warning or any other event it is
+ *       CONTRADICTORY (`retry-event-mismatch`). Neither is a `dnp_retry`
+ *       record, so neither can set the retry lifecycle or make the event
+ *       known. An event with no validated enforcement DECISION is never known
+ *       and never "actually stopped", whatever its retry rows say.
+ *   (c) LEGACY ACCEPTANCE (explicit, closed). Every shipped writer since the
+ *       first `denials.jsonl` writer (#247, 12 Aug 2026) has written `event`,
+ *       `outcome`, `signals`, `severity`, `tool` and `detectedAt` on every
+ *       enforcement row. Rows written before #284 (12–14 Aug 2026) lack
+ *       `origin`, `actionId`, `sessionId` and `notify`; `correlationId` was
+ *       optional. The ONLY pre-schema tolerance this tool grants is therefore:
+ *         - no `notify` object        → accepted; notification lifecycle `none`;
+ *         - no `actionId`             → accepted; grouped by `correlationId`,
+ *                                       else by its own line;
+ *         - no `origin` / `sessionId` → accepted; never read.
+ *       Everything else outside the pinned schema — no `event`, no `outcome`,
+ *       a non-string `event`, a declared denial/warning without `signals`, a
+ *       non-array or non-string signal member, a non-object notify, a
+ *       non-string notify status or channel — is rejected as MALFORMED with a
+ *       named reason. There is no silent tolerance and no inference of a
+ *       missing field from any other field. The malformed reason reported is
+ *       the first failing check in this order: `missing-outcome`,
+ *       `event-not-string`, signals problems, notify problems, `missing-event`.
+ *
+ * Round-5 M2 — the RETRY lifecycle is a HISTORY, not last-row-wins. Over the
+ * validated retry rows of an event, in time order:
+ *   - `grantSeen`  becomes true once ANY validated `retry_granted` is observed
+ *                  and never goes back to false;
+ *   - `effective`  is the current retry state in
+ *                  { none, granted, denied, revoked, failed, unknown }:
+ *                    retry_granted      → granted
+ *                    retry_denied       → denied   (a grant, if any, is spent/withdrawn)
+ *                    retry_revoked      → revoked  (reserved: the writer records a
+ *                                         revocation only inside `reason` text,
+ *                                         which this tool never reads → 0 today)
+ *                    retry_grant_failed → failed when no grant has been seen;
+ *                                         UNKNOWN when a grant HAS been seen — a
+ *                                         failed re-issue after a grant is not a
+ *                                         revocation and does not restore the stop;
+ *   - `history`    is the ordered list of validated retry states.
+ * "Actually stopped" = enforcement final is a stop outcome AND the effective
+ * retry state is neither `granted` nor `unknown`. The public projection carries
+ * the effective-state distribution, the number of events with a grant seen, and
+ * the distribution of compact history patterns (state sequences), so an earlier
+ * grant is never dropped from the output — while actionIds themselves never
+ * leave the tool.
  *
  * NOT a classifier replay (the command surface is redacted, so no command is
  * re-run) and NOT an effect measurement (Half B does that).
@@ -106,18 +159,26 @@ export const safeSignalName = publicSignalName;
 // ── 1. Parse + classify: every line accounted for, record kinds discriminated ─
 
 /**
- * Classify a row by its DECLARED event + outcome contract.
+ * Classify a row by its DECLARED event + outcome contract. Round-5 M1(b):
+ * there is no shortcut for any outcome — a retry outcome needs a present,
+ * string `event` equal to `action_guard_denial` exactly as a denial does; a
+ * missing event is never classified into a lifecycle (it is malformed, see
+ * `rowProblem`), and a retry outcome under any other event is contradictory.
  * @param {object} row
  * @returns {{ kind: 'denial'|'warning'|'dnp_retry'|'contradictory'|'other', retry?: string, reason?: string }}
  */
 export function classifyRecord(row) {
   const outcome = typeof row.outcome === 'string' ? row.outcome : '';
   const event = typeof row.event === 'string' ? row.event : null;
-  if (RETRY_SET.has(outcome)) return { kind: 'dnp_retry', retry: outcome };
+  if (event === null) return { kind: 'other', reason: 'missing-event' };
+  if (RETRY_SET.has(outcome)) {
+    return event === 'action_guard_denial'
+      ? { kind: 'dnp_retry', retry: outcome }
+      : { kind: 'contradictory', reason: 'retry-event-mismatch' };
+  }
+  if (!EVENT_SET.has(event)) return { kind: 'other', reason: 'unknown-event' };
   const byOutcome = DENIAL_SET.has(outcome) ? 'denial' : WARNING_SET.has(outcome) ? 'warning' : null;
-  if (event !== null && !EVENT_SET.has(event)) return { kind: 'other', reason: 'unknown-event' };
   if (!byOutcome) return { kind: 'other', reason: 'unknown-outcome' };
-  if (event === null) return { kind: byOutcome };
   const byEvent = event === 'action_guard_denial' ? 'denial' : 'warning';
   if (byEvent !== byOutcome) return { kind: 'contradictory', reason: 'event-outcome-mismatch' };
   return { kind: byOutcome };
@@ -153,14 +214,21 @@ function baseRecord(row, lineNo) {
 /**
  * Validate one JSON object row against the writer's schema. Returns the
  * malformed reason, or null when the row conforms to its declared contract.
+ * The same checks apply to every row kind (M1(b)): a retry row is not exempt
+ * from any of them. Check order (first failure is the reported reason):
+ * missing-outcome, event-not-string, signals, notify, missing-event.
+ * The legacy tolerances (M1(c)) are exactly: no notify object, no actionId,
+ * no origin / sessionId. A missing `event` is NOT legacy — no shipped writer
+ * ever omitted it — so it is malformed.
  */
 function rowProblem(row, cls) {
   if (typeof row.outcome !== 'string' || row.outcome === '') return 'missing-outcome';
-  if (row.event !== undefined && typeof row.event !== 'string') return 'event-not-string';
+  if (row.event !== undefined && row.event !== null && typeof row.event !== 'string') return 'event-not-string';
   const sp = signalsProblem(row, cls.kind);
   if (sp) return sp;
   const nv = validateNotify(row);
   if (!nv.ok) return nv.reason;
+  if (row.event === undefined || row.event === null) return 'missing-event';
   return null;
 }
 
@@ -171,25 +239,33 @@ export function parseDenials(text) {
   const records = [];
   const malformed = [];
   let blankLines = 0;
+  // Round-5 M1(a): every non-blank line is counted ONCE, here, as it is read.
+  // `parsed` counts rows that conformed to their declared contract; every
+  // other non-blank line is in `malformed`. total === parsed + malformed by
+  // construction — retaining a malformed object as a record below adds
+  // nothing to any count.
+  let total = 0, parsed = 0;
   const lines = text.split(/\r?\n/);
   lines.forEach((line, i) => {
     const lineNo = i + 1;
     if (line.trim() === '') { blankLines++; return; }
+    total++;
     let row;
     try { row = JSON.parse(line); } catch { malformed.push({ lineNo, reason: 'not-json' }); return; }
     if (row === null || typeof row !== 'object' || Array.isArray(row)) { malformed.push({ lineNo, reason: 'not-object' }); return; }
     const cls = classifyRecord(row);
     const problem = rowProblem(row, cls);
     if (problem) {
-      // M1: a malformed JSON row is counted AND retained as a `malformed`
-      // record so it stays part of its event (same actionId / correlationId)
-      // and marks that event malformed. Nothing else is read from it: no
-      // signals, no notify — a row that failed its contract carries no
-      // evidence, only the fact that it exists.
+      // M1: a malformed JSON row is counted (once, in `malformed`) AND
+      // retained as a `malformed` record so it stays part of its event (same
+      // actionId / correlationId) and marks that event malformed. Nothing
+      // else is read from it: no signals, no notify — a row that failed its
+      // contract carries no evidence, only the fact that it exists.
       malformed.push({ lineNo, reason: problem });
       records.push({ ...baseRecord(row, lineNo), kind: 'malformed', retry: null, reason: problem, signals: [], straySignals: 0, notify: NO_NOTIFY });
       return;
     }
+    parsed++;
     const nv = validateNotify(row);
     const raw = Array.isArray(row.signals) ? [...new Set(row.signals.map(s => s.trim()).filter(Boolean))] : [];
     // M1: only a validated ENFORCEMENT row (denial / warning by declared
@@ -213,7 +289,8 @@ export function parseDenials(text) {
     });
   });
   if (lines.length && lines[lines.length - 1] === '') blankLines--;
-  return { records, malformed, blankLines };
+  const rows = { total, parsed, malformed: malformed.length, blankLines, lines: total + blankLines };
+  return { records, malformed, blankLines, rows };
 }
 
 // ── 2. Group: full lifecycle per event, nothing wins by position ─────────────
@@ -257,10 +334,15 @@ export function groupEvents(records) {
     const enfOutcomes = [...new Set(decisions.map(x => x.outcome))];
     const enforcementFinal = lastDecision ? enforcementState(lastDecision.outcome) : 'none';
 
-    // M2 — RETRY / REVOCATION lifecycle: its own final state, from its own rows.
+    // M2 (round 4 + round 5) — RETRY / REVOCATION lifecycle: a HISTORY over
+    // the VALIDATED retry rows only (`dnp_retry` kind — a retry row that
+    // failed the schema or carried the wrong event is malformed /
+    // contradictory and never reaches here). `grantSeen` latches on the first
+    // validated grant; `effective` is the current state; a grant_failed AFTER
+    // a grant is a failed re-issue (effective UNKNOWN), never a revocation.
     const retryOutcomes = retries.map(r => r.retry);
-    const retryFinal = retries.length ? retryState(retries[retries.length - 1].retry) : 'none';
-    const retryGranted = retryFinal === 'granted';
+    const retry = retryLifecycle(retryOutcomes);
+    const retryGranted = retry.effective === 'granted';
 
     // M2 — NOTIFICATION lifecycle: the LAST row that carries a notify object.
     // A retry row (which never carries one) does not reset it to none.
@@ -269,9 +351,18 @@ export function groupEvents(records) {
     const anyValidatedDelivery = ev.records.some(r => r.notify.claimsDelivery && r.notify.channelPresent);
     const notificationFinal = notificationState(lastNotify);
 
-    // Actually stopped: the enforcement lifecycle ended in a stop AND the retry
-    // lifecycle did not end in a grant. A grant is still not execution proof.
-    const actuallyStopped = STOPPED_OUTCOMES.has(enforcementFinal) && retryFinal !== 'granted';
+    // Actually stopped: a validated enforcement DECISION ended in a stop AND
+    // the effective retry state is neither granted nor unknown (M1(b): no
+    // decision → never stopped; M2: a grant followed by a failed re-issue is
+    // unresolved, not a restored stop) AND every row of the event validated
+    // (M1(b): a malformed or contradictory row — e.g. an unvalidated retry
+    // row — is not accepted as a grant, but it is not ignored either: the stop
+    // is then UNCONFIRMED, never counted as stopped). A grant is still not
+    // execution proof.
+    const stopDecided = STOPPED_OUTCOMES.has(enforcementFinal);
+    const evidenceIntact = malformedRows === 0 && !ev.records.some(r => r.kind === 'contradictory');
+    const actuallyStopped = stopDecided && evidenceIntact && retry.effective !== 'granted' && retry.effective !== 'unknown';
+    const stopUnconfirmed = stopDecided && !evidenceIntact;
     const finalEnfOutcome = lastDecision ? lastDecision.outcome : (retries.length ? 'retry-only' : 'none');
 
     // Contradictions (finding 4): the evidence disagrees with itself.
@@ -293,10 +384,10 @@ export function groupEvents(records) {
       contradictions,
       lifecycle: {
         enforcement: { final: enforcementFinal, decisions: decisions.length, notifyCopies },
-        retry: { final: retryFinal, history: retryOutcomes },
+        retry,
         notification: { final: notificationFinal, anyValidatedDelivery },
       },
-      retryOutcomes, retryGranted, actuallyStopped,
+      retryOutcomes, retryGranted, actuallyStopped, stopUnconfirmed,
       signals: union,
       unrecognisedSignals: union.filter(s => !isVocabularySignal(s)).length,
       signalDrift: !sameSet(firstDecision ? firstDecision.signals : [], lastDecision ? lastDecision.signals : []),
@@ -320,8 +411,47 @@ const sameSet = (a, b) => a.length === b.length && a.every(s => b.includes(s));
 
 /** Closed lifecycle states (M2). Each is projected verbatim; anything else is `other`. */
 export const ENFORCEMENT_STATES = Object.freeze(['none', ...DENIAL_OUTCOMES, ...WARNING_OUTCOMES, 'other']);
-export const RETRY_STATES = Object.freeze(['none', 'granted', 'denied', 'failed', 'revoked']);
+export const RETRY_STATES = Object.freeze(['none', 'granted', 'denied', 'failed', 'revoked', 'unknown']);
 export const NOTIFICATION_STATES = Object.freeze(['none', 'delivered', 'failed', 'suppressed', 'unknown']);
+/** Longest retry history pattern printed verbatim; longer ones end in `more`. */
+export const RETRY_HISTORY_MAX = 8;
+
+/**
+ * Round-5 M2 — project the ordered VALIDATED retry outcomes of one event into
+ * its retry lifecycle: `{ effective, grantSeen, history }`.
+ *   none    — no validated retry row;
+ *   granted — the latest state is a grant;
+ *   denied  — the latest state is a denial (a prior grant, if any, is withdrawn);
+ *   revoked — reserved (see `retryState`);
+ *   failed  — a grant_failed with NO grant ever seen;
+ *   unknown — a grant_failed AFTER a grant was seen (a failed re-issue; the
+ *             earlier grant is neither confirmed nor revoked), or a retry
+ *             outcome the state mapper does not recognise.
+ * `grantSeen` is true once any validated grant is observed and never resets.
+ */
+export function retryLifecycle(retryOutcomes) {
+  let effective = 'none', grantSeen = false;
+  const history = [];
+  for (const o of retryOutcomes ?? []) {
+    const st = retryState(o);
+    history.push(st);
+    if (st === 'granted') { grantSeen = true; effective = 'granted'; }
+    else if (st === 'denied') effective = 'denied';
+    else if (st === 'revoked') effective = 'revoked';
+    else if (st === 'failed') effective = grantSeen ? 'unknown' : 'failed';
+    else effective = 'unknown';
+  }
+  return { effective, grantSeen, history };
+}
+
+/** Compact, closed pattern key for a retry history: states joined by ' -> ', capped. */
+export function retryHistoryKey(history) {
+  const states = (history ?? []).map(s => (RETRY_STATES.includes(s) ? s : OTHER));
+  if (states.length === 0) return 'none';
+  const shown = states.slice(0, RETRY_HISTORY_MAX);
+  if (states.length > RETRY_HISTORY_MAX) shown.push('more');
+  return shown.join(' -> ');
+}
 
 /** Enforcement final state from the last DECISION row's outcome. */
 export function enforcementState(outcome) {
@@ -329,9 +459,11 @@ export function enforcementState(outcome) {
 }
 
 /**
- * Retry final state from the last retry row. `revoked` is reserved: the
- * current writer records a revocation only inside the `reason` text of a
+ * Retry state of ONE validated retry row. `revoked` is reserved: the current
+ * writer records a revocation only inside the `reason` text of a
  * `retry_denied` row, which this tool never reads, so it is 0 by construction.
+ * Anything outside the retry enum maps to `none` (it cannot be a `dnp_retry`
+ * record in the first place, see `classifyRecord`).
  */
 export function retryState(retryOutcome) {
   if (retryOutcome === 'retry_granted') return 'granted';
@@ -386,9 +518,14 @@ export function bucketOf(e) {
 
 /**
  * @param {ReturnType<typeof groupEvents>} events
- * @param {{ malformed: Array<{lineNo:number,reason:string}>, rowCount: number, blankLines: number }} parse
+ * @param {ReturnType<typeof parseDenials>} parse — the parser's own result; its
+ *   `rows` accounting is the ONLY source of the row counts (M1(a)). A caller
+ *   that re-derives a total from record arrays is refused.
  */
 export function analyse(events, parse) {
+  if (!parse || !parse.rows || !Array.isArray(parse.malformed)) {
+    throw new Error('analyse: pass the parseDenials() result; row counts are never re-derived from record arrays (round-5 M1a)');
+  }
   const buckets = events.map(e => ({ e, ...bucketOf(e) }));
   const known = buckets.filter(b => b.bucket === 'known').map(b => b.e);
   const unknown = buckets.filter(b => b.bucket === 'unknown').map(b => b.e);
@@ -407,14 +544,19 @@ export function analyse(events, parse) {
   // over ALL events (a lifecycle exists for every event; `none` is a state).
   const lifecycles = {
     enforcement: { final: counter(), decisions: counter(), notifyCopies: 0 },
-    retry: { final: counter() },
+    // Round-5 M2: effective-state distribution, events with a grant seen, and
+    // the distribution of compact history patterns — the earlier grant of a
+    // grant → grant_failed event survives here as `granted -> failed`.
+    retry: { effective: counter(), grantSeen: 0, histories: counter() },
     notification: { final: counter(), anyValidatedDelivery: 0 },
   };
   for (const e of events) {
     bump(lifecycles.enforcement.final, e.lifecycle.enforcement.final);
     bump(lifecycles.enforcement.decisions, String(e.lifecycle.enforcement.decisions));
     lifecycles.enforcement.notifyCopies += e.lifecycle.enforcement.notifyCopies;
-    bump(lifecycles.retry.final, e.lifecycle.retry.final);
+    bump(lifecycles.retry.effective, e.lifecycle.retry.effective);
+    if (e.lifecycle.retry.grantSeen) lifecycles.retry.grantSeen++;
+    bump(lifecycles.retry.histories, retryHistoryKey(e.lifecycle.retry.history));
     bump(lifecycles.notification.final, e.lifecycle.notification.final);
     if (e.lifecycle.notification.anyValidatedDelivery) lifecycles.notification.anyValidatedDelivery++;
   }
@@ -431,14 +573,16 @@ export function analyse(events, parse) {
 
   // ACTUAL outcome accounting (finding 4) — what the guard truly did, read
   // from the lifecycle finals (M2), never from row position.
-  const actual = { actuallyStopped: 0, warnedOnly: 0, retryGranted: 0, retryDeniedOrFailed: 0, other: 0 };
+  const actual = { actuallyStopped: 0, stopUnconfirmed: 0, warnedOnly: 0, retryGranted: 0, retryDeniedOrFailed: 0, retryUnresolved: 0, other: 0 };
   const finalEnfDist = counter();
   for (const e of events) {
     bump(finalEnfDist, e.finalEnfOutcome);
-    const enf = e.lifecycle.enforcement.final, retry = e.lifecycle.retry.final;
+    const enf = e.lifecycle.enforcement.final, retry = e.lifecycle.retry.effective;
     if (e.actuallyStopped) actual.actuallyStopped++;
+    else if (e.stopUnconfirmed) actual.stopUnconfirmed++;
     else if (retry === 'granted') actual.retryGranted++;
     else if (retry === 'denied' || retry === 'failed' || retry === 'revoked') actual.retryDeniedOrFailed++;
+    else if (retry === 'unknown') actual.retryUnresolved++;
     else if (enf === 'warned' || enf === 'failure_allowed') actual.warnedOnly++;
     else actual.other++;
   }
@@ -520,7 +664,12 @@ export function analyse(events, parse) {
     banner: BANNER,
     scope: 'logged-signal comparison; actual outcome and hypothetical match reported separately; malformed, contradictory and unknown evidence excluded from every percentage',
     dateRange: dates.length ? { from: dates[0], to: dates[dates.length - 1] } : null,
-    rows: { total: parse.rowCount, parsed: parse.rowCount - parse.malformed.length, malformed: parse.malformed.length, blankLines: parse.blankLines },
+    // Round-5 M1(a): counts come straight from the parser's single pass
+    // (`parse.rows`); nothing here re-derives a total from record arrays.
+    rows: {
+      total: parse.rows.total, parsed: parse.rows.parsed, malformed: parse.rows.malformed,
+      blankLines: parse.rows.blankLines, lines: parse.rows.lines,
+    },
     malformed: parse.malformed.slice(0, 50),
     evidence: {
       validKnown: known.length,
@@ -538,7 +687,13 @@ export function analyse(events, parse) {
     actual: { ...actual, finalEnforcementOutcome: sortedObj(finalEnfDist) },
     lifecycles: {
       enforcement: { final: sortedObj(lifecycles.enforcement.final), decisionsPerEvent: sortedObj(lifecycles.enforcement.decisions), notifyCopies: lifecycles.enforcement.notifyCopies },
-      retry: { final: sortedObj(lifecycles.retry.final), note: 'revoked is reserved: the writer records a revocation only inside reason text, which this tool never reads' },
+      retry: {
+        effective: sortedObj(lifecycles.retry.effective),
+        grantSeen: lifecycles.retry.grantSeen,
+        histories: sortedObj(lifecycles.retry.histories),
+        total: events.length,
+        note: 'effective is the current retry state over the validated retry history; grantSeen counts events where any validated grant was observed; a grant_failed after a grant is a failed re-issue (unknown), not a revocation; revoked is reserved: the writer records a revocation only inside reason text, which this tool never reads',
+      },
       notification: { final: sortedObj(lifecycles.notification.final), anyValidatedDelivery: lifecycles.notification.anyValidatedDelivery, total: events.length },
     },
     unknown: {
@@ -574,6 +729,11 @@ function projectDist(obj, mapKey) {
   return sortedObj(m);
 }
 const identOrOther = (k) => (isIdent(k) ? k : OTHER);
+/** A retry history pattern key: each step a closed retry state or the `more` cap marker, else `other`. */
+function projectRetryHistoryKey(k) {
+  return String(k).split(' -> ').slice(0, RETRY_HISTORY_MAX + 1)
+    .map(x => (RETRY_STATES.includes(x) || x === 'more' ? x : OTHER)).join(' -> ');
+}
 const signalsToPublic = (list) => (list ?? []).map(publicSignalName);
 function projectNotifyKey(k) {
   // "<status> via=<channel>" — both halves through their enum.
@@ -599,7 +759,7 @@ export function projectPublic(s) {
     banner: BANNER,
     scope: s.scope,
     dateRange: s.dateRange ? { from: String(s.dateRange.from).slice(0, 10), to: String(s.dateRange.to).slice(0, 10) } : null,
-    rows: { total: num(s.rows.total), parsed: num(s.rows.parsed), malformed: num(s.rows.malformed), blankLines: num(s.rows.blankLines) },
+    rows: { total: num(s.rows.total), parsed: num(s.rows.parsed), malformed: num(s.rows.malformed), blankLines: num(s.rows.blankLines), lines: num(s.rows.lines) },
     malformed: (s.malformed ?? []).map(m => ({ lineNo: num(m.lineNo), reason: identOrOther(String(m.reason)) })),
     evidence: {
       validKnown: num(s.evidence.validKnown),
@@ -619,8 +779,9 @@ export function projectPublic(s) {
       straySignals: num(s.events.straySignals),
     },
     actual: {
-      actuallyStopped: num(s.actual.actuallyStopped), warnedOnly: num(s.actual.warnedOnly),
-      retryGranted: num(s.actual.retryGranted), retryDeniedOrFailed: num(s.actual.retryDeniedOrFailed), other: num(s.actual.other),
+      actuallyStopped: num(s.actual.actuallyStopped), stopUnconfirmed: num(s.actual.stopUnconfirmed), warnedOnly: num(s.actual.warnedOnly),
+      retryGranted: num(s.actual.retryGranted), retryDeniedOrFailed: num(s.actual.retryDeniedOrFailed),
+      retryUnresolved: num(s.actual.retryUnresolved), other: num(s.actual.other),
       finalEnforcementOutcome: projectDist(s.actual.finalEnforcementOutcome, outcomeOrLifecycle),
     },
     lifecycles: {
@@ -629,7 +790,14 @@ export function projectPublic(s) {
         decisionsPerEvent: projectDist(s.lifecycles.enforcement.decisionsPerEvent, k => (/^\d{1,6}$/.test(k) ? k : OTHER)),
         notifyCopies: num(s.lifecycles.enforcement.notifyCopies),
       },
-      retry: { final: projectDist(s.lifecycles.retry.final, k => (RETRY_STATES.includes(k) ? k : OTHER)), note: s.lifecycles.retry.note },
+      retry: {
+        effective: projectDist(s.lifecycles.retry.effective, k => (RETRY_STATES.includes(k) ? k : OTHER)),
+        grantSeen: num(s.lifecycles.retry.grantSeen),
+        // history patterns: every step re-mapped through the closed state set (+ the `more` cap marker)
+        histories: projectDist(s.lifecycles.retry.histories, projectRetryHistoryKey),
+        total: num(s.lifecycles.retry.total),
+        note: s.lifecycles.retry.note,
+      },
       notification: {
         final: projectDist(s.lifecycles.notification.final, k => (NOTIFICATION_STATES.includes(k) ? k : OTHER)),
         anyValidatedDelivery: num(s.lifecycles.notification.anyValidatedDelivery), total: num(s.lifecycles.notification.total),
@@ -683,9 +851,9 @@ export function renderMarkdown(s) {
   out.push('```', s.banner, '```', '');
   out.push(`**Window:** ${s.dateRange ? `${s.dateRange.from} to ${s.dateRange.to}` : 'n/a'} (dates from the log's own timestamps; no host named)`, '');
   out.push('### Input accounting', '');
-  out.push('| rows | parsed | malformed | blank | events | multi-record | conflicting | signal drift |');
-  out.push('|---|---|---|---|---|---|---|---|');
-  out.push(`| ${s.rows.total} | ${s.rows.parsed} | **${s.rows.malformed}** | ${s.rows.blankLines} | ${s.events.total} | ${s.events.multiRecord} | ${s.events.conflictingOutcome} | ${s.events.signalDriftBetweenFirstAndLast} |`, '');
+  out.push('| rows (= parsed + malformed) | parsed | malformed | blank | lines (= rows + blank) | events | multi-record | conflicting | signal drift |');
+  out.push('|---|---|---|---|---|---|---|---|---|');
+  out.push(`| ${s.rows.total} | ${s.rows.parsed} | **${s.rows.malformed}** | ${s.rows.blankLines} | ${s.rows.lines} | ${s.events.total} | ${s.events.multiRecord} | ${s.events.conflictingOutcome} | ${s.events.signalDriftBetweenFirstAndLast} |`, '');
   out.push(`- events keyed by: ${kv(s.events.keyedBy)}`);
   out.push(`- records per event: ${kv(s.events.recordsPerEvent)}`);
   out.push(`- record kinds present: ${kv(s.events.recordKinds)}`);
@@ -708,10 +876,12 @@ export function renderMarkdown(s) {
   out.push('### ACTUAL outcome (what the guard did — separate from any policy hypothesis)', '');
   out.push('| category | events | note |');
   out.push('|---|---|---|');
-  out.push(`| actually stopped | ${s.actual.actuallyStopped} | enforcement final auto_denied / denied_no_prompt_surface AND retry lifecycle did not end in a grant |`);
+  out.push(`| actually stopped | ${s.actual.actuallyStopped} | a validated enforcement DECISION of auto_denied / denied_no_prompt_surface, every row of the event validated, AND effective retry state neither granted nor unknown |`);
+  out.push(`| stop unconfirmed | ${s.actual.stopUnconfirmed} | a stop decision exists but the event also carries a malformed or contradictory row (e.g. an unvalidated retry row): not accepted as a grant, not counted as stopped |`);
   out.push(`| warned only | ${s.actual.warnedOnly} | advisory; NO permission decision emitted — did not stop the call |`);
-  out.push(`| retry granted | ${s.actual.retryGranted} | retry lifecycle ended in a scoped one-shot grant; NOT proof of execution |`);
-  out.push(`| retry denied / grant failed | ${s.actual.retryDeniedOrFailed} | |`);
+  out.push(`| retry granted | ${s.actual.retryGranted} | effective retry state is a scoped one-shot grant; NOT proof of execution |`);
+  out.push(`| retry denied / grant failed | ${s.actual.retryDeniedOrFailed} | effective retry state denied, revoked, or failed with no grant ever seen |`);
+  out.push(`| retry unresolved | ${s.actual.retryUnresolved} | a grant was seen, then a grant_failed: a failed re-issue, NOT a revocation — the stop is not restored |`);
   out.push(`| other | ${s.actual.other} | |`);
   out.push('');
   out.push(`- final enforcement outcome distribution: ${kv(s.actual.finalEnforcementOutcome)}`, '');
@@ -720,7 +890,7 @@ export function renderMarkdown(s) {
   out.push('| lifecycle | final-state distribution | note |');
   out.push('|---|---|---|');
   out.push(`| enforcement | ${kv(s.lifecycles.enforcement.final)} | last DECISION row; ${s.lifecycles.enforcement.notifyCopies} notify-copy row(s) (same event/outcome/signals, only notify differs) were NOT counted as new decisions; decisions per event: ${kv(s.lifecycles.enforcement.decisionsPerEvent)} |`);
-  out.push(`| retry / revocation | ${kv(s.lifecycles.retry.final)} | ${s.lifecycles.retry.note} |`);
+  out.push(`| retry / revocation (effective) | ${kv(s.lifecycles.retry.effective)} | grant seen on ${s.lifecycles.retry.grantSeen} of ${s.lifecycles.retry.total} event(s); validated retry histories: ${kv(s.lifecycles.retry.histories)}; ${s.lifecycles.retry.note} |`);
   out.push(`| notification | ${kv(s.lifecycles.notification.final)} | last row that CARRIES a notify object; validated delivery on any row: ${s.lifecycles.notification.anyValidatedDelivery} of ${s.lifecycles.notification.total} |`);
   out.push('');
 
@@ -771,7 +941,8 @@ export function renderMarkdown(s) {
 export function run(text) {
   const parsed = parseDenials(text);
   const events = groupEvents(parsed.records);
-  const internal = analyse(events, { malformed: parsed.malformed, rowCount: parsed.records.length + parsed.malformed.length, blankLines: parsed.blankLines });
+  // M1(a): the parser's own accounting is passed through untouched.
+  const internal = analyse(events, parsed);
   const summary = projectPublic(internal);
   return { summary, markdown: renderMarkdown(summary) };
 }

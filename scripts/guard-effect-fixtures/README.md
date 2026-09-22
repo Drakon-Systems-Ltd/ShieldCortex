@@ -53,17 +53,20 @@ never by whether a `signals` array happens to be present. Four event buckets
 partition the events, each reported with counts, and **only known enters a
 denominator**:
 
-- **malformed events** — any event holding a malformed JSON row: no outcome, a
-  non-string `event`, a declared denial or warning with no `signals`, a
-  non-array or non-string signal member, a non-string notify status or a
-  non-string channel. A malformed JSON row is **retained** as a record of its
+- **malformed events** — any event holding a malformed JSON row: no outcome, no
+  `event` (round 5), a non-string `event`, a declared denial or warning with no
+  `signals`, a non-array or non-string signal member, a non-object notify, a
+  non-string notify status or a non-string channel — for **every** row kind,
+  retry rows included. A malformed JSON row is **retained** as a record of its
   event (same `actionId` / `correlationId`, else its own line) — never
   discarded before grouping — and nothing else is read from it. Row-level
   malformed counts (which also cover not-JSON / not-object lines) are reported
   alongside;
-- **contradictory events** — event/outcome pair disagrees; conflicting
-  enforcement outcomes across an event's decision records; a `delivered`
-  status with no channel (a whitespace `deliveredVia` is not a channel);
+- **contradictory events** — event/outcome pair disagrees (including a retry
+  outcome under any event other than `action_guard_denial`, round 5);
+  conflicting enforcement outcomes across an event's decision records; a
+  `delivered` status with no channel (a whitespace `deliveredVia` is not a
+  channel);
 - **unknown events** — redacted or empty signals, retry-only lifecycles, an
   outcome outside the writer's enum, any signal outside the writer's
   vocabulary, or **stray signals** carried on a retry or unknown-outcome row;
@@ -73,6 +76,48 @@ Only **validated enforcement signals** (denial / warning rows that passed their
 contract) form an event's signal set; a signal on a retry row or an
 unknown-outcome row is counted as stray and never reaches a tier or floor match.
 
+**Input accounting (round 5, M1a).** One input row is counted exactly once, in
+the parser's single pass: `rows.total` is the number of non-blank lines and
+equals `rows.parsed + rows.malformed`; `rows.blankLines` is separate and
+`rows.lines = rows.total + rows.blankLines`. Retaining a malformed object as a
+`malformed` record for correlation adds nothing to any count, and `analyse`
+refuses a caller that re-derives a total from record arrays. A single
+`event: 42` row is `total 1 / parsed 0 / malformed 1`; one valid row plus one
+malformed row is `total 2`.
+
+**No declared-pair shortcut (round 5, M1b).** A retry row (`retry_granted` /
+`retry_denied` / `retry_grant_failed`) is validated against the **same** pinned
+schema as an enforcement row: `event` present, a string, and exactly
+`action_guard_denial` (the only event the retry writer emits). A retry row with
+a missing event is malformed (`missing-event`); with a warning or any other
+event it is contradictory (`retry-event-mismatch`). Neither is a `dnp_retry`
+record, so neither can set the retry lifecycle, make the event known, or set
+`retry = granted`. An event with **no validated enforcement decision** is never
+known and never "actually stopped", whatever its retry rows say. A stop
+decision that shares its event with a malformed or contradictory row is
+reported as **stop unconfirmed**, never as stopped.
+
+**Legacy acceptance (round 5, M1c) — explicit and closed.** Every shipped
+writer since the first `denials.jsonl` writer (#247, 12 Aug 2026) has written
+`event`, `outcome`, `signals`, `severity`, `tool` and `detectedAt` on every
+enforcement row. Rows written before #284 (12–14 Aug 2026) lack `origin`,
+`actionId`, `sessionId` and `notify`, and `correlationId` was optional. The
+**only** pre-schema tolerances the replay grants are therefore:
+
+| pre-schema shape | accepted? | bucket / effect |
+|---|---|---|
+| no `notify` object | yes | notification lifecycle `none`; no delivery claim |
+| no `actionId` | yes | grouped by `correlationId`, else by its own line |
+| no `origin` / `sessionId` | yes | never read |
+
+Anything else outside the pinned schema — no `event`, no `outcome`, a
+non-string `event`, a declared denial or warning without `signals`, a non-array
+or non-string signal member, a non-object notify, a non-string notify status or
+channel — is rejected as **malformed** with a named reason. Nothing is inferred
+from another field and nothing is tolerated silently. The reported reason is
+the first failing check in this order: `missing-outcome`, `event-not-string`,
+signals problems, notify problems, `missing-event`.
+
 **Three lifecycles per event (round 4).** Each `actionId` carries three
 independent observations, each with its own final state:
 
@@ -81,15 +126,26 @@ independent observations, each with its own final state:
   same denial with its final notify status once delivery settles; a row with
   the same event, outcome and signal set as an earlier decision is that
   *notify copy*, never a new decision;
-- **retry / revocation** — `none` / `granted` / `denied` / `failed` /
-  `revoked` from the retry rows alone. `revoked` is reserved: the current writer
-  records a revocation only inside `reason` text, which the replay never reads;
+- **retry / revocation** — a **history** over the validated retry rows in time
+  order (round 5, M2), never last-row-wins: `grantSeen` latches true on the
+  first validated `retry_granted` and never resets; `effective` is the current
+  state in `none` / `granted` / `denied` / `revoked` / `failed` / `unknown`
+  (`retry_granted` → granted; `retry_denied` → denied; `retry_grant_failed` →
+  failed when no grant was ever seen, **unknown** when a grant *was* seen — a
+  failed re-issue after a grant is not a revocation and does not restore the
+  stop); `history` is the ordered list of states. `revoked` is reserved: the
+  current writer records a revocation only inside `reason` text, which the
+  replay never reads. The public projection carries the effective-state
+  distribution, the count of events with a grant seen, and the distribution of
+  compact history patterns (e.g. `granted -> failed`), so an earlier grant is
+  never dropped from the output; actionIds themselves never leave the tool;
 - **notification** — `none` / `delivered` / `failed` / `suppressed` / `unknown`
   from the last row that *carries* a notify object (a retry row does not reset
   it), plus `anyValidatedDelivery` across all rows.
 
-"Actually stopped" = the enforcement lifecycle ended in a stop outcome **and**
-the retry lifecycle did not end in a grant. A *validated delivery* is a
+"Actually stopped" = a validated enforcement decision ended in a stop outcome,
+every row of the event validated, **and** the effective retry state is neither
+`granted` nor `unknown`. A *validated delivery* is a
 delivery-claim status **with** a channel across any record of the event; it is
 a transport report, never proof a person saw it.
 

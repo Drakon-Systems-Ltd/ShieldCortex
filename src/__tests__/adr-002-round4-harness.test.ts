@@ -88,7 +88,7 @@ describe('round 4 / M1 — only VALIDATED ENFORCEMENT signals classify an event'
     expect(summary.evidence).toEqual(expect.objectContaining({ validKnown: 0, unknown: 1, unknownReasons: { 'signals-on-non-enforcement-row': 1 } }));
     const e = eventOf(log, 'aid:m1c');
     expect(e.signals).toEqual(['file-delete']);
-    expect(e.lifecycle.retry.final).toBe('granted');
+    expect(e.lifecycle.retry.effective).toBe('granted');
     expect(summary.perSignal.map((r: any) => r.signal)).not.toContain('fork-bomb');
     for (const p of summary.policies) expect(p.hypotheticalMatch + p.hypotheticalNoMatch).toBe(0);
   });
@@ -143,7 +143,7 @@ describe('round 4 / M2 — three independent lifecycles per actionId', () => {
     const e = eventOf(log, 'aid:i');
     expect(e.lifecycle).toEqual({
       enforcement: { final: 'auto_denied', decisions: 1, notifyCopies: 0 },
-      retry: { final: 'granted', history: ['retry_granted'] },
+      retry: { effective: 'granted', grantSeen: true, history: ['granted'] },
       notification: { final: 'delivered', anyValidatedDelivery: true },
     });
     expect(e.actuallyStopped).toBe(false);
@@ -162,7 +162,7 @@ describe('round 4 / M2 — three independent lifecycles per actionId', () => {
     );
     const e = eventOf(log, 'aid:ii');
     expect(e.lifecycle.enforcement).toEqual({ final: 'auto_denied', decisions: 1, notifyCopies: 1 });
-    expect(e.lifecycle.retry.final).toBe('granted');
+    expect(e.lifecycle.retry.effective).toBe('granted');
     expect(e.lifecycle.notification).toEqual({ final: 'delivered', anyValidatedDelivery: true });
     expect(e.actuallyStopped).toBe(false);
     expect(e.conflictingOutcome).toBe(false);
@@ -193,12 +193,12 @@ describe('round 4 / M2 — three independent lifecycles per actionId', () => {
       retry('iii', 'retry_denied', T2),
     );
     const e = eventOf(log, 'aid:iii');
-    expect(e.lifecycle.retry).toEqual({ final: 'denied', history: ['retry_granted', 'retry_denied'] });
+    expect(e.lifecycle.retry).toEqual({ effective: 'denied', grantSeen: true, history: ['granted', 'denied'] });
     expect(e.lifecycle.enforcement.final).toBe('auto_denied');
     expect(e.retryGranted).toBe(false);
     expect(e.actuallyStopped).toBe(true);
     const { summary } = run(log);
-    expect(summary.lifecycles.retry.final).toEqual({ denied: 1 });
+    expect(summary.lifecycles.retry.effective).toEqual({ denied: 1 });
     expect(summary.actual).toEqual(expect.objectContaining({ actuallyStopped: 1, retryGranted: 0, retryDeniedOrFailed: 0 }));
   });
 
@@ -211,18 +211,18 @@ describe('round 4 / M2 — three independent lifecycles per actionId', () => {
     );
     expect(eventOf(log, 'aid:w').lifecycle).toEqual({
       enforcement: { final: 'warned', decisions: 1, notifyCopies: 0 },
-      retry: { final: 'none', history: [] },
+      retry: { effective: 'none', grantSeen: false, history: [] },
       notification: { final: 'delivered', anyValidatedDelivery: true },
     });
     expect(eventOf(log, 'aid:gf').lifecycle).toEqual({
       enforcement: { final: 'auto_denied', decisions: 1, notifyCopies: 0 },
-      retry: { final: 'failed', history: ['retry_grant_failed'] },
+      retry: { effective: 'failed', grantSeen: false, history: ['failed'] },
       notification: { final: 'failed', anyValidatedDelivery: false },
     });
     expect(eventOf(log, 'aid:s').lifecycle.notification).toEqual({ final: 'suppressed', anyValidatedDelivery: false });
     const { summary } = run(log);
     expect(summary.lifecycles.enforcement.final).toEqual({ auto_denied: 2, warned: 1 });
-    expect(summary.lifecycles.retry.final).toEqual({ none: 2, failed: 1 });
+    expect(summary.lifecycles.retry.effective).toEqual({ none: 2, failed: 1 });
     expect(summary.lifecycles.notification.final).toEqual({ delivered: 1, failed: 1, suppressed: 1 });
     expect(summary.actual).toEqual(expect.objectContaining({ actuallyStopped: 2, warnedOnly: 1, retryDeniedOrFailed: 0 }));
   });
@@ -240,13 +240,13 @@ describe('round 4 / M2 — three independent lifecycles per actionId', () => {
   it('the lifecycles survive the public projection through closed enums and are what run() returns', () => {
     const log = lines(denial({ actionId: 'p', signals: ['file-delete'] }), retry('p', 'retry_granted', T1));
     const parsed = parseDenials(log);
-    const internal = analyse(groupEvents(parsed.records), { malformed: parsed.malformed, rowCount: parsed.records.length + parsed.malformed.length, blankLines: parsed.blankLines });
+    const internal = analyse(groupEvents(parsed.records), parsed);
     const once = projectPublic(internal);
     expect(projectPublic(once)).toEqual(once);
     expect(run(log).summary.lifecycles).toEqual(once.lifecycles);
     // an out-of-enum lifecycle label collapses to `other` in projection
-    const tampered = { ...internal, lifecycles: { ...internal.lifecycles, retry: { ...internal.lifecycles.retry, final: { 'private-state': 1 } } } };
-    expect(projectPublic(tampered).lifecycles.retry.final).toEqual({ other: 1 });
+    const tampered = { ...internal, lifecycles: { ...internal.lifecycles, retry: { ...internal.lifecycles.retry, effective: { 'private-state': 1 } } } };
+    expect(projectPublic(tampered).lifecycles.retry.effective).toEqual({ other: 1 });
   });
 });
 

@@ -306,7 +306,7 @@ describe('round 3 / finding 3 — one safe export projection; vocabulary members
 
   it('the JSON and Markdown consume the SAME projection: projectPublic(analyse(...)) is idempotent and is what run() returns', () => {
     const parsed = parseDenials(LOG);
-    const internal = analyse(groupEvents(parsed.records), { malformed: parsed.malformed, rowCount: parsed.records.length + parsed.malformed.length, blankLines: parsed.blankLines });
+    const internal = analyse(groupEvents(parsed.records), parsed);
     const once = projectPublic(internal);
     expect(projectPublic(once)).toEqual(once);
     expect(run(LOG).summary).toEqual(once);
