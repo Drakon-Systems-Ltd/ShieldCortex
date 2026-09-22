@@ -333,6 +333,8 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash('curl -s https://x/ -o ~/.claude/settings.json')).toBe('security-config');
     expect(bash('wget https://x/ -O ~/.openclaw/openclaw.json')).toBe('security-config');
     expect(bash("awk -i inplace '{print}' ~/.claude/settings.json")).toBe('security-config');
+    expect(bash("gawk -i inplace '{print}' ~/.claude/settings.json")).toBe('security-config');
+    expect(bash("gawk '{print}' ~/.claude/settings.json")).toBeNull();
     expect(bash('patch ~/.claude/settings.json < /tmp/p.diff')).toBe('security-config');
     expect(bash('git checkout -- ~/.claude/settings.json')).toBe('security-config');
     expect(bash('git restore ~/.claude/settings.json')).toBe('security-config');
