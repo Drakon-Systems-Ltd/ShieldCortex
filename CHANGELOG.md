@@ -8,6 +8,22 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- (none yet)
+
+### Fixed
+- (none yet)
+
+## [5.1.0] - 2026-09-22
+
+Minor on 5.0.7. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`). Cloud pin stays `^5.0.0`.
+
+**Two behaviour changes — read before you upgrade:**
+- **PII is now redacted when memories are written (#510).** UK NI numbers, US SSNs, labelled tax ids and salary figures are stored as `[REDACTED:<kind>]` rather than verbatim, and those rows are classified CONFIDENTIAL or above. Memories already stored are not rewritten in bulk; an existing row is redacted the next time it is updated or enriched. Set `SHIELDCORTEX_PII_REDACTION=off` to keep storing verbatim (the labels stay).
+- **`shieldcortex doctor` can now exit 1 where it used to exit 0 (#517 c).** A host whose signed config has Action Guard enabled **and** enforcing, on a plane that is not visibly disarmed, with no enabled webhook sink, is now a FAIL. Scripts or CI that run `doctor` and check its exit code will see this. Guard-off, advisory, disabled and plugin-off hosts are unchanged (WARN, exit 0). Doctor only reports — it never changes your config.
+
+Also in this release: recall output is framed as untrusted data, not instructions (#507); `SECRET` and unknown sensitivity labels are isolated like RESTRICTED (#542); provider keys split by whitespace or invisible characters are detected (#543); folded script comments no longer read as commands (#532); `audit --help` / `allowlist --help` print usage (#515); the session-lease write-shape mapper (#550); file-reading command substitutions are scanned as what the shell runs (#517 b); the dashboard's production audit is clean (#513). ADR-002 (provenance-first enforcement) is a proposed design document only — nothing in this release changes enforcement for it.
+
+### Added
 - **Design:** ADR-002 provenance-first enforcement, v2 round 3 (Status: Proposed; session taint, the effect decision as a function of (effect kinds, targets, taint) with a minimum effect taxonomy and a fail-closed unclassified branch, opaque-invocation approval as a distinct mode with execution-time revalidation, measured narrowing gated on 5A/5B/5C with pre-registered engineering acceptance bars; folds the #556 author-side objections and the round-2/round-3 review). Docs only, no behaviour change — `docs/architecture/ADR-002-provenance-first-enforcement.md`
 
 ### Fixed
