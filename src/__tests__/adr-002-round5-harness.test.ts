@@ -21,7 +21,7 @@
  */
 import { describe, it, expect } from '@jest/globals';
 // @ts-expect-error — plain ESM, no types
-import { run, parseDenials, groupEvents, analyse, projectPublic, classifyRecord, bucketOf, retryLifecycle, retryHistoryKey, RETRY_STATES } from '../../scripts/guard-policy-replay.mjs';
+import { run, parseDenials, groupEvents, analyse, projectPublic, classifyRecord, bucketOf, retryLifecycle, retryHistoryKey, RETRY_STATES, CONTRADICTORY_ROW_REASONS } from '../../scripts/guard-policy-replay.mjs';
 
 const T0 = '2026-09-01T00:00:00.000Z', T1 = '2026-09-01T00:00:01.000Z', T2 = '2026-09-01T00:00:02.000Z', T3 = '2026-09-01T00:00:03.000Z';
 const denial = (o: Record<string, unknown>) => JSON.stringify({
@@ -145,13 +145,17 @@ describe('round 5 / M1(b) — no declared-pair shortcut', () => {
       const e = eventOf(log, 'aid:rc');
       expect(e.lifecycle.retry).toEqual({ effective: 'none', grantSeen: false, history: [] });
       expect(e.retryGranted).toBe(false);
-      expect(bucketOf(e)).toEqual({ bucket: 'contradictory', reason: 'event-outcome-mismatch' });
+      // #559 follow-up: the retry mismatch is its OWN bucket reason, never folded into event-outcome-mismatch
+      expect(bucketOf(e)).toEqual({ bucket: 'contradictory', reason: 'retry-event-mismatch' });
+      expect(e.contradictions).toEqual(['retry-event-mismatch']);
       expect(e.actuallyStopped).toBe(false);
       expect(e.stopUnconfirmed).toBe(true);
       const { summary, markdown } = run(log);
-      expect(summary.evidence).toEqual(expect.objectContaining({ validKnown: 0, contradictory: 1, contradictoryReasons: { 'event-outcome-mismatch': 1 } }));
+      expect(summary.evidence).toEqual(expect.objectContaining({ validKnown: 0, contradictory: 1, contradictoryReasons: { 'retry-event-mismatch': 1 } }));
+      expect(summary.evidence.contradictoryReasons).not.toHaveProperty('event-outcome-mismatch');
       expect(summary.actual).toEqual(expect.objectContaining({ actuallyStopped: 0, stopUnconfirmed: 1, retryGranted: 0 }));
       expect(markdown).toMatch(/\| stop unconfirmed \| 1 \|/);
+      expect(markdown).toMatch(/\| contradictory events \| 1 \| retry-event-mismatch=1 \|/);
       expect(summary.lifecycles.retry.grantSeen).toBe(0);
       expect(partitions(summary)).toBe(true);
     }
@@ -161,6 +165,34 @@ describe('round 5 / M1(b) — no declared-pair shortcut', () => {
       expect(classifyRecord({ outcome })).toEqual({ kind: 'other', reason: 'missing-event' });
       expect(classifyRecord({ event: 'action_guard_denial', outcome }).kind).toBe('dnp_retry');
     }
+  });
+
+  it('#559 follow-up: retry-event-mismatch and event-outcome-mismatch are two separate counters, reported side by side and never summed into one', () => {
+    const log = lines(
+      // c1: an enforcement pair that disagrees → event-outcome-mismatch only
+      denial({ actionId: 'c1', signals: ['file-delete'], event: 'action_guard_warning' }),
+      // c2: a valid denial plus a retry grant under a warning event → retry-event-mismatch only
+      denial({ actionId: 'c2', signals: ['file-delete'] }),
+      retry('c2', 'retry_granted', T1, { event: 'action_guard_warning' }),
+      // c3: both in one event → both reasons listed, pair first, and still ONE contradictory event
+      denial({ actionId: 'c3', signals: ['file-delete'], event: 'action_guard_warning' }),
+      retry('c3', 'retry_granted', T2, { event: 'something_else' }),
+    );
+    const events = groupEvents(parseDenials(log).records);
+    const by = (k: string) => events.find((x: any) => x.key === k);
+    expect(by('aid:c1').contradictions).toEqual(['event-outcome-mismatch']);
+    expect(by('aid:c2').contradictions).toEqual(['retry-event-mismatch']);
+    expect(by('aid:c3').contradictions).toEqual(['event-outcome-mismatch', 'retry-event-mismatch']);
+    expect(bucketOf(by('aid:c2'))).toEqual({ bucket: 'contradictory', reason: 'retry-event-mismatch' });
+    expect(bucketOf(by('aid:c3'))).toEqual({ bucket: 'contradictory', reason: 'event-outcome-mismatch' });
+    const { summary, markdown } = run(log);
+    expect(summary.evidence.contradictory).toBe(3);
+    expect(summary.evidence.contradictoryReasons).toEqual({ 'event-outcome-mismatch': 2, 'retry-event-mismatch': 2 });
+    expect(markdown).toMatch(/\| contradictory events \| 3 \| event-outcome-mismatch=2, retry-event-mismatch=2 \|/);
+    // the public projection keeps both names verbatim (they are identifier-shaped), never `other`
+    expect(projectPublic(summary).evidence.contradictoryReasons).toEqual({ 'event-outcome-mismatch': 2, 'retry-event-mismatch': 2 });
+    expect(CONTRADICTORY_ROW_REASONS).toEqual(['event-outcome-mismatch', 'retry-event-mismatch']);
+    expect(partitions(summary)).toBe(true);
   });
 
   it('M1b: a retry row is validated against the SAME pinned schema as an enforcement row (notify shape included)', () => {

@@ -53,23 +53,28 @@ never by whether a `signals` array happens to be present. Four event buckets
 partition the events, each reported with counts, and **only known enters a
 denominator**:
 
-- **malformed events** — any event holding a malformed JSON row: no outcome, no
-  `event` (round 5), a non-string `event`, a declared denial or warning with no
-  `signals`, a non-array or non-string signal member, a non-object notify, a
+- **malformed events** — any event holding a malformed JSON row: no `outcome`
+  (absent, empty or not a string), no `event` (round 5), a non-string `event`,
+  a row whose `event` and `outcome` agree on a denial or warning but that has
+  no `signals`, a non-array or non-string signal member, a non-object notify, a
   non-string notify status or a non-string channel — for **every** row kind,
   retry rows included. A malformed JSON row is **retained** as a record of its
   event (same `actionId` / `correlationId`, else its own line) — never
   discarded before grouping — and nothing else is read from it. Row-level
   malformed counts (which also cover not-JSON / not-object lines) are reported
   alongside;
-- **contradictory events** — event/outcome pair disagrees (including a retry
-  outcome under any event other than `action_guard_denial`, round 5);
-  conflicting enforcement outcomes across an event's decision records; a
-  `delivered` status with no channel (a whitespace `deliveredVia` is not a
-  channel);
-- **unknown events** — redacted or empty signals, retry-only lifecycles, an
-  outcome outside the writer's enum, any signal outside the writer's
-  vocabulary, or **stray signals** carried on a retry or unknown-outcome row;
+- **contradictory events** — reported under separate named reasons, never
+  summed into one: `event-outcome-mismatch` (a denial/warning `event` whose
+  `outcome` says the other); `retry-event-mismatch` (a retry outcome under any
+  event other than `action_guard_denial`, round 5); `conflicting-enforcement-outcomes`
+  (across an event's decision records); `delivery-claimed-without-channel` (a
+  `delivered` status with no channel; a whitespace `deliveredVia` is not a
+  channel). An event carrying more than one reason is counted once as an
+  event and once under each reason;
+- **unknown events** — redacted or empty signals, retry-only lifecycles, a
+  non-retry row whose `event` or `outcome` is a string outside the writer's
+  enum, any signal outside the writer's vocabulary, or **stray signals**
+  carried on a retry or unknown-outcome row;
 - **known events** — everything else.
 
 Only **validated enforcement signals** (denial / warning rows that passed their
@@ -110,13 +115,26 @@ enforcement row. Rows written before #284 (12–14 Aug 2026) lack `origin`,
 | no `actionId` | yes | grouped by `correlationId`, else by its own line |
 | no `origin` / `sessionId` | yes | never read |
 
-Anything else outside the pinned schema — no `event`, no `outcome`, a
-non-string `event`, a declared denial or warning without `signals`, a non-array
-or non-string signal member, a non-object notify, a non-string notify status or
-channel — is rejected as **malformed** with a named reason. Nothing is inferred
-from another field and nothing is tolerated silently. The reported reason is
-the first failing check in this order: `missing-outcome`, `event-not-string`,
-signals problems, notify problems, `missing-event`.
+**What the validator enforces (exactly).** The pinned schema covers four
+fields — `event`, `outcome`, `signals` and `notify` — and nothing else. Within
+those four, every departure is rejected as **malformed** with a named reason:
+no `event`, no `outcome`, a non-string `event`, an agreeing denial/warning pair
+without `signals`, a non-array or non-string signal member, a non-object
+notify, a non-string notify status or channel. Nothing is inferred from another
+field. The reported reason is the first failing check in this order:
+`missing-outcome`, `event-not-string`, signals problems, notify problems,
+`missing-event`. A `signals` array is required only when the pair agrees on a
+denial or warning; a contradictory, retry or unknown-pair row may omit it.
+
+The remaining fields are **read permissively and never validated**, so their
+absence or wrong type is not a malformed reason: a missing or non-string
+`severity` / `tool` is projected as `other`; a missing or non-string
+`detectedAt` is treated as an empty timestamp (it sorts first within its
+event); a missing or non-string `actionId` / `correlationId` falls through to
+the next grouping key (the row's own line, at worst). A string `event` or
+`outcome` outside the writer's enum on a non-retry row is not malformed
+either — the row is an unrecognised-outcome record and its event lands in the
+**unknown** bucket.
 
 **Three lifecycles per event (round 4).** Each `actionId` carries three
 independent observations, each with its own final state:
@@ -284,7 +302,9 @@ env HOME="$(mktemp -d)" PATH="/usr/bin:/bin:$(dirname "$(command -v node)")" \
   SHIELDCORTEX_SKIP_TEST_BUILD=1 node scripts/run-jest.mjs --runInBand --runTestsByPath \
   src/__tests__/adr-002-guard-policy-replay.test.ts \
   src/__tests__/adr-002-effect-fixtures.test.ts \
-  src/__tests__/adr-002-round3-harness.test.ts
+  src/__tests__/adr-002-round3-harness.test.ts \
+  src/__tests__/adr-002-round4-harness.test.ts \
+  src/__tests__/adr-002-round5-harness.test.ts
 ```
 
 These suites DO execute the committed fixtures in throwaway sandboxes (that is
