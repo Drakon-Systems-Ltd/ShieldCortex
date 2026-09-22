@@ -369,6 +369,22 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash("python3 -c '\nopen(\"/home/op/.openclaw/openclaw.json\",\"w\").write(\"changed\")\n'")).toBe('security-config');
   });
 
+  it('a sed/awk SCRIPT naming the file writes it; uniq/xxd second operand is an output (#552 r3)', () => {
+    expect(bash("sed -n 'w ~/.openclaw/openclaw.json' /tmp/in")).toBe('security-config');
+    expect(bash("sed 's/a/b/w ~/.claude/settings.json' /tmp/in")).toBe('security-config');
+    expect(bash("sed -e w~/.openclaw/openclaw.json /tmp/in")).toBe('security-config');
+    expect(bash("awk '{print > \"/home/x/.openclaw/openclaw.json\"}' /tmp/in")).toBe('security-config');
+    expect(bash('uniq /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -r /tmp/in.hex ~/.claude/settings.json')).toBe('security-config');
+    // Plain reads through the same verbs stay reads.
+    expect(bash("sed -n '1,5p' ~/.openclaw/openclaw.json")).toBeNull();
+    expect(bash("awk '{print $1}' ~/.openclaw/openclaw.json")).toBeNull();
+    expect(bash('uniq ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('uniq ~/.openclaw/openclaw.json /tmp/out')).toBeNull();
+    expect(bash('xxd ~/.claude/settings.json')).toBeNull();
+    expect(bash('xxd ~/.claude/settings.json /tmp/out.hex')).toBeNull();
+  });
+
   it('a `|` written inside a heredoc body is text, not a pipe — the body is never split into stages', () => {
     // #552 round 2 finding 3: pipeline splitting read the inert body and made a
     // `tee <file>` stage out of it. The body rides on the stage that opened it.

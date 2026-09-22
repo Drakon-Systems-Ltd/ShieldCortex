@@ -319,6 +319,8 @@ const MUTATE_ANY_OPERAND_VERBS = new Set([
 ]);
 /** Verbs whose LAST operand is the destination. A protected SOURCE is a read. */
 const COPY_TO_LAST_OPERAND_VERBS = new Set(['cp', 'install', 'ln', 'rsync', 'scp']);
+/** Filters whose optional SECOND operand is an output file (`uniq in out`, `xxd -r in out`). */
+const SECOND_OPERAND_OUTPUT_VERBS = new Set(['uniq', 'xxd']);
 /**
  * Verbs that only READ the paths they are given. This is the proven-read
  * relief: a verb NOT listed here, given the file, fails closed.
@@ -326,7 +328,7 @@ const COPY_TO_LAST_OPERAND_VERBS = new Set(['cp', 'install', 'ln', 'rsync', 'scp
 const READ_ONLY_VERBS = new Set([
   'cat', 'jq', 'diff', 'cmp', 'ls', 'stat', 'file', 'wc', 'head', 'tail', 'less', 'more', 'bat',
   'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum',
-  'cksum', 'sum', 'strings', 'od', 'xxd', 'hexdump', 'base64', 'cut', 'sort', 'uniq', 'nl',
+  'cksum', 'sum', 'strings', 'od', 'hexdump', 'base64', 'cut', 'sort', 'nl',
   'column', 'du', 'df', 'readlink', 'realpath', 'basename', 'dirname', 'test', '[', '[[',
   'echo', 'printf', 'true', 'false', ':', 'type', 'which', 'whereis', 'lsattr', 'getfacl',
 ]);
@@ -773,9 +775,27 @@ function stageWritesProtectedFile(stage: string, pipedNamesFile: boolean): boole
   if (INTERPRETER_VERBS.has(verb)) return namesFile || (viaXargs && pipedNamesFile);
   if (MUTATE_ANY_OPERAND_VERBS.has(verb)) return namedOperand || (viaXargs && pipedNamesFile);
   if (verb === 'dd') return operands.some((t) => /^of=/i.test(unquote(t)) && isProtectedTarget(t));
-  if (verb === 'sed') return flags.some((t) => IN_PLACE_FLAG_RE.test(t)) && (namedOperand || (viaXargs && pipedNamesFile));
-  if (verb === 'awk' || verb === 'gawk' || verb === 'mawk' || verb === 'nawk') {
+  if (verb === 'sed' || verb === 'awk' || verb === 'gawk' || verb === 'mawk' || verb === 'nawk') {
+    // In place, or a SCRIPT that names the file: sed's `w <file>` / `s///w
+    // <file>` and awk's `print > "<file>"` write it without any flag. The
+    // mapper does not parse sed or awk, so a script token naming the file
+    // fails closed; a plain path operand is still the read it looks like.
+    const scriptNamesFile = rest.some((t) => {
+      const bare = unquote(t);
+      const m = SECURITY_CONFIG_FILE_ANY_RE.exec(bare);
+      if (!m) return false;
+      // A plain path operand has nothing but a path prefix (`~/`, `/home/x/`,
+      // `$HOME/`, `../`, or `--opt=` then one) before the file; anything else
+      // in front (`w ~/`, `s/a/b/w ~/`, `w~/`) is script text naming it.
+      const before = bare.slice(0, m.index);
+      return !/^(?:[^=\s]*=)?(?:~|\.{1,2}|\$\w+|\$\{\w+\}|[A-Za-z]:)?[\\/]?(?:[\w.\-]+[\\/])*$/.test(before);
+    });
+    if (scriptNamesFile) return true;
     return flags.some((t) => IN_PLACE_FLAG_RE.test(t)) && (namedOperand || (viaXargs && pipedNamesFile));
+  }
+  if (SECOND_OPERAND_OUTPUT_VERBS.has(verb)) {
+    const out = operands[1];
+    return (out != null && isProtectedTarget(out)) || (viaXargs && pipedNamesFile);
   }
   if (COPY_TO_LAST_OPERAND_VERBS.has(verb)) {
     const last = operands[operands.length - 1];
