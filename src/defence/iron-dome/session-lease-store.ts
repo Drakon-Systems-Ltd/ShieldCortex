@@ -180,6 +180,11 @@ export function isHolderPidAlive(
   return true;
 }
 
+/**
+ * Parent pid of `pid`, or null when it cannot be read. Linux reads
+ * `/proc/<pid>/status`; elsewhere `ps -o ppid=` (only reached on the rare
+ * path where a live foreign holder exists, never on the unscoped fast path).
+ */
 export interface AcquireInput {
   dir?: string;
   scope: LeaseScope;
@@ -347,8 +352,9 @@ export function evaluateToolCallLease(
       const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs });
       if (!acquired.acquired && acquired.record && acquired.record.holder !== self) {
         // Lost a race between check and acquire — re-decide with the winner.
-        const raced = checkSessionLease({ scope, ledger, held: acquired.record, self, nowMs });
-        return { scope, decision: raced, ledgerChanged };
+        const winnerAlive = isHolderPidAlive(acquired.record.pid);
+        const raced = checkSessionLease({ scope, ledger, held: acquired.record, self, nowMs, holderAlive: winnerAlive });
+        return { scope, decision: raced, acquired: false, ledgerChanged };
       }
       return { scope, decision, acquired: acquired.acquired, ledgerChanged };
     }

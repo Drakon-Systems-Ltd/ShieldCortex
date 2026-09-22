@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,5 +167,35 @@ describe('#227 — the freeze binds DURING a guard outage (review MAJOR-1)', () 
     writeFileSync(join(home, '.shieldcortex', 'DECISIONS.md'), '| FROZEN | no publishes until review |\n');
     const run = await runHookWithDegradedGuard(home, 'npm publish');
     expect(decisionOf(run).permissionDecision).toBe('deny');
+  });
+});
+
+describe('#550 — a bare mention of a protected file is not a scoped call, on the wire', () => {
+  const leasesFile = () => join(home, '.shieldcortex', 'leases', 'leases.json');
+  const seedForeignLease = (pid: number) => {
+    mkdirSync(join(home, '.shieldcortex', 'leases'), { recursive: true });
+    const now = Date.now();
+    writeFileSync(leasesFile(), JSON.stringify({
+      leases: {
+        'security-config': { holder: 'openclaw-session-uuid', pid, acquiredAtMs: now, expiresAtMs: now + 600_000, token: 'gw' },
+      },
+    }, null, 2));
+  };
+
+  it('a write shape against a foreign live holder is still refused, record untouched', async () => {
+    seedForeignLease(process.pid);
+    const before = readFileSync(leasesFile(), 'utf-8');
+    const run = await runHook(home, 'Bash', { command: `echo x > ${join(home, '.openclaw', 'openclaw.json')}` });
+    const decision = decisionOf(run);
+    expect(decision.permissionDecision).toBe('deny');
+    expect(decision.permissionDecisionReason ?? '').toContain('held by another session');
+    expect(JSON.parse(readFileSync(leasesFile(), 'utf-8')).leases).toEqual(JSON.parse(before).leases);
+  });
+
+  it('a bare mention of the file is not a scoped call at all — the lease layer is never consulted', async () => {
+    seedForeignLease(1);
+    const run = await runHook(home, 'Bash', { command: `git commit -m "gate ${join(home, '.openclaw', 'openclaw.json')} writes"` });
+    expect(decisionOf(run).permissionDecisionReason ?? '').not.toContain('held by another session');
+    expect(run.stderr).not.toContain('SESSION-LEASE');
   });
 });
