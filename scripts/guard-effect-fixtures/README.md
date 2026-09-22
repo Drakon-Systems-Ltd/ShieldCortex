@@ -30,21 +30,49 @@ node scripts/guard-policy-replay.mjs <denials.jsonl> [--json out.json] [--md out
 ```
 
 Reads an Action Guard `denials.jsonl` and, **on the logged signal names only**,
-reports what each of three policies would gate vs demote to audit-only:
+reports two things **separately**: the **ACTUAL** outcome the guard recorded
+per event (actually stopped / warned only / retry granted / other) and the
+**HYPOTHETICAL** signal-set match of each of three policies:
 
-1. **current tiers** — catastrophic block + dangerous approve (baseline; a
-   denials log only holds events these stopped).
+1. **current tiers** — the catastrophic + dangerous signal set (a hypothetical
+   match like the others; the log also holds warnings that stopped nothing and
+   retry rows, so there is no "100% stopped" baseline).
 2. **destruction-only floor** — ADR-002 §3 as written (root/home recursive
    delete, fork bomb, block-device raw write, filesystem format/partition).
 3. **broad floor** — destruction + credential/secret egress + persistence sinks
    + security-config writes (the #556 counter-proposal).
 
 It is **not** a classifier replay (the log does not store the command) and
-**not** an effect measurement. Rows whose signals cannot be reconstructed
-(`redacted-signal`, empty) are bucketed *unknown* and excluded from every
-percentage. It fixes the four defects of the ad-hoc script behind #555's numbers
-(hand-picked signal set; `pipe-download-to-shell` omitted; malformed rows
-silently skipped; last-record-wins per `actionId`).
+**not** an effect measurement. It fixes the four defects of the ad-hoc script
+behind #555's numbers (hand-picked signal set; `pipe-download-to-shell`
+omitted; malformed rows silently skipped; last-record-wins per `actionId`).
+
+**Schema and evidence buckets (round 3).** A row is classified by its
+*declared* `event` + `outcome` contract (`scripts/lib/guard-log-schema.mjs`),
+never by whether a `signals` array happens to be present. Three buckets are
+reported with counts and **none enters a known denominator**:
+
+- **malformed rows** — not JSON / not an object / no outcome; a declared denial
+  or warning with no `signals`; a non-array or non-string signal member; a
+  non-string notify status or a non-string channel;
+- **contradictory events** — event/outcome pair disagrees; conflicting
+  enforcement outcomes across an event's records; a `delivered` status with no
+  channel (a whitespace `deliveredVia` is not a channel);
+- **unknown events** — redacted or empty signals, retry-only lifecycles, or any
+  signal outside the writer's vocabulary.
+
+A *validated delivery* is a delivery-claim status **with** a channel across any
+record of the event; it is a transport report, never proof a person saw it.
+
+**Public export projection (round 3).** One projection (`projectPublic`) feeds
+both the JSON and the Markdown. Counts are copied; a signal name is printed only
+by **membership** in the writer's signal vocabulary (transcribed from the
+writer's allowlist in `scripts/pre-tool-hook.mjs`, cross-checked by the test
+suite against the writer and the guard source — not a syntax regex); every
+other signal is counted under one redacted label. `event`, `outcome`, notify
+`status`, `deliveredVia`, `severity` and `tool` are each mapped to a closed
+enum or `other`. No `reason`, `surface`, ids, payloads or command text are read
+into the summary at all.
 
 ## Half B — synthetic effect fixtures
 
@@ -96,11 +124,27 @@ one config and one sentinel were not written; it does **not** prove that no
 outside write occurred.
 
 **Run status (R4).** The report carries `runStatus: VALID | INVALID`. A run is
-INVALID when the canary tripped, a read-only negative control achieved a goal,
-a committed witness selftest disagreed with its expectation, or a corpus row
-was refused by containment/validation. An INVALID run reports **no rates**
-(`policies`/`detail` are null); it is never presented as, and must never be
-read as, "zero attack success".
+INVALID when the canary tripped, a read-only negative control did not run or
+achieved a goal, a committed witness selftest disagreed with its expectation,
+a corpus row was refused by containment/validation, or **any fixture in the
+run is not registered and byte-identical to its committed definition** (round
+3: an invalid fixture is never evaluated or executed, and it fails the run —
+it never passes because nothing happened). An INVALID run reports **no rates**
+(`policies`/`detail` are null) and exits 3; it is never presented as, and must
+never be read as, "zero attack success".
+
+**Not-run mode (round 3).** Without `--execute` **nothing runs**, so there is
+nothing to observe. The report is `mode: "not-run"`: `observations` are all
+zero, every non-gated effect/completion is `null` (unmeasured), the
+executed-witness rates are `null`, there are **no** negative/positive control
+or selftest claims, the canary is not armed, and both the banner and the
+stderr line say "not executed". Only the gate decisions (and the modelled
+bucket, which is a decision by definition) are counted. The default path is
+pinned by a CLI-level regression test.
+
+**Model-only fixtures** are refused by `sandboxExecutor` before any sandbox
+setup (`not-executable`), whether or not they are registered; `--execute`
+never runs them.
 
 Absolute-root and block-device shapes that cannot be confined
 (`destruct-root`, `destruct-format`, `destruct-raw-write`) are **model-only**:
@@ -125,6 +169,28 @@ build-free stand-in used only by the tests.
 `scripts/lib/guard-policy-sets.mjs` enumerates the three policies as explicit
 signal-name sets so both halves stay in lockstep and a reviewer can diff the
 membership against `src/defence/iron-dome/tool-action-guard.ts`.
+`scripts/lib/guard-log-schema.mjs` holds the writer's signal vocabulary and the
+closed event / outcome / notify-status / channel / severity / tool enums that
+bound Half A's public output.
+
+## What the numbers are, and are not
+
+- Half B is an **ideal-gate simulation, not host-effect proof**: a policy
+  "gates" a fixture when its signal set matches the built evaluator's verdict
+  in-process. A `require_approval` verdict is reported as **HELD**
+  (approval-required), not as an observed terminal block and not as failed
+  legitimate work. Simulated attack success on a proven-positive subset is one
+  minus the gate rate on that subset. None of this is current-host
+  effectiveness.
+- Inherited classifier blind spots (a shape the evaluator gives no signal for)
+  are reported as such; they are not the same as a policy deliberately
+  narrowing its coverage, and they do not show a hypothetical new classifier
+  would miss the shape.
+- Known, undisclosed-by-default limitations: the evaluator id does not bind a
+  dist/source hash; the expected corpus counts are hardcoded; `diff(before,
+  after)` does not exclude the fixture's own target, so an intended mutation
+  is also listed as collateral; `failure_allowed` events fall into the
+  warned-only bucket. Resolve or disclose before any decision-grade use.
 
 ## Tests
 
@@ -132,7 +198,13 @@ membership against `src/defence/iron-dome/tool-action-guard.ts`.
 env HOME="$(mktemp -d)" PATH="/usr/bin:/bin:$(dirname "$(command -v node)")" \
   SHIELDCORTEX_SKIP_TEST_BUILD=1 node scripts/run-jest.mjs --runInBand --runTestsByPath \
   src/__tests__/adr-002-guard-policy-replay.test.ts \
-  src/__tests__/adr-002-effect-fixtures.test.ts
+  src/__tests__/adr-002-effect-fixtures.test.ts \
+  src/__tests__/adr-002-round3-harness.test.ts
 ```
+
+These suites DO execute the committed fixtures in throwaway sandboxes (that is
+how the witness and containment properties are proven); they do not build
+`dist/`, do not run the product suite, and never execute an unregistered
+fixture.
 
 No product code is touched by this harness.

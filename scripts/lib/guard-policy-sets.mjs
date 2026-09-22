@@ -231,10 +231,12 @@ export const ALL_KNOWN_SIGNALS = Object.freeze(Object.keys(SIGNAL_FAMILY));
  * one event, would this policy stop the action.
  *
  * `current-tiers` gates on any catastrophic/dangerous-tier signal or a schema
- * reject — i.e. on everything the guard stops today. On a denials log that is
- * a tautology (the log only holds stopped events) and the column is a
- * baseline, not a finding; on the synthetic fixtures it is the live guard's
- * own decision and is measured honestly there.
+ * reject — i.e. the signal set the guard's tiers key on today. In Half A this
+ * is a HYPOTHETICAL signal-set match like the other two policies — the log
+ * holds denials, warnings (which stopped nothing) and retry lifecycle rows, so
+ * it is NOT "everything in the log was stopped" and no 100% baseline exists;
+ * the ACTUAL outcome is accounted separately. On the synthetic fixtures it is
+ * the live guard's own decision.
  */
 export const POLICIES = Object.freeze([
   {

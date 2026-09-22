@@ -20,23 +20,33 @@
  *                            policy's SIGNAL SET would match. This is NOT an
  *                            enforcement rate and there is no 100% baseline.
  *
- * Record kinds (finding 5): the log interleaves `action_guard_denial`,
- * `action_guard_warning`, and RETRY lifecycle rows (`retry_granted` /
- * `retry_denied` / `retry_grant_failed`) that carry the SAME actionId and NO
- * signals. Retry rows are first-class records kept in the event lifecycle, never
- * malformed. A retry GRANT is NOT proof of execution — it is a scoped one-shot
- * re-offer; it is tracked as its own lifecycle state.
+ * Record contracts (round-2 finding 4, round-3): a row is classified by its
+ * DECLARED event + outcome pair (`scripts/lib/guard-log-schema.mjs`), never by
+ * the presence of a signals array. A declared denial or warning that lacks
+ * signals is MALFORMED; a numeric notify status or an array channel is
+ * MALFORMED; an event/outcome pair that disagrees is CONTRADICTORY; an event
+ * whose signals are redacted, empty, or outside the writer's vocabulary is
+ * UNKNOWN. The three buckets are reported separately, with counts, and none of
+ * them enters a known denominator. A `deliveredVia` of whitespace is not a
+ * channel; a `delivered` status with no channel is a contradictory claim, not
+ * a validated delivery — and a validated delivery is a transport report, never
+ * proof a person saw it.
+ *
+ * Retry lifecycle rows (`retry_granted` / `retry_denied` / `retry_grant_failed`)
+ * share the actionId and carry no signals; they are first-class records
+ * (finding 5). A retry GRANT is NOT proof of execution.
  *
  * NOT a classifier replay (the command surface is redacted, so no command is
- * re-run) and NOT an effect measurement (Half B does that). Rows whose signals
- * cannot be reconstructed (redacted/empty) are bucketed *unknown* and excluded
- * from every percentage.
+ * re-run) and NOT an effect measurement (Half B does that).
  *
- * Privacy (finding 7): output is a field ALLOWLIST — counts, outcome enums, tool
- * names, notify statuses, and signal names that conform to the guard's own
- * `[a-z][a-z0-9-]*` vocabulary. A non-conforming or non-string signal member is
- * never echoed verbatim; it is redacted and counted. No `reason`, `surface`,
- * session/correlation ids, payloads or command text are ever printed.
+ * Privacy (finding 3, round-3): ONE export projection (`projectPublic`) feeds
+ * both the JSON and the Markdown. It copies counts, and strings ONLY through
+ * the closed sets in `guard-log-schema.mjs`: a signal name is printed only by
+ * MEMBERSHIP in the writer's vocabulary (not by matching a pattern) and every
+ * other signal is counted under one redacted bucket; event / outcome / notify
+ * status / channel / severity / tool are each mapped to their enum or `other`.
+ * No `reason`, `surface`, session/correlation ids, payloads or command text are
+ * ever read into the summary at all.
  *
  * Node core only. Exports its functions for the harness test; runs `main` only
  * when invoked directly.
@@ -45,8 +55,13 @@ import { readFileSync, writeFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   POLICIES, gates, gatingSignals, SIGNAL_FAMILY, INJECTION_FLAVOURED,
-  NEVER_LOGGED_SIGNALS, REDACTED_MARKER, SCHEMA_OR_SCAN_GAP, ALL_KNOWN_SIGNALS,
+  NEVER_LOGGED_SIGNALS, REDACTED_MARKER, SCHEMA_OR_SCAN_GAP,
 } from './lib/guard-policy-sets.mjs';
+import {
+  DENIAL_OUTCOMES, WARNING_OUTCOMES, RETRY_OUTCOMES, EVENT_ENUM, DELIVERY_CLAIM_STATUSES,
+  publicEvent, publicOutcome, publicNotifyStatus, publicChannel, publicSeverity, publicTool,
+  isVocabularySignal, publicSignalName, validateNotify, REDACTED_SIGNAL_LABEL, OTHER,
+} from './lib/guard-log-schema.mjs';
 
 export const BANNER = [
   '=== LOGGED-SIGNAL POLICY COMPARISON ===',
@@ -55,44 +70,48 @@ export const BANNER = [
   '(auto_denied / denied_no_prompt_surface actually stopped the call; warned did NOT — it emits',
   'no permission decision; retry_granted re-offered one scoped attempt), and (2) HYPOTHETICAL',
   'signal-set match per policy, which is NOT an enforcement rate. A denials filename does not',
-  'make every record a denial. Redacted/empty-signal rows are "unknown" and excluded from every %.',
+  'make every record a denial. Malformed rows, contradictory events and unknown-signal events are',
+  'three separate buckets, all excluded from every %. Only vocabulary signal names are printed.',
 ].join('\n');
 
 const INJECTION_SET = new Set(INJECTION_FLAVOURED);
 const SCHEMA_SET = new Set(SCHEMA_OR_SCAN_GAP);
-const KNOWN_SIGNAL_SET = new Set(ALL_KNOWN_SIGNALS);
-const RETRY_OUTCOMES = new Set(['retry_granted', 'retry_denied', 'retry_grant_failed']);
+const DENIAL_SET = new Set(DENIAL_OUTCOMES);
+const WARNING_SET = new Set(WARNING_OUTCOMES);
+const RETRY_SET = new Set(RETRY_OUTCOMES);
+const EVENT_SET = new Set(EVENT_ENUM);
 const STOPPED_OUTCOMES = new Set(['auto_denied', 'denied_no_prompt_surface', 'failure_denied']);
-const OUTCOME_SPLIT = ['warned', 'auto_denied', 'denied_no_prompt_surface', 'retry_granted', 'retry_denied', 'retry_grant_failed'];
-const DELIVERED_STATUSES = new Set(['delivered', 'sent']);
+const CLAIM_SET = new Set(DELIVERY_CLAIM_STATUSES);
 
-/** Public-safe signal name: the guard's own vocabulary only, else redacted. */
-export function safeSignalName(s) {
-  return typeof s === 'string' && /^[a-z][a-z0-9-]{0,63}$/.test(s) ? s : '<non-conforming-signal-redacted>';
-}
+/** Public-safe signal name (kept as an export for the tests): membership, not syntax. */
+export const safeSignalName = publicSignalName;
 
 // ── 1. Parse + classify: every line accounted for, record kinds discriminated ─
 
 /**
+ * Classify a row by its DECLARED event + outcome contract.
  * @param {object} row
- * @returns {{ kind: 'denial'|'warning'|'dnp_retry'|'other', retry?: string }}
+ * @returns {{ kind: 'denial'|'warning'|'dnp_retry'|'contradictory'|'other', retry?: string, reason?: string }}
  */
 export function classifyRecord(row) {
   const outcome = typeof row.outcome === 'string' ? row.outcome : '';
-  const event = typeof row.event === 'string' ? row.event : '';
-  if (RETRY_OUTCOMES.has(outcome)) return { kind: 'dnp_retry', retry: outcome };
-  if (event === 'action_guard_warning' || outcome === 'warned') return { kind: 'warning' };
-  if (Array.isArray(row.signals)) return { kind: 'denial' };
-  return { kind: 'other' };
+  const event = typeof row.event === 'string' ? row.event : null;
+  if (RETRY_SET.has(outcome)) return { kind: 'dnp_retry', retry: outcome };
+  const byOutcome = DENIAL_SET.has(outcome) ? 'denial' : WARNING_SET.has(outcome) ? 'warning' : null;
+  if (event !== null && !EVENT_SET.has(event)) return { kind: 'other', reason: 'unknown-event' };
+  if (!byOutcome) return { kind: 'other', reason: 'unknown-outcome' };
+  if (event === null) return { kind: byOutcome };
+  const byEvent = event === 'action_guard_denial' ? 'denial' : 'warning';
+  if (byEvent !== byOutcome) return { kind: 'contradictory', reason: 'event-outcome-mismatch' };
+  return { kind: byOutcome };
 }
 
 /**
- * A signals member must be an array of strings. Returns the reason a row is
- * malformed on its signals, or null if the signals are acceptable / absent.
+ * A signals member, when present, must be an array of strings; a denial or
+ * warning REQUIRES it. Returns the malformed reason or null.
  */
 function signalsProblem(row, kind) {
-  if (row.signals == null) {
-    // Only denial/warning kinds REQUIRE signals; retry/other may omit them.
+  if (row.signals === undefined || row.signals === null) {
     return kind === 'denial' || kind === 'warning' ? 'missing-signals' : null;
   }
   if (!Array.isArray(row.signals)) return 'signals-not-array';
@@ -118,7 +137,27 @@ export function parseDenials(text) {
     const cls = classifyRecord(row);
     const sp = signalsProblem(row, cls.kind);
     if (sp) { malformed.push({ lineNo, reason: sp }); return; }
-    records.push({ lineNo, row, kind: cls.kind, retry: cls.retry ?? null });
+    const nv = validateNotify(row);
+    if (!nv.ok) { malformed.push({ lineNo, reason: nv.reason }); return; }
+    const signals = Array.isArray(row.signals) ? [...new Set(row.signals.map(s => s.trim()).filter(Boolean))] : [];
+    // Only these fields ever leave the row. Ids are used for grouping and are
+    // never copied into any output; every label is enum-mapped here, once.
+    records.push({
+      lineNo, kind: cls.kind, retry: cls.retry ?? null, reason: cls.reason ?? null,
+      signals,
+      event: publicEvent(row.event), outcome: publicOutcome(row.outcome),
+      severity: publicSeverity(row.severity), tool: publicTool(row.tool),
+      notify: {
+        present: nv.status !== null || nv.channel !== null,
+        status: nv.status === null ? null : publicNotifyStatus(nv.status),
+        claimsDelivery: nv.status !== null && CLAIM_SET.has(nv.status),
+        channel: nv.channel === null ? null : publicChannel(nv.channel),
+        channelPresent: nv.channel !== null,
+      },
+      actionId: typeof row.actionId === 'string' ? row.actionId : '',
+      correlationId: typeof row.correlationId === 'string' ? row.correlationId : '',
+      detectedAt: typeof row.detectedAt === 'string' ? row.detectedAt : '',
+    });
   });
   if (lines.length && lines[lines.length - 1] === '') blankLines--;
   return { records, malformed, blankLines };
@@ -126,77 +165,65 @@ export function parseDenials(text) {
 
 // ── 2. Group: full lifecycle per event, nothing wins by position ─────────────
 
-const str = (v) => (typeof v === 'string' ? v : '');
-const notifyOf = (row) => {
-  const n = row.notify && typeof row.notify === 'object' && !Array.isArray(row.notify) ? row.notify : null;
-  return { status: n ? str(n.status) || 'none' : 'none', deliveredVia: n ? str(n.deliveredVia) || null : null };
-};
-
 /**
- * @param {Array<{lineNo:number,row:object,kind:string,retry:string|null}>} records
+ * @param {ReturnType<typeof parseDenials>['records']} records
  */
 export function groupEvents(records) {
   const byKey = new Map();
   for (const r of records) {
-    const aid = str(r.row.actionId);
-    const cid = str(r.row.correlationId);
-    const key = aid ? `aid:${aid}` : cid ? `corr:${cid}` : `line:${r.lineNo}`;
-    const keyKind = aid ? 'actionId' : cid ? 'correlationId' : 'line';
+    const key = r.actionId ? `aid:${r.actionId}` : r.correlationId ? `corr:${r.correlationId}` : `line:${r.lineNo}`;
+    const keyKind = r.actionId ? 'actionId' : r.correlationId ? 'correlationId' : 'line';
     if (!byKey.has(key)) byKey.set(key, { key, keyKind, records: [] });
     byKey.get(key).records.push(r);
   }
   const events = [];
   for (const ev of byKey.values()) {
-    ev.records.sort((a, b) => {
-      const ta = str(a.row.detectedAt), tb = str(b.row.detectedAt);
-      return ta < tb ? -1 : ta > tb ? 1 : a.lineNo - b.lineNo;
-    });
+    ev.records.sort((a, b) => (a.detectedAt < b.detectedAt ? -1 : a.detectedAt > b.detectedAt ? 1 : a.lineNo - b.lineNo));
     const enforcement = ev.records.filter(r => r.kind === 'denial' || r.kind === 'warning');
     const retries = ev.records.filter(r => r.kind === 'dnp_retry');
-    const sigs = (row) => (Array.isArray(row.signals) ? row.signals.map(s => String(s ?? '').trim()).filter(Boolean) : []);
-    const union = [...new Set(ev.records.flatMap(x => sigs(x.row)))];
+    const union = [...new Set(ev.records.flatMap(x => x.signals))];
 
     const firstRec = ev.records[0];
     const lastRec = ev.records[ev.records.length - 1];
     const lastEnf = enforcement.length ? enforcement[enforcement.length - 1] : null;
     const firstEnf = enforcement.length ? enforcement[0] : null;
-    const enfOutcomes = [...new Set(enforcement.map(x => x.row.outcome))];
-
-    const firstSigs = firstEnf ? sigs(firstEnf.row) : [];
-    const lastSigs = lastEnf ? sigs(lastEnf.row) : [];
+    const enfOutcomes = [...new Set(enforcement.map(x => x.outcome))];
     const sameSet = (a, b) => a.length === b.length && a.every(s => b.includes(s));
 
     const retryOutcomes = retries.map(r => r.retry);
     const retryGranted = retryOutcomes.includes('retry_granted');
-    // Actual enforcement: the final enforcement record's outcome, NOT lifted by
-    // a later grant. A warned-only event never stopped anything.
-    const finalEnfOutcome = lastEnf ? str(lastEnf.row.outcome) : (retries.length ? 'retry-only' : 'none');
+    const finalEnfOutcome = lastEnf ? lastEnf.outcome : (retries.length ? 'retry-only' : 'none');
     const actuallyStopped = !!lastEnf && STOPPED_OUTCOMES.has(finalEnfOutcome) && !retryGrantedAfter(ev.records);
+
+    // Contradictions (finding 4): the evidence disagrees with itself.
+    const contradictions = [];
+    if (ev.records.some(r => r.kind === 'contradictory')) contradictions.push('event-outcome-mismatch');
+    if (enfOutcomes.length > 1) contradictions.push('conflicting-enforcement-outcomes');
+    if (ev.records.some(r => r.notify.claimsDelivery && !r.notify.channelPresent)) contradictions.push('delivery-claimed-without-channel');
 
     events.push({
       key: ev.key, keyKind: ev.keyKind,
       recordCount: ev.records.length,
       kinds: [...new Set(ev.records.map(r => r.kind))],
       hasEnforcement: enforcement.length > 0,
-      finalEnfOutcome,
-      enfOutcomes,
+      finalEnfOutcome, enfOutcomes,
       conflictingOutcome: enfOutcomes.length > 1,
-      retryOutcomes,
-      retryGranted,
-      actuallyStopped,
+      contradictions,
+      retryOutcomes, retryGranted, actuallyStopped,
       signals: union,
-      signalDrift: !sameSet(firstSigs, lastSigs),
+      unrecognisedSignals: union.filter(s => !isVocabularySignal(s)).length,
+      signalDrift: !sameSet(firstEnf ? firstEnf.signals : [], lastEnf ? lastEnf.signals : []),
       redacted: union.includes(REDACTED_MARKER),
-      severity: str((lastEnf ?? lastRec).row.severity) || 'unknown',
-      tool: str((lastEnf ?? lastRec).row.tool) || 'tool',
-      event: str((lastEnf ?? lastRec).row.event) || 'unknown',
-      // Delivery is tracked across ALL records, never just the final one.
-      anyValidatedDelivery: ev.records.some(r => { const n = notifyOf(r.row); return DELIVERED_STATUSES.has(n.status) && !!n.deliveredVia; }),
-      finalNotify: notifyOf(lastRec.row),
-      firstNotify: notifyOf(firstRec.row),
-      coalescedEver: ev.records.some(r => notifyOf(r.row).status === 'coalesced'),
-      suppressedEver: ev.records.some(r => notifyOf(r.row).status === 'suppressed'),
-      detectedAt: str(lastRec.row.detectedAt),
+      severity: (lastEnf ?? lastRec).severity,
+      tool: (lastEnf ?? lastRec).tool,
+      event: (lastEnf ?? lastRec).event,
+      // Delivery across ALL records: a validated delivery is a claim status WITH a channel.
+      anyValidatedDelivery: ev.records.some(r => r.notify.claimsDelivery && r.notify.channelPresent),
+      finalNotify: lastRec.notify,
+      firstNotify: firstRec.notify,
+      coalescedEver: ev.records.some(r => r.notify.status === 'coalesced'),
+      suppressedEver: ev.records.some(r => r.notify.status === 'suppressed'),
+      detectedAt: lastRec.detectedAt,
     });
   }
   return events;
@@ -215,19 +242,31 @@ const counter = () => new Map();
 const bump = (m, k, n = 1) => m.set(k, (m.get(k) ?? 0) + n);
 const sortedObj = (m) => Object.fromEntries([...m.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))));
 
+/** Which evidence bucket an event lands in, with the reason. */
+export function bucketOf(e) {
+  if (e.contradictions.length) return { bucket: 'contradictory', reason: e.contradictions[0] };
+  if (!e.hasEnforcement) return { bucket: 'unknown', reason: 'retry-or-other-only' };
+  if (e.signals.length === 0) return { bucket: 'unknown', reason: 'empty-signals' };
+  if (e.redacted) return { bucket: 'unknown', reason: e.signals.length === 1 ? 'redacted-only' : 'redacted-plus-partial' };
+  if (e.unrecognisedSignals > 0) return { bucket: 'unknown', reason: 'signal-outside-vocabulary' };
+  return { bucket: 'known', reason: null };
+}
+
 /**
  * @param {ReturnType<typeof groupEvents>} events
  * @param {{ malformed: Array<{lineNo:number,reason:string}>, rowCount: number, blankLines: number }} parse
  */
 export function analyse(events, parse) {
-  // "known" needs reconstructable signals; a signal-less retry-only event is not
-  // malformed (finding 5) but has no signal footprint for a policy to key on.
-  const known = events.filter(e => !e.redacted && e.signals.length > 0);
-  const unknown = events.filter(e => e.redacted || e.signals.length === 0);
+  const buckets = events.map(e => ({ e, ...bucketOf(e) }));
+  const known = buckets.filter(b => b.bucket === 'known').map(b => b.e);
+  const unknown = buckets.filter(b => b.bucket === 'unknown').map(b => b.e);
+  const contradictory = buckets.filter(b => b.bucket === 'contradictory').map(b => b.e);
   const signalless = events.filter(e => e.signals.length === 0);
 
-  const unknownReasons = counter();
-  for (const e of unknown) bump(unknownReasons, e.signals.length === 0 ? (e.hasEnforcement ? 'empty-signals' : 'retry-or-other-only') : e.signals.length === 1 ? 'redacted-only' : 'redacted-plus-partial');
+  const unknownReasons = counter(), contradictoryReasons = counter(), malformedReasons = counter();
+  for (const b of buckets) if (b.bucket === 'unknown') bump(unknownReasons, b.reason);
+  for (const e of contradictory) for (const c of e.contradictions) bump(contradictoryReasons, c);
+  for (const m of parse.malformed) bump(malformedReasons, m.reason);
 
   const keyKinds = counter(), recordsPerEvent = counter(), outcomeTransitions = counter();
   let multiRecord = 0, conflicting = 0, drift = 0;
@@ -247,30 +286,30 @@ export function analyse(events, parse) {
     if (e.actuallyStopped) actual.actuallyStopped++;
     else if (e.retryGranted) actual.retryGranted++;
     else if (e.retryOutcomes.some(o => o === 'retry_denied' || o === 'retry_grant_failed')) actual.retryDeniedOrFailed++;
-    else if (e.finalEnfOutcome === 'warned') actual.warnedOnly++;
+    else if (e.finalEnfOutcome === 'warned' || e.finalEnfOutcome === 'failure_allowed') actual.warnedOnly++;
     else actual.other++;
   }
 
   const severityAll = counter(), toolAll = counter(), eventKindAll = counter(), recordKindAll = counter();
   for (const e of events) { bump(severityAll, e.severity); bump(toolAll, e.tool); bump(eventKindAll, e.event); for (const k of e.kinds) bump(recordKindAll, k); }
 
-  // Delivery across ALL records (finding 7) — never "person reached".
-  const delivery = { anyValidatedDelivery: 0, coalescedEver: 0, suppressedEver: 0, finalStatus: counter(), unknownFinal: 0 };
+  // Delivery across ALL records (finding 7) — a transport report, never "person reached".
+  const delivery = { anyValidatedDelivery: 0, coalescedEver: 0, suppressedEver: 0, finalStatus: counter(), unknownFinal: 0, claimedWithoutChannel: 0 };
   for (const e of events) {
     if (e.anyValidatedDelivery) delivery.anyValidatedDelivery++;
     if (e.coalescedEver) delivery.coalescedEver++;
     if (e.suppressedEver) delivery.suppressedEver++;
-    const fs = `${e.finalNotify.status} via=${e.finalNotify.deliveredVia ?? 'none'}`;
-    bump(delivery.finalStatus, fs);
-    if (e.finalNotify.status === 'none' || e.finalNotify.status === 'pending') delivery.unknownFinal++;
+    if (e.contradictions.includes('delivery-claimed-without-channel')) delivery.claimedWithoutChannel++;
+    const st = e.finalNotify.status ?? 'none';
+    bump(delivery.finalStatus, `${st} via=${e.finalNotify.channel ?? 'none'}`);
+    if (st === 'none' || st === 'pending') delivery.unknownFinal++;
   }
 
   const isInjection = (e) => e.signals.some(s => INJECTION_SET.has(s));
   const injection = known.filter(isInjection);
   const rest = known.filter(e => !isInjection(e));
 
-  // Policy comparison: HYPOTHETICAL signal-set match, alongside how many of
-  // those events ACTUALLY stopped. No enforcement-rate claim, no 100% baseline.
+  // Policy comparison: HYPOTHETICAL signal-set match over KNOWN events only.
   const policies = POLICIES.map(p => {
     const matched = known.filter(e => gates(p, e.signals));
     const matchedInj = injection.filter(e => gates(p, e.signals)).length;
@@ -296,15 +335,16 @@ export function analyse(events, parse) {
   const broadMatched = known.filter(e => gates(broad, e.signals)).length;
   const broadPlusEgressMatched = known.filter(e => gates(broadPlusEgress, e.signals)).length;
 
+  // Per-signal table over KNOWN events: every name here is a vocabulary member
+  // by construction (an event with any other name is in the unknown bucket).
   const perSignal = new Map();
   for (const e of known) {
     for (const s of e.signals) {
-      const known_s = KNOWN_SIGNAL_SET.has(s);
       if (!perSignal.has(s)) {
         perSignal.set(s, {
-          signal: s, safe: safeSignalName(s),
+          signal: s,
           family: SIGNAL_FAMILY[s] ?? 'unclassified',
-          known: known_s, events: 0,
+          events: 0,
           injectionFlavoured: INJECTION_SET.has(s),
           policies: Object.fromEntries(POLICIES.map(p => [p.id, { matched: 0, noMatch: 0, gatesByItself: p.gateSet.has(s) }])),
         });
@@ -315,16 +355,26 @@ export function analyse(events, parse) {
     }
   }
   const perSignalRows = [...perSignal.values()].sort((a, b) => b.events - a.events || a.signal.localeCompare(b.signal));
-  const unclassified = perSignalRows.filter(r => r.family === 'unclassified').map(r => r.safe);
+  const unclassified = perSignalRows.filter(r => r.family === 'unclassified').map(r => r.signal);
   const schemaOnlyKnown = known.filter(e => e.signals.every(s => SCHEMA_SET.has(s))).length;
   const dates = events.map(e => e.detectedAt.slice(0, 10)).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
 
+  // Signals outside the vocabulary: counted, never named.
+  let outsideVocabOccurrences = 0, outsideVocabEvents = 0;
+  for (const e of events) { if (e.unrecognisedSignals) { outsideVocabEvents++; outsideVocabOccurrences += e.unrecognisedSignals; } }
+
   return {
     banner: BANNER,
-    scope: 'logged-signal comparison; actual outcome and hypothetical match reported separately; unknown rows excluded from every percentage',
+    scope: 'logged-signal comparison; actual outcome and hypothetical match reported separately; malformed, contradictory and unknown evidence excluded from every percentage',
     dateRange: dates.length ? { from: dates[0], to: dates[dates.length - 1] } : null,
     rows: { total: parse.rowCount, parsed: parse.rowCount - parse.malformed.length, malformed: parse.malformed.length, blankLines: parse.blankLines },
     malformed: parse.malformed.slice(0, 50),
+    evidence: {
+      validKnown: known.length,
+      unknown: unknown.length, unknownReasons: sortedObj(unknownReasons),
+      contradictory: contradictory.length, contradictoryReasons: sortedObj(contradictoryReasons),
+      malformedRows: parse.malformed.length, malformedReasons: sortedObj(malformedReasons),
+    },
     events: {
       total: events.length, keyedBy: sortedObj(keyKinds), recordsPerEvent: sortedObj(recordsPerEvent),
       recordKinds: sortedObj(recordKindAll), multiRecord, conflictingOutcome: conflicting,
@@ -336,11 +386,13 @@ export function analyse(events, parse) {
       neverLoggedSignals: [...NEVER_LOGGED_SIGNALS],
       note: 'Signals outside the notify allowlist are written as redacted-signal; security-config-write signals are among them, so they are structurally invisible here.',
     },
-    known: { total: known.total ?? known.length, schemaRejectOnly: schemaOnlyKnown },
+    redactedSignals: { label: REDACTED_SIGNAL_LABEL, occurrences: outsideVocabOccurrences, events: outsideVocabEvents },
+    known: { total: known.length, schemaRejectOnly: schemaOnlyKnown },
     severity: sortedObj(severityAll), tools: sortedObj(toolAll), eventKinds: sortedObj(eventKindAll),
     delivery: {
       anyValidatedDelivery: delivery.anyValidatedDelivery, coalescedEver: delivery.coalescedEver,
       suppressedEver: delivery.suppressedEver, unknownFinal: delivery.unknownFinal,
+      claimedWithoutChannel: delivery.claimedWithoutChannel,
       finalStatus: sortedObj(delivery.finalStatus), total: events.length,
     },
     injection: { set: [...INJECTION_FLAVOURED], withSignal: injection.length, without: rest.length },
@@ -351,7 +403,102 @@ export function analyse(events, parse) {
   };
 }
 
-// ── 4. Render ─────────────────────────────────────────────────────────────────
+// ── 4. The ONE public export projection (finding 3) ─────────────────────────
+
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+const isIdent = (k) => /^[A-Za-z0-9_.:>\-\s]{1,80}$/.test(k);
+/** Copy a {label: count} distribution, re-keying every label through `mapKey`. */
+function projectDist(obj, mapKey) {
+  const m = counter();
+  for (const [k, v] of Object.entries(obj ?? {})) bump(m, mapKey(k), num(v));
+  return sortedObj(m);
+}
+const identOrOther = (k) => (isIdent(k) ? k : OTHER);
+const signalsToPublic = (list) => (list ?? []).map(publicSignalName);
+function projectNotifyKey(k) {
+  // "<status> via=<channel>" — both halves through their enum.
+  const m = /^(.*) via=(.*)$/.exec(k);
+  if (!m) return OTHER;
+  const st = m[1] === 'none' ? 'none' : publicNotifyStatus(m[1]);
+  const ch = m[2] === 'none' ? 'none' : publicChannel(m[2]);
+  return `${st} via=${ch}`;
+}
+
+/**
+ * Build the public summary. Every string that reaches JSON or Markdown passes
+ * through here: counts are copied as numbers; signal names only by vocabulary
+ * membership (everything else collapses to one redaction label); metadata
+ * labels only through their closed enums (everything else is `other`).
+ * Pure; both renderers consume ONLY its output.
+ */
+export function projectPublic(s) {
+  const policyIds = new Set(POLICIES.map(p => p.id));
+  const policyId = (id) => (policyIds.has(id) ? id : OTHER);
+  const outcomeOrLifecycle = (k) => (k === 'none' || k === 'retry-only' ? k : publicOutcome(k));
+  return {
+    banner: BANNER,
+    scope: s.scope,
+    dateRange: s.dateRange ? { from: String(s.dateRange.from).slice(0, 10), to: String(s.dateRange.to).slice(0, 10) } : null,
+    rows: { total: num(s.rows.total), parsed: num(s.rows.parsed), malformed: num(s.rows.malformed), blankLines: num(s.rows.blankLines) },
+    malformed: (s.malformed ?? []).map(m => ({ lineNo: num(m.lineNo), reason: identOrOther(String(m.reason)) })),
+    evidence: {
+      validKnown: num(s.evidence.validKnown),
+      unknown: num(s.evidence.unknown), unknownReasons: projectDist(s.evidence.unknownReasons, identOrOther),
+      contradictory: num(s.evidence.contradictory), contradictoryReasons: projectDist(s.evidence.contradictoryReasons, identOrOther),
+      malformedRows: num(s.evidence.malformedRows), malformedReasons: projectDist(s.evidence.malformedReasons, identOrOther),
+    },
+    events: {
+      total: num(s.events.total),
+      keyedBy: projectDist(s.events.keyedBy, k => (['actionId', 'correlationId', 'line'].includes(k) ? k : OTHER)),
+      recordsPerEvent: projectDist(s.events.recordsPerEvent, k => (/^\d{1,6}$/.test(k) ? k : OTHER)),
+      recordKinds: projectDist(s.events.recordKinds, k => (['denial', 'warning', 'dnp_retry', 'contradictory', 'other'].includes(k) ? k : OTHER)),
+      multiRecord: num(s.events.multiRecord), conflictingOutcome: num(s.events.conflictingOutcome),
+      outcomeTransitions: projectDist(s.events.outcomeTransitions, k => k.split(' -> ').map(publicOutcome).join(' -> ')),
+      signalDriftBetweenFirstAndLast: num(s.events.signalDriftBetweenFirstAndLast),
+    },
+    actual: {
+      actuallyStopped: num(s.actual.actuallyStopped), warnedOnly: num(s.actual.warnedOnly),
+      retryGranted: num(s.actual.retryGranted), retryDeniedOrFailed: num(s.actual.retryDeniedOrFailed), other: num(s.actual.other),
+      finalEnforcementOutcome: projectDist(s.actual.finalEnforcementOutcome, outcomeOrLifecycle),
+    },
+    unknown: {
+      total: num(s.unknown.total), signalless: num(s.unknown.signalless), reasons: projectDist(s.unknown.reasons, identOrOther),
+      neverLoggedSignals: [...NEVER_LOGGED_SIGNALS], note: s.unknown.note,
+    },
+    redactedSignals: { label: REDACTED_SIGNAL_LABEL, occurrences: num(s.redactedSignals.occurrences), events: num(s.redactedSignals.events) },
+    known: { total: num(s.known.total), schemaRejectOnly: num(s.known.schemaRejectOnly) },
+    severity: projectDist(s.severity, publicSeverity),
+    tools: projectDist(s.tools, publicTool),
+    eventKinds: projectDist(s.eventKinds, publicEvent),
+    delivery: {
+      anyValidatedDelivery: num(s.delivery.anyValidatedDelivery), coalescedEver: num(s.delivery.coalescedEver),
+      suppressedEver: num(s.delivery.suppressedEver), unknownFinal: num(s.delivery.unknownFinal),
+      claimedWithoutChannel: num(s.delivery.claimedWithoutChannel),
+      finalStatus: projectDist(s.delivery.finalStatus, projectNotifyKey), total: num(s.delivery.total),
+    },
+    injection: { set: signalsToPublic(s.injection.set), withSignal: num(s.injection.withSignal), without: num(s.injection.without) },
+    policies: (s.policies ?? []).map(p => ({
+      id: policyId(p.id), label: POLICIES.find(x => x.id === p.id)?.label ?? OTHER,
+      hypotheticalMatch: num(p.hypotheticalMatch), hypotheticalNoMatch: num(p.hypotheticalNoMatch),
+      matchedAndActuallyStopped: num(p.matchedAndActuallyStopped),
+      injectionMatched: num(p.injectionMatched), injectionNoMatch: num(p.injectionNoMatch),
+      restMatched: num(p.restMatched), restNoMatch: num(p.restNoMatch),
+      matchedBySignal: projectDist(p.matchedBySignal, publicSignalName),
+      unknownLowerBoundMatch: num(p.unknownLowerBoundMatch),
+    })),
+    sensitivity: { broadFloorPlusExternalEgress: { matched: num(s.sensitivity.broadFloorPlusExternalEgress.matched), delta: num(s.sensitivity.broadFloorPlusExternalEgress.delta) } },
+    perSignal: (s.perSignal ?? []).map(r => ({
+      signal: publicSignalName(r.signal),
+      family: identOrOther(String(r.family)),
+      events: num(r.events),
+      injectionFlavoured: !!r.injectionFlavoured,
+      policies: Object.fromEntries(Object.entries(r.policies ?? {}).map(([id, c]) => [policyId(id), { matched: num(c.matched), noMatch: num(c.noMatch), gatesByItself: !!c.gatesByItself }])),
+    })),
+    unclassifiedSignals: signalsToPublic(s.unclassifiedSignals),
+  };
+}
+
+// ── 5. Render (consumes ONLY the public projection) ─────────────────────────
 
 const pct = (n, d) => (d > 0 ? `${((100 * n) / d).toFixed(1)}%` : 'n/a');
 const kv = (obj) => Object.entries(obj).map(([k, v]) => `${k}=${v}`).join(', ') || '(none)';
@@ -372,6 +519,16 @@ export function renderMarkdown(s) {
   if (s.rows.malformed) out.push(`- malformed lines (first 50): ${s.malformed.map(m => `${m.lineNo}:${m.reason}`).join(', ')}`);
   out.push('');
 
+  out.push('### Evidence buckets (three separate buckets; none enters a known denominator)', '');
+  out.push('| bucket | count | reasons |');
+  out.push('|---|---|---|');
+  out.push(`| valid known events | **${s.evidence.validKnown}** | reconstructable vocabulary signals, consistent event/outcome |`);
+  out.push(`| unknown events | ${s.evidence.unknown} | ${kv(s.evidence.unknownReasons)} |`);
+  out.push(`| contradictory events | ${s.evidence.contradictory} | ${kv(s.evidence.contradictoryReasons)} |`);
+  out.push(`| malformed rows | ${s.evidence.malformedRows} | ${kv(s.evidence.malformedReasons)} |`);
+  out.push('');
+  out.push(`- signals outside the writer's vocabulary: ${s.redactedSignals.occurrences} occurrence(s) across ${s.redactedSignals.events} event(s); printed only as \`${s.redactedSignals.label}\``, '');
+
   out.push('### ACTUAL outcome (what the guard did — separate from any policy hypothesis)', '');
   out.push('| category | events | note |');
   out.push('|---|---|---|');
@@ -388,15 +545,16 @@ export function renderMarkdown(s) {
   out.push(`- known (reconstructable-signal) events: **${K}** (schema-reject only: ${s.known.schemaRejectOnly})`);
   out.push(`- structurally never logged (redacted at write): ${s.unknown.neverLoggedSignals.join(', ')} — ${s.unknown.note}`, '');
 
-  out.push('### Notify delivery — across ALL records (never "person reached")', '');
+  out.push('### Notify delivery — across ALL records (a transport report; never "person reached")', '');
   out.push('| measure | events |');
   out.push('|---|---|');
-  out.push(`| any validated delivery (status delivered/sent + channel) | **${s.delivery.anyValidatedDelivery}** of ${s.delivery.total} |`);
+  out.push(`| validated delivery (a delivery-claim status WITH a channel) | **${s.delivery.anyValidatedDelivery}** of ${s.delivery.total} |`);
+  out.push(`| delivery claimed WITHOUT a channel (contradictory, not validated) | ${s.delivery.claimedWithoutChannel} |`);
   out.push(`| coalesced at some point | ${s.delivery.coalescedEver} |`);
   out.push(`| suppressed at some point | ${s.delivery.suppressedEver} |`);
   out.push(`| final status none/pending (unknown) | ${s.delivery.unknownFinal} |`);
   out.push('');
-  out.push(`- final status distribution: ${kv(s.delivery.finalStatus)}`, '');
+  out.push(`- final status distribution (enum or other): ${kv(s.delivery.finalStatus)}`, '');
 
   out.push('### Policy comparison — HYPOTHETICAL signal-set match (NOT an enforcement rate)', '');
   out.push(`- injection-flavoured set: ${s.injection.set.join(', ')}`);
@@ -415,21 +573,22 @@ export function renderMarkdown(s) {
   out.push(`| signal | family | events | ${ids.join(' | ')} |`);
   out.push(`|---|---|---|${ids.map(() => '---').join('|')}|`);
   for (const r of s.perSignal) {
-    const cells = ids.map(id => { const c = r.policies[id]; return `${c.matched} / ${c.noMatch}${c.gatesByItself ? '' : ' ⁽ᶜ⁾'}`; });
-    out.push(`| ${r.safe}${r.injectionFlavoured ? ' ⚑' : ''}${r.known ? '' : ' ⚠unknown-id'} | ${r.family} | ${r.events} | ${cells.join(' | ')} |`);
+    const cells = ids.map(id => { const c = r.policies[id]; return c ? `${c.matched} / ${c.noMatch}${c.gatesByItself ? '' : ' ⁽ᶜ⁾'}` : 'n/a'; });
+    out.push(`| ${r.signal}${r.injectionFlavoured ? ' ⚑' : ''} | ${r.family} | ${r.events} | ${cells.join(' | ')} |`);
   }
   out.push('');
-  out.push('⁽ᶜ⁾ signal not in that policy\'s gate set; any match there comes from a co-occurring signal. ⚑ injection-flavoured. ⚠ a signal name absent from the guard\'s known vocabulary.');
-  out.push(`- unclassified signals (present in log, absent from the policy map — fix the map): ${s.unclassifiedSignals.length ? s.unclassifiedSignals.join(', ') : 'none'}`);
+  out.push('⁽ᶜ⁾ signal not in that policy\'s gate set; any match there comes from a co-occurring signal. ⚑ injection-flavoured.');
+  out.push(`- unclassified signals (in the vocabulary but absent from the policy family map — fix the map): ${s.unclassifiedSignals.length ? s.unclassifiedSignals.join(', ') : 'none'}`);
   return out.join('\n');
 }
 
-// ── 5. Main ────────────────────────────────────────────────────────────────
+// ── 6. Main ────────────────────────────────────────────────────────────────
 
 export function run(text) {
   const parsed = parseDenials(text);
   const events = groupEvents(parsed.records);
-  const summary = analyse(events, { malformed: parsed.malformed, rowCount: parsed.records.length + parsed.malformed.length, blankLines: parsed.blankLines });
+  const internal = analyse(events, { malformed: parsed.malformed, rowCount: parsed.records.length + parsed.malformed.length, blankLines: parsed.blankLines });
+  const summary = projectPublic(internal);
   return { summary, markdown: renderMarkdown(summary) };
 }
 

@@ -113,11 +113,13 @@ describe('ADR-002 Half A — delivery across all records + privacy (finding 7)',
     expect(JSON.stringify(summary.delivery)).not.toMatch(/person/i);
   });
 
-  it('never echoes a non-conforming signal name verbatim', () => {
-    // A conforming id passes; a name with spaces/semicolons/uppercase is redacted.
-    expect(safeSignalName('legit-name')).toBe('legit-name');
-    expect(safeSignalName('Injected Title; SELECT 1')).toBe('<non-conforming-signal-redacted>');
-    expect(safeSignalName(42 as any)).toBe('<non-conforming-signal-redacted>');
+  it('never echoes a signal name outside the writer\'s vocabulary verbatim (membership, not syntax — round 3)', () => {
+    // A vocabulary member passes; a lexically valid but unregistered name, a
+    // name with spaces/semicolons/uppercase, and a non-string are all redacted.
+    expect(safeSignalName('file-delete')).toBe('file-delete');
+    expect(safeSignalName('legit-name')).toBe('<signal-outside-vocabulary-redacted>');
+    expect(safeSignalName('Injected Title; SELECT 1')).toBe('<signal-outside-vocabulary-redacted>');
+    expect(safeSignalName(42 as any)).toBe('<signal-outside-vocabulary-redacted>');
   });
 
   it('buckets redacted/empty rows as unknown and excludes them from percentages', () => {

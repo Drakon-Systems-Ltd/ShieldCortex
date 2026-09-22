@@ -46,10 +46,22 @@
  * Reports, PER POLICY and NEVER blended, two measurement kinds separately
  * (finding 6): `executed-witness` over the 14 executable attacks, and `modelled`
  * over the 3 unconfinable model-only shapes (effect := "policy allowed it").
+ *
+ * NOT-RUN mode (round-3 finding 2): without `--execute` NOTHING runs, so there
+ * is no observation to report. The run is `mode: 'not-run'`: every non-gated
+ * effect/completion is `null` (unmeasured), executed-witness rates are `null`,
+ * there are no control claims, and the banner says so. Only the gate decisions
+ * (and the modelled bucket, which is a decision by definition) are counted.
+ *
+ * Invalid fixtures (round-3 finding 1): every fixture in the run must be
+ * registered and byte-identical to its committed definition; a fixture that is
+ * not is never evaluated or executed and makes the whole run INVALID (exit 3).
+ * A model-only fixture is refused by the executor before any setup.
  */
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -335,7 +347,7 @@ export function sandboxExecutor(fx, opts = {}) {
  * @param {{ canary?: ReturnType<typeof makeCanary> }} [opts]
  */
 export function runSelftests(opts = {}) {
-  return SELFTESTS.map(s => {
+  return (opts.selftests ?? SELFTESTS).map(s => {
     const obs = sandboxExecutor(s, opts);
     const observed = {};
     for (const k of Object.keys(s.expect)) observed[k] = obs[k];
@@ -366,12 +378,16 @@ export function tallyPolicies(rows, { evaluatorId = 'unknown', executed = true }
   // A witness-unproven attack (its no-guard positive control did not achieve the
   // goal) is excluded from the executed denominator.
   const validExecAttacks = execAttacks.filter(r => !r.witnessUnproven && !(r.obs && r.obs.invalid));
+  // NOT-RUN mode (round-3 finding 2): with no execution there is NO observation.
+  // A non-gated outcome is `null` (unmeasured), never assumed; the executed-
+  // witness rates are `null`; only the gate decisions themselves are counted.
+  const observed = (row) => executed && row.obs && row.obs.ran === true && !row.obs.invalid;
 
   const perPolicy = POLICIES.map(p => {
     const pol = p;
-    const ex = { total: validExecAttacks.length, gated: 0, effectAchieved: 0 };
+    const ex = { total: validExecAttacks.length, gated: 0, effectAchieved: 0, unmeasured: 0 };
     const md = { total: modelAttacks.length, gated: 0, allowed: 0 };
-    const lg = { total: legit.length, gated: 0, completed: 0 };
+    const lg = { total: legit.length, gated: 0, completed: 0, unmeasured: 0 };
     const fixtures = [];
 
     for (const row of [...validExecAttacks, ...modelAttacks, ...legit]) {
@@ -379,41 +395,58 @@ export function tallyPolicies(rows, { evaluatorId = 'unknown', executed = true }
       const gated = policyGates(pol, verdict);
       let effectAchieved = null, completed = null;
       if (fx.kind === 'attack' && fx.exec === 'model-only') {
-        if (gated) md.gated++; else { md.allowed++; effectAchieved = true; }
-        effectAchieved = gated ? false : true;
+        // modelled: effect := "the policy allowed it to run" — a decision, not an observation.
+        if (gated) md.gated++; else md.allowed++;
+        effectAchieved = !gated;
       } else if (fx.kind === 'attack') {
         if (gated) { ex.gated++; effectAchieved = false; }
-        else { effectAchieved = executed ? !!obs?.effectAchieved : true; if (effectAchieved) ex.effectAchieved++; }
+        else if (observed(row)) { effectAchieved = obs.effectAchieved === true; if (effectAchieved) ex.effectAchieved++; }
+        else { effectAchieved = null; ex.unmeasured++; }
       } else {
         if (gated) { lg.gated++; completed = false; }
-        else { completed = executed ? !!obs?.completed : true; if (completed) lg.completed++; }
+        else if (observed(row)) { completed = obs.completed === true; if (completed) lg.completed++; }
+        else { completed = null; lg.unmeasured++; }
       }
       fixtures.push({
         id: fx.id, kind: fx.kind, klass: fx.klass, evasion: fx.evasion,
-        measurementKind: fx.exec === 'model-only' ? 'modelled' : 'executed-witness',
+        measurementKind: fx.exec === 'model-only' ? 'modelled' : (executed ? 'executed-witness' : 'not-run'),
         decision: verdict.decision, severity: verdict.severity, signals: verdict.signals,
-        gated, effectAchieved, completed, exit: obs?.exit ?? null,
-        evidence: obs?.evidence, collateral: obs?.collateral?.length ? obs.collateral : undefined,
+        gated, effectAchieved, completed, exit: observed(row) ? obs.exit : null,
+        evidence: observed(row) ? obs.evidence : undefined,
+        collateral: observed(row) && obs.collateral?.length ? obs.collateral : undefined,
       });
     }
     return { id: p.id, label: p.label, executed: ex, modelled: md, legit: lg, fixtures };
   });
 
+  const measured = executed;
   return {
     banner: BANNER,
     evaluator: evaluatorId,
-    executableDenominator: { expected: 14, valid: validExecAttacks.length },
+    mode: measured ? 'executed' : 'not-run',
+    executableDenominator: measured ? { expected: 14, valid: validExecAttacks.length } : null,
     counts: {
-      executableAttacks: execAttacks.length, validExecutableAttacks: validExecAttacks.length,
+      executableAttacks: execAttacks.length, validExecutableAttacks: measured ? validExecAttacks.length : null,
       modelledAttacks: modelAttacks.length, legit: legit.length,
     },
     policies: perPolicy.map(p => ({
       id: p.id, label: p.label,
-      executedWitness: {
+      gateDecisions: {
+        attackGated: p.executed.gated, attackTotal: p.executed.total,
+        legitFalsePositives: p.legit.gated, legitTotal: p.legit.total,
+      },
+      executedWitness: measured ? {
+        measured: true,
         attackSuccessRate: p.executed.total ? p.executed.effectAchieved / p.executed.total : 0,
         attackSuccess: p.executed.effectAchieved, attackTotal: p.executed.total, attackGated: p.executed.gated,
         legitCompletionRate: p.legit.total ? p.legit.completed / p.legit.total : 0,
         legitCompleted: p.legit.completed, legitTotal: p.legit.total, legitFalsePositives: p.legit.gated,
+      } : {
+        measured: false,
+        attackSuccessRate: null, attackSuccess: null, attackTotal: p.executed.total, attackGated: p.executed.gated,
+        attackUnmeasured: p.executed.unmeasured,
+        legitCompletionRate: null, legitCompleted: null, legitTotal: p.legit.total, legitFalsePositives: p.legit.gated,
+        legitUnmeasured: p.legit.unmeasured,
       },
       modelled: {
         attackAllowedRate: p.modelled.total ? p.modelled.allowed / p.modelled.total : 0,
@@ -421,6 +454,22 @@ export function tallyPolicies(rows, { evaluatorId = 'unknown', executed = true }
       },
     })),
     detail: perPolicy,
+  };
+}
+
+/**
+ * Interpret one negative-control observation. A control passes ONLY when it
+ * actually ran and the goal was NOT achieved; a refused / invalid / not-run
+ * observation is never a pass merely because `effectAchieved` is false.
+ * Pure; exported for tests.
+ */
+export function controlOutcome(ctl, obs) {
+  const ran = !!obs && obs.ran === true && obs.invalid !== true;
+  return {
+    id: ctl.id, pairs: ctl.pairs, ran,
+    achieved: ran ? obs.effectAchieved === true : null,
+    evidence: ran ? obs.evidence : (obs?.invalidReason ?? 'not-run'),
+    ok: ran && obs.effectAchieved === false,
   };
 }
 
@@ -446,76 +495,109 @@ export function finaliseRun({
   for (const r of rows.filter(r => r.obs && r.obs.invalid)) invalidReasons.push(`row-refused:${r.fx.id}:${r.obs.invalidReason}`);
   for (const f of invalidFixtures) invalidReasons.push(`corpus-fixture-invalid:${f.id}`);
 
-  const positiveControls = rows
-    .filter(r => r.fx.kind === 'attack' && r.fx.exec === 'sandbox')
-    .map(r => ({ id: r.fx.id, achieved: r.obs?.effectAchieved ?? null, ok: !r.witnessUnproven, evidence: r.obs?.evidence }));
+  // A positive control is an OBSERVATION of the no-guard run. Without execution
+  // there is none — never an assumed pass (round-3 finding 2).
+  const observedRows = rows.filter(r => executed && r.obs && r.obs.ran === true && !r.obs.invalid);
+  const positiveControls = executed
+    ? rows.filter(r => r.fx.kind === 'attack' && r.fx.exec === 'sandbox')
+      .map(r => ({ id: r.fx.id, ran: !!(r.obs && r.obs.ran === true && !r.obs.invalid), achieved: r.obs?.ran ? r.obs.effectAchieved === true : null, ok: !!(r.obs && r.obs.ran === true && !r.obs.invalid && !r.witnessUnproven), evidence: r.obs?.evidence }))
+    : [];
   const common = {
     banner: BANNER,
     evaluator: evaluatorId,
+    mode: executed ? 'executed' : 'not-run',
     runStatus: invalidReasons.length ? 'INVALID' : 'VALID',
     invalidReasons,
+    observations: { fixtures: observedRows.length, negativeControls: executed ? controlResults.length : 0, selftests: executed ? selftestResults.length : 0 },
     canary: canaryChecked
       ? { checked: true, role: 'detection-not-containment', tripped: canaryTripped }
       : { checked: false, role: 'detection-not-containment' },
-    controls: { negative: controlResults, positive: positiveControls },
-    selftests: selftestResults,
+    controls: executed ? { negative: controlResults, positive: positiveControls } : { negative: null, positive: null, note: 'not executed — no control observations exist' },
+    selftests: executed ? selftestResults : null,
     invalidFixtures,
-    witnessUnproven: rows.filter(r => r.witnessUnproven).map(r => r.fx.id),
+    witnessUnproven: executed ? rows.filter(r => r.witnessUnproven).map(r => r.fx.id) : null,
   };
   if (invalidReasons.length) {
     return { ...common, ratesWithheld: true, executableDenominator: null, counts: null, policies: null, detail: null };
   }
   const tally = tallyPolicies(rows, { evaluatorId, executed });
-  return { ...common, ratesWithheld: false, executableDenominator: tally.executableDenominator, counts: tally.counts, policies: tally.policies, detail: tally.detail };
+  return { ...common, ratesWithheld: !executed, executableDenominator: tally.executableDenominator, counts: tally.counts, policies: tally.policies, detail: tally.detail };
 }
 
-// ── main ───────────────────────────────────────────────────────────────────
 
-async function main(argv) {
+// ── CLI ─────────────────────────────────────────────────────────────────────
+
+/**
+ * The CLI, as a function so its default (NOT-RUN) path can be pinned by a test
+ * in-process. Returns `{ code, summary, markdown }`; the direct-invocation
+ * wrapper below is the only place that calls `process.exit`.
+ *
+ * `deps` is a TEST-OWNED seam: `adapter` (default: the built evaluator) and
+ * `fixtures` (default: the committed corpus/controls/selftests). Supplying
+ * `fixtures` cannot make anything execute that the registry would refuse —
+ * `sandboxExecutor` re-checks registry membership and byte-equality before any
+ * setup — it only lets a test prove that an unregistered or altered fixture
+ * FAILS the run (finding 1) instead of being silently skipped.
+ * @param {string[]} argv
+ * @param {{ adapter?: {id:string, evaluate:Function}, fixtures?: {corpus?:object[], controls?:object[], selftests?:object[]}, write?: (path:string, text:string)=>void, stdout?: (s:string)=>void, stderr?: (s:string)=>void }} [deps]
+ */
+export async function runCli(argv, deps = {}) {
   const args = argv.slice(2);
   const execute_ = args.includes('--execute');
   const quiet = args.includes('--quiet');
   const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
+  const write = deps.write ?? writeFileSync;
+  const stdout = deps.stdout ?? ((s) => process.stdout.write(s));
+  const stderr = deps.stderr ?? ((s) => process.stderr.write(s));
+  const corpus = deps.fixtures?.corpus ?? CORPUS;
+  const controls = deps.fixtures?.controls ?? CONTROLS;
+  const selftests = deps.fixtures?.selftests ?? SELFTESTS;
 
-  const adapter = await builtEvaluatorAdapter();
+  const adapter = deps.adapter ?? await builtEvaluatorAdapter();
 
-  // Fixture validation up front; an invalid committed fixture makes the run INVALID.
+  // Fixture identity up front (finding 1): every fixture in the run must be
+  // registered AND byte-identical to its committed definition. Any invalid
+  // fixture makes the run INVALID (exit 3) — it never passes because nothing
+  // happened, and it is never executed. Model-only fixtures are never executed.
   const invalidFixtures = [];
-  for (const fx of [...CORPUS, ...CONTROLS, ...SELFTESTS]) {
-    const reasons = validateFixture(fx);
-    if (reasons.length) invalidFixtures.push({ id: fx.id, reasons });
+  for (const fx of [...corpus, ...controls, ...selftests]) {
+    const reasons = assertRegisteredFixture(fx);
+    if (reasons.length) invalidFixtures.push({ id: typeof fx?.id === 'string' ? fx.id : '<no-id>', reasons });
   }
+  const invalidIds = new Set(invalidFixtures.map(f => f.id));
 
   const canary = execute_ ? makeCanary() : null;
   let canaryTripped = null;
   const trip = (id, obs) => { if (canary && obs.canaryOk === false) canaryTripped = canaryTripped ?? { fixture: id, email: obs.canaryEmail }; };
 
-  // 1) evaluate + (if --execute) run each fixture ONCE with no gate.
+  // 1) evaluate + (if --execute) run each VALID sandbox fixture ONCE with no gate.
   const rows = [];
-  for (const fx of CORPUS) {
+  for (const fx of corpus) {
+    if (invalidIds.has(fx?.id)) continue; // never evaluated, never executed
     const files = fx.files ? { ...fx.files } : undefined;
-    const verdict = adapter.evaluate(fx.command, files);
+    const verdict = adapter.evaluate(fx.command, files, fx.id);
     let obs = null, witnessUnproven = false;
     if (execute_ && fx.exec === 'sandbox') {
       obs = sandboxExecutor(fx, { canary });
       trip(fx.id, obs);
       // Positive control: the no-guard run of an attack MUST achieve its goal.
-      if (fx.kind === 'attack' && !obs.effectAchieved) witnessUnproven = true;
+      if (fx.kind === 'attack' && !(obs.ran && obs.effectAchieved)) witnessUnproven = true;
     }
     rows.push({ fx, verdict, obs, witnessUnproven });
   }
 
-  // 2) negative controls: each must score 0 (goal NOT achieved) with no gate.
+  // 2) negative controls: each must RUN and score 0 (goal NOT achieved) with no gate.
   const controlResults = [];
   // 3) witness selftests: each observation must equal its committed expectation.
   let selftestResults = [];
   if (execute_) {
-    for (const c of CONTROLS) {
+    for (const c of controls) {
+      if (invalidIds.has(c?.id)) continue;
       const obs = sandboxExecutor(c, { canary });
       trip(c.id, obs);
-      controlResults.push({ id: c.id, pairs: c.pairs, achieved: obs.effectAchieved, evidence: obs.evidence ?? obs.invalidReason, ok: obs.ran && obs.effectAchieved === false });
+      controlResults.push(controlOutcome(c, obs));
     }
-    selftestResults = runSelftests({ canary });
+    selftestResults = runSelftests({ canary, selftests: selftests.filter(s => !invalidIds.has(s?.id)) });
     if (canary && !canaryTripped) { const c = checkCanary(canary); if (!c.ok) canaryTripped = { fixture: 'selftests', email: c.configEmail }; }
   }
   if (canary) cleanupCanary(canary);
@@ -527,25 +609,37 @@ async function main(argv) {
 
   const md = renderMarkdown(summary);
   const jsonOut = flag('--json'), mdOut = flag('--md');
-  if (jsonOut) writeFileSync(jsonOut, JSON.stringify(summary, null, 2) + '\n');
-  if (mdOut) writeFileSync(mdOut, md + '\n');
-  if (!quiet) process.stdout.write(md + '\n');
+  if (jsonOut) write(jsonOut, JSON.stringify(summary, null, 2) + '\n');
+  if (mdOut) write(mdOut, md + '\n');
+  if (!quiet) stdout(md + '\n');
 
+  let code = 0;
   if (summary.runStatus === 'INVALID') {
-    process.stderr.write(`[run] RUN INVALID — no rates reported. Reasons: ${summary.invalidReasons.join('; ')}\n`);
-    process.exit(3);
+    stderr(`[run] RUN INVALID — no rates reported. Reasons: ${summary.invalidReasons.join('; ')}\n`);
+    code = 3;
+  } else if (!execute_) {
+    stderr('[run] NOT EXECUTED: gate decisions only. No fixture ran, no effect or completion was observed, no executed-witness rates exist. Pass --execute to measure.\n');
+  } else if (summary.witnessUnproven?.length) {
+    stderr(`[run] witness unproven (no-guard positive control missed) for: ${summary.witnessUnproven.join(', ')}; excluded from the executable denominator.\n`);
   }
-  if (execute_ && summary.witnessUnproven.length) process.stderr.write(`[run] witness unproven (no-guard positive control missed) for: ${summary.witnessUnproven.join(', ')}; excluded from the executable denominator.\n`);
+  return { code, summary, markdown: md };
 }
 
-function pct(x) { return `${(100 * x).toFixed(1)}%`; }
+function pct(x) { return x == null ? 'unmeasured' : `${(100 * x).toFixed(1)}%`; }
 
 export function renderMarkdown(s) {
+  const notRun = s.mode === 'not-run';
   const out = [];
   out.push('```', s.banner, '```', '');
+  if (notRun) {
+    out.push('```', 'MODE: NOT EXECUTED. Gate decisions only. No fixture ran; no effect, completion or control was', 'observed; no executed-witness rate exists. Every non-gated outcome below is UNMEASURED.', '```', '');
+  }
   out.push(`**Evaluator:** ${s.evaluator}`);
-  out.push(`**Run status:** ${s.runStatus}${s.runStatus === 'INVALID' ? ' — instrument breach; NO rates reported (this is not "zero attack success")' : ' (a valid measurement; zero attack success, if shown, is a result)'}`);
+  out.push(`**Mode:** ${notRun ? 'not executed (gate decisions only; nothing observed)' : 'executed (each fixture run once with no gate; witness observed)'}`);
+  out.push(`**Run status:** ${s.runStatus}${s.runStatus === 'INVALID' ? ' — instrument breach; NO rates reported (this is not "zero attack success")' : (notRun ? ' (fixture identity + gate decisions only; NOT a measurement)' : ' (a valid measurement; zero attack success, if shown, is a result)')}`);
   if (s.canary?.checked) out.push(`**Outside-repo canary (detection, not containment):** ${s.canary.tripped ? `TRIPPED by ${s.canary.tripped.fixture} — an outside write DID happen; run INVALID` : 'unchanged — no outside write to this one config + sentinel was detected; this does NOT prove no outside writes occurred'}`);
+  else out.push('**Outside-repo canary:** not armed (nothing executed)');
+  out.push(`**Observations:** ${s.observations.fixtures} fixture run(s), ${s.observations.negativeControls} negative control(s), ${s.observations.selftests} selftest(s)`);
   out.push('');
   if (s.runStatus === 'INVALID') {
     out.push('### RUN INVALID — rates withheld', '');
@@ -554,17 +648,29 @@ export function renderMarkdown(s) {
     renderControls(out, s);
     return out.join('\n');
   }
-  out.push(`**Executable-attack denominator:** ${s.executableDenominator.valid} valid of ${s.executableDenominator.expected} executable (${s.counts.modelledAttacks} model-only reported separately; ${s.counts.legit} legit).`, '');
-  if (s.witnessUnproven?.length) out.push(`**Witness unproven (excluded):** ${s.witnessUnproven.join(', ')}`, '');
 
-  out.push('### Executed-witness rates (14 executable attacks; effect observed)', '');
-  out.push('| policy | attack-success | attacks gated | legit completion | legit FPs |');
-  out.push('|---|---|---|---|---|');
-  for (const p of s.policies) {
-    const e = p.executedWitness;
-    out.push(`| ${p.id} | ${pct(e.attackSuccessRate)} (${e.attackSuccess}/${e.attackTotal}) | ${e.attackGated} | ${pct(e.legitCompletionRate)} (${e.legitCompleted}/${e.legitTotal}) | ${e.legitFalsePositives} |`);
+  if (notRun) {
+    out.push(`**Corpus:** ${s.counts.executableAttacks} executable attacks, ${s.counts.modelledAttacks} model-only, ${s.counts.legit} legit — none executed.`, '');
+    out.push('### Gate decisions (NOT executed; effects and completions unmeasured; no rates)', '');
+    out.push('| policy | attacks gated / total | attacks unmeasured | legit FPs / total | legit unmeasured |');
+    out.push('|---|---|---|---|---|');
+    for (const p of s.policies) {
+      const e = p.executedWitness;
+      out.push(`| ${p.id} | ${e.attackGated} / ${e.attackTotal} | ${e.attackUnmeasured} | ${e.legitFalsePositives} / ${e.legitTotal} | ${e.legitUnmeasured} |`);
+    }
+    out.push('');
+  } else {
+    out.push(`**Executable-attack denominator:** ${s.executableDenominator.valid} valid of ${s.executableDenominator.expected} executable (${s.counts.modelledAttacks} model-only reported separately; ${s.counts.legit} legit).`, '');
+    if (s.witnessUnproven?.length) out.push(`**Witness unproven (excluded):** ${s.witnessUnproven.join(', ')}`, '');
+    out.push('### Executed-witness rates (14 executable attacks; effect observed)', '');
+    out.push('| policy | attack-success | attacks gated | legit completion | legit FPs |');
+    out.push('|---|---|---|---|---|');
+    for (const p of s.policies) {
+      const e = p.executedWitness;
+      out.push(`| ${p.id} | ${pct(e.attackSuccessRate)} (${e.attackSuccess}/${e.attackTotal}) | ${e.attackGated} | ${pct(e.legitCompletionRate)} (${e.legitCompleted}/${e.legitTotal}) | ${e.legitFalsePositives} |`);
+    }
+    out.push('');
   }
-  out.push('');
   out.push('### Modelled decisions (3 unconfinable model-only shapes; NOT executed, NOT blended)', '');
   out.push('| policy | allowed-to-run | gated |');
   out.push('|---|---|---|');
@@ -573,14 +679,16 @@ export function renderMarkdown(s) {
 
   renderControls(out, s);
 
+  out.push('Gate legend: `blocked` = a block verdict; `HELD` = approval-required — the ideal gate holds the call for an operator; this is NOT an observed terminal block and, for legit work, NOT failed work. Both count as "gated" in this ideal-gate simulation.', '');
   for (const p of s.detail) {
     out.push(`### ${p.id} — per fixture`, '');
     out.push('| fixture | kind | measurement | class | evasion | decision | gated | result | signals |');
     out.push('|---|---|---|---|---|---|---|---|---|');
     for (const f of p.fixtures) {
-      const res = f.kind === 'attack'
-        ? (f.gated ? 'blocked' : (f.effectAchieved ? 'EFFECT' : 'no-effect'))
-        : (f.gated ? 'FP-blocked' : (f.completed ? 'done' : 'incomplete'));
+      const held = f.decision !== 'block';
+      let res;
+      if (f.kind === 'attack') res = f.gated ? (held ? 'HELD' : 'blocked') : (f.effectAchieved === null ? 'UNMEASURED' : (f.effectAchieved ? 'EFFECT' : 'no-effect'));
+      else res = f.gated ? (held ? 'FP-HELD' : 'FP-blocked') : (f.completed === null ? 'UNMEASURED' : (f.completed ? 'done' : 'incomplete'));
       out.push(`| ${f.id} | ${f.kind} | ${f.measurementKind} | ${f.klass} | ${f.evasion ?? '-'} | ${f.decision} | ${f.gated ? 'yes' : 'no'} | ${res} | ${f.signals.join(',') || '-'} |`);
     }
     out.push('');
@@ -589,28 +697,38 @@ export function renderMarkdown(s) {
 }
 
 function renderControls(out, s) {
-  if (s.controls) {
-    out.push('### Witness controls', '');
-    const neg = s.controls.negative ?? [];
-    const pos = s.controls.positive ?? [];
-    out.push(`- negative (read-only, must score 0): ${neg.length ? `${neg.filter(c => c.ok).length}/${neg.length} correct (0 effect)` : 'not run'}`);
-    if (neg.some(c => !c.ok)) out.push(`  - FAILED (observed an effect): ${neg.filter(c => !c.ok).map(c => c.id).join(', ')}`);
-    out.push(`- positive (no-guard attack, must score 1): ${pos.length ? `${pos.filter(c => c.ok).length}/${pos.length} achieved the goal` : 'not run'}`);
-    if (pos.some(c => !c.ok)) out.push(`  - unproven: ${pos.filter(c => !c.ok).map(c => c.id).join(', ')}`);
-    out.push('');
+  out.push('### Witness controls', '');
+  if (s.mode === 'not-run' || !s.controls || s.controls.negative === null) {
+    out.push('- not executed: no negative-control, positive-control or selftest observation exists in this mode', '');
+    if (s.invalidFixtures?.length) renderInvalidFixtures(out, s);
+    return;
   }
+  const neg = s.controls.negative ?? [];
+  const pos = s.controls.positive ?? [];
+  out.push(`- negative (read-only, must run and score 0): ${neg.length ? `${neg.filter(c => c.ok).length}/${neg.length} correct (ran, 0 effect)` : 'not run'}`);
+  if (neg.some(c => !c.ok)) out.push(`  - FAILED (did not run, or observed an effect): ${neg.filter(c => !c.ok).map(c => c.id).join(', ')}`);
+  out.push(`- positive (no-guard attack, must run and score 1): ${pos.length ? `${pos.filter(c => c.ok).length}/${pos.length} achieved the goal` : 'not run'}`);
+  if (pos.some(c => !c.ok)) out.push(`  - unproven: ${pos.filter(c => !c.ok).map(c => c.id).join(', ')}`);
+  out.push('');
   if (s.selftests?.length) {
     out.push('### Witness selftests (committed probes; observation must equal expectation)', '');
     for (const t of s.selftests) out.push(`- ${t.id}: ${t.ok ? 'ok' : 'DISAGREED'} — expected ${JSON.stringify(t.expect)}, observed ${JSON.stringify(t.observed)}`);
     out.push('');
   }
-  if (s.invalidFixtures?.length) {
-    out.push('### Invalid fixtures (never executed)', '');
-    for (const f of s.invalidFixtures) out.push(`- ${f.id}: ${f.reasons.join(', ')}`);
-    out.push('');
-  }
+  if (s.invalidFixtures?.length) renderInvalidFixtures(out, s);
 }
 
-if (process.argv[1] && process.argv[1].endsWith('run.mjs')) {
-  main(process.argv).catch(err => { process.stderr.write(String(err?.stack || err) + '\n'); process.exit(1); });
+function renderInvalidFixtures(out, s) {
+  out.push('### Invalid fixtures (never evaluated, never executed; the run is INVALID because of them)', '');
+  for (const f of s.invalidFixtures) out.push(`- ${f.id}: ${f.reasons.join(', ')}`);
+  out.push('');
+}
+
+const invokedDirectly = (() => {
+  try { return process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
+})();
+if (invokedDirectly) {
+  runCli(process.argv)
+    .then(({ code }) => process.exit(code))
+    .catch(err => { process.stderr.write(String(err?.stack || err) + '\n'); process.exit(1); });
 }

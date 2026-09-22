@@ -29,7 +29,7 @@ import { snapshot, diff, changed, fingerprint, confinedPath, assertConfined, Con
 // @ts-expect-error — plain ESM, no types
 import { CORPUS, ATTACKS, LEGIT, CONTROLS, SELFTESTS, FIXTURE_REGISTRY, validateFixture, assertRegisteredFixture, canonicalFixture } from '../../scripts/guard-effect-fixtures/corpus.mjs';
 // @ts-expect-error — plain ESM, no types
-import { tallyPolicies, finaliseRun, renderMarkdown, sandboxExecutor, runSelftests, makeCanary, checkCanary, cleanupCanary } from '../../scripts/guard-effect-fixtures/run.mjs';
+import { tallyPolicies, finaliseRun, renderMarkdown, sandboxExecutor, runSelftests, makeCanary, checkCanary, cleanupCanary, runCli, controlOutcome } from '../../scripts/guard-effect-fixtures/run.mjs';
 // @ts-expect-error — plain ESM, no types
 import { stubEvaluatorAdapter } from '../../scripts/guard-effect-fixtures/adapter.mjs';
 
@@ -320,8 +320,8 @@ describe('ADR-002 Half B — per-policy tally keeps measurement kinds separate (
   const pick = Object.keys(verdicts);
   const rows = CORPUS.filter((f: any) => pick.includes(f.id)).map((fx: any) => ({
     fx, verdict: stub.evaluate(fx.command, fx.files, fx.id),
-    // pretend both executable attacks achieved their goal under the no-guard run
-    obs: fx.exec === 'sandbox' ? { effectAchieved: fx.kind === 'attack', completed: fx.kind === 'legit' && false, invalid: false } : null,
+    // pretend both executable attacks achieved their goal under the no-guard run (a RAN observation)
+    obs: fx.exec === 'sandbox' ? { ran: true, effectAchieved: fx.kind === 'attack', completed: fx.kind === 'legit' && false, invalid: false } : null,
     witnessUnproven: false,
   }));
 
@@ -330,7 +330,7 @@ describe('ADR-002 Half B — per-policy tally keeps measurement kinds separate (
     const cur = s.policies.find((p: any) => p.id === 'current-tiers')!;
     expect(cur.modelled.attackTotal).toBe(1);
     expect(cur.executedWitness.attackTotal).toBe(s.counts.validExecutableAttacks);
-    expect(Object.keys(cur)).toEqual(['id', 'label', 'executedWitness', 'modelled']);
+    expect(Object.keys(cur)).toEqual(['id', 'label', 'gateDecisions', 'executedWitness', 'modelled']);
   });
 
   it('a benign-classified executable attack is a MISS on every policy (effect achieved)', () => {
