@@ -326,6 +326,69 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash("cat > ~/.openclaw/openclaw.json <<'EOF'\n{}\nEOF")).toBe('security-config');
   });
 
+  // #552 review, round 3: the mapper fails closed — an unknown verb given the
+  // file is a write until proven otherwise; only proven reads and mentions
+  // take nothing.
+  it('ordinary write shapes the verb table did not know take the lease (fail closed)', () => {
+    expect(bash('curl -s https://x/ -o ~/.claude/settings.json')).toBe('security-config');
+    expect(bash('wget https://x/ -O ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash("awk -i inplace '{print}' ~/.claude/settings.json")).toBe('security-config');
+    expect(bash('patch ~/.claude/settings.json < /tmp/p.diff')).toBe('security-config');
+    expect(bash('git checkout -- ~/.claude/settings.json')).toBe('security-config');
+    expect(bash('git restore ~/.claude/settings.json')).toBe('security-config');
+    expect(bash("yq -i '.a=1' ~/.openclaw/openclaw.json")).toBe('security-config');
+    expect(bash('npx json -I -f ~/.openclaw/openclaw.json -e "this.a=1"')).toBe('security-config');
+    expect(bash('some-new-tool ~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash('git diff --no-index --output=$HOME/.openclaw/openclaw.json /dev/null /dev/null')).toBe('security-config');
+  });
+
+  it('compound statements, wrappers with option arguments, and xargs are seen through', () => {
+    expect(bash('if true; then touch ~/.openclaw/openclaw.json; fi')).toBe('security-config');
+    expect(bash('while :; do rm -f ~/.claude/settings.json; break; done')).toBe('security-config');
+    expect(bash('env -u UNUSED_VAR touch ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash("sudo -u root sed -i 's/a/b/' ~/.claude/settings.json")).toBe('security-config');
+    expect(bash('sudo -u root tee ~/.claude/settings.json')).toBe('security-config');
+    expect(bash('nice -n 10 rm ~/.claude/settings.json')).toBe('security-config');
+    expect(bash('timeout 5 tee ~/.claude/settings.json < /tmp/x')).toBe('security-config');
+    expect(bash("echo ~/.claude/settings.json | xargs -I{} sh -c 'echo x > {}'")).toBe('security-config');
+    expect(bash('echo ~/.claude/settings.json | xargs rm -f')).toBe('security-config');
+    expect(bash('echo ~/.claude/settings.json | xargs cat')).toBeNull();
+    // the wrapped command is still read as itself
+    expect(bash('sudo -u root cat ~/.claude/settings.json')).toBeNull();
+  });
+
+  it('indirection and substitution fail closed', () => {
+    expect(bash('T=~/.claude/settings.json; echo x > "$T"')).toBe('security-config');
+    expect(bash('echo x > `echo ~/.claude/settings.json`')).toBe('security-config');
+    expect(bash('echo x > $(echo ~/.claude/settings.json)')).toBe('security-config');
+  });
+
+  it('a multi-line quoted program is one statement handed to its interpreter', () => {
+    expect(bash("python3 -c '\nopen(\"/home/op/.openclaw/openclaw.json\",\"w\").write(\"changed\")\n'")).toBe('security-config');
+  });
+
+  it('a `<<` inside quotes, a comment or arithmetic opens no heredoc — later lines are still judged', () => {
+    expect(bash('echo "docs for << EOF"\ntee ~/.claude/settings.json < /tmp/x')).toBe('security-config');
+    expect(bash("echo '<<EOF'\nprintf changed > ~/.openclaw/openclaw.json")).toBe('security-config');
+    expect(bash('N=$((1 << WIDTH))\ntee ~/.claude/settings.json < /tmp/x')).toBe('security-config');
+    expect(bash('# note: << EOF\ntee ~/.claude/settings.json < /tmp/x')).toBe('security-config');
+    expect(bash('# note: << EOF\ncat ~/.claude/settings.json')).toBeNull();
+  });
+
+  it('proven reads and mentions still take nothing', () => {
+    expect(bash('dd if=~/.claude/settings.json of=/tmp/x')).toBeNull();
+    expect(bash('dd if=/tmp/x of=~/.claude/settings.json')).toBe('security-config');
+    expect(bash('tar czf /tmp/b.tgz ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('tar cf ~/.openclaw/openclaw.json /tmp/dir')).toBe('security-config');
+    expect(bash('tar xzf /tmp/b.tgz ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash("awk '{print}' ~/.claude/settings.json")).toBeNull();
+    expect(bash('git show HEAD:~/.claude/settings.json')).toBeNull();
+    expect(bash('git add ~/.claude/settings.json && git commit -m x')).toBeNull();
+    expect(bash('sha256sum ~/.shieldcortex/config.json')).toBeNull();
+    expect(bash('echo "see ~/.shieldcortex/config.json for details" # then edit ~/.claude/settings.json')).toBeNull();
+    expect(bash('cat ~/.openclaw/openclaw.json # rm ~/.openclaw/openclaw.json')).toBeNull();
+  });
+
   it('file-edit tools are judged on their target path exactly as before', () => {
     expect(scopeForToolCall('Edit', { file_path: '/Users/op/.shieldcortex/config.json' })).toBe('security-config');
     expect(scopeForToolCall('Write', { file_path: '/Users/op/.claude/settings.json' })).toBe('security-config');

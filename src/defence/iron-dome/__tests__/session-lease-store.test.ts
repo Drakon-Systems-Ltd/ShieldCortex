@@ -9,6 +9,7 @@ import {
   evaluateToolCallLease,
   isHolderPidAlive,
   isSpawningRuntimePid,
+  CALL_BINDING_WINDOW_MS,
 } from '../session-lease-store.js';
 
 /**
@@ -286,6 +287,30 @@ describe('#550 — cross-plane re-entry through the spawning runtime', () => {
     const other = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'other-openclaw-session', dir, nowMs: NOW + 800 });
     expect(other?.decision.verdict).toBe('held');
     expect(readFileSync(leasesPath(), 'utf-8')).toBe(before);
+  });
+
+  it('#552: the same parent gating a DIFFERENT call does not admit a sibling session\'s hook', () => {
+    // Gateway plane gated session A's write and holds the record (pid = our parent).
+    const gw = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'openclaw-session-A', dir, nowMs: NOW });
+    expect(gw?.acquired).toBe(true);
+    setPid('security-config', process.ppid);
+    const before = readFileSync(leasesPath(), 'utf-8');
+    // Session B's hook, same gateway parent, a different call: held, nothing written.
+    const b = evaluateToolCallLease('Bash', { command: 'echo y > ~/.claude/settings.json' }, { self: 'sc-session-B-hash', dir, nowMs: NOW + 400, spawnedRuntimeReentry: true });
+    expect(b?.decision.verdict).toBe('held');
+    expect(b?.decision.reason).toContain('held by another session');
+    expect(readFileSync(leasesPath(), 'utf-8')).toBe(before);
+    // The same call, but outside the binding window: the record was taken for
+    // some earlier call, not this one — held.
+    const late = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'sc-session-B-hash', dir, nowMs: NOW + CALL_BINDING_WINDOW_MS + 1, spawnedRuntimeReentry: true });
+    expect(late?.decision.verdict).toBe('held');
+    expect(readFileSync(leasesPath(), 'utf-8')).toBe(before);
+    // A record with no call key at all (an older writer) never re-enters.
+    const file = JSON.parse(readFileSync(leasesPath(), 'utf-8')) as { leases: Record<string, Record<string, unknown>> };
+    delete file.leases['security-config']!.gatedCall;
+    writeFileSync(leasesPath(), JSON.stringify(file, null, 2));
+    const nokey = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'sc-session-B-hash', dir, nowMs: NOW + 400, spawnedRuntimeReentry: true });
+    expect(nokey?.decision.verdict).toBe('held');
   });
 
   it('a live holder that did not spawn this process still binds, and the refusal leaves the record byte-identical', () => {

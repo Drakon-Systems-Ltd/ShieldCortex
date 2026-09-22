@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -175,16 +176,22 @@ describe('#550 — the hook re-enters a lease held by the runtime that spawned i
   // id and acquired the record; the hook is then spawned by THIS process, so
   // this process stands in for the gateway (parent of the hook).
   const leasesFile = () => join(home, '.shieldcortex', 'leases', 'leases.json');
-  const seedGatewayLease = (pid: number) => {
+  const writeShape = () => ({ command: `echo x > ${join(home, '.openclaw', 'openclaw.json')}` });
+  // #552: the record is bound to the CALL the gateway gated — the same key the
+  // store computes (scope + call surface), stamped moments ago.
+  const callKeyFor = (command: string) => createHash('sha256').update(`security-config\u0000cmd:${command}`, 'utf-8').digest('hex');
+  const seedGatewayLease = (pid: number, gatedFor: string = writeShape().command) => {
     mkdirSync(join(home, '.shieldcortex', 'leases'), { recursive: true });
     const now = Date.now();
     writeFileSync(leasesFile(), JSON.stringify({
       leases: {
-        'security-config': { holder: 'openclaw-session-uuid', pid, acquiredAtMs: now, expiresAtMs: now + 600_000, token: 'gw' },
+        'security-config': {
+          holder: 'openclaw-session-uuid', pid, acquiredAtMs: now, expiresAtMs: now + 600_000, token: 'gw',
+          gatedCall: { key: callKeyFor(gatedFor), atMs: now },
+        },
       },
     }, null, 2));
   };
-  const writeShape = () => ({ command: `echo x > ${join(home, '.openclaw', 'openclaw.json')}` });
 
   it('held by the hook\'s parent under another identity → no lease refusal, record untouched', async () => {
     seedGatewayLease(process.pid);
@@ -199,6 +206,16 @@ describe('#550 — the hook re-enters a lease held by the runtime that spawned i
 
   it('held by a live process that did not spawn the hook → still refused, record untouched', async () => {
     seedGatewayLease(1);
+    const before = readFileSync(leasesFile(), 'utf-8');
+    const run = await runHook(home, 'Bash', writeShape());
+    const decision = decisionOf(run);
+    expect(decision.permissionDecision).toBe('deny');
+    expect(decision.permissionDecisionReason ?? '').toContain('held by another session');
+    expect(JSON.parse(readFileSync(leasesFile(), 'utf-8')).leases).toEqual(JSON.parse(before).leases);
+  });
+
+  it('#552: held by the hook\'s parent but gated for ANOTHER call → refused, record untouched', async () => {
+    seedGatewayLease(process.pid, `echo y > ${join(home, '.claude', 'settings.json')}`);
     const before = readFileSync(leasesFile(), 'utf-8');
     const run = await runHook(home, 'Bash', writeShape());
     const decision = decisionOf(run);

@@ -48,6 +48,7 @@ import path from 'path';
 
 import {
   checkSessionLease,
+  leaseCallSurface,
   scopeForToolCall,
   DEFAULT_LEASE_TTL_MS,
   type LeaseDecision,
@@ -245,6 +246,8 @@ export interface AcquireInput {
   nowMs?: number;
   ttlMs?: number;
   reason?: string;
+  /** Key of the call this acquisition gates (#552); stamped on the record. */
+  callKey?: string;
 }
 
 export interface AcquireResult {
@@ -278,6 +281,7 @@ export function acquireOrRefreshLease(input: AcquireInput): AcquireResult {
       acquiredAtMs: current?.holder === input.self ? (current.acquiredAtMs ?? nowMs) : nowMs,
       expiresAtMs: nowMs + ttlMs,
       token,
+      ...(input.callKey ? { gatedCall: { key: input.callKey, atMs: nowMs } } : {}),
     };
     file.leases[input.scope] = record;
     writeLeaseFile(dir, file);
@@ -363,6 +367,23 @@ function sha256(text: string): string {
 }
 
 /**
+ * How long after the spawning runtime gated a call its record still counts
+ * as "taken for this call" (#552). The gateway gates the call and the child
+ * runs it within seconds; a record older than this was taken for some other
+ * call and a hook must not ride on it.
+ */
+export const CALL_BINDING_WINDOW_MS = 60_000;
+
+/** The key a record is bound to: scope + call surface. Same on both planes. */
+export function leaseCallKey(
+  scope: LeaseScope,
+  toolName: string,
+  args: Record<string, unknown> | null | undefined,
+): string {
+  return sha256(`${scope}\u0000${leaseCallSurface(toolName, args)}`);
+}
+
+/**
  * The one function both enforcement planes call, AFTER the guard verdict and
  * BEFORE any approval affordance (a freeze that can be one-click-approved
  * around is not a freeze).
@@ -409,30 +430,44 @@ export function evaluateToolCallLease(
       // Evidence recording must never affect the decision.
     }
 
-    const held = liveRecord(readLeaseFile(dir).leases[scope] as StoredLease | undefined, nowMs);
-    const holderAlive = held ? isHolderPidAlive(held.pid) : undefined;
-    // #550: only for a plane that opted in (the Claude Code hook), and only
-    // about a live FOREIGN holder — the process walk is never on the fast
-    // path, and a record this identity wrote re-enters by name.
-    const holderSpawnedSelf =
-      opts.spawnedRuntimeReentry === true && held && held.holder !== self && holderAlive !== false
-        ? isSpawningRuntimePid(held.pid)
+    const callKey = leaseCallKey(scope, toolName, args);
+    // #550/#552: only for a plane that opted in (the Claude Code hook), and
+    // only about a live FOREIGN holder — the process walk is never on the
+    // fast path, and a record this identity wrote re-enters by name. Two
+    // facts are injected and both must hold: the holder spawned this harness,
+    // and its record was stamped for this very call moments ago.
+    const reentryFacts = (rec: StoredLease | null) => {
+      const holderAlive = rec ? isHolderPidAlive(rec.pid) : undefined;
+      const foreignLive = opts.spawnedRuntimeReentry === true && rec != null && rec.holder !== self && holderAlive !== false;
+      const holderSpawnedSelf = foreignLive ? isSpawningRuntimePid(rec.pid) : undefined;
+      const gated = rec?.gatedCall;
+      const holderGatedThisCall = foreignLive
+        ? gated != null && gated.key === callKey && typeof gated.atMs === 'number' && nowMs - gated.atMs >= 0 && nowMs - gated.atMs <= CALL_BINDING_WINDOW_MS
         : undefined;
-    const decision = checkSessionLease({ scope, ledger, held, self, nowMs, holderAlive, holderSpawnedSelf });
+      return { holderAlive, holderSpawnedSelf, holderGatedThisCall };
+    };
+    const reentersThrough = (rec: StoredLease | null, facts: ReturnType<typeof reentryFacts>) =>
+      rec != null && rec.holder !== self && facts.holderSpawnedSelf === true && facts.holderGatedThisCall === true;
+
+    const held = liveRecord(readLeaseFile(dir).leases[scope] as StoredLease | undefined, nowMs);
+    const facts = reentryFacts(held);
+    const decision = checkSessionLease({ scope, ledger, held, self, nowMs, ...facts });
 
     if (decision.verdict === 'allow') {
-      if (held && held.holder !== self && holderSpawnedSelf === true) {
+      if (reentersThrough(held, facts)) {
         // Re-entry through the spawning runtime's record: that runtime owns
         // the lease and releases it. Writing nothing keeps the record
         // byte-identical — a second plane must not refresh, re-stamp or
         // take over a hold it did not mint.
         return { scope, decision, acquired: false, ledgerChanged };
       }
-      const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs });
+      const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs, callKey });
       if (!acquired.acquired && acquired.record && acquired.record.holder !== self) {
-        // Lost a race between check and acquire — re-decide with the winner.
-        const raced = checkSessionLease({ scope, ledger, held: acquired.record, self, nowMs });
-        return { scope, decision: raced, ledgerChanged };
+        // Lost a race between check and acquire — re-decide with the winner,
+        // with the same facts asked of the winner's record.
+        const winnerFacts = reentryFacts(acquired.record);
+        const raced = checkSessionLease({ scope, ledger, held: acquired.record, self, nowMs, ...winnerFacts });
+        return { scope, decision: raced, acquired: false, ledgerChanged };
       }
       return { scope, decision, acquired: acquired.acquired, ledgerChanged };
     }
