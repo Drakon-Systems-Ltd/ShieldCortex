@@ -385,6 +385,27 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash('xxd ~/.claude/settings.json /tmp/out.hex')).toBeNull();
   });
 
+  it('a command substitution executes, inside double quotes and an unquoted heredoc too (#552 r3)', () => {
+    expect(bash('echo "$(printf x > ~/.openclaw/openclaw.json)"')).toBe('security-config');
+    expect(bash('V="$(tee ~/.claude/settings.json < /tmp/p)"; echo "$V"')).toBe('security-config');
+    expect(bash('echo "`printf x > ~/.openclaw/openclaw.json`"')).toBe('security-config');
+    expect(bash('echo "$(echo "$(printf x > ~/.openclaw/openclaw.json)")"')).toBe('security-config');
+    expect(bash("cat <<EOF\n$(printf x > ~/.openclaw/openclaw.json)\nEOF")).toBe('security-config');
+    // Single quotes and a quoted delimiter keep the text literal.
+    expect(bash("echo '$(printf x > ~/.openclaw/openclaw.json)'")).toBeNull();
+    expect(bash("cat <<'EOF'\n$(printf x > ~/.openclaw/openclaw.json)\nEOF")).toBeNull();
+    // A substitution that only reads the file is a read.
+    expect(bash('echo "$(cat ~/.openclaw/openclaw.json)"')).toBeNull();
+    expect(bash('N=$((1 << 2)); cat ~/.openclaw/openclaw.json')).toBeNull();
+  });
+
+  it('a lone `-` is stdin, an operand; grep -o is only-matching (#552 r3)', () => {
+    expect(bash('xxd -r - ~/.claude/settings.json < /tmp/in.hex')).toBe('security-config');
+    expect(bash('uniq - ~/.openclaw/openclaw.json < /tmp/in')).toBe('security-config');
+    expect(bash('grep -o ~/.openclaw/openclaw.json /tmp/in')).toBeNull();
+    expect(bash('grep -o pattern ~/.openclaw/openclaw.json')).toBeNull();
+  });
+
   it('a `|` written inside a heredoc body is text, not a pipe — the body is never split into stages', () => {
     // #552 round 2 finding 3: pipeline splitting read the inert body and made a
     // `tee <file>` stage out of it. The body rides on the stage that opened it.

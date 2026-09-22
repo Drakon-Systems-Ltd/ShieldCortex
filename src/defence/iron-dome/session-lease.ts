@@ -319,6 +319,8 @@ const MUTATE_ANY_OPERAND_VERBS = new Set([
 ]);
 /** Verbs whose LAST operand is the destination. A protected SOURCE is a read. */
 const COPY_TO_LAST_OPERAND_VERBS = new Set(['cp', 'install', 'ln', 'rsync', 'scp']);
+/** grep and friends: `-o` means only-matching, never an output file. */
+const GREP_FAMILY_VERBS = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack']);
 /** Filters whose optional SECOND operand is an output file (`uniq in out`, `xxd -r in out`). */
 const SECOND_OPERAND_OUTPUT_VERBS = new Set(['uniq', 'xxd']);
 /**
@@ -431,7 +433,7 @@ const HEREDOC_TAG_RE = /^<<-?\s*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][\w-]*))/;
  * arithmetic: `echo '<<EOF'`, `# note: << EOF` and `$((1 << WIDTH))` open
  * nothing — a phantom heredoc would swallow every following line as data.
  */
-function findHeredocTag(line: string): string | null {
+function findHeredocTag(line: string): { tag: string; quoted: boolean } | null {
   let quote: string | null = null;
   let arith = 0;
   for (let i = 0; i < line.length; i++) {
@@ -464,7 +466,7 @@ function findHeredocTag(line: string): string | null {
     }
     if (arith === 0 && c === '<' && line[i + 1] === '<' && line[i + 2] !== '<' && (i === 0 || line[i - 1] !== '<')) {
       const m = HEREDOC_TAG_RE.exec(line.slice(i));
-      if (m) return (m[1] ?? m[2] ?? m[3])!;
+      if (m) return { tag: (m[1] ?? m[2] ?? m[3])!, quoted: m[3] == null };
     }
   }
   return null;
@@ -519,6 +521,60 @@ function splitLineOnSeparators(line: string): string[] {
 }
 
 /**
+ * The bodies of every `$( … )` and backtick substitution on the surface —
+ * they EXECUTE, inside double quotes too (`echo "$(printf x > <file>)"`);
+ * only single quotes keep them as text. `$(( … ))` is arithmetic and holds
+ * no command. Nested substitutions are found when the body is judged.
+ */
+function commandSubstitutionBodies(text: string): string[] {
+  const out: string[] = [];
+  let single = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (single) {
+      if (c === "'") single = false;
+      continue;
+    }
+    if (c === "'") {
+      single = true;
+      continue;
+    }
+    if (c === '$' && text[i + 1] === '(' && text[i + 2] !== '(') {
+      let depth = 1;
+      let j = i + 2;
+      let q: string | null = null;
+      for (; j < text.length && depth > 0; j++) {
+        const d = text[j]!;
+        if (d === '\\') {
+          j++;
+          continue;
+        }
+        if (q) {
+          if (d === q) q = null;
+          continue;
+        }
+        if (d === "'" || d === '"') q = d;
+        else if (d === '(') depth++;
+        else if (d === ')') depth--;
+      }
+      out.push(text.slice(i + 2, depth === 0 ? j - 1 : j));
+      i = j - 1;
+      continue;
+    }
+    if (c === '`') {
+      const end = text.indexOf('`', i + 1);
+      out.push(text.slice(i + 1, end < 0 ? text.length : end));
+      i = end < 0 ? text.length : end;
+    }
+  }
+  return out.filter((b) => b.trim());
+}
+
+/**
  * Split a command into statements. A newline inside quotes continues the
  * statement (`python3 -c '⏎…⏎'` is one program); a comment is dropped; a
  * heredoc BODY stays attached to the stage that opened it (`cat > /tmp/x
@@ -538,12 +594,17 @@ function splitStatementsHeredocAware(command: string): string[] {
       logical += `\n${lines[j]!}`;
     }
     const code = stripComment(logical);
-    const tag = findHeredocTag(code);
-    if (tag == null) {
+    // A substitution on the line executes whatever it holds: judge its body
+    // as statements of its own (recursively — it may open heredocs and
+    // substitutions of its own).
+    for (const body of commandSubstitutionBodies(code)) out.push(...splitStatementsHeredocAware(body));
+    const opened = findHeredocTag(code);
+    if (opened == null) {
       out.push(...splitLineOnSeparators(code));
       i = j + 1;
       continue;
     }
+    const tag = opened.tag;
     const body: string[] = [];
     let k = j + 1;
     let trailer = '';
@@ -565,6 +626,11 @@ function splitStatementsHeredocAware(command: string): string[] {
     const opener = Math.max(0, segments.findIndex((s) => findHeredocTag(s) != null));
     if (segments.length > 0) segments[opener] = `${segments[opener]!}\u0000${body.join(' ')}`;
     out.push(...segments);
+    // An UNQUOTED delimiter expands the body: a `$( … )` written in it runs.
+    // A quoted delimiter (`<<'EOF'`) keeps the body literal.
+    if (!opened.quoted) {
+      for (const sub of commandSubstitutionBodies(body.join('\n'))) out.push(...splitStatementsHeredocAware(sub));
+    }
     if (trailer.trim()) out.push(...splitLineOnSeparators(stripComment(trailer)));
     i = k + 1;
   }
@@ -758,7 +824,8 @@ function stageWritesProtectedFile(stage: string, pipedNamesFile: boolean): boole
   const rest = toks.slice(k + 1);
   // Flags are read with their quotes off: `sed "-i"` is `sed -i` to sed.
   const flags = rest.map(unquote);
-  const operands = rest.filter((t) => !unquote(t).startsWith('-'));
+  // A lone `-` is stdin, an operand: `xxd -r - <file>` writes its second.
+  const operands = rest.filter((t) => unquote(t) === '-' || !unquote(t).startsWith('-'));
   /** The file anywhere on the stage, quoted or not, header or body. */
   const namesFile = SECURITY_CONFIG_FILE_ANY_RE.test(stage.replace(/\u0000/g, ' '));
   /** An operand or option value that IS the file, quotes off. */
@@ -768,6 +835,8 @@ function stageWritesProtectedFile(stage: string, pipedNamesFile: boolean): boole
   for (let i = 0; i < rest.length; i++) {
     const m = OUTPUT_OPTION_RE.exec(flags[i]!);
     if (!m) continue;
+    // grep's `-o` is only-matching; the next token is the pattern.
+    if (flags[i] === '-o' && GREP_FAMILY_VERBS.has(verb)) continue;
     const target = m[1] ?? rest[i + 1] ?? '';
     if (target && isProtectedTarget(target)) return true;
   }
