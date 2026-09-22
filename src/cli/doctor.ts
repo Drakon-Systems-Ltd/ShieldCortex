@@ -3009,10 +3009,10 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       // Denial-capable sink for unattended/DNP path = enabled notify + webhook URL.
       const denialSink = notifyOn && webhook.length > 0;
       const signedArmed = effective.enabled && effective.enforce;
-      // FAIL only when a live enforcing plane claims a sink. Signed Enforce
-      // leftover against an explicit plugin-off is the Jarvis 5.0.1 1-fail:
-      // not lying, not a missing webhook. Missing plugin config cannot prove
-      // the plugin is off — that still FAILs.
+      // "Armed" = signed enabled + enforce AND the plugin plane is not visibly
+      // disarmed. Signed Enforce leftover against an explicit plugin-off is
+      // the Jarvis 5.0.1 1-fail: not a live gate, so not armed. Missing plugin
+      // config cannot prove the plugin is off — that still counts as armed.
       const armed = signedArmed && !pluginOff;
       if (!denialSink) {
         const openclawOnly = notifyOn && openclaw && !webhook;
@@ -3025,9 +3025,11 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         //   notify.enabled + openclaw, no webhook  → clawdbot1, 0 of 312
         //   notify.enabled alone,      no webhook  → tars,      0 of 89
         // The shape that stayed WARN — enforcing, no notify stanza at all —
-        // delivered exactly the same zero (#555: 837 of 837 notifications
-        // reached nobody), and exit 0 let it pass every fleet gate. The
-        // operator reading this row is deciding whether the host is safe;
+        // delivered exactly the same zero: #555 records `notify:
+        // not_configured` on 837 of 837 events (638 advisory warnings, 199
+        // enforced), which describes the notification channel only, and the
+        // row exited 0. The operator reading this row is deciding whether
+        // the host is safe;
         // "enforcing, and nobody will hear a denial" is a failure whether or
         // not the config also lies about it. The line is now armed-vs-not.
         //
