@@ -189,3 +189,29 @@ describe('checkSessionLease — fails closed', () => {
     expect(d.verdict).toBe('allow');
   });
 });
+
+describe('#550 — re-entry through the runtime that spawned this harness', () => {
+  const held = { holder: 'openclaw-session-uuid', pid: 4242, acquiredAtMs: NOW - 1000, expiresAtMs: NOW + 60_000 };
+
+  it('a live foreign record held by the spawning runtime re-enters', () => {
+    const d = checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true });
+    expect(d.verdict).toBe('allow');
+    expect(d.reason).toContain('spawned this session');
+    expect(d.reason).toContain('4242');
+  });
+
+  it('omitted or false is the old answer: held', () => {
+    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW }).verdict).toBe('held');
+    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: false }).verdict).toBe('held');
+  });
+
+  it('a record without a pid never re-enters this way — no skeleton key through emptiness', () => {
+    const noPid = { ...held, pid: null };
+    expect(checkSessionLease({ scope: 'security-config', ledger: '', held: noPid, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true }).verdict).toBe('held');
+  });
+
+  it('a freeze still outranks the spawning runtime', () => {
+    const d = checkSessionLease({ scope: 'security-config', ledger: '| FROZEN | security component edits |', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true });
+    expect(d.verdict).toBe('frozen');
+  });
+});

@@ -40,6 +40,7 @@
  * a separate append-only/owner-only sink would be stronger and is future work.
  */
 
+import { execFileSync } from 'child_process';
 import { createHash, randomBytes } from 'crypto';
 import fs from 'fs';
 import os from 'os';
@@ -180,6 +181,63 @@ export function isHolderPidAlive(
   return true;
 }
 
+/**
+ * Parent pid of `pid`, or null when it cannot be read. Linux reads
+ * `/proc/<pid>/status`; elsewhere `ps -o ppid=` (only reached on the rare
+ * path where a live foreign holder exists, never on the unscoped fast path).
+ */
+export type PpidRead = (pid: number) => number | null;
+
+function defaultReadPpid(pid: number): number | null {
+  try {
+    const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+    const m = /^PPid:\s*(\d+)/m.exec(status);
+    if (m) return Number(m[1]);
+  } catch {
+    /* no procfs (macOS) or the process is gone — fall through */
+  }
+  try {
+    const out = execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 500,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return /^\d+$/.test(out) ? Number(out) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #550: is `pid` the runtime process that SPAWNED this harness — the parent
+ * of this process, or the grandparent through exactly one intermediate
+ * (OpenClaw gateway → claude → PreToolUse hook)?
+ *
+ * Depth is deliberately capped at two. A nested harness started from a Bash
+ * tool (`claude -p …`) sits at depth three or more from the gateway, and a
+ * `bash -c 'exec claude …'` at depth three: neither may inherit a lease the
+ * gateway holds for a DIFFERENT session, because the gateway never gated
+ * the nested harness's own tool calls. Orphans re-parent to init/systemd,
+ * not to the gateway, so re-parenting cannot manufacture the relationship.
+ *
+ * Never true for pid ≤ 1, for this process itself, or when the chain cannot
+ * be read — "cannot know" fails closed to "not the spawner".
+ */
+export function isSpawningRuntimePid(
+  pid: number | null | undefined,
+  selfPid: number = process.pid,
+  readPpid: PpidRead = defaultReadPpid,
+): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 1 || pid === selfPid) return false;
+  let cursor: number | null = selfPid;
+  for (let depth = 0; depth < 2; depth++) {
+    cursor = readPpid(cursor);
+    if (cursor == null || cursor <= 1) return false;
+    if (cursor === pid) return true;
+  }
+  return false;
+}
+
 export interface AcquireInput {
   dir?: string;
   scope: LeaseScope;
@@ -286,6 +344,18 @@ export interface LeaseGateOptions {
   dir?: string;
   nowMs?: number;
   ttlMs?: number;
+  /**
+   * #550: this plane runs INSIDE a harness that a host runtime spawned and
+   * whose tool calls that runtime already gates under its own identity (the
+   * Claude Code PreToolUse hook under an OpenClaw gateway). A live lease held
+   * by that runtime — this process's parent or grandparent — is then this
+   * call's own lease under another name and re-enters without acquiring.
+   *
+   * Opt-in, off by default: the OpenClaw interceptor, `evaluateAction` and
+   * any host adapter keep strict identity matching, so a program that merely
+   * runs as a grandchild of a gateway cannot inherit its sessions' leases.
+   */
+  spawnedRuntimeReentry?: boolean;
 }
 
 function sha256(text: string): string {
@@ -341,9 +411,23 @@ export function evaluateToolCallLease(
 
     const held = liveRecord(readLeaseFile(dir).leases[scope] as StoredLease | undefined, nowMs);
     const holderAlive = held ? isHolderPidAlive(held.pid) : undefined;
-    const decision = checkSessionLease({ scope, ledger, held, self, nowMs, holderAlive });
+    // #550: only for a plane that opted in (the Claude Code hook), and only
+    // about a live FOREIGN holder — the process walk is never on the fast
+    // path, and a record this identity wrote re-enters by name.
+    const holderSpawnedSelf =
+      opts.spawnedRuntimeReentry === true && held && held.holder !== self && holderAlive !== false
+        ? isSpawningRuntimePid(held.pid)
+        : undefined;
+    const decision = checkSessionLease({ scope, ledger, held, self, nowMs, holderAlive, holderSpawnedSelf });
 
     if (decision.verdict === 'allow') {
+      if (held && held.holder !== self && holderSpawnedSelf === true) {
+        // Re-entry through the spawning runtime's record: that runtime owns
+        // the lease and releases it. Writing nothing keeps the record
+        // byte-identical — a second plane must not refresh, re-stamp or
+        // take over a hold it did not mint.
+        return { scope, decision, acquired: false, ledgerChanged };
+      }
       const acquired = acquireOrRefreshLease({ dir, scope, self, nowMs, ttlMs: opts.ttlMs });
       if (!acquired.acquired && acquired.record && acquired.record.holder !== self) {
         // Lost a race between check and acquire — re-decide with the winner.

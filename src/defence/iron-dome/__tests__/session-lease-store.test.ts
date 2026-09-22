@@ -8,6 +8,7 @@ import {
   releaseLease,
   evaluateToolCallLease,
   isHolderPidAlive,
+  isSpawningRuntimePid,
 } from '../session-lease-store.js';
 
 /**
@@ -232,5 +233,77 @@ describe('evaluateToolCallLease — the single entry point both planes call', ()
     expect(r?.decision.verdict).toBe('allow');
     const rec = acquireOrRefreshLease({ dir, scope: 'install', self: 'probe', nowMs: NOW + 1 });
     expect(rec.record?.holder).not.toBe('');
+  });
+});
+
+describe('#550 — cross-plane re-entry through the spawning runtime', () => {
+  const leasesPath = () => join(dir, 'leases', 'leases.json');
+  const setPid = (scope: string, pid: number) => {
+    const file = JSON.parse(readFileSync(leasesPath(), 'utf-8')) as { leases: Record<string, { pid: number }> };
+    file.leases[scope]!.pid = pid;
+    writeFileSync(leasesPath(), JSON.stringify(file, null, 2));
+  };
+  const WRITE = 'echo x > ~/.openclaw/openclaw.json';
+
+  it('isSpawningRuntimePid: parent or grandparent only; never self, init, depth three or unreadable', () => {
+    // hook 500 ← claude 400 ← gateway 300 ← systemd 200 ← init 1
+    const chain: Record<number, number> = { 500: 400, 400: 300, 300: 200, 200: 1 };
+    const read = (p: number) => chain[p] ?? null;
+    expect(isSpawningRuntimePid(400, 500, read)).toBe(true);
+    expect(isSpawningRuntimePid(300, 500, read)).toBe(true);
+    // depth three: a nested `claude -p` under a Bash tool must not inherit a peer's lease
+    expect(isSpawningRuntimePid(200, 500, read)).toBe(false);
+    expect(isSpawningRuntimePid(500, 500, read)).toBe(false);
+    expect(isSpawningRuntimePid(1, 500, read)).toBe(false);
+    expect(isSpawningRuntimePid(0, 500, read)).toBe(false);
+    expect(isSpawningRuntimePid(undefined, 500, read)).toBe(false);
+    expect(isSpawningRuntimePid(400, 500, () => null)).toBe(false);
+  });
+
+  it('the default reader walks the real process table on this host', () => {
+    expect(isSpawningRuntimePid(process.ppid)).toBe(true);
+    expect(isSpawningRuntimePid(process.pid)).toBe(false);
+  });
+
+  it('the hook plane re-enters a lease the gateway plane holds under the OpenClaw session id, writing nothing', () => {
+    // Gateway plane: the OpenClaw session id, allowed and acquired (pid = gateway).
+    const gw = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'openclaw-session-uuid', dir, nowMs: NOW });
+    expect(gw?.decision.verdict).toBe('allow');
+    expect(gw?.acquired).toBe(true);
+    // In this test the "gateway" is our parent process.
+    setPid('security-config', process.ppid);
+    const before = readFileSync(leasesPath(), 'utf-8');
+
+    // Hook plane: the same call, 400 ms later, under the hashed Claude session id.
+    const hook = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'sc-0123456789abcdef', dir, nowMs: NOW + 400, spawnedRuntimeReentry: true });
+    expect(hook?.decision.verdict).toBe('allow');
+    expect(hook?.acquired).toBe(false);
+    expect(hook?.decision.reason).toContain('openclaw-session-uuid');
+    expect(readFileSync(leasesPath(), 'utf-8')).toBe(before);
+
+    // A plane that did not opt in (the interceptor, evaluateAction, a host
+    // adapter) keeps the strict match even from the same process tree.
+    const other = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'other-openclaw-session', dir, nowMs: NOW + 800 });
+    expect(other?.decision.verdict).toBe('held');
+    expect(readFileSync(leasesPath(), 'utf-8')).toBe(before);
+  });
+
+  it('a live holder that did not spawn this process still binds, and the refusal leaves the record byte-identical', () => {
+    const first = evaluateToolCallLease('Bash', { command: 'npm install -g x' }, { self: 'session-a', dir, nowMs: NOW });
+    expect(first?.acquired).toBe(true);
+    // pid = this very process: alive, not our parent, not our grandparent.
+    setPid('install', process.pid);
+    const before = readFileSync(leasesPath(), 'utf-8');
+    const r = evaluateToolCallLease('Bash', { command: 'npm install -g y' }, { self: 'sc-0123456789abcdef', dir, nowMs: NOW + 1, spawnedRuntimeReentry: true });
+    expect(r?.decision.verdict).toBe('held');
+    expect(readFileSync(leasesPath(), 'utf-8')).toBe(before);
+  });
+
+  it('a dead spawning-runtime pid is reaped by #438 before re-entry is even asked', () => {
+    evaluateToolCallLease('Bash', { command: WRITE }, { self: 'openclaw-session-uuid', dir, nowMs: NOW });
+    setPid('security-config', unusedDeadPid());
+    const r = evaluateToolCallLease('Bash', { command: WRITE }, { self: 'sc-0123456789abcdef', dir, nowMs: NOW + 1, spawnedRuntimeReentry: true });
+    expect(r?.decision.verdict).toBe('allow');
+    expect(r?.acquired).toBe(true);
   });
 });

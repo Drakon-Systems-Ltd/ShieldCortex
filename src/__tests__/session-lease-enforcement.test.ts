@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,5 +167,50 @@ describe('#227 — the freeze binds DURING a guard outage (review MAJOR-1)', () 
     writeFileSync(join(home, '.shieldcortex', 'DECISIONS.md'), '| FROZEN | no publishes until review |\n');
     const run = await runHookWithDegradedGuard(home, 'npm publish');
     expect(decisionOf(run).permissionDecision).toBe('deny');
+  });
+});
+
+describe('#550 — the hook re-enters a lease held by the runtime that spawned it, on the wire', () => {
+  // The gateway plane has already gated this call under the OpenClaw session
+  // id and acquired the record; the hook is then spawned by THIS process, so
+  // this process stands in for the gateway (parent of the hook).
+  const leasesFile = () => join(home, '.shieldcortex', 'leases', 'leases.json');
+  const seedGatewayLease = (pid: number) => {
+    mkdirSync(join(home, '.shieldcortex', 'leases'), { recursive: true });
+    const now = Date.now();
+    writeFileSync(leasesFile(), JSON.stringify({
+      leases: {
+        'security-config': { holder: 'openclaw-session-uuid', pid, acquiredAtMs: now, expiresAtMs: now + 600_000, token: 'gw' },
+      },
+    }, null, 2));
+  };
+  const writeShape = () => ({ command: `echo x > ${join(home, '.openclaw', 'openclaw.json')}` });
+
+  it('held by the hook\'s parent under another identity → no lease refusal, record untouched', async () => {
+    seedGatewayLease(process.pid);
+    const before = JSON.parse(readFileSync(leasesFile(), 'utf-8')).leases;
+    const run = await runHook(home, 'Bash', writeShape());
+    const decision = decisionOf(run);
+    // The guard proper may still ask/deny a config write; the LEASE must not.
+    expect(decision.permissionDecisionReason ?? '').not.toContain('held by another session');
+    expect(run.stderr).not.toContain('SESSION-LEASE');
+    expect(JSON.parse(readFileSync(leasesFile(), 'utf-8')).leases).toEqual(before);
+  });
+
+  it('held by a live process that did not spawn the hook → still refused, record untouched', async () => {
+    seedGatewayLease(1);
+    const before = readFileSync(leasesFile(), 'utf-8');
+    const run = await runHook(home, 'Bash', writeShape());
+    const decision = decisionOf(run);
+    expect(decision.permissionDecision).toBe('deny');
+    expect(decision.permissionDecisionReason ?? '').toContain('held by another session');
+    expect(JSON.parse(readFileSync(leasesFile(), 'utf-8')).leases).toEqual(JSON.parse(before).leases);
+  });
+
+  it('a bare mention of the file is not a scoped call at all — the lease layer is never consulted', async () => {
+    seedGatewayLease(1);
+    const run = await runHook(home, 'Bash', { command: `git commit -m "gate ${join(home, '.openclaw', 'openclaw.json')} writes"` });
+    expect(decisionOf(run).permissionDecisionReason ?? '').not.toContain('held by another session');
+    expect(run.stderr).not.toContain('SESSION-LEASE');
   });
 });

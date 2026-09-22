@@ -187,3 +187,113 @@ describe('scopeForToolCall — evasions of its own stated coverage (review MAJOR
     expect(bash('npm i lodash')).toBeNull();
   });
 });
+
+describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a mention', () => {
+  const bash = (command: string) => scopeForToolCall('Bash', { command });
+
+  // The issue's acceptance pair, verbatim.
+  it('a commit message naming the file takes no lease; a redirect onto it does', () => {
+    expect(bash('git commit -m "gate ~/.openclaw/openclaw.json writes"')).toBeNull();
+    expect(bash('echo x > ~/.openclaw/openclaw.json')).toBe('security-config');
+  });
+
+  it('the refusals from the issue take no lease', () => {
+    // 1. a heredoc writing a throwaway probe whose string literals name the file
+    expect(bash([
+      "cat > /tmp/sc517/probe505.mjs <<'EOF'",
+      'const dist = process.argv[2];',
+      "const target = '~/.openclaw/openclaw.json';",
+      "console.log(scope('Write', { file_path: target }), scope('Bash', { command: 'cat ' + target }));",
+      'EOF',
+    ].join('\n'))).toBeNull();
+    // 3. a commit message body naming the file, chained into push and PR creation
+    expect(bash([
+      "git add -A && git commit -F - <<'EOF'",
+      'fix(guard): #505 treat ~/.openclaw/openclaw.json as a sensitive write target',
+      '',
+      'Details in the PR body.',
+      'EOF',
+      'git push -u origin HEAD && gh pr create --fill',
+    ].join('\n'))).toBeNull();
+    // the live re-trigger while fixing this: a grep whose TARGET is the file
+    expect(bash('grep -rn "PreToolUse" ~/.claude/settings.json')).toBeNull();
+  });
+
+  it('reads, searches, diffs and backups of the file take no lease', () => {
+    expect(bash('cat ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('jq .plugins ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('diff ~/.shieldcortex/config.json /tmp/x')).toBeNull();
+    expect(bash('ls -la ~/.claude/settings.json && stat ~/.claude/settings.json')).toBeNull();
+    expect(bash("sed -n '1,20p' ~/.openclaw/openclaw.json")).toBeNull();
+    expect(bash('cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.bak')).toBeNull();
+    expect(bash('cp ~/.openclaw/openclaw.json /tmp/backup.json')).toBeNull();
+    expect(bash('tar czf /tmp/b.tgz ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('rsync -a ~/.shieldcortex/config.json backup:/srv/')).toBeNull();
+    // A redirect written INSIDE a string is prose, not a redirect.
+    expect(bash('echo "how to edit ~/.openclaw/openclaw.json > careful"')).toBeNull();
+    expect(bash("git log --oneline -3 -- '~/.claude/settings.json'")).toBeNull();
+  });
+
+  it('redirects onto the file take the lease: glued, quoted, appended or via an fd', () => {
+    expect(bash('echo x >~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('echo x >> ~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash('cat > "$HOME/.claude/settings.json" <<\'EOF\'\n{}\nEOF')).toBe('security-config');
+    expect(bash('jq ".a=1" ~/.openclaw/openclaw.json > /tmp/x && cp /tmp/x ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('some-tool 2> ~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash('some-tool &> ~/.shieldcortex/config.json')).toBe('security-config');
+    // fd dups are not files
+    expect(bash('cat ~/.openclaw/openclaw.json 2>&1 | head')).toBeNull();
+  });
+
+  it('mutating verbs given the file as an operand take the lease', () => {
+    expect(bash('rm -f ~/.claude/settings.json')).toBe('security-config');
+    expect(bash('mv /tmp/new.json ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('mv ~/.openclaw/openclaw.json /tmp/away.json')).toBe('security-config');
+    expect(bash("sed -i 's/a/b/' ~/.shieldcortex/config.json")).toBe('security-config');
+    expect(bash("sed -i.bak 's/a/b/' ~/.shieldcortex/config.json")).toBe('security-config');
+    expect(bash("perl -pi -e 's/a/b/' ~/.shieldcortex/config.json")).toBe('security-config');
+    expect(bash('echo x | sudo tee -a ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('vim ~/.claude/settings.json')).toBe('security-config');
+    expect(bash('code ~/.claude/settings.json')).toBe('security-config');
+    expect(bash('truncate -s 0 ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('chmod 600 ~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash('dd if=/tmp/x of=$HOME/.openclaw/openclaw.json')).toBe('security-config');
+  });
+
+  it('copy-like verbs take the lease only when the file is the destination', () => {
+    expect(bash('cp ~/.openclaw/openclaw.json.bak ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('install -m 600 /tmp/x ~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash('ln -sf /tmp/x ~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash('(cd /tmp && cp new.json ~/.shieldcortex/config.json)')).toBe('security-config');
+    expect(bash('cp ~/.shieldcortex/config.json /tmp/copy.json')).toBeNull();
+  });
+
+  it('an interpreter or shell handed the file fails closed — the mapper does not parse programs', () => {
+    expect(bash('python3 -c "import json; json.dump({}, open(\'/home/op/.openclaw/openclaw.json\',\'w\'))"')).toBe('security-config');
+    expect(bash('node -e "require(\'fs\').writeFileSync(process.env.HOME+\'/.claude/settings.json\',\'{}\')"')).toBe('security-config');
+    expect(bash("python3 - <<'EOF'\nopen('/home/op/.shieldcortex/config.json','w').write('{}')\nEOF")).toBe('security-config');
+    expect(bash("bash -c 'echo x > ~/.openclaw/openclaw.json'")).toBe('security-config');
+    expect(bash('python3 scripts/patch.py ~/.openclaw/openclaw.json')).toBe('security-config');
+  });
+
+  it('a heredoc body is data for the stage that opened it, and later statements are still read', () => {
+    // body mentions the file; the writer targets /tmp — no lease
+    expect(bash("cat > /tmp/x <<'EOF' && echo done\nconst p = '~/.openclaw/openclaw.json';\nEOF")).toBeNull();
+    // the statement AFTER the terminator is evaluated on its own
+    expect(bash("cat > /tmp/x <<'EOF'\nhello\nEOF\ncp /tmp/x ~/.openclaw/openclaw.json")).toBe('security-config');
+    expect(bash("cat > /tmp/x <<'EOF'\nhello\nEOF && cp /tmp/x ~/.openclaw/openclaw.json")).toBe('security-config');
+  });
+
+  it('file-edit tools are judged on their target path exactly as before', () => {
+    expect(scopeForToolCall('Edit', { file_path: '/Users/op/.shieldcortex/config.json' })).toBe('security-config');
+    expect(scopeForToolCall('Write', { file_path: '/Users/op/.claude/settings.json' })).toBe('security-config');
+    expect(scopeForToolCall('Read', { file_path: '/Users/op/.claude/settings.json' })).toBeNull();
+  });
+
+  it('the other scope rows are untouched', () => {
+    expect(bash('npm publish')).toBe('npm-publish');
+    expect(bash('npm install -g x')).toBe('install');
+    expect(bash('openclaw gateway restart')).toBe('gateway-restart');
+    expect(bash('git status')).toBeNull();
+  });
+});
