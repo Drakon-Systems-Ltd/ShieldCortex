@@ -20,21 +20,37 @@
  *                            policy's SIGNAL SET would match. This is NOT an
  *                            enforcement rate and there is no 100% baseline.
  *
- * Record contracts (round-2 finding 4, round-3): a row is classified by its
- * DECLARED event + outcome pair (`scripts/lib/guard-log-schema.mjs`), never by
- * the presence of a signals array. A declared denial or warning that lacks
- * signals is MALFORMED; a numeric notify status or an array channel is
+ * Record contracts (round-2 finding 4, round-3, round-4 M1): a row is
+ * classified by its DECLARED event + outcome pair
+ * (`scripts/lib/guard-log-schema.mjs`), never by the presence of a signals
+ * array. A declared denial or warning that lacks signals is MALFORMED; a
+ * non-string `event`, a numeric notify status or an array channel is
  * MALFORMED; an event/outcome pair that disagrees is CONTRADICTORY; an event
  * whose signals are redacted, empty, or outside the writer's vocabulary is
- * UNKNOWN. The three buckets are reported separately, with counts, and none of
- * them enters a known denominator. A `deliveredVia` of whitespace is not a
- * channel; a `delivered` status with no channel is a contradictory claim, not
- * a validated delivery — and a validated delivery is a transport report, never
- * proof a person saw it.
+ * UNKNOWN. A `deliveredVia` of whitespace is not a channel; a `delivered`
+ * status with no channel is a contradictory claim, not a validated delivery —
+ * and a validated delivery is a transport report, never proof a person saw it.
  *
- * Retry lifecycle rows (`retry_granted` / `retry_denied` / `retry_grant_failed`)
- * share the actionId and carry no signals; they are first-class records
- * (finding 5). A retry GRANT is NOT proof of execution.
+ * Round-4 M1 — only VALIDATED ENFORCEMENT signals classify an event. A
+ * malformed JSON row is never discarded before grouping: it is retained as a
+ * `malformed` record of its event (by actionId / correlationId, or its own
+ * line) and the whole event lands in the MALFORMED bucket. Signals carried on
+ * a retry row or on a row with an outcome outside the writer's enum are
+ * counted as STRAY, never unioned into the event's signal set, and make the
+ * event UNKNOWN. Four event buckets — known / unknown / contradictory /
+ * malformed — partition the events; none but known enters a denominator.
+ *
+ * Round-4 M2 — three independent lifecycles per actionId, each with its own
+ * final state: ENFORCEMENT (the last DECISION row; the writer's final
+ * notification copy of a denial — same event, outcome and signals, only the
+ * notify object differs — is NEVER a new decision), RETRY (`retry_granted` /
+ * `retry_denied` / `retry_grant_failed` → granted / denied / failed; a
+ * revocation is only ever written inside `reason` text, which this tool never
+ * reads, so `revoked` is structurally 0 from the current writer) and
+ * NOTIFICATION (the last row that CARRIES a notify object; a retry row without
+ * one does not reset it). "Actually stopped" = enforcement final is a stop
+ * outcome AND the retry lifecycle did not end in a grant. A retry GRANT is NOT
+ * proof of execution (finding 5).
  *
  * NOT a classifier replay (the command surface is redacted, so no command is
  * re-run) and NOT an effect measurement (Half B does that).
@@ -70,8 +86,9 @@ export const BANNER = [
   '(auto_denied / denied_no_prompt_surface actually stopped the call; warned did NOT — it emits',
   'no permission decision; retry_granted re-offered one scoped attempt), and (2) HYPOTHETICAL',
   'signal-set match per policy, which is NOT an enforcement rate. A denials filename does not',
-  'make every record a denial. Malformed rows, contradictory events and unknown-signal events are',
-  'three separate buckets, all excluded from every %. Only vocabulary signal names are printed.',
+  'make every record a denial. Known, unknown, contradictory and malformed are four separate event',
+  'buckets; all but known are excluded from every %. Only validated enforcement signals classify an',
+  'event, and only vocabulary signal names are printed.',
 ].join('\n');
 
 const INJECTION_SET = new Set(INJECTION_FLAVOURED);
@@ -119,6 +136,34 @@ function signalsProblem(row, kind) {
   return null;
 }
 
+const NO_NOTIFY = Object.freeze({ present: false, status: null, claimsDelivery: false, channel: null, channelPresent: false });
+
+/** The fields a record carries; ids are grouping keys only and never leave the tool. */
+function baseRecord(row, lineNo) {
+  return {
+    lineNo,
+    actionId: typeof row.actionId === 'string' ? row.actionId : '',
+    correlationId: typeof row.correlationId === 'string' ? row.correlationId : '',
+    detectedAt: typeof row.detectedAt === 'string' ? row.detectedAt : '',
+    severity: publicSeverity(row.severity), tool: publicTool(row.tool),
+    event: publicEvent(row.event), outcome: publicOutcome(row.outcome),
+  };
+}
+
+/**
+ * Validate one JSON object row against the writer's schema. Returns the
+ * malformed reason, or null when the row conforms to its declared contract.
+ */
+function rowProblem(row, cls) {
+  if (typeof row.outcome !== 'string' || row.outcome === '') return 'missing-outcome';
+  if (row.event !== undefined && typeof row.event !== 'string') return 'event-not-string';
+  const sp = signalsProblem(row, cls.kind);
+  if (sp) return sp;
+  const nv = validateNotify(row);
+  if (!nv.ok) return nv.reason;
+  return null;
+}
+
 /**
  * @param {string} text
  */
@@ -133,20 +178,31 @@ export function parseDenials(text) {
     let row;
     try { row = JSON.parse(line); } catch { malformed.push({ lineNo, reason: 'not-json' }); return; }
     if (row === null || typeof row !== 'object' || Array.isArray(row)) { malformed.push({ lineNo, reason: 'not-object' }); return; }
-    if (typeof row.outcome !== 'string' || row.outcome === '') { malformed.push({ lineNo, reason: 'missing-outcome' }); return; }
     const cls = classifyRecord(row);
-    const sp = signalsProblem(row, cls.kind);
-    if (sp) { malformed.push({ lineNo, reason: sp }); return; }
+    const problem = rowProblem(row, cls);
+    if (problem) {
+      // M1: a malformed JSON row is counted AND retained as a `malformed`
+      // record so it stays part of its event (same actionId / correlationId)
+      // and marks that event malformed. Nothing else is read from it: no
+      // signals, no notify — a row that failed its contract carries no
+      // evidence, only the fact that it exists.
+      malformed.push({ lineNo, reason: problem });
+      records.push({ ...baseRecord(row, lineNo), kind: 'malformed', retry: null, reason: problem, signals: [], straySignals: 0, notify: NO_NOTIFY });
+      return;
+    }
     const nv = validateNotify(row);
-    if (!nv.ok) { malformed.push({ lineNo, reason: nv.reason }); return; }
-    const signals = Array.isArray(row.signals) ? [...new Set(row.signals.map(s => s.trim()).filter(Boolean))] : [];
-    // Only these fields ever leave the row. Ids are used for grouping and are
-    // never copied into any output; every label is enum-mapped here, once.
+    const raw = Array.isArray(row.signals) ? [...new Set(row.signals.map(s => s.trim()).filter(Boolean))] : [];
+    // M1: only a validated ENFORCEMENT row (denial / warning by declared
+    // contract) contributes signals. A retry row or an unknown-outcome row
+    // that carries signals has them counted as STRAY and dropped.
+    const enforcement = cls.kind === 'denial' || cls.kind === 'warning';
+    const signals = enforcement ? raw : [];
+    const straySignals = enforcement ? 0 : raw.length;
+    // Only these fields ever leave the row; every label is enum-mapped here, once.
     records.push({
-      lineNo, kind: cls.kind, retry: cls.retry ?? null, reason: cls.reason ?? null,
-      signals,
-      event: publicEvent(row.event), outcome: publicOutcome(row.outcome),
-      severity: publicSeverity(row.severity), tool: publicTool(row.tool),
+      ...baseRecord(row, lineNo),
+      kind: cls.kind, retry: cls.retry ?? null, reason: cls.reason ?? null,
+      signals, straySignals,
       notify: {
         present: nv.status !== null || nv.channel !== null,
         status: nv.status === null ? null : publicNotifyStatus(nv.status),
@@ -154,9 +210,6 @@ export function parseDenials(text) {
         channel: nv.channel === null ? null : publicChannel(nv.channel),
         channelPresent: nv.channel !== null,
       },
-      actionId: typeof row.actionId === 'string' ? row.actionId : '',
-      correlationId: typeof row.correlationId === 'string' ? row.correlationId : '',
-      detectedAt: typeof row.detectedAt === 'string' ? row.detectedAt : '',
     });
   });
   if (lines.length && lines[lines.length - 1] === '') blankLines--;
@@ -181,19 +234,45 @@ export function groupEvents(records) {
     ev.records.sort((a, b) => (a.detectedAt < b.detectedAt ? -1 : a.detectedAt > b.detectedAt ? 1 : a.lineNo - b.lineNo));
     const enforcement = ev.records.filter(r => r.kind === 'denial' || r.kind === 'warning');
     const retries = ev.records.filter(r => r.kind === 'dnp_retry');
-    const union = [...new Set(ev.records.flatMap(x => x.signals))];
+    const malformedRowReasons = ev.records.filter(r => r.kind === 'malformed').map(r => r.reason);
+    const malformedRows = malformedRowReasons.length;
+    const unrecognisedOutcomeRows = ev.records.filter(r => r.kind === 'other').length;
+    const straySignals = ev.records.reduce((n, r) => n + r.straySignals, 0);
+    // M1: the signal set is the union over VALIDATED ENFORCEMENT rows only.
+    const union = [...new Set(enforcement.flatMap(x => x.signals))];
 
-    const firstRec = ev.records[0];
-    const lastRec = ev.records[ev.records.length - 1];
-    const lastEnf = enforcement.length ? enforcement[enforcement.length - 1] : null;
-    const firstEnf = enforcement.length ? enforcement[0] : null;
-    const enfOutcomes = [...new Set(enforcement.map(x => x.outcome))];
-    const sameSet = (a, b) => a.length === b.length && a.every(s => b.includes(s));
+    // M2 — ENFORCEMENT lifecycle. The writer re-emits a denial/warning row with
+    // the same event, outcome and signals once notification settles ("were
+    // they told"); that copy is NOT a new decision. A row is a DECISION unless
+    // an earlier enforcement row of the event already carries the same
+    // (event, outcome, signal set).
+    const decisions = [];
+    let notifyCopies = 0;
+    for (const r of enforcement) {
+      const dup = decisions.some(d => d.event === r.event && d.outcome === r.outcome && sameSet(d.signals, r.signals));
+      if (dup) notifyCopies++; else decisions.push(r);
+    }
+    const firstDecision = decisions.length ? decisions[0] : null;
+    const lastDecision = decisions.length ? decisions[decisions.length - 1] : null;
+    const enfOutcomes = [...new Set(decisions.map(x => x.outcome))];
+    const enforcementFinal = lastDecision ? enforcementState(lastDecision.outcome) : 'none';
 
+    // M2 — RETRY / REVOCATION lifecycle: its own final state, from its own rows.
     const retryOutcomes = retries.map(r => r.retry);
-    const retryGranted = retryOutcomes.includes('retry_granted');
-    const finalEnfOutcome = lastEnf ? lastEnf.outcome : (retries.length ? 'retry-only' : 'none');
-    const actuallyStopped = !!lastEnf && STOPPED_OUTCOMES.has(finalEnfOutcome) && !retryGrantedAfter(ev.records);
+    const retryFinal = retries.length ? retryState(retries[retries.length - 1].retry) : 'none';
+    const retryGranted = retryFinal === 'granted';
+
+    // M2 — NOTIFICATION lifecycle: the LAST row that carries a notify object.
+    // A retry row (which never carries one) does not reset it to none.
+    const notifyRows = ev.records.filter(r => r.notify.present);
+    const lastNotify = notifyRows.length ? notifyRows[notifyRows.length - 1].notify : NO_NOTIFY;
+    const anyValidatedDelivery = ev.records.some(r => r.notify.claimsDelivery && r.notify.channelPresent);
+    const notificationFinal = notificationState(lastNotify);
+
+    // Actually stopped: the enforcement lifecycle ended in a stop AND the retry
+    // lifecycle did not end in a grant. A grant is still not execution proof.
+    const actuallyStopped = STOPPED_OUTCOMES.has(enforcementFinal) && retryFinal !== 'granted';
+    const finalEnfOutcome = lastDecision ? lastDecision.outcome : (retries.length ? 'retry-only' : 'none');
 
     // Contradictions (finding 4): the evidence disagrees with itself.
     const contradictions = [];
@@ -201,25 +280,33 @@ export function groupEvents(records) {
     if (enfOutcomes.length > 1) contradictions.push('conflicting-enforcement-outcomes');
     if (ev.records.some(r => r.notify.claimsDelivery && !r.notify.channelPresent)) contradictions.push('delivery-claimed-without-channel');
 
+    const firstRec = ev.records[0];
+    const lastRec = ev.records[ev.records.length - 1];
     events.push({
       key: ev.key, keyKind: ev.keyKind,
       recordCount: ev.records.length,
       kinds: [...new Set(ev.records.map(r => r.kind))],
-      hasEnforcement: enforcement.length > 0,
+      malformedRows, malformedRowReasons, unrecognisedOutcomeRows, straySignals,
+      hasEnforcement: decisions.length > 0,
       finalEnfOutcome, enfOutcomes,
       conflictingOutcome: enfOutcomes.length > 1,
       contradictions,
+      lifecycle: {
+        enforcement: { final: enforcementFinal, decisions: decisions.length, notifyCopies },
+        retry: { final: retryFinal, history: retryOutcomes },
+        notification: { final: notificationFinal, anyValidatedDelivery },
+      },
       retryOutcomes, retryGranted, actuallyStopped,
       signals: union,
       unrecognisedSignals: union.filter(s => !isVocabularySignal(s)).length,
-      signalDrift: !sameSet(firstEnf ? firstEnf.signals : [], lastEnf ? lastEnf.signals : []),
+      signalDrift: !sameSet(firstDecision ? firstDecision.signals : [], lastDecision ? lastDecision.signals : []),
       redacted: union.includes(REDACTED_MARKER),
-      severity: (lastEnf ?? lastRec).severity,
-      tool: (lastEnf ?? lastRec).tool,
-      event: (lastEnf ?? lastRec).event,
+      severity: (lastDecision ?? lastRec).severity,
+      tool: (lastDecision ?? lastRec).tool,
+      event: (lastDecision ?? lastRec).event,
       // Delivery across ALL records: a validated delivery is a claim status WITH a channel.
-      anyValidatedDelivery: ev.records.some(r => r.notify.claimsDelivery && r.notify.channelPresent),
-      finalNotify: lastRec.notify,
+      anyValidatedDelivery,
+      finalNotify: lastNotify,
       firstNotify: firstRec.notify,
       coalescedEver: ev.records.some(r => r.notify.status === 'coalesced'),
       suppressedEver: ev.records.some(r => r.notify.status === 'suppressed'),
@@ -229,11 +316,49 @@ export function groupEvents(records) {
   return events;
 }
 
-/** True if a retry_granted appears after the last denial/warning record. */
-function retryGrantedAfter(records) {
-  let lastEnfIdx = -1;
-  records.forEach((r, i) => { if (r.kind === 'denial' || r.kind === 'warning') lastEnfIdx = i; });
-  return records.some((r, i) => i > lastEnfIdx && r.retry === 'retry_granted');
+const sameSet = (a, b) => a.length === b.length && a.every(s => b.includes(s));
+
+/** Closed lifecycle states (M2). Each is projected verbatim; anything else is `other`. */
+export const ENFORCEMENT_STATES = Object.freeze(['none', ...DENIAL_OUTCOMES, ...WARNING_OUTCOMES, 'other']);
+export const RETRY_STATES = Object.freeze(['none', 'granted', 'denied', 'failed', 'revoked']);
+export const NOTIFICATION_STATES = Object.freeze(['none', 'delivered', 'failed', 'suppressed', 'unknown']);
+
+/** Enforcement final state from the last DECISION row's outcome. */
+export function enforcementState(outcome) {
+  return DENIAL_SET.has(outcome) || WARNING_SET.has(outcome) ? outcome : 'other';
+}
+
+/**
+ * Retry final state from the last retry row. `revoked` is reserved: the
+ * current writer records a revocation only inside the `reason` text of a
+ * `retry_denied` row, which this tool never reads, so it is 0 by construction.
+ */
+export function retryState(retryOutcome) {
+  if (retryOutcome === 'retry_granted') return 'granted';
+  if (retryOutcome === 'retry_denied') return 'denied';
+  if (retryOutcome === 'retry_grant_failed') return 'failed';
+  if (retryOutcome === 'retry_revoked') return 'revoked';
+  return 'none';
+}
+
+/**
+ * Notification final state from the last notify-bearing row:
+ *   none       — no row carried a notify object, or nothing was attempted
+ *                (`not_configured`, `no_channel`);
+ *   delivered  — a delivery claim WITH a channel (validated transport report);
+ *   failed     — `error`;
+ *   suppressed — `suppressed` or `coalesced` (folded into another alert);
+ *   unknown    — `pending`, a delivery claim without a channel, or a status
+ *                outside the writer's enum.
+ */
+export function notificationState(notify) {
+  if (!notify || !notify.present || notify.status === null) return notify && notify.channelPresent ? 'unknown' : 'none';
+  const st = notify.status;
+  if (st === 'not_configured' || st === 'no_channel') return 'none';
+  if (notify.claimsDelivery) return notify.channelPresent ? 'delivered' : 'unknown';
+  if (st === 'error') return 'failed';
+  if (st === 'suppressed' || st === 'coalesced') return 'suppressed';
+  return 'unknown';
 }
 
 // ── 3. Analyse ────────────────────────────────────────────────────────────────
@@ -242,10 +367,17 @@ const counter = () => new Map();
 const bump = (m, k, n = 1) => m.set(k, (m.get(k) ?? 0) + n);
 const sortedObj = (m) => Object.fromEntries([...m.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))));
 
-/** Which evidence bucket an event lands in, with the reason. */
+/**
+ * Which of the FOUR evidence buckets an event lands in, with the reason.
+ * malformed > contradictory > unknown > known: a schema failure anywhere in
+ * the event outranks a semantic reading of the rest of it.
+ */
 export function bucketOf(e) {
+  if (e.malformedRows > 0) return { bucket: 'malformed', reason: 'malformed-row-in-event' };
   if (e.contradictions.length) return { bucket: 'contradictory', reason: e.contradictions[0] };
   if (!e.hasEnforcement) return { bucket: 'unknown', reason: 'retry-or-other-only' };
+  if (e.straySignals > 0) return { bucket: 'unknown', reason: 'signals-on-non-enforcement-row' };
+  if (e.unrecognisedOutcomeRows > 0) return { bucket: 'unknown', reason: 'unrecognised-outcome-row' };
   if (e.signals.length === 0) return { bucket: 'unknown', reason: 'empty-signals' };
   if (e.redacted) return { bucket: 'unknown', reason: e.signals.length === 1 ? 'redacted-only' : 'redacted-plus-partial' };
   if (e.unrecognisedSignals > 0) return { bucket: 'unknown', reason: 'signal-outside-vocabulary' };
@@ -261,12 +393,31 @@ export function analyse(events, parse) {
   const known = buckets.filter(b => b.bucket === 'known').map(b => b.e);
   const unknown = buckets.filter(b => b.bucket === 'unknown').map(b => b.e);
   const contradictory = buckets.filter(b => b.bucket === 'contradictory').map(b => b.e);
+  const malformedEvents = buckets.filter(b => b.bucket === 'malformed').map(b => b.e);
   const signalless = events.filter(e => e.signals.length === 0);
 
-  const unknownReasons = counter(), contradictoryReasons = counter(), malformedReasons = counter();
+  const unknownReasons = counter(), contradictoryReasons = counter(), malformedReasons = counter(), malformedEventReasons = counter();
   for (const b of buckets) if (b.bucket === 'unknown') bump(unknownReasons, b.reason);
   for (const e of contradictory) for (const c of e.contradictions) bump(contradictoryReasons, c);
   for (const m of parse.malformed) bump(malformedReasons, m.reason);
+  // Event-level malformed reasons: the reasons of the malformed rows retained inside each malformed event.
+  for (const e of malformedEvents) for (const r of e.malformedRowReasons) bump(malformedEventReasons, r);
+
+  // M2: the three lifecycles, aggregated. Each final-state distribution is
+  // over ALL events (a lifecycle exists for every event; `none` is a state).
+  const lifecycles = {
+    enforcement: { final: counter(), decisions: counter(), notifyCopies: 0 },
+    retry: { final: counter() },
+    notification: { final: counter(), anyValidatedDelivery: 0 },
+  };
+  for (const e of events) {
+    bump(lifecycles.enforcement.final, e.lifecycle.enforcement.final);
+    bump(lifecycles.enforcement.decisions, String(e.lifecycle.enforcement.decisions));
+    lifecycles.enforcement.notifyCopies += e.lifecycle.enforcement.notifyCopies;
+    bump(lifecycles.retry.final, e.lifecycle.retry.final);
+    bump(lifecycles.notification.final, e.lifecycle.notification.final);
+    if (e.lifecycle.notification.anyValidatedDelivery) lifecycles.notification.anyValidatedDelivery++;
+  }
 
   const keyKinds = counter(), recordsPerEvent = counter(), outcomeTransitions = counter();
   let multiRecord = 0, conflicting = 0, drift = 0;
@@ -278,15 +429,17 @@ export function analyse(events, parse) {
     if (e.signalDrift) drift++;
   }
 
-  // ACTUAL outcome accounting (finding 4) — what the guard truly did.
+  // ACTUAL outcome accounting (finding 4) — what the guard truly did, read
+  // from the lifecycle finals (M2), never from row position.
   const actual = { actuallyStopped: 0, warnedOnly: 0, retryGranted: 0, retryDeniedOrFailed: 0, other: 0 };
   const finalEnfDist = counter();
   for (const e of events) {
     bump(finalEnfDist, e.finalEnfOutcome);
+    const enf = e.lifecycle.enforcement.final, retry = e.lifecycle.retry.final;
     if (e.actuallyStopped) actual.actuallyStopped++;
-    else if (e.retryGranted) actual.retryGranted++;
-    else if (e.retryOutcomes.some(o => o === 'retry_denied' || o === 'retry_grant_failed')) actual.retryDeniedOrFailed++;
-    else if (e.finalEnfOutcome === 'warned' || e.finalEnfOutcome === 'failure_allowed') actual.warnedOnly++;
+    else if (retry === 'granted') actual.retryGranted++;
+    else if (retry === 'denied' || retry === 'failed' || retry === 'revoked') actual.retryDeniedOrFailed++;
+    else if (enf === 'warned' || enf === 'failure_allowed') actual.warnedOnly++;
     else actual.other++;
   }
 
@@ -373,14 +526,21 @@ export function analyse(events, parse) {
       validKnown: known.length,
       unknown: unknown.length, unknownReasons: sortedObj(unknownReasons),
       contradictory: contradictory.length, contradictoryReasons: sortedObj(contradictoryReasons),
+      malformed: malformedEvents.length, malformedEventReasons: sortedObj(malformedEventReasons),
       malformedRows: parse.malformed.length, malformedReasons: sortedObj(malformedReasons),
     },
     events: {
       total: events.length, keyedBy: sortedObj(keyKinds), recordsPerEvent: sortedObj(recordsPerEvent),
       recordKinds: sortedObj(recordKindAll), multiRecord, conflictingOutcome: conflicting,
       outcomeTransitions: sortedObj(outcomeTransitions), signalDriftBetweenFirstAndLast: drift,
+      straySignals: events.reduce((n, e) => n + e.straySignals, 0),
     },
     actual: { ...actual, finalEnforcementOutcome: sortedObj(finalEnfDist) },
+    lifecycles: {
+      enforcement: { final: sortedObj(lifecycles.enforcement.final), decisionsPerEvent: sortedObj(lifecycles.enforcement.decisions), notifyCopies: lifecycles.enforcement.notifyCopies },
+      retry: { final: sortedObj(lifecycles.retry.final), note: 'revoked is reserved: the writer records a revocation only inside reason text, which this tool never reads' },
+      notification: { final: sortedObj(lifecycles.notification.final), anyValidatedDelivery: lifecycles.notification.anyValidatedDelivery, total: events.length },
+    },
     unknown: {
       total: unknown.length, signalless: signalless.length, reasons: sortedObj(unknownReasons),
       neverLoggedSignals: [...NEVER_LOGGED_SIGNALS],
@@ -445,21 +605,35 @@ export function projectPublic(s) {
       validKnown: num(s.evidence.validKnown),
       unknown: num(s.evidence.unknown), unknownReasons: projectDist(s.evidence.unknownReasons, identOrOther),
       contradictory: num(s.evidence.contradictory), contradictoryReasons: projectDist(s.evidence.contradictoryReasons, identOrOther),
+      malformed: num(s.evidence.malformed), malformedEventReasons: projectDist(s.evidence.malformedEventReasons, identOrOther),
       malformedRows: num(s.evidence.malformedRows), malformedReasons: projectDist(s.evidence.malformedReasons, identOrOther),
     },
     events: {
       total: num(s.events.total),
       keyedBy: projectDist(s.events.keyedBy, k => (['actionId', 'correlationId', 'line'].includes(k) ? k : OTHER)),
       recordsPerEvent: projectDist(s.events.recordsPerEvent, k => (/^\d{1,6}$/.test(k) ? k : OTHER)),
-      recordKinds: projectDist(s.events.recordKinds, k => (['denial', 'warning', 'dnp_retry', 'contradictory', 'other'].includes(k) ? k : OTHER)),
+      recordKinds: projectDist(s.events.recordKinds, k => (['denial', 'warning', 'dnp_retry', 'contradictory', 'malformed', 'other'].includes(k) ? k : OTHER)),
       multiRecord: num(s.events.multiRecord), conflictingOutcome: num(s.events.conflictingOutcome),
       outcomeTransitions: projectDist(s.events.outcomeTransitions, k => k.split(' -> ').map(publicOutcome).join(' -> ')),
       signalDriftBetweenFirstAndLast: num(s.events.signalDriftBetweenFirstAndLast),
+      straySignals: num(s.events.straySignals),
     },
     actual: {
       actuallyStopped: num(s.actual.actuallyStopped), warnedOnly: num(s.actual.warnedOnly),
       retryGranted: num(s.actual.retryGranted), retryDeniedOrFailed: num(s.actual.retryDeniedOrFailed), other: num(s.actual.other),
       finalEnforcementOutcome: projectDist(s.actual.finalEnforcementOutcome, outcomeOrLifecycle),
+    },
+    lifecycles: {
+      enforcement: {
+        final: projectDist(s.lifecycles.enforcement.final, k => (ENFORCEMENT_STATES.includes(k) ? k : OTHER)),
+        decisionsPerEvent: projectDist(s.lifecycles.enforcement.decisionsPerEvent, k => (/^\d{1,6}$/.test(k) ? k : OTHER)),
+        notifyCopies: num(s.lifecycles.enforcement.notifyCopies),
+      },
+      retry: { final: projectDist(s.lifecycles.retry.final, k => (RETRY_STATES.includes(k) ? k : OTHER)), note: s.lifecycles.retry.note },
+      notification: {
+        final: projectDist(s.lifecycles.notification.final, k => (NOTIFICATION_STATES.includes(k) ? k : OTHER)),
+        anyValidatedDelivery: num(s.lifecycles.notification.anyValidatedDelivery), total: num(s.lifecycles.notification.total),
+      },
     },
     unknown: {
       total: num(s.unknown.total), signalless: num(s.unknown.signalless), reasons: projectDist(s.unknown.reasons, identOrOther),
@@ -519,26 +693,36 @@ export function renderMarkdown(s) {
   if (s.rows.malformed) out.push(`- malformed lines (first 50): ${s.malformed.map(m => `${m.lineNo}:${m.reason}`).join(', ')}`);
   out.push('');
 
-  out.push('### Evidence buckets (three separate buckets; none enters a known denominator)', '');
+  out.push('### Evidence buckets (four separate event buckets; only known enters a denominator)', '');
   out.push('| bucket | count | reasons |');
   out.push('|---|---|---|');
-  out.push(`| valid known events | **${s.evidence.validKnown}** | reconstructable vocabulary signals, consistent event/outcome |`);
+  out.push(`| valid known events | **${s.evidence.validKnown}** | validated enforcement signals in the vocabulary, consistent event/outcome, no stray or malformed rows |`);
   out.push(`| unknown events | ${s.evidence.unknown} | ${kv(s.evidence.unknownReasons)} |`);
   out.push(`| contradictory events | ${s.evidence.contradictory} | ${kv(s.evidence.contradictoryReasons)} |`);
-  out.push(`| malformed rows | ${s.evidence.malformedRows} | ${kv(s.evidence.malformedReasons)} |`);
+  out.push(`| malformed events | ${s.evidence.malformed} | ${kv(s.evidence.malformedEventReasons)} |`);
+  out.push(`| malformed rows (row level; JSON rows are retained inside their event) | ${s.evidence.malformedRows} | ${kv(s.evidence.malformedReasons)} |`);
   out.push('');
-  out.push(`- signals outside the writer's vocabulary: ${s.redactedSignals.occurrences} occurrence(s) across ${s.redactedSignals.events} event(s); printed only as \`${s.redactedSignals.label}\``, '');
+  out.push(`- signals outside the writer's vocabulary: ${s.redactedSignals.occurrences} occurrence(s) across ${s.redactedSignals.events} event(s); printed only as \`${s.redactedSignals.label}\``);
+  out.push(`- stray signals (carried on a retry or unknown-outcome row; never used for matching): ${s.events.straySignals}`, '');
 
   out.push('### ACTUAL outcome (what the guard did — separate from any policy hypothesis)', '');
   out.push('| category | events | note |');
   out.push('|---|---|---|');
-  out.push(`| actually stopped | ${s.actual.actuallyStopped} | final outcome auto_denied / denied_no_prompt_surface, not lifted by a grant |`);
+  out.push(`| actually stopped | ${s.actual.actuallyStopped} | enforcement final auto_denied / denied_no_prompt_surface AND retry lifecycle did not end in a grant |`);
   out.push(`| warned only | ${s.actual.warnedOnly} | advisory; NO permission decision emitted — did not stop the call |`);
-  out.push(`| retry granted | ${s.actual.retryGranted} | a scoped one-shot re-offer; NOT proof of execution |`);
+  out.push(`| retry granted | ${s.actual.retryGranted} | retry lifecycle ended in a scoped one-shot grant; NOT proof of execution |`);
   out.push(`| retry denied / grant failed | ${s.actual.retryDeniedOrFailed} | |`);
   out.push(`| other | ${s.actual.other} | |`);
   out.push('');
   out.push(`- final enforcement outcome distribution: ${kv(s.actual.finalEnforcementOutcome)}`, '');
+
+  out.push('### Lifecycles per event (three independent observations, each with its own final state)', '');
+  out.push('| lifecycle | final-state distribution | note |');
+  out.push('|---|---|---|');
+  out.push(`| enforcement | ${kv(s.lifecycles.enforcement.final)} | last DECISION row; ${s.lifecycles.enforcement.notifyCopies} notify-copy row(s) (same event/outcome/signals, only notify differs) were NOT counted as new decisions; decisions per event: ${kv(s.lifecycles.enforcement.decisionsPerEvent)} |`);
+  out.push(`| retry / revocation | ${kv(s.lifecycles.retry.final)} | ${s.lifecycles.retry.note} |`);
+  out.push(`| notification | ${kv(s.lifecycles.notification.final)} | last row that CARRIES a notify object; validated delivery on any row: ${s.lifecycles.notification.anyValidatedDelivery} of ${s.lifecycles.notification.total} |`);
+  out.push('');
 
   out.push('### Unknown bucket (excluded from every percentage)', '');
   out.push(`- unknown events: **${s.unknown.total}** of ${s.events.total} (${kv(s.unknown.reasons)}); signal-less events (incl. retry-only): ${s.unknown.signalless}`);

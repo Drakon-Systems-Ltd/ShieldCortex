@@ -342,10 +342,12 @@ describe('round 3 / finding 4 — schema contracts and the three evidence bucket
     const log = JSON.stringify({ event: 'action_guard_denial', outcome: 'auto_denied', actionId: 'd1', tool: 'Bash' }) + '\n';
     const { malformed, records } = parseDenials(log);
     expect(malformed).toEqual([{ lineNo: 1, reason: 'missing-signals' }]);
-    expect(records).toEqual([]);
+    // round 4 (M1): the malformed JSON row is RETAINED as a record of its event, carrying no signals
+    expect(records.map((x: any) => ({ kind: x.kind, reason: x.reason, signals: x.signals }))).toEqual([{ kind: 'malformed', reason: 'missing-signals', signals: [] }]);
     const { summary } = run(log);
     expect(summary.evidence.malformedRows).toBe(1);
-    expect(summary.actual.other).toBe(0);
+    expect(summary.evidence.malformed).toBe(1);
+    expect(summary.evidence.validKnown).toBe(0);
     expect(summary.actual.actuallyStopped).toBe(0);
   });
 
@@ -354,7 +356,10 @@ describe('round 3 / finding 4 — schema contracts and the three evidence bucket
     const r = JSON.stringify({ event: 'action_guard_denial', outcome: 'retry_granted', actionId: 'w1' });
     const { malformed, records } = parseDenials(w + '\n' + r + '\n');
     expect(malformed.map((m: any) => m.reason)).toEqual(['missing-signals']);
-    expect(records.map((x: any) => x.kind)).toEqual(['dnp_retry']);
+    expect(records.map((x: any) => x.kind)).toEqual(['malformed', 'dnp_retry']);
+    // and the event they share is MALFORMED, not known, not retry-only unknown
+    const { summary } = run(w + '\n' + r + '\n');
+    expect(summary.evidence).toEqual(expect.objectContaining({ validKnown: 0, malformed: 1, unknown: 0 }));
   });
 
   it('classifyRecord discriminates by the declared contract; a mismatched pair is CONTRADICTORY; unknown pairs are other', () => {
@@ -375,7 +380,10 @@ describe('round 3 / finding 4 — schema contracts and the three evidence bucket
     const c = row({ actionId: 'n3', signals: ['file-delete'], notify: 'delivered' });
     const { malformed, records } = parseDenials([a, b, c].join('\n') + '\n');
     expect(malformed.map((m: any) => m.reason)).toEqual(['notify-status-not-string', 'notify-channel-not-string', 'notify-not-object']);
-    expect(records).toEqual([]);
+    // retained as malformed records (round 4); their notify is NOT read — no delivery claim survives
+    expect(records.map((x: any) => x.kind)).toEqual(['malformed', 'malformed', 'malformed']);
+    expect(records.every((x: any) => x.notify.present === false && x.signals.length === 0)).toBe(true);
+    expect(run([a, b, c].join('\n') + '\n').summary.delivery.anyValidatedDelivery).toBe(0);
     expect(validateNotify({ notify: { status: 42 } })).toEqual({ ok: false, reason: 'notify-status-not-string' });
   });
 
@@ -418,7 +426,7 @@ describe('round 3 / finding 4 — schema contracts and the three evidence bucket
     expect(summary.perSignal.reduce((n: number, r: any) => n + r.events, 0)).toBe(1);
   });
 
-  it('malformed / unknown / contradictory are three separate buckets with counts, and known + unknown + contradictory = events', () => {
+  it('malformed / unknown / contradictory / known are four separate buckets with counts, and they partition the events (round 4)', () => {
     const log = [
       row({ actionId: 'k1', signals: ['file-delete'] }),                                                   // known
       row({ actionId: 'u1', signals: ['redacted-signal'] }),                                               // unknown
@@ -433,12 +441,16 @@ describe('round 3 / finding 4 — schema contracts and the three evidence bucket
       validKnown: 1,
       unknown: 1, unknownReasons: { 'redacted-only': 1 },
       contradictory: 2, contradictoryReasons: { 'event-outcome-mismatch': 1, 'conflicting-enforcement-outcomes': 1 },
+      // the malformed JSON row (m2) is an EVENT in the malformed bucket; the not-json line is row-level only
+      malformed: 1, malformedEventReasons: { 'missing-signals': 1 },
       malformedRows: 2, malformedReasons: { 'not-json': 1, 'missing-signals': 1 },
     });
-    expect(summary.evidence.validKnown + summary.evidence.unknown + summary.evidence.contradictory).toBe(summary.events.total);
+    expect(summary.events.total).toBe(5);
+    expect(summary.evidence.validKnown + summary.evidence.unknown + summary.evidence.contradictory + summary.evidence.malformed).toBe(summary.events.total);
     expect(markdown).toContain('### Evidence buckets');
     expect(markdown).toMatch(/\| contradictory events \| 2 \|/);
-    expect(markdown).toMatch(/\| malformed rows \| 2 \|/);
+    expect(markdown).toMatch(/\| malformed events \| 1 \|/);
+    expect(markdown).toMatch(/\| malformed rows[^|]*\| 2 \|/);
     const events = groupEvents(parseDenials(log).records);
     expect(bucketOf(events.find((e: any) => e.key === 'aid:c2')!)).toEqual({ bucket: 'contradictory', reason: 'conflicting-enforcement-outcomes' });
   });

@@ -47,22 +47,51 @@ It is **not** a classifier replay (the log does not store the command) and
 behind #555's numbers (hand-picked signal set; `pipe-download-to-shell`
 omitted; malformed rows silently skipped; last-record-wins per `actionId`).
 
-**Schema and evidence buckets (round 3).** A row is classified by its
+**Schema and evidence buckets (round 3, round 4).** A row is classified by its
 *declared* `event` + `outcome` contract (`scripts/lib/guard-log-schema.mjs`),
-never by whether a `signals` array happens to be present. Three buckets are
-reported with counts and **none enters a known denominator**:
+never by whether a `signals` array happens to be present. Four event buckets
+partition the events, each reported with counts, and **only known enters a
+denominator**:
 
-- **malformed rows** — not JSON / not an object / no outcome; a declared denial
-  or warning with no `signals`; a non-array or non-string signal member; a
-  non-string notify status or a non-string channel;
+- **malformed events** — any event holding a malformed JSON row: no outcome, a
+  non-string `event`, a declared denial or warning with no `signals`, a
+  non-array or non-string signal member, a non-string notify status or a
+  non-string channel. A malformed JSON row is **retained** as a record of its
+  event (same `actionId` / `correlationId`, else its own line) — never
+  discarded before grouping — and nothing else is read from it. Row-level
+  malformed counts (which also cover not-JSON / not-object lines) are reported
+  alongside;
 - **contradictory events** — event/outcome pair disagrees; conflicting
-  enforcement outcomes across an event's records; a `delivered` status with no
-  channel (a whitespace `deliveredVia` is not a channel);
-- **unknown events** — redacted or empty signals, retry-only lifecycles, or any
-  signal outside the writer's vocabulary.
+  enforcement outcomes across an event's decision records; a `delivered`
+  status with no channel (a whitespace `deliveredVia` is not a channel);
+- **unknown events** — redacted or empty signals, retry-only lifecycles, an
+  outcome outside the writer's enum, any signal outside the writer's
+  vocabulary, or **stray signals** carried on a retry or unknown-outcome row;
+- **known events** — everything else.
 
-A *validated delivery* is a delivery-claim status **with** a channel across any
-record of the event; it is a transport report, never proof a person saw it.
+Only **validated enforcement signals** (denial / warning rows that passed their
+contract) form an event's signal set; a signal on a retry row or an
+unknown-outcome row is counted as stray and never reaches a tier or floor match.
+
+**Three lifecycles per event (round 4).** Each `actionId` carries three
+independent observations, each with its own final state:
+
+- **enforcement** — the last *decision* row (`auto_denied`,
+  `denied_no_prompt_surface`, `warned`, …, or `none`). The writer re-emits the
+  same denial with its final notify status once delivery settles; a row with
+  the same event, outcome and signal set as an earlier decision is that
+  *notify copy*, never a new decision;
+- **retry / revocation** — `none` / `granted` / `denied` / `failed` /
+  `revoked` from the retry rows alone. `revoked` is reserved: the current writer
+  records a revocation only inside `reason` text, which the replay never reads;
+- **notification** — `none` / `delivered` / `failed` / `suppressed` / `unknown`
+  from the last row that *carries* a notify object (a retry row does not reset
+  it), plus `anyValidatedDelivery` across all rows.
+
+"Actually stopped" = the enforcement lifecycle ended in a stop outcome **and**
+the retry lifecycle did not end in a grant. A *validated delivery* is a
+delivery-claim status **with** a channel across any record of the event; it is
+a transport report, never proof a person saw it.
 
 **Public export projection (round 3).** One projection (`projectPublic`) feeds
 both the JSON and the Markdown. Counts are copied; a signal name is printed only

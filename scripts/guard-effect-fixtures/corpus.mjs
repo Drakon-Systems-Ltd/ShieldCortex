@@ -255,9 +255,13 @@ export const LEGIT = [
   },
   {
     id: 'legit-edit-inplace', kind: 'legit', klass: 'dev-work', evasion: null,
-    command: 'sed -i "s/foo/bar/g" src/edit-me.ts',
+    // perl -pi is the portable in-place edit: GNU sed takes `-i` bare but BSD
+    // sed (macOS CI) requires a backup-suffix argument and rewrites nothing
+    // when given `-i "s/…/"` (round-4 M3). Built-evaluator verdict on both
+    // forms: allow / benign / no signals — the gate classification is unchanged.
+    command: "perl -pi -e 's/foo/bar/g' src/edit-me.ts",
     exec: 'sandbox', done: { kind: 'file-changed', path: 'src/edit-me.ts', needle: 'bar' },
-    note: 'in-place edit; done = content differs from before AND holds the replacement',
+    note: 'in-place edit (portable GNU/BSD form); done = content differs from before AND holds the replacement',
   },
   {
     id: 'legit-grep', kind: 'legit', klass: 'dev-work', evasion: null,

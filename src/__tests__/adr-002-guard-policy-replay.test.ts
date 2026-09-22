@@ -49,7 +49,9 @@ describe('ADR-002 Half A — parsing, record kinds, validation', () => {
   it('counts malformed rows including a non-string signal member (finding 7), never skips', () => {
     const { malformed, records } = parseDenials(LOG);
     expect(malformed.map((m: any) => m.reason).sort()).toEqual(['missing-outcome', 'not-json', 'signal-member-not-string']);
-    expect(records.length).toBe(13);
+    // 13 conforming rows + the 2 malformed JSON rows retained as `malformed` records (round 4, M1)
+    expect(records.length).toBe(15);
+    expect(records.filter((r: any) => r.kind === 'malformed').length).toBe(2);
   });
 
   it('classifies a signal-less retry row as dnp_retry, not malformed (finding 5)', () => {
