@@ -517,6 +517,12 @@ function tokenise(stage: string): string[] {
       cur = '';
       continue;
     }
+    // A redirect operator ends the word before it: `printf x>f` is `printf`,
+    // `x`, `>f` to the shell. Only an fd digit or `&` stays glued (`2>f`, `&>f`).
+    if (c === '>' && cur && !/^(?:\d|&|>)$/.test(cur)) {
+      toks.push(cur);
+      cur = '';
+    }
     cur += c;
   }
   if (cur) toks.push(cur);
@@ -540,7 +546,11 @@ function isProtectedTarget(token: string): boolean {
  * destination, or an inline interpreter/shell program that names it.
  */
 function stageWritesProtectedFile(stage: string): boolean {
-  const toks = tokenise(stage);
+  // The heredoc body (after the NUL the splitter inserted) is data: a redirect
+  // written inside it is text, not a redirect. Only the interpreter rule
+  // reads it, through `namesFile` below.
+  const header = stage.split('\u0000')[0]!;
+  const toks = tokenise(header);
   if (toks.length === 0) return false;
 
   // Redirects: `> f`, `>> f`, `>| f`, `2> f`, `&> f`, glued or spaced. Fd dups
@@ -569,17 +579,27 @@ function stageWritesProtectedFile(stage: string): boolean {
   if (k >= toks.length) return false;
   const verb = (unquote(toks[k]!).split(/[\\/]/).pop() ?? '').toLowerCase();
   const rest = toks.slice(k + 1);
-  const operands = rest.filter((t) => !t.startsWith('-'));
+  // Flags are read with their quotes off: `sed "-i"` is `sed -i` to sed.
+  const flags = rest.map(unquote);
+  const operands = rest.filter((t) => !unquote(t).startsWith('-'));
   const stageText = stage.replace(/\u0000/g, ' ');
   const namesFile = SECURITY_CONFIG_FILE_ANY_RE.test(stageText);
+
+  // An output option names a destination whatever the verb: `git diff
+  // --output=f`, `--output f`, `-o f`, `curl -o f`, `jq ... > f` is above.
+  for (let i = 0; i < rest.length; i++) {
+    const m = /^(?:-o|--(?:output|out|outfile|out-file|output-file|dest|destination))(?:=(.*))?$/.exec(flags[i]!);
+    if (!m) continue;
+    const target = m[1] ?? rest[i + 1] ?? '';
+    if (target && isProtectedTarget(target)) return true;
+  }
 
   if (MUTATE_ANY_OPERAND_VERBS.has(verb)) {
     return rest.some(isProtectedTarget);
   }
-  if (verb === 'sed' && rest.some((t) => /^(?:-i|--in-place)/.test(t))) {
-    return operands.some(isProtectedTarget);
-  }
-  if (verb === 'perl' && rest.some((t) => /^-[a-zA-Z]*i/.test(t))) {
+  // sed's in-place flag may sit in a cluster (`-ni`, `-Ei`, `-i.bak`) or be
+  // spelled out (`--in-place[=suffix]`); perl's the same (`-pi`, `-i.bak`).
+  if ((verb === 'sed' || verb === 'perl') && flags.some((t) => /^-[a-zA-Z]*i/.test(t) || /^--in-place(?:=|$)/.test(t))) {
     return operands.some(isProtectedTarget);
   }
   if (COPY_TO_LAST_OPERAND_VERBS.has(verb)) {

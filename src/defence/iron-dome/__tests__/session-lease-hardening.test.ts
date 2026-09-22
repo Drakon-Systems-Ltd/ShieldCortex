@@ -284,6 +284,48 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash("cat > /tmp/x <<'EOF'\nhello\nEOF && cp /tmp/x ~/.openclaw/openclaw.json")).toBe('security-config');
   });
 
+  // Review of #552 (Tars): real writes the first cut returned null for, and a
+  // heredoc body it read as a redirect.
+  it('a redirect glued to the word before it is still a redirect', () => {
+    expect(bash('printf changed>~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('printf changed>"$HOME/.openclaw/openclaw.json"')).toBe('security-config');
+    expect(bash('echo x>>~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash('echo x 2>~/.claude/settings.json')).toBe('security-config');
+    // still not a redirect inside a string, and fd dups are still not files
+    expect(bash('echo "x>~/.openclaw/openclaw.json"')).toBeNull();
+    expect(bash('cat ~/.openclaw/openclaw.json 2>&1 >/dev/null')).toBeNull();
+  });
+
+  it('sed/perl in-place flags are read quoted and in clusters', () => {
+    expect(bash('sed "-i" "s/a/b/" ~/.shieldcortex/config.json')).toBe('security-config');
+    expect(bash("sed -ni 's/a/b/p' ~/.shieldcortex/config.json")).toBe('security-config');
+    expect(bash("sed -Ei 's/a/b/' ~/.openclaw/openclaw.json")).toBe('security-config');
+    expect(bash("sed --in-place=.bak 's/a/b/' ~/.claude/settings.json")).toBe('security-config');
+    expect(bash("sed --in-place 's/a/b/' '~/.claude/settings.json'")).toBe('security-config');
+    expect(bash("perl -i.bak -pe 's/a/b/' ~/.shieldcortex/config.json")).toBe('security-config');
+    // without an in-place flag sed is a read
+    expect(bash("sed -nE '/plugins/p' ~/.openclaw/openclaw.json")).toBeNull();
+  });
+
+  it('an output option naming the file is a write whatever the verb', () => {
+    expect(bash('git diff --output=$HOME/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('git diff --output ~/.openclaw/openclaw.json HEAD~1')).toBe('security-config');
+    expect(bash('git diff --output "$HOME/.openclaw/openclaw.json"')).toBe('security-config');
+    expect(bash('curl -o ~/.shieldcortex/config.json https://example.invalid/c.json')).toBe('security-config');
+    expect(bash('git diff --output=/tmp/x -- ~/.openclaw/openclaw.json')).toBeNull();
+  });
+
+  it('a redirect written inside a heredoc body is data, not a redirect', () => {
+    expect(bash([
+      "cat > /tmp/notes.md <<'EOF'",
+      'To change the setting run:',
+      '  printf x > ~/.openclaw/openclaw.json',
+      'EOF',
+    ].join('\n'))).toBeNull();
+    // the header's own redirect is still read
+    expect(bash("cat > ~/.openclaw/openclaw.json <<'EOF'\n{}\nEOF")).toBe('security-config');
+  });
+
   it('file-edit tools are judged on their target path exactly as before', () => {
     expect(scopeForToolCall('Edit', { file_path: '/Users/op/.shieldcortex/config.json' })).toBe('security-config');
     expect(scopeForToolCall('Write', { file_path: '/Users/op/.claude/settings.json' })).toBe('security-config');
