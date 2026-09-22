@@ -369,6 +369,17 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash("python3 -c '\nopen(\"/home/op/.openclaw/openclaw.json\",\"w\").write(\"changed\")\n'")).toBe('security-config');
   });
 
+  it('a `|` written inside a heredoc body is text, not a pipe — the body is never split into stages', () => {
+    // #552 round 2 finding 3: pipeline splitting read the inert body and made a
+    // `tee <file>` stage out of it. The body rides on the stage that opened it.
+    expect(bash("cat > /tmp/note <<'EOF'\nrun: echo hi | tee ~/.openclaw/openclaw.json\nEOF")).toBeNull();
+    expect(bash("cat <<'EOF' | grep -c x\nrun: echo hi | tee ~/.openclaw/openclaw.json\nEOF")).toBeNull();
+    // The statements after the terminator are still judged.
+    expect(bash("cat > /tmp/note <<'EOF'\necho hi | tee ~/.openclaw/openclaw.json\nEOF\nprintf x > ~/.openclaw/openclaw.json")).toBe('security-config');
+    // An interpreter fed by the heredoc still reads its body, even mid-pipeline.
+    expect(bash("python3 - <<'EOF' | tee /tmp/out\nopen('/home/x/.openclaw/openclaw.json','w').write('x')\nEOF")).toBe('security-config');
+  });
+
   it('a `<<` inside quotes, a comment or arithmetic opens no heredoc — later lines are still judged', () => {
     expect(bash('echo "docs for << EOF"\ntee ~/.claude/settings.json < /tmp/x')).toBe('security-config');
     expect(bash("echo '<<EOF'\nprintf changed > ~/.openclaw/openclaw.json")).toBe('security-config');

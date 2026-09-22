@@ -189,38 +189,3 @@ describe('checkSessionLease — fails closed', () => {
     expect(d.verdict).toBe('allow');
   });
 });
-
-describe('#550 — re-entry through the runtime that spawned this harness', () => {
-  const held = { holder: 'openclaw-session-uuid', pid: 4242, acquiredAtMs: NOW - 1000, expiresAtMs: NOW + 60_000 };
-
-  it('a live foreign record held by the spawning runtime, taken for this call, re-enters', () => {
-    const d = checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true, holderGatedThisCall: true });
-    expect(d.verdict).toBe('allow');
-    expect(d.reason).toContain('spawned this session');
-    expect(d.reason).toContain('this very call');
-    expect(d.reason).toContain('4242');
-  });
-
-  it('ancestry alone is not identity (#552): spawned-by but not gated-for-this-call is held', () => {
-    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true }).verdict).toBe('held');
-    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true, holderGatedThisCall: false }).verdict).toBe('held');
-    // and the call key alone, from a process that did not spawn us, is held too
-    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderGatedThisCall: true }).verdict).toBe('held');
-    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: false, holderGatedThisCall: true }).verdict).toBe('held');
-  });
-
-  it('omitted or false is the old answer: held', () => {
-    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW }).verdict).toBe('held');
-    expect(checkSessionLease({ scope: 'security-config', ledger: '', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: false }).verdict).toBe('held');
-  });
-
-  it('a record without a pid never re-enters this way — no skeleton key through emptiness', () => {
-    const noPid = { ...held, pid: null };
-    expect(checkSessionLease({ scope: 'security-config', ledger: '', held: noPid, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true, holderGatedThisCall: true }).verdict).toBe('held');
-  });
-
-  it('a freeze still outranks the spawning runtime', () => {
-    const d = checkSessionLease({ scope: 'security-config', ledger: '| FROZEN | security component edits |', held, self: 'sc-hook-hash', nowMs: NOW, holderSpawnedSelf: true, holderGatedThisCall: true });
-    expect(d.verdict).toBe('frozen');
-  });
-});

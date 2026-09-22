@@ -68,9 +68,6 @@ export interface LeaseRecord {
   reason?: string;
   acquiredAtMs?: number;
   expiresAtMs?: number;
-  /** The call this record was taken or last refreshed for (#552): a key
-   *  over the scope and the call surface, and when it was stamped. */
-  gatedCall?: { key: string; atMs: number } | null;
 }
 
 export interface LeaseCheckInput {
@@ -92,38 +89,6 @@ export interface LeaseCheckInput {
    * A blank/missing PID is never a skeleton key even when this is false.
    */
   holderAlive?: boolean;
-  /**
-   * Injected (#550): `held.pid` is the live runtime process that SPAWNED the
-   * checking harness — its parent, or its grandparent through one harness
-   * process (gateway → claude → hook). Pure core does not walk the process
-   * table; the store layer sets this after a same-host check.
-   *
-   * Two enforcement planes gate the same tool call under two identities: the
-   * OpenClaw interceptor as the OpenClaw session id (pid = gateway), then the
-   * Claude Code hook as the hashed Claude session id. The first plane allowed
-   * and acquired; the second found a foreign holder and refused — naming the
-   * caller's own session and "0s ago". The runtime that spawned this harness
-   * already gated this very call under its own identity, so a record it holds
-   * is this call's own lease, not a rival's.
-   *
-   *   - true: the holder is the spawning runtime → re-enter (allow, no acquire)
-   *   - false / omitted: fail closed; a foreign live holder still binds
-   *
-   * A blank/missing PID is never a skeleton key even when this is true.
-   */
-  holderSpawnedSelf?: boolean;
-  /**
-   * Injected (#552 review of #550): the held record was taken FOR THIS VERY
-   * CALL — its `gatedCall.key` is the key of the call being checked and it
-   * was stamped moments ago. Ancestry alone is not identity: one gateway
-   * process backs every session's record, so a sibling session's hook has
-   * the same parent. Re-entry needs BOTH: the holder spawned this harness
-   * AND gated this call.
-   *
-   *   - true: this call is the one the holder gated → re-enter (allow, no acquire)
-   *   - false / omitted: fail closed; a foreign live holder still binds
-   */
-  holderGatedThisCall?: boolean;
 }
 
 export type LeaseVerdict = 'allow' | 'frozen' | 'held' | 'unknown';
@@ -263,24 +228,6 @@ export function checkSessionLease(input: LeaseCheckInput): LeaseDecision {
           reason:
             `${scope} lease holder pid ${pid} is dead — treating the slot as free ` +
             `rather than waiting out the TTL`,
-        };
-      }
-      // #550: the holder is the runtime that spawned this harness (the OpenClaw
-      // gateway gating a Claude Code child's tool call as the OpenClaw session,
-      // while the hook gates the same call as the Claude session) AND its
-      // record was taken for this very call. That runtime already applied
-      // session-level exclusion to this call before the child ran it, so its
-      // record is this call's own lease under another name. Ancestry alone is
-      // not enough (#552): the gateway is one process for every session, so a
-      // sibling session's hook shares the parent — the call key tells them
-      // apart. Re-enter without acquiring: the record stays the holder's, and
-      // a later refusal in this plane has nothing of its own to release.
-      if (pidPresent && input.holderSpawnedSelf === true && input.holderGatedThisCall === true) {
-        return {
-          verdict: 'allow',
-          reason:
-            `${scope} lease is held by the runtime that spawned this session ` +
-            `(${held.holder}, pid ${pid}) and was taken for this very call — re-entering`,
         };
       }
       const ageSec = held.acquiredAtMs != null ? Math.round((nowMs - held.acquiredAtMs) / 1000) : null;
@@ -622,8 +569,23 @@ function splitStatementsHeredocAware(command: string): string[] {
   return out;
 }
 
-/** Split a statement on single `|` / `|&` outside quotes (`||` is already split). */
+/**
+ * Split a statement on single `|` / `|&` outside quotes (`||` is already
+ * split). A heredoc body (after the NUL the statement splitter inserted) is
+ * data and is never split: a `|` written inside it is text, not a pipe. The
+ * body rides on the stage that opened the heredoc (`python3 - <<'EOF' | tee
+ * out` keeps the body with `python3`, where the interpreter rule reads it).
+ */
 function splitPipeline(statement: string): string[] {
+  const nul = statement.indexOf('\u0000');
+  if (nul >= 0) {
+    const stages = splitPipeline(statement.slice(0, nul));
+    if (stages.length === 0) return [];
+    const opener = stages.findIndex((s) => findHeredocTag(s) != null);
+    const at = opener >= 0 ? opener : stages.length - 1;
+    stages[at] = `${stages[at]!}${statement.slice(nul)}`;
+    return stages;
+  }
   const out: string[] = [];
   let cur = '';
   let quote: string | null = null;
@@ -865,23 +827,6 @@ export function securityConfigWriteShape(command: string): boolean {
     }
   }
   return false;
-}
-
-/**
- * The part of a tool call a lease record is bound to: the command text for a
- * command surface, the target path for a file-edit tool. Both enforcement
- * planes see the same surface for the same call even though the tool name
- * and the argument envelope differ between them.
- */
-export function leaseCallSurface(
-  toolName: string,
-  args: Record<string, unknown> | null | undefined,
-): string {
-  const command = extractCommand(args);
-  if (command != null) return `cmd:${command}`;
-  const filePath = extractFilePath(args);
-  if (filePath != null) return `path:${filePath}`;
-  return `tool:${String(toolName ?? '')}`;
 }
 
 /**

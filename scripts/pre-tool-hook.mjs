@@ -2440,14 +2440,7 @@ process.stdin.on('end', async () => {
     try {
       const lease = await loadLease();
       if (lease) {
-        // #550: this hook runs inside a harness a host runtime may have
-        // spawned (OpenClaw gateway → claude → hook). That runtime gates the
-        // same tool call first, under ITS session id, and acquires; without
-        // this flag the hook then found a "foreign" holder — the caller's own
-        // session — and refused it. A lease held by the spawning runtime
-        // (parent or grandparent, never deeper) re-enters; an older dist
-        // ignores the flag and keeps the strict match.
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, spawnedRuntimeReentry: true });
+        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf });
         if (leaseGate && leaseGate.ledgerChanged) {
           console.error(
             `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
