@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { checkActionGuard, fixActionGuardConfig } from '../doctor.js';
+import { checkActionGuard, doctorExitCode, fixActionGuardConfig } from '../doctor.js';
 import { handleCloudConfig } from '../../cloud/cli.js';
 import {
   getConfigDir,
@@ -193,10 +193,13 @@ describe('doctor — Action Guard #209 alias resolution and migration', () => {
  * eight days of backups vanished while lastRunStatus stayed ok.
  *
  * #354 (30 Aug 2026): the old rule here was "WARN, not fail". It is gone. The
- * line is now honest-vs-lying, not misconfig-vs-evaluator — while armed,
- * `notify.enabled: true` with no webhook FAILS, because it claims a delivery
- * path it does not have. Notify that is off, or a host that is disabled or in
- * warn-mode, still WARNs: under-configured is not the same as untruthful.
+ * line was then honest-vs-lying — while armed, `notify.enabled: true` with no
+ * webhook FAILS, because it claims a delivery path it does not have.
+ *
+ * #517 (22 Sep 2026): the line is now armed-vs-not. An enforcing live plane
+ * with no denial-capable sink FAILS whether or not the config also claims
+ * one — see the #517 describe below. A host that is disabled or in warn-mode
+ * still WARNs: under-configured is not enforcing.
  */
 describe('doctor — Action Guard notify channel (#242)', () => {
   it('warns when enforce is on and notify.webhookUrl is unset (the default)', async () => {
@@ -303,6 +306,106 @@ describe('doctor — Action Guard notify channel (#242)', () => {
 });
 
 /**
+ * #517 (c) / #555 / #556 — the delivery half. The #354 rule above FAILed only
+ * the shape that CLAIMED a sink (`notify.enabled: true`, no webhook) and let
+ * an enforcing host with no notify stanza at all WARN and exit 0. Measured on
+ * 21 Sep 2026 (#555): 837 of 837 notifications reached nobody. An enforcing
+ * plane whose denials cannot reach a human is a failure whether or not the
+ * config also lies about it — the operator reading `doctor` is deciding if
+ * the host is safe, and "enforcing, nobody will hear a denial" is not a warning.
+ *
+ * Fail LOUD, enforcement UNTOUCHED: the row never advises `enforce: false`,
+ * never disables anything, never writes config. Warn-mode with no sink stays
+ * WARN (under-configured, not enforcing). Guard off / plugin off stay as they
+ * were (the Jarvis 5.0.6 paste regression stays fixed).
+ */
+describe('doctor — enforcing with no denial-capable sink is a FAIL (#517)', () => {
+  const NO_DISABLE_ADVICE = /enforce\s*[:=]\s*false|--action-guard-disable|disable action guard|switch (?:off|it off)|turn (?:off|it off)|set enforce/i;
+
+  it('FAILs (exit 1) when enforcing on a live plane with NO notify stanza at all', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify).toBeDefined();
+    expect(notify!.status).toBe('fail');
+    // The message names the sink to configure.
+    expect(notify!.message).toMatch(/actionGuard\.notify\.webhookUrl/);
+    expect(notify!.message).toMatch(/enforcing/i);
+    // The fix names the sink, not the off switch.
+    expect(notify!.fix ?? '').toMatch(/--action-guard-notify-webhook/);
+    expect(notify!.fix ?? '').not.toMatch(NO_DISABLE_ADVICE);
+    expect(notify!.message).not.toMatch(NO_DISABLE_ADVICE);
+    expect(doctorExitCode(results)).toBe(1);
+  });
+
+  it('FAILs (exit 1) when enforcing with notify explicitly off — off is not a sink', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true, notify: { enabled: false } } });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('fail');
+    expect(notify!.message).toMatch(/actionGuard\.notify\.webhookUrl/);
+    expect(doctorExitCode(results)).toBe(1);
+  });
+
+  it('FAILs when enforcing with a webhookUrl but notify.enabled not true — the transport is off', async () => {
+    writeConfig({
+      actionGuard: {
+        enabled: true,
+        enforce: true,
+        notify: { webhookUrl: 'https://hooks.example.invalid/sc' },
+      },
+    });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('fail');
+    // Do not tell the operator the URL is unset when it is the switch that is off.
+    expect(notify!.message).not.toMatch(/webhookUrl unset/i);
+    expect(notify!.message).toMatch(/notify\.enabled/);
+    expect(notify!.fix ?? '').toMatch(/--action-guard-notify-webhook/);
+  });
+
+  it('passes (no notify row, exit 0) when enforcing with a denial-capable webhook sink', async () => {
+    writeConfig({
+      actionGuard: {
+        enabled: true,
+        enforce: true,
+        notify: { enabled: true, webhookUrl: 'https://hooks.example.invalid/sc' },
+      },
+    });
+    const results = await checkActionGuard();
+    expect(results.find((r) => /notify/i.test(r.label))).toBeUndefined();
+    expect(results.filter((r) => r.status === 'fail')).toEqual([]);
+    expect(doctorExitCode(results)).toBe(0);
+  });
+
+  it('only WARNs (exit 0) in warn-mode with no sink — under-configured, not enforcing', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: false } });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('warn');
+    expect(notify!.message).toMatch(/warn-mode/i);
+    expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
+    expect(doctorExitCode(results)).toBe(0);
+  });
+
+  it('never writes config: config.json bytes are identical before and after the FAIL', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    const before = fs.readFileSync(configPath());
+    const results = await checkActionGuard();
+    expect(results.find((r) => /notify/i.test(r.label))!.status).toBe('fail');
+    const after = fs.readFileSync(configPath());
+    expect(Buffer.compare(before, after)).toBe(0);
+    // (`readRawConfig()` may mint a `.config-sig` SIDECAR when it adopts an
+    // unsigned legacy fixture — that is the pre-existing integrity adoption,
+    // computed over these exact bytes, not a write to config.json.)
+    // Enforcement state is untouched: the file still says enforce.
+    const reread = JSON.parse(after.toString('utf-8')) as { actionGuard: { enabled: boolean; enforce: boolean } };
+    expect(reread.actionGuard.enabled).toBe(true);
+    expect(reread.actionGuard.enforce).toBe(true);
+  });
+});
+
+/**
  * Jarvis 5.0.1: signed config said Enforce + notify.enabled, plugin said
  * Guard off, interceptor journal said Off. Doctor FAILed NOTIFY and the
  * `$` footer prescribed a webhook. Adding a webhook / enabling Guard from
@@ -361,6 +464,23 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     const results = await checkActionGuard();
     const notify = results.find((r) => /notify/i.test(r.label));
     expect(notify!.status).toBe('warn');
+  });
+
+  it('WARNs (not FAIL) when signed Enforce meets plugin-off and there is NO notify stanza at all (#517)', async () => {
+    // The #517 FAIL is for a LIVE enforcing plane. Leftover signed Enforce
+    // against an explicit plugin-off is the Jarvis 5.0.6 paste: nothing is
+    // gating, so the missing sink is under-configuration, not a failure, and
+    // the fix must still not prescribe a webhook.
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    writePluginConfig({ actionGuard: { enabled: false, enforce: false } });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify).toBeDefined();
+    expect(notify!.status).toBe('warn');
+    expect(notify!.message).toMatch(/plugin is off/i);
+    expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
+    expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
+    expect(doctorExitCode(results.filter((r) => /notify/i.test(r.label)))).toBe(0);
   });
 
   it('still FAILs when the plugin entry has no Guard keys — signed Enforce is live', async () => {
