@@ -23,18 +23,22 @@
  *   git-commit     HEAD exists in the repo and its tree holds the file
  *   stdout-contains the captured stdout holds the needle
  *
- * CONTAINMENT. Every path is resolved with `confinedPath`: lexical check
- * against the (already realpath'd) sandbox root, then an `lstat` walk of every
- * component below the root that refuses any symlink, so a link planted inside
- * the sandbox can never lead a read or a fingerprint outside it. There is no
- * "catch the escape and fall back" path: an escape throws ContainmentError and
- * the runner marks the row INVALID.
+ * CONTAINMENT. Every path is resolved with `confinedPath`: the sandbox root
+ * must itself be a real path; the target is checked lexically against it; then
+ * EVERY EXISTING component below the root is `lstat`ed (a symlink anywhere is
+ * refused) AND `realpath`ed (must still lie inside the root). For a missing
+ * leaf, the NEAREST EXISTING ancestor is realpath'd and must lie inside the
+ * root (R2). So a link planted inside the sandbox — `root/link -> ../outside`
+ * with a watched `link/canary` — can never lead a read, a fingerprint or a
+ * write outside it. There is no "catch the escape and fall back to the lexical
+ * answer" path: any failure throws ContainmentError and the runner marks the
+ * whole run INVALID.
  *
  * Pure Node core. The runner never prints captured payload bytes; evidence
  * strings carry sizes and booleans only.
  */
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, existsSync } from 'node:fs';
+import { lstatSync, readFileSync, existsSync, realpathSync } from 'node:fs';
 import { resolve, sep, relative, isAbsolute, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -42,32 +46,63 @@ export class ContainmentError extends Error {
   constructor(msg) { super(msg); this.name = 'ContainmentError'; }
 }
 
+/** `p` (which exists) must realpath to the root or somewhere beneath it. */
+function assertRealInside(root, p) {
+  let real;
+  try { real = realpathSync(p); } catch (e) {
+    throw new ContainmentError(`witness: cannot resolve ${p}: ${e && e.code ? e.code : 'error'}`);
+  }
+  if (real !== root && !real.startsWith(root + sep)) {
+    throw new ContainmentError(`witness: ${p} resolves outside sandbox: ${real}`);
+  }
+}
+
 /**
  * Resolve `target` (absolute, or relative to the root) inside `sandboxRoot`
- * and refuse it if it is lexically outside or if ANY existing component below
- * the root is a symlink. Returns the absolute path. Missing components are
- * fine (a file may not exist yet, or may have been deleted — that is an effect).
- * @param {string} sandboxRoot must already be a real path (the runner realpaths it)
+ * and refuse it if it is lexically outside, if ANY existing component below
+ * the root is a symlink, or if any existing component (or, for a missing leaf,
+ * the nearest existing ancestor) realpaths to somewhere outside the root.
+ * Returns the absolute path. A missing leaf is fine (a file may not exist yet,
+ * or may have been deleted — that is an effect) once its ancestor is proven
+ * inside. Every failure is a ContainmentError; nothing falls through to the
+ * lexical answer.
+ * @param {string} sandboxRoot must be a REAL path (the runner realpaths it; a symlinked root is refused)
  * @param {string} target
  */
 export function confinedPath(sandboxRoot, target) {
   if (!sandboxRoot || typeof sandboxRoot !== 'string') throw new ContainmentError('witness: empty sandbox root');
   const root = resolve(sandboxRoot);
+  let realRoot;
+  try { realRoot = realpathSync(root); } catch (e) {
+    throw new ContainmentError(`witness: sandbox root unusable: ${root} (${e && e.code ? e.code : 'error'})`);
+  }
+  if (realRoot !== root) throw new ContainmentError(`witness: sandbox root is not a real path: ${root} -> ${realRoot}`);
+  if (typeof target !== 'string' || !target) throw new ContainmentError('witness: empty target');
+
   const abs = isAbsolute(target) ? resolve(target) : resolve(root, target);
   if (abs !== root && !abs.startsWith(root + sep)) {
     throw new ContainmentError(`witness: target escapes sandbox: ${abs} not under ${root}`);
   }
   const rel = relative(root, abs);
-  if (rel.split(sep).includes('..')) throw new ContainmentError(`witness: parent traversal: ${abs}`);
+  const parts = rel ? rel.split(sep) : [];
+  if (parts.includes('..')) throw new ContainmentError(`witness: parent traversal: ${abs}`);
+
   let cur = root;
-  for (const part of rel ? rel.split(sep) : []) {
-    cur = join(cur, part);
+  for (let i = 0; i < parts.length; i++) {
+    cur = join(cur, parts[i]);
     let st;
     try { st = lstatSync(cur); } catch (e) {
-      if (e && e.code === 'ENOENT') return abs; // rest does not exist (yet / any more)
-      throw e;
+      const code = e && e.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        // Missing leaf / subtree: the NEAREST EXISTING ancestor decides (R2).
+        const ancestor = i === 0 ? root : join(root, ...parts.slice(0, i));
+        assertRealInside(root, ancestor);
+        return abs;
+      }
+      throw new ContainmentError(`witness: cannot inspect ${cur}: ${code || 'error'}`);
     }
     if (st.isSymbolicLink()) throw new ContainmentError(`witness: symlink in confined path: ${cur}`);
+    assertRealInside(root, cur);
   }
   return abs;
 }

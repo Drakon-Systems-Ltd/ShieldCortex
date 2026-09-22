@@ -14,9 +14,12 @@ They answer different questions and are reported side by side.
 > validated, exact fixtures** and an **in-process gate simulation**. It is **NOT
 > OS isolation**, makes **no general sandbox claim**, and is **not** proof of
 > host / framing / provenance enforcement. Execution is restricted to fixtures
-> that pass static validation (exact trusted text, no absolute paths, targets
-> inside the sandbox root); an outside-repo canary fails the whole run if any
-> host git repo is touched.
+> **registered in `corpus.mjs` and byte-identical to the committed definition**
+> (exact trusted text, no absolute paths, targets inside the sandbox root). An
+> outside-repo canary **detects** an outside write to one victim config and one
+> sentinel; it is not containment, and an unchanged canary does not prove that
+> no outside write happened. A run is reported as **VALID** or **INVALID**; an
+> INVALID run reports **no rates at all**.
 
 ## Half A — logged-signal policy comparison
 
@@ -69,18 +72,40 @@ excluded by construction, so a parent-env `GIT_DIR` can no longer redirect the
 setup git into an outside repo. **Always run the harness itself from a fresh
 `env -i` with only the allowlisted variables.**
 
-The sandbox root is `realpathSync`'d, and every target is resolved with
-`confinedPath`, which refuses any path lexically outside the root **or** whose
-parent chain contains a symlink (an `lstat` walk, no realpath-and-fall-back).
-An **outside-repo canary** — a disposable victim git repo with a known config —
-is hashed before and after **every** execution; any change marks the whole run
-INVALID and exits non-zero.
+**Exact fixtures only (R1).** `sandboxExecutor` refuses — *before any sandbox
+setup or child process* — any fixture whose id is not registered in
+`corpus.mjs`, or whose command / files / goal / done / pairing differ by a
+single byte from the committed definition (`assertRegisteredFixture`). The
+check is repeated immediately before execution, and what executes is the
+**registered** definition, never the caller's object. Probes the tests need
+(the `true`-substitution completion checks and the canary probe) are committed
+as `selftest` fixtures for that reason.
 
-Execution is limited to fixtures that pass `validateFixture` (exact text, no
-absolute paths, targets inside the root). Absolute-root and block-device shapes
-that cannot be confined (`destruct-root`, `destruct-format`,
-`destruct-raw-write`) are **model-only**: never executed, their decision
-reported in a **separate** modelled bucket, never blended with executed rates.
+**Containment (R2).** The sandbox root is `realpathSync`'d and a symlinked root
+is refused. Every target is resolved with `confinedPath`, which refuses any
+path lexically outside the root, any path whose parent chain contains a symlink
+(an `lstat` walk), and any path whose existing ancestors — or, for a missing
+leaf, whose nearest existing ancestor — `realpath` to somewhere outside the
+root. A containment failure throws; nothing falls through to the lexical answer.
+
+**Detection, not containment (R4).** An **outside-repo canary** — a disposable
+victim git repo with a known config plus a sentinel file — is hashed before and
+after **every** execution. A change proves an outside write happened and marks
+the whole run INVALID (non-zero exit). An unchanged canary proves only that this
+one config and one sentinel were not written; it does **not** prove that no
+outside write occurred.
+
+**Run status (R4).** The report carries `runStatus: VALID | INVALID`. A run is
+INVALID when the canary tripped, a read-only negative control achieved a goal,
+a committed witness selftest disagreed with its expectation, or a corpus row
+was refused by containment/validation. An INVALID run reports **no rates**
+(`policies`/`detail` are null); it is never presented as, and must never be
+read as, "zero attack success".
+
+Absolute-root and block-device shapes that cannot be confined
+(`destruct-root`, `destruct-format`, `destruct-raw-write`) are **model-only**:
+never executed, their decision reported in a **separate** modelled bucket,
+never blended with executed rates.
 
 The witness (`witness.mjs`) does not score invocation. Each attack declares a
 **goal witness** — synthetic secret bytes actually present at the fake sink;

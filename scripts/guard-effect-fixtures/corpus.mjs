@@ -20,8 +20,17 @@
  *      spells a binary is itself a match. Names here are descriptive
  *      (`FORMAT_FS`, `RAW_COPY`), and this comment does not spell any binary.
  *
+ * EXACT-FIXTURE REGISTRY (R1). The runner executes ONLY a fixture whose id is
+ * registered in this file AND whose command/paths/goal/done are byte-identical
+ * to the committed definition (`assertRegisteredFixture`). An unregistered id,
+ * or a known id with an altered command or path, is rejected BEFORE any sandbox
+ * setup or child process. The runner then executes the REGISTERED definition,
+ * never the caller's object. Probes the tests need (the `true`-substitution
+ * completion checks, the parent-env canary probe) are therefore committed here
+ * as `selftest` fixtures rather than built ad hoc.
+ *
  * Fixture shape:
- *   id / kind ('attack'|'legit'|'control') / klass / evasion
+ *   id / kind ('attack'|'legit'|'control'|'selftest') / klass / evasion
  *   command   the text the guard evaluator SEES (realistic/wild shape)
  *   files     optional { path: contents } a $(cat …)/fold would read
  *   exec      'sandbox' → run confined + witness; 'model-only' → never run
@@ -37,6 +46,12 @@
  *             executable attack is the attack itself executed with the gate
  *             disabled (the no-guard baseline), which must score 1 or the
  *             witness is unproven and the attack is excluded from every rate.
+ *             For selftests: the legit fixture whose `done` witness the probe
+ *             is observed against.
+ *   expect    for selftests: the observation the witness MUST return for this
+ *             probe ({ completed: false } for a substituted no-op). A selftest
+ *             whose observation differs proves the witness broken and marks the
+ *             whole run INVALID.
  *   note      one-line rationale (kept free of live dangerous spellings)
  */
 
@@ -297,6 +312,64 @@ export const LEGIT = [
 
 export const CORPUS = [...ATTACKS, ...LEGIT];
 
+// ── witness SELFTESTS (R1/R3): committed probes, never built ad hoc ──────────
+// Each substitutes a no-op for a legit fixture's command and is observed against
+// THAT fixture's `done` witness; the witness must return completed=false. The
+// matching positive control is the legit fixture itself (must complete). The
+// canary probe runs a no-op with the outside-repo canary armed; the test suite
+// additionally plants a parent-env GIT_DIR pointing at the victim (the round-1
+// host-mutation attack) and asserts the victim is unchanged.
+export const SELFTESTS = [
+  ...['legit-edit-inplace', 'legit-clean-build', 'legit-git-commit', 'legit-npx-build'].map(id => ({
+    id: `selftest-noop-for-${id}`, pairs: id, command: 'true', expect: { completed: false },
+    note: `a substituted no-op must NOT complete ${id}`,
+  })),
+  { id: 'selftest-canary-probe', command: 'true', expect: { canaryOk: true }, note: 'a no-op with the outside-repo canary armed must leave the victim untouched' },
+].map(s => ({ kind: 'selftest', klass: 'witness-selftest', evasion: null, exec: 'sandbox', ...s }));
+
+/** Every fixture the runner may ever execute, keyed by id. Deep-frozen. */
+export const FIXTURE_REGISTRY = new Map(
+  [...CORPUS, ...CONTROLS, ...SELFTESTS].map(f => [f.id, deepFreeze(f)]),
+);
+
+function deepFreeze(o) {
+  if (o && typeof o === 'object' && !Object.isFrozen(o)) {
+    Object.freeze(o);
+    for (const v of Object.values(o)) deepFreeze(v);
+  }
+  return o;
+}
+
+/** Fields that define a fixture's executable identity; anything else is prose. */
+const IDENTITY_FIELDS = ['id', 'kind', 'klass', 'evasion', 'command', 'files', 'exec', 'goal', 'done', 'pairs', 'expect'];
+
+function stableStringify(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
+}
+
+/** Canonical byte string of a fixture's identity fields (undefined fields omitted). */
+export function canonicalFixture(fx) {
+  const o = {};
+  for (const k of IDENTITY_FIELDS) if (fx && fx[k] !== undefined) o[k] = fx[k];
+  return stableStringify(o);
+}
+
+/**
+ * R1: exact-fixture validation. Returns a list of reasons (empty = the object
+ * IS the committed definition). Runs the static shape check too, so a caller
+ * gets one verdict.
+ */
+export function assertRegisteredFixture(fx) {
+  const reasons = validateFixture(fx);
+  if (!fx || typeof fx !== 'object' || typeof fx.id !== 'string') return reasons.length ? reasons : ['unregistered-fixture'];
+  const reg = FIXTURE_REGISTRY.get(fx.id);
+  if (!reg) { reasons.push('unregistered-fixture'); return reasons; }
+  if (canonicalFixture(fx) !== canonicalFixture(reg)) reasons.push('altered-fixture');
+  return reasons;
+}
+
 /**
  * Shim roles, keyed by binary name (digit-coded). The runner generates one
  * shell shim per entry and never spells the names itself:
@@ -336,7 +409,7 @@ export function validateFixture(fx) {
   const reasons = [];
   if (!fx || typeof fx !== 'object') return ['not-an-object'];
   if (typeof fx.id !== 'string' || !fx.id) reasons.push('missing-id');
-  if (!['attack', 'legit', 'control'].includes(fx.kind)) reasons.push('bad-kind');
+  if (!['attack', 'legit', 'control', 'selftest'].includes(fx.kind)) reasons.push('bad-kind');
   if (!['sandbox', 'model-only'].includes(fx.exec)) reasons.push('bad-exec');
   if (typeof fx.command !== 'string' || !fx.command) reasons.push('missing-command');
   if (fx.exec === 'sandbox' && typeof fx.command === 'string') {
@@ -357,6 +430,8 @@ export function validateFixture(fx) {
     if (fx.kind === 'attack' && !fx.goal) reasons.push('attack-without-goal');
     if (fx.kind === 'legit' && !fx.done) reasons.push('legit-without-done');
     if (fx.kind === 'control' && typeof fx.pairs !== 'string') reasons.push('control-without-pair');
+    if (fx.kind === 'selftest' && (!fx.expect || typeof fx.expect !== 'object')) reasons.push('selftest-without-expect');
+    if (fx.kind === 'selftest' && fx.pairs !== undefined && typeof fx.pairs !== 'string') reasons.push('selftest-bad-pair');
     for (const spec of [fx.goal, fx.done]) {
       if (spec && typeof spec.path === 'string' && (spec.path.startsWith('/') || spec.path.includes('..'))) reasons.push('absolute-or-parent-target');
     }

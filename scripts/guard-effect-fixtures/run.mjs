@@ -20,11 +20,28 @@
  *      attack scores 0, a non-gated attack inherits the witnessed effect, a
  *      gated legit command is a false positive.
  *
- * Containment (finding 1): the sandbox root is `realpathSync`'d; every target is
- * resolved with `confinedPath`, which refuses a symlinked component. An OUTSIDE-
- * REPO CANARY (a disposable victim git repo with a known config) is hashed
- * before and after EVERY execution; any change marks the whole run INVALID and
- * exits non-zero.
+ * Exact fixtures (R1): `sandboxExecutor` runs ONLY a fixture registered in
+ * corpus.mjs whose identity fields are byte-identical to the committed
+ * definition; the check happens BEFORE any sandbox setup or child process, and
+ * what executes is the REGISTERED definition, never the caller's object.
+ *
+ * Containment (finding 1, R2): the sandbox root is `realpathSync`'d; every
+ * target is resolved with `confinedPath`, which refuses a symlinked component
+ * and realpaths every existing ancestor (a missing leaf's nearest existing
+ * ancestor) back inside the root. Failures never fall through to a lexical
+ * answer.
+ *
+ * Detection, NOT containment (R4): an OUTSIDE-REPO CANARY (a disposable victim
+ * git repo with a known config plus a sentinel file) is hashed before and after
+ * EVERY execution. A change proves an outside write happened; an unchanged
+ * canary does NOT prove no outside write happened — it is one config and one
+ * file. Any change marks the whole run INVALID.
+ *
+ * Run status (R4): a run is VALID or INVALID. An INVALID run (canary tripped,
+ * a negative control achieved a goal, a witness selftest disagreed, a corpus
+ * row refused by containment/validation) reports NO rates at all and exits
+ * non-zero. "Zero attack success" is a VALID-run result and is never conflated
+ * with INVALID.
  *
  * Reports, PER POLICY and NEVER blended, two measurement kinds separately
  * (finding 6): `executed-witness` over the 14 executable attacks, and `modelled`
@@ -36,7 +53,8 @@ import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  CORPUS, ATTACKS, LEGIT, CONTROLS, SHIM_ROLES, SHIMMED_BINARIES, validateFixture,
+  CORPUS, CONTROLS, SELFTESTS, FIXTURE_REGISTRY, SHIM_ROLES, SHIMMED_BINARIES,
+  validateFixture, assertRegisteredFixture,
   PLANTED_KEY_MATERIAL, ENV_CANARY_NAME, ENV_CANARY_VALUE,
 } from './corpus.mjs';
 import {
@@ -54,6 +72,9 @@ const BANNER = [
   'witness observes the declared GOAL/completion state, never mere invocation. Two measurement',
   'kinds are reported separately and never blended: executed-witness (14 executable attacks)',
   'and modelled (3 unconfinable model-only shapes; effect := policy allowed it to run).',
+  'Only REGISTERED, byte-identical fixtures execute. The outside-repo canary is DETECTION of an',
+  'outside write, not containment: an unchanged canary does not prove no outside writes occurred.',
+  'A run is VALID or INVALID; an INVALID run reports no rates.',
 ].join('\n');
 
 const RUN_TIMEOUT_MS = 5000;
@@ -245,44 +266,82 @@ export function cleanupCanary(canary) { try { rmSync(canary.dir, { recursive: tr
 // ── the single confined execution + witness of one fixture ───────────────────
 
 /**
- * Execute ONE fixture confined, observe its effect/completion, and verify the
- * canary is untouched. Returns raw observations; interpretation is the caller's.
+ * Execute ONE registered fixture confined, observe its effect/completion, and
+ * check the canary. Returns raw observations; interpretation is the caller's.
+ *
+ * R1: the caller's object is validated against the committed registry BEFORE
+ * any sandbox setup (`setupStarted:false` on refusal) and the REGISTERED
+ * definition is what executes. Control goals and selftest completion witnesses
+ * are resolved from the registry, never from the caller.
  * @param {object} fx
- * @param {{ canary?: ReturnType<typeof makeCanary>, goalOverride?: object }} [opts]
+ * @param {{ canary?: ReturnType<typeof makeCanary> }} [opts]
  */
 export function sandboxExecutor(fx, opts = {}) {
-  const invalid = validateFixture(fx);
-  if (invalid.length) return { ran: false, invalid: true, invalidReason: invalid.join(','), effectAchieved: false, completed: false };
+  const refused = (reason, extra = {}) => ({
+    ran: false, setupStarted: false, invalid: true, invalidReason: reason,
+    effectAchieved: false, completed: false, canaryOk: true, ...extra,
+  });
+  // 1) exact-fixture validation, before setup.
+  const reasons = assertRegisteredFixture(fx);
+  if (reasons.length) return refused(reasons.join(','));
+  const reg = FIXTURE_REGISTRY.get(fx.id);
+  if (!reg || reg.exec !== 'sandbox') return refused('not-executable');
+  // The witness spec is resolved from the registry.
+  let goal = null, done = null;
+  if (reg.kind === 'attack') goal = reg.goal;
+  else if (reg.kind === 'legit') done = reg.done;
+  else if (reg.kind === 'control') {
+    const paired = FIXTURE_REGISTRY.get(reg.pairs);
+    if (!paired || paired.kind !== 'attack' || !paired.goal) return refused('control-pair-unregistered');
+    goal = paired.goal;
+  } else if (reg.kind === 'selftest' && reg.pairs) {
+    const paired = FIXTURE_REGISTRY.get(reg.pairs);
+    if (!paired || !(paired.done || paired.goal)) return refused('selftest-pair-unregistered');
+    done = paired.done ?? null; goal = paired.done ? null : paired.goal;
+  }
+
+  // 2) setup — only after validation passed.
   const sb = buildSandbox();
+  let setupStarted = true;
   try {
-    materialiseFixtureFiles(sb.root, fx);
+    materialiseFixtureFiles(sb.root, reg);
     const watched = allWatchedTargets();
     const before = snapshot(sb.root, watched);
-    const { exit, stdout } = execute(sb.root, fx.command);
+    // 3) re-validate immediately before execution (R1: before setup AND before execution).
+    if (assertRegisteredFixture(fx).length) return refused('altered-between-setup-and-execution', { setupStarted });
+    const { exit, stdout } = execute(sb.root, reg.command);
     const after = snapshot(sb.root, watched);
     const collateral = diff(before, after).collateral;
 
     let effectAchieved = false, completed = false, evidence = '';
     const env = childEnv(sb.root);
-    if (fx.kind === 'attack') {
-      const o = observeGoal(sb.root, fx.goal); effectAchieved = o.achieved; evidence = o.evidence;
-    } else if (fx.kind === 'legit') {
-      const o = observeDone(sb.root, fx.done, { before, stdout, env }); completed = o.achieved; evidence = o.evidence;
-    } else if (fx.kind === 'control') {
-      // A negative control shares its paired attack's goal; it must NOT achieve it.
-      const goal = opts.goalOverride ?? fx.goal;
-      const o = observeGoal(sb.root, goal); effectAchieved = o.achieved; evidence = o.evidence;
-    }
+    if (goal) { const o = observeGoal(sb.root, goal); effectAchieved = o.achieved; evidence = o.evidence; }
+    if (done) { const o = observeDone(sb.root, done, { before, stdout, env }); completed = o.achieved; evidence = o.evidence; }
 
     let canaryOk = true, canaryEmail = null;
     if (opts.canary) { const c = checkCanary(opts.canary); canaryOk = c.ok; canaryEmail = c.configEmail; }
-    return { ran: true, invalid: false, exit, effectAchieved, completed, evidence, collateral, canaryOk, canaryEmail };
+    return { ran: true, setupStarted, invalid: false, exit, effectAchieved, completed, evidence, collateral, canaryOk, canaryEmail };
   } catch (e) {
-    if (e instanceof ContainmentError) return { ran: false, invalid: true, invalidReason: `containment:${e.message}`, effectAchieved: false, completed: false, canaryOk: true };
+    if (e instanceof ContainmentError) return refused(`containment:${e.message}`, { setupStarted });
     throw e;
   } finally {
     rmSync(sb.root, { recursive: true, force: true });
   }
+}
+
+/**
+ * Run every committed witness selftest (R3). Each probe's observation must
+ * equal its `expect`; a disagreement proves the witness broken.
+ * @param {{ canary?: ReturnType<typeof makeCanary> }} [opts]
+ */
+export function runSelftests(opts = {}) {
+  return SELFTESTS.map(s => {
+    const obs = sandboxExecutor(s, opts);
+    const observed = {};
+    for (const k of Object.keys(s.expect)) observed[k] = obs[k];
+    const ok = obs.ran && Object.keys(s.expect).every(k => obs[k] === s.expect[k]);
+    return { id: s.id, pairs: s.pairs ?? null, expect: s.expect, observed, ok, evidence: obs.evidence ?? obs.invalidReason };
+  });
 }
 
 // ── evaluation ────────────────────────────────────────────────────────────────
@@ -365,6 +424,51 @@ export function tallyPolicies(rows, { evaluatorId = 'unknown', executed = true }
   };
 }
 
+// ── run status (R4) ─────────────────────────────────────────────────────────
+
+/**
+ * Decide VALID/INVALID and assemble the report. An INVALID run carries its
+ * reasons and NO rates (policies/detail are null) — it is a broken instrument,
+ * not a measurement, and is never presented as "zero attack success".
+ * Pure; exported for tests.
+ * @param {{ rows: object[], controlResults?: object[], selftestResults?: object[],
+ *   canaryTripped?: object|null, canaryChecked?: boolean, invalidFixtures?: object[],
+ *   evaluatorId?: string, executed?: boolean }} input
+ */
+export function finaliseRun({
+  rows, controlResults = [], selftestResults = [], canaryTripped = null, canaryChecked = false,
+  invalidFixtures = [], evaluatorId = 'unknown', executed = true,
+}) {
+  const invalidReasons = [];
+  if (canaryTripped) invalidReasons.push(`canary-tripped:${canaryTripped.fixture}`);
+  for (const c of controlResults.filter(c => !c.ok)) invalidReasons.push(`negative-control-achieved-goal:${c.id}`);
+  for (const s of selftestResults.filter(s => !s.ok)) invalidReasons.push(`witness-selftest-disagreed:${s.id}`);
+  for (const r of rows.filter(r => r.obs && r.obs.invalid)) invalidReasons.push(`row-refused:${r.fx.id}:${r.obs.invalidReason}`);
+  for (const f of invalidFixtures) invalidReasons.push(`corpus-fixture-invalid:${f.id}`);
+
+  const positiveControls = rows
+    .filter(r => r.fx.kind === 'attack' && r.fx.exec === 'sandbox')
+    .map(r => ({ id: r.fx.id, achieved: r.obs?.effectAchieved ?? null, ok: !r.witnessUnproven, evidence: r.obs?.evidence }));
+  const common = {
+    banner: BANNER,
+    evaluator: evaluatorId,
+    runStatus: invalidReasons.length ? 'INVALID' : 'VALID',
+    invalidReasons,
+    canary: canaryChecked
+      ? { checked: true, role: 'detection-not-containment', tripped: canaryTripped }
+      : { checked: false, role: 'detection-not-containment' },
+    controls: { negative: controlResults, positive: positiveControls },
+    selftests: selftestResults,
+    invalidFixtures,
+    witnessUnproven: rows.filter(r => r.witnessUnproven).map(r => r.fx.id),
+  };
+  if (invalidReasons.length) {
+    return { ...common, ratesWithheld: true, executableDenominator: null, counts: null, policies: null, detail: null };
+  }
+  const tally = tallyPolicies(rows, { evaluatorId, executed });
+  return { ...common, ratesWithheld: false, executableDenominator: tally.executableDenominator, counts: tally.counts, policies: tally.policies, detail: tally.detail };
+}
+
 // ── main ───────────────────────────────────────────────────────────────────
 
 async function main(argv) {
@@ -375,15 +479,16 @@ async function main(argv) {
 
   const adapter = await builtEvaluatorAdapter();
 
-  // Fixture validation up front; INVALID fixtures never run.
+  // Fixture validation up front; an invalid committed fixture makes the run INVALID.
   const invalidFixtures = [];
-  for (const fx of [...CORPUS, ...CONTROLS]) {
+  for (const fx of [...CORPUS, ...CONTROLS, ...SELFTESTS]) {
     const reasons = validateFixture(fx);
     if (reasons.length) invalidFixtures.push({ id: fx.id, reasons });
   }
 
   const canary = execute_ ? makeCanary() : null;
   let canaryTripped = null;
+  const trip = (id, obs) => { if (canary && obs.canaryOk === false) canaryTripped = canaryTripped ?? { fixture: id, email: obs.canaryEmail }; };
 
   // 1) evaluate + (if --execute) run each fixture ONCE with no gate.
   const rows = [];
@@ -393,7 +498,7 @@ async function main(argv) {
     let obs = null, witnessUnproven = false;
     if (execute_ && fx.exec === 'sandbox') {
       obs = sandboxExecutor(fx, { canary });
-      if (canary && obs.canaryOk === false) canaryTripped = { fixture: fx.id, email: obs.canaryEmail };
+      trip(fx.id, obs);
       // Positive control: the no-guard run of an attack MUST achieve its goal.
       if (fx.kind === 'attack' && !obs.effectAchieved) witnessUnproven = true;
     }
@@ -402,26 +507,23 @@ async function main(argv) {
 
   // 2) negative controls: each must score 0 (goal NOT achieved) with no gate.
   const controlResults = [];
+  // 3) witness selftests: each observation must equal its committed expectation.
+  let selftestResults = [];
   if (execute_) {
-    const byId = Object.fromEntries(ATTACKS.map(a => [a.id, a]));
     for (const c of CONTROLS) {
-      const paired = byId[c.pairs];
-      const obs = sandboxExecutor(c, { canary, goalOverride: paired?.goal });
-      if (canary && obs.canaryOk === false) canaryTripped = canaryTripped ?? { fixture: c.id, email: obs.canaryEmail };
-      controlResults.push({ id: c.id, pairs: c.pairs, achieved: obs.effectAchieved, evidence: obs.evidence, ok: obs.effectAchieved === false });
+      const obs = sandboxExecutor(c, { canary });
+      trip(c.id, obs);
+      controlResults.push({ id: c.id, pairs: c.pairs, achieved: obs.effectAchieved, evidence: obs.evidence ?? obs.invalidReason, ok: obs.ran && obs.effectAchieved === false });
     }
+    selftestResults = runSelftests({ canary });
+    if (canary && !canaryTripped) { const c = checkCanary(canary); if (!c.ok) canaryTripped = { fixture: 'selftests', email: c.configEmail }; }
   }
   if (canary) cleanupCanary(canary);
 
-  const summary = tallyPolicies(rows, { evaluatorId: adapter.id, executed: execute_ });
-  const positiveControls = rows
-    .filter(r => r.fx.kind === 'attack' && r.fx.exec === 'sandbox')
-    .map(r => ({ id: r.fx.id, achieved: r.obs?.effectAchieved ?? null, ok: !r.witnessUnproven, evidence: r.obs?.evidence }));
-
-  summary.controls = { negative: controlResults, positive: positiveControls };
-  summary.invalidFixtures = invalidFixtures;
-  summary.canary = execute_ ? { checked: true, tripped: canaryTripped } : { checked: false };
-  summary.witnessUnproven = rows.filter(r => r.witnessUnproven).map(r => r.fx.id);
+  const summary = finaliseRun({
+    rows, controlResults, selftestResults, canaryTripped, canaryChecked: execute_,
+    invalidFixtures, evaluatorId: adapter.id, executed: execute_,
+  });
 
   const md = renderMarkdown(summary);
   const jsonOut = flag('--json'), mdOut = flag('--md');
@@ -429,10 +531,10 @@ async function main(argv) {
   if (mdOut) writeFileSync(mdOut, md + '\n');
   if (!quiet) process.stdout.write(md + '\n');
 
-  // Fail the run on any containment or witness-integrity breach (finding 1/2).
-  const controlFail = controlResults.filter(c => !c.ok);
-  if (canaryTripped) { process.stderr.write(`[run] CANARY TRIPPED by ${canaryTripped.fixture} (victim email now ${canaryTripped.email}); run INVALID.\n`); process.exit(3); }
-  if (controlFail.length) { process.stderr.write(`[run] negative control(s) achieved a goal: ${controlFail.map(c => c.id).join(', ')}; run INVALID.\n`); process.exit(4); }
+  if (summary.runStatus === 'INVALID') {
+    process.stderr.write(`[run] RUN INVALID — no rates reported. Reasons: ${summary.invalidReasons.join('; ')}\n`);
+    process.exit(3);
+  }
   if (execute_ && summary.witnessUnproven.length) process.stderr.write(`[run] witness unproven (no-guard positive control missed) for: ${summary.witnessUnproven.join(', ')}; excluded from the executable denominator.\n`);
 }
 
@@ -442,8 +544,17 @@ export function renderMarkdown(s) {
   const out = [];
   out.push('```', s.banner, '```', '');
   out.push(`**Evaluator:** ${s.evaluator}`);
+  out.push(`**Run status:** ${s.runStatus}${s.runStatus === 'INVALID' ? ' — instrument breach; NO rates reported (this is not "zero attack success")' : ' (a valid measurement; zero attack success, if shown, is a result)'}`);
+  if (s.canary?.checked) out.push(`**Outside-repo canary (detection, not containment):** ${s.canary.tripped ? `TRIPPED by ${s.canary.tripped.fixture} — an outside write DID happen; run INVALID` : 'unchanged — no outside write to this one config + sentinel was detected; this does NOT prove no outside writes occurred'}`);
+  out.push('');
+  if (s.runStatus === 'INVALID') {
+    out.push('### RUN INVALID — rates withheld', '');
+    for (const r of s.invalidReasons) out.push(`- ${r}`);
+    out.push('');
+    renderControls(out, s);
+    return out.join('\n');
+  }
   out.push(`**Executable-attack denominator:** ${s.executableDenominator.valid} valid of ${s.executableDenominator.expected} executable (${s.counts.modelledAttacks} model-only reported separately; ${s.counts.legit} legit).`, '');
-  if (s.canary?.checked) out.push(`**Outside-repo canary:** ${s.canary.tripped ? `TRIPPED by ${s.canary.tripped.fixture} — run INVALID` : 'intact (no host git repo mutated)'}`, '');
   if (s.witnessUnproven?.length) out.push(`**Witness unproven (excluded):** ${s.witnessUnproven.join(', ')}`, '');
 
   out.push('### Executed-witness rates (14 executable attacks; effect observed)', '');
@@ -460,21 +571,7 @@ export function renderMarkdown(s) {
   for (const p of s.policies) out.push(`| ${p.id} | ${p.modelled.attackAllowed}/${p.modelled.attackTotal} | ${p.modelled.attackGated} |`);
   out.push('');
 
-  if (s.controls) {
-    out.push('### Witness controls', '');
-    const neg = s.controls.negative ?? [];
-    const pos = s.controls.positive ?? [];
-    out.push(`- negative (read-only, must score 0): ${neg.length ? `${neg.filter(c => c.ok).length}/${neg.length} correct (0 effect)` : 'not run'}`);
-    if (neg.some(c => !c.ok)) out.push(`  - FAILED (observed an effect): ${neg.filter(c => !c.ok).map(c => c.id).join(', ')}`);
-    out.push(`- positive (no-guard attack, must score 1): ${pos.length ? `${pos.filter(c => c.ok).length}/${pos.length} achieved the goal` : 'not run'}`);
-    if (pos.some(c => !c.ok)) out.push(`  - unproven: ${pos.filter(c => !c.ok).map(c => c.id).join(', ')}`);
-    out.push('');
-  }
-  if (s.invalidFixtures?.length) {
-    out.push('### Invalid fixtures (never executed)', '');
-    for (const f of s.invalidFixtures) out.push(`- ${f.id}: ${f.reasons.join(', ')}`);
-    out.push('');
-  }
+  renderControls(out, s);
 
   for (const p of s.detail) {
     out.push(`### ${p.id} — per fixture`, '');
@@ -489,6 +586,29 @@ export function renderMarkdown(s) {
     out.push('');
   }
   return out.join('\n');
+}
+
+function renderControls(out, s) {
+  if (s.controls) {
+    out.push('### Witness controls', '');
+    const neg = s.controls.negative ?? [];
+    const pos = s.controls.positive ?? [];
+    out.push(`- negative (read-only, must score 0): ${neg.length ? `${neg.filter(c => c.ok).length}/${neg.length} correct (0 effect)` : 'not run'}`);
+    if (neg.some(c => !c.ok)) out.push(`  - FAILED (observed an effect): ${neg.filter(c => !c.ok).map(c => c.id).join(', ')}`);
+    out.push(`- positive (no-guard attack, must score 1): ${pos.length ? `${pos.filter(c => c.ok).length}/${pos.length} achieved the goal` : 'not run'}`);
+    if (pos.some(c => !c.ok)) out.push(`  - unproven: ${pos.filter(c => !c.ok).map(c => c.id).join(', ')}`);
+    out.push('');
+  }
+  if (s.selftests?.length) {
+    out.push('### Witness selftests (committed probes; observation must equal expectation)', '');
+    for (const t of s.selftests) out.push(`- ${t.id}: ${t.ok ? 'ok' : 'DISAGREED'} — expected ${JSON.stringify(t.expect)}, observed ${JSON.stringify(t.observed)}`);
+    out.push('');
+  }
+  if (s.invalidFixtures?.length) {
+    out.push('### Invalid fixtures (never executed)', '');
+    for (const f of s.invalidFixtures) out.push(`- ${f.id}: ${f.reasons.join(', ')}`);
+    out.push('');
+  }
 }
 
 if (process.argv[1] && process.argv[1].endsWith('run.mjs')) {
