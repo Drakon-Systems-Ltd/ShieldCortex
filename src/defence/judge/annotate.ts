@@ -65,10 +65,11 @@ export async function annotateQuarantineItem(id: number): Promise<ReviewAnnotati
   const row = getPendingRow(id);
   if (!row) return null;
 
-  const annotation = await reviewQuarantineItem(toReviewItem(row));
-  if (!shouldPersistAnnotation(annotation)) return null;
+  const produced = await reviewQuarantineItem(toReviewItem(row));
+  if (!shouldPersistAnnotation(produced)) return null;
 
-  saveQuarantineAnnotation(annotation);
+  // #538: the stored form is the redacted form; report and return that.
+  const annotation = saveQuarantineAnnotation(produced);
   recordAnnotationCreated(annotation);
   return annotation;
 }
@@ -112,12 +113,12 @@ export async function annotatePendingQuarantineItems(
 
   for (const row of rows) {
     try {
-      const annotation = await reviewQuarantineItem(toReviewItem(row));
-      if (!shouldPersistAnnotation(annotation)) {
+      const produced = await reviewQuarantineItem(toReviewItem(row));
+      if (!shouldPersistAnnotation(produced)) {
         result.skipped++;
         continue;
       }
-      saveQuarantineAnnotation(annotation);
+      const annotation = saveQuarantineAnnotation(produced);
       recordAnnotationCreated(annotation);
       result.annotated++;
     } catch {

@@ -25,6 +25,8 @@
 
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
+import { redactAnnotationForPersistence } from '../defence/judge/redact.js';
+import type { ReviewAnnotation } from '../defence/judge/types.js';
 
 /**
  * Log unexpected errors from idempotent DDL operations (v4.26.0).
@@ -1010,5 +1012,77 @@ export function runMigrations(database: Database.Database): void {
     }
   } catch (err) {
     logIfUnexpectedDdlError(err, 'memories content_form (#402)');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration: #538 — one-time redaction backfill of quarantine_annotations.
+  //
+  // Until #538 the Review Copilot's output (verbatim evidence snippets of the
+  // quarantined text, plus the summary / reasoning / group key it composed)
+  // was inserted raw, so a quarantine row holding an identifier — a legacy row
+  // stored before #510, or one the model paraphrased — was copied into a
+  // second table that the admin listing and `getAnnotationForItem` read.
+  // `saveQuarantineAnnotation` now redacts at write; this rewrites the rows
+  // written before it did.
+  //
+  // SCOPE: annotations only. They are derived, regenerable data, so an
+  // in-place rewrite loses nothing an operator relies on. Legacy
+  // `quarantine.original_content` is deliberately NOT rewritten here — it is
+  // the operator's review evidence and is redacted as it moves (#534).
+  //
+  // Run-once guard = existence of `quarantine_annotations_backfill` (a
+  // `.dump`-restored database keeps tables, not `user_version`). The marker
+  // records what the run did. The redactor is idempotent on its own tokens,
+  // so a lost marker costs one scan and rewrites nothing. A row whose JSON
+  // does not parse is left as it is; it is not this migration's to repair.
+  //
+  // LOUD catch: a data backfill failure must be visible and retried on the
+  // next startup (no marker is written), not swallowed as idempotent DDL.
+  try {
+    const annotationsTable = database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='quarantine_annotations'")
+      .get();
+    const alreadyDone = database
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='quarantine_annotations_backfill'")
+      .get();
+    if (annotationsTable && !alreadyDone) {
+      const rows = database
+        .prepare('SELECT id, annotation_json FROM quarantine_annotations')
+        .all() as Array<{ id: number; annotation_json: string }>;
+      const update = database.prepare(
+        'UPDATE quarantine_annotations SET annotation_json = ?, similar_group_key = ? WHERE id = ?',
+      );
+      const backfill = database.transaction(() => {
+        let rowsRedacted = 0;
+        for (const row of rows) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(row.annotation_json);
+          } catch {
+            continue;
+          }
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+          const stored = parsed as ReviewAnnotation;
+          const redacted = redactAnnotationForPersistence(stored);
+          if (redacted === stored) continue;
+          update.run(JSON.stringify(redacted), redacted.similarGroupKey ?? null, row.id);
+          rowsRedacted++;
+        }
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS quarantine_annotations_backfill (
+            ran_at TEXT NOT NULL,
+            rows_scanned INTEGER NOT NULL,
+            rows_redacted INTEGER NOT NULL
+          )
+        `);
+        database
+          .prepare('INSERT INTO quarantine_annotations_backfill (ran_at, rows_scanned, rows_redacted) VALUES (?, ?, ?)')
+          .run(new Date().toISOString(), rows.length, rowsRedacted);
+      });
+      backfill.immediate();
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[backfill #538] quarantine_annotations redaction backfill failed (will retry next startup): ${msg}`);
   }
 }
