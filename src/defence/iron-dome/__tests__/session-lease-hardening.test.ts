@@ -399,6 +399,47 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash('N=$((1 << 2)); cat ~/.openclaw/openclaw.json')).toBeNull();
   });
 
+  it('quote and expansion contexts are a class: an apostrophe inside double quotes or an expanding heredoc body is text (#552 r4)', () => {
+    // Tars at 0c70adc6: the substitution scanner had a single-quote toggle only.
+    // Inside double quotes a `'` is literal and the `$( … )` still runs.
+    expect(bash(`echo "'$(printf changed > ~/.openclaw/openclaw.json)'"`)).toBe('security-config');
+    expect(bash('echo "\'`printf changed > ~/.openclaw/openclaw.json`\'"')).toBe('security-config');
+    // An expanding heredoc body has NO shell quoting: quotes are text, `$( … )` runs.
+    expect(bash("cat <<EOF\n'$(printf changed > ~/.openclaw/openclaw.json)'\nEOF")).toBe('security-config');
+    expect(bash('cat <<EOF\n"$(printf changed > ~/.openclaw/openclaw.json)"\nEOF')).toBe('security-config');
+    // Inside single quotes a backslash is literal, so `\'` CLOSES the quote.
+    expect(bash("echo 'a\\'$(printf changed > ~/.openclaw/openclaw.json)")).toBe('security-config');
+    // Inside double quotes `\$` and `\\` are escapes: `\$(` opens nothing.
+    expect(bash('echo "\\$(printf changed > ~/.openclaw/openclaw.json)"')).toBeNull();
+    expect(bash('echo "\\\\$(printf changed > ~/.openclaw/openclaw.json)"')).toBe('security-config');
+    // In an expanding heredoc body only `\$`, `` \` `` and `\\` escape.
+    expect(bash('cat <<EOF\n\\$(printf changed > ~/.openclaw/openclaw.json)\nEOF')).toBeNull();
+    expect(bash('cat <<EOF\n\\\\$(printf changed > ~/.openclaw/openclaw.json)\nEOF')).toBe('security-config');
+    // Single quotes on the shell surface still keep it literal.
+    expect(bash("echo 'x\"$(printf changed > ~/.openclaw/openclaw.json)\"'")).toBeNull();
+    // `$'…'` is a quote in which `\'` is an escaped apostrophe, not a close.
+    expect(bash("echo $'a\\'$(printf changed > ~/.openclaw/openclaw.json)'")).toBeNull();
+    expect(bash("echo $'a\\'; tee ~/.openclaw/openclaw.json < /tmp/x'")).toBeNull();
+    // Every lexer shares the machine: `\"` inside double quotes does not close
+    // them, so the `;` and the `>` after it are still string text.
+    expect(bash('git commit -m "a\\"; tee ~/.openclaw/openclaw.json < /tmp/x"')).toBeNull();
+    expect(bash('git commit -m "a\\" > ~/.openclaw/openclaw.json"')).toBeNull();
+    expect(bash('git commit -m "a\\" | tee ~/.openclaw/openclaw.json"')).toBeNull();
+  });
+
+  it('a backslash-quoted or partly quoted heredoc delimiter is QUOTED: the body is literal and the terminator is the whole word (#552 r4)', () => {
+    // `<<\EOF` is literal to bash (a substitution in the body is text) — no lease.
+    expect(bash('cat <<\\EOF\n$(printf changed > ~/.openclaw/openclaw.json)\nEOF')).toBeNull();
+    // `<<E'O'F` terminates on `EOF` and the body is literal; the write AFTER it is real.
+    expect(bash("cat <<E'O'F\n$(printf changed > ~/.openclaw/openclaw.json)\nEOF\ntee ~/.openclaw/openclaw.json < /tmp/x")).toBe('security-config');
+    expect(bash("cat <<E'O'F\n$(printf changed > ~/.openclaw/openclaw.json)\nEOF\necho done")).toBeNull();
+    expect(bash('cat <<"EO"F\n$(printf changed > ~/.openclaw/openclaw.json)\nEOF\ncat ~/.openclaw/openclaw.json')).toBeNull();
+    // `<<\EOF` swallows exactly its body: the statement after the terminator is judged.
+    expect(bash('cat <<\\EOF\nbody\nEOF\ntee ~/.claude/settings.json < /tmp/x')).toBe('security-config');
+    // `<<-` with a quoted delimiter is quoted too.
+    expect(bash("cat <<-'EOF'\n\t$(printf changed > ~/.openclaw/openclaw.json)\n\tEOF")).toBeNull();
+  });
+
   it('a lone `-` is stdin, an operand; grep -o is only-matching (#552 r3)', () => {
     expect(bash('xxd -r - ~/.claude/settings.json < /tmp/in.hex')).toBe('security-config');
     expect(bash('uniq - ~/.openclaw/openclaw.json < /tmp/in')).toBe('security-config');

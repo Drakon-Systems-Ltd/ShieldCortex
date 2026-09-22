@@ -378,55 +378,147 @@ const OUTPUT_OPTION_RE = /^(?:-o|-O|--(?:output|out|outfile|out-file|output-file
 /** sed/awk in-place: a leading `-i`, a cluster holding one (`-ni`, `-Ei`, `-i.bak`), or the long form. */
 const IN_PLACE_FLAG_RE = /^(?:-[a-zA-Z]*i\S*|--in-place(?:=.*)?|--inplace)$/;
 
-/** The quote open at the end of `text`, or null. Backslash escapes outside single quotes. */
-function openQuoteAtEnd(text: string): string | null {
-  let quote: string | null = null;
-  for (let i = 0; i < text.length; i++) {
+/**
+ * The quoting contexts of POSIX/bash text, as ONE state machine shared by
+ * every lexer below — so `'` inside `"…"`, `\'` inside `'…'`, `$'…'`, and
+ * the quote-less expanding heredoc body are handled as a class, not as a
+ * table of spellings found one review at a time.
+ *
+ * Per character the machine says what the character IS to the shell:
+ *  - `bare`      — unquoted, unescaped: operators (`;`, `|`, `#`, `<<`) act.
+ *  - `expanding` — inside double quotes or an expanding heredoc body: `$(…)`
+ *                  and `` `…` `` still EXECUTE; operators do not act.
+ *  - `text`      — inside single quotes / `$'…'`, or escaped: nothing acts.
+ *
+ * Rules: single quotes end only at the next `'` (a backslash is literal, so
+ * `'a\'` is CLOSED). Double quotes: `\` escapes the next character; `'` is
+ * text. `$'…'`: `\` escapes, `'` closes. Bare: `\` escapes the next
+ * character. Expanding heredoc body: there is no quoting at all — quotes are
+ * text — and `\` escapes only `$`, `` ` `` and `\`.
+ */
+type ShellQuote = 'none' | 'single' | 'double' | 'ansi';
+type CharRole = 'bare' | 'expanding' | 'text';
+
+class ShellLexer {
+  quote: ShellQuote = 'none';
+  constructor(private readonly context: 'shell' | 'heredoc-body' = 'shell') {}
+
+  /** Classify `text[i]`; returns the role and the index of the NEXT unread char. */
+  step(text: string, i: number): { role: CharRole; next: number } {
     const c = text[i]!;
-    if (quote === "'") {
-      if (c === "'") quote = null;
-      continue;
+    if (this.context === 'heredoc-body') {
+      if (c === '\\' && (text[i + 1] === '$' || text[i + 1] === '`' || text[i + 1] === '\\')) {
+        return { role: 'text', next: i + 2 };
+      }
+      return { role: 'expanding', next: i + 1 };
     }
-    if (c === '\\') {
-      i++;
-      continue;
+    switch (this.quote) {
+      case 'single':
+        if (c === "'") this.quote = 'none';
+        return { role: 'text', next: i + 1 };
+      case 'ansi':
+        if (c === '\\') return { role: 'text', next: i + 2 };
+        if (c === "'") this.quote = 'none';
+        return { role: 'text', next: i + 1 };
+      case 'double':
+        if (c === '\\') return { role: 'text', next: i + 2 };
+        if (c === '"') {
+          this.quote = 'none';
+          return { role: 'text', next: i + 1 };
+        }
+        return { role: 'expanding', next: i + 1 };
+      default:
+        if (c === '\\') return { role: 'text', next: i + 2 };
+        if (c === "'") {
+          this.quote = 'single';
+          return { role: 'text', next: i + 1 };
+        }
+        if (c === '"') {
+          this.quote = 'double';
+          return { role: 'text', next: i + 1 };
+        }
+        if (c === '$' && text[i + 1] === "'") {
+          this.quote = 'ansi';
+          return { role: 'text', next: i + 2 };
+        }
+        return { role: 'bare', next: i + 1 };
     }
-    if (quote === '"') {
-      if (c === '"') quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') quote = c;
   }
-  return quote;
+}
+
+/** The quote open at the end of `text` (`'` or `"`), or null. */
+function openQuoteAtEnd(text: string): string | null {
+  const lx = new ShellLexer();
+  for (let i = 0; i < text.length; ) i = lx.step(text, i).next;
+  if (lx.quote === 'double') return '"';
+  if (lx.quote === 'single' || lx.quote === 'ansi') return "'";
+  return null;
 }
 
 /** Cut an unquoted `#` comment (at a word start) off a line. */
 function stripComment(line: string): string {
-  let quote: string | null = null;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]!;
-    if (quote === "'") {
-      if (c === "'") quote = null;
-      continue;
-    }
-    if (c === '\\') {
-      i++;
-      continue;
-    }
-    if (quote === '"') {
-      if (c === '"') quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      continue;
-    }
-    if (c === '#' && (i === 0 || /[\s;|&(]/.test(line[i - 1]!))) return line.slice(0, i);
+  const lx = new ShellLexer();
+  for (let i = 0; i < line.length; ) {
+    const { role, next } = lx.step(line, i);
+    if (role === 'bare' && line[i] === '#' && (i === 0 || /[\s;|&(]/.test(line[i - 1]!))) return line.slice(0, i);
+    i = next;
   }
   return line;
 }
 
-const HEREDOC_TAG_RE = /^<<-?\s*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][\w-]*))/;
+const HEREDOC_WORD_END = /[\s;|&<>()]/;
+const BARE_HEREDOC_TAG_RE = /^[A-Za-z_][\w-]*$/;
+
+/**
+ * Read the delimiter WORD after `<<` / `<<-`. bash takes the whole word
+ * (`E'O'F`, `"EO"F`, `\EOF` are all the delimiter `EOF`) and treats the body
+ * as literal if ANY part of the word was quoted — a backslash counts. A bare
+ * word must look like a name, so `$((1 << 2))`-adjacent text and `1<<2`
+ * never open a phantom heredoc.
+ */
+function parseHeredocWord(text: string, at: number): { tag: string; quoted: boolean } | null {
+  let i = at;
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
+  let tag = '';
+  let quoted = false;
+  for (; i < text.length; ) {
+    const c = text[i]!;
+    if (c === "'") {
+      const close = text.indexOf("'", i + 1);
+      if (close < 0) return null;
+      tag += text.slice(i + 1, close);
+      quoted = true;
+      i = close + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      for (; j < text.length && text[j] !== '"'; j++) {
+        if (text[j] === '\\' && j + 1 < text.length) {
+          tag += text[j + 1]!;
+          j++;
+        } else tag += text[j]!;
+      }
+      if (j >= text.length) return null;
+      quoted = true;
+      i = j + 1;
+      continue;
+    }
+    if (c === '\\') {
+      if (i + 1 >= text.length) return null;
+      tag += text[i + 1]!;
+      quoted = true;
+      i += 2;
+      continue;
+    }
+    if (HEREDOC_WORD_END.test(c)) break;
+    tag += c;
+    i++;
+  }
+  if (!tag) return null;
+  if (!quoted && !BARE_HEREDOC_TAG_RE.test(tag)) return null;
+  return { tag, quoted };
+}
 
 /**
  * The tag of a heredoc OPENED on this line, or null. Quote-aware and outside
@@ -434,40 +526,29 @@ const HEREDOC_TAG_RE = /^<<-?\s*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][\w-]*))/;
  * nothing — a phantom heredoc would swallow every following line as data.
  */
 function findHeredocTag(line: string): { tag: string; quoted: boolean } | null {
-  let quote: string | null = null;
+  const lx = new ShellLexer();
   let arith = 0;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]!;
-    if (quote === "'") {
-      if (c === "'") quote = null;
-      continue;
-    }
-    if (c === '\\') {
-      i++;
-      continue;
-    }
-    if (quote === '"') {
-      if (c === '"') quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
+  for (let i = 0; i < line.length; ) {
+    const { role, next } = lx.step(line, i);
+    if (role !== 'bare') {
+      i = next;
       continue;
     }
     if (line.startsWith('$((', i)) {
       arith++;
-      i += 2;
+      i += 3;
       continue;
     }
     if (arith > 0 && line.startsWith('))', i)) {
       arith--;
-      i++;
+      i += 2;
       continue;
     }
-    if (arith === 0 && c === '<' && line[i + 1] === '<' && line[i + 2] !== '<' && (i === 0 || line[i - 1] !== '<')) {
-      const m = HEREDOC_TAG_RE.exec(line.slice(i));
-      if (m) return { tag: (m[1] ?? m[2] ?? m[3])!, quoted: m[3] == null };
+    if (arith === 0 && line[i] === '<' && line[i + 1] === '<' && line[i + 2] !== '<' && (i === 0 || line[i - 1] !== '<')) {
+      const found = parseHeredocWord(line, line[i + 2] === '-' ? i + 3 : i + 2);
+      if (found) return found;
     }
+    i = next;
   }
   return null;
 }
@@ -475,35 +556,27 @@ function findHeredocTag(line: string): { tag: string; quoted: boolean } | null {
 /**
  * Quote-aware: a `;` or `|` inside `python3 -c "a; b"` is program text, not a
  * shell separator — splitting there would hide the file from the interpreter
- * rule and read `json.dump(` as a verb.
+ * rule and read `json.dump(` as a verb. Quote state comes from ShellLexer, so
+ * `"a\"; b"` and `$'a\'; b'` are one string too.
  * Separators: `;`, `&&`, `||`, and a bare `&` (not `>&`, `|&`).
  */
 function splitLineOnSeparators(line: string): string[] {
   const out: string[] = [];
   let cur = '';
-  let quote: string | null = null;
-  for (let i = 0; i < line.length; i++) {
+  const lx = new ShellLexer();
+  for (let i = 0; i < line.length; ) {
+    const { role, next } = lx.step(line, i);
+    if (role !== 'bare') {
+      cur += line.slice(i, next);
+      i = next;
+      continue;
+    }
     const c = line[i]!;
     const n = line[i + 1];
-    if (quote) {
-      cur += c;
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      cur += c;
-      continue;
-    }
-    if (c === '\\' && n != null) {
-      cur += c + n;
-      i++;
-      continue;
-    }
     if (c === ';' || ((c === '&' || c === '|') && n === c)) {
       if (cur.trim()) out.push(cur);
       cur = '';
-      if (c !== ';') i++;
+      i += c === ';' ? 1 : 2;
       continue;
     }
     if (c === '&') {
@@ -511,65 +584,66 @@ function splitLineOnSeparators(line: string): string[] {
       if (prev !== '>' && prev !== '|') {
         if (cur.trim()) out.push(cur);
         cur = '';
+        i++;
         continue;
       }
     }
     cur += c;
+    i = next;
   }
   if (cur.trim()) out.push(cur);
   return out;
 }
 
 /**
- * The bodies of every `$( … )` and backtick substitution on the surface —
- * they EXECUTE, inside double quotes too (`echo "$(printf x > <file>)"`);
- * only single quotes keep them as text. `$(( … ))` is arithmetic and holds
- * no command. Nested substitutions are found when the body is judged.
+ * The bodies of every `$( … )` and backtick substitution in `text` — they
+ * EXECUTE wherever the character is `bare` or `expanding` (double quotes,
+ * an expanding heredoc body); only `text` (single quotes, `$'…'`, an escape)
+ * keeps them literal. `$(( … ))` is arithmetic and holds no command. Nested
+ * substitutions are found when the body is judged.
+ *
+ * `context` says what `text` is: shell surface (quotes act) or the body of
+ * an unquoted heredoc (quotes are text; only `\$`, `` \` `` and `\\` escape).
  */
-function commandSubstitutionBodies(text: string): string[] {
+function commandSubstitutionBodies(text: string, context: 'shell' | 'heredoc-body' = 'shell'): string[] {
   const out: string[] = [];
-  let single = false;
-  for (let i = 0; i < text.length; i++) {
+  const lx = new ShellLexer(context);
+  for (let i = 0; i < text.length; ) {
+    const { role, next } = lx.step(text, i);
+    if (role === 'text') {
+      i = next;
+      continue;
+    }
     const c = text[i]!;
-    if (c === '\\') {
-      i++;
-      continue;
-    }
-    if (single) {
-      if (c === "'") single = false;
-      continue;
-    }
-    if (c === "'") {
-      single = true;
-      continue;
-    }
     if (c === '$' && text[i + 1] === '(' && text[i + 2] !== '(') {
+      // The body is shell text of its own: track its quotes so a `)` inside
+      // `'…'` or `"…"` does not close it, and balance bare parentheses.
+      const inner = new ShellLexer();
       let depth = 1;
       let j = i + 2;
-      let q: string | null = null;
-      for (; j < text.length && depth > 0; j++) {
-        const d = text[j]!;
-        if (d === '\\') {
-          j++;
-          continue;
+      while (j < text.length && depth > 0) {
+        const st = inner.step(text, j);
+        if (st.role === 'bare') {
+          if (text[j] === '(') depth++;
+          else if (text[j] === ')') depth--;
         }
-        if (q) {
-          if (d === q) q = null;
-          continue;
-        }
-        if (d === "'" || d === '"') q = d;
-        else if (d === '(') depth++;
-        else if (d === ')') depth--;
+        j = st.next;
       }
-      out.push(text.slice(i + 2, depth === 0 ? j - 1 : j));
-      i = j - 1;
+      const close = depth === 0 ? j - 1 : Math.min(j, text.length);
+      out.push(text.slice(i + 2, close));
+      i = Math.max(next, close + 1);
       continue;
     }
     if (c === '`') {
-      const end = text.indexOf('`', i + 1);
-      out.push(text.slice(i + 1, end < 0 ? text.length : end));
-      i = end < 0 ? text.length : end;
+      // Inside backticks `\` escapes `` ` ``, `$` and `\`; the first
+      // unescaped backtick closes.
+      let j = i + 1;
+      while (j < text.length && text[j] !== '`') j += text[j] === '\\' ? 2 : 1;
+      out.push(text.slice(i + 1, Math.min(j, text.length)));
+      i = Math.min(j, text.length) + 1;
+      continue;
     }
+    i = next;
   }
   return out.filter((b) => b.trim());
 }
@@ -629,7 +703,7 @@ function splitStatementsHeredocAware(command: string): string[] {
     // An UNQUOTED delimiter expands the body: a `$( … )` written in it runs.
     // A quoted delimiter (`<<'EOF'`) keeps the body literal.
     if (!opened.quoted) {
-      for (const sub of commandSubstitutionBodies(body.join('\n'))) out.push(...splitStatementsHeredocAware(sub));
+      for (const sub of commandSubstitutionBodies(body.join('\n'), 'heredoc-body')) out.push(...splitStatementsHeredocAware(sub));
     }
     if (trailer.trim()) out.push(...splitLineOnSeparators(stripComment(trailer)));
     i = k + 1;
@@ -656,31 +730,17 @@ function splitPipeline(statement: string): string[] {
   }
   const out: string[] = [];
   let cur = '';
-  let quote: string | null = null;
-  for (let i = 0; i < statement.length; i++) {
-    const c = statement[i]!;
-    if (quote) {
-      cur += c;
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      cur += c;
-      continue;
-    }
-    if (c === '\\' && i + 1 < statement.length) {
-      cur += c + statement[i + 1]!;
-      i++;
-      continue;
-    }
-    if (c === '|') {
+  const lx = new ShellLexer();
+  for (let i = 0; i < statement.length; ) {
+    const { role, next } = lx.step(statement, i);
+    if (role === 'bare' && statement[i] === '|') {
       if (cur.trim()) out.push(cur.trim());
       cur = '';
-      if (statement[i + 1] === '&') i++;
+      i += statement[i + 1] === '&' ? 2 : 1;
       continue;
     }
-    cur += c;
+    cur += statement.slice(i, next);
+    i = next;
   }
   if (cur.trim()) out.push(cur.trim());
   return out;
@@ -696,27 +756,19 @@ function splitPipeline(statement: string): string[] {
 function tokenise(stage: string): string[] {
   const toks: string[] = [];
   let cur = '';
-  let quote: string | null = null;
-  for (let i = 0; i < stage.length; i++) {
+  const lx = new ShellLexer();
+  for (let i = 0; i < stage.length; ) {
+    const { role, next } = lx.step(stage, i);
+    if (role !== 'bare') {
+      cur += stage.slice(i, next);
+      i = next;
+      continue;
+    }
     const c = stage[i]!;
-    if (quote) {
-      cur += c;
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      cur += c;
-      continue;
-    }
-    if (c === '\\' && i + 1 < stage.length) {
-      cur += c + stage[i + 1]!;
-      i++;
-      continue;
-    }
     if (/\s/.test(c) || c === '\u0000') {
       if (cur) toks.push(cur);
       cur = '';
+      i = next;
       continue;
     }
     if (c === '>' && cur && !/^(?:\d|&|>)$/.test(cur)) {
@@ -724,6 +776,7 @@ function tokenise(stage: string): string[] {
       cur = '';
     }
     cur += c;
+    i = next;
   }
   if (cur) toks.push(cur);
   return toks;
