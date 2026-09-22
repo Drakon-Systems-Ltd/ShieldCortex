@@ -321,8 +321,74 @@ const MUTATE_ANY_OPERAND_VERBS = new Set([
 const COPY_TO_LAST_OPERAND_VERBS = new Set(['cp', 'install', 'ln', 'rsync', 'scp']);
 /** grep and friends: `-o` means only-matching, never an output file. */
 const GREP_FAMILY_VERBS = new Set(['grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack']);
-/** Filters whose optional SECOND operand is an output file (`uniq in out`, `xxd -r in out`). */
-const SECOND_OPERAND_OUTPUT_VERBS = new Set(['uniq', 'xxd']);
+/**
+ * Filters whose optional SECOND operand is an output file (`uniq in out`,
+ * `xxd -r in out`). Their option ARGUMENTS shift the operands (#552 r6):
+ * `uniq -w 5 in out` has two operands, not three. Per verb: the options
+ * that take a value (separate or glued, `-w 5` / `-w5` / `--skip-fields=1`)
+ * and the options known to take none. An option in NEITHER set leaves the
+ * operand count unproven, and an unproven protected operand fails closed.
+ * uniq clusters short flags (`-cw 5`); xxd does not.
+ */
+const SECOND_OPERAND_OUTPUT_VERBS: Record<string, { valued: Set<string>; bare: Set<string>; clusters: boolean }> = {
+  uniq: {
+    valued: new Set(['-w', '-f', '-s', '--check-chars', '--skip-fields', '--skip-chars']),
+    bare: new Set(['-c', '-d', '-D', '-i', '-u', '-z', '--count', '--repeated', '--all-repeated', '--ignore-case', '--unique', '--zero-terminated', '--group', '--help', '--version']),
+    clusters: true,
+  },
+  xxd: {
+    valued: new Set(['-c', '-l', '-s', '-g', '-o', '-R', '-cols', '-len', '-seek', '-groupsize', '-name']),
+    bare: new Set(['-a', '-b', '-C', '-d', '-e', '-E', '-i', '-p', '-ps', '-r', '-u', '-v', '-h', '-autoskip', '-bits', '-capitalize', '-include', '-plain', '-postscript', '-revert', '-upper', '-version', '-help']),
+    clusters: false,
+  },
+};
+
+/**
+ * The operands of a SECOND_OPERAND_OUTPUT_VERBS command with option values
+ * removed, and whether every option was recognised. Fail closed on the
+ * unrecognised: the caller treats an unproven protected operand as the output.
+ */
+function operandsAfterOptions(verb: string, rest: string[]): { operands: string[]; proven: boolean } {
+  const spec = SECOND_OPERAND_OUTPUT_VERBS[verb]!;
+  const operands: string[] = [];
+  let proven = true;
+  for (let i = 0; i < rest.length; i++) {
+    const raw = rest[i]!;
+    const t = unquote(raw);
+    if (t === '--') {
+      operands.push(...rest.slice(i + 1));
+      break;
+    }
+    if (t === '-' || !t.startsWith('-')) {
+      operands.push(raw);
+      continue;
+    }
+    const eq = t.indexOf('=');
+    const name = t.startsWith('--') && eq > 0 ? t.slice(0, eq) : t;
+    if (spec.valued.has(name)) {
+      if (name === t) i++; // separate value
+      continue;
+    }
+    if (spec.bare.has(name)) continue;
+    // Glued short value (`-w5`, `-c16`) or a cluster (`-cw5`, `-cw 5`).
+    if (!t.startsWith('--')) {
+      let consumed = false;
+      for (let c = 1; c < t.length; c++) {
+        const flag = `-${t[c]!}`;
+        if (spec.valued.has(flag)) {
+          if (c === t.length - 1) i++; // value is the next token
+          consumed = true;
+          break;
+        }
+        if (!spec.clusters || !spec.bare.has(flag)) break;
+        if (c === t.length - 1) consumed = true;
+      }
+      if (consumed) continue;
+    }
+    proven = false;
+  }
+  return { operands, proven };
+}
 /**
  * Verbs that only READ the paths they are given. This is the proven-read
  * relief: a verb NOT listed here, given the file, fails closed.
@@ -400,12 +466,24 @@ const IN_PLACE_FLAG_RE = /^(?:-[a-zA-Z]*i\S*|--in-place(?:=.*)?|--inplace)$/;
  * escape (bare, double quotes, an expanding heredoc body): bash removes both
  * characters, so the next line belongs to the same statement. Single and
  * `$'…'` quotes keep it literal (see lineEnd).
+ *
+ * A COMMENT is a class of the same machine (#552 r6): in the bare context a
+ * `#` at the start of a word (the first character, or after whitespace or
+ * one of `;|&(`) opens a comment that runs to the newline. Every character
+ * of it is `text` — a `'` or `"` in `# don't` opens nothing, a `)` closes no
+ * substitution, a `<<` opens no heredoc, and a trailing `\` is NOT a
+ * continuation (bash ends the comment at the newline regardless; verified
+ * against bash 5.2 by the r6 probe). The newline that ends it is `bare`.
+ * Inside double quotes `#` keeps expanding; `a#b` is one word. An expanding
+ * heredoc body has no comments.
  */
 type ShellQuote = 'none' | 'single' | 'double' | 'ansi';
 type CharRole = 'bare' | 'expanding' | 'text';
 
 class ShellLexer {
   quote: ShellQuote = 'none';
+  /** Inside a `#` comment (bare context only), until the next newline. */
+  comment = false;
   constructor(private readonly context: 'shell' | 'heredoc-body' = 'shell') {}
 
   /** Classify `text[i]`; returns the role and the index of the NEXT unread char. */
@@ -416,6 +494,13 @@ class ShellLexer {
         return { role: 'text', next: i + 2 };
       }
       return { role: 'expanding', next: i + 1 };
+    }
+    if (this.comment) {
+      if (c === '\n') {
+        this.comment = false;
+        return { role: 'bare', next: i + 1 };
+      }
+      return { role: 'text', next: i + 1 };
     }
     switch (this.quote) {
       case 'single':
@@ -446,6 +531,10 @@ class ShellLexer {
           this.quote = 'ansi';
           return { role: 'text', next: i + 2 };
         }
+        if (c === '#' && (i === 0 || /[\s;|&(]/.test(text[i - 1]!))) {
+          this.comment = true;
+          return { role: 'text', next: i + 1 };
+        }
         return { role: 'bare', next: i + 1 };
     }
   }
@@ -470,26 +559,36 @@ function lineEnd(text: string): { quote: string | null; continues: boolean } {
   return { quote, continues };
 }
 
-/** Cut an unquoted `#` comment (at a word start) off a line. */
+/** Cut a `#` comment off a line — where the lexer says one starts. */
 function stripComment(line: string): string {
   const lx = new ShellLexer();
   for (let i = 0; i < line.length; ) {
-    const { role, next } = lx.step(line, i);
-    if (role === 'bare' && line[i] === '#' && (i === 0 || /[\s;|&(]/.test(line[i - 1]!))) return line.slice(0, i);
+    const { next } = lx.step(line, i);
+    if (lx.comment) return line.slice(0, i);
     i = next;
   }
   return line;
 }
 
 const HEREDOC_WORD_END = /[\s;|&<>()]/;
-const BARE_HEREDOC_TAG_RE = /^[A-Za-z_][\w-]*$/;
+
+/** A heredoc opened on a line: its delimiter, whether the body is literal, and `<<-`. */
+interface HeredocOpen {
+  tag: string;
+  quoted: boolean;
+  /** `<<-`: leading TABS are stripped from body and terminator lines. */
+  dash: boolean;
+}
 
 /**
  * Read the delimiter WORD after `<<` / `<<-`. bash takes the whole word
  * (`E'O'F`, `"EO"F`, `\EOF` are all the delimiter `EOF`) and treats the body
- * as literal if ANY part of the word was quoted — a backslash counts. A bare
- * word must look like a name, so `$((1 << 2))`-adjacent text and `1<<2`
- * never open a phantom heredoc.
+ * as literal if ANY part of the word was quoted — a backslash counts. ANY
+ * word is a delimiter (#552 r6): `<<1`, `<<!`, `<<$$`, `<<.`, `<<--` (that
+ * is `<<-` with the delimiter `-`), `<<END-OF-FILE` — the word runs to the
+ * next metacharacter. The only thing that keeps `<<` from opening a heredoc
+ * is arithmetic (see findHeredocTags); `echo 1<<2` and `let x<<=2` DO open
+ * one to bash (delimiters `2` and `=2`), so they open one here.
  */
 function parseHeredocWord(text: string, at: number): { tag: string; quoted: boolean } | null {
   let i = at;
@@ -539,16 +638,19 @@ function parseHeredocWord(text: string, at: number): { tag: string; quoted: bool
     i++;
   }
   if (!tag) return null;
-  if (!quoted && !BARE_HEREDOC_TAG_RE.test(tag)) return null;
   return { tag, quoted };
 }
 
 /**
- * The tag of a heredoc OPENED on this line, or null. Quote-aware and outside
- * arithmetic: `echo '<<EOF'`, `# note: << EOF` and `$((1 << WIDTH))` open
+ * Every heredoc OPENED on this line, in the order of its `<<` operators —
+ * bash reads the bodies in that order, each beginning on the line after the
+ * previous terminator (`cat <<A <<B`, `cat <<A; cat <<B`, `diff <(cat <<A)
+ * <(cat <<B)`). Quote-, comment- and arithmetic-aware: `echo '<<EOF'`,
+ * `# note: << EOF`, `$((1 << WIDTH))` and a bare `(( x = 1 << 2 ))` open
  * nothing — a phantom heredoc would swallow every following line as data.
  */
-function findHeredocTag(line: string): { tag: string; quoted: boolean } | null {
+function findHeredocTags(line: string): HeredocOpen[] {
+  const out: HeredocOpen[] = [];
   const lx = new ShellLexer();
   let arith = 0;
   for (let i = 0; i < line.length; ) {
@@ -557,9 +659,9 @@ function findHeredocTag(line: string): { tag: string; quoted: boolean } | null {
       i = next;
       continue;
     }
-    if (line.startsWith('$((', i)) {
+    if (line.startsWith('$((', i) || line.startsWith('((', i)) {
       arith++;
-      i += 3;
+      i += line[i] === '$' ? 3 : 2;
       continue;
     }
     if (arith > 0 && line.startsWith('))', i)) {
@@ -568,12 +670,32 @@ function findHeredocTag(line: string): { tag: string; quoted: boolean } | null {
       continue;
     }
     if (arith === 0 && line[i] === '<' && line[i + 1] === '<' && line[i + 2] !== '<' && (i === 0 || line[i - 1] !== '<')) {
-      const found = parseHeredocWord(line, line[i + 2] === '-' ? i + 3 : i + 2);
-      if (found) return found;
+      const dash = line[i + 2] === '-';
+      const found = parseHeredocWord(line, dash ? i + 3 : i + 2);
+      if (found) out.push({ ...found, dash });
     }
     i = next;
   }
-  return null;
+  return out;
+}
+
+/**
+ * Attach heredoc bodies to the parts of a line that opened them: the Nth
+ * body goes to the part holding the Nth `<<`. Bodies ride after a NUL each
+ * (`header␀bodyA␀bodyB`) — the marker splitPipeline, tokenise and
+ * stageWritesProtectedFile rely on. Bodies left over (a count mismatch)
+ * go to the last part rather than being dropped.
+ */
+function attachHeredocBodies(parts: string[], bodies: string[]): string[] {
+  if (parts.length === 0 || bodies.length === 0) return parts;
+  const out = [...parts];
+  let b = 0;
+  for (let p = 0; p < out.length && b < bodies.length; p++) {
+    const opens = findHeredocTags(out[p]!).length;
+    for (let n = 0; n < opens && b < bodies.length; n++, b++) out[p] = `${out[p]!}\u0000${bodies[b]!}`;
+  }
+  for (; b < bodies.length; b++) out[out.length - 1] = `${out[out.length - 1]!}\u0000${bodies[b]!}`;
+  return out;
 }
 
 /**
@@ -700,63 +822,119 @@ function splitStatementsHeredocAware(command: string): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < lines.length) {
-    let logical = lines[i]!;
-    let j = i;
-    while (j + 1 < lines.length) {
-      const end = lineEnd(logical);
-      if (end.continues) {
-        // Backslash-newline: bash drops both characters, so `tee \⏎<file>` is
-        // one statement whose operand is on the second line.
-        j++;
-        logical = logical.slice(0, -1) + lines[j]!;
-        continue;
-      }
-      if (end.quote === null) break;
-      j++;
-      logical += `\n${lines[j]!}`;
-    }
-    const code = stripComment(logical);
+    const { code, bodies, next } = readLogicalLine(lines, i);
     // A substitution on the line executes whatever it holds: judge its body
     // as statements of its own (recursively — it may open heredocs and
     // substitutions of its own).
     for (const body of commandSubstitutionBodies(code)) out.push(...splitStatementsHeredocAware(body));
-    const opened = findHeredocTag(code);
-    if (opened == null) {
-      out.push(...splitLineOnSeparators(code));
-      i = j + 1;
-      continue;
-    }
-    const tag = opened.tag;
-    const body: string[] = [];
-    let k = j + 1;
-    let trailer = '';
-    for (; k < lines.length; k++) {
-      const candidate = lines[k]!.trim();
-      // bash requires the delimiter alone on its line; a delimiter followed
-      // by a separator is read as a terminator too, so the statements after
-      // it are still evaluated rather than swallowed into the body.
-      const term = new RegExp(`^${tag.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}(?:\\s*(?:;|&&|\\|\\||[&|])(.*))?$`).exec(candidate);
-      if (term) {
-        trailer = term[1] ?? '';
-        break;
-      }
-      body.push(lines[k]!);
-    }
-    // The body rides on the segment of the header that opened it: `cat >
+    // Each body rides on the segment of the header that opened it: `cat >
     // /tmp/x <<'EOF' && echo done` keeps the body with `cat`, not `echo`.
-    const segments = splitLineOnSeparators(code);
-    const opener = Math.max(0, segments.findIndex((s) => findHeredocTag(s) != null));
-    if (segments.length > 0) segments[opener] = `${segments[opener]!}\u0000${body.join(' ')}`;
-    out.push(...segments);
+    out.push(...attachHeredocBodies(splitLineOnSeparators(code), bodies.map((b) => b.lines.join(' '))));
     // An UNQUOTED delimiter expands the body: a `$( … )` written in it runs.
     // A quoted delimiter (`<<'EOF'`) keeps the body literal.
-    if (!opened.quoted) {
-      for (const sub of commandSubstitutionBodies(body.join('\n'), 'heredoc-body')) out.push(...splitStatementsHeredocAware(sub));
+    for (const b of bodies) {
+      if (b.quoted) continue;
+      for (const sub of commandSubstitutionBodies(b.lines.join('\n'), 'heredoc-body')) out.push(...splitStatementsHeredocAware(sub));
     }
-    if (trailer.trim()) out.push(...splitLineOnSeparators(stripComment(trailer)));
-    i = k + 1;
+    i = next;
   }
   return out;
+}
+
+/** One heredoc body as read from the lines after its header. */
+interface HeredocBody {
+  lines: string[];
+  quoted: boolean;
+}
+
+/**
+ * Read ONE logical line starting at `lines[at]`, exactly as bash does
+ * (#552 r6, every rule verified against bash 5.2 by the differential probe):
+ *
+ *  1. Physical lines are joined while the line ends in a continuation or an
+ *     open quote (lineEnd) — the HEADER, before any body is read.
+ *  2. The comment is cut.
+ *  3. The heredocs opened on the header are read in `<<` order, one body
+ *     after another; each terminator is the line that EQUALS the delimiter
+ *     (for `<<-`, after stripping leading tabs only). `EOF; cmd`, `EOF ` and
+ *     ` EOF` are body lines, not terminators. For an UNQUOTED delimiter bash
+ *     removes `\⏎` pairs while reading, so `EO\⏎F` joins to `EOF` and ends
+ *     the body; a quoted delimiter keeps them literal.
+ *  4. A header whose shell text ends in a bare `|`, `|&`, `&&` or `||`
+ *     continues on the first line AFTER the bodies: that line is read the
+ *     same way (it may open heredocs of its own) and joined to the header,
+ *     so the pipeline is one statement (`cat <<EOF |⏎…⏎EOF⏎tee <file>`).
+ *
+ * Returns the joined shell text, the bodies in `<<` order and the index of
+ * the first unread line.
+ */
+function readLogicalLine(lines: string[], at: number): { code: string; bodies: HeredocBody[]; next: number } {
+  let logical = lines[at]!;
+  let j = at;
+  while (j + 1 < lines.length) {
+    const end = lineEnd(logical);
+    if (end.continues) {
+      // Backslash-newline: bash drops both characters, so `tee \⏎<file>` is
+      // one statement whose operand is on the second line.
+      j++;
+      logical = logical.slice(0, -1) + lines[j]!;
+      continue;
+    }
+    if (end.quote === null) break;
+    j++;
+    logical += `\n${lines[j]!}`;
+  }
+  let code = stripComment(logical);
+  const bodies: HeredocBody[] = [];
+  let k = j + 1;
+  for (const open of findHeredocTags(code)) {
+    const body: string[] = [];
+    for (; k < lines.length; k++) {
+      let line = lines[k]!;
+      if (!open.quoted) {
+        // bash removes `\⏎` from an expanding body as it reads: an odd run
+        // of trailing backslashes escapes the newline (`\\⏎` is `\` + end).
+        while (k + 1 < lines.length && /(?:^|[^\\])(?:\\\\)*\\$/.test(line)) {
+          k++;
+          line = line.slice(0, -1) + lines[k]!;
+        }
+      }
+      const candidate = open.dash ? line.replace(/^\t+/, '') : line;
+      if (candidate === open.tag) break;
+      body.push(line);
+    }
+    bodies.push({ lines: body, quoted: open.quoted });
+    k++;
+  }
+  if (k < lines.length && endsWithPipelineOperator(code)) {
+    const rest = readLogicalLine(lines, k);
+    code = `${code} ${rest.code}`;
+    bodies.push(...rest.bodies);
+    k = rest.next;
+  }
+  return { code, bodies, next: k };
+}
+
+/** True when the bare shell text of `code` ends in `|`, `|&`, `&&` or `||`. */
+function endsWithPipelineOperator(code: string): boolean {
+  const lx = new ShellLexer();
+  let tail = '';
+  let inOperator = false;
+  for (let i = 0; i < code.length; ) {
+    const { role, next } = lx.step(code, i);
+    const c = code[i]!;
+    if (role === 'bare' && (c === '|' || c === '&')) {
+      tail = inOperator ? tail + c : c;
+      inOperator = true;
+    } else if (role === 'bare' && /\s/.test(c)) {
+      inOperator = false;
+    } else {
+      tail = '';
+      inOperator = false;
+    }
+    i = next;
+  }
+  return /^(?:\||\|&|&&|\|\|)$/.test(tail);
 }
 
 /**
@@ -771,10 +949,7 @@ function splitPipeline(statement: string): string[] {
   if (nul >= 0) {
     const stages = splitPipeline(statement.slice(0, nul));
     if (stages.length === 0) return [];
-    const opener = stages.findIndex((s) => findHeredocTag(s) != null);
-    const at = opener >= 0 ? opener : stages.length - 1;
-    stages[at] = `${stages[at]!}${statement.slice(nul)}`;
-    return stages;
+    return attachHeredocBodies(stages, statement.slice(nul + 1).split('\u0000'));
   }
   const out: string[] = [];
   let cur = '';
@@ -950,6 +1125,17 @@ function stageWritesProtectedFile(stage: string, pipedNamesFile: boolean): boole
     // <file>` and awk's `print > "<file>"` write it without any flag. The
     // mapper does not parse sed or awk, so a script token naming the file
     // fails closed; a plain path operand is still the read it looks like.
+    //
+    // #552 r6: an awk ASSIGNMENT whose value is the file (`-v f=<file>`,
+    // `-vf=<file>`, a bare `f=<file>` operand) is indirection — `print > f`
+    // writes it — so it takes the lease like the env-assignment rule. And a
+    // script read from a FILE (`-f prog`, `--file=prog`) is unseen: the
+    // protected path anywhere on such a command line fails closed, whether
+    // it is an operand under `-f` or the script file itself.
+    const isAwk = verb !== 'sed';
+    if (isAwk && rest.some((t) => /^(?:-v|--assign=)?[A-Za-z_]\w*=/.test(unquote(t)) && isProtectedTarget(t))) return true;
+    const scriptFromFile = flags.some((t) => t.startsWith('--file') || (/^-[a-zA-Z]*f/.test(t) && !t.startsWith('--')));
+    if (scriptFromFile && namedOperand) return true;
     const scriptNamesFile = rest.some((t) => {
       const bare = unquote(t);
       const m = SECURITY_CONFIG_FILE_ANY_RE.exec(bare);
@@ -963,8 +1149,13 @@ function stageWritesProtectedFile(stage: string, pipedNamesFile: boolean): boole
     if (scriptNamesFile) return true;
     return flags.some((t) => IN_PLACE_FLAG_RE.test(t)) && (namedOperand || (viaXargs && pipedNamesFile));
   }
-  if (SECOND_OPERAND_OUTPUT_VERBS.has(verb)) {
-    const out = operands[1];
+  if (Object.prototype.hasOwnProperty.call(SECOND_OPERAND_OUTPUT_VERBS, verb)) {
+    // Option values are not operands (`uniq -w 5 in out`); an option the
+    // table does not know leaves operand[0] unproven, so a protected operand
+    // anywhere is then the output.
+    const parsed = operandsAfterOptions(verb, rest);
+    if (!parsed.proven) return parsed.operands.some(isProtectedTarget) || (viaXargs && pipedNamesFile);
+    const out = parsed.operands[1];
     return (out != null && isProtectedTarget(out)) || (viaXargs && pipedNamesFile);
   }
   if (COPY_TO_LAST_OPERAND_VERBS.has(verb)) {
@@ -1013,7 +1204,9 @@ export function securityConfigWriteShape(command: string): boolean {
     let pipedNamesFile = false;
     for (const stage of splitPipeline(statement)) {
       if (stageWritesProtectedFile(stage, pipedNamesFile)) return true;
-      if (SECURITY_CONFIG_FILE_ANY_RE.test(stage.split('\u0000')[0]!)) pipedNamesFile = true;
+      // Header OR heredoc body: `cat <<'EOF' | xargs rm⏎<file>⏎EOF` hands
+      // the file to xargs through the body (#552 r6).
+      if (SECURITY_CONFIG_FILE_ANY_RE.test(stage.replace(/\u0000/g, ' '))) pipedNamesFile = true;
     }
   }
   return false;

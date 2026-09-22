@@ -281,7 +281,11 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash("cat > /tmp/x <<'EOF' && echo done\nconst p = '~/.openclaw/openclaw.json';\nEOF")).toBeNull();
     // the statement AFTER the terminator is evaluated on its own
     expect(bash("cat > /tmp/x <<'EOF'\nhello\nEOF\ncp /tmp/x ~/.openclaw/openclaw.json")).toBe('security-config');
-    expect(bash("cat > /tmp/x <<'EOF'\nhello\nEOF && cp /tmp/x ~/.openclaw/openclaw.json")).toBe('security-config');
+    // #552 r6: bash's terminator is the line that EQUALS the delimiter. `EOF &&
+    // cp …` is a BODY line (bash 5.2: "here-document delimited by end-of-file",
+    // the cp never runs), so it takes nothing. The r2 assertion here encoded
+    // the mapper's old "delimiter then separator" leniency, not bash.
+    expect(bash("cat > /tmp/x <<'EOF'\nhello\nEOF && cp /tmp/x ~/.openclaw/openclaw.json")).toBeNull();
   });
 
   // Review of #552 (Tars): real writes the first cut returned null for, and a
@@ -485,6 +489,146 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     // escapes: `"E\OF"` is the delimiter `E\OF`, so a bare `EOF` line is body
     // and the literal substitution after it is still body.
     expect(bash('cat <<"E\\OF"\nEOF\n$(printf x > ~/.openclaw/openclaw.json)\nE\\OF')).toBeNull();
+  });
+
+  it('a comment is a lexer class: quotes, `)`, `<<` and a trailing backslash inside it are text (#552 r6 A)', () => {
+    // Tars at 5830b2f7: `# don't` opened a phantom single quote, the next
+    // line's real write was joined into it and cut off with the comment.
+    expect(bash("echo hi # don't\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    expect(bash("echo hi # don't\ncat ~/.openclaw/openclaw.json")).toBeNull();
+    expect(bash('echo hi # say "x\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    expect(bash("true;# don't\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    // bash ends a comment at the newline: a trailing `\` in it continues nothing.
+    expect(bash('echo hi # foo \\\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    expect(bash('echo hi # foo \\\ncat ~/.openclaw/openclaw.json')).toBeNull();
+    // A `)` inside a comment of a multi-line `$( … )` does not close it.
+    expect(bash('echo $(echo a # )\ntee ~/.openclaw/openclaw.json < /dev/null\n)')).toBe('security-config');
+    expect(bash('echo $(echo a # )\ncat ~/.openclaw/openclaw.json\n)')).toBeNull();
+    expect(bash("x=$(\n# don't\ntee ~/.openclaw/openclaw.json < /dev/null\n)")).toBe('security-config');
+    // After a heredoc header the comment is cut before the body is read.
+    expect(bash("cat <<'EOF' # don't\nbody\nEOF\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    expect(bash("cat <<'EOF' # don't\ntee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    // `#` inside double quotes keeps expanding; `a#b` is one word.
+    expect(bash('echo "#$(tee ~/.openclaw/openclaw.json < /dev/null)"')).toBe('security-config');
+    expect(bash('echo a#b; tee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    expect(bash("echo a#'b\ntee ~/.openclaw/openclaw.json < /dev/null'")).toBeNull();
+  });
+
+  it('any word after `<<` is a delimiter; a bare `((` is arithmetic (#552 r6 B)', () => {
+    expect(bash('cat <<1\n$(printf x > ~/.openclaw/openclaw.json)\n1')).toBe('security-config');
+    expect(bash("cat <<'1'\ntee ~/.openclaw/openclaw.json < /dev/null\n1")).toBeNull();
+    expect(bash("cat <<'!'\ntee ~/.openclaw/openclaw.json < /dev/null\n!")).toBeNull();
+    expect(bash('cat <<!\nbody\n!\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    expect(bash('cat <<$$\ntee ~/.openclaw/openclaw.json < /dev/null\n$$')).toBeNull();
+    expect(bash('cat <<.\ntee ~/.openclaw/openclaw.json < /dev/null\n.')).toBeNull();
+    // `<<--` is `<<-` with the delimiter `-`.
+    expect(bash('cat <<--\ntee ~/.openclaw/openclaw.json < /dev/null\n-')).toBeNull();
+    expect(bash('cat <<--\nbody\n-\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    expect(bash('cat <<END-OF-FILE\nbody\nEND-OF-FILE\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    // `<<-` strips leading TABS only.
+    expect(bash("cat <<-'EOF'\n\ttee ~/.openclaw/openclaw.json < /dev/null\n\tEOF")).toBeNull();
+    expect(bash("cat <<-'EOF'\n  EOF\ntee ~/.openclaw/openclaw.json < /dev/null\n\tEOF")).toBeNull();
+    // Bare arithmetic: `<<` inside `(( … ))` is a shift, and the write after it is real.
+    expect(bash('(( x = 1 << 2 )); tee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    expect(bash('(( 1 << 2 )); cat ~/.openclaw/openclaw.json')).toBeNull();
+    // Outside arithmetic `<<` is ALWAYS a heredoc to bash: `echo 1<<2` reads a
+    // body up to the line `2`, `let x<<=2` up to `=2`.
+    expect(bash('echo 1<<2\ntee ~/.openclaw/openclaw.json < /dev/null\n2')).toBeNull();
+    expect(bash('echo 1<<2\n$(printf x > ~/.openclaw/openclaw.json)\n2')).toBe('security-config');
+    expect(bash('let x<<=2\ntee ~/.openclaw/openclaw.json < /dev/null\n=2')).toBeNull();
+    expect(bash('let x<<=2\nbody\n=2\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+  });
+
+  it('several heredocs on one logical line read their bodies in `<<` order, each on its own opener (#552 r6 C)', () => {
+    expect(bash("cat <<'A' <<'B'\n$(printf x > ~/.openclaw/openclaw.json)\nA\n$(printf x > ~/.openclaw/openclaw.json)\nB")).toBeNull();
+    expect(bash("cat <<'A' <<B\nx\nA\n$(printf x > ~/.openclaw/openclaw.json)\nB")).toBe('security-config');
+    expect(bash("cat <<A <<'B'\n$(printf x > ~/.openclaw/openclaw.json)\nA\nx\nB")).toBe('security-config');
+    expect(bash("cat <<'A' <<'B'\na\nA\ntee ~/.openclaw/openclaw.json < /dev/null\nB")).toBeNull();
+    expect(bash("cat <<'A' <<'B'\na\nA\nb\nB\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    expect(bash("cat <<'A'; cat <<'B'\na\nA\ntee ~/.openclaw/openclaw.json < /dev/null\nB")).toBeNull();
+    expect(bash("cat <<'A'; cat <<B\na\nA\n$(printf x > ~/.openclaw/openclaw.json)\nB")).toBe('security-config');
+    expect(bash("diff <(cat <<'A') <(cat <<'B')\na\nA\ntee ~/.openclaw/openclaw.json < /dev/null\nB")).toBeNull();
+    expect(bash("diff <(cat <<'A') <(cat <<B)\na\nA\n$(printf x > ~/.openclaw/openclaw.json)\nB")).toBe('security-config');
+    expect(bash("cat <<'A' | cat <<'B'\na\nA\ntee ~/.openclaw/openclaw.json < /dev/null\nB")).toBeNull();
+    expect(bash("cat <<'A' | cat <<'B'\na\nA\nb\nB\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+  });
+
+  it('a terminator is the line that EQUALS the delimiter; `\\⏎` joins in an unquoted body; a trailing `|` continues after the body (#552 r6 D)', () => {
+    // D1: `EOF; cmd`, `EOF && cmd`, `EOF ` and ` EOF` are body lines to bash.
+    expect(bash("cat <<'EOF'\nEOF; tee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    expect(bash('cat <<EOF\nEOF; tee ~/.openclaw/openclaw.json < /dev/null\nEOF')).toBeNull();
+    expect(bash("cat <<'EOF'\nEOF && tee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    expect(bash("cat <<'EOF'\nEOF | tee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    expect(bash("cat <<'EOF'\nEOF \ntee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    expect(bash("cat <<'EOF'\nEOF \nEOF\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    expect(bash("cat <<'EOF'\n EOF\ntee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    // D2: an unquoted delimiter's body drops `\⏎`, so `EO\⏎F` terminates; quoted keeps it.
+    expect(bash('cat <<EOF\nbody\nEO\\\nF\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
+    expect(bash("cat <<'EOF'\nbody\nEO\\\nF\ntee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    expect(bash('cat <<EOF\nEOF\\\\\ntee ~/.openclaw/openclaw.json < /dev/null\nEOF')).toBeNull();
+    // D3: a header ending in `|`, `|&`, `&&` or `||` continues on the line after the body.
+    expect(bash("cat <<'EOF' |\nbody\nEOF\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    expect(bash("cat <<'EOF' |\nbody\nEOF\ncat ~/.openclaw/openclaw.json")).toBeNull();
+    expect(bash("cat <<'EOF' &&\nbody\nEOF\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    expect(bash("false <<'EOF' ||\nbody\nEOF\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    // …recursively: the continuation may open heredocs of its own.
+    expect(bash("cat <<'A' |\na\nA\ncat <<'B'\ntee ~/.openclaw/openclaw.json < /dev/null\nB")).toBeNull();
+    expect(bash("cat <<'A' |\na\nA\ncat <<B\n$(printf x > ~/.openclaw/openclaw.json)\nB")).toBe('security-config');
+    // The joined pipeline is ONE statement: a body naming the file is piped to xargs.
+    expect(bash("cat <<'EOF' | xargs -I{} sh -c 'printf x > {}'\n~/.openclaw/openclaw.json\nEOF")).toBe('security-config');
+    expect(bash("cat <<'EOF' |\n~/.openclaw/openclaw.json\nEOF\nxargs -I{} sh -c 'printf x > {}'")).toBe('security-config');
+    expect(bash("cat <<'EOF' | xargs rm -f\n~/.openclaw/openclaw.json\nEOF")).toBe('security-config');
+    expect(bash("cat <<'EOF' | grep -c x\n~/.openclaw/openclaw.json\nEOF")).toBeNull();
+    // D4: quote joining and continuation still apply to the header first.
+    expect(bash("echo \"a\nb\" <<'EOF'\nbody\nEOF\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    expect(bash("echo \"a\nb\" <<'EOF'\ntee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+    expect(bash("cat <<'EOF' \\\n> /dev/null\ntee ~/.openclaw/openclaw.json < /dev/null\nEOF")).toBeNull();
+  });
+
+  it('uniq/xxd option values are not operands; an unknown option fails closed (#552 r6 E)', () => {
+    expect(bash('uniq -w 5 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('uniq -w5 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('uniq -f 1 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('uniq -s 3 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('uniq --skip-fields=1 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('uniq --skip-fields 1 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('uniq -cw 5 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('uniq -w 5 ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('uniq -w 5 ~/.openclaw/openclaw.json /tmp/out')).toBeNull();
+    expect(bash('xxd -c 16 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -c16 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -l 8 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -s 4 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -g 2 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -o 0 /tmp/in ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -c 16 ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('xxd -c 16 ~/.openclaw/openclaw.json /tmp/out')).toBeNull();
+    // Disclosed cost: an option the table does not know cannot prove the
+    // protected file is the input, so it is treated as the output.
+    expect(bash('uniq --frobnicate ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('xxd -Q 3 ~/.openclaw/openclaw.json')).toBe('security-config');
+  });
+
+  it('an awk assignment naming the file and a sed/awk script read from a file fail closed (#552 r6 F)', () => {
+    expect(bash("awk -v f=~/.openclaw/openclaw.json 'BEGIN{print \"x\" > f}'")).toBe('security-config');
+    expect(bash("awk -vf=~/.openclaw/openclaw.json 'BEGIN{print \"x\" > f}'")).toBe('security-config');
+    expect(bash("awk '{print > f}' f=~/.openclaw/openclaw.json /tmp/in")).toBe('security-config');
+    expect(bash("awk -v x=1 '{print}' ~/.openclaw/openclaw.json")).toBeNull();
+    expect(bash("awk '{print}' ~/.openclaw/openclaw.json")).toBeNull();
+    // A script file is unseen: the protected path anywhere on the line is a write.
+    expect(bash('sed -n -f /tmp/w.sed ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('sed --file=/tmp/w.sed ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('awk -f /tmp/prog.awk ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash("sed -e 'w ~/.openclaw/openclaw.json' /tmp/in")).toBe('security-config');
+    expect(bash("sed --expression='w ~/.openclaw/openclaw.json' /tmp/in")).toBe('security-config');
+    expect(bash('sed -s -i s/a/b/ ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('sed -n -i s/a/b/p ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('sed --in-place=.bak s/a/b/ ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('sed -i.bak s/a/b/ ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('sed -E -i s/a/b/ ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('sed -i s/a/b/ -- ~/.openclaw/openclaw.json')).toBe('security-config');
+    expect(bash('sed -n p ~/.openclaw/openclaw.json')).toBeNull();
+    expect(bash('sed -e p ~/.openclaw/openclaw.json')).toBeNull();
   });
 
   it('a lone `-` is stdin, an operand; grep -o is only-matching (#552 r3)', () => {
