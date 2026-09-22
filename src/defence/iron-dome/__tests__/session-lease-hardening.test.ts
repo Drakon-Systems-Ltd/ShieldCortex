@@ -539,6 +539,29 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash('let x<<=2\nbody\n=2\ntee ~/.openclaw/openclaw.json < /dev/null')).toBe('security-config');
   });
 
+  it("a quoted EMPTY delimiter (`<<''`, `<<\"\"`) is valid: the body ends at the first empty line (#552 r6 addendum 2)", () => {
+    // Literal body: the substitution inside it never runs.
+    expect(bash("cat <<''\n$(printf x > ~/.openclaw/openclaw.json)\n\n")).toBeNull();
+    expect(bash('cat <<""\n$(printf x > ~/.openclaw/openclaw.json)\n\n')).toBeNull();
+    expect(bash("cat <<''\ntee ~/.openclaw/openclaw.json < /dev/null\n\n")).toBeNull();
+    // A line holding only a space is NOT empty; it is body.
+    expect(bash("cat <<''\n \ntee ~/.openclaw/openclaw.json < /dev/null\n\n")).toBeNull();
+    // The statement after the empty line runs (reviewer row "empty delimiter postwrite").
+    expect(bash("cat <<''\ntext\n\nprintf changed > ~/.openclaw/openclaw.json")).toBe('security-config');
+    expect(bash("cat <<-''\n\ttext\n\t\ntee ~/.openclaw/openclaw.json < /dev/null")).toBe('security-config');
+    // Reviewer's exact spellings from the 5830 rerun: E.OF, 1EOF, E$OF feed the
+    // interpreter; END.DOC and a bare 2 are inert data.
+    expect(bash('python3 - <<E.OF\nopen("/home/x/.claude/settings.json","w").write("changed")\nE.OF')).toBe('security-config');
+    expect(bash('python3 - <<1EOF\nopen("/home/x/.claude/settings.json","w").write("changed")\n1EOF')).toBe('security-config');
+    expect(bash('python3 - <<E$OF\nopen("/home/x/.claude/settings.json","w").write("changed")\nE$OF')).toBe('security-config');
+    expect(bash('cat <<END.DOC\nprintf changed > /home/x/.claude/settings.json\nEND.DOC')).toBeNull();
+    expect(bash('cat <<2\nprintf changed > /home/x/.claude/settings.json\n2')).toBeNull();
+    expect(bash("cat <<'FIRST' <<SECOND\nliteral\nFIRST\n'$( printf changed > /home/x/.claude/settings.json )'\nSECOND")).toBe('security-config');
+    expect(bash('cat <<A <<B\nx\nA\nprintf changed > /home/x/.claude/settings.json\nB')).toBeNull();
+    expect(bash('echo ok # note \\\nprintf changed > /home/x/.claude/settings.json')).toBe('security-config');
+    expect(bash('(( 1 << SHIFT ))\nprintf changed > /home/x/.claude/settings.json')).toBe('security-config');
+  });
+
   it('several heredocs on one logical line read their bodies in `<<` order, each on its own opener (#552 r6 C)', () => {
     expect(bash("cat <<'A' <<'B'\n$(printf x > ~/.openclaw/openclaw.json)\nA\n$(printf x > ~/.openclaw/openclaw.json)\nB")).toBeNull();
     expect(bash("cat <<'A' <<B\nx\nA\n$(printf x > ~/.openclaw/openclaw.json)\nB")).toBe('security-config');
@@ -629,6 +652,26 @@ describe('#550 — security-config is a WRITE SHAPE onto a protected file, not a
     expect(bash('sed -i s/a/b/ -- ~/.openclaw/openclaw.json')).toBe('security-config');
     expect(bash('sed -n p ~/.openclaw/openclaw.json')).toBeNull();
     expect(bash('sed -e p ~/.openclaw/openclaw.json')).toBeNull();
+  });
+
+  it('sed/awk plain-path relief needs a ROOTED prefix: `w/abs/path` is the w command (#552 r6 addendum 1)', () => {
+    // Reviewer row "sed compact program": `w` glued to an absolute path was read
+    // as a relative directory called `w`. A letter before the first slash is
+    // script text.
+    expect(bash("printf changed | sed -n 'w/home/x/.claude/settings.json'")).toBe('security-config');
+    expect(bash('printf changed | sed -n "w/home/x/.claude/settings.json"')).toBe('security-config');
+    expect(bash("printf x | sed 's/x/y/w/home/x/.claude/settings.json'")).toBe('security-config');
+    expect(bash("sed -n 'w~/.openclaw/openclaw.json'")).toBe('security-config');
+    expect(bash("sed -n 'w./.openclaw/openclaw.json'")).toBe('security-config');
+    // Rooted prefixes are still the read they look like.
+    expect(bash('sed -n p /home/x/.claude/settings.json')).toBeNull();
+    expect(bash('sed -n p ./.claude/settings.json')).toBeNull();
+    expect(bash('sed -n p ../.claude/settings.json')).toBeNull();
+    expect(bash('sed -n p $HOME/.claude/settings.json')).toBeNull();
+    expect(bash('sed -n p ${HOME}/.claude/settings.json')).toBeNull();
+    expect(bash('sed -n p C:/Users/x/.claude/settings.json')).toBeNull();
+    expect(bash('sed -n p .claude/settings.json')).toBeNull();
+    expect(bash("awk '{print}' /home/x/.claude/settings.json")).toBeNull();
   });
 
   it('a lone `-` is stdin, an operand; grep -o is only-matching (#552 r3)', () => {

@@ -637,7 +637,10 @@ function parseHeredocWord(text: string, at: number): { tag: string; quoted: bool
     tag += c;
     i++;
   }
-  if (!tag) return null;
+  // A QUOTED empty word (`<<''`, `<<""`, `<<$''`) is a valid delimiter: the
+  // body ends at the first EMPTY line (#552 r6 addendum). Only a bare empty
+  // word is no heredoc (bash: syntax error).
+  if (!tag && !quoted) return null;
   return { tag, quoted };
 }
 
@@ -1140,11 +1143,14 @@ function stageWritesProtectedFile(stage: string, pipedNamesFile: boolean): boole
       const bare = unquote(t);
       const m = SECURITY_CONFIG_FILE_ANY_RE.exec(bare);
       if (!m) return false;
-      // A plain path operand has nothing but a path prefix (`~/`, `/home/x/`,
-      // `$HOME/`, `../`, or `--opt=` then one) before the file; anything else
-      // in front (`w ~/`, `s/a/b/w ~/`, `w~/`) is script text naming it.
+      // A plain path operand has nothing but a ROOTED path prefix before the
+      // file — `/`, `~/`, `./`, `../`, `$VAR/`, `${VAR}/`, `X:/` (optionally
+      // after `--opt=`), then directory names — or nothing at all. Anything
+      // else in front is script text naming it: `w ~/`, `s/a/b/w ~/`, `w~/`,
+      // and (#552 r6 addendum) `w/home/x/` — a letter before the first slash
+      // is sed's `w` command, not a relative directory called `w`.
       const before = bare.slice(0, m.index);
-      return !/^(?:[^=\s]*=)?(?:~|\.{1,2}|\$\w+|\$\{\w+\}|[A-Za-z]:)?[\\/]?(?:[\w.\-]+[\\/])*$/.test(before);
+      return !/^(?:--?[\w-]+=)?(?:(?:[\\/]|~[\\/]|\.{1,2}[\\/]|\$\w+[\\/]|\$\{\w+\}[\\/]|[A-Za-z]:[\\/])(?:[\w.\-]+[\\/])*)?$/.test(before);
     });
     if (scriptNamesFile) return true;
     return flags.some((t) => IN_PLACE_FLAG_RE.test(t)) && (namedOperand || (viaXargs && pipedNamesFile));
