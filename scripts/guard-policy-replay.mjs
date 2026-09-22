@@ -23,13 +23,16 @@
  * Record contracts (round-2 finding 4, round-3, round-4 M1): a row is
  * classified by its DECLARED event + outcome pair
  * (`scripts/lib/guard-log-schema.mjs`), never by the presence of a signals
- * array. A declared denial or warning that lacks signals is MALFORMED; a
- * non-string `event`, a numeric notify status or an array channel is
- * MALFORMED; an event/outcome pair that disagrees is CONTRADICTORY; an event
- * whose signals are redacted, empty, or outside the writer's vocabulary is
- * UNKNOWN. A `deliveredVia` of whitespace is not a channel; a `delivered`
- * status with no channel is a contradictory claim, not a validated delivery —
- * and a validated delivery is a transport report, never proof a person saw it.
+ * array. A row whose event and outcome agree on a denial or warning but lacks
+ * signals is MALFORMED; a non-string `event`, a numeric notify status or an
+ * array channel is MALFORMED; an event/outcome pair that disagrees is
+ * CONTRADICTORY (`event-outcome-mismatch`, or `retry-event-mismatch` for a
+ * retry outcome under the wrong event — two separate counters, never summed);
+ * an event whose signals are redacted, empty, or outside the writer's
+ * vocabulary is UNKNOWN. A `deliveredVia` of whitespace is not a channel; a
+ * `delivered` status with no channel is a contradictory claim, not a validated
+ * delivery — and a validated delivery is a transport report, never proof a
+ * person saw it.
  *
  * Round-4 M1 — only VALIDATED ENFORCEMENT signals classify an event. A
  * malformed JSON row is never discarded before grouping: it is retained as a
@@ -73,14 +76,22 @@
  *         - no `actionId`             → accepted; grouped by `correlationId`,
  *                                       else by its own line;
  *         - no `origin` / `sessionId` → accepted; never read.
- *       Everything else outside the pinned schema — no `event`, no `outcome`,
- *       a non-string `event`, a declared denial/warning without `signals`, a
- *       non-array or non-string signal member, a non-object notify, a
- *       non-string notify status or channel — is rejected as MALFORMED with a
- *       named reason. There is no silent tolerance and no inference of a
- *       missing field from any other field. The malformed reason reported is
- *       the first failing check in this order: `missing-outcome`,
- *       `event-not-string`, signals problems, notify problems, `missing-event`.
+ *       The pinned schema the validator enforces covers FOUR fields — `event`,
+ *       `outcome`, `signals`, `notify` — and nothing else. Within those, every
+ *       departure is rejected as MALFORMED with a named reason: no `event`, no
+ *       `outcome` (absent, empty or non-string), a non-string `event`, an
+ *       agreeing denial/warning pair without `signals`, a non-array or
+ *       non-string signal member, a non-object notify, a non-string notify
+ *       status or channel. No missing field is inferred from another. The
+ *       reported reason is the first failing check in this order:
+ *       `missing-outcome`, `event-not-string`, signals problems, notify
+ *       problems, `missing-event`.
+ *       The other fields are READ PERMISSIVELY and never validated: a missing
+ *       or non-string `severity` / `tool` projects to `other`; a missing or
+ *       non-string `detectedAt` is an empty timestamp; a missing or non-string
+ *       `actionId` / `correlationId` falls through to the next grouping key.
+ *       A string `event` / `outcome` outside the enum on a non-retry row is
+ *       an unrecognised-outcome record (UNKNOWN bucket), not malformed.
  *
  * Round-5 M2 — the RETRY lifecycle is a HISTORY, not last-row-wins. Over the
  * validated retry rows of an event, in time order:
@@ -219,7 +230,9 @@ function baseRecord(row, lineNo) {
  * missing-outcome, event-not-string, signals, notify, missing-event.
  * The legacy tolerances (M1(c)) are exactly: no notify object, no actionId,
  * no origin / sessionId. A missing `event` is NOT legacy — no shipped writer
- * ever omitted it — so it is malformed.
+ * ever omitted it — so it is malformed. Only `event`, `outcome`, `signals`
+ * and `notify` are checked here; `severity`, `tool`, `detectedAt` and the ids
+ * are read permissively in `baseRecord` and never produce a malformed reason.
  */
 function rowProblem(row, cls) {
   if (typeof row.outcome !== 'string' || row.outcome === '') return 'missing-outcome';
@@ -365,9 +378,14 @@ export function groupEvents(records) {
     const stopUnconfirmed = stopDecided && !evidenceIntact;
     const finalEnfOutcome = lastDecision ? lastDecision.outcome : (retries.length ? 'retry-only' : 'none');
 
-    // Contradictions (finding 4): the evidence disagrees with itself.
+    // Contradictions (finding 4): the evidence disagrees with itself. Each
+    // row-level contradiction reason is its OWN entry (#559 follow-up): a
+    // retry outcome under the wrong event (`retry-event-mismatch`) is never
+    // folded into a disagreeing enforcement pair (`event-outcome-mismatch`).
     const contradictions = [];
-    if (ev.records.some(r => r.kind === 'contradictory')) contradictions.push('event-outcome-mismatch');
+    const rowReasons = new Set(ev.records.filter(r => r.kind === 'contradictory').map(r => r.reason));
+    for (const reason of CONTRADICTORY_ROW_REASONS) if (rowReasons.delete(reason)) contradictions.push(reason);
+    for (const reason of rowReasons) contradictions.push(typeof reason === 'string' && reason ? reason : 'contradictory-row');
     if (enfOutcomes.length > 1) contradictions.push('conflicting-enforcement-outcomes');
     if (ev.records.some(r => r.notify.claimsDelivery && !r.notify.channelPresent)) contradictions.push('delivery-claimed-without-channel');
 
@@ -408,6 +426,15 @@ export function groupEvents(records) {
 }
 
 const sameSet = (a, b) => a.length === b.length && a.every(s => b.includes(s));
+
+/**
+ * Row-level contradiction reasons `classifyRecord` can emit, in the order they
+ * are listed on an event (the first is the event's bucket reason). Each is
+ * reported under its own name in `contradictoryReasons`; the event-level
+ * `conflicting-enforcement-outcomes` and `delivery-claimed-without-channel`
+ * follow them.
+ */
+export const CONTRADICTORY_ROW_REASONS = Object.freeze(['event-outcome-mismatch', 'retry-event-mismatch']);
 
 /** Closed lifecycle states (M2). Each is projected verbatim; anything else is `other`. */
 export const ENFORCEMENT_STATES = Object.freeze(['none', ...DENIAL_OUTCOMES, ...WARNING_OUTCOMES, 'other']);

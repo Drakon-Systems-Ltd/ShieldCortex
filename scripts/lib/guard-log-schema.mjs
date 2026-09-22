@@ -107,8 +107,13 @@ export function publicSignalName(s) { return isVocabularySignal(s) ? s : REDACTE
 /**
  * Validate the `notify` member of a row against the writer's schema.
  * @returns {{ ok: true, status: string|null, channel: string|null } | { ok: false, reason: string }}
- * `status: null` means the row carried no notify object at all (allowed: retry rows).
- * A whitespace-only channel is NOT a channel (finding 4).
+ * A missing notify object is accepted on EVERY row kind (pre-#284 rows and
+ * retry rows carry none). `status: null` means either no notify object or a
+ * notify object without a `status` member; a present non-string status or
+ * channel, or a non-object notify, is rejected. The status and channel values
+ * are NOT checked against their enums here — that mapping happens in the
+ * public projection (`other`). A whitespace-only channel is NOT a channel
+ * (finding 4).
  */
 export function validateNotify(row) {
   if (row.notify === undefined || row.notify === null) return { ok: true, status: null, channel: null };
