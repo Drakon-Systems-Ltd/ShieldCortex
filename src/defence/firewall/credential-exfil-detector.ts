@@ -86,24 +86,55 @@ const CURL_WGET_CMD = /(?:^|[\s;&|()`'"/])(curl|wget)(?=\s)/gi;
 const CURL_WGET_TARGET = new RegExp(
   String.raw`^(?:\/\/)?(?:[^\s;&|<>()\`'"\\@/]+@)?` +
     BARE_HOST +
-    String.raw`(?::\d+)?(?=$|[\s/?#;&|<>()\`'"\\])`,
+    String.raw`\.?(?::\d+)?(?=$|[\s/?#;&|<>()\`'"\\])`,
   'i',
 );
-/** Options whose NEXT word is a value (file, header, body, …), never the target. */
-const CURL_SHORT_VALUE = new Set('AbcCdDeEFHKmoPQrtTuUwxXyYz'.split(''));
-const WGET_SHORT_VALUE = new Set('aABDeiIloOPQRtTUwX'.split(''));
-const LONG_VALUE = new Set([
-  // curl
-  'data', 'data-ascii', 'data-binary', 'data-raw', 'data-urlencode', 'json', 'output', 'output-dir',
-  'header', 'proxy-header', 'user', 'user-agent', 'referer', 'request', 'upload-file', 'form',
-  'form-string', 'cookie', 'cookie-jar', 'config', 'proxy', 'proxy-user', 'max-time', 'connect-timeout',
-  'retry', 'write-out', 'cacert', 'capath', 'cert', 'key', 'resolve', 'connect-to', 'range', 'dump-header',
-  'interface', 'oauth2-bearer', 'trace', 'trace-ascii', 'stderr', 'variable',
-  // wget
-  'post-file', 'post-data', 'body-file', 'body-data', 'method', 'output-document', 'output-file',
-  'append-output', 'password', 'http-user', 'http-password', 'directory-prefix', 'tries', 'timeout',
-  'input-file', 'execute', 'load-cookies', 'save-cookies', 'ca-certificate', 'certificate',
-  'private-key', 'bind-address', 'wait', 'quota', 'level', 'accept', 'reject', 'domains', 'base',
+/**
+ * Options whose NEXT word is a value (file, header, body, …), never the target.
+ * The long sets are every value-taking option printed by `curl --help all`
+ * (curl 8.5.0, plus the `[protocol://]host` forms `--proxy`/`--preproxy`) and
+ * `wget --help` (1.21.4), so an unlisted option cannot turn its file argument
+ * into a "host". `--url` is handled separately: its value IS a target.
+ */
+const CURL_SHORT_VALUE = new Set('ACDEFHKPQTUXYbcdehmortuwxyz'.split(''));
+const WGET_SHORT_VALUE = new Set('ABDIOPQRTUXaeilotw'.split(''));
+const CURL_LONG_VALUE = new Set([
+  'abstract-unix-socket', 'alt-svc', 'aws-sigv4', 'cacert', 'capath', 'cert', 'cert-type',
+  'ciphers', 'config', 'connect-timeout', 'connect-to', 'continue-at', 'cookie', 'cookie-jar',
+  'create-file-mode', 'crlfile', 'curves', 'data', 'data-ascii', 'data-binary', 'data-raw',
+  'data-urlencode', 'delegation', 'dns-interface', 'dns-ipv4-addr', 'dns-ipv6-addr', 'dns-servers',
+  'doh-url', 'dump-header', 'egd-file', 'engine', 'etag-compare', 'etag-save', 'expect100-timeout',
+  'form', 'form-string', 'ftp-account', 'ftp-alternative-to-user', 'ftp-method', 'ftp-port',
+  'ftp-ssl-ccc-mode', 'happy-eyeballs-timeout-ms', 'header', 'help', 'hostpubmd5', 'hostpubsha256',
+  'hsts', 'interface', 'ipfs-gateway', 'json', 'keepalive-time', 'key', 'key-type', 'krb',
+  'libcurl', 'limit-rate', 'local-port', 'login-options', 'mail-auth', 'mail-from', 'mail-rcpt',
+  'max-filesize', 'max-redirs', 'max-time', 'netrc-file', 'noproxy', 'oauth2-bearer', 'output',
+  'output-dir', 'parallel-max', 'pass', 'pinnedpubkey', 'preproxy', 'proto', 'proto-default',
+  'proto-redir', 'proxy', 'proxy-cacert', 'proxy-capath', 'proxy-cert', 'proxy-cert-type',
+  'proxy-ciphers', 'proxy-crlfile', 'proxy-header', 'proxy-key', 'proxy-key-type', 'proxy-pass',
+  'proxy-pinnedpubkey', 'proxy-service-name', 'proxy-tls13-ciphers', 'proxy-tlsauthtype',
+  'proxy-tlspassword', 'proxy-tlsuser', 'proxy-user', 'proxy1.0', 'pubkey', 'quote', 'random-file',
+  'range', 'rate', 'referer', 'request', 'request-target', 'resolve', 'retry', 'retry-delay',
+  'retry-max-time', 'sasl-authzid', 'service-name', 'socks4', 'socks4a', 'socks5',
+  'socks5-gssapi-service', 'socks5-hostname', 'speed-limit', 'speed-time', 'stderr',
+  'telnet-option', 'tftp-blksize', 'time-cond', 'tls-max', 'tls13-ciphers', 'tlsauthtype',
+  'tlspassword', 'tlsuser', 'trace', 'trace-ascii', 'trace-config', 'unix-socket', 'upload-file',
+  'url-query', 'user', 'user-agent', 'variable', 'write-out',
+]);
+const WGET_LONG_VALUE = new Set([
+  'accept', 'accept-regex', 'append-output', 'backups', 'base', 'bind-address', 'body-data',
+  'body-file', 'ca-certificate', 'ca-directory', 'certificate', 'certificate-type', 'ciphers',
+  'compression', 'config', 'connect-timeout', 'crl-file', 'cut-dirs', 'default-page',
+  'directory-prefix', 'dns-timeout', 'domains', 'exclude-directories', 'exclude-domains',
+  'execute', 'follow-tags', 'ftp-password', 'ftp-user', 'header', 'http-password', 'http-user',
+  'ignore-tags', 'include-directories', 'input-file', 'level', 'limit-rate', 'load-cookies',
+  'local-encoding', 'method', 'output-document', 'output-file', 'password', 'pinnedpubkey',
+  'post-data', 'post-file', 'prefer-family', 'private-key', 'private-key-type', 'progress',
+  'proxy-password', 'proxy-user', 'quota', 'random-file', 'read-timeout', 'referer', 'regex-type',
+  'reject', 'reject-regex', 'rejected-log', 'remote-encoding', 'report-speed',
+  'restrict-file-names', 'retry-on-http-error', 'save-cookies', 'secure-protocol', 'start-pos',
+  'timeout', 'tries', 'use-askpass', 'user', 'user-agent', 'wait', 'waitretry', 'warc-dedup',
+  'warc-file', 'warc-header', 'warc-max-size', 'warc-tempdir',
 ]);
 
 interface ShellWord {
@@ -113,9 +144,15 @@ interface ShellWord {
 }
 
 /**
- * Split the text after a curl/wget command word into shell words. Quotes are
- * removed as the shell would; an unquoted `;`, `&`, `|` or newline ends the
- * statement; unquoted `<>()` and backticks separate words.
+ * Split the text after a curl/wget command word into shell words, the way the
+ * shell would:
+ * - quotes are removed; inside double quotes `\` escapes only `"\$` `` ` `` and
+ *   a newline, elsewhere it escapes the next character or joins a continued line;
+ * - an unquoted `;`, `|`, `&&`, `&` or newline ends the statement, and an
+ *   unquoted `#` word opens a comment that runs to the end of the line;
+ * - `<`, `>`, `2>&1`, `>&2` and `&>` are redirections: the word they take is a
+ *   file descriptor or path, never a target;
+ * - unquoted `()` and backticks separate words.
  */
 function statementWords(content: string, start: number): ShellWord[] {
   const words: ShellWord[] = [];
@@ -139,7 +176,14 @@ function statementWords(content: string, start: number): ShellWord[] {
     const c = content[i];
     if (quote) {
       if (c === quote) quote = null;
-      else cur += c;
+      else if (c === '\\' && quote === '"' && i + 1 < content.length) {
+        const n = content[i + 1];
+        if (n === '\n') i++;
+        else if (n === '"' || n === '\\' || n === '$' || n === '`') {
+          cur += n;
+          i++;
+        } else cur += c;
+      } else cur += c;
       continue;
     }
     if (c === "'" || c === '"') {
@@ -147,7 +191,26 @@ function statementWords(content: string, start: number): ShellWord[] {
       quote = c;
       continue;
     }
-    if (c === ';' || c === '&' || c === '|' || c === '\n') break;
+    if (c === '\\') {
+      if (i + 1 >= content.length) break;
+      if (content[i + 1] === '\n') {
+        i++; // line continuation: the statement carries on
+        continue;
+      }
+      begin();
+      cur += content[++i];
+      continue;
+    }
+    if (c === ';' || c === '|' || c === '\n') break;
+    if (c === '#' && !inWord) break;
+    if (c === '&') {
+      if (content[i + 1] === '>') {
+        flush(); // `&>file`: the `>` that follows marks the redirection
+        continue;
+      }
+      if (redirectNext && !inWord) continue; // `2>&1` / `>&2`: descriptor dup
+      break; // `&` / `&&`: statement end
+    }
     if (/\s/.test(c) || c === '(' || c === ')' || c === '`' || c === '<' || c === '>') {
       flush();
       if (c === '<' || c === '>') redirectNext = true;
@@ -168,7 +231,9 @@ function curlWgetTargets(content: string): string[] {
     if (t?.[1]) hosts.push(t[1]);
   };
   for (const m of content.matchAll(CURL_WGET_CMD)) {
-    const shortValue = m[1].toLowerCase() === 'curl' ? CURL_SHORT_VALUE : WGET_SHORT_VALUE;
+    const isCurl = m[1].toLowerCase() === 'curl';
+    const shortValue = isCurl ? CURL_SHORT_VALUE : WGET_SHORT_VALUE;
+    const longValue = isCurl ? CURL_LONG_VALUE : WGET_LONG_VALUE;
     const words = statementWords(content, (m.index ?? 0) + m[0].length);
     for (let i = 0; i < words.length; i++) {
       const { word, redirect } = words[i];
@@ -180,7 +245,7 @@ function curlWgetTargets(content: string): string[] {
         if (name === 'url') {
           if (eq !== -1) push(word.slice(eq + 1));
           else if (i + 1 < words.length) push(words[++i].word);
-        } else if (eq === -1 && LONG_VALUE.has(name)) {
+        } else if (eq === -1 && longValue.has(name)) {
           i++;
         }
         continue;
