@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - **#547 recall framing, end to end:** the built MCP server is spawned over stdio and its `recall` / `get_memory` text asserted framed; the bundled OpenClaw hook (both shipped copies) is transpiled as the gateway loads it and driven on a `message` event, consuming the real server output through a stubbed `npx mcporter` on PATH, so "server frame + hook frame never nest" is tested on real data. Removing the frame from either emitter fails the suite. `docs/openclaw-integration.md` now says plainly that the frame is guidance to the model, not enforcement.
+- **#547 docs:** `docs/openclaw-integration.md` no longer claims every surface is framed. It lists the framed tools, resources, hook and adapter, and names `export_memories` and the #535 echo paths (`remember`, `forget`, graph, quarantine, scan) as the ones still unframed.
 - **#547 audit fixtures the #530 review could not ship:** the INJECTION and PRIVILEGE end-to-end fixtures are generated at test time from fragments, pinning rule-id attribution, non-empty `matchedText`, line and excerpt for those two finding types (previously pinned for the block/quarantine finding only).
 
 ### Fixed

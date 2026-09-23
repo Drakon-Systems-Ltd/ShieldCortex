@@ -180,7 +180,14 @@ All memory writes routed through ShieldCortex are scanned by the defence pipelin
 
 ### Recalled memory is framed as data — guidance, not enforcement
 
-Every surface that hands stored memory back to a model (the MCP tool results and resources, proactive recall on a `message` event, the Claude Code hooks, the LangChain adapter) wraps it in the same untrusted-data frame: an opening line, a notice that imperative text inside is data and not an instruction, and a closing line carrying a per-emission random id that stored text cannot predict (#507).
+The recall surfaces wrap stored memory in one untrusted-data frame before a model sees it: an opening line, a notice that imperative text inside is data and not an instruction, and a closing line carrying a per-emission random id that stored text cannot predict (#507). The surfaces that carry the frame today are:
+
+- the MCP tools `recall`, `get_memory`, `get_related`, `get_context` (prose output; `format: "raw"` is a JSON document that carries the same notice and frame id as fields) and `start_session`;
+- the MCP resources `memory://context` and `memory://important`;
+- proactive recall on a `message` event (the bundled OpenClaw hook);
+- the Claude Code hooks and the LangChain adapter.
+
+Not every tool result that echoes stored text is framed yet. `export_memories` returns the stored rows as raw JSON, and the tools that echo a memory back after acting on it (`remember`, `forget`, graph, quarantine and scan results) are unframed too; that gap is tracked as #535 and stays open until those paths carry the frame. Until then, treat an `export_memories` result as you would any untrusted file.
 
 Be clear about what that is. The frame tells the model who is speaking; it does not stop the model reading the text, and it does not make a hostile memory safe. It is advice to the model, and a model can ignore advice. The controls that actually withhold or block content are the write-time defence pipeline (a memory that scans as an injection is quarantined, never recalled) and the recall filter that drops a poisoned row before it is emitted. Treat the frame as the last line, not the first.
 
