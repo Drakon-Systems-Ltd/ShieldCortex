@@ -189,7 +189,7 @@ The recall surfaces wrap stored memory in one untrusted-data frame before a mode
 
 Not every tool result that echoes stored text is framed yet. `export_memories` returns the stored rows as raw JSON, and the tools that echo a memory back after acting on it (`remember`, `forget`, graph, quarantine and scan results) are unframed too; that gap is tracked as #535 and stays open until those paths carry the frame. Until then, treat an `export_memories` result as you would any untrusted file.
 
-Be clear about what that is. The frame tells the model who is speaking; it does not stop the model reading the text, and it does not make a hostile memory safe. It is advice to the model, and a model can ignore advice. The controls that actually withhold or block content are the write-time defence pipeline (a memory that scans as an injection is quarantined, never recalled) and the recall filter that drops a poisoned row before it is emitted. Treat the frame as the last line, not the first.
+Be clear about what that is. The frame tells the model who is speaking; it does not stop the model reading the text, and it does not make a hostile memory safe. It is advice to the model, and a model can ignore advice. The controls that actually withhold or block content are the write-time defence pipeline (a memory that scans as an injection is blocked or quarantined according to policy, never recalled) and the recall filter that drops a poisoned row before it is emitted. Treat the frame as the last line, not the first.
 
 ### PII redaction on the hook write path
 
