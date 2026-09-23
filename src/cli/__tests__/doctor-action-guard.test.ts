@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { checkActionGuard, doctorExitCode, fixActionGuardConfig } from '../doctor.js';
+import { normaliseWebhookUrl } from '../../defence/iron-dome/notify-config.js';
 import { handleCloudConfig } from '../../cloud/cli.js';
 import {
   getConfigDir,
@@ -402,6 +403,120 @@ describe('doctor — enforcing with no denial-capable sink is a FAIL (#517)', ()
     const reread = JSON.parse(after.toString('utf-8')) as { actionGuard: { enabled: boolean; enforce: boolean } };
     expect(reread.actionGuard.enabled).toBe(true);
     expect(reread.actionGuard.enforce).toBe(true);
+  });
+});
+
+/**
+ * #517 (c) residual, found in the #558 review: doctor's "denial-capable sink"
+ * test was `webhook.length > 0` while the runtime (`normaliseWebhookUrl` in
+ * notify-config.ts) rejects non-http(s) and malformed URLs. So a signed
+ * config with `notify.enabled: true` and `webhookUrl: "ftp://…"` gave no
+ * NOTIFY row and exit 0 on an enforcing host that the transport would never
+ * deliver for — the armed-and-silent shape #558 exists to FAIL. Doctor now
+ * asks the runtime's own normaliser whether a URL is a sink.
+ *
+ * A well-formed URL is still not delivery proof; the hook-plane observation
+ * gap stays disclosed (#556 / ADR-002).
+ */
+describe('doctor — a webhookUrl the notify transport rejects is not a sink (#517 c residual)', () => {
+  const NO_DISABLE_ADVICE = /enforce\s*[:=]\s*false|--action-guard-disable|disable action guard|switch (?:off|it off)|turn (?:off|it off)|set enforce/i;
+  const REJECTED = [
+    ['non-http(s) scheme', 'ftp://example.invalid/notify'],
+    ['javascript scheme', 'javascript:alert(1)'],
+    ['unparsable string', 'not a url at all'],
+    ['over the runtime length bound', `https://hooks.example.invalid/${'a'.repeat(2_100)}`],
+  ] as const;
+
+  for (const [why, url] of REJECTED) {
+    it(`FAILs (exit 1) when armed with notify.enabled and a webhookUrl the runtime rejects — ${why}`, async () => {
+      writeConfig({
+        actionGuard: { enabled: true, enforce: true, notify: { enabled: true, webhookUrl: url } },
+      });
+      expect(normaliseWebhookUrl(url)).toBeUndefined();
+      const results = await checkActionGuard();
+      const notify = results.find((r) => /notify/i.test(r.label));
+      expect(notify).toBeDefined();
+      expect(notify!.status).toBe('fail');
+      expect(notify!.message).toMatch(/enforcing/i);
+      expect(notify!.message).toMatch(/actionGuard\.notify\.webhookUrl/);
+      // The URL is present and the switch is on: say the URL is unusable,
+      // not that it is unset or that the transport is off.
+      expect(notify!.message).toMatch(/not an http\(s\) URL/i);
+      expect(notify!.message).not.toMatch(/webhookUrl unset/i);
+      expect(notify!.message).not.toMatch(/notify\.enabled is not true/i);
+      // Never echo the rejected value: it may be junk pasted from anywhere.
+      expect(notify!.message).not.toContain(url.slice(0, 40));
+      expect(notify!.fix ?? '').toMatch(/--action-guard-notify-webhook/);
+      expect(notify!.fix ?? '').not.toMatch(NO_DISABLE_ADVICE);
+      expect(notify!.message).not.toMatch(NO_DISABLE_ADVICE);
+      expect(doctorExitCode(results)).toBe(1);
+    });
+  }
+
+  it('the rejected-URL message wins over "openclaw only" when both apply', async () => {
+    writeConfig({
+      actionGuard: {
+        enabled: true,
+        enforce: true,
+        notify: { enabled: true, openclaw: true, webhookUrl: 'ftp://example.invalid/notify' },
+      },
+    });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('fail');
+    expect(notify!.message).toMatch(/not an http\(s\) URL/i);
+    expect(notify!.message).not.toMatch(/openclaw only/i);
+    expect(doctorExitCode(results)).toBe(1);
+  });
+
+  it('only WARNs (exit 0) in warn-mode with a rejected webhookUrl — under-configured, not enforcing', async () => {
+    writeConfig({
+      actionGuard: { enabled: true, enforce: false, notify: { enabled: true, webhookUrl: 'ftp://example.invalid/notify' } },
+    });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('warn');
+    expect(notify!.message).toMatch(/warn-mode/i);
+    expect(notify!.message).toMatch(/not an http\(s\) URL/i);
+    expect(doctorExitCode(results)).toBe(0);
+  });
+
+  it('agrees with the runtime normaliser on every shape: a URL is a sink iff normaliseWebhookUrl accepts it', async () => {
+    const shapes = [
+      'https://hooks.example.invalid/sc',
+      'http://hooks.example.invalid/sc',
+      '  https://hooks.example.invalid/sc  ',
+      'ftp://example.invalid/notify',
+      'file:///tmp/notify',
+      'data:text/plain,hi',
+      'hooks.example.invalid/sc',
+      '',
+      `https://hooks.example.invalid/${'b'.repeat(2_100)}`,
+    ];
+    for (const url of shapes) {
+      writeConfig({ actionGuard: { enabled: true, enforce: true, notify: { enabled: true, webhookUrl: url } } });
+      const results = await checkActionGuard();
+      const row = results.find((r) => /notify/i.test(r.label));
+      const accepted = normaliseWebhookUrl(url) !== undefined;
+      expect({ url: url.slice(0, 40), sink: row === undefined }).toEqual({ url: url.slice(0, 40), sink: accepted });
+      expect(doctorExitCode(results)).toBe(accepted ? 0 : 1);
+    }
+  });
+
+  it('never writes config: bytes identical before and after the rejected-URL FAIL', async () => {
+    writeConfig({
+      actionGuard: { enabled: true, enforce: true, notify: { enabled: true, webhookUrl: 'ftp://example.invalid/notify' } },
+    });
+    const before = fs.readFileSync(configPath());
+    const results = await checkActionGuard();
+    expect(results.find((r) => /notify/i.test(r.label))!.status).toBe('fail');
+    const after = fs.readFileSync(configPath());
+    expect(Buffer.compare(before, after)).toBe(0);
+    const reread = JSON.parse(after.toString('utf-8')) as {
+      actionGuard: { enabled: boolean; enforce: boolean; notify: { enabled: boolean; webhookUrl: string } };
+    };
+    expect(reread.actionGuard.enforce).toBe(true);
+    expect(reread.actionGuard.notify.webhookUrl).toBe('ftp://example.invalid/notify');
   });
 });
 
