@@ -109,11 +109,13 @@ const MAX_SHELL_DEPTH = 3;
  * Options whose NEXT word is a value (file, header, body, …), never the target.
  * The long sets are every value-taking option printed by `curl --help all`
  * (curl 8.5.0, plus the `[protocol://]host` forms `--proxy`/`--preproxy`) and
- * `wget --help` (1.21.4), so an unlisted option cannot turn its file argument
- * into a "host". `--url` is handled separately: its value IS a target.
+ * `wget --help` (1.21.4), cross-checked by invoking every remaining option with
+ * no operand and keeping those that answer "requires parameter/argument"
+ * (help omits the placeholder for `--haproxy-clientip`, `--hsts-file`,
+ * `--max-redirect`, `-n`, `-Y`). `--url` is handled separately: its value IS a target.
  */
 const CURL_SHORT_VALUE = new Set('ACDEFHKPQTUXYbcdehmortuwxyz'.split(''));
-const WGET_SHORT_VALUE = new Set('ABDIOPQRTUXaeilotw'.split(''));
+const WGET_SHORT_VALUE = new Set('ABDIOPQRTUXYaeilnotw'.split(''));
 const CURL_LONG_VALUE = new Set([
   'abstract-unix-socket', 'alt-svc', 'aws-sigv4', 'cacert', 'capath', 'cert', 'cert-type',
   'ciphers', 'config', 'connect-timeout', 'connect-to', 'continue-at', 'cookie', 'cookie-jar',
@@ -121,7 +123,7 @@ const CURL_LONG_VALUE = new Set([
   'data-urlencode', 'delegation', 'dns-interface', 'dns-ipv4-addr', 'dns-ipv6-addr', 'dns-servers',
   'doh-url', 'dump-header', 'egd-file', 'engine', 'etag-compare', 'etag-save', 'expect100-timeout',
   'form', 'form-string', 'ftp-account', 'ftp-alternative-to-user', 'ftp-method', 'ftp-port',
-  'ftp-ssl-ccc-mode', 'happy-eyeballs-timeout-ms', 'header', 'help', 'hostpubmd5', 'hostpubsha256',
+  'ftp-ssl-ccc-mode', 'happy-eyeballs-timeout-ms', 'haproxy-clientip', 'header', 'help', 'hostpubmd5', 'hostpubsha256',
   'hsts', 'interface', 'ipfs-gateway', 'json', 'keepalive-time', 'key', 'key-type', 'krb',
   'libcurl', 'limit-rate', 'local-port', 'login-options', 'mail-auth', 'mail-from', 'mail-rcpt',
   'max-filesize', 'max-redirs', 'max-time', 'netrc-file', 'noproxy', 'oauth2-bearer', 'output',
@@ -142,9 +144,9 @@ const WGET_LONG_VALUE = new Set([
   'body-file', 'ca-certificate', 'ca-directory', 'certificate', 'certificate-type', 'ciphers',
   'compression', 'config', 'connect-timeout', 'crl-file', 'cut-dirs', 'default-page',
   'directory-prefix', 'dns-timeout', 'domains', 'exclude-directories', 'exclude-domains',
-  'execute', 'follow-tags', 'ftp-password', 'ftp-user', 'header', 'http-password', 'http-user',
+  'execute', 'follow-tags', 'ftp-password', 'ftp-user', 'header', 'hsts-file', 'http-password', 'http-user',
   'ignore-tags', 'include-directories', 'input-file', 'level', 'limit-rate', 'load-cookies',
-  'local-encoding', 'method', 'output-document', 'output-file', 'password', 'pinnedpubkey',
+  'local-encoding', 'max-redirect', 'method', 'output-document', 'output-file', 'password', 'pinnedpubkey',
   'post-data', 'post-file', 'prefer-family', 'private-key', 'private-key-type', 'progress',
   'proxy-password', 'proxy-user', 'quota', 'random-file', 'read-timeout', 'referer', 'regex-type',
   'reject', 'reject-regex', 'rejected-log', 'remote-encoding', 'report-speed',
