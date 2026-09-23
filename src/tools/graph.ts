@@ -6,6 +6,8 @@
  */
 
 import { getDatabase } from '../database/init.js';
+// @ts-expect-error — importing a .mjs hook util that has no .d.ts
+import { recallFrameFields } from '../../scripts/lib/recall-frame.mjs';
 
 interface EntityInfo {
   id: number;
@@ -24,6 +26,14 @@ interface Connection {
 
 function mcpText(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+/** Stored graph labels are untrusted data (#535). Errors and empty results stay unframed. */
+function mcpStored(data: Record<string, unknown>) {
+  return mcpText({
+    ...(recallFrameFields() as { untrusted_data_notice: string; frame_id: string }),
+    ...data,
+  });
 }
 
 /**
@@ -112,7 +122,7 @@ export function handleGraphQuery(args: {
     if (frontier.length === 0) break;
   }
 
-  return mcpText({ entity: rootEntity, connections });
+  return mcpStored({ entity: rootEntity, connections });
 }
 
 /**
@@ -159,7 +169,7 @@ export function handleGraphEntities(args: {
     };
   });
 
-  return mcpText({ entities });
+  return entities.length === 0 ? mcpText({ entities }) : mcpStored({ entities });
 }
 
 /**
@@ -191,7 +201,7 @@ export function handleGraphExplain(args: {
   }
 
   if (fromRow.id === toRow.id) {
-    return mcpText({ paths: [{ hops: [{ entity: fromRow.name, predicate: '(self)' }] }], sourceMemories: [] });
+    return mcpStored({ paths: [{ hops: [{ entity: fromRow.name, predicate: '(self)' }] }], sourceMemories: [] });
   }
 
   // BFS to find path
@@ -289,5 +299,5 @@ export function handleGraphExplain(args: {
     ).all(...ids) as any[];
   }
 
-  return mcpText({ paths: [{ hops }], sourceMemories });
+  return mcpStored({ paths: [{ hops }], sourceMemories });
 }
