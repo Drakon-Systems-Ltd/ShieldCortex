@@ -9,12 +9,12 @@
  * locator that lost the line when blank lines sat between marker and payload,
  * and two tests that passed with the fix deleted.
  *
- * KNOWN GAP (review item 5). End-to-end fixtures that trip the INJECTION and
- * PRIVILEGE detectors, to pin rule-id attribution on those two finding types,
- * are not here: the Action Guard on the authoring box refused to write them,
- * twice. Attribution is pinned end to end for the block/quarantine finding
- * only. Whoever can write those fixtures should add them; the intended
- * assertions are in the commit body.
+ * Review item 5 — end-to-end fixtures that trip the INJECTION and PRIVILEGE
+ * detectors, to pin rule-id attribution on those two finding types — could not
+ * be written here (the Action Guard on the authoring box refused them). They
+ * are generated at test time from fragments in audit-review-followups-547
+ * .test.ts, which also anchors STEALTH_ONLY_REASON and covers the Markdown
+ * code-span fix (#547).
  *
  * Control characters are built with String.fromCharCode so this file stays
  * plain ASCII whatever writes it.
