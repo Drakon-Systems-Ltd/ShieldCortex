@@ -103,6 +103,14 @@ const WRAPPERS = new Set([
 /** Wrapper options whose next word is a value, so it is not the command. */
 const WRAPPER_VALUE_OPTS = new Set(['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U', '-T', '-n', '-c', '-k', '-s', '-o', '-e']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
+/** Shell reserved words that precede a command word without being one (#567 r3). */
+const RESERVED = new Set(['if', 'then', 'else', 'elif', 'while', 'until', 'do', '!', '{', '}']);
+/**
+ * A command word is only an invocation when its first operand is
+ * invocation-shaped: an option, a target, `-` (stdin) or a `$expansion`.
+ * `wget is available from github.com mirrors` has none, so it is prose.
+ */
+const INVOCATION_OPERAND = /^(?:-|\$|\/\/|[a-z][a-z0-9+.-]*:\/\/)/i;
 const MAX_SHELL_DEPTH = 3;
 
 /**
@@ -315,7 +323,7 @@ function curlWgetTargets(content: string): string[] {
       // Assignment prefixes and wrappers precede the command word.
       for (;;) {
         skipRedirects();
-        while (i < words.length && (words[i].redirect || ASSIGNMENT.test(words[i].word))) i++;
+        while (i < words.length && (words[i].redirect || ASSIGNMENT.test(words[i].word) || RESERVED.has(words[i].word))) i++;
         skipRedirects();
         if (i >= words.length) break;
         const name = words[i].word.match(COMMAND_NAME)?.[1]?.toLowerCase();
@@ -336,7 +344,10 @@ function curlWgetTargets(content: string): string[] {
       if (i >= words.length) continue;
       const name = words[i].word.match(COMMAND_NAME)?.[1]?.toLowerCase();
       if (name === 'curl' || name === 'wget') {
-        argv(words, i + 1, name === 'curl');
+        let f = i + 1;
+        while (f < words.length && words[f].redirect) f++;
+        const first = f < words.length ? words[f].word : '';
+        if (first && (INVOCATION_OPERAND.test(first) || CURL_WGET_TARGET.test(first))) argv(words, i + 1, name === 'curl');
       } else if (depth < MAX_SHELL_DEPTH && name === 'eval') {
         scan(words.slice(i + 1).filter((w) => !w.redirect).map((w) => w.word).join(' '), depth + 1);
       } else if (depth < MAX_SHELL_DEPTH && name && SHELLS.has(name)) {
