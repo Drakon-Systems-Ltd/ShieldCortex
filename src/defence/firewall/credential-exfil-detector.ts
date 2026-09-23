@@ -71,13 +71,138 @@ const CREDENTIAL_ACCESS: Sig[] = [
 const EGRESS_TOOL = /\b(?:curl|wget|nc|ncat|netcat|scp|rsync|sftp|ftp|telnet)\b/i;
 const HTTP_POST_LIB = /\b(?:requests\.(?:post|put)|http\.post|urllib\.request|axios\.(?:post|put)|XMLHttpRequest)\b|\bfetch\s*\(/i;
 
-/** Off-host destinations named as a bare host (no URL scheme): scp/rsync/nc/ssh. */
+/** Off-host destinations named as a bare host (no URL scheme): scp/rsync/nc/ssh, curl/wget. */
 const BARE_HOST = '([a-z0-9][a-z0-9.-]*\\.[a-z]{2,}|(?:\\d{1,3}\\.){3}\\d{1,3})';
 const SCP_TARGET = new RegExp(`\\b(?:scp|rsync|sftp)\\b[^\\n|]*?(?:[\\w.-]+@)?${BARE_HOST}:`, 'gi');
 const NC_TARGET = new RegExp(`\\b(?:nc|ncat|netcat)\\b\\s+(?:-\\w+\\s+)*${BARE_HOST}\\b`, 'gi');
 const SSH_TARGET = new RegExp(`\\bssh\\b[^\\n|]*?\\s(?:[\\w.-]+@)${BARE_HOST}\\b`, 'gi');
 
-/** Collect non-local bare-host destinations from scp/rsync/nc/ssh invocations. */
+/**
+ * curl/wget also accept a scheme-less `host[:port][/path]` target (#566). The
+ * host ends at the same shell metacharacters as the guard's RE_URL_TOKEN, so a
+ * chained command after `;` or `|` can never become part of the "host".
+ */
+const CURL_WGET_CMD = /(?:^|[\s;&|()`'"/])(curl|wget)(?=\s)/gi;
+const CURL_WGET_TARGET = new RegExp(
+  String.raw`^(?:\/\/)?(?:[^\s;&|<>()\`'"\\@/]+@)?` +
+    BARE_HOST +
+    String.raw`(?::\d+)?(?=$|[\s/?#;&|<>()\`'"\\])`,
+  'i',
+);
+/** Options whose NEXT word is a value (file, header, body, …), never the target. */
+const CURL_SHORT_VALUE = new Set('AbcCdDeEFHKmoPQrtTuUwxXyYz'.split(''));
+const WGET_SHORT_VALUE = new Set('aABDeiIloOPQRtTUwX'.split(''));
+const LONG_VALUE = new Set([
+  // curl
+  'data', 'data-ascii', 'data-binary', 'data-raw', 'data-urlencode', 'json', 'output', 'output-dir',
+  'header', 'proxy-header', 'user', 'user-agent', 'referer', 'request', 'upload-file', 'form',
+  'form-string', 'cookie', 'cookie-jar', 'config', 'proxy', 'proxy-user', 'max-time', 'connect-timeout',
+  'retry', 'write-out', 'cacert', 'capath', 'cert', 'key', 'resolve', 'connect-to', 'range', 'dump-header',
+  'interface', 'oauth2-bearer', 'trace', 'trace-ascii', 'stderr', 'variable',
+  // wget
+  'post-file', 'post-data', 'body-file', 'body-data', 'method', 'output-document', 'output-file',
+  'append-output', 'password', 'http-user', 'http-password', 'directory-prefix', 'tries', 'timeout',
+  'input-file', 'execute', 'load-cookies', 'save-cookies', 'ca-certificate', 'certificate',
+  'private-key', 'bind-address', 'wait', 'quota', 'level', 'accept', 'reject', 'domains', 'base',
+]);
+
+interface ShellWord {
+  word: string;
+  /** The word follows `<` / `>` — a redirection file, never a target. */
+  redirect: boolean;
+}
+
+/**
+ * Split the text after a curl/wget command word into shell words. Quotes are
+ * removed as the shell would; an unquoted `;`, `&`, `|` or newline ends the
+ * statement; unquoted `<>()` and backticks separate words.
+ */
+function statementWords(content: string, start: number): ShellWord[] {
+  const words: ShellWord[] = [];
+  let cur = '';
+  let inWord = false;
+  let quote: string | null = null;
+  let redirectNext = false;
+  let curRedirect = false;
+  const begin = () => {
+    if (inWord) return;
+    inWord = true;
+    curRedirect = redirectNext;
+    redirectNext = false;
+  };
+  const flush = () => {
+    if (inWord) words.push({ word: cur, redirect: curRedirect });
+    cur = '';
+    inWord = false;
+  };
+  for (let i = start; i < content.length; i++) {
+    const c = content[i];
+    if (quote) {
+      if (c === quote) quote = null;
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      begin();
+      quote = c;
+      continue;
+    }
+    if (c === ';' || c === '&' || c === '|' || c === '\n') break;
+    if (/\s/.test(c) || c === '(' || c === ')' || c === '`' || c === '<' || c === '>') {
+      flush();
+      if (c === '<' || c === '>') redirectNext = true;
+      continue;
+    }
+    begin();
+    cur += c;
+  }
+  flush();
+  return words;
+}
+
+/** Scheme-less target hosts named in curl/wget invocations; option values are skipped. */
+function curlWgetTargets(content: string): string[] {
+  const hosts: string[] = [];
+  const push = (word: string) => {
+    const t = word.match(CURL_WGET_TARGET);
+    if (t?.[1]) hosts.push(t[1]);
+  };
+  for (const m of content.matchAll(CURL_WGET_CMD)) {
+    const shortValue = m[1].toLowerCase() === 'curl' ? CURL_SHORT_VALUE : WGET_SHORT_VALUE;
+    const words = statementWords(content, (m.index ?? 0) + m[0].length);
+    for (let i = 0; i < words.length; i++) {
+      const { word, redirect } = words[i];
+      if (redirect) continue;
+      if (word.startsWith('--')) {
+        const eq = word.indexOf('=');
+        const name = (eq === -1 ? word.slice(2) : word.slice(2, eq)).toLowerCase();
+        // `--url X` names the destination explicitly: its value IS a target.
+        if (name === 'url') {
+          if (eq !== -1) push(word.slice(eq + 1));
+          else if (i + 1 < words.length) push(words[++i].word);
+        } else if (eq === -1 && LONG_VALUE.has(name)) {
+          i++;
+        }
+        continue;
+      }
+      if (word.length > 1 && word.startsWith('-')) {
+        // Short cluster (`-sT`): a value-taking letter takes the rest of the
+        // word, or the next word when it is the last letter.
+        for (let j = 1; j < word.length; j++) {
+          if (shortValue.has(word[j])) {
+            if (j === word.length - 1) i++;
+            break;
+          }
+        }
+        continue;
+      }
+      push(word);
+    }
+  }
+  return hosts;
+}
+
+/** Collect non-local bare-host destinations from scp/rsync/nc/ssh/curl/wget invocations. */
 function externalBareHosts(content: string): string[] {
   const hosts: string[] = [];
   for (const re of [SCP_TARGET, NC_TARGET, SSH_TARGET]) {
@@ -85,6 +210,7 @@ function externalBareHosts(content: string): string[] {
       if (m[1]) hosts.push(m[1]);
     }
   }
+  hosts.push(...curlWgetTargets(content));
   return hosts.filter((h) => !isLocalHost(h));
 }
 
