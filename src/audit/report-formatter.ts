@@ -242,6 +242,26 @@ export function formatTerminalReport(report: AuditReport): string {
 // ── Markdown Formatter (for CI/GitHub) ──
 
 /**
+ * Wrap attacker-influenced text in a Markdown code span that cannot be broken
+ * from inside (#547). A backtick in a file name closed the single-backtick
+ * span the report used, and everything after it rendered as Markdown.
+ *
+ * CommonMark: a code span is delimited by a backtick run of any length, and
+ * closes only at a run of exactly that length, so the delimiter here is one
+ * longer than the longest run in the text. Content that begins or ends with a
+ * backtick is padded with one space on each side; the renderer strips one
+ * space from each end when both are present, so the padding is invisible and
+ * the backtick stays inside the span.
+ */
+export function markdownCodeSpan(text: string): string {
+  let longest = 0;
+  for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  const fence = '`'.repeat(longest + 1);
+  const body = text.startsWith('`') || text.endsWith('`') ? ` ${text} ` : text;
+  return `${fence}${body}${fence}`;
+}
+
+/**
  * Format an audit report as markdown (for GitHub PR comments).
  */
 export function formatMarkdownReport(report: AuditReport): string {
@@ -281,7 +301,7 @@ export function formatMarkdownReport(report: AuditReport): string {
                    finding.severity === 'medium' ? '🟡' : '🔵';
       lines.push(`- ${icon} **${safe(finding.title)}**`);
       lines.push(`  ${safe(finding.description)}`);
-      if (finding.filePath) lines.push(`  📄 \`${safe(finding.filePath)}\``);
+      if (finding.filePath) lines.push(`  📄 ${markdownCodeSpan(safe(finding.filePath))}`);
       lines.push('');
     }
   }

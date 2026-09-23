@@ -104,8 +104,18 @@ export interface StealthVerdictInput {
 
 // Balanced mode names the skill threats; strict mode lists every indicator. In
 // both, stealth_instruction has to be the whole list, not a member of it.
+//
+// Anchored at both ends to the two exact shapes the firewall produces
+// (`determineResult` in defence/firewall/index.ts), with the pipeline's
+// optional `Quarantined: ` / `Blocked: ` prefix. The first version anchored
+// only the strict-mode alternative, so any text after `stealth_instruction (`
+// still matched and `blockedPatterns` was the only real gate (#547). Now a
+// reason carrying anything more — a second threat, a low-trust suffix, an LLM
+// verification note — is not "stealth only", whatever the pattern list says.
+// If the firewall wording ever changes, this stops matching and the owner's
+// memory files are flagged again: a false positive, never a bypass.
 const STEALTH_ONLY_REASON =
-  /Skill-level threat detected: stealth_instruction \(|Strict mode: detected stealth_instruction$/;
+  /^(?:(?:Quarantined|Blocked): )?(?:Skill-level threat detected: stealth_instruction \(confidence: [0-9]+(?:\.[0-9]+)?\)|Strict mode: detected stealth_instruction)$/;
 
 /**
  * True when the ONLY thing wrong with an owner memory file is that its

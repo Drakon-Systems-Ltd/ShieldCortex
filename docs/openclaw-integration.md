@@ -178,6 +178,12 @@ Tuning bounds:
 
 All memory writes routed through ShieldCortex are scanned by the defence pipeline and recorded in audit logs. Threat detections from the real-time plugin can also sync to cloud when configured.
 
+### Recalled memory is framed as data — guidance, not enforcement
+
+Every surface that hands stored memory back to a model (the MCP tool results and resources, proactive recall on a `message` event, the Claude Code hooks, the LangChain adapter) wraps it in the same untrusted-data frame: an opening line, a notice that imperative text inside is data and not an instruction, and a closing line carrying a per-emission random id that stored text cannot predict (#507).
+
+Be clear about what that is. The frame tells the model who is speaking; it does not stop the model reading the text, and it does not make a hostile memory safe. It is advice to the model, and a model can ignore advice. The controls that actually withhold or block content are the write-time defence pipeline (a memory that scans as an injection is quarantined, never recalled) and the recall filter that drops a poisoned row before it is emitted. Treat the frame as the last line, not the first.
+
 ### PII redaction on the hook write path
 
 Hook-captured memories go through the same write-time PII redactor as every other write: UK NI numbers, US SSNs, labelled tax ids and salary figures are stored as `[REDACTED:<kind>]`.

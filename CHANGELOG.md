@@ -8,10 +8,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- (none yet)
+- **#547 recall framing, end to end:** the built MCP server is spawned over stdio and its `recall` / `get_memory` text asserted framed; the bundled OpenClaw hook (both shipped copies) is transpiled as the gateway loads it and driven on a `message` event, consuming the real server output through a stubbed `npx mcporter` on PATH, so "server frame + hook frame never nest" is tested on real data. Removing the frame from either emitter fails the suite. `docs/openclaw-integration.md` now says plainly that the frame is guidance to the model, not enforcement.
+- **#547 audit fixtures the #530 review could not ship:** the INJECTION and PRIVILEGE end-to-end fixtures are generated at test time from fragments, pinning rule-id attribution, non-empty `matchedText`, line and excerpt for those two finding types (previously pinned for the block/quarantine finding only).
 
 ### Fixed
-- (none yet)
+- **#547 audit:** `STEALTH_ONLY_REASON` (the owner-memory frontmatter downgrade) is anchored at both ends to the two exact firewall shapes; before, any text after `stealth_instruction (` still matched and `blockedPatterns` was the only real gate. A reason carrying a second threat, a low-trust suffix or a verification note is no longer "stealth only".
+- **#547 audit:** a backtick in a file name no longer breaks the Markdown report's code span; the span's delimiter is one longer than any run in the name and edge backticks are padded (`markdownCodeSpan`).
 
 ## [5.1.0] - 2026-09-22
 
