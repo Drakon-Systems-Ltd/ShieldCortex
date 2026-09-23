@@ -28,6 +28,20 @@
  * Everything is isolated: a temporary HOME, a temporary database, every
  * inherited SHIELDCORTEX_* variable dropped, embeddings and the brain worker
  * off. Neither the host's `shieldcortex` nor `openclaw` binary is reachable.
+ *
+ * The trust ceiling is the test's, not the host's. The server infers its
+ * caller from the environment (`inferSourceFromEnvironment`): a Claude Code
+ * session exports CLAUDE_CODE_ENTRYPOINT and lands on the `cli:mcp` 0.9
+ * ceiling, a bare CI runner exports nothing and lands on `agent:unknown`, and
+ * at that ceiling the seeded INTERNAL row is (correctly) withheld — so a
+ * suite that let the host's variables through passed on a developer's box and
+ * failed on CI for a reason that had nothing to do with framing. Every
+ * detector variable is dropped and the ceiling pinned to the direct-CLI rung,
+ * the shape a client launched from an operator's terminal has; the last case
+ * below shows the default ceiling withholding the row, so the pin is visible.
+ * No `source` is declared on the calls: the OpenClaw hook declares none
+ * either, and a same-score declaration under `cli:mcp` is dropped as an
+ * identity spoof anyway.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
@@ -74,18 +88,56 @@ function expectSingleFrame(text: string, bodyMustContain: string[]): Frame {
   return frame;
 }
 
-function isolatedEnv(home: string): Record<string, string> {
+/** Every variable `inferSourceFromEnvironment` reads; none may leak from the host. */
+const DETECTOR_VARS = new Set([
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_AGENT_CONTEXT',
+  'CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
+  'CODEX_THREAD_ID',
+  'CODEX_CI',
+]);
+
+/**
+ * `ceiling: 'cli'` pins the direct-CLI rung (`cli:mcp`, 0.9); `'default'`
+ * leaves no detector variable at all, the `agent:unknown` rung.
+ */
+function isolatedEnv(home: string, ceiling: 'cli' | 'default' = 'cli'): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined) continue;
-    if (key.startsWith('SHIELDCORTEX_') || key === 'CLAUDE_MEMORY_DB') continue;
+    if (key.startsWith('SHIELDCORTEX_') || key === 'CLAUDE_MEMORY_DB' || DETECTOR_VARS.has(key)) continue;
     env[key] = value;
   }
   env.HOME = home;
   env.USERPROFILE = home;
   env.SHIELDCORTEX_SKIP_EMBEDDINGS = '1';
   env.SHIELDCORTEX_DISABLE_WORKER = '1';
+  if (ceiling === 'cli') env.CLAUDE_CODE_ENTRYPOINT = 'cli';
   return env;
+}
+
+/** The single text block of a tool result. */
+function textOf(result: unknown): string {
+  const content = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
+  const texts = content.filter((c) => c.type === 'text').map((c) => c.text ?? '');
+  expect(texts).toHaveLength(1);
+  return texts[0];
+}
+
+/** Spawn the built server over stdio against the seeded database. */
+async function connectServer(env: Record<string, string>, name: string): Promise<Client> {
+  // The built server is the artefact under test. run-jest builds it before
+  // any worker starts; a bare jest run without a build fails here honestly.
+  expect(existsSync(DIST_SERVER)).toBe(true);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [DIST_SERVER, '--db', dbPath],
+    env,
+    stderr: 'pipe',
+  });
+  const client = new Client({ name, version: '0.0.0' });
+  await client.connect(transport);
+  return client;
 }
 
 let home: string;
@@ -114,34 +166,17 @@ describe('#547 e2e: the MCP server, spawned over stdio, returns framed recall', 
   let client: Client | undefined;
 
   beforeAll(async () => {
-    // The built server is the artefact under test. run-jest builds it before
-    // any worker starts; a bare jest run without a build fails here honestly.
-    expect(existsSync(DIST_SERVER)).toBe(true);
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [DIST_SERVER, '--db', dbPath],
-      env: isolatedEnv(home),
-      stderr: 'pipe',
-    });
-    client = new Client({ name: 'shieldcortex-547-e2e', version: '0.0.0' });
-    await client.connect(transport);
+    client = await connectServer(isolatedEnv(home), 'shieldcortex-547-e2e');
   }, 120_000);
 
   afterAll(async () => {
     await client?.close();
   });
 
-  function textOf(result: unknown): string {
-    const content = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
-    const texts = content.filter((c) => c.type === 'text').map((c) => c.text ?? '');
-    expect(texts).toHaveLength(1);
-    return texts[0];
-  }
-
   it('recall: the tool result is one frame with the memory inside', async () => {
     const result = await client!.callTool({
       name: 'recall',
-      arguments: { mode: 'recent', project: '*', limit: 5, source: { type: 'cli', identifier: 'e2e-547' } },
+      arguments: { mode: 'recent', project: '*', limit: 5 },
     });
     const text = textOf(result);
     expectSingleFrame(text, ['Found 1 memory:', MEMORY_TITLE, MEMORY_CONTENT]);
@@ -151,7 +186,7 @@ describe('#547 e2e: the MCP server, spawned over stdio, returns framed recall', 
   it('get_memory: a single memory is framed the same way', async () => {
     const result = await client!.callTool({
       name: 'get_memory',
-      arguments: { id: 1, source: { type: 'cli', identifier: 'e2e-547' } },
+      arguments: { id: 1 },
     });
     expectSingleFrame(textOf(result), [MEMORY_TITLE, MEMORY_CONTENT]);
   }, 60_000);
@@ -159,7 +194,7 @@ describe('#547 e2e: the MCP server, spawned over stdio, returns framed recall', 
   it('two emissions carry different ids: the closing line is not predictable from stored text', async () => {
     const again = textOf(await client!.callTool({
       name: 'recall',
-      arguments: { mode: 'recent', project: '*', limit: 5, source: { type: 'cli', identifier: 'e2e-547' } },
+      arguments: { mode: 'recent', project: '*', limit: 5 },
     }));
     expect(frameOf(again).id).not.toBe(frameOf(serverRecallText as string).id);
   }, 60_000);
@@ -272,5 +307,23 @@ describe('#547 e2e: the OpenClaw hook pushes the real server output, framed once
     const { messages, argvLog } = runHook('control-off', HOOK_COPIES[0][1], false);
     expect(messages).toEqual([]);
     expect(existsSync(argvLog)).toBe(false);
+  }, 60_000);
+});
+
+describe('#547 e2e: the ceiling is the test\'s, not the host\'s', () => {
+  it('with no detector variable the server sits at agent:unknown and withholds the INTERNAL row', async () => {
+    const client = await connectServer(isolatedEnv(home, 'default'), 'shieldcortex-547-e2e-control');
+    try {
+      const text = textOf(await client.callTool({
+        name: 'recall',
+        arguments: { mode: 'recent', project: '*', limit: 5 },
+      }));
+      // Still framed — the frame does not depend on there being a body — but
+      // the row the pinned ceiling reads is not there for an unknown agent.
+      expectSingleFrame(text, ['No memories found matching your query.']);
+      expect(text).not.toContain(MEMORY_CONTENT);
+    } finally {
+      await client.close();
+    }
   }, 60_000);
 });
