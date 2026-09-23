@@ -82,13 +82,29 @@ const SSH_TARGET = new RegExp(`\\bssh\\b[^\\n|]*?\\s(?:[\\w.-]+@)${BARE_HOST}\\b
  * host ends at the same shell metacharacters as the guard's RE_URL_TOKEN, so a
  * chained command after `;` or `|` can never become part of the "host".
  */
-const CURL_WGET_CMD = /(?:^|[\s;&|()`'"/])(curl|wget)(?=\s)/gi;
 const CURL_WGET_TARGET = new RegExp(
   String.raw`^(?:\/\/)?(?:[^\s;&|<>()\`'"\\@/]+@)?` +
     BARE_HOST +
     String.raw`\.?(?::\d+)?(?=$|[\s/?#;&|<>()\`'"\\])`,
   'i',
 );
+/**
+ * Command-position recognition (#567 r2). `curl`/`wget` count only as the
+ * command word of a statement — the first word, after `NAME=value` prefixes,
+ * after a wrapper (`sudo`, `env -i`, `timeout 30`, …) or as the body of
+ * `sh -c '…'` / `eval '…'` — never as a word in prose. `/usr/bin/curl` counts.
+ */
+const COMMAND_NAME = /(?:^|\/)([a-z0-9_.-]+)$/i;
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const WRAPPERS = new Set([
+  'sudo', 'doas', 'env', 'exec', 'command', 'builtin', 'nohup', 'nice', 'ionice', 'time', 'timeout',
+  'xargs', 'stdbuf', 'unbuffer', 'chronic', 'setsid', 'strace', 'ltrace', 'busybox',
+]);
+/** Wrapper options whose next word is a value, so it is not the command. */
+const WRAPPER_VALUE_OPTS = new Set(['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U', '-T', '-n', '-c', '-k', '-s', '-o', '-e']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash']);
+const MAX_SHELL_DEPTH = 3;
+
 /**
  * Options whose NEXT word is a value (file, header, body, …), never the target.
  * The long sets are every value-taking option printed by `curl --help all`
@@ -139,23 +155,23 @@ const WGET_LONG_VALUE = new Set([
 
 interface ShellWord {
   word: string;
-  /** The word follows `<` / `>` — a redirection file, never a target. */
+  /** The word follows `<` / `>` (or `>|`, `>&`, `&>`) — a redirection operand, never a target. */
   redirect: boolean;
 }
 
 /**
- * Split the text after a curl/wget command word into shell words, the way the
- * shell would:
- * - quotes are removed; inside double quotes `\` escapes only `"\$` `` ` `` and
- *   a newline, elsewhere it escapes the next character or joins a continued line;
- * - an unquoted `;`, `|`, `&&`, `&` or newline ends the statement, and an
- *   unquoted `#` word opens a comment that runs to the end of the line;
- * - `<`, `>`, `2>&1`, `>&2` and `&>` are redirections: the word they take is a
- *   file descriptor or path, never a target;
- * - unquoted `()` and backticks separate words.
+ * Tokenise shell text ONCE into statements of words, the way the shell would
+ * (linear in the input, #567 r2):
+ * - quotes are removed; inside double quotes `\` escapes only `"\$`, backtick
+ *   and newline, elsewhere it escapes the next character or joins a continued line;
+ * - an unquoted `;`, `|`, `&`, `&&`, `||`, newline, `(`, `)` or backtick ends
+ *   a statement; an unquoted `#` word opens a comment to the end of the line;
+ * - `<`, `>`, `>>`, `>|`, `2>&1`, `>&2` and `&>` are redirections: the operand
+ *   they take is a descriptor or path, never a command or a target.
  */
-function statementWords(content: string, start: number): ShellWord[] {
-  const words: ShellWord[] = [];
+function shellStatements(content: string): ShellWord[][] {
+  const statements: ShellWord[][] = [];
+  let words: ShellWord[] = [];
   let cur = '';
   let inWord = false;
   let quote: string | null = null;
@@ -172,7 +188,13 @@ function statementWords(content: string, start: number): ShellWord[] {
     cur = '';
     inWord = false;
   };
-  for (let i = start; i < content.length; i++) {
+  const endStatement = () => {
+    flush();
+    redirectNext = false;
+    if (words.length > 0) statements.push(words);
+    words = [];
+  };
+  for (let i = 0; i < content.length; i++) {
     const c = content[i];
     if (quote) {
       if (c === quote) quote = null;
@@ -201,41 +223,59 @@ function statementWords(content: string, start: number): ShellWord[] {
       cur += content[++i];
       continue;
     }
-    if (c === ';' || c === '|' || c === '\n') break;
-    if (c === '#' && !inWord) break;
-    if (c === '&') {
-      if (content[i + 1] === '>') {
-        flush(); // `&>file`: the `>` that follows marks the redirection
-        continue;
-      }
-      if (redirectNext && !inWord) continue; // `2>&1` / `>&2`: descriptor dup
-      break; // `&` / `&&`: statement end
+    if (c === '#' && !inWord) {
+      const nl = content.indexOf('\n', i);
+      if (nl === -1) break;
+      i = nl - 1; // the newline ends the statement below
+      continue;
     }
-    if (/\s/.test(c) || c === '(' || c === ')' || c === '`' || c === '<' || c === '>') {
+    if (redirectNext && !inWord && (c === '&' || c === '|')) continue; // `>&1`, `>|file`
+    if (c === '&' && content[i + 1] === '>') {
+      flush(); // `&>file`: the `>` that follows marks the redirection
+      continue;
+    }
+    if (c === ';' || c === '|' || c === '&' || c === '\n' || c === '(' || c === ')' || c === '`') {
+      endStatement();
+      continue;
+    }
+    if (c === '<' || c === '>') {
+      // `2>&1`: digits glued to the operator are its descriptor, not a word.
+      if (inWord && /^\d+$/.test(cur)) {
+        cur = '';
+        inWord = false;
+      } else flush();
+      redirectNext = true;
+      continue;
+    }
+    if (/\s/.test(c)) {
       flush();
-      if (c === '<' || c === '>') redirectNext = true;
       continue;
     }
     begin();
     cur += c;
   }
-  flush();
-  return words;
+  endStatement();
+  return statements;
 }
 
-/** Scheme-less target hosts named in curl/wget invocations; option values are skipped. */
+/** Scheme-less target hosts named by curl/wget in command position; option values are skipped. */
 function curlWgetTargets(content: string): string[] {
   const hosts: string[] = [];
   const push = (word: string) => {
     const t = word.match(CURL_WGET_TARGET);
     if (t?.[1]) hosts.push(t[1]);
   };
-  for (const m of content.matchAll(CURL_WGET_CMD)) {
-    const isCurl = m[1].toLowerCase() === 'curl';
+  const argv = (words: ShellWord[], from: number, isCurl: boolean) => {
     const shortValue = isCurl ? CURL_SHORT_VALUE : WGET_SHORT_VALUE;
     const longValue = isCurl ? CURL_LONG_VALUE : WGET_LONG_VALUE;
-    const words = statementWords(content, (m.index ?? 0) + m[0].length);
-    for (let i = 0; i < words.length; i++) {
+    // The shell strips redirections before the tool parses argv, so an
+    // option's value is the next NON-redirect word.
+    const next = (i: number) => {
+      let j = i + 1;
+      while (j < words.length && words[j].redirect) j++;
+      return j;
+    };
+    for (let i = from; i < words.length; i++) {
       const { word, redirect } = words[i];
       if (redirect) continue;
       if (word.startsWith('--')) {
@@ -244,9 +284,9 @@ function curlWgetTargets(content: string): string[] {
         // `--url X` names the destination explicitly: its value IS a target.
         if (name === 'url') {
           if (eq !== -1) push(word.slice(eq + 1));
-          else if (i + 1 < words.length) push(words[++i].word);
+          else if (next(i) < words.length) push(words[(i = next(i))].word);
         } else if (eq === -1 && longValue.has(name)) {
-          i++;
+          i = next(i);
         }
         continue;
       }
@@ -255,7 +295,7 @@ function curlWgetTargets(content: string): string[] {
         // word, or the next word when it is the last letter.
         for (let j = 1; j < word.length; j++) {
           if (shortValue.has(word[j])) {
-            if (j === word.length - 1) i++;
+            if (j === word.length - 1) i = next(i);
             break;
           }
         }
@@ -263,7 +303,57 @@ function curlWgetTargets(content: string): string[] {
       }
       push(word);
     }
-  }
+  };
+  const scan = (text: string, depth: number) => {
+    for (const words of shellStatements(text)) {
+      let i = 0;
+      const skipRedirects = () => {
+        while (i < words.length && words[i].redirect) i++;
+      };
+      // Assignment prefixes and wrappers precede the command word.
+      for (;;) {
+        skipRedirects();
+        while (i < words.length && (words[i].redirect || ASSIGNMENT.test(words[i].word))) i++;
+        skipRedirects();
+        if (i >= words.length) break;
+        const name = words[i].word.match(COMMAND_NAME)?.[1]?.toLowerCase();
+        if (!name || !WRAPPERS.has(name)) break;
+        const wrapper = name;
+        i++;
+        for (; i < words.length; i++) {
+          const w = words[i];
+          if (w.redirect || ASSIGNMENT.test(w.word)) continue;
+          if (w.word.startsWith('-') && w.word.length > 1) {
+            if ((wrapper === 'sudo' || wrapper === 'doas') && WRAPPER_VALUE_OPTS.has(w.word)) i++;
+            continue;
+          }
+          if ((wrapper === 'timeout' || wrapper === 'nice' || wrapper === 'ionice') && /^\d+(?:\.\d+)?[smhd]?$/.test(w.word)) continue;
+          break;
+        }
+      }
+      if (i >= words.length) continue;
+      const name = words[i].word.match(COMMAND_NAME)?.[1]?.toLowerCase();
+      if (name === 'curl' || name === 'wget') {
+        argv(words, i + 1, name === 'curl');
+      } else if (depth < MAX_SHELL_DEPTH && name === 'eval') {
+        scan(words.slice(i + 1).filter((w) => !w.redirect).map((w) => w.word).join(' '), depth + 1);
+      } else if (depth < MAX_SHELL_DEPTH && name && SHELLS.has(name)) {
+        // `sh -c '…'` / `bash -lc "…"`: the word after the option cluster containing `c` is a script.
+        for (let j = i + 1; j < words.length; j++) {
+          const w = words[j];
+          if (w.redirect) continue;
+          if (w.word.startsWith('-') && !w.word.startsWith('--') && w.word.includes('c')) {
+            let k = j + 1;
+            while (k < words.length && words[k].redirect) k++;
+            if (k < words.length) scan(words[k].word, depth + 1);
+            break;
+          }
+          if (!w.word.startsWith('-')) break;
+        }
+      }
+    }
+  };
+  scan(content, 0);
   return hosts;
 }
 
