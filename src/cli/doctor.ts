@@ -38,6 +38,11 @@ import {
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
+import {
+  resolveHermesHome,
+  scanHermesPluginCopies,
+  type HermesPluginScan,
+} from '../setup/hermes-plugins.js';
 import { isNativeModuleLoadError, NativeModuleLoadError } from '../database/native-load-classify.js';
 // The typed lazy loader — the SAME one every real database open goes through
 // (database/init.ts). Importing it adds no static edge doctor did not already
@@ -2718,6 +2723,244 @@ export async function checkOpenClawDuplicateInstalls(
       fallbackFix: `Remove manually: ${rmCmd}, then restart OpenClaw. The canonical npm install at ~/.openclaw/npm/ is the supported location.`,
     },
   };
+}
+
+// ── Check: Hermes plugin copies (#569) ──────────────────
+/**
+ * A second copy of our Hermes plugin left beside the live one silently wins.
+ *
+ * Hermes keys plugins on the manifest `name:`, walks `plugins/` in sorted
+ * order, and on a same-source key collision the LATER manifest replaces the
+ * earlier one with no warning (NousResearch/hermes-agent#121078). Our
+ * installer writes `~/.hermes/plugins/shieldcortex/`; the natural operator
+ * move before an upgrade is to copy it aside as
+ * `plugins/shieldcortex.bak-pre510-<ts>/`. That name sorts AFTER
+ * `shieldcortex`, so from the next gateway start Hermes loads the backup: the
+ * upgrade lands on disk, doctor reads the new bytes, and the gate keeps
+ * running the old code. The same mechanism has already been seen in the field
+ * on the Ekho plugin.
+ *
+ * WARN rather than FAIL: nothing here is broken — the gate is up and enforcing
+ * — but it is not running the code the operator installed, and only a human
+ * knows which copy they meant to keep. `--fix-hermes-plugin-copies` moves the
+ * extras aside; see `fixHermesPluginShadowing`.
+ *
+ * The scan rules live in `setup/hermes-plugins.ts`, shared with the installer
+ * so `hermes install` warns about the same state this row reports.
+ */
+export const HERMES_PLUGIN_COPIES_LABEL = 'Hermes plugin copies';
+
+export async function checkHermesPluginShadowing(
+  home: string = os.homedir(),
+): Promise<CheckResult> {
+  const label = HERMES_PLUGIN_COPIES_LABEL;
+  const hermesHome = resolveHermesHome(home);
+
+  let scan: HermesPluginScan;
+  try {
+    scan = scanHermesPluginCopies(hermesHome);
+  } catch (err: unknown) {
+    // The scan already swallows unreadable dirs and bad manifests per entry;
+    // this is the belt-and-braces path. A crashed row would say less than an
+    // honest "could not look".
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      label,
+      status: 'info',
+      message: `skipped (${tildify(hermesHome)} could not be scanned — ${msg})`,
+    };
+  }
+
+  if (!scan.present) {
+    return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  }
+
+  if (!scan.shadowed) {
+    if (scan.copies.length === 0) {
+      return {
+        label,
+        status: 'pass',
+        message: `clean (no \`shieldcortex\` plugin copy under ${tildify(hermesHome)} — nothing can shadow)`,
+      };
+    }
+    const where = scan.copies.map((c) => tildify(c.dir)).join(', ');
+    return {
+      label,
+      status: 'pass',
+      message:
+        `clean (one canonical \`shieldcortex\` copy per plugin root: ${where})`,
+    };
+  }
+
+  // One clause per affected root: every copy by full path, then the winner.
+  const clauses: string[] = [];
+  let orphanedRoots = 0;
+  let repairableRoots = 0;
+  for (const rootScan of scan.roots) {
+    if (!rootScan.shadowed || rootScan.loaded === null) continue;
+    const all = rootScan.copies.map((c) => tildify(c.dir)).join(', ');
+    const loaded = tildify(rootScan.loaded.dir);
+    if (!rootScan.hasCanonical) {
+      orphanedRoots += 1;
+      clauses.push(
+        `${tildify(rootScan.root)}: ${all} — Hermes loads ${loaded}, and there is no ` +
+        `canonical ${tildify(path.join(rootScan.root, 'shieldcortex'))} beside it`,
+      );
+    } else {
+      repairableRoots += 1;
+      clauses.push(
+        `${tildify(rootScan.root)}: ${rootScan.copies.length} copies (${all}) — ` +
+        `Hermes loads ${loaded} (last in sorted order wins), shadowing ` +
+        `${tildify(path.join(rootScan.root, 'shieldcortex'))}`,
+      );
+    }
+  }
+
+  // The remedy differs per root, so say which roots the command will act on
+  // rather than offering it or withholding it wholesale.
+  const restart =
+    'Restart the Hermes gateway afterwards — plugin discovery only re-runs at start-up.';
+  const runIt =
+    'Run `shieldcortex doctor --fix-hermes-plugin-copies` to move every non-canonical copy ' +
+    `into ${tildify(path.join(hermesHome, 'backups'))}, or move the extra directories out of ` +
+    '`plugins/` yourself.';
+  const humanCall =
+    'Where there is no canonical `plugins/shieldcortex` the fix deliberately moves nothing — ' +
+    'a human has to choose which copy is authoritative, then either reinstall with ' +
+    '`shieldcortex hermes install` or rename the copy they are keeping.';
+  const fix =
+    orphanedRoots === 0 ? `${runIt} ${restart}`
+    : repairableRoots === 0 ? `${humanCall} ${restart}`
+    : `${runIt} ${humanCall} ${restart}`;
+
+  return {
+    label,
+    status: 'warn',
+    message:
+      `Hermes is not loading the installed plugin — ${clauses.join('; ')}. ` +
+      'Hermes keys plugins on the manifest `name:`, so a copy beside the live one wins ' +
+      'silently and an upgrade runs the old code.',
+    fix,
+  };
+}
+
+/** One copy taken out of Hermes' search path, and where it went. */
+export interface HermesShadowMove {
+  from: string;
+  to: string;
+}
+
+export interface HermesShadowFixResult {
+  moved: HermesShadowMove[];
+  /** Copies deliberately left in place, each with the reason why. */
+  refused: Array<{ dir: string; reason: string }>;
+  changed: boolean;
+  message: string;
+}
+
+/**
+ * Second half of a cross-device move: the tree already exists at the
+ * destination, so the source copy is discarded. Named for what it does in the
+ * move, not for the call it makes.
+ */
+function discardRelocatedSource(source: string): void {
+  fs.rmSync(source, { recursive: true, force: true });
+}
+
+function relocateDirectory(from: string, to: string): void {
+  try {
+    fs.renameSync(from, to);
+    return;
+  } catch (err: unknown) {
+    // EXDEV is the one failure a retry can fix: `plugins/` and `backups/` are
+    // on different filesystems, which a bind mount or a separate volume for
+    // the agent home makes ordinary. Anything else is the caller's to report.
+    if ((err as NodeJS.ErrnoException)?.code !== 'EXDEV') throw err;
+  }
+  fs.cpSync(from, to, { recursive: true, errorOnExist: true, force: false });
+  discardRelocatedSource(from);
+}
+
+/**
+ * `doctor --fix-hermes-plugin-copies` (#569): move every non-canonical copy
+ * out of its `plugins/` root and into `<hermesHome>/backups/`, so the next
+ * gateway start discovers exactly one `shieldcortex` — the installed one.
+ *
+ * Three deliberate refusals:
+ *   - A root with NO canonical `plugins/shieldcortex` is left entirely alone.
+ *     Moving the only copy there would take the plugin off that root; which
+ *     directory is authoritative is a human's call.
+ *   - An existing destination is never overwritten. The backups directory is
+ *     the operator's, and a same-named entry there is someone's data.
+ *   - Copies are MOVED, never deleted. The bad state is "two copies Hermes can
+ *     see", and taking one out of the search path is the whole repair — the
+ *     bytes stay on disk for whoever wants to look at them.
+ *
+ * `now` is a test seam so a destination collision can be staged; production
+ * always passes the current time.
+ */
+export function fixHermesPluginShadowing(
+  home: string = os.homedir(),
+  now: Date = new Date(),
+): HermesShadowFixResult {
+  const hermesHome = resolveHermesHome(home);
+  const scan = scanHermesPluginCopies(hermesHome);
+  const moved: HermesShadowMove[] = [];
+  const refused: Array<{ dir: string; reason: string }> = [];
+
+  if (!scan.present) {
+    return { moved, refused, changed: false, message: 'Hermes not detected — nothing to move' };
+  }
+
+  const backupsRoot = path.join(hermesHome, 'backups');
+  // UTC, and `:`/`.` swapped out so the name is a legal directory on every
+  // platform the CLI runs on.
+  const stamp = now.toISOString().replace(/[:.]/g, '-');
+
+  for (const rootScan of scan.roots) {
+    const extras = rootScan.copies.filter((c) => !c.canonical);
+    if (extras.length === 0) continue;
+    if (!rootScan.hasCanonical) {
+      for (const copy of extras) {
+        refused.push({
+          dir: copy.dir,
+          reason:
+            `no canonical ${tildify(path.join(rootScan.root, 'shieldcortex'))} to keep — ` +
+            'a human must choose which copy is authoritative',
+        });
+      }
+      continue;
+    }
+    for (const copy of extras) {
+      const dest = path.join(backupsRoot, `shieldcortex-shadow-${copy.dirName}-${stamp}`);
+      if (fs.existsSync(dest)) {
+        refused.push({ dir: copy.dir, reason: `${tildify(dest)} already exists — left in place` });
+        continue;
+      }
+      try {
+        fs.mkdirSync(backupsRoot, { recursive: true });
+        relocateDirectory(copy.dir, dest);
+        moved.push({ from: copy.dir, to: dest });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        refused.push({ dir: copy.dir, reason: `could not be moved — ${msg}` });
+      }
+    }
+  }
+
+  const parts: string[] = [];
+  if (moved.length > 0) {
+    parts.push(
+      `moved ${moved.length} shadowing cop${moved.length === 1 ? 'y' : 'ies'} into ` +
+      `${tildify(backupsRoot)} — restart the Hermes gateway`,
+    );
+  }
+  for (const item of refused) {
+    parts.push(`${tildify(item.dir)}: ${item.reason}`);
+  }
+  if (parts.length === 0) parts.push('nothing to move (no shadowing copies)');
+
+  return { moved, refused, changed: moved.length > 0, message: parts.join('; ') };
 }
 
 // ── Check: Defence canary (#48) ──────────────────────
@@ -7126,6 +7369,7 @@ export async function runDoctor(
     checkPluginStartupIntent,
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
+    checkHermesPluginShadowing,
     checkOpenClawManagedPinDrift,
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
@@ -7200,6 +7444,33 @@ export async function runDoctor(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.log(`  ${dim}--fix-action-guard failed: ${msg}${reset}\n`);
+    }
+  }
+
+  // --fix-hermes-plugin-copies (#569): move every non-canonical `shieldcortex`
+  // copy out of its Hermes `plugins/` root, then re-run the check so the
+  // printed report reflects the post-fix state rather than the state that was
+  // true before the move.
+  if (args.includes('--fix-hermes-plugin-copies')) {
+    try {
+      const fix = fixHermesPluginShadowing();
+      console.log(`  ${dim}--fix-hermes-plugin-copies: ${fix.message}${reset}`);
+      for (const move of fix.moved) {
+        console.log(`  ${dim}  moved ${tildify(move.from)} → ${tildify(move.to)}${reset}`);
+      }
+      if (fix.moved.length > 0) {
+        console.log(`  ${dim}  restart the Hermes gateway — plugin discovery only re-runs at start-up.${reset}`);
+      }
+      console.log();
+      if (fix.changed) {
+        const refreshed = await checkHermesPluginShadowing();
+        const idx = results.findIndex((r) => r.label === HERMES_PLUGIN_COPIES_LABEL);
+        if (idx !== -1) results[idx] = refreshed;
+        else results.push(refreshed);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  ${dim}--fix-hermes-plugin-copies failed: ${msg}${reset}\n`);
     }
   }
 

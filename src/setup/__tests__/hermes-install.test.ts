@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, afterEach } from '@jest/globals';
@@ -36,5 +36,36 @@ describe('hermes install', () => {
     const text = logs.join('\n');
     expect(text).toMatch(/Action Guard stays off/);
     expect(text).not.toMatch(/Enforce is ON by default/);
+  });
+
+  it('warns — and moves nothing — when a shadowing copy is already there (#569)', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'sc-hermes-'));
+    homes.push(home);
+    // Sorts after `shieldcortex`, so Hermes loads THIS on the next start and
+    // the install we are about to do never runs.
+    const shadow = join(home, '.hermes', 'plugins', 'shieldcortex.bak-pre510-x');
+    mkdirSync(shadow, { recursive: true });
+    writeFileSync(join(shadow, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    const origLog = console.log;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+    console.log = () => {};
+    try {
+      await installHermes(home);
+    } finally {
+      console.warn = origWarn;
+      console.log = origLog;
+    }
+
+    const text = warnings.join('\n');
+    expect(text).toMatch(/shieldcortex\.bak-pre510-x/);
+    expect(text).toMatch(/LOADED BY HERMES/);
+    expect(text).toMatch(/--fix-hermes-plugin-copies/);
+    // Warn only: the copy is the operator's, and which one they meant to keep
+    // is not a decision the installer gets to make mid-install.
+    expect(existsSync(join(shadow, 'plugin.yaml'))).toBe(true);
+    expect(hermesPluginInstalled(home)).toBe(true);
   });
 });

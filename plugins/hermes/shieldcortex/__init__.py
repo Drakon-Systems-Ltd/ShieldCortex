@@ -29,6 +29,7 @@ try:
         fallback_surface,
     )
     from .policy import action_guard_decision, resolve_enforce
+    from .shadow import detect_shadow, shadow_error_line
 except ImportError:  # pragma: no cover - standalone import
     from sc_client import (
         evaluate_tool_call,
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - standalone import
         fallback_surface,
     )
     from policy import action_guard_decision, resolve_enforce
+    from shadow import detect_shadow, shadow_error_line
 
 log = logging.getLogger("shieldcortex.hermes")
 
@@ -87,8 +89,33 @@ def _enforce_default() -> bool:
     return resolve_enforce(os.environ.get("SHIELDCORTEX_ENFORCE"))
 
 
+def _package_dir():
+    """Where this module was loaded from. Test seam for the #569 signal."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _log_shadow_warning():
+    """#569: one ERROR line when another copy of this plugin is on disk.
+
+    Hermes keys plugins on the manifest `name:` and lets the last directory in
+    sorted order win silently, so `plugins/shieldcortex.bak-<ts>/` beside
+    `plugins/shieldcortex/` means an upgrade installs new bytes and the gateway
+    keeps running the old ones. Whichever copy is executing is by definition
+    the winner, so start-up is the one moment this can be said with certainty.
+
+    Never raises: a diagnostic must not be able to stop the gate registering.
+    """
+    try:
+        line = shadow_error_line(detect_shadow(_package_dir()))
+        if line:
+            log.error("%s", line)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 def register(ctx):
     """Hermes plugin entrypoint — registers the pre_tool_call gate."""
+    _log_shadow_warning()
     enforce = _enforce_default()
 
     def pre_tool_call(tool_name, args, task_id=None, **_kw):

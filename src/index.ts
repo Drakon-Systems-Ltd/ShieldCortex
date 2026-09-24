@@ -645,6 +645,11 @@ ${bold}COMMANDS${reset}
   ${cyan}worker${reset}                Run headless background sync + heartbeat worker
   ${cyan}status${reset}                Show current protection status
   ${cyan}doctor${reset}                Diagnose installation issues (exits 1 on a ❌; --strict also fails on ⚠️)
+                        Repairs: --fix-project-keys (project-key collisions)
+                                 --fix-action-guard (migrate the deprecated
+                                   interceptor.actionGuard alias)
+                                 --fix-hermes-plugin-copies (move shadowing
+                                   Hermes plugin copies into ~/.hermes/backups/)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
