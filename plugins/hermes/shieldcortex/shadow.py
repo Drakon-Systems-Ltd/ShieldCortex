@@ -40,16 +40,45 @@ inside the gateway it is already imported. What this check never does is run
 plugin registration or install anything: it calls the read-only scanning
 functions and nothing else.
 
+## An answer it could not read is not an answer (#569 r8)
+
+Two things make a copy invisible to this check while the gateway loads it
+perfectly well, and both are about READING a manifest rather than finding one:
+
+  * the check stopped at `os.stat`, and stat and open are two different
+    permissions. A portable `plugin.json` written 0600 by another account
+    stats for everybody and opens for nobody else, so the file whose contents
+    decide the key was never actually consulted. Every candidate that is there
+    is now opened and one byte taken out of it;
+  * Hermes wraps what it hit. `agent_plugins._read_json_object` turns a
+    PermissionError into an `AgentPluginError` — a ValueError — with
+    `raise ... from exc`, and `plugins_discovery` logs that wrapper. On its own
+    type it is indistinguishable from a schema rejection, which is an ANSWER,
+    so the records this scan provokes are now kept and every one of them is
+    followed down its `__cause__`/`__context__` chain.
+
+Neither produces a verdict here: an incomplete answer is one DEBUG line, and
+`shieldcortex doctor` is where uncertainty is reported with a remedy.
+
 Stdlib only, and every entry point swallows its own errors: a start-up
 diagnostic must never be able to stop the gate from registering.
 """
 import contextlib
 import logging
 import os
+import stat
 import threading
 
 #: The manifest key this plugin declares — the thing that can collide.
 PLUGIN_NAME = "shieldcortex"
+
+#: The manifest names Hermes looks for in a plugin directory, in its order.
+MANIFEST_NAMES = ("plugin.yaml", "plugin.yml", "plugin.json")
+
+#: How far down an exception's `__cause__`/`__context__` chain to look for the
+#: filesystem error underneath it (#569 r8). Bounded because a chain can be
+#: long, and `__context__` can be cyclic.
+MAX_EXCEPTION_CHAIN = 12
 
 #: Past this many entries in a `plugins/` root, the START-UP check declines
 #: (#569 r3). Hermes' discovery reads a manifest per child and recurses into
@@ -83,7 +112,7 @@ _DISCOVERY_MODULES = frozenset({
 
 
 class _ScanQuietFilter(logging.Filter):
-    """Drop the records OUR scan provokes; pass everything else through.
+    """Drop the records OUR scan provokes — and KEEP them; pass the rest through.
 
     `scan_directory` warns about every unreadable directory and unparseable
     manifest it meets. That is useful to the gateway and pure noise from a
@@ -91,18 +120,156 @@ class _ScanQuietFilter(logging.Filter):
     already said it once. A filter returning False stops the record before
     `callHandlers`, so it does not propagate either, which is exactly why this
     has to be narrow: same logger, different thread, still gets through.
+
+    Suppressing a record is fine; DISCARDING what it said is not (#569 r8). A
+    manifest Hermes could not read is reported as one of these warnings and
+    nowhere else, so the records our own scan caused are kept for
+    :func:`_unreadable_from_records` to classify.
     """
 
     def __init__(self):
         logging.Filter.__init__(self)
         self.thread = threading.get_ident()
+        self.records = []
 
     def filter(self, record):
         if getattr(record, "module", None) not in _DISCOVERY_MODULES:
             return True
         if getattr(record, "thread", None) not in (None, self.thread):
             return True
+        self.records.append(record)
         return False
+
+
+def _fs_reason(path, exc):
+    """One filesystem failure in the words an operator can act on."""
+    return "%s (%s: %s)" % (path, type(exc).__name__, exc)
+
+
+def _os_error_in_chain(exc):
+    """The filesystem failure underneath *exc* — or None if there is not one.
+
+    Hermes does not always log the error it met. `agent_plugins
+    ._read_json_object` turns a PermissionError on `plugin.json` into an
+    `AgentPluginError` — a ValueError — with `raise ... from exc`, and
+    `plugins_discovery` logs that wrapper (#569 r8). Judged on the logged
+    object alone it cannot be told apart from a manifest that failed schema
+    validation, which is an ANSWER, so a directory that was not read was taken
+    for "not a plugin" and the root came out clean.
+
+    `__cause__` first (the explicit `from`), then `__context__` (what was being
+    handled), bounded by :data:`MAX_EXCEPTION_CHAIN` with a seen-set for the
+    cycles `__context__` can form. FileNotFoundError is not one of these at any
+    depth — a manifest that went away mid-scan was discovered by nobody — and a
+    JSON or schema error with no OSError under it comes back None and stays the
+    verdict it is.
+    """
+    seen = set()
+    while isinstance(exc, BaseException) and len(seen) < MAX_EXCEPTION_CHAIN:
+        if id(exc) in seen:
+            return None
+        seen.add(id(exc))
+        if isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError):
+            return exc
+        exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return None
+
+
+def _record_exceptions(record, args):
+    """Every exception one record carries: in its args, and in `exc_info`.
+
+    Hermes logs the exception as a formatting argument (`"Failed to parse %s:
+    %s", path, exc`) and sometimes attaches it as well — `parse_manifest_file`
+    passes `exc_info=` under the plugins debug flag. Both are read, because
+    which one is populated is a Hermes-side setting and not something a verdict
+    here should depend on.
+    """
+    found = [arg for arg in args if isinstance(arg, BaseException)]
+    info = getattr(record, "exc_info", None)
+    if isinstance(info, tuple) and len(info) > 1 and isinstance(info[1], BaseException):
+        found.append(info[1])
+    return found
+
+
+def _unreadable_from_records(records):
+    """The filesystem failures Hermes met while scanning, as readable reasons.
+
+    The test is on the record's arguments rather than on its wording, so a
+    rephrased log line still counts. The path is the first path-like argument —
+    Hermes puts it there in every one of these lines — and falls back to the
+    errno's own `filename`.
+    """
+    found = []
+    for record in records or ():
+        try:
+            args = record.args if isinstance(record.args, tuple) else (record.args,)
+            under = None
+            for candidate in _record_exceptions(record, args):
+                under = _os_error_in_chain(candidate)
+                if under is not None:
+                    break
+            if under is None:
+                continue
+            named = next(
+                (a for a in args if isinstance(a, str) or hasattr(a, "__fspath__")), None)
+            if named is None:
+                named = getattr(under, "filename", None)
+            found.append(_fs_reason(named if named is not None else "(path not reported)", under))
+        except Exception:  # pragma: no cover - a diagnostic never raises
+            continue
+    return found
+
+
+def _manifest_read_problems(root):
+    """Why a manifest beside this copy would not be READ — one reason each.
+
+    `scan_directory` picks a child up by asking whether `plugin.yaml` and
+    friends exist, and then it OPENS what it found. Those are two different
+    permissions (#569 r8): a portable `plugin.json` written 0600 by another
+    account stats for everybody and opens for nobody else, so stat-ing it
+    proves nothing about the file whose contents decide the key. Every
+    candidate that is there is therefore opened and one byte is taken out of
+    it.
+
+    Only the root's DIRECT children are walked. A manifest one level down is
+    keyed `<category>/<name>` by Hermes and cannot collide with this plugin's
+    key, so it is not part of the question this module asks.
+
+    Absent is the ordinary case and no problem at all. A candidate that is not
+    a regular file is an answer too and is left alone: nobody reads a directory
+    as a manifest, here or in the loader, and opening a FIFO named
+    `plugin.json` would hang the gateway's start-up rather than answer it.
+    """
+    problems = []
+    try:
+        with os.scandir(root) as entries:
+            children = [entry.path for entry in entries if entry.is_dir()]
+    except (FileNotFoundError, NotADirectoryError):
+        return []  # genuinely absent contributes nothing, which is true
+    except OSError as exc:
+        return [_fs_reason(root, exc)]
+    except Exception:  # pragma: no cover - a diagnostic never raises
+        return []
+    for child in sorted(children):
+        for filename in MANIFEST_NAMES:
+            candidate = os.path.join(child, filename)
+            try:
+                mode = os.stat(candidate).st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError as exc:
+                problems.append(_fs_reason(candidate, exc))
+                continue
+            if not stat.S_ISREG(mode):
+                continue
+            try:
+                with open(candidate, "rb") as handle:
+                    handle.read(1)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                problems.append(_fs_reason(candidate, exc))
+    return problems
 
 
 def _discovery_logger_names(modules):
@@ -122,7 +289,11 @@ def _discovery_logger_names(modules):
 
 @contextlib.contextmanager
 def _quiet_discovery_logging(modules=()):
-    """Install `_ScanQuietFilter` on the discovery loggers for this block."""
+    """Install `_ScanQuietFilter` on the discovery loggers for this block.
+
+    Yields the filter itself: what it swallowed is the only account anyone has
+    of a manifest Hermes could not read (#569 r8).
+    """
     installed = []
     scan_filter = _ScanQuietFilter()
     try:
@@ -130,7 +301,7 @@ def _quiet_discovery_logging(modules=()):
             logger = logging.getLogger(name)
             logger.addFilter(scan_filter)
             installed.append(logger)
-        yield
+        yield scan_filter
     finally:
         for logger in installed:
             try:
@@ -140,12 +311,17 @@ def _quiet_discovery_logging(modules=()):
 
 
 def _hermes_root_scan(root):
-    """`(copies, winner, reason)` from Hermes' own discovery.
+    """`(copies, winner, reason, unreadable)` from Hermes' own discovery.
 
     `copies is None` means Hermes could not answer and `reason` says why, in
     the words the operator needs: the import failed, or discovery itself
     raised. Round 2 flattened both to "hermes_cli not importable", which is
     wrong for every failure after a successful import (#569 r3).
+
+    `unreadable` is the filesystem failures Hermes met WHILE answering (#569
+    r8). Those are not failures of the scan — it completed — but each one is a
+    directory whose manifest nobody read, so the copy list is a floor and not
+    the whole of it.
     """
     try:
         from pathlib import Path
@@ -155,15 +331,16 @@ def _hermes_root_scan(root):
         from hermes_cli.plugins_discovery import resolve_manifest_winners, scan_directory
         from hermes_cli.plugins_manifest import manifest_key
     except Exception as exc:
-        return None, None, "hermes_cli is not importable (%s: %s)" % (type(exc).__name__, exc)
+        return None, None, "hermes_cli is not importable (%s: %s)" % (type(exc).__name__, exc), []
     try:
-        with _quiet_discovery_logging((_discovery, _manifest)):
+        with _quiet_discovery_logging((_discovery, _manifest)) as captured:
             manifests = scan_directory(Path(root), "user")
             copies = [str(m.path) for m in manifests if manifest_key(m) == PLUGIN_NAME]
             winner = resolve_manifest_winners(manifests).get(PLUGIN_NAME)
     except Exception as exc:
-        return None, None, "hermes_cli discovery raised %s: %s" % (type(exc).__name__, exc)
-    return copies, (str(winner.path) if winner is not None else None), None
+        return None, None, "hermes_cli discovery raised %s: %s" % (type(exc).__name__, exc), []
+    return (copies, (str(winner.path) if winner is not None else None), None,
+            _unreadable_from_records(captured.records))
 
 
 def _root_is_too_big(root):
@@ -225,7 +402,7 @@ def detect_shadow(package_dir):
             )
             return None
 
-        copies, _winner, reason = _hermes_root_scan(parent)
+        copies, _winner, reason, unreadable = _hermes_root_scan(parent)
         if copies is None:
             # Inside the gateway this should be unreachable: Hermes just used
             # the module we are asking for. DEBUG, because a diagnostic that
@@ -237,6 +414,23 @@ def detect_shadow(package_dir):
                 "run `shieldcortex doctor` for the full scan", reason,
             )
             return None
+
+        # What neither Hermes nor this process could READ (#569 r8). Both
+        # halves land here: the manifests we opened ourselves, and the ones
+        # Hermes met an error on and logged — including the PermissionError it
+        # wraps in an `AgentPluginError` for a portable `plugin.json`, which
+        # looks exactly like a schema rejection until the chain is followed.
+        #
+        # This is a start-up diagnostic, so an incomplete answer is said once
+        # at DEBUG and nothing more: the list below is a FLOOR, `doctor` is
+        # where "could not determine" is reported properly with the remedy
+        # attached, and a gate must never be held up by a check about it.
+        unreadable = list(unreadable) + _manifest_read_problems(parent)
+        if unreadable:
+            log.debug(
+                "[shieldcortex] plugin copy check is incomplete: could not read %s; "
+                "run `shieldcortex doctor` for the full scan", "; ".join(unreadable),
+            )
 
         others = sorted(c for c in copies if not _same_path(c, loaded))
         misnamed = own_name != PLUGIN_NAME

@@ -322,7 +322,7 @@ class NoDiscoveryStartupTests(PluginRootCase):
                        "(ModuleNotFoundError: No module named 'hermes_cli')")
         for module in (shadow_module, shieldcortex.shadow):
             patched = mock.patch.object(module, "_hermes_root_scan",
-                                        return_value=(None, None, self.reason))
+                                        return_value=(None, None, self.reason, []))
             patched.start()
             self.addCleanup(patched.stop)
 

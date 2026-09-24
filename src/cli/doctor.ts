@@ -2785,6 +2785,21 @@ export async function checkOpenClawDuplicateInstalls(
  * A root the scan could not enter looks exactly like a root with nothing in
  * it, and those two hosts want opposite things from the repair.
  *
+ * ## "READ" means opened, and it means Hermes' errors too (#569 r8)
+ *
+ * Two things still let a copy through. The check STATTED each manifest and
+ * stopped there, and a `plugin.json` owned by the gateway's service account at
+ * mode 0600 stats for everybody and opens for nobody else — so the bytes that
+ * decide the key were never read. And Hermes WRAPS a read failure: a
+ * PermissionError becomes an `AgentPluginError` with `raise ... from exc`,
+ * logged as a wrapper that looks exactly like a schema rejection. Either way
+ * this row said "clean" about a host whose gateway loads the backup.
+ *
+ * Both are closed in the probe, and both land here as an ordinary undetermined
+ * path: WARN, no verdict, and the repair refused in every root — including
+ * when the resulting PLAN IS EMPTY, which is the shape this one takes, because
+ * Hermes drops the manifest it could not read and one copy is no collision.
+ *
  * Every root is reported on — a shadow in a sibling profile is a real shadow
  * whichever profile the doctor happens to be running under — with the active
  * one labelled.
@@ -2804,11 +2819,14 @@ const HERMES_UNDETERMINED_FIX =
 
 /** The remedy for "part of the tree could not be read", said once (#569 r6). */
 const HERMES_UNREADABLE_FIX =
-  'Give the user running the doctor permission to LIST the named paths — a directory that can ' +
-  'be entered but not listed (mode `--x`, or an ACL) raises `EACCES` here, and a scan that ' +
-  'treated it as empty would drop every plugin copy inside it. Then re-run. Until then this row ' +
-  'gives no verdict and `--fix-hermes-plugin-copies` moves nothing in any root: the copy the ' +
-  'scan could not see can be the one another plugin root loads through.';
+  'Give the user running the doctor permission to LIST and to OPEN the named paths — a ' +
+  'directory that can be entered but not listed (mode `--x`, or an ACL) raises `EACCES` here, ' +
+  'and so does a manifest another account owns at mode 0600: that one STATS for everybody and ' +
+  'opens only for the gateway, which reads it and loads the plugin (#569 r8). A manifest that ' +
+  'is a DIRECTORY rather than a file is reported the same way and is fixed by removing or ' +
+  'renaming it. Then re-run. Until then this row gives no verdict and ' +
+  '`--fix-hermes-plugin-copies` moves nothing in any root: the copy the scan could not read ' +
+  'can be the one the gateway loads, or the one another plugin root resolves through.';
 
 export async function checkHermesPluginShadowing(
   home: string = os.homedir(),

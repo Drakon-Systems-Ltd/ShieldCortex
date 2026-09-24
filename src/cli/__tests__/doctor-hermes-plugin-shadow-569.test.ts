@@ -170,17 +170,34 @@ describeWithHermes('checkHermesPluginShadowing (#569)', () => {
     expect((await checkHermesPluginShadowing(home)).status).toBe('pass');
   });
 
-  it('ignores a plugin.yaml directory that hides a valid plugin.yml', async () => {
+  it('invents no shadow from a plugin.yaml directory that hides a valid plugin.yml', async () => {
     // Hermes selects on `exists()`, hits the directory, fails to parse and
     // takes NOTHING from that child. Falling through to the `.yml` would invent
     // a shadow and send an operator to move a directory that is not loaded.
+    //
+    // It is not reported CLEAN either, since r8: Hermes met an IsADirectoryError
+    // of its own reading that path, a valid `plugin.yml` naming us is sitting
+    // beside it untouched, and which of the two a given Hermes picks is not
+    // something this row may decide. So the row warns and names the path, and
+    // the decoy is never a copy, a winner or a shadow.
     makePlugin(plugins, 'shieldcortex');
     const decoy = path.join(plugins, 'shieldcortex.decoy');
     fs.mkdirSync(path.join(decoy, 'plugin.yaml'), { recursive: true });
     fs.writeFileSync(path.join(decoy, 'plugin.yml'), 'name: shieldcortex\n');
 
     const result = await checkHermesPluginShadowing(home);
-    expect(result.status).toBe('pass');
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain(path.join(decoy, 'plugin.yaml'));
+    expect(result.message).toMatch(/IsADirectoryError/);
+    // Never a verdict about the decoy: no copy count, no winner.
+    expect(result.message).not.toMatch(/2 copies/);
+    expect(result.message).not.toMatch(/Hermes loads/);
+
+    // And nothing is moved on the strength of it.
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
+    expect(fs.existsSync(path.join(decoy, 'plugin.yml'))).toBe(true);
   });
 
   it('ignores a sibling whose manifest declares a different name', async () => {

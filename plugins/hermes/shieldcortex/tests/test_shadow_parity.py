@@ -252,6 +252,14 @@ CASES = [
      ["shieldcortex"], "shieldcortex"),
 ]
 
+#: The one fixture where Hermes met a filesystem error of its own: its
+#: `plugin.yaml` is a DIRECTORY, so `read_text()` raises IsADirectoryError and
+#: the child is dropped — with a valid `plugin.yml` naming us sitting beside it
+#: and never looked at. Which of the two a given Hermes picks is Hermes'
+#: business, so the scan says "I did not read this" rather than certifying the
+#: root (#569 r8). The copies and the winner below are still Hermes' own answer.
+UNREADABLE_CASE = "a plugin.yaml directory beside a valid plugin.yml"
+
 
 class ParityFixtures(unittest.TestCase):
     """One `plugins/` root per case — a collision is per-root."""
@@ -283,7 +291,8 @@ class NoHermesTests(ParityFixtures):
 
     def _unavailable(self, module_reason):
         return mock.patch.object(
-            shadow_module, "_hermes_root_scan", return_value=(None, None, module_reason))
+            shadow_module, "_hermes_root_scan",
+            return_value=(None, None, module_reason, []))
 
     def test_every_fixture_produces_no_verdict_and_one_debug_line(self):
         reason = ("hermes_cli is not importable "
@@ -331,11 +340,21 @@ class NoHermesTests(ParityFixtures):
 
 @unittest.skipUnless(HERMES_IMPORTABLE, "hermes_cli is not importable in this interpreter")
 class HermesPrimaryTests(ParityFixtures):
+    def _assert_read_failures(self, label, unreadable):
+        """Every fixture is readable; one holds a manifest nobody can read."""
+        if label != UNREADABLE_CASE:
+            self.assertEqual(unreadable, [])
+            return
+        self.assertEqual(len(unreadable), 1, unreadable)
+        self.assertIn("plugin.yaml", unreadable[0])
+        self.assertIn("IsADirectoryError", unreadable[0])
+
     def test_hermes_reports_the_recorded_copies_and_winner(self):
         for label, _build, copies, winner in CASES:
             with self.subTest(label):
-                got_copies, got_winner, reason = _hermes_root_scan(self.roots[label])
+                got_copies, got_winner, reason, unreadable = _hermes_root_scan(self.roots[label])
                 self.assertIsNone(reason)
+                self._assert_read_failures(label, unreadable)
                 self.assertEqual(sorted(os.path.basename(c) for c in got_copies), sorted(copies))
                 self.assertEqual(
                     os.path.basename(got_winner) if got_winner else None, winner)
@@ -345,9 +364,10 @@ class HermesPrimaryTests(ParityFixtures):
         # answers, the answer is complete. There is no third state.
         for label, _build, _copies, _winner in CASES:
             with self.subTest(label):
-                copies, _got_winner, reason = _hermes_root_scan(self.roots[label])
+                copies, _got_winner, reason, unreadable = _hermes_root_scan(self.roots[label])
                 self.assertIsNotNone(copies)
                 self.assertIsNone(reason)
+                self._assert_read_failures(label, unreadable)
 
     def test_detect_shadow_names_the_copies_hermes_passed_over(self):
         label = "an inline # comment after the name"
@@ -369,10 +389,12 @@ class FallbackReasonTests(unittest.TestCase):
 
     def test_an_import_failure_says_so(self):
         with mock.patch.dict(sys.modules, {"hermes_cli": None}):
-            copies, winner, reason = _hermes_root_scan(tempfile.gettempdir())
+            copies, winner, reason, unreadable = _hermes_root_scan(tempfile.gettempdir())
         self.assertIsNone(copies)
         self.assertIsNone(winner)
         self.assertIn("not importable", reason)
+        # A scan that never ran read nothing; the non-answer is `reason`.
+        self.assertEqual(unreadable, [])
 
     @unittest.skipUnless(HERMES_IMPORTABLE, "hermes_cli is not importable in this interpreter")
     def test_a_discovery_failure_is_not_reported_as_an_import_failure(self):
@@ -380,8 +402,9 @@ class FallbackReasonTests(unittest.TestCase):
 
         with mock.patch.object(discovery, "scan_directory",
                                side_effect=RuntimeError("disk on fire")):
-            copies, _winner, reason = _hermes_root_scan(tempfile.gettempdir())
+            copies, _winner, reason, unreadable = _hermes_root_scan(tempfile.gettempdir())
         self.assertIsNone(copies)
+        self.assertEqual(unreadable, [])
         self.assertIn("discovery raised RuntimeError", reason)
         self.assertNotIn("not importable", reason)
 

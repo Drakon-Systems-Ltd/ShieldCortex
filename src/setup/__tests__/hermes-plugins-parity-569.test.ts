@@ -50,6 +50,15 @@ interface ParityCase {
   build: (root: string) => void;
   /** What Hermes' own discovery reports for this tree. */
   hermes: { copies: string[]; winner: string | null };
+  /**
+   * A path in this tree that nobody could READ, and the error naming it (#569
+   * r8). Absent means the whole tree is readable, which is the normal case:
+   * every fixture here is built by this file at ordinary modes. The one that
+   * has it holds a `plugin.yaml` that is a DIRECTORY, so Hermes' own read of
+   * it raises — the copies and the winner below are still Hermes' answer, but
+   * the scan says it did not read that path rather than certifying the root.
+   */
+  unreadable?: { dir: string; file: string; error: RegExp };
 }
 
 function write(target: string, body: string): void {
@@ -120,6 +129,11 @@ const CASES: ParityCase[] = [
       manifest(root, 'shieldcortex.dirmanifest', 'name: shieldcortex\n', 'plugin.yml');
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
+    unreadable: {
+      dir: 'shieldcortex.dirmanifest',
+      file: 'plugin.yaml',
+      error: /IsADirectoryError/,
+    },
   },
   {
     // A valid `name:` line above broken YAML: Hermes' safe_load raises and
@@ -449,8 +463,21 @@ describePrimary(`primary path via Hermes itself (${interpreter ?? 'no interprete
         { home: homes.get(testCase.name)!, hermesHome: null },
         { interpreter },
       );
+      if (testCase.unreadable !== undefined) {
+        // A tree with a path nobody read is not a tree with a verdict (#569
+        // r8): the scan names that path and withdraws, which is a complete
+        // answer to a different question and still not a third state.
+        const root = roots.get(testCase.name)!;
+        const { dir, file, error } = testCase.unreadable;
+        expect(scan.fromHermes).toBe(false);
+        expect(scan.undetermined).toEqual([
+          { path: path.join(root, dir, file), error: expect.stringMatching(error) },
+        ]);
+        continue;
+      }
       expect(scan.fromHermes).toBe(true);
       expect(scan.undeterminedReason).toBeNull();
+      expect(scan.undetermined).toEqual([]);
       expect(scan.hintRoots).toEqual([]);
       expect(scan.copies.map((c) => c.dirName)).toEqual(testCase.hermes.copies);
       expect(scan.roots[0].loaded?.dirName ?? null).toBe(testCase.hermes.winner);

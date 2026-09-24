@@ -125,6 +125,33 @@
  * per root. Nothing is ever moved from or into that directory: which copy is
  * authoritative there is a human's call, and the gateway's working directory
  * is not something this process can see.
+ *
+ * ## A manifest that was not READ is not a manifest that says nothing (#569 r8)
+ *
+ * The reported layout is ordinary: `plugins/shieldcortex` beside a valid
+ * portable package in `plugins/shieldcortex.bak-portable`, whose `plugin.json`
+ * is owned by the gateway's service account at mode 0600. Readable, the row
+ * warns — the backup sorts later and is what loads. Unreadable, it PASSED
+ * "clean", by two separate routes:
+ *
+ *   - the pre-verdict check STATTED each manifest candidate and stopped there.
+ *     Stat and open are two different permissions: a 0600 file stats for
+ *     everybody and opens for nobody but its owner, so the bytes that decide
+ *     the key were never consulted. Every candidate that is there is now
+ *     opened and one byte taken out of it;
+ *   - Hermes WRAPS what it hits. `agent_plugins._read_json_object` turns the
+ *     PermissionError into an `AgentPluginError` — a ValueError — with
+ *     `raise ... from exc`, and `plugins_discovery` logs the wrapper. On its
+ *     own type that is indistinguishable from a schema rejection, which is an
+ *     ANSWER. The probe used to DISABLE those loggers; it now collects the
+ *     records and follows every exception they carry down its
+ *     `__cause__`/`__context__` chain.
+ *
+ * Either one makes the path undetermined, with the same consequence as every
+ * other hole since r6: no verdict on this host, and the whole repair refused.
+ * An ordinary rejection — bad JSON, a wrong `$schema`, YAML that will not
+ * construct — has no OSError under it and is untouched: Hermes' answer there
+ * is "this is not a plugin", which is a verdict and not a gap.
  */
 
 import { spawnSync } from 'child_process';
@@ -669,7 +696,12 @@ const PROBE_SCRIPT = [
   // side turns a single entry into "no verdict, no repair" for every root.
   '_undet = []',
   'def _note(_p, _exc):',
-  '    _undet.append({"path": str(_p), "error": "%s: %s" % (type(_exc).__name__, _exc)})',
+  // Deduplicated because the same failure is now found twice on purpose: our
+  // own pre-read opens the manifest, and Hermes logs its own attempt at it
+  // (#569 r8). Two identical rows would only crowd the bounded summary.
+  '    _entry = {"path": str(_p), "error": "%s: %s" % (type(_exc).__name__, _exc)}',
+  '    if _entry not in _undet:',
+  '        _undet.append(_entry)',
   'def _listdir(_p):',
   '    """Sorted names under _p. [] when _p is genuinely absent, None when undetermined."""',
   '    try:',
@@ -699,6 +731,52 @@ const PROBE_SCRIPT = [
   '_FOREIGN = set([".claude-plugin", ".codex-plugin", ".cursor-plugin", ".devin-plugin",',
   '                ".kimi-plugin"])',
   '_MANIFESTS = ("plugin.yaml", "plugin.yml", "plugin.json")',
+  // ── Statting a manifest is not reading it (#569 r8) ───────────────────
+  //
+  // The pre-verdict check stopped at `os.stat`, and stat and open are two
+  // different permissions. `plugins/shieldcortex.bak-portable/plugin.json`
+  // written 0600 by the service account lists and stats for anybody and opens
+  // for nobody else: Hermes reads it, keys the directory `shieldcortex` and
+  // loads it, while this check saw a manifest that was "there", found no
+  // problem, and reported ONE canonical copy — a clean PASS on a host running
+  // the backup. So every candidate that is there is OPENED and one byte is
+  // taken out of it.
+  'def _manifest_state(_child):',
+  '    """(has_manifest, blind) for one plugin directory.',
+  '',
+  '    Absent is the ordinary case and no problem at all — most directories',
+  '    hold one of the three names and not the other two. A candidate that is',
+  '    not a REGULAR file is an answer as well and is left alone: nobody reads',
+  '    a directory as a manifest, here or in the loader, and opening a FIFO',
+  '    named `plugin.json` would hang this scan rather than answer it.',
+  '',
+  '    Every other error is UNDETERMINED and is recorded with its path, which',
+  '    withdraws the verdict for this whole host: a manifest this process',
+  '    cannot read may say `name: shieldcortex` to the account that can."""',
+  '    _has = False',
+  '    _blind = False',
+  '    for _base in _MANIFESTS:',
+  '        _p = os.path.join(_child, _base)',
+  '        try:',
+  '            _st = os.stat(_p)',
+  '        except (FileNotFoundError, NotADirectoryError):',
+  '            continue',
+  '        except BaseException as _exc:',
+  '            _note(_p, _exc)',
+  '            _blind = True',
+  '            continue',
+  '        _has = True',
+  '        if not stat.S_ISREG(_st.st_mode):',
+  '            continue',
+  '        try:',
+  '            with open(_p, "rb") as _fh:',
+  '                _fh.read(1)',
+  '        except FileNotFoundError:',
+  '            continue',
+  '        except BaseException as _exc:',
+  '            _note(_p, _exc)',
+  '            _blind = True',
+  '    return (_has, _blind)',
   'def _audit(_d, _depth):',
   '    """Walk one `plugins/` root exactly where `scan_directory` walks it and',
   '    record every place the filesystem could not answer.',
@@ -722,20 +800,92 @@ const PROBE_SCRIPT = [
   '        _cs = _state(_child)',
   '        if _cs is None or not _cs[1]:',
   '            continue',
-  '        _blind = False',
-  '        _has = False',
-  '        for _base in _MANIFESTS:',
-  '            _ms = _state(os.path.join(_child, _base))',
-  '            if _ms is None:',
-  '                _blind = True',
-  '                break',
-  '            if _ms[0]:',
-  '                _has = True',
-  '                break',
+  '        _has, _blind = _manifest_state(_child)',
   // A manifest-less directory is a category directory to Hermes and it
   // recurses one level into it; the audit follows to the same depth cap.
   '        if not _blind and not _has and _depth == 0:',
   '            _audit(_child, 1)',
+  // ── What Hermes met, followed down its cause chain (#569 r8) ──────────
+  //
+  // Hermes does not always log the error it hit. `agent_plugins
+  // ._read_json_object` turns a PermissionError on `plugin.json` into an
+  // `AgentPluginError` — a ValueError — with `raise ... from exc`, and
+  // `plugins_discovery` logs that wrapper. Judged on the logged object alone
+  // it is indistinguishable from a manifest that failed schema validation,
+  // which is an ANSWER ("this is not a plugin"), so a directory neither
+  // Hermes nor this process could read was recorded as no plugin at all and
+  // the root came out clean.
+  '_MAX_CHAIN = 12',
+  '_records = []',
+  'class _Collect(logging.Filter):',
+  '    """Keep what Hermes logs while it scans, and keep it off the console.',
+  '',
+  '    This probe used to set `disabled = True` on the discovery loggers,',
+  '    which is quieter still and throws the record away before anything can',
+  '    look at it. A WARNING is how `scan_directory` reports the manifest it',
+  '    could not read, so the record IS the evidence and discarding it is how',
+  '    an unreadable copy became a clean verdict. Returning False stops the',
+  '    record before `callHandlers`, so it reaches no handler and no ancestor',
+  '    logger either."""',
+  '',
+  '    def filter(self, _record):',
+  '        _records.append(_record)',
+  '        return False',
+  'def _os_error_in_chain(_e):',
+  '    """The filesystem failure underneath _e, or None if there is not one.',
+  '',
+  '    `__cause__` first (the explicit `raise ... from`), then `__context__`',
+  '    (what was being handled), bounded by _MAX_CHAIN with a seen-set for the',
+  '    cycles `__context__` can form. FileNotFoundError is not one of these at',
+  '    any depth — a manifest that went away mid-scan was discovered by nobody',
+  '    — and a JSON or schema error with no OSError under it comes back None',
+  '    and stays the verdict it is."""',
+  '    _seen = set()',
+  '    while isinstance(_e, BaseException) and len(_seen) < _MAX_CHAIN:',
+  '        if id(_e) in _seen:',
+  '            return None',
+  '        _seen.add(id(_e))',
+  '        if isinstance(_e, OSError) and not isinstance(_e, FileNotFoundError):',
+  '            return _e',
+  '        _e = _e.__cause__ if _e.__cause__ is not None else _e.__context__',
+  '    return None',
+  'def _record_excs(_r, _args):',
+  '    """Every exception one record carries: in its args, and in `exc_info`.',
+  '',
+  '    Hermes logs the exception as a formatting argument ("Failed to parse',
+  '    %s: %s", path, exc) and sometimes attaches it as well —',
+  '    `parse_manifest_file` passes `exc_info=` under the plugins debug flag.',
+  '    Both are read, because which one is populated is a Hermes-side setting',
+  '    and not something a verdict here may depend on."""',
+  '    _found = [_a for _a in _args if isinstance(_a, BaseException)]',
+  '    _info = getattr(_r, "exc_info", None)',
+  '    if isinstance(_info, tuple) and len(_info) > 1 and isinstance(_info[1], BaseException):',
+  '        _found.append(_info[1])',
+  '    return _found',
+  'def _note_logged():',
+  '    """Record every filesystem failure Hermes met, as one of ours.',
+  '',
+  '    The test is on the record\'s arguments rather than on its wording, so a',
+  '    rephrased log line still counts. The path is the first path-like',
+  '    argument — Hermes puts it there in every one of these lines — and falls',
+  '    back to the errno\'s own `filename`."""',
+  '    for _r in _records:',
+  '        _args = _r.args if isinstance(_r.args, tuple) else (_r.args,)',
+  '        _under = None',
+  '        for _cand in _record_excs(_r, _args):',
+  '            _under = _os_error_in_chain(_cand)',
+  '            if _under is not None:',
+  '                break',
+  '        if _under is None:',
+  '            continue',
+  '        _named = None',
+  '        for _a in _args:',
+  '            if isinstance(_a, str) or hasattr(_a, "__fspath__"):',
+  '                _named = _a',
+  '                break',
+  '        if _named is None:',
+  '            _named = getattr(_under, "filename", None)',
+  '        _note(_named if _named is not None else "(path not reported)", _under)',
   'try:',
   '    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):',
   '        for _cand in _payload.get("importRoots") or []:',
@@ -758,8 +908,19 @@ const PROBE_SCRIPT = [
   '            _lg = getattr(_mod, "logger", None)',
   '            if isinstance(_lg, logging.Logger):',
   '                _quiet.add(_lg.name)',
+  // A record that is never created cannot be classified, so the suppression
+  // that used to live here is replaced by a collector (#569 r8). A level or a
+  // global `logging.disable` high enough to swallow a WARNING is lifted on
+  // these loggers only, which costs nothing: this child process exists solely
+  // for the scan, and everything the lift lets through `_Collect` drops.
+  '        logging.disable(logging.NOTSET)',
+  '        _collector = _Collect()',
   '        for _lname in _quiet:',
-  '            logging.getLogger(_lname).disabled = True',
+  '            _lg = logging.getLogger(_lname)',
+  '            _lg.disabled = False',
+  '            if _lg.getEffectiveLevel() > logging.WARNING:',
+  '                _lg.setLevel(logging.WARNING)',
+  '            _lg.addFilter(_collector)',
   '        _name = _payload["name"]',
   // Hermes' own home resolution, from Hermes. Anything at all going wrong here
   // is reported as itself and never worked around: a root set we made up is
@@ -837,6 +998,10 @@ const PROBE_SCRIPT = [
   '                         "loaded": (str(_win.path) if _win is not None else None),',
   '                         "effective": (str(_eff.path) if _eff is not None else None),',
   '                         "effectiveSource": (str(_eff.source) if _eff is not None else None)})',
+  // Last, because it reads what EVERY scan above logged. A wrapped
+  // PermissionError on a portable manifest arrives here and nowhere else
+  // (#569 r8).
+  '        _note_logged()',
   '    _real.write(json.dumps({"ok": True, "activeHome": _active, "root": _root, "roots": _out,',
   '                            "project": _proj, "undetermined": _undet}))',
   'except BaseException as _exc:',
