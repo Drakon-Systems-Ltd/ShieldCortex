@@ -91,7 +91,16 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:/\*?)?(?:\s|$)", re.I),
     re.compile(r"\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)", re.I),
     re.compile(r"\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log", re.I),
-    re.compile(r"/etc/(passwd|shadow|sudoers)|~/\.ssh|id_rsa|\.aws/credentials|\.env\b", re.I),
+    # #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
+    re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b", re.I),
+    # #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
+    re.compile(
+        r"(?:>>?\s*|\btee\b(?:\s+-\w+)*\s+|\bsed\b(?=[^|;&\n]*\s-i)[^|;&\n]*\s)['\"]?(?:[^\s'\"|;&<>]*/)?"
+        r"(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config/fish/config\.fish\b)|"
+        r"\b(?:cp|mv|install)\b[^|;&\n]*\s['\"]?(?:[^\s'\"|;&<>]*/)?"
+        r"(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config/fish/config\.fish\b)['\"]?\s*(?=$|[|;&\n])",
+        re.I,
+    ),
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b", re.I),
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b", re.I),
     re.compile(r"\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)", re.I),
