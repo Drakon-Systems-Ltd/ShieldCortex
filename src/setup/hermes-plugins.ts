@@ -311,6 +311,22 @@ export interface HermesProjectState {
   copies: HermesPluginCopy[];
   /** Every manifest directory there, all keys — the protection list again. */
   discovered: string[];
+  /**
+   * That directory, resolved through symlinks, IS the ACTIVE plugins root
+   * (#569 r9) — `cwd=$HOME` with `HERMES_HOME=$HOME/.hermes` is the ordinary
+   * way to arrive here. Hermes scans one directory twice under two labels:
+   * same manifests, same winner, and a root the repair may fix like any other.
+   * So `copies` and `discovered` are EMPTY when this is true, not because the
+   * directory is empty but because everything in it is already reported as
+   * that root's own.
+   *
+   * It is deliberately NOT set for any other root. With
+   * `HERMES_HOME=<root>/profiles/work` the user source is the profile and
+   * `<root>/plugins` is read as `project` alone, so it wins the key over the
+   * profile's install — the exact host the sibling Ekho change reported as
+   * clean (ekho#85 r9 blocker C).
+   */
+  sameAsActiveRoot: boolean;
 }
 
 export interface HermesPluginScan {
@@ -725,6 +741,61 @@ const PROBE_SCRIPT = [
   '        _note(_p, _exc)',
   '        return None',
   '    return (True, stat.S_ISDIR(_st.st_mode))',
+  // ── Is this project dir the ACTIVE plugins root? (#569 r9) ────────────
+  //
+  // `<cwd>/.hermes/plugins` and `get_hermes_home()/plugins` can be one
+  // directory, and which of the two situations it is decides the verdict. See
+  // `_same_directory`. Both are resolved through symlinks, and a path that
+  // will not resolve is a NON-ANSWER: `_state` records it, which withdraws the
+  // verdict for this whole host rather than guessing either way.
+  'def _resolved_dir(_p):',
+  '    """_p with its symlinks resolved, or None when the filesystem could not say.',
+  '',
+  '    Absence is an ANSWER here, not a problem: `<home>/plugins` is in the root',
+  '    set whether or not it exists, and project plugins enabled in a directory',
+  '    with no `.hermes` at all is an ordinary clean run. Every component that IS',
+  '    there still resolves, which is what makes `<cwd>/.hermes -> <home>/.hermes`',
+  '    compare equal with the `plugins/` inside it absent.',
+  '',
+  '    `_state` is what tells the two apart: it answers ENOENT/ENOTDIR as absence',
+  '    and records anything else — a symlink loop, a component that cannot be',
+  '    traversed — as undetermined. A stat that succeeded also means every',
+  '    component was traversable, which is exactly what `realpath` needs to be',
+  '    right about the links it reads."""',
+  '    _abs = os.path.normpath(os.path.abspath(_p))',
+  '    if _state(_abs) is None:',
+  '        return None',
+  '    return os.path.normpath(os.path.realpath(_abs))',
+  'def _same_directory(_left, _right):',
+  '    """(do these name the same directory?, was that answerable at all?)',
+  '',
+  '    One caller: noticing that the enabled project dir IS the ACTIVE plugins',
+  '    root. `cwd=$HOME` with `HERMES_HOME=$HOME/.hermes` makes',
+  '    `<cwd>/.hermes/plugins` and `<home>/plugins` one directory, which Hermes',
+  '    then scans twice under two source labels — harmless to the loader, and',
+  '    taken literally here it turns the operator\'s own plugins root into an',
+  '    untouchable project dir and refuses its repair.',
+  '',
+  '    Only the ACTIVE root, and only ever the active root. Matching some OTHER',
+  '    root is not the same situation: Hermes\' user source is',
+  '    `get_hermes_home()/plugins` ALONE, so with',
+  '    `HERMES_HOME=<root>/profiles/work` the profile is the user source and',
+  '    `<root>/plugins` is read as `project` alone — which means it WINS the key',
+  '    over the profile\'s install. Reading that as "a root we already cover"',
+  '    discards the source that decides which tree loads, and reports the root',
+  '    that lost as clean (ekho#85 r9 blocker C).',
+  '',
+  '    Neither answer is safe to guess, so a path that will not resolve comes',
+  '    back unanswerable: "no" scans a root a second time and refuses the repair',
+  '    of a tree that may be the operator\'s own, and "yes" drops the one source',
+  '    that beats every root."""',
+  '    if os.path.normpath(_left) == os.path.normpath(_right):',
+  '        return (True, True)',
+  '    _l = _resolved_dir(_left)',
+  '    _r = _resolved_dir(_right)',
+  '    if _l is None or _r is None:',
+  '        return (False, False)',
+  '    return (_l == _r, True)',
   // Hermes' own skip rules, mirrored so the audit walks where discovery walks
   // and does not report an undetermined entry for a directory Hermes never
   // looks inside.
@@ -962,7 +1033,7 @@ const PROBE_SCRIPT = [
   // whole probe fails: "the switch might be on and I could not ask" is not a
   // clean bill of health.
   '        _proj = {"envSet": ("HERMES_ENABLE_PROJECT_PLUGINS" in os.environ), "enabled": False,',
-  '                 "dir": None, "copies": [], "discovered": []}',
+  '                 "dir": None, "copies": [], "discovered": [], "sameAsActiveRoot": False}',
   '        try:',
   '            from hermes_cli import plugins as _origin',
   '            _proj["enabled"] = bool(_origin._env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"))',
@@ -977,10 +1048,25 @@ const PROBE_SCRIPT = [
   // caller says so in the row rather than pretending otherwise.
   '            _pdir = os.path.normpath(os.path.abspath(os.path.join(os.getcwd(), ".hermes", "plugins")))',
   '            _proj["dir"] = _pdir',
-  '            _audit(_pdir, 0)',
-  '            _proj_ms = scan_directory(Path(_pdir), "project")',
-  '            _proj["copies"] = [str(_m.path) for _m in _proj_ms if manifest_key(_m) == _name]',
-  '            _proj["discovered"] = [str(_m.path) for _m in _proj_ms]',
+  // The ACTIVE plugins root and nothing else (#569 r9). When the project dir
+  // IS that root, Hermes reads one directory twice under two labels: same
+  // manifests, same winner, and an ordinary root the repair is allowed to fix.
+  // When it is any OTHER root — `<root>/plugins` under
+  // `HERMES_HOME=<root>/profiles/work` — it is not a source this scan already
+  // covers, because Hermes' user source is the active home alone; it is read
+  // as `project` only, and it therefore wins the key over every root. See
+  // `_same_directory`.
+  '            _same, _known = _same_directory(_pdir, os.path.join(_active, "plugins"))',
+  '            _proj["sameAsActiveRoot"] = _same',
+  // Unanswerable is neither branch: `_state` has already recorded the failure,
+  // which makes the whole host undetermined on the TypeScript side, and there
+  // is nothing to gain by scanning a directory whose role could not be
+  // established.
+  '            if _known and not _same:',
+  '                _audit(_pdir, 0)',
+  '                _proj_ms = scan_directory(Path(_pdir), "project")',
+  '                _proj["copies"] = [str(_m.path) for _m in _proj_ms if manifest_key(_m) == _name]',
+  '                _proj["discovered"] = [str(_m.path) for _m in _proj_ms]',
   '        _out = []',
   '        for _r in _roots:',
   '            _audit(_r, 0)',
@@ -1027,6 +1113,8 @@ interface ProbeProject {
   dir: string | null;
   copies: string[];
   discovered: string[];
+  /** Whether that directory resolves to the ACTIVE plugins root (#569 r9). */
+  sameAsActiveRoot: boolean;
 }
 
 /** Everything the probe answers: where Hermes lives, and what is in each root. */
@@ -1192,10 +1280,22 @@ function projectFrom(value: unknown): ProbeProject | null {
   const copies = stringArray(value.copies);
   const discovered = stringArray(value.discovered);
   if (copies === null || discovered === null) return null;
+  // A probe that does not carry the field is not one that found no equality —
+  // it is one that never asked, and "the project dir might BE this root" is
+  // the difference between an untouchable source and the operator's own
+  // plugins tree (#569 r9).
+  if (typeof value.sameAsActiveRoot !== 'boolean') return null;
   // Enabled means the directory was computed and scanned; a payload that says
   // it scanned a directory it cannot name is not one to act on.
   if (value.enabled && dir === null) return null;
-  return { envSet: value.envSet, enabled: value.enabled, dir, copies, discovered };
+  return {
+    envSet: value.envSet,
+    enabled: value.enabled,
+    dir,
+    copies,
+    discovered,
+    sameAsActiveRoot: value.sameAsActiveRoot,
+  };
 }
 
 function toCopy(dir: string, root: string, source: HermesPluginSource): HermesPluginCopy {
@@ -1234,8 +1334,16 @@ function rootScanFrom(
 ): HermesPluginRootScan {
   const copies = probe.copies.map((dir) => toCopy(dir, probe.root, 'user'));
   const known = [...copies, ...projectCopies];
+  // The SOURCE is Hermes' own answer and is matched on first (#569 r9). One
+  // directory can be both this root's own copy and the project source's — a
+  // project dir that is some other plugins root — and taking whichever entry
+  // happened to be built first re-labels the source that actually won the key.
   const resolve = (dir: string | null, source: HermesPluginSource): HermesPluginCopy | null =>
-    dir === null ? null : known.find((c) => c.dir === dir) ?? toCopy(dir, probe.root, source);
+    dir === null
+      ? null
+      : known.find((c) => c.dir === dir && c.source === source) ??
+        known.find((c) => c.dir === dir) ??
+        toCopy(dir, probe.root, source);
   const loaded = resolve(probe.loaded, 'user');
   const effective = resolve(probe.effective, probe.effectiveSource ?? 'user');
   return {
@@ -1370,6 +1478,7 @@ export function scanHermesPluginCopies(
       dir: null,
       copies: [] as HermesPluginCopy[],
       discovered: [] as string[],
+      sameAsActiveRoot: false,
     } as HermesProjectState,
     hintRoots: [] as HermesPluginHintRoot[],
   };
@@ -1440,6 +1549,7 @@ export function scanHermesPluginCopies(
       dir: projectDir,
       copies: projectCopies,
       discovered: probe.project.discovered,
+      sameAsActiveRoot: probe.project.sameAsActiveRoot,
     },
   };
 }

@@ -452,7 +452,7 @@ describe('a malformed probe answer is rejected, never filtered (#569 r7)', () =>
   }
 
   const PROJECT = '"project": {"envSet": false, "enabled": false, "dir": null, "copies": [], ' +
-    '"discovered": []}';
+    '"discovered": [], "sameAsActiveRoot": false}';
 
   it('rejects a top-level null instead of throwing on it', () => {
     // `JSON.parse("null")` is a perfectly successful parse, and reading `.ok`
@@ -519,7 +519,7 @@ describe('a malformed probe answer is rejected, never filtered (#569 r7)', () =>
       errorFrom(
         '{"ok": true, "activeHome": "/h", "root": "/h", "roots": [], "undetermined": [], ' +
         '"project": {"envSet": false, "enabled": false, "dir": null, "copies": [3], ' +
-        '"discovered": []}}',
+        '"discovered": [], "sameAsActiveRoot": false}}',
       ),
     ).toMatch(/malformed project entry/);
     // Enabled, but unable to name the directory it says it scanned.
@@ -527,7 +527,24 @@ describe('a malformed probe answer is rejected, never filtered (#569 r7)', () =>
       errorFrom(
         '{"ok": true, "activeHome": "/h", "root": "/h", "roots": [], "undetermined": [], ' +
         '"project": {"envSet": true, "enabled": true, "dir": null, "copies": [], ' +
+        '"discovered": [], "sameAsActiveRoot": false}}',
+      ),
+    ).toMatch(/malformed project entry/);
+    // A probe with no answer about the ACTIVE-root equality is not one that
+    // found none (#569 r9): silence there is the difference between the
+    // operator's own plugins root and a source this command may not touch.
+    expect(
+      errorFrom(
+        '{"ok": true, "activeHome": "/h", "root": "/h", "roots": [], "undetermined": [], ' +
+        '"project": {"envSet": false, "enabled": false, "dir": null, "copies": [], ' +
         '"discovered": []}}',
+      ),
+    ).toMatch(/malformed project entry/);
+    expect(
+      errorFrom(
+        '{"ok": true, "activeHome": "/h", "root": "/h", "roots": [], "undetermined": [], ' +
+        '"project": {"envSet": false, "enabled": false, "dir": null, "copies": [], ' +
+        '"discovered": [], "sameAsActiveRoot": "no"}}',
       ),
     ).toMatch(/malformed project entry/);
   });
@@ -549,6 +566,7 @@ describe('a malformed probe answer is rejected, never filtered (#569 r7)', () =>
     expect(probe.roots[0].discovered).toEqual(['/h/plugins/shieldcortex']);
     expect(probe.roots[0].effectiveSource).toBe('user');
     expect(probe.project.enabled).toBe(false);
+    expect(probe.project.sameAsActiveRoot).toBe(false);
   });
 });
 

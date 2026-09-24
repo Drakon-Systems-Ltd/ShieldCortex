@@ -2800,6 +2800,33 @@ export async function checkOpenClawDuplicateInstalls(
  * when the resulting PLAN IS EMPTY, which is the shape this one takes, because
  * Hermes drops the manifest it could not read and one copy is no collision.
  *
+ * ## The project dir can BE a plugins root — and which one decides it (#569 r9)
+ *
+ * `<cwd>/.hermes/plugins` and a `plugins/` root are two names that can land on
+ * one directory, and the two ways that happens want opposite treatment.
+ *
+ * Hermes' USER source is `get_hermes_home()/plugins` and nothing else. So with
+ * `cwd=$HOME` and `HERMES_HOME=$HOME/.hermes` the project dir IS the active
+ * root: Hermes reads one directory twice under two labels, the winner is the
+ * same either way, and reading it as a project override would turn the
+ * operator's own plugins tree into a directory this repair may not touch —
+ * a permanent WARN, and a refused fix, on an ordinary host.
+ *
+ * But with `HERMES_HOME=$HOME/.hermes/profiles/work` the user source is the
+ * PROFILE, and `$HOME/.hermes/plugins` — a root this scan covers only because
+ * a gateway could run under it — is read as `project` alone. Later sources
+ * win, so the default install beats the profile's install. Suppressing it as
+ * "a root we already cover" is how the sibling Ekho change reported PASS on a
+ * host loading the other tree (ekho#85 r9 blocker C), and it is what the probe
+ * compares realpaths to avoid: the overlay is dropped for the ACTIVE root and
+ * for no other, and a path that will not resolve is undetermined rather than
+ * guessed either way.
+ *
+ * Only the EFFECTIVE winner is ever called loaded. When a project copy
+ * outranks the roots, each root's own winner is reported as a ROOT-LOCAL
+ * winner — it is still a duplicate worth clearing up, and it decides again the
+ * moment the project dir goes away, but it is not what runs.
+ *
  * Every root is reported on — a shadow in a sibling profile is a real shadow
  * whichever profile the doctor happens to be running under — with the active
  * one labelled.
@@ -2936,6 +2963,15 @@ export async function checkHermesPluginShadowing(
   // `shieldcortex`, so the installed copy still wins and "Hermes is not
   // loading the installed plugin" would be a false alarm about a real mess.
   let misloadedRoots = 0;
+  // Only the EFFECTIVE winner is ever described as loaded (#569 r9 nit 1).
+  // Once a project copy outranks every root, "Hermes loads X" about a root's
+  // own winner contradicts the clause two sentences later that names the copy
+  // the gateway actually runs — and "the installed copy is the one loaded" is
+  // flatly untrue. The root-local fact is still worth reporting (a duplicate
+  // is a duplicate, and the moment the project dir goes away it decides
+  // again), so it is reported as what it is.
+  const winnerPhrase = (dir: string): string =>
+    projectCopies.length > 0 ? `the root-local winner is ${dir}` : `Hermes loads ${dir}`;
   for (const rootScan of shadowedRoots) {
     const all = rootScan.copies.map((c) => tildify(c.dir)).join(', ');
     const loaded = tildify(rootScan.loaded!.dir);
@@ -2943,14 +2979,14 @@ export async function checkHermesPluginShadowing(
       orphanedRoots += 1;
       misloadedRoots += 1;
       clauses.push(
-        `${named(rootScan)}: ${all} — Hermes loads ${loaded}, and there is no ` +
+        `${named(rootScan)}: ${all} — ${winnerPhrase(loaded)}, and there is no ` +
         `canonical ${tildify(path.join(rootScan.root, 'shieldcortex'))} beside it`,
       );
     } else if (rootScan.loaded!.canonical) {
       repairableRoots += 1;
       clauses.push(
         `${named(rootScan)}: ${rootScan.copies.length} copies (${all}) — ` +
-        `Hermes loads ${loaded}, which IS the installed copy, because the extra ` +
+        `${winnerPhrase(loaded)}, which IS the installed copy, because the extra ` +
         `cop${rootScan.copies.length === 2 ? 'y sorts' : 'ies sort'} BEFORE it in ` +
         'discovery order; the next backup that sorts after it would win instead, silently',
       );
@@ -2959,19 +2995,33 @@ export async function checkHermesPluginShadowing(
       misloadedRoots += 1;
       clauses.push(
         `${named(rootScan)}: ${rootScan.copies.length} copies (${all}) — ` +
-        `Hermes loads ${loaded} (last in sorted order wins), shadowing ` +
+        `${winnerPhrase(loaded)} (last in sorted order wins), shadowing ` +
         `${tildify(path.join(rootScan.root, 'shieldcortex'))}`,
       );
     }
   }
   if (projectCopies.length > 0) {
     const all = projectCopies.map((c) => tildify(c.dir)).join(', ');
+    // The overlap worth spelling out (#569 r9): the project dir can be one of
+    // the roots listed two clauses up, which reads as a contradiction until
+    // somebody says that Hermes' USER source is the active home alone. A
+    // lexical comparison is right here and nowhere else — this is a note, not
+    // the decision; the decision is the probe's, on resolved paths.
+    const alsoARoot =
+      scan.project.dir !== null &&
+      scan.roots.some((r) => path.resolve(r.root) === path.resolve(scan.project.dir as string));
+    const activeRootPath = scan.roots.find((r) => r.active)?.root ?? path.join(hermesHome, 'plugins');
     clauses.push(
       `the project plugin directory ${tildify(scan.project.dir ?? '')} holds ` +
       `${projectCopies.length} \`shieldcortex\` cop${projectCopies.length === 1 ? 'y' : 'ies'} ` +
       `(${all}) — \`HERMES_ENABLE_PROJECT_PLUGINS\` is enabled and Hermes scans the project ` +
       `directory AFTER the user plugins, so ${tildify(projectWinner?.dir ?? '')} is what a ` +
-      'gateway started in that working directory loads, whatever is installed in the roots above'
+      'gateway started in that working directory loads, whatever is installed in the roots above' +
+      (alsoARoot
+        ? `; that directory is itself one of the plugin roots above, but it is NOT the active ` +
+          `one — Hermes' user source is ${tildify(activeRootPath)} alone, so here it is read as ` +
+          'the project source, and that is exactly why it wins'
+        : '')
     );
   }
 
@@ -3049,13 +3099,28 @@ export async function checkHermesPluginShadowing(
  */
 function describeProjectSource(project: HermesProjectState): string {
   const where = '`<cwd>/.hermes/plugins`';
+  const gatewayCaveat =
+    'Project plugins follow the GATEWAY\'s working directory and environment, which this ' +
+    'check cannot see: a gateway started elsewhere scans a different directory, and one ' +
+    'started without the variable scans none.';
+  // One directory, read twice (#569 r9). Saying nothing here would leave an
+  // operator who can see `HERMES_ENABLE_PROJECT_PLUGINS` in their environment
+  // wondering why no project directory is reported on; saying it is a separate
+  // source would make their own plugins root look untouchable.
+  if (project.enabled && project.sameAsActiveRoot) {
+    return (
+      '`HERMES_ENABLE_PROJECT_PLUGINS` is enabled in this doctor\'s environment, and the ' +
+      `project plugin directory it names (${tildify(project.dir ?? where)}) IS the active ` +
+      'plugins root, which Hermes therefore scans a second time under the `project` label — ' +
+      `same directory, same copies, same winner, and reported above as that root. ` +
+      gatewayCaveat
+    );
+  }
   if (project.enabled) {
     return (
       '`HERMES_ENABLE_PROJECT_PLUGINS` is enabled in this doctor\'s environment, so Hermes ' +
       `also scanned the project plugin directory ${tildify(project.dir ?? where)} and its ` +
-      'copies are included above. Project plugins follow the GATEWAY\'s working directory and ' +
-      'environment, which this check cannot see: a gateway started elsewhere scans a different ' +
-      'directory, and one started without the variable scans none.'
+      `copies are included above. ${gatewayCaveat}`
     );
   }
   if (project.envSet) {

@@ -130,6 +130,40 @@ describe('hermes install', () => {
     },
   );
 
+  (HAS_HERMES ? it : it.skip)(
+    'marks the root winner root-local when a project copy outranks it (#569 r9)',
+    async () => {
+      // Two lines carrying `LOADED BY HERMES` is one line too many: Hermes
+      // scans the project directory after the user plugins, so the project
+      // copy is the one that runs and the root's own winner is a local fact.
+      const { home, shadow } = shadowedHome();
+      const project = mkdtempSync(join(tmpdir(), 'sc-hermes-proj-'));
+      homes.push(project);
+      const projectCopy = join(project, '.hermes', 'plugins', 'shieldcortex');
+      mkdirSync(projectCopy, { recursive: true });
+      writeFileSync(join(projectCopy, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+      const savedProjectPlugins = process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+      const savedCwd = process.cwd();
+      process.env.HERMES_ENABLE_PROJECT_PLUGINS = '1';
+      process.chdir(project);
+
+      let text: string;
+      try {
+        text = await installCapturingWarnings(home);
+      } finally {
+        process.chdir(savedCwd);
+        if (savedProjectPlugins === undefined) delete process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+        else process.env.HERMES_ENABLE_PROJECT_PLUGINS = savedProjectPlugins;
+      }
+
+      expect(text).toMatch(/Hermes is loading a different `shieldcortex` copy/);
+      expect(text).toMatch(new RegExp(`${shadow} {2}→ ROOT-LOCAL WINNER`));
+      expect(text).toMatch(/→ PROJECT PLUGIN, LOADED BY HERMES/);
+      // Exactly one loading claim, and it belongs to the project copy.
+      expect(text.match(/LOADED BY HERMES/g)).toHaveLength(1);
+    },
+  );
+
   it('says nothing about copies when Hermes cannot be asked (#569 r4)', async () => {
     // No interpreter to resolve, so there is no answer to give. An install log
     // is the wrong place to learn "I could not tell" — `shieldcortex doctor`

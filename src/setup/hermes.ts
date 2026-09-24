@@ -56,7 +56,9 @@ function pluginDestDir(home: string = os.homedir()): string {
  * as a duplicate to clear up rather than as an install that is not running. And
  * a copy in an enabled project directory DOES win, over every user root, so it
  * is named as the loaded one even though nothing here or in the doctor will
- * ever move it.
+ * ever move it — and it is then the ONLY copy named as loaded (#569 r9): each
+ * root's own winner is marked root-local, because two `LOADED BY HERMES` marks
+ * cannot both be true and the root-local one is the false one.
  */
 function warnOnShadowingCopies(home: string): void {
   let scan: ReturnType<typeof scanHermesPluginCopies>;
@@ -85,9 +87,13 @@ function warnOnShadowingCopies(home: string): void {
       ? '⚠️  Hermes is loading a different `shieldcortex` copy than the one just installed.'
       : '⚠️  Duplicate `shieldcortex` plugin copies are visible to Hermes.',
   );
+  // Only the EFFECTIVE winner is marked as loaded (#569 r9). Once a project
+  // copy outranks every root, two lines carrying `LOADED BY HERMES` is one
+  // line too many, and the root-local one is the false one.
+  const rootMark = projectCopies.length > 0 ? '  → ROOT-LOCAL WINNER' : '  → LOADED BY HERMES';
   for (const rootScan of shadowedRoots) {
     for (const copy of rootScan.copies) {
-      const mark = copy.dir === rootScan.loaded!.dir ? '  → LOADED BY HERMES' : '';
+      const mark = copy.dir === rootScan.loaded!.dir ? rootMark : '';
       console.warn(`      ${copy.dir}${mark}`);
     }
   }
