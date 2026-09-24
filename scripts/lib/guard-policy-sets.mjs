@@ -54,6 +54,7 @@ export const DANGEROUS_TIER = Object.freeze([
   'privilege-escalation',
   'modify-scheduler',
   'modify-network-firewall',
+  'modify-shell-startup',
   'install-package',
   'install-package-global',
   'registry-code-exec',
@@ -154,6 +155,7 @@ export const CREDENTIAL_EGRESS = Object.freeze([
 /** A one-shot action becoming a standing one: scheduler, shell rc, hook/agent config. */
 export const PERSISTENCE_SINKS = Object.freeze([
   'modify-scheduler',
+  'modify-shell-startup',
   'persistence-risk',
 ]);
 
