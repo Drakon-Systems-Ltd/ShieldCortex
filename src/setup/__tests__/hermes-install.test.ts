@@ -102,6 +102,34 @@ describe('hermes install', () => {
     },
   );
 
+  (HAS_HERMES ? it : it.skip)(
+    'calls a copy that sorts FIRST a duplicate, not a downgrade (#569 r7)',
+    async () => {
+      // `old-shieldcortex` sorts BEFORE `shieldcortex`, so the copy just
+      // installed is still the one Hermes loads. The duplicate is worth saying
+      // out loud — the next backup that sorts after it takes over silently —
+      // but telling an operator their install is not running is false here, and
+      // sends them hunting a fault that is not there.
+      const home = mkdtempSync(join(tmpdir(), 'sc-hermes-'));
+      homes.push(home);
+      const duplicate = join(home, '.hermes', 'plugins', 'old-shieldcortex');
+      mkdirSync(duplicate, { recursive: true });
+      writeFileSync(join(duplicate, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+
+      const text = await installCapturingWarnings(home);
+
+      expect(text).toMatch(/Duplicate `shieldcortex` plugin copies/);
+      expect(text).toMatch(/old-shieldcortex/);
+      expect(text).not.toMatch(/is what runs, not what/);
+      expect(text).toMatch(/still the one loaded/);
+      expect(text).toMatch(/--fix-hermes-plugin-copies/);
+      // The mark still says which copy Hermes loads — and it is ours.
+      expect(text).toMatch(/shieldcortex {2}→ LOADED BY HERMES/);
+      expect(existsSync(join(duplicate, 'plugin.yaml'))).toBe(true);
+      expect(existsSync(join(home, '.hermes', 'backups'))).toBe(false);
+    },
+  );
+
   it('says nothing about copies when Hermes cannot be asked (#569 r4)', async () => {
     // No interpreter to resolve, so there is no answer to give. An install log
     // is the wrong place to learn "I could not tell" — `shieldcortex doctor`

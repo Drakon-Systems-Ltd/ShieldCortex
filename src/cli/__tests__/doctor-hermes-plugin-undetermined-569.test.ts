@@ -430,7 +430,9 @@ describe('a probe that does not say what it could not read is not trusted (#569 
       fake,
       [
         '#!/bin/sh',
-        'echo \'{"ok": true, "activeHome": "/h", "root": "/h", "roots": [], "undetermined": []}\'',
+        'echo \'{"ok": true, "activeHome": "/h", "root": "/h", "roots": [], "undetermined": [],' +
+          ' "project": {"envSet": false, "enabled": false, "dir": null, "copies": [],' +
+          ' "discovered": []}}\'',
         '',
       ].join('\n'),
     );

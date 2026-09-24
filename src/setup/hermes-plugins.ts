@@ -98,6 +98,33 @@
  * `fs.existsSync` and Python's `Path.exists()` both return false on a
  * permission error, so neither is allowed anywhere an absence would permit a
  * move; the checked helpers below use stat/lstat and test the errno.
+ *
+ * ## The collision set is not the protection set (#569 r7)
+ *
+ * Only an exact `shieldcortex` key can collide with the installed plugin, so
+ * the copy list stays exactly that. But `scan_directory` keys a manifest one
+ * level down as `<category>/<name>`, and
+ * `profiles/work/plugins/security/shieldcortex -> plugins/shieldcortex.bak-x`
+ * is a real, enabled installation that resolves THROUGH a directory the repair
+ * would move. Filtering it out of the scan took it out of the symlink walk and
+ * the dependent-path preflight as well, and the repair stranded it.
+ *
+ * So the probe now also returns `discovered` — every manifest directory in
+ * every protective root, all keys, categories included. It decides nothing:
+ * no collision, no winner, no move. The repair walks it and protects it.
+ *
+ * ## The user roots are not the whole of discovery either (#569 r7)
+ *
+ * `collect_directory_manifests` scans `Path.cwd()/.hermes/plugins` as source
+ * `"project"` AFTER the user source when `HERMES_ENABLE_PROJECT_PLUGINS` is
+ * enabled, and `resolve_manifest_winners` lets the later source win. A
+ * canonical home install with an older copy in a project directory is
+ * therefore a host running the old code, and the per-root winner alone called
+ * it clean. The probe asks Hermes' own `_env_enabled` whether the switch is
+ * on, scans the project directory when it is, and reports the EFFECTIVE winner
+ * per root. Nothing is ever moved from or into that directory: which copy is
+ * authoritative there is a human's call, and the gateway's working directory
+ * is not something this process can see.
  */
 
 import { spawnSync } from 'child_process';
@@ -132,6 +159,16 @@ const FOREIGN_HARNESS_MANIFEST_DIRS: ReadonlySet<string> = new Set([
   '.kimi-plugin',
 ]);
 
+/**
+ * Which of Hermes' discovery sources a manifest came from.
+ *
+ * `user` is a `plugins/` root under the Hermes home or a profile — the tree the
+ * installer writes to and the only one this command ever moves anything in.
+ * `project` is `<cwd>/.hermes/plugins`, scanned after user when
+ * `HERMES_ENABLE_PROJECT_PLUGINS` is enabled, which means it WINS (#569 r7).
+ */
+export type HermesPluginSource = 'user' | 'project';
+
 /** One directory under a `plugins/` root whose manifest declares our name. */
 export interface HermesPluginCopy {
   /** Absolute path of the plugin directory, exactly as discovery names it. */
@@ -140,8 +177,15 @@ export interface HermesPluginCopy {
   dirName: string;
   /** The `plugins/` root it was found under. */
   root: string;
-  /** True only for `<root>/shieldcortex`, the directory our installer writes. */
+  /**
+   * True only for `<root>/shieldcortex` under a USER root, the directory our
+   * installer writes. A copy in the project directory is never canonical
+   * however it is named: the installer never writes there, and a repair never
+   * touches it (#569 r7).
+   */
   canonical: boolean;
+  /** Which discovery source found it. */
+  source: HermesPluginSource;
 }
 
 /** Hermes' answer for one `plugins/` root. */
@@ -149,8 +193,31 @@ export interface HermesPluginRootScan {
   root: string;
   /** Every copy keyed `shieldcortex`, in Hermes' discovery order. */
   copies: HermesPluginCopy[];
-  /** The one Hermes actually loads: the winner of the key. */
+  /**
+   * The winner of the key among THIS ROOT's own copies. `effective` is what
+   * the gateway really loads; the two differ only when a project plugin
+   * overrides this root (#569 r7).
+   */
   loaded: HermesPluginCopy | null;
+  /**
+   * What a gateway running on this root actually loads for the key, once the
+   * project source is taken into account — `resolve_manifest_winners` over
+   * this root plus the project directory, which is Hermes' own precedence.
+   * Equal to `loaded` whenever project plugins are off or hold no copy.
+   */
+  effective: HermesPluginCopy | null;
+  /**
+   * Every plugin directory Hermes discovered a manifest in under this root —
+   * ALL keys, categories included, ours and everyone else's (#569 r7).
+   *
+   * This is a PROTECTION list and nothing else. It never decides a collision,
+   * a winner or a move: only an exact `shieldcortex` key can collide with the
+   * installed plugin. But `profiles/work/plugins/security/shieldcortex` is
+   * keyed `security/shieldcortex`, and it can be a symlink to the very backup
+   * this repair would move — so the repair walks and protects every one of
+   * these paths even though none of them is a copy.
+   */
+  discovered: string[];
   /** Whether `<root>/shieldcortex` is among the copies. */
   hasCanonical: boolean;
   /** More than one copy, or a single copy that is not the canonical one. */
@@ -189,6 +256,34 @@ export interface HermesUndetermined {
   path: string;
   /** The error, as `ErrorName: message` (Python) or `CODE: message` (Node). */
   error: string;
+}
+
+/**
+ * Hermes' OPT-IN PROJECT PLUGIN SOURCE, as this host has it configured (#569
+ * r7).
+ *
+ * `collect_directory_manifests` scans `Path.cwd()/.hermes/plugins` as source
+ * `"project"` AFTER the user plugins when `HERMES_ENABLE_PROJECT_PLUGINS` is
+ * enabled, and later sources win. So an old copy in a project directory beats
+ * the canonical install silently, and a check that looked only at the user
+ * roots would certify that host clean.
+ *
+ * Two honest limits, both said out loud in the row rather than papered over:
+ * the working directory here is the DOCTOR's, not the gateway's, and the
+ * variable read here is the DOCTOR's environment. Nothing in this process can
+ * see either of the gateway's.
+ */
+export interface HermesProjectState {
+  /** Whether `HERMES_ENABLE_PROJECT_PLUGINS` is present at all in this environment. */
+  envSet: boolean;
+  /** Hermes' own `_env_enabled` verdict for it — set is not the same as enabled. */
+  enabled: boolean;
+  /** `<cwd>/.hermes/plugins`, as Hermes would compute it here. Null unless enabled. */
+  dir: string | null;
+  /** Copies keyed `shieldcortex` in that directory, in discovery order. */
+  copies: HermesPluginCopy[];
+  /** Every manifest directory there, all keys — the protection list again. */
+  discovered: string[];
 }
 
 export interface HermesPluginScan {
@@ -232,9 +327,17 @@ export interface HermesPluginScan {
    */
   undetermined: HermesUndetermined[];
   roots: HermesPluginRootScan[];
-  /** Every copy across every root, roots in order. */
+  /** Every copy across every root, roots in order. Never project copies. */
   copies: HermesPluginCopy[];
+  /**
+   * Every plugin directory Hermes discovered a manifest in, across every
+   * protective root AND the project directory — all keys, deduplicated, roots
+   * in order (#569 r7). Protection only; see `HermesPluginRootScan.discovered`.
+   */
+  discovered: string[];
   shadowed: boolean;
+  /** The project source, and what is in it. */
+  project: HermesProjectState;
   /** Unverified hints per root. Empty when `fromHermes`. */
   hintRoots: HermesPluginHintRoot[];
 }
@@ -684,16 +787,58 @@ const PROBE_SCRIPT = [
   '            if _ps is not None and _ps[1]:',
   '                _add(os.path.join(_profiles, _n, "plugins"))',
   '        _add(os.path.join(_active, "plugins"))',
+  // ── Project plugins, from Hermes' own switch (#569 r7) ────────────────
+  //
+  // `collect_directory_manifests` scans `Path.cwd()/.hermes/plugins` as source
+  // `"project"` AFTER the user source when `HERMES_ENABLE_PROJECT_PLUGINS` is
+  // enabled, and `resolve_manifest_winners` lets the later source win. So an
+  // older copy sitting in a project directory beats the canonical install, and
+  // a scan of the user roots alone reports a host that is clean and is not.
+  //
+  // Whether the switch is on is Hermes' own question, asked of Hermes' own
+  // helper through the same origin module `plugins_discovery` uses. If that
+  // helper cannot be reached and the variable is set to anything at all, the
+  // whole probe fails: "the switch might be on and I could not ask" is not a
+  // clean bill of health.
+  '        _proj = {"envSet": ("HERMES_ENABLE_PROJECT_PLUGINS" in os.environ), "enabled": False,',
+  '                 "dir": None, "copies": [], "discovered": []}',
+  '        try:',
+  '            from hermes_cli import plugins as _origin',
+  '            _proj["enabled"] = bool(_origin._env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"))',
+  '        except BaseException as _pexc:',
+  '            if _proj["envSet"]:',
+  '                raise RuntimeError("HERMES_ENABLE_PROJECT_PLUGINS is set but the Hermes helper '
+    + '_env_enabled could not be reached (%s: %s)" % (type(_pexc).__name__, _pexc))',
+  '        _proj_ms = []',
+  '        if _proj["enabled"]:',
+  // Hermes' own expression, evaluated in this child: the doctor's working
+  // directory. It is NOT the gateway's, which nothing here can see — the
+  // caller says so in the row rather than pretending otherwise.
+  '            _pdir = os.path.normpath(os.path.abspath(os.path.join(os.getcwd(), ".hermes", "plugins")))',
+  '            _proj["dir"] = _pdir',
+  '            _audit(_pdir, 0)',
+  '            _proj_ms = scan_directory(Path(_pdir), "project")',
+  '            _proj["copies"] = [str(_m.path) for _m in _proj_ms if manifest_key(_m) == _name]',
+  '            _proj["discovered"] = [str(_m.path) for _m in _proj_ms]',
   '        _out = []',
   '        for _r in _roots:',
   '            _audit(_r, 0)',
   '            _ms = scan_directory(Path(_r), "user")',
   '            _copies = [str(_m.path) for _m in _ms if manifest_key(_m) == _name]',
+  // EVERY manifest in the root, under every key — categories included (#569
+  // r7). The collision set stays exactly what it was, because only an exact
+  // `shieldcortex` key can collide; but `security/shieldcortex` in a profile
+  // is a real installation that can be a symlink to the very backup this
+  // repair would move, and a plan that cannot see it strands it.
+  '            _disc = [str(_m.path) for _m in _ms]',
   '            _win = resolve_manifest_winners(_ms).get(_name)',
-  '            _out.append({"root": _r, "copies": _copies,',
-  '                         "loaded": (str(_win.path) if _win is not None else None)})',
+  '            _eff = resolve_manifest_winners(_ms + _proj_ms).get(_name)',
+  '            _out.append({"root": _r, "copies": _copies, "discovered": _disc,',
+  '                         "loaded": (str(_win.path) if _win is not None else None),',
+  '                         "effective": (str(_eff.path) if _eff is not None else None),',
+  '                         "effectiveSource": (str(_eff.source) if _eff is not None else None)})',
   '    _real.write(json.dumps({"ok": True, "activeHome": _active, "root": _root, "roots": _out,',
-  '                            "undetermined": _undet}))',
+  '                            "project": _proj, "undetermined": _undet}))',
   'except BaseException as _exc:',
   '    _real.write(json.dumps({"ok": False, "error": "%s: %s" % (type(_exc).__name__, _exc)}))',
 ].join('\n');
@@ -701,7 +846,22 @@ const PROBE_SCRIPT = [
 interface ProbeRoot {
   root: string;
   copies: string[];
+  /** Every manifest directory in the root, all keys (#569 r7). */
+  discovered: string[];
+  /** The winner among this root's own copies. */
   loaded: string | null;
+  /** The winner once the project source is included. */
+  effective: string | null;
+  /** Which source `effective` came from. Null exactly when `effective` is. */
+  effectiveSource: HermesPluginSource | null;
+}
+
+interface ProbeProject {
+  envSet: boolean;
+  enabled: boolean;
+  dir: string | null;
+  copies: string[];
+  discovered: string[];
 }
 
 /** Everything the probe answers: where Hermes lives, and what is in each root. */
@@ -712,6 +872,8 @@ export interface HermesProbeResult {
   root: string;
   /** Every protective root, in the order the probe built them. */
   roots: ProbeRoot[];
+  /** Hermes' project source, as this environment has it configured (#569 r7). */
+  project: ProbeProject;
   /**
    * Every place the filesystem could not answer (#569 r6). Empty is the normal
    * case and the only one in which `roots` is a complete picture; a single
@@ -771,14 +933,15 @@ export function probeHermesDiscovery(
   } catch {
     return { error: 'Hermes probe produced no parseable result' };
   }
-  const record = parsed as {
-    ok?: unknown;
-    error?: unknown;
-    activeHome?: unknown;
-    root?: unknown;
-    roots?: unknown;
-    undetermined?: unknown;
-  };
+  // Shape first, dereference second (#569 r7). `JSON.parse('null')` is a
+  // perfectly successful parse, and reading `.ok` off it throws a TypeError out
+  // of a function whose whole contract is to RETURN "no answer" — the caller
+  // then reports a crash rather than an undetermined scan. Nothing below is
+  // filtered, either: a response with one malformed element is a response from
+  // something that is not the probe, and taking the rest of it on trust is how
+  // a copy goes missing from the collision set.
+  if (!isRecord(parsed)) return { error: 'Hermes probe produced no result object' };
+  const record = parsed;
   if (record.ok !== true || !Array.isArray(record.roots)) {
     const why = typeof record.error === 'string' ? record.error : 'unknown reason';
     return { error: `Hermes could not be asked — ${why}` };
@@ -793,56 +956,133 @@ export function probeHermesDiscovery(
     return { error: 'Hermes probe did not say which paths it could not read' };
   }
   const undetermined: HermesUndetermined[] = [];
-  for (const entry of record.undetermined as unknown[]) {
-    const row = entry as { path?: unknown; error?: unknown };
-    if (typeof row?.path !== 'string' || typeof row?.error !== 'string') {
+  for (const entry of record.undetermined) {
+    if (!isRecord(entry) || typeof entry.path !== 'string' || typeof entry.error !== 'string') {
       return { error: 'Hermes probe returned a malformed undetermined entry' };
     }
-    undetermined.push({ path: row.path, error: row.error });
+    undetermined.push({ path: entry.path, error: entry.error });
   }
   const out: ProbeRoot[] = [];
-  for (const entry of record.roots as Array<Record<string, unknown>>) {
-    const root = typeof entry.root === 'string' ? entry.root : null;
-    if (root === null || !Array.isArray(entry.copies)) {
+  for (const entry of record.roots) {
+    if (!isRecord(entry) || typeof entry.root !== 'string') {
       return { error: 'Hermes probe returned a malformed root entry' };
     }
-    out.push({
-      root,
-      copies: (entry.copies as unknown[]).filter((c): c is string => typeof c === 'string'),
-      loaded: typeof entry.loaded === 'string' ? entry.loaded : null,
-    });
+    const copies = stringArray(entry.copies);
+    const discovered = stringArray(entry.discovered);
+    if (copies === null || discovered === null) {
+      return { error: 'Hermes probe returned a malformed root entry' };
+    }
+    const loaded = optionalString(entry.loaded);
+    const effective = optionalString(entry.effective);
+    if (loaded === undefined || effective === undefined) {
+      return { error: 'Hermes probe returned a malformed root entry' };
+    }
+    const effectiveSource = pluginSource(entry.effectiveSource);
+    if (effectiveSource === undefined || (effective === null) !== (effectiveSource === null)) {
+      return { error: 'Hermes probe returned a malformed root entry' };
+    }
+    out.push({ root: entry.root, copies, discovered, loaded, effective, effectiveSource });
   }
-  return { activeHome: record.activeHome, root: record.root, roots: out, undetermined };
+  const project = projectFrom(record.project);
+  if (project === null) return { error: 'Hermes probe returned a malformed project entry' };
+  return { activeHome: record.activeHome, root: record.root, roots: out, project, undetermined };
 }
 
-function toCopy(dir: string, root: string): HermesPluginCopy {
+/** A JSON object — not null, not an array, which `typeof` alone cannot say. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** `value` as an array of strings, or null when ANY element is not one. */
+function stringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return null;
+    out.push(item);
+  }
+  return out;
+}
+
+/** A string or an explicit null; `undefined` means "neither, so malformed". */
+function optionalString(value: unknown): string | null | undefined {
+  if (typeof value === 'string') return value;
+  if (value === null) return null;
+  return undefined;
+}
+
+/** One of Hermes' two directory sources, or null; `undefined` is malformed. */
+function pluginSource(value: unknown): HermesPluginSource | null | undefined {
+  if (value === 'user' || value === 'project') return value;
+  if (value === null) return null;
+  return undefined;
+}
+
+/** The project block, validated whole; null rejects the entire response. */
+function projectFrom(value: unknown): ProbeProject | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.envSet !== 'boolean' || typeof value.enabled !== 'boolean') return null;
+  const dir = optionalString(value.dir);
+  if (dir === undefined) return null;
+  const copies = stringArray(value.copies);
+  const discovered = stringArray(value.discovered);
+  if (copies === null || discovered === null) return null;
+  // Enabled means the directory was computed and scanned; a payload that says
+  // it scanned a directory it cannot name is not one to act on.
+  if (value.enabled && dir === null) return null;
+  return { envSet: value.envSet, enabled: value.enabled, dir, copies, discovered };
+}
+
+function toCopy(dir: string, root: string, source: HermesPluginSource): HermesPluginCopy {
   const dirName = path.basename(dir);
   return {
     dir,
     dirName,
     root,
-    // Canonical is a position, not just a name: `<root>/shieldcortex` is the
-    // directory the installer writes. A `shieldcortex` nested under a category
-    // is a different key entirely and never reaches here.
-    canonical: dirName === HERMES_PLUGIN_NAME && path.resolve(path.dirname(dir)) === path.resolve(root),
+    // Canonical is a position AND a source, not just a name: it is the
+    // directory the installer writes, which is always `<root>/shieldcortex`
+    // under a user root. A `shieldcortex` nested under a category is a
+    // different key entirely and never reaches here; a `shieldcortex` in the
+    // project directory is a copy the installer never wrote and this command
+    // never moves, so it is not the canonical one either (#569 r7).
+    canonical:
+      source === 'user' &&
+      dirName === HERMES_PLUGIN_NAME &&
+      path.resolve(path.dirname(dir)) === path.resolve(root),
+    source,
   };
 }
 
 
 /**
  * Hermes' answer for one root, turned into the shape doctor reports on.
+ *
+ * `projectCopies` are the project source's own copies, already built: the
+ * effective winner for this root can be one of them, and it has to come back
+ * carrying its real root and source rather than being re-attributed to the
+ * user root that it beat (#569 r7).
  */
-function rootScanFrom(probe: ProbeRoot, activeHome: string): HermesPluginRootScan {
-  const copies = probe.copies.map((dir) => toCopy(dir, probe.root));
-  const loaded =
-    probe.loaded === null
-      ? null
-      : copies.find((c) => c.dir === probe.loaded) ?? toCopy(probe.loaded, probe.root);
+function rootScanFrom(
+  probe: ProbeRoot,
+  activeHome: string,
+  projectCopies: HermesPluginCopy[],
+): HermesPluginRootScan {
+  const copies = probe.copies.map((dir) => toCopy(dir, probe.root, 'user'));
+  const known = [...copies, ...projectCopies];
+  const resolve = (dir: string | null, source: HermesPluginSource): HermesPluginCopy | null =>
+    dir === null ? null : known.find((c) => c.dir === dir) ?? toCopy(dir, probe.root, source);
+  const loaded = resolve(probe.loaded, 'user');
+  const effective = resolve(probe.effective, probe.effectiveSource ?? 'user');
   return {
     root: probe.root,
     copies,
     loaded,
+    effective,
+    discovered: probe.discovered,
     hasCanonical: copies.some((c) => c.canonical),
+    // Root-local, deliberately: "is the copy this root installed the one this
+    // root loads". A project plugin overriding the root is a different fact
+    // with a different remedy, carried by `effective` and reported on its own.
     shadowed: copies.length > 1 || (loaded !== null && !loaded.canonical),
     active: path.resolve(probe.root) === path.resolve(path.join(activeHome, 'plugins')),
   };
@@ -953,7 +1193,19 @@ export function scanHermesPluginCopies(
     undetermined: [] as HermesUndetermined[],
     roots: [] as HermesPluginRootScan[],
     copies: [] as HermesPluginCopy[],
+    discovered: [] as string[],
     shadowed: false,
+    // Nothing was asked of Hermes on these paths, so `enabled` stays false and
+    // says only that: whether the switch is ON is Hermes' answer to give, and
+    // where there is no answer there is no verdict. `envSet` is a fact about
+    // this process's own environment and is true regardless.
+    project: {
+      envSet: process.env.HERMES_ENABLE_PROJECT_PLUGINS !== undefined,
+      enabled: false,
+      dir: null,
+      copies: [] as HermesPluginCopy[],
+      discovered: [] as string[],
+    } as HermesProjectState,
     hintRoots: [] as HermesPluginHintRoot[],
   };
   // "Not detected" is a conclusion, and it may only be drawn from an answer.
@@ -998,7 +1250,16 @@ export function scanHermesPluginCopies(
     };
   }
 
-  const rootScans = probe.roots.map((entry) => rootScanFrom(entry, probe.activeHome));
+  const projectDir = probe.project.dir;
+  const projectCopies = probe.project.copies.map((dir) =>
+    toCopy(dir, projectDir ?? path.dirname(dir), 'project'),
+  );
+  const rootScans = probe.roots.map((entry) =>
+    rootScanFrom(entry, probe.activeHome, projectCopies),
+  );
+  const discovered = [
+    ...new Set([...rootScans.flatMap((r) => r.discovered), ...probe.project.discovered]),
+  ];
   return {
     ...base,
     hermesHome: probe.activeHome,
@@ -1006,7 +1267,15 @@ export function scanHermesPluginCopies(
     fromHermes: true,
     roots: rootScans,
     copies: rootScans.flatMap((r) => r.copies),
+    discovered,
     shadowed: rootScans.some((r) => r.shadowed),
+    project: {
+      envSet: probe.project.envSet,
+      enabled: probe.project.enabled,
+      dir: projectDir,
+      copies: projectCopies,
+      discovered: probe.project.discovered,
+    },
   };
 }
 

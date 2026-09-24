@@ -50,6 +50,13 @@ function pluginDestDir(home: string = os.homedir()): string {
  * an environment with `HERMES_HOME` UNSET, and Hermes' own resolution then
  * lands on exactly that default home rather than wherever the operator's shell
  * points (#569 r5).
+ *
+ * Two things it is careful not to overstate (#569 r7). A copy that sorts
+ * BEFORE `shieldcortex` — `old-shieldcortex` — does not win, so it is reported
+ * as a duplicate to clear up rather than as an install that is not running. And
+ * a copy in an enabled project directory DOES win, over every user root, so it
+ * is named as the loaded one even though nothing here or in the doctor will
+ * ever move it.
  */
 function warnOnShadowingCopies(home: string): void {
   let scan: ReturnType<typeof scanHermesPluginCopies>;
@@ -59,20 +66,48 @@ function warnOnShadowingCopies(home: string): void {
     // A scan that cannot run must never fail an otherwise-good install.
     return;
   }
-  if (!scan.fromHermes || !scan.shadowed) return;
+  if (!scan.fromHermes) return;
+  const projectCopies = scan.project.enabled ? scan.project.copies : [];
+  const shadowedRoots = scan.roots.filter((r) => r.shadowed && r.loaded !== null);
+  if (shadowedRoots.length === 0 && projectCopies.length === 0) return;
+
+  // Whether the copy Hermes loads is the one just installed (#569 r7 nit 3). A
+  // backup named `old-shieldcortex` sorts BEFORE `shieldcortex`, so the install
+  // does run — the duplicate is a trap for the next rename, not a live
+  // downgrade, and saying otherwise sends an operator hunting a fault that is
+  // not there. A project copy, on the other hand, outranks every user root.
+  const misloading =
+    shadowedRoots.some((r) => !r.loaded!.canonical) || projectCopies.length > 0;
 
   console.warn();
-  console.warn('⚠️  Other `shieldcortex` plugin copies are visible to Hermes.');
-  for (const rootScan of scan.roots) {
-    if (!rootScan.shadowed || rootScan.loaded === null) continue;
+  console.warn(
+    misloading
+      ? '⚠️  Hermes is loading a different `shieldcortex` copy than the one just installed.'
+      : '⚠️  Duplicate `shieldcortex` plugin copies are visible to Hermes.',
+  );
+  for (const rootScan of shadowedRoots) {
     for (const copy of rootScan.copies) {
-      const mark = copy.dir === rootScan.loaded.dir ? '  → LOADED BY HERMES' : '';
+      const mark = copy.dir === rootScan.loaded!.dir ? '  → LOADED BY HERMES' : '';
       console.warn(`      ${copy.dir}${mark}`);
     }
   }
+  for (const copy of projectCopies) {
+    console.warn(`      ${copy.dir}  → PROJECT PLUGIN, LOADED BY HERMES`);
+  }
   console.warn('    Hermes keys plugins on the manifest `name:` and the last one in sorted');
-  console.warn('    order wins silently — so the copy marked above is what runs, not what');
-  console.warn('    was just installed.');
+  if (misloading) {
+    console.warn('    order wins silently — so the copy marked above is what runs, not what');
+    console.warn('    was just installed.');
+  } else {
+    console.warn('    order wins silently. The copy just installed is still the one loaded,');
+    console.warn('    because the extras sort before it — but the next backup that sorts');
+    console.warn('    after it would take over with nothing said.');
+  }
+  if (projectCopies.length > 0) {
+    console.warn('    HERMES_ENABLE_PROJECT_PLUGINS is enabled, and Hermes scans the project');
+    console.warn('    directory AFTER the user plugins. Nothing moves that copy for you:');
+    console.warn('    what belongs in a project tree is the project owner\'s call.');
+  }
   console.warn('    Fix:  shieldcortex doctor --fix-hermes-plugin-copies');
   console.warn('    Then restart the Hermes gateway — discovery only re-runs at start-up.');
   console.warn();
