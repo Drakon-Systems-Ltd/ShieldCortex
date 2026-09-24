@@ -331,19 +331,27 @@ export function refreshHermesPluginCopies(
     let staging: string;
     try {
       staging = reserveBackupDir(stagingParent, `.shieldcortex-staging-${stamp}`);
-      copyPluginTree(sourceDir, path.join(staging, path.basename(target.dir)));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       detail.push(`${target.dir}: could not stage the new copy — ${msg}; left in place`);
       continue;
     }
     const staged = path.join(staging, path.basename(target.dir));
-
+    // Only ever a directory this run created moments ago, and only ever when
+    // the swap it was made for did not happen.
     const cleanupStaging = (): void => {
       try {
         fs.rmSync(staging, { recursive: true, force: true });
       } catch { /* our own staging dir; a leftover costs nothing */ }
     };
+    try {
+      copyPluginTree(sourceDir, staged);
+    } catch (err: unknown) {
+      cleanupStaging();
+      const msg = err instanceof Error ? err.message : String(err);
+      detail.push(`${target.dir}: could not stage the new copy — ${msg}; left in place`);
+      continue;
+    }
 
     // `rename(2)` refuses to cross a filesystem, and this never turns a move
     // into a copy-then-delete of the operator's directory. Both hops are

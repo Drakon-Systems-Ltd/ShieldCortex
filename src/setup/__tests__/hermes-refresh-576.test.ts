@@ -254,6 +254,28 @@ describeWithHermes('refreshHermesPluginCopies — what it writes (#576)', () => 
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
   });
 
+  it('leaves no staging directory behind when the new copy cannot be staged', () => {
+    installCopy();
+    makeStale();
+    const realCp = fs.copyFileSync;
+    jest.spyOn(fs, 'copyFileSync').mockImplementation((from, to) => {
+      if (String(to).includes('.shieldcortex-staging')) {
+        throw Object.assign(new Error('ENOSPC: simulated'), { code: 'ENOSPC' });
+      }
+      return realCp(from, to);
+    });
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('warn');
+    expect(result.detail.join('\n')).toMatch(/could not stage the new copy/);
+    // The installed copy is untouched, and nothing of ours is left beside the
+    // plugins root for the next operator to wonder about.
+    expect(fs.readFileSync(path.join(installed, '__init__.py'), 'utf-8')).toBe('# shieldcortex 5.1.0\n');
+    expect(fs.readdirSync(hermes).filter((n) => n.startsWith('.shieldcortex-staging'))).toEqual([]);
+    expect(backupDirs()).toEqual([]);
+  });
+
   it('restores the previous copy when the swap fails part-way', () => {
     installCopy();
     makeStale();
