@@ -104,6 +104,7 @@ import { validateOpenClawConfig } from '../integrations/openclaw-config-validate
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
+import { normaliseWebhookUrl } from '../defence/iron-dome/notify-config.js';
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
@@ -3004,10 +3005,23 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     {
       const notify = isBlock(merged.notify) ? merged.notify : {};
       const notifyOn = notify.enabled === true;
-      const webhook = typeof notify.webhookUrl === 'string' ? notify.webhookUrl.trim() : '';
+      const webhookRaw = typeof notify.webhookUrl === 'string' ? notify.webhookUrl.trim() : '';
+      // #517 (c) residual (found in the #558 review): "is there a sink" used
+      // to be `webhookRaw.length > 0`, while the runtime transport decides
+      // with `normaliseWebhookUrl` — non-http(s) schemes, unparsable strings
+      // and over-length values read as "no configured channel" there. A
+      // signed `notify.enabled: true` + `webhookUrl: "ftp://…"` therefore
+      // produced no NOTIFY row and exit 0 on an enforcing host the transport
+      // would never deliver for: the armed-and-silent shape this row exists
+      // to FAIL. Ask the runtime's own normaliser, so the two cannot drift.
+      const webhook = normaliseWebhookUrl(notify.webhookUrl);
+      // Present on disk, unusable at runtime. Reported as its own shape: the
+      // operator set a URL and must not be told it is "unset".
+      const webhookRejected = webhookRaw.length > 0 && webhook === undefined;
       const openclaw = notify.openclaw === true;
-      // Denial-capable sink for unattended/DNP path = enabled notify + webhook URL.
-      const denialSink = notifyOn && webhook.length > 0;
+      // Denial-capable sink for unattended/DNP path = enabled notify + a
+      // webhook URL the transport will actually deliver to.
+      const denialSink = notifyOn && webhook !== undefined;
       const signedArmed = effective.enabled && effective.enforce;
       // "Armed" = signed enabled + enforce AND the plugin plane is not visibly
       // disarmed. Signed Enforce leftover against an explicit plugin-off is
@@ -3057,7 +3071,13 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         results.push({
           label: `${label} notify`,
           status,
-          message: openclawOnly
+          message: webhookRejected
+            ? // The value is never echoed: it may be junk pasted from anywhere.
+              `${prefix} no denial-capable notify sink (actionGuard.notify.webhookUrl is set but is not an ` +
+              `http(s) URL the notify transport will deliver to` +
+              `${notifyOn ? '' : ', and notify.enabled is not true'}) — unattended denials stay in the ` +
+              `audit log and session-guard index only. The #242 cron incidents were this shape.`
+            : openclawOnly
             ? `${prefix} notify.openclaw only — that arms interactive approval cards, ` +
               `not unattended denial delivery. Headless denials (denied_no_prompt_surface / cron) stay local ` +
               `unless actionGuard.notify.webhookUrl is set as the denial-capable sink (#354 / #310).`

@@ -42,12 +42,14 @@ export function hostFromAuthority(authority: string): string {
  * *.ts.net names. These are diagnostics, not off-host exfiltration.
  */
 export function isLocalHost(host: string): boolean {
-  const h = host.replace(/\.$/, '');
+  // DNS names are case-insensitive and a trailing dot is the same FQDN.
+  const h = host.toLowerCase().replace(/\.$/, '');
   if (!h) return false;
   if (h === 'localhost' || h.endsWith('.localhost')) return true;
   if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.ts.net')) return true;
   if (h === '::1' || h === '0:0:0:0:0:0:0:1') return true;
-  if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:')) return true; // ULA / link-local IPv6
+  // ULA (fc00::/7) / link-local IPv6 — literals only, so `fcollector.example` is not "local".
+  if (/^f[cd][0-9a-f]{2}:/.test(h) || h.startsWith('fe80:')) return true;
   const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (m) {
     const a = Number(m[1]);
