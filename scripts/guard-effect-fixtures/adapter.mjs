@@ -23,17 +23,58 @@
  * payload exactly as the live hook would judge it.
  */
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DIST_GUARD = resolve(HERE, '../../dist/defence/iron-dome/tool-action-guard.js');
+const DIST_GUARD_DIR = resolve(HERE, '../../dist/defence/iron-dome');
+const DIST_GUARD = join(DIST_GUARD_DIR, 'tool-action-guard.js');
+
+/** Scope label recorded next to every digest so a reader knows what was hashed. */
+export const EVALUATOR_DIGEST_SCOPE = 'dist/defence/iron-dome/**/*.js';
+
+/**
+ * Digest of the BUILT evaluator (#570 item 1). sha256 over every `.js` file
+ * under `dir`, in sorted relative-path order, each contributing
+ * `<relative path>\0<bytes>\0`, so a byte change in any imported guard module,
+ * a renamed file or an added file changes the value. Directory mtimes, file
+ * mtimes and non-`.js` files (maps, d.ts) are NOT part of the digest: the
+ * digest binds what Node loads, not how it was written to disk.
+ *
+ * This binds the run to the ARTEFACT BYTES, not to a source revision: two
+ * builds of the same source give the same digest; a run cannot tell you which
+ * commit was built, only which bytes evaluated the fixtures. Pair the digest
+ * with the PR head in the report comment.
+ * @param {string} dir
+ * @returns {{ algorithm: 'sha256', scope: string, files: number, value: string }}
+ */
+export function evaluatorDigest(dir, scope = EVALUATOR_DIGEST_SCOPE) {
+  const files = [];
+  const walk = (d) => {
+    for (const name of readdirSync(d).sort()) {
+      const abs = join(d, name);
+      const st = statSync(abs);
+      if (st.isDirectory()) walk(abs);
+      else if (st.isFile() && name.endsWith('.js')) files.push(abs);
+    }
+  };
+  walk(dir);
+  files.sort((a, b) => (relative(dir, a) < relative(dir, b) ? -1 : 1));
+  const h = createHash('sha256');
+  for (const abs of files) {
+    h.update(relative(dir, abs)); h.update('\0');
+    h.update(readFileSync(abs)); h.update('\0');
+  }
+  return { algorithm: 'sha256', scope, files: files.length, value: h.digest('hex') };
+}
 
 /**
  * The real adapter, bound to the built evaluator. Async because it dynamically
- * imports dist.
- * @returns {Promise<{ id: string, evaluate: (command: string, files?: Record<string,string>) => {decision:string,severity:string,signals:string[]} }>}
+ * imports dist. `digest` is computed BEFORE the import so it describes the
+ * bytes that were on disk when they were loaded.
+ * @returns {Promise<{ id: string, digest: ReturnType<typeof evaluatorDigest>, evaluate: (command: string, files?: Record<string,string>) => {decision:string,severity:string,signals:string[]} }>}
  */
 export async function builtEvaluatorAdapter() {
   if (!existsSync(DIST_GUARD)) {
@@ -43,12 +84,14 @@ export async function builtEvaluatorAdapter() {
       `This runner deliberately measures the BUILT artefact, per ADR-002 (#556).`,
     );
   }
+  const digest = evaluatorDigest(DIST_GUARD_DIR);
   const mod = await import(pathToFileURL(DIST_GUARD).href);
   if (typeof mod.evaluateToolCall !== 'function') {
     throw new Error(`dist guard has no evaluateToolCall export (found: ${Object.keys(mod).join(', ')})`);
   }
   return {
     id: 'built-dist-evaluateToolCall',
+    digest,
     evaluate(command, files) {
       const options = files
         ? { resolveScriptSource: (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null) }
@@ -62,12 +105,14 @@ export async function builtEvaluatorAdapter() {
 /**
  * A deterministic stub. `table` maps fixture id → { decision, severity, signals }.
  * A fixture id with no entry returns a benign allow, so a partial table is a
- * valid "everything not listed is allowed" fixture.
+ * valid "everything not listed is allowed" fixture. A stub is NOT a build, so
+ * its `digest` is `null` and any report it produces says the run is unbound.
  * @param {Record<string, {decision?:string,severity?:string,signals?:string[]}>} table
  */
 export function stubEvaluatorAdapter(table = {}) {
   return {
     id: 'stub',
+    digest: null,
     evaluate(_command, _files, fixtureId) {
       const e = fixtureId != null ? table[fixtureId] : undefined;
       return {
