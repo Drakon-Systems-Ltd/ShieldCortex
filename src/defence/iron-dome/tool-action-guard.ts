@@ -961,11 +961,13 @@ const DANGEROUS: Pattern[] = [
   // any tool call the guard will see — `export PATH=/tmp/evil:$PATH` in
   // `.bashrc` is a PATH hijack with no dangerous verb in it, which is why
   // the content scan alone (#93) let it through. Write shapes only: a
-  // redirect, `tee`, `sed -i`, or a `cp`/`mv`/`install` whose LAST operand is
-  // the startup file. Reading or sourcing one is untouched. The Write/Edit
+  // redirect, `tee -a`/`--append`, `sed -i`/`--in-place` (short clusters such
+  // as `-Ei` and suffix forms such as `-i.bak` included — argv parity, not a
+  // shell parser), or a `cp`/`mv`/`install` whose LAST operand is the startup
+  // file. Reading or sourcing one is untouched. The Write/Edit
   // tool path is gated at the verdict site (`isShellStartupWritePath`), where
   // the target is a path argument rather than shell text.
-  { re: new RegExp(String.raw`(?:>>?\s*|\btee\b(?:\s+-\w+)*\s+|\bsed\b(?=[^|;&\n]*\s-i)[^|;&\n]*\s)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*\s['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i'), signal: 'modify-shell-startup' },
+  { re: new RegExp(String.raw`(?:>>?\s*|\btee\b(?:\s+--?[\w-]+(?:=\S*)?)*\s+|\bsed\b(?=[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place))[^|;&\n]*\s)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*\s['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i'), signal: 'modify-shell-startup' },
   // The guard's own one-shot approval store (#118). The TTY gate stops the
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own

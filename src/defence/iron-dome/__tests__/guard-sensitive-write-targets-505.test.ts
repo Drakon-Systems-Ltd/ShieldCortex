@@ -128,6 +128,13 @@ describe('#505 — sensitive write targets in the user home', () => {
       ['overwrite', `printf 'x' > ~/${ZRC}`],
       ['tee -a', `echo 'alias x=y' | tee -a ~/${ZRC}`],
       ['sed -i', `sed -i 's/old/new/' ~/.profile`],
+      // long option forms (Tars, #578 review): argv parity with the short forms above
+      ['tee --append', `echo 'alias x=y' | tee --append ~/${ZRC}`],
+      ['tee --append with a second long option', `echo 'alias x=y' | tee --output-error=warn --append ~/${ZRC}`],
+      ['sed --in-place', `sed --in-place 's/FOO=1/FOO=2/' ~/${RC}`],
+      ['sed --in-place=suffix', `sed --in-place=.bak 's/FOO=1/FOO=2/' /home/ubuntu/${RC}`],
+      ['sed -i.bak', `sed -i.bak 's/FOO=1/FOO=2/' ~/${RC}`],
+      ['sed -Ei (combined short)', `sed -Ei 's/FOO=1/FOO=2/' ~/${RC}`],
       ['cp onto', `cp /tmp/payload.txt ~/${RC}`],
       ['mv onto', `mv /tmp/payload.txt /home/ubuntu/${RC}`],
       ['fish config', `echo 'set -x PATH /tmp/evil $PATH' >> ~/.config/fish/config.fish`],
@@ -143,6 +150,10 @@ describe('#505 — sensitive write targets in the user home', () => {
         `grep PATH ~/${ZRC}`,
         `cp ~/${RC} /tmp/backup-rc`,          // the startup file is the SOURCE, not the destination
         `diff ~/${RC} /tmp/backup-rc`,
+        `sed -n '/PATH/p' ~/${RC}`,                     // sed without an in-place flag is a read
+        `sed --expression='s/a/b/' ~/${RC}`,           // a long option that is not --in-place
+        `tee --help`,                                  // tee with no startup-file operand
+        `echo "use tee --append ~/${RC} to persist it" > /tmp/notes.txt`, // quoted mention, other destination
       ]) {
         const v = bash(command);
         expect([command, v.signals.includes('modify-shell-startup')]).toEqual([command, false]);

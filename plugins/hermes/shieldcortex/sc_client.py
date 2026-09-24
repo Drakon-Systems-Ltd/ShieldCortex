@@ -95,7 +95,7 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b", re.I),
     # #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
     re.compile(
-        r"(?:>>?\s*|\btee\b(?:\s+-\w+)*\s+|\bsed\b(?=[^|;&\n]*\s-i)[^|;&\n]*\s)['\"]?(?:[^\s'\"|;&<>]*/)?"
+        r"(?:>>?\s*|\btee\b(?:\s+--?[\w-]+(?:=\S*)?)*\s+|\bsed\b(?=[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place))[^|;&\n]*\s)['\"]?(?:[^\s'\"|;&<>]*/)?"
         r"(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config/fish/config\.fish\b)|"
         r"\b(?:cp|mv|install)\b[^|;&\n]*\s['\"]?(?:[^\s'\"|;&<>]*/)?"
         r"(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config/fish/config\.fish\b)['\"]?\s*(?=$|[|;&\n])",
