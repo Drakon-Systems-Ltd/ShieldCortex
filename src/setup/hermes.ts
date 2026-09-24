@@ -37,9 +37,13 @@ function pluginDestDir(home: string = os.homedir()): string {
  * upgrade, sorts after `plugins/shieldcortex/` and wins. The install then
  * reports success while the gateway keeps running the old code.
  *
- * The installer only WARNS: the copies are the operator's, and which one they
- * meant to keep is not ours to decide mid-install. `doctor
- * --fix-hermes-plugin-copies` does the move once they have read this.
+ * WARN only, and only on Hermes' own discovery (#569 r4). The copies are the
+ * operator's and which one they meant to keep is not ours to decide
+ * mid-install; and where Hermes cannot be asked there is no answer to give, so
+ * the installer stays SILENT rather than dressing a guess up as a caveat. An
+ * operator who wants to know either way runs `shieldcortex doctor`, whose job
+ * is to report "could not determine" and say how to fix that; the tail of an
+ * install log is not the place to learn it.
  *
  * Scans the tree we just wrote to (`<home>/.hermes`), not `HERMES_HOME`,
  * because that is where `pluginDestDir` put the bytes.
@@ -52,33 +56,20 @@ function warnOnShadowingCopies(home: string): void {
     // A scan that cannot run must never fail an otherwise-good install.
     return;
   }
-  if (!scan.shadowed && scan.unknownDirs.length === 0) return;
+  if (!scan.fromHermes || !scan.shadowed) return;
 
   console.warn();
-  if (scan.shadowed) {
-    console.warn('⚠️  Other `shieldcortex` plugin copies are visible to Hermes.');
-    for (const rootScan of scan.roots) {
-      if (!rootScan.shadowed || rootScan.loaded === null) continue;
-      for (const copy of rootScan.copies) {
-        const mark = copy.dir === rootScan.loaded.dir ? '  → LOADED BY HERMES' : '';
-        console.warn(`      ${copy.dir}${mark}`);
-      }
-    }
-    console.warn('    Hermes keys plugins on the manifest `name:` and the last one in sorted');
-    console.warn('    order wins silently — so the copy marked above is what runs, not what');
-    console.warn('    was just installed.');
-  } else {
-    console.warn('⚠️  Could not confirm which `shieldcortex` plugin copy Hermes will load.');
-  }
-  // The scan asks Hermes' own discovery when it can reach it; when it cannot,
-  // the answer above is a conservative read and says so rather than passing
-  // itself off as Hermes'.
-  if (!scan.fromHermes) {
-    console.warn(`    (approximate: Hermes discovery not reachable — ${scan.fallbackReason ?? 'reason unrecorded'})`);
-    for (const dir of scan.unknownDirs) {
-      console.warn(`      ${dir}  → manifest not modelled by the fallback reader`);
+  console.warn('⚠️  Other `shieldcortex` plugin copies are visible to Hermes.');
+  for (const rootScan of scan.roots) {
+    if (!rootScan.shadowed || rootScan.loaded === null) continue;
+    for (const copy of rootScan.copies) {
+      const mark = copy.dir === rootScan.loaded.dir ? '  → LOADED BY HERMES' : '';
+      console.warn(`      ${copy.dir}${mark}`);
     }
   }
+  console.warn('    Hermes keys plugins on the manifest `name:` and the last one in sorted');
+  console.warn('    order wins silently — so the copy marked above is what runs, not what');
+  console.warn('    was just installed.');
   console.warn('    Fix:  shieldcortex doctor --fix-hermes-plugin-copies');
   console.warn('    Then restart the Hermes gateway — discovery only re-runs at start-up.');
   console.warn();

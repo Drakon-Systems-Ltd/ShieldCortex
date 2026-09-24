@@ -3,39 +3,43 @@ import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import {
+  hintDirsInRoot,
   probeHermesDiscovery,
   resolveHermesInterpreter,
-  scanHermesPluginRootFallback,
+  scanHermesPluginCopies,
 } from '../hermes-plugins.js';
-import { classifyPluginDir, couldBeOurs, readYamlManifestName } from '../hermes-manifest-parse.js';
+import { checkHermesPluginShadowing, fixHermesPluginShadowing } from '../../cli/doctor.js';
 
 /**
  * #569 — the detector must never disagree with Hermes about which directory
  * gets the `shieldcortex` key and which one wins it.
  *
  * Round 1 mirrored the discovery rules in a line reader. Round 2 asked Hermes
- * on the primary path but kept a guessing reader for the fallback, and
- * independent review of the sibling Ekho change found the guesses wrong in
- * BOTH directions: a block-scalar `name:` made it report a clean install while
- * Hermes was loading the backup, and an invalid `description: backup: x` under
- * a valid `name:` line made it label a backup LOADED that Hermes rejects.
+ * on the primary path but kept a guessing reader for hosts with none. Round 3
+ * narrowed that reader to a grammar it was supposed to be certain about.
+ * Independent review found a confident wrong answer in EVERY version:
  *
- * Round 3 narrowed the fallback to "understood, or unknown", so the contract
- * these tests pin is a differential one:
+ *   - `name: >-` with an indented name (reported clean while Hermes loaded the
+ *     backup);
+ *   - `description: backup: before upgrade` (labelled LOADED where Hermes
+ *     rejects the manifest);
+ *   - `name: "shieldcorte\u0078"` (the escape left undecoded, so the copy that
+ *     Hermes loads was missed);
+ *   - `description: 2026-99-99` (YAML reads an invalid timestamp and Hermes
+ *     drops the manifest, where the grammar happily accepted the line);
+ *   - `manifest_version: .inf` (YAML builds infinity and Hermes' `int()`
+ *     conversion raises).
  *
- *   for every fixture tree, the fallback gives the SAME answer as Hermes, or
- *   it says unknown. Never a confident disagreement.
+ * The last two are ordinary-looking lines: the disagreement lives in YAML's
+ * implicit typing and Hermes' own conversion code, not in exotic syntax. So
+ * round 4 removed the reader, and the contract these tests pin is:
  *
- * Two halves run over the same trees:
+ *   Hermes' own discovery answers, or NOTHING answers. Without it the check is
+ *   WARN, names no winner, and the repair moves nothing.
  *
- *   - the FALLBACK reader (`scanHermesPluginRootFallback`), always;
- *   - the PRIMARY path (`probeHermesDiscovery`, which spawns the Hermes
- *     interpreter and asks `hermes_cli.plugins_discovery`), when this box has a
- *     Hermes to ask. That is the differential half.
- *
- * Every `hermes` expectation below was recorded by running Hermes' own
- * `scan_directory` + `resolve_manifest_winners` over these exact trees, so the
- * fallback-only half is still pinned to Hermes' behaviour on a box with none.
+ * Both halves run over the same trees. Every `hermes` expectation below was
+ * recorded by running Hermes' own `scan_directory` + `resolve_manifest_winners`
+ * over these exact trees.
  */
 
 const SCHEMA_V1 = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
@@ -46,8 +50,6 @@ interface ParityCase {
   build: (root: string) => void;
   /** What Hermes' own discovery reports for this tree. */
   hermes: { copies: string[]; winner: string | null };
-  /** What the conservative reader reports: copies, winner, and unknowns. */
-  fallback: { copies: string[]; winner: string | null; unknown?: string[] };
 }
 
 function write(target: string, body: string): void {
@@ -70,20 +72,16 @@ const CASES: ParityCase[] = [
       manifest(root, 'shieldcortex.bak-x', 'name: shieldcortex # backup\n');
     },
     hermes: { copies: ['shieldcortex', 'shieldcortex.bak-x'], winner: 'shieldcortex.bak-x' },
-    fallback: { copies: ['shieldcortex', 'shieldcortex.bak-x'], winner: 'shieldcortex.bak-x' },
   },
   {
     // `data.get("name", plugin_dir.name)`: no `name:` key at all means the
-    // DIRECTORY name is the key. Round 1 excluded such a manifest entirely,
-    // which loses the canonical copy and can turn a shadowed root into
-    // "there is no canonical copy — a human must choose".
+    // DIRECTORY name is the key.
     name: 'a manifest with no name: at all',
     build: (root) => {
       manifest(root, 'shieldcortex', 'version: 1\n');
       manifest(root, 'zz-nameless', 'version: 1\n');
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: 'shieldcortex' },
   },
   {
     name: 'quoted names, single and double',
@@ -92,13 +90,10 @@ const CASES: ParityCase[] = [
       manifest(root, 'shieldcortex.q', "name: 'shieldcortex'   # old\n");
     },
     hermes: { copies: ['shieldcortex', 'shieldcortex.q'], winner: 'shieldcortex.q' },
-    fallback: { copies: ['shieldcortex', 'shieldcortex.q'], winner: 'shieldcortex.q' },
   },
   {
     // A portable Agent Plugins v1 package has no plugin.yaml at all, and Hermes
-    // accepts it after `agent_plugins._validate_manifest`. The fallback does
-    // not mirror that validation and no longer judges plugin.json at all, so
-    // the copy Hermes loads here comes back UNKNOWN and the root has no winner.
+    // accepts it after `agent_plugins._validate_manifest`.
     name: 'a portable plugin.json manifest',
     build: (root) => {
       manifest(root, 'shieldcortex', 'name: shieldcortex\n');
@@ -113,17 +108,11 @@ const CASES: ParityCase[] = [
       write(path.join(root, 'shieldcortex.notjson', 'plugin.json'), '{not json');
     },
     hermes: { copies: ['shieldcortex', 'shieldcortex.portable'], winner: 'shieldcortex.portable' },
-    fallback: {
-      copies: ['shieldcortex'],
-      winner: null,
-      unknown: ['shieldcortex.badjson', 'shieldcortex.portable'],
-    },
   },
   {
     // Hermes selects the manifest with `Path.exists()`, not `is_file()`. A
     // `plugin.yaml` DIRECTORY is therefore selected, fails to parse, and Hermes
     // takes NOTHING from that child — it never looks at the `plugin.yml`.
-    // Falling through to the `.yml` invents a shadow that does not exist.
     name: 'a plugin.yaml directory beside a valid plugin.yml',
     build: (root) => {
       manifest(root, 'shieldcortex', 'name: shieldcortex\n');
@@ -131,12 +120,10 @@ const CASES: ParityCase[] = [
       manifest(root, 'shieldcortex.dirmanifest', 'name: shieldcortex\n', 'plugin.yml');
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: 'shieldcortex' },
   },
   {
     // A valid `name:` line above broken YAML: Hermes' safe_load raises and
-    // `parse_manifest_file` returns None, so the directory is not a copy. A
-    // line reader that stops at the first `name:` claims it is.
+    // `parse_manifest_file` returns None, so the directory is not a copy.
     name: 'invalid YAML after a valid name: line',
     build: (root) => {
       manifest(root, 'shieldcortex', 'name: shieldcortex\n');
@@ -145,17 +132,11 @@ const CASES: ParityCase[] = [
       manifest(root, 'shieldcortex.broken3', 'name: shieldcortex\n:\n  not: [a manifest\n');
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: {
-      copies: ['shieldcortex'],
-      winner: null,
-      unknown: ['shieldcortex.broken', 'shieldcortex.broken2', 'shieldcortex.broken3'],
-    },
   },
   {
-    // The rules round 1 got right, kept as regression cover: dunder children
-    // and per-harness manifest dirs are skipped before any manifest is read, a
-    // manifest-less child is a category keyed `<cat>/<name>`, a different
-    // `name:` cannot collide, and `plugin.yml` counts.
+    // Dunder children and per-harness manifest dirs are skipped before any
+    // manifest is read, a manifest-less child is a category keyed
+    // `<cat>/<name>`, a different `name:` cannot collide, `plugin.yml` counts.
     name: 'dunder, foreign-harness, category, other name, plugin.yml',
     build: (root) => {
       manifest(root, 'shieldcortex', 'name: shieldcortex\n');
@@ -166,10 +147,6 @@ const CASES: ParityCase[] = [
       manifest(root, 'shieldcortex.yml-spelling', 'name: shieldcortex\n', 'plugin.yml');
     },
     hermes: {
-      copies: ['shieldcortex', 'shieldcortex.yml-spelling'],
-      winner: 'shieldcortex.yml-spelling',
-    },
-    fallback: {
       copies: ['shieldcortex', 'shieldcortex.yml-spelling'],
       winner: 'shieldcortex.yml-spelling',
     },
@@ -188,7 +165,6 @@ const CASES: ParityCase[] = [
       );
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: 'shieldcortex' },
   },
   {
     // An empty manifest parses to `{}`, so the name is the directory name.
@@ -198,7 +174,6 @@ const CASES: ParityCase[] = [
       manifest(root, 'zz-empty', '');
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: 'shieldcortex' },
   },
   {
     // A sequence at the top level is not a Mapping, and Hermes rejects it.
@@ -208,7 +183,6 @@ const CASES: ParityCase[] = [
       manifest(root, 'shieldcortex.list', '- name: shieldcortex\n');
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: null, unknown: ['shieldcortex.list'] },
   },
   {
     name: 'no copy at all',
@@ -216,27 +190,24 @@ const CASES: ParityCase[] = [
       manifest(root, 'kanban', 'name: kanban\n');
     },
     hermes: { copies: [], winner: null },
-    fallback: { copies: [], winner: null },
   },
 
-  // ── The four round-3 differential fixtures ─────────────────────────────
+  // ── The round-3 differential fixtures ──────────────────────────────────
   {
     // THE round-2 blocker. Hermes reads the folded scalar, gets `shieldcortex`
     // and LOADS the backup. Round 2 saw a shape it did not model, decided the
     // name was absent, keyed the directory on its own name, and reported a
-    // clean canonical install — certifying the exact state it exists to catch.
+    // clean canonical install.
     name: 'a block-scalar name Hermes reads and loads',
     build: (root) => {
       manifest(root, 'shieldcortex', 'name: shieldcortex\n');
       manifest(root, 'shieldcortex.bak-x', 'name: >-\n  shieldcortex\n');
     },
     hermes: { copies: ['shieldcortex', 'shieldcortex.bak-x'], winner: 'shieldcortex.bak-x' },
-    fallback: { copies: ['shieldcortex'], winner: null, unknown: ['shieldcortex.bak-x'] },
   },
   {
     // The same blocker in the other direction. `description: backup: before
-    // upgrade` is not YAML — Hermes raises and drops the manifest. Round 2 only
-    // ever inspected the `name:` line, so it labelled this backup LOADED.
+    // upgrade` is not YAML — Hermes raises and drops the manifest.
     name: 'invalid YAML from a colon in a later value',
     build: (root) => {
       manifest(root, 'shieldcortex', 'name: shieldcortex\n');
@@ -247,12 +218,10 @@ const CASES: ParityCase[] = [
       );
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: null, unknown: ['shieldcortex.bak-y'] },
   },
   {
     // `agent_plugins._validate_manifest` requires plugin.json to resolve INSIDE
-    // the plugin root, so Hermes rejects this one. Round 2 followed the link
-    // and called the directory the winner.
+    // the plugin root, so Hermes rejects this one.
     name: 'a plugin.json symlinked outside the plugin root',
     build: (root) => {
       manifest(root, 'shieldcortex', 'name: shieldcortex\n');
@@ -266,7 +235,6 @@ const CASES: ParityCase[] = [
       fs.symlinkSync(path.join(outside, 'plugin.json'), path.join(linked, 'plugin.json'));
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: null, unknown: ['shieldcortex.linked'] },
   },
   {
     // `author` may hold only name/email/url. An unknown field raises, so Hermes
@@ -285,24 +253,67 @@ const CASES: ParityCase[] = [
       );
     },
     hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
-    fallback: { copies: ['shieldcortex'], winner: null, unknown: ['shieldcortex.authored'] },
+  },
+
+  // ── The round-4 fixtures: ordinary lines, typed by YAML ────────────────
+  {
+    // Recorded live: Hermes keys the backup `shieldcortex` and LOADS it. The
+    // literal bytes `shieldcortex` never appear in that manifest's name value —
+    // the escape spells the final `x` — so even the raw-substring hint would
+    // only find it through the folder name.
+    name: 'a unicode escape in a double-quoted name',
+    build: (root) => {
+      manifest(root, 'shieldcortex', 'name: shieldcortex\n');
+      manifest(root, 'shieldcortex.bak-esc', 'name: "shieldcorte\\u0078"\n');
+    },
+    hermes: { copies: ['shieldcortex', 'shieldcortex.bak-esc'], winner: 'shieldcortex.bak-esc' },
+  },
+  {
+    // Round-4 blocker, half one. `2026-99-99` is a plain scalar the grammar
+    // accepted without a second look; YAML's implicit typing reads it as a
+    // TIMESTAMP, month 99 fails construction, and Hermes rejects the whole
+    // manifest. Recorded live: the backup is not a copy at all.
+    name: 'a date-shaped value YAML cannot construct',
+    build: (root) => {
+      manifest(root, 'shieldcortex', 'name: shieldcortex\n');
+      manifest(root, 'shieldcortex.bak-date', 'name: shieldcortex\ndescription: 2026-99-99\n');
+    },
+    hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
+  },
+  {
+    // Round-4 blocker, half two. `.inf` constructs as a float infinity, and
+    // Hermes' manifest conversion calls `int()` on it, which raises
+    // OverflowError outside the narrow handler. Recorded live: rejected.
+    name: 'an infinite manifest_version Hermes cannot convert',
+    build: (root) => {
+      manifest(root, 'shieldcortex', 'name: shieldcortex\n');
+      manifest(root, 'shieldcortex.bak-inf', 'name: shieldcortex\nmanifest_version: .inf\n');
+    },
+    hermes: { copies: ['shieldcortex'], winner: 'shieldcortex' },
   },
 ];
 
 let fixtures: string;
-let roots: Map<string, string>;
+/** Case name → the fake Hermes HOME (`<case>`), whose `.hermes/plugins` is the root. */
+const homes = new Map<string, string>();
+/** Case name → the `plugins/` root itself. */
+const roots = new Map<string, string>();
 const savedHermesHome = process.env.HERMES_HOME;
+
+/** Frozen so a destination name computed twice cannot straddle a second. */
+const FROZEN = new Date('2026-09-24T12:34:56.789Z');
 
 beforeAll(() => {
   delete process.env.HERMES_HOME;
   fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-parity-'));
-  roots = new Map();
   CASES.forEach((testCase, index) => {
-    // One `plugins/` root per case: a collision is per-root, so mixing cases
-    // into one root would make the winner meaningless.
-    const root = path.join(fixtures, `case-${index}`, 'plugins');
+    // One Hermes home per case: a collision is per-root, so mixing cases into
+    // one root would make the winner meaningless.
+    const home = path.join(fixtures, `case-${index}`);
+    const root = path.join(home, '.hermes', 'plugins');
     fs.mkdirSync(root, { recursive: true });
     testCase.build(root);
+    homes.set(testCase.name, home);
     roots.set(testCase.name, root);
   });
 });
@@ -316,98 +327,96 @@ afterAll(() => {
 /** The Hermes interpreter this box can offer, resolved once. */
 const interpreter = resolveHermesInterpreter(path.join(os.homedir(), '.hermes'));
 
-describe('fallback reader (#569)', () => {
-  it.each(CASES)('reports the recorded answer on: $name', (testCase) => {
-    const root = roots.get(testCase.name)!;
-    const scan = scanHermesPluginRootFallback(root);
-    expect(scan.copies.map((c) => c.dirName)).toEqual(testCase.fallback.copies);
-    expect(scan.loaded?.dirName ?? null).toBe(testCase.fallback.winner);
-    expect(scan.unknownDirs.map((d) => path.basename(d))).toEqual(testCase.fallback.unknown ?? []);
-    expect(scan.undetermined).toBe((testCase.fallback.unknown ?? []).length > 0);
-  });
+/**
+ * Force the "no Hermes to ask" path. A box WITH a working Hermes would never
+ * otherwise reach it, and that path is the whole subject of round 4.
+ */
+const NO_HERMES = { interpreter: null } as const;
 
-  it('flags the canonical copy as canonical and the backup as not', () => {
-    const root = roots.get('an inline # comment after the name')!;
-    const scan = scanHermesPluginRootFallback(root);
-    expect(scan.copies.map((c) => c.canonical)).toEqual([true, false]);
-    expect(scan.hasCanonical).toBe(true);
-    expect(scan.shadowed).toBe(true);
-  });
-
-  it('gives an undetermined root no winner and no shadow verdict', () => {
-    // The point of the rule: the directory we would not read may well be a
-    // copy, and it may sort after every copy we did read. Naming a winner
-    // anyway is the guess that made round 2 certify a shadowed host.
-    for (const name of [
-      'a block-scalar name Hermes reads and loads',
-      'invalid YAML from a colon in a later value',
-      'a plugin.json symlinked outside the plugin root',
-      'a plugin.json with an unknown author field',
-    ]) {
-      const scan = scanHermesPluginRootFallback(roots.get(name)!);
-      expect(scan.undetermined).toBe(true);
-      expect(scan.loaded).toBeNull();
-      expect(scan.shadowed).toBe(false);
-      expect(scan.copies.map((c) => c.dirName)).toEqual(['shieldcortex']);
+/** Every directory under a tree, so "nothing moved" can be asserted exactly. */
+function snapshot(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (current: string): void => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) =>
+      a.name < b.name ? -1 : 1,
+    )) {
+      const full = path.join(current, entry.name);
+      out.push(path.relative(dir, full));
+      if (entry.isDirectory() && !entry.isSymbolicLink()) walk(full);
     }
-  });
-});
+  };
+  walk(dir);
+  return out;
+}
 
-describe('the understood-manifest rule (#569 r3)', () => {
-  it.each([
-    'name: shieldcortex\n',
-    'name: shieldcortex # backup\n',
-    'name: "shieldcortex"\n',
-    'version: 1\nname: shieldcortex\nkind: standalone\n',
-    '# only a comment\n',
-    '',
-    'meta:\n  inner: value\n  - item\nname: shieldcortex\n',
-  ])('understands the ordinary shape: %j', (body) => {
-    expect(readYamlManifestName(body).understood).toBe(true);
-  });
+describe('without Hermes there is no verdict at all (#569 r4)', () => {
+  it.each(CASES)('reports unknown rather than an answer on: $name', async (testCase) => {
+    const home = homes.get(testCase.name)!;
 
-  it.each([
-    'name: >-\n  shieldcortex\n', // folded block scalar
-    'name: |\n  shieldcortex\n', // literal block scalar
-    'name:\n  first: x\n', // a null name with a block under it
-    'name: [shieldcortex]\n', // flow collection
-    'name: &anchor shieldcortex\n',
-    'name: *alias\n',
-    'name: !!str shieldcortex\n',
-    '---\nname: shieldcortex\n', // document marker
-    'name: shieldcortex\n...\n',
-    'name: shieldcortex\n\tkind: x\n', // tab
-    'name: shieldcortex\ndescription: backup: x\n', // unquoted `: `
-    '- name: shieldcortex\n', // sequence document
-    "name: 'unterminated\n",
-    '  name: shieldcortex\n', // nothing at column 0
-    'name: shieldcortex\ndeps: [a, b]\n', // a flow collection anywhere
-  ])('refuses to read: %j', (body) => {
-    expect(readYamlManifestName(body).understood).toBe(false);
+    const scan = scanHermesPluginCopies(path.join(home, '.hermes'), NO_HERMES);
+    expect(scan.fromHermes).toBe(false);
+    expect(scan.undeterminedReason).toMatch(/no Hermes interpreter/i);
+    // No copies, no winner, no shadow verdict — the three things every earlier
+    // round produced from a reader of its own, and got wrong.
+    expect(scan.roots).toEqual([]);
+    expect(scan.copies).toEqual([]);
+    expect(scan.shadowed).toBe(false);
+
+    const row = await checkHermesPluginShadowing(home, NO_HERMES);
+    expect(row.status).toBe('warn');
+    expect(row.message).toContain('could not determine which copy Hermes loads');
+    expect(row.message).toContain('Install Hermes, or point the doctor at its python.');
+    // Never a winner: the one claim that made a shadowed host look healthy.
+    // "which copy Hermes loads" is the question; "Hermes loads <path>" is the
+    // answer, and this row is not entitled to give one.
+    expect(row.message).not.toMatch(/Hermes loads [~/]/);
+    expect(row.message).not.toMatch(/last in sorted order wins/);
+    expect(row.message).not.toMatch(/\bclean\b/);
   });
 
-  it('reserves unknown for manifests that could take our key', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-unknown-'));
+  it.each(CASES)('moves nothing and exits non-zero on: $name', (testCase) => {
+    const home = homes.get(testCase.name)!;
+    const before = snapshot(home);
+
+    const fix = fixHermesPluginShadowing(home, FROZEN, NO_HERMES);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.changed).toBe(false);
+    expect(fix.failed).toBe(true);
+    expect(fix.fromHermes).toBe(false);
+    expect(fix.message).toContain('nothing was moved');
+    expect(fix.message).toContain('could not determine which copy Hermes loads');
+    expect(snapshot(home)).toEqual(before);
+    expect(fs.existsSync(path.join(home, '.hermes', 'backups'))).toBe(false);
+  });
+
+  it('offers hints, and never lets them read as a verdict', async () => {
+    // The hint is a folder-name prefix or a raw substring — no parsing. Both
+    // halves are wrong in both directions, which is exactly why they are
+    // labelled unverified and never counted as copies.
+    const home = homes.get('a block-scalar name Hermes reads and loads')!;
+    const row = await checkHermesPluginShadowing(home, NO_HERMES);
+    expect(row.message).toContain('Possible copies (unverified');
+    expect(row.message).toContain(path.join('.hermes', 'plugins', 'shieldcortex.bak-x'));
+    expect(row.status).toBe('warn');
+  });
+
+  it('lists a hint by folder name and by raw manifest substring, and nothing else', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-hint-'));
     try {
-      // A neighbour's block scalar must not put a permanent "cannot determine"
-      // on a host where nothing is wrong.
-      manifest(tmp, 'zz-other', 'name: kanban\ndescription: >-\n  a plugin\n');
-      expect(classifyPluginDir(path.join(tmp, 'zz-other'), 'zz-other')).toBe('other');
-      // …but the same shape in a directory that could take our key is unknown.
-      manifest(tmp, 'zz-maybe', 'name: shieldcortex\nkind: [unclosed\n');
-      expect(classifyPluginDir(path.join(tmp, 'zz-maybe'), 'zz-maybe')).toBe('unknown');
+      manifest(tmp, 'shieldcortex.bak-x', 'name: >-\n  anything\n'); // folder name
+      manifest(tmp, 'zz-mentions', 'name: other\ndescription: replaces shieldcortex\n'); // text
+      manifest(tmp, 'zz-unrelated', 'name: kanban\n');
+      manifest(tmp, '__pycache__', 'name: shieldcortex\n'); // Hermes skips dunder
+      manifest(tmp, '.claude-plugin', 'name: shieldcortex\n'); // and harness dirs
+      fs.mkdirSync(path.join(tmp, 'zz-category'), { recursive: true }); // no manifest
+      expect(hintDirsInRoot(tmp).map((d) => path.basename(d))).toEqual([
+        'shieldcortex.bak-x',
+        'zz-mentions',
+      ]);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
-  });
-
-  it('covers the three ways our key can reach a manifest', () => {
-    expect(couldBeOurs('shieldcortex', 'name: anything\n')).toBe(true);
-    expect(couldBeOurs('other', 'name: shieldcortex\n')).toBe(true);
-    // A double-quoted escape is the only way to spell the name without the
-    // literal bytes, and a backslash is the only way to write one.
-    expect(couldBeOurs('other', 'name: "shieldcorte\\x78"\n')).toBe(true);
-    expect(couldBeOurs('other', 'name: kanban\n')).toBe(false);
   });
 });
 
@@ -418,7 +427,7 @@ const describePrimary = interpreter === null ? describe.skip : describe;
 describePrimary(`primary path via Hermes itself (${interpreter ?? 'no interpreter'})`, () => {
   it.each(CASES)('Hermes reports the recorded copies and winner: $name', (testCase) => {
     const root = roots.get(testCase.name)!;
-    const probe = probeHermesDiscovery(path.dirname(root), [root], { interpreter });
+    const probe = probeHermesDiscovery(homes.get(testCase.name)!, [root], { interpreter });
     expect('roots' in probe ? null : probe.error).toBeNull();
     if (!('roots' in probe)) return;
     expect(probe.roots).toHaveLength(1);
@@ -428,60 +437,29 @@ describePrimary(`primary path via Hermes itself (${interpreter ?? 'no interprete
     );
   });
 
-  it('never disagrees confidently with Hermes on any fixture tree', () => {
-    // The round-3 contract: the same answer, or unknown. Never a third thing.
-    const disagreements: string[] = [];
+  it('answers every fixture — Hermes never reports an unknown', () => {
+    // The contract that replaced the differential one: where Hermes answers,
+    // the answer is complete. There is no third state to reconcile.
     for (const testCase of CASES) {
-      const root = roots.get(testCase.name)!;
-      const probe = probeHermesDiscovery(path.dirname(root), [root], { interpreter });
-      if (!('roots' in probe)) {
-        disagreements.push(`${testCase.name}: probe failed — ${probe.error}`);
-        continue;
-      }
-      const fallback = scanHermesPluginRootFallback(root);
-      const theirs = probe.roots[0].copies.map((c) => path.basename(c));
-      const mine = fallback.copies.map((c) => c.dirName);
-      const unknown = fallback.unknownDirs.map((d) => path.basename(d));
-
-      // Every copy the fallback NAMES is one Hermes names too: a confident
-      // positive is never invented.
-      for (const name of mine) {
-        if (!theirs.includes(name)) {
-          disagreements.push(`${testCase.name}: fallback invented the copy ${name}`);
-        }
-      }
-      // Every copy it MISSES it has flagged unknown: a confident negative is
-      // never a real shadow swept under the carpet.
-      for (const name of theirs) {
-        if (!mine.includes(name) && !unknown.includes(name)) {
-          disagreements.push(`${testCase.name}: fallback silently dropped ${name}`);
-        }
-      }
-      const mineWinner = fallback.loaded?.dirName ?? null;
-      const theirWinner =
-        probe.roots[0].loaded === null ? null : path.basename(probe.roots[0].loaded);
-      if (mineWinner !== null && mineWinner !== theirWinner) {
-        disagreements.push(
-          `${testCase.name}: fallback named ${mineWinner}, Hermes loads ${theirWinner}`,
-        );
-      }
-      if (mineWinner === null && theirWinner !== null && unknown.length === 0) {
-        disagreements.push(
-          `${testCase.name}: fallback named no winner and no unknowns, Hermes loads ${theirWinner}`,
-        );
-      }
+      const scan = scanHermesPluginCopies(path.join(homes.get(testCase.name)!, '.hermes'), {
+        interpreter,
+      });
+      expect(scan.fromHermes).toBe(true);
+      expect(scan.undeterminedReason).toBeNull();
+      expect(scan.hintRoots).toEqual([]);
+      expect(scan.copies.map((c) => c.dirName)).toEqual(testCase.hermes.copies);
+      expect(scan.roots[0].loaded?.dirName ?? null).toBe(testCase.hermes.winner);
     }
-    expect(disagreements).toEqual([]);
   });
 
-  it('never reports an unknown directory — Hermes always has an answer', () => {
-    const root = roots.get('invalid YAML after a valid name: line')!;
-    const probe = probeHermesDiscovery(path.dirname(root), [root], { interpreter });
-    expect('roots' in probe).toBe(true);
-    if (!('roots' in probe)) return;
-    // The three broken manifests the fallback calls `unknown` are, to Hermes,
-    // simply not copies.
-    expect(probe.roots[0].copies).toHaveLength(1);
+  it('flags the canonical copy as canonical and the backup as not', () => {
+    const scan = scanHermesPluginCopies(
+      path.join(homes.get('an inline # comment after the name')!, '.hermes'),
+      { interpreter },
+    );
+    expect(scan.roots[0].copies.map((c) => c.canonical)).toEqual([true, false]);
+    expect(scan.roots[0].hasCanonical).toBe(true);
+    expect(scan.roots[0].shadowed).toBe(true);
   });
 });
 

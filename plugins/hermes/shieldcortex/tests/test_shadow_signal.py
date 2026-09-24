@@ -11,6 +11,11 @@ Whichever copy is executing is by definition the one that won discovery, so
 roots in a temp dir, and check both halves of the contract: the ERROR line is
 there when it should be, and registration succeeds either way — a diagnostic
 must never cost the host its gate.
+
+Round 4 removed the reader that used to answer when `hermes_cli` could not be
+imported (see `test_shadow_parity.py` for why). So everything that expects a
+VERDICT needs a real `hermes_cli`, and skips without one; the cases that pin
+the no-discovery behaviour force it and always run.
 """
 import importlib.util
 import logging
@@ -29,7 +34,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import shieldcortex  # noqa: E402
 import shadow as shadow_module  # noqa: E402
-from shadow import detect_shadow, read_manifest_name, shadow_error_line  # noqa: E402
+from shadow import detect_shadow, shadow_error_line  # noqa: E402
+
+try:
+    import hermes_cli.plugins_discovery  # noqa: F401
+
+    HERMES_IMPORTABLE = True
+except Exception:  # pragma: no cover - depends on the interpreter under test
+    HERMES_IMPORTABLE = False
+
+needs_hermes = unittest.skipUnless(
+    HERMES_IMPORTABLE, "hermes_cli is not importable in this interpreter")
 
 #: The real package directory, used as the source for the copies the
 #: loader-level tests import.
@@ -57,34 +72,47 @@ def make_plugin_dir(root, name, manifest_name="shieldcortex", manifest_file="plu
     return directory
 
 
-class ShadowSignalTests(unittest.TestCase):
+class PluginRootCase(unittest.TestCase):
+    """A fake `plugins/` root per test, and `register()` driven against it."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.plugins = os.path.join(self._tmp.name, "plugins")
         os.makedirs(self.plugins)
         self.addCleanup(self._tmp.cleanup)
 
-    def register_from(self, package_dir):
-        """Run `register()` as if loaded from `package_dir`; return (result, errors)."""
+    def register_from(self, package_dir, level="INFO"):
+        """Run `register()` as if loaded from `package_dir`.
+
+        Returns `(ctx, result, by_level)`. INFO is the default floor because
+        `register` always logs one INFO line, so the context manager has a
+        record either way and a clean case can assert the ABSENCE of an ERROR
+        rather than fail on an empty log.
+        """
         ctx = FakeCtx()
         logger = logging.getLogger("shieldcortex.hermes")
         with mock.patch.object(shieldcortex, "_package_dir", return_value=package_dir):
-            # INFO, not ERROR: `register` always logs one INFO line, so the
-            # context manager has a record either way and the clean case can
-            # assert the ABSENCE of an ERROR rather than fail on an empty log.
-            with self.assertLogs(logger, level="INFO") as captured:
+            with self.assertLogs(logger, level=level) as captured:
                 result = shieldcortex.register(ctx)
-        errors = [r.getMessage() for r in captured.records if r.levelno >= logging.ERROR]
-        return ctx, result, errors
+        by_level = {
+            "error": [r.getMessage() for r in captured.records if r.levelno >= logging.ERROR],
+            "warning": [r.getMessage() for r in captured.records
+                        if r.levelno == logging.WARNING],
+            "debug": [r.getMessage() for r in captured.records if r.levelno == logging.DEBUG],
+        }
+        return ctx, result, by_level
 
+
+@needs_hermes
+class ShadowSignalTests(PluginRootCase):
     def test_error_line_when_loaded_from_a_backup_copy(self):
         make_plugin_dir(self.plugins, "shieldcortex")
         backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
 
-        ctx, result, errors = self.register_from(backup)
+        ctx, result, logs = self.register_from(backup)
 
-        self.assertEqual(len(errors), 1, errors)
-        line = errors[0]
+        self.assertEqual(len(logs["error"]), 1, logs)
+        line = logs["error"][0]
         self.assertIn(backup, line)
         self.assertIn(os.path.join(self.plugins, "shieldcortex"), line)
         self.assertIn("--fix-hermes-plugin-copies", line)
@@ -96,11 +124,11 @@ class ShadowSignalTests(unittest.TestCase):
         canonical = make_plugin_dir(self.plugins, "shieldcortex")
         backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
 
-        ctx, result, errors = self.register_from(canonical)
+        ctx, result, logs = self.register_from(canonical)
 
-        self.assertEqual(len(errors), 1, errors)
-        self.assertIn(backup, errors[0])
-        self.assertIn("--fix-hermes-plugin-copies", errors[0])
+        self.assertEqual(len(logs["error"]), 1, logs)
+        self.assertIn(backup, logs["error"][0])
+        self.assertIn("--fix-hermes-plugin-copies", logs["error"][0])
         self.assertIn("pre_tool_call", ctx.hooks)
         self.assertEqual(result["name"], "shieldcortex")
 
@@ -112,22 +140,39 @@ class ShadowSignalTests(unittest.TestCase):
         make_plugin_dir(os.path.join(self.plugins, "memory"), "provider")
         make_plugin_dir(self.plugins, "zz-other", manifest_name="ekho")
 
-        ctx, result, errors = self.register_from(canonical)
+        ctx, result, logs = self.register_from(canonical)
 
-        self.assertEqual(errors, [])
+        self.assertEqual(logs["error"], [])
+        self.assertEqual(logs["warning"], [])
+        self.assertIn("pre_tool_call", ctx.hooks)
+        self.assertEqual(result["name"], "shieldcortex")
+
+
+class RegistrationSurvivesTests(PluginRootCase):
+    """A diagnostic must never be able to stop the gate registering."""
+
+    def test_registration_survives_a_discovery_that_raises_outright(self):
+        # Not "returns a reason" — actually raises, from inside our own helper,
+        # which is the shape no error path anticipates.
+        canonical = make_plugin_dir(self.plugins, "shieldcortex")
+        with mock.patch.object(shieldcortex.shadow, "_hermes_root_scan",
+                               side_effect=RuntimeError("boom")):
+            ctx, result, logs = self.register_from(canonical)
+        self.assertEqual(logs["error"], [])
+        self.assertEqual(logs["warning"], [])
         self.assertIn("pre_tool_call", ctx.hooks)
         self.assertEqual(result["name"], "shieldcortex")
 
     def test_registration_survives_an_unreadable_plugin_root(self):
-        # The signal is best-effort; a parent it cannot list must not raise.
         canonical = make_plugin_dir(self.plugins, "shieldcortex")
-        with mock.patch("os.listdir", side_effect=OSError("denied")):
-            ctx, result, errors = self.register_from(canonical)
-        self.assertEqual(errors, [])
+        with mock.patch("os.scandir", side_effect=OSError("denied")):
+            ctx, result, logs = self.register_from(canonical, level="DEBUG")
+        self.assertEqual(logs["error"], [])
         self.assertIn("pre_tool_call", ctx.hooks)
         self.assertEqual(result["name"], "shieldcortex")
 
 
+@needs_hermes
 class SymlinkedInstallationTests(unittest.TestCase):
     """#569 blocker 5 — the signal has to survive a symlinked plugin directory.
 
@@ -229,14 +274,9 @@ class SymlinkedInstallationTests(unittest.TestCase):
         self.assertEqual(result["name"], "shieldcortex")
 
 
-class ShadowDetectionTests(unittest.TestCase):
-    """The discovery rules the signal mirrors, tested directly."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.plugins = os.path.join(self._tmp.name, "plugins")
-        os.makedirs(self.plugins)
-        self.addCleanup(self._tmp.cleanup)
+@needs_hermes
+class ShadowDetectionTests(PluginRootCase):
+    """The discovery rules, asked of Hermes and reported by `detect_shadow`."""
 
     def test_dunder_directories_are_skipped(self):
         canonical = make_plugin_dir(self.plugins, "shieldcortex")
@@ -257,119 +297,77 @@ class ShadowDetectionTests(unittest.TestCase):
             fh.write(":\n  not: [a manifest\n")
         self.assertIsNone(detect_shadow(canonical))
 
-    def test_manifest_name_reader_handles_quotes_comments_and_nesting(self):
-        directory = make_plugin_dir(self.plugins, "p", manifest_name=None)
-        manifest = os.path.join(directory, "plugin.yaml")
-        with open(manifest, "w", encoding="utf-8") as fh:
-            fh.write("meta:\n  name: not-the-plugin-key\nname: 'shieldcortex'  # live\n")
-        self.assertEqual(read_manifest_name(manifest), "shieldcortex")
-
     def test_clean_report_has_no_error_line(self):
         self.assertIsNone(shadow_error_line(None))
 
 
-class UndeterminedStartupTests(unittest.TestCase):
-    """#569 r3: "I could not tell" is a thing this must be able to say.
+class NoDiscoveryStartupTests(PluginRootCase):
+    """#569 r4: with no Hermes discovery, start-up says nothing but DEBUG.
 
-    Round 2 appended a note about the directories it would not read and then
-    reported the install clean anyway. On a host where the unreadable directory
-    IS the shadow, that is the check certifying the exact state it exists to
-    catch. The fallback now gives the root no verdict at all, and the start-up
-    line says so at WARNING — not ERROR, because nothing is known to be wrong,
-    and not silence, because nothing is known to be right.
+    Round 2 appended a note about the directories its reader would not read and
+    reported the install clean anyway. Round 3 replaced that with a WARNING
+    built on the same reader. Round 4 removed the reader: there is no longer
+    anything to base a level on, so the line is DEBUG, carries the real reason,
+    and names no copy, no winner and no shadow. `shieldcortex doctor` is where
+    "could not determine" is reported properly, with the remedy attached.
     """
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.plugins = os.path.join(self._tmp.name, "plugins")
-        os.makedirs(self.plugins)
-        self.addCleanup(self._tmp.cleanup)
-        # This box has a working hermes_cli, and the primary path never reports
-        # an unknown — so the fallback is forced, with the reason it would
-        # really carry on a host that has no Hermes to ask.
-        #
+        super().setUp()
         # Both module objects, deliberately: these tests import `shadow` as a
         # top-level module, while `register()` goes through the package's
         # `shieldcortex.shadow`. They are two distinct objects under one file,
         # and patching only one silently leaves the other live.
-        reason = ("hermes_cli is not importable "
-                  "(ModuleNotFoundError: No module named 'hermes_cli')")
+        self.reason = ("hermes_cli is not importable "
+                       "(ModuleNotFoundError: No module named 'hermes_cli')")
         for module in (shadow_module, shieldcortex.shadow):
             patched = mock.patch.object(module, "_hermes_root_scan",
-                                        return_value=(None, None, reason))
+                                        return_value=(None, None, self.reason))
             patched.start()
             self.addCleanup(patched.stop)
 
-    def register_from(self, package_dir):
-        ctx = FakeCtx()
-        logger = logging.getLogger("shieldcortex.hermes")
-        with mock.patch.object(shieldcortex, "_package_dir", return_value=package_dir):
-            with self.assertLogs(logger, level="DEBUG") as captured:
-                result = shieldcortex.register(ctx)
-        by_level = {
-            "error": [r.getMessage() for r in captured.records if r.levelno >= logging.ERROR],
-            "warning": [r.getMessage() for r in captured.records
-                        if r.levelno == logging.WARNING],
-            "debug": [r.getMessage() for r in captured.records if r.levelno == logging.DEBUG],
-        }
-        return ctx, result, by_level
-
-    def test_an_unreadable_neighbour_is_a_warning_not_a_clean_start(self):
+    def test_a_plain_shadow_produces_no_error_and_no_warning(self):
         canonical = make_plugin_dir(self.plugins, "shieldcortex")
-        murky = make_plugin_dir(self.plugins, "zz-murky", manifest_name=None)
-        with open(os.path.join(murky, "plugin.yaml"), "w", encoding="utf-8") as fh:
-            # Mentions our key, so it could be the shadow; a block scalar, so
-            # this reader will not say whether it is.
-            fh.write("name: >-\n  shieldcortex\n")
+        make_plugin_dir(self.plugins, "shieldcortex.bak-x")
 
-        ctx, result, logs = self.register_from(canonical)
+        ctx, result, logs = self.register_from(canonical, level="DEBUG")
 
         self.assertEqual(logs["error"], [])
-        line = next(m for m in logs["warning"] if "shieldcortex" in m)
-        self.assertIn("could not determine which plugin copy Hermes loads", line)
-        self.assertIn(murky, line)
-        # And the real reason travels with it, rather than being flattened.
+        self.assertEqual(logs["warning"], [])
+        line = next(m for m in logs["debug"] if "plugin copy check skipped" in m)
+        # The real reason travels with it rather than being flattened.
         self.assertIn("ModuleNotFoundError", line)
+        # And nothing in it reads as a verdict.
+        self.assertNotIn("shieldcortex.bak-x", line)
+        self.assertNotIn("conflict", line)
         # The gate registered regardless.
         self.assertIn("pre_tool_call", ctx.hooks)
         self.assertEqual(result["name"], "shieldcortex")
 
-    def test_a_real_shadow_beside_an_unknown_is_still_an_error(self):
-        canonical = make_plugin_dir(self.plugins, "shieldcortex")
+    def test_being_the_backup_ourselves_is_not_reported_either(self):
+        make_plugin_dir(self.plugins, "shieldcortex")
         backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
-        murky = make_plugin_dir(self.plugins, "zz-murky", manifest_name=None)
-        with open(os.path.join(murky, "plugin.yaml"), "w", encoding="utf-8") as fh:
-            fh.write("name: >-\n  shieldcortex\n")
 
-        _ctx, _result, logs = self.register_from(canonical)
+        _ctx, _result, logs = self.register_from(backup, level="DEBUG")
 
-        self.assertEqual(len(logs["error"]), 1, logs)
-        self.assertIn(backup, logs["error"][0])
-        self.assertIn(murky, logs["error"][0])
+        self.assertEqual(logs["error"], [])
+        self.assertEqual(logs["warning"], [])
 
-    def test_the_fallback_reason_is_the_real_one(self):
+    def test_detect_shadow_returns_nothing_to_report(self):
         canonical = make_plugin_dir(self.plugins, "shieldcortex")
         make_plugin_dir(self.plugins, "shieldcortex.bak-x")
-        report = detect_shadow(canonical)
-        self.assertTrue(report["approximate"])
-        self.assertIn("ModuleNotFoundError", report["reason"])
-        self.assertIn(report["reason"], shadow_error_line(report))
+        with self.assertLogs(logging.getLogger("shieldcortex.hermes"), level="DEBUG"):
+            self.assertIsNone(detect_shadow(canonical))
 
 
-class StartupRootSizeTests(unittest.TestCase):
+class StartupRootSizeTests(PluginRootCase):
     """#569 r3 nit: the start-up check declines an enormous plugins root.
 
-    Whichever half answers, the cost is a manifest read per child — and Hermes'
-    own discovery recurses into category dirs and reads each manifest whole.
-    Fine for the tens of entries a real root holds; not something to do
-    synchronously inside `register()` for thousands. `doctor` has no such cap.
+    Hermes' discovery reads a manifest per child and recurses into category
+    dirs. Fine for the tens of entries a real root holds; not something to do a
+    second time synchronously inside `register()` for thousands. `doctor` has
+    no such cap.
     """
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.plugins = os.path.join(self._tmp.name, "plugins")
-        os.makedirs(self.plugins)
-        self.addCleanup(self._tmp.cleanup)
 
     def _fill(self, count):
         for index in range(count):
@@ -387,6 +385,19 @@ class StartupRootSizeTests(unittest.TestCase):
         debug = [r.getMessage() for r in captured.records if r.levelno == logging.DEBUG]
         self.assertTrue(any("skipped at start-up" in m for m in debug), debug)
 
+    def test_our_own_directory_name_is_not_a_verdict_past_the_cap(self):
+        # Round 3 still reported `misnamed` here, on the grounds that it costs
+        # no I/O. Round 4 does not: a verdict this check did not get from
+        # Hermes is not one it gives (#569 r4). Doctor has no cap and answers
+        # properly.
+        backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
+        make_plugin_dir(self.plugins, "shieldcortex")
+        self._fill(shadow_module.MAX_STARTUP_ROOT_ENTRIES + 1)
+
+        with self.assertLogs(logging.getLogger("shieldcortex.hermes"), level="DEBUG"):
+            self.assertIsNone(detect_shadow(backup))
+
+    @needs_hermes
     def test_the_same_root_under_the_cap_still_reports(self):
         canonical = make_plugin_dir(self.plugins, "shieldcortex")
         backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
@@ -394,19 +405,6 @@ class StartupRootSizeTests(unittest.TestCase):
         report = detect_shadow(canonical)
         self.assertIsNotNone(report)
         self.assertEqual(report["others"], [backup])
-
-    def test_our_own_directory_name_is_still_read_past_the_cap(self):
-        # It costs no I/O at all, and it is the strongest signal there is:
-        # whichever copy is executing won discovery, so a non-canonical name IS
-        # the shadow.
-        backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
-        make_plugin_dir(self.plugins, "shieldcortex")
-        self._fill(shadow_module.MAX_STARTUP_ROOT_ENTRIES + 1)
-
-        report = detect_shadow(backup)
-        self.assertIsNotNone(report)
-        self.assertTrue(report["misnamed"])
-        self.assertEqual(report["others"], [])
 
 
 if __name__ == "__main__":  # pragma: no cover

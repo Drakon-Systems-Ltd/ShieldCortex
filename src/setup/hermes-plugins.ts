@@ -15,27 +15,36 @@
  * the old code. Observed in the field on the Ekho plugin through exactly this
  * mechanism.
  *
- * ## Why this does not re-implement the rules
+ * ## There is exactly one source of truth, and it is Hermes
  *
- * Round 1 of this fix mirrored the discovery rules in a line reader, and an
- * independent review of the sibling Ekho change found six shapes where a line
- * reader and Hermes disagree — each one a silent wrong answer in a health
- * check whose entire job is to be right about what Hermes loads:
- * `name: shieldcortex # backup` (Hermes strips the comment), a manifest with no
- * `name:` at all (Hermes falls back to the directory name), quoted names, a
- * portable `plugin.json` (Hermes accepts it), a `plugin.yaml` DIRECTORY beside
- * a valid `plugin.yml` (Hermes selects on `exists()`, fails to parse, and takes
- * nothing from that directory), and a valid `name:` line above broken YAML
- * (Hermes rejects the manifest).
+ * Rounds 1 to 3 shipped a second implementation: first a line reader that
+ * mirrored the discovery rules, then a deliberately narrow reader that was
+ * supposed to answer only about manifests it fully understood. Four rounds of
+ * independent review on the sibling Ekho change found a confident wrong answer
+ * in EVERY version of that grammar, each one narrower than the last:
  *
- * So the primary path asks Hermes: resolve the Hermes interpreter, spawn it
- * with a small embedded script, and let `hermes_cli.plugins_discovery` answer.
- * There is no parity to maintain because there is no second implementation.
+ *   - `name: >-` with an indented name under it (read as absent, so a shadowed
+ *     host was certified clean);
+ *   - `description: backup: before upgrade` (accepted, where Hermes rejects the
+ *     whole manifest);
+ *   - `name: "ekho"` (the escape left undecoded, so the copy was missed);
+ *   - `description: 2026-99-99` — YAML types the plain scalar as a timestamp,
+ *     the month is invalid, construction fails and Hermes drops the manifest;
+ *   - `manifest_version: .inf` — YAML constructs infinity and Hermes' `int()`
+ *     conversion raises `OverflowError`, so the manifest is dropped.
  *
- * `setup/hermes-manifest-parse.ts` is the fallback for a host where no Hermes
- * interpreter can be found or the spawn fails. Its answers are marked
- * `approximate`, every caller says so out loud, and a manifest whose shape it
- * does not model comes back `unknown` rather than guessed.
+ * The last two need no exotic syntax at all: they are ordinary-looking lines
+ * whose meaning lives in YAML's implicit typing and in Hermes' own conversion
+ * code. Chasing that is endless, and a health check whose entire job is to be
+ * right about what the gateway loads cannot ship "probably".
+ *
+ * So round 4 removed the grammar entirely. Hermes' own discovery answers, or
+ * NOTHING answers: `scanHermesPluginCopies` returns `fromHermes: false` with
+ * the real reason, every caller reports "could not determine", and the repair
+ * moves nothing. The only thing offered without Hermes is a HINT list — the
+ * directories whose folder name starts with `shieldcortex`, or whose manifest
+ * text contains that substring — which is explicitly unverified and is never
+ * turned into a copy, a winner or a shadow.
  *
  * Profiles get their own plugin root at `<hermesHome>/profiles/<name>/plugins/`,
  * scanned independently — a collision is per-root.
@@ -46,16 +55,32 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import {
-  classifyPluginDir,
-  FOREIGN_HARNESS_MANIFEST_DIRS,
-  HERMES_PLUGIN_NAME,
-} from './hermes-manifest-parse.js';
+/** The manifest key our plugin declares — the thing that can collide. */
+export const HERMES_PLUGIN_NAME = 'shieldcortex';
 
-export { HERMES_PLUGIN_NAME };
-
-/** How long the Hermes probe may take before we fall back. */
+/** How long the Hermes probe may take before we give up on an answer. */
 const PROBE_TIMEOUT_MS = 8_000;
+
+/**
+ * How much of a manifest the HINT list reads. Nothing parses these bytes; the
+ * only question asked of them is whether the literal string `shieldcortex`
+ * appears, so an unbounded read would buy nothing and cost a health check its
+ * memory ceiling.
+ */
+const HINT_BYTE_CAP = 64 * 1024;
+
+/**
+ * `plugins_discovery._FOREIGN_HARNESS_MANIFEST_DIRS` — per-harness manifest
+ * directories Hermes skips before it looks for a manifest at all. The hint list
+ * skips them for the same reason: they are never plugin directories.
+ */
+const FOREIGN_HARNESS_MANIFEST_DIRS: ReadonlySet<string> = new Set([
+  '.claude-plugin',
+  '.codex-plugin',
+  '.cursor-plugin',
+  '.devin-plugin',
+  '.kimi-plugin',
+]);
 
 /** One directory under a `plugins/` root whose manifest declares our name. */
 export interface HermesPluginCopy {
@@ -69,7 +94,7 @@ export interface HermesPluginCopy {
   canonical: boolean;
 }
 
-/** The outcome for one `plugins/` root. */
+/** Hermes' answer for one `plugins/` root. */
 export interface HermesPluginRootScan {
   root: string;
   /** Every copy keyed `shieldcortex`, in Hermes' discovery order. */
@@ -80,43 +105,44 @@ export interface HermesPluginRootScan {
   hasCanonical: boolean;
   /** More than one copy, or a single copy that is not the canonical one. */
   shadowed: boolean;
-  /**
-   * Directories the FALLBACK reader could not classify and that could still be
-   * ours. Always empty on the primary path — Hermes always has an answer.
-   */
-  unknownDirs: string[];
-  /**
-   * True when this root holds at least one unknown directory. The root then
-   * has NO winner and NO shadow verdict: the copy Hermes loads may well be one
-   * of the directories the reader would not read, so naming a winner or
-   * calling the root clean would both be guesses (#569 r3).
-   */
-  undetermined: boolean;
+}
+
+/**
+ * The unverified hint for one root, offered ONLY when Hermes could not answer.
+ * These are directories that merely look like they might be ours; no manifest
+ * was parsed, and nothing here is a copy, a winner or a shadow.
+ */
+export interface HermesPluginHintRoot {
+  root: string;
+  dirs: string[];
 }
 
 export interface HermesPluginScan {
   hermesHome: string;
   /** Whether the Hermes home directory exists at all. */
   present: boolean;
+  /**
+   * True when Hermes' own discovery answered. When it is FALSE nothing below
+   * is a verdict: `roots` and `copies` are empty, `shadowed` is false because
+   * it is unknown rather than because it is absent, and only `hintRoots` and
+   * `undeterminedReason` carry anything.
+   */
+  fromHermes: boolean;
+  /** Why Hermes could not be asked, verbatim. Null when `fromHermes`. */
+  undeterminedReason: string | null;
   roots: HermesPluginRootScan[];
   /** Every copy across every root, roots in order. */
   copies: HermesPluginCopy[];
   shadowed: boolean;
-  /** True when Hermes' own discovery answered; false when the fallback did. */
-  fromHermes: boolean;
-  /** Why the fallback was used, for the message. Null when `fromHermes`. */
-  fallbackReason: string | null;
-  /** Any directory the fallback could not classify, across every root. */
-  unknownDirs: string[];
-  /** True when at least one root came back undetermined. */
-  undetermined: boolean;
+  /** Unverified hints per root. Empty when `fromHermes`. */
+  hintRoots: HermesPluginHintRoot[];
 }
 
 export interface HermesScanOptions {
   /**
    * Override interpreter resolution. `null` is "this box has no Hermes to
-   * ask", which is the seam the fallback tests use: a box with a working
-   * Hermes would otherwise never exercise the approximate path.
+   * ask", which is the seam the undetermined-path tests use: a box with a
+   * working Hermes would otherwise never exercise it.
    */
   interpreter?: string | null;
 }
@@ -407,7 +433,11 @@ function toCopy(dir: string, root: string): HermesPluginCopy {
   };
 }
 
-function rootScanFrom(probe: ProbeRoot, unknownDirs: string[] = []): HermesPluginRootScan {
+
+/**
+ * Hermes' answer for one root, turned into the shape doctor reports on.
+ */
+function rootScanFrom(probe: ProbeRoot): HermesPluginRootScan {
   const copies = probe.copies.map((dir) => toCopy(dir, probe.root));
   const loaded =
     probe.loaded === null
@@ -419,54 +449,76 @@ function rootScanFrom(probe: ProbeRoot, unknownDirs: string[] = []): HermesPlugi
     loaded,
     hasCanonical: copies.some((c) => c.canonical),
     shadowed: copies.length > 1 || (loaded !== null && !loaded.canonical),
-    unknownDirs,
-    undetermined: unknownDirs.length > 0,
   };
 }
 
-// ── Fallback path: the conservative reader ────────────────────────────────
+// ── Without Hermes: hints, and nothing that decides ───────────────────────
 
 /**
- * Apply Hermes' discovery rules to one `plugins/` root with the conservative
- * reader. Used only when Hermes itself could not be asked; the result is
- * `approximate` and its `unknownDirs` are the directories it refused to guess
- * about.
+ * The manifest file Hermes would read from `dir`, or null.
+ *
+ * Selection, not parsing: `plugin.yaml` then `plugin.yml` on EXISTENCE (which
+ * is what Hermes uses — a `plugin.yaml` DIRECTORY is selected and then fails),
+ * then a portable `plugin.json` when neither YAML spelling is there. The hint
+ * list only wants somewhere to look for a literal substring.
  */
-export function scanHermesPluginRootFallback(root: string): HermesPluginRootScan {
-  const copies: HermesPluginCopy[] = [];
-  const unknownDirs: string[] = [];
+function hintManifestFile(dir: string): string | null {
+  for (const base of ['plugin.yaml', 'plugin.yml', 'plugin.json']) {
+    const candidate = path.join(dir, base);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** Whether a manifest's first `HINT_BYTE_CAP` bytes mention our key at all. */
+function manifestMentionsUs(file: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'r');
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(HINT_BYTE_CAP);
+    const read = fs.readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, read).toString('utf8').includes(HERMES_PLUGIN_NAME);
+  } catch {
+    return false;
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* the answer is already decided */
+    }
+  }
+}
+
+/**
+ * Directories under `root` that MIGHT be a copy of our plugin — the folder name
+ * starts with `shieldcortex`, or the manifest text contains that substring.
+ *
+ * This is a hint and nothing more. It is offered only when Hermes' own
+ * discovery could not be reached, it is labelled unverified everywhere it is
+ * printed, and no caller may turn it into a copy, a winner or a shadow: both
+ * halves of the test are wrong in both directions (a manifest can spell our key
+ * in escapes and never contain the bytes; a third-party manifest can mention us
+ * in prose), which is precisely why rounds 1 to 3 kept shipping wrong answers.
+ * A substring test cannot be mistaken for a parse.
+ */
+export function hintDirsInRoot(root: string): string[] {
+  const hints: string[] = [];
   for (const dirName of childDirectories(root)) {
-    // Hermes skips dunder children and the per-harness manifest dirs outright.
     if (dirName.startsWith('__') && dirName.endsWith('__')) continue;
     if (FOREIGN_HARNESS_MANIFEST_DIRS.has(dirName)) continue;
     const dir = path.join(root, dirName);
-    const verdict = classifyPluginDir(dir, dirName);
-    // A manifest-less child is a CATEGORY dir: its plugins are keyed
-    // `<category>/<name>`, which can never collide with a flat name.
-    if (verdict === 'category' || verdict === 'other') continue;
-    if (verdict === 'unknown') {
-      unknownDirs.push(dir);
+    if (dirName.startsWith(HERMES_PLUGIN_NAME)) {
+      hints.push(dir);
       continue;
     }
-    copies.push(toCopy(dir, root));
+    const manifest = hintManifestFile(dir);
+    if (manifest !== null && manifestMentionsUs(manifest)) hints.push(dir);
   }
-  // One unknown costs the whole root its verdict (#569 r3). The directory this
-  // reader would not read may be a copy, and it may sort after every copy it
-  // did read — so "the last one wins" cannot be applied, and "no shadow here"
-  // cannot be claimed either. `copies` stays: those are facts, and the message
-  // is better for naming them.
-  const undetermined = unknownDirs.length > 0;
-  // `copies` is in Hermes' sorted order, and the last writer of the key wins.
-  const loaded = !undetermined && copies.length > 0 ? copies[copies.length - 1] : null;
-  return {
-    root,
-    copies,
-    loaded,
-    hasCanonical: copies.some((c) => c.canonical),
-    shadowed: !undetermined && (copies.length > 1 || (loaded !== null && !loaded.canonical)),
-    unknownDirs,
-    undetermined,
-  };
+  return hints;
 }
 
 // ── Public entry point ───────────────────────────────────────────────────
@@ -476,58 +528,44 @@ export function scanHermesPluginRootFallback(root: string): HermesPluginRootScan
  * than resolved here so the installer can scan the tree it just wrote to, and
  * the doctor can scan the one `HERMES_HOME` points at.
  *
- * Hermes' own discovery answers when it can. Callers must surface
- * `fromHermes === false` to the operator: an approximate answer about which
- * copy runs is still worth printing, but not worth mistaking for a fact.
+ * Hermes' own discovery answers, or nothing does. `fromHermes === false` is not
+ * a lesser answer to be labelled "approximate" and acted on anyway — it is the
+ * absence of an answer, and every caller has to say so and stop (#569 r4).
  */
 export function scanHermesPluginCopies(
   hermesHome: string,
   opts: HermesScanOptions = {},
 ): HermesPluginScan {
   const present = isDirectory(hermesHome);
-  if (!present) {
-    return {
-      hermesHome,
-      present,
-      roots: [],
-      copies: [],
-      shadowed: false,
-      fromHermes: false,
-      fallbackReason: null,
-      unknownDirs: [],
-      undetermined: false,
-    };
-  }
-
-  const roots = hermesPluginRoots(hermesHome);
-
-  const probe = probeHermesDiscovery(hermesHome, roots, opts);
-  if ('roots' in probe) {
-    const rootScans = probe.roots.map((r) => rootScanFrom(r));
-    return {
-      hermesHome,
-      present,
-      roots: rootScans,
-      copies: rootScans.flatMap((r) => r.copies),
-      shadowed: rootScans.some((r) => r.shadowed),
-      fromHermes: true,
-      fallbackReason: null,
-      unknownDirs: [],
-      undetermined: false,
-    };
-  }
-
-  const fallbackReason = probe.error;
-  const rootScans = roots.map(scanHermesPluginRootFallback);
-  return {
+  const base = {
     hermesHome,
     present,
+    fromHermes: false,
+    undeterminedReason: null as string | null,
+    roots: [] as HermesPluginRootScan[],
+    copies: [] as HermesPluginCopy[],
+    shadowed: false,
+    hintRoots: [] as HermesPluginHintRoot[],
+  };
+  if (!present) return base;
+
+  const roots = hermesPluginRoots(hermesHome);
+  const probe = probeHermesDiscovery(hermesHome, roots, opts);
+
+  if ('error' in probe) {
+    return {
+      ...base,
+      undeterminedReason: probe.error,
+      hintRoots: roots.map((root) => ({ root, dirs: hintDirsInRoot(root) })),
+    };
+  }
+
+  const rootScans = probe.roots.map(rootScanFrom);
+  return {
+    ...base,
+    fromHermes: true,
     roots: rootScans,
     copies: rootScans.flatMap((r) => r.copies),
     shadowed: rootScans.some((r) => r.shadowed),
-    fromHermes: false,
-    fallbackReason,
-    unknownDirs: rootScans.flatMap((r) => r.unknownDirs),
-    undetermined: rootScans.some((r) => r.undetermined),
   };
 }

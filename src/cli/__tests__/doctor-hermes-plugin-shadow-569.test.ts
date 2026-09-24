@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { checkHermesPluginShadowing, fixHermesPluginShadowing } from '../doctor.js';
+import { probeHermesDiscovery } from '../../setup/hermes-plugins.js';
 
 /**
  * #569 — Hermes loads plugins by manifest `name:`, in sorted directory order,
@@ -48,7 +49,7 @@ function reservedFor(dirName: string, suffix = ''): string {
 }
 
 /**
- * Force the conservative reader. The default path spawns the Hermes
+ * Force the 'no Hermes to ask' path. The default path spawns the Hermes
  * interpreter, which is the right thing on a box that has one; these cases are
  * about what a box WITHOUT one reports, so they say so explicitly rather than
  * depending on the absence of Hermes.
@@ -85,7 +86,26 @@ function makePlugin(
   return dir;
 }
 
-describe('checkHermesPluginShadowing (#569)', () => {
+/**
+ * Whether this box can actually be asked — resolved once, by asking. Since
+ * round 4 there is no second implementation to fall back to, so every case
+ * that expects a VERDICT needs a real Hermes; those blocks skip cleanly rather
+ * than passing for the wrong reason on a box without one. The cases that pin
+ * the no-Hermes behaviour force `interpreter: null` and always run.
+ */
+const HAS_HERMES = (() => {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-probe-'));
+  try {
+    const root = path.join(probeDir, 'plugins');
+    fs.mkdirSync(root, { recursive: true });
+    return 'roots' in probeHermesDiscovery(probeDir, [root]);
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+})();
+const describeWithHermes = HAS_HERMES ? describe : describe.skip;
+
+describeWithHermes('checkHermesPluginShadowing (#569)', () => {
   it('skips with info when there is no Hermes home', async () => {
     const result = await checkHermesPluginShadowing(home);
     expect(result.status).toBe('info');
@@ -235,7 +255,7 @@ describe('checkHermesPluginShadowing (#569)', () => {
   });
 });
 
-describe('fixHermesPluginShadowing (#569)', () => {
+describeWithHermes('fixHermesPluginShadowing (#569)', () => {
   it('moves the backup out of plugins/, preserving its contents', async () => {
     const canonical = makePlugin(plugins, 'shieldcortex');
     const backup = makePlugin(plugins, 'shieldcortex.bak-pre510-1');
@@ -308,7 +328,7 @@ describe('fixHermesPluginShadowing (#569)', () => {
  * between the check and the move. The destination is therefore RESERVED with an
  * exclusive `mkdir`, and the copy goes inside it.
  */
-describe('fixHermesPluginShadowing reserves its destination (#569)', () => {
+describeWithHermes('fixHermesPluginShadowing reserves its destination (#569)', () => {
   it('goes to a fresh name rather than into an occupied one', () => {
     makePlugin(plugins, 'shieldcortex');
     const backup = makePlugin(plugins, 'shieldcortex.bak-x');
@@ -413,7 +433,7 @@ describe('fixHermesPluginShadowing reserves its destination (#569)', () => {
  * path depends on — and then the re-run check reports PASS because it can no
  * longer find any copies at all.
  */
-describe('fixHermesPluginShadowing protects the canonical install (#569)', () => {
+describeWithHermes('fixHermesPluginShadowing protects the canonical install (#569)', () => {
   it('refuses when the canonical path is a symlink to the backup', async () => {
     const real = makePlugin(plugins, 'shieldcortex.bak-x');
     fs.writeFileSync(path.join(real, 'marker'), 'the only bytes\n');
@@ -504,147 +524,91 @@ describe('fixHermesPluginShadowing protects the canonical install (#569)', () =>
 });
 
 /**
- * Honesty about which half answered. On a host with no Hermes interpreter the
- * conservative reader answers, and every surface says so — a health check that
- * quietly downgrades its own source of truth is how round 1 shipped six wrong
- * answers.
+ * Round-4 blocker: without Hermes' own discovery there is NO verdict.
+ *
+ * Rounds 1 to 3 shipped a reader of our own for hosts with no Hermes
+ * interpreter, narrowing its grammar each round; four rounds of independent
+ * review found a confident wrong answer in every version of it, the last two
+ * from lines with no exotic syntax at all (`description: 2026-99-99`,
+ * `manifest_version: .inf`) whose meaning lives in YAML's implicit typing and
+ * Hermes' own conversion code. A check that is sometimes confidently wrong
+ * about which copy the gateway loads is worth less than one that says it
+ * cannot tell.
+ *
+ * So: always WARN, never a winner, and a repair that moves nothing.
  */
-describe('checkHermesPluginShadowing labels an approximate answer (#569)', () => {
-  it('marks a shadow found without Hermes as approximate', async () => {
+describe('no Hermes discovery, no verdict (#569 r4)', () => {
+  it('warns — never passes — on a host that looks perfectly clean', async () => {
     makePlugin(plugins, 'shieldcortex');
-    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
 
     const result = await checkHermesPluginShadowing(home, NO_HERMES);
 
     expect(result.status).toBe('warn');
-    expect(result.message).toContain('approximate: Hermes discovery not reachable');
+    expect(result.message).toContain('could not determine which copy Hermes loads');
     expect(result.message).toMatch(/no Hermes interpreter/);
-    expect(result.message).toContain(shown(backup));
+    expect(result.message).toContain('Install Hermes, or point the doctor at its python.');
+    expect(result.fix).toMatch(/moves nothing/);
   });
 
-  it('marks a clean host found without Hermes as approximate', async () => {
+  it('warns — and still names no winner — on a host that is plainly shadowed', async () => {
     makePlugin(plugins, 'shieldcortex');
-    const result = await checkHermesPluginShadowing(home, NO_HERMES);
-    expect(result.status).toBe('pass');
-    expect(result.message).toContain('approximate: Hermes discovery not reachable');
-  });
-
-  it('does not label an answer that came from Hermes itself', async () => {
-    makePlugin(plugins, 'shieldcortex');
-    const result = await checkHermesPluginShadowing(home);
-    // On a box with no Hermes at all this still holds: the message is then
-    // labelled, and this asserts only that the label tracks the source.
-    const { scanHermesPluginCopies } = await import('../../setup/hermes-plugins.js');
-    const scan = scanHermesPluginCopies(path.join(home, '.hermes'));
-    expect(result.message.includes('approximate')).toBe(!scan.fromHermes);
-  });
-
-  it('refuses to call a host clean while a manifest is unreadable without Hermes', async () => {
-    makePlugin(plugins, 'shieldcortex');
-    // A valid `name:` line above YAML the fallback reader does not model. It
-    // mentions our key, so it could be a shadow — Hermes would know; this
-    // reader will not guess.
-    const murky = makePlugin(plugins, 'zz-murky', null, {
-      body: 'name: shieldcortex\nkind: [unclosed\n',
-    });
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
 
     const result = await checkHermesPluginShadowing(home, NO_HERMES);
 
     expect(result.status).toBe('warn');
-    expect(result.message).toMatch(/could not be classified without Hermes/);
-    expect(result.message).toContain(shown(murky));
-    expect(result.fix).toMatch(/Hermes/);
-
-    // Hermes itself has no such doubt: it rejects the manifest outright.
-    const authoritative = await checkHermesPluginShadowing(home);
-    const { scanHermesPluginCopies } = await import('../../setup/hermes-plugins.js');
-    if (scanHermesPluginCopies(path.join(home, '.hermes')).fromHermes) {
-      expect(authoritative.status).toBe('pass');
-    }
+    expect(result.message).toContain('could not determine which copy Hermes loads');
+    // The backup appears only as an unverified hint. "Hermes loads <path>" is
+    // the claim this row is not entitled to make.
+    expect(result.message).toContain('Possible copies (unverified');
+    expect(result.message).toContain(shown(backup));
+    expect(result.message).not.toMatch(/Hermes loads [~/]/);
+    expect(result.message).not.toMatch(/last in sorted order wins/);
   });
 
-  it('does not touch a directory it could not classify', () => {
+  it('lists hints by folder name and by raw manifest substring only', async () => {
     makePlugin(plugins, 'shieldcortex');
-    const murky = makePlugin(plugins, 'zz-murky', null, {
-      body: 'name: shieldcortex\nkind: [unclosed\n',
+    // Not named like us, and not ours — but the manifest text mentions us, so
+    // a substring test cannot rule it out. It is listed, and it is labelled.
+    const mentions = makePlugin(plugins, 'zz-mentions', null, {
+      body: 'name: kanban\ndescription: replaces shieldcortex\n',
     });
-
-    const fix = fixHermesPluginShadowing(home, FROZEN, NO_HERMES);
-
-    expect(fix.moved).toEqual([]);
-    expect(fix.failed).toBe(true);
-    expect(fix.refused[0].dir).toBe(murky);
-    expect(fix.refused[0].reason).toMatch(/could not read without Hermes/);
-    expect(fix.message).toMatch(/approximate/);
-    expect(fs.existsSync(path.join(murky, 'plugin.yaml'))).toBe(true);
-  });
-});
-
-/**
- * Round-3 blocker 1+2. The fallback used to guess at manifests it did not
- * model, and the guesses were wrong in both directions — so a root holding one
- * now has NO winner and NO clean bill, and the repair does not touch it.
- */
-describe('an undetermined root is neither clean nor shadowed (#569 r3)', () => {
-  /** The shape that broke round 2: Hermes reads it, the line reader cannot. */
-  const BLOCK_SCALAR_NAME = 'name: >-\n  shieldcortex\n';
-
-  it('names no winner even when two confirmed copies are sitting there', async () => {
-    const canonical = makePlugin(plugins, 'shieldcortex');
-    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
-    const murky = makePlugin(plugins, 'zz-murky', null, { body: BLOCK_SCALAR_NAME });
+    // Neither the name nor the text mentions us: not a hint.
+    const unrelated = makePlugin(plugins, 'zz-unrelated', 'kanban');
 
     const result = await checkHermesPluginShadowing(home, NO_HERMES);
 
-    expect(result.status).toBe('warn');
-    expect(result.message).toMatch(/could not determine which copy Hermes loads/);
-    expect(result.message).toContain(shown(murky));
-    // Both real copies are still named — those are facts.
-    expect(result.message).toContain(shown(canonical));
-    expect(result.message).toContain(shown(backup));
-    // But no winner is claimed: `zz-murky` sorts last and may well be the one
-    // Hermes loads, which is exactly what could not be worked out. (The two
-    // "which copy Hermes loads" phrasings say there is no answer, so the thing
-    // to look for is `Hermes loads <a path>`.)
-    expect(result.message).not.toMatch(/Hermes loads \S*shieldcortex/);
-    expect(result.message).not.toMatch(/\d+ copies \(/);
-    expect(result.fix).toMatch(/Install the Hermes agent virtualenv/);
+    expect(result.message).toContain(shown(mentions));
+    expect(result.message).not.toContain(shown(unrelated));
+    // Nothing in the hint clause is called a copy, a shadow or a winner.
+    expect(result.message).toContain('no manifest was read');
   });
 
-  it('moves nothing in that root, not even the obvious backup', () => {
+  it('moves nothing at all, and exits non-zero', () => {
     const canonical = makePlugin(plugins, 'shieldcortex');
     const backup = makePlugin(plugins, 'shieldcortex.bak-x');
-    fs.writeFileSync(path.join(backup, 'marker'), 'old code\n');
-    const murky = makePlugin(plugins, 'zz-murky', null, { body: BLOCK_SCALAR_NAME });
 
     const fix = fixHermesPluginShadowing(home, FROZEN, NO_HERMES);
 
     expect(fix.moved).toEqual([]);
     expect(fix.changed).toBe(false);
+    // Non-zero from the CLI: the operator asked for a repair and did not get
+    // one, and a script has to be able to see that.
     expect(fix.failed).toBe(true);
-    expect(fix.refused.map((r) => r.dir)).toEqual([murky, backup]);
-    expect(fix.refused[1].reason).toMatch(/which copy the gateway loads here is unknown/);
-    // Every byte where it was, and no backups/ tree invented for a move that
-    // never happened.
-    expect(fs.readFileSync(path.join(backup, 'marker'), 'utf8')).toBe('old code\n');
+    expect(fix.fromHermes).toBe(false);
+    expect(fix.message).toContain('nothing was moved');
+    expect(fix.message).toContain('could not determine which copy Hermes loads');
     expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(backup, 'plugin.yaml'))).toBe(true);
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
   });
 
-  it('leaves a determined root alone rather than freezing the whole host', () => {
-    // The undetermined root is a profile; the main root is ordinary and gets
-    // repaired. Uncertainty is per-root, and so is the refusal.
+  it('does not label an answer that came from Hermes itself', async () => {
     makePlugin(plugins, 'shieldcortex');
-    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
-    const profile = path.join(hermes, 'profiles', 'research', 'plugins');
-    makePlugin(profile, 'shieldcortex');
-    makePlugin(profile, 'zz-murky', null, { body: BLOCK_SCALAR_NAME });
-
-    const fix = fixHermesPluginShadowing(home, FROZEN, NO_HERMES);
-
-    expect(fix.moved).toHaveLength(1);
-    expect(fix.moved[0].from).toBe(backup);
-    expect(fix.refused.map((r) => r.dir)).toEqual([path.join(profile, 'zz-murky')]);
+    const result = await checkHermesPluginShadowing(home);
+    const { scanHermesPluginCopies } = await import('../../setup/hermes-plugins.js');
+    const scan = scanHermesPluginCopies(path.join(home, '.hermes'));
+    expect(result.message.includes('could not determine')).toBe(!scan.fromHermes);
   });
 });
 
@@ -659,7 +623,7 @@ describe('an undetermined root is neither clean nor shadowed (#569 r3)', () => {
  * had already been skipped as clean, so a re-run reports PASS on a host whose
  * plugin has just been taken away.
  */
-describe('fixHermesPluginShadowing preflights every root (#569 r3)', () => {
+describeWithHermes('fixHermesPluginShadowing plans, preflights, then moves (#569 r3/r4)', () => {
   /** The reviewer's exact layout; `linkTarget` decides relative vs absolute. */
   function buildEntangledHost(relative: boolean): {
     canonical: string;
@@ -715,11 +679,6 @@ describe('fixHermesPluginShadowing preflights every root (#569 r3)', () => {
     expectNothingMoved(fixHermesPluginShadowing(home, FROZEN), layout);
   });
 
-  it('refuses on the conservative reader too, not only via Hermes', () => {
-    const layout = buildEntangledHost(true);
-    expectNothingMoved(fixHermesPluginShadowing(home, FROZEN, NO_HERMES), layout);
-  });
-
   it('refuses when a profile install lives INSIDE the directory being moved', () => {
     // Not a link to the copy but a link into it: moving the copy takes the
     // profile's install along with it.
@@ -756,5 +715,142 @@ describe('fixHermesPluginShadowing preflights every root (#569 r3)', () => {
     expect(fix.failed).toBe(false);
     expect(fix.refused).toEqual([]);
     expect(fs.existsSync(path.join(profile, 'shieldcortex', 'plugin.yaml'))).toBe(true);
+  });
+  it('refuses the review\'s forward-link chain, where no two realpaths overlap', () => {
+    // The layout that defeats endpoint comparison (astra-r3, blocker 2):
+    //
+    //   plugins/shieldcortex/                      real, canonical
+    //   plugins/shieldcortex.bak-x/                real, older
+    //   plugins/shieldcortex.bak-x/forward      -> srv/profile-sc
+    //   profiles/work/plugins/shieldcortex      -> plugins/…/bak-x/forward
+    //   srv/profile-sc/                            the profile's real copy
+    //
+    // The backup's realpath is the backup. The profile's canonical resolves to
+    // `srv/profile-sc`. Neither equals nor contains the other, so every
+    // realpath test in rounds 2 and 3 permits the move — and the move takes
+    // `forward` with it and leaves the profile's install pointing at nothing.
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+    const elsewhere = makePlugin(path.join(home, 'srv'), 'profile-sc');
+    fs.writeFileSync(path.join(elsewhere, 'marker'), 'the profile runs this\n');
+    const forward = path.join(backup, 'forward');
+    fs.symlinkSync(elsewhere, forward);
+    const profilePlugins = path.join(hermes, 'profiles', 'work', 'plugins');
+    fs.mkdirSync(profilePlugins, { recursive: true });
+    const profileLink = path.join(profilePlugins, 'shieldcortex');
+    fs.symlinkSync(forward, profileLink);
+
+    // The premise: the endpoints really do not overlap.
+    expect(fs.realpathSync(backup)).not.toBe(fs.realpathSync(profileLink));
+    expect(fs.realpathSync(profileLink)).toBe(fs.realpathSync(elsewhere));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.changed).toBe(false);
+    expect(fix.failed).toBe(true);
+    const reasons = fix.refused.map((r) => r.reason).join(' ');
+    expect(reasons).toMatch(/nothing was moved/);
+    expect(reasons).toMatch(/symlink/);
+    // Everything still resolves to its own bytes.
+    expect(fs.readFileSync(path.join(profileLink, 'marker'), 'utf8')).toBe(
+      'the profile runs this\n',
+    );
+    expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('refuses a symlink buried deep inside a backup', () => {
+    // The link need not be at the top of the copy. Anything under it travels
+    // with the rename, so anything under it can be what another root resolves
+    // through — the walk has to reach the bottom of the tree.
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+    const deep = path.join(backup, 'a', 'b', 'c');
+    fs.mkdirSync(deep, { recursive: true });
+    const elsewhere = makePlugin(path.join(home, 'srv'), 'kept');
+    fs.symlinkSync(elsewhere, path.join(deep, 'link'));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
+    const reasons = fix.refused.map((r) => r.reason).join(' ');
+    expect(reasons).toMatch(/nothing was moved/);
+    expect(reasons).toContain(shown(path.join(deep, 'link')));
+    expect(fs.existsSync(path.join(backup, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('repairs an ordinary backup in the main root AND a profile in one pass', () => {
+    // The round-4 nit. Executing root by root leaves the profile's preflight
+    // walking a main-root backup that the earlier move has already taken away:
+    // the walk errors, the profile repair refuses, and half the host is fixed.
+    // One scan, one plan, one preflight, one execution.
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    const mainBackup = makePlugin(plugins, 'shieldcortex.bak-main');
+    const profilePlugins = path.join(hermes, 'profiles', 'work', 'plugins');
+    const profileCanonical = makePlugin(profilePlugins, 'shieldcortex');
+    const profileBackup = makePlugin(profilePlugins, 'shieldcortex.bak-profile');
+
+    const before = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(before.failed).toBe(false);
+    expect(before.refused).toEqual([]);
+    expect(before.moved.map((m) => m.from).sort()).toEqual([mainBackup, profileBackup].sort());
+    expect(fs.existsSync(mainBackup)).toBe(false);
+    expect(fs.existsSync(profileBackup)).toBe(false);
+    // Both installs are untouched, and both moved copies survive under backups/.
+    expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(profileCanonical, 'plugin.yaml'))).toBe(true);
+    for (const move of before.moved) {
+      expect(fs.existsSync(path.join(move.to, 'plugin.yaml'))).toBe(true);
+    }
+  });
+
+  it('re-checks clean for both roots after that one pass', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    makePlugin(plugins, 'shieldcortex.bak-main');
+    const profilePlugins = path.join(hermes, 'profiles', 'work', 'plugins');
+    makePlugin(profilePlugins, 'shieldcortex');
+    makePlugin(profilePlugins, 'shieldcortex.bak-profile');
+
+    expect((await checkHermesPluginShadowing(home)).status).toBe('warn');
+    fixHermesPluginShadowing(home, FROZEN);
+
+    const after = await checkHermesPluginShadowing(home);
+    expect(after.status).toBe('pass');
+    expect(after.message).toContain(shown(path.join(plugins, 'shieldcortex')));
+    expect(after.message).toContain(shown(path.join(profilePlugins, 'shieldcortex')));
+  });
+
+  it('moves nothing anywhere when one root alone is refused (all or nothing)', () => {
+    // The main root is entirely ordinary and would repair cleanly on its own.
+    // The profile's backup holds a link, so the whole plan is abandoned — a
+    // partial repair across a layout nobody has looked at yet is the state
+    // hardest to reason about afterwards.
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    const mainBackup = makePlugin(plugins, 'shieldcortex.bak-main');
+    fs.writeFileSync(path.join(mainBackup, 'marker'), 'ordinary\n');
+    const profilePlugins = path.join(hermes, 'profiles', 'work', 'plugins');
+    makePlugin(profilePlugins, 'shieldcortex');
+    const profileBackup = makePlugin(profilePlugins, 'shieldcortex.bak-profile');
+    const elsewhere = makePlugin(path.join(home, 'srv'), 'kept');
+    fs.symlinkSync(elsewhere, path.join(profileBackup, 'link'));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.changed).toBe(false);
+    expect(fix.failed).toBe(true);
+    // The refusal names the main-root copy too: it is the one an operator
+    // would otherwise expect to have moved.
+    expect(fix.refused.map((r) => r.dir)).toContain(mainBackup);
+    expect(fix.refused.map((r) => r.reason).join(' ')).toMatch(/nothing was moved/);
+    expect(fs.readFileSync(path.join(mainBackup, 'marker'), 'utf8')).toBe('ordinary\n');
+    expect(fs.existsSync(path.join(profileBackup, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
   });
 });
