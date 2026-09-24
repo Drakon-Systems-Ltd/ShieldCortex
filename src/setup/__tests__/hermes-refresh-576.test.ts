@@ -211,6 +211,9 @@ describeWithHermes('refreshHermesPluginCopies — what it writes (#576)', () => 
     expect(hermesPluginCopyStale(installed).stale).toBe(true);
     expect(fs.existsSync(path.join(shadow, 'plugin.yaml'))).toBe(true);
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+    // Nothing was written, so nothing is waiting for a restart: telling an
+    // operator to bounce the gateway here is advice with no work behind it.
+    expect([result.summary, ...result.detail].join('\n')).not.toMatch(/restart the Hermes gateway/);
   });
 
   it('writes nothing when a project plugin copy outranks the install', () => {

@@ -228,7 +228,7 @@ export function refreshHermesPluginCopies(
   if (scan.undetermined.length > 0) {
     return warn(
       `could not scan every plugin root — nothing written (${FIX_POINTER})`,
-      [undeterminedSummary(scan.undetermined), HERMES_RESTART_NOTE],
+      [undeterminedSummary(scan.undetermined)],
     );
   }
   if (!scan.present) return { status: 'not-installed', summary: 'Hermes not detected', detail: [], refreshed: [] };
@@ -244,7 +244,7 @@ export function refreshHermesPluginCopies(
     }
     return warn(
       `could not determine which copy Hermes loads — nothing written (${FIX_POINTER})`,
-      [scan.undeterminedReason ?? 'reason unrecorded', HERMES_RESTART_NOTE],
+      [scan.undeterminedReason ?? 'reason unrecorded'],
     );
   }
 
@@ -257,7 +257,10 @@ export function refreshHermesPluginCopies(
     const what = projectCopies.length > 0
       ? `a project plugin copy (${projectCopies[projectCopies.length - 1].dir}) outranks every installed copy`
       : `shadowing copies are present (${scan.copies.map((c) => c.dir).join(', ')})`;
-    return warn(`${what} — nothing written (${FIX_POINTER})`, [HERMES_RESTART_NOTE]);
+    // No restart note on a refusal: nothing was written, so there is nothing
+    // new for a restart to load, and saying otherwise sends an operator to
+    // bounce a gateway for no reason. The commands named above print their own.
+    return warn(`${what} — nothing written (${FIX_POINTER})`);
   }
 
   // The copy Hermes loads for each root, and nothing else: `effective` is the
