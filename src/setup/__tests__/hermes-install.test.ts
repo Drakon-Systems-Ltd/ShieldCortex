@@ -64,8 +64,11 @@ describe('hermes install', () => {
     expect(text).toMatch(/LOADED BY HERMES/);
     expect(text).toMatch(/--fix-hermes-plugin-copies/);
     // Warn only: the copy is the operator's, and which one they meant to keep
-    // is not a decision the installer gets to make mid-install.
+    // is not a decision the installer gets to make mid-install. Nothing was
+    // relocated, and `backups/` — the directory the repair reserves under —
+    // was never even created.
     expect(existsSync(join(shadow, 'plugin.yaml'))).toBe(true);
+    expect(existsSync(join(home, '.hermes', 'backups'))).toBe(false);
     expect(hermesPluginInstalled(home)).toBe(true);
   });
 });

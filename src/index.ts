@@ -649,7 +649,8 @@ ${bold}COMMANDS${reset}
                                  --fix-action-guard (migrate the deprecated
                                    interceptor.actionGuard alias)
                                  --fix-hermes-plugin-copies (move shadowing
-                                   Hermes plugin copies into ~/.hermes/backups/)
+                                   Hermes plugin copies into ~/.hermes/backups/;
+                                   exits 1 if a copy could not be moved safely)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact

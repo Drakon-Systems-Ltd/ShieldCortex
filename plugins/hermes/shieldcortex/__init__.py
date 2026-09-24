@@ -90,8 +90,28 @@ def _enforce_default() -> bool:
 
 
 def _package_dir():
-    """Where this module was loaded from. Test seam for the #569 signal."""
-    return os.path.dirname(os.path.abspath(__file__))
+    """The directory DISCOVERY loaded this package from (#569).
+
+    Deliberately never resolves symlinks. Hermes loads a directory plugin with
+    `spec_from_file_location(..., submodule_search_locations=[str(plugin_dir)])`
+    where `plugin_dir` is the unresolved child of `plugins/` it discovered, so
+    `__spec__.submodule_search_locations[0]` is exactly the path that won
+    discovery. `realpath()` would hand back the link's target instead: for
+    `plugins/shieldcortex.bak-x -> /srv/sc-old` the shadow check would be handed
+    `/srv/sc-old`, whose parent is not a `plugins/` root, and the one case this
+    diagnostic exists for would produce no warning at all — the failure the
+    review found in the sibling Ekho plugin.
+
+    `abspath` (which only normalises, never resolves) of `dirname(__file__)` is
+    the fallback for a loader that records no search locations.
+    """
+    locations = getattr(__spec__, "submodule_search_locations", None) if __spec__ else None
+    if locations:
+        try:
+            return os.path.abspath(next(iter(locations)))
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return os.path.abspath(os.path.dirname(__file__))
 
 
 def _log_shadow_warning():

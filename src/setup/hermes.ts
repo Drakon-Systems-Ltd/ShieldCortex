@@ -52,20 +52,33 @@ function warnOnShadowingCopies(home: string): void {
     // A scan that cannot run must never fail an otherwise-good install.
     return;
   }
-  if (!scan.shadowed) return;
+  if (!scan.shadowed && scan.unknownDirs.length === 0) return;
 
   console.warn();
-  console.warn('⚠️  Other `shieldcortex` plugin copies are visible to Hermes.');
-  for (const rootScan of scan.roots) {
-    if (!rootScan.shadowed || rootScan.loaded === null) continue;
-    for (const copy of rootScan.copies) {
-      const mark = copy.dir === rootScan.loaded.dir ? '  → LOADED BY HERMES' : '';
-      console.warn(`      ${copy.dir}${mark}`);
+  if (scan.shadowed) {
+    console.warn('⚠️  Other `shieldcortex` plugin copies are visible to Hermes.');
+    for (const rootScan of scan.roots) {
+      if (!rootScan.shadowed || rootScan.loaded === null) continue;
+      for (const copy of rootScan.copies) {
+        const mark = copy.dir === rootScan.loaded.dir ? '  → LOADED BY HERMES' : '';
+        console.warn(`      ${copy.dir}${mark}`);
+      }
+    }
+    console.warn('    Hermes keys plugins on the manifest `name:` and the last one in sorted');
+    console.warn('    order wins silently — so the copy marked above is what runs, not what');
+    console.warn('    was just installed.');
+  } else {
+    console.warn('⚠️  Could not confirm which `shieldcortex` plugin copy Hermes will load.');
+  }
+  // The scan asks Hermes' own discovery when it can reach it; when it cannot,
+  // the answer above is a conservative read and says so rather than passing
+  // itself off as Hermes'.
+  if (!scan.fromHermes) {
+    console.warn(`    (approximate: Hermes discovery not reachable — ${scan.fallbackReason ?? 'reason unrecorded'})`);
+    for (const dir of scan.unknownDirs) {
+      console.warn(`      ${dir}  → manifest not modelled by the fallback reader`);
     }
   }
-  console.warn('    Hermes keys plugins on the manifest `name:` and the last one in sorted');
-  console.warn('    order wins silently — so the copy marked above is what runs, not what');
-  console.warn('    was just installed.');
   console.warn('    Fix:  shieldcortex doctor --fix-hermes-plugin-copies');
   console.warn('    Then restart the Hermes gateway — discovery only re-runs at start-up.');
   console.warn();

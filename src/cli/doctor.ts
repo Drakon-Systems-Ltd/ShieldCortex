@@ -41,7 +41,9 @@ import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native
 import {
   resolveHermesHome,
   scanHermesPluginCopies,
+  type HermesPluginCopy,
   type HermesPluginScan,
+  type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
 import { isNativeModuleLoadError, NativeModuleLoadError } from '../database/native-load-classify.js';
 // The typed lazy loader — the SAME one every real database open goes through
@@ -2745,20 +2747,31 @@ export async function checkOpenClawDuplicateInstalls(
  * knows which copy they meant to keep. `--fix-hermes-plugin-copies` moves the
  * extras aside; see `fixHermesPluginShadowing`.
  *
- * The scan rules live in `setup/hermes-plugins.ts`, shared with the installer
- * so `hermes install` warns about the same state this row reports.
+ * The answer comes from Hermes, not from a re-implementation of it:
+ * `setup/hermes-plugins.ts` spawns the Hermes interpreter and asks
+ * `hermes_cli.plugins_discovery` which directories carry our key and which one
+ * wins. A row whose only job is to be right about what the gateway loads
+ * cannot afford a second opinion — round 1 had one, and six shapes came back
+ * different. Where no interpreter can be found the conservative reader answers
+ * instead and the message says `(approximate: …)`; a directory it will not
+ * classify is named rather than assumed harmless, so this row does not say
+ * "clean" on evidence it does not have.
+ *
+ * The same scan backs the installer, so `hermes install` warns about the same
+ * state this row reports.
  */
 export const HERMES_PLUGIN_COPIES_LABEL = 'Hermes plugin copies';
 
 export async function checkHermesPluginShadowing(
   home: string = os.homedir(),
+  opts: HermesScanOptions = {},
 ): Promise<CheckResult> {
   const label = HERMES_PLUGIN_COPIES_LABEL;
   const hermesHome = resolveHermesHome(home);
 
   let scan: HermesPluginScan;
   try {
-    scan = scanHermesPluginCopies(hermesHome);
+    scan = scanHermesPluginCopies(hermesHome, opts);
   } catch (err: unknown) {
     // The scan already swallows unreadable dirs and bad manifests per entry;
     // this is the belt-and-braces path. A crashed row would say less than an
@@ -2775,21 +2788,41 @@ export async function checkHermesPluginShadowing(
     return { label, status: 'info', message: 'skipped (Hermes not detected)' };
   }
 
+  // Every message says which half answered. An approximate verdict about which
+  // copy the gateway runs is worth printing; mistaking it for Hermes' own
+  // answer is what the round-1 review caught.
+  const approx = scan.fromHermes
+    ? ''
+    : ` (approximate: Hermes discovery not reachable — ${scan.fallbackReason ?? 'reason unrecorded'})`;
+
+  // A directory the fallback reader would not guess about. It cannot be "clean"
+  // while one of these is outstanding, and the fix must not touch it.
+  const unknown = scan.unknownDirs;
+  const unknownClause =
+    unknown.length === 0
+      ? ''
+      : ` ${unknown.length} director${unknown.length === 1 ? 'y' : 'ies'} could not be ` +
+        `classified without Hermes (${unknown.map((d) => tildify(d)).join(', ')}) — ` +
+        'each holds a manifest this reader does not model, so whether Hermes keys it ' +
+        '`shieldcortex` is unknown.';
+
   if (!scan.shadowed) {
-    if (scan.copies.length === 0) {
+    const where = scan.copies.map((c) => tildify(c.dir)).join(', ');
+    const clean =
+      scan.copies.length === 0
+        ? `no \`shieldcortex\` plugin copy under ${tildify(hermesHome)} — nothing can shadow`
+        : `one canonical \`shieldcortex\` copy per plugin root: ${where}`;
+    if (unknown.length > 0) {
       return {
         label,
-        status: 'pass',
-        message: `clean (no \`shieldcortex\` plugin copy under ${tildify(hermesHome)} — nothing can shadow)`,
+        status: 'warn',
+        message: `cannot confirm which copy Hermes loads${approx}.${unknownClause}`,
+        fix:
+          'Start the Hermes gateway (or install its virtualenv) so the check can ask Hermes\' own ' +
+          'discovery, or open the manifests named above and fix the YAML they carry.',
       };
     }
-    const where = scan.copies.map((c) => tildify(c.dir)).join(', ');
-    return {
-      label,
-      status: 'pass',
-      message:
-        `clean (one canonical \`shieldcortex\` copy per plugin root: ${where})`,
-    };
+    return { label, status: 'pass', message: `clean (${clean})${approx}` };
   }
 
   // One clause per affected root: every copy by full path, then the winner.
@@ -2837,9 +2870,9 @@ export async function checkHermesPluginShadowing(
     label,
     status: 'warn',
     message:
-      `Hermes is not loading the installed plugin — ${clauses.join('; ')}. ` +
+      `Hermes is not loading the installed plugin${approx} — ${clauses.join('; ')}. ` +
       'Hermes keys plugins on the manifest `name:`, so a copy beside the live one wins ' +
-      'silently and an upgrade runs the old code.',
+      `silently and an upgrade runs the old code.${unknownClause}`,
     fix,
   };
 }
@@ -2855,30 +2888,79 @@ export interface HermesShadowFixResult {
   /** Copies deliberately left in place, each with the reason why. */
   refused: Array<{ dir: string; reason: string }>;
   changed: boolean;
+  /**
+   * True when a copy this command exists to relocate could not be relocated
+   * safely — a symlink, a shared tree, another filesystem, a failed rename.
+   * The CLI exits non-zero on it: the host is still shadowed and the operator
+   * has work to do. A root with no canonical copy is NOT a failure; it is the
+   * designed refusal, and the row already says what a human has to decide.
+   */
+  failed: boolean;
+  /** False when the scan behind this fix came from the conservative reader. */
+  fromHermes: boolean;
   message: string;
 }
 
-/**
- * Second half of a cross-device move: the tree already exists at the
- * destination, so the source copy is discarded. Named for what it does in the
- * move, not for the call it makes.
- */
-function discardRelocatedSource(source: string): void {
-  fs.rmSync(source, { recursive: true, force: true });
+function isSymlink(target: string): boolean {
+  try {
+    return fs.lstatSync(target).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
-function relocateDirectory(from: string, to: string): void {
+function realPathOrNull(target: string): string | null {
   try {
-    fs.renameSync(from, to);
-    return;
-  } catch (err: unknown) {
-    // EXDEV is the one failure a retry can fix: `plugins/` and `backups/` are
-    // on different filesystems, which a bind mount or a separate volume for
-    // the agent home makes ordinary. Anything else is the caller's to report.
-    if ((err as NodeJS.ErrnoException)?.code !== 'EXDEV') throw err;
+    return fs.realpathSync(target);
+  } catch {
+    return null;
   }
-  fs.cpSync(from, to, { recursive: true, errorOnExist: true, force: false });
-  discardRelocatedSource(from);
+}
+
+/** Whether `inner` is `outer` or lives underneath it, lexically on real paths. */
+function pathContains(outer: string, inner: string): boolean {
+  if (outer === inner) return true;
+  const rel = path.relative(outer, inner);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * Reserve a fresh, unique directory under `backupsRoot` and return it.
+ *
+ * `fs.mkdirSync` WITHOUT `recursive` on the leaf is the reservation: mkdir(2)
+ * fails EEXIST when anything already occupies the name — including a DANGLING
+ * SYMLINK, which `existsSync` reports as absent and which a rename would
+ * happily follow or replace. There is no check-then-act window to lose, because
+ * the check and the act are the same syscall; a squatter that wins the race
+ * simply sends us to the next suffix.
+ */
+function reserveBackupDir(backupsRoot: string, leafBase: string): string {
+  fs.mkdirSync(backupsRoot, { recursive: true });
+  for (let attempt = 1; attempt <= 64; attempt += 1) {
+    const leaf = attempt === 1 ? leafBase : `${leafBase}-${attempt}`;
+    const candidate = path.join(backupsRoot, leaf);
+    try {
+      fs.mkdirSync(candidate);
+      return candidate;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+    }
+  }
+  throw new Error(`could not reserve a free name under ${tildify(backupsRoot)} after 64 tries`);
+}
+
+/**
+ * Give a reservation back when the move it was made for did not happen. Only
+ * ever an EMPTY directory this function itself created moments ago: `rmdir`
+ * cannot remove a non-empty one, so a reservation that somehow acquired
+ * contents is left standing rather than forced.
+ */
+function releaseReservation(reserved: string): void {
+  try {
+    fs.rmdirSync(reserved);
+  } catch {
+    /* an unreleased empty directory under backups/ costs nothing */
+  }
 }
 
 /**
@@ -2886,12 +2968,25 @@ function relocateDirectory(from: string, to: string): void {
  * out of its `plugins/` root and into `<hermesHome>/backups/`, so the next
  * gateway start discovers exactly one `shieldcortex` — the installed one.
  *
- * Three deliberate refusals:
+ * The repair's own hazard is that it can break the thing it is protecting, so
+ * it refuses before it moves:
  *   - A root with NO canonical `plugins/shieldcortex` is left entirely alone.
  *     Moving the only copy there would take the plugin off that root; which
  *     directory is authoritative is a human's call.
- *   - An existing destination is never overwritten. The backups directory is
- *     the operator's, and a same-named entry there is someone's data.
+ *   - A copy that IS a symlink is never moved. Renaming a symlink relocates its
+ *     text, not the tree; a relative target then resolves somewhere else, and
+ *     an absolute one leaves a live link pointing into `backups/`.
+ *   - A canonical `plugins/shieldcortex` that is itself a symlink freezes the
+ *     whole root. Its target may be one of the very directories we would move,
+ *     and then the "repair" leaves the installed path dangling while the check
+ *     reports PASS because it can no longer find any copies.
+ *   - A copy whose real path is, contains, or is contained by the canonical
+ *     install's real path is never moved, for the same reason.
+ *   - The destination is RESERVED, not checked: see `reserveBackupDir`.
+ *   - On EXDEV the copy stays where it is. A cross-filesystem "move" is a copy
+ *     followed by a delete of the original, and this command does not delete
+ *     the operator's plugin directories — it says the copy is on another
+ *     filesystem and must be moved by hand, and the caller exits non-zero.
  *   - Copies are MOVED, never deleted. The bad state is "two copies Hermes can
  *     see", and taking one out of the search path is the whole repair — the
  *     bytes stay on disk for whoever wants to look at them.
@@ -2902,14 +2997,28 @@ function relocateDirectory(from: string, to: string): void {
 export function fixHermesPluginShadowing(
   home: string = os.homedir(),
   now: Date = new Date(),
+  opts: HermesScanOptions = {},
 ): HermesShadowFixResult {
   const hermesHome = resolveHermesHome(home);
-  const scan = scanHermesPluginCopies(hermesHome);
+  const scan = scanHermesPluginCopies(hermesHome, opts);
   const moved: HermesShadowMove[] = [];
   const refused: Array<{ dir: string; reason: string }> = [];
+  let failed = false;
+
+  const refuse = (dir: string, reason: string, isFailure = true): void => {
+    refused.push({ dir, reason });
+    if (isFailure) failed = true;
+  };
 
   if (!scan.present) {
-    return { moved, refused, changed: false, message: 'Hermes not detected — nothing to move' };
+    return {
+      moved,
+      refused,
+      changed: false,
+      failed: false,
+      fromHermes: scan.fromHermes,
+      message: 'Hermes not detected — nothing to move',
+    };
   }
 
   const backupsRoot = path.join(hermesHome, 'backups');
@@ -2917,33 +3026,112 @@ export function fixHermesPluginShadowing(
   // platform the CLI runs on.
   const stamp = now.toISOString().replace(/[:.]/g, '-');
 
+  // Plan first, move second. Every refusal below is decided against the tree as
+  // it was scanned, before a single rename has changed it — a check that ran
+  // after an earlier move could be looking at a directory that has already
+  // gone, and would report a fabricated reason for leaving it alone.
+  const plan: Array<{ copy: HermesPluginCopy; real: string }> = [];
+
   for (const rootScan of scan.roots) {
+    for (const dir of rootScan.unknownDirs) {
+      refuse(
+        dir,
+        'holds a manifest this check could not read without Hermes — not touched until ' +
+        'Hermes itself can say whether it is a copy',
+      );
+    }
+
     const extras = rootScan.copies.filter((c) => !c.canonical);
     if (extras.length === 0) continue;
     if (!rootScan.hasCanonical) {
       for (const copy of extras) {
-        refused.push({
-          dir: copy.dir,
-          reason:
-            `no canonical ${tildify(path.join(rootScan.root, 'shieldcortex'))} to keep — ` +
-            'a human must choose which copy is authoritative',
-        });
+        refuse(
+          copy.dir,
+          `no canonical ${tildify(path.join(rootScan.root, 'shieldcortex'))} to keep — ` +
+          'a human must choose which copy is authoritative',
+          false,
+        );
       }
       continue;
     }
+
+    const canonicalDir = path.join(rootScan.root, 'shieldcortex');
+    if (isSymlink(canonicalDir)) {
+      for (const copy of extras) {
+        refuse(
+          copy.dir,
+          `${tildify(canonicalDir)} is itself a symlink — moving anything beside it could ` +
+          'leave the installed path dangling; resolve the link by hand first',
+        );
+      }
+      continue;
+    }
+    const canonicalReal = realPathOrNull(canonicalDir);
+
     for (const copy of extras) {
-      const dest = path.join(backupsRoot, `shieldcortex-shadow-${copy.dirName}-${stamp}`);
-      if (fs.existsSync(dest)) {
-        refused.push({ dir: copy.dir, reason: `${tildify(dest)} already exists — left in place` });
+      const copyReal = realPathOrNull(copy.dir);
+      if (copyReal === null) {
+        refuse(copy.dir, 'could not be resolved on disk — left in place');
         continue;
       }
-      try {
-        fs.mkdirSync(backupsRoot, { recursive: true });
-        relocateDirectory(copy.dir, dest);
-        moved.push({ from: copy.dir, to: dest });
-      } catch (err: unknown) {
+      // Ahead of the symlink test on purpose: when the extra resolves onto the
+      // canonical install (`shieldcortex.bak-x -> shieldcortex`, or anything a
+      // symlinked ancestor or a bind mount can produce), "this IS the installed
+      // plugin" is the reason the operator needs, not "this is a link".
+      if (
+        canonicalReal !== null &&
+        (pathContains(canonicalReal, copyReal) || pathContains(copyReal, canonicalReal))
+      ) {
+        const shared = pathContains(copyReal, canonicalReal) ? copyReal : canonicalReal;
+        refuse(
+          copy.dir,
+          `resolves into the same tree as ${tildify(canonicalDir)} (both are under ` +
+          `${tildify(shared)}) — moving it would move the installed plugin`,
+        );
+        continue;
+      }
+      if (isSymlink(copy.dir)) {
+        refuse(
+          copy.dir,
+          'is a symlink — moving the link would relocate its text and not the tree it ' +
+          'points at; delete or repoint the link by hand',
+        );
+        continue;
+      }
+      // The same physical directory can appear under two roots when a profile's
+      // `plugins/` is a link to the main one. Moving it once fixes both; a
+      // second attempt would only fail on a path that no longer exists.
+      if (plan.some((p) => p.real === copyReal)) continue;
+      plan.push({ copy, real: copyReal });
+    }
+  }
+
+  for (const { copy } of plan) {
+    let reserved: string;
+    try {
+      reserved = reserveBackupDir(backupsRoot, `shieldcortex-shadow-${copy.dirName}-${stamp}`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      refuse(copy.dir, `no destination could be reserved under ${tildify(backupsRoot)} — ${msg}`);
+      continue;
+    }
+    const dest = path.join(reserved, copy.dirName);
+    try {
+      fs.renameSync(copy.dir, dest);
+      moved.push({ from: copy.dir, to: dest });
+    } catch (err: unknown) {
+      releaseReservation(reserved);
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'EXDEV') {
+        refuse(
+          copy.dir,
+          `is on a different filesystem from ${tildify(backupsRoot)} (EXDEV) — nothing was ` +
+          'copied and nothing was removed; move the directory out of `plugins/` by hand, ' +
+          'then restart the Hermes gateway',
+        );
+      } else {
         const msg = err instanceof Error ? err.message : String(err);
-        refused.push({ dir: copy.dir, reason: `could not be moved — ${msg}` });
+        refuse(copy.dir, `could not be moved — ${msg}`);
       }
     }
   }
@@ -2959,8 +3147,18 @@ export function fixHermesPluginShadowing(
     parts.push(`${tildify(item.dir)}: ${item.reason}`);
   }
   if (parts.length === 0) parts.push('nothing to move (no shadowing copies)');
+  if (!scan.fromHermes) {
+    parts.push('(approximate: Hermes discovery not reachable, so this acted on a conservative read)');
+  }
 
-  return { moved, refused, changed: moved.length > 0, message: parts.join('; ') };
+  return {
+    moved,
+    refused,
+    changed: moved.length > 0,
+    failed,
+    fromHermes: scan.fromHermes,
+    message: parts.join('; '),
+  };
 }
 
 // ── Check: Defence canary (#48) ──────────────────────
@@ -7462,6 +7660,12 @@ export async function runDoctor(
         console.log(`  ${dim}  restart the Hermes gateway — plugin discovery only re-runs at start-up.${reset}`);
       }
       console.log();
+      // A copy this command exists to relocate and could not — a symlink, a
+      // shared tree, another filesystem — leaves the host still shadowed. The
+      // row it produces is a `warn`, which only fails the run under `--strict`,
+      // so the exit code is set here: an operator who asked for a repair and
+      // did not get one must be able to see that from a script.
+      if (fix.failed) process.exitCode = 1;
       if (fix.changed) {
         const refreshed = await checkHermesPluginShadowing();
         const idx = results.findIndex((r) => r.label === HERMES_PLUGIN_COPIES_LABEL);
@@ -7471,6 +7675,7 @@ export async function runDoctor(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.log(`  ${dim}--fix-hermes-plugin-copies failed: ${msg}${reset}\n`);
+      process.exitCode = 1;
     }
   }
 

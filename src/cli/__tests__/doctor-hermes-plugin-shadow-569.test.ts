@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { checkHermesPluginShadowing, fixHermesPluginShadowing } from '../doctor.js';
 
 /**
@@ -28,10 +28,32 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  jest.restoreAllMocks();
   fs.rmSync(home, { recursive: true, force: true });
   if (savedHermesHome === undefined) delete process.env.HERMES_HOME;
   else process.env.HERMES_HOME = savedHermesHome;
 });
+
+/**
+ * Every destination name is derived from a timestamp, so anything that computes
+ * one twice — once to stage a collision, once inside the fix — has to freeze the
+ * clock or it goes flaky the moment the two calls straddle a second boundary.
+ */
+const FROZEN = new Date('2026-09-24T12:34:56.789Z');
+const STAMP = FROZEN.toISOString().replace(/[:.]/g, '-');
+
+/** The parent directory the fix reserves for one copy, at the frozen clock. */
+function reservedFor(dirName: string, suffix = ''): string {
+  return path.join(hermes, 'backups', `shieldcortex-shadow-${dirName}-${STAMP}${suffix}`);
+}
+
+/**
+ * Force the conservative reader. The default path spawns the Hermes
+ * interpreter, which is the right thing on a box that has one; these cases are
+ * about what a box WITHOUT one reports, so they say so explicitly rather than
+ * depending on the absence of Hermes.
+ */
+const NO_HERMES = { interpreter: null } as const;
 
 /**
  * Doctor prints paths tildified. The temp dir a CI box hands out can itself
@@ -93,6 +115,53 @@ describe('checkHermesPluginShadowing (#569)', () => {
     );
     expect(result.fix).toMatch(/--fix-hermes-plugin-copies/);
     expect(result.fix).toMatch(/restart the Hermes gateway/i);
+  });
+
+  it('sees through an inline # comment on the backup manifest', async () => {
+    // Round 1 compared the whole rest of the line, so `shieldcortex # backup`
+    // was not `shieldcortex` and this host was reported CLEAN while Hermes was
+    // loading the backup. The row's whole value is being right about this.
+    makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x', null, {
+      body: 'name: shieldcortex # backup\nkind: standalone\n',
+    });
+
+    const result = await checkHermesPluginShadowing(home);
+
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain(shown(backup));
+  });
+
+  it('counts a canonical manifest with no name: as the canonical copy', async () => {
+    // Hermes falls back to the directory name. Round 1 required a `name:` line,
+    // so it saw only the backup, and the fix then refused to move anything
+    // because it believed there was no canonical copy to keep.
+    makePlugin(plugins, 'shieldcortex', null, { body: 'version: 1\n' });
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+
+    const result = await checkHermesPluginShadowing(home);
+
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('2 copies');
+    expect(result.fix).toMatch(/--fix-hermes-plugin-copies/);
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+    expect(fix.moved).toHaveLength(1);
+    expect(fix.moved[0].from).toBe(backup);
+    expect((await checkHermesPluginShadowing(home)).status).toBe('pass');
+  });
+
+  it('ignores a plugin.yaml directory that hides a valid plugin.yml', async () => {
+    // Hermes selects on `exists()`, hits the directory, fails to parse and
+    // takes NOTHING from that child. Falling through to the `.yml` would invent
+    // a shadow and send an operator to move a directory that is not loaded.
+    makePlugin(plugins, 'shieldcortex');
+    const decoy = path.join(plugins, 'shieldcortex.decoy');
+    fs.mkdirSync(path.join(decoy, 'plugin.yaml'), { recursive: true });
+    fs.writeFileSync(path.join(decoy, 'plugin.yml'), 'name: shieldcortex\n');
+
+    const result = await checkHermesPluginShadowing(home);
+    expect(result.status).toBe('pass');
   });
 
   it('ignores a sibling whose manifest declares a different name', async () => {
@@ -173,19 +242,21 @@ describe('fixHermesPluginShadowing (#569)', () => {
     fs.mkdirSync(path.join(backup, 'nested'), { recursive: true });
     fs.writeFileSync(path.join(backup, 'nested', 'sc_client.py'), 'old code\n');
 
-    const fix = fixHermesPluginShadowing(home);
+    const fix = fixHermesPluginShadowing(home, FROZEN);
 
     expect(fix.changed).toBe(true);
+    expect(fix.failed).toBe(false);
     expect(fix.moved).toHaveLength(1);
     expect(fix.moved[0].from).toBe(backup);
     expect(fix.message).toMatch(/restart the Hermes gateway/);
 
     // Source gone from the search path, contents intact at the destination.
+    // The copy lands INSIDE the reserved parent, under its own name, so the
+    // reservation and the payload are two different directories.
     expect(fs.existsSync(backup)).toBe(false);
     expect(fs.existsSync(canonical)).toBe(true);
     const dest = fix.moved[0].to;
-    expect(path.dirname(dest)).toBe(path.join(hermes, 'backups'));
-    expect(path.basename(dest)).toMatch(/^shieldcortex-shadow-shieldcortex\.bak-pre510-1-/);
+    expect(dest).toBe(path.join(reservedFor('shieldcortex.bak-pre510-1'), 'shieldcortex.bak-pre510-1'));
     expect(fs.readFileSync(path.join(dest, 'nested', 'sc_client.py'), 'utf8')).toBe('old code\n');
 
     // And the row the operator reads is green afterwards.
@@ -200,51 +271,311 @@ describe('fixHermesPluginShadowing (#569)', () => {
     expect(before.status).toBe('warn');
     expect(before.fix).toMatch(/human/i);
 
-    const fix = fixHermesPluginShadowing(home);
+    const fix = fixHermesPluginShadowing(home, FROZEN);
 
     expect(fix.changed).toBe(false);
     expect(fix.moved).toEqual([]);
     expect(fix.refused).toHaveLength(1);
     expect(fix.refused[0].dir).toBe(onlyCopy);
     expect(fix.refused[0].reason).toMatch(/human must choose/);
+    // A designed refusal, not a failure: nothing was asked of the operator that
+    // an exit code would tell them twice.
+    expect(fix.failed).toBe(false);
     // Untouched: the only copy of the plugin stays where the host can load it.
     expect(fs.existsSync(path.join(onlyCopy, 'plugin.yaml'))).toBe(true);
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
   });
 
-  it('refuses to overwrite an existing destination', () => {
-    makePlugin(plugins, 'shieldcortex');
-    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
-    // Pin the clock so the destination name is knowable, then occupy it.
-    const now = new Date('2026-09-24T12:34:56.789Z');
-    const dest = path.join(
-      hermes,
-      'backups',
-      `shieldcortex-shadow-shieldcortex.bak-x-${now.toISOString().replace(/[:.]/g, '-')}`,
-    );
-    fs.mkdirSync(dest, { recursive: true });
-    fs.writeFileSync(path.join(dest, 'someone-elses-data'), 'keep me\n');
-
-    const fix = fixHermesPluginShadowing(home, now);
-
-    expect(fix.changed).toBe(false);
-    expect(fix.moved).toEqual([]);
-    expect(fix.refused[0].reason).toMatch(/already exists/);
-    // Neither side was disturbed.
-    expect(fs.readFileSync(path.join(dest, 'someone-elses-data'), 'utf8')).toBe('keep me\n');
-    expect(fs.existsSync(path.join(backup, 'plugin.yaml'))).toBe(true);
-  });
-
   it('reports nothing to move when the host is already clean', () => {
     makePlugin(plugins, 'shieldcortex');
-    const fix = fixHermesPluginShadowing(home);
+    const fix = fixHermesPluginShadowing(home, FROZEN);
     expect(fix.changed).toBe(false);
+    expect(fix.failed).toBe(false);
     expect(fix.message).toMatch(/nothing to move/);
   });
 
   it('says so when Hermes is not installed at all', () => {
-    const fix = fixHermesPluginShadowing(home);
+    const fix = fixHermesPluginShadowing(home, FROZEN);
     expect(fix.changed).toBe(false);
     expect(fix.message).toMatch(/Hermes not detected/);
+  });
+});
+
+/**
+ * Never overwrite (review blocker 3). An existence check before a rename has
+ * two holes the review named: a DANGLING symlink is "absent" to `exists()` but
+ * very much present to `rename()`, and anything can appear in the window
+ * between the check and the move. The destination is therefore RESERVED with an
+ * exclusive `mkdir`, and the copy goes inside it.
+ */
+describe('fixHermesPluginShadowing reserves its destination (#569)', () => {
+  it('goes to a fresh name rather than into an occupied one', () => {
+    makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+    const taken = reservedFor('shieldcortex.bak-x');
+    fs.mkdirSync(taken, { recursive: true });
+    fs.writeFileSync(path.join(taken, 'someone-elses-data'), 'keep me\n');
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.changed).toBe(true);
+    expect(fix.moved[0].to).toBe(path.join(reservedFor('shieldcortex.bak-x', '-2'), 'shieldcortex.bak-x'));
+    // The occupant is untouched, and so is everything it held.
+    expect(fs.readFileSync(path.join(taken, 'someone-elses-data'), 'utf8')).toBe('keep me\n');
+    expect(fs.readdirSync(taken)).toEqual(['someone-elses-data']);
+    expect(fs.existsSync(backup)).toBe(false);
+  });
+
+  it('treats a dangling destination symlink as occupied', () => {
+    makePlugin(plugins, 'shieldcortex');
+    makePlugin(plugins, 'shieldcortex.bak-x');
+    const taken = reservedFor('shieldcortex.bak-x');
+    fs.mkdirSync(path.dirname(taken), { recursive: true });
+    // Points at nothing: `fs.existsSync(taken)` is FALSE, which is exactly the
+    // hole an existence check leaves open.
+    fs.symlinkSync(path.join(home, 'no-such-target'), taken);
+    expect(fs.existsSync(taken)).toBe(false);
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.changed).toBe(true);
+    expect(fix.moved[0].to).toBe(path.join(reservedFor('shieldcortex.bak-x', '-2'), 'shieldcortex.bak-x'));
+    // The link is still a link, still dangling — nothing was written through it.
+    expect(fs.lstatSync(taken).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(taken)).toBe(path.join(home, 'no-such-target'));
+    expect(fs.existsSync(path.join(home, 'no-such-target'))).toBe(false);
+  });
+
+  it('survives a destination that appears between check and move', () => {
+    makePlugin(plugins, 'shieldcortex');
+    makePlugin(plugins, 'shieldcortex.bak-x');
+    const contested = reservedFor('shieldcortex.bak-x');
+
+    // Simulate the race the review described: something else creates the
+    // destination at the exact moment we reach for it. With an exclusive
+    // `mkdir` there is no window to lose — the create IS the check — so the
+    // squatter wins the name and we take the next one.
+    const realMkdir = fs.mkdirSync.bind(fs) as typeof fs.mkdirSync;
+    let squatted = false;
+    jest.spyOn(fs, 'mkdirSync').mockImplementation(((target: fs.PathLike, options?: unknown) => {
+      if (!squatted && String(target) === contested) {
+        squatted = true;
+        realMkdir(target, { recursive: true });
+        fs.writeFileSync(path.join(contested, 'raced-in'), 'mine\n');
+        const err: NodeJS.ErrnoException = new Error(`EEXIST: file already exists, mkdir '${contested}'`);
+        err.code = 'EEXIST';
+        throw err;
+      }
+      return realMkdir(target, options as never);
+    }) as typeof fs.mkdirSync);
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(squatted).toBe(true);
+    expect(fix.changed).toBe(true);
+    expect(fix.moved[0].to).toBe(path.join(reservedFor('shieldcortex.bak-x', '-2'), 'shieldcortex.bak-x'));
+    expect(fs.readFileSync(path.join(contested, 'raced-in'), 'utf8')).toBe('mine\n');
+  });
+
+  it('leaves everything in place on a cross-device move', () => {
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+    fs.writeFileSync(path.join(backup, 'marker'), 'old code\n');
+
+    jest.spyOn(fs, 'renameSync').mockImplementation(() => {
+      const err: NodeJS.ErrnoException = new Error('EXDEV: cross-device link not permitted, rename');
+      err.code = 'EXDEV';
+      throw err;
+    });
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.changed).toBe(false);
+    // Non-zero from the CLI: the host is still shadowed and a human has to act.
+    expect(fix.failed).toBe(true);
+    expect(fix.refused).toHaveLength(1);
+    expect(fix.refused[0].dir).toBe(backup);
+    expect(fix.refused[0].reason).toMatch(/different filesystem/);
+    expect(fix.refused[0].reason).toMatch(/EXDEV/);
+    expect(fix.refused[0].reason).toMatch(/by hand/);
+    // No copy-then-discard: the source is whole and the backups tree holds
+    // nothing at all, not even the reservation that was made for the move.
+    expect(fs.readFileSync(path.join(backup, 'marker'), 'utf8')).toBe('old code\n');
+    expect(fs.existsSync(canonical)).toBe(true);
+    expect(fs.readdirSync(path.join(hermes, 'backups'))).toEqual([]);
+  });
+});
+
+/**
+ * Never break the canonical install (review blocker 4). Each case below is a
+ * layout where the repair, done naively, relocates the bytes the live plugin
+ * path depends on — and then the re-run check reports PASS because it can no
+ * longer find any copies at all.
+ */
+describe('fixHermesPluginShadowing protects the canonical install (#569)', () => {
+  it('refuses when the canonical path is a symlink to the backup', async () => {
+    const real = makePlugin(plugins, 'shieldcortex.bak-x');
+    fs.writeFileSync(path.join(real, 'marker'), 'the only bytes\n');
+    // `plugins/shieldcortex` is not a directory at all — it is a link to the
+    // backup. Moving `shieldcortex.bak-x` would leave it dangling.
+    fs.symlinkSync('shieldcortex.bak-x', path.join(plugins, 'shieldcortex'));
+
+    const before = await checkHermesPluginShadowing(home);
+    expect(before.status).toBe('warn');
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
+    expect(fix.refused.map((r) => r.reason).join(' ')).toMatch(/is itself a symlink/);
+    // The canonical path still resolves to real bytes.
+    expect(fs.readFileSync(path.join(plugins, 'shieldcortex', 'marker'), 'utf8')).toBe(
+      'the only bytes\n',
+    );
+    expect(fs.existsSync(path.join(real, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('refuses a relative symlink backup', () => {
+    makePlugin(plugins, 'shieldcortex');
+    const elsewhere = makePlugin(path.join(hermes, 'kept-aside'), 'sc-old');
+    fs.writeFileSync(path.join(elsewhere, 'marker'), 'old code\n');
+    // Relative link text: renaming the link into backups/ would re-resolve it
+    // against a different parent and point it at nothing.
+    fs.symlinkSync(path.join('..', 'kept-aside', 'sc-old'), path.join(plugins, 'shieldcortex.bak-x'));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
+    expect(fix.refused[0].reason).toMatch(/is a symlink/);
+    expect(fs.lstatSync(path.join(plugins, 'shieldcortex.bak-x')).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(elsewhere, 'marker'), 'utf8')).toBe('old code\n');
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('refuses a backup symlinked to a tree outside plugins/', () => {
+    makePlugin(plugins, 'shieldcortex');
+    const outside = makePlugin(path.join(home, 'srv'), 'sc-old');
+    fs.symlinkSync(outside, path.join(plugins, 'shieldcortex.bak-x'));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
+    expect(fix.refused[0].reason).toMatch(/is a symlink/);
+    expect(fs.existsSync(path.join(outside, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('refuses a backup that resolves onto the canonical install itself', () => {
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    fs.writeFileSync(path.join(canonical, 'marker'), 'installed\n');
+    // Two names, one directory. The naive repair moves `shieldcortex.bak-x`,
+    // which IS `shieldcortex`, and takes the live plugin with it.
+    fs.symlinkSync('shieldcortex', path.join(plugins, 'shieldcortex.bak-x'));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
+    expect(fix.refused[0].reason).toMatch(/same tree as/);
+    expect(fs.readFileSync(path.join(canonical, 'marker'), 'utf8')).toBe('installed\n');
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('moves a copy visible through two plugin roots exactly once', () => {
+    makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+    // A profile whose `plugins/` is the main one: the same physical directory
+    // is discovered under two roots, and one rename repairs both.
+    const profile = path.join(hermes, 'profiles', 'research');
+    fs.mkdirSync(profile, { recursive: true });
+    fs.symlinkSync(plugins, path.join(profile, 'plugins'));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toHaveLength(1);
+    expect(fix.moved[0].from).toBe(backup);
+    expect(fix.failed).toBe(false);
+    expect(fix.refused).toEqual([]);
+  });
+});
+
+/**
+ * Honesty about which half answered. On a host with no Hermes interpreter the
+ * conservative reader answers, and every surface says so — a health check that
+ * quietly downgrades its own source of truth is how round 1 shipped six wrong
+ * answers.
+ */
+describe('checkHermesPluginShadowing labels an approximate answer (#569)', () => {
+  it('marks a shadow found without Hermes as approximate', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+
+    const result = await checkHermesPluginShadowing(home, NO_HERMES);
+
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('approximate: Hermes discovery not reachable');
+    expect(result.message).toMatch(/no Hermes interpreter/);
+    expect(result.message).toContain(shown(backup));
+  });
+
+  it('marks a clean host found without Hermes as approximate', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    const result = await checkHermesPluginShadowing(home, NO_HERMES);
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('approximate: Hermes discovery not reachable');
+  });
+
+  it('does not label an answer that came from Hermes itself', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    const result = await checkHermesPluginShadowing(home);
+    // On a box with no Hermes at all this still holds: the message is then
+    // labelled, and this asserts only that the label tracks the source.
+    const { scanHermesPluginCopies } = await import('../../setup/hermes-plugins.js');
+    const scan = scanHermesPluginCopies(path.join(home, '.hermes'));
+    expect(result.message.includes('approximate')).toBe(!scan.fromHermes);
+  });
+
+  it('refuses to call a host clean while a manifest is unreadable without Hermes', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    // A valid `name:` line above YAML the fallback reader does not model. It
+    // mentions our key, so it could be a shadow — Hermes would know; this
+    // reader will not guess.
+    const murky = makePlugin(plugins, 'zz-murky', null, {
+      body: 'name: shieldcortex\nkind: [unclosed\n',
+    });
+
+    const result = await checkHermesPluginShadowing(home, NO_HERMES);
+
+    expect(result.status).toBe('warn');
+    expect(result.message).toMatch(/could not be classified without Hermes/);
+    expect(result.message).toContain(shown(murky));
+    expect(result.fix).toMatch(/Hermes/);
+
+    // Hermes itself has no such doubt: it rejects the manifest outright.
+    const authoritative = await checkHermesPluginShadowing(home);
+    const { scanHermesPluginCopies } = await import('../../setup/hermes-plugins.js');
+    if (scanHermesPluginCopies(path.join(home, '.hermes')).fromHermes) {
+      expect(authoritative.status).toBe('pass');
+    }
+  });
+
+  it('does not touch a directory it could not classify', () => {
+    makePlugin(plugins, 'shieldcortex');
+    const murky = makePlugin(plugins, 'zz-murky', null, {
+      body: 'name: shieldcortex\nkind: [unclosed\n',
+    });
+
+    const fix = fixHermesPluginShadowing(home, FROZEN, NO_HERMES);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
+    expect(fix.refused[0].dir).toBe(murky);
+    expect(fix.refused[0].reason).toMatch(/could not read without Hermes/);
+    expect(fix.message).toMatch(/approximate/);
+    expect(fs.existsSync(path.join(murky, 'plugin.yaml'))).toBe(true);
   });
 });
