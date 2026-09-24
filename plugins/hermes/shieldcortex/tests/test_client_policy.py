@@ -426,7 +426,12 @@ class FallbackDangerousScanTests(unittest.TestCase):
             "sed --in-place 's/a/b/' ~/" + rc, "sed -Ei 's/a/b/' ~/.profile",
         ]:
             self.assertTrue(fallback_dangerous_match(cmd), cmd)
-        for cmd in ["cat ~/" + rc, "source ~/" + rc, "sed -n '/PATH/p' ~/" + rc, "grep PATH ~/.profile"]:
+        for cmd in [
+            "cat ~/" + rc, "source ~/" + rc, "sed -n '/PATH/p' ~/" + rc, "grep PATH ~/.profile",
+            # round-4 regression pin: a tee operand run stops at the statement boundary
+            "printf x | tee /tmp/log\ncat ~/" + rc, "printf x | tee /tmp/log\nsource ~/.profile",
+            "printf x | tee /tmp/log; cat ~/" + rc,
+        ]:
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
 
     def test_fallback_surface_extracts_command_value(self):

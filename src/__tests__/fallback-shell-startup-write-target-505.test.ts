@@ -66,6 +66,19 @@ describe('#505 — OpenClaw interceptor fallback: startup-file write target', ()
   });
 });
 
+describe('#505 — OpenClaw interceptor fallback: tee operand run stops at the statement boundary', () => {
+  const run = (command: string) => {
+    const entries: InterceptAuditEntry[] = [];
+    const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, { onAuditEntry: (e) => entries.push(e) });
+    return i.handleToolCall({ toolName: 'Bash', arguments: { command } });
+  };
+  it('a read of a startup file on the NEXT line is not a tee operand', async () => {
+    await expect(run(`printf x | tee /tmp/log\ncat ~/${RC}`)).resolves.toBeUndefined();
+    await expect(run(`printf x | tee /tmp/log; source ~/.profile`)).resolves.toBeUndefined();
+    await expect(run(`printf x | tee /tmp/log ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
+  });
+});
+
 describe('#505 — Claude Code hook fallback: startup-file write target', () => {
   const originalHome = process.env.HOME;
   let tempHome: string;

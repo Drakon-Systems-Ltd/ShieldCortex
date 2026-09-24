@@ -148,6 +148,19 @@ describe('#505 — sensitive write targets in the user home', () => {
       gated(bash(command), 'modify-shell-startup');
     });
 
+    it('a tee operand run stops at the statement boundary (round-4 regression pin)', () => {
+      for (const command of [
+        `printf x | tee /tmp/log\ncat ~/${RC}`,
+        `printf x | tee /tmp/log\nsource ~/.profile`,
+        `printf x | tee /tmp/log; cat ~/${RC}`,
+        `printf x | tee -a /tmp/log && grep PATH ~/${ZRC}`,
+      ]) {
+        const v = bash(command);
+        expect([command, v.signals.includes('modify-shell-startup')]).toEqual([command, false]);
+      }
+      gated(bash(`printf x | tee /tmp/log ~/${RC}`), 'modify-shell-startup');
+    });
+
     it('reading or sourcing a startup file is not a write', () => {
       for (const command of [
         `cat ~/${RC}`,
@@ -174,6 +187,26 @@ describe('#505 — sensitive write targets in the user home', () => {
       gated(t, 'modify-shell-startup');
     });
 
+    it('write-content: an executable shell string still gates — quoting is not inertness (round-4 regression pin)', () => {
+      // Reviewer-executed at 7a95827c: each of these appends to a scratch .bashrc with exit 0.
+      for (const [file, content] of [
+        ['/repo/install.sh', `sh -c 'echo x >> ~/${RC}'\n`],
+        ['/repo/install.sh', `echo "$(echo x >> ~/${RC})"\n`],
+        ['/repo/install.sh', 'echo "`echo x >> ~/' + RC + '`"\n'],
+        ['/repo/setup.py', `import os\nos.system("echo x >> ~/${RC}")\n`],
+        ['/repo/src/cli.ts', `import { execSync } from 'node:child_process';\nexecSync("echo x >> ~/${ZRC}");\n`],
+      ] as const) {
+        const v = write(file, content);
+        expect([file, content, v.decision, v.signals.includes('modify-shell-startup')])
+          .toEqual([file, content, 'require_approval', true]);
+      }
+    });
+
+    it('disclosed residual: a JS template literal quoting the shape still cards (#444 treats a Node backtick as a shell-out sink)', () => {
+      const v = write('/repo/src/cli.ts', 'console.log(`hint: echo x >> ~/' + RC + '`);\n');
+      gated(v, 'modify-shell-startup');
+    });
+
     it('write-content: the shape quoted inside a string literal of ordinary code is a mention (no false card)', () => {
       // Reviewer-reproduced false cards at 728686aa: all three ALLOW on main and must ALLOW here.
       for (const [file, content] of [
@@ -182,6 +215,7 @@ describe('#505 — sensitive write targets in the user home', () => {
         ['/repo/x.test.ts', `const cmd = 'echo x >> ~/${ZRC}';\nexpect(guard(cmd).decision).toBe('require_approval');\n`],
         ['/repo/src/cli.ts', `console.log("or: echo x | tee -a ~/${RC}");\n`],
         ['/repo/src/cli.ts', `const s = "sed -i 's/a/b/' ~/.profile";\n`],
+        ['/repo/install.sh', `echo "add: echo x >> ~/${RC}"\n`],              // shell data argument, no substitution
       ] as const) {
         const v = write(file, content);
         expect([file, content, v.decision, v.signals.includes('modify-shell-startup')])
