@@ -97,8 +97,19 @@ function warnOnShadowingCopies(home: string): void {
       console.warn(`      ${copy.dir}${mark}`);
     }
   }
+  // Only the project copy that actually wins the key is the loaded one; any
+  // other project copy is a duplicate beside it, not a second loaded plugin.
+  const projectWinners = new Set(
+    scan.roots
+      .map((r) => r.effective)
+      .filter((c): c is NonNullable<typeof c> => c !== null && c.source === 'project')
+      .map((c) => c.dir),
+  );
   for (const copy of projectCopies) {
-    console.warn(`      ${copy.dir}  → PROJECT PLUGIN, LOADED BY HERMES`);
+    const mark = projectWinners.has(copy.dir)
+      ? 'PROJECT PLUGIN, LOADED BY HERMES'
+      : 'PROJECT PLUGIN, DUPLICATE';
+    console.warn(`      ${copy.dir}  → ${mark}`);
   }
   console.warn('    Hermes keys plugins on the manifest `name:` and the last one in sorted');
   if (misloading) {

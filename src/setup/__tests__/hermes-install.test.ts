@@ -164,6 +164,38 @@ describe('hermes install', () => {
     },
   );
 
+  (HAS_HERMES ? it : it.skip)(
+    'marks only the winning project copy as loaded; other project copies are duplicates (#569 r2 review nit)',
+    async () => {
+      const { home } = shadowedHome();
+      const project = mkdtempSync(join(tmpdir(), 'sc-hermes-proj-'));
+      homes.push(project);
+      const projPlugins = join(project, '.hermes', 'plugins');
+      for (const d of ['shieldcortex', 'shieldcortex.bak-x']) {
+        mkdirSync(join(projPlugins, d), { recursive: true });
+        writeFileSync(join(projPlugins, d, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+      }
+      const savedProjectPlugins = process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+      const savedCwd = process.cwd();
+      process.env.HERMES_ENABLE_PROJECT_PLUGINS = '1';
+      process.chdir(project);
+
+      let text: string;
+      try {
+        text = await installCapturingWarnings(home);
+      } finally {
+        process.chdir(savedCwd);
+        if (savedProjectPlugins === undefined) delete process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+        else process.env.HERMES_ENABLE_PROJECT_PLUGINS = savedProjectPlugins;
+      }
+
+      // Hermes: last in sorted order wins, so the .bak-x project copy loads.
+      expect(text).toMatch(new RegExp(`${join(projPlugins, 'shieldcortex.bak-x')} {2}→ PROJECT PLUGIN, LOADED BY HERMES`));
+      expect(text).toMatch(new RegExp(`${join(projPlugins, 'shieldcortex')} {2}→ PROJECT PLUGIN, DUPLICATE`));
+      expect(text.match(/LOADED BY HERMES/g)).toHaveLength(1);
+    },
+  );
+
   it('says nothing about copies when Hermes cannot be asked (#569 r4)', async () => {
     // No interpreter to resolve, so there is no answer to give. An install log
     // is the wrong place to learn "I could not tell" — `shieldcortex doctor`
