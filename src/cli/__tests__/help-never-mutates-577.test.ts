@@ -40,6 +40,7 @@ import { HERMES_HELP, handleHermesCommand } from '../../setup/hermes.js';
 import { OPENCLAW_HELP, handleOpenClawCommand } from '../../setup/openclaw.js';
 import { handleMemoriesCommand } from '../migrate-legacy.js';
 import { handleSessionsCommand } from '../sessions.js';
+import { VACUUM_HELP, vacuumHelpRequested } from '../vacuum.js';
 import { closeDatabase } from '../../database/init.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -63,6 +64,8 @@ async function withConsole(fn: () => Promise<void>): Promise<Captured & { exitCo
   const origError = console.error;
   const origOut = process.stdout.write.bind(process.stdout);
   const origErr = process.stderr.write.bind(process.stderr);
+  const origExit = process.exit;
+  process.exit = ((code?: number) => { throw new Error(`process.exit(${code})`); }) as typeof process.exit;
   console.log = ((...args: unknown[]) => { captured.out.push(args.map(String).join(' ')); }) as typeof console.log;
   console.error = ((...args: unknown[]) => { captured.err.push(args.map(String).join(' ')); }) as typeof console.error;
   process.stdout.write = ((chunk: string | Uint8Array) => { captured.out.push(String(chunk)); return true; }) as typeof process.stdout.write;
@@ -76,6 +79,7 @@ async function withConsole(fn: () => Promise<void>): Promise<Captured & { exitCo
     console.error = origError;
     process.stdout.write = origOut;
     process.stderr.write = origErr;
+    process.exit = origExit;
     process.exitCode = prevExit;
   }
 }
@@ -427,12 +431,41 @@ describe('#577 — the DB-opening prune/compact commands print usage instead', (
     expect(body.indexOf('wantsHelp(')).toBeLessThan(body.indexOf('execSync('));
   });
 
-  it('the vacuum branch gates on --help before it opens or compacts the database', () => {
+  it('`vacuum --help` stops the caller and prints usage', () => {
+    for (const args of [['--help'], ['-h']]) {
+      const out: string[] = [];
+      const err: string[] = [];
+      const prevExit = process.exitCode;
+      try {
+        expect(vacuumHelpRequested(args, { log: (m) => out.push(m), error: (m) => err.push(m) })).toBe(true);
+        expect(process.exitCode).toBe(0);
+      } finally {
+        process.exitCode = prevExit;
+      }
+      expect(err).toEqual([]);
+      expect(out.join('\n')).toBe(VACUUM_HELP);
+      expect(out.join('\n')).toContain('Usage: shieldcortex vacuum');
+    }
+  });
+
+  it('`vacuum --bogus` stops the caller with exit 2, and a bare `vacuum` proceeds', () => {
+    const err: string[] = [];
+    const prevExit = process.exitCode;
+    try {
+      expect(vacuumHelpRequested(['--bogus'], { log: () => {}, error: (m) => err.push(m) })).toBe(true);
+      expect(process.exitCode).toBe(2);
+      expect(vacuumHelpRequested([], { log: () => {}, error: (m) => err.push(m) })).toBe(false);
+    } finally {
+      process.exitCode = prevExit;
+    }
+    expect(err.join('\n')).toContain('Unknown argument: --bogus');
+  });
+
+  it('the vacuum branch consults the gate before it opens or compacts the database', () => {
     const at = indexSrc.indexOf("process.argv[2] === 'vacuum'");
     expect(at).toBeGreaterThan(-1);
     const branch = indexSrc.slice(at, indexSrc.indexOf('\n  }', at));
-    expect(branch).toMatch(/wantsHelp\(/);
-    expect(branch).toContain('Usage: shieldcortex vacuum');
-    expect(branch.indexOf('wantsHelp(')).toBeLessThan(branch.indexOf('initDatabase()'));
+    expect(branch).toContain('vacuumHelpRequested(process.argv.slice(3))');
+    expect(branch.indexOf('vacuumHelpRequested(')).toBeLessThan(branch.indexOf('initDatabase()'));
   });
 });

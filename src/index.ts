@@ -1426,20 +1426,8 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'vacuum' || process.argv[2] === 'compact') {
     // #577: VACUUM rewrites the whole database file, so --help must stop here —
     // before the DB is even opened (initDatabase also migrates and backfills).
-    if (wantsHelp(process.argv.slice(3))) {
-      console.log(`Usage: shieldcortex vacuum
-
-Compact the memory database, reclaiming the free pages left behind by deletes
-(consolidate / prune free rows; only VACUUM shrinks the file on disk).
-Alias: shieldcortex compact. Takes no arguments.
-
-Options:
-  -h, --help   Show this help and exit (compacts nothing)
-
-Environment:
-  CLAUDE_MEMORY_DB   Database file to compact (default ~/.shieldcortex/memories.db)`);
-      return;
-    }
+    const { vacuumHelpRequested } = await import('./cli/vacuum.js');
+    if (vacuumHelpRequested(process.argv.slice(3))) return;
     const { initDatabase, getDatabase } = await import('./database/init.js');
     const { statSync } = await import('fs');
     initDatabase();
