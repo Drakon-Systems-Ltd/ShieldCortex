@@ -132,8 +132,11 @@ function parseAuditArgs(args: string[]): AuditOptions {
 /**
  * Run the full audit.
  */
+/** `audit`'s value-taking options — `--deps-path help` is a path (#577). */
+export const AUDIT_VALUE_FLAGS = ['--deps-path'] as const;
+
 export async function handleAuditCommand(args: string[]): Promise<void> {
-  if (wantsHelp(args)) {
+  if (wantsHelp(args, { valueFlags: AUDIT_VALUE_FLAGS })) {
     console.log(AUDIT_HELP);
     return;
   }

@@ -39,6 +39,10 @@ import type { EnsureResult } from '../setup/native-binding.js';
 // better-sqlite3 loader.
 import { isPackagedPrebuildLoadError } from '../database/native-load-classify.js';
 import { helpGate } from './help-gate.js';
+import {
+  resolveConversationAccessConsent,
+  ALLOW_CONVERSATION_ACCESS_FLAG,
+} from '../setup/conversation-access-consent.js';
 
 // ── ANSI ────────────────────────────────────────────────────
 
@@ -837,7 +841,7 @@ export async function stepVerifyProtection(
    * SHIELDCORTEX_VERBOSE itself, which is how `update --help` reached the
    * upgrade with nobody having parsed the flags.
    */
-  options: { verbose?: boolean } = {},
+  options: { verbose?: boolean; allowConversationAccess?: boolean } = {},
 ): Promise<StepResult> {
   // #248: split unreadable vs absent. Caller owns process.exitCode from ledger.
   const registration = readRealtimePluginRegistration(home);
@@ -857,7 +861,13 @@ export async function stepVerifyProtection(
       formatReconcileReport,
       protectionLedgerFromReconcile,
     } = await import('../setup/openclaw-reconcile.js');
-    const result = await reconcileOpenClawPluginState({ home, expectedVersion: readPackageVersion() });
+    const result = await reconcileOpenClawPluginState({
+      home,
+      expectedVersion: readPackageVersion(),
+      // #577: parsed at the entry point, not re-read from process.argv down
+      // here — that deep read was invisible to update's own argument parser.
+      grantConversationAccess: options.allowConversationAccess ?? false,
+    });
     // Compact by default on update (mobile-first). Full forensic dump only with --verbose.
     const compact = !options.verbose;
     for (const line of formatReconcileReport(result, { compact })) {
@@ -878,8 +888,22 @@ export async function stepVerifyProtection(
 
 // ── Public entry ────────────────────────────────────────────
 
-/** Every flag `update` honours. Anything else is an error, not a no-op (#577). */
-export const UPDATE_FLAGS = ['--force', '-f', '--verbose'] as const;
+/**
+ * Every flag `update` honours. Anything else is an error, not a no-op (#577).
+ *
+ * The list is the WHOLE call graph's, not this file's: `--allow-conversation-access`
+ * is consumed by the plugin reconcile several modules down (#226), and
+ * `--debug` by `debugLog()` under `database/init.js`. A strict parser that only
+ * knows the flags its own function body reads rejects working invocations — so
+ * every `process.argv` reader reachable from `runUpdate` is represented here.
+ */
+export const UPDATE_FLAGS = [
+  '--force',
+  '-f',
+  '--verbose',
+  '--debug',
+  ALLOW_CONVERSATION_ACCESS_FLAG,
+] as const;
 
 export const UPDATE_HELP = `Usage: shieldcortex update [options]
 
@@ -890,11 +914,20 @@ MUTATES the host — it installs globally and rewrites hook config.
 Options:
   -f, --force   Reinstall every stage even when already on the latest version
       --verbose Full forensic plugin-reconcile output (default: compact)
+      --debug   Print internal startup diagnostics on stderr
+      --allow-conversation-access
+                Consent, for this run only, to the OpenClaw conversation-access
+                hook gate the plugin reconcile restores. Without it the gate is
+                left exactly as found (#226).
   -h, --help    Show this help and exit (never starts the upgrade)
 
 Environment:
   SHIELDCORTEX_VERBOSE=1
       Same as --verbose.
+  SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1
+      Same as --allow-conversation-access.
+  SHIELDCORTEX_DEBUG=1
+      Same as --debug.
   SHIELDCORTEX_UPDATE_REEXEC=1
       Internal. Set by update on the child it launches after the npm install,
       so the second process skips the install and owns the remaining stages.
@@ -908,6 +941,12 @@ export interface UpdateOptions {
   force: boolean;
   /** Full forensic plugin-reconcile output instead of the compact default. */
   verbose: boolean;
+  /**
+   * Operator consent to close the OpenClaw conversation-access gate on this run
+   * (#226). Parsed here and passed down to the reconcile, so the flag the
+   * parser accepts and the consent the registry writer sees are one value.
+   */
+  allowConversationAccess: boolean;
 }
 
 /**
@@ -926,6 +965,7 @@ export function parseUpdateOptions(
   return {
     force: args.includes('--force') || args.includes('-f'),
     verbose: args.includes('--verbose') || env.SHIELDCORTEX_VERBOSE === '1',
+    allowConversationAccess: resolveConversationAccessConsent({ argv: args, env }),
   };
 }
 
@@ -1005,7 +1045,10 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
 
   const protection: StepResult = reexecFailed
     ? { status: 'unproven', summary: 'protection unproven', detail: ['New CLI could not be started; re-run update before verifying protection.', 'next: shieldcortex update'] }
-    : await stepVerifyProtection(home, { verbose: options.verbose });
+    : await stepVerifyProtection(home, {
+      verbose: options.verbose,
+      allowConversationAccess: options.allowConversationAccess,
+    });
 
   // If the binding couldn't be auto-healed, print the exact copy-paste fix.
   // Headline and panel detail come from renderEngineFailure so they can never

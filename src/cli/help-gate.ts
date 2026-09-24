@@ -26,6 +26,12 @@ export interface HelpGateOptions {
    * allow-list cannot describe.
    */
   known?: readonly string[];
+  /**
+   * The command's value-taking options, forwarded to `wantsHelp` so that a
+   * VALUE spelled `help` (`--agent help`) is not mistaken for the help verb
+   * (#577). Omit for commands whose options are all boolean.
+   */
+  valueFlags?: readonly string[];
   log?: (message: string) => void;
   error?: (message: string) => void;
 }
@@ -43,7 +49,7 @@ export function helpGate(
   help: string,
   options: HelpGateOptions = {},
 ): 0 | 2 | null {
-  if (wantsHelp(args)) {
+  if (wantsHelp(args, { valueFlags: options.valueFlags })) {
     (options.log ?? ((m: string) => process.stdout.write(`${m}\n`)))(help);
     return 0;
   }

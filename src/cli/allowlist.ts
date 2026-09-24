@@ -174,6 +174,14 @@ export function pinReviewedScript(target: string, note: string | undefined, deps
   return { ok: true, entry };
 }
 
+/** `allowlist scan`'s value-taking options — a glob or path may spell "help" (#577). */
+export const ALLOWLIST_VALUE_FLAGS = [
+  '--glob',
+  '--hermes-cron',
+  '--openclaw-cron',
+  '--openclaw-cron-db',
+] as const;
+
 export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number | Promise<number> {
   const now = deps.now ?? Date.now();
   const log = deps.log ?? ((m: string) => console.log(m));
@@ -185,7 +193,7 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number |
   const sub = args[0];
 
   // --help / -h must not list, pin, or scan. Check before any config read.
-  if (wantsHelp(args)) {
+  if (wantsHelp(args, { valueFlags: ALLOWLIST_VALUE_FLAGS })) {
     log(ALLOWLIST_HELP);
     return 0;
   }

@@ -95,10 +95,13 @@ function printUsage(): void {
   console.log('      the env var floor is 1 — dry-run-by-default is the guard rail.');
 }
 
+/** `sessions`' value-taking options — `--days help` is a value, not a verb (#577). */
+export const SESSIONS_VALUE_FLAGS = ['--days'] as const;
+
 export async function handleSessionsCommand(args: string[]): Promise<void> {
   // #577: `sessions prune --help` opened (and migrated) the memory DB to print a
   // dry-run report instead of printing usage.
-  if (wantsHelp(args)) {
+  if (wantsHelp(args, { valueFlags: SESSIONS_VALUE_FLAGS })) {
     printUsage();
     return;
   }

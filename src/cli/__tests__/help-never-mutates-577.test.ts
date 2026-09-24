@@ -174,15 +174,17 @@ describe('#577 — shieldcortex update --help never upgrades', () => {
       await handleUpdateCommand(['-f', '--verbose'], { run, env: {}, log: s.log, error: s.error });
     });
     expect(seen).toEqual([
-      { force: false, verbose: false },
-      { force: true, verbose: false },
-      { force: true, verbose: true },
+      { force: false, verbose: false, allowConversationAccess: false },
+      { force: true, verbose: false, allowConversationAccess: false },
+      { force: true, verbose: true, allowConversationAccess: false },
     ]);
   });
 
   it('SHIELDCORTEX_VERBOSE=1 is resolved at the one parse point', () => {
-    expect(parseUpdateOptions([], { SHIELDCORTEX_VERBOSE: '1' })).toEqual({ force: false, verbose: true });
-    expect(parseUpdateOptions([], {})).toEqual({ force: false, verbose: false });
+    expect(parseUpdateOptions([], { SHIELDCORTEX_VERBOSE: '1' }))
+      .toEqual({ force: false, verbose: true, allowConversationAccess: false });
+    expect(parseUpdateOptions([], {}))
+      .toEqual({ force: false, verbose: false, allowConversationAccess: false });
   });
 
   it('runUpdate reads no flags out of process.argv any more', () => {
@@ -208,7 +210,7 @@ describe('#577 — shieldcortex update --help never upgrades', () => {
       await handleUpdateCommand(launched.slice(2), { run, env: {}, log: s.log, error: s.error });
     });
     expect(s.err).toEqual([]);
-    expect(run).toHaveBeenCalledWith({ force: true, verbose: true });
+    expect(run).toHaveBeenCalledWith({ force: true, verbose: true, allowConversationAccess: false });
   });
 
   it('index.ts parses once at the entry point instead of calling runUpdate bare', () => {

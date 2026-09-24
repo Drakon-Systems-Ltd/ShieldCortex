@@ -412,12 +412,46 @@ function printUsage(): void {
   console.log('      Backup auto-saved before any change; purge later with `prune`.');
 }
 
-export async function handleMemoriesCommand(args: string[]): Promise<void> {
+/**
+ * Every value-taking option across the `memories` verbs (#577).
+ *
+ * `prune --project help`, `migrate-legacy --source help` and friends are real
+ * invocations — a project key and a source path that happen to spell "help".
+ * The help gate has to skip these tokens or it answers "usage" to work it was
+ * asked to do, and returns 0 while doing nothing.
+ */
+export const MEMORIES_VALUE_FLAGS = [
+  '--source',        // migrate-legacy
+  '--project',       // prune, dedupe, repair-project-keys, import-native
+  '--salience-lte',  // prune
+  '--older-than',    // prune
+  '--limit',         // dedupe
+  '--db',            // repair-project-keys, purge, recalc
+  '--backup-dir',    // repair-project-keys, purge, recalc
+  '--map',           // repair-project-keys
+  '--scan-paths',    // repair-project-keys
+  '--host-id',       // import-native
+  '--agent-id',      // import-native
+] as const;
+
+export async function handleMemoriesCommand(
+  args: string[],
+  deps: {
+    /**
+     * Injectable importer (#577). `--source <path>` is why this seam exists:
+     * `--source help` was swallowed by the help gate, and the regression test
+     * has to watch the VALUE arrive without opening the operator's database —
+     * `migrateLegacy` resolves its target from `os.homedir()`, which a test
+     * process cannot move.
+     */
+    migrateLegacy?: typeof migrateLegacy;
+  } = {},
+): Promise<void> {
   // #577: `memories prune --help` / `migrate-legacy --help` fell straight into
   // the subcommand, which calls initDatabase() (creating and migrating the
   // memory DB) before printing anything — and migrate-legacy is dry-run only
   // with an explicit --dry-run, so a help flag performed a real import.
-  if (wantsHelp(args)) {
+  if (wantsHelp(args, { valueFlags: MEMORIES_VALUE_FLAGS })) {
     printUsage();
     return;
   }
@@ -433,7 +467,7 @@ export async function handleMemoriesCommand(args: string[]): Promise<void> {
     const sources = sourceIdx !== -1 && args[sourceIdx + 1]
       ? [args[sourceIdx + 1]]
       : undefined;
-    const report = migrateLegacy({ sources, dryRun });
+    const report = (deps.migrateLegacy ?? migrateLegacy)({ sources, dryRun });
     printReport(report);
     return;
   }

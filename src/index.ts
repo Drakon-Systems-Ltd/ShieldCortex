@@ -74,7 +74,7 @@ import fs from 'fs';
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { SCAN_EXIT, formatScanToolFailure } from './cli/scan-exit.js';
-import { wantsHelp } from './cli/wants-help.js';
+import { wantsHelp, GLOBAL_VALUE_FLAGS } from './cli/wants-help.js';
 
 // Heavy modules (MCP server, visualization API + express/cors/ws, embedding
 // model, brain worker, installer handlers) are loaded lazily via `await import`
@@ -98,7 +98,7 @@ function checkVersionStaleness(): void {
   // own update-notifier hit the registry and write ~/.npm/_logs), so a gate
   // inside the update branch alone could not make `update --help` side-effect
   // free. Nothing here is worth printing above a usage block anyway.
-  if (wantsHelp(process.argv.slice(2))) return;
+  if (wantsHelp(process.argv.slice(2), { valueFlags: GLOBAL_VALUE_FLAGS })) return;
 
   try {
     const globalVersion = execSync('npm ls -g shieldcortex --depth=0 --json 2>/dev/null', {
@@ -163,7 +163,7 @@ export function shouldShowInteractiveBanner(argv: string[], mode: ServerMode): b
   const first = argv[2];
   if (!first) return false; // bare invocation → MCP stdio server
   // --help / -h must not query the live DB via the stats banner (#515).
-  if (wantsHelp(argv.slice(2))) return false;
+  if (wantsHelp(argv.slice(2), { valueFlags: GLOBAL_VALUE_FLAGS })) return false;
   // A positional (non-flag) first arg means a CLI subcommand was given.
   const hasPositionalCommand = !first.startsWith('-');
   if (hasPositionalCommand) {
@@ -603,6 +603,17 @@ async function main() {
   if (process.argv[2] === 'hook') {
     const { handleHookCommand } = await import('./setup/hooks.js');
     await handleHookCommand(process.argv[3] || '');
+    return;
+  }
+
+  // #577: an invalid argument must cost NOTHING — and `checkVersionStaleness()`
+  // below spawns `npm ls -g`, which lets npm's own update-notifier reach the
+  // registry and write ~/.npm/_logs. So the strict-parser commands are
+  // validated first, by the same pure gate the dispatcher applies later.
+  const strictExit = await (await import('./cli/strict-args-preflight.js'))
+    .preflightStrictArgs(process.argv.slice(2));
+  if (strictExit !== null) {
+    process.exitCode = strictExit;
     return;
   }
 

@@ -387,6 +387,13 @@ export function migrateOpenClawHooks(): { migrated: boolean; cleanedLegacy: bool
   return { migrated, cleanedLegacy };
 }
 
+/**
+ * `migrate` honours no flags at all (#577) — and unlike the other gated
+ * commands that is provable rather than assumed: nothing in its call graph
+ * reads `process.argv`, so there is no deep flag to list.
+ */
+export const MIGRATE_FLAGS = [] as const;
+
 export const MIGRATE_HELP = `Usage: shieldcortex migrate
 
 Migrate an existing Claude Cortex / Claude Memory install to ShieldCortex: swap
@@ -409,7 +416,7 @@ export async function handleMigrateCommand(
   args: readonly string[] = [],
   deps: { run?: () => Promise<void> } = {},
 ): Promise<void> {
-  const gate = helpGate(args, MIGRATE_HELP, { known: [] });
+  const gate = helpGate(args, MIGRATE_HELP, { known: MIGRATE_FLAGS });
   if (gate !== null) {
     process.exitCode = gate;
     return;
