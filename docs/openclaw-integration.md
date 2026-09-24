@@ -180,16 +180,17 @@ All memory writes routed through ShieldCortex are scanned by the defence pipelin
 
 ### Recalled memory is framed as data — guidance, not enforcement
 
-The recall surfaces wrap stored memory in one untrusted-data frame before a model sees it: an opening line, a notice that imperative text inside is data and not an instruction, and a closing line carrying a per-emission random id that stored text cannot predict (#507). The surfaces that carry the frame today are:
+The recall surfaces wrap stored memory in one untrusted-data frame before a model sees it: an opening line, a notice that imperative text inside is data and not an instruction, and a closing line carrying a per-emission random id that stored text cannot predict (#507, #535). The surfaces that carry the frame today are:
 
-- the MCP tools `recall`, `get_memory`, `get_related`, `get_context` (prose output; `format: "raw"` is a JSON document that carries the same notice and frame id as fields) and `start_session`;
+- the MCP tools `recall`, `get_memory`, `get_related`, `get_context` (prose output; `format: "raw"` is a JSON document that carries the same notice and frame id as fields), `start_session`, `remember` (success), `forget` (when it lists titles), consolidation previews that list titles, contradiction listings, `quarantine_review` list, and `scan_memories` findings;
+- JSON emitters `export_memories` and graph query/entities/explain success payloads, which carry `untrusted_data_notice` / `frame_id` as the first keys so the document still parses;
 - the MCP resources `memory://context` and `memory://important`;
 - proactive recall on a `message` event (the bundled OpenClaw hook);
 - the Claude Code hooks and the LangChain adapter.
 
-Not every tool result that echoes stored text is framed yet. `export_memories` returns the stored rows as raw JSON, and the tools that echo a memory back after acting on it (`remember`, `forget`, graph, quarantine and scan results) are unframed too; that gap is tracked as #535 and stays open until those paths carry the frame. Until then, treat an `export_memories` result as you would any untrusted file.
+Empty and error results with no stored text stay unframed.
 
-Be clear about what that is. The frame tells the model who is speaking; it does not stop the model reading the text, and it does not make a hostile memory safe. It is advice to the model, and a model can ignore advice. The controls that actually withhold or block content are the write-time defence pipeline (a memory that scans as an injection is quarantined, never recalled) and the recall filter that drops a poisoned row before it is emitted. Treat the frame as the last line, not the first.
+Be clear about what that is. The frame tells the model who is speaking; it does not stop the model reading the text, and it does not make a hostile memory safe. It is advice to the model, and a model can ignore advice. The controls that actually withhold or block content are the write-time defence pipeline (a memory that scans as an injection is blocked or quarantined according to policy, never recalled) and the recall filter that drops a poisoned row before it is emitted. Treat the frame as the last line, not the first.
 
 ### PII redaction on the hook write path
 
@@ -199,7 +200,7 @@ The same redactor also runs on **session events**: every `session_events` row th
 
 Both hook write paths load that redactor from the installed package's compiled `dist`. If the redactor alone is missing or stale (for example straight after an upgrade), the hook **still stores the memory or event, unredacted, at CONFIDENTIAL or above** and says so on stderr: `PII redactor unavailable — storing unredacted at raised sensitivity`. Session events print that notice once per hook process; memory capture prints it once per candidate. An event already labelled RESTRICTED (or SECRET) keeps that label as written; it is never downgraded.
 
-This fail-safe covers a missing redactor only. If the defence modules in `dist` cannot load at all, hook memory capture is dropped and audited as `defence_pipeline_unavailable`, as it was before this change; session events are still written. This is deliberate — a packaging fault must not stop a host remembering — but it is a fail-safe, not a fail-closed redaction guarantee: raw identifiers can be stored until `dist` is fresh. Run `shieldcortex doctor` after every upgrade to confirm it is.
+This fail-safe covers a missing redactor only. If any *required* defence module in `dist` is missing — the pipeline, database init or disposition module; one is enough, it does not take all three — hook memory capture is dropped and audited as `defence_pipeline_unavailable`, as it was before this change; session events are still written. This is deliberate — a packaging fault must not stop a host remembering — but it is a fail-safe, not a fail-closed redaction guarantee: raw identifiers can be stored until `dist` is fresh. Run `shieldcortex doctor` after every upgrade to confirm it is.
 
 Hook memories that redact to the same text (two people's NI numbers) are deduplicated by a bounded rule, not by similarity: a redacted candidate is skipped when the project already holds a row with the identical redacted title and content created in the last 24 hours, or already holds 3 such rows of any age. So a hook that re-extracts the same memory every turn stores it once, two people's records captured more than 24 hours apart are both kept (up to 3), and two distinct records that redact identically within 24 hours of each other collapse to one.
 

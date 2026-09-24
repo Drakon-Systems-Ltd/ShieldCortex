@@ -295,7 +295,7 @@ describe('#507 review 2: wiring of the emitters this file cannot run', () => {
 
   it('MCP server: every memory-bearing text surface goes through framedRecall', () => {
     const server = read('src', 'server.ts');
-    expect(server).toContain("import { frameRecallBlock } from '../scripts/lib/recall-frame.mjs';");
+    expect(server).toContain("import { frameRecallBlock, recallFrameFields } from '../scripts/lib/recall-frame.mjs';");
     for (const needle of [
       'framedRecall(formatRecallResult(result, true))',
       'framedRecall(result.context!)',

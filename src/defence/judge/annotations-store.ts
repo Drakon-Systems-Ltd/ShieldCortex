@@ -1,4 +1,5 @@
 import { getDatabase } from '../../database/init.js';
+import { redactAnnotationForPersistence } from './redact.js';
 import type { ReviewAnnotation } from './types.js';
 
 interface AnnotationRow {
@@ -14,9 +15,20 @@ function toNumericItemId(itemId: string): number {
   return numericId;
 }
 
-export function saveQuarantineAnnotation(annotation: ReviewAnnotation): void {
+/**
+ * Persist a Review Copilot annotation and return the form that was stored.
+ *
+ * #538: this is a persistence boundary. The judge's free text (summary,
+ * evidence snippets, reasoning, group key) is redacted here, before the row is
+ * written, so an identifier in a quarantine row — a legacy row stored raw
+ * before #510, or one the model paraphrased — never lands in a second table.
+ * Callers must use the RETURNED annotation (the admin API echoes it) rather
+ * than the one they passed in.
+ */
+export function saveQuarantineAnnotation(input: ReviewAnnotation): ReviewAnnotation {
   const db = getDatabase();
-  const itemId = toNumericItemId(annotation.itemId);
+  const itemId = toNumericItemId(input.itemId);
+  const annotation = redactAnnotationForPersistence(input);
   db.prepare(`
     INSERT INTO quarantine_annotations (
       item_id,
@@ -46,6 +58,7 @@ export function saveQuarantineAnnotation(annotation: ReviewAnnotation): void {
     JSON.stringify(annotation),
     annotation.generatedAt,
   );
+  return annotation;
 }
 
 export function getAnnotationForItem(id: number): ReviewAnnotation | null {

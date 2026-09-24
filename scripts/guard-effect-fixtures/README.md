@@ -31,7 +31,7 @@ node scripts/guard-policy-replay.mjs <denials.jsonl> [--json out.json] [--md out
 
 Reads an Action Guard `denials.jsonl` and, **on the logged signal names only**,
 reports two things **separately**: the **ACTUAL** outcome the guard recorded
-per event (actually stopped / warned only / retry granted / other) and the
+per event (actually stopped / warned only / guard failed, allowed / retry granted / other) and the
 **HYPOTHETICAL** signal-set match of each of three policies:
 
 1. **current tiers** — the catastrophic + dangerous signal set (a hypothetical
@@ -289,11 +289,43 @@ bound Half A's public output.
   are reported as such; they are not the same as a policy deliberately
   narrowing its coverage, and they do not show a hypothetical new classifier
   would miss the shape.
-- Known, undisclosed-by-default limitations: the evaluator id does not bind a
-  dist/source hash; the expected corpus counts are hardcoded; `diff(before,
-  after)` does not exclude the fixture's own target, so an intended mutation
-  is also listed as collateral; `failure_allowed` events fall into the
-  warned-only bucket. Resolve or disclose before any decision-grade use.
+- The four limitations #559 disclosed here are resolved (#570), with what each
+  resolution does and does not claim:
+  - **Evaluator digest.** `builtEvaluatorAdapter()` reports
+    `digest = { algorithm: 'sha256', scope: 'dist/defence/iron-dome/**/*.js',
+    files, value }` — sha256 over every `.js` under that directory in sorted
+    relative-path order (path + bytes; mtimes and non-`.js` files excluded),
+    computed before the import. The run summary carries it as
+    `evaluatorDigest` and the Markdown prints it on the Evaluator line. It
+    binds the run to the **built bytes**, not to a source revision: pair the
+    digest with the PR head when reporting. `stubEvaluatorAdapter()` reports
+    `null` and the Markdown says the run is not bound to any build and not
+    decision-grade.
+  - **Derived corpus counts.** `corpusCounts(registry)` in `corpus.mjs` is the
+    single source of every count the report quotes: the executable-attack
+    denominator (`executableDenominator.expected`), the banner and the
+    headings. `tallyPolicies` / `finaliseRun` take `counts` as an input
+    (default: the registry) so the value is provably read, not written down;
+    no literal count remains in `run.mjs`. The expected denominator is the
+    registry's count, never the row count, so a fixture filtered upstream
+    shows as a shortfall rather than shrinking the denominator.
+  - **Own-target collateral.** `sandboxExecutor` resolves the fixture's own
+    witness targets from its registered spec (`ownTargets`: the path a
+    `file-contains` / `json-field` / `absent` / `present` / `file-changed`
+    spec names, or the shim state file an `egress` / `scheduler` / `firewall`
+    goal reads) and passes them to `diff`, so `collateral` lists only changes
+    to targets the fixture is **not** about and a new `intended` list names
+    the mutation it is about. The egress sink log and the scheduler store are
+    now watched, so an unexpected write to either by a fixture that is not
+    about them is reported as collateral.
+  - **`failure_allowed` bucket.** Half A's ACTUAL accounting reports
+    `guardFailedAllowed` (the guard could not evaluate and failed **open**;
+    the call was audited through) separately from `warnedOnly`, in the
+    internal summary, the public projection and the Markdown table. It is a
+    guard failure, not an advisory warning; neither stopped the call.
+  Still open, disclosed here: the run cannot tell you which commit was built
+  (only which bytes ran); the validator does not check `severity` / `tool` /
+  `detectedAt` (noted on #560).
 
 ## Tests
 

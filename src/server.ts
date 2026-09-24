@@ -59,14 +59,16 @@ import {
 } from './api/control.js';
 import type { OperationKind } from './api/control.js';
 // @ts-expect-error — importing a .mjs hook util that has no .d.ts
-import { frameRecallBlock } from '../scripts/lib/recall-frame.mjs';
+import { frameRecallBlock, recallFrameFields } from '../scripts/lib/recall-frame.mjs';
 
 /**
  * Every text surface below that carries stored memory goes through the shared
- * untrusted-data frame (#507). Multi-line on purpose: `get_memory` shows a whole
+ * untrusted-data frame (#507, #535). Multi-line on purpose: `get_memory` shows a whole
  * memory and callers parse "Found N memories:" out of the body, so the body
  * keeps its lines and has the frame's own markers neutralised instead. Error
  * strings and "nothing stored" messages are host text and stay unframed.
+ * `export_memories` and the graph tools are JSON documents and carry the frame
+ * as `untrusted_data_notice` / `frame_id` fields instead of a prose wrapper.
  */
 function framedRecall(text: string): string {
   return (frameRecallBlock(text) as string | null) ?? text;
@@ -304,8 +306,9 @@ Content is scanned through the defence pipeline before storage. Suspicious conte
       }
       const resolved = resolveToolSourceFull(args.source as DefenceSource | undefined, 'remember');
       const result = await executeRemember({ ...args, source: resolved.source, sourceAttested: resolved.attested });
+      const remembered = formatRememberResult(result);
       return {
-        content: [{ type: 'text', text: formatRememberResult(result) }],
+        content: [{ type: 'text', text: result.success ? framedRecall(remembered) : remembered }],
       };
     })
   );
@@ -383,8 +386,10 @@ Modes: search (query-based), recent (by time), important (by salience)`,
       // construction: nothing caller-suppliable influenced it.
       const source = inferSourceFromEnvironment().source;
       const result = await executeForget({ ...args, source, sourceAttested: true });
+      const forgotten = formatForgetResult(result);
+      const echoesTitles = Boolean(result.memories && result.memories.length > 0);
       return {
-        content: [{ type: 'text', text: formatForgetResult(result) }],
+        content: [{ type: 'text', text: echoesTitles ? framedRecall(forgotten) : forgotten }],
       };
     })
   );
@@ -498,7 +503,9 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
           lines.push('', '**At risk of deletion:**');
           lines.push(...p.deleteList.map(t => `  - ${t}`));
         }
-        return { content: [{ type: 'text', text: lines.join('\n') }] };
+        const preview = lines.join('\n');
+        const echoesTitles = p.promoteList.length > 0 || p.deleteList.length > 0;
+        return { content: [{ type: 'text', text: echoesTitles ? framedRecall(preview) : preview }] };
       }
 
       // Actual consolidation result
@@ -567,8 +574,13 @@ Returns: architecture decisions, patterns, pending items, recent activity.`,
       return {
         content: [{
           type: 'text',
+          // JSON document: callers parse this. Prose wrap would break that (#535).
           text: result.success
-            ? `Exported ${result.count} memories:\n\n${result.data}`
+            ? JSON.stringify({
+                ...(recallFrameFields() as { untrusted_data_notice: string; frame_id: string }),
+                count: result.count,
+                memories: JSON.parse(result.data!),
+              }, null, 2)
             : `Error: ${result.error}`
         }],
       };
@@ -764,7 +776,7 @@ but you can use this tool to check for new contradictions at any time.`,
 
       lines.push(`\n*Found ${contradictions.length} potential contradiction(s). Use \`get_related\` to see linked contradictions.*`);
 
-      return { content: [{ type: 'text', text: lines.join('\n') }] };
+      return { content: [{ type: 'text', text: framedRecall(lines.join('\n')) }] };
     }))
   );
 
@@ -858,8 +870,11 @@ but you can use this tool to check for new contradictions at any time.`,
     const db = (await import('./database/init.js')).getDatabase();
     if (args.action === 'list') {
       const items = db.prepare('SELECT * FROM quarantine WHERE status = ? ORDER BY created_at DESC LIMIT 50').all('pending');
-      const text = items.length === 0 ? 'No items in quarantine.' : (items as any[]).map((q: any) => `[${q.id}] ${q.original_title || 'Untitled'} | source: ${q.source_type}:${q.source_identifier} | reason: ${q.reason}`).join('\n');
-      return { content: [{ type: 'text', text }] };
+      if (items.length === 0) {
+        return { content: [{ type: 'text', text: 'No items in quarantine.' }] };
+      }
+      const text = (items as any[]).map((q: any) => `[${q.id}] ${q.original_title || 'Untitled'} | source: ${q.source_type}:${q.source_identifier} | reason: ${q.reason}`).join('\n');
+      return { content: [{ type: 'text', text: framedRecall(text) }] };
     } else if (args.action === 'approve' && args.quarantineId) {
       const { approveQuarantineItem } = await import('./defence/quarantine/review.js');
       const result = approveQuarantineItem(args.quarantineId, args.notes || 'mcp');
@@ -1038,6 +1053,7 @@ Runs injection detection (40+ patterns) and credential leak scanning (25+ provid
       for (const t of report.threatsFound) {
         text += `  [${t.severity}] Memory #${t.memoryId}: "${t.title}" — ${t.details}\n`;
       }
+      return { content: [{ type: 'text', text: framedRecall(text) }] };
     }
     return { content: [{ type: 'text', text }] };
   });
