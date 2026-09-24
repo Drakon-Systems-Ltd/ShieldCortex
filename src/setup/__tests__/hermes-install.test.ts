@@ -1,8 +1,24 @@
-import { mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, afterEach } from '@jest/globals';
 import { installHermes, hermesPluginInstalled, uninstallHermes } from '../hermes.js';
+import { probeHermesDiscovery } from '../hermes-plugins.js';
+
+/**
+ * The installer's #569 warning comes from Hermes' own discovery and from
+ * nothing else (r4), so the case that expects a warning needs a box that has
+ * Hermes. Asked once, by asking.
+ */
+const HAS_HERMES = (() => {
+  const probeDir = mkdtempSync(join(tmpdir(), 'sc-hermes-probe-'));
+  try {
+    mkdirSync(join(probeDir, '.hermes', 'plugins'), { recursive: true });
+    return 'roots' in probeHermesDiscovery({ home: probeDir, hermesHome: null });
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+})();
 
 describe('hermes install', () => {
   const homes: string[] = [];
@@ -36,5 +52,171 @@ describe('hermes install', () => {
     const text = logs.join('\n');
     expect(text).toMatch(/Action Guard stays off/);
     expect(text).not.toMatch(/Enforce is ON by default/);
+  });
+
+  /** Canonical-plus-backup under a fresh fake home, with the backup's path. */
+  function shadowedHome(): { home: string; shadow: string } {
+    const home = mkdtempSync(join(tmpdir(), 'sc-hermes-'));
+    homes.push(home);
+    // Sorts after `shieldcortex`, so Hermes loads THIS on the next start and
+    // the install we are about to do never runs.
+    const shadow = join(home, '.hermes', 'plugins', 'shieldcortex.bak-pre510-x');
+    mkdirSync(shadow, { recursive: true });
+    writeFileSync(join(shadow, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+    return { home, shadow };
+  }
+
+  /** Run `installHermes` with stdout swallowed; return what it warned. */
+  async function installCapturingWarnings(home: string): Promise<string> {
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    const origLog = console.log;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+    console.log = () => {};
+    try {
+      await installHermes(home);
+    } finally {
+      console.warn = origWarn;
+      console.log = origLog;
+    }
+    return warnings.join('\n');
+  }
+
+  (HAS_HERMES ? it : it.skip)(
+    'warns — and moves nothing — when a shadowing copy is already there (#569)',
+    async () => {
+      const { home, shadow } = shadowedHome();
+
+      const text = await installCapturingWarnings(home);
+
+      expect(text).toMatch(/shieldcortex\.bak-pre510-x/);
+      expect(text).toMatch(/LOADED BY HERMES/);
+      expect(text).toMatch(/--fix-hermes-plugin-copies/);
+      // Warn only: the copy is the operator's, and which one they meant to keep
+      // is not a decision the installer gets to make mid-install. Nothing was
+      // relocated, and `backups/` — the directory the repair reserves under —
+      // was never even created.
+      expect(existsSync(join(shadow, 'plugin.yaml'))).toBe(true);
+      expect(existsSync(join(home, '.hermes', 'backups'))).toBe(false);
+      expect(hermesPluginInstalled(home)).toBe(true);
+    },
+  );
+
+  (HAS_HERMES ? it : it.skip)(
+    'calls a copy that sorts FIRST a duplicate, not a downgrade (#569 r7)',
+    async () => {
+      // `old-shieldcortex` sorts BEFORE `shieldcortex`, so the copy just
+      // installed is still the one Hermes loads. The duplicate is worth saying
+      // out loud — the next backup that sorts after it takes over silently —
+      // but telling an operator their install is not running is false here, and
+      // sends them hunting a fault that is not there.
+      const home = mkdtempSync(join(tmpdir(), 'sc-hermes-'));
+      homes.push(home);
+      const duplicate = join(home, '.hermes', 'plugins', 'old-shieldcortex');
+      mkdirSync(duplicate, { recursive: true });
+      writeFileSync(join(duplicate, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+
+      const text = await installCapturingWarnings(home);
+
+      expect(text).toMatch(/Duplicate `shieldcortex` plugin copies/);
+      expect(text).toMatch(/old-shieldcortex/);
+      expect(text).not.toMatch(/is what runs, not what/);
+      expect(text).toMatch(/still the one loaded/);
+      expect(text).toMatch(/--fix-hermes-plugin-copies/);
+      // The mark still says which copy Hermes loads — and it is ours.
+      expect(text).toMatch(/shieldcortex {2}→ LOADED BY HERMES/);
+      expect(existsSync(join(duplicate, 'plugin.yaml'))).toBe(true);
+      expect(existsSync(join(home, '.hermes', 'backups'))).toBe(false);
+    },
+  );
+
+  (HAS_HERMES ? it : it.skip)(
+    'marks the root winner root-local when a project copy outranks it (#569 r9)',
+    async () => {
+      // Two lines carrying `LOADED BY HERMES` is one line too many: Hermes
+      // scans the project directory after the user plugins, so the project
+      // copy is the one that runs and the root's own winner is a local fact.
+      const { home, shadow } = shadowedHome();
+      const project = mkdtempSync(join(tmpdir(), 'sc-hermes-proj-'));
+      homes.push(project);
+      const projectCopy = join(project, '.hermes', 'plugins', 'shieldcortex');
+      mkdirSync(projectCopy, { recursive: true });
+      writeFileSync(join(projectCopy, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+      const savedProjectPlugins = process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+      const savedCwd = process.cwd();
+      process.env.HERMES_ENABLE_PROJECT_PLUGINS = '1';
+      process.chdir(project);
+
+      let text: string;
+      try {
+        text = await installCapturingWarnings(home);
+      } finally {
+        process.chdir(savedCwd);
+        if (savedProjectPlugins === undefined) delete process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+        else process.env.HERMES_ENABLE_PROJECT_PLUGINS = savedProjectPlugins;
+      }
+
+      expect(text).toMatch(/Hermes is loading a different `shieldcortex` copy/);
+      expect(text).toMatch(new RegExp(`${shadow} {2}→ ROOT-LOCAL WINNER`));
+      expect(text).toMatch(/→ PROJECT PLUGIN, LOADED BY HERMES/);
+      // Exactly one loading claim, and it belongs to the project copy.
+      expect(text.match(/LOADED BY HERMES/g)).toHaveLength(1);
+    },
+  );
+
+  (HAS_HERMES ? it : it.skip)(
+    'marks only the winning project copy as loaded; other project copies are duplicates (#569 r2 review nit)',
+    async () => {
+      const { home } = shadowedHome();
+      const project = mkdtempSync(join(tmpdir(), 'sc-hermes-proj-'));
+      homes.push(project);
+      const projPlugins = join(project, '.hermes', 'plugins');
+      for (const d of ['shieldcortex', 'shieldcortex.bak-x']) {
+        mkdirSync(join(projPlugins, d), { recursive: true });
+        writeFileSync(join(projPlugins, d, 'plugin.yaml'), 'name: shieldcortex\nkind: standalone\n');
+      }
+      const savedProjectPlugins = process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+      const savedCwd = process.cwd();
+      process.env.HERMES_ENABLE_PROJECT_PLUGINS = '1';
+      process.chdir(project);
+
+      let text: string;
+      try {
+        text = await installCapturingWarnings(home);
+      } finally {
+        process.chdir(savedCwd);
+        if (savedProjectPlugins === undefined) delete process.env.HERMES_ENABLE_PROJECT_PLUGINS;
+        else process.env.HERMES_ENABLE_PROJECT_PLUGINS = savedProjectPlugins;
+      }
+
+      // Hermes: last in sorted order wins, so the .bak-x project copy loads.
+      expect(text).toMatch(new RegExp(`${join(projPlugins, 'shieldcortex.bak-x')} {2}→ PROJECT PLUGIN, LOADED BY HERMES`));
+      expect(text).toMatch(new RegExp(`${join(projPlugins, 'shieldcortex')} {2}→ PROJECT PLUGIN, DUPLICATE`));
+      expect(text.match(/LOADED BY HERMES/g)).toHaveLength(1);
+    },
+  );
+
+  it('says nothing about copies when Hermes cannot be asked (#569 r4)', async () => {
+    // No interpreter to resolve, so there is no answer to give. An install log
+    // is the wrong place to learn "I could not tell" — `shieldcortex doctor`
+    // reports that properly, with the remedy attached — and a guess dressed up
+    // as a caveat is what four review rounds removed.
+    const { home, shadow } = shadowedHome();
+    const savedPath = process.env.PATH;
+    const emptyBin = mkdtempSync(join(tmpdir(), 'sc-hermes-nopath-'));
+    let text: string;
+    try {
+      process.env.PATH = emptyBin;
+      text = await installCapturingWarnings(home);
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
+      rmSync(emptyBin, { recursive: true, force: true });
+    }
+
+    expect(text).toBe('');
+    expect(existsSync(join(shadow, 'plugin.yaml'))).toBe(true);
+    expect(existsSync(join(home, '.hermes', 'backups'))).toBe(false);
+    expect(hermesPluginInstalled(home)).toBe(true);
   });
 });

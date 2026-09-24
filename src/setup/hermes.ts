@@ -11,6 +11,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { scanHermesPluginCopies } from './hermes-plugins.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,8 +21,113 @@ function pluginSourceDir(): string {
   return path.resolve(__dirname, '..', '..', 'plugins', 'hermes', 'shieldcortex');
 }
 
+function hermesHomeDir(home: string = os.homedir()): string {
+  return path.join(home, '.hermes');
+}
+
 function pluginDestDir(home: string = os.homedir()): string {
-  return path.join(home, '.hermes', 'plugins', 'shieldcortex');
+  return path.join(hermesHomeDir(home), 'plugins', 'shieldcortex');
+}
+
+/**
+ * #569: a copy of the plugin left beside the one we just wrote is loaded
+ * INSTEAD of it. Hermes keys plugins on the manifest `name:`, walks `plugins/`
+ * in sorted order, and lets the later manifest win silently — so
+ * `plugins/shieldcortex.bak-pre510-<ts>/`, the obvious thing to make before an
+ * upgrade, sorts after `plugins/shieldcortex/` and wins. The install then
+ * reports success while the gateway keeps running the old code.
+ *
+ * WARN only, and only on Hermes' own discovery (#569 r4). The copies are the
+ * operator's and which one they meant to keep is not ours to decide
+ * mid-install; and where Hermes cannot be asked there is no answer to give, so
+ * the installer stays SILENT rather than dressing a guess up as a caveat. An
+ * operator who wants to know either way runs `shieldcortex doctor`, whose job
+ * is to report "could not determine" and say how to fix that; the tail of an
+ * install log is not the place to learn it.
+ *
+ * Scans the tree we just wrote to (`<home>/.hermes`), not `HERMES_HOME`,
+ * because that is where `pluginDestDir` put the bytes — so the scan runs under
+ * an environment with `HERMES_HOME` UNSET, and Hermes' own resolution then
+ * lands on exactly that default home rather than wherever the operator's shell
+ * points (#569 r5).
+ *
+ * Two things it is careful not to overstate (#569 r7). A copy that sorts
+ * BEFORE `shieldcortex` — `old-shieldcortex` — does not win, so it is reported
+ * as a duplicate to clear up rather than as an install that is not running. And
+ * a copy in an enabled project directory DOES win, over every user root, so it
+ * is named as the loaded one even though nothing here or in the doctor will
+ * ever move it — and it is then the ONLY copy named as loaded (#569 r9): each
+ * root's own winner is marked root-local, because two `LOADED BY HERMES` marks
+ * cannot both be true and the root-local one is the false one.
+ */
+function warnOnShadowingCopies(home: string): void {
+  let scan: ReturnType<typeof scanHermesPluginCopies>;
+  try {
+    scan = scanHermesPluginCopies({ home, hermesHome: null });
+  } catch {
+    // A scan that cannot run must never fail an otherwise-good install.
+    return;
+  }
+  if (!scan.fromHermes) return;
+  const projectCopies = scan.project.enabled ? scan.project.copies : [];
+  const shadowedRoots = scan.roots.filter((r) => r.shadowed && r.loaded !== null);
+  if (shadowedRoots.length === 0 && projectCopies.length === 0) return;
+
+  // Whether the copy Hermes loads is the one just installed (#569 r7 nit 3). A
+  // backup named `old-shieldcortex` sorts BEFORE `shieldcortex`, so the install
+  // does run — the duplicate is a trap for the next rename, not a live
+  // downgrade, and saying otherwise sends an operator hunting a fault that is
+  // not there. A project copy, on the other hand, outranks every user root.
+  const misloading =
+    shadowedRoots.some((r) => !r.loaded!.canonical) || projectCopies.length > 0;
+
+  console.warn();
+  console.warn(
+    misloading
+      ? '⚠️  Hermes is loading a different `shieldcortex` copy than the one just installed.'
+      : '⚠️  Duplicate `shieldcortex` plugin copies are visible to Hermes.',
+  );
+  // Only the EFFECTIVE winner is marked as loaded (#569 r9). Once a project
+  // copy outranks every root, two lines carrying `LOADED BY HERMES` is one
+  // line too many, and the root-local one is the false one.
+  const rootMark = projectCopies.length > 0 ? '  → ROOT-LOCAL WINNER' : '  → LOADED BY HERMES';
+  for (const rootScan of shadowedRoots) {
+    for (const copy of rootScan.copies) {
+      const mark = copy.dir === rootScan.loaded!.dir ? rootMark : '';
+      console.warn(`      ${copy.dir}${mark}`);
+    }
+  }
+  // Only the project copy that actually wins the key is the loaded one; any
+  // other project copy is a duplicate beside it, not a second loaded plugin.
+  const projectWinners = new Set(
+    scan.roots
+      .map((r) => r.effective)
+      .filter((c): c is NonNullable<typeof c> => c !== null && c.source === 'project')
+      .map((c) => c.dir),
+  );
+  for (const copy of projectCopies) {
+    const mark = projectWinners.has(copy.dir)
+      ? 'PROJECT PLUGIN, LOADED BY HERMES'
+      : 'PROJECT PLUGIN, DUPLICATE';
+    console.warn(`      ${copy.dir}  → ${mark}`);
+  }
+  console.warn('    Hermes keys plugins on the manifest `name:` and the last one in sorted');
+  if (misloading) {
+    console.warn('    order wins silently — so the copy marked above is what runs, not what');
+    console.warn('    was just installed.');
+  } else {
+    console.warn('    order wins silently. The copy just installed is still the one loaded,');
+    console.warn('    because the extras sort before it — but the next backup that sorts');
+    console.warn('    after it would take over with nothing said.');
+  }
+  if (projectCopies.length > 0) {
+    console.warn('    HERMES_ENABLE_PROJECT_PLUGINS is enabled, and Hermes scans the project');
+    console.warn('    directory AFTER the user plugins. Nothing moves that copy for you:');
+    console.warn('    what belongs in a project tree is the project owner\'s call.');
+  }
+  console.warn('    Fix:  shieldcortex doctor --fix-hermes-plugin-copies');
+  console.warn('    Then restart the Hermes gateway — discovery only re-runs at start-up.');
+  console.warn();
 }
 
 function copyDir(src: string, dest: string): void {
@@ -61,6 +167,9 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
   console.log('Requires a running local API:  shieldcortex api   (http://127.0.0.1:3001)');
   console.log('Enable in Hermes:              hermes plugins enable shieldcortex');
   console.log('Conversation / freeze:         NOT bound on this plane.');
+
+  // Last, so it is the final thing on screen rather than scrolled past.
+  warnOnShadowingCopies(home);
 }
 
 export async function uninstallHermes(home: string = os.homedir()): Promise<void> {
