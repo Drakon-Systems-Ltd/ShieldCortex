@@ -39,7 +39,6 @@ import { parseRegistrationsSince, parseLogLinePid } from '../integrations/opencl
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
-  describeFsError,
   hermesEnvironment,
   protectedDirs,
   scanHermesPluginCopies,
@@ -50,10 +49,12 @@ import {
   type HermesProjectState,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
+// The staleness comparator `update`'s Hermes step decides on, so this row and
+// that step can never disagree about the same host (#576).
+import { hermesPluginCopyStale } from '../setup/hermes-refresh.js';
 // The filesystem readers the #569 repair is built on, shared with `update`'s
 // Hermes refresh (#576) so "I could not look" cannot decay into "there is
 // nothing there" in one of the two.
-import { hermesPluginCopyStale } from '../setup/hermes-refresh.js';
 import {
   deviceUnder,
   findLinkInTree,
