@@ -375,6 +375,81 @@ function copyHookFiles(sourceDir: string, destDir: string): void {
   }
 }
 
+/**
+ * The installed cortex-memory hook directories that ACTUALLY EXIST (#574).
+ *
+ * Deliberately not `findAllHooksDirs`: that one CREATES `hooks/` under any
+ * config dir it finds, because it is the install path's answer to "where should
+ * this go". The refresh path's question is the opposite one — "what is already
+ * here" — and an update that conjures a hooks directory on a host that never
+ * had the hook would be installing an integration nobody asked for.
+ */
+export function installedHookDirs(home: string = resolveUserHome()): string[] {
+  return [
+    path.join(home, '.openclaw', 'hooks', HOOK_NAME),
+    path.join(home, '.claude', 'hooks', HOOK_NAME),
+  ].filter((dir) => fs.existsSync(dir));
+}
+
+export interface HookRefreshResult {
+  /** Every installed copy found. Never created — see `installedHookDirs`. */
+  installed: string[];
+  /** Directories whose files were re-copied because they were behind the package. */
+  refreshed: string[];
+  /** Installed directories that already matched the packaged source. */
+  current: string[];
+  /** Directories the copy could not be written to, with the reason. */
+  failed: Array<{ dir: string; error: string }>;
+  /**
+   * False when the PACKAGED hook source is missing, in which case nothing was
+   * compared and nothing was copied — `hookFilesStale` cannot answer against a
+   * source it cannot read, and neither can this.
+   */
+  sourceAvailable: boolean;
+}
+
+/**
+ * Re-copy the packaged hook over every installed copy that is out of date.
+ *
+ * The hook is installed by FILE COPY, so upgrading the npm package leaves the
+ * gateway running the previous `handler.ts` / `runtime.mjs` until somebody runs
+ * `shieldcortex openclaw install` (#574). This is the copy half of that command
+ * and nothing else: no plugin install, no registry write, no gateway restart.
+ * The gateway imports the handler module ONCE into its own long-lived process,
+ * so new bytes on disk change nothing until it is restarted — which is the
+ * caller's line to print, and the operator's call to make, because a restart
+ * kills every in-flight turn on the host.
+ *
+ * `hookFilesStale` decides, so this and `doctor`'s staleness row can never
+ * disagree about the same directory.
+ */
+export function refreshInstalledHookFiles(home: string = resolveUserHome()): HookRefreshResult {
+  const result: HookRefreshResult = {
+    installed: installedHookDirs(home),
+    refreshed: [],
+    current: [],
+    failed: [],
+    sourceAvailable: hookSourceAvailable(),
+  };
+  // No source, no comparison and no copy — but the installed copies are still
+  // reported, so the caller can tell "nothing to refresh" from "nothing is
+  // installed" (they need different words).
+  if (!result.sourceAvailable) return result;
+  for (const dir of result.installed) {
+    if (!hookFilesStale(dir)) {
+      result.current.push(dir);
+      continue;
+    }
+    try {
+      copyHookFiles(HOOK_SOURCE, dir);
+      result.refreshed.push(dir);
+    } catch (err: unknown) {
+      result.failed.push({ dir, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return result;
+}
+
 function removeHookDir(dir: string): boolean {
   if (!fs.existsSync(dir)) return false;
   fs.rmSync(dir, { recursive: true, force: true });

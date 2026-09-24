@@ -10,15 +10,14 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { scanHermesPluginCopies } from './hermes-plugins.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// The install set and the staleness comparator are one rule, not two (#576):
+// whatever `copyDir` skips below is exactly what `hermesPluginCopyStale` (and
+// therefore `update` and `doctor`) declines to compare.
+import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir } from './hermes-refresh.js';
 
 function pluginSourceDir(): string {
-  // dist/setup/hermes.js → repo-or-package root / plugins/hermes/shieldcortex
-  return path.resolve(__dirname, '..', '..', 'plugins', 'hermes', 'shieldcortex');
+  return hermesPluginSourceDir();
 }
 
 function hermesHomeDir(home: string = os.homedir()): string {
@@ -133,9 +132,7 @@ function warnOnShadowingCopies(home: string): void {
 function copyDir(src: string, dest: string): void {
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (entry.name === '__pycache__' || entry.name === '.pytest_cache' || entry.name === 'tests') {
-      continue;
-    }
+    if (HERMES_UNCOPIED_DIRS.has(entry.name)) continue;
     const from = path.join(src, entry.name);
     const to = path.join(dest, entry.name);
     if (entry.isDirectory()) {

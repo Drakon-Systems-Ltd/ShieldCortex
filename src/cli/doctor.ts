@@ -41,6 +41,7 @@ import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native
 import {
   describeFsError,
   hermesEnvironment,
+  protectedDirs,
   scanHermesPluginCopies,
   undeterminedSummary,
   type HermesPluginCopy,
@@ -49,6 +50,20 @@ import {
   type HermesProjectState,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
+// The filesystem readers the #569 repair is built on, shared with `update`'s
+// Hermes refresh (#576) so "I could not look" cannot decay into "there is
+// nothing there" in one of the two.
+import { hermesPluginCopyStale } from '../setup/hermes-refresh.js';
+import {
+  deviceUnder,
+  findLinkInTree,
+  lstatAnswer,
+  pathContains,
+  realPathAnswer,
+  releaseReservation,
+  reserveBackupDir,
+  SYMLINK_PREFLIGHT_ENTRY_BUDGET,
+} from '../setup/fs-answers.js';
 import { isNativeModuleLoadError, NativeModuleLoadError } from '../database/native-load-classify.js';
 // The typed lazy loader — the SAME one every real database open goes through
 // (database/init.ts). Importing it adds no static edge doctor did not already
@@ -3137,6 +3152,100 @@ function describeProjectSource(project: HermesProjectState): string {
   );
 }
 
+/**
+ * Is the installed Hermes plugin copy behind the packaged one (#576)?
+ *
+ * The exact counterpart of `checkOpenClawHookFreshness`, for the other
+ * integration installed by file copy: `shieldcortex update` upgrades the npm
+ * package, and until #576 nothing re-copied `~/.hermes/plugins/shieldcortex`,
+ * so the gateway kept running the previous `pre_tool_call` gate with nothing
+ * said anywhere. `hermesPluginCopyStale` is the single source of truth — the
+ * same function `update`'s refresh step decides on — and it compares exactly
+ * the file set `hermes install` copies (`tests/`, `__pycache__/` and
+ * `.pytest_cache/` are never installed, so they are never staleness).
+ *
+ * WARN at most, and never a FAIL: a stale copy is a gate running old code, not
+ * a broken host, and this row must not move doctor's exit code (#569's sibling
+ * row has the same rule).
+ *
+ * Only the copy Hermes itself says it loads is examined. Where that question
+ * has no answer — no Hermes discovery, an unreadable root, shadowing copies, a
+ * project plugin in play — this row is INFO and says which: the `Hermes plugin
+ * copies` row above already warns about exactly those layouts with the remedy
+ * attached, and a second yellow line restating it would be noise, not news.
+ *
+ * It runs its own scan rather than sharing the row above's: each is one python
+ * probe, and a memoised scan shared between two checks is a cache that would
+ * outlive the repair `--fix-hermes-plugin-copies` performs between them.
+ */
+export async function checkHermesPluginFreshness(
+  home: string = os.homedir(),
+  opts: HermesScanOptions = {},
+): Promise<CheckResult> {
+  const label = 'Hermes plugin';
+  let scan: HermesPluginScan;
+  try {
+    scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'info', message: `check skipped — ${msg}` };
+  }
+  if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  if (scan.undetermined.length > 0 || !scan.fromHermes) {
+    return {
+      label,
+      status: 'info',
+      message:
+        'skipped (could not determine which copy Hermes loads — see the ' +
+        `${HERMES_PLUGIN_COPIES_LABEL} row)`,
+    };
+  }
+  const projectCopies = scan.project.enabled ? scan.project.copies : [];
+  if (scan.shadowed || projectCopies.length > 0) {
+    return {
+      label,
+      status: 'info',
+      message:
+        'skipped (more than one copy is in play, so the installed one is not necessarily ' +
+        `the one loaded — see the ${HERMES_PLUGIN_COPIES_LABEL} row)`,
+    };
+  }
+
+  const loaded = scan.roots
+    .map((r) => r.effective)
+    .filter((c): c is HermesPluginCopy => c !== null && c.source === 'user');
+  if (loaded.length === 0) {
+    return { label, status: 'info', message: 'skipped (Hermes plugin not installed)' };
+  }
+
+  const stale = loaded
+    .map((copy) => ({ copy, verdict: hermesPluginCopyStale(copy.dir) }))
+    .filter((entry) => entry.verdict.stale);
+  if (stale.length === 0) {
+    const comparable = hermesPluginCopyStale(loaded[0].dir).comparable;
+    if (!comparable) {
+      return { label, status: 'info', message: 'skipped (packaged Hermes plugin source not found)' };
+    }
+    return { label, status: 'pass', message: 'Hermes plugin copy up to date' };
+  }
+
+  const where = stale
+    .map((entry) => `${tildify(entry.copy.dir)} (${entry.verdict.differing} file(s) differ; ` +
+      `${entry.verdict.reason ?? 'first difference unrecorded'})`)
+    .join(', ');
+  return {
+    label,
+    status: 'warn',
+    message:
+      `Hermes plugin copy is out of date (installed copy differs from packaged version): ${where}. ` +
+      'Hermes loads that copy at start-up, so the gateway is running the previous plugin',
+    fix:
+      'Run `shieldcortex hermes install` to refresh it, then restart the Hermes gateway — ' +
+      'plugin discovery only re-runs at start-up. `shieldcortex update` now does the same ' +
+      'refresh on upgrade.',
+  };
+}
+
 /** One copy taken out of Hermes' search path, and where it went. */
 export interface HermesShadowMove {
   from: string;
@@ -3163,208 +3272,6 @@ export interface HermesShadowFixResult {
   /** False when Hermes' own discovery could not be reached — nothing moved. */
   fromHermes: boolean;
   message: string;
-}
-
-/**
- * What the filesystem said, with the two answers a repair must never conflate
- * kept apart (#569 r6): `absent` is "there is nothing at this path", `error` is
- * "I could not look". Only the first one may ever permit a move.
- *
- * Every `lstat`, `realpath` and `readdir` on the repair and preflight path goes
- * through one of the readers below. None of them is allowed to be written as a
- * `try { … } catch { return false }`, and `fs.existsSync` is not allowed here at
- * all: it returns false for a permission error, which is precisely the answer
- * that makes a move look safe.
- */
-type FsAnswer<T> = { value: T } | { absent: true } | { error: string };
-
-/** Absence for a STAT: nothing at the path, or nothing under a non-directory. */
-const STAT_ABSENT_CODES: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
-
-/**
- * Absence for an ENUMERATION: only ENOENT. `ENOTDIR` here means a directory
- * was expected and something else is there — that is a fact about the layout
- * nobody has explained, not an empty directory.
- */
-const READ_ABSENT_CODES: ReadonlySet<string> = new Set(['ENOENT']);
-
-function fsAnswer<T>(read: () => T, absentCodes: ReadonlySet<string>): FsAnswer<T> {
-  try {
-    return { value: read() };
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (typeof code === 'string' && absentCodes.has(code)) return { absent: true };
-    return { error: describeFsError(err) };
-  }
-}
-
-/** `lstat`, following nothing: absent, the stats, or why not. */
-function lstatAnswer(target: string): FsAnswer<fs.Stats> {
-  return fsAnswer(() => fs.lstatSync(target), STAT_ABSENT_CODES);
-}
-
-/** `realpath`: absent covers a dangling link, whose ENOENT is the truth. */
-function realPathAnswer(target: string): FsAnswer<string> {
-  return fsAnswer(() => fs.realpathSync(target), STAT_ABSENT_CODES);
-}
-
-/** `readdir` with types, so entries are classified by `lstat` semantics. */
-function readdirAnswer(dir: string): FsAnswer<fs.Dirent[]> {
-  return fsAnswer(() => fs.readdirSync(dir, { withFileTypes: true }), READ_ABSENT_CODES);
-}
-
-/** `stat`, FOLLOWING links: what a rename would actually land on. */
-function statAnswer(target: string): FsAnswer<fs.Stats> {
-  return fsAnswer(() => fs.statSync(target), STAT_ABSENT_CODES);
-}
-
-/**
- * The device `target` sits on — or, when it does not exist yet, the device of
- * the nearest existing ancestor, which is the device `mkdir` would create it
- * on (#569 r7 nit 1).
- *
- * `rename(2)` refuses to cross a filesystem, and `backups/` is commonly a
- * fresh directory that does not exist until the first reservation is made. So
- * the question "will this move be EXDEV" has to be asked of the tree that WILL
- * hold it, before any of the plan runs. Links are followed on purpose: a
- * `backups` symlinked onto another volume puts the copies on that volume.
- */
-function deviceUnder(target: string): FsAnswer<number> {
-  let cursor = path.resolve(target);
-  for (;;) {
-    const answer = statAnswer(cursor);
-    if ('error' in answer) return { error: answer.error };
-    if ('value' in answer) return { value: answer.value.dev };
-    const parent = path.dirname(cursor);
-    if (parent === cursor) return { absent: true };
-    cursor = parent;
-  }
-}
-
-/**
- * Every directory this repair has to protect: each discovered `shieldcortex`
- * copy, plus EVERY other plugin directory Hermes found a manifest in — any
- * key, categories included, in every protective root and in the project
- * directory (#569 r7).
- *
- * Deduplicated, copies first, so a refusal names the copy rather than an
- * equivalent path whenever it can.
- */
-function protectedDirs(scan: HermesPluginScan): string[] {
-  return [...new Set([...scan.copies.map((c) => c.dir), ...scan.discovered])];
-}
-
-/** Whether `inner` is `outer` or lives underneath it, lexically on real paths. */
-function pathContains(outer: string, inner: string): boolean {
-  if (outer === inner) return true;
-  const rel = path.relative(outer, inner);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-/**
- * How many directory entries the whole symlink preflight may look at before it
- * gives up. A plugin tree is hundreds of files; a budget this size is never
- * reached by a real one, and an unbounded recursive walk inside a repair
- * command is a hazard of its own. Exhausting it REFUSES (see `findLinkInTree`):
- * "I did not finish looking" is not "there is nothing there".
- */
-const SYMLINK_PREFLIGHT_ENTRY_BUDGET = 20_000;
-
-/**
- * The first symlink at or under `dir`, or null when the tree demonstrably holds
- * none. There are two other answers, and neither of them is "none":
- *
- *   - `exhausted` — the walk ran out of budget, so it did not finish looking;
- *   - `unreadable` — a path in the tree could not be read, and it says which
- *     one and why (#569 r6). A directory that raises EACCES could be holding
- *     the link that another plugin root resolves through, and a walk that
- *     treats it as empty reports a clean tree.
- *
- * Nothing here follows a link. `readdirSync(withFileTypes)` reports the entry
- * itself (`lstat` semantics), and a directory entry that IS a link stops the
- * walk before it is descended into — so a link loop cannot be entered and a
- * link out of the tree is never followed out of it.
- */
-function findLinkInTree(dir: string, budget: { left: number }): {
-  link: string | null;
-  exhausted: boolean;
-  unreadable: { path: string; error: string } | null;
-} {
-  const self = lstatAnswer(dir);
-  if ('error' in self) return { link: null, exhausted: false, unreadable: { path: dir, error: self.error } };
-  // Absent is possible under a race with the operator's own shell; it holds no
-  // links, which is all this walk is asked about.
-  if ('value' in self && self.value.isSymbolicLink()) {
-    return { link: dir, exhausted: false, unreadable: null };
-  }
-  const stack = [dir];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    const listing = readdirAnswer(current);
-    if ('error' in listing) {
-      return { link: null, exhausted: false, unreadable: { path: current, error: listing.error } };
-    }
-    if ('absent' in listing) continue;
-    for (const entry of listing.value) {
-      if (budget.left <= 0) return { link: null, exhausted: true, unreadable: null };
-      budget.left -= 1;
-      const full = path.join(current, entry.name);
-      if (entry.isSymbolicLink()) return { link: full, exhausted: false, unreadable: null };
-      if (entry.isDirectory()) stack.push(full);
-    }
-  }
-  return { link: null, exhausted: false, unreadable: null };
-}
-
-/**
- * Reserve a fresh, unique directory under `backupsRoot` and return it.
- *
- * `fs.mkdirSync` WITHOUT `recursive` on the leaf is the reservation: mkdir(2)
- * fails EEXIST when anything already occupies the name — including a DANGLING
- * SYMLINK, which `existsSync` reports as absent and which a rename would
- * happily follow or replace. There is no check-then-act window to lose, because
- * the check and the act are the same syscall; a squatter that wins the race
- * simply sends us to the next suffix.
- */
-function reserveBackupDir(backupsRoot: string, leafBase: string): string {
-  fs.mkdirSync(backupsRoot, { recursive: true });
-  for (let attempt = 1; attempt <= 64; attempt += 1) {
-    const leaf = attempt === 1 ? leafBase : `${leafBase}-${attempt}`;
-    const candidate = path.join(backupsRoot, leaf);
-    try {
-      fs.mkdirSync(candidate);
-      return candidate;
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
-    }
-  }
-  throw new Error(`could not reserve a free name under ${tildify(backupsRoot)} after 64 tries`);
-}
-
-/**
- * Give a reservation back when the move it was made for did not happen.
- *
- * Only ever an EMPTY directory this function itself created moments ago:
- * `fs.rmdirSync` fails on a non-empty directory, so a reservation that somehow
- * acquired contents is left standing rather than forced. Nothing here follows
- * a symlink either — `rmdir(2)` operates on the directory named, and a symlink
- * is not one.
- *
- * Residual race, documented rather than papered over (#569 r3): between the
- * exclusive `mkdir` that made the reservation and this call, an arbitrary
- * writer can put something inside our freshly created container. If it does,
- * the release fails and an empty-named-but-not-empty directory is left under
- * `backups/`, which costs nothing and destroys nothing. We do not escalate to
- * a recursive removal: the whole point of this command is that it never
- * removes a directory it did not create, and "I created the container" is not
- * "I created what is now inside it".
- */
-function releaseReservation(reserved: string): void {
-  try {
-    fs.rmdirSync(reserved);
-  } catch {
-    /* an unreleased empty directory under backups/ costs nothing */
-  }
 }
 
 /**
@@ -3923,7 +3830,7 @@ export function fixHermesPluginShadowing(
     if (stopped !== null) break;
     let reserved: string;
     try {
-      reserved = reserveBackupDir(backupsRoot, `shieldcortex-shadow-${copy.dirName}-${stamp}`);
+      reserved = reserveBackupDir(backupsRoot, `shieldcortex-shadow-${copy.dirName}-${stamp}`, tildify);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       refuse(copy.dir, `no destination could be reserved under ${tildify(backupsRoot)} — ${msg}`);
@@ -8401,6 +8308,7 @@ export async function runDoctor(
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkHermesPluginShadowing,
+    checkHermesPluginFreshness,
     checkOpenClawManagedPinDrift,
     checkOpenClawApprovalButtons,
     checkDefenceCanary,

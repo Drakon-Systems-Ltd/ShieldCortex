@@ -35,6 +35,11 @@ import {
 // Type-only: erased at compile time, so this adds no runtime edge to the
 // native-binding module (which `stepVerifyEngine` still imports lazily).
 import type { EnsureResult } from '../setup/native-binding.js';
+// Type-only again: the two host-copy refreshers are loaded lazily inside their
+// steps (they reach fs and, for Hermes, a python probe), so `update` keeps
+// paying for them only on the run that uses them.
+import type { HookRefreshResult as HookRefreshShape } from '../setup/openclaw.js';
+import type { HermesRefreshResult as HermesRefreshShape } from '../setup/hermes-refresh.js';
 // Classification only — the side-effect-free classifier module, never the
 // better-sqlite3 loader.
 import { isPackagedPrebuildLoadError } from '../database/native-load-classify.js';
@@ -683,6 +688,91 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
   });
 }
 
+/**
+ * Refresh the FILE-COPIED cortex-memory hook (#574).
+ *
+ * `update` already advances the npm package, the registry-managed plugin and
+ * the ClawHub skill — but the hook at `~/.openclaw/hooks/cortex-memory/` is
+ * plain files that `installOpenClawHook` copies, and nothing here re-copied
+ * them. Every upgrade left the old handler in place until an operator noticed
+ * the doctor warning, so hosts that upgrade unattended kept a stale hook
+ * indefinitely.
+ *
+ * Deliberately NOT done here: `openclaw plugins install` (that is the step
+ * above) and the gateway restart. The gateway imports the handler once into its
+ * long-lived process, so the refreshed files do NOTHING until it restarts — and
+ * a restart from this step would kill every in-flight turn on the host, which
+ * is the caution the installer documents and the reason `restartOpenClawGateway`
+ * refuses without a TTY or an explicit env. So the step SAYS a restart is
+ * needed and leaves it to the operator; the footer's restart line already
+ * appears on any run that changed the package.
+ */
+export async function stepOpenClawHook(
+  home: string,
+  deps: { refresh?: (home: string) => HookRefreshShape } = {},
+): Promise<StepResult> {
+  return await step('OpenClaw hook', async () => {
+    const refresh = deps.refresh
+      ?? (await import('../setup/openclaw.js')).refreshInstalledHookFiles;
+    const result = refresh(home);
+    if (result.installed.length === 0) {
+      return { status: 'skip' as const, summary: 'not installed — `shieldcortex openclaw install` adds it' };
+    }
+    if (!result.sourceAvailable) {
+      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from' };
+    }
+    const detail = [
+      ...result.refreshed.map((dir) => sanitiseForReport(`refreshed ${dir}`, { home })),
+      ...result.failed.map((f) => sanitiseForReport(`could not refresh ${f.dir}: ${f.error}`, { home })),
+    ];
+    if (result.failed.length > 0) {
+      return {
+        status: 'warn' as const,
+        summary: `${result.failed.length} cop${result.failed.length === 1 ? 'y' : 'ies'} could not be refreshed — run \`shieldcortex openclaw install\``,
+        detail,
+      };
+    }
+    if (result.refreshed.length === 0) {
+      return `current (${result.current.length} cop${result.current.length === 1 ? 'y' : 'ies'})`;
+    }
+    return {
+      status: 'ok' as const,
+      summary: `refreshed ${result.refreshed.length} cop${result.refreshed.length === 1 ? 'y' : 'ies'} — restart the gateway to load it`,
+      detail: [
+        ...detail,
+        'the gateway reads the hook once at start-up; the new files take effect on the next restart',
+      ],
+    };
+  });
+}
+
+/**
+ * Refresh the FILE-COPIED Hermes plugin (#576) — the Hermes counterpart of the
+ * step above, and subject to #569's rule about which copy that is.
+ *
+ * All the judgement lives in `refreshHermesPluginCopies`: it writes only where
+ * Hermes' own discovery answered completely and cleanly, only over a copy that
+ * already exists, and never inside a `plugins/` root. This step is its
+ * reporting surface. The gateway is never restarted from here either — Hermes
+ * runs plugin discovery once at start-up, so the step says so.
+ */
+export async function stepHermesPlugin(
+  home: string,
+  deps: { refresh?: (home: string) => HermesRefreshShape } = {},
+): Promise<StepResult> {
+  return await step('Hermes plugin', async () => {
+    const refresh = deps.refresh
+      ?? (await import('../setup/hermes-refresh.js')).refreshHermesPluginCopies;
+    const result = refresh(home);
+    const detail = result.detail.map((line) => sanitiseForReport(line, { home }));
+    const summary = sanitiseForReport(result.summary, { home });
+    if (result.status === 'not-installed') return { status: 'skip' as const, summary };
+    if (result.status === 'warn') return { status: 'warn' as const, summary, detail };
+    if (result.status === 'current') return { status: 'ok' as const, summary };
+    return { status: 'ok' as const, summary, detail };
+  });
+}
+
 async function stepClaudeHooks(home: string): Promise<StepResult> {
   const { scanHostTable } = await import('../setup/host-table.js');
   const claude = scanHostTable(home).rows.find((r) => r.id === 'claude');
@@ -913,6 +1003,11 @@ export async function runUpdate(): Promise<void> {
 
   const pluginResult = await stepOpenClawPlugin(home);
   const skillResult = await stepOpenClawSkill(home);
+  // The two FILE-COPIED host integrations the upgrade path used to walk past
+  // (#574, #576). Both refresh only what is already installed, and neither
+  // restarts the host that loads it.
+  const hookResult = await stepOpenClawHook(home);
+  const hermesResult = await stepHermesPlugin(home);
   await stepClaudeHooks(home);
   await stepStatePermissions();
 
@@ -1006,6 +1101,10 @@ export async function runUpdate(): Promise<void> {
   }
   if (engineFailure) details.push(engineFailure.detail);
   if (keyAttention) details.push('keys: ambiguous project-key collisions remain');
+  // A host integration that could not be refreshed is a stale gate still
+  // running, so the panel names it rather than leaving it scrolled off above.
+  if (hookResult.status === 'warn') details.push(`hook: ${sanitiseDisplayField(hookResult.summary ?? 'could not be refreshed')}`);
+  if (hermesResult.status === 'warn') details.push(`hermes: ${sanitiseDisplayField(hermesResult.summary ?? 'could not be refreshed')}`);
 
   // Unproven is attention, not failure. Only true unprotected / npm fail exit 1.
   const failed = protection.status === 'failed' || npmStatus === 'failed';
@@ -1013,6 +1112,8 @@ export async function runUpdate(): Promise<void> {
     keyAttention ||
     pluginResult.status === 'warn' ||
     skillResult.status === 'warn' ||
+    hookResult.status === 'warn' ||
+    hermesResult.status === 'warn' ||
     Boolean(engineResult.remediation) ||
     protection.status === 'unproven' ||
     protection.status === 'warn' ||
