@@ -8,6 +8,7 @@ import Database from 'better-sqlite3';
 import { deriveProjectKey } from '../context/derive-project-key.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
+import { wantsHelp } from './wants-help.js';
 
 interface LegacyMemoryRow {
   id: number;
@@ -412,6 +413,14 @@ function printUsage(): void {
 }
 
 export async function handleMemoriesCommand(args: string[]): Promise<void> {
+  // #577: `memories prune --help` / `migrate-legacy --help` fell straight into
+  // the subcommand, which calls initDatabase() (creating and migrating the
+  // memory DB) before printing anything — and migrate-legacy is dry-run only
+  // with an explicit --dry-run, so a help flag performed a real import.
+  if (wantsHelp(args)) {
+    printUsage();
+    return;
+  }
   const sub = args[0];
   if (sub === 'import-native') {
     const { handleNativeImportCommand } = await import('./import-native.js');

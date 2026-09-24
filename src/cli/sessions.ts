@@ -12,6 +12,8 @@
  * process ..." single-writer behaviour).
  */
 
+import { wantsHelp } from './wants-help.js';
+
 function flagValue(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
   if (idx === -1) return undefined;
@@ -94,6 +96,12 @@ function printUsage(): void {
 }
 
 export async function handleSessionsCommand(args: string[]): Promise<void> {
+  // #577: `sessions prune --help` opened (and migrated) the memory DB to print a
+  // dry-run report instead of printing usage.
+  if (wantsHelp(args)) {
+    printUsage();
+    return;
+  }
   const sub = args[0];
   if (sub === 'prune') {
     try {

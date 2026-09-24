@@ -93,6 +93,12 @@ const pkg = require('../package.json');
 function checkVersionStaleness(): void {
   // Skip for MCP server mode (no argv[2]) — stdout must stay clean for JSON-RPC
   if (!process.argv[2]) return;
+  // #577: a help request must reach no process, network or file. This preamble
+  // runs before every subcommand and shells out to `npm ls -g` (which lets npm's
+  // own update-notifier hit the registry and write ~/.npm/_logs), so a gate
+  // inside the update branch alone could not make `update --help` side-effect
+  // free. Nothing here is worth printing above a usage block anyway.
+  if (wantsHelp(process.argv.slice(2))) return;
 
   try {
     const globalVersion = execSync('npm ls -g shieldcortex --depth=0 --json 2>/dev/null', {
@@ -777,18 +783,14 @@ ${bold}DOCS${reset}
   // Handle "migrate" subcommand
   if (process.argv[2] === 'migrate') {
     const { handleMigrateCommand } = await import('./setup/migrate.js');
-    await handleMigrateCommand();
+    await handleMigrateCommand(process.argv.slice(3));
     return;
   }
 
   // Handle "uninstall" subcommand
   if (process.argv[2] === 'uninstall') {
-    const { uninstallAll } = await import('./setup/uninstall.js');
-    await uninstallAll({
-      keepLogs: process.argv.includes('--keep-logs'),
-      deep: process.argv.includes('--deep'),
-      restartGateway: !process.argv.includes('--no-gateway-restart'),
-    });
+    const { handleUninstallCommand } = await import('./setup/uninstall.js');
+    await handleUninstallCommand(process.argv.slice(3));
     return;
   }
 
@@ -819,7 +821,7 @@ ${bold}DOCS${reset}
 
   if (process.argv[2] === 'hermes') {
     const { handleHermesCommand } = await import('./setup/hermes.js');
-    await handleHermesCommand(process.argv[3] || '');
+    await handleHermesCommand(process.argv[3] || '', process.argv.slice(4));
     return;
   }
 
@@ -943,8 +945,11 @@ ${bold}DOCS${reset}
   // output, per-step timings, version-delta header). Same underlying steps
   // as the previous inline implementation.
   if (process.argv[2] === 'update') {
-    const { runUpdate } = await import('./cli/update.js');
-    await runUpdate();
+    // #577: parse once, here. handleUpdateCommand prints usage for --help/-h and
+    // sets exit 2 for an unknown argument WITHOUT reaching the registry or the
+    // filesystem; only the run path enters runUpdate, which owns the exit code.
+    const { handleUpdateCommand } = await import('./cli/update.js');
+    await handleUpdateCommand(process.argv.slice(3));
     return;
   }
 
@@ -1419,6 +1424,22 @@ ${bold}DOCS${reset}
   // needs no standalone sqlite3 CLI — which minimal boxes (EDITH had none) lack,
   // and which the old doctor remedy wrongly assumed was present.
   if (process.argv[2] === 'vacuum' || process.argv[2] === 'compact') {
+    // #577: VACUUM rewrites the whole database file, so --help must stop here —
+    // before the DB is even opened (initDatabase also migrates and backfills).
+    if (wantsHelp(process.argv.slice(3))) {
+      console.log(`Usage: shieldcortex vacuum
+
+Compact the memory database, reclaiming the free pages left behind by deletes
+(consolidate / prune free rows; only VACUUM shrinks the file on disk).
+Alias: shieldcortex compact. Takes no arguments.
+
+Options:
+  -h, --help   Show this help and exit (compacts nothing)
+
+Environment:
+  CLAUDE_MEMORY_DB   Database file to compact (default ~/.shieldcortex/memories.db)`);
+      return;
+    }
     const { initDatabase, getDatabase } = await import('./database/init.js');
     const { statSync } = await import('fs');
     initDatabase();

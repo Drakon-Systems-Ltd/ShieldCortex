@@ -16,6 +16,7 @@
 import { ensureNativeBinding } from '../setup/native-binding.js';
 import { secureStatePermissions } from '../setup/state-permissions.js';
 import { getConfigDir } from '../cloud/config.js';
+import { helpGate } from './help-gate.js';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -24,7 +25,44 @@ const pkg = require('../../package.json') as { version: string };
 const isTTY = Boolean(process.stdout.isTTY);
 const c = (code: string, s: string) => (isTTY ? `\x1b[${code}m${s}\x1b[0m` : s);
 
-export async function runRepair(_args: string[] = []): Promise<void> {
+export const REPAIR_HELP = `Usage: shieldcortex repair
+
+Heal a broken install in place. Rebuilds and re-verifies the better-sqlite3
+native binding, reconciles the OpenClaw realtime plugin's install metadata, and
+re-hardens the state-tree permissions. This MUTATES the install; it takes no
+arguments.
+
+Options:
+  -h, --help   Show this help and exit (repairs nothing)
+
+Environment:
+  SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1
+      Let the plugin-reconcile pass execute remediation (it reloads the OpenClaw
+      gateway). Diagnosis only without it.
+  SHIELDCORTEX_CONFIG_DIR
+      State tree to re-harden (default ~/.shieldcortex).
+`;
+
+/**
+ * `shieldcortex repair` entry point (#577).
+ *
+ * The arguments used to be named `_args` and dropped on the floor, so
+ * `repair --help` rebuilt the native binding, reloaded plugin state and
+ * chmod'd the state tree instead of printing usage. Gate first, mutate second.
+ */
+export async function runRepair(
+  args: string[] = [],
+  deps: { run?: () => Promise<void> } = {},
+): Promise<void> {
+  const gate = helpGate(args, REPAIR_HELP, { known: [] });
+  if (gate !== null) {
+    process.exitCode = gate;
+    return;
+  }
+  await (deps.run ?? repairInstall)();
+}
+
+async function repairInstall(): Promise<void> {
   process.stdout.write(`\n  ${c('35', '◆')} ${c('1', 'ShieldCortex repair')}\n\n`);
   process.stdout.write(`  ${c('90', 'Checking the native database engine (better-sqlite3)…')}\n`);
 

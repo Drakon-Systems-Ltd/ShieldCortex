@@ -22,6 +22,7 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
+import { helpGate } from '../cli/help-gate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2671,7 +2672,40 @@ export function uninstallOpenClawSkill(home: string = resolveUserHome()): { remo
   return { removed, skipped };
 }
 
-export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
+export const OPENCLAW_HELP = `Usage: shieldcortex openclaw <install|uninstall|status|repair|inspect-runtime|skill install>
+
+Install options:
+  --no-hooks              Skip hook installation (useful in Docker/CI)
+  --no-plugins            Skip plugin installation (useful in Docker/CI)
+  --no-gateway-restart    Skip the auto gateway restart after install
+  --allow-conversation-access
+                          Grant OpenClaw conversation-hook access to the plugin
+                          (plugins.entries[id].hooks.allowConversationAccess=true).
+                          REQUIRED for llm_input/llm_output scanning, and for the
+                          conversation firewall on 2026.5.9-beta.1+. Off by default:
+                          it lets the plugin read every prompt and model response
+                          on this box, which is your call, not the installer's.
+  -h, --help              Show this help and exit (installs nothing)
+
+Repair: diagnose + safely fix duplicate-plugin-id state surfaced by
+\`shieldcortex doctor\`. Preserves the customer's OpenClaw-side plugin
+config (interceptor settings, cloud API key, allowlist) across the
+uninstall+reinstall round-trip needed for sticky cases.
+`;
+
+/**
+ * `shieldcortex openclaw <verb>` entry point.
+ *
+ * #577: `openclaw install --help` installed the hook and plugin and restarted
+ * the gateway — `--help` simply was not one of the flags `extraArgs` was checked
+ * for. The gate runs before the switch, so no verb can mutate on a help flag.
+ */
+export async function handleOpenClawCommand(
+  subcommand: string,
+  extraArgs: string[] = [],
+  deps: { install?: typeof installOpenClawHook } = {},
+): Promise<void> {
+  if (helpGate([subcommand, ...extraArgs], OPENCLAW_HELP) !== null) return;
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
   const restartGateway = !extraArgs.includes('--no-gateway-restart');
@@ -2681,7 +2715,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
 
   switch (subcommand) {
     case 'install':
-      await installOpenClawHook({ noHooks, noPlugins, restartGateway, grantConversationAccess });
+      await (deps.install ?? installOpenClawHook)({ noHooks, noPlugins, restartGateway, grantConversationAccess });
       break;
     case 'uninstall':
       await uninstallOpenClawHook();
@@ -2720,24 +2754,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       break;
     }
     default:
-      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair|inspect-runtime|skill install>');
-      console.log('');
-      console.log('Install options:');
-      console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
-      console.log('  --no-plugins            Skip plugin installation (useful in Docker/CI)');
-      console.log('  --no-gateway-restart    Skip the auto gateway restart after install');
-      console.log('  --allow-conversation-access');
-      console.log('                          Grant OpenClaw conversation-hook access to the plugin');
-      console.log('                          (plugins.entries[id].hooks.allowConversationAccess=true).');
-      console.log('                          REQUIRED for llm_input/llm_output scanning, and for the');
-      console.log('                          conversation firewall on 2026.5.9-beta.1+. Off by default:');
-      console.log('                          it lets the plugin read every prompt and model response');
-      console.log('                          on this box, which is your call, not the installer\'s.');
-      console.log('');
-      console.log('Repair: diagnose + safely fix duplicate-plugin-id state surfaced by');
-      console.log('`shieldcortex doctor`. Preserves the customer\'s OpenClaw-side plugin');
-      console.log('config (interceptor settings, cloud API key, allowlist) across the');
-      console.log('uninstall+reinstall round-trip needed for sticky cases.');
+      console.log(OPENCLAW_HELP.trimEnd());
       process.exit(1);
   }
 }
