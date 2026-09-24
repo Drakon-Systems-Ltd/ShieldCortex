@@ -39,9 +39,10 @@ import { parseRegistrationsSince, parseLogLinePid } from '../integrations/opencl
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
-  resolveHermesHome,
+  hermesEnvironment,
   scanHermesPluginCopies,
   type HermesPluginCopy,
+  type HermesPluginRootScan,
   type HermesPluginScan,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
@@ -2762,6 +2763,22 @@ export async function checkOpenClawDuplicateInstalls(
  * like copies, labelled unverified, and `--fix-hermes-plugin-copies` moves
  * nothing at all (#569 r4).
  *
+ * ## …and so do the ROOTS (#569 r5)
+ *
+ * Which directories to ask about is its own question, and getting it wrong
+ * produces the same confident falsehood as reading a manifest wrong. A literal
+ * `HERMES_HOME=$HOME/.hermes` is expanded by Hermes and was taken verbatim
+ * here, so this row PASSED a host whose gateway was loading the backup; and
+ * `HERMES_HOME=<root>/profiles/work` makes `<root>/plugins` and the SIBLING
+ * profiles live roots, which a scan rooted at the ACTIVE home never sees. So
+ * the probe asks `hermes_constants.get_hermes_home()` and
+ * `get_default_hermes_root()` as well, and when either is unavailable this row
+ * is undetermined for exactly the reason a missing discovery makes it so.
+ *
+ * Every root is reported on — a shadow in a sibling profile is a real shadow
+ * whichever profile the doctor happens to be running under — with the active
+ * one labelled.
+ *
  * The same scan backs the installer, so `hermes install` warns about the same
  * state this row reports.
  */
@@ -2780,11 +2797,11 @@ export async function checkHermesPluginShadowing(
   opts: HermesScanOptions = {},
 ): Promise<CheckResult> {
   const label = HERMES_PLUGIN_COPIES_LABEL;
-  const hermesHome = resolveHermesHome(home);
+  const env = hermesEnvironment(home);
 
   let scan: HermesPluginScan;
   try {
-    scan = scanHermesPluginCopies(hermesHome, opts);
+    scan = scanHermesPluginCopies(env, opts);
   } catch (err: unknown) {
     // The scan already swallows unreadable dirs per entry; this is the
     // belt-and-braces path. A crashed row would say less than an honest
@@ -2793,9 +2810,10 @@ export async function checkHermesPluginShadowing(
     return {
       label,
       status: 'info',
-      message: `skipped (${tildify(hermesHome)} could not be scanned — ${msg})`,
+      message: `skipped (Hermes could not be scanned — ${msg})`,
     };
   }
+  const hermesHome = scan.hermesHome;
 
   if (!scan.present) {
     return { label, status: 'info', message: 'skipped (Hermes not detected)' };
@@ -2824,13 +2842,25 @@ export async function checkHermesPluginShadowing(
   }
 
   const shadowedRoots = scan.roots.filter((r) => r.shadowed && r.loaded !== null);
+  // Every root is reported on, and the one this host is running under is said
+  // out loud: a shadow in a sibling profile is just as real, but "which of
+  // these am I looking at right now" is the first thing an operator asks.
+  const named = (rootScan: HermesPluginRootScan): string =>
+    `${tildify(rootScan.root)}${rootScan.active ? ' (active home)' : ''}`;
 
   if (shadowedRoots.length === 0) {
-    const where = scan.copies.map((c) => tildify(c.dir)).join(', ');
+    const where = scan.copies
+      .map((c) => {
+        const inRoot = scan.roots.find((r) => r.root === c.root);
+        return `${tildify(c.dir)}${inRoot?.active ? ' (active home)' : ''}`;
+      })
+      .join(', ');
+    const roots = `${scan.roots.length} plugin root${scan.roots.length === 1 ? '' : 's'} under ` +
+      `${tildify(scan.hermesRoot ?? hermesHome)}`;
     const clean =
       scan.copies.length === 0
-        ? `no \`shieldcortex\` plugin copy under ${tildify(hermesHome)} — nothing can shadow`
-        : `one canonical \`shieldcortex\` copy per plugin root: ${where}`;
+        ? `no \`shieldcortex\` plugin copy in ${roots} — nothing can shadow`
+        : `one canonical \`shieldcortex\` copy per plugin root (${roots}): ${where}`;
     return { label, status: 'pass', message: `clean (${clean})` };
   }
 
@@ -2844,13 +2874,13 @@ export async function checkHermesPluginShadowing(
     if (!rootScan.hasCanonical) {
       orphanedRoots += 1;
       clauses.push(
-        `${tildify(rootScan.root)}: ${all} — Hermes loads ${loaded}, and there is no ` +
+        `${named(rootScan)}: ${all} — Hermes loads ${loaded}, and there is no ` +
         `canonical ${tildify(path.join(rootScan.root, 'shieldcortex'))} beside it`,
       );
     } else {
       repairableRoots += 1;
       clauses.push(
-        `${tildify(rootScan.root)}: ${rootScan.copies.length} copies (${all}) — ` +
+        `${named(rootScan)}: ${rootScan.copies.length} copies (${all}) — ` +
         `Hermes loads ${loaded} (last in sorted order wins), shadowing ` +
         `${tildify(path.join(rootScan.root, 'shieldcortex'))}`,
       );
@@ -2869,14 +2899,25 @@ export async function checkHermesPluginShadowing(
   }
   if (orphanedRoots > 0) {
     fixParts.push(
-      'Where there is no canonical `plugins/shieldcortex` the fix deliberately moves nothing — ' +
-      'a human has to choose which copy is authoritative, then either reinstall with ' +
-      '`shieldcortex hermes install` or rename the copy they are keeping.',
+      'A root with no canonical `plugins/shieldcortex` stops the repair EVERYWHERE — ' +
+      'a human has to choose which copy is authoritative there first, then either reinstall ' +
+      'with `shieldcortex hermes install` or rename the copy they are keeping; until then ' +
+      '`--fix-hermes-plugin-copies` moves nothing in any root.',
     );
   }
   fixParts.push(
     'Restart the Hermes gateway afterwards — plugin discovery only re-runs at start-up.',
   );
+
+  // Which roots were looked at, and which one this host is running under. The
+  // active root can be perfectly clean while a sibling profile is shadowed —
+  // that is still a real shadow and still worth repairing, but an operator
+  // reading the row has to be able to tell the two apart (#569 r5).
+  const activeRoot = scan.roots.find((r) => r.active);
+  const scanned =
+    `Scanned ${scan.roots.length} plugin root${scan.roots.length === 1 ? '' : 's'} under ` +
+    `${tildify(scan.hermesRoot ?? hermesHome)}; the active home is ${tildify(hermesHome)}` +
+    `${activeRoot === undefined ? '' : ` (${tildify(activeRoot.root)})`}.`;
 
   return {
     label,
@@ -2884,7 +2925,7 @@ export async function checkHermesPluginShadowing(
     message:
       `Hermes is not loading the installed plugin — ${clauses.join('; ')}. ` +
       'Hermes keys plugins on the manifest `name:`, so a copy beside the live one wins ' +
-      'silently and an upgrade runs the old code.',
+      `silently and an upgrade runs the old code. ${scanned}`,
     fix: fixParts.join(' '),
   };
 }
@@ -2905,8 +2946,10 @@ export interface HermesShadowFixResult {
    * safely — a symlink anywhere in the layout, a shared tree, another
    * filesystem, a failed rename, or no Hermes discovery to plan against. The
    * CLI exits non-zero on it: the host may still be shadowed and the operator
-   * has work to do. A root with no canonical copy is NOT a failure; it is the
-   * designed refusal, and the row already says what a human has to decide.
+   * has work to do. A root with no canonical copy is not in itself a failure —
+   * it is the designed refusal, and the row already says what a human has to
+   * decide — but when it abandons moves that were otherwise ready to go, those
+   * moves DID fail to happen and the exit code says so (#569 r5).
    */
   failed: boolean;
   /** False when Hermes' own discovery could not be reached — nothing moved. */
@@ -3064,10 +3107,14 @@ function releaseReservation(reserved: string): void {
  *   - No Hermes discovery at all: nothing is planned and nothing moves (#569
  *     r4). Which copy the gateway loads is exactly the question that could not
  *     be answered.
- *   - A root with NO canonical `plugins/shieldcortex` is left alone. Moving the
- *     only copy there would take the plugin off that root; which directory is
- *     authoritative is a human's call. This is the one QUIET refusal: exit 0,
- *     and other roots still proceed.
+ *   - A root with NO canonical `plugins/shieldcortex` stops the WHOLE repair
+ *     (#569 r5). Moving the only copy there would take the plugin off that
+ *     root, and which directory is authoritative is a human's call — so the
+ *     copies there are left alone, and because the plan is one plan across
+ *     entangled roots, nothing moves anywhere else either. It stays a QUIET,
+ *     exit-0 refusal when that root's copies were all this command had to do;
+ *     when it abandons moves that would otherwise have happened, the operator
+ *     asked for a repair and got none, so that exits non-zero.
  *   - A canonical `plugins/shieldcortex` that is itself a symlink freezes the
  *     repair. Its target may be one of the very directories we would move.
  *   - A copy whose real path is, contains, or is contained by the canonical
@@ -3098,8 +3145,7 @@ export function fixHermesPluginShadowing(
   now: Date = new Date(),
   opts: HermesScanOptions = {},
 ): HermesShadowFixResult {
-  const hermesHome = resolveHermesHome(home);
-  const scan = scanHermesPluginCopies(hermesHome, opts);
+  const scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
   const moved: HermesShadowMove[] = [];
   const refused: Array<{ dir: string; reason: string }> = [];
   let failed = false;
@@ -3141,7 +3187,10 @@ export function fixHermesPluginShadowing(
     };
   }
 
-  const backupsRoot = path.join(hermesHome, 'backups');
+  // Hermes' own active home, not one we worked out: the copies go beside the
+  // tree they came out of even when `HERMES_HOME` is a profile or a literal
+  // `$HOME/.hermes` (#569 r5).
+  const backupsRoot = path.join(scan.hermesHome, 'backups');
   // UTC, and `:`/`.` swapped out so the name is a legal directory on every
   // platform the CLI runs on.
   const stamp = now.toISOString().replace(/[:.]/g, '-');
@@ -3154,10 +3203,16 @@ export function fixHermesPluginShadowing(
   // that a dependent it is about to protect is itself on the move list.
   const considered = new Set<string>();
 
+  // Roots that hold a copy but no canonical install. Nothing moves in them,
+  // and — since r5 — nothing moves anywhere else either: see the refusal after
+  // the loop.
+  const orphanedRoots: string[] = [];
+
   for (const rootScan of scan.roots) {
     const extras = rootScan.copies.filter((c) => !c.canonical);
     if (extras.length === 0) continue;
     if (!rootScan.hasCanonical) {
+      orphanedRoots.push(rootScan.root);
       for (const copy of extras) {
         refuse(
           copy.dir,
@@ -3166,6 +3221,9 @@ export function fixHermesPluginShadowing(
           false,
         );
       }
+      // Quiet on its own (exit 0), but it still stops the plan: whichever copy
+      // the human picks here can be the one another root resolves through.
+      abandoned = true;
       continue;
     }
 
@@ -3221,7 +3279,29 @@ export function fixHermesPluginShadowing(
     }
   }
 
-  // ── 2a. Preflight: no symlinks anywhere in this layout ────────────────
+  // ── 2. Preflight: a root nobody can repair stops every root ───────────
+  //
+  // Review of the sibling Ekho change (astra-r5, nit 1): with canonical +
+  // backup in the main root and only `shieldcortex.bak-x` in a profile, the
+  // profile contributed a refusal and the main root's backup still moved. The
+  // row had just told the operator that a human must choose which copy in that
+  // profile is authoritative — and the copy they choose can be the one this
+  // move relocates, or the one another root resolves through. The plan is one
+  // plan; an unresolvable root refuses all of it.
+  if (orphanedRoots.length > 0 && plan.length > 0) {
+    const where = tildify(orphanedRoots[0]);
+    for (const { copy } of plan) {
+      refuse(
+        copy.dir,
+        `nothing was moved: ${where} holds a \`shieldcortex\` copy but no canonical ` +
+        `${tildify(path.join(orphanedRoots[0], 'shieldcortex'))}, so which copy is ` +
+        'authoritative there is a human\'s call — and this repair is one plan across every ' +
+        'plugin root. Resolve that root first, then run the fix again',
+      );
+    }
+  }
+
+  // ── 3a. Preflight: no symlinks anywhere in this layout ────────────────
   //
   // Review of the sibling Ekho change found the layout that defeats endpoint
   // comparison:
@@ -3269,7 +3349,7 @@ export function fixHermesPluginShadowing(
     }
   }
 
-  // ── 2b. Preflight: nothing another root still loads from ──────────────
+  // ── 3b. Preflight: nothing another root still loads from ──────────────
   //
   // Collect every directory Hermes could use across EVERY root, resolve it, and
   // refuse if any candidate is one of them, contains one, or is contained by
@@ -3322,7 +3402,7 @@ export function fixHermesPluginShadowing(
     }
   }
 
-  // ── 3. Execute, all or nothing ────────────────────────────────────────
+  // ── 4. Execute, all or nothing ────────────────────────────────────────
   for (const { copy } of abandoned ? [] : plan) {
     let reserved: string;
     try {

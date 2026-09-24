@@ -46,12 +46,15 @@ function pluginDestDir(home: string = os.homedir()): string {
  * install log is not the place to learn it.
  *
  * Scans the tree we just wrote to (`<home>/.hermes`), not `HERMES_HOME`,
- * because that is where `pluginDestDir` put the bytes.
+ * because that is where `pluginDestDir` put the bytes — so the scan runs under
+ * an environment with `HERMES_HOME` UNSET, and Hermes' own resolution then
+ * lands on exactly that default home rather than wherever the operator's shell
+ * points (#569 r5).
  */
 function warnOnShadowingCopies(home: string): void {
   let scan: ReturnType<typeof scanHermesPluginCopies>;
   try {
-    scan = scanHermesPluginCopies(hermesHomeDir(home));
+    scan = scanHermesPluginCopies({ home, hermesHome: null });
   } catch {
     // A scan that cannot run must never fail an otherwise-good install.
     return;

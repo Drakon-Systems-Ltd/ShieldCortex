@@ -46,8 +46,34 @@
  * text contains that substring — which is explicitly unverified and is never
  * turned into a copy, a winner or a shadow.
  *
- * Profiles get their own plugin root at `<hermesHome>/profiles/<name>/plugins/`,
+ * Profiles get their own plugin root at `<root>/profiles/<name>/plugins/`,
  * scanned independently — a collision is per-root.
+ *
+ * ## The ROOTS come from Hermes too (#569 r5)
+ *
+ * Asking Hermes' own discovery about the wrong directory is not parity. Two
+ * ways of computing the roots ourselves were both wrong, and both produced a
+ * confident answer about a tree the gateway does not load from:
+ *
+ *   - `HERMES_HOME=$HOME/.hermes` (the literal string, as a service unit or a
+ *     shell profile can easily leave it). Hermes expands it —
+ *     `hermes_constants._expand_hermes_home` is
+ *     `expanduser(expandvars(path))` — and loads the backup under the real
+ *     directory. We took it literally, scanned a path that does not exist,
+ *     found no copies and reported PASS.
+ *   - `HERMES_HOME=<root>/profiles/work`. Hermes' `get_default_hermes_root()`
+ *     hands back `<root>` for profile-level work, so `<root>/plugins` and the
+ *     SIBLING profiles are all live plugin roots. We looked for profiles under
+ *     the ACTIVE home instead, so a repair run from `work` never saw
+ *     `<root>/plugins/shieldcortex -> profiles/work/plugins/shieldcortex.bak-x`
+ *     and happily moved the directory that link depends on.
+ *
+ * So the probe now asks `hermes_constants` for the active home AND the
+ * containing root, builds the protective root set there, and scans all of it.
+ * Nothing in TypeScript re-implements that resolution: if `hermes_constants`
+ * is missing or either function raises, the answer is UNDETERMINED, exactly as
+ * an unavailable discovery is. `resolveHermesHome` below still exists, but it
+ * decides nothing — see its own comment.
  */
 
 import { spawnSync } from 'child_process';
@@ -105,6 +131,13 @@ export interface HermesPluginRootScan {
   hasCanonical: boolean;
   /** More than one copy, or a single copy that is not the canonical one. */
   shadowed: boolean;
+  /**
+   * True for the ACTIVE home's own `plugins/` — the root the process Hermes is
+   * running now loads from. The others are just as real (a sibling profile is
+   * a live plugin root the moment something starts under it), which is why
+   * they are scanned and repaired; this only says which one is in use today.
+   */
+  active: boolean;
 }
 
 /**
@@ -118,7 +151,19 @@ export interface HermesPluginHintRoot {
 }
 
 export interface HermesPluginScan {
+  /**
+   * The ACTIVE Hermes home. Hermes' own `get_hermes_home()` when `fromHermes`;
+   * otherwise the best-effort guess from `resolveHermesHome`, which is good
+   * enough to say "there is no Hermes here" and nothing more.
+   */
   hermesHome: string;
+  /**
+   * The CONTAINING root — `get_default_hermes_root()`, which is `<root>` when
+   * `HERMES_HOME=<root>/profiles/<name>`. Null when Hermes did not answer:
+   * this one is never guessed, because it is what decides which OTHER profiles
+   * a repair has to protect.
+   */
+  hermesRoot: string | null;
   /** Whether the Hermes home directory exists at all. */
   present: boolean;
   /**
@@ -148,16 +193,86 @@ export interface HermesScanOptions {
 }
 
 /**
- * `HERMES_HOME` when the operator has set it, else `<home>/.hermes`. Hermes
- * reads the same variable, so a host that has moved its agent home is scanned
- * where its plugins actually are.
+ * The environment a scan runs under: the two variables Hermes resolves its own
+ * home from. They travel together, and they travel UNEXPANDED — expanding
+ * `HERMES_HOME` before handing it over is precisely the mistake #569 r5 fixes.
  */
-export function resolveHermesHome(home: string = os.homedir()): string {
-  const override = process.env.HERMES_HOME;
-  if (typeof override === 'string' && override.trim() !== '') {
-    return path.resolve(override.trim());
+export interface HermesEnvironment {
+  /** `HOME`. Hermes' platform default home is derived from it. */
+  home: string;
+  /** `HERMES_HOME` exactly as the operator set it, or null when unset. */
+  hermesHome: string | null;
+}
+
+/**
+ * This process's environment, with `home` overridable so a test (and the
+ * installer) can name the tree to scan. `HERMES_HOME` is trimmed and empty is
+ * unset, matching Hermes' own `os.environ.get("HERMES_HOME", "").strip()`.
+ */
+export function hermesEnvironment(home: string = os.homedir()): HermesEnvironment {
+  const raw = process.env.HERMES_HOME;
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  return { home, hermesHome: trimmed === '' ? null : trimmed };
+}
+
+/** The environment the probe child runs under: this one's, with HOME replaced. */
+function childEnvironment(env: HermesEnvironment): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: env.home,
+    // Windows' `Path.home()`; harmless everywhere else.
+    USERPROFILE: env.home,
+    // Nothing here should leave artefacts in the tree it is inspecting.
+    PYTHONDONTWRITEBYTECODE: '1',
+    PYTHONWARNINGS: 'ignore',
+  };
+  if (env.hermesHome === null) delete out.HERMES_HOME;
+  else out.HERMES_HOME = env.hermesHome;
+  return out;
+}
+
+/**
+ * `os.path.expandvars` for the same strings Hermes sees: `$NAME` and
+ * `${NAME}`, left verbatim when the variable is unset — which is what Python
+ * does, and the reason an unset variable does not collapse a path to a
+ * relative one.
+ */
+function expandVars(value: string, env: NodeJS.ProcessEnv): string {
+  return value.replace(/\$(\w+|\{[^}]*\})/g, (whole, token: string) => {
+    const name = token.startsWith('{') ? token.slice(1, -1) : token;
+    const found = env[name];
+    return typeof found === 'string' ? found : whole;
+  });
+}
+
+/**
+ * A best-effort Hermes home, used for THREE things and none of them a verdict:
+ * finding an interpreter to ask, deciding whether there is a Hermes here at
+ * all, and listing unverified hint directories when there is nothing to ask.
+ *
+ * It mirrors `hermes_constants._expand_hermes_home` (`expanduser` after
+ * `expandvars`) because a literal `HERMES_HOME=$HOME/.hermes` otherwise makes
+ * this report "Hermes not detected" on a host that has one — but a mirror is
+ * exactly what rounds 1 to 4 proved cannot be trusted to decide anything. The
+ * roots that verdicts and repairs are built on come from `hermes_constants`
+ * itself, through the probe; see `probeHermesDiscovery`.
+ */
+export function resolveHermesHome(env: HermesEnvironment): string {
+  const childEnv = childEnvironment(env);
+  if (env.hermesHome !== null) {
+    const expanded = expandUser(expandVars(env.hermesHome, childEnv), env.home);
+    if (expanded !== '') return path.resolve(expanded);
   }
-  return path.join(home, '.hermes');
+  return path.join(env.home, '.hermes');
+}
+
+/** `os.path.expanduser` for the only form Hermes homes take: a leading `~`. */
+function expandUser(value: string, home: string): string {
+  if (value === '~') return home;
+  if (value.startsWith(`~${path.sep}`) || value.startsWith('~/')) {
+    return path.join(home, value.slice(2));
+  }
+  return value;
 }
 
 function isDirectory(target: string): boolean {
@@ -199,7 +314,15 @@ function childDirectories(dir: string): string[] {
   return names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** Every `plugins/` root Hermes discovers from: the main one, then profiles. */
+/**
+ * The `plugins/` roots UNDER one home: the main one, then its profiles.
+ *
+ * Hint-list scaffolding only (#569 r5). This is not where Hermes discovers
+ * from when `HERMES_HOME` names a profile — the containing root and its
+ * SIBLING profiles are live roots too, and working that out is
+ * `hermes_constants.get_default_hermes_root()`'s job, asked through the probe.
+ * Nothing that produces a verdict or a move may call this.
+ */
 export function hermesPluginRoots(hermesHome: string): string[] {
   const roots = [path.join(hermesHome, 'plugins')];
   const profiles = path.join(hermesHome, 'profiles');
@@ -290,16 +413,38 @@ function hermesImportRoots(hermesHome: string, interpreter: string): string[] {
 }
 
 /**
- * The embedded probe. It imports Hermes' own discovery, scans each root with
- * source `"user"` (the source our plugins root actually is), and prints the
- * copies keyed `shieldcortex` plus the winner.
+ * The embedded probe. It imports Hermes' own discovery AND Hermes' own home
+ * resolution, works out which `plugins/` roots this host actually loads from,
+ * scans each of them with source `"user"` (the source our plugins root really
+ * is), and prints the copies keyed `shieldcortex` plus the winner per root.
  *
  * `resolve_manifest_winners` is what decides the winner inside Hermes, so the
  * winner here is not "the last entry" by our reckoning — it is Hermes' answer.
  *
+ * ## Where the roots come from (#569 r5)
+ *
+ *   - `hermes_constants.get_hermes_home()` — the ACTIVE home, after Hermes'
+ *     own `expanduser(expandvars(...))`, so a literal `$HOME/.hermes` names
+ *     the directory the gateway really loads from and not a path that does not
+ *     exist.
+ *   - `hermes_constants.get_default_hermes_root()` — the CONTAINING root,
+ *     which is `<root>` when `HERMES_HOME=<root>/profiles/<name>` and handles
+ *     the Docker/custom-root layout as well. `<root>/plugins` and every
+ *     `<root>/profiles/<name>/plugins` are live plugin roots whatever profile this
+ *     process happens to be running as, and a repair that cannot see them will
+ *     move a directory another profile's install points at.
+ *   - The active home's own `plugins/`, appended when the two above did not
+ *     already cover it.
+ *
+ * Either function missing or raising is a HARD failure of the whole probe: the
+ * caller then has no roots, so it has no verdict either. Re-deriving the rules
+ * here is the thing this round exists to stop doing.
+ *
  * stdout and stderr are captured across the import and the scan so a chatty
  * module or a discovery warning cannot land in the middle of the JSON; the
- * result is written to the real stdout afterwards.
+ * result is written to the real stdout afterwards. (`get_hermes_home()` writes
+ * a profile-fallback notice straight to stderr in one case, which is exactly
+ * the sort of thing that redirect is there for.)
  *
  * Logging is quietened on HERMES' DISCOVERY LOGGERS ONLY and never on the root
  * logger (#569 r3) — the names Hermes uses today plus whatever `logger` the
@@ -332,14 +477,39 @@ const PROBE_SCRIPT = [
   '        for _lname in _quiet:',
   '            logging.getLogger(_lname).disabled = True',
   '        _name = _payload["name"]',
+  // Hermes' own home resolution, from Hermes. Anything at all going wrong here
+  // is reported as itself and never worked around: a root set we made up is
+  // what this round is removing.
+  '        try:',
+  '            import hermes_constants as _hc',
+  '            _active = os.path.normpath(os.path.abspath(str(_hc.get_hermes_home())))',
+  '            _root = os.path.normpath(os.path.abspath(str(_hc.get_default_hermes_root())))',
+  '        except BaseException as _hexc:',
+  '            raise RuntimeError("hermes_constants could not resolve the Hermes home and root '
+    + '(%s: %s)" % (type(_hexc).__name__, _hexc))',
+  '        _roots = []',
+  '        def _add(_p):',
+  '            _p = os.path.normpath(os.path.abspath(_p))',
+  '            if _p not in _roots:',
+  '                _roots.append(_p)',
+  '        _add(os.path.join(_root, "plugins"))',
+  '        _profiles = os.path.join(_root, "profiles")',
+  '        try:',
+  '            _names = sorted(os.listdir(_profiles))',
+  '        except OSError:',
+  '            _names = []',
+  '        for _n in _names:',
+  '            if os.path.isdir(os.path.join(_profiles, _n)):',
+  '                _add(os.path.join(_profiles, _n, "plugins"))',
+  '        _add(os.path.join(_active, "plugins"))',
   '        _out = []',
-  '        for _root in _payload["roots"]:',
-  '            _ms = scan_directory(Path(_root), "user")',
+  '        for _r in _roots:',
+  '            _ms = scan_directory(Path(_r), "user")',
   '            _copies = [str(_m.path) for _m in _ms if manifest_key(_m) == _name]',
   '            _win = resolve_manifest_winners(_ms).get(_name)',
-  '            _out.append({"root": _root, "copies": _copies,',
+  '            _out.append({"root": _r, "copies": _copies,',
   '                         "loaded": (str(_win.path) if _win is not None else None)})',
-  '    _real.write(json.dumps({"ok": True, "roots": _out}))',
+  '    _real.write(json.dumps({"ok": True, "activeHome": _active, "root": _root, "roots": _out}))',
   'except BaseException as _exc:',
   '    _real.write(json.dumps({"ok": False, "error": "%s: %s" % (type(_exc).__name__, _exc)}))',
 ].join('\n');
@@ -350,24 +520,41 @@ interface ProbeRoot {
   loaded: string | null;
 }
 
+/** Everything the probe answers: where Hermes lives, and what is in each root. */
+export interface HermesProbeResult {
+  /** `hermes_constants.get_hermes_home()`. */
+  activeHome: string;
+  /** `hermes_constants.get_default_hermes_root()`. */
+  root: string;
+  /** Every protective root, in the order the probe built them. */
+  roots: ProbeRoot[];
+}
+
 /**
- * Run the Hermes probe over `roots`. Returns null when there is no interpreter,
- * the spawn failed, it timed out, or the output was not the JSON we asked for —
- * every one of which means "fall back", never "there are no copies".
+ * Ask Hermes where it loads plugins from and what is there. Returns
+ * `{ error }` when there is no interpreter, the spawn failed, it timed out,
+ * `hermes_constants` could not answer, or the output was not the JSON we asked
+ * for — every one of which means "no answer", never "there are no copies".
+ *
+ * `env` is passed to the child UNEXPANDED (see `childEnvironment`): Hermes
+ * expands `HERMES_HOME` itself, and the whole point is that its expansion is
+ * the one that counts.
  */
 export function probeHermesDiscovery(
-  hermesHome: string,
-  roots: string[],
+  env: HermesEnvironment,
   opts: HermesScanOptions = {},
-): { roots: ProbeRoot[] } | { error: string } {
+): HermesProbeResult | { error: string } {
+  // The interpreter is LOOKED FOR under the best-effort home. That is a search
+  // for something to ask, not an answer: a wrong guess here costs a venv
+  // lookup and falls through to the `hermes` launcher on PATH.
+  const searchHome = resolveHermesHome(env);
   const interpreter =
-    opts.interpreter !== undefined ? opts.interpreter : resolveHermesInterpreter(hermesHome);
+    opts.interpreter !== undefined ? opts.interpreter : resolveHermesInterpreter(searchHome);
   if (interpreter === null) return { error: 'no Hermes interpreter found' };
 
   const payload = JSON.stringify({
     name: HERMES_PLUGIN_NAME,
-    roots,
-    importRoots: hermesImportRoots(hermesHome, interpreter),
+    importRoots: hermesImportRoots(searchHome, interpreter),
   });
 
   // spawnSync, no shell: the only untrusted strings here are paths, and they
@@ -377,13 +564,7 @@ export function probeHermesDiscovery(
     timeout: PROBE_TIMEOUT_MS,
     maxBuffer: 4 * 1024 * 1024,
     windowsHide: true,
-    env: {
-      ...process.env,
-      HERMES_HOME: hermesHome,
-      // Nothing here should leave artefacts in the tree it is inspecting.
-      PYTHONDONTWRITEBYTECODE: '1',
-      PYTHONWARNINGS: 'ignore',
-    },
+    env: childEnvironment(env),
   });
 
   if (run.error) return { error: `Hermes probe failed to run — ${run.error.message}` };
@@ -400,10 +581,19 @@ export function probeHermesDiscovery(
   } catch {
     return { error: 'Hermes probe produced no parseable result' };
   }
-  const record = parsed as { ok?: unknown; error?: unknown; roots?: unknown };
+  const record = parsed as {
+    ok?: unknown;
+    error?: unknown;
+    activeHome?: unknown;
+    root?: unknown;
+    roots?: unknown;
+  };
   if (record.ok !== true || !Array.isArray(record.roots)) {
     const why = typeof record.error === 'string' ? record.error : 'unknown reason';
-    return { error: `Hermes discovery could not be imported — ${why}` };
+    return { error: `Hermes could not be asked — ${why}` };
+  }
+  if (typeof record.activeHome !== 'string' || typeof record.root !== 'string') {
+    return { error: 'Hermes probe named no home or no containing root' };
   }
   const out: ProbeRoot[] = [];
   for (const entry of record.roots as Array<Record<string, unknown>>) {
@@ -417,7 +607,7 @@ export function probeHermesDiscovery(
       loaded: typeof entry.loaded === 'string' ? entry.loaded : null,
     });
   }
-  return { roots: out };
+  return { activeHome: record.activeHome, root: record.root, roots: out };
 }
 
 function toCopy(dir: string, root: string): HermesPluginCopy {
@@ -437,7 +627,7 @@ function toCopy(dir: string, root: string): HermesPluginCopy {
 /**
  * Hermes' answer for one root, turned into the shape doctor reports on.
  */
-function rootScanFrom(probe: ProbeRoot): HermesPluginRootScan {
+function rootScanFrom(probe: ProbeRoot, activeHome: string): HermesPluginRootScan {
   const copies = probe.copies.map((dir) => toCopy(dir, probe.root));
   const loaded =
     probe.loaded === null
@@ -449,6 +639,7 @@ function rootScanFrom(probe: ProbeRoot): HermesPluginRootScan {
     loaded,
     hasCanonical: copies.some((c) => c.canonical),
     shadowed: copies.length > 1 || (loaded !== null && !loaded.canonical),
+    active: path.resolve(probe.root) === path.resolve(path.join(activeHome, 'plugins')),
   };
 }
 
@@ -524,21 +715,29 @@ export function hintDirsInRoot(root: string): string[] {
 // ── Public entry point ───────────────────────────────────────────────────
 
 /**
- * Scan a Hermes home for copies of our plugin. `hermesHome` is passed in rather
- * than resolved here so the installer can scan the tree it just wrote to, and
- * the doctor can scan the one `HERMES_HOME` points at.
+ * Scan this host for copies of our plugin. `env` is the environment to scan
+ * UNDER — the installer hands it the home it just wrote to, the doctor hands
+ * it the operator's — and it is never pre-resolved, because Hermes' own
+ * expansion of `HERMES_HOME` is the one that decides where the plugins are.
  *
  * Hermes' own discovery answers, or nothing does. `fromHermes === false` is not
  * a lesser answer to be labelled "approximate" and acted on anyway — it is the
  * absence of an answer, and every caller has to say so and stop (#569 r4).
+ * Since r5 that covers the ROOTS as well: if `hermes_constants` cannot say
+ * where this host's plugin roots are, there is no verdict to give about them.
  */
 export function scanHermesPluginCopies(
-  hermesHome: string,
+  env: HermesEnvironment,
   opts: HermesScanOptions = {},
 ): HermesPluginScan {
-  const present = isDirectory(hermesHome);
+  // Best-effort, and used only to answer "is there a Hermes here at all" and
+  // to list hint directories when there is nothing to ask. See
+  // `resolveHermesHome`.
+  const guessedHome = resolveHermesHome(env);
+  const present = isDirectory(guessedHome);
   const base = {
-    hermesHome,
+    hermesHome: guessedHome,
+    hermesRoot: null as string | null,
     present,
     fromHermes: false,
     undeterminedReason: null as string | null,
@@ -549,20 +748,24 @@ export function scanHermesPluginCopies(
   };
   if (!present) return base;
 
-  const roots = hermesPluginRoots(hermesHome);
-  const probe = probeHermesDiscovery(hermesHome, roots, opts);
+  const probe = probeHermesDiscovery(env, opts);
 
   if ('error' in probe) {
     return {
       ...base,
       undeterminedReason: probe.error,
-      hintRoots: roots.map((root) => ({ root, dirs: hintDirsInRoot(root) })),
+      hintRoots: hermesPluginRoots(guessedHome).map((root) => ({
+        root,
+        dirs: hintDirsInRoot(root),
+      })),
     };
   }
 
-  const rootScans = probe.roots.map(rootScanFrom);
+  const rootScans = probe.roots.map((entry) => rootScanFrom(entry, probe.activeHome));
   return {
     ...base,
+    hermesHome: probe.activeHome,
+    hermesRoot: probe.root,
     fromHermes: true,
     roots: rootScans,
     copies: rootScans.flatMap((r) => r.copies),

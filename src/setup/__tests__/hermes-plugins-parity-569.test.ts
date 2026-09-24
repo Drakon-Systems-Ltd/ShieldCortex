@@ -353,7 +353,7 @@ describe('without Hermes there is no verdict at all (#569 r4)', () => {
   it.each(CASES)('reports unknown rather than an answer on: $name', async (testCase) => {
     const home = homes.get(testCase.name)!;
 
-    const scan = scanHermesPluginCopies(path.join(home, '.hermes'), NO_HERMES);
+    const scan = scanHermesPluginCopies({ home, hermesHome: null }, NO_HERMES);
     expect(scan.fromHermes).toBe(false);
     expect(scan.undeterminedReason).toMatch(/no Hermes interpreter/i);
     // No copies, no winner, no shadow verdict — the three things every earlier
@@ -427,10 +427,14 @@ const describePrimary = interpreter === null ? describe.skip : describe;
 describePrimary(`primary path via Hermes itself (${interpreter ?? 'no interpreter'})`, () => {
   it.each(CASES)('Hermes reports the recorded copies and winner: $name', (testCase) => {
     const root = roots.get(testCase.name)!;
-    const probe = probeHermesDiscovery(homes.get(testCase.name)!, [root], { interpreter });
+    const probe = probeHermesDiscovery(
+      { home: homes.get(testCase.name)!, hermesHome: null },
+      { interpreter },
+    );
     expect('roots' in probe ? null : probe.error).toBeNull();
     if (!('roots' in probe)) return;
-    expect(probe.roots).toHaveLength(1);
+    // Hermes' own root set for a home with no profiles: exactly `plugins/`.
+    expect(probe.roots.map((r) => r.root)).toEqual([root]);
     expect(probe.roots[0].copies.map((c) => path.basename(c))).toEqual(testCase.hermes.copies);
     expect(probe.roots[0].loaded === null ? null : path.basename(probe.roots[0].loaded)).toBe(
       testCase.hermes.winner,
@@ -441,9 +445,10 @@ describePrimary(`primary path via Hermes itself (${interpreter ?? 'no interprete
     // The contract that replaced the differential one: where Hermes answers,
     // the answer is complete. There is no third state to reconcile.
     for (const testCase of CASES) {
-      const scan = scanHermesPluginCopies(path.join(homes.get(testCase.name)!, '.hermes'), {
-        interpreter,
-      });
+      const scan = scanHermesPluginCopies(
+        { home: homes.get(testCase.name)!, hermesHome: null },
+        { interpreter },
+      );
       expect(scan.fromHermes).toBe(true);
       expect(scan.undeterminedReason).toBeNull();
       expect(scan.hintRoots).toEqual([]);
@@ -454,7 +459,7 @@ describePrimary(`primary path via Hermes itself (${interpreter ?? 'no interprete
 
   it('flags the canonical copy as canonical and the backup as not', () => {
     const scan = scanHermesPluginCopies(
-      path.join(homes.get('an inline # comment after the name')!, '.hermes'),
+      { home: homes.get('an inline # comment after the name')!, hermesHome: null },
       { interpreter },
     );
     expect(scan.roots[0].copies.map((c) => c.canonical)).toEqual([true, false]);
@@ -517,29 +522,31 @@ describe('interpreter resolution (#569)', () => {
   });
 
   it('reports why, rather than "no copies", when there is no interpreter', () => {
-    const root = roots.get('an inline # comment after the name')!;
-    const probe = probeHermesDiscovery(path.dirname(root), [root], { interpreter: null });
+    const probe = probeHermesDiscovery(
+      { home: homes.get('an inline # comment after the name')!, hermesHome: null },
+      { interpreter: null },
+    );
     expect('error' in probe).toBe(true);
     if ('error' in probe) expect(probe.error).toMatch(/no Hermes interpreter/i);
   });
 
   it('reports why when the interpreter cannot import Hermes discovery', () => {
-    const root = roots.get('an inline # comment after the name')!;
     // A real Python with no hermes_cli on its path: the probe must come back as
     // an error the caller can print, not as an empty scan.
-    const probe = probeHermesDiscovery(path.join(os.tmpdir(), 'sc-no-hermes-here'), [root], {
-      interpreter: process.execPath,
-    });
+    const probe = probeHermesDiscovery(
+      { home: homes.get('an inline # comment after the name')!, hermesHome: null },
+      { interpreter: process.execPath },
+    );
     expect('error' in probe).toBe(true);
   });
 
   it('reports why when the interpreter path does not exist at all', () => {
     // The "bogus interpreter" seam: the reason has to survive to the caller so
     // doctor can print it, rather than being flattened to "no copies".
-    const root = roots.get('an inline # comment after the name')!;
-    const probe = probeHermesDiscovery(path.dirname(root), [root], {
-      interpreter: path.join(os.tmpdir(), 'sc-no-such-python-569'),
-    });
+    const probe = probeHermesDiscovery(
+      { home: homes.get('an inline # comment after the name')!, hermesHome: null },
+      { interpreter: path.join(os.tmpdir(), 'sc-no-such-python-569') },
+    );
     expect('error' in probe).toBe(true);
     if ('error' in probe) expect(probe.error).toMatch(/failed to run|ENOENT/i);
   });

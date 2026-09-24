@@ -13,9 +13,8 @@ import { probeHermesDiscovery } from '../hermes-plugins.js';
 const HAS_HERMES = (() => {
   const probeDir = mkdtempSync(join(tmpdir(), 'sc-hermes-probe-'));
   try {
-    const root = join(probeDir, 'plugins');
-    mkdirSync(root, { recursive: true });
-    return 'roots' in probeHermesDiscovery(probeDir, [root]);
+    mkdirSync(join(probeDir, '.hermes', 'plugins'), { recursive: true });
+    return 'roots' in probeHermesDiscovery({ home: probeDir, hermesHome: null });
   } finally {
     rmSync(probeDir, { recursive: true, force: true });
   }

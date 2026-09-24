@@ -96,9 +96,8 @@ function makePlugin(
 const HAS_HERMES = (() => {
   const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-probe-'));
   try {
-    const root = path.join(probeDir, 'plugins');
-    fs.mkdirSync(root, { recursive: true });
-    return 'roots' in probeHermesDiscovery(probeDir, [root]);
+    fs.mkdirSync(path.join(probeDir, '.hermes', 'plugins'), { recursive: true });
+    return 'roots' in probeHermesDiscovery({ home: probeDir, hermesHome: null });
   } finally {
     fs.rmSync(probeDir, { recursive: true, force: true });
   }
@@ -607,7 +606,7 @@ describe('no Hermes discovery, no verdict (#569 r4)', () => {
     makePlugin(plugins, 'shieldcortex');
     const result = await checkHermesPluginShadowing(home);
     const { scanHermesPluginCopies } = await import('../../setup/hermes-plugins.js');
-    const scan = scanHermesPluginCopies(path.join(home, '.hermes'));
+    const scan = scanHermesPluginCopies({ home, hermesHome: null });
     expect(result.message.includes('could not determine')).toBe(!scan.fromHermes);
   });
 });
@@ -851,6 +850,302 @@ describeWithHermes('fixHermesPluginShadowing plans, preflights, then moves (#569
     expect(fs.readFileSync(path.join(mainBackup, 'marker'), 'utf8')).toBe('ordinary\n');
     expect(fs.existsSync(path.join(profileBackup, 'plugin.yaml'))).toBe(true);
     expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+});
+
+/**
+ * Round-5 blockers: the ROOTS have to come from Hermes as well.
+ *
+ * Asking Hermes' own discovery about a directory we worked out ourselves is
+ * not parity — and review of the sibling Ekho change found both ways it goes
+ * wrong. Every case here drives the real probe end to end with `HOME` and
+ * `HERMES_HOME` set exactly as an operator would have them, so what is being
+ * pinned is `hermes_constants`' answer and not a second copy of its rules.
+ */
+describeWithHermes('the plugin roots come from hermes_constants (#569 r5)', () => {
+  it('protects the default root when HERMES_HOME names a profile', () => {
+    // astra-r5 blocker 1. `get_default_hermes_root()` hands back `<root>` for
+    // `HERMES_HOME=<root>/profiles/work`, so `<root>/plugins` is live — and
+    // here it is a link INTO the work profile's backup. Looking for profiles
+    // under the ACTIVE home instead never sees it, moves the backup, and
+    // leaves the default profile's install pointing at nothing.
+    const profilePlugins = path.join(hermes, 'profiles', 'work', 'plugins');
+    const profileCanonical = makePlugin(profilePlugins, 'shieldcortex');
+    fs.writeFileSync(path.join(profileCanonical, 'marker'), 'the work profile\n');
+    const profileBackup = makePlugin(profilePlugins, 'shieldcortex.bak-x');
+    fs.writeFileSync(path.join(profileBackup, 'marker'), 'what the default root loads\n');
+
+    fs.mkdirSync(plugins, { recursive: true });
+    const defaultCanonical = path.join(plugins, 'shieldcortex');
+    fs.symlinkSync(
+      path.join('..', 'profiles', 'work', 'plugins', 'shieldcortex.bak-x'),
+      defaultCanonical,
+    );
+
+    process.env.HERMES_HOME = path.join(hermes, 'profiles', 'work');
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.changed).toBe(false);
+    expect(fix.failed).toBe(true);
+    // The refusal names the dependent path in the root we would have missed.
+    expect(fix.refused.map((r) => r.reason).join(' ')).toContain(shown(defaultCanonical));
+    // Both installs still resolve to their own bytes.
+    expect(fs.readFileSync(path.join(defaultCanonical, 'marker'), 'utf8')).toBe(
+      'what the default root loads\n',
+    );
+    expect(fs.readFileSync(path.join(profileCanonical, 'marker'), 'utf8')).toBe(
+      'the work profile\n',
+    );
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+    expect(fs.existsSync(path.join(hermes, 'profiles', 'work', 'backups'))).toBe(false);
+  });
+
+  it('reports on the default root and the sibling profiles from a named profile', async () => {
+    // The reporting half of the same blocker: a shadow in a sibling profile is
+    // a real shadow, and running as `work` must not hide it.
+    const mainBackup = makePlugin(plugins, 'shieldcortex.bak-main');
+    makePlugin(plugins, 'shieldcortex');
+    const siblingPlugins = path.join(hermes, 'profiles', 'research', 'plugins');
+    makePlugin(siblingPlugins, 'shieldcortex');
+    const siblingBackup = makePlugin(siblingPlugins, 'shieldcortex.bak-sib');
+    const workPlugins = path.join(hermes, 'profiles', 'work', 'plugins');
+    makePlugin(workPlugins, 'shieldcortex');
+
+    process.env.HERMES_HOME = path.join(hermes, 'profiles', 'work');
+
+    const row = await checkHermesPluginShadowing(home);
+
+    expect(row.status).toBe('warn');
+    expect(row.message).toContain(shown(mainBackup));
+    expect(row.message).toContain(shown(siblingBackup));
+    // Every root is accounted for, and the one in use is said out loud, so
+    // "which of these am I running under" is answered rather than inferred.
+    expect(row.message).toContain('Scanned 3 plugin roots under ' + shown(hermes));
+    expect(row.message).toContain('the active home is ' + shown(path.join(hermes, 'profiles', 'work')));
+    expect(row.message).toContain(shown(workPlugins));
+
+    // And the repair — planned across all three roots — fixes both.
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+    expect(fix.failed).toBe(false);
+    expect(fix.moved.map((m) => m.from).sort()).toEqual([mainBackup, siblingBackup].sort());
+    // Moved beside the ACTIVE home, which is the work profile, not the root.
+    for (const move of fix.moved) {
+      expect(move.to.startsWith(path.join(hermes, 'profiles', 'work', 'backups'))).toBe(true);
+    }
+    expect((await checkHermesPluginShadowing(home)).status).toBe('pass');
+  });
+
+  it.each([
+    ['a literal $HOME', '$HOME/.hermes'],
+    ['a braced ${HOME}', '${HOME}/.hermes'],
+    ['a leading ~', '~/.hermes'],
+  ])('expands %s in HERMES_HOME the way Hermes does', async (_label, value) => {
+    // astra-r5 blocker 2. `hermes_constants._expand_hermes_home` is
+    // `expanduser(expandvars(path))`. Taking the value literally scans a
+    // directory that does not exist, finds no copies, and reports PASS while
+    // the gateway loads the backup — the exact false clean bill of health.
+    makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+
+    process.env.HERMES_HOME = value;
+
+    const row = await checkHermesPluginShadowing(home);
+
+    expect(row.status).toBe('warn');
+    expect(row.message).toContain(shown(backup));
+    expect(row.message).toMatch(
+      new RegExp(`Hermes loads ${shown(backup).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`),
+    );
+    // Not the two shapes a literal reading produces: a clean host, or a host
+    // with nothing on it at all.
+    expect(row.status).not.toBe('pass');
+    expect(row.message).not.toMatch(/nothing can shadow/);
+    expect(row.message).not.toMatch(/Hermes not detected/);
+  });
+
+  it('covers the containing root and its profiles on a custom (Docker-style) root', async () => {
+    // `get_default_hermes_root()`: `HERMES_HOME=<root>/profiles/<name>` outside
+    // the native home is the container layout, and `<root>` is still the root.
+    const root = path.join(home, 'opt', 'data');
+    const rootPlugins = path.join(root, 'plugins');
+    makePlugin(rootPlugins, 'shieldcortex');
+    const rootBackup = makePlugin(rootPlugins, 'shieldcortex.bak-root');
+    const siblingPlugins = path.join(root, 'profiles', 'sib', 'plugins');
+    makePlugin(siblingPlugins, 'shieldcortex');
+    const siblingBackup = makePlugin(siblingPlugins, 'shieldcortex.bak-sib');
+    const workPlugins = path.join(root, 'profiles', 'work', 'plugins');
+    makePlugin(workPlugins, 'shieldcortex');
+
+    process.env.HERMES_HOME = path.join(root, 'profiles', 'work');
+
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('warn');
+    expect(row.message).toContain(shown(rootBackup));
+    expect(row.message).toContain(shown(siblingBackup));
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+    expect(fix.failed).toBe(false);
+    expect(fix.moved.map((m) => m.from).sort()).toEqual([rootBackup, siblingBackup].sort());
+    expect((await checkHermesPluginShadowing(home)).status).toBe('pass');
+    // The native `~/.hermes` was never involved: it does not even exist here.
+    expect(fs.existsSync(hermes)).toBe(false);
+  });
+
+  it('moves nothing anywhere when one root has copies but no canonical install', async () => {
+    // astra-r5 nit. The profile's copy is one a human has to choose about, and
+    // the copy they choose can be the one another root resolves through — so
+    // the main root's perfectly ordinary backup waits too.
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    const mainBackup = makePlugin(plugins, 'shieldcortex.bak-main');
+    fs.writeFileSync(path.join(mainBackup, 'marker'), 'ordinary\n');
+    const profilePlugins = path.join(hermes, 'profiles', 'work', 'plugins');
+    const orphan = makePlugin(profilePlugins, 'shieldcortex.bak-x');
+
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('warn');
+    expect(row.fix).toMatch(/stops the repair EVERYWHERE/);
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.changed).toBe(false);
+    // Moves that were ready to go did not happen, so the CLI exits non-zero.
+    expect(fix.failed).toBe(true);
+    // Both the orphan and the copy it is holding up are named, and the reason
+    // names the root a human has to resolve.
+    expect(fix.refused.map((r) => r.dir)).toContain(orphan);
+    expect(fix.refused.map((r) => r.dir)).toContain(mainBackup);
+    expect(fix.refused.map((r) => r.reason).join(' ')).toContain(shown(profilePlugins));
+    // Nothing moved, anywhere.
+    expect(fs.readFileSync(path.join(mainBackup, 'marker'), 'utf8')).toBe('ordinary\n');
+    expect(fs.existsSync(path.join(orphan, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+});
+
+/**
+ * The new dependency fails the same way the old one does: closed.
+ *
+ * Round 4 established that without Hermes' own discovery there is no verdict.
+ * Round 5 made the ROOTS come from Hermes too, which is a second thing that
+ * can be absent — and a root set is not something to fall back to guessing,
+ * because guessing it is the whole defect this round repairs.
+ */
+describeWithHermes('hermes_constants missing is undetermined, not a verdict (#569 r5)', () => {
+  const savedPythonPath = process.env.PYTHONPATH;
+  let blocker: string;
+
+  beforeEach(() => {
+    // A `sitecustomize` on the child's PYTHONPATH that hides the module. The
+    // interpreter is real and `hermes_cli` is where it always was, so this
+    // isolates "the home/root resolution is unavailable" from "there is no
+    // Hermes here".
+    blocker = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-noconst-'));
+    fs.writeFileSync(
+      path.join(blocker, 'sitecustomize.py'),
+      'import sys\n' +
+      'class _Block:\n' +
+      '    def find_spec(self, name, path=None, target=None):\n' +
+      '        if name == "hermes_constants":\n' +
+      '            raise ModuleNotFoundError("No module named %r (hidden for the r5 test)" % name)\n' +
+      '        return None\n' +
+      'sys.meta_path.insert(0, _Block())\n',
+    );
+    process.env.PYTHONPATH = blocker;
+  });
+
+  afterEach(() => {
+    if (savedPythonPath === undefined) delete process.env.PYTHONPATH;
+    else process.env.PYTHONPATH = savedPythonPath;
+    fs.rmSync(blocker, { recursive: true, force: true });
+  });
+
+  it('warns and names no winner on a plainly shadowed host', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+
+    const row = await checkHermesPluginShadowing(home);
+
+    expect(row.status).toBe('warn');
+    expect(row.message).toContain('could not determine which copy Hermes loads');
+    expect(row.message).not.toMatch(/Hermes loads [~/]/);
+    expect(row.message).not.toMatch(/\bclean\b/);
+    // The backup is offered only as an unverified hint.
+    expect(row.message).toContain('Possible copies (unverified');
+    expect(row.message).toContain(shown(backup));
+  });
+
+  it('never PASSes a host it could not locate the roots of', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('warn');
+    expect(row.status).not.toBe('pass');
+  });
+
+  it('moves nothing and exits non-zero', () => {
+    const canonical = makePlugin(plugins, 'shieldcortex');
+    const backup = makePlugin(plugins, 'shieldcortex.bak-x');
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+
+    expect(fix.moved).toEqual([]);
+    expect(fix.changed).toBe(false);
+    expect(fix.failed).toBe(true);
+    expect(fix.fromHermes).toBe(false);
+    expect(fix.message).toContain('nothing was moved');
+    expect(fs.existsSync(path.join(canonical, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(backup, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+});
+
+/**
+ * …and so does a root resolution that RAISES. Present-but-broken is the case
+ * an import guard alone would sail straight past, and it is the one that would
+ * otherwise tempt a fallback: "Hermes is right here, surely we can work the
+ * roots out ourselves". That is the defect, not the remedy.
+ */
+describeWithHermes('hermes_constants raising is undetermined too (#569 r5)', () => {
+  const savedPythonPath = process.env.PYTHONPATH;
+  let blocker: string;
+
+  beforeEach(() => {
+    blocker = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-raise-'));
+    fs.writeFileSync(
+      path.join(blocker, 'sitecustomize.py'),
+      'import hermes_constants as _hc\n' +
+      'def _boom():\n' +
+      '    raise RuntimeError("root resolution is unavailable (r5 test)")\n' +
+      '_hc.get_default_hermes_root = _boom\n',
+    );
+    process.env.PYTHONPATH = blocker;
+  });
+
+  afterEach(() => {
+    if (savedPythonPath === undefined) delete process.env.PYTHONPATH;
+    else process.env.PYTHONPATH = savedPythonPath;
+    fs.rmSync(blocker, { recursive: true, force: true });
+  });
+
+  it('reports the raise verbatim and gives no verdict', async () => {
+    makePlugin(plugins, 'shieldcortex');
+    makePlugin(plugins, 'shieldcortex.bak-x');
+
+    const row = await checkHermesPluginShadowing(home);
+
+    expect(row.status).toBe('warn');
+    expect(row.message).toContain('could not determine which copy Hermes loads');
+    expect(row.message).toContain('hermes_constants could not resolve');
+    expect(row.message).toContain('root resolution is unavailable (r5 test)');
+    expect(row.message).not.toMatch(/Hermes loads [~/]/);
+
+    const fix = fixHermesPluginShadowing(home, FROZEN);
+    expect(fix.moved).toEqual([]);
+    expect(fix.failed).toBe(true);
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
   });
 });
