@@ -135,6 +135,12 @@ describe('#505 — sensitive write targets in the user home', () => {
       ['sed --in-place=suffix', `sed --in-place=.bak 's/FOO=1/FOO=2/' /home/ubuntu/${RC}`],
       ['sed -i.bak', `sed -i.bak 's/FOO=1/FOO=2/' ~/${RC}`],
       ['sed -Ei (combined short)', `sed -Ei 's/FOO=1/FOO=2/' ~/${RC}`],
+      // review round 3 (Tars/Opus, #578): noclobber redirect, tee's later operand, `--` end-of-options
+      ['noclobber >|', `echo 'export PATH=/tmp/evil:$PATH' >| ~/${RC}`],
+      ['tee later operand', `echo 'alias x=y' | tee /tmp/log ~/${ZRC}`],
+      ['tee -a --', `echo 'alias x=y' | tee -a -- ~/${RC}`],
+      ['tee quoted earlier operand', `echo 'alias x=y' | tee '/tmp/a b' /home/ubuntu/${RC}`],
+      ['tee --append after operand', `echo 'alias x=y' | tee /tmp/log --append ~/.profile`],
       ['cp onto', `cp /tmp/payload.txt ~/${RC}`],
       ['mv onto', `mv /tmp/payload.txt /home/ubuntu/${RC}`],
       ['fish config', `echo 'set -x PATH /tmp/evil $PATH' >> ~/.config/fish/config.fish`],
@@ -157,6 +163,29 @@ describe('#505 — sensitive write targets in the user home', () => {
       ]) {
         const v = bash(command);
         expect([command, v.signals.includes('modify-shell-startup')]).toEqual([command, false]);
+      }
+    });
+
+    it('write-content: a script that really appends to a startup file is gated (positive control)', () => {
+      const v = write('/repo/install.sh', `#!/bin/sh\necho 'export PATH=/opt/tool/bin:$PATH' >> ~/${RC}\n`);
+      gated(v, 'modify-shell-startup');
+      expect(v.signals).toEqual(expect.arrayContaining(['write-content-dangerous']));
+      const t = write('/repo/setup.sh', `cat <<EOF | tee -a ~/${ZRC}\nalias ll='ls -l'\nEOF\n`);
+      gated(t, 'modify-shell-startup');
+    });
+
+    it('write-content: the shape quoted inside a string literal of ordinary code is a mention (no false card)', () => {
+      // Reviewer-reproduced false cards at 728686aa: all three ALLOW on main and must ALLOW here.
+      for (const [file, content] of [
+        ['/repo/src/cli.ts', `console.log("Add: echo x >> ~/${RC}");\n`],
+        ['/repo/help.py', `HINT = "run: echo 'export PATH=~/bin:$PATH' >> ~/${RC}"\nprint(HINT)\n`],
+        ['/repo/x.test.ts', `const cmd = 'echo x >> ~/${ZRC}';\nexpect(guard(cmd).decision).toBe('require_approval');\n`],
+        ['/repo/src/cli.ts', `console.log("or: echo x | tee -a ~/${RC}");\n`],
+        ['/repo/src/cli.ts', `const s = "sed -i 's/a/b/' ~/.profile";\n`],
+      ] as const) {
+        const v = write(file, content);
+        expect([file, content, v.decision, v.signals.includes('modify-shell-startup')])
+          .toEqual([file, content, 'allow', false]);
       }
     });
 

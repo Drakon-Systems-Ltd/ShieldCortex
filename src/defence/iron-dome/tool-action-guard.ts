@@ -758,6 +758,43 @@ const OPENCLAW_CONFIG_PATH_RE = /(?:^|[\s'"=:(\\/])\.openclaw[\\/]+openclaw\.jso
 const SSH_DIR_PATH_SRC = String.raw`(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])`;
 const AUTHORIZED_KEYS_PATH_SRC = String.raw`(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b`;
 const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b`;
+// #505: a shell WRITE shape whose destination is a startup file. The write
+// prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of
+// options and earlier operands (`-a`, `--append`, `--`, `/tmp/log`), or
+// `sed` carrying an in-place flag (`-i`, `-i.bak`, a cluster such as `-Ei`,
+// `--in-place[=suffix]`); or a `cp`/`mv`/`install` whose LAST operand is the
+// startup file. Named so the DANGEROUS row and the write-content disposer
+// (`shellStartupWriteIsStatement`) scan the same text.
+const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)\s*|\btee\b(?:\s+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>-][^\s'"|;&<>]*))*\s+|\bsed\b(?=[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place))[^|;&\n]*\s)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*\s['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
+
+/**
+ * #505 (write-content disposer): true when at least one modify-shell-startup
+ * match in `text` sits at STATEMENT position — not inside a single- or
+ * double-quoted string literal opened earlier on the same line. A script
+ * that really runs `echo 'export PATH=…' >> ~/.bashrc` has balanced quotes
+ * before the redirect and stays gated; `console.log("run: echo x >> ~/.bashrc")`
+ * in a .ts file, or a Python string holding the same hint, is a mention.
+ * Unbalanced quotes are read as "inside a literal" (odd count); backslash-
+ * escaped quotes do not count. Template literals (backticks) are NOT treated
+ * as quoting — in shell a backtick is command substitution — so a JS
+ * template string quoting the shape still gates (disclosed residual).
+ */
+function shellStartupWriteIsStatement(text: string): boolean {
+  const g = new RegExp(MODIFY_SHELL_STARTUP_RE.source, MODIFY_SHELL_STARTUP_RE.flags + 'g');
+  for (const m of text.matchAll(g)) {
+    const at = m.index ?? 0;
+    const lineStart = text.lastIndexOf('\n', at - 1) + 1;
+    let sq = 0, dq = 0;
+    for (let i = lineStart; i < at; i++) {
+      const ch = text[i];
+      if (ch === '\\') { i++; continue; }
+      if (ch === "'" && dq % 2 === 0) sq++;
+      else if (ch === '"' && sq % 2 === 0) dq++;
+    }
+    if (sq % 2 === 0 && dq % 2 === 0) return true;
+  }
+  return false;
+}
 
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
@@ -961,13 +998,13 @@ const DANGEROUS: Pattern[] = [
   // any tool call the guard will see — `export PATH=/tmp/evil:$PATH` in
   // `.bashrc` is a PATH hijack with no dangerous verb in it, which is why
   // the content scan alone (#93) let it through. Write shapes only: a
-  // redirect, `tee -a`/`--append`, `sed -i`/`--in-place` (short clusters such
-  // as `-Ei` and suffix forms such as `-i.bak` included — argv parity, not a
-  // shell parser), or a `cp`/`mv`/`install` whose LAST operand is the startup
-  // file. Reading or sourcing one is untouched. The Write/Edit
+  // redirect (`>`, `>>`, noclobber `>|`), `tee` with any option run or
+  // earlier operand, `sed -i`/`--in-place` (short clusters such as `-Ei` and
+  // suffix forms such as `-i.bak` included — argv parity, not a shell parser),
+  // or a `cp`/`mv`/`install` whose LAST operand is the startup file. Reading or sourcing one is untouched. The Write/Edit
   // tool path is gated at the verdict site (`isShellStartupWritePath`), where
   // the target is a path argument rather than shell text.
-  { re: new RegExp(String.raw`(?:>>?\s*|\btee\b(?:\s+--?[\w-]+(?:=\S*)?)*\s+|\bsed\b(?=[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place))[^|;&\n]*\s)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*\s['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i'), signal: 'modify-shell-startup' },
+  { re: MODIFY_SHELL_STARTUP_RE, signal: 'modify-shell-startup' },
   // The guard's own one-shot approval store (#118). The TTY gate stops the
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own
@@ -5264,6 +5301,9 @@ function scanWriteContentPayload(content: string): {
       if (m.signal === 'git-delete-branch' && !gitDeleteBranchInvoked(text)) continue;
       if (m.signal === 'modify-network-firewall' && firewallCallsAreReadOnly(text)) continue;
       if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
+      // #505: a startup-file write quoted inside a string literal of the file
+      // being written (a CLI hint, a test fixture) is a mention, not the write.
+      if (m.signal === 'modify-shell-startup' && !shellStartupWriteIsStatement(text)) continue;
       // #386: quoted install vocabulary in scripts/logs is not an install.
       if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
       if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;

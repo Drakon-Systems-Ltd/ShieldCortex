@@ -1878,7 +1878,7 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   // #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
   { re: /\/etc\/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])|(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
   // #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
-  { re: /(?:>>?\s*|\btee\b(?:\s+--?[\w-]+(?:=\S*)?)*\s+|\bsed\b(?=[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place))[^|;&\n]*\s)['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)|\b(?:cp|mv|install)\b[^|;&\n]*\s['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)['"]?\s*(?=$|[|;&\n])/i, signal: 'modify-shell-startup' },
+  { re: /(?:(?:>>?|>\|)\s*|\btee\b(?:\s+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>-][^\s'"|;&<>]*))*\s+|\bsed\b(?=[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place))[^|;&\n]*\s)['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)|\b(?:cp|mv|install)\b[^|;&\n]*\s['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)['"]?\s*(?=$|[|;&\n])/i, signal: 'modify-shell-startup' },
   // Guard's own approval store (#118): agent-side writes here mint approvals.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
   // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
@@ -2021,8 +2021,43 @@ function fallbackLockPathAccessIsReadOnly(text, toolName) {
   return sawStage;
 }
 
+
+// ── #505: startup-file WRITE target, ported to the blunt fallback ────────────
+//
+// The real guard gates a Write/Edit whose TARGET is a shell startup file on
+// the path alone (`isShellStartupWritePath` at the verdict site): a PATH
+// prepend written there carries no dangerous verb, so no content regex can
+// see it. The DANGEROUS row above covers the SHELL spellings only; a tool
+// write carries the target as a path argument, so in degraded mode the same
+// write was invisible. Mirrors `classifyFamily`'s WRITE_TOOLS / READ_TOOLS
+// split: a read-family tool never gates, an unknown tool with no write-like
+// name never gates here (the table rows still apply to it), a write-like
+// tool naming a startup file under a path key gates. Kept in sync across
+// scripts/pre-tool-hook.mjs, plugins/openclaw/interceptor.ts and
+// plugins/hermes/shieldcortex/sc_client.py.
+
+/** Write-family tool names — the guard's WRITE_TOOLS set. */
+const FALLBACK_WRITE_TOOLS = /(write|edit|create|update|patch|append|save|mkdir|move|copy|cp|mv|rename|chmod|chown)/;
+/** Path-bearing keys only (never `command`): the target of a tool write. */
+const FALLBACK_WRITE_PATH_KEYS = ['path', 'file_path', 'filePath', 'file', 'target', 'destination'];
+/** A login/interactive startup file by basename, plus fish's config — `isShellStartupWritePath`. */
+const FALLBACK_SHELL_STARTUP_PATH_RE = /(?:^|[\\/])(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config[\\/]fish[\\/]config\.fish)$/i;
+
+function fallbackWriteTargetMatch(toolInput, toolName) {
+  const seg = String(toolName || '').toLowerCase().split(/__|\.|:|\//).filter(Boolean).pop() || '';
+  if (!seg || FALLBACK_READ_TOOLS.test(seg) || !FALLBACK_WRITE_TOOLS.test(seg)) return null;
+  for (const k of FALLBACK_WRITE_PATH_KEYS) {
+    const v = toolInput?.[k];
+    if (typeof v !== 'string') continue;
+    if (FALLBACK_SHELL_STARTUP_PATH_RE.test(v.trim())) return 'modify-shell-startup';
+  }
+  return null;
+}
+
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
 function fallbackDangerousMatch(toolInput, toolName) {
+  const writeTarget = fallbackWriteTargetMatch(toolInput, toolName);
+  if (writeTarget) return writeTarget;
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
