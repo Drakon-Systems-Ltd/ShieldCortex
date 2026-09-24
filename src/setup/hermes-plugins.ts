@@ -74,6 +74,30 @@
  * is missing or either function raises, the answer is UNDETERMINED, exactly as
  * an unavailable discovery is. `resolveHermesHome` below still exists, but it
  * decides nothing — see its own comment.
+ *
+ * ## A directory that cannot be read is not an empty directory (#569 r6)
+ *
+ * The root set was built with `except OSError: names = []` around
+ * `os.listdir(<root>/profiles)`. A `profiles/` that can be traversed but not
+ * listed — a mode change, an ACL — raises PermissionError, so the profile list
+ * became empty, the sibling profiles left the protective scan, and the repair
+ * moved the backup that `profiles/work/plugins/shieldcortex` pointed at.
+ *
+ * That is a class, not a line. Every enumeration and stat that feeds the root
+ * set, the per-copy symlink walk, the plan preflight or the destination checks
+ * now answers one of three things:
+ *
+ *   - what is there;
+ *   - GENUINELY ABSENT — ENOENT on the path itself (and ENOTDIR for a name
+ *     under a non-directory). It contributes nothing, which is TRUE;
+ *   - UNDETERMINED — anything else at all. It is recorded with its path and
+ *     error in `HermesPluginScan.undetermined`, `fromHermes` goes false, the
+ *     doctor row WARNs naming the path, and `--fix-hermes-plugin-copies`
+ *     refuses the WHOLE plan and exits non-zero.
+ *
+ * `fs.existsSync` and Python's `Path.exists()` both return false on a
+ * permission error, so neither is allowed anywhere an absence would permit a
+ * move; the checked helpers below use stat/lstat and test the errno.
  */
 
 import { spawnSync } from 'child_process';
@@ -150,6 +174,23 @@ export interface HermesPluginHintRoot {
   dirs: string[];
 }
 
+/**
+ * One place the filesystem could not be read, and what it said (#569 r6).
+ *
+ * This is the third answer every enumeration and stat on this path has to be
+ * able to give. "There is nothing there" and "I could not look" are different
+ * facts about a directory, and only the first one makes it safe to move
+ * something: a `profiles/` that can be traversed but not listed raises
+ * PermissionError, and a caller that catches that and carries on with an empty
+ * list has just dropped every sibling profile out of the safety scan.
+ */
+export interface HermesUndetermined {
+  /** The exact path that could not be read. */
+  path: string;
+  /** The error, as `ErrorName: message` (Python) or `CODE: message` (Node). */
+  error: string;
+}
+
 export interface HermesPluginScan {
   /**
    * The ACTIVE Hermes home. Hermes' own `get_hermes_home()` when `fromHermes`;
@@ -161,20 +202,35 @@ export interface HermesPluginScan {
    * The CONTAINING root — `get_default_hermes_root()`, which is `<root>` when
    * `HERMES_HOME=<root>/profiles/<name>`. Null when Hermes did not answer:
    * this one is never guessed, because it is what decides which OTHER profiles
-   * a repair has to protect.
+   * a repair has to protect. It IS set when Hermes named the root and the
+   * enumeration under it then failed (#569 r6) — that is Hermes' own answer to
+   * the only question it was asked, and it is what the row needs to say where
+   * the unreadable path is; `fromHermes` is still false and nothing is a
+   * verdict.
    */
   hermesRoot: string | null;
   /** Whether the Hermes home directory exists at all. */
   present: boolean;
   /**
-   * True when Hermes' own discovery answered. When it is FALSE nothing below
-   * is a verdict: `roots` and `copies` are empty, `shadowed` is false because
-   * it is unknown rather than because it is absent, and only `hintRoots` and
-   * `undeterminedReason` carry anything.
+   * True when Hermes' own discovery answered COMPLETELY. When it is FALSE
+   * nothing below is a verdict: `roots` and `copies` are empty, `shadowed` is
+   * false because it is unknown rather than because it is absent, and only
+   * `hintRoots`, `undetermined` and `undeterminedReason` carry anything.
+   *
+   * A scan with a hole in it is false here too (#569 r6). Hermes may have
+   * answered about every root it could read, but a root it could not read is
+   * not an empty root, and a caller that cannot tell the difference is exactly
+   * the caller that moves the directory another profile loads from.
    */
   fromHermes: boolean;
   /** Why Hermes could not be asked, verbatim. Null when `fromHermes`. */
   undeterminedReason: string | null;
+  /**
+   * The paths that could not be read, with their errors (#569 r6). Non-empty
+   * implies `fromHermes === false`; it is the reason-with-detail behind
+   * `undeterminedReason`, kept structured so a row can name every one of them.
+   */
+  undetermined: HermesUndetermined[];
   roots: HermesPluginRootScan[];
   /** Every copy across every root, roots in order. */
   copies: HermesPluginCopy[];
@@ -275,12 +331,38 @@ function expandUser(value: string, home: string): string {
   return value;
 }
 
-function isDirectory(target: string): boolean {
+/**
+ * One filesystem error in the words an operator can act on: the errno code
+ * first, because `EACCES` is the whole diagnosis, then whatever the platform
+ * said. Shared with the doctor's repair so both halves of #569 r6 name a
+ * failure the same way.
+ */
+export function describeFsError(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  const message = err instanceof Error ? err.message : String(err);
+  return typeof code === 'string' && code !== '' ? `${code}: ${message}` : message;
+}
+
+/**
+ * Is this a directory, is it absent, or could we not tell (#569 r6)?
+ *
+ * `statSync` in a `try/catch` that returns false conflates the last two, and
+ * "there is no Hermes here" is a conclusion this module draws from exactly
+ * that answer. ENOENT and ENOTDIR are genuine absence — nothing is there, and
+ * nothing under a non-directory can be either; anything else is undetermined.
+ */
+function directoryState(target: string): 'dir' | 'notdir' | 'absent' | { error: string } {
   try {
-    return fs.statSync(target).isDirectory();
-  } catch {
-    return false;
+    return fs.statSync(target).isDirectory() ? 'dir' : 'notdir';
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'absent';
+    return { error: describeFsError(err) };
   }
+}
+
+function isDirectory(target: string): boolean {
+  return directoryState(target) === 'dir';
 }
 
 function isFile(target: string): boolean {
@@ -440,6 +522,18 @@ function hermesImportRoots(hermesHome: string, interpreter: string): string[] {
  * caller then has no roots, so it has no verdict either. Re-deriving the rules
  * here is the thing this round exists to stop doing.
  *
+ * ## What it could not read (#569 r6)
+ *
+ * Alongside the roots it returns an `undetermined` list of `{path, error}`.
+ * Every enumeration and stat in the script feeds it, and so does an audit walk
+ * over each root that follows `scan_directory`'s own traversal looking for the
+ * places Hermes would have skipped silently — an unlistable root, a child it
+ * cannot stat, a manifest name it cannot ask about. Hermes' discovery is
+ * forgiving by design, because one unreadable plugin must not break the
+ * loader; a safety scan cannot afford the same forgiveness, because the copy
+ * that was skipped is the one the repair would move something out from under.
+ * One entry is enough to withdraw every verdict on this host.
+ *
  * stdout and stderr are captured across the import and the scan so a chatty
  * module or a discovery warning cannot land in the middle of the JSON; the
  * result is written to the real stdout afterwards. (`get_hermes_home()` writes
@@ -455,13 +549,100 @@ function hermesImportRoots(hermesHome: string, interpreter: string): string[] {
  * to be more careful, and is (see `shadow.py`).
  */
 const PROBE_SCRIPT = [
-  'import contextlib, io, json, logging, os, sys',
+  'import contextlib, io, json, logging, os, stat, sys',
   '_payload = json.loads(sys.argv[1])',
   '_real = sys.stdout',
+  // ── Absent, or undetermined — never "empty" (#569 r6) ─────────────────
+  //
+  // A directory that can be traversed but not listed raises PermissionError,
+  // and `except OSError: names = []` reads that as an empty directory. That is
+  // how a whole profile root fell out of the protective scan while the repair
+  // ran on and moved the backup the profile's install pointed at.
+  //
+  // So every enumeration and stat below answers one of three things: what is
+  // there, GENUINELY ABSENT (ENOENT on the path itself — it contributes
+  // nothing, which is true), or UNDETERMINED. Undetermined is recorded here
+  // with the path and the error and travels out in the JSON; the TypeScript
+  // side turns a single entry into "no verdict, no repair" for every root.
+  '_undet = []',
+  'def _note(_p, _exc):',
+  '    _undet.append({"path": str(_p), "error": "%s: %s" % (type(_exc).__name__, _exc)})',
+  'def _listdir(_p):',
+  '    """Sorted names under _p. [] when _p is genuinely absent, None when undetermined."""',
+  '    try:',
+  '        return sorted(os.listdir(_p))',
+  '    except FileNotFoundError:',
+  '        return []',
+  '    except BaseException as _exc:',
+  '        _note(_p, _exc)',
+  '        return None',
+  'def _state(_p):',
+  '    """(exists, is_dir), following links as Hermes\' own `Path.is_dir()` does.',
+  '',
+  '    None is undetermined. ENOENT and ENOTDIR mean the path is not there: a',
+  '    dangling link and a name under a non-directory are both genuinely absent,',
+  '    and Hermes reads them the same way."""',
+  '    try:',
+  '        _st = os.stat(_p)',
+  '    except (FileNotFoundError, NotADirectoryError):',
+  '        return (False, False)',
+  '    except BaseException as _exc:',
+  '        _note(_p, _exc)',
+  '        return None',
+  '    return (True, stat.S_ISDIR(_st.st_mode))',
+  // Hermes' own skip rules, mirrored so the audit walks where discovery walks
+  // and does not report an undetermined entry for a directory Hermes never
+  // looks inside.
+  '_FOREIGN = set([".claude-plugin", ".codex-plugin", ".cursor-plugin", ".devin-plugin",',
+  '                ".kimi-plugin"])',
+  '_MANIFESTS = ("plugin.yaml", "plugin.yml", "plugin.json")',
+  'def _audit(_d, _depth):',
+  '    """Walk one `plugins/` root exactly where `scan_directory` walks it and',
+  '    record every place the filesystem could not answer.',
+  '',
+  '    Hermes\' discovery is deliberately forgiving: an unlistable root logs a',
+  '    warning and returns the manifests it managed to read, and an unreadable',
+  '    child is skipped so that one bad plugin cannot break every other one.',
+  '    That is right for a loader and fatal for a safety scan, because the copy',
+  '    it skipped is exactly the one a repair would then move something out from',
+  '    under. Nothing here reads or parses a manifest — the only question asked',
+  '    is whether the filesystem could answer at all."""',
+  '    _names = _listdir(_d)',
+  '    if _names is None:',
+  '        return',
+  '    for _n in _names:',
+  '        if _n.startswith("__") and _n.endswith("__"):',
+  '            continue',
+  '        if _n in _FOREIGN:',
+  '            continue',
+  '        _child = os.path.join(_d, _n)',
+  '        _cs = _state(_child)',
+  '        if _cs is None or not _cs[1]:',
+  '            continue',
+  '        _blind = False',
+  '        _has = False',
+  '        for _base in _MANIFESTS:',
+  '            _ms = _state(os.path.join(_child, _base))',
+  '            if _ms is None:',
+  '                _blind = True',
+  '                break',
+  '            if _ms[0]:',
+  '                _has = True',
+  '                break',
+  // A manifest-less directory is a category directory to Hermes and it
+  // recurses one level into it; the audit follows to the same depth cap.
+  '        if not _blind and not _has and _depth == 0:',
+  '            _audit(_child, 1)',
   'try:',
   '    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):',
   '        for _cand in _payload.get("importRoots") or []:',
-  '            if os.path.isdir(os.path.join(_cand, "hermes_cli")) and _cand not in sys.path:',
+  // Not a protective path: this only decides whether a candidate joins
+  // `sys.path`. A wrong answer cannot invent a verdict — it can only cost us
+  // the import, which is already a hard probe failure — but an unreadable
+  // candidate is still recorded, because "which `hermes_cli` answered" is the
+  // premise the whole parity claim rests on.
+  '            _cs = _state(os.path.join(_cand, "hermes_cli"))',
+  '            if _cs is not None and _cs[1] and _cand not in sys.path:',
   '                sys.path.insert(0, _cand)',
   '        from pathlib import Path',
   '        import hermes_cli.plugins_discovery as _pd',
@@ -494,22 +675,25 @@ const PROBE_SCRIPT = [
   '                _roots.append(_p)',
   '        _add(os.path.join(_root, "plugins"))',
   '        _profiles = os.path.join(_root, "profiles")',
-  '        try:',
-  '            _names = sorted(os.listdir(_profiles))',
-  '        except OSError:',
-  '            _names = []',
-  '        for _n in _names:',
-  '            if os.path.isdir(os.path.join(_profiles, _n)):',
+  // The line this round exists for. A `profiles/` that can be traversed but
+  // not listed used to become `[]` here, and every sibling profile silently
+  // left the protective set.
+  '        _names = _listdir(_profiles)',
+  '        for _n in (_names or []):',
+  '            _ps = _state(os.path.join(_profiles, _n))',
+  '            if _ps is not None and _ps[1]:',
   '                _add(os.path.join(_profiles, _n, "plugins"))',
   '        _add(os.path.join(_active, "plugins"))',
   '        _out = []',
   '        for _r in _roots:',
+  '            _audit(_r, 0)',
   '            _ms = scan_directory(Path(_r), "user")',
   '            _copies = [str(_m.path) for _m in _ms if manifest_key(_m) == _name]',
   '            _win = resolve_manifest_winners(_ms).get(_name)',
   '            _out.append({"root": _r, "copies": _copies,',
   '                         "loaded": (str(_win.path) if _win is not None else None)})',
-  '    _real.write(json.dumps({"ok": True, "activeHome": _active, "root": _root, "roots": _out}))',
+  '    _real.write(json.dumps({"ok": True, "activeHome": _active, "root": _root, "roots": _out,',
+  '                            "undetermined": _undet}))',
   'except BaseException as _exc:',
   '    _real.write(json.dumps({"ok": False, "error": "%s: %s" % (type(_exc).__name__, _exc)}))',
 ].join('\n');
@@ -528,6 +712,12 @@ export interface HermesProbeResult {
   root: string;
   /** Every protective root, in the order the probe built them. */
   roots: ProbeRoot[];
+  /**
+   * Every place the filesystem could not answer (#569 r6). Empty is the normal
+   * case and the only one in which `roots` is a complete picture; a single
+   * entry means the scan has a hole in it, and a hole is not an absence.
+   */
+  undetermined: HermesUndetermined[];
 }
 
 /**
@@ -587,6 +777,7 @@ export function probeHermesDiscovery(
     activeHome?: unknown;
     root?: unknown;
     roots?: unknown;
+    undetermined?: unknown;
   };
   if (record.ok !== true || !Array.isArray(record.roots)) {
     const why = typeof record.error === 'string' ? record.error : 'unknown reason';
@@ -594,6 +785,20 @@ export function probeHermesDiscovery(
   }
   if (typeof record.activeHome !== 'string' || typeof record.root !== 'string') {
     return { error: 'Hermes probe named no home or no containing root' };
+  }
+  // An older probe that does not carry the field at all is not "nothing went
+  // wrong" — it is a probe whose answer cannot be trusted on this question, and
+  // the whole point of the field is that silence is not a clean bill of health.
+  if (!Array.isArray(record.undetermined)) {
+    return { error: 'Hermes probe did not say which paths it could not read' };
+  }
+  const undetermined: HermesUndetermined[] = [];
+  for (const entry of record.undetermined as unknown[]) {
+    const row = entry as { path?: unknown; error?: unknown };
+    if (typeof row?.path !== 'string' || typeof row?.error !== 'string') {
+      return { error: 'Hermes probe returned a malformed undetermined entry' };
+    }
+    undetermined.push({ path: row.path, error: row.error });
   }
   const out: ProbeRoot[] = [];
   for (const entry of record.roots as Array<Record<string, unknown>>) {
@@ -607,7 +812,7 @@ export function probeHermesDiscovery(
       loaded: typeof entry.loaded === 'string' ? entry.loaded : null,
     });
   }
-  return { activeHome: record.activeHome, root: record.root, roots: out };
+  return { activeHome: record.activeHome, root: record.root, roots: out, undetermined };
 }
 
 function toCopy(dir: string, root: string): HermesPluginCopy {
@@ -725,6 +930,10 @@ export function hintDirsInRoot(root: string): string[] {
  * absence of an answer, and every caller has to say so and stop (#569 r4).
  * Since r5 that covers the ROOTS as well: if `hermes_constants` cannot say
  * where this host's plugin roots are, there is no verdict to give about them.
+ * Since r6 it covers a PARTIAL answer too: if any directory in the tree could
+ * not be read, `undetermined` names it and `fromHermes` is false, because a
+ * scan that missed a root is indistinguishable from one where that root was
+ * empty — and those two hosts want opposite things from the repair.
  */
 export function scanHermesPluginCopies(
   env: HermesEnvironment,
@@ -734,19 +943,31 @@ export function scanHermesPluginCopies(
   // to list hint directories when there is nothing to ask. See
   // `resolveHermesHome`.
   const guessedHome = resolveHermesHome(env);
-  const present = isDirectory(guessedHome);
+  const homeState = directoryState(guessedHome);
   const base = {
     hermesHome: guessedHome,
     hermesRoot: null as string | null,
-    present,
+    present: homeState === 'dir',
     fromHermes: false,
     undeterminedReason: null as string | null,
+    undetermined: [] as HermesUndetermined[],
     roots: [] as HermesPluginRootScan[],
     copies: [] as HermesPluginCopy[],
     shadowed: false,
     hintRoots: [] as HermesPluginHintRoot[],
   };
-  if (!present) return base;
+  // "Not detected" is a conclusion, and it may only be drawn from an answer.
+  // A home that cannot be statted is undetermined, not absent (#569 r6):
+  // reporting "no Hermes here" for an EACCES would tell an operator the one
+  // thing that makes it safe to stop looking.
+  if (typeof homeState === 'object') {
+    return {
+      ...base,
+      undetermined: [{ path: guessedHome, error: homeState.error }],
+      undeterminedReason: undeterminedSummary([{ path: guessedHome, error: homeState.error }]),
+    };
+  }
+  if (homeState !== 'dir') return base;
 
   const probe = probeHermesDiscovery(env, opts);
 
@@ -761,6 +982,22 @@ export function scanHermesPluginCopies(
     };
   }
 
+  // Hermes answered, but part of the tree could not be read (#569 r6). What
+  // came back is a scan with a hole in it, and a hole is not an absence: the
+  // roots it did see are dropped rather than reported, because a caller given
+  // three roots out of four has no way to know the fourth was ever there.
+  // No hint list either — the hints come off the same filesystem that just
+  // said it could not answer.
+  if (probe.undetermined.length > 0) {
+    return {
+      ...base,
+      hermesHome: probe.activeHome,
+      hermesRoot: probe.root,
+      undetermined: probe.undetermined,
+      undeterminedReason: undeterminedSummary(probe.undetermined),
+    };
+  }
+
   const rootScans = probe.roots.map((entry) => rootScanFrom(entry, probe.activeHome));
   return {
     ...base,
@@ -771,4 +1008,25 @@ export function scanHermesPluginCopies(
     copies: rootScans.flatMap((r) => r.copies),
     shadowed: rootScans.some((r) => r.shadowed),
   };
+}
+
+/** How many undetermined paths a message spells out before it counts the rest. */
+const UNDETERMINED_NAMED_LIMIT = 3;
+
+/**
+ * The undetermined paths as one sentence, every path with its own error.
+ *
+ * Bounded on purpose: a host with a mode-000 `plugins/` can produce one entry
+ * per child, and a doctor row is read by a human. The first few are named in
+ * full — a path and an errno is the whole remedy — and the remainder is
+ * counted, so nothing is hidden and the row stays a row.
+ */
+export function undeterminedSummary(entries: HermesUndetermined[]): string {
+  const named = entries
+    .slice(0, UNDETERMINED_NAMED_LIMIT)
+    .map((e) => `${e.path} (${e.error})`)
+    .join('; ');
+  const rest = entries.length - Math.min(entries.length, UNDETERMINED_NAMED_LIMIT);
+  const more = rest > 0 ? `; and ${rest} more path${rest === 1 ? '' : 's'}` : '';
+  return `could not read ${named}${more}`;
 }

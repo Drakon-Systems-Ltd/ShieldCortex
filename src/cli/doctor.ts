@@ -39,8 +39,10 @@ import { parseRegistrationsSince, parseLogLinePid } from '../integrations/opencl
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
+  describeFsError,
   hermesEnvironment,
   scanHermesPluginCopies,
+  undeterminedSummary,
   type HermesPluginCopy,
   type HermesPluginRootScan,
   type HermesPluginScan,
@@ -2775,6 +2777,13 @@ export async function checkOpenClawDuplicateInstalls(
  * `get_default_hermes_root()` as well, and when either is unavailable this row
  * is undetermined for exactly the reason a missing discovery makes it so.
  *
+ * ## A partial answer is not an answer (#569 r6)
+ *
+ * If any directory in the tree could not be READ, this row WARNs naming that
+ * path and its errno rather than reporting on the roots it did manage to see.
+ * A root the scan could not enter looks exactly like a root with nothing in
+ * it, and those two hosts want opposite things from the repair.
+ *
  * Every root is reported on — a shadow in a sibling profile is a real shadow
  * whichever profile the doctor happens to be running under — with the active
  * one labelled.
@@ -2791,6 +2800,14 @@ const HERMES_UNDETERMINED_FIX =
   '`--fix-hermes-plugin-copies` moves nothing. The interpreter is looked for at ' +
   '`$HERMES_HOME/hermes-agent/.venv/bin/python3`, then at the shebang of the `hermes` ' +
   'launcher on PATH.';
+
+/** The remedy for "part of the tree could not be read", said once (#569 r6). */
+const HERMES_UNREADABLE_FIX =
+  'Give the user running the doctor permission to LIST the named paths — a directory that can ' +
+  'be entered but not listed (mode `--x`, or an ACL) raises `EACCES` here, and a scan that ' +
+  'treated it as empty would drop every plugin copy inside it. Then re-run. Until then this row ' +
+  'gives no verdict and `--fix-hermes-plugin-copies` moves nothing in any root: the copy the ' +
+  'scan could not see can be the one another plugin root loads through.';
 
 export async function checkHermesPluginShadowing(
   home: string = os.homedir(),
@@ -2814,6 +2831,24 @@ export async function checkHermesPluginShadowing(
     };
   }
   const hermesHome = scan.hermesHome;
+
+  // Ahead of "not detected" on purpose (#569 r6): a home that could not be
+  // statted is not an absent one, and "skipped (Hermes not detected)" is the
+  // one message that tells an operator they have nothing to look at.
+  if (scan.undetermined.length > 0) {
+    const named = undeterminedSummary(
+      scan.undetermined.map((e) => ({ path: tildify(e.path), error: e.error })),
+    );
+    return {
+      label,
+      status: 'warn',
+      message:
+        `could not scan every plugin root — ${named}. A directory that cannot be read is not ` +
+        'an empty directory, so no copy of this plugin can be ruled in or out here and ' +
+        '`--fix-hermes-plugin-copies` moves nothing in any root.',
+      fix: HERMES_UNREADABLE_FIX,
+    };
+  }
 
   if (!scan.present) {
     return { label, status: 'info', message: 'skipped (Hermes not detected)' };
@@ -2944,7 +2979,8 @@ export interface HermesShadowFixResult {
   /**
    * True when a copy this command exists to relocate could not be relocated
    * safely — a symlink anywhere in the layout, a shared tree, another
-   * filesystem, a failed rename, or no Hermes discovery to plan against. The
+   * filesystem, a failed rename, a path that could not be read at all (#569
+   * r6), or no Hermes discovery to plan against. The
    * CLI exits non-zero on it: the host may still be shadowed and the operator
    * has work to do. A root with no canonical copy is not in itself a failure —
    * it is the designed refusal, and the row already says what a human has to
@@ -2957,20 +2993,52 @@ export interface HermesShadowFixResult {
   message: string;
 }
 
-function isSymlink(target: string): boolean {
+/**
+ * What the filesystem said, with the two answers a repair must never conflate
+ * kept apart (#569 r6): `absent` is "there is nothing at this path", `error` is
+ * "I could not look". Only the first one may ever permit a move.
+ *
+ * Every `lstat`, `realpath` and `readdir` on the repair and preflight path goes
+ * through one of the readers below. None of them is allowed to be written as a
+ * `try { … } catch { return false }`, and `fs.existsSync` is not allowed here at
+ * all: it returns false for a permission error, which is precisely the answer
+ * that makes a move look safe.
+ */
+type FsAnswer<T> = { value: T } | { absent: true } | { error: string };
+
+/** Absence for a STAT: nothing at the path, or nothing under a non-directory. */
+const STAT_ABSENT_CODES: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
+
+/**
+ * Absence for an ENUMERATION: only ENOENT. `ENOTDIR` here means a directory
+ * was expected and something else is there — that is a fact about the layout
+ * nobody has explained, not an empty directory.
+ */
+const READ_ABSENT_CODES: ReadonlySet<string> = new Set(['ENOENT']);
+
+function fsAnswer<T>(read: () => T, absentCodes: ReadonlySet<string>): FsAnswer<T> {
   try {
-    return fs.lstatSync(target).isSymbolicLink();
-  } catch {
-    return false;
+    return { value: read() };
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (typeof code === 'string' && absentCodes.has(code)) return { absent: true };
+    return { error: describeFsError(err) };
   }
 }
 
-function realPathOrNull(target: string): string | null {
-  try {
-    return fs.realpathSync(target);
-  } catch {
-    return null;
-  }
+/** `lstat`, following nothing: absent, the stats, or why not. */
+function lstatAnswer(target: string): FsAnswer<fs.Stats> {
+  return fsAnswer(() => fs.lstatSync(target), STAT_ABSENT_CODES);
+}
+
+/** `realpath`: absent covers a dangling link, whose ENOENT is the truth. */
+function realPathAnswer(target: string): FsAnswer<string> {
+  return fsAnswer(() => fs.realpathSync(target), STAT_ABSENT_CODES);
+}
+
+/** `readdir` with types, so entries are classified by `lstat` semantics. */
+function readdirAnswer(dir: string): FsAnswer<fs.Dirent[]> {
+  return fsAnswer(() => fs.readdirSync(dir, { withFileTypes: true }), READ_ABSENT_CODES);
 }
 
 /** Whether `inner` is `outer` or lives underneath it, lexically on real paths. */
@@ -2991,8 +3059,13 @@ const SYMLINK_PREFLIGHT_ENTRY_BUDGET = 20_000;
 
 /**
  * The first symlink at or under `dir`, or null when the tree demonstrably holds
- * none. `{ exhausted }` is the third answer: the walk ran out of budget or hit
- * a directory it could not read, so nothing is established either way.
+ * none. There are two other answers, and neither of them is "none":
+ *
+ *   - `exhausted` — the walk ran out of budget, so it did not finish looking;
+ *   - `unreadable` — a path in the tree could not be read, and it says which
+ *     one and why (#569 r6). A directory that raises EACCES could be holding
+ *     the link that another plugin root resolves through, and a walk that
+ *     treats it as empty reports a clean tree.
  *
  * Nothing here follows a link. `readdirSync(withFileTypes)` reports the entry
  * itself (`lstat` semantics), and a directory entry that IS a link stops the
@@ -3002,28 +3075,32 @@ const SYMLINK_PREFLIGHT_ENTRY_BUDGET = 20_000;
 function findLinkInTree(dir: string, budget: { left: number }): {
   link: string | null;
   exhausted: boolean;
+  unreadable: { path: string; error: string } | null;
 } {
-  if (isSymlink(dir)) return { link: dir, exhausted: false };
+  const self = lstatAnswer(dir);
+  if ('error' in self) return { link: null, exhausted: false, unreadable: { path: dir, error: self.error } };
+  // Absent is possible under a race with the operator's own shell; it holds no
+  // links, which is all this walk is asked about.
+  if ('value' in self && self.value.isSymbolicLink()) {
+    return { link: dir, exhausted: false, unreadable: null };
+  }
   const stack = [dir];
   while (stack.length > 0) {
     const current = stack.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      // Unreadable: a symlink could be sitting in there and we would never see
-      // it. Fail closed.
-      return { link: null, exhausted: true };
+    const listing = readdirAnswer(current);
+    if ('error' in listing) {
+      return { link: null, exhausted: false, unreadable: { path: current, error: listing.error } };
     }
-    for (const entry of entries) {
-      if (budget.left <= 0) return { link: null, exhausted: true };
+    if ('absent' in listing) continue;
+    for (const entry of listing.value) {
+      if (budget.left <= 0) return { link: null, exhausted: true, unreadable: null };
       budget.left -= 1;
       const full = path.join(current, entry.name);
-      if (entry.isSymbolicLink()) return { link: full, exhausted: false };
+      if (entry.isSymbolicLink()) return { link: full, exhausted: false, unreadable: null };
       if (entry.isDirectory()) stack.push(full);
     }
   }
-  return { link: null, exhausted: false };
+  return { link: null, exhausted: false, unreadable: null };
 }
 
 /**
@@ -3107,6 +3184,13 @@ function releaseReservation(reserved: string): void {
  *   - No Hermes discovery at all: nothing is planned and nothing moves (#569
  *     r4). Which copy the gateway loads is exactly the question that could not
  *     be answered.
+ *   - ANY PATH THAT COULD NOT BE READ, on either side of the probe (#569 r6).
+ *     A `profiles/` that can be traversed but not listed used to read as an
+ *     empty directory, so every sibling profile left the protective scan and
+ *     the repair moved the backup one of them pointed at. Absence is ENOENT and
+ *     nothing else; every other errno — EACCES, EPERM, ENOTDIR where a
+ *     directory was expected, a walk that could not finish — refuses the whole
+ *     plan and names the path and the error.
  *   - A root with NO canonical `plugins/shieldcortex` stops the WHOLE repair
  *     (#569 r5). Moving the only copy there would take the plugin off that
  *     root, and which directory is authoritative is a human's call — so the
@@ -3159,6 +3243,40 @@ export function fixHermesPluginShadowing(
       abandoned = true;
     }
   };
+
+  /**
+   * A path this repair had to read and could not (#569 r6). It abandons the
+   * whole plan, in every root: what that directory was hiding is unknown, and
+   * the thing it hides best is the link another root resolves through.
+   */
+  const refuseUndetermined = (target: string, error: string, subject?: string): void => {
+    refuse(
+      subject ?? target,
+      `nothing was moved: ${tildify(target)} could not be read (${error}). A directory that ` +
+      'cannot be read is not an empty one — a copy or a link it is hiding can be what another ' +
+      'plugin root loads through, so no copy can be moved safely anywhere. Make that path ' +
+      'readable and run the fix again',
+    );
+  };
+
+  // A scan with a hole in it (#569 r6). Hermes may have answered about every
+  // root it could read; the one it could not read is the one this would move
+  // something out from under.
+  if (scan.undetermined.length > 0) {
+    for (const entry of scan.undetermined) refuseUndetermined(entry.path, entry.error);
+    return {
+      moved,
+      refused,
+      changed: false,
+      failed: true,
+      fromHermes: false,
+      message:
+        'nothing was moved: the plugin roots could not be scanned completely — ' +
+        `${undeterminedSummary(scan.undetermined.map((e) => ({ path: tildify(e.path), error: e.error })))}. ` +
+        'A directory that cannot be read is not an empty directory, so there is no safe plan ' +
+        'to execute in any root',
+    };
+  }
 
   if (!scan.present) {
     return {
@@ -3228,7 +3346,12 @@ export function fixHermesPluginShadowing(
     }
 
     const canonicalDir = path.join(rootScan.root, 'shieldcortex');
-    if (isSymlink(canonicalDir)) {
+    const canonicalStat = lstatAnswer(canonicalDir);
+    if ('error' in canonicalStat) {
+      refuseUndetermined(canonicalDir, canonicalStat.error, extras[0].dir);
+      continue;
+    }
+    if ('value' in canonicalStat && canonicalStat.value.isSymbolicLink()) {
       for (const copy of extras) {
         refuse(
           copy.dir,
@@ -3238,14 +3361,27 @@ export function fixHermesPluginShadowing(
       }
       continue;
     }
-    const canonicalReal = realPathOrNull(canonicalDir);
+    // Absent is possible: discovery found it a moment ago and something took it
+    // away since. Then there is no tree to protect it from, and the copy's own
+    // checks below decide on their own merits.
+    const canonicalResolved = realPathAnswer(canonicalDir);
+    if ('error' in canonicalResolved) {
+      refuseUndetermined(canonicalDir, canonicalResolved.error, extras[0].dir);
+      continue;
+    }
+    const canonicalReal = 'value' in canonicalResolved ? canonicalResolved.value : null;
 
     for (const copy of extras) {
-      const copyReal = realPathOrNull(copy.dir);
-      if (copyReal === null) {
+      const copyResolved = realPathAnswer(copy.dir);
+      if ('error' in copyResolved) {
+        refuseUndetermined(copy.dir, copyResolved.error);
+        continue;
+      }
+      if ('absent' in copyResolved) {
         refuse(copy.dir, 'could not be resolved on disk — left in place');
         continue;
       }
+      const copyReal = copyResolved.value;
       // Ahead of the symlink test on purpose: when the extra resolves onto the
       // canonical install (`shieldcortex.bak-x -> shieldcortex`, or anything a
       // symlinked ancestor or a bind mount can produce), "this IS the installed
@@ -3262,7 +3398,12 @@ export function fixHermesPluginShadowing(
         );
         continue;
       }
-      if (isSymlink(copy.dir)) {
+      const copyStat = lstatAnswer(copy.dir);
+      if ('error' in copyStat) {
+        refuseUndetermined(copy.dir, copyStat.error);
+        continue;
+      }
+      if ('value' in copyStat && copyStat.value.isSymbolicLink()) {
         refuse(
           copy.dir,
           'is a symlink — moving the link would relocate its text and not the tree it ' +
@@ -3324,19 +3465,30 @@ export function fixHermesPluginShadowing(
     const budget = { left: SYMLINK_PREFLIGHT_ENTRY_BUDGET };
     const walked = new Set<string>();
     for (const copy of scan.copies) {
-      const real = realPathOrNull(copy.dir);
+      const resolved = realPathAnswer(copy.dir);
+      if ('error' in resolved) {
+        refuseUndetermined(copy.dir, resolved.error, plan[0].copy.dir);
+        break;
+      }
+      const real = 'value' in resolved ? resolved.value : null;
       // The same physical tree under two roots is walked once.
       if (real !== null && walked.has(real)) continue;
       if (real !== null) walked.add(real);
-      const { link, exhausted } = findLinkInTree(copy.dir, budget);
+      const { link, exhausted, unreadable } = findLinkInTree(copy.dir, budget);
+      // A path inside a discovered copy that could not be read is its own
+      // refusal, named and quoted, rather than a vague "could not be checked".
+      if (unreadable !== null) {
+        refuseUndetermined(unreadable.path, unreadable.error, plan[0].copy.dir);
+        break;
+      }
       if (link === null && !exhausted) continue;
       const why =
         link !== null
           ? link === copy.dir
             ? `${tildify(copy.dir)} is a symlink`
             : `${tildify(copy.dir)} holds a symlink (${tildify(link)})`
-          : `${tildify(copy.dir)} could not be checked for symlinks (unreadable entry, or more ` +
-            `than ${SYMLINK_PREFLIGHT_ENTRY_BUDGET} entries)`;
+          : `${tildify(copy.dir)} could not be checked for symlinks (more than ` +
+            `${SYMLINK_PREFLIGHT_ENTRY_BUDGET} entries)`;
       for (const { copy: planned } of plan) {
         refuse(
           planned.dir,
@@ -3365,10 +3517,18 @@ export function fixHermesPluginShadowing(
       inRoot.add(path.join(rootScan.root, 'shieldcortex'));
       for (const dir of inRoot) {
         if (considered.has(dir)) continue;
-        const real = realPathOrNull(dir);
-        if (real === null) continue; // absent, or a dangling link: nothing to break
-        dependents.push({ dir, real });
+        const resolved = realPathAnswer(dir);
+        // Undetermined is NOT "nothing to break": this loop exists to find the
+        // installations a move would strand, and one it could not resolve is
+        // the one most likely to be stranded (#569 r6).
+        if ('error' in resolved) {
+          refuseUndetermined(dir, resolved.error, plan[0].copy.dir);
+          break;
+        }
+        if ('absent' in resolved) continue; // absent, or a dangling link: nothing to break
+        dependents.push({ dir, real: resolved.value });
       }
+      if (abandoned) break;
     }
 
     const entangled = plan
@@ -3383,7 +3543,7 @@ export function fixHermesPluginShadowing(
       }))
       .find((candidate) => candidate.blocker !== undefined);
 
-    if (entangled !== undefined && entangled.blocker !== undefined) {
+    if (!abandoned && entangled !== undefined && entangled.blocker !== undefined) {
       const { blocker } = entangled;
       const relation =
         blocker.real === entangled.entry.real
@@ -3397,6 +3557,28 @@ export function fixHermesPluginShadowing(
           `nothing was moved: ${tildify(entangled.entry.copy.dir)} ${relation} ` +
           `(both resolve under ${tildify(blocker.real)}), which another plugin root still loads ` +
           'from — moving it would leave that installation dangling. Resolve the link by hand first',
+        );
+      }
+    }
+  }
+
+  // ── 3c. Preflight: the destination, before the first move ─────────────
+  //
+  // The reservation itself is the destination check for each leaf (see
+  // `reserveBackupDir`), but `backups/` is common to every move, so a `backups`
+  // that cannot be statted or is not a directory would be discovered halfway
+  // through the plan — after the first copy had already moved. It is one lstat,
+  // and it belongs with the other whole-plan refusals (#569 r6).
+  if (!abandoned && plan.length > 0) {
+    const dest = lstatAnswer(backupsRoot);
+    if ('error' in dest) {
+      refuseUndetermined(backupsRoot, dest.error, plan[0].copy.dir);
+    } else if ('value' in dest && !dest.value.isDirectory() && !dest.value.isSymbolicLink()) {
+      for (const { copy } of plan) {
+        refuse(
+          copy.dir,
+          `nothing was moved: ${tildify(backupsRoot)} exists and is not a directory, so there ` +
+          'is nowhere to put the copies. Move it aside by hand, then run the fix again',
         );
       }
     }
