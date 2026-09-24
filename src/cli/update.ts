@@ -689,6 +689,22 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
 }
 
 /**
+ * Home-scrub one of OUR OWN report lines — and nothing more (#574/#576).
+ *
+ * `sanitiseForReport` is built for text a CHILD PROCESS produced, where npm can
+ * echo an NPM_TOKEN back at us: it redacts any 20-character fragment that looks
+ * high-entropy. `shieldcortex-preupdate-2026-09-24T23-10-23-474Z` — the backup
+ * directory now holding the operator's previous plugin — is exactly such a
+ * fragment, and redacting it destroys the one fact the line exists to carry.
+ * These lines are built here out of paths this process computed, carry no child
+ * output and no environment value, so the home scrub is the whole treatment
+ * they need.
+ */
+function scrubHomePath(text: string, home: string): string {
+  return home.length > 1 ? text.split(home).join('~') : text;
+}
+
+/**
  * Refresh the FILE-COPIED cortex-memory hook (#574).
  *
  * `update` already advances the npm package, the registry-managed plugin and
@@ -722,8 +738,8 @@ export async function stepOpenClawHook(
       return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from' };
     }
     const detail = [
-      ...result.refreshed.map((dir) => sanitiseForReport(`refreshed ${dir}`, { home })),
-      ...result.failed.map((f) => sanitiseForReport(`could not refresh ${f.dir}: ${f.error}`, { home })),
+      ...result.refreshed.map((dir) => scrubHomePath(`refreshed ${dir}`, home)),
+      ...result.failed.map((f) => scrubHomePath(`could not refresh ${f.dir}: ${f.error}`, home)),
     ];
     if (result.failed.length > 0) {
       return {
@@ -764,8 +780,8 @@ export async function stepHermesPlugin(
     const refresh = deps.refresh
       ?? (await import('../setup/hermes-refresh.js')).refreshHermesPluginCopies;
     const result = refresh(home);
-    const detail = result.detail.map((line) => sanitiseForReport(line, { home }));
-    const summary = sanitiseForReport(result.summary, { home });
+    const detail = result.detail.map((line) => scrubHomePath(line, home));
+    const summary = scrubHomePath(result.summary, home);
     if (result.status === 'not-installed') return { status: 'skip' as const, summary };
     if (result.status === 'warn') return { status: 'warn' as const, summary, detail };
     if (result.status === 'current') return { status: 'ok' as const, summary };

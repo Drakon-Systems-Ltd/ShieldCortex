@@ -236,6 +236,27 @@ describe('stepHermesPlugin — what `update` reports (#576)', () => {
     expect(result.detail?.join('\n')).toContain('~/.hermes/backups/x');
   });
 
+  it('prints the stamped backup directory verbatim, not as a redacted fragment', async () => {
+    // `shieldcortex-preupdate-<iso stamp>` is a 40-plus character run of
+    // [A-Za-z0-9-], which the CHILD-OUTPUT sanitiser redacts as a possible
+    // credential. That reads `previous copy kept at ~[REDACTED-high_entropy]`
+    // and loses the only fact the line carries.
+    const backup = `${home}/.hermes/backups/shieldcortex-preupdate-2026-09-24T23-10-23-474Z/shieldcortex`;
+    const result = await runQuietly(() => stepHermesPlugin(home, {
+      refresh: () => ({
+        ...base,
+        status: 'refreshed',
+        summary: 'refreshed 1 copy — restart the Hermes gateway to load it',
+        detail: [`${home}/.hermes/plugins/shieldcortex refreshed; previous copy kept at ${backup}`],
+        refreshed: [{ dir: `${home}/.hermes/plugins/shieldcortex`, backup }],
+      }),
+    }));
+    expect(result.detail?.join('\n')).toContain(
+      '~/.hermes/backups/shieldcortex-preupdate-2026-09-24T23-10-23-474Z/shieldcortex',
+    );
+    expect(result.detail?.join('\n')).not.toMatch(/REDACTED/);
+  });
+
   it('reports "current" as a pass with no detail', async () => {
     const result = await runQuietly(() => stepHermesPlugin(home, {
       refresh: () => ({ ...base, status: 'current', summary: 'current (1 copy)' }),
