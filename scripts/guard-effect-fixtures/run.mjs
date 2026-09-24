@@ -44,8 +44,18 @@
  * with INVALID.
  *
  * Reports, PER POLICY and NEVER blended, two measurement kinds separately
- * (finding 6): `executed-witness` over the 14 executable attacks, and `modelled`
- * over the 3 unconfinable model-only shapes (effect := "policy allowed it").
+ * (finding 6): `executed-witness` over the registry's executable attacks, and
+ * `modelled` over its unconfinable model-only shapes (effect := "policy allowed
+ * it"). Every count the report quotes — denominator, banner, headings — is
+ * derived from `corpusCounts()` (#570 item 2); no literal count lives here.
+ *
+ * Evaluator binding (#570 item 1): the built adapter's sha256 digest over the
+ * guard modules it imports is carried into the summary as `evaluatorDigest`;
+ * a stub adapter reports `null` and the Markdown says the run is unbound.
+ *
+ * Collateral (#570 item 3): a fixture's own witness targets are `intended`
+ * mutations; `collateral` lists only changes to targets the fixture is NOT
+ * about.
  *
  * NOT-RUN mode (round-3 finding 2): without `--execute` NOTHING runs, so there
  * is no observation to report. The run is `mode: 'not-run'`: every non-gated
@@ -66,28 +76,35 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   CORPUS, CONTROLS, SELFTESTS, FIXTURE_REGISTRY, SHIM_ROLES, SHIMMED_BINARIES,
-  validateFixture, assertRegisteredFixture,
+  validateFixture, assertRegisteredFixture, corpusCounts,
   PLANTED_KEY_MATERIAL, ENV_CANARY_NAME, ENV_CANARY_VALUE,
 } from './corpus.mjs';
 import {
   snapshot, diff, observeGoal, observeDone, confinedPath, ContainmentError,
-  STATE_DIR, FIREWALL_STATE,
+  STATE_DIR, FIREWALL_STATE, EGRESS_LOG, SCHEDULER_STORE,
 } from './witness.mjs';
 import { builtEvaluatorAdapter } from './adapter.mjs';
 import { POLICIES, gates } from '../lib/guard-policy-sets.mjs';
 
-const BANNER = [
-  '=== SYNTHETIC EFFECT-FIXTURE RUN ===',
-  'This is an IN-PROCESS GATE SIMULATION; NOT host/framing/provenance enforcement proof.',
-  'Path-confined fixture runner for VALIDATED EXACT fixtures — NOT OS isolation, no general',
-  'sandbox claim. Each fixture is executed ONCE with no gate (the positive control) and the',
-  'witness observes the declared GOAL/completion state, never mere invocation. Two measurement',
-  'kinds are reported separately and never blended: executed-witness (14 executable attacks)',
-  'and modelled (3 unconfinable model-only shapes; effect := policy allowed it to run).',
-  'Only REGISTERED, byte-identical fixtures execute. The outside-repo canary is DETECTION of an',
-  'outside write, not containment: an unchanged canary does not prove no outside writes occurred.',
-  'A run is VALID or INVALID; an INVALID run reports no rates.',
-].join('\n');
+/**
+ * The banner is rendered from the registry-derived counts (#570 item 2) so it
+ * can never disagree with the denominator the same run reports.
+ * @param {ReturnType<typeof corpusCounts>} counts
+ */
+export function banner(counts = corpusCounts()) {
+  return [
+    '=== SYNTHETIC EFFECT-FIXTURE RUN ===',
+    'This is an IN-PROCESS GATE SIMULATION; NOT host/framing/provenance enforcement proof.',
+    'Path-confined fixture runner for VALIDATED EXACT fixtures — NOT OS isolation, no general',
+    'sandbox claim. Each fixture is executed ONCE with no gate (the positive control) and the',
+    'witness observes the declared GOAL/completion state, never mere invocation. Two measurement',
+    `kinds are reported separately and never blended: executed-witness (${counts.executableAttacks} executable attacks)`,
+    `and modelled (${counts.modelOnlyAttacks} unconfinable model-only shapes; effect := policy allowed it to run).`,
+    'Only REGISTERED, byte-identical fixtures execute. The outside-repo canary is DETECTION of an',
+    'outside write, not containment: an unchanged canary does not prove no outside writes occurred.',
+    'A run is VALID or INVALID; an INVALID run reports no rates.',
+  ].join('\n');
+}
 
 const RUN_TIMEOUT_MS = 5000;
 
@@ -228,12 +245,34 @@ function materialiseFixtureFiles(root, fixture) {
 function allWatchedTargets() {
   const set = new Set([
     'home/keepme', 'home/work/src/main.ts', 'home/.bashrc', 'home/.ssh/authorized_keys',
-    'home/.shieldcortex/config.json', 'src/edit-me.ts', FIREWALL_STATE,
+    'home/.shieldcortex/config.json', 'src/edit-me.ts', FIREWALL_STATE, EGRESS_LOG, SCHEDULER_STORE,
   ]);
   for (const f of CORPUS) {
     for (const spec of [f.goal, f.done]) if (spec?.path) set.add(spec.path);
   }
   return [...set];
+}
+
+/**
+ * The sandbox targets a witness spec is ABOUT (#570 item 3): the path it names,
+ * or the shim state file its kind reads (`egress` → the egress sink log,
+ * `scheduler` → the scheduler store, `firewall` → the firewall state). These
+ * are the fixture's INTENDED mutations; `diff` excludes them from `collateral`
+ * so that column only ever lists a change to a target the fixture is not
+ * about — the confinement smell it exists to surface. A spec whose witness
+ * does not read a watched file (`git-commit`, `stdout-contains`) owns nothing.
+ * Exported for tests.
+ * @param {object|null|undefined} spec goal or done spec, as resolved from the registry
+ * @returns {string[]}
+ */
+export function ownTargets(spec) {
+  if (!spec || typeof spec !== 'object') return [];
+  switch (spec.kind) {
+    case 'egress': return [EGRESS_LOG];
+    case 'scheduler': return [SCHEDULER_STORE];
+    case 'firewall': return [FIREWALL_STATE];
+    default: return typeof spec.path === 'string' ? [spec.path] : [];
+  }
 }
 
 function execute(root, command) {
@@ -323,7 +362,10 @@ export function sandboxExecutor(fx, opts = {}) {
     if (assertRegisteredFixture(fx).length) return refused('altered-between-setup-and-execution', { setupStarted });
     const { exit, stdout } = execute(sb.root, reg.command);
     const after = snapshot(sb.root, watched);
-    const collateral = diff(before, after).collateral;
+    // #570 item 3: the fixture's own witness targets are INTENDED mutations,
+    // never collateral. Resolved from the registry spec, like the witness itself.
+    const own = ownTargets(goal ?? done);
+    const { collateral, watchedMutated: intended } = diff(before, after, own);
 
     let effectAchieved = false, completed = false, evidence = '';
     const env = childEnv(sb.root);
@@ -332,7 +374,7 @@ export function sandboxExecutor(fx, opts = {}) {
 
     let canaryOk = true, canaryEmail = null;
     if (opts.canary) { const c = checkCanary(opts.canary); canaryOk = c.ok; canaryEmail = c.configEmail; }
-    return { ran: true, setupStarted, invalid: false, exit, effectAchieved, completed, evidence, collateral, canaryOk, canaryEmail };
+    return { ran: true, setupStarted, invalid: false, exit, effectAchieved, completed, evidence, collateral, intended, canaryOk, canaryEmail };
   } catch (e) {
     if (e instanceof ContainmentError) return refused(`containment:${e.message}`, { setupStarted });
     throw e;
@@ -371,7 +413,7 @@ export function policyGates(policy, verdict) {
  * policy inherits the witnessed effect; a gated policy scores 0. The two
  * measurement kinds are tallied into SEPARATE buckets and never summed.
  */
-export function tallyPolicies(rows, { evaluatorId = 'unknown', executed = true } = {}) {
+export function tallyPolicies(rows, { evaluatorId = 'unknown', evaluatorDigest = null, executed = true, counts = corpusCounts() } = {}) {
   const execAttacks = rows.filter(r => r.fx.kind === 'attack' && r.fx.exec === 'sandbox');
   const modelAttacks = rows.filter(r => r.fx.kind === 'attack' && r.fx.exec === 'model-only');
   const legit = rows.filter(r => r.fx.kind === 'legit');
@@ -414,6 +456,7 @@ export function tallyPolicies(rows, { evaluatorId = 'unknown', executed = true }
         gated, effectAchieved, completed, exit: observed(row) ? obs.exit : null,
         evidence: observed(row) ? obs.evidence : undefined,
         collateral: observed(row) && obs.collateral?.length ? obs.collateral : undefined,
+        intended: observed(row) && obs.intended?.length ? obs.intended : undefined,
       });
     }
     return { id: p.id, label: p.label, executed: ex, modelled: md, legit: lg, fixtures };
@@ -421,10 +464,14 @@ export function tallyPolicies(rows, { evaluatorId = 'unknown', executed = true }
 
   const measured = executed;
   return {
-    banner: BANNER,
+    banner: banner(counts),
     evaluator: evaluatorId,
+    evaluatorDigest,
     mode: measured ? 'executed' : 'not-run',
-    executableDenominator: measured ? { expected: 14, valid: validExecAttacks.length } : null,
+    // The expected denominator is the REGISTRY's count (#570 item 2), never a
+    // literal and never the row count: a row filtered out upstream must show
+    // as a shortfall against the frozen denominator, not shrink it.
+    executableDenominator: measured ? { expected: counts.executableAttacks, valid: validExecAttacks.length } : null,
     counts: {
       executableAttacks: execAttacks.length, validExecutableAttacks: measured ? validExecAttacks.length : null,
       modelledAttacks: modelAttacks.length, legit: legit.length,
@@ -486,7 +533,7 @@ export function controlOutcome(ctl, obs) {
  */
 export function finaliseRun({
   rows, controlResults = [], selftestResults = [], canaryTripped = null, canaryChecked = false,
-  invalidFixtures = [], evaluatorId = 'unknown', executed = true,
+  invalidFixtures = [], evaluatorId = 'unknown', evaluatorDigest = null, executed = true, counts = corpusCounts(),
 }) {
   const invalidReasons = [];
   if (canaryTripped) invalidReasons.push(`canary-tripped:${canaryTripped.fixture}`);
@@ -503,8 +550,9 @@ export function finaliseRun({
       .map(r => ({ id: r.fx.id, ran: !!(r.obs && r.obs.ran === true && !r.obs.invalid), achieved: r.obs?.ran ? r.obs.effectAchieved === true : null, ok: !!(r.obs && r.obs.ran === true && !r.obs.invalid && !r.witnessUnproven), evidence: r.obs?.evidence }))
     : [];
   const common = {
-    banner: BANNER,
+    banner: banner(counts),
     evaluator: evaluatorId,
+    evaluatorDigest,
     mode: executed ? 'executed' : 'not-run',
     runStatus: invalidReasons.length ? 'INVALID' : 'VALID',
     invalidReasons,
@@ -520,7 +568,7 @@ export function finaliseRun({
   if (invalidReasons.length) {
     return { ...common, ratesWithheld: true, executableDenominator: null, counts: null, policies: null, detail: null };
   }
-  const tally = tallyPolicies(rows, { evaluatorId, executed });
+  const tally = tallyPolicies(rows, { evaluatorId, evaluatorDigest, executed, counts });
   return { ...common, ratesWithheld: !executed, executableDenominator: tally.executableDenominator, counts: tally.counts, policies: tally.policies, detail: tally.detail };
 }
 
@@ -604,7 +652,7 @@ export async function runCli(argv, deps = {}) {
 
   const summary = finaliseRun({
     rows, controlResults, selftestResults, canaryTripped, canaryChecked: execute_,
-    invalidFixtures, evaluatorId: adapter.id, executed: execute_,
+    invalidFixtures, evaluatorId: adapter.id, evaluatorDigest: adapter.digest ?? null, executed: execute_,
   });
 
   const md = renderMarkdown(summary);
@@ -634,7 +682,9 @@ export function renderMarkdown(s) {
   if (notRun) {
     out.push('```', 'MODE: NOT EXECUTED. Gate decisions only. No fixture ran; no effect, completion or control was', 'observed; no executed-witness rate exists. Every non-gated outcome below is UNMEASURED.', '```', '');
   }
-  out.push(`**Evaluator:** ${s.evaluator}`);
+  out.push(`**Evaluator:** ${s.evaluator}${s.evaluatorDigest
+    ? ` — ${s.evaluatorDigest.algorithm} ${s.evaluatorDigest.value} over ${s.evaluatorDigest.files} file(s), scope ${s.evaluatorDigest.scope} (binds the built bytes, not a source revision)`
+    : ' — NO BUILD DIGEST: this run is not bound to any built evaluator bytes and is not decision-grade'}`);
   out.push(`**Mode:** ${notRun ? 'not executed (gate decisions only; nothing observed)' : 'executed (each fixture run once with no gate; witness observed)'}`);
   out.push(`**Run status:** ${s.runStatus}${s.runStatus === 'INVALID' ? ' — instrument breach; NO rates reported (this is not "zero attack success")' : (notRun ? ' (fixture identity + gate decisions only; NOT a measurement)' : ' (a valid measurement; zero attack success, if shown, is a result)')}`);
   if (s.canary?.checked) out.push(`**Outside-repo canary (detection, not containment):** ${s.canary.tripped ? `TRIPPED by ${s.canary.tripped.fixture} — an outside write DID happen; run INVALID` : 'unchanged — no outside write to this one config + sentinel was detected; this does NOT prove no outside writes occurred'}`);
@@ -662,7 +712,7 @@ export function renderMarkdown(s) {
   } else {
     out.push(`**Executable-attack denominator:** ${s.executableDenominator.valid} valid of ${s.executableDenominator.expected} executable (${s.counts.modelledAttacks} model-only reported separately; ${s.counts.legit} legit).`, '');
     if (s.witnessUnproven?.length) out.push(`**Witness unproven (excluded):** ${s.witnessUnproven.join(', ')}`, '');
-    out.push('### Executed-witness rates (14 executable attacks; effect observed)', '');
+    out.push(`### Executed-witness rates (${s.executableDenominator.expected} registered executable attacks; effect observed)`, '');
     out.push('| policy | attack-success | attacks gated | legit completion | legit FPs |');
     out.push('|---|---|---|---|---|');
     for (const p of s.policies) {
@@ -671,7 +721,7 @@ export function renderMarkdown(s) {
     }
     out.push('');
   }
-  out.push('### Modelled decisions (3 unconfinable model-only shapes; NOT executed, NOT blended)', '');
+  out.push(`### Modelled decisions (${s.counts.modelledAttacks} unconfinable model-only shapes; NOT executed, NOT blended)`, '');
   out.push('| policy | allowed-to-run | gated |');
   out.push('|---|---|---|');
   for (const p of s.policies) out.push(`| ${p.id} | ${p.modelled.attackAllowed}/${p.modelled.attackTotal} | ${p.modelled.attackGated} |`);

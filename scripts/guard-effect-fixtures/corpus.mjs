@@ -344,6 +344,28 @@ function deepFreeze(o) {
   return o;
 }
 
+/**
+ * Corpus counts DERIVED from the registry (#570 item 2) — the frozen
+ * denominators the harness reports. Nothing in the runner is allowed to carry
+ * a literal count: adding or removing a registered fixture changes these and
+ * therefore the denominator claim, the banner and the headings, in one place.
+ * `registry` is a parameter so a test can prove the runner reads it rather
+ * than a constant.
+ * @param {Map<string, object>} [registry]
+ */
+export function corpusCounts(registry = FIXTURE_REGISTRY) {
+  const all = [...registry.values()];
+  const attacks = all.filter(f => f.kind === 'attack');
+  return Object.freeze({
+    attacks: attacks.length,
+    executableAttacks: attacks.filter(f => f.exec === 'sandbox').length,
+    modelOnlyAttacks: attacks.filter(f => f.exec === 'model-only').length,
+    legit: all.filter(f => f.kind === 'legit').length,
+    controls: all.filter(f => f.kind === 'control').length,
+    selftests: all.filter(f => f.kind === 'selftest').length,
+  });
+}
+
 /** Fields that define a fixture's executable identity; anything else is prose. */
 const IDENTITY_FIELDS = ['id', 'kind', 'klass', 'evasion', 'command', 'files', 'exec', 'goal', 'done', 'pairs', 'expect'];
 

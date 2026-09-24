@@ -8,7 +8,10 @@
  * Reads an Action Guard log and, per policy, reports the HYPOTHETICAL tier match
  * (would this policy's signal set match the reconstructable signals) SEPARATELY
  * from the ACTUAL outcome the guard recorded (auto_denied / denied_no_prompt_
- * surface / warned / retry_granted / other). The two are never conflated:
+ * surface / warned / failure_allowed / retry_granted / other). The two are
+ * never conflated. `failure_allowed` (the guard failed OPEN and the call was
+ * audited through) is its own bucket, `guardFailedAllowed`, never folded into
+ * "warned only" (#570 item 4):
  *
  *   - "actually stopped"   = events whose FINAL enforcement outcome stopped the
  *                            call (auto_denied or denied_no_prompt_surface, and
@@ -600,7 +603,11 @@ export function analyse(events, parse) {
 
   // ACTUAL outcome accounting (finding 4) — what the guard truly did, read
   // from the lifecycle finals (M2), never from row position.
-  const actual = { actuallyStopped: 0, stopUnconfirmed: 0, warnedOnly: 0, retryGranted: 0, retryDeniedOrFailed: 0, retryUnresolved: 0, other: 0 };
+  // `failure_allowed` (#570 item 4) is the guard FAILING OPEN — the evaluator
+  // could not run and the call was audited through. It stopped nothing, like a
+  // warning, but it is not advisory-by-design; it is counted in its own bucket
+  // so guard failures are never read as "warned".
+  const actual = { actuallyStopped: 0, stopUnconfirmed: 0, warnedOnly: 0, guardFailedAllowed: 0, retryGranted: 0, retryDeniedOrFailed: 0, retryUnresolved: 0, other: 0 };
   const finalEnfDist = counter();
   for (const e of events) {
     bump(finalEnfDist, e.finalEnfOutcome);
@@ -610,7 +617,8 @@ export function analyse(events, parse) {
     else if (retry === 'granted') actual.retryGranted++;
     else if (retry === 'denied' || retry === 'failed' || retry === 'revoked') actual.retryDeniedOrFailed++;
     else if (retry === 'unknown') actual.retryUnresolved++;
-    else if (enf === 'warned' || enf === 'failure_allowed') actual.warnedOnly++;
+    else if (enf === 'failure_allowed') actual.guardFailedAllowed++;
+    else if (enf === 'warned') actual.warnedOnly++;
     else actual.other++;
   }
 
@@ -807,6 +815,7 @@ export function projectPublic(s) {
     },
     actual: {
       actuallyStopped: num(s.actual.actuallyStopped), stopUnconfirmed: num(s.actual.stopUnconfirmed), warnedOnly: num(s.actual.warnedOnly),
+      guardFailedAllowed: num(s.actual.guardFailedAllowed),
       retryGranted: num(s.actual.retryGranted), retryDeniedOrFailed: num(s.actual.retryDeniedOrFailed),
       retryUnresolved: num(s.actual.retryUnresolved), other: num(s.actual.other),
       finalEnforcementOutcome: projectDist(s.actual.finalEnforcementOutcome, outcomeOrLifecycle),
@@ -906,6 +915,7 @@ export function renderMarkdown(s) {
   out.push(`| actually stopped | ${s.actual.actuallyStopped} | a validated enforcement DECISION of auto_denied / denied_no_prompt_surface, every row of the event validated, AND effective retry state neither granted nor unknown |`);
   out.push(`| stop unconfirmed | ${s.actual.stopUnconfirmed} | a stop decision exists but the event also carries a malformed or contradictory row (e.g. an unvalidated retry row): not accepted as a grant, not counted as stopped |`);
   out.push(`| warned only | ${s.actual.warnedOnly} | advisory; NO permission decision emitted — did not stop the call |`);
+  out.push(`| guard failed, allowed | ${s.actual.guardFailedAllowed} | failure_allowed: the guard could not evaluate and FAILED OPEN; the call was audited through. Not advisory-by-design — a guard failure, reported separately from warnings |`);
   out.push(`| retry granted | ${s.actual.retryGranted} | effective retry state is a scoped one-shot grant; NOT proof of execution |`);
   out.push(`| retry denied / grant failed | ${s.actual.retryDeniedOrFailed} | effective retry state denied, revoked, or failed with no grant ever seen |`);
   out.push(`| retry unresolved | ${s.actual.retryUnresolved} | a grant was seen, then a grant_failed: a failed re-issue, NOT a revocation — the stop is not restored |`);
