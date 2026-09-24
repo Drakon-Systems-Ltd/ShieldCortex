@@ -23,22 +23,29 @@ This code runs INSIDE Hermes, so it asks Hermes. `_hermes_root_scan` imports
 moment earlier. There is no second implementation of the discovery rules to
 drift out of parity with — round 1 had one, and an independent review of the
 sibling Ekho fix found six shapes where a hand-rolled line reader and Hermes
-disagree (`name: x # comment`, a manifest with no `name:`, quoted names, a
-portable `plugin.json`, a `plugin.yaml` DIRECTORY beside a valid `plugin.yml`,
-and broken YAML under a valid `name:` line).
+disagree.
+
+Importing `hermes_cli` is not free of side effects (its `__init__` can
+reconfigure the standard streams, and `config` can evict stale modules), but
+inside the gateway it is already imported. What this check never does is run
+plugin registration or install anything: it calls the read-only scanning
+functions and nothing else.
 
 `_fallback_root_scan` is what runs if that import ever fails — a stripped
-environment, a partially installed Hermes. It is conservative: a manifest whose
-shape it does not model is reported `unknown` rather than guessed, and anything
-it produces is flagged `approximate` so the error line says so.
+environment, a partially installed Hermes. Round 3 made it deliberately narrow:
+it only ever answers about a manifest it fully understands, and a manifest it
+does not is `unknown`, which costs its whole root a verdict. See
+`_understand_manifest`. The real reason the fallback was reached is kept and
+printed, rather than flattened to "hermes_cli not importable".
 
 Stdlib only, and every entry point swallows its own errors: a start-up
 diagnostic must never be able to stop the gate from registering.
 """
-import json
+import contextlib
 import logging
 import os
 import re
+import threading
 
 #: The manifest key this plugin declares — the thing that can collide.
 PLUGIN_NAME = "shieldcortex"
@@ -49,11 +56,13 @@ PLUGIN_NAME = "shieldcortex"
 #: "not ours" — Hermes would have read it.
 MANIFEST_BYTE_CAP = 64 * 1024
 
-#: `hermes_cli.agent_plugins.PLUGIN_SCHEMA_V1`.
-PLUGIN_SCHEMA_V1 = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
-
-#: `hermes_cli.agent_plugins._PLUGIN_NAME_RE`, verbatim.
-_PORTABLE_NAME_RE = re.compile(r"^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+#: Past this many entries in a `plugins/` root, the START-UP check declines
+#: (#569 r3). Whichever half answers, the cost is a manifest read per child, and
+#: Hermes' own discovery also recurses into category dirs and reads each
+#: manifest whole. That is nothing for the tens of entries a real plugins root
+#: holds, and not something to do synchronously inside `register()` for
+#: thousands. `shieldcortex doctor` has no such cap: there the scan IS the work.
+MAX_STARTUP_ROOT_ENTRIES = 256
 
 #: `hermes_cli.plugins_discovery._FOREIGN_HARNESS_MANIFEST_DIRS`.
 _FOREIGN_HARNESS_MANIFEST_DIRS = frozenset({
@@ -62,255 +71,321 @@ _FOREIGN_HARNESS_MANIFEST_DIRS = frozenset({
 
 _MANIFEST_NAMES = ("plugin.yaml", "plugin.yml")
 
+log = logging.getLogger("shieldcortex.hermes")
+
 
 # ── Primary: ask Hermes ───────────────────────────────────────────────────
 
-def _hermes_root_scan(root):
-    """`(copies, winner)` from Hermes' own discovery, or None when unavailable.
+#: The loggers Hermes' discovery emits on. Suppression is scoped to THESE, for
+#: the duration of our scan, on OUR thread — never the root logger (#569 r3).
+#: A gateway logging from another thread through the same logger is not ours to
+#: silence, and an ancestor's filters never see a child's records, so the
+#: filter goes on each emitting logger itself.
+_DISCOVERY_LOGGERS = (
+    "hermes_cli.plugins",
+    "hermes_cli.plugins_discovery",
+    "hermes_cli.plugins_manifest",
+    "hermes_cli.agent_plugins",
+)
 
-    `copies` are the directories Hermes keys `shieldcortex`, in discovery order;
-    `winner` is the one it loads. The discovery logger is silenced for the call:
-    a diagnostic pass must not put warnings in the gateway log about manifests
-    the loader has already complained about.
+#: `record.module` for the records this scan causes.
+_DISCOVERY_MODULES = frozenset({
+    "plugins", "plugins_discovery", "plugins_manifest", "agent_plugins",
+})
+
+
+class _ScanQuietFilter(logging.Filter):
+    """Drop the records OUR scan provokes; pass everything else through.
+
+    `scan_directory` warns about every unreadable directory and unparseable
+    manifest it meets. That is useful to the gateway and pure noise from a
+    diagnostic pass whose whole subject is those directories — the loader has
+    already said it once. A filter returning False stops the record before
+    `callHandlers`, so it does not propagate either, which is exactly why this
+    has to be narrow: same logger, different thread, still gets through.
+    """
+
+    def __init__(self):
+        logging.Filter.__init__(self)
+        self.thread = threading.get_ident()
+
+    def filter(self, record):
+        if getattr(record, "module", None) not in _DISCOVERY_MODULES:
+            return True
+        if getattr(record, "thread", None) not in (None, self.thread):
+            return True
+        return False
+
+
+def _discovery_logger_names(modules):
+    """Every logger to filter: the documented names, whatever `logger` the
+    imported discovery modules actually hold, and any existing children."""
+    names = set(_DISCOVERY_LOGGERS)
+    for module in modules or ():
+        found = getattr(module, "logger", None)
+        if isinstance(found, logging.Logger) and found.name:
+            names.add(found.name)
+    for existing in list(logging.root.manager.loggerDict):
+        if any(existing.startswith(name + ".") for name in tuple(names)):
+            names.add(existing)
+    # Never the root logger: it carries everything this process logs.
+    return sorted(name for name in names if name)
+
+
+@contextlib.contextmanager
+def _quiet_discovery_logging(modules=()):
+    """Install `_ScanQuietFilter` on the discovery loggers for this block."""
+    installed = []
+    scan_filter = _ScanQuietFilter()
+    try:
+        for name in _discovery_logger_names(modules):
+            logger = logging.getLogger(name)
+            logger.addFilter(scan_filter)
+            installed.append(logger)
+        yield
+    finally:
+        for logger in installed:
+            try:
+                logger.removeFilter(scan_filter)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+
+def _hermes_root_scan(root):
+    """`(copies, winner, reason)` from Hermes' own discovery.
+
+    `copies is None` means Hermes could not answer and `reason` says why, in
+    the words the operator needs: the import failed, or discovery itself
+    raised. Round 2 flattened both to "hermes_cli not importable", which is
+    wrong for every failure after a successful import (#569 r3).
     """
     try:
         from pathlib import Path
 
+        from hermes_cli import plugins_discovery as _discovery
+        from hermes_cli import plugins_manifest as _manifest
         from hermes_cli.plugins_discovery import resolve_manifest_winners, scan_directory
         from hermes_cli.plugins_manifest import manifest_key
-    except Exception:
-        return None
-    logger = logging.getLogger("hermes_cli.plugins")
-    was_disabled = logger.disabled
+    except Exception as exc:
+        return None, None, "hermes_cli is not importable (%s: %s)" % (type(exc).__name__, exc)
     try:
-        logger.disabled = True
-        manifests = scan_directory(Path(root), "user")
-        copies = [str(m.path) for m in manifests if manifest_key(m) == PLUGIN_NAME]
-        winner = resolve_manifest_winners(manifests).get(PLUGIN_NAME)
-    except Exception:
-        return None
-    finally:
-        logger.disabled = was_disabled
-    return copies, (str(winner.path) if winner is not None else None)
+        with _quiet_discovery_logging((_discovery, _manifest)):
+            manifests = scan_directory(Path(root), "user")
+            copies = [str(m.path) for m in manifests if manifest_key(m) == PLUGIN_NAME]
+            winner = resolve_manifest_winners(manifests).get(PLUGIN_NAME)
+    except Exception as exc:
+        return None, None, "hermes_cli discovery raised %s: %s" % (type(exc).__name__, exc)
+    return copies, (str(winner.path) if winner is not None else None), None
 
 
 # ── Fallback: the conservative reader ─────────────────────────────────────
+#
+# Round 2 modelled as much of YAML as a line reader can and guessed at the
+# rest. Review of the sibling Ekho change showed the guesses are wrong in both
+# directions, and both are a start-up diagnostic lying: `name: >-` with an
+# indented `shieldcortex` under it made round 2 report a clean install while
+# Hermes was loading that backup, and `description: backup: before upgrade`
+# under a valid `name:` line made it call a backup LOADED that Hermes rejects.
+#
+# So the fallback no longer tries to be a YAML parser. A manifest is UNDERSTOOD
+# only when every non-blank, non-comment line is either a column-0 `key: value`
+# whose value is a plain or quoted single-line scalar with no unquoted `: ` in
+# it, or an indented continuation of a key other than `name`. Everything else —
+# block scalars, flow collections, anchors, aliases, tags, a null `name:`,
+# document markers, tabs — makes the directory `unknown`, and so does any
+# directory whose effective manifest is a portable `plugin.json`.
+
+#: A column-0 mapping key. YAML needs the space (or end of line) after the
+#: colon: `name:shieldcortex` is the plain scalar `name:shieldcortex`, and a
+#: scalar document is not a mapping, so Hermes rejects it outright.
+_KEY_LINE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.\-]*):(?:[ \t](.*))?$")
+
+#: A value opening with any of these is not a plain or quoted scalar: a block
+#: scalar, a flow collection, an anchor, an alias, a tag, or one of YAML's
+#: reserved indicators.
+_NOT_A_SCALAR = "|>[]{},&*!%@`?"
+
+#: C0 controls other than tab/LF/CR, plus DEL — outside YAML's printable set,
+#: so a manifest carrying one does not load at all.
+_NON_PRINTABLE = re.compile("[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]")
+
+_ABSENT = object()
+
 
 def _read_bounded(manifest_path):
-    """`(text, truncated)` for a manifest, or None when it cannot be read."""
+    """`(text, truncated)` for a manifest, or None when it cannot be read.
+
+    None is a DECIDED answer, not an unknown one: Hermes' `read_text` raises on
+    exactly the same inputs — a `plugin.yaml` that is a directory, a permission
+    denial, bytes that are not UTF-8 — and takes no manifest from that child.
+    """
     try:
         with open(manifest_path, "rb") as fh:
             raw = fh.read(MANIFEST_BYTE_CAP + 1)
     except (OSError, ValueError):
-        # A `plugin.yaml` DIRECTORY, a permission denial, an I/O error: Hermes'
-        # own `read_text` raises here too and takes no manifest from the child.
         return None
     if len(raw) > MANIFEST_BYTE_CAP:
+        # A cap landing mid-character must not be mistaken for bad bytes.
         return raw[:MANIFEST_BYTE_CAP].decode("utf-8", "replace"), True
-    return raw.decode("utf-8", "replace"), False
+    try:
+        return raw.decode("utf-8"), False
+    except UnicodeDecodeError:
+        return None
 
 
-def _key_colon(line):
-    """Index of the `:` that ends a block-mapping key, or -1."""
-    quote = ""
-    for index, ch in enumerate(line):
-        if quote:
-            if ch == quote:
-                quote = ""
+def _closing_quote(value, start):
+    """Index of the quote closing the one at `start`, or None if unterminated."""
+    quote = value[start]
+    index = start + 1
+    size = len(value)
+    while index < size:
+        char = value[index]
+        if quote == '"' and char == "\\":
+            index += 2
             continue
-        if ch in ("'", '"'):
-            quote = ch
-            continue
-        if ch == ":":
-            nxt = line[index + 1:index + 2]
-            if nxt in ("", " ", "\t"):
-                return index
-    return -1
-
-
-def _comment_start(text):
-    """Index of the ` #` that starts a trailing comment, or -1."""
-    for index, ch in enumerate(text):
-        if ch != "#":
-            continue
-        if index == 0 or text[index - 1] in (" ", "\t"):
+        if char == quote:
+            if quote == "'" and value[index + 1:index + 2] == "'":
+                index += 2
+                continue
             return index
-    return -1
+        index += 1
+    return None
 
 
-def _flow_delta(line):
-    """Net `[`/`{` minus `]`/`}`, ignoring quoted text and comments."""
-    depth = 0
-    quote = ""
-    for index, ch in enumerate(line):
-        if quote:
-            if ch == quote:
-                quote = ""
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            continue
-        if ch == "#" and (index == 0 or line[index - 1] in (" ", "\t")):
+def _strip_comment(value):
+    """`(payload, readable)` — one line's value with its comment removed.
+
+    YAML starts a comment only at a `#` that begins the value or follows
+    whitespace, and never inside quotes: `name: shieldcortex # backup` is
+    `shieldcortex` and `name: a#b` is `a#b`. An unterminated quote is not YAML
+    this reader can read.
+    """
+    out = []
+    index = 0
+    size = len(value)
+    while index < size:
+        char = value[index]
+        if char == "#" and (index == 0 or value[index - 1] in " \t"):
             break
-        if ch in ("[", "{"):
-            depth += 1
-        elif ch in ("]", "}"):
-            depth -= 1
-    return depth
+        if char in "\"'":
+            closing = _closing_quote(value, index)
+            if closing is None:
+                return "", False
+            out.append(value[index:closing + 1])
+            index = closing + 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out).strip(), True
 
 
-def _plain_scalar(raw):
-    """`(value, modelled)` for a YAML scalar written on one line.
+def _unquote(payload):
+    """The string a quoted YAML scalar stands for; a plain one passes through."""
+    if len(payload) >= 2 and payload[0] == payload[-1] == '"':
+        return payload[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    if len(payload) >= 2 and payload[0] == payload[-1] == "'":
+        return payload[1:-1].replace("''", "'")
+    return payload
 
-    Quotes are honoured, a ` #` comment is stripped, whitespace trimmed. Shapes
-    that put the value somewhere other than this line — an empty value, a block
-    scalar, an anchor, an alias, a tag — come back unmodelled, because guessing
-    at them is exactly how round 1 disagreed with Hermes.
+
+def _scalar(value):
+    """`(payload, understood)` for one line's value.
+
+    `payload is None` with `understood` means the line carries no value and
+    opens a nested block — fine for any key but `name`, whose value would then
+    be somewhere this reader cannot see.
     """
-    text = raw.strip()
-    if not text or text.startswith("#"):
+    payload, readable = _strip_comment(value)
+    if not readable:
         return None, False
-    lead = text[0]
-    # A collection is not a string, so it can never equal our key. That is a
-    # decision, not a gap.
-    if lead in ("[", "{"):
+    if not payload:
         return None, True
-    if lead in ("|", ">", "&", "*", "!"):
+    if payload[0] in "\"'":
+        closing = _closing_quote(payload, 0)
+        if closing is None or closing != len(payload) - 1:
+            return None, False  # unterminated, or something after the quote
+        return payload, True
+    if payload[0] in _NOT_A_SCALAR:
         return None, False
-    if lead in ("'", '"'):
-        close = text.find(lead, 1)
-        if close == -1:
-            return None, False
-        inner = text[1:close]
-        # Escapes (`''` in single quotes, `\"` in double) are not unescaped here.
-        if lead == '"' and "\\" in inner:
-            return None, False
-        if lead == "'" and text[close + 1:close + 2] == "'":
-            return None, False
-        after = text[close + 1:].strip()
-        if after and not after.startswith("#"):
-            return None, False
-        return inner, True
-    cut = _comment_start(text)
-    head = (text if cut == -1 else text[:cut]).strip()
-    return (head, True) if head else (None, False)
+    if any(char in payload for char in "[]{}\"'"):
+        return None, False  # a flow collection, or a quote mid-scalar
+    if ": " in payload or payload.endswith(":"):
+        return None, False  # `description: backup: x` is not YAML at all
+    return payload, True
 
 
-def read_yaml_manifest_name(text):
-    """`(name, modelled)` for a manifest body.
+def _understand_manifest(text):
+    """`(declared name or None, understood)` for a manifest body.
 
-    Models a flat block mapping of `key: value` lines, which is every real
-    `plugin.yaml`. A sequence document, a second document, tab indentation, an
-    unterminated flow collection, a top-level line that is not a key: all report
-    unmodelled, so the caller says "unknown" instead of accepting a manifest
-    Hermes rejects.
+    See the block comment above for the rule. `understood is False` is the
+    whole point: it means this reader does not know what `yaml.safe_load` would
+    make of the document, so the caller must say "unknown" rather than name a
+    winner or call a root clean.
     """
-    name = None
-    saw_key = False
-    saw_content = False
-    doc_started = False
-    ended = False
-    flow = 0
-
-    for line in text.splitlines():
-        if flow > 0:
-            flow += _flow_delta(line)
-            if flow < 0:
-                return None, False
-            continue
-        if not line.strip():
-            continue
-        # A tab in the indentation is invalid YAML; libyaml rejects the whole
-        # document, so Hermes takes no manifest from it.
-        if re.match(r"^ *\t", line):
-            return None, False
-        if ended:
-            return None, False
-        if line[:1].isspace():
-            flow += _flow_delta(line)
-            if flow < 0:
-                return None, False
-            continue
-        if line.startswith("#") or line.startswith("%"):
-            continue
-        if line == "---" or line.startswith("--- "):
-            if doc_started or saw_content:
-                return None, False
-            doc_started = True
-            continue
-        if line == "..." or line.startswith("... "):
-            ended = True
-            continue
-        if line == "-" or line.startswith("- "):
-            # A sequence item before any key means the document is a list, and
-            # `parse_manifest_file` rejects a non-mapping top level outright.
-            if not saw_key:
-                return None, False
-            saw_content = True
-            flow += _flow_delta(line)
-            if flow < 0:
-                return None, False
-            continue
-        colon = _key_colon(line)
-        if colon == -1:
-            return None, False
-        raw_key = line[:colon].strip()
-        if not raw_key:
-            return None, False
-        if len(raw_key) > 1 and raw_key[0] == raw_key[-1] and raw_key[0] in ("'", '"'):
-            key = raw_key[1:-1]
-        else:
-            key = raw_key
-        saw_key = True
-        saw_content = True
-        rest = line[colon + 1:]
-        if key == "name" and name is None:
-            value, modelled = _plain_scalar(rest)
-            if not modelled:
-                return None, False
-            name = value
-        stripped = rest.strip()
-        if stripped.startswith("[") or stripped.startswith("{"):
-            flow += _flow_delta(rest)
-            if flow < 0:
-                return None, False
-    if flow != 0:
+    if _NON_PRINTABLE.search(text):
         return None, False
-    return name, True
+    name = _ABSENT
+    key = None
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        # A tab may never indent YAML, and this reader reads none inside a
+        # value either — both ways round, the answer is "ask Hermes".
+        if "\t" in raw:
+            return None, False
+        body = raw.lstrip(" ")
+        indent = len(raw) - len(body)
+
+        if indent == 0:
+            head = body.rstrip()
+            # A document marker means there may be a second document, which
+            # makes `safe_load` raise; this reader is not going to decide that.
+            if head in ("---", "...") or body.startswith(("--- ", "... ")):
+                return None, False
+            match = _KEY_LINE.match(body)
+            if match is None:
+                return None, False  # the top level is not a plain mapping
+            key = match.group(1)
+            payload, understood = _scalar(match.group(2) or "")
+            if not understood:
+                return None, False
+            if key == "name":
+                if payload is None:
+                    return None, False  # the value is on lines we cannot read
+                # Duplicate keys are legal to PyYAML and the LAST wins, so this
+                # deliberately overwrites rather than keeping the first.
+                name = _unquote(payload)
+            continue
+
+        # An indented line continues the last column-0 key. A continuation of
+        # `name` means its value is not the single-line scalar we just read.
+        if key is None or key == "name":
+            return None, False
+        item = body
+        while item.startswith("- "):
+            item = item[2:].lstrip(" ")
+        if not item or item == "-":
+            continue
+        match = _KEY_LINE.match(item)
+        value = (match.group(2) or "") if match else item
+        if not _scalar(value)[1]:
+            return None, False
+
+    return (None if name is _ABSENT else name), True
 
 
 def read_manifest_name(manifest_path):
     """The top-level `name:` a manifest declares, or None.
 
-    None covers both "there is no such key" and "this reader does not model the
-    document". Callers that must tell those apart use `classify_plugin_dir`.
+    None covers both "there is no such key" and "this reader does not
+    understand the document". Callers that must tell those apart use
+    `classify_plugin_dir`.
     """
     read = _read_bounded(manifest_path)
     if read is None or read[1]:
         return None
-    name, modelled = read_yaml_manifest_name(read[0])
-    return name if modelled else None
-
-
-def read_portable_manifest_name(manifest_path):
-    """The `name` a portable `plugin.json` declares, after Hermes' v1 gate."""
-    read = _read_bounded(manifest_path)
-    if read is None or read[1]:
-        return None
-    try:
-        data = json.loads(read[0])
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    if data.get("$schema") != PLUGIN_SCHEMA_V1:
-        return None
-    name = data.get("name")
-    if not isinstance(name, str) or not 1 <= len(name) <= 64:
-        return None
-    if _PORTABLE_NAME_RE.fullmatch(name) is None:
-        return None
-    return name
+    name, understood = _understand_manifest(read[0])
+    return name if understood else None
 
 
 def select_manifest(directory):
@@ -330,33 +405,59 @@ def select_manifest(directory):
     return None
 
 
+def could_be_ours(dir_name, text):
+    """Whether a directory could possibly be keyed `shieldcortex`.
+
+    `unknown` costs its whole root a verdict, so it is reserved for manifests
+    that could still take OUR key. For Hermes to key a directory `shieldcortex`
+    the manifest must produce that exact string, and there are only three ways
+    that happens: the directory is named `shieldcortex` (the missing-name
+    fallback), the literal bytes are in the file, or a double-quoted scalar
+    spells it in escapes — a folded block scalar joins its lines with
+    whitespace and cannot spell one word, and an alias resolves to an anchor
+    whose text is in the same file. Without this gate, one neighbouring
+    third-party manifest with a `description: >` in it would put a permanent
+    "cannot determine" on a host where nothing is wrong.
+    """
+    return dir_name == PLUGIN_NAME or PLUGIN_NAME in text or "\\" in text
+
+
 def classify_plugin_dir(directory, dir_name):
     """One of `copy`, `other`, `category`, `unknown` for a child directory."""
     selected = select_manifest(directory)
     if selected is None:
         return "category"
     kind, manifest_path = selected
-    if kind == "portable":
-        return "copy" if read_portable_manifest_name(manifest_path) == PLUGIN_NAME else "other"
     read = _read_bounded(manifest_path)
+    # Unreadable is DECIDED, not unknown: Hermes' own read raises the same way
+    # and it takes no manifest from the child.
     if read is None:
         return "other"
     text, truncated = read
-    # `unknown` is reserved for manifests that could still be ours; a
-    # neighbour's broken manifest that never mentions us cannot take our key
-    # however it parses.
-    plausible = dir_name == PLUGIN_NAME or PLUGIN_NAME in text
+    plausible = could_be_ours(dir_name, text)
+    if kind == "portable":
+        # `agent_plugins._validate_manifest` demands a regular file resolving
+        # INSIDE the plugin root, known author fields and object extension
+        # namespaces. Round 2 mirrored a fraction of that and called a backup
+        # with a symlinked `plugin.json` the winner where Hermes rejects it, so
+        # the fallback now declines to judge `plugin.json` at all (#569 r3).
+        return "unknown" if plausible else "other"
     if truncated:
         return "unknown" if plausible else "other"
-    name, modelled = read_yaml_manifest_name(text)
-    if not modelled:
+    name, understood = _understand_manifest(text)
+    if not understood:
         return "unknown" if plausible else "other"
     # `data.get("name", plugin_dir.name)` — no name means the directory name.
     return "copy" if (name if name is not None else dir_name) == PLUGIN_NAME else "other"
 
 
 def _fallback_root_scan(root):
-    """`(copies, winner, unknown)` from the conservative reader."""
+    """`(copies, winner, unknown)` from the conservative reader.
+
+    One unknown costs the root its winner (#569 r3): the copy Hermes loads may
+    well be a directory this reader would not read, and it may sort after every
+    copy it did read.
+    """
     copies = []
     unknown = []
     try:
@@ -377,16 +478,47 @@ def _fallback_root_scan(root):
             unknown.append(directory)
         elif verdict == "copy":
             copies.append(directory)
-    return copies, (copies[-1] if copies else None), unknown
+    winner = copies[-1] if copies and not unknown else None
+    return copies, winner, unknown
 
 
 def scan_plugin_root(root):
-    """`(copies, winner, unknown, approximate)` for one `plugins/` root."""
-    primary = _hermes_root_scan(root)
-    if primary is not None:
-        return primary[0], primary[1], [], False
+    """What is known about one `plugins/` root.
+
+    A dict with `copies`, `winner`, `unknown`, `approximate` and `reason` —
+    `reason` being why Hermes could not be asked, kept verbatim so the log line
+    can print it.
+    """
+    copies, winner, reason = _hermes_root_scan(root)
+    if copies is not None:
+        return {"copies": copies, "winner": winner, "unknown": [],
+                "approximate": False, "reason": None}
     copies, winner, unknown = _fallback_root_scan(root)
-    return copies, winner, unknown, True
+    return {"copies": copies, "winner": winner, "unknown": unknown,
+            "approximate": True, "reason": reason}
+
+
+def _root_is_too_big(root):
+    """True when this root has more entries than the START-UP check will read.
+
+    See `MAX_STARTUP_ROOT_ENTRIES`. Logged at DEBUG, because a skipped
+    diagnostic is a fact about this run and not a problem with the host.
+    """
+    counted = 0
+    try:
+        with os.scandir(root) as entries:
+            for _entry in entries:
+                counted += 1
+                if counted > MAX_STARTUP_ROOT_ENTRIES:
+                    log.debug(
+                        "[shieldcortex] plugin copy check skipped at start-up: %s holds more "
+                        "than %d entries; run `shieldcortex doctor` for the full scan",
+                        root, MAX_STARTUP_ROOT_ENTRIES,
+                    )
+                    return True
+    except OSError:
+        return False  # unreadable: let the scan report whatever it can
+    return False
 
 
 def _same_path(left, right):
@@ -398,7 +530,9 @@ def detect_shadow(package_dir):
     """Describe this copy's discovery situation, or None when it is clean.
 
     Clean means: the package directory is named `shieldcortex` (what the
-    installer writes) and no sibling directory takes the same manifest key.
+    installer writes), no sibling directory takes the same manifest key, and
+    nothing in the root was left undetermined. An undetermined root is NOT
+    clean — round 2 appended a note and reported clean anyway (#569 r3).
 
     `package_dir` must be the path DISCOVERY used, not a resolved one. When
     Hermes loads `plugins/shieldcortex.bak-x -> /srv/sc-old`, the discovery path
@@ -408,40 +542,65 @@ def detect_shadow(package_dir):
 
     The returned dict has `loaded` (this copy's path), `expected` (the canonical
     path beside it), `misnamed`, `others` (copies Hermes passed over),
-    `approximate` (true when Hermes' own discovery could not be reached) and
-    `unknown` (directories the fallback would not classify).
+    `approximate` (true when Hermes' own discovery could not be reached),
+    `reason` (why, verbatim), `unknown` (directories the fallback would not
+    classify) and `undetermined`.
     """
     try:
         loaded = os.path.abspath(package_dir)
         own_name = os.path.basename(loaded)
         parent = os.path.dirname(loaded)
         expected = os.path.join(parent, PLUGIN_NAME)
-
-        copies, _winner, unknown, approximate = scan_plugin_root(parent)
-        others = sorted(c for c in copies if not _same_path(c, loaded))
-
         misnamed = own_name != PLUGIN_NAME
-        if not misnamed and not others:
-            return None
-        return {
+
+        report = {
             "loaded": loaded,
             "expected": expected,
             "misnamed": misnamed,
-            "others": others,
-            "approximate": approximate,
-            "unknown": sorted(unknown),
+            "others": [],
+            "approximate": False,
+            "reason": None,
+            "unknown": [],
+            "undetermined": False,
         }
+
+        if _root_is_too_big(parent):
+            # The one thing still knowable for nothing is our own directory
+            # name, and it is the strongest signal there is: whichever copy is
+            # executing won discovery, so a non-canonical name IS the shadow.
+            return report if misnamed else None
+
+        found = scan_plugin_root(parent)
+        others = sorted(c for c in found["copies"] if not _same_path(c, loaded))
+        unknown = sorted(found["unknown"])
+        report["others"] = others
+        report["unknown"] = unknown
+        report["undetermined"] = bool(unknown)
+        report["approximate"] = found["approximate"]
+        report["reason"] = found["reason"]
+
+        if not misnamed and not others and not unknown:
+            return None
+        return report
     except Exception:  # pragma: no cover - defensive
         return None
 
 
 def shadow_error_line(report):
-    """One ERROR line for a `detect_shadow` report, or None when clean."""
+    """One log line for a `detect_shadow` report, or None when clean."""
     if not report:
         return None
     try:
-        parts = ["[shieldcortex] plugin copy conflict: Hermes loaded this plugin from %s"
-                 % report["loaded"]]
+        definite = bool(report.get("misnamed")) or bool(report.get("others"))
+        if definite:
+            parts = ["[shieldcortex] plugin copy conflict: Hermes loaded this plugin from %s"
+                     % report["loaded"]]
+        else:
+            # Nothing is wrong that we can point at — we simply could not work
+            # out what Hermes loads, and saying "clean" would be the guess this
+            # round exists to stop making.
+            parts = ["[shieldcortex] could not determine which plugin copy Hermes loads; this "
+                     "one was loaded from %s" % report["loaded"]]
         if report.get("misnamed"):
             parts.append("which is not the installed %s" % report["expected"])
         others = report.get("others") or []
@@ -450,11 +609,11 @@ def shadow_error_line(report):
                          % (PLUGIN_NAME, ", ".join(others)))
         unknown = report.get("unknown") or []
         if unknown:
-            parts.append("and these could not be classified without Hermes' own discovery: %s"
-                         % ", ".join(unknown))
+            parts.append("and these hold a manifest this reader does not model, so whether "
+                         "Hermes keys them `%s` is unknown: %s" % (PLUGIN_NAME, ", ".join(unknown)))
         if report.get("approximate"):
-            parts.append("(approximate: hermes_cli discovery was not importable, so this is a "
-                         "conservative read)")
+            parts.append("(approximate: Hermes' own discovery was not reachable — %s)"
+                         % (report.get("reason") or "reason unrecorded"))
         parts.append(
             "Hermes keys plugins on the manifest name and the last directory in sorted order "
             "wins silently, so an upgrade can leave old code running. Run `shieldcortex doctor "

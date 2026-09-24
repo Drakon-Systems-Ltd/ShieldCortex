@@ -6,34 +6,55 @@
  * asks `hermes_cli.plugins_discovery`. This module is what runs when there is
  * no interpreter to ask, and everything it returns is labelled approximate.
  *
- * It mirrors `plugins_discovery.scan_directory` and
- * `plugins_manifest.parse_manifest_file` as closely as a non-YAML reader can:
+ * ## It is not a YAML parser, and round 3 stopped it pretending to be one
  *
- *   - `plugin.yaml` then `plugin.yml`, chosen on EXISTENCE, not on "is a file".
- *     Hermes uses `Path.exists()`; a `plugin.yaml` DIRECTORY beside a valid
- *     `plugin.yml` therefore wins the selection and then fails to parse, and
- *     Hermes takes no manifest from that directory at all. Falling through to
- *     the `.yml` would claim a copy Hermes never loads.
- *   - a portable `plugin.json` only when neither YAML spelling exists, keyed on
- *     its `name` after the same v1 gate Hermes applies (`$schema`, name shape).
- *   - a manifest with no top-level `name:` keys on the DIRECTORY name
- *     (`data.get("name", plugin_dir.name)`), so `shieldcortex/plugin.yaml`
- *     holding only `version: 1` is still our plugin.
- *   - an unparseable manifest is rejected by Hermes outright, so a `name:` line
- *     followed by broken YAML is NOT a copy.
+ * Round 2 modelled as much of YAML as a line reader can and guessed at the
+ * rest. Independent review of the sibling Ekho change found that the guesses
+ * are wrong in both directions, and both directions are a health check lying:
  *
- * The last rule is the one a line reader cannot decide, so it does not pretend
- * to. When the text carries a shape this reader does not model — a tab in the
- * indentation, an unterminated flow collection or quote, a top-level line that
- * is not a `key:`, a `name:` whose value is not a plain scalar — the verdict is
- * `unknown`, and the caller says so instead of guessing.
+ *   - `name: >-` with an indented `shieldcortex` under it. Hermes reads the
+ *     block scalar, gets `shieldcortex`, and loads that backup. Round 2 saw a
+ *     shape it did not model, called the name ABSENT, substituted the directory
+ *     name, and reported a clean canonical install.
+ *   - `name: shieldcortex` followed by `description: backup: before upgrade`.
+ *     That is not valid YAML and Hermes drops the manifest. Round 2 only ever
+ *     inspected the value of the `name:` line, so it accepted the rest of the
+ *     document sight unseen and labelled the backup LOADED.
  *
- * `unknown` is reserved for manifests that could still be ours: the text
- * mentions `shieldcortex`, or the directory is named `shieldcortex` (which is
- * what the missing-name fallback would key it as). A neighbour's broken
- * manifest that never mentions us cannot take our key however it parses, so it
- * is simply not a copy — otherwise every host with one messy third-party
- * plugin would get a warning about ours.
+ * So the rule is now the narrow one, and everything outside it is `unknown`:
+ *
+ *   **A manifest is UNDERSTOOD only when every non-blank, non-comment line is
+ *   either a column-0 `key: value` whose value is a plain or quoted
+ *   single-line scalar with no unquoted `: ` in it, or an indented
+ *   continuation of a key other than `name`.**
+ *
+ * Block scalars (`|`, `>`, `>-`), flow collections, anchors, aliases, tags, a
+ * `name:` with no value, document markers, tabs and an unquoted value carrying
+ * `: ` all make the directory unknown. So does ANY directory whose effective
+ * manifest is a portable `plugin.json` — `agent_plugins._validate_manifest`
+ * rejects a manifest that does not resolve inside the plugin root, unknown
+ * author fields and non-object extension namespaces, and mirroring that is
+ * another second implementation to get wrong.
+ *
+ * Selection still follows Hermes exactly, because selection is not a parse:
+ * `plugin.yaml` then `plugin.yml` on EXISTENCE (a `plugin.yaml` DIRECTORY is
+ * selected and then fails, and Hermes takes nothing from that child), then
+ * `plugin.json` only when neither YAML spelling is there. A manifest with no
+ * `name:` is keyed on the DIRECTORY (`data.get("name", plugin_dir.name)`).
+ *
+ * ## Why `unknown` is gated on "could this be ours"
+ *
+ * `unknown` costs its whole root a verdict, so it is reserved for manifests
+ * that could still take OUR key: the directory is named `shieldcortex` (what
+ * the missing-name fallback would key it as), or the text mentions
+ * `shieldcortex`, or the text carries a backslash. Those three are exhaustive.
+ * For Hermes to key a directory `shieldcortex` the manifest must produce that
+ * exact string, and the only way to write it without the literal bytes is a
+ * double-quoted escape — a folded block scalar joins its lines with whitespace
+ * and cannot spell one word, and an alias resolves to an anchor whose text is
+ * in the same file. Without the gate one neighbouring third-party manifest
+ * with a `description: >` in it would put a permanent "cannot determine" on a
+ * host where nothing is wrong.
  */
 
 import fs from 'fs';
@@ -49,12 +70,6 @@ export const HERMES_PLUGIN_NAME = 'shieldcortex';
  * cap is reported `unknown`, never "not ours" — Hermes would have read it.
  */
 export const MANIFEST_BYTE_CAP = 64 * 1024;
-
-/** Agent Plugins v1 schema id — `agent_plugins._validate_manifest` rejects anything else. */
-const PLUGIN_SCHEMA_V1 = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
-
-/** `agent_plugins._PLUGIN_NAME_RE`, verbatim. */
-const PORTABLE_NAME_RE = /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 
 /**
  * `plugins_discovery._FOREIGN_HARNESS_MANIFEST_DIRS` — per-harness manifest
@@ -72,29 +87,59 @@ export const FOREIGN_HARNESS_MANIFEST_DIRS: ReadonlySet<string> = new Set([
  * What one child directory resolves to.
  *
  *   `copy`     — Hermes keys it `shieldcortex`.
- *   `other`    — Hermes keys it something else (or takes no manifest from it).
+ *   `other`    — Hermes keys it something else, or takes no manifest from it.
  *   `category` — no manifest at all: a category dir, keyed `<cat>/<name>`,
  *                which can never collide with a flat name.
  *   `unknown`  — could be ours; this reader will not say.
  */
 export type ManifestVerdict = 'copy' | 'other' | 'category' | 'unknown';
 
-/** A plain YAML scalar read off a `key: value` line, or why it could not be. */
+/**
+ * A column-0 mapping key. YAML needs the space (or the end of the line) after
+ * the colon — `name:shieldcortex` is the plain scalar `name:shieldcortex`, and
+ * a scalar document is not a mapping, so Hermes rejects it outright.
+ */
+const KEY_LINE = /^([A-Za-z_][A-Za-z0-9_.-]*):(?:[ \t](.*))?$/;
+
+/**
+ * A value opening with any of these is not a plain or quoted scalar: a block
+ * scalar (`|`/`>`), a flow collection, an anchor, an alias, a tag, or one of
+ * YAML's reserved indicators. We do not read those, so the directory is
+ * unknown rather than guessed at.
+ */
+const NOT_A_SCALAR = '|>[]{},&*!%@`?';
+
+/** C0 controls other than tab/LF/CR, plus DEL — outside YAML's printable set. */
+const NON_PRINTABLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+
+/** The value read off one `key:` line, and whether the shape was understood. */
 interface ScalarRead {
-  value: string | null;
-  /** False when the shape is one this reader does not model. */
-  modelled: boolean;
+  /** Null when the line carries no value at all, which opens a nested block. */
+  payload: string | null;
+  understood: boolean;
 }
 
-/** The result of reading a manifest body. */
-interface YamlRead {
+/** What a manifest body declares, and whether the reader understood all of it. */
+export interface ManifestRead {
   /** The declared top-level `name:`, or null when there is no such key. */
   name: string | null;
-  /** False when the document carries a shape this reader does not model. */
-  modelled: boolean;
+  understood: boolean;
 }
 
-function readBounded(target: string): { text: string; truncated: boolean } | null {
+/** A bounded read of a manifest file. */
+interface BoundedRead {
+  text: string;
+  /** True when the file is larger than the cap and `text` is a prefix. */
+  truncated: boolean;
+  /**
+   * False when the bytes are not valid UTF-8. Hermes' `read_text(encoding=
+   * "utf-8")` RAISES on those, so the manifest is dropped — a decided answer,
+   * not an unknown one. Node would silently hand back U+FFFD instead.
+   */
+  decodable: boolean;
+}
+
+function readBounded(target: string): BoundedRead | null {
   let fd: number;
   try {
     fd = fs.openSync(target, 'r');
@@ -106,9 +151,14 @@ function readBounded(target: string): { text: string; truncated: boolean } | nul
     const buf = Buffer.alloc(MANIFEST_BYTE_CAP + 1);
     const read = fs.readSync(fd, buf, 0, buf.length, 0);
     if (read > MANIFEST_BYTE_CAP) {
-      return { text: buf.subarray(0, MANIFEST_BYTE_CAP).toString('utf8'), truncated: true };
+      const text = buf.subarray(0, MANIFEST_BYTE_CAP).toString('utf8');
+      // A cap that lands mid-character would fail the round trip below for a
+      // reason that says nothing about the file, so truncation is not judged.
+      return { text, truncated: true, decodable: true };
     }
-    return { text: buf.subarray(0, read).toString('utf8'), truncated: false };
+    const bytes = buf.subarray(0, read);
+    const text = bytes.toString('utf8');
+    return { text, truncated: false, decodable: Buffer.from(text, 'utf8').equals(bytes) };
   } catch {
     // EISDIR (a `plugin.yaml` directory), EACCES, EIO — Hermes' own read raises
     // here too and `parse_manifest_file` returns None.
@@ -123,206 +173,152 @@ function readBounded(target: string): { text: string; truncated: boolean } | nul
 }
 
 /**
- * The first `:` that ends a block-mapping key: followed by a space, a tab or
- * the end of the line, and not inside quotes. -1 when the line has none.
+ * The index of the quote closing the one at `start`, or -1 when the string
+ * runs off the end of the line. A backslash escape inside double quotes and
+ * `''` inside single quotes, exactly as YAML has it.
  */
-function keyColon(line: string): number {
-  let quote = '';
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (quote !== '') {
-      if (ch === quote) quote = '';
+function closingQuote(value: string, start: number): number {
+  const quote = value[start];
+  let index = start + 1;
+  while (index < value.length) {
+    const ch = value[index];
+    if (quote === '"' && ch === '\\') {
+      index += 2;
       continue;
     }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      continue;
+    if (ch === quote) {
+      if (quote === "'" && value[index + 1] === "'") {
+        index += 2;
+        continue;
+      }
+      return index;
     }
-    if (ch === ':') {
-      const next = line[i + 1];
-      if (next === undefined || next === ' ' || next === '\t') return i;
-    }
-  }
-  return -1;
-}
-
-/** Index of the ` #` that starts a trailing comment, or -1. */
-function commentStart(text: string): number {
-  for (let i = 0; i < text.length; i += 1) {
-    if (text[i] !== '#') continue;
-    if (i === 0) return 0;
-    const prev = text[i - 1];
-    if (prev === ' ' || prev === '\t') return i;
+    index += 1;
   }
   return -1;
 }
 
 /**
- * A plain YAML scalar value, the way `yaml.safe_load` would read it off a
- * single line: quotes honoured, a ` #` comment stripped, whitespace trimmed.
- * Shapes with the value somewhere other than this line — an empty value, a
- * block scalar, an anchor/alias/tag — come back unmodelled.
+ * One line's value with its trailing comment removed. A `#` only starts a
+ * comment at the start of the value or after whitespace, and never inside
+ * quotes — which is why `name: shieldcortex # backup` is `shieldcortex` and
+ * `name: a#b` is `a#b`. An unterminated quote is not YAML this reader can read.
  */
-function plainScalar(raw: string): ScalarRead {
-  const text = raw.trim();
-  // `name:` with nothing after it can still be a multi-line plain scalar on the
-  // following indented lines, so the value is genuinely unknown from here.
-  if (text === '') return { value: null, modelled: false };
-  if (text.startsWith('#')) return { value: null, modelled: false };
-  const lead = text[0];
-  // A collection is not a string, so it can never equal our key. That is a
-  // decision, not a gap.
-  if (lead === '[' || lead === '{') return { value: null, modelled: true };
-  // Block scalars, anchors, aliases and tags all put the value out of reach.
-  if (lead === '|' || lead === '>' || lead === '&' || lead === '*' || lead === '!') {
-    return { value: null, modelled: false };
+function stripComment(value: string): { payload: string; readable: boolean } {
+  let out = '';
+  let index = 0;
+  while (index < value.length) {
+    const ch = value[index];
+    if (ch === '#' && (index === 0 || value[index - 1] === ' ' || value[index - 1] === '\t')) break;
+    if (ch === '"' || ch === "'") {
+      const close = closingQuote(value, index);
+      if (close === -1) return { payload: '', readable: false };
+      out += value.slice(index, close + 1);
+      index = close + 1;
+      continue;
+    }
+    out += ch;
+    index += 1;
   }
-  if (lead === "'" || lead === '"') {
-    const close = text.indexOf(lead, 1);
-    if (close === -1) return { value: null, modelled: false };
-    // Escapes (`''` in single quotes, `\"` in double) are a shape this reader
-    // does not unescape; say so rather than return the raw bytes.
-    const inner = text.slice(1, close);
-    if (lead === '"' && inner.includes('\\')) return { value: null, modelled: false };
-    if (lead === "'" && text[close + 1] === "'") return { value: null, modelled: false };
-    const after = text.slice(close + 1).trim();
-    if (after !== '' && !after.startsWith('#')) return { value: null, modelled: false };
-    return { value: inner, modelled: true };
-  }
-  // Plain scalar: `#` only starts a comment when whitespace precedes it, which
-  // is exactly what `name: shieldcortex # backup` needs and what
-  // `name: a#b` must not trigger.
-  const cut = commentStart(text);
-  const head = (cut === -1 ? text : text.slice(0, cut)).trim();
-  return head === '' ? { value: null, modelled: false } : { value: head, modelled: true };
+  return { payload: out.trim(), readable: true };
 }
 
-/** Net `[`/`{` minus `]`/`}` on one line, ignoring quoted text and comments. */
-function flowDelta(line: string): number {
-  let depth = 0;
-  let quote = '';
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (quote !== '') {
-      if (ch === quote) quote = '';
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      continue;
-    }
-    if (ch === '#' && (i === 0 || line[i - 1] === ' ' || line[i - 1] === '\t')) break;
-    if (ch === '[' || ch === '{') depth += 1;
-    else if (ch === ']' || ch === '}') depth -= 1;
+/** The string a quoted YAML scalar stands for; a plain one passes through. */
+function unquote(payload: string): string {
+  if (payload.length >= 2 && payload[0] === '"' && payload[payload.length - 1] === '"') {
+    return payload.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
   }
-  return depth;
+  if (payload.length >= 2 && payload[0] === "'" && payload[payload.length - 1] === "'") {
+    return payload.slice(1, -1).replace(/''/g, "'");
+  }
+  return payload;
 }
 
 /**
- * Read a manifest body for its top-level `name:`, refusing to guess.
+ * The value on one `key:` line. `payload === null` with `understood` means the
+ * line carries no value and opens a nested block — fine for every key except
+ * `name`, whose value would then be somewhere this reader cannot see.
+ */
+function scalarValue(value: string): ScalarRead {
+  const { payload, readable } = stripComment(value);
+  if (!readable) return { payload: null, understood: false };
+  if (payload === '') return { payload: null, understood: true };
+  if (payload[0] === '"' || payload[0] === "'") {
+    const close = closingQuote(payload, 0);
+    // Anything after the closing quote is a shape we are not modelling.
+    if (close !== payload.length - 1) return { payload: null, understood: false };
+    return { payload, understood: true };
+  }
+  if (NOT_A_SCALAR.includes(payload[0])) return { payload: null, understood: false };
+  // A flow collection, or a quote starting mid-scalar.
+  if (/[[\]{}"']/.test(payload)) return { payload: null, understood: false };
+  // `description: backup: before upgrade` — not YAML, and Hermes drops it.
+  if (payload.includes(': ') || payload.endsWith(':')) return { payload: null, understood: false };
+  return { payload, understood: true };
+}
+
+/**
+ * Read a manifest body under the narrow rule at the top of this file.
  *
- * Deliberately narrow: this models a flat block mapping of `key: value` lines,
- * which is every real `plugin.yaml`. Anything else — a sequence document, a
- * second document, tab indentation, an unterminated flow collection, a
- * top-level line that is not a key — is reported unmodelled so the caller can
- * say "unknown" instead of accepting a manifest Hermes rejects.
+ * `understood: false` is the whole point: it means this reader does not know
+ * what `yaml.safe_load` would make of the document, so the caller must say
+ * "unknown" rather than name a winner or call a root clean.
  */
-export function readYamlManifestName(text: string): YamlRead {
-  const unmodelled: YamlRead = { name: null, modelled: false };
-  const lines = text.split(/\r?\n/);
+export function readYamlManifestName(text: string): ManifestRead {
+  const unknown: ManifestRead = { name: null, understood: false };
+  // YAML's printable set excludes the C0 controls other than tab/LF/CR, and
+  // DEL. A manifest carrying one does not load at all.
+  if (NON_PRINTABLE.test(text)) return unknown;
+
   let name: string | null = null;
-  let sawKey = false;
-  let sawContent = false;
-  let docStarted = false;
-  let ended = false;
-  // Depth of an open `[`/`{` collection that began on an earlier line.
-  let flow = 0;
+  let sawName = false;
+  let key: string | null = null;
 
-  for (const line of lines) {
-    if (flow > 0) {
-      flow += flowDelta(line);
-      if (flow < 0) return unmodelled;
-      continue;
-    }
-    if (line.trim() === '') continue;
-    // A tab anywhere in the indentation is invalid YAML; libyaml rejects the
-    // whole document, so Hermes takes no manifest from it.
-    if (/^ *\t/.test(line)) return unmodelled;
-    if (ended) return unmodelled;
-    if (/^\s/.test(line)) {
-      // Nested content. It cannot hold a top-level key, but it can open a flow
-      // collection that swallows the lines after it.
-      flow += flowDelta(line);
-      if (flow < 0) return unmodelled;
-      continue;
-    }
-    if (line.startsWith('#')) continue;
-    if (line.startsWith('%')) continue;
-    if (line === '---' || line.startsWith('--- ')) {
-      // A second document start means `safe_load` raises on multiple documents.
-      if (docStarted || sawContent) return unmodelled;
-      docStarted = true;
-      continue;
-    }
-    if (line === '...' || line.startsWith('... ')) {
-      ended = true;
-      continue;
-    }
-    if (line === '-' || line.startsWith('- ')) {
-      // A sequence item before any key means the document is a list, and
-      // `parse_manifest_file` rejects a non-mapping top level outright.
-      if (!sawKey) return unmodelled;
-      sawContent = true;
-      flow += flowDelta(line);
-      if (flow < 0) return unmodelled;
-      continue;
-    }
-    const colon = keyColon(line);
-    if (colon === -1) return unmodelled;
-    const rawKey = line.slice(0, colon).trim();
-    if (rawKey === '') return unmodelled;
-    const quoted =
-      rawKey.length > 1 &&
-      ((rawKey.startsWith("'") && rawKey.endsWith("'")) ||
-        (rawKey.startsWith('"') && rawKey.endsWith('"')));
-    const key = quoted ? rawKey.slice(1, -1) : rawKey;
-    sawKey = true;
-    sawContent = true;
-    const rest = line.slice(colon + 1);
-    if (key === 'name' && name === null) {
-      const scalar = plainScalar(rest);
-      if (!scalar.modelled) return unmodelled;
-      name = scalar.value;
-    }
-    const trimmedRest = rest.trim();
-    if (trimmedRest.startsWith('[') || trimmedRest.startsWith('{')) {
-      flow += flowDelta(rest);
-      if (flow < 0) return unmodelled;
-    }
-  }
-  // A collection still open at EOF is the classic "valid `name:` line, broken
-  // YAML underneath" — Hermes rejects the file; we refuse to claim it.
-  if (flow !== 0) return unmodelled;
-  return { name, modelled: true };
-}
+  for (const raw of text.split(/\r?\n/)) {
+    if (raw.trim() === '' || raw.trimStart().startsWith('#')) continue;
+    // A tab may never indent YAML, and this reader reads none inside values
+    // either — either way the answer is "ask Hermes".
+    if (raw.includes('\t')) return unknown;
+    const body = raw.replace(/^ +/, '');
+    const indent = raw.length - body.length;
 
-/** The `name` a portable `plugin.json` declares, after Hermes' v1 gate. */
-export function readPortableManifestName(manifest: string): string | null {
-  const read = readBounded(manifest);
-  if (read === null || read.truncated) return null;
-  let data: unknown;
-  try {
-    data = JSON.parse(read.text);
-  } catch {
-    return null;
+    if (indent === 0) {
+      const head = body.trimEnd();
+      // `---`/`...`: a second document makes `safe_load` raise, and this reader
+      // is not going to work out whether there is one.
+      if (head === '---' || head === '...' || /^(---|\.\.\.) /.test(body)) return unknown;
+      const match = body.match(KEY_LINE);
+      // The top level is not a plain mapping — a sequence item, a bare scalar,
+      // a quoted key, a directive.
+      if (match === null) return unknown;
+      key = match[1];
+      const scalar = scalarValue(match[2] ?? '');
+      if (!scalar.understood) return unknown;
+      if (key === 'name') {
+        // `name:` with the value on following lines (a block scalar, a folded
+        // scalar, a nested mapping) is the shape that made round 2 report a
+        // clean install while Hermes was loading the backup.
+        if (scalar.payload === null) return unknown;
+        // Duplicate keys are legal to PyYAML and the LAST one wins, so this
+        // deliberately overwrites rather than keeping the first.
+        name = unquote(scalar.payload);
+        sawName = true;
+      }
+      continue;
+    }
+
+    // An indented line continues the last column-0 key. A continuation of
+    // `name` means its value is not the single-line scalar we just read.
+    if (key === null || key === 'name') return unknown;
+    let item = body;
+    while (item.startsWith('- ')) item = item.slice(2).replace(/^ +/, '');
+    if (item === '' || item === '-') continue;
+    const nested = item.match(KEY_LINE);
+    const value = nested === null ? item : nested[2] ?? '';
+    if (!scalarValue(value).understood) return unknown;
   }
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
-  const record = data as Record<string, unknown>;
-  if (record.$schema !== PLUGIN_SCHEMA_V1) return null;
-  const name = record.name;
-  if (typeof name !== 'string' || name.length < 1 || name.length > 64) return null;
-  if (!PORTABLE_NAME_RE.test(name)) return null;
-  return name;
+
+  return { name: sawName ? name : null, understood: true };
 }
 
 /**
@@ -331,9 +327,7 @@ export function readPortableManifestName(manifest: string): string | null {
  * spelling is there. `null` means the directory has no manifest at all, which
  * makes it a category directory.
  */
-export function selectManifest(
-  dir: string,
-): { kind: 'yaml' | 'portable'; file: string } | null {
+export function selectManifest(dir: string): { kind: 'yaml' | 'portable'; file: string } | null {
   for (const base of ['plugin.yaml', 'plugin.yml']) {
     const candidate = path.join(dir, base);
     // `Path.exists()`, not `is_file()`: a `plugin.yaml` DIRECTORY is selected
@@ -354,6 +348,18 @@ export function selectManifest(
 }
 
 /**
+ * Whether a directory could possibly be keyed `shieldcortex` — see the header.
+ * Exported because both the verdict and the tests hang off the same rule.
+ */
+export function couldBeOurs(dirName: string, text: string): boolean {
+  if (dirName === HERMES_PLUGIN_NAME) return true;
+  if (text.includes(HERMES_PLUGIN_NAME)) return true;
+  // A double-quoted scalar can spell the name in escapes, and a backslash is
+  // the only way to write it without the literal bytes appearing.
+  return text.includes('\\');
+}
+
+/**
  * Classify one child directory of a `plugins/` root the way Hermes would,
  * conservatively. `dirName` is the basename Hermes sorts on and the name a
  * manifest with no `name:` inherits.
@@ -362,22 +368,27 @@ export function classifyPluginDir(dir: string, dirName: string): ManifestVerdict
   const selected = selectManifest(dir);
   if (selected === null) return 'category';
 
+  const read = readBounded(selected.file);
+  // Unreadable is DECIDED, not unknown: Hermes' own read raises the same way
+  // and it takes no manifest from the child.
+  if (read === null) return 'other';
+  const plausible = couldBeOurs(dirName, read.text);
+
   if (selected.kind === 'portable') {
-    return readPortableManifestName(selected.file) === HERMES_PLUGIN_NAME ? 'copy' : 'other';
+    // `agent_plugins._validate_manifest` demands a regular file resolving
+    // INSIDE the plugin root, known author fields and object extension
+    // namespaces. Mirroring that is how round 2 called a backup with a
+    // symlinked `plugin.json` the winner when Hermes had rejected it.
+    return plausible ? 'unknown' : 'other';
   }
 
-  const read = readBounded(selected.file);
-  // Unreadable is decided, not unknown: Hermes' `read_text` raises the same way
-  // and `parse_manifest_file` returns None.
-  if (read === null) return 'other';
-
-  const plausible = dirName === HERMES_PLUGIN_NAME || read.text.includes(HERMES_PLUGIN_NAME);
   if (read.truncated) return plausible ? 'unknown' : 'other';
+  // Undecodable bytes: `read_text` raises for Hermes too, so this is a fact.
+  if (!read.decodable) return 'other';
 
   const parsed = readYamlManifestName(read.text);
-  if (!parsed.modelled) return plausible ? 'unknown' : 'other';
+  if (!parsed.understood) return plausible ? 'unknown' : 'other';
   // `data.get("name", plugin_dir.name)` — a manifest with no name is keyed on
   // the directory it lives in.
-  const name = parsed.name ?? dirName;
-  return name === HERMES_PLUGIN_NAME ? 'copy' : 'other';
+  return (parsed.name ?? dirName) === HERMES_PLUGIN_NAME ? 'copy' : 'other';
 }

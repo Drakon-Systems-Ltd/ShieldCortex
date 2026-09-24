@@ -28,6 +28,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import shieldcortex  # noqa: E402
+import shadow as shadow_module  # noqa: E402
 from shadow import detect_shadow, read_manifest_name, shadow_error_line  # noqa: E402
 
 #: The real package directory, used as the source for the copies the
@@ -265,6 +266,147 @@ class ShadowDetectionTests(unittest.TestCase):
 
     def test_clean_report_has_no_error_line(self):
         self.assertIsNone(shadow_error_line(None))
+
+
+class UndeterminedStartupTests(unittest.TestCase):
+    """#569 r3: "I could not tell" is a thing this must be able to say.
+
+    Round 2 appended a note about the directories it would not read and then
+    reported the install clean anyway. On a host where the unreadable directory
+    IS the shadow, that is the check certifying the exact state it exists to
+    catch. The fallback now gives the root no verdict at all, and the start-up
+    line says so at WARNING — not ERROR, because nothing is known to be wrong,
+    and not silence, because nothing is known to be right.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.plugins = os.path.join(self._tmp.name, "plugins")
+        os.makedirs(self.plugins)
+        self.addCleanup(self._tmp.cleanup)
+        # This box has a working hermes_cli, and the primary path never reports
+        # an unknown — so the fallback is forced, with the reason it would
+        # really carry on a host that has no Hermes to ask.
+        #
+        # Both module objects, deliberately: these tests import `shadow` as a
+        # top-level module, while `register()` goes through the package's
+        # `shieldcortex.shadow`. They are two distinct objects under one file,
+        # and patching only one silently leaves the other live.
+        reason = ("hermes_cli is not importable "
+                  "(ModuleNotFoundError: No module named 'hermes_cli')")
+        for module in (shadow_module, shieldcortex.shadow):
+            patched = mock.patch.object(module, "_hermes_root_scan",
+                                        return_value=(None, None, reason))
+            patched.start()
+            self.addCleanup(patched.stop)
+
+    def register_from(self, package_dir):
+        ctx = FakeCtx()
+        logger = logging.getLogger("shieldcortex.hermes")
+        with mock.patch.object(shieldcortex, "_package_dir", return_value=package_dir):
+            with self.assertLogs(logger, level="DEBUG") as captured:
+                result = shieldcortex.register(ctx)
+        by_level = {
+            "error": [r.getMessage() for r in captured.records if r.levelno >= logging.ERROR],
+            "warning": [r.getMessage() for r in captured.records
+                        if r.levelno == logging.WARNING],
+            "debug": [r.getMessage() for r in captured.records if r.levelno == logging.DEBUG],
+        }
+        return ctx, result, by_level
+
+    def test_an_unreadable_neighbour_is_a_warning_not_a_clean_start(self):
+        canonical = make_plugin_dir(self.plugins, "shieldcortex")
+        murky = make_plugin_dir(self.plugins, "zz-murky", manifest_name=None)
+        with open(os.path.join(murky, "plugin.yaml"), "w", encoding="utf-8") as fh:
+            # Mentions our key, so it could be the shadow; a block scalar, so
+            # this reader will not say whether it is.
+            fh.write("name: >-\n  shieldcortex\n")
+
+        ctx, result, logs = self.register_from(canonical)
+
+        self.assertEqual(logs["error"], [])
+        line = next(m for m in logs["warning"] if "shieldcortex" in m)
+        self.assertIn("could not determine which plugin copy Hermes loads", line)
+        self.assertIn(murky, line)
+        # And the real reason travels with it, rather than being flattened.
+        self.assertIn("ModuleNotFoundError", line)
+        # The gate registered regardless.
+        self.assertIn("pre_tool_call", ctx.hooks)
+        self.assertEqual(result["name"], "shieldcortex")
+
+    def test_a_real_shadow_beside_an_unknown_is_still_an_error(self):
+        canonical = make_plugin_dir(self.plugins, "shieldcortex")
+        backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
+        murky = make_plugin_dir(self.plugins, "zz-murky", manifest_name=None)
+        with open(os.path.join(murky, "plugin.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("name: >-\n  shieldcortex\n")
+
+        _ctx, _result, logs = self.register_from(canonical)
+
+        self.assertEqual(len(logs["error"]), 1, logs)
+        self.assertIn(backup, logs["error"][0])
+        self.assertIn(murky, logs["error"][0])
+
+    def test_the_fallback_reason_is_the_real_one(self):
+        canonical = make_plugin_dir(self.plugins, "shieldcortex")
+        make_plugin_dir(self.plugins, "shieldcortex.bak-x")
+        report = detect_shadow(canonical)
+        self.assertTrue(report["approximate"])
+        self.assertIn("ModuleNotFoundError", report["reason"])
+        self.assertIn(report["reason"], shadow_error_line(report))
+
+
+class StartupRootSizeTests(unittest.TestCase):
+    """#569 r3 nit: the start-up check declines an enormous plugins root.
+
+    Whichever half answers, the cost is a manifest read per child — and Hermes'
+    own discovery recurses into category dirs and reads each manifest whole.
+    Fine for the tens of entries a real root holds; not something to do
+    synchronously inside `register()` for thousands. `doctor` has no such cap.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.plugins = os.path.join(self._tmp.name, "plugins")
+        os.makedirs(self.plugins)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _fill(self, count):
+        for index in range(count):
+            os.makedirs(os.path.join(self.plugins, "filler-%04d" % index), exist_ok=True)
+
+    def test_a_huge_root_is_skipped_and_said_so_at_debug(self):
+        canonical = make_plugin_dir(self.plugins, "shieldcortex")
+        # A genuine shadow, which the check would otherwise report.
+        make_plugin_dir(self.plugins, "shieldcortex.bak-x")
+        self._fill(shadow_module.MAX_STARTUP_ROOT_ENTRIES + 1)
+
+        logger = logging.getLogger("shieldcortex.hermes")
+        with self.assertLogs(logger, level="DEBUG") as captured:
+            self.assertIsNone(detect_shadow(canonical))
+        debug = [r.getMessage() for r in captured.records if r.levelno == logging.DEBUG]
+        self.assertTrue(any("skipped at start-up" in m for m in debug), debug)
+
+    def test_the_same_root_under_the_cap_still_reports(self):
+        canonical = make_plugin_dir(self.plugins, "shieldcortex")
+        backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
+        self._fill(10)
+        report = detect_shadow(canonical)
+        self.assertIsNotNone(report)
+        self.assertEqual(report["others"], [backup])
+
+    def test_our_own_directory_name_is_still_read_past_the_cap(self):
+        # It costs no I/O at all, and it is the strongest signal there is:
+        # whichever copy is executing won discovery, so a non-canonical name IS
+        # the shadow.
+        backup = make_plugin_dir(self.plugins, "shieldcortex.bak-x")
+        make_plugin_dir(self.plugins, "shieldcortex")
+        self._fill(shadow_module.MAX_STARTUP_ROOT_ENTRIES + 1)
+
+        report = detect_shadow(backup)
+        self.assertIsNotNone(report)
+        self.assertTrue(report["misnamed"])
+        self.assertEqual(report["others"], [])
 
 
 if __name__ == "__main__":  # pragma: no cover

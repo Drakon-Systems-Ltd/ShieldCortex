@@ -115,7 +115,7 @@ def _package_dir():
 
 
 def _log_shadow_warning():
-    """#569: one ERROR line when another copy of this plugin is on disk.
+    """#569: one line when another copy of this plugin is on disk.
 
     Hermes keys plugins on the manifest `name:` and lets the last directory in
     sorted order win silently, so `plugins/shieldcortex.bak-<ts>/` beside
@@ -123,12 +123,24 @@ def _log_shadow_warning():
     keeps running the old ones. Whichever copy is executing is by definition
     the winner, so start-up is the one moment this can be said with certainty.
 
+    The level tracks what is actually known (#569 r3). A copy we can point at
+    is an ERROR — the gateway is demonstrably not running the installed code.
+    A root the conservative reader could not decide is a WARNING: something in
+    it may be shadowing us and may not, and the remedy is to let Hermes' own
+    discovery answer. What it never does is stay silent and let "no line" mean
+    "clean".
+
     Never raises: a diagnostic must not be able to stop the gate registering.
     """
     try:
-        line = shadow_error_line(detect_shadow(_package_dir()))
-        if line:
+        report = detect_shadow(_package_dir())
+        line = shadow_error_line(report)
+        if not line:
+            return
+        if report.get("misnamed") or report.get("others"):
             log.error("%s", line)
+        else:
+            log.warning("%s", line)
     except Exception:  # pragma: no cover - defensive
         pass
 

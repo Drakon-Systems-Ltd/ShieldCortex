@@ -85,6 +85,13 @@ export interface HermesPluginRootScan {
    * ours. Always empty on the primary path — Hermes always has an answer.
    */
   unknownDirs: string[];
+  /**
+   * True when this root holds at least one unknown directory. The root then
+   * has NO winner and NO shadow verdict: the copy Hermes loads may well be one
+   * of the directories the reader would not read, so naming a winner or
+   * calling the root clean would both be guesses (#569 r3).
+   */
+  undetermined: boolean;
 }
 
 export interface HermesPluginScan {
@@ -101,6 +108,8 @@ export interface HermesPluginScan {
   fallbackReason: string | null;
   /** Any directory the fallback could not classify, across every root. */
   unknownDirs: string[];
+  /** True when at least one root came back undetermined. */
+  undetermined: boolean;
 }
 
 export interface HermesScanOptions {
@@ -264,8 +273,15 @@ function hermesImportRoots(hermesHome: string, interpreter: string): string[] {
  *
  * stdout and stderr are captured across the import and the scan so a chatty
  * module or a discovery warning cannot land in the middle of the JSON; the
- * result is written to the real stdout afterwards. The discovery logger is
- * disabled for the same reason.
+ * result is written to the real stdout afterwards.
+ *
+ * Logging is quietened on HERMES' DISCOVERY LOGGERS ONLY and never on the root
+ * logger (#569 r3) — the names Hermes uses today plus whatever `logger` the
+ * imported discovery modules actually carry, so a rename upstream cannot
+ * silently widen or narrow the suppression. This runs in a child process that
+ * exists solely for the scan, so "for the duration of the scan" and "for the
+ * life of the process" are the same window; the in-process Python detector has
+ * to be more careful, and is (see `shadow.py`).
  */
 const PROBE_SCRIPT = [
   'import contextlib, io, json, logging, os, sys',
@@ -276,10 +292,19 @@ const PROBE_SCRIPT = [
   '        for _cand in _payload.get("importRoots") or []:',
   '            if os.path.isdir(os.path.join(_cand, "hermes_cli")) and _cand not in sys.path:',
   '                sys.path.insert(0, _cand)',
-  '        logging.getLogger("hermes_cli.plugins").disabled = True',
   '        from pathlib import Path',
+  '        import hermes_cli.plugins_discovery as _pd',
+  '        import hermes_cli.plugins_manifest as _pm',
   '        from hermes_cli.plugins_discovery import resolve_manifest_winners, scan_directory',
   '        from hermes_cli.plugins_manifest import manifest_key',
+  '        _quiet = set(["hermes_cli.plugins", "hermes_cli.plugins_discovery",',
+  '                      "hermes_cli.plugins_manifest", "hermes_cli.agent_plugins"])',
+  '        for _mod in (_pd, _pm):',
+  '            _lg = getattr(_mod, "logger", None)',
+  '            if isinstance(_lg, logging.Logger):',
+  '                _quiet.add(_lg.name)',
+  '        for _lname in _quiet:',
+  '            logging.getLogger(_lname).disabled = True',
   '        _name = _payload["name"]',
   '        _out = []',
   '        for _root in _payload["roots"]:',
@@ -395,6 +420,7 @@ function rootScanFrom(probe: ProbeRoot, unknownDirs: string[] = []): HermesPlugi
     hasCanonical: copies.some((c) => c.canonical),
     shadowed: copies.length > 1 || (loaded !== null && !loaded.canonical),
     unknownDirs,
+    undetermined: unknownDirs.length > 0,
   };
 }
 
@@ -424,15 +450,22 @@ export function scanHermesPluginRootFallback(root: string): HermesPluginRootScan
     }
     copies.push(toCopy(dir, root));
   }
+  // One unknown costs the whole root its verdict (#569 r3). The directory this
+  // reader would not read may be a copy, and it may sort after every copy it
+  // did read — so "the last one wins" cannot be applied, and "no shadow here"
+  // cannot be claimed either. `copies` stays: those are facts, and the message
+  // is better for naming them.
+  const undetermined = unknownDirs.length > 0;
   // `copies` is in Hermes' sorted order, and the last writer of the key wins.
-  const loaded = copies.length > 0 ? copies[copies.length - 1] : null;
+  const loaded = !undetermined && copies.length > 0 ? copies[copies.length - 1] : null;
   return {
     root,
     copies,
     loaded,
     hasCanonical: copies.some((c) => c.canonical),
-    shadowed: copies.length > 1 || (loaded !== null && !loaded.canonical),
+    shadowed: !undetermined && (copies.length > 1 || (loaded !== null && !loaded.canonical)),
     unknownDirs,
+    undetermined,
   };
 }
 
@@ -462,6 +495,7 @@ export function scanHermesPluginCopies(
       fromHermes: false,
       fallbackReason: null,
       unknownDirs: [],
+      undetermined: false,
     };
   }
 
@@ -479,6 +513,7 @@ export function scanHermesPluginCopies(
       fromHermes: true,
       fallbackReason: null,
       unknownDirs: [],
+      undetermined: false,
     };
   }
 
@@ -493,5 +528,6 @@ export function scanHermesPluginCopies(
     fromHermes: false,
     fallbackReason,
     unknownDirs: rootScans.flatMap((r) => r.unknownDirs),
+    undetermined: rootScans.some((r) => r.undetermined),
   };
 }
