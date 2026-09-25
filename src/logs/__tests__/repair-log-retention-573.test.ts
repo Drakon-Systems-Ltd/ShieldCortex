@@ -12,7 +12,8 @@
  *   - newest N survive, N is a strict integer >= 1 from the environment;
  *   - only `project-key-repair-*.json`, only directly in the logs dir, only
  *     regular files (lstat, so a symlink with that name is never followed);
- *   - a plane reachable through a symlink refuses the whole pass;
+ *   - the directory is fully resolved before anything is listed, and a plane
+ *     that resolves into the realtime audit ledger refuses the whole pass;
  *   - deletion re-checks with lstat immediately before unlink, so a file
  *     swapped for a symlink mid-pass is left alone.
  */
@@ -24,6 +25,7 @@ import path from 'path';
 
 import {
   DEFAULT_REPAIR_LOG_KEEP,
+  defaultRepairLogDir,
   pruneRepairLogs,
   REPAIR_LOG_MIN_AGE_MS,
   repairLogDbId,
@@ -34,6 +36,8 @@ import {
 
 let root: string;
 let logsDir: string;
+let auditDir: string;
+let auditBefore: string | undefined;
 
 /** `project-key-repair-<iso>.json`, oldest first, with distinct mtimes. */
 function seedLogs(count: number, dir = logsDir): string[] {
@@ -53,13 +57,22 @@ function seedLogs(count: number, dir = logsDir): string[] {
 const listed = (dir = logsDir): string[] => fs.readdirSync(dir).sort();
 
 beforeEach(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-retention-'));
+  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-retention-')));
   logsDir = path.join(root, '.shieldcortex', 'logs');
   fs.mkdirSync(logsDir, { recursive: true });
+  // The audit plane this module must never touch, moved inside the sandbox:
+  // the refusal is measured against a directory this test owns, and the real
+  // ~/.shieldcortex/audit is never even stat'ed.
+  auditDir = path.join(root, '.shieldcortex', 'audit');
+  fs.mkdirSync(auditDir, { recursive: true });
+  auditBefore = process.env.SHIELDCORTEX_AUDIT_DIR;
+  process.env.SHIELDCORTEX_AUDIT_DIR = auditDir;
 });
 
 afterEach(() => {
   jest.restoreAllMocks();
+  if (auditBefore === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;
+  else process.env.SHIELDCORTEX_AUDIT_DIR = auditBefore;
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
@@ -178,7 +191,7 @@ describe('#573 pruneRepairLogs only ever touches repair logs', () => {
   });
 });
 
-describe('#573 pruneRepairLogs refuses a plane reachable through a symlink', () => {
+describe('#573 pruneRepairLogs settles its directory before it lists anything', () => {
   it('refuses when the logs directory itself is a symlink', () => {
     const real = path.join(root, 'elsewhere');
     seedLogs(25, real);
@@ -192,26 +205,97 @@ describe('#573 pruneRepairLogs refuses a plane reachable through a symlink', () 
     expect(fs.readdirSync(real)).toHaveLength(25);
   });
 
-  it('refuses when a component below .shieldcortex is a symlink', () => {
-    const real = path.join(root, 'real-sc');
-    fs.mkdirSync(path.join(real, 'logs'), { recursive: true });
-    seedLogs(25, path.join(real, 'logs'));
-    const link = path.join(root, '.shieldcortex', 'sub');
-    fs.symlinkSync(real, link);
-
-    const result = pruneRepairLogs({ dir: path.join(link, 'logs'), keep: 1, execute: true });
-
-    expect(result.refused).toMatch(/symlink/i);
-    expect(result.deleted).toEqual([]);
-    expect(fs.readdirSync(path.join(real, 'logs'))).toHaveLength(25);
-  });
-
   it('refuses when the logs path is not a directory at all', () => {
     const asFile = path.join(root, '.shieldcortex', 'logs-file');
     fs.writeFileSync(asFile, 'not a directory');
     const result = pruneRepairLogs({ dir: asFile, keep: 1, execute: true });
     expect(result.refused).toMatch(/not a directory/i);
     expect(fs.existsSync(asFile)).toBe(true);
+  });
+
+  it('acts on the RESOLVED directory, so a symlinked ancestor cannot redirect it', () => {
+    // A link above the logs directory is not itself a refusal — it just does
+    // not get to decide anything. Everything from the listing to the unlink
+    // uses the resolved path, and that is what the result reports.
+    const real = path.join(root, 'real-sc', 'logs');
+    seedLogs(25, real);
+    const link = path.join(root, '.shieldcortex', 'sub');
+    fs.symlinkSync(path.join(root, 'real-sc'), link);
+
+    const result = pruneRepairLogs({ dir: path.join(link, 'logs'), keep: 1, execute: true });
+
+    expect(result.refused).toBeNull();
+    expect(result.dir).toBe(real);
+    expect(result.deleted).toHaveLength(24);
+    expect(fs.readdirSync(real)).toHaveLength(1);
+  });
+});
+
+/**
+ * Round-2 blocker 1 / round-3 blocker 1 — the realtime audit plane (#579's) is
+ * reachable through a planted symlink, and must be refused wherever the link
+ * sits. The boundary used to be chosen by basename: `lastIndexOf('.shieldcortex')`
+ * picked the INNERMOST `.shieldcortex` component and never looked at anything
+ * above it, so both layouts below pruned inside the audit directory with
+ * `refused: null` and `errors: []`.
+ */
+describe('#573 blocker 1 — no path resolves into the realtime audit plane', () => {
+  /** Byte-for-byte evidence that #579's plane was not touched. */
+  function auditManifest(): Array<[string, string]> {
+    return fs.readdirSync(auditDir, { recursive: true } as never)
+      .map((n) => path.join(auditDir, n as string))
+      .filter((f) => fs.statSync(f).isFile())
+      .map((f) => [path.relative(auditDir, f), fs.readFileSync(f, 'utf-8')] as [string, string])
+      .sort();
+  }
+
+  it('refuses a logs directory whose parent is a link to the audit plane', () => {
+    // The reviewer's first layout: HOME/db-link -> .shieldcortex/audit, with
+    // the repair logs written at db-link/logs. Nothing in the supplied path
+    // contains `.shieldcortex` at all.
+    const inside = path.join(auditDir, 'logs');
+    seedLogs(3, inside);
+    fs.writeFileSync(path.join(auditDir, 'realtime-2026-01-01.jsonl'), '{"event":"blocked"}\n');
+    const before = auditManifest();
+    fs.symlinkSync(auditDir, path.join(root, 'db-link'));
+
+    const result = pruneRepairLogs({
+      dir: path.join(root, 'db-link', 'logs'), keep: 1, execute: true,
+    });
+
+    expect(result.refused).toMatch(/audit/i);
+    expect(result.deleted).toEqual([]);
+    expect(result.errors).toEqual([]);
+    expect(auditManifest()).toEqual(before);
+  });
+
+  it('refuses a nested .shieldcortex reached through a link to the audit plane', () => {
+    // The reviewer's second layout: .shieldcortex/alias/.shieldcortex/logs with
+    // alias -> the audit directory. Picking the LAST `.shieldcortex` component
+    // as the trusted root skipped `alias` entirely.
+    const inside = path.join(auditDir, '.shieldcortex', 'logs');
+    seedLogs(3, inside);
+    const before = auditManifest();
+    fs.symlinkSync(auditDir, path.join(root, '.shieldcortex', 'alias'));
+
+    const result = pruneRepairLogs({
+      dir: path.join(root, '.shieldcortex', 'alias', '.shieldcortex', 'logs'),
+      keep: 1,
+      execute: true,
+    });
+
+    expect(result.refused).toMatch(/audit/i);
+    expect(result.deleted).toEqual([]);
+    expect(result.errors).toEqual([]);
+    expect(auditManifest()).toEqual(before);
+  });
+
+  it('refuses the audit directory itself, named directly', () => {
+    seedLogs(3, auditDir);
+    const before = auditManifest();
+    const result = pruneRepairLogs({ dir: auditDir, keep: 1, execute: true });
+    expect(result.refused).toMatch(/audit/i);
+    expect(auditManifest()).toEqual(before);
   });
 });
 
@@ -309,18 +393,34 @@ describe('#573 resolveRepairLogKeep is strict about its integer', () => {
 
 describe('#573 the repair log belongs beside the database it describes', () => {
   it('resolves <db-dir>/logs', () => {
-    expect(repairLogDirForDb('/var/tmp/scratch/memories.db'))
-      .toBe(path.join('/var/tmp/scratch', 'logs'));
+    const scratch = path.join(root, 'scratch');
+    fs.mkdirSync(scratch);
+    expect(repairLogDirForDb(path.join(scratch, 'memories.db'))).toBe(path.join(scratch, 'logs'));
   });
 
   it('resolves the documented ~/.shieldcortex/logs for the default database', () => {
-    const home = os.homedir();
+    // A home this test owns, not the developer's: the formula is what is under
+    // test, and it must agree with `defaultRepairLogDir()` for the default DB.
+    const home = path.join(root, 'home');
+    fs.mkdirSync(path.join(home, '.shieldcortex'), { recursive: true });
+    jest.spyOn(os, 'homedir').mockReturnValue(home);
+
     expect(repairLogDirForDb(path.join(home, '.shieldcortex', 'memories.db')))
       .toBe(path.join(home, '.shieldcortex', 'logs'));
+    expect(defaultRepairLogDir()).toBe(path.join(home, '.shieldcortex', 'logs'));
   });
 
   it('resolves a relative db path against the cwd rather than guessing', () => {
-    expect(repairLogDirForDb('memories.db')).toBe(path.join(process.cwd(), 'logs'));
+    expect(repairLogDirForDb('memories.db'))
+      .toBe(path.join(fs.realpathSync(process.cwd()), 'logs'));
+  });
+
+  it('resolves every symlink above the database, so no link picks the destination', () => {
+    const realDbDir = path.join(root, 'real-db-dir');
+    fs.mkdirSync(realDbDir);
+    fs.symlinkSync(realDbDir, path.join(root, 'db-alias'));
+    expect(repairLogDirForDb(path.join(root, 'db-alias', 'memories.db')))
+      .toBe(path.join(realDbDir, 'logs'));
   });
 });
 

@@ -260,6 +260,38 @@ describe('#573 blocker 4 — the record is created exclusively', () => {
     }
   });
 
+  it('refuses a database whose own directory is a link into the audit plane', async () => {
+    // Round-3 blocker 1, the reviewer's layout: the database lives INSIDE
+    // .shieldcortex/audit and is reached through HOME/db-link. The supplied
+    // path contains no `.shieldcortex` component at all, so a boundary chosen
+    // by basename never looked above `logs` — and the repair committed a row
+    // and wrote its record into the realtime audit directory. `realpath` of
+    // the database's own directory answers every one of these layouts at once.
+    const audit = path.join(fakeHome, '.shieldcortex', 'audit');
+    fs.mkdirSync(audit, { recursive: true });
+    fs.writeFileSync(path.join(audit, 'realtime-2026-09-25.jsonl'), '{"event":"blocked"}\n');
+    const auditDb = path.join(audit, 'memories.db');
+    seedDb(auditDb);
+    const manifest = fs.readdirSync(audit).sort();
+    fs.symlinkSync(audit, path.join(dbHome, 'db-link'));
+    const previous = process.env.SHIELDCORTEX_AUDIT_DIR;
+    process.env.SHIELDCORTEX_AUDIT_DIR = audit;
+
+    try {
+      await expect(repairProjectKeys({
+        dbPath: path.join(dbHome, 'db-link', 'memories.db'),
+        map: { myrepo: 'acme-myrepo' }, execute: true, noConfirm: true,
+      })).rejects.toThrow(/audit/i);
+
+      // Nothing was written into the plane, and nothing was committed.
+      expect(fs.readdirSync(audit).sort()).toEqual(manifest);
+      expect(projectsIn(auditDb)).toEqual(['acme-myrepo', 'myrepo']);
+    } finally {
+      if (previous === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;
+      else process.env.SHIELDCORTEX_AUDIT_DIR = previous;
+    }
+  });
+
   it('refuses a <db-dir>/logs pointed at the realtime audit plane, leaving it untouched', async () => {
     const audit = path.join(fakeHome, '.shieldcortex', 'audit');
     fs.mkdirSync(audit, { recursive: true });
