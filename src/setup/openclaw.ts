@@ -427,8 +427,9 @@ function hookConfigRoots(home: string): string[] {
 }
 
 /**
- * The ONE destination a refresh or a self-heal ever writes to, computed from
- * the resolved home and the config root and from nothing else (#574 r3).
+ * The ONE destination a refresh ever writes to, computed from the resolved
+ * home and the config root and from nothing else (#574 r3). Nothing self-heals
+ * here — a copy that is absent is reported, not reinstalled.
  */
 function standardHookDir(configRoot: string): string {
   return path.join(configRoot, 'hooks', HOOK_NAME);
