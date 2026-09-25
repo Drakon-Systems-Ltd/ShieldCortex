@@ -9,6 +9,7 @@ import { deriveProjectKey } from '../context/derive-project-key.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
 import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
+import { repairLogDirForDb } from '../logs/retention.js';
 
 interface LegacyMemoryRow {
   id: number;
@@ -392,8 +393,10 @@ function printUsage(): void {
   console.log('                      [--include-stm] [--execute]');
   console.log('      Relabel memories tagged under a legacy basename project key');
   console.log('      to their canonical owner-repo key (#42). DRY-RUN BY DEFAULT.');
-  console.log('      Backup auto-saved before any rewrite; per-rewrite log written');
-  console.log('      to ~/.shieldcortex/logs/project-key-repair-<ts>.json.');
+  console.log('      Backup auto-saved before any rewrite; the per-rewrite log is');
+  console.log('      written BESIDE THE DATABASE, at <db-dir>/logs/project-key-');
+  console.log('      repair-<ts>.json — so the default DB still logs to');
+  console.log('      ~/.shieldcortex/logs/. Bound by `shieldcortex logs prune`.');
   console.log('');
   console.log('  purge --malformed [--dry-run] [--execute]');
   console.log('                    [--backup-dir <path>]');
@@ -1029,8 +1032,23 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
     });
     txn();
 
-    // 5. Per-rewrite JSON log under ~/.shieldcortex/logs/.
-    const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
+    // 5. Per-rewrite JSON log, BESIDE THE DATABASE IT DESCRIBES (#573).
+    //
+    // This used to be an unconditional write to `os.homedir()/.shieldcortex/
+    // logs/` no matter which database had been repaired. Every run against a
+    // throwaway DB — a test, a probe, `--db <tmp>`, a repair of a scratch copy
+    // — therefore deposited a permanent file in the operator's REAL home,
+    // describing a database that had since been deleted. Measured on the #573
+    // host: 3,508 repair logs, 3,508 of them for a DB outside
+    // ~/.shieldcortex, not one for the live one. That is the entire observed
+    // growth rate.
+    //
+    // The log now follows the database, exactly as the safety backup above
+    // already does (`${dbPath}.bak.<ts>`). For the real DB at
+    // ~/.shieldcortex/memories.db this resolves to the documented
+    // ~/.shieldcortex/logs/ and nothing moves; for a temp DB the log is born
+    // and dies with the temp tree.
+    const logsDir = repairLogDirForDb(dbPath);
     mkdirSecure(logsDir);
     const logPath = path.join(
       logsDir,
