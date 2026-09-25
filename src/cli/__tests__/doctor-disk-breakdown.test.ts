@@ -60,33 +60,47 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.message).toMatch(/DB .* · backups .* · logs/);
   });
 
-  it('points at `shieldcortex vacuum` when the live DB itself is the bulk', async () => {
+  it('never tells the operator to run the sqlite3 binary, even on an unreadable DB', async () => {
+    // This fixture is 60 KB of filler, not a SQLite file, so nothing about its
+    // contents can be measured — and #573 recommends only what a measurement
+    // supports, so the answer is the sizes and no command. What has not
+    // changed, and is this case's whole point: the remedy must never name the
+    // `sqlite3` CLI, which is not bundled and was absent on the fleet agent
+    // that hit this. (Was: asserted `shieldcortex vacuum` here. Free pages
+    // cannot be read from a file SQLite cannot open, and "we could not measure
+    // it" must not reach the same recommendation as "we measured it".)
     writeBytes('memories.db', 60 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
     expect(result.status).toBe('fail');
-    // Must be the native command, NOT an invocation of the `sqlite3` binary — that
-    // CLI is not bundled and is absent on minimal boxes (a fleet agent had none).
-    // Mentioning "no sqlite3 CLI needed" in prose is fine; recommending you RUN
-    // `sqlite3 ~/… 'VACUUM'` is the bug. Forbid only the command form.
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
     expect(result.fix).not.toMatch(/sqlite3 ['"~]/);
+    expect(result.fix).toMatch(/No single measured consumer/);
   });
 
-  it('flags audit/log files when those dominate', async () => {
+  it('names the audit plane when audit files dominate, and does not promise to prune them', async () => {
+    // This case asserted `/audit\/log files/` — the old text "safe to rotate or
+    // clear under ~/.shieldcortex/{logs,audit}/", which lumped two planes with
+    // very different answers. #573 splits them: the project-key repair logs
+    // have retention and a command, the realtime audit ledger has neither yet
+    // (it is an unread queue with concurrent writers — tracked in #579). So the
+    // remedy must name the audit plane and say plainly that nothing here will
+    // delete security evidence, instead of implying a command covers it.
     writeBytes('memories.db', 2 * KB);
     writeBytes('audit/realtime.jsonl', 40 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
     expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/audit\/log files/);
+    expect(result.fix).toMatch(/audit/);
+    expect(result.fix).toContain('#579');
+    expect(result.fix).not.toMatch(/logs prune --execute/);
+    expect(result.fix).not.toMatch(/memories prune|memories dedupe/);
   });
 
   // ── #110 signature: big DB, tiny memories table ─────────────────────────
   // Live incident (Edith, 2026-07-21, v4.47.12): 79.6 MB DB with only 117
-  // memories — dbstat put session_events at 62.8 MB. The old remedy pointed at
-  // vacuum (0.0 MB of free pages — no-op) and memories prune (117 rows — no-op).
-  // When session_events payload dominates the memories table, the remedy must
-  // name `shieldcortex sessions prune` (and vacuum AFTER, to reclaim the pages
-  // the prune frees).
+  // memories — dbstat put session_events at 62.8 MB, and the remedy pointed at
+  // vacuum (0.0 MB of free pages — no-op) and memories prune (117 rows —
+  // no-op). #573 round 3 stopped this row naming ANY row-deleting command: the
+  // requirement these cases now hold to is that it never sends the operator to
+  // a deletion the measurement does not support.
   function buildRealDb(opts: {
     memories: number;
     memoryBytes: number;
@@ -129,19 +143,27 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     db.close();
   }
 
-  it('points at `shieldcortex sessions prune` when session_events dominate a big DB (#110)', async () => {
+  it('reports the sizes rather than naming a row-deleting command (#110)', async () => {
     // ~200 KB of session payload vs ~1 KB of memories → DB well over 50% of a
     // 128 KB limit, with the #110 signature (big DB, tiny memories table).
+    //
+    // This asserted `shieldcortex sessions prune` and `shieldcortex vacuum`.
+    // #573 round 3 removed row-deletion advice from the DISK row entirely:
+    // deciding which rows are the bulk is what produced a new wrong answer in
+    // each of the last three rounds, and this row does not need to decide it.
+    // The negative assertion below — never lead with `memories prune` — is the
+    // part of #110 the row is still responsible for, and it still holds.
     buildRealDb({ memories: 5, memoryBytes: 200, events: 100, eventBytes: 2048 });
 
     const result = await checkDiskUsage(tmpDir, 128 * KB);
 
     expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/shieldcortex sessions prune/);
-    // Vacuum must still be named — prune alone leaves free pages in the file.
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
-    // And it must NOT lead with the no-op remedies the incident hit.
     expect(result.fix).not.toMatch(/^Run `shieldcortex memories prune/);
+    expect(result.fix).not.toMatch(/memories prune|memories dedupe|sessions prune/);
+    expect(result.fix).toMatch(/No single measured consumer/);
+    // The row reports the DB's aggregate size only (no per-table attribution
+    // since #573 r3), so the operator sees how big the DB is, not what is in it.
+    expect(result.message).toMatch(/DB /);
   });
 
   it('does NOT recommend sessions prune on an audit-dominated DB (#111 review repro)', async () => {
@@ -164,8 +186,12 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(/sessions prune/);
     expect(result.fix).not.toMatch(/bulk is session-capture/);
-    // Vacuum guidance is retained for the audit-dominated case.
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
+    // Vacuum is no longer offered here (originally asserted): this fixture has
+    // essentially no free pages, so a full file rewrite would reclaim nothing.
+    // Nor is defence_audit named as "the bulk" any more — #573 round 3 stopped
+    // the DISK row attributing the file to a table at all.
+    expect(result.fix).not.toMatch(/shieldcortex vacuum/);
+    expect(result.fix).toMatch(/No single measured consumer/);
   });
 
   it('does not claim session capture is the bulk when the memories table dominates', async () => {
@@ -176,7 +202,11 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.status).toBe('fail');
     // Generic big-DB remedy — must not assert that session_events is the bulk.
     expect(result.fix).not.toMatch(/session_events .*is the bulk|bulk is session-capture/);
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
+    // Was `shieldcortex vacuum`, unconditionally. This fixture's pages are
+    // nearly all in use, so that command would rewrite 200 KB to reclaim
+    // nothing; #573 gives it only above the 20% free-page floor.
+    expect(result.fix).not.toMatch(/shieldcortex vacuum/);
+    expect(result.fix).toMatch(/No single measured consumer/);
   });
 
   it('honours a custom limit (the plumbing behind the breakdown remedy)', async () => {

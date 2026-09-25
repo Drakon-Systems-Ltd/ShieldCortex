@@ -22,7 +22,17 @@ import { isGatedCommand, type GatedCommand } from './wants-help.js';
  * registry is a compile error rather than a gate that silently reaches its
  * verdict from an empty table (#577 round 3).
  */
-const STRICT_COMMANDS: Partial<Record<GatedCommand, () => Promise<{ known: readonly string[]; help: string }>>> = {
+interface StrictSpec {
+  known: readonly string[];
+  help: string;
+  /**
+   * An optional grammar on top of the allow-list, for a command whose shape
+   * matters and not just its vocabulary. Returns the usage error, or null.
+   */
+  grammar?: (args: readonly string[]) => string | null;
+}
+
+const STRICT_COMMANDS: Partial<Record<GatedCommand, () => Promise<StrictSpec>>> = {
   update: async () => {
     const m = await import('./update.js');
     return { known: m.UPDATE_FLAGS, help: m.UPDATE_HELP };
@@ -42,6 +52,14 @@ const STRICT_COMMANDS: Partial<Record<GatedCommand, () => Promise<{ known: reado
   vacuum: async () => {
     const m = await import('./vacuum.js');
     return { known: m.VACUUM_FLAGS, help: m.VACUUM_HELP };
+  },
+  // #573: `logs prune --execute` deletes files, and its whole argument surface
+  // is two tokens — so it belongs here rather than in the help-only group.
+  // Without it, `logs prune --execute --exectue` exited 1 only AFTER the npm
+  // staleness subprocess had written ~/.npm/_logs and update-notifier state.
+  logs: async () => {
+    const m = await import('./logs.js');
+    return { known: m.LOGS_FLAGS, help: m.LOGS_HELP, grammar: m.logsUsageError };
   },
 };
 STRICT_COMMANDS.compact = STRICT_COMMANDS.vacuum; // documented alias
@@ -63,6 +81,18 @@ export async function preflightStrictArgs(
   if (!isGatedCommand(command)) return null;
   const load = STRICT_COMMANDS[command];
   if (!load) return null;
-  const { known, help } = await load();
-  return helpGate(argv.slice(1), help, { command, known, log: deps.log, error: deps.error });
+  const { known, help, grammar } = await load();
+  const args = argv.slice(1);
+  const verdict = helpGate(args, help, { command, known, log: deps.log, error: deps.error });
+  if (verdict !== null) return verdict;
+  // Membership, then shape. `logs prune prune --execute` is every token known
+  // and still not a command line — and the deletion it would have run is the
+  // reason that distinction is drawn here rather than after the preamble.
+  const bad = grammar?.(args);
+  if (!bad) return null;
+  const error = deps.error ?? ((m: string) => process.stderr.write(`${m}\n`));
+  error(bad);
+  error('');
+  error(help);
+  return 2;
 }

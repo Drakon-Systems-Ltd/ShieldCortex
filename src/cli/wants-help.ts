@@ -178,6 +178,7 @@ export const COMMAND_HELP_SPECS = {
   uninstall: NO_VALUE_FLAGS,
   vacuum: NO_VALUE_FLAGS,
   compact: NO_VALUE_FLAGS,      // documented alias of vacuum
+  logs: NO_VALUE_FLAGS,         // #573 `logs prune [--execute]` deletes files
 } as const satisfies Record<string, CommandHelpSpec>;
 
 /** A command word with an entry in `COMMAND_HELP_SPECS`. */

@@ -83,7 +83,7 @@ describe('#577 — one value-flag table, read by every gate', () => {
     // Keep the registry honest about its own scope: these are the command words
     // `src/index.ts` dispatches to a handler with a gate (plus the two aliases).
     expect(COMMANDS.sort()).toEqual([
-      'allowlist', 'audit', 'clawdbot', 'compact', 'hermes', 'memories',
+      'allowlist', 'audit', 'clawdbot', 'compact', 'hermes', 'logs', 'memories',
       'migrate', 'openclaw', 'repair', 'sessions', 'uninstall', 'update', 'vacuum',
     ]);
   });

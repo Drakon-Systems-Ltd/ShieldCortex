@@ -107,6 +107,7 @@ import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
+import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
 import {
@@ -1983,63 +1984,43 @@ async function checkProcesses(): Promise<CheckResult[]> {
  * user with a local AI model cached.
  */
 /**
- * Best-effort read-only peek at what actually fills the live DB (#110):
- * row counts + stored byte totals for the memories and session_events
- * tables. Returns null on ANY failure (missing file, corrupt/locked DB,
- * missing tables, unreadable engine) — the caller then falls back to the
- * generic remedy text, so this can never break the disk check itself.
+ * How much of the live database is already free space (#573).
+ *
+ * The ONE fact the DISK row states about the file's contents, because it is the
+ * one it can state honestly: free pages are reclaimed by `shieldcortex vacuum`
+ * without deleting a row.
+ *
+ * Round 3 removed everything else this function used to do. Attributing pages
+ * to tables — dbstat sums over `memories`, its indexes, an FTS5 index's shadow
+ * tables, a `content=` option read out of the schema — produced a new
+ * confidently-wrong "delete your memories" on every fixture the reviewers
+ * built, most recently by reading `content=memories_backup` as `memories`. The
+ * DISK row does not need to answer "which rows are the bulk" to be useful, and
+ * it was answering it wrongly. `shieldcortex stats` is where contents are
+ * inspected.
+ *
+ * Returns null on ANY failure (missing file, corrupt or locked DB, unreadable
+ * engine), so this can never break the disk check itself.
  */
-interface DbRowConsumers {
-  memoriesCount: number;
-  memoriesBytes: number;
-  sessionEventCount: number;
-  sessionEventBytes: number;
-  auditCount: number;
-  auditBytes: number;
+interface DbFreeSpace {
+  pageCount: number;
+  freePages: number;
+  freeBytes: number;
 }
 
-function readDbRowConsumers(dbPath: string): DbRowConsumers | null {
+function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   if (!fs.existsSync(dbPath)) return null;
   let db: any = null;
   try {
     const Database = require('better-sqlite3');
     db = new Database(dbPath, { readonly: true });
-    const mem = db.prepare(
-      'SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(content)), 0) AS b FROM memories',
-    ).get() as { c: number; b: number };
-    const se = db.prepare(
-      'SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(payload)), 0) AS b FROM session_events',
-    ).get() as { c: number; b: number };
-
-    // defence_audit is the OTHER unbounded-growth table (bounded since Phase
-    // 8a, but pre-valve DBs can still be audit-dominated). Approximate its
-    // stored bytes by summing the text-bearing columns. Guarded separately:
-    // a DB without the table (older install, partial fixture) just reports 0
-    // rather than nulling out the whole peek.
-    let auditCount = 0;
-    let auditBytes = 0;
-    try {
-      const audit = db.prepare(`
-        SELECT COUNT(*) AS c, COALESCE(SUM(
-          LENGTH(COALESCE(reason, '')) +
-          LENGTH(COALESCE(threat_indicators, '')) +
-          LENGTH(COALESCE(blocked_patterns, '')) +
-          LENGTH(COALESCE(source_type, '')) +
-          LENGTH(COALESCE(source_identifier, ''))
-        ), 0) AS b FROM defence_audit
-      `).get() as { c: number; b: number };
-      auditCount = audit.c;
-      auditBytes = audit.b;
-    } catch { /* table absent — keep zeros */ }
-
-    return {
-      memoriesCount: mem.c,
-      memoriesBytes: mem.b,
-      sessionEventCount: se.c,
-      sessionEventBytes: se.b,
-      auditCount,
-      auditBytes,
-    };
+    const pageSize = Number(db.pragma('page_size', { simple: true }));
+    const pageCount = Number(db.pragma('page_count', { simple: true }));
+    const freePages = Number(db.pragma('freelist_count', { simple: true }));
+    if (!Number.isFinite(pageSize) || !Number.isFinite(pageCount) || !Number.isFinite(freePages)) {
+      return null;
+    }
+    return { pageCount, freePages, freeBytes: freePages * pageSize };
   } catch {
     return null;
   } finally {
@@ -2124,6 +2105,30 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += sizeOf(fp);
     }
 
+    // #573: "logs" as one lump is not actionable. The live incident read
+    // "DB 54.2 MB · logs 41.4 MB" and every remedy on offer pointed into the
+    // database, because nothing here knew how much of that lump was realtime
+    // audit evidence (no retention, tracked in #579) and how much was
+    // project-key repair logs (retention, and a command behind it). Split it.
+    // The audit plane is measured as a whole directory and REPORTED ONLY. This
+    // check never recommends an action against it and nothing in this release
+    // deletes or rewrites an audit file.
+    const auditLogSize = sizeOf(path.join(scDir, 'audit'));
+    // Counted by the SAME grammar `logs prune` acts on (isRepairLogName), so
+    // the number shown here is exactly the set the recommended command would
+    // consider — not doctor's own approximation of it.
+    const repairLogs = { bytes: 0, files: 0 };
+    try {
+      for (const e of fs.readdirSync(path.join(scDir, 'logs'), { withFileTypes: true })) {
+        if (e.isFile() && isRepairLogName(e.name)) {
+          repairLogs.bytes += sizeOf(path.join(scDir, 'logs', e.name));
+          repairLogs.files++;
+        }
+      }
+    } catch { /* absent or unreadable — contributes nothing */ }
+    const repairLogSize = repairLogs.bytes;
+    const otherLogSize = Math.max(0, logsSize - auditLogSize - repairLogSize);
+
     // #153: a safety backup does NOT spend the memory-system budget.
     //
     // The budget answers "is the memory system's footprint under control?".
@@ -2144,49 +2149,79 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const dataStr = `${formatBytes(dataSize)} / ${limitMb} MB limit`;
     const modelsStr = modelsSize > 0 ? ` + ${formatBytes(modelsSize)} models` : '';
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
-    const breakdown = `DB ${formatBytes(liveDbSize)} · backups ${formatBytes(backupsSize)} · logs ${formatBytes(logsSize)}`;
 
+    // One database open, for one number: how much of the file is free space.
+    const free = readDbFreeSpace(path.join(scDir, 'memories.db'));
+
+    // Name WHICH logs, and how much of the DB file is free pages, so the
+    // headline points somewhere. The leading `DB … · backups … · logs …` shape
+    // is unchanged; the detail is appended.
+    const dbFreeNote = free ? ` (${formatBytes(free.freeBytes)} free)` : '';
+    const logTerms: string[] = [];
+    if (auditLogSize > 0) logTerms.push(`audit ${formatBytes(auditLogSize)}`);
+    if (repairLogSize > 0) logTerms.push(`repair ${formatBytes(repairLogSize)}`);
+    if (otherLogSize > 0) logTerms.push(`other ${formatBytes(otherLogSize)}`);
+    const logDetail = logTerms.length > 0 ? ` [${logTerms.join(' · ')}]` : '';
+    const breakdown =
+      `DB ${formatBytes(liveDbSize)}${dbFreeNote} · backups ${formatBytes(backupsSize)} · ` +
+      `logs ${formatBytes(logsSize)}${logDetail}`;
+
+    // Everything the row reports, which is also the denominator every share
+    // below is measured against. Backups are exempt from the BUDGET (#153) but
+    // they are still bytes on the disk, so they still count here.
+    const otherSize = Math.max(0, dataSize - liveDbSize - logsSize) + otherLogSize;
+    const measured = liveDbSize + backupsSize + auditLogSize + repairLogSize + otherSize;
+    const shareOf = (bytes: number): number => (measured > 0 ? bytes / measured : 0);
+
+    /** A term has to hold half of the measured footprint to be "the" consumer. */
+    const CONSUMER_SHARE = 0.5;
+    /**
+     * Free pages worth a `vacuum`. Below this the command rewrites the whole
+     * file to reclaim a rounding error, so recommending it wastes the
+     * operator's time and teaches them to ignore us.
+     */
+    const VACUUM_FREE_SHARE = 0.2;
+
+    /**
+     * Report, and advise only where a MEASUREMENT supports it (#573 round 3).
+     *
+     * Every version of this that tried to decide WHICH ROWS were the bulk got
+     * it wrong on some real database and sent the operator to delete memories,
+     * session events or audit rows that were not the problem — a 54 MB
+     * threat-graph DB, a 95%-free-pages DB, a table called `memories_backup`
+     * behind an FTS5 `content=` option. So the row no longer decides that. It
+     * names a remedy in exactly the two cases where the number it already holds
+     * IS the evidence: repair logs, which have a bounded plane and a command,
+     * and free pages, which `vacuum` reclaims without deleting anything. It
+     * never recommends deleting rows — not memories, not sessions, not audit.
+     */
     const remedy = (): string => {
-      // NOTE: backups no longer count toward the budget (#153), so they can no
-      // longer be the cause of an overage and must not be blamed for one. The
-      // old first branch here sent operators to delete their own rollback point
-      // — and, when that did not help, to move our files out of our own
-      // directory. Both were treating a symptom of the accounting being wrong.
-      if (liveDbSize > limit * 0.5) {
-        // #110 signature: a big DB whose memories table is tiny — the bulk is
-        // session-capture rows. Live incident (Edith, 2026-07-21): 79.6 MB DB,
-        // 117 memories, session_events 62.8 MB (79% of the file); both
-        // previously suggested fixes (vacuum — 0.0 MB free pages — and
-        // memories prune) were no-ops. Best-effort peek inside the DB to name
-        // the actual consumer; falls through to the generic remedy when the
-        // DB can't be read.
-        //
-        // Review hardening: only blame session capture when its payload
-        // GENUINELY dominates — more than 40% of the live DB file (Edith's
-        // signature was 79%) AND more than the defence_audit bytes. A merely
-        // "bigger than the memories table" comparison misattributed
-        // audit-dominated DBs and recommended a no-op sessions prune.
-        const consumers = readDbRowConsumers(path.join(scDir, 'memories.db'));
-        if (
-          consumers &&
-          consumers.sessionEventCount > 0 &&
-          consumers.sessionEventBytes > liveDbSize * 0.4 &&
-          consumers.sessionEventBytes > consumers.auditBytes
-        ) {
-          return `The database is ${formatBytes(liveDbSize)} but the memories table holds only ${consumers.memoriesCount} memor${consumers.memoriesCount === 1 ? 'y' : 'ies'} — the bulk is session-capture rows (session_events: ${consumers.sessionEventCount} rows, ${formatBytes(consumers.sessionEventBytes)} of payload), which memories prune/dedupe and vacuum alone can't shrink. Run \`shieldcortex sessions prune --execute\` (deletes events older than 30 days; --days N to adjust), then \`shieldcortex vacuum\` to reclaim the freed pages on disk.`;
-        }
-        if (consumers && consumers.auditBytes > consumers.sessionEventBytes) {
-          // Audit-dominated: the worker's Phase 8a audit retention (90d + row
-          // cap) bounds this over time; don't send the user to a sessions
-          // prune that would be a no-op.
-          return `The database is ${formatBytes(liveDbSize)} — the bulk is defence-audit rows (defence_audit: ${consumers.auditCount} rows, ~${formatBytes(consumers.auditBytes)}), which the background worker's audit retention trims over time (90-day window + row cap). Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
-        }
-        return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. If it is session capture, \`shieldcortex sessions prune --execute\` deletes events older than 30 days. Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
+      if (shareOf(repairLogSize) >= CONSUMER_SHARE) {
+        return `${formatBytes(repairLogSize)} of the measured ${formatBytes(measured)} is `
+          + `project-key repair logs (logs/project-key-repair-*.json, ${repairLogs.files} `
+          + `file${repairLogs.files === 1 ? '' : 's'}) — diagnostics with no reader, which until `
+          + 'now nothing ever deleted. Run `shieldcortex logs prune` to see what retention would '
+          + 'remove, then `shieldcortex logs prune --execute`.';
       }
-      if (logsSize > limit * 0.2) {
-        return `${formatBytes(logsSize)} is audit/log files — safe to rotate or clear under ~/.shieldcortex/{logs,audit}/.`;
+      if (free !== null && free.pageCount > 0 && free.freePages >= free.pageCount * VACUUM_FREE_SHARE) {
+        return `${formatBytes(free.freeBytes)} of the database `
+          + `(${Math.round((free.freePages / free.pageCount) * 100)}% of its pages) is already free `
+          + 'space — `shieldcortex vacuum` reclaims it on disk, in place, via the bundled engine '
+          + '(no sqlite3 CLI needed), without deleting anything.';
       }
-      return 'Run `shieldcortex memories prune --execute` or `memories dedupe --execute` to trim the live memory table.';
+      if (shareOf(auditLogSize) >= CONSUMER_SHARE) {
+        // Reported, never acted on. Naming a command here would be a lie:
+        // nothing in this release deletes or rewrites an audit file.
+        return `${formatBytes(auditLogSize)} of the measured ${formatBytes(measured)} is realtime `
+          + 'audit evidence under ~/.shieldcortex/audit/. That plane has NO AUTOMATIC RETENTION '
+          + 'yet — it is an unread queue with concurrent writers, a projector cursor and stop-hook '
+          + 'recovery reading it, so bounding it safely is separate work, tracked in #579. Nothing '
+          + 'here will delete security evidence for you.';
+      }
+      return `No single measured consumer: DB ${formatBytes(liveDbSize)}${dbFreeNote}, backups `
+        + `${formatBytes(backupsSize)}, repair logs ${formatBytes(repairLogSize)}, audit `
+        + `${formatBytes(auditLogSize)}, everything else ${formatBytes(otherSize)}. Those sizes are `
+        + 'the whole measurement — inspect before removing anything.';
     };
 
     if (pct >= 95) {

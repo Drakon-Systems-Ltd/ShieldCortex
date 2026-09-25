@@ -63,6 +63,7 @@ const HANDLER_SOURCES: Record<GatedCommand | 'global', string[]> = {
   uninstall: ['src/setup/uninstall.ts'],
   vacuum: ['src/cli/vacuum.ts'],
   compact: ['src/cli/vacuum.ts'],
+  logs: ['src/cli/logs.ts'],
   global: ['src/index.ts'],
 };
 

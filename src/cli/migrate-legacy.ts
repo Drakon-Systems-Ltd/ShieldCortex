@@ -1,5 +1,4 @@
 import fs from 'fs';
-import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
@@ -9,6 +8,7 @@ import { deriveProjectKey } from '../context/derive-project-key.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
 import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
+import { prepareRepairLogDir, writeRepairLogRecord } from '../logs/retention.js';
 
 interface LegacyMemoryRow {
   id: number;
@@ -392,8 +392,10 @@ function printUsage(): void {
   console.log('                      [--include-stm] [--execute]');
   console.log('      Relabel memories tagged under a legacy basename project key');
   console.log('      to their canonical owner-repo key (#42). DRY-RUN BY DEFAULT.');
-  console.log('      Backup auto-saved before any rewrite; per-rewrite log written');
-  console.log('      to ~/.shieldcortex/logs/project-key-repair-<ts>.json.');
+  console.log('      Backup auto-saved before any rewrite; the per-rewrite log is');
+  console.log('      written BESIDE THE DATABASE, at <db-dir>/logs/project-key-');
+  console.log('      repair-<ts>.json — so the default DB still logs to');
+  console.log('      ~/.shieldcortex/logs/. Bound by `shieldcortex logs prune`.');
   console.log('');
   console.log('  purge --malformed [--dry-run] [--execute]');
   console.log('                    [--backup-dir <path>]');
@@ -984,6 +986,14 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
       }
     }
 
+    // #573 — settle the evidence destination BEFORE the database is touched.
+    //
+    // This used to happen after the commit, so a regular file (or a symlink)
+    // at `<db-dir>/logs` threw with the rewrite already applied and no log
+    // written, and the exception never said the commit had happened. A
+    // refusal here means nothing has changed yet, and nothing will.
+    const logsDir = prepareRepairLogDir(dbPath);
+
     // Budget-aware safety backup (#148). This copy is a full duplicate of the
     // database, and on a host whose DB is a large fraction of the disk limit it
     // used to consume the entire remaining budget without looking — turning a
@@ -1029,31 +1039,35 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
     });
     txn();
 
-    // 5. Per-rewrite JSON log under ~/.shieldcortex/logs/.
-    const logsDir = path.join(os.homedir(), '.shieldcortex', 'logs');
-    mkdirSecure(logsDir);
-    const logPath = path.join(
-      logsDir,
-      `project-key-repair-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
-    );
-    fs.writeFileSync(
-      logPath,
-      JSON.stringify(
-        {
-          dbPath,
-          backupPath,
-          appliedAt: new Date().toISOString(),
-          rewrites: proposals,
-          totalRowsAffected: report.applied,
-        },
-        null,
-        2
-      ),
-      'utf-8'
-    );
-    report.logPath = logPath;
+    // 5. Per-rewrite JSON log, BESIDE THE DATABASE IT DESCRIBES (#573).
+    //
+    // This used to write to `os.homedir()/.shieldcortex/logs/` whichever
+    // database had been repaired, so every run against a throwaway DB left a
+    // permanent file in the operator's real home describing a database that no
+    // longer existed. It now follows the DB, exactly as the safety backup above
+    // already does — see src/logs/retention.ts for the measurements and the
+    // rules that bound the result.
+    try {
+      report.logPath = writeRepairLogRecord(logsDir, dbPath, {
+        dbPath,
+        backupPath,
+        appliedAt: new Date().toISOString(),
+        rewrites: proposals,
+        totalRowsAffected: report.applied,
+      });
+    } catch (err) {
+      // The rewrite is COMMITTED and only its evidence is missing. Saying
+      // nothing, or reporting the write fault alone, would leave the operator
+      // unable to tell which happened — so name both, and the rollback point.
+      const why = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Repair COMMITTED — ${report.applied} row(s) rewritten in ${dbPath} — but its log ` +
+        `could not be written to ${logsDir}: ${why}. The rewrite stands; roll back with the ` +
+        `backup at ${backupPath} if you did not want it.`
+      );
+    }
     console.log(`Applied: ${report.applied} rows`);
-    console.log(`Log:     ${logPath}`);
+    console.log(`Log:     ${report.logPath}`);
   } finally {
     db.close();
   }
@@ -1068,5 +1082,14 @@ async function runRepairProjectKeys(args: string[]): Promise<void> {
   const dbPath = flagValue(args, '--db');
   const includeStm = args.includes('--include-stm');
   const execute = args.includes('--execute');
-  await repairProjectKeys({ dbPath, map, scanPaths, onlyProject, includeStm, execute });
+  try {
+    await repairProjectKeys({ dbPath, map, scanPaths, onlyProject, includeStm, execute });
+  } catch (err) {
+    // #573: a refused destination (nothing changed) and a committed rewrite
+    // whose log could not be written both arrive here. Print the reason as
+    // written — it already distinguishes the two — and exit non-zero, rather
+    // than letting it surface as "Failed to start shieldcortex server".
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
 }
