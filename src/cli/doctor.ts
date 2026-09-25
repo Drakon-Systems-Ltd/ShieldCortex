@@ -3438,34 +3438,12 @@ export function fixHermesPluginShadowing(
     //
     // The re-plan must not reach past the locks this call holds (#574 r5
     // review): a copy that appeared in another root between the survey and the
-    // lock would otherwise be moved out from under that root's own writer. So
-    // plan again WITHOUT executing, and refuse the whole repair if the new plan
-    // names any root outside the held set — nothing moved; running doctor
-    // again re-surveys and locks the larger set.
+    // lock would otherwise be moved out from under that root's own writer. The
+    // executing plan is handed the held set and refuses the whole repair if it
+    // names any root outside it — nothing moved; running doctor again
+    // re-surveys and locks the larger set.
     afterLocked?.();
-    const heldRoots = new Set(roots);
-    const replan = planHermesShadowFix(home, now, opts, false);
-    const needed = [...new Set([
-      ...replan.plan.map((copy) => path.dirname(copy.root)),
-      ...(replan.plan.length > 0 ? [path.dirname(replan.backupsRoot)] : []),
-    ])];
-    const unlocked = needed.filter((root) => !heldRoots.has(root));
-    if (unlocked.length > 0) {
-      const list = unlocked.map((root) => tildify(root)).join(', ');
-      return {
-        moved: [],
-        refused: replan.plan.map((copy) => ({
-          dir: copy.dir,
-          reason: `nothing was moved: the layout changed while doctor was taking its locks (${list} not locked) — run it again`,
-        })),
-        changed: false,
-        failed: true,
-        fromHermes: replan.result.fromHermes,
-        message:
-          `nothing was moved: the layout changed while doctor was taking its locks (${list} not locked) — run it again`,
-      };
-    }
-    return planHermesShadowFix(home, now, opts, true).result;
+    return planHermesShadowFix(home, now, opts, true, new Set(roots)).result;
   } finally {
     for (const lock of held) lock.release();
   }
@@ -3480,6 +3458,13 @@ function planHermesShadowFix(
   now: Date,
   opts: HermesScanOptions,
   execute: boolean,
+  /**
+   * When executing: the Hermes roots whose locks the caller holds. A plan that
+   * names any other root (as a source or as the backups root) moves NOTHING
+   * (#574 r5 review) — the check is on the very plan that executes, so no
+   * rescan can slip a root in after it.
+   */
+  allowedRoots?: ReadonlySet<string>,
 ): { result: HermesShadowFixResult; plan: HermesPluginCopy[]; backupsRoot: string } {
   const surveyed = (result: HermesShadowFixResult) => ({ result, plan: [], backupsRoot: '' });
   const scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
@@ -3940,6 +3925,16 @@ function planHermesShadowFix(
   // The survey pass (`execute === false`) stops here: it exists to name the
   // roots the caller must lock, and moving anything before those locks are
   // held is the defect it was added for.
+  if (execute && !abandoned && allowedRoots !== undefined && plan.length > 0) {
+    const needed = new Set([...plan.map(({ copy }) => path.dirname(copy.root)), path.dirname(backupsRoot)]);
+    const unlocked = [...needed].filter((root) => !allowedRoots.has(root));
+    if (unlocked.length > 0) {
+      const list = unlocked.map((root) => tildify(root)).join(', ');
+      for (const { copy } of plan) {
+        refuse(copy.dir, `nothing was moved: the layout changed while doctor was taking its locks (${list} not locked) — run it again`);
+      }
+    }
+  }
   const attempted = abandoned || !execute ? [] : plan;
   for (const { copy } of attempted) {
     if (stopped !== null) break;
