@@ -587,9 +587,11 @@ function publishJobs(params: {
       : { status: 'current', summary: `current (${alreadyCurrent.length} cop${alreadyCurrent.length === 1 ? 'y' : 'ies'})`, detail, refreshed: [] };
   }
   if (refreshed.length === 0) {
-    return warn(`could not refresh ${jobs.length - vanished.length - alreadyCurrent.length} cop${attempted === 1 ? 'y' : 'ies'}`, detail);
+    return warn(`could not refresh ${attempted} cop${attempted === 1 ? 'y' : 'ies'}`, detail);
   }
-  const partial = refreshed.length < attempted || busy.length > 0 || vanished.length > 0;
+  // A busy root's jobs are counted in `attempted` and never refreshed, so the
+  // first comparison already covers them.
+  const partial = refreshed.length < attempted || vanished.length > 0;
   return {
     status: partial || degraded.length > 0 ? 'warn' : 'refreshed',
     summary: (degraded.length > 0
