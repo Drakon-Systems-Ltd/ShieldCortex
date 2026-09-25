@@ -212,6 +212,35 @@ describe('#573 `shieldcortex logs prune` is reachable from the CLI', () => {
     expect(run(['logs']).status).toBe(1);
   });
 
+  it('a help flag anywhere on the line wins over --execute, through the shared #577 gate', () => {
+    seedLogs(25);
+    for (const argv of [
+      ['logs', 'prune', '--execute', '--help'],
+      ['logs', 'prune', '--help', '--execute'],
+      ['logs', 'prune', '-h'],
+    ]) {
+      const res = run(argv);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('Usage: shieldcortex logs');
+      expect(res.stdout).not.toContain('Deleted');
+    }
+    // Past the verb, `help` is an argument (the #577 rule every gated command
+    // follows) — so `prune help` is an unknown argument: refused, nothing run.
+    const verbArg = run(['logs', 'prune', 'help']);
+    expect(verbArg.status).toBe(1);
+    expect(verbArg.stdout).not.toContain('[DRY RUN]');
+    expect(fs.readdirSync(logsDir)).toHaveLength(25);
+  });
+
+  it('refuses an unknown prune flag before touching the disk', () => {
+    seedLogs(25);
+    const res = run(['logs', 'prune', '--exectue']);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("Unknown option for 'logs prune': --exectue");
+    expect(res.stdout).not.toContain('[DRY RUN]');
+    expect(fs.readdirSync(logsDir)).toHaveLength(25);
+  });
+
   it('is listed in `--help`', () => {
     const res = run(['--help']);
     expect(res.stdout).toMatch(/logs.*prune/);

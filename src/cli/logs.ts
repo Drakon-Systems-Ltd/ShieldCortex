@@ -18,6 +18,7 @@
  */
 
 import path from 'path';
+import { commandWantsHelp } from './wants-help.js';
 import {
   DEFAULT_REPAIR_LOG_KEEP,
   defaultRepairLogDir,
@@ -134,11 +135,23 @@ export async function handleLogsCommand(args: string[]): Promise<void> {
   // is going to do must never be answered with an error, and must never run
   // the command. Bare `logs` with no subcommand is still a usage error and
   // exits 1, exactly as `sessions` does.
-  if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
+  //
+  // #577: the help flag counts ANYWHERE on the line, through the shared gate —
+  // `logs prune --execute --help` must print usage, not delete logs.
+  if (commandWantsHelp('logs', args)) {
     for (const line of logsUsageLines()) console.log(line);
     return;
   }
   if (args[0] === 'prune') {
+    // #577: unknown flags are refused before anything touches the disk, so a
+    // typo such as `--exectue` is an error, not a silent dry run, and a
+    // misspelt `--help` is never mistaken for consent to delete.
+    const unknown = args.slice(1).filter((a) => a !== '--execute');
+    if (unknown.length > 0) {
+      console.error(`Unknown option for 'logs prune': ${unknown.join(' ')}`);
+      for (const line of logsUsageLines()) console.error(line);
+      process.exit(1);
+    }
     try {
       await runLogsPrune(args.slice(1));
     } catch (err) {
