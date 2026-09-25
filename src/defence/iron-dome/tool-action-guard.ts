@@ -763,88 +763,9 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // options and earlier operands (`-a`, `--append`, `--`, `/tmp/log`), or
 // `sed` carrying an in-place flag (`-i`, `-i.bak`, a cluster such as `-Ei`,
 // `--in-place[=suffix]`); or a `cp`/`mv`/`install` whose LAST operand is the
-// startup file. Named so the DANGEROUS row and the write-content disposer
-// (`shellStartupWriteIsExecuted`) scan the same text.
+// startup file. Exec surface only: the write-content scan skips this row
+// (#505 Option A; the residual is #588).
 const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
-
-/**
- * #505 (write-content disposer): true when at least one modify-shell-startup
- * match in `text` is EXECUTED under the guard's own span classifier — the
- * same `matchSpansClassified` the exec surface uses — with the content read
- * in the language of the file being written. Shell content (`.sh`, unknown
- * extension, a shebang): a redirect at statement position, the argument of
- * `sh -c '…'`, a `$(…)` / backtick substitution are executed; an
- * `echo "…"` data argument is a mention. Interpreter source (`.py`, `.ts`,
- * …): a string literal is a mention unless the region shells out — then a
- * sink argument (`os.system("…")`, `execSync("…")`) is executed and the
- * guard's write-then-exec floor (#84/#188) applies to the rest. No new
- * tier logic: this only asks the classifier the question the plain
- * `matchSpans` pass in `scanWriteContentPayload` never asked.
- */
-const MODIFY_SHELL_STARTUP_ROW: Pattern = { re: MODIFY_SHELL_STARTUP_RE, signal: 'modify-shell-startup' };
-
-/**
- * #505: read the template literals of written Node content. Openers are the
- * odd-numbered unescaped backticks; a template is TAGGED when the non-blank
- * character before its opener is an identifier/`$`/`)`/`]` (zx's `$\`…\``,
- * `exec\`…\``) — the shape that runs a shell. Untagged templates are strings,
- * and their two backticks are rewritten to `"` in a same-length copy so the
- * span classifier (whose #444 per-line rule reads ANY Node backtick as a
- * shell-out sink) sees a plain string literal; tagged ones keep their
- * backticks and stay sinks. A nested template inside `${…}` can break the
- * parity, in which case closers read as openers, more templates look tagged,
- * and the answer errs towards "sink" (fail-closed), never towards silence.
- */
-function readNodeTemplates(text: string): { tagged: boolean; neutralised: string } {
-  let tagged = false;
-  const chars = text.split('');
-  let opener = true;
-  let untaggedOpenAt = -1;
-  for (let i = text.indexOf('`'); i !== -1; i = text.indexOf('`', i + 1)) {
-    if (i > 0 && text[i - 1] === '\\') continue;
-    if (opener) {
-      let j = i - 1;
-      while (j >= 0 && (text[j] === ' ' || text[j] === '\t')) j--;
-      if (j >= 0 && /[\w$)\]]/.test(text[j]!)) { tagged = true; untaggedOpenAt = -1; }
-      else untaggedOpenAt = i;
-    } else if (untaggedOpenAt >= 0) {
-      chars[untaggedOpenAt] = '"';
-      chars[i] = '"';
-      untaggedOpenAt = -1;
-    }
-    opener = !opener;
-  }
-  return { tagged, neutralised: chars.join('') };
-}
-
-/**
- * #505: does written interpreter content hand a string to a shell anywhere?
- * Same `SHELL_OUT_SINK` vocabulary as `hasShellOutSink`; differs only on a
- * bare backtick: ruby/perl/php execute it, node only when it tags a template.
- */
-function writtenContentShellsOut(text: string, lang: ScriptLang, nodeTagged = false): boolean {
-  if (SHELL_OUT_SINK.test(text)) return true;
-  if (!text.includes('`')) return false;
-  if (lang === 'node') return nodeTagged;
-  return BACKTICK_EXEC_LANGS.has(lang);
-}
-
-function shellStartupWriteIsExecuted(text: string, lang: ScriptLang): boolean {
-  if (lang === 'sh') {
-    const regions = [...interpreterHeredocRegions(text), ...inlineProgramRegions(text)];
-    return matchSpansClassified([MODIFY_SHELL_STARTUP_ROW], text, regions).length > 0;
-  }
-  const node = lang === 'node' ? readNodeTemplates(text) : { tagged: false, neutralised: text };
-  const surface = node.neutralised;
-  // `folded: true`: the content is bytes landing on disk, not the caller's
-  // exec surface, so a literal in a region that does shell out takes the
-  // payload tier (still gated) rather than executed.
-  const region: ScanRegion = {
-    start: 0, end: surface.length, lang,
-    hasSink: writtenContentShellsOut(text, lang, node.tagged), folded: true,
-  };
-  return matchSpansClassified([MODIFY_SHELL_STARTUP_ROW], surface, [region]).length > 0;
-}
 
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
@@ -1054,7 +975,7 @@ const DANGEROUS: Pattern[] = [
   // or a `cp`/`mv`/`install` whose LAST operand is the startup file. Reading or sourcing one is untouched. The Write/Edit
   // tool path is gated at the verdict site (`isShellStartupWritePath`), where
   // the target is a path argument rather than shell text.
-  MODIFY_SHELL_STARTUP_ROW,
+  { re: MODIFY_SHELL_STARTUP_RE, signal: 'modify-shell-startup' },
   // The guard's own one-shot approval store (#118). The TTY gate stops the
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own
@@ -5330,7 +5251,7 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
  * "git push -f" does not gate at write time when the identical text would not
  * gate at exec time.
  */
-function scanWriteContentPayload(content: string, lang: ScriptLang = 'sh'): {
+function scanWriteContentPayload(content: string): {
   catastrophic: Array<{ signal: string; span: string }>;
   dangerous: Array<{ signal: string; span: string }>;
 } {
@@ -5351,9 +5272,11 @@ function scanWriteContentPayload(content: string, lang: ScriptLang = 'sh'): {
       if (m.signal === 'git-delete-branch' && !gitDeleteBranchInvoked(text)) continue;
       if (m.signal === 'modify-network-firewall' && firewallCallsAreReadOnly(text)) continue;
       if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
-      // #505: a startup-file write quoted inside a string literal of the file
-      // being written (a CLI hint, a test fixture) is a mention, not the write.
-      if (m.signal === 'modify-shell-startup' && !shellStartupWriteIsExecuted(text, lang)) continue;
+      // #505 (Option A): the startup-file write shape is judged on the exec
+      // surface, not in written content. Regex reading could not tell a
+      // quoted mention from a real write here (#588). A written script that
+      // appends is still gated when it runs: the folded-script scan reads it.
+      if (m.signal === 'modify-shell-startup') continue;
       // #386: quoted install vocabulary in scripts/logs is not an install.
       if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
       if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;
@@ -5965,8 +5888,7 @@ function evaluateToolCallCore(
       const scanBody = (memory && /\.md$/i.test(path) && !writeContentLooksExecutable(writeContent))
         ? neutralizeMarkdownCommandMentions(writeContent)
         : writeContent;
-      // #505: the content is read in the language of the file it lands in.
-      const hits = scanWriteContentPayload(scanBody, langFromPath(path));
+      const hits = scanWriteContentPayload(scanBody);
       if (hits.catastrophic.length > 0) {
         const signals = ['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)];
         const span = hits.catastrophic[0]?.span;

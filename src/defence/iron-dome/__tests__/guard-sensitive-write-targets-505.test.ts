@@ -183,52 +183,26 @@ describe('#505 — sensitive write targets in the user home', () => {
       }
     });
 
-    it('write-content: a script that really appends to a startup file is gated (positive control)', () => {
-      const v = write('/repo/install.sh', `#!/bin/sh\necho 'export PATH=/opt/tool/bin:$PATH' >> ~/${RC}\n`);
-      gated(v, 'modify-shell-startup');
-      expect(v.signals).toEqual(expect.arrayContaining(['write-content-dangerous']));
-      const t = write('/repo/setup.sh', `cat <<EOF | tee -a ~/${ZRC}\nalias ll='ls -l'\nEOF\n`);
-      gated(t, 'modify-shell-startup');
-    });
-
-    it('write-content: an executable shell string still gates — quoting is not inertness (round-4 regression pin)', () => {
-      // Reviewer-executed at 7a95827c: each of these appends to a scratch .bashrc with exit 0.
-      for (const [file, content] of [
-        ['/repo/install.sh', `sh -c 'echo x >> ~/${RC}'\n`],
-        ['/repo/install.sh', `echo "$(echo x >> ~/${RC})"\n`],
-        ['/repo/install.sh', 'echo "`echo x >> ~/' + RC + '`"\n'],
-        ['/repo/setup.py', `import os\nos.system("echo x >> ~/${RC}")\n`],
-        ['/repo/src/cli.ts', `import { execSync } from 'node:child_process';\nexecSync("echo x >> ~/${ZRC}");\n`],
-      ] as const) {
-        const v = write(file, content);
-        expect([file, content, v.decision, v.signals.includes('modify-shell-startup')])
-          .toEqual([file, content, 'require_approval', true]);
-      }
-    });
-
-    it('write-content: an untagged Node template literal is a string (round-5: no new card vs base); a TAGGED template runs a shell and gates', () => {
-      const plain = write('/repo/src/cli.ts', 'console.log(`hint: echo x >> ~/' + RC + '`);\n');
-      expect([plain.decision, plain.signals.includes('modify-shell-startup')]).toEqual(['allow', false]);
-      const multi = write('/repo/src/cli.ts', 'const a = `x`;\nconst b = `see: echo x >> ~/' + RC + '`;\nconsole.log(a + b);\n');
-      expect([multi.decision, multi.signals.includes('modify-shell-startup')]).toEqual(['allow', false]);
-      gated(write('/repo/run.mjs', "import { $ } from 'zx';\nawait $`echo x >> ~/" + RC + "`;\n"), 'modify-shell-startup');
-      gated(write('/repo/run.mjs', "const { execSync } = require('node:child_process');\nconst s = `echo x >> ~/" + ZRC + "`;\nexecSync(s);\n"), 'modify-shell-startup');
-    });
-
-    it('write-content: the shape quoted inside a string literal of ordinary code is a mention (no false card)', () => {
-      // Reviewer-reproduced false cards at 728686aa: all three ALLOW on main and must ALLOW here.
+    it('write-content is not scanned for the shape at write time; running the written script is (Option A, #588)', () => {
+      // #505 descope: the write-content row is gone, so a mention in ordinary
+      // code allows exactly as on base, and so does a real appending script
+      // at write time. The backstop is the exec-surface row over the folded
+      // source when the script actually runs.
       for (const [file, content] of [
         ['/repo/src/cli.ts', `console.log("Add: echo x >> ~/${RC}");\n`],
         ['/repo/help.py', `HINT = "run: echo 'export PATH=~/bin:$PATH' >> ~/${RC}"\nprint(HINT)\n`],
-        ['/repo/x.test.ts', `const cmd = 'echo x >> ~/${ZRC}';\nexpect(guard(cmd).decision).toBe('require_approval');\n`],
-        ['/repo/src/cli.ts', `console.log("or: echo x | tee -a ~/${RC}");\n`],
-        ['/repo/src/cli.ts', `const s = "sed -i 's/a/b/' ~/.profile";\n`],
-        ['/repo/install.sh', `echo "add: echo x >> ~/${RC}"\n`],              // shell data argument, no substitution
+        ['/repo/src/cli.ts', 'function help() { return `hint: echo x >> ~/' + RC + '`; }\n'],
+        ['/repo/install.sh', `#!/bin/sh\necho 'export PATH=/opt/tool/bin:$PATH' >> ~/${RC}\n`],
       ] as const) {
         const v = write(file, content);
         expect([file, content, v.decision, v.signals.includes('modify-shell-startup')])
           .toEqual([file, content, 'allow', false]);
       }
+      const script = `#!/bin/sh\necho 'export PATH=/opt/tool/bin:$PATH' >> ~/${RC}\n`;
+      const run = evaluateToolCall('Bash', { command: 'sh /repo/install.sh' }, undefined, {
+        resolveScriptSource: (p: string) => (p === '/repo/install.sh' ? script : null),
+      });
+      gated(run, 'modify-shell-startup');
     });
 
     it('isShellStartupWritePath recognises the set and nothing else', () => {
