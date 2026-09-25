@@ -182,7 +182,10 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
   // home) no longer exists, because there is no journal to look for.
   const acquired = acquireUpdateLock(hermesHomeDir(home), { createRoot: true });
   if ('busy' in acquired) {
+    // Non-zero, like every other refusal here: the operator asked for an
+    // install and did not get one (r4 nit 1).
     console.error(`Hermes plugin install skipped — ${acquired.busy}; nothing written.`);
+    process.exitCode = 1;
     return;
   }
   const dest = pluginDestDir(home);

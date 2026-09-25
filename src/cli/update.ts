@@ -87,6 +87,46 @@ interface StepResult {
   detail?: string[];
   /** True when `detail` is a reduction of longer output (#221). */
   truncated?: boolean;
+  /**
+   * The step did not do the work it was asked to: a root another run holds, an
+   * integration copy it could not refresh, a copy that vanished mid-swap, a
+   * durability it could not confirm. `update` exits NON-ZERO on any of these
+   * (#574/#576 r4 nit 1) — the warning was printed and the exit code was still
+   * 0, so an unattended upgrade that refreshed nothing at all looked from a
+   * script exactly like one that refreshed everything.
+   */
+  unfinished?: boolean;
+}
+
+/**
+ * What `update` exits with, and what its closing panel calls the run.
+ *
+ * Lifted out of `runUpdate` so the decision is reachable from a test: the flow
+ * around it resolves the registry, spawns npm and re-execs the new CLI. A step
+ * that did not finish the work it was asked to — a busy integration root, a
+ * copy it could not publish, one that vanished mid-swap, a durability the
+ * device would not confirm — is NON-ZERO (#574/#576 r4 nit 1). It was printed
+ * as a warning and exited 0, so from a script an unattended upgrade that
+ * refreshed nothing looked exactly like one that refreshed everything.
+ *
+ * INCOMPLETE rather than FAILED when that is all that went wrong: the upgrade
+ * itself landed, and npm failing is a different sentence.
+ */
+export function updateVerdict(args: {
+  failed: boolean;
+  attention: boolean;
+  unfinished: boolean;
+}): { exitCode: number; verdict: VerdictKind } {
+  const exitCode = args.failed || args.unfinished ? 1 : 0;
+  return {
+    exitCode,
+    verdict: deriveUpdateVerdict({
+      exitCode,
+      failed: args.failed,
+      incomplete: args.unfinished && !args.failed,
+      attention: args.attention,
+    }),
+  };
 }
 
 export async function step(
@@ -599,6 +639,7 @@ export async function stepOpenClawPlugin(
       status: 'warn' as const,
       summary: 'skipped — ~/.openclaw could not be taken exclusively',
       detail: [scrubHomePath(acquired.busy, home)],
+      unfinished: true,
     }));
   }
   try {
@@ -787,6 +828,7 @@ export async function stepOpenClawHook(
           status: 'warn' as const,
           summary: 'the hook could not be refreshed — run `shieldcortex openclaw install`',
           detail: result.failed.map((f) => scrub(f.error)),
+          unfinished: true,
         }
         : { status: 'skip' as const, summary: 'not installed — `shieldcortex openclaw install` adds it' };
     }
@@ -807,6 +849,7 @@ export async function stepOpenClawHook(
         status: 'warn' as const,
         summary: `${result.failed.length} cop${result.failed.length === 1 ? 'y' : 'ies'} could not be refreshed — run \`shieldcortex openclaw install\``,
         detail,
+        unfinished: true,
       };
     }
     // Published, but the device refused to flush a rename parent (r4 nit 2).
@@ -817,6 +860,7 @@ export async function stepOpenClawHook(
         status: 'warn' as const,
         summary: `refreshed ${written} cop${written === 1 ? 'y' : 'ies'}, durability not confirmed`,
         detail,
+        unfinished: true,
       };
     }
     // Installed and stale when it was discovered, gone by the time the lock
@@ -826,6 +870,7 @@ export async function stepOpenClawHook(
         status: 'warn' as const,
         summary: `${result.vanished.length} cop${result.vanished.length === 1 ? 'y was' : 'ies were'} removed mid-refresh — run \`shieldcortex openclaw install\` to reinstall`,
         detail,
+        unfinished: true,
       };
     }
     if (written === 0) {
@@ -873,7 +918,10 @@ export async function stepHermesPlugin(
     const detail = result.detail.map((line) => scrubHomePath(line, home));
     const summary = scrubHomePath(result.summary, home);
     if (result.status === 'not-installed') return { status: 'skip' as const, summary, detail };
-    if (result.status === 'warn') return { status: 'warn' as const, summary, detail };
+    // Every `warn` this refresher returns is work it was asked for and did not
+    // finish: a busy root, a copy it could not publish, one that vanished, a
+    // durability it could not confirm (r4 nit 1).
+    if (result.status === 'warn') return { status: 'warn' as const, summary, detail, unfinished: true };
     return { status: 'ok' as const, summary, detail };
   });
 }
@@ -1333,6 +1381,12 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
 
   // Unproven is attention, not failure. Only true unprotected / npm fail exit 1.
   const failed = protection.status === 'failed' || npmStatus === 'failed';
+  // A host integration this run did not finish refreshing — a busy root, a
+  // copy it could not publish, one that vanished mid-swap, a durability it
+  // could not confirm. Distinct from an npm failure, and still non-zero: the
+  // gate running on that host is the old one, and an unattended upgrade that
+  // refreshed nothing at all used to exit 0 (r4 nit 1).
+  const unfinished = [pluginResult, hookResult, hermesResult].some((r) => r.unfinished === true);
   const attention =
     keyAttention ||
     pluginResult.status === 'warn' ||
@@ -1344,14 +1398,8 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
     protection.status === 'warn' ||
     protection.status === 'blocked';
 
-  if (failed) process.exitCode = 1;
-  else process.exitCode = 0;
-  const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
-  const verdict: VerdictKind = deriveUpdateVerdict({
-    exitCode,
-    failed,
-    attention,
-  });
+  const { exitCode, verdict } = updateVerdict({ failed, attention, unfinished });
+  process.exitCode = exitCode;
 
   const next: string[] = [];
   // Prefer next from protection detail (openclaw gateway restart) over generic doctor when present.
