@@ -76,6 +76,7 @@ describe('#505 — OpenClaw interceptor fallback: tee operand run stops at the s
     await expect(run(`printf x | tee /tmp/log\ncat ~/${RC}`)).resolves.toBeUndefined();
     await expect(run(`printf x | tee /tmp/log; source ~/.profile`)).resolves.toBeUndefined();
     await expect(run(`printf x | tee /tmp/log ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
+    await expect(run(`printf x | tee -a \\\n  ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i); // escaped newline = continuation
   });
 });
 

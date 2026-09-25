@@ -765,7 +765,7 @@ const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlog
 // `--in-place[=suffix]`); or a `cp`/`mv`/`install` whose LAST operand is the
 // startup file. Named so the DANGEROUS row and the write-content disposer
 // (`shellStartupWriteIsExecuted`) scan the same text.
-const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)[ \t]*|\btee\b(?:[ \t]+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>-][^\s'"|;&<>]*))*[ \t]+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*[ \t])['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*[ \t]['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
+const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
 
 /**
  * #505 (write-content disposer): true when at least one modify-shell-startup
@@ -783,16 +783,67 @@ const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)[ \t]*|\btee
  */
 const MODIFY_SHELL_STARTUP_ROW: Pattern = { re: MODIFY_SHELL_STARTUP_RE, signal: 'modify-shell-startup' };
 
+/**
+ * #505: read the template literals of written Node content. Openers are the
+ * odd-numbered unescaped backticks; a template is TAGGED when the non-blank
+ * character before its opener is an identifier/`$`/`)`/`]` (zx's `$\`…\``,
+ * `exec\`…\``) — the shape that runs a shell. Untagged templates are strings,
+ * and their two backticks are rewritten to `"` in a same-length copy so the
+ * span classifier (whose #444 per-line rule reads ANY Node backtick as a
+ * shell-out sink) sees a plain string literal; tagged ones keep their
+ * backticks and stay sinks. A nested template inside `${…}` can break the
+ * parity, in which case closers read as openers, more templates look tagged,
+ * and the answer errs towards "sink" (fail-closed), never towards silence.
+ */
+function readNodeTemplates(text: string): { tagged: boolean; neutralised: string } {
+  let tagged = false;
+  const chars = text.split('');
+  let opener = true;
+  let untaggedOpenAt = -1;
+  for (let i = text.indexOf('`'); i !== -1; i = text.indexOf('`', i + 1)) {
+    if (i > 0 && text[i - 1] === '\\') continue;
+    if (opener) {
+      let j = i - 1;
+      while (j >= 0 && (text[j] === ' ' || text[j] === '\t')) j--;
+      if (j >= 0 && /[\w$)\]]/.test(text[j]!)) { tagged = true; untaggedOpenAt = -1; }
+      else untaggedOpenAt = i;
+    } else if (untaggedOpenAt >= 0) {
+      chars[untaggedOpenAt] = '"';
+      chars[i] = '"';
+      untaggedOpenAt = -1;
+    }
+    opener = !opener;
+  }
+  return { tagged, neutralised: chars.join('') };
+}
+
+/**
+ * #505: does written interpreter content hand a string to a shell anywhere?
+ * Same `SHELL_OUT_SINK` vocabulary as `hasShellOutSink`; differs only on a
+ * bare backtick: ruby/perl/php execute it, node only when it tags a template.
+ */
+function writtenContentShellsOut(text: string, lang: ScriptLang, nodeTagged = false): boolean {
+  if (SHELL_OUT_SINK.test(text)) return true;
+  if (!text.includes('`')) return false;
+  if (lang === 'node') return nodeTagged;
+  return BACKTICK_EXEC_LANGS.has(lang);
+}
+
 function shellStartupWriteIsExecuted(text: string, lang: ScriptLang): boolean {
-  const regions: ScanRegion[] = lang === 'sh'
-    ? [...interpreterHeredocRegions(text), ...inlineProgramRegions(text)]
-    // `folded: true`: the content is bytes landing on disk, not the caller's
-    // exec surface — so a backtick is a sink only in languages where it
-    // executes (ruby/perl/php), a JS template literal is a string, and a
-    // literal in a region that does shell out takes the payload tier (still
-    // gated) rather than executed.
-    : [{ start: 0, end: text.length, lang, hasSink: hasShellOutSink(text, lang, true), folded: true }];
-  return matchSpansClassified([MODIFY_SHELL_STARTUP_ROW], text, regions).length > 0;
+  if (lang === 'sh') {
+    const regions = [...interpreterHeredocRegions(text), ...inlineProgramRegions(text)];
+    return matchSpansClassified([MODIFY_SHELL_STARTUP_ROW], text, regions).length > 0;
+  }
+  const node = lang === 'node' ? readNodeTemplates(text) : { tagged: false, neutralised: text };
+  const surface = node.neutralised;
+  // `folded: true`: the content is bytes landing on disk, not the caller's
+  // exec surface, so a literal in a region that does shell out takes the
+  // payload tier (still gated) rather than executed.
+  const region: ScanRegion = {
+    start: 0, end: surface.length, lang,
+    hasSink: writtenContentShellsOut(text, lang, node.tagged), folded: true,
+  };
+  return matchSpansClassified([MODIFY_SHELL_STARTUP_ROW], surface, [region]).length > 0;
 }
 
 const DANGEROUS: Pattern[] = [

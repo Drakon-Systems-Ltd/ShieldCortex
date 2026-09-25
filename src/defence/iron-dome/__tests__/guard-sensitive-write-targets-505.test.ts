@@ -159,6 +159,10 @@ describe('#505 — sensitive write targets in the user home', () => {
         expect([command, v.signals.includes('modify-shell-startup')]).toEqual([command, false]);
       }
       gated(bash(`printf x | tee /tmp/log ~/${RC}`), 'modify-shell-startup');
+      // round 5: an ESCAPED newline is line continuation, not a statement boundary
+      gated(bash(`printf x | tee -a \\\n  ~/${RC}`), 'modify-shell-startup');
+      gated(bash(`echo 'export PATH=/tmp/evil:$PATH' >> \\\n  /home/ubuntu/${RC}`), 'modify-shell-startup');
+      gated(bash(`cp /tmp/payload \\\n  ~/${ZRC}`), 'modify-shell-startup');
     });
 
     it('reading or sourcing a startup file is not a write', () => {
@@ -202,9 +206,13 @@ describe('#505 — sensitive write targets in the user home', () => {
       }
     });
 
-    it('disclosed residual: a JS template literal quoting the shape still cards (#444 treats a Node backtick as a shell-out sink)', () => {
-      const v = write('/repo/src/cli.ts', 'console.log(`hint: echo x >> ~/' + RC + '`);\n');
-      gated(v, 'modify-shell-startup');
+    it('write-content: an untagged Node template literal is a string (round-5: no new card vs base); a TAGGED template runs a shell and gates', () => {
+      const plain = write('/repo/src/cli.ts', 'console.log(`hint: echo x >> ~/' + RC + '`);\n');
+      expect([plain.decision, plain.signals.includes('modify-shell-startup')]).toEqual(['allow', false]);
+      const multi = write('/repo/src/cli.ts', 'const a = `x`;\nconst b = `see: echo x >> ~/' + RC + '`;\nconsole.log(a + b);\n');
+      expect([multi.decision, multi.signals.includes('modify-shell-startup')]).toEqual(['allow', false]);
+      gated(write('/repo/run.mjs', "import { $ } from 'zx';\nawait $`echo x >> ~/" + RC + "`;\n"), 'modify-shell-startup');
+      gated(write('/repo/run.mjs', "const { execSync } = require('node:child_process');\nconst s = `echo x >> ~/" + ZRC + "`;\nexecSync(s);\n"), 'modify-shell-startup');
     });
 
     it('write-content: the shape quoted inside a string literal of ordinary code is a mention (no false card)', () => {

@@ -424,6 +424,7 @@ class FallbackDangerousScanTests(unittest.TestCase):
             "echo x >> ~/" + rc, "echo x >| ~/" + rc, "echo x | tee --append ~/" + rc,
             "echo x | tee /tmp/log ~/" + rc, "echo x | tee -a -- ~/" + rc,
             "sed --in-place 's/a/b/' ~/" + rc, "sed -Ei 's/a/b/' ~/.profile",
+            "printf x | tee -a \\\n  ~/" + rc,  # escaped newline is continuation, not a boundary
         ]:
             self.assertTrue(fallback_dangerous_match(cmd), cmd)
         for cmd in [
