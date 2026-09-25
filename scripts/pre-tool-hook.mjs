@@ -1062,12 +1062,8 @@ function safeSignalList(signals) {
 // the OpenClaw interceptor already persists it; this is the hook plane
 // catching up, not a new evidence source.
 //
-// What is persisted is SANITISED, the same way `signals` is: a rule name the
-// hook does not recognise contributes nothing (the row's `signals` already
-// says `redacted-signal` for it), a span is whitespace-collapsed and bounded,
-// and every span goes through the credential redactor before it is written.
-// The raw command is still not persisted (#284 Face 1); a bounded span of the
-// matched pattern is not the command.
+// What is persisted is a PROJECTION, never the command itself — see the r4
+// note below for why redaction was abandoned for this field.
 
 /**
  * Rules whose matched span IS the secret. The core omits a span for these
@@ -1076,87 +1072,190 @@ function safeSignalList(signals) {
  */
 const SPANLESS_SIGNAL_RE = /^(secret-egress|credential-access)/;
 const MAX_MATCH_ROWS = 25;
-/**
- * The core's own `fmtSpan` bound; re-applied here for the same reason. A
- * redacted field may grow past it by exactly the placeholders' growth, never
- * by more raw content (see `sanitiseEvidenceText`).
- */
-const MAX_SPAN_CHARS = 80;
-const MAX_PROVENANCE_CHARS = 256;
-/**
- * Hard cap on what the redactor is ever asked to look at. The core bounds
- * its spans to 80, but this hook does not get to assume the dist it loads is
- * a version that does; an unbounded string from a substitute or older build
- * must not become an unbounded regex workload.
- */
-const MAX_RAW_EVIDENCE_CHARS = 2048;
-/** What replaces the trailing word of evidence that may have been cut mid-token. */
-const CUT_MARKER = '[REDACTED-cut]';
 
-// ── Evidence contract (review of #586) ────────────────────────────────────
+// ── Evidence contract (r4 — allow-list projection, not redaction) ─────────
 //
-// Two things the first cut of this got wrong, both found in independent
-// review:
+// Three independent review rounds (r1–r3) each found a new credential-
+// bearing shell-argument shape that the previous approach — collapse,
+// bound, run a credential redactor over the matched span — still let
+// through whole: a header value glued to its flag with `=`
+// (`--header="Cookie: sid=<value>"`) and a value attached to a bundled
+// short-flag cluster with no separator at all (`-bsid=<value>`) both
+// persisted the complete secret in denials.jsonl. Each round closed one
+// shape and review found the next, because a shell command line is an
+// open-ended grammar and a redactor is a denylist over it: it can always be
+// one shape behind.
 //
-//   1. The dist redactor is a memory-pipeline detector. It knows provider
-//      token shapes, env-style `KEY=value` pairs and `scheme://user:pass@host`
-//      URLs, and does not know `-u user:pass`, `--cookie sid=…` or a
-//      `Cookie:` header whose value is too short or too plain for the entropy
-//      net. A pipe-download-to-shell span is the WHOLE command, so a real one
-//      carries the credential the download used. The hook therefore runs its
-//      own recogniser for those shapes FIRST and the dist redactor second;
-//      neither is trusted to be complete on its own. And `source` / `chain`
-//      (#184 folded-source provenance) are free text from the same untrusted
-//      place a span is — a script path can be `/tmp/<token>.sh` — so they go
-//      through the same pipeline, not around it.
+// The fix that closes the CLASS, not the next shape, is to stop asking "is
+// this text safe to keep" and start asking "what SPECIFIC facts about this
+// text are safe to compute". Nothing from a command-derived span is ever
+// persisted verbatim, redacted or otherwise — `spanWithheld: 'command-text'`
+// says so on every row that had one. What is persisted instead is built
+// ONLY from this allow-list, each fact proven by the tokeniser, never
+// copied from the input:
 //
-//   2. Bounding to 80 BEFORE redaction let a token that would have been
-//      redacted whole survive as a fragment: cut at the boundary it no longer
-//      matches its provider pattern and is too short for the entropy net.
-//      Swapping the order in the hook is necessary but not sufficient, because
-//      the core's own `fmtSpan` already cut the span before the hook saw it.
-//      So the contract is: redact first, bound second, and at ANY boundary
-//      that may have cut a token — the core's 80, this hook's raw cap, or the
-//      post-redaction bound — the trailing whitespace-delimited WORD is
-//      replaced by CUT_MARKER rather than written as a fragment (review r2:
-//      an "atom" bounded by `/ : @ =` let path- and base64-shaped fragments
-//      through). The only words that survive a boundary are ones too short
-//      to be a credential fragment.
+//   - `verb`   — the first shell token, only if it is a bare command-name
+//                shape (`/^[A-Za-z0-9_.-]{1,32}$/`); a token that fails
+//                that shape (quotes, spaces, a credential-looking argv[0])
+//                contributes no verb rather than a fragment of one.
+//   - `argc`   — how many shell-aware tokens the span had. A count, not text.
+//   - `hosts`  — bare hostnames pulled out of URL-shaped tokens, with
+//                userinfo (`user:pass@`), port, path, query and fragment
+//                all DROPPED before the host is even looked at — `curl
+//                https://alice:S3cr3t@host/token?x=T` contributes `host`
+//                and nothing else. Validated against a strict hostname
+//                grammar; a numeric-label host is kept only when it is a
+//                genuine, in-range IPv4 address, so a dotted string that
+//                merely LOOKS like one cannot smuggle other data through it.
+//   - `flags`  — flag NAMES only, value discarded at the first `=`. A
+//                single-dash cluster (`-bsid=…`, `-su`) is folded to its
+//                first letter (`-b`, `-s`): the letters after the first in
+//                a short-option cluster are themselves the vector the r3
+//                and r4 reproductions used to carry an attached value, so
+//                the cluster is never trusted past its first letter. A
+//                long flag (`--header=…`) keeps its full name.
+//   - `pipeToShell` / `subshell` — booleans, cheaply read off the tokens
+//                (a bare `|`, a `$(` or backtick), never the text itself.
 //
-//   3. (review r3) The rules above are whitespace-anchored regexes: they
-//      find a flag or a label and then match a value up to the next space.
-//      That is not what a shell argument is. `curl -su user:pass` bundles
-//      `-s` and `-u` into one cluster the `-u` regex never sees, and
-//      `curl -u "user:pass with spaces"` has its password cut at the first
-//      space inside the quotes — the rest is written out beside the
-//      placeholder. Neither is a new shape to add a rule for; both are the
-//      SAME bug, that these rules do not know what a shell argument is. The
-//      fix is to tokenise the span the way a shell would — quotes make
-//      whitespace part of the value, not a separator — and classify whole
-//      ARGUMENTS as credential-bearing (following a `-u`/`--user`/`--cookie`
-//      family flag, a bundled short-flag cluster ending in `u`, a
-//      `key=value` pair whose key is a secret name, a header-label value, or
-//      URL userinfo). The credential-bearing argument is then replaced
-//      WHOLE — never up to the first space inside it — and the cut-boundary
-//      rule below uses the same tokeniser: a truncation landing inside an
-//      unterminated quote drops the whole argument from its opening quote,
-//      not just the trailing whitespace-word, because whitespace inside an
-//      open quote is value, not a boundary.
+// Nothing else survives: no quoted-argument contents, no `key=value`
+// values, no URL path/query, no header value. The two r4 reproductions are
+// covered by construction, not by a new rule aimed at them specifically:
+// `--header=` is a flag name that stops at `=`, so the quoted
+// `"Cookie: sid=…"` after it is never inspected past that point; `-bsid=`
+// is a single-dash cluster folded to `-b`, so the attached `sid=<value>`
+// never contributes a flag name either.
 //
-// What stays useful: a short span (`sudo fixture-elevate`) is untouched, a
-// span with a credential inside keeps its shape around a placeholder, and a
-// benign script path in `source` is still the path.
+// Provenance (`source`, `chain`) is free text from the same untrusted place
+// a span is — a folded script's path can be `/tmp/<token>.sh` (#184) — so it
+// gets the same treatment: only the FILE NAME (basename) of each path
+// component survives, and only when that name is itself allow-listed shape
+// (`[A-Za-z0-9._-]{1,64}`, no 16-or-longer alphanumeric run — a hash- or
+// token-shaped name). `line` is an integer and needs none of this.
+//
+// The credential redactor from `dist/defence/credential-leak` is no longer
+// on this path — there is no free-text command field left for it to run
+// over, and an unreachable "safety" layer is worse than none, so r2/r3's
+// tokeniser-redaction machinery (`sanitiseEvidenceText`,
+// `redactCredentialArguments`, the cut-boundary rule, the credential-flag
+// tables) is deleted rather than kept dead. `tokenizeShellArgs` survives:
+// the projection still needs a shell-aware tokeniser, it just never hands a
+// token's raw text back out.
+
+const VERB_RE = /^[A-Za-z0-9_.-]{1,32}$/;
+/** A flag token up to `=`; whatever follows `=` is never captured or kept. */
+const FLAG_RE = /^-{1,2}[A-Za-z][A-Za-z0-9-]{0,31}(?=$|=)/;
+const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+/** A URL-shaped token: only the host (capture group 1) is ever read from a match. */
+const URL_TOKEN_RE = /^[a-z][a-z0-9+.-]*:\/\/(?:[^\s@/]*@)?([^\s/:?#]+)(?::\d+)?(?:[/?#].*)?$/i;
+const MAX_HOSTS = 5;
+const MAX_FLAGS = 12;
+/**
+ * The hook must not assume the dist it loads bounds a span to any size (see
+ * the file header). Nothing here is a security boundary — the tokeniser is
+ * a single linear pass, not a backtracking regex, and every persisted list
+ * is already capped — this only bounds the WORK done on a pathologically
+ * large string from a compromised or buggy dist before that capping applies.
+ */
+const MAX_PROJECTION_INPUT_CHARS = 8192;
+
+function isValidIPv4(host) {
+  const parts = host.split('.');
+  if (parts.length !== 4) return false;
+  return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255 && (p.length === 1 || p[0] !== '0'));
+}
+
+/**
+ * A hostname-grammar match whose labels are ALL digits is kept only when it
+ * is a genuine, in-range IPv4 address — otherwise it merely LOOKS like one
+ * (out-of-range octets, the wrong number of labels) and is dropped rather
+ * than persisted on the strength of that resemblance.
+ */
+function safeHostname(host) {
+  if (!HOSTNAME_RE.test(host)) return false;
+  const allNumericLabels = host.split('.').every((label) => /^[0-9]+$/.test(label));
+  return allNumericLabels ? isValidIPv4(host) : true;
+}
+
+function projectVerb(tokens) {
+  const first = tokens[0]?.value;
+  return typeof first === 'string' && VERB_RE.test(first) ? first : undefined;
+}
+
+function projectHosts(tokens) {
+  const hosts = [];
+  for (const tok of tokens) {
+    const m = URL_TOKEN_RE.exec(tok.value);
+    if (!m) continue;
+    const host = m[1].toLowerCase();
+    if (!safeHostname(host) || hosts.includes(host)) continue;
+    hosts.push(host);
+    if (hosts.length >= MAX_HOSTS) break;
+  }
+  return hosts;
+}
+
+function projectFlags(tokens) {
+  const flags = [];
+  for (const tok of tokens) {
+    const m = FLAG_RE.exec(tok.value);
+    if (!m) continue;
+    const full = m[0];
+    // A single-dash cluster is folded to its first letter: `-bsid=…` and
+    // `-su` both carry a value past the first letter (an attached value, or
+    // the next argument is the value) — exactly the vector r3/r4 needed
+    // redacting — so the cluster is never trusted past that first letter.
+    const name = full.startsWith('--') ? full : full.slice(0, 2);
+    if (flags.includes(name)) continue;
+    flags.push(name);
+    if (flags.length >= MAX_FLAGS) break;
+  }
+  return flags;
+}
+
+function projectShellShape(tokens) {
+  let pipeToShell = false;
+  let subshell = false;
+  for (const tok of tokens) {
+    if (tok.quote === "'") continue; // single-quoted: shell-literal text, not an operator
+    if (tok.value.includes('|')) pipeToShell = true;
+    if (tok.value.includes('$(') || tok.value.includes('`')) subshell = true;
+  }
+  return { pipeToShell, subshell };
+}
+
+/**
+ * The whole safety mechanism for command-derived evidence (r4): `value` is
+ * tokenised and only the allow-listed facts above are read off it. Nothing
+ * else — not a substring, not a redacted copy — is ever returned.
+ */
+function projectCommandEvidence(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().slice(0, MAX_PROJECTION_INPUT_CHARS);
+  if (!trimmed) return null;
+  const tokens = tokenizeShellArgs(trimmed);
+  if (tokens.length === 0) return null;
+  const out = { spanWithheld: 'command-text' };
+  const verb = projectVerb(tokens);
+  if (verb) out.verb = verb;
+  out.argc = tokens.length;
+  const hosts = projectHosts(tokens);
+  if (hosts.length > 0) out.hosts = hosts;
+  const flags = projectFlags(tokens);
+  if (flags.length > 0) out.flags = flags;
+  const { pipeToShell, subshell } = projectShellShape(tokens);
+  if (pipeToShell) out.pipeToShell = true;
+  if (subshell) out.subshell = true;
+  return out;
+}
 
 /**
  * Split `text` into shell-style argument tokens. Whitespace separates
  * arguments except inside single quotes (fully literal) or double quotes
  * (`\` escapes `" \ $` \``` only); outside quotes `\` escapes the next
- * character. Each token records its raw `start`/`end` span, its decoded
- * `value`, `quote` (the quote character when the ENTIRE token was one
- * closed quoted run, else `null`) and `truncated` (true when the LAST
- * token's quote never closed, or ended on a lone trailing `\`, before
- * `text` ran out — what `value` shows may be only part of the real
- * argument).
+ * character. Each token records its decoded `value` and `quote` (the quote
+ * character when the ENTIRE token was one closed quoted run, else `null`) —
+ * no token ever has its raw text or position handed back to a caller, so
+ * that is all a projection needs.
  */
 function tokenizeShellArgs(text) {
   const tokens = [];
@@ -1165,9 +1264,7 @@ function tokenizeShellArgs(text) {
   while (i < len) {
     while (i < len && /\s/.test(text[i])) i += 1;
     if (i >= len) break;
-    const start = i;
     const parts = [];
-    let truncated = false;
     while (i < len && !/\s/.test(text[i])) {
       const ch = text[i];
       if (ch === "'" || ch === '"') {
@@ -1186,14 +1283,12 @@ function tokenizeShellArgs(text) {
           body += c;
           i += 1;
         }
-        if (!closed) truncated = true;
         parts.push({ kind: 'quoted', quote, text: body, closed });
       } else if (ch === '\\') {
         if (i + 1 < len) {
           parts.push({ kind: 'bare', text: text[i + 1] });
           i += 2;
         } else {
-          truncated = true;
           i += 1;
         }
       } else {
@@ -1205,274 +1300,67 @@ function tokenizeShellArgs(text) {
     }
     const value = parts.map((p) => p.text).join('');
     const quote = parts.length === 1 && parts[0].kind === 'quoted' && parts[0].closed ? parts[0].quote : null;
-    tokens.push({ start, end: i, value, quote, truncated });
+    tokens.push({ value, quote });
   }
   return tokens;
 }
 
-/** Flags whose NEXT argument is entirely a credential value. */
-const CREDENTIAL_FLAG_TYPES = new Map([
-  ['-u', 'basic-auth'], ['-U', 'basic-auth'], ['--user', 'basic-auth'],
-  ['--proxy-user', 'basic-auth'], ['--auth', 'basic-auth'],
-  ['-p', 'credential'], ['--password', 'credential'], ['--token', 'credential'],
-  ['--api-key', 'credential'], ['--apikey', 'credential'],
-  ['-b', 'cookie'], ['--cookie', 'cookie'],
-]);
-/**
- * A bundled short-option cluster ending in `u` — curl's `-su`, `-sSu` — the
- * credential rides in the NEXT argument, same as a bare `-u`. Curl has no
- * OTHER bundled password-bearing short flag (its `-p` is `--proxytunnel`,
- * which takes no value), so only a `u`-ending cluster is treated this way;
- * `USERPASS_SHAPE_RE` below still has to agree before this fires, so `sort
- * -u file` (no colon in the next argument) is not mistaken for one.
- */
-const BUNDLED_USER_FLAG_RE = /^-[A-Za-z]+u$/;
-// Checked against the NEXT token's already-decoded value, which may be a
-// quoted argument with embedded spaces — so whitespace is not excluded here
-// the way it is from the (still whitespace-anchored) key=value/basic-auth
-// regexes elsewhere: a quoted `user:pass with spaces` must still count.
-const USERPASS_SHAPE_RE = /^[^"':]+:[^"']+$/;
-const SECRET_KEY_NAMES = '(?:session|sess|sessid|sessionid|phpsessid|jsessionid|sid|csrf(?:[-_]?token)?|xsrf(?:[-_]?token)?|auth(?:[-_]?token)?|access[-_]?token|refresh[-_]?token|id[-_]?token|api[-_]?key|apikey|api[-_]?secret|token|secret|password|passwd|pwd|credentials?)';
-const SECRET_KEY_ONLY_RE = new RegExp(`^${SECRET_KEY_NAMES}$`, 'i');
-/**
- * `key=value` pairs inside one already-isolated argument — a query-string
- * segment, a `--data` body, a bare `key=value` token. The value is bounded
- * by `&`/`;`/end of argument, NOT whitespace: whitespace inside an argument
- * only exists because it was quoted, so it is part of the value, not a
- * separator (this is the r3 fix — the old whole-string version of this rule
- * stopped at the first space even inside quotes).
- */
-const KEY_VALUE_RE = new RegExp(`(^|[?&;])${SECRET_KEY_NAMES}\\s*=\\s*["']?[^&;"']*`, 'gi');
-/** `Authorization:` / `Cookie:` as the label starting an argument's value. */
-const HEADER_LABEL_RE = /^((?:proxy-)?authorization|(?:set-)?cookie)\s*[:=]\s*/i;
-/** A bearer token immediately after the word "bearer", inside one argument. */
-const BEARER_RE = /^bearer\s+(.+)$/i;
-/** `scheme://user:pass@host…` — only the userinfo is a credential. */
-// The password segment allows `/` (a base64-shaped credential legitimately
-// contains it) — only whitespace, quotes, backtick and the terminating `@`
-// end it. The username segment stays stricter (`/` excluded) so a bare
-// `scheme://host/path@fragment` is not mistaken for userinfo.
-const USERINFO_RE = /^([a-z][a-z0-9+.-]*:\/\/)([^\s"'`/:@]+):([^\s"'`@]+)@/i;
+const PATH_COMPONENT_RE = /^[A-Za-z0-9._-]{1,64}$/;
+/** A run this long inside an otherwise-allowed component is hash/token shaped, not a normal filename. */
+const LONG_ALNUM_RUN_RE = /[A-Za-z0-9]{16,}/;
+const CHAIN_SEPARATOR = '→';
+const MAX_CHAIN_COMPONENTS = 6;
 
-function renderToken(tok, value) {
-  return tok.quote ? tok.quote + value + tok.quote : value;
+function basenameOf(text) {
+  const trimmed = text.trim().replace(/[\\/]+$/, '');
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+}
+
+function safePathComponent(text) {
+  const base = basenameOf(text);
+  if (!PATH_COMPONENT_RE.test(base) || LONG_ALNUM_RUN_RE.test(base)) return null;
+  return base;
 }
 
 /**
- * Classify one token given what the PREVIOUS token established (`pendingType`,
- * set when the previous token was a credential flag) and what follows
- * (`nextTok`, needed only to confirm a bundled-flag guess).
- *
- * @returns `{ newValue, nextPending }` — `newValue` is this token's
- *   replacement (`null` if it needs none) and `nextPending` is the type the
- *   NEXT token must be redacted as (`null` if none).
+ * `source`/`chain` never persist as given — only the FILE NAME of each path
+ * component, and only when that name is itself allow-listed shape. Either
+ * field failing its check withholds BOTH: an operator sees one honest
+ * reason, not a partially-redacted source beside a withheld chain.
  */
-function classifyShellArgument(tok, pendingType, nextTok) {
-  if (pendingType) return { newValue: `[REDACTED-${pendingType}]`, nextPending: null };
-  const value = tok.value;
-
-  const eq = value.indexOf('=');
-  if (eq > 0) {
-    const flagPart = value.slice(0, eq);
-    const flagType = CREDENTIAL_FLAG_TYPES.get(flagPart);
-    if (flagType) return { newValue: `${flagPart}=[REDACTED-${flagType}]`, nextPending: null };
-    if (SECRET_KEY_ONLY_RE.test(flagPart.replace(/^-+/, ''))) {
-      return { newValue: `${flagPart}=[REDACTED-credential]`, nextPending: null };
+function projectProvenance(rawSource, rawChain) {
+  let source;
+  if (typeof rawSource === 'string' && rawSource.trim()) {
+    source = safePathComponent(rawSource);
+    if (source === null) return { withheld: 'unsafe-path' };
+  }
+  let chain;
+  if (typeof rawChain === 'string' && rawChain.trim()) {
+    const parts = rawChain.split(CHAIN_SEPARATOR).map((p) => p.trim()).filter(Boolean).slice(0, MAX_CHAIN_COMPONENTS);
+    const bases = [];
+    for (const part of parts) {
+      const base = safePathComponent(part);
+      if (base === null) return { withheld: 'unsafe-path' };
+      bases.push(base);
     }
+    if (bases.length > 0) chain = bases.join(' > ');
   }
-
-  const header = HEADER_LABEL_RE.exec(value);
-  if (header) {
-    const label = value.slice(0, header[0].length);
-    const kind = /cookie/i.test(header[1]) ? 'cookie' : 'authorization';
-    // An unquoted label with nothing after it in THIS token (`Authorization:`
-    // as its own word) — the value is the next token. The realistic shape
-    // (`-H "Authorization: Bearer x"`) is already one quoted token and never
-    // reaches this branch.
-    if (header[0].length === value.length) return { newValue: label, nextPending: kind };
-    return { newValue: `${label}[REDACTED-${kind}]`, nextPending: null };
-  }
-
-  const bearer = BEARER_RE.exec(value);
-  if (bearer) return { newValue: value.slice(0, value.length - bearer[1].length) + '[REDACTED-bearer]', nextPending: null };
-
-  const userinfo = USERINFO_RE.exec(value);
-  if (userinfo) {
-    return {
-      newValue: value.slice(0, userinfo[1].length) + '[REDACTED-basic-auth]@' + value.slice(userinfo[0].length),
-      nextPending: null,
-    };
-  }
-
-  KEY_VALUE_RE.lastIndex = 0;
-  const kv = value.replace(KEY_VALUE_RE, (_m, pre) => `${pre}[REDACTED-credential]`);
-  if (kv !== value) return { newValue: kv, nextPending: null };
-
-  let nextPending = null;
-  if (CREDENTIAL_FLAG_TYPES.has(value)) nextPending = CREDENTIAL_FLAG_TYPES.get(value);
-  else if (value.toLowerCase() === 'bearer') nextPending = 'bearer';
-  else if (BUNDLED_USER_FLAG_RE.test(value) && nextTok && USERPASS_SHAPE_RE.test(nextTok.value)) nextPending = 'basic-auth';
-  return { newValue: null, nextPending };
+  const out = {};
+  if (source) out.source = source;
+  if (chain) out.chain = chain;
+  return out;
 }
 
 /**
- * Tokenise `text` as shell arguments and replace every credential-bearing
- * ARGUMENT whole — never a substring stopped at the first space inside a
- * quote. Runs before the dist redactor (see contract above).
- *
- * @returns `{ text, truncatedArg }` — `truncatedArg` is true when the LAST
- *   argument's quote never closed: the field may have been cut mid-argument
- *   for a reason unrelated to length (a genuine truncation this hook's own
- *   length checks would not catch), so the caller treats it as possibly cut.
- */
-function redactCredentialArguments(text) {
-  const tokens = tokenizeShellArgs(text);
-  if (tokens.length === 0) return { text, truncatedArg: false };
-  let out = '';
-  let cursor = 0;
-  let pendingType = null;
-  let truncatedArg = false;
-  for (let i = 0; i < tokens.length; i += 1) {
-    const tok = tokens[i];
-    out += text.slice(cursor, tok.start);
-    const { newValue, nextPending } = classifyShellArgument(tok, pendingType, tokens[i + 1]);
-    out += newValue === null ? text.slice(tok.start, tok.end) : renderToken(tok, newValue);
-    cursor = tok.end;
-    pendingType = nextPending;
-    if (i === tokens.length - 1 && tok.truncated) truncatedArg = true;
-  }
-  out += text.slice(cursor);
-  return { text: out, truncatedArg };
-}
-
-/**
- * A trailing word too short to be a credential fragment: one to three pure
- * letters. Anything else — digits, punctuation, a fourth letter — is
- * dropped with the argument it ends.
- */
-const HARMLESS_WORD_RE = /^[A-Za-z]{1,3}$/;
-
-/**
- * Apply the boundary rule: `text` ends where something may have cut a
- * token, so its trailing ARGUMENT (shell-tokenised, quote-aware) is not
- * evidence, it is a fragment. Replace the WHOLE argument with CUT_MARKER —
- * for an argument still inside an open quote that means dropping back to
- * the quote's OPENING character, not the last whitespace, because
- * whitespace inside that quote is value, not a boundary.
- *
- * @returns `{ text, marked }` — `marked` is true iff CUT_MARKER was written,
- *   which is the only time a caller may say the field was cut; or
- *   `{ withheld: 'cut-inside-token' }` when the trailing argument was the
- *   whole field and nothing would be left to persist.
- */
-function markCutBoundary(text) {
-  const tokens = tokenizeShellArgs(text);
-  const last = tokens[tokens.length - 1];
-  // No token reaches the end (the field ends in whitespace, or is empty):
-  // every argument present is whole, nothing to drop; the marker still says
-  // the field continued past this point.
-  if (!last || last.end !== text.length) return { text: text + CUT_MARKER, marked: true };
-  if (!last.truncated && HARMLESS_WORD_RE.test(last.value)) return { text, marked: false };
-  const head = text.slice(0, last.start);
-  if (!head.trim()) return { withheld: 'cut-inside-token' };
-  return { text: head + CUT_MARKER, marked: true };
-}
-
-/**
- * The single path every persisted free-text evidence field takes:
- * collapse → cap → redact credential ARGUMENTS locally (shell-tokenised) →
- * redact with the dist detector → bound → mark any boundary that may have
- * cut a token.
- *
- * @returns `{ text, cut }` or `{ withheld }` with the reason. `cut` is true
- *   exactly when the boundary rule wrote CUT_MARKER (the field ends in it);
- *   `withheld: 'cut-inside-token'` when the cut argument was the whole field.
- */
-function sanitiseEvidenceText(value, redactSpan, bound) {
-  if (typeof value !== 'string') return null;
-  let raw = value.replace(/\s+/g, ' ').trim();
-  if (!raw) return null;
-  // The core's fmtSpan cuts at exactly `bound`; a value of exactly that
-  // length may have been cut before the hook saw it, and the hook cannot
-  // tell — so it is treated as if it was. A longer value was not cut by
-  // that bound; if it needs cutting here, the cut below says so.
-  let possiblyCut = raw.length === bound;
-  if (raw.length > MAX_RAW_EVIDENCE_CHARS) {
-    raw = raw.slice(0, MAX_RAW_EVIDENCE_CHARS);
-    possiblyCut = true;
-  }
-  if (typeof redactSpan !== 'function') return { withheld: 'redactor-unavailable' };
-  const argRedaction = redactCredentialArguments(raw);
-  // An unterminated quote at the end of `raw` means the LAST argument may be
-  // only part of what was really there, for a reason none of the length
-  // checks above would catch (this hook's own MAX_RAW_EVIDENCE_CHARS cut, or
-  // a genuinely malformed value) — ambiguous truncation is treated the same
-  // as a known one.
-  if (argRedaction.truncatedArg) possiblyCut = true;
-  let redacted;
-  try {
-    redacted = String(redactSpan(argRedaction.text));
-  } catch {
-    return { withheld: 'redactor-failed' };
-  }
-  // Bound AFTER redaction. A placeholder carries none of the raw text, so
-  // the bound grows by the placeholders' own length and by nothing else:
-  // never more than `bound` characters of raw content, whatever the
-  // placeholders replaced was longer or shorter than them.
-  const placeholderChars = (redacted.match(/\[REDACTED-[^\]]*\]/g) ?? [])
-    .reduce((n, p) => n + p.length, 0);
-  const limit = Math.min(bound + placeholderChars, bound * 2);
-  let text = redacted;
-  if (text.length > limit) {
-    text = text.slice(0, limit);
-    possiblyCut = true;
-    // This hook's own cut may land inside a `[REDACTED-…]` placeholder. No
-    // special case is needed to keep half a placeholder out of the row: a
-    // placeholder contains no whitespace, so a partial one is always inside
-    // the trailing word, and the boundary rule below drops that word whole.
-    // (Only a 1–3 letter word survives the rule, and `[RED` is not one.)
-  }
-  if (!possiblyCut) return { text, cut: false };
-  const marked = markCutBoundary(text);
-  if (marked.withheld) return { withheld: marked.withheld };
-  // `cut` is true only when the marker was actually written — and then the
-  // raw trailing word is gone. A field that met a boundary but ended in a
-  // harmless word is persisted as-is and not called cut.
-  return { text: marked.text, cut: marked.marked };
-}
-
-let spanRedactorPromise = null;
-/**
- * The credential redactor from dist — the same detector the memory pipeline
- * uses — loaded through the same seam as every other module this hook trusts.
- * Null when the build predates it or cannot be loaded; the caller then
- * withholds every span rather than writing one unredacted.
- */
-function loadSpanRedactor() {
-  if (spanRedactorPromise === null) {
-    spanRedactorPromise = (async () => {
-      try {
-        const mod = await import(
-          pathToFileURL(resolve(hookDistRoot(), 'defence', 'credential-leak', 'index.js')).href
-        );
-        return typeof mod?.redactCredentials === 'function' ? mod.redactCredentials : null;
-      } catch {
-        return null;
-      }
-    })();
-  }
-  return spanRedactorPromise;
-}
-
-/**
- * Sanitise the guard's rule → matched-span evidence for the denial record.
+ * Project the guard's rule → matched-span evidence for the denial record.
  * Fail-closed on every axis: an unrecognised rule name is dropped, every
- * free-text field (span, source, chain) takes `sanitiseEvidenceText`, and
- * with no working redactor every one of them is withheld and the row says
- * why (`spanWithheld` / `provenanceWithheld`). `line` is an integer and
- * needs none of that.
+ * command-derived span goes through `projectCommandEvidence` (never kept
+ * verbatim), and unsafe provenance withholds and says why
+ * (`provenanceWithheld: 'unsafe-path'`). `line` is an integer and needs
+ * none of that.
  */
-function safeMatchList(matches, redactSpan) {
+function safeMatchList(matches) {
   if (!Array.isArray(matches)) return [];
   const out = [];
   for (const raw of matches) {
@@ -1482,26 +1370,18 @@ function safeMatchList(matches, redactSpan) {
     if (!SAFE_SIGNALS.has(signal)) continue;
     const row = { signal };
     if (!SPANLESS_SIGNAL_RE.test(signal)) {
-      const span = sanitiseEvidenceText(raw.span, redactSpan, MAX_SPAN_CHARS);
-      if (span?.withheld) row.spanWithheld = span.withheld;
-      else if (span?.text) {
-        row.span = span.text;
-        if (span.cut) row.spanCut = true;
-      }
+      const projection = projectCommandEvidence(raw.span);
+      if (projection) Object.assign(row, projection);
     }
     // #184: where the match came from folded script source, the row names the
-    // file and invocation chain so the operator is not left reading a parent
-    // script that does not contain the matched pattern. Both are free text
-    // from the same place the span came from and get the same treatment.
-    const source = sanitiseEvidenceText(raw.source, redactSpan, MAX_PROVENANCE_CHARS);
-    const chain = sanitiseEvidenceText(raw.chain, redactSpan, MAX_PROVENANCE_CHARS);
-    const provenanceWithheld = source?.withheld ?? chain?.withheld;
-    if (provenanceWithheld) {
-      row.provenanceWithheld = provenanceWithheld;
-    } else {
-      if (source?.text) row.source = source.text;
-      if (chain?.text) row.chain = chain.text;
-      if (source?.cut || chain?.cut) row.provenanceCut = true;
+    // file so the operator is not left reading a parent script that does not
+    // contain the matched pattern. Both fields are free text from the same
+    // place the span came from and get the same treatment.
+    const provenance = projectProvenance(raw.source, raw.chain);
+    if (provenance.withheld) row.provenanceWithheld = provenance.withheld;
+    else {
+      if (provenance.source) row.source = provenance.source;
+      if (provenance.chain) row.chain = provenance.chain;
     }
     if (Number.isInteger(raw.line) && raw.line > 0) row.line = raw.line;
     out.push(row);
@@ -1683,11 +1563,11 @@ function terminalDecisionReason(verdict, outcome, event) {
   return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
 }
 
-function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify, redactSpan }) {
+function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
   const id = actionId || mintActionId();
   const context = notificationContext(sessionKey, id);
-  // #517 (3): rule → matched-span evidence, sanitised and credential-redacted.
-  const matches = safeMatchList(verdict.matches, redactSpan);
+  // #517 (3): rule → matched-span evidence, projected (r4 — command text withheld).
+  const matches = safeMatchList(verdict.matches);
   const row = {
     event,
     outcome,
@@ -1874,16 +1754,12 @@ function retryBudgetWindow(digestDecision) {
 
 async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId, retryCtx }) {
   const id = actionId || mintActionId();
-  // #517 (3): the redactor is loaded before the first row is written so both
-  // rows of an event carry the same evidence. A load that fails withholds
-  // spans; it never delays or drops the row.
-  const redactSpan = await loadSpanRedactor();
   // #284 dual-review blocker (SOL): write the denial row FIRST with notify pending,
   // then attempt delivery and append/update status. A hang/crash during notify must
   // not drop the forensics row that operators open first (denials.jsonl).
   const pendingRow = buildLocalGuardOutcome({
     toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
-    notify: { status: 'pending', deliveredVia: null }, redactSpan,
+    notify: { status: 'pending', deliveredVia: null },
   });
   recordLocalGuardOutcome(pendingRow);
 
@@ -2113,7 +1989,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   // first row if delivery hangs.
   const finalRow = buildLocalGuardOutcome({
     toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
-    notify: notifyStatus, redactSpan,
+    notify: notifyStatus,
   });
   recordLocalGuardOutcome(finalRow);
 
