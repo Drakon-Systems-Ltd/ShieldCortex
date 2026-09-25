@@ -19,6 +19,7 @@
  * npm, a registry and a gateway.
  */
 import { describe, it, expect } from '@jest/globals';
+import { updateVerdict } from '../update.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -63,14 +64,18 @@ describe('#171 — update ends by verifying protection, like repair', () => {
   });
 
   it('an applied-but-failed verify sets a non-zero exit code — no false all-clear', () => {
-    // Ledger maps true unprotected → failed; unproven (canary live / roster unread)
-    // stays attention. runUpdate exits 1 only on protection.status === 'failed'.
+    // Ledger maps true unprotected → failed; unproven (canary live / roster
+    // unread) stays attention. Since #574 r4 nit 1 the decision itself is
+    // `updateVerdict`, which can be asserted for real instead of by grep —
+    // so this case greps only for the WIRING and tests the rule directly.
     const stepBody = bodyOf('stepVerifyProtection');
     const runBody = bodyOf('runUpdate');
     expect(stepBody).toMatch(/protectionLedgerFromReconcile/);
     expect(stepBody).toMatch(/ledger\.status/);
-    expect(runBody).toMatch(/process\.exitCode\s*=\s*1/);
     expect(runBody).toMatch(/protection\.status === 'failed'/);
+    expect(runBody).toMatch(/process\.exitCode = exitCode/);
+    expect(updateVerdict({ failed: true, attention: true, unfinished: false }).exitCode).toBe(1);
+    expect(updateVerdict({ failed: false, attention: true, unfinished: false }).exitCode).toBe(0);
   });
 
   it('runUpdate invokes it', () => {
