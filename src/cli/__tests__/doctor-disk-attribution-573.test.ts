@@ -1,6 +1,6 @@
 /**
- * #573 — the DISK check names the real consumer, and never recommends deleting
- * memories without positive page-level evidence.
+ * #573 — the DISK check REPORTS what it measured, and prescribes only what a
+ * measurement supports.
  *
  * THE INCIDENT. A host read `DB 54.2 MB · logs 41.4 MB`, and every remedy on
  * offer pointed into the database — because "logs" was one undifferentiated
@@ -8,14 +8,23 @@
  * and `memories dedupe`. The operator's only way to clear a failure caused by
  * log growth was to delete deliberately-retained memories.
  *
- * THE RULE. Memory-deletion advice requires POSITIVE ATTRIBUTION: the pages of
- * the `memories` table plus its indexes and FTS shadow tables, read from the
- * `dbstat` virtual table, must be at least half the database's used pages, and
- * the database must be the largest disk term. The FILE's size is never the
- * evidence — free pages, session capture, defence-audit rows and the threat
- * graph all inflate it and none of them are reachable by prune or dedupe. When
- * attribution is unavailable (no dbstat, unreadable DB) the answer is
- * inspection, not a guess that happens to be destructive.
+ * THE RULE, after two rounds of getting the clever version wrong. Rounds 1 and
+ * 2 tried to decide WHICH ROWS were the bulk — `dbstat` page sums over the
+ * `memories` table, its indexes and an FTS5 index's shadow tables, with the
+ * index found by reading the `content=` option out of the schema. Each attempt
+ * produced a new confidently-wrong recommendation to delete memories: a
+ * threat-graph database, a database that was 95% free pages, an ordinary table
+ * called `memories_backup` behind that `content=` option. So the ambition is
+ * gone. The row reports the sizes it measured, and names a command in exactly
+ * two cases, each backed by the number it already has:
+ *
+ *   1. repair logs are at least half the measured footprint → `logs prune`;
+ *   2. at least 20% of the database is free pages → `vacuum`.
+ *
+ * Audit-dominated says so and names #579 (no command, nothing here deletes
+ * evidence). Anything else reports the sizes and asks the operator to look.
+ * NOTHING in this row ever recommends deleting a row — not memories, not
+ * session events, not audit rows.
  */
 
 import fs from 'fs';
@@ -29,8 +38,8 @@ import { checkDiskUsage } from '../doctor.js';
 const KB = 1024;
 let scDir: string;
 
-/** Any memory-deleting recommendation, in any of the forms doctor uses. */
-const DELETION_ADVICE = /memories prune|memories dedupe|memories clear/;
+/** Any row-deleting recommendation, in any of the forms doctor has ever used. */
+const DELETION_ADVICE = /memories prune|memories dedupe|memories clear|sessions prune/;
 
 beforeEach(() => {
   scDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-disk-'));
@@ -56,15 +65,7 @@ function repairLogs(count: number, bytesEach: number): void {
 }
 
 const MEMORIES_DDL = 'CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL)';
-const MEMORIES_FTS_DDL = "CREATE VIRTUAL TABLE memories_fts USING fts5(content, content='memories', content_rowid='id')";
 const THREAT_DDL = 'CREATE TABLE threat_nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, blob TEXT NOT NULL)';
-const SESSION_DDL = `CREATE TABLE session_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, ts TIMESTAMP NOT NULL,
-  kind TEXT NOT NULL, payload TEXT NOT NULL)`;
-const AUDIT_DDL = `CREATE TABLE defence_audit (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, reason TEXT, threat_indicators TEXT DEFAULT '[]',
-  blocked_patterns TEXT DEFAULT '[]', source_type TEXT NOT NULL DEFAULT 'test',
-  source_identifier TEXT NOT NULL DEFAULT 'test')`;
 
 interface DbShape {
   memoryBytes: number;
@@ -72,57 +73,26 @@ interface DbShape {
   threatBytes?: number;
   /** Bytes of threat_nodes written and then deleted — free pages, not data. */
   freedThreatBytes?: number;
-  withFts?: boolean;
   /**
-   * Fill memories with distinct tokens rather than one repeated character, so
-   * the FTS5 index is a realistic share of the pages. Repetitive content
-   * compresses to a single term and makes the shadow tables negligible, which
-   * hides whether they are counted at all.
+   * An EXTERNAL-CONTENT FTS5 index over a table called `memories_backup`. The
+   * round-2 attribution read its `content=memories_backup` option with
+   * `/content\s*=\s*'?memories'?/` and charged its pages to `memories`.
    */
-  varied?: boolean;
-  /** Shadow the dbstat vtab with a view, so attribution is genuinely absent. */
-  breakDbstat?: boolean;
-  /** Bytes in `defence_audit`, spread over `auditRows` rows (default 1). */
-  auditBytes?: number;
-  auditRows?: number;
-  /**
-   * Bytes in an ORDINARY table called `memories_fts_backup` — not an FTS index,
-   * just a name a LIKE pattern used to claim (#573 round 2, blocker 7).
-   */
-  ftsBackupBytes?: number;
+  ftsOverBackupBytes?: number;
 }
 
 function buildDb(shape: DbShape): void {
   const db = new Database(path.join(scDir, 'memories.db'));
   // One transaction for the whole fixture: a few hundred autocommitted inserts
-  // is a few hundred fsyncs, and these suites build ten of them.
+  // is a few hundred fsyncs, and these suites build several of them.
   db.prepare('BEGIN').run();
   db.prepare(MEMORIES_DDL).run();
-  db.prepare(SESSION_DDL).run();
-  db.prepare(AUDIT_DDL).run();
   db.prepare(THREAT_DDL).run();
-  if (shape.withFts) db.prepare(MEMORIES_FTS_DDL).run();
 
   const rows = shape.memoryRows ?? 1;
   const per = Math.max(1, Math.floor(shape.memoryBytes / rows));
   const insMem = db.prepare('INSERT INTO memories (content) VALUES (?)');
-  for (let i = 0; i < rows; i++) {
-    if (shape.varied) {
-      // GLOBALLY distinct tokens. Tokens that repeat across rows collapse into
-      // shared posting lists and shrink the FTS index below the table it
-      // indexes, which is the one shape that would make this fixture unable to
-      // tell "shadow tables counted" from "shadow tables ignored".
-      const wordsPerRow = Math.max(1, Math.floor(per / 6));
-      const words: string[] = [];
-      for (let j = 0; j < wordsPerRow; j++) words.push(`w${(i * wordsPerRow + j).toString(36)}`);
-      insMem.run(words.join(' '));
-    } else {
-      insMem.run('m'.repeat(per));
-    }
-  }
-  if (shape.withFts) {
-    db.prepare("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')").run();
-  }
+  for (let i = 0; i < rows; i++) insMem.run('m'.repeat(per));
 
   const insThreat = db.prepare('INSERT INTO threat_nodes (blob) VALUES (?)');
   const chunk = 2048;
@@ -136,25 +106,25 @@ function buildDb(shape: DbShape): void {
     }
     db.prepare('DELETE FROM threat_nodes WHERE id > ?').run(before.m ?? 0);
   }
-  if (shape.auditBytes) {
-    const auditRows = shape.auditRows ?? 1;
-    const perAudit = Math.max(1, Math.floor(shape.auditBytes / auditRows));
-    const insAudit = db.prepare('INSERT INTO defence_audit (reason) VALUES (?)');
-    for (let i = 0; i < auditRows; i++) insAudit.run('a'.repeat(perAudit));
-  }
-  if (shape.ftsBackupBytes) {
-    db.prepare('CREATE TABLE memories_fts_backup (id INTEGER PRIMARY KEY, content TEXT)').run();
-    const insBackup = db.prepare('INSERT INTO memories_fts_backup (content) VALUES (?)');
-    for (let written = 0; written < shape.ftsBackupBytes; written += chunk) {
-      insBackup.run('b'.repeat(chunk));
+  if (shape.ftsOverBackupBytes) {
+    db.prepare('CREATE TABLE memories_backup (id INTEGER PRIMARY KEY, content TEXT)').run();
+    const ins = db.prepare('INSERT INTO memories_backup (content) VALUES (?)');
+    let word = 0;
+    for (let written = 0; written < shape.ftsOverBackupBytes; written += chunk) {
+      const words: string[] = [];
+      for (let j = 0; j < chunk / 6; j++) words.push(`w${(word++).toString(36)}`);
+      ins.run(words.join(' '));
     }
+    db.prepare(
+      "CREATE VIRTUAL TABLE backup_search USING fts5(content, content=memories_backup, content_rowid=id)",
+    ).run();
+    db.prepare("INSERT INTO backup_search(backup_search) VALUES('rebuild')").run();
   }
-  if (shape.breakDbstat) db.prepare('CREATE VIEW dbstat AS SELECT 1 AS irrelevant').run();
   db.prepare('COMMIT').run();
   db.close();
 }
 
-describe('#573 the DISK breakdown names which logs, and the free pages inside the DB', () => {
+describe('#573 the DISK breakdown reports the sizes it measured', () => {
   it('splits the logs term into audit, repair and other', async () => {
     writeBytes('memories.db', 4 * KB);
     writeBytes('audit/realtime-2026-01-01.jsonl', 20 * KB);
@@ -176,10 +146,24 @@ describe('#573 the DISK breakdown names which logs, and the free pages inside th
 
     expect(result.message).toMatch(/DB .*\(\d+\.\d KB free\)/);
   });
+
+  it('counts a repair log by the grammar `logs prune` acts on, not by prefix', async () => {
+    // The number shown has to be the set the recommended command would
+    // consider. `project-key-repair-config.json` is an operator's file: prune
+    // leaves it alone (round-3 blocker 4), so this must not count it either.
+    writeBytes('memories.db', 1 * KB);
+    repairLogs(4, 2 * KB);
+    writeBytes(path.join('logs', 'project-key-repair-config.json'), 40 * KB);
+
+    const result = await checkDiskUsage(scDir, 32 * KB);
+
+    expect(result.message).toMatch(/repair 8\.0 KB/);
+    expect(result.fix).not.toMatch(/logs prune/);
+  });
 });
 
-describe('#573 the remedy points at the term that is actually over budget', () => {
-  it('recommends `logs prune --execute` when repair logs are the largest term', async () => {
+describe('#573 the remedy follows the measurement, or names no command', () => {
+  it('recommends `logs prune --execute` when repair logs are most of the footprint', async () => {
     writeBytes('memories.db', 4 * KB);
     repairLogs(30, 2 * KB);
 
@@ -191,7 +175,7 @@ describe('#573 the remedy points at the term that is actually over budget', () =
     expect(result.fix).not.toMatch(DELETION_ADVICE);
   });
 
-  it('names the audit plane and the follow-up issue when audit is the largest term, with no command', async () => {
+  it('names the audit plane and the follow-up issue, with no command', async () => {
     writeBytes('memories.db', 4 * KB);
     writeBytes('audit/realtime-2026-01-01.jsonl', 60 * KB);
     repairLogs(1, 1 * KB);
@@ -206,125 +190,23 @@ describe('#573 the remedy points at the term that is actually over budget', () =
     expect(result.fix).not.toMatch(/logs prune --execute/);
     expect(result.fix).not.toMatch(DELETION_ADVICE);
   });
-});
 
-describe('#573 memory deletion needs positive page-level attribution', () => {
-  it('does not recommend deletion for a DB filled by the threat graph (reviewer fixture)', async () => {
-    // 1 byte of memories, 500 KB of threat_nodes. A file-size heuristic calls
-    // this "the DB is the bulk, prune your memories"; the pages say the
-    // memories table is a rounding error.
-    buildDb({ memoryBytes: 1, threatBytes: 500 * KB });
+  it('reports the sizes and names nothing when no term holds half of them', async () => {
+    writeBytes('memories.db', 20 * KB);
+    writeBytes('audit/realtime-2026-01-01.jsonl', 20 * KB);
+    writeBytes('state/worker.json', 20 * KB);
 
-    const result = await checkDiskUsage(scDir, 256 * KB);
+    const result = await checkDiskUsage(scDir, 32 * KB);
 
     expect(result.status).toBe('fail');
+    expect(result.fix).toMatch(/No single measured consumer/);
+    expect(result.fix).toMatch(/inspect before removing anything/);
     expect(result.fix).not.toMatch(DELETION_ADVICE);
-    expect(result.fix).toMatch(/shieldcortex stats/);
-  });
-
-  it('recommends vacuum, not deletion, when the DB is mostly free pages', async () => {
-    buildDb({ memoryBytes: 1, threatBytes: 100 * KB, freedThreatBytes: 400 * KB });
-
-    const result = await checkDiskUsage(scDir, 256 * KB);
-
-    expect(result.status).toBe('fail');
-    expect(result.fix).not.toMatch(DELETION_ADVICE);
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
-    expect(result.fix).toMatch(/free pages/);
-  });
-
-  it('DOES recommend prune when the memories table really is the bulk', async () => {
-    buildDb({ memoryBytes: 500 * KB, memoryRows: 250, withFts: true });
-
-    const result = await checkDiskUsage(scDir, 256 * KB);
-
-    expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/shieldcortex memories prune --execute/);
-    // Prune alone leaves the freed pages in the file.
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
-  });
-
-  it('refuses to recommend deletion when dbstat is unavailable, even on the same fixture', async () => {
-    // Identical to the case above apart from dbstat being unreachable. Absence
-    // of evidence is not evidence: the advice must fall back to inspection.
-    buildDb({ memoryBytes: 500 * KB, memoryRows: 250, withFts: true, breakDbstat: true });
-
-    const result = await checkDiskUsage(scDir, 256 * KB);
-
-    expect(result.status).toBe('fail');
-    expect(result.fix).not.toMatch(DELETION_ADVICE);
-    expect(result.fix).toMatch(/shieldcortex stats/);
-    // And it must say WHY it cannot advise, rather than reporting an
-    // unmeasured share as a measured one. Treating "no dbstat" as "0% of the
-    // pages" reaches the same non-destructive conclusion by asserting
-    // something false about the operator's database.
-    expect(result.fix).toMatch(/dbstat/);
-    expect(result.fix).not.toMatch(/holds only 0%/);
-  });
-
-  it('counts the FTS shadow tables and indexes as part of the memories table', async () => {
-    // Real text: the external-content FTS5 index ends up LARGER than the table
-    // it indexes (measured on this fixture: 166 pages of shadow tables against
-    // 111 of `memories`). Counting only the table puts the memory system at 39%
-    // of the used pages and silently withdraws prune advice from a database
-    // that genuinely is nothing but memories.
-    buildDb({ memoryBytes: 400 * KB, memoryRows: 400, withFts: true, varied: true });
-
-    const result = await checkDiskUsage(scDir, 512 * KB);
-
-    expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/shieldcortex memories prune --execute/);
-  });
-
-  it('gives no deletion advice when the DB is not the largest term at all', async () => {
-    // Even a genuinely memories-dominated DB must not be the answer when
-    // something else is what filled the directory.
-    buildDb({ memoryBytes: 20 * KB, memoryRows: 20, withFts: true });
-    repairLogs(60, 2 * KB);
-
-    const result = await checkDiskUsage(scDir, 64 * KB);
-
-    expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/shieldcortex logs prune --execute/);
-    expect(result.fix).not.toMatch(DELETION_ADVICE);
-  });
-});
-
-// ── Round-2 blockers 6 and 7 ──────────────────────────────────────────────
-
-describe('#573 blocker 6 — a consumer is only "the bulk" when it is measured to be', () => {
-  it('does not blame one byte of defence_audit for a threat-graph database', async () => {
-    // The reviewer's fixture exactly: 1 B of memories, 500 KB of threat_nodes,
-    // 1 B in defence_audit, no free pages. The old condition compared audit
-    // bytes ONLY against session bytes (1 > 0), so doctor announced "the bulk
-    // is defence-audit rows … ~1 B" and recommended a vacuum with nothing to
-    // reclaim.
-    buildDb({ memoryBytes: 1, threatBytes: 500 * KB, auditBytes: 1 });
-
-    const result = await checkDiskUsage(scDir, 256 * KB);
-
-    expect(result.status).toBe('fail');
-    expect(result.fix).not.toMatch(/bulk is defence-audit/);
-    expect(result.fix).not.toMatch(DELETION_ADVICE);
-    expect(result.fix).not.toMatch(/shieldcortex vacuum/);
-    expect(result.fix).toMatch(/shieldcortex stats/);
-  });
-
-  it('DOES blame defence_audit when it genuinely holds the file', async () => {
-    // The other side of the same rule: the branch must still fire when the
-    // measurement supports it, or the fix above is just a mute button.
-    buildDb({ memoryBytes: 1, auditBytes: 400 * KB, auditRows: 400 });
-
-    const result = await checkDiskUsage(scDir, 256 * KB);
-
-    expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/bulk is defence-audit rows/);
-    expect(result.fix).toMatch(/400 rows/);
-    expect(result.fix).not.toMatch(DELETION_ADVICE);
+    expect(result.fix).not.toMatch(/shieldcortex vacuum|logs prune/);
   });
 
   it('recommends no vacuum, and no blanket clearing, for a state file and no database', async () => {
-    // The reviewer's second fixture: a large state file, no DB at all. It was
+    // The round-2 reviewer's fixture: a large state file, no DB at all. It was
     // told to vacuum, and handed a list of five directories as "safe to rotate
     // or clear" — including state/ (worker freshness, locks) and quarantine/
     // (items awaiting review).
@@ -336,47 +218,99 @@ describe('#573 blocker 6 — a consumer is only "the bulk" when it is measured t
     expect(result.fix).not.toMatch(/shieldcortex vacuum/);
     expect(result.fix).not.toMatch(/safe to rotate or clear/);
     expect(result.fix).toMatch(/No single measured consumer/);
-    expect(result.fix).toMatch(/Inspect before removing anything/);
+  });
+});
+
+// ── Round-3 blockers 2 and 3: the reviewer's three fixtures ───────────────
+
+describe('#573 blocker 3 — deletion advice is gone, and vacuum needs free pages', () => {
+  it('sends a 95%-free-pages database to vacuum, and to nothing else', async () => {
+    // The reviewer's fixture: 25 pages of memories, then a large row inserted
+    // and deleted — 488 of 515 pages free, reclaimable without deleting one
+    // memory. Doctor called memories "the bulk" (93% of the REMAINING used
+    // pages) and prescribed prune/dedupe before vacuum.
+    buildDb({ memoryBytes: 100 * KB, memoryRows: 50, freedThreatBytes: 800 * KB });
+
+    const result = await checkDiskUsage(scDir, 256 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).toMatch(/shieldcortex vacuum/);
+    expect(result.fix).toMatch(/free/);
+    expect(result.fix).not.toMatch(DELETION_ADVICE);
   });
 
-  it('withholds vacuum advice below the 20% free-page floor, and gives it above', async () => {
+  it('withholds vacuum below the 20% free-page floor, and gives it above', async () => {
+    // A database with essentially no free pages must not be sent to a full
+    // file rewrite that would reclaim nothing — the round-2 defect was that
+    // the memory and session branches named `vacuum` without consulting this
+    // threshold at all.
     buildDb({ memoryBytes: 1, threatBytes: 500 * KB });
     const tight = await checkDiskUsage(scDir, 256 * KB);
     expect(tight.fix).not.toMatch(/shieldcortex vacuum/);
+    expect(tight.fix).not.toMatch(DELETION_ADVICE);
 
     fs.rmSync(path.join(scDir, 'memories.db'));
     buildDb({ memoryBytes: 1, threatBytes: 100 * KB, freedThreatBytes: 400 * KB });
     const loose = await checkDiskUsage(scDir, 256 * KB);
     expect(loose.fix).toMatch(/shieldcortex vacuum/);
-    expect(loose.fix).toMatch(/free pages/);
   });
-});
 
-describe('#573 blocker 7 — a name prefix is not ownership by the search index', () => {
-  it('does not claim the pages of an ordinary table called memories_fts_backup', async () => {
-    // The reviewer's fixture: 1 B of memories and 500 KB in an ORDINARY table
-    // named `memories_fts_backup`. Under `tbl_name LIKE 'memories_fts%'` doctor
-    // reported memories owning 99% of the used pages and recommended
-    // `memories prune`/`dedupe`, neither of which can reclaim another table.
-    buildDb({ memoryBytes: 1, withFts: true, ftsBackupBytes: 500 * KB });
+  it('gives a mixed footprint with no free pages no command at all', async () => {
+    // The reviewer's second fixture: DB ~104 KB, audit ~98 KB, another 90 KB
+    // file, zero free pages. Memories were ~35% of the measured total and
+    // still drew `memories prune`/`dedupe`, followed by a `vacuum` with
+    // nothing to reclaim.
+    buildDb({ memoryBytes: 90 * KB, memoryRows: 90 });
+    writeBytes('audit/realtime-2026-01-01.jsonl', 98 * KB);
+    writeBytes('state/worker.json', 90 * KB);
+
+    const result = await checkDiskUsage(scDir, 128 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).not.toMatch(DELETION_ADVICE);
+    expect(result.fix).not.toMatch(/shieldcortex vacuum/);
+    expect(result.fix).toMatch(/No single measured consumer/);
+  });
+
+  it('never recommends deletion for a database filled by the threat graph', async () => {
+    // 1 byte of memories, 500 KB of threat_nodes: a file-size heuristic calls
+    // this "the DB is the bulk, prune your memories".
+    buildDb({ memoryBytes: 1, threatBytes: 500 * KB });
 
     const result = await checkDiskUsage(scDir, 256 * KB);
 
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(DELETION_ADVICE);
-    expect(result.fix).toMatch(/holds only \d+% of its used pages/);
-    expect(result.fix).toMatch(/shieldcortex stats/);
   });
 
-  it('still counts the real FTS5 index, so the rule is precision and not silence', async () => {
-    // Same shape as the fixture above minus the impostor table: the genuine
-    // external-content FTS5 index and its shadow tables must still be counted
-    // as the memory system's, or blocker 7's fix would simply withdraw all
-    // prune advice.
-    buildDb({ memoryBytes: 400 * KB, memoryRows: 400, withFts: true, varied: true });
+  it('never recommends deletion even when the database really is all memories', async () => {
+    // The case the old code was built to serve. It is STILL not advice this
+    // row gives: doctor cannot tell a deliberately-retained corpus from a
+    // runaway one, and the DISK row is not where that call gets made.
+    buildDb({ memoryBytes: 500 * KB, memoryRows: 250 });
 
-    const result = await checkDiskUsage(scDir, 512 * KB);
+    const result = await checkDiskUsage(scDir, 256 * KB);
 
-    expect(result.fix).toMatch(/shieldcortex memories prune --execute/);
+    expect(result.status).toBe('fail');
+    expect(result.fix).not.toMatch(DELETION_ADVICE);
+  });
+});
+
+describe('#573 blocker 2 — no schema text is read as ownership by the memory system', () => {
+  it('gives no deletion advice for an FTS5 index over `memories_backup`', async () => {
+    // The reviewer's fixture: one byte of memories, a separate memories_backup
+    // table, and `CREATE VIRTUAL TABLE backup_search USING fts5(content,
+    // content=memories_backup, content_rowid=id)`. The regex
+    // /content\s*=\s*'?memories'?/ matched `content=memories_backup`, so one
+    // real memories page out of 372 was reported as 50% and drew prune/dedupe.
+    buildDb({ memoryBytes: 1, ftsOverBackupBytes: 400 * KB });
+
+    const result = await checkDiskUsage(scDir, 256 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).not.toMatch(DELETION_ADVICE);
+    // And no share of any table is claimed at all — there is no attribution
+    // left to be right or wrong about.
+    expect(result.fix).not.toMatch(/used pages|% of the/);
   });
 });
