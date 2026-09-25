@@ -3,11 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from '@jest/globals';
 import {
+  claudeToolGateWired,
   formatHostTable,
+  guardHeadlineFromPlanes,
   presentUnwired,
   repairJobsFor,
   scanHostTable,
   writeRepairAgentBrief,
+  type HostGatePlanes,
 } from '../host-table.js';
 
 describe('host table', () => {
@@ -87,6 +90,46 @@ describe('host table', () => {
     expect(text).toContain('Hermes');
     expect(text).not.toMatch(/action-guard-enable|iron-dome activate/i);
     expect(presentUnwired(scanHostTable(h)).map((r) => r.id)).toEqual(['claude']);
+  });
+
+  it('#536 headline is Guard mixed when Claude is enforcing and OpenClaw is observe-only', () => {
+    const h = home();
+    mkdirSync(join(h, '.claude'), { recursive: true });
+    writeFileSync(
+      join(h, '.claude', 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'shieldcortex hook pre-tool' }] }] } }),
+    );
+    validLocalPlugin(h);
+    enableOpenClaw(h);
+    fakeOpenClawBin(h);
+    const planes: HostGatePlanes = {
+      signedEnabled: true,
+      signedEnforce: true,
+      claudeWired: claudeToolGateWired(h),
+      openclaw: 'observe-only',
+    };
+    expect(planes.claudeWired).toBe(true);
+    expect(guardHeadlineFromPlanes(planes)).toBe('mixed');
+    const text = formatHostTable(scanHostTable(h), '5.2.0', planes).join('\n');
+    expect(text).toContain('Guard mixed');
+    expect(text).not.toContain('Guard off');
+    expect(text).toMatch(/Claude Code.*enforcing/);
+    expect(text).toMatch(/OpenClaw.*observe-only/);
+    expect(text).not.toMatch(/action-guard-enable|iron-dome activate|action-guard-enforce/i);
+  });
+
+  it('#536 leftover signed Enforce with Claude unwired stays Guard off', () => {
+    const planes: HostGatePlanes = {
+      signedEnabled: true,
+      signedEnforce: true,
+      claudeWired: false,
+      openclaw: 'off',
+    };
+    expect(guardHeadlineFromPlanes(planes)).toBe('off');
+    const h = home();
+    const text = formatHostTable(scanHostTable(h), '5.2.0', planes).join('\n');
+    expect(text).toContain('Guard off');
+    expect(text).not.toMatch(/action-guard-enable/i);
   });
 
   it('repair brief names only the jobs and forbids Guard / conversation / import', () => {

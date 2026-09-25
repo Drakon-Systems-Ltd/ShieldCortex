@@ -51,17 +51,23 @@ const LOOSE_CONFIG = {
 
 let protectedRoot: string;
 let configDir: string;
+let ocHome: string;
 let prevProtectedRoot: string | undefined;
 let prevConfigDir: string | undefined;
+let prevOpenclawHome: string | undefined;
 
 beforeEach(() => {
   protectedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-501-protect-root-'));
   configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-501-protect-cfg-'));
+  ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-501-protect-oc-'));
   prevProtectedRoot = process.env[PROTECTED_ROOT_ENV];
   prevConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
+  prevOpenclawHome = process.env.OPENCLAW_HOME;
   process.env[PROTECTED_ROOT_ENV] = protectedRoot;
   process.env.SHIELDCORTEX_CONFIG_DIR = configDir;
+  process.env.OPENCLAW_HOME = ocHome;
   clearPolicyLockReportState();
+  jest.spyOn(os, 'homedir').mockReturnValue(configDir);
 });
 
 afterEach(() => {
@@ -70,8 +76,11 @@ afterEach(() => {
   else process.env[PROTECTED_ROOT_ENV] = prevProtectedRoot;
   if (prevConfigDir === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
   else process.env.SHIELDCORTEX_CONFIG_DIR = prevConfigDir;
+  if (prevOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+  else process.env.OPENCLAW_HOME = prevOpenclawHome;
   fs.rmSync(protectedRoot, { recursive: true, force: true });
   fs.rmSync(configDir, { recursive: true, force: true });
+  fs.rmSync(ocHome, { recursive: true, force: true });
 });
 
 describe('#501 parseProtectArgs', () => {
