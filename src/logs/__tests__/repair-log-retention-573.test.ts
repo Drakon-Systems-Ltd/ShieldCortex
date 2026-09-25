@@ -434,7 +434,10 @@ describe('#573 resolveRepairLogKeep is strict about its integer', () => {
       env: { SHIELDCORTEX_REPAIR_LOG_KEEP: ' ' },
     });
     expect(result.keep).toBe(DEFAULT_REPAIR_LOG_KEEP);
-    expect(result.errors.join(' ')).toContain('SHIELDCORTEX_REPAIR_LOG_KEEP');
+    // A warning, not an error: the pass ran to completion at the default, so
+    // the command still exits 0 (see the exit-status case in logs-prune-573).
+    expect(result.warnings.join(' ')).toContain('SHIELDCORTEX_REPAIR_LOG_KEEP');
+    expect(result.errors).toEqual([]);
   });
 });
 
@@ -629,7 +632,9 @@ describe('#573 blocker 2 — a record younger than an hour is never a candidate'
     const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
 
     expect(fs.existsSync(linked)).toBe(true);
-    expect(result.errors.join('\n')).toMatch(/hard links/);
+    // Deliberately left in place, so it is a warning: nothing failed.
+    expect(result.warnings.join('\n')).toMatch(/hard links/);
+    expect(result.errors).toEqual([]);
     expect(result.deleted.map((d) => path.basename(d.path))).toEqual([names[1]]);
   });
 });
