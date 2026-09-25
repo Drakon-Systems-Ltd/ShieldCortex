@@ -39,8 +39,8 @@ import { parseRegistrationsSince, parseLogLinePid } from '../integrations/opencl
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
 import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
-  describeFsError,
   hermesEnvironment,
+  protectedDirs,
   scanHermesPluginCopies,
   undeterminedSummary,
   type HermesPluginCopy,
@@ -49,6 +49,23 @@ import {
   type HermesProjectState,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
+// The staleness comparator `update`'s Hermes step decides on, so this row and
+// that step can never disagree about the same host (#576).
+import { hermesPluginCopyStale } from '../setup/hermes-refresh.js';
+import { acquireUpdateLock, updateLockPath, type UpdateLock } from '../setup/host-swap.js';
+// The filesystem readers the #569 repair is built on, shared with `update`'s
+// Hermes refresh (#576) so "I could not look" cannot decay into "there is
+// nothing there" in one of the two.
+import {
+  deviceUnder,
+  findLinkInTree,
+  lstatAnswer,
+  pathContains,
+  realPathAnswer,
+  releaseReservation,
+  reserveBackupDir,
+  SYMLINK_PREFLIGHT_ENTRY_BUDGET,
+} from '../setup/fs-answers.js';
 import { isNativeModuleLoadError, NativeModuleLoadError } from '../database/native-load-classify.js';
 // The typed lazy loader — the SAME one every real database open goes through
 // (database/init.ts). Importing it adds no static edge doctor did not already
@@ -90,6 +107,7 @@ import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
+import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
 import {
@@ -130,6 +148,10 @@ import {
   repairJobsFor,
   scanHostTable,
   writeRepairAgentBrief,
+  claudeToolGateWired,
+  claudePlaneEnforcing,
+  type HostGatePlanes,
+  type OpenClawGatePosture,
 } from '../setup/host-table.js';
 import {
   correlateCronDenials,
@@ -1962,63 +1984,43 @@ async function checkProcesses(): Promise<CheckResult[]> {
  * user with a local AI model cached.
  */
 /**
- * Best-effort read-only peek at what actually fills the live DB (#110):
- * row counts + stored byte totals for the memories and session_events
- * tables. Returns null on ANY failure (missing file, corrupt/locked DB,
- * missing tables, unreadable engine) — the caller then falls back to the
- * generic remedy text, so this can never break the disk check itself.
+ * How much of the live database is already free space (#573).
+ *
+ * The ONE fact the DISK row states about the file's contents, because it is the
+ * one it can state honestly: free pages are reclaimed by `shieldcortex vacuum`
+ * without deleting a row.
+ *
+ * Round 3 removed everything else this function used to do. Attributing pages
+ * to tables — dbstat sums over `memories`, its indexes, an FTS5 index's shadow
+ * tables, a `content=` option read out of the schema — produced a new
+ * confidently-wrong "delete your memories" on every fixture the reviewers
+ * built, most recently by reading `content=memories_backup` as `memories`. The
+ * DISK row does not need to answer "which rows are the bulk" to be useful, and
+ * it was answering it wrongly. `shieldcortex stats` is where contents are
+ * inspected.
+ *
+ * Returns null on ANY failure (missing file, corrupt or locked DB, unreadable
+ * engine), so this can never break the disk check itself.
  */
-interface DbRowConsumers {
-  memoriesCount: number;
-  memoriesBytes: number;
-  sessionEventCount: number;
-  sessionEventBytes: number;
-  auditCount: number;
-  auditBytes: number;
+interface DbFreeSpace {
+  pageCount: number;
+  freePages: number;
+  freeBytes: number;
 }
 
-function readDbRowConsumers(dbPath: string): DbRowConsumers | null {
+function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   if (!fs.existsSync(dbPath)) return null;
   let db: any = null;
   try {
     const Database = require('better-sqlite3');
     db = new Database(dbPath, { readonly: true });
-    const mem = db.prepare(
-      'SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(content)), 0) AS b FROM memories',
-    ).get() as { c: number; b: number };
-    const se = db.prepare(
-      'SELECT COUNT(*) AS c, COALESCE(SUM(LENGTH(payload)), 0) AS b FROM session_events',
-    ).get() as { c: number; b: number };
-
-    // defence_audit is the OTHER unbounded-growth table (bounded since Phase
-    // 8a, but pre-valve DBs can still be audit-dominated). Approximate its
-    // stored bytes by summing the text-bearing columns. Guarded separately:
-    // a DB without the table (older install, partial fixture) just reports 0
-    // rather than nulling out the whole peek.
-    let auditCount = 0;
-    let auditBytes = 0;
-    try {
-      const audit = db.prepare(`
-        SELECT COUNT(*) AS c, COALESCE(SUM(
-          LENGTH(COALESCE(reason, '')) +
-          LENGTH(COALESCE(threat_indicators, '')) +
-          LENGTH(COALESCE(blocked_patterns, '')) +
-          LENGTH(COALESCE(source_type, '')) +
-          LENGTH(COALESCE(source_identifier, ''))
-        ), 0) AS b FROM defence_audit
-      `).get() as { c: number; b: number };
-      auditCount = audit.c;
-      auditBytes = audit.b;
-    } catch { /* table absent — keep zeros */ }
-
-    return {
-      memoriesCount: mem.c,
-      memoriesBytes: mem.b,
-      sessionEventCount: se.c,
-      sessionEventBytes: se.b,
-      auditCount,
-      auditBytes,
-    };
+    const pageSize = Number(db.pragma('page_size', { simple: true }));
+    const pageCount = Number(db.pragma('page_count', { simple: true }));
+    const freePages = Number(db.pragma('freelist_count', { simple: true }));
+    if (!Number.isFinite(pageSize) || !Number.isFinite(pageCount) || !Number.isFinite(freePages)) {
+      return null;
+    }
+    return { pageCount, freePages, freeBytes: freePages * pageSize };
   } catch {
     return null;
   } finally {
@@ -2103,6 +2105,30 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       else if (entry.isDirectory() && LOG_DIRS.has(entry.name)) logsSize += sizeOf(fp);
     }
 
+    // #573: "logs" as one lump is not actionable. The live incident read
+    // "DB 54.2 MB · logs 41.4 MB" and every remedy on offer pointed into the
+    // database, because nothing here knew how much of that lump was realtime
+    // audit evidence (no retention, tracked in #579) and how much was
+    // project-key repair logs (retention, and a command behind it). Split it.
+    // The audit plane is measured as a whole directory and REPORTED ONLY. This
+    // check never recommends an action against it and nothing in this release
+    // deletes or rewrites an audit file.
+    const auditLogSize = sizeOf(path.join(scDir, 'audit'));
+    // Counted by the SAME grammar `logs prune` acts on (isRepairLogName), so
+    // the number shown here is exactly the set the recommended command would
+    // consider — not doctor's own approximation of it.
+    const repairLogs = { bytes: 0, files: 0 };
+    try {
+      for (const e of fs.readdirSync(path.join(scDir, 'logs'), { withFileTypes: true })) {
+        if (e.isFile() && isRepairLogName(e.name)) {
+          repairLogs.bytes += sizeOf(path.join(scDir, 'logs', e.name));
+          repairLogs.files++;
+        }
+      }
+    } catch { /* absent or unreadable — contributes nothing */ }
+    const repairLogSize = repairLogs.bytes;
+    const otherLogSize = Math.max(0, logsSize - auditLogSize - repairLogSize);
+
     // #153: a safety backup does NOT spend the memory-system budget.
     //
     // The budget answers "is the memory system's footprint under control?".
@@ -2123,49 +2149,79 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const dataStr = `${formatBytes(dataSize)} / ${limitMb} MB limit`;
     const modelsStr = modelsSize > 0 ? ` + ${formatBytes(modelsSize)} models` : '';
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
-    const breakdown = `DB ${formatBytes(liveDbSize)} · backups ${formatBytes(backupsSize)} · logs ${formatBytes(logsSize)}`;
 
+    // One database open, for one number: how much of the file is free space.
+    const free = readDbFreeSpace(path.join(scDir, 'memories.db'));
+
+    // Name WHICH logs, and how much of the DB file is free pages, so the
+    // headline points somewhere. The leading `DB … · backups … · logs …` shape
+    // is unchanged; the detail is appended.
+    const dbFreeNote = free ? ` (${formatBytes(free.freeBytes)} free)` : '';
+    const logTerms: string[] = [];
+    if (auditLogSize > 0) logTerms.push(`audit ${formatBytes(auditLogSize)}`);
+    if (repairLogSize > 0) logTerms.push(`repair ${formatBytes(repairLogSize)}`);
+    if (otherLogSize > 0) logTerms.push(`other ${formatBytes(otherLogSize)}`);
+    const logDetail = logTerms.length > 0 ? ` [${logTerms.join(' · ')}]` : '';
+    const breakdown =
+      `DB ${formatBytes(liveDbSize)}${dbFreeNote} · backups ${formatBytes(backupsSize)} · ` +
+      `logs ${formatBytes(logsSize)}${logDetail}`;
+
+    // Everything the row reports, which is also the denominator every share
+    // below is measured against. Backups are exempt from the BUDGET (#153) but
+    // they are still bytes on the disk, so they still count here.
+    const otherSize = Math.max(0, dataSize - liveDbSize - logsSize) + otherLogSize;
+    const measured = liveDbSize + backupsSize + auditLogSize + repairLogSize + otherSize;
+    const shareOf = (bytes: number): number => (measured > 0 ? bytes / measured : 0);
+
+    /** A term has to hold half of the measured footprint to be "the" consumer. */
+    const CONSUMER_SHARE = 0.5;
+    /**
+     * Free pages worth a `vacuum`. Below this the command rewrites the whole
+     * file to reclaim a rounding error, so recommending it wastes the
+     * operator's time and teaches them to ignore us.
+     */
+    const VACUUM_FREE_SHARE = 0.2;
+
+    /**
+     * Report, and advise only where a MEASUREMENT supports it (#573 round 3).
+     *
+     * Every version of this that tried to decide WHICH ROWS were the bulk got
+     * it wrong on some real database and sent the operator to delete memories,
+     * session events or audit rows that were not the problem — a 54 MB
+     * threat-graph DB, a 95%-free-pages DB, a table called `memories_backup`
+     * behind an FTS5 `content=` option. So the row no longer decides that. It
+     * names a remedy in exactly the two cases where the number it already holds
+     * IS the evidence: repair logs, which have a bounded plane and a command,
+     * and free pages, which `vacuum` reclaims without deleting anything. It
+     * never recommends deleting rows — not memories, not sessions, not audit.
+     */
     const remedy = (): string => {
-      // NOTE: backups no longer count toward the budget (#153), so they can no
-      // longer be the cause of an overage and must not be blamed for one. The
-      // old first branch here sent operators to delete their own rollback point
-      // — and, when that did not help, to move our files out of our own
-      // directory. Both were treating a symptom of the accounting being wrong.
-      if (liveDbSize > limit * 0.5) {
-        // #110 signature: a big DB whose memories table is tiny — the bulk is
-        // session-capture rows. Live incident (Edith, 2026-07-21): 79.6 MB DB,
-        // 117 memories, session_events 62.8 MB (79% of the file); both
-        // previously suggested fixes (vacuum — 0.0 MB free pages — and
-        // memories prune) were no-ops. Best-effort peek inside the DB to name
-        // the actual consumer; falls through to the generic remedy when the
-        // DB can't be read.
-        //
-        // Review hardening: only blame session capture when its payload
-        // GENUINELY dominates — more than 40% of the live DB file (Edith's
-        // signature was 79%) AND more than the defence_audit bytes. A merely
-        // "bigger than the memories table" comparison misattributed
-        // audit-dominated DBs and recommended a no-op sessions prune.
-        const consumers = readDbRowConsumers(path.join(scDir, 'memories.db'));
-        if (
-          consumers &&
-          consumers.sessionEventCount > 0 &&
-          consumers.sessionEventBytes > liveDbSize * 0.4 &&
-          consumers.sessionEventBytes > consumers.auditBytes
-        ) {
-          return `The database is ${formatBytes(liveDbSize)} but the memories table holds only ${consumers.memoriesCount} memor${consumers.memoriesCount === 1 ? 'y' : 'ies'} — the bulk is session-capture rows (session_events: ${consumers.sessionEventCount} rows, ${formatBytes(consumers.sessionEventBytes)} of payload), which memories prune/dedupe and vacuum alone can't shrink. Run \`shieldcortex sessions prune --execute\` (deletes events older than 30 days; --days N to adjust), then \`shieldcortex vacuum\` to reclaim the freed pages on disk.`;
-        }
-        if (consumers && consumers.auditBytes > consumers.sessionEventBytes) {
-          // Audit-dominated: the worker's Phase 8a audit retention (90d + row
-          // cap) bounds this over time; don't send the user to a sessions
-          // prune that would be a no-op.
-          return `The database is ${formatBytes(liveDbSize)} — the bulk is defence-audit rows (defence_audit: ${consumers.auditCount} rows, ~${formatBytes(consumers.auditBytes)}), which the background worker's audit retention trims over time (90-day window + row cap). Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
-        }
-        return `The database is ${formatBytes(liveDbSize)} — usually session capture + audit rows, which prune/dedupe can't shrink. If it is session capture, \`shieldcortex sessions prune --execute\` deletes events older than 30 days. Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed); if it is genuinely the memory table, \`shieldcortex memories prune --execute\`.`;
+      if (shareOf(repairLogSize) >= CONSUMER_SHARE) {
+        return `${formatBytes(repairLogSize)} of the measured ${formatBytes(measured)} is `
+          + `project-key repair logs (logs/project-key-repair-*.json, ${repairLogs.files} `
+          + `file${repairLogs.files === 1 ? '' : 's'}) — diagnostics with no reader, which until `
+          + 'now nothing ever deleted. Run `shieldcortex logs prune` to see what retention would '
+          + 'remove, then `shieldcortex logs prune --execute`.';
       }
-      if (logsSize > limit * 0.2) {
-        return `${formatBytes(logsSize)} is audit/log files — safe to rotate or clear under ~/.shieldcortex/{logs,audit}/.`;
+      if (free !== null && free.pageCount > 0 && free.freePages >= free.pageCount * VACUUM_FREE_SHARE) {
+        return `${formatBytes(free.freeBytes)} of the database `
+          + `(${Math.round((free.freePages / free.pageCount) * 100)}% of its pages) is already free `
+          + 'space — `shieldcortex vacuum` reclaims it on disk, in place, via the bundled engine '
+          + '(no sqlite3 CLI needed), without deleting anything.';
       }
-      return 'Run `shieldcortex memories prune --execute` or `memories dedupe --execute` to trim the live memory table.';
+      if (shareOf(auditLogSize) >= CONSUMER_SHARE) {
+        // Reported, never acted on. Naming a command here would be a lie:
+        // nothing in this release deletes or rewrites an audit file.
+        return `${formatBytes(auditLogSize)} of the measured ${formatBytes(measured)} is realtime `
+          + 'audit evidence under ~/.shieldcortex/audit/. That plane has NO AUTOMATIC RETENTION '
+          + 'yet — it is an unread queue with concurrent writers, a projector cursor and stop-hook '
+          + 'recovery reading it, so bounding it safely is separate work, tracked in #579. Nothing '
+          + 'here will delete security evidence for you.';
+      }
+      return `No single measured consumer: DB ${formatBytes(liveDbSize)}${dbFreeNote}, backups `
+        + `${formatBytes(backupsSize)}, repair logs ${formatBytes(repairLogSize)}, audit `
+        + `${formatBytes(auditLogSize)}, everything else ${formatBytes(otherSize)}. Those sizes are `
+        + 'the whole measurement — inspect before removing anything.';
     };
 
     if (pct >= 95) {
@@ -3137,6 +3193,111 @@ function describeProjectSource(project: HermesProjectState): string {
   );
 }
 
+/**
+ * Is the installed Hermes plugin copy behind the packaged one (#576)?
+ *
+ * The exact counterpart of `checkOpenClawHookFreshness`, for the other
+ * integration installed by file copy: `shieldcortex update` upgrades the npm
+ * package, and until #576 nothing re-copied `~/.hermes/plugins/shieldcortex`,
+ * so the gateway kept running the previous `pre_tool_call` gate with nothing
+ * said anywhere. `hermesPluginCopyStale` is the single source of truth — the
+ * same function `update`'s refresh step decides on — and it compares exactly
+ * the file set `hermes install` copies (`tests/`, `__pycache__/` and
+ * `.pytest_cache/` are never installed, so they are never staleness).
+ *
+ * WARN at most, and never a FAIL: a stale copy is a gate running old code, not
+ * a broken host (#569's sibling row has the same rule). WARN carries doctor's
+ * ordinary warning contract and nothing special — exit 0 normally, exit 1
+ * under `--strict`, which is the documented "every ⚠️ becomes exit 1" gate
+ * (docs/openclaw-integration.md). An earlier draft of this comment claimed the
+ * row never changes the exit code at all; it does under `--strict`, like every
+ * other warning, and carving out an exception would silently override the
+ * fleet policy `--strict` exists to express.
+ *
+ * Only the copy Hermes itself says it loads is examined. Where that question
+ * has no answer — no Hermes discovery, an unreadable root, shadowing copies, a
+ * project plugin in play — this row is INFO and says which: the `Hermes plugin
+ * copies` row above already warns about exactly those layouts with the remedy
+ * attached, and a second yellow line restating it would be noise, not news.
+ *
+ * It runs its own scan rather than sharing the row above's: each is one python
+ * probe, and a memoised scan shared between two checks is a cache that would
+ * outlive the repair `--fix-hermes-plugin-copies` performs between them.
+ */
+export async function checkHermesPluginFreshness(
+  home: string = os.homedir(),
+  opts: HermesScanOptions = {},
+): Promise<CheckResult> {
+  const label = 'Hermes plugin';
+  let scan: HermesPluginScan;
+  try {
+    scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'info', message: `check skipped — ${msg}` };
+  }
+  // There is deliberately NO "an interrupted refresh left the plugin missing"
+  // row (r4). Round 3 had one, keyed on "the target is absent AND
+  // `backups/<name>-preupdate-*` exists" — a predicate the ordinary sequence
+  // refresh → uninstall also satisfies, so it told operators their deliberate
+  // uninstall was a crash. Doctor has no stored marker to read intent from.
+  // `update` prints that sentence when its own swap fails, and nowhere else.
+  if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  if (scan.undetermined.length > 0 || !scan.fromHermes) {
+    return {
+      label,
+      status: 'info',
+      message:
+        'skipped (could not determine which copy Hermes loads — see the ' +
+        `${HERMES_PLUGIN_COPIES_LABEL} row)`,
+    };
+  }
+  const projectCopies = scan.project.enabled ? scan.project.copies : [];
+  if (scan.shadowed || projectCopies.length > 0) {
+    return {
+      label,
+      status: 'info',
+      message:
+        'skipped (more than one copy is in play, so the installed one is not necessarily ' +
+        `the one loaded — see the ${HERMES_PLUGIN_COPIES_LABEL} row)`,
+    };
+  }
+
+  const loaded = scan.roots
+    .map((r) => r.effective)
+    .filter((c): c is HermesPluginCopy => c !== null && c.source === 'user');
+  if (loaded.length === 0) {
+    return { label, status: 'info', message: 'skipped (Hermes plugin not installed)' };
+  }
+
+  const stale = loaded
+    .map((copy) => ({ copy, verdict: hermesPluginCopyStale(copy.dir) }))
+    .filter((entry) => entry.verdict.stale);
+  if (stale.length === 0) {
+    const comparable = hermesPluginCopyStale(loaded[0].dir).comparable;
+    if (!comparable) {
+      return { label, status: 'info', message: 'skipped (packaged Hermes plugin source not found)' };
+    }
+    return { label, status: 'pass', message: 'Hermes plugin copy up to date' };
+  }
+
+  const where = stale
+    .map((entry) => `${tildify(entry.copy.dir)} (${entry.verdict.differing} file(s) differ; ` +
+      `${entry.verdict.reason ?? 'first difference unrecorded'})`)
+    .join(', ');
+  return {
+    label,
+    status: 'warn',
+    message:
+      `Hermes plugin copy is out of date (installed copy differs from packaged version): ${where}. ` +
+      'Hermes loads that copy at start-up, so the gateway is running the previous plugin',
+    fix:
+      'Run `shieldcortex hermes install` to refresh it, then restart the Hermes gateway — ' +
+      'plugin discovery only re-runs at start-up. `shieldcortex update` now does the same ' +
+      'refresh on upgrade.',
+  };
+}
+
 /** One copy taken out of Hermes' search path, and where it went. */
 export interface HermesShadowMove {
   from: string;
@@ -3166,208 +3327,6 @@ export interface HermesShadowFixResult {
 }
 
 /**
- * What the filesystem said, with the two answers a repair must never conflate
- * kept apart (#569 r6): `absent` is "there is nothing at this path", `error` is
- * "I could not look". Only the first one may ever permit a move.
- *
- * Every `lstat`, `realpath` and `readdir` on the repair and preflight path goes
- * through one of the readers below. None of them is allowed to be written as a
- * `try { … } catch { return false }`, and `fs.existsSync` is not allowed here at
- * all: it returns false for a permission error, which is precisely the answer
- * that makes a move look safe.
- */
-type FsAnswer<T> = { value: T } | { absent: true } | { error: string };
-
-/** Absence for a STAT: nothing at the path, or nothing under a non-directory. */
-const STAT_ABSENT_CODES: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
-
-/**
- * Absence for an ENUMERATION: only ENOENT. `ENOTDIR` here means a directory
- * was expected and something else is there — that is a fact about the layout
- * nobody has explained, not an empty directory.
- */
-const READ_ABSENT_CODES: ReadonlySet<string> = new Set(['ENOENT']);
-
-function fsAnswer<T>(read: () => T, absentCodes: ReadonlySet<string>): FsAnswer<T> {
-  try {
-    return { value: read() };
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (typeof code === 'string' && absentCodes.has(code)) return { absent: true };
-    return { error: describeFsError(err) };
-  }
-}
-
-/** `lstat`, following nothing: absent, the stats, or why not. */
-function lstatAnswer(target: string): FsAnswer<fs.Stats> {
-  return fsAnswer(() => fs.lstatSync(target), STAT_ABSENT_CODES);
-}
-
-/** `realpath`: absent covers a dangling link, whose ENOENT is the truth. */
-function realPathAnswer(target: string): FsAnswer<string> {
-  return fsAnswer(() => fs.realpathSync(target), STAT_ABSENT_CODES);
-}
-
-/** `readdir` with types, so entries are classified by `lstat` semantics. */
-function readdirAnswer(dir: string): FsAnswer<fs.Dirent[]> {
-  return fsAnswer(() => fs.readdirSync(dir, { withFileTypes: true }), READ_ABSENT_CODES);
-}
-
-/** `stat`, FOLLOWING links: what a rename would actually land on. */
-function statAnswer(target: string): FsAnswer<fs.Stats> {
-  return fsAnswer(() => fs.statSync(target), STAT_ABSENT_CODES);
-}
-
-/**
- * The device `target` sits on — or, when it does not exist yet, the device of
- * the nearest existing ancestor, which is the device `mkdir` would create it
- * on (#569 r7 nit 1).
- *
- * `rename(2)` refuses to cross a filesystem, and `backups/` is commonly a
- * fresh directory that does not exist until the first reservation is made. So
- * the question "will this move be EXDEV" has to be asked of the tree that WILL
- * hold it, before any of the plan runs. Links are followed on purpose: a
- * `backups` symlinked onto another volume puts the copies on that volume.
- */
-function deviceUnder(target: string): FsAnswer<number> {
-  let cursor = path.resolve(target);
-  for (;;) {
-    const answer = statAnswer(cursor);
-    if ('error' in answer) return { error: answer.error };
-    if ('value' in answer) return { value: answer.value.dev };
-    const parent = path.dirname(cursor);
-    if (parent === cursor) return { absent: true };
-    cursor = parent;
-  }
-}
-
-/**
- * Every directory this repair has to protect: each discovered `shieldcortex`
- * copy, plus EVERY other plugin directory Hermes found a manifest in — any
- * key, categories included, in every protective root and in the project
- * directory (#569 r7).
- *
- * Deduplicated, copies first, so a refusal names the copy rather than an
- * equivalent path whenever it can.
- */
-function protectedDirs(scan: HermesPluginScan): string[] {
-  return [...new Set([...scan.copies.map((c) => c.dir), ...scan.discovered])];
-}
-
-/** Whether `inner` is `outer` or lives underneath it, lexically on real paths. */
-function pathContains(outer: string, inner: string): boolean {
-  if (outer === inner) return true;
-  const rel = path.relative(outer, inner);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-/**
- * How many directory entries the whole symlink preflight may look at before it
- * gives up. A plugin tree is hundreds of files; a budget this size is never
- * reached by a real one, and an unbounded recursive walk inside a repair
- * command is a hazard of its own. Exhausting it REFUSES (see `findLinkInTree`):
- * "I did not finish looking" is not "there is nothing there".
- */
-const SYMLINK_PREFLIGHT_ENTRY_BUDGET = 20_000;
-
-/**
- * The first symlink at or under `dir`, or null when the tree demonstrably holds
- * none. There are two other answers, and neither of them is "none":
- *
- *   - `exhausted` — the walk ran out of budget, so it did not finish looking;
- *   - `unreadable` — a path in the tree could not be read, and it says which
- *     one and why (#569 r6). A directory that raises EACCES could be holding
- *     the link that another plugin root resolves through, and a walk that
- *     treats it as empty reports a clean tree.
- *
- * Nothing here follows a link. `readdirSync(withFileTypes)` reports the entry
- * itself (`lstat` semantics), and a directory entry that IS a link stops the
- * walk before it is descended into — so a link loop cannot be entered and a
- * link out of the tree is never followed out of it.
- */
-function findLinkInTree(dir: string, budget: { left: number }): {
-  link: string | null;
-  exhausted: boolean;
-  unreadable: { path: string; error: string } | null;
-} {
-  const self = lstatAnswer(dir);
-  if ('error' in self) return { link: null, exhausted: false, unreadable: { path: dir, error: self.error } };
-  // Absent is possible under a race with the operator's own shell; it holds no
-  // links, which is all this walk is asked about.
-  if ('value' in self && self.value.isSymbolicLink()) {
-    return { link: dir, exhausted: false, unreadable: null };
-  }
-  const stack = [dir];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    const listing = readdirAnswer(current);
-    if ('error' in listing) {
-      return { link: null, exhausted: false, unreadable: { path: current, error: listing.error } };
-    }
-    if ('absent' in listing) continue;
-    for (const entry of listing.value) {
-      if (budget.left <= 0) return { link: null, exhausted: true, unreadable: null };
-      budget.left -= 1;
-      const full = path.join(current, entry.name);
-      if (entry.isSymbolicLink()) return { link: full, exhausted: false, unreadable: null };
-      if (entry.isDirectory()) stack.push(full);
-    }
-  }
-  return { link: null, exhausted: false, unreadable: null };
-}
-
-/**
- * Reserve a fresh, unique directory under `backupsRoot` and return it.
- *
- * `fs.mkdirSync` WITHOUT `recursive` on the leaf is the reservation: mkdir(2)
- * fails EEXIST when anything already occupies the name — including a DANGLING
- * SYMLINK, which `existsSync` reports as absent and which a rename would
- * happily follow or replace. There is no check-then-act window to lose, because
- * the check and the act are the same syscall; a squatter that wins the race
- * simply sends us to the next suffix.
- */
-function reserveBackupDir(backupsRoot: string, leafBase: string): string {
-  fs.mkdirSync(backupsRoot, { recursive: true });
-  for (let attempt = 1; attempt <= 64; attempt += 1) {
-    const leaf = attempt === 1 ? leafBase : `${leafBase}-${attempt}`;
-    const candidate = path.join(backupsRoot, leaf);
-    try {
-      fs.mkdirSync(candidate);
-      return candidate;
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
-    }
-  }
-  throw new Error(`could not reserve a free name under ${tildify(backupsRoot)} after 64 tries`);
-}
-
-/**
- * Give a reservation back when the move it was made for did not happen.
- *
- * Only ever an EMPTY directory this function itself created moments ago:
- * `fs.rmdirSync` fails on a non-empty directory, so a reservation that somehow
- * acquired contents is left standing rather than forced. Nothing here follows
- * a symlink either — `rmdir(2)` operates on the directory named, and a symlink
- * is not one.
- *
- * Residual race, documented rather than papered over (#569 r3): between the
- * exclusive `mkdir` that made the reservation and this call, an arbitrary
- * writer can put something inside our freshly created container. If it does,
- * the release fails and an empty-named-but-not-empty directory is left under
- * `backups/`, which costs nothing and destroys nothing. We do not escalate to
- * a recursive removal: the whole point of this command is that it never
- * removes a directory it did not create, and "I created the container" is not
- * "I created what is now inside it".
- */
-function releaseReservation(reserved: string): void {
-  try {
-    fs.rmdirSync(reserved);
-  } catch {
-    /* an unreleased empty directory under backups/ costs nothing */
-  }
-}
-
-/**
  * `doctor --fix-hermes-plugin-copies` (#569): move every non-canonical copy
  * out of its `plugins/` root and into `<hermesHome>/backups/`, so the next
  * gateway start discovers exactly one `shieldcortex` — the installed one.
@@ -3392,6 +3351,16 @@ function releaseReservation(reserved: string): void {
  * refusal abandons the entire repair — a partial repair across entangled roots
  * is the state hardest to reason about afterwards, and the operator has to look
  * at the layout either way.
+ *
+ * The plan is also built TWICE (#574 r4 blocker 2). The first pass writes
+ * nothing; it exists only to name the roots the moves would leave and the root
+ * `backups/` is written into. Those roots' update locks — the same ones
+ * `update`'s refresh and `shieldcortex hermes install` take — are acquired, in
+ * sorted order so two doctors cannot deadlock, and the plan is then rebuilt
+ * under them and executed. Anything the first pass concluded is a claim about
+ * a tree nothing was holding still; a busy lock moves nothing at all and names
+ * the root, because a partial repair under a partial set of locks is the state
+ * this command exists to avoid.
  *
  * The refusals, in the order they are decided:
  *   - No Hermes discovery at all: nothing is planned and nothing moves (#569
@@ -3462,7 +3431,81 @@ export function fixHermesPluginShadowing(
   home: string = os.homedir(),
   now: Date = new Date(),
   opts: HermesScanOptions = {},
+  /** Test seam: runs once every lock is held, before the re-plan (#574 r5). */
+  afterLocked?: () => void,
 ): HermesShadowFixResult {
+  // SURVEY first, writing nothing, only to learn which roots this would touch
+  // (#574 r4 blocker 2). Until this round the repair moved directories with no
+  // lock at all, so it could relocate a plugin that `update`'s refresh or
+  // `hermes install` was mid-swap on, under their supposedly exclusive lock.
+  const survey = planHermesShadowFix(home, now, opts, false);
+  if (survey.plan.length === 0) return survey.result;
+
+  // Every root a copy would leave, plus the root `backups/` is written into.
+  // Sorted, so two doctors racing each other take them in the same order and
+  // cannot deadlock holding one another's first lock.
+  const roots = [...new Set([
+    ...survey.plan.map((copy) => path.dirname(copy.root)),
+    path.dirname(survey.backupsRoot),
+  ])].sort();
+  const held: UpdateLock[] = [];
+  for (const root of roots) {
+    const acquired = acquireUpdateLock(root);
+    if ('busy' in acquired) {
+      for (const lock of held) lock.release();
+      // Nothing at all: a partial repair under a partial set of locks is the
+      // state this command exists to avoid.
+      return {
+        moved: [],
+        refused: survey.plan.map((copy) => ({
+          dir: copy.dir,
+          reason: `nothing was moved: ${tildify(updateLockPath(root))} — ${acquired.busy}`,
+        })),
+        changed: false,
+        failed: true,
+        fromHermes: survey.result.fromHermes,
+        message:
+          `nothing was moved: ${tildify(root)} could not be taken exclusively — ${acquired.busy}`,
+      };
+    }
+    held.push(acquired.lock);
+  }
+  try {
+    // RE-PLAN under the locks and act only on what that plan says. The survey
+    // above read a tree nothing was holding still; everything it concluded is
+    // a claim about a state that may have changed since.
+    //
+    // The re-plan must not reach past the locks this call holds (#574 r5
+    // review): a copy that appeared in another root between the survey and the
+    // lock would otherwise be moved out from under that root's own writer. The
+    // executing plan is handed the held set and refuses the whole repair if it
+    // names any root outside it — nothing moved; running doctor again
+    // re-surveys and locks the larger set.
+    afterLocked?.();
+    return planHermesShadowFix(home, now, opts, true, new Set(roots)).result;
+  } finally {
+    for (const lock of held) lock.release();
+  }
+}
+
+/**
+ * The scan, the preflights and — when `execute` — the moves. Returns the plan
+ * as well as the result so the caller above can lock the roots it names.
+ */
+function planHermesShadowFix(
+  home: string,
+  now: Date,
+  opts: HermesScanOptions,
+  execute: boolean,
+  /**
+   * When executing: the Hermes roots whose locks the caller holds. A plan that
+   * names any other root (as a source or as the backups root) moves NOTHING
+   * (#574 r5 review) — the check is on the very plan that executes, so no
+   * rescan can slip a root in after it.
+   */
+  allowedRoots?: ReadonlySet<string>,
+): { result: HermesShadowFixResult; plan: HermesPluginCopy[]; backupsRoot: string } {
+  const surveyed = (result: HermesShadowFixResult) => ({ result, plan: [], backupsRoot: '' });
   const scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
   const moved: HermesShadowMove[] = [];
   const refused: Array<{ dir: string; reason: string }> = [];
@@ -3498,7 +3541,7 @@ export function fixHermesPluginShadowing(
   // something out from under.
   if (scan.undetermined.length > 0) {
     for (const entry of scan.undetermined) refuseUndetermined(entry.path, entry.error);
-    return {
+    return surveyed({
       moved,
       refused,
       changed: false,
@@ -3509,24 +3552,24 @@ export function fixHermesPluginShadowing(
         `${undeterminedSummary(scan.undetermined.map((e) => ({ path: tildify(e.path), error: e.error })))}. ` +
         'A directory that cannot be read is not an empty directory, so there is no safe plan ' +
         'to execute in any root',
-    };
+    });
   }
 
   if (!scan.present) {
-    return {
+    return surveyed({
       moved,
       refused,
       changed: false,
       failed: false,
       fromHermes: false,
       message: 'Hermes not detected — nothing to move',
-    };
+    });
   }
 
   // Without Hermes' own discovery there is no plan to make: which copy the
   // gateway loads is the question that could not be answered (#569 r4).
   if (!scan.fromHermes) {
-    return {
+    return surveyed({
       moved,
       refused,
       changed: false,
@@ -3536,7 +3579,7 @@ export function fixHermesPluginShadowing(
         'nothing was moved: could not determine which copy Hermes loads ' +
         `(${scan.undeterminedReason ?? 'reason unrecorded'}). ` +
         'Install Hermes, or point the doctor at its python.',
-    };
+    });
   }
 
   // ── Project plugins are never ours to move (#569 r7) ──────────────────
@@ -3918,12 +3961,25 @@ export function fixHermesPluginShadowing(
   // since changed, and "carry on and see" is how a partial repair becomes an
   // unexplainable one. What completed and what did not is then said exactly.
   let stopped: string | null = null;
-  const attempted = abandoned ? [] : plan;
+  // The survey pass (`execute === false`) stops here: it exists to name the
+  // roots the caller must lock, and moving anything before those locks are
+  // held is the defect it was added for.
+  if (execute && !abandoned && allowedRoots !== undefined && plan.length > 0) {
+    const needed = new Set([...plan.map(({ copy }) => path.dirname(copy.root)), path.dirname(backupsRoot)]);
+    const unlocked = [...needed].filter((root) => !allowedRoots.has(root));
+    if (unlocked.length > 0) {
+      const list = unlocked.map((root) => tildify(root)).join(', ');
+      for (const { copy } of plan) {
+        refuse(copy.dir, `nothing was moved: the layout changed while doctor was taking its locks (${list} not locked) — run it again`);
+      }
+    }
+  }
+  const attempted = abandoned || !execute ? [] : plan;
   for (const { copy } of attempted) {
     if (stopped !== null) break;
     let reserved: string;
     try {
-      reserved = reserveBackupDir(backupsRoot, `shieldcortex-shadow-${copy.dirName}-${stamp}`);
+      reserved = reserveBackupDir(backupsRoot, `shieldcortex-shadow-${copy.dirName}-${stamp}`, tildify);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       refuse(copy.dir, `no destination could be reserved under ${tildify(backupsRoot)} — ${msg}`);
@@ -3985,12 +4041,17 @@ export function fixHermesPluginShadowing(
   if (parts.length === 0) parts.push('nothing to move (no shadowing copies)');
 
   return {
-    moved,
-    refused,
-    changed: moved.length > 0,
-    failed,
-    fromHermes: true,
-    message: parts.join('; '),
+    result: {
+      moved,
+      refused,
+      changed: moved.length > 0,
+      failed,
+      fromHermes: true,
+      message: parts.join('; '),
+    },
+    // An abandoned plan moves nothing, so there is nothing to lock for.
+    plan: abandoned ? [] : plan.map((entry) => entry.copy),
+    backupsRoot,
   };
 }
 
@@ -4143,6 +4204,33 @@ function pluginPlaneDisarmed(live: ReturnType<typeof readOpenClawPluginGuardLive
   );
 }
 
+function openclawGatePosture(live: ReturnType<typeof readOpenClawPluginGuardLive>): OpenClawGatePosture {
+  if (!live.readable) return 'unknown';
+  if (live.pluginEnabled === false) return 'off';
+  if (pluginPlaneDisarmed(live)) return 'observe-only';
+  return 'enforcing';
+}
+
+/** #536: any live enforcing plane, not only the OpenClaw plugin flags. */
+export function readHostGatePlanes(hostHome?: string): HostGatePlanes {
+  let signedEnabled = false;
+  let signedEnforce = false;
+  try {
+    const core = getActionGuardCoreConfig();
+    signedEnabled = core.enabled;
+    signedEnforce = core.enabled && core.enforce;
+  } catch {
+    signedEnabled = false;
+    signedEnforce = false;
+  }
+  return {
+    signedEnabled,
+    signedEnforce,
+    claudeWired: claudeToolGateWired(hostHome),
+    openclaw: openclawGatePosture(readOpenClawPluginGuardLive()),
+  };
+}
+
 export async function checkActionGuard(): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const label = 'Action guard';
@@ -4229,6 +4317,8 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       top && k in top ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
     const pluginLive = readOpenClawPluginGuardLive();
     const pluginOff = pluginPlaneDisarmed(pluginLive);
+    const planes = readHostGatePlanes();
+    const claudeGating = claudePlaneEnforcing(planes);
     const pluginOffFix =
       'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
 
@@ -4297,11 +4387,12 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       // webhook URL the transport will actually deliver to.
       const denialSink = notifyOn && webhook !== undefined;
       const signedArmed = effective.enabled && effective.enforce;
-      // "Armed" = signed enabled + enforce AND the plugin plane is not visibly
-      // disarmed. Signed Enforce leftover against an explicit plugin-off is
-      // the Jarvis 5.0.1 1-fail: not a live gate, so not armed. Missing plugin
-      // config cannot prove the plugin is off — that still counts as armed.
-      const armed = signedArmed && !pluginOff;
+      // "Armed" = signed enabled + enforce AND any live plane is gating.
+      // OpenClaw plugin-off is not a live gate (#501 / Jarvis 5.0.6).
+      // Claude Code PreToolUse wired + signed Enforce IS a live gate (#536).
+      // Missing plugin config cannot prove the plugin is off — that still
+      // counts as armed on the OpenClaw side.
+      const armed = signedArmed && (!pluginOff || claudeGating);
       if (!denialSink) {
         const openclawOnly = notifyOn && openclaw && !webhook;
         // FAIL, not WARN, for ANY armed no-sink (#517 (c), 22 Sep 2026).
@@ -4327,7 +4418,9 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         // hosts stay WARN: under-configured, not enforcing. Plugin-off stays
         // WARN (Jarvis 5.0.6: leftover signed Enforce is not a live gate).
         const status: CheckResult['status'] = armed ? 'fail' : 'warn';
-        const prefix = pluginOff && signedArmed
+        const prefix = claudeGating && pluginOff
+          ? 'Action Guard is enforcing on the Claude Code hook (OpenClaw plugin is observe-only/off) with'
+          : pluginOff && signedArmed
           ? 'Action Guard signed config says Enforce, but the OpenClaw plugin is off, and, when re-enabled, would run with'
           : pluginOff
             ? 'Action Guard OpenClaw plugin is off, and, when re-enabled, would run with'
@@ -4363,7 +4456,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
                 : `actionGuard.notify.webhookUrl unset${notifyOn ? '' : ', notify.enabled is not true'}`) +
               `) — unattended denials stay in the audit log and session-guard index only. ` +
               `The #242 cron incidents were this shape.`,
-          fix: (pluginOff || !armed) ? pluginOffFix : webhookFix,
+          fix: armed ? webhookFix : pluginOffFix,
         });
       }
 
@@ -4458,10 +4551,12 @@ export function policyLockRows(): CheckResult[] {
   })();
   const pluginLive = readOpenClawPluginGuardLive();
   const pluginOff = pluginPlaneDisarmed(pluginLive);
-  // Unreadable roster is not proof of a live gate (same class as NOTIFY:
-  // pluginOff === false is not armed). FAIL the lock only when we can see
-  // a live OpenClaw plane that is actually gating.
-  const liveGating = signedOn && pluginLive.readable && !pluginOff;
+  const planes = readHostGatePlanes();
+  // Unreadable roster is not proof of a live OpenClaw gate. Claude Code
+  // PreToolUse wired + signed Enforce is a live gate even when the plugin
+  // is observe-only (#536).
+  const liveGating = claudePlaneEnforcing(planes)
+    || (signedOn && pluginLive.readable && !pluginOff);
 
   switch (summary.status) {
     case 'locked':
@@ -4492,7 +4587,9 @@ export function policyLockRows(): CheckResult[] {
         status: liveGating ? 'fail' : 'warn',
         message:
           `${summary.headline}${liveGating
-            ? ' — Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice'
+            ? (claudePlaneEnforcing(planes) && pluginOff
+              ? ' — Action Guard is live on the Claude Code hook (OpenClaw plugin is not), but a one-line edit to config.json switches it off and nothing would notice'
+              : ' — Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice')
             : ' — Guard is off on this host. A lock is optional. This is not unprotected.'}`,
         fix: liveGating
           ? `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`
@@ -8401,6 +8498,7 @@ export async function runDoctor(
     checkOpenClawPluginPackage,
     checkOpenClawDuplicateInstalls,
     checkHermesPluginShadowing,
+    checkHermesPluginFreshness,
     checkOpenClawManagedPinDrift,
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
@@ -8574,7 +8672,7 @@ export async function runDoctor(
     color: shouldColorDoctor(),
     style,
     width: Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80,
-    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? '')),
+    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), readHostGatePlanes()),
     nextCommand,
   });
   for (const line of reportLines) console.log(line);

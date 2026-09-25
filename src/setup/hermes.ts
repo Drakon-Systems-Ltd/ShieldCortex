@@ -10,15 +10,20 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { scanHermesPluginCopies } from './hermes-plugins.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// The install set and the staleness comparator are one rule, not two (#576):
+// whatever `copyDir` skips below is exactly what `hermesPluginCopyStale` (and
+// therefore `update` and `doctor`) declines to compare.
+import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir } from './hermes-refresh.js';
+// One writer per Hermes home, shared with `update`'s refresh step (#576 r3):
+// an install and a refresh must never interleave their renames over the same
+// `plugins/` tree.
+import { acquireUpdateLock } from './host-swap.js';
+import { findLinkOnPath, refuseLinkedDestination } from './fs-answers.js';
+import { helpGate } from '../cli/help-gate.js';
 
 function pluginSourceDir(): string {
-  // dist/setup/hermes.js → repo-or-package root / plugins/hermes/shieldcortex
-  return path.resolve(__dirname, '..', '..', 'plugins', 'hermes', 'shieldcortex');
+  return hermesPluginSourceDir();
 }
 
 function hermesHomeDir(home: string = os.homedir()): string {
@@ -130,17 +135,23 @@ function warnOnShadowingCopies(home: string): void {
   console.warn();
 }
 
+/**
+ * Overlay the packaged tree onto `dest`, refusing any destination that is a
+ * SYMLINK (#576 r3 blocker 4) — `mkdirSync`/`copyFileSync` follow one, so a
+ * link at `plugins/shieldcortex/shadow.py` truncates a file elsewhere on the
+ * box. Throws; the caller reports it and writes nothing further.
+ */
 function copyDir(src: string, dest: string): void {
+  refuseLinkedDestination(dest);
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (entry.name === '__pycache__' || entry.name === '.pytest_cache' || entry.name === 'tests') {
-      continue;
-    }
+    if (HERMES_UNCOPIED_DIRS.has(entry.name)) continue;
     const from = path.join(src, entry.name);
     const to = path.join(dest, entry.name);
     if (entry.isDirectory()) {
       copyDir(from, to);
     } else {
+      refuseLinkedDestination(to);
       fs.copyFileSync(from, to);
     }
   }
@@ -158,8 +169,41 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
     process.exit(1);
   }
 
+  // The documented manual remedy is also the recovery (#576 r3): an operator
+  // whose `update` was interrupted between the two renames of a swap runs
+  // `shieldcortex hermes install`, and this copy IS the recovery — the
+  // packaged plugin goes back into the standard path, needing nothing from
+  // disk but the destination this installer has always computed itself.
+  //
+  // That destination is `<home>/.hermes`, exactly as on main. `HERMES_HOME`
+  // and Hermes' profile resolution are deliberately NOT read here: redirecting
+  // where an install writes is a behaviour change nobody asked for, and the
+  // round-2 blocker it was raised under (a journal looked for in the wrong
+  // home) no longer exists, because there is no journal to look for.
+  const acquired = acquireUpdateLock(hermesHomeDir(home), { createRoot: true });
+  if ('busy' in acquired) {
+    // Non-zero, like every other refusal here: the operator asked for an
+    // install and did not get one (r4 nit 1).
+    console.error(`Hermes plugin install skipped — ${acquired.busy}; nothing written.`);
+    process.exitCode = 1;
+    return;
+  }
   const dest = pluginDestDir(home);
-  copyDir(src, dest);
+  try {
+    // `copyDir` refuses a linked destination at every level it creates, but
+    // the components ABOVE it are created by one `mkdir -p` that would follow
+    // a symlinked `plugins/` straight out of the tree. Same bound as the lock.
+    const { link, unreadable } = findLinkOnPath(hermesHomeDir(home), dest);
+    if (unreadable !== null) throw new Error(`${unreadable.path} could not be read (${unreadable.error}); nothing written`);
+    if (link !== null) throw new Error(`${link} is a symlink; nothing written`);
+    copyDir(src, dest);
+  } catch (err: unknown) {
+    console.error(`Hermes plugin install refused — ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
+  } finally {
+    acquired.lock.release();
+  }
   console.log(`✓ Hermes — plugin copied to ${dest}`);
   console.log();
   console.log('This is a tool gate (pre_tool_call → POST /api/v1/action-guard).');
@@ -193,23 +237,45 @@ export async function hermesStatus(home: string = os.homedir()): Promise<void> {
   console.log('  Turn gate / freeze: not bound');
 }
 
-export async function handleHermesCommand(subcommand: string): Promise<void> {
+export const HERMES_HELP = `Usage: shieldcortex hermes <install|uninstall|status>
+
+Installs the Hermes pre_tool_call plugin (Action Guard).
+This is a deny plane. Codex/Cursor MCP install is not.
+
+Options:
+  -h, --help   Show this help and exit (installs nothing)
+`;
+
+/**
+ * `shieldcortex hermes <verb>` entry point.
+ *
+ * #577: the dispatcher passed only argv[3], so the `--help` in
+ * `hermes install --help` was invisible and the plugin was copied into
+ * ~/.hermes/plugins anyway. `extraArgs` exists so the gate can see it.
+ */
+export async function handleHermesCommand(
+  subcommand: string,
+  extraArgs: readonly string[] = [],
+  deps: {
+    install?: (home?: string) => Promise<void>;
+    uninstall?: (home?: string) => Promise<void>;
+    status?: (home?: string) => Promise<void>;
+  } = {},
+): Promise<void> {
+  if (helpGate([subcommand, ...extraArgs], HERMES_HELP, { command: 'hermes' }) !== null) return;
   console.log();
   switch (subcommand) {
     case 'install':
-      await installHermes();
+      await (deps.install ?? installHermes)();
       break;
     case 'uninstall':
-      await uninstallHermes();
+      await (deps.uninstall ?? uninstallHermes)();
       break;
     case 'status':
-      await hermesStatus();
+      await (deps.status ?? hermesStatus)();
       break;
     default:
-      console.log('Usage: shieldcortex hermes <install|uninstall|status>');
-      console.log();
-      console.log('Installs the Hermes pre_tool_call plugin (Action Guard).');
-      console.log('This is a deny plane. Codex/Cursor MCP install is not.');
+      console.log(HERMES_HELP.trimEnd());
       process.exit(1);
   }
 }

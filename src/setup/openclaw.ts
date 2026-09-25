@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync, execSync, spawnSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
 import {
@@ -22,6 +22,20 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
+import { invokingUserHome, OPENCLAW_HOME_MARKERS } from './user-home.js';
+import {
+  deviceUnder,
+  findLinkOnPath,
+  lstatAnswer,
+  pathContains,
+  refuseLinkedDestination,
+  releaseReservation,
+  reserveBackupDir,
+} from './fs-answers.js';
+import { acquireUpdateLock, stageAndPublish, type UpdateLock } from './host-swap.js';
+import { helpGate } from '../cli/help-gate.js';
+import { COMMAND_HELP_SPECS } from '../cli/wants-help.js';
+import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,15 +100,6 @@ export function isDockerEnvironment(): boolean {
 }
 
 /**
- * A conservative POSIX-portable username. SUDO_USER is environment-controlled
- * and, in some sudo setups, attacker-influenceable — anything outside this
- * shape is ignored entirely rather than looked up (#429). Also excludes
- * leading dashes (argv option injection) and slashes/dots that could turn the
- * direct home-directory probes below into path traversal.
- */
-const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
-
-/**
  * Resolve the operator home the installer will write under.
  *
  * #472: OPENCLAW_HOME (absolute, or `~/…`) wins, matching OpenClaw's
@@ -103,8 +108,10 @@ const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
  * which this CLI cannot know, so probing them would write into the
  * live tree while a throwaway profile thought it was isolated.
  *
- * When run under sudo, os.homedir() returns /root/.
- * We check SUDO_USER first and resolve their actual home.
+ * Everything after the override is `invokingUserHome` (#429's SUDO_USER
+ * resolution), shared with the Hermes side since #574/#576 r2: under sudo
+ * `os.homedir()` is `/root`, and an `update` that refreshed /root's hooks
+ * refreshed nothing the operator runs.
  */
 function resolveUserHome(): string {
   const explicit = process.env.OPENCLAW_HOME?.trim();
@@ -121,55 +128,21 @@ function resolveUserHome(): string {
     // relative / ~user: fall through to sudo / os.homedir, never cwd.
   }
 
-  const sudoUser = process.env.SUDO_USER;
-  if (sudoUser && SAFE_USERNAME.test(sudoUser)) {
-    // Try getent passwd (reliable on Linux) — argv-array, no shell.
-    try {
-      const entry = execFileSync('getent', ['passwd', sudoUser], {
-        encoding: 'utf-8',
-        timeout: 5000,
-      }).trim();
-      const homeDir = entry.split(':')[5];
-      if (homeDir && fs.existsSync(homeDir)) {
-        return homeDir;
-      }
-    } catch {
-      // getent not available (macOS) — probe the standard locations
-    }
+  return invokingUserHome(OPENCLAW_HOME_MARKERS);
+}
 
-    // Fallback: the standard home locations, probed directly. Replaces a
-    // `eval echo ~${sudoUser}` shell eval (#429) — same answer on any box
-    // where that expansion would have worked, with no shell involved.
-    for (const homeDir of [`/Users/${sudoUser}`, `/home/${sudoUser}`]) {
-      if (fs.existsSync(homeDir)) {
-        return homeDir;
-      }
-    }
-  }
-
-  const home = os.homedir();
-
-  // If we're root without SUDO_USER (e.g. after `sudo su -`),
-  // search /home/* for a user who has .openclaw/ or .claude/ configured.
-  if (home === '/root' || (process.getuid && process.getuid() === 0)) {
-    try {
-      const users = fs.readdirSync('/home');
-      for (const username of users) {
-        const userHome = path.join('/home', username);
-        try {
-          if (!fs.statSync(userHome).isDirectory()) continue;
-        } catch { continue; }
-        if (fs.existsSync(path.join(userHome, '.openclaw')) ||
-            fs.existsSync(path.join(userHome, '.claude'))) {
-          return userHome;
-        }
-      }
-    } catch {
-      // /home not readable
-    }
-  }
-
-  return home;
+/**
+ * The OpenClaw home every OpenClaw surface of `update` must resolve through
+ * (#574 r2 blocker 3).
+ *
+ * `runUpdate` used to hand `os.homedir()` to the hook-refresh step, which
+ * defeated exactly this function: with `OPENCLAW_HOME` set the update
+ * refreshed the wrong tree, and under sudo it refreshed root's. Exported so
+ * the update path and `defaultHookDestDir()` (which doctor uses) cannot
+ * disagree about the same host.
+ */
+export function openClawUserHome(): string {
+  return resolveUserHome();
 }
 
 /**
@@ -231,14 +204,20 @@ function isOpenClawInstalled(): boolean {
  *
  * Only returns user-space directories that survive package updates.
  * Creates the hooks/ subdirectory if the parent config dir exists.
+ *
+ * `locked` restricts it to config roots whose update lock the caller holds
+ * (#574 r3 blocker 6): creating `hooks/` is a WRITE, and it used to happen on
+ * every root before any lock was taken. Non-writing callers (status,
+ * claude-md) pass nothing and see every root, as before.
  */
-export function findAllHooksDirs(): string[] {
+export function findAllHooksDirs(locked?: ReadonlySet<string>): string[] {
   const home = resolveUserHome();
   const dirs: string[] = [];
+  const permitted = (dir: string): boolean => locked === undefined || locked.has(dir);
 
   // If openclaw is installed but config dir doesn't exist yet, create it
   const openclawDir = path.join(home, '.openclaw');
-  if (!fs.existsSync(openclawDir) && isOpenClawInstalled()) {
+  if (permitted(openclawDir) && !fs.existsSync(openclawDir) && isOpenClawInstalled()) {
     try {
       fs.mkdirSync(openclawDir, { recursive: true });
     } catch {
@@ -253,7 +232,7 @@ export function findAllHooksDirs(): string[] {
 
   for (const { config, hooks } of candidates) {
     const configDir = path.join(home, config);
-    if (fs.existsSync(configDir)) {
+    if (permitted(configDir) && fs.existsSync(configDir)) {
       if (!fs.existsSync(hooks)) {
         try {
           fs.mkdirSync(hooks, { recursive: true });
@@ -270,6 +249,49 @@ export function findAllHooksDirs(): string[] {
 
 function preferredHookDir(hooksDir: string): string {
   return path.join(hooksDir, HOOK_NAME);
+}
+
+/**
+ * Every path the hook installer creates, copies into or DELETES, under one
+ * config root (#574 r4 blocker 1).
+ *
+ * `copyHookFiles` lstats the leaves it writes, but the installer gets to those
+ * leaves through `hooks/` and `hooks/internal/`, which it `mkdir -p`s, and it
+ * `rm -rf`s the legacy layouts before copying anything. The reviewer made
+ * `~/.openclaw/hooks` a link to an external directory: the install overwrote a
+ * `cortex-memory/handler.ts` out there and DELETED an external `shieldcortex/`
+ * as a "legacy variant", then reported success. Listing the deletions beside
+ * the destinations is the point — a removal through a link costs strictly more
+ * than a write does.
+ */
+function hookInstallPaths(configRoot: string): string[] {
+  const hooks = path.join(configRoot, 'hooks');
+  const internal = path.join(hooks, 'internal');
+  return [
+    // The destination, and the legacy layouts `removeLegacyHookVariants`
+    // deletes. `findLinkOnPath` checks every component from `configRoot` down,
+    // so `hooks/` and `hooks/internal/` are covered by the paths beneath them.
+    path.join(hooks, HOOK_NAME),
+    path.join(hooks, 'shieldcortex'),
+    path.join(internal, HOOK_NAME),
+    path.join(internal, 'shieldcortex'),
+  ];
+}
+
+/**
+ * Why this config root cannot be installed into, or null when it can.
+ *
+ * Run BEFORE the first `mkdir`, `copyFileSync` or `rmSync` in the root — a
+ * refusal afterwards is not a refusal. "Could not read" refuses too: it is
+ * never "there is nothing there" (#569 r6).
+ */
+function linkedHookInstallPath(configRoot: string): string | null {
+  for (const target of hookInstallPaths(configRoot)) {
+    const { link, unreadable } = findLinkOnPath(configRoot, target);
+    if (unreadable !== null) return `${unreadable.path} could not be read (${unreadable.error})`;
+    if (link !== null) return `${link} is a symlink`;
+  }
+  return null;
 }
 
 function legacyHookDirs(hooksDir: string): string[] {
@@ -359,12 +381,19 @@ export function hookFilesStale(destDir: string = defaultHookDestDir()): boolean 
   return false;
 }
 
+/**
+ * Overlay the packaged hook onto `destDir`, refusing any destination that is a
+ * SYMLINK (#574 r3 blocker 4) — `copyFileSync` follows one and truncates its
+ * referent. Throws; the caller reports it and installs nothing there.
+ */
 function copyHookFiles(sourceDir: string, destDir: string): void {
+  refuseLinkedDestination(destDir);
   fs.mkdirSync(destDir, { recursive: true });
 
   for (const file of HOOK_FILES) {
     const src = path.join(sourceDir, file);
     const dest = path.join(destDir, file);
+    refuseLinkedDestination(dest);
     fs.copyFileSync(src, dest);
 
     try {
@@ -373,6 +402,283 @@ function copyHookFiles(sourceDir: string, destDir: string): void {
       console.error(`  Warning: ${dest} was copied but is not readable`);
     }
   }
+}
+
+/**
+ * Where a cortex-memory hook can be installed: the CONFIG roots, not the
+ * `hooks/` directories inside them.
+ *
+ * Everything the refresh writes outside the live hook directory — the staging
+ * tree, `backups/`, the update lock — goes HERE, one level above `hooks/`.
+ * That is the whole safety argument on the OpenClaw side: `loadHooksFromDir`
+ * enumerates the SUBDIRECTORIES of `<configDir>/hooks` and loads any one that
+ * holds a `HOOK.md`, keying them by hook name with later sources winning, so a
+ * staging directory inside `hooks/` IS a second `cortex-memory` hook for as
+ * long as it exists — the #569 shadowing shape on this plane. Nothing
+ * enumerates `<configRoot>/backups/` or `.shieldcortex-hook-staging-*`.
+ *
+ * (The one residual: an operator who puts `~/.openclaw` itself in
+ * `hooks.internal.load.extraDirs` makes OpenClaw scan its children. Even then
+ * the staged set loses — `extra` is the LOWEST-precedence source and the
+ * managed `hooks/cortex-memory` still wins the name.)
+ */
+function hookConfigRoots(home: string): string[] {
+  return [path.join(home, '.openclaw'), path.join(home, '.claude')];
+}
+
+/**
+ * The ONE destination a refresh ever writes to, computed from the resolved
+ * home and the config root and from nothing else (#574 r3). Nothing self-heals
+ * here — a copy that is absent is reported, not reinstalled.
+ */
+function standardHookDir(configRoot: string): string {
+  return path.join(configRoot, 'hooks', HOOK_NAME);
+}
+
+/**
+ * Is a hook INSTALLED at this path — not merely a directory, but one carrying
+ * the file OpenClaw requires to load it (#574 r3)?
+ *
+ * A directory left half-written by a failed install has a `handler.ts` and no
+ * `HOOK.md`; OpenClaw does not load it, so calling it "installed" and skipping
+ * it is how a broken host stays broken. A directory that IS installed but
+ * whose bytes are behind the package is a different thing — that one is stale,
+ * and the ordinary refresh below handles it.
+ */
+function hookInstalledAt(dir: string): boolean {
+  return fs.existsSync(path.join(dir, 'HOOK.md'));
+}
+
+/**
+ * How a STAGED hook set differs from the package, or null when it does not.
+ *
+ * Stricter than `hookFilesStale`, on purpose. That comparator SKIPS a file the
+ * package does not ship, because it cannot claim staleness against a source it
+ * cannot read. This one is the gate in front of a PUBLICATION: a hook
+ * directory with a handler and no runtime is a broken hook, so an incomplete
+ * packaged set means nothing is published at all.
+ */
+function hookStagedDifference(staged: string): string | null {
+  for (const file of HOOK_FILES) {
+    try {
+      const src = fs.readFileSync(path.join(HOOK_SOURCE, file));
+      if (!src.equals(fs.readFileSync(path.join(staged, file)))) return `${file} differs`;
+    } catch {
+      return `${file} could not be read`;
+    }
+  }
+  return null;
+}
+
+/** What puts the hook back when a refresh could not. Always from the package. */
+const HOOK_REINSTALL_COMMAND = 'run `shieldcortex openclaw install`';
+
+interface HookPublishResult {
+  ok: boolean;
+  /** Where the previous hook directory was kept. Never deleted. */
+  backup?: string | null;
+  error?: string;
+  /** Directories the platform refused to flush. Reported, never swallowed. */
+  unsynced?: string[];
+  /** Post-rename flushes the DEVICE refused: refreshed, durability unproven. */
+  unconfirmed?: string[];
+}
+/**
+ * Replace one hook directory, all or nothing (#574 r2 blocker 2).
+ *
+ * The old path overwrote `HOOK.md`, `handler.ts` and `runtime.mjs` one at a
+ * time, IN PLACE. A failure on the third left the new handler beside the old
+ * runtime — a mismatched pair the gateway would import on its next restart,
+ * which no amount of error reporting undoes; the reviewer reproduced exactly
+ * that. So the full set is staged outside every hook discovery directory,
+ * flushed, verified byte-for-byte and only then swapped in. `dir` is always
+ * `standardHookDir`, and no path here is ever read off disk.
+ */
+function publishHookDir(dir: string, now: Date): HookPublishResult {
+  const hooksRoot = path.dirname(dir);
+  const configRoot = path.dirname(hooksRoot);
+  const backupsRoot = path.join(configRoot, 'backups');
+
+  // The two containers the swap writes into, checked before it reserves
+  // anything in either. `stageAndPublish` re-checks the three paths it
+  // actually renames, so there is no quieter write path that skips a
+  // preflight — the reinstall is this same call.
+  for (const target of [hooksRoot, backupsRoot]) {
+    const { link, unreadable } = findLinkOnPath(configRoot, target);
+    if (unreadable !== null) {
+      return { ok: false, error: `${unreadable.path} could not be read (${unreadable.error}); nothing written` };
+    }
+    if (link !== null) return { ok: false, error: `${link} is a symlink; nothing written` };
+  }
+  // Staging and backups are outside hook discovery by construction; prove it
+  // rather than assert it, because the construction is one `path.dirname`
+  // away from being wrong.
+  if (pathContains(hooksRoot, configRoot)) {
+    return { ok: false, error: `${configRoot} is inside ${hooksRoot}, which OpenClaw loads hooks from; nothing written` };
+  }
+
+  const outcome = stageAndPublish({
+    bound: configRoot,
+    target: dir,
+    stagingParent: configRoot,
+    backupsRoot,
+    stamp: now.toISOString().replace(/[:.]/g, '-'),
+    stagingPrefix: '.shieldcortex-hook-staging',
+    backupPrefix: HOOK_NAME,
+    stage: (staged) => copyHookFiles(HOOK_SOURCE, staged),
+    verify: hookStagedDifference,
+    reinstallCommand: `${HOOK_REINSTALL_COMMAND} by hand`,
+  });
+  if (outcome.ok) {
+    return { ok: true, backup: outcome.backup, unsynced: outcome.unsynced, unconfirmed: outcome.unconfirmed };
+  }
+  return {
+    ok: false,
+    unsynced: outcome.unsynced,
+    unconfirmed: outcome.unconfirmed,
+    error: outcome.targetMissing
+      ? `the new hook could not be swapped in — ${outcome.error}, AND the previous copy could not ` +
+        `be restored; it is at ${outcome.backup}. ${HOOK_REINSTALL_COMMAND} to put the packaged ` +
+        'hook back'
+      : outcome.error,
+  };
+}
+
+/**
+ * The installed cortex-memory hook directories that ACTUALLY EXIST (#574).
+ *
+ * Deliberately not `findAllHooksDirs`: that one CREATES `hooks/` under any
+ * config dir it finds, because it is the install path's answer to "where should
+ * this go". The refresh path's question is the opposite one — "what is already
+ * here" — and an update that conjures a hooks directory on a host that never
+ * had the hook would be installing an integration nobody asked for.
+ */
+export function installedHookDirs(home: string = resolveUserHome()): string[] {
+  return hookConfigRoots(home).map(standardHookDir).filter(hookInstalledAt);
+}
+
+export interface HookRefreshResult {
+  /** Every installed copy found. Never created — see `installedHookDirs`. */
+  installed: string[];
+  /** Directories whose files were re-copied because they were behind the package. */
+  refreshed: string[];
+  /** Installed directories that already matched the packaged source. */
+  current: string[];
+  /**
+   * Copies that were installed and stale at discovery and GONE by the time
+   * this held the lock (r4 blocker 3). Skipped, never reinstalled: a refresh
+   * cannot tell a half-finished swap from an uninstall that happened while it
+   * was queueing for the lock.
+   */
+  vanished: string[];
+  /**
+   * Copies that were published but whose parent-directory flush the device
+   * refused (r4 nit 2) — refreshed, durability not confirmed. Not a clean
+   * success and not a failed refresh.
+   */
+  degraded: Array<{ dir: string; error: string }>;
+  /** Directories the copy could not be written to, with the reason. */
+  failed: Array<{ dir: string; error: string }>;
+  /** Where each replaced hook directory was kept. Never deleted. */
+  backups: Array<{ dir: string; backup: string }>;
+  /** Non-fatal facts worth printing — directories the platform would not flush. */
+  warnings: string[];
+  /**
+   * False when the PACKAGED hook source is missing, in which case nothing was
+   * compared and nothing was copied — `hookFilesStale` cannot answer against a
+   * source it cannot read, and neither can this.
+   */
+  sourceAvailable: boolean;
+}
+
+/**
+ * Re-copy the packaged hook over every installed copy that is out of date.
+ *
+ * The hook is installed by FILE COPY, so upgrading the npm package leaves the
+ * gateway running the previous `handler.ts` / `runtime.mjs` until somebody runs
+ * `shieldcortex openclaw install` (#574). This is the copy half of that command
+ * and nothing else: no plugin install, no registry write, no gateway restart.
+ * The gateway imports the handler module ONCE into its own long-lived process,
+ * so new bytes on disk change nothing until it is restarted — which is the
+ * caller's line to print, and the operator's call to make, because a restart
+ * kills every in-flight turn on the host.
+ *
+ * `hookFilesStale` decides staleness, so this and `doctor`'s row can never
+ * disagree about the same directory.
+ */
+export function refreshInstalledHookFiles(
+  home: string = resolveUserHome(),
+  opts: { now?: Date } = {},
+): HookRefreshResult {
+  const now = opts.now ?? new Date();
+  const result: HookRefreshResult = {
+    installed: [],
+    refreshed: [],
+    current: [],
+    vanished: [],
+    degraded: [],
+    failed: [],
+    backups: [],
+    warnings: [],
+    sourceAvailable: hookSourceAvailable(),
+  };
+  for (const configRoot of hookConfigRoots(home)) {
+    // A config root that is not there holds no hook, and nothing here creates
+    // one: `update` refreshes an integration, it does not install one.
+    if (!fs.existsSync(configRoot)) continue;
+    const dir = standardHookDir(configRoot);
+    const installed = hookInstalledAt(dir);
+    if (installed) result.installed.push(dir);
+    // No source, no comparison and no copy — but the installed copies are
+    // still reported, so the caller can tell "nothing to refresh" from
+    // "nothing is installed" (they need different words).
+    if (!result.sourceAvailable) continue;
+    // A hook that is not there is not refreshed into existence (r4): a backup
+    // under this root is what a SUCCESSFUL refresh leaves too, so healing from
+    // one reinstalls a hook the operator uninstalled.
+    if (!installed) continue;
+    if (!hookFilesStale(dir)) {
+      result.current.push(dir);
+      continue;
+    }
+
+    // One writer per config root. `openclaw install` takes the same lock, so
+    // two commands can never interleave their renames over one hooks tree.
+    const acquired = acquireUpdateLock(configRoot, { now });
+    if ('busy' in acquired) {
+      result.failed.push({ dir, error: `${acquired.busy}; nothing written` });
+      continue;
+    }
+    let published: HookPublishResult | null = null;
+    try {
+      // Discovery above ran BEFORE the lock, so everything it decided is a
+      // claim about a tree another refresher or an uninstall may have changed
+      // since (r4 blocker 3). Both answers are re-asked here, under the lock
+      // that makes them hold: a copy that is gone is skipped rather than
+      // recreated, and one somebody else has already refreshed is current.
+      if (!hookInstalledAt(dir)) {
+        result.vanished.push(dir);
+        continue;
+      }
+      if (!hookFilesStale(dir)) {
+        result.current.push(dir);
+        continue;
+      }
+      published = publishHookDir(dir, now);
+    } finally {
+      acquired.lock.release();
+    }
+    if (published === null) continue;
+    result.warnings.push(...(published.unsynced ?? []));
+    if (!published.ok) {
+      result.failed.push({ dir, error: published.error ?? 'refresh failed' });
+      continue;
+    }
+    result.refreshed.push(dir);
+    for (const error of published.unconfirmed ?? []) result.degraded.push({ dir, error });
+    if (typeof published.backup === 'string') result.backups.push({ dir, backup: published.backup });
+  }
+  return result;
 }
 
 function removeHookDir(dir: string): boolean {
@@ -550,29 +856,15 @@ export function hasConversationAccessGrant(entry: { hooks?: unknown } | undefine
 }
 
 /**
- * Has the operator asked for conversation access on THIS run (#226)?
- *
- * The grant lets a non-bundled plugin read every prompt and every model
- * response on the box. Issue #225 is explicit that it is "the operator's call
- * per box — the installer must never set it silently", and OpenClaw made it a
- * separate key, defaulting off, for the same reason. So installing ShieldCortex
- * does not grant it; ASKING for it does, either way round:
- *
- *   shieldcortex openclaw install --allow-conversation-access
- *   SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1 shieldcortex openclaw install
- *
- * Anything else — including a plain install on an interactive terminal — leaves
- * the gate untouched and prints the one-line remedy. Doctor fails on it
- * separately, so the gap is reported until a human closes it.
+ * Re-exported so every existing `from './openclaw.js'` import keeps working;
+ * the rule itself moved to its own module in #577 so that `update` and `repair`
+ * can parse the consent at their entry point without importing the installer.
  */
-export function resolveConversationAccessConsent(input: {
-  argv?: string[];
-  env?: NodeJS.ProcessEnv;
-}): boolean {
-  const argv = input.argv ?? [];
-  if (argv.includes('--allow-conversation-access')) return true;
-  return (input.env ?? {}).SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS === '1';
-}
+export {
+  resolveConversationAccessConsent,
+  ALLOW_CONVERSATION_ACCESS_FLAG,
+  ALLOW_CONVERSATION_ACCESS_ENV,
+} from './conversation-access-consent.js';
 
 /**
  * Read the conversation-access grant straight off the config on disk (#226).
@@ -1516,11 +1808,75 @@ export interface OpenClawInstallOptions {
   restartGateway?: boolean;
 }
 
+/**
+ * Take the update lock on every config root this install may write in, BEFORE
+ * the first write (#574 r3 blocker 6).
+ *
+ * Round 3 locked inside the hook-copy loop, so `findAllHooksDirs` creating
+ * `hooks/` and `cleanupLegacyPlugin` rewriting `openclaw.json` ran ahead of
+ * it, and the plugin install, the registration rewrite and the gateway restart
+ * ran after it. The reviewer drove both ends with the lock held. A busy root is
+ * now dropped whole: no `hooks/`, no config rewrite, no plugin, no restart.
+ */
 export async function installOpenClawHook(options: OpenClawInstallOptions = {}): Promise<void> {
-  const hooksDirs = findAllHooksDirs();
+  const home = resolveUserHome();
+  const held = new Map<string, UpdateLock>();
+  let unavailable = 0;
+  for (const configRoot of hookConfigRoots(home)) {
+    // `findAllHooksDirs` creates `~/.openclaw` when the binary is on the box.
+    // That is a write, so it happens under the lock or not at all.
+    const createRoot = configRoot === path.join(home, '.openclaw') && isOpenClawInstalled();
+    if (!createRoot && !fs.existsSync(configRoot)) continue;
+    const acquired = acquireUpdateLock(configRoot, { createRoot });
+    if ('busy' in acquired) {
+      console.warn(`  Skipped ${configRoot} — ${acquired.busy}; nothing written`);
+      unavailable += 1;
+      continue;
+    }
+    // The hook tree, before the first mkdir/copy/rm anywhere in this root
+    // (r4 blocker 1). A linked `hooks/` or `hooks/internal/` is followed by
+    // both the install AND the legacy cleanup, so a link there is a write and
+    // a DELETE somewhere nobody named. The root is dropped whole, and the
+    // lock it briefly held goes back. With `--no-hooks` nothing is copied into
+    // or deleted from the hook tree, so its links are not this run's business
+    // (r5 nit 3); the root itself was already checked by `acquireUpdateLock`.
+    const linked = options.noHooks ? null : linkedHookInstallPath(configRoot);
+    if (linked !== null) {
+      console.warn(`  Skipped ${configRoot} — ${linked}; nothing written or deleted`);
+      acquired.lock.release();
+      unavailable += 1;
+      continue;
+    }
+    held.set(configRoot, acquired.lock);
+  }
+  // A root this run could not write in is a non-zero exit, whether it was one
+  // of them or all of them (r4 nit 1): "installed" must not be the verdict on
+  // a host where the hook the operator asked for is still the old one.
+  if (unavailable > 0) process.exitCode = 1;
+  if (held.size === 0 && unavailable > 0) {
+    console.error('Nothing was installed: every OpenClaw/Claude config root was locked or refused.');
+    return;
+  }
+  try {
+    await writeOpenClawInstall(options, home, new Set(held.keys()));
+  } finally {
+    for (const lock of held.values()) lock.release();
+  }
+}
+
+/** The install itself, with every lock it needs already held. */
+async function writeOpenClawInstall(
+  options: OpenClawInstallOptions,
+  home: string,
+  locked: ReadonlySet<string>,
+): Promise<void> {
+  const hooksDirs = findAllHooksDirs(locked);
+  // Every write below this line that touches `~/.openclaw` — the config
+  // cleanup, the snapshot, the plugin, the registration, the restart — is
+  // gated on holding that root's lock.
+  const openClawWritable = locked.has(path.join(home, '.openclaw'));
 
   if (hooksDirs.length === 0) {
-    const home = resolveUserHome();
     console.error('Could not find OpenClaw or Claude Code config directory.');
     console.error('');
     console.error('Debug info:');
@@ -1544,7 +1900,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   }
 
   // Clean up legacy plugin entry that caused config validation errors
-  cleanupLegacyPlugin();
+  if (openClawWritable) cleanupLegacyPlugin();
 
   // Docker / container: warn about environment
   if (isDockerEnvironment()) {
@@ -1616,11 +1972,12 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   }
 
   // #214: snapshot openclaw.json before any path that can rewrite it.
-  if (!options.noPlugins) snapshotOpenClawConfig();
+  const noPlugins = options.noPlugins === true || !openClawWritable;
+  if (!noPlugins) snapshotOpenClawConfig();
 
   // Install the real-time plugin to the extensions directory
   const pluginInstallMode = installPlugin({
-    noPlugins: options.noPlugins,
+    noPlugins,
     grantConversationAccess: options.grantConversationAccess,
   });
 
@@ -1724,7 +2081,9 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   // capability paths skipped (--no-hooks AND --no-plugins), or no work
   // landed (installed === 0 AND plugin skipped).
   const didInstallSomething = installed > 0 || pluginInstallMode !== 'skipped';
-  const restartRequested = options.restartGateway !== false;
+  // A restart while another run is mid-swap in `~/.openclaw` boots the gateway
+  // on a half-published tree, so it waits for that root's lock like the writes.
+  const restartRequested = options.restartGateway !== false && openClawWritable;
   if (restartRequested && didInstallSomething) {
     const { restartOpenClawGateway } = await import('./deep-clean.js');
     const result = await restartOpenClawGateway();
@@ -2671,7 +3030,59 @@ export function uninstallOpenClawSkill(home: string = resolveUserHome()): { remo
   return { removed, skipped };
 }
 
-export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
+export const OPENCLAW_HELP = `Usage: shieldcortex openclaw <install|uninstall|status|repair|inspect-runtime|skill install>
+
+Install options:
+  --no-hooks              Skip hook installation (useful in Docker/CI)
+  --no-plugins            Skip plugin installation (useful in Docker/CI)
+  --no-gateway-restart    Skip the auto gateway restart after install
+  --allow-conversation-access
+                          Grant OpenClaw conversation-hook access to the plugin
+                          (plugins.entries[id].hooks.allowConversationAccess=true).
+                          REQUIRED for llm_input/llm_output scanning, and for the
+                          conversation firewall on 2026.5.9-beta.1+. Off by default:
+                          it lets the plugin read every prompt and model response
+                          on this box, which is your call, not the installer's.
+  -h, --help              Show this help and exit (installs nothing)
+
+Repair: diagnose + safely fix duplicate-plugin-id state surfaced by
+\`shieldcortex doctor\`. Preserves the customer's OpenClaw-side plugin
+config (interceptor settings, cloud API key, allowlist) across the
+uninstall+reinstall round-trip needed for sticky cases.
+`;
+
+/**
+ * `shieldcortex openclaw <verb>` entry point.
+ *
+ * #577: `openclaw install --help` installed the hook and plugin and restarted
+ * the gateway — `--help` simply was not one of the flags `extraArgs` was checked
+ * for. The gate runs before the switch, so no verb can mutate on a help flag.
+ */
+/**
+ * `openclaw`'s value-taking options (#577). `--agent help` is an agent id, not
+ * a help request: without this list the help gate printed usage and did nothing
+ * for `openclaw skill install --agent help`.
+ *
+ * Re-exported from the shared registry, which `helpGate` below and the
+ * whole-argv gates in `src/index.ts` both read (round 3).
+ */
+export const OPENCLAW_VALUE_FLAGS = COMMAND_HELP_SPECS.openclaw.valueFlags;
+
+export async function handleOpenClawCommand(
+  subcommand: string,
+  extraArgs: string[] = [],
+  deps: {
+    install?: typeof installOpenClawHook;
+    /**
+     * Injectable skill installer (#577). The `--agent <id>` value is the reason
+     * this seam exists: `--agent help` used to be eaten by the help gate, and
+     * the regression test has to watch the value ARRIVE here without ClawHub
+     * installing anything on the box running the suite.
+     */
+    skillInstall?: typeof installOpenClawSkill;
+  } = {},
+): Promise<void> {
+  if (helpGate([subcommand, ...extraArgs], OPENCLAW_HELP, { command: 'openclaw' }) !== null) return;
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
   const restartGateway = !extraArgs.includes('--no-gateway-restart');
@@ -2681,7 +3092,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
 
   switch (subcommand) {
     case 'install':
-      await installOpenClawHook({ noHooks, noPlugins, restartGateway, grantConversationAccess });
+      await (deps.install ?? installOpenClawHook)({ noHooks, noPlugins, restartGateway, grantConversationAccess });
       break;
     case 'uninstall':
       await uninstallOpenClawHook();
@@ -2709,7 +3120,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
           console.error('--agent requires an agent id');
           process.exit(1);
         }
-        const ok = await installOpenClawSkill(resolveUserHome(), agent);
+        const ok = await (deps.skillInstall ?? installOpenClawSkill)(resolveUserHome(), agent);
         if (!ok) process.exit(1);
       } else if (verb === 'uninstall') {
         uninstallOpenClawSkill();
@@ -2720,24 +3131,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       break;
     }
     default:
-      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair|inspect-runtime|skill install>');
-      console.log('');
-      console.log('Install options:');
-      console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
-      console.log('  --no-plugins            Skip plugin installation (useful in Docker/CI)');
-      console.log('  --no-gateway-restart    Skip the auto gateway restart after install');
-      console.log('  --allow-conversation-access');
-      console.log('                          Grant OpenClaw conversation-hook access to the plugin');
-      console.log('                          (plugins.entries[id].hooks.allowConversationAccess=true).');
-      console.log('                          REQUIRED for llm_input/llm_output scanning, and for the');
-      console.log('                          conversation firewall on 2026.5.9-beta.1+. Off by default:');
-      console.log('                          it lets the plugin read every prompt and model response');
-      console.log('                          on this box, which is your call, not the installer\'s.');
-      console.log('');
-      console.log('Repair: diagnose + safely fix duplicate-plugin-id state surfaced by');
-      console.log('`shieldcortex doctor`. Preserves the customer\'s OpenClaw-side plugin');
-      console.log('config (interceptor settings, cloud API key, allowlist) across the');
-      console.log('uninstall+reinstall round-trip needed for sticky cases.');
+      console.log(OPENCLAW_HELP.trimEnd());
       process.exit(1);
   }
 }

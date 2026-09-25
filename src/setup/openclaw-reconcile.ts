@@ -16,6 +16,7 @@ import { runPluginSelfCheck, type SelfCheckRunResult } from './openclaw-selfchec
 import { waitForGatewayReady } from './gateway-readiness.js';
 import { summariseRepair, renderRepairHeadline } from './repair-verdict.js';
 import { resolveRepairConsent } from './repair-consent.js';
+import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
 import { gatewayBootLogAdvice } from './gateway-restart-command.js';
 
@@ -108,6 +109,18 @@ export interface ReconcileOptions {
    * path and leave the re-read unproven.
    */
   readState?: () => { input: ReconcileInput; verdict: ReconcileVerdict };
+  /**
+   * Did the operator ask for conversation access on THIS run (#226/#577)?
+   *
+   * `update` and `repair` now parse their own arguments once at the entry point
+   * and pass the answer down, because the strict argument parsers added in #577
+   * have to KNOW about every flag the command honours — a consent switch read
+   * from `process.argv` several modules below the parser is invisible to it and
+   * was rejected as an unknown argument. Omitted (`openclaw repair`, which has
+   * already consumed its own argv) falls back to reading the process arguments,
+   * exactly as before.
+   */
+  grantConversationAccess?: boolean;
   /** Internal: which converge pass this is (1-based). */
   pass?: number;
 }
@@ -199,12 +212,14 @@ function defaultPruneDir(home: string, dirName: string): void {
  * write that silently did not land cannot be reported as a success — which is
  * why it is preferred here over a bare `trustLocalPlugin` write.
  */
-async function defaultRestoreRegistration(home: string): Promise<{ ok: boolean; detail: string }> {
-  const { verifyPluginRegistration, resolveConversationAccessConsent } = await import('./openclaw.js');
+async function defaultRestoreRegistration(
+  home: string,
+  grantConversationAccess: boolean,
+): Promise<{ ok: boolean; detail: string }> {
+  const { verifyPluginRegistration } = await import('./openclaw.js');
   // #226: repair closes the conversation-access gate too — but only when the
   // operator has asked for it on this run, exactly as the installer does.
   // Repairing an install is not consent to widen what it may read.
-  const grantConversationAccess = resolveConversationAccessConsent({ argv: process.argv.slice(2), env: process.env });
   const r = verifyPluginRegistration(home, { grantConversationAccess });
   return { ok: r.registered, detail: r.detail };
 }
@@ -225,6 +240,12 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
     ?? ((h: string, p: string) => runPluginSelfCheck(h, { pluginId: p, expectedVersion: options.expectedVersion }));
   const pruneDir = options.pruneDir ?? defaultPruneDir;
   const waitForGateway = options.waitForGateway ?? (opts => waitForGatewayReady(opts));
+  // #577: the callers with a strict argument parser (`update`, `repair`) pass
+  // this in, so the flag they accept and the consent that reaches the registry
+  // writer are the same value. `openclaw repair` still resolves it here.
+  const grantConversationAccess =
+    options.grantConversationAccess
+    ?? resolveConversationAccessConsent({ argv: process.argv.slice(2), env: process.env });
 
   const messages: string[] = [];
   const readState =
@@ -314,7 +335,7 @@ export async function reconcileOpenClawPluginState(options: ReconcileOptions): P
       try {
         r = options.restoreRegistration
           ? options.restoreRegistration(home, pluginId)
-          : await defaultRestoreRegistration(home);
+          : await defaultRestoreRegistration(home, grantConversationAccess);
       } catch (err) {
         r = { ok: false, detail: `restore failed: ${err instanceof Error ? err.message : String(err)}` };
       }

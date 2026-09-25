@@ -54,8 +54,17 @@ describe("doctor checkDiskUsage excludes models/ from the 100 MB safety limit", 
     const result = await checkDiskUsage(tmpDir);
     expect(result.status).toBe('fail');
     expect(result.message).toContain('at limit');
-    // Fix should be DB-trimming commands, not model-cache deletion
-    expect(result.fix).toMatch(/memories prune|memories dedupe/);
+    // The fix must say nothing about the model cache, which is what this case
+    // is actually about.
+    //
+    // This used to assert `memories prune|memories dedupe`. The fixture's
+    // memories.db is 99 MB of zero bytes — not a database anything can open —
+    // and #573 recommends only what a measurement supports: an unreadable file
+    // is not evidence about what is inside it, so the remedy reports the sizes
+    // and names no command.
+    expect(result.fix).toMatch(/No single measured consumer/);
+    expect(result.fix).not.toMatch(/models/);
+    expect(result.fix).not.toMatch(/memories prune|memories dedupe|sessions prune/);
   });
 
   it("flags warn at 80% of the data limit", async () => {

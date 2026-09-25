@@ -15,6 +15,31 @@ const PRE_TOOL_HOOK = join(REPO, 'scripts', 'pre-tool-hook.mjs');
 const SESSION_SALT = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const SECRET_SENTINEL = 'PUPIL_OR_SECRET_VALUE_SHOULD_NOT_LEAVE_AUDIT_PREVIEW';
 
+/**
+ * Replace `dir` with a symlink to `outside` while a hook is concurrently
+ * writing into `dir`. Two races live here, and both are retried until one
+ * deadline: the writer can leave the directory non-empty between `rmSync`'s
+ * scan and its unlink (ENOTEMPTY / EBUSY), and — the one Node 22.14.0 hit in
+ * CI (#586) — it can recreate the directory between `rmSync` returning and
+ * `symlinkSync` running, so the symlink fails with EEXIST. Remove and link are
+ * therefore ONE retried step, not two.
+ */
+async function swapDirForSymlink(dir: string, outside: string): Promise<void> {
+  const deadline = Date.now() + 2000;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      symlinkSync(outside, dir);
+      return;
+    } catch (err: any) {
+      if (err?.code !== 'ENOTEMPTY' && err?.code !== 'EBUSY' && err?.code !== 'EEXIST') throw err;
+      if (Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+}
+
 describe('stop hook — Action Guard run summary (#242)', () => {
   let home: string;
 
@@ -526,22 +551,7 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       tool_input: { command: 'sudo systemctl stop nginx' },
     }, { SHIELDCORTEX_TEST_POST_APPEND_VALIDATION_DELAY_MS: '250' }, 2500);
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-    // Race-hardening: concurrent lock writers can leave auditDir non-empty briefly (ENOTEMPTY).
-    {
-      const deadline = Date.now() + 2000;
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        try {
-          rmSync(auditDir, { recursive: true, force: true });
-          break;
-        } catch (err: any) {
-          if (err?.code !== 'ENOTEMPTY' && err?.code !== 'EBUSY') throw err;
-          if (Date.now() > deadline) throw err;
-          await new Promise((r) => setTimeout(r, 25));
-        }
-      }
-    }
-    symlinkSync(outside, auditDir);
+    await swapDirForSymlink(auditDir, outside);
 
     const result = await pending;
 
@@ -562,22 +572,7 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       2500,
     );
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-    // Race-hardening: concurrent lock writers can leave auditDir non-empty briefly (ENOTEMPTY).
-    {
-      const deadline = Date.now() + 2000;
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        try {
-          rmSync(auditDir, { recursive: true, force: true });
-          break;
-        } catch (err: any) {
-          if (err?.code !== 'ENOTEMPTY' && err?.code !== 'EBUSY') throw err;
-          if (Date.now() > deadline) throw err;
-          await new Promise((r) => setTimeout(r, 25));
-        }
-      }
-    }
-    symlinkSync(outside, auditDir);
+    await swapDirForSymlink(auditDir, outside);
 
     const result = await pending;
 

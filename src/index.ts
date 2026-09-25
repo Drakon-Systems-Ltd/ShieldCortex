@@ -74,7 +74,7 @@ import fs from 'fs';
 import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { SCAN_EXIT, formatScanToolFailure } from './cli/scan-exit.js';
-import { wantsHelp } from './cli/wants-help.js';
+import { argvWantsHelp } from './cli/wants-help.js';
 
 // Heavy modules (MCP server, visualization API + express/cors/ws, embedding
 // model, brain worker, installer handlers) are loaded lazily via `await import`
@@ -93,6 +93,12 @@ const pkg = require('../package.json');
 function checkVersionStaleness(): void {
   // Skip for MCP server mode (no argv[2]) — stdout must stay clean for JSON-RPC
   if (!process.argv[2]) return;
+  // #577: a help request must reach no process, network or file. This preamble
+  // runs before every subcommand and shells out to `npm ls -g` (which lets npm's
+  // own update-notifier hit the registry and write ~/.npm/_logs), so a gate
+  // inside the update branch alone could not make `update --help` side-effect
+  // free. Nothing here is worth printing above a usage block anyway.
+  if (argvWantsHelp(process.argv.slice(2))) return;
 
   try {
     const globalVersion = execSync('npm ls -g shieldcortex --depth=0 --json 2>/dev/null', {
@@ -157,7 +163,7 @@ export function shouldShowInteractiveBanner(argv: string[], mode: ServerMode): b
   const first = argv[2];
   if (!first) return false; // bare invocation → MCP stdio server
   // --help / -h must not query the live DB via the stats banner (#515).
-  if (wantsHelp(argv.slice(2))) return false;
+  if (argvWantsHelp(argv.slice(2))) return false;
   // A positional (non-flag) first arg means a CLI subcommand was given.
   const hasPositionalCommand = !first.startsWith('-');
   if (hasPositionalCommand) {
@@ -600,6 +606,35 @@ async function main() {
     return;
   }
 
+  // #577: an invalid argument must cost NOTHING — and `checkVersionStaleness()`
+  // below spawns `npm ls -g`, which lets npm's own update-notifier reach the
+  // registry and write ~/.npm/_logs. So the strict-parser commands are
+  // validated first, by the same pure gate the dispatcher applies later.
+  const strictExit = await (await import('./cli/strict-args-preflight.js'))
+    .preflightStrictArgs(process.argv.slice(2));
+  if (strictExit !== null) {
+    process.exitCode = strictExit;
+    return;
+  }
+
+  // Handle "logs" subcommand (#573) — retention for the project-key repair
+  // logs, the one on-disk plane nothing ever deleted.
+  //
+  // Dispatched HERE, ahead of the staleness preamble and the stats banner,
+  // for the same reason `hook` is: both would undo what this command is for.
+  // `logs prune` is the disk-pressure relief valve — the command an operator
+  // reaches for when doctor says the budget is full — and `npm ls -g` lets
+  // npm's update-notifier reach the registry and write ~/.npm/_logs, while the
+  // banner opens the database this command deliberately does not need. Neither
+  // is worth a byte of the operator's HOME on a DRY RUN that promises to change
+  // nothing. Its arguments were already validated by the strict preflight
+  // above, so a typo never reaches this line.
+  if (process.argv[2] === 'logs') {
+    const { handleLogsCommand } = await import('./cli/logs.js');
+    await handleLogsCommand(process.argv.slice(3));
+    return;
+  }
+
   // Warn if npx is serving a stale cached version
   checkVersionStaleness();
   const parsedArgs = parseArgs();
@@ -654,6 +689,8 @@ ${bold}COMMANDS${reset}
                                    if anything could not be moved safely)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
+  ${cyan}logs${reset} prune            Keep only the newest project-key-repair-*.json logs
+                        (dry-run; --execute). Audit logs are not managed yet (#579).
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
   ${cyan}allowlist${reset} [add|remove|verify|scan]
@@ -777,18 +814,14 @@ ${bold}DOCS${reset}
   // Handle "migrate" subcommand
   if (process.argv[2] === 'migrate') {
     const { handleMigrateCommand } = await import('./setup/migrate.js');
-    await handleMigrateCommand();
+    await handleMigrateCommand(process.argv.slice(3));
     return;
   }
 
   // Handle "uninstall" subcommand
   if (process.argv[2] === 'uninstall') {
-    const { uninstallAll } = await import('./setup/uninstall.js');
-    await uninstallAll({
-      keepLogs: process.argv.includes('--keep-logs'),
-      deep: process.argv.includes('--deep'),
-      restartGateway: !process.argv.includes('--no-gateway-restart'),
-    });
+    const { handleUninstallCommand } = await import('./setup/uninstall.js');
+    await handleUninstallCommand(process.argv.slice(3));
     return;
   }
 
@@ -819,7 +852,7 @@ ${bold}DOCS${reset}
 
   if (process.argv[2] === 'hermes') {
     const { handleHermesCommand } = await import('./setup/hermes.js');
-    await handleHermesCommand(process.argv[3] || '');
+    await handleHermesCommand(process.argv[3] || '', process.argv.slice(4));
     return;
   }
 
@@ -943,8 +976,11 @@ ${bold}DOCS${reset}
   // output, per-step timings, version-delta header). Same underlying steps
   // as the previous inline implementation.
   if (process.argv[2] === 'update') {
-    const { runUpdate } = await import('./cli/update.js');
-    await runUpdate();
+    // #577: parse once, here. handleUpdateCommand prints usage for --help/-h and
+    // sets exit 2 for an unknown argument WITHOUT reaching the registry or the
+    // filesystem; only the run path enters runUpdate, which owns the exit code.
+    const { handleUpdateCommand } = await import('./cli/update.js');
+    await handleUpdateCommand(process.argv.slice(3));
     return;
   }
 
@@ -1419,6 +1455,10 @@ ${bold}DOCS${reset}
   // needs no standalone sqlite3 CLI — which minimal boxes (EDITH had none) lack,
   // and which the old doctor remedy wrongly assumed was present.
   if (process.argv[2] === 'vacuum' || process.argv[2] === 'compact') {
+    // #577: VACUUM rewrites the whole database file, so --help must stop here —
+    // before the DB is even opened (initDatabase also migrates and backfills).
+    const { vacuumHelpRequested } = await import('./cli/vacuum.js');
+    if (vacuumHelpRequested(process.argv.slice(3))) return;
     const { initDatabase, getDatabase } = await import('./database/init.js');
     const { statSync } = await import('fs');
     initDatabase();
@@ -1475,7 +1515,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve', 'deny', 'allowlist',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'logs', 'approve', 'deny', 'allowlist',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {

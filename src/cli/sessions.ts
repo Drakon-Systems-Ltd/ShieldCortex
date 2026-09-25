@@ -12,6 +12,8 @@
  * process ..." single-writer behaviour).
  */
 
+import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
+
 function flagValue(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
   if (idx === -1) return undefined;
@@ -93,7 +95,19 @@ function printUsage(): void {
   console.log('      the env var floor is 1 — dry-run-by-default is the guard rail.');
 }
 
+/**
+ * `sessions`' value-taking options — `--days help` is a value, not a verb (#577).
+ * Re-exported from the shared registry the whole-argv gates read (round 3).
+ */
+export const SESSIONS_VALUE_FLAGS = COMMAND_HELP_SPECS.sessions.valueFlags;
+
 export async function handleSessionsCommand(args: string[]): Promise<void> {
+  // #577: `sessions prune --help` opened (and migrated) the memory DB to print a
+  // dry-run report instead of printing usage.
+  if (commandWantsHelp('sessions', args)) {
+    printUsage();
+    return;
+  }
   const sub = args[0];
   if (sub === 'prune') {
     try {
