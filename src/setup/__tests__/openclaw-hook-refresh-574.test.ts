@@ -3,33 +3,42 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { HOOK_FILES, hookFilesStale, refreshInstalledHookFiles } from '../openclaw.js';
-import { journalPath, readJournal, writeJournal } from '../swap-journal.js';
+import { updateLockPath } from '../host-swap.js';
 
 /**
- * #574 round 2, blocker 2 — the hook refresh overwrote `HOOK.md`,
+ * #574 round 2 blocker 2 — the hook refresh overwrote `HOOK.md`,
  * `handler.ts` and `runtime.mjs` one at a time, IN PLACE. A failure on the
  * third left the new handler beside the old runtime: a mismatched pair the
  * gateway would import on its next restart, which no amount of error reporting
  * undoes. The reviewer's fault-injection probe confirmed it.
  *
- * The refresh now stages the complete set outside every hook discovery
- * directory, verifies it byte-for-byte, and publishes it through the same
- * journalled swap the Hermes plugin uses (blocker 1). These cases are the
- * proof, on fake homes under a temp dir — no `$HOME`, no gateway.
+ * Round 2 replaced it with a JOURNALLED swap; round 3 removed the journal,
+ * because a recovery that reads its destination from a file can be told where
+ * to write. The set is still staged outside every hook discovery directory,
+ * flushed, verified byte-for-byte and swapped in — but a refresh a crash
+ * interrupted is now finished by reinstalling the PACKAGE into the standard
+ * path, and nothing on disk names a destination.
+ *
+ * These cases are the proof, on fake homes under a temp dir — no `$HOME`, no
+ * gateway.
  */
 let home: string;
 let configRoot: string;
 let hooksRoot: string;
 let hookDir: string;
+let elsewhere: string;
 const HOOK_SOURCE = path.resolve(
   path.dirname(new URL(import.meta.url).pathname),
   '..', '..', '..', 'hooks', 'openclaw', 'cortex-memory',
 );
 const FROZEN = new Date('2026-09-24T12:34:56.789Z');
+const STAMP = '2026-09-24T12-34-56-789Z';
+const JOURNAL = '.shieldcortex-refresh-journal.json';
 const OLD = (file: string): string => `// shieldcortex 5.1.0 ${file}\n`;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hook-refresh-'));
+  elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hook-elsewhere-'));
   configRoot = path.join(home, '.openclaw');
   hooksRoot = path.join(configRoot, 'hooks');
   hookDir = path.join(hooksRoot, 'cortex-memory');
@@ -38,6 +47,7 @@ beforeEach(() => {
 afterEach(() => {
   jest.restoreAllMocks();
   fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(elsewhere, { recursive: true, force: true });
 });
 
 function installStale(dir: string = hookDir): void {
@@ -50,6 +60,21 @@ function expectOldSetIntact(dir: string = hookDir): void {
   for (const file of HOOK_FILES) {
     expect(fs.readFileSync(path.join(dir, file), 'utf-8')).toBe(OLD(file));
   }
+}
+
+/** Every path under `root`, relative and sorted — a whole-tree fingerprint. */
+function treeOf(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isSymbolicLink()) out.push(`${rel} -> ${fs.readlinkSync(path.join(dir, entry.name))}`);
+      else if (entry.isDirectory()) { out.push(`${rel}/`); walk(path.join(dir, entry.name), rel); }
+      else out.push(`${rel} ${fs.readFileSync(path.join(dir, entry.name), 'utf-8')}`);
+    }
+  };
+  walk(root, '');
+  return out;
 }
 
 /** Directories OpenClaw's `loadHooksFromDir` would enumerate under `hooks/`. */
@@ -98,6 +123,9 @@ describe('a failed hook refresh leaves the previously working set intact (#574 r
     expect(result.refreshed).toEqual([]);
     expect(result.failed[0].error).toMatch(/did not verify/);
     expectOldSetIntact();
+    // The reservation the failed publication made was given back, so the
+    // refusal leaves no empty directory under `backups/`.
+    expect(fs.readdirSync(path.join(configRoot, 'backups'))).toEqual([]);
   });
 
   it('refuses a symlinked hook directory, `hooks/` or `backups/` without writing', () => {
@@ -156,8 +184,6 @@ describe('the staged set never becomes a second hook (#574 r2)', () => {
     // `hooks/` and loads any that holds a HOOK.md, keying them by name with
     // later sources winning. So a staging directory in there IS a second
     // cortex-memory hook while it exists.
-    // At every observed moment, `hooks/` holds either nothing loadable or the
-    // one cortex-memory hook — never a second copy of it.
     for (const state of seen) expect(['', 'cortex-memory']).toContain(state.join(','));
     const publish = renames.find((r) => r.to === hookDir);
     expect(publish).toBeDefined();
@@ -172,7 +198,7 @@ describe('the staged set never becomes a second hook (#574 r2)', () => {
   });
 });
 
-describe('a crash between the hook renames is recovered (#574 r2)', () => {
+describe('a crash between the hook renames is healed from the package (#574 r3)', () => {
   function crashAfterFirstRename(): ReturnType<typeof refreshInstalledHookFiles> {
     const real = fs.renameSync;
     const spy = jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
@@ -186,69 +212,188 @@ describe('a crash between the hook renames is recovered (#574 r2)', () => {
     }
   }
 
-  it('leaves the journal and staging for recovery, and names the command', () => {
+  it('leaves the backup and nothing else, and names the command that puts it back', () => {
     installStale();
 
     const result = crashAfterFirstRename();
 
     expect(fs.existsSync(hookDir)).toBe(false);
-    expect(result.failed[0].error).toMatch(/shieldcortex update/);
-    const journal = readJournal(configRoot);
-    expect('journal' in journal && journal.journal.kind).toBe('openclaw-hook');
-    expect(fs.existsSync(String('journal' in journal ? journal.journal.staged : ''))).toBe(true);
+    expect(result.failed[0].error).toMatch(/shieldcortex openclaw install/);
+    expect(fs.readdirSync(path.join(configRoot, 'backups'))).toEqual([`cortex-memory-preupdate-${STAMP}`]);
+    // No journal and no staging tree survive: nothing for a later run to read
+    // a destination out of.
+    expect(fs.readdirSync(configRoot).filter((n) => n.startsWith('.shieldcortex-'))).toEqual([]);
   });
 
-  it('is put back by the next refresh, which then republishes cleanly', () => {
+  it('is put back by the next refresh, from the package', () => {
     installStale();
     crashAfterFirstRename();
     expect(fs.existsSync(hookDir)).toBe(false);
 
     const result = refreshInstalledHookFiles(home, { now: FROZEN });
 
-    expect(result.recovered.join('\n')).toMatch(/interrupted refresh was found/);
-    expect(result.refreshed).toEqual([hookDir]);
+    expect(result.reinstalled).toEqual([hookDir]);
+    expect(result.refreshed).toEqual([]);
     expect(hookFilesStale(hookDir)).toBe(false);
-    expect(fs.existsSync(journalPath(configRoot))).toBe(false);
     expect(hookDirsIn(hooksRoot)).toEqual(['cortex-memory']);
+    // A reinstall has nothing to displace, so it reserves no second backup.
+    expect(fs.readdirSync(path.join(configRoot, 'backups'))).toHaveLength(1);
   });
 
-  it('reports rather than guesses when the journal cannot be parsed', () => {
-    installStale();
-    fs.writeFileSync(journalPath(configRoot), '{ truncated');
+  it('leaves a config root that never had the hook alone', () => {
+    fs.mkdirSync(configRoot, { recursive: true });
 
     const result = refreshInstalledHookFiles(home, { now: FROZEN });
 
-    expect(result.failed.map((f) => f.dir)).toContain(configRoot);
-    expect(fs.existsSync(journalPath(configRoot))).toBe(true);
+    expect(result.installed).toEqual([]);
+    expect(result.reinstalled).toEqual([]);
+    expect(fs.existsSync(hooksRoot)).toBe(false);
   });
 
-  it('clears a journal whose swap had already completed, keeping the backup', () => {
+  it('refreshes a PARTIAL hook directory instead of accepting it as installed', () => {
+    // The reviewer's ENOSPC probe left a target with one file and no HOOK.md.
+    // "The directory exists" is not "the hook is installed".
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(path.join(hookDir, 'handler.ts'), 'half a hook\n');
+    fs.mkdirSync(path.join(configRoot, 'backups', 'cortex-memory-preupdate-old'), { recursive: true });
+
+    const result = refreshInstalledHookFiles(home, { now: FROZEN });
+
+    expect(result.reinstalled).toEqual([hookDir]);
+    expect(hookFilesStale(hookDir)).toBe(false);
+    // The husk was kept, not deleted.
+    expect(fs.readFileSync(
+      path.join(configRoot, 'backups', `cortex-memory-preupdate-${STAMP}`, 'cortex-memory', 'handler.ts'),
+      'utf-8',
+    )).toBe('half a hook\n');
+  });
+});
+
+describe('planted files name no destination (#574 r3)', () => {
+  it('a planted journal and a planted staging directory are inert', () => {
+    fs.mkdirSync(path.join(elsewhere, 'treasure'), { recursive: true });
+    fs.writeFileSync(path.join(elsewhere, 'treasure', 'payroll.csv'), 'do not move me\n');
     installStale();
-    const backupRoot = path.join(configRoot, 'backups', 'cortex-memory-preupdate-x');
-    fs.mkdirSync(path.join(backupRoot, 'cortex-memory'), { recursive: true });
-    fs.writeFileSync(path.join(backupRoot, 'cortex-memory', 'HOOK.md'), 'previous\n');
-    const stagingRoot = path.join(configRoot, '.shieldcortex-hook-staging-x');
-    fs.mkdirSync(stagingRoot);
-    writeJournal({
+    fs.writeFileSync(path.join(configRoot, JOURNAL), `${JSON.stringify({
       version: 1,
       kind: 'openclaw-hook',
       root: configRoot,
-      target: hookDir,
-      backup: path.join(backupRoot, 'cortex-memory'),
-      staged: path.join(stagingRoot, 'cortex-memory'),
-      stagingRoot,
+      target: path.join(elsewhere, 'victim'),
+      backup: path.join(elsewhere, 'treasure'),
+      staged: path.join(elsewhere, 'staged'),
+      stagingRoot: path.join(elsewhere, 'treasure'),
       packagedVersion: '5.2.0',
       phase: 'publishing',
       startedAt: FROZEN.toISOString(),
       pid: 1,
-    });
+    })}\n`);
+    fs.mkdirSync(path.join(configRoot, '.shieldcortex-hook-staging-planted'), { recursive: true });
+    fs.writeFileSync(path.join(configRoot, '.shieldcortex-hook-staging-planted', 'keep.txt'), 'keep\n');
+    const before = treeOf(elsewhere);
 
     const result = refreshInstalledHookFiles(home, { now: FROZEN });
 
-    expect(result.recovered.join('\n')).toMatch(/is in place, so it was cleared/);
-    expect(fs.existsSync(journalPath(configRoot))).toBe(false);
-    expect(fs.readFileSync(path.join(backupRoot, 'cortex-memory', 'HOOK.md'), 'utf-8')).toBe('previous\n');
-    expect(fs.existsSync(stagingRoot)).toBe(false);
+    expect(result.refreshed).toEqual([hookDir]);
+    expect(treeOf(elsewhere)).toEqual(before);
+    expect(fs.existsSync(path.join(elsewhere, 'victim'))).toBe(false);
+    expect(fs.readFileSync(path.join(configRoot, '.shieldcortex-hook-staging-planted', 'keep.txt'), 'utf-8')).toBe('keep\n');
+    expect(fs.existsSync(path.join(configRoot, JOURNAL))).toBe(true);
+  });
+
+  it('writes through no predictable temp name — the `.next` link victim survives', () => {
+    // Round 2's `advanceJournalPhase` wrote `<journal>.next` with `openSync(…,
+    // 'w')`, which FOLLOWS a symlink planted at that name and truncates the
+    // referent. The reviewer confirmed both the overwrite and the symlink
+    // being installed as the journal.
+    const victim = path.join(elsewhere, 'victim.txt');
+    fs.writeFileSync(victim, 'important\n');
+    installStale();
+    const trap = path.join(configRoot, `${JOURNAL}.next`);
+    fs.symlinkSync(victim, trap);
+    const opened: string[] = [];
+    const realOpen = fs.openSync;
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      opened.push(String(p));
+      return (realOpen as (...a: unknown[]) => number)(p, ...rest);
+    }) as typeof fs.openSync);
+
+    expect(refreshInstalledHookFiles(home, { now: FROZEN }).refreshed).toEqual([hookDir]);
+
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('important\n');
+    expect(fs.lstatSync(trap).isSymbolicLink()).toBe(true);
+    expect(opened.filter((p) => p.includes(JOURNAL))).toEqual([]);
+  });
+});
+
+describe('one writer per config root (#574 r2 blocker 3)', () => {
+  it('a second refresh that starts mid-swap refuses and writes nothing', () => {
+    installStale();
+    let inner: ReturnType<typeof refreshInstalledHookFiles> | null = null;
+    const real = fs.renameSync;
+    jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      const out = real(from, to);
+      if (inner === null && String(to).includes('-preupdate-')) {
+        inner = refreshInstalledHookFiles(home, { now: FROZEN });
+      }
+      return out;
+    });
+
+    const outer = refreshInstalledHookFiles(home, { now: FROZEN });
+
+    expect(outer.refreshed).toEqual([hookDir]);
+    expect(inner).not.toBeNull();
+    expect(inner!.refreshed).toEqual([]);
+    expect(inner!.failed[0].error).toMatch(/another ShieldCortex update\/install is running/);
+    // Exactly ONE writer: one backup, no staging left, a hook that verifies.
+    expect(fs.readdirSync(path.join(configRoot, 'backups'))).toHaveLength(1);
+    expect(fs.readdirSync(configRoot).filter((n) => n.startsWith('.shieldcortex-'))).toEqual([]);
+    expect(hookFilesStale(hookDir)).toBe(false);
+  });
+
+  it('a held lock stops the refresh before it writes anything', () => {
+    installStale();
+    fs.writeFileSync(updateLockPath(configRoot), `shieldcortex-update ${process.pid} ${FROZEN.toISOString()}\n`);
+
+    const result = refreshInstalledHookFiles(home, { now: FROZEN });
+
+    expect(result.refreshed).toEqual([]);
+    expect(result.failed[0].error).toMatch(/another ShieldCortex update\/install is running/);
+    expectOldSetIntact();
+    expect(fs.existsSync(path.join(configRoot, 'backups'))).toBe(false);
+  });
+});
+
+describe('the staged set is durable before it is reachable (#574 r2 blocker 4)', () => {
+  it('every staged file is fsynced before the first rename', () => {
+    installStale();
+    const staged = path.join(configRoot, `.shieldcortex-hook-staging-${STAMP}`, 'cortex-memory');
+    const byFd = new Map<number, string>();
+    const synced: string[] = [];
+    let syncedAtFirstRename: string[] | null = null;
+
+    const realOpen = fs.openSync;
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (realOpen as (...a: unknown[]) => number)(p, ...rest);
+      byFd.set(fd, String(p));
+      return fd;
+    }) as typeof fs.openSync);
+    const realFsync = fs.fsyncSync;
+    jest.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      synced.push(byFd.get(fd) ?? `fd:${fd}`);
+      return realFsync(fd);
+    });
+    const realRename = fs.renameSync;
+    jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      syncedAtFirstRename ??= [...synced];
+      return realRename(from, to);
+    });
+
+    expect(refreshInstalledHookFiles(home, { now: FROZEN }).refreshed).toEqual([hookDir]);
+
+    expect(syncedAtFirstRename).not.toBeNull();
+    const before = new Set(syncedAtFirstRename!);
+    for (const file of HOOK_FILES) expect(before.has(path.join(staged, file))).toBe(true);
+    expect(before.has(staged)).toBe(true);
   });
 });
 
