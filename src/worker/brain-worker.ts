@@ -46,11 +46,6 @@ import {
   purgeSessionEventsUnderSizePressure,
   resolveSessionRetentionDays,
 } from '../sessions/retention.js';
-import {
-  isRepairLogPruneDue,
-  pruneRepairLogs,
-  type RepairLogPruneResult,
-} from '../logs/retention.js';
 import { isFeatureEnabled } from '../license/gate.js';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -74,7 +69,6 @@ function persistWorkerState(
   lastLightTick: Date,
   lastAuditPurge: Date | null,
   lastSessionPurge: Date | null,
-  lastRepairLogPrune: Date | null,
 ): void {
   try {
     if (!existsSync(WORKER_STATE_DIR)) mkdirSync(WORKER_STATE_DIR, { recursive: true });
@@ -87,7 +81,6 @@ function persistWorkerState(
           lastLightTick: lastLightTick.toISOString(),
           lastAuditPurge: lastAuditPurge ? lastAuditPurge.toISOString() : null,
           lastSessionPurge: lastSessionPurge ? lastSessionPurge.toISOString() : null,
-          lastRepairLogPrune: lastRepairLogPrune ? lastRepairLogPrune.toISOString() : null,
         },
         null,
         2,
@@ -112,9 +105,7 @@ function persistWorkerState(
  * wedged. Applies to BOTH keys; this function is the single read path for
  * each.
  */
-export function readPersistedPurgeDate(
-  key: 'lastAuditPurge' | 'lastSessionPurge' | 'lastRepairLogPrune',
-): Date | null {
+export function readPersistedPurgeDate(key: 'lastAuditPurge' | 'lastSessionPurge'): Date | null {
   try {
     const raw = JSON.parse(readFileSync(WORKER_STATE_FILE, 'utf-8')) as Record<string, string | null | undefined>;
     const value = raw[key];
@@ -156,7 +147,6 @@ export class BrainWorker {
   // frequent MCP-server restarts.
   private lastAuditPurge: Date | null = readPersistedPurgeDate('lastAuditPurge');
   private lastSessionPurge: Date | null = readPersistedPurgeDate('lastSessionPurge');
-  private lastRepairLogPrune: Date | null = readPersistedPurgeDate('lastRepairLogPrune');
 
   /**
    * Create a new BrainWorker
@@ -265,43 +255,6 @@ export class BrainWorker {
    */
   isActive(): boolean {
     return this.isRunning;
-  }
-
-  /**
-   * Repair-log retention (#573), throttled to ~once per 24h.
-   *
-   * Returns the pass's result, or null when the pass was not due or could not
-   * run. EVERY error is contained: this is housekeeping, and it may not take
-   * down a light tick that also drains the sync queue and projects the threat
-   * graph. It opens no database, so it holds no handle, no lease and no
-   * transaction — which is why it still works on a host whose DB is at the
-   * hard size block.
-   *
-   * The throttle is armed whenever the pass reaches a conclusion, a refusal
-   * included: a logs directory reachable through a symlink is a state to
-   * report once a day, not to re-report every five minutes.
-   */
-  runDueRepairLogPrune(now: Date): RepairLogPruneResult | null {
-    try {
-      if (!isRepairLogPruneDue(this.lastRepairLogPrune, now.getTime())) return null;
-      const result = pruneRepairLogs({ dir: this.config.repairLogDir, execute: true });
-      this.lastRepairLogPrune = now;
-      if (result.refused !== null) {
-        console.error(`[BrainWorker] Repair-log retention refused: ${result.refused}`);
-      } else if (result.deleted.length > 0) {
-        console.error(
-          `[BrainWorker] Repair-log retention deleted ${result.deleted.length} log(s), ` +
-          `${(result.freedBytes / 1024).toFixed(1)} KB freed (kept the newest ${result.keep})`
-        );
-      }
-      for (const err of result.errors) {
-        console.error(`[BrainWorker] Repair-log retention: ${err}`);
-      }
-      return result;
-    } catch (err) {
-      console.error('[BrainWorker] Repair-log retention failed:', err);
-      return null;
-    }
   }
 
   /**
@@ -420,19 +373,6 @@ export class BrainWorker {
         }
       }
 
-      // 3d. Repair-log retention (#573) — runs on BOTH profiles. It is pure
-      // filesystem work with no database handle, so it cannot be blocked by DB
-      // size pressure (the state this valve most needs to relieve) and it
-      // cannot sit inside the projector's transaction or hold its lease. Placed
-      // after the projector for tidiness only; the two share nothing.
-      //
-      // Automatic rather than command-only: the #573 host accumulated 3,508
-      // repair logs and the operator's first sight of it was a doctor failure.
-      // `shieldcortex logs prune` remains for an operator who wants to see
-      // (dry-run) or force a pass, exactly as `sessions prune` sits beside the
-      // session valve.
-      this.runDueRepairLogPrune(result.timestamp);
-
       // 4. Sync retry queue — drains on BOTH profiles. MCP-only installs have
       // no full worker, so if this stayed full-only their queued audits/
       // memories would age out unsent (the same gap we closed for audit
@@ -480,13 +420,7 @@ export class BrainWorker {
       this.stats.lightTicks++;
 
       // Persist worker freshness for `shieldcortex doctor` to detect stalls.
-      persistWorkerState(
-        this.config.profile,
-        result.timestamp,
-        this.lastAuditPurge,
-        this.lastSessionPurge,
-        this.lastRepairLogPrune,
-      );
+      persistWorkerState(this.config.profile, result.timestamp, this.lastAuditPurge, this.lastSessionPurge);
 
       // Emit light tick event
       emitWorkerLightTick(result);

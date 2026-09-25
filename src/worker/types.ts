@@ -57,12 +57,6 @@ export interface WorkerConfig {
    * (default: ~/.shieldcortex/audit). Injectable for tests.
    */
   threatGraphRealtimeDir?: string;
-
-  /**
-   * Directory holding `project-key-repair-*.json` (default
-   * ~/.shieldcortex/logs). Injectable for tests. See #573.
-   */
-  repairLogDir?: string;
 }
 
 /**

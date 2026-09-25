@@ -24,9 +24,7 @@ import path from 'path';
 
 import {
   DEFAULT_REPAIR_LOG_KEEP,
-  isRepairLogPruneDue,
   pruneRepairLogs,
-  REPAIR_LOG_PRUNE_INTERVAL_MS,
   repairLogDirForDb,
   resolveRepairLogKeep,
 } from '../retention.js';
@@ -320,22 +318,5 @@ describe('#573 the repair log belongs beside the database it describes', () => {
 
   it('resolves a relative db path against the cwd rather than guessing', () => {
     expect(repairLogDirForDb('memories.db')).toBe(path.join(process.cwd(), 'logs'));
-  });
-});
-
-describe('#573 the automatic pass is throttled to once per 24h', () => {
-  it('is due when it has never run', () => {
-    expect(isRepairLogPruneDue(null, Date.now())).toBe(true);
-  });
-
-  it('is not due again until a full interval has passed', () => {
-    const now = Date.UTC(2026, 8, 25, 12, 0, 0);
-    const last = new Date(now - REPAIR_LOG_PRUNE_INTERVAL_MS + 1000);
-    expect(isRepairLogPruneDue(last, now)).toBe(false);
-    expect(isRepairLogPruneDue(new Date(now - REPAIR_LOG_PRUNE_INTERVAL_MS), now)).toBe(true);
-  });
-
-  it('is a day, not an hour', () => {
-    expect(REPAIR_LOG_PRUNE_INTERVAL_MS).toBe(24 * 60 * 60 * 1000);
   });
 });

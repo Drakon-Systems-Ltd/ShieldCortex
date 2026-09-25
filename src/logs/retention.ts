@@ -35,13 +35,6 @@ import path from 'path';
 /** Newest `project-key-repair-*.json` files kept. Never below 1. */
 export const DEFAULT_REPAIR_LOG_KEEP = 20;
 
-/**
- * Cadence of the automatic pass in the brain worker's light tick. A daily
- * bound is plenty for a plane that grows by a handful of files per repair, and
- * the pass is a directory listing plus at most a few unlinks.
- */
-export const REPAIR_LOG_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
-
 /** The one name shape this module will ever act on. */
 const REPAIR_LOG_RE = /^project-key-repair-.+\.json$/;
 
@@ -272,10 +265,4 @@ export function pruneRepairLogs(options: RepairLogPruneOptions = {}): RepairLogP
     refused: null,
     errors,
   };
-}
-
-/** Has a full interval passed since the last automatic pass? */
-export function isRepairLogPruneDue(last: Date | null, nowMs: number): boolean {
-  if (last === null) return true;
-  return nowMs - last.getTime() >= REPAIR_LOG_PRUNE_INTERVAL_MS;
 }

@@ -2343,8 +2343,8 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           + `(logs/project-key-repair-*.json, ${repairLogs.files} file${repairLogs.files === 1 ? '' : 's'}) — `
           + 'diagnostics with no reader, which until now nothing ever deleted. Run '
           + '`shieldcortex logs prune` to see what retention would remove (dry-run), then '
-          + `\`shieldcortex logs prune --execute\`. The newest ${resolveRepairLogKeep().keep} are always kept, `
-          + 'and the background worker applies the same bound once a day.';
+          + `\`shieldcortex logs prune --execute\`. The newest ${resolveRepairLogKeep().keep} per database are `
+          + 'kept, and so is anything written in the last hour.';
       }
       if (largest.key === 'audit') {
         // Reported, never acted on. Recommending a command here would be a lie:
