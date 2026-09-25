@@ -130,7 +130,7 @@ export interface Consumer {
   site: string;
 }
 
-/** Every flag whose value one command consumes, with the site that consumes it. */
+/** Each flag whose value a recognised consumer shape reads, with the site that reads it. */
 function analyse(files: string[]): { consumers: Consumer[]; unattributed: string[] } {
   const consumers: Consumer[] = [];
   const unattributed: string[] = [];
@@ -184,7 +184,7 @@ function declaredFor(command: GatedCommand | 'global'): readonly string[] {
   return command === 'global' ? GLOBAL_VALUE_FLAGS : COMMAND_HELP_SPECS[command].valueFlags;
 }
 
-describe('#577 — every value-consuming flag is in its command\'s list', () => {
+describe('#577 — every recognised value-consuming flag is in its command\'s list', () => {
   const commands = Object.keys(HANDLER_SOURCES) as Array<GatedCommand | 'global'>;
 
   it('the analyser finds the consumers it is supposed to find', () => {
