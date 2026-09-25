@@ -57,12 +57,31 @@ export const DEFAULT_REPAIR_LOG_KEEP = 20;
 export const REPAIR_LOG_MIN_AGE_MS = 60 * 60 * 1000;
 
 /**
- * The one name shape this module will ever act on, with the optional database
- * id `repairLogName` writes. A legacy name is `project-key-repair-<iso>.json`
- * and cannot be mistaken for an id-bearing one: the ISO stamp's first 12
- * characters are `2026-09-25T0`, which is not 12 hex digits.
+ * The writer's timestamp: `new Date().toISOString()` with `:` and `.` replaced
+ * by `-`, which is also exactly what the pre-#573 writer produced.
  */
-const REPAIR_LOG_RE = /^project-key-repair-(?:([0-9a-f]{12})-)?.+\.json$/;
+const STAMP = String.raw`\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z`;
+
+/**
+ * The two names this module will ever act on, and nothing else: the legacy
+ * `project-key-repair-<stamp>.json` and the id-bearing
+ * `project-key-repair-<12 hex>-<stamp>.json`, each with `writeRepairLogRecord`'s
+ * optional `-<n>` collision suffix.
+ *
+ * The stamp is required. It used to be `.+`, which is not a record shape but a
+ * wildcard: `project-key-repair-config.json` — an operator's configuration
+ * file, not a record — was a deletion candidate, and with keep=1 it was
+ * deleted. A legacy stamp can never be read as a database id either, because
+ * its fifth character is `-` and an id is 12 hex digits.
+ */
+const REPAIR_LOG_RE = new RegExp(
+  String.raw`^project-key-repair-(?:([0-9a-f]{12})-)?${STAMP}(?:-\d+)?\.json$`,
+);
+
+/** Does `name` have the shape the repair writer produces? */
+export function isRepairLogName(name: string): boolean {
+  return REPAIR_LOG_RE.test(name);
+}
 
 /** Records with no database id in the name: everything written before #573. */
 const LEGACY_GROUP = 'legacy';

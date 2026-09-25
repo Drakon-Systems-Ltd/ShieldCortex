@@ -140,6 +140,14 @@ describe('#573 pruneRepairLogs only ever touches repair logs', () => {
       'PROJECT-KEY-REPAIR-2026-01-01.json',    // case matters
       'denials.jsonl',
       'worker.json',
+      // Round-3 blocker 4. Under the old `.+` stand-in for the timestamp these
+      // were records — an operator's configuration and notes, deleted with
+      // errors=[] and counted as retention doing its job.
+      'project-key-repair-config.json',
+      'project-key-repair-notes.json',
+      'project-key-repair-.json',
+      'project-key-repair-2026-01-01.json',    // a date is not the writer's stamp
+      'project-key-repair-2026-01-01T00-00-00-000Z.json.bak',
     ];
     for (const name of bystanders) fs.writeFileSync(path.join(logsDir, name), 'keep me');
 
@@ -149,6 +157,45 @@ describe('#573 pruneRepairLogs only ever touches repair logs', () => {
     for (const name of bystanders) {
       expect(fs.existsSync(path.join(logsDir, name))).toBe(true);
     }
+  });
+
+  it('leaves an operator file beside an older record, even at keep 1', () => {
+    // The reviewer's exact reproduction: `project-key-repair-config.json`, OLDER
+    // than the one real record, with keep=1 and execute=true. The name check
+    // accepted it, the age rule did not save it, and it was unlinked.
+    const config = path.join(logsDir, 'project-key-repair-config.json');
+    fs.writeFileSync(config, '{"operator":"settings"}');
+    fs.utimesSync(config, new Date(1_600_000_000_000), new Date(1_600_000_000_000));
+    seedLogs(2);
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+
+    expect(result.matched).toBe(2);
+    expect(result.deleted).toHaveLength(1);
+    expect(fs.readFileSync(config, 'utf-8')).toBe('{"operator":"settings"}');
+  });
+
+  it('bounds both name shapes the writer produces, suffixed collisions included', () => {
+    // The other side of the grammar: tightening it must not withdraw retention
+    // from a record the writer really wrote. `-<n>` is `writeRepairLogRecord`'s
+    // collision suffix, which a stamp-only grammar would exclude.
+    const names = [
+      'project-key-repair-2026-01-01T00-00-00-000Z.json',
+      'project-key-repair-2026-01-01T00-00-00-000Z-1.json',
+      'project-key-repair-0123456789ab-2026-01-01T00-00-01-000Z.json',
+      'project-key-repair-0123456789ab-2026-01-01T00-00-01-000Z-2.json',
+    ];
+    names.forEach((name, i) => {
+      const full = path.join(logsDir, name);
+      fs.writeFileSync(full, '{}');
+      fs.utimesSync(full, new Date(1_700_000_000_000 + i * 1000), new Date(1_700_000_000_000 + i * 1000));
+    });
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+
+    expect(result.matched).toBe(4);
+    expect(result.databases).toBe(2);   // one legacy group, one id-bearing
+    expect(listed()).toEqual([names[1], names[3]].sort());
   });
 
   it('does not descend into subdirectories', () => {
