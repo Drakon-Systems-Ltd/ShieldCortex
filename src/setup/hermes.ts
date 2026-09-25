@@ -14,7 +14,11 @@ import { scanHermesPluginCopies } from './hermes-plugins.js';
 // The install set and the staleness comparator are one rule, not two (#576):
 // whatever `copyDir` skips below is exactly what `hermesPluginCopyStale` (and
 // therefore `update` and `doctor`) declines to compare.
-import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir, recoverHermesRefresh } from './hermes-refresh.js';
+import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir } from './hermes-refresh.js';
+// One writer per Hermes home, shared with `update`'s refresh step (#576 r3):
+// an install and a refresh must never interleave their renames over the same
+// `plugins/` tree.
+import { acquireUpdateLock } from './host-swap.js';
 
 function pluginSourceDir(): string {
   return hermesPluginSourceDir();
@@ -155,17 +159,28 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
     process.exit(1);
   }
 
-  // The documented manual remedy is also the recovery (#576 r2 blocker 1): an
-  // operator whose `update` was interrupted between the two renames of a swap
-  // runs `shieldcortex hermes install`, and this finishes that swap before the
-  // copy below overlays anything. Scans `<home>/.hermes`, which is where
-  // `pluginDestDir` writes and therefore where the journal was left.
-  for (const line of recoverHermesRefresh(hermesHomeDir(home)).detail) {
-    console.log(line);
+  // The documented manual remedy is also the recovery (#576 r3): an operator
+  // whose `update` was interrupted between the two renames of a swap runs
+  // `shieldcortex hermes install`, and this copy IS the recovery — the
+  // packaged plugin goes back into the standard path, needing nothing from
+  // disk but the destination this installer has always computed itself.
+  //
+  // That destination is `<home>/.hermes`, exactly as on main. `HERMES_HOME`
+  // and Hermes' profile resolution are deliberately NOT read here: redirecting
+  // where an install writes is a behaviour change nobody asked for, and the
+  // round-2 blocker it was raised under (a journal looked for in the wrong
+  // home) no longer exists, because there is no journal to look for.
+  const acquired = acquireUpdateLock(hermesHomeDir(home), { createRoot: true });
+  if ('busy' in acquired) {
+    console.error(`Hermes plugin install skipped — ${acquired.busy}; nothing written.`);
+    return;
   }
-
   const dest = pluginDestDir(home);
-  copyDir(src, dest);
+  try {
+    copyDir(src, dest);
+  } finally {
+    acquired.lock.release();
+  }
   console.log(`✓ Hermes — plugin copied to ${dest}`);
   console.log();
   console.log('This is a tool gate (pre_tool_call → POST /api/v1/action-guard).');

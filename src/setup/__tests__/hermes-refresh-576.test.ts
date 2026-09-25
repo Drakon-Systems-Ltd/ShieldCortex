@@ -368,3 +368,64 @@ describe('refreshHermesPluginCopies — when Hermes cannot be asked (#569 r4)', 
     expect(result.summary).toMatch(/could not scan every plugin root/);
   });
 });
+
+/**
+ * #576 r2 blocker 6 — with `HERMES_HOME` pointing at a profile, round 2's
+ * `hermes install` looked for the crash journal under `<home>/.hermes` while
+ * `update` had written it under the profile. The install then wrote into the
+ * DEFAULT root and reported success while the active profile stayed broken.
+ *
+ * There is no journal to look in the wrong place for any more. What is left to
+ * prove is the half that still matters: every path `update` writes comes from
+ * the home HERMES' OWN resolution returned, so a profile host self-heals into
+ * the profile and never into the default root.
+ */
+const HAS_HERMES_PROFILE = (() => {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-hermes-probe-'));
+  try {
+    fs.mkdirSync(path.join(probeDir, '.hermes', 'plugins'), { recursive: true });
+    return 'roots' in probeHermesDiscovery({ home: probeDir, hermesHome: null });
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+})();
+
+(HAS_HERMES_PROFILE ? describe : describe.skip)('a profile HERMES_HOME (#576 r2 blocker 6)', () => {
+  let profile: string;
+  let profileInstalled: string;
+
+  beforeEach(() => {
+    profile = path.join(hermes, 'profiles', 'work');
+    profileInstalled = path.join(profile, 'plugins', 'shieldcortex');
+    fs.mkdirSync(path.join(profile, 'plugins'), { recursive: true });
+    process.env.HERMES_HOME = profile;
+  });
+
+  it('self-heals into the profile, never into the default root', () => {
+    // The state a crash between the two renames leaves in a profile: the
+    // plugin gone from `profiles/work/plugins`, the previous copy in the
+    // profile's own `backups/`.
+    fs.mkdirSync(path.join(profile, 'backups', 'shieldcortex-preupdate-old', 'shieldcortex'), { recursive: true });
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('refreshed');
+    expect(hermesPluginCopyStale(profileInstalled).stale).toBe(false);
+    expect(result.detail.join('\n')).toContain(profileInstalled);
+    // The default root is where round 2's install went. Nothing goes there.
+    expect(fs.existsSync(installed)).toBe(false);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+
+  it('refreshes the profile copy and leaves the default root untouched', () => {
+    installCopy(profileInstalled);
+    fs.writeFileSync(path.join(profileInstalled, '__init__.py'), '# shieldcortex 5.1.0\n');
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('refreshed');
+    expect(result.refreshed.map((r) => r.dir)).toEqual([profileInstalled]);
+    expect(fs.readdirSync(path.join(profile, 'backups'))).toEqual([`shieldcortex-preupdate-${STAMP}`]);
+    expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
+  });
+});
