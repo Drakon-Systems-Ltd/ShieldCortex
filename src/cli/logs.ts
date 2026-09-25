@@ -49,7 +49,7 @@ export function renderRepairLogPrune(
     // "would delete 0" here would read as "nothing to do".
     log(`  Refused — ${result.refused}`);
     log('  Nothing was read, written or removed.');
-    for (const err of result.errors) log(`  ⚠ ${err}`);
+    for (const warning of result.warnings) log(`  ⚠ ${warning}`);
     return;
   }
 
@@ -77,7 +77,8 @@ export function renderRepairLogPrune(
       '(a repair may still be writing one).',
     );
   }
-  for (const err of result.errors) log(`  ⚠ ${err}`);
+  for (const warning of result.warnings) log(`  ⚠ ${warning}`);
+  for (const err of result.errors) log(`  ✗ ${err}`);
   if (result.dryRun && result.deleted.length > 0) {
     log('  Re-run with --execute to apply.');
   }
@@ -125,9 +126,11 @@ export function logsUsageLines(): string[] {
     '      is written beside the database it repaired. A record written in the',
     '      LAST HOUR is never deleted, whatever the keep count says, so a log a',
     '      repair is still writing is never a candidate; it becomes one on the',
-    '      next run. Only that exact name is ever touched, only directly in the',
-    '      logs directory, only regular files with a single hard link, and a',
-    '      logs path reachable through a symlink refuses the whole pass.',
+    '      next run. Only the exact name a repair writes is ever touched, only',
+    '      directly in the logs directory, only regular files with a single hard',
+    '      link. The directory is fully resolved before anything is listed: a',
+    '      symlinked logs path, or one resolving inside the realtime audit',
+    '      ledger, refuses the whole pass and reports why.',
     '',
     '      NOT MANAGED YET: the realtime audit logs under',
     '      ~/.shieldcortex/audit/ have no retention. They are an unread queue',
@@ -151,6 +154,27 @@ export function logsUsageLines(): string[] {
  */
 export const LOGS_FLAGS = ['prune', '--execute'] as const;
 
+/**
+ * The command's GRAMMAR, which token membership cannot express: exactly one
+ * `prune`, then at most `--execute`.
+ *
+ * `logs prune prune --execute` passed the allow-list — every token is known —
+ * so the second verb was silently ignored and the deletion ran under HOME
+ * (round-2 blocker 5). An argument we do not understand must be a usage error,
+ * not a token we drop on the floor on the way to unlinking files.
+ *
+ * Returns the error to print, or null when the line is valid.
+ */
+export function logsUsageError(args: readonly string[]): string | null {
+  if (args.length === 0) return 'Missing subcommand.';
+  if (args[0] !== 'prune') return `Unknown subcommand: ${args[0]}`;
+  const rest = args.slice(1);
+  if (rest.length > 1 || (rest.length === 1 && rest[0] !== '--execute')) {
+    return `\`logs prune\` takes at most --execute; got: ${rest.join(' ')}`;
+  }
+  return null;
+}
+
 /** The same usage text, as one string, for the shared gate. */
 export const LOGS_HELP = logsUsageLines().join('\n');
 
@@ -166,16 +190,21 @@ export async function handleLogsCommand(args: string[]): Promise<void> {
     process.exitCode = gate;
     return;
   }
-  if (args[0] === 'prune') {
-    try {
-      await runLogsPrune(args.slice(1));
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exitCode = 1;
-    }
+  const usage = logsUsageError(args);
+  if (usage !== null) {
+    process.stderr.write(`${usage}\n\n${LOGS_HELP}\n`);
+    process.exitCode = 2;
     return;
   }
-  // A recognised token, but no verb (`logs`, `logs --execute`). Usage error.
-  process.stderr.write(`${LOGS_HELP}\n`);
-  process.exitCode = 2;
+  try {
+    const result = await runLogsPrune(args.slice(1));
+    // A refusal examined nothing and a fault deleted less than it planned to;
+    // either way the plane is not bounded and a script must be able to see
+    // that. A rejected keep value is not in this set: the pass did its whole
+    // job, at the default, and said so.
+    if (result.refused !== null || result.errors.length > 0) process.exitCode = 1;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
 }

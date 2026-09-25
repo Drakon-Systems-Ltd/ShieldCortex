@@ -19,7 +19,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { logsUsageLines, runLogsPrune } from '../logs.js';
+import { logsUsageError, logsUsageLines, runLogsPrune } from '../logs.js';
 
 let root: string;
 let logsDir: string;
@@ -128,6 +128,21 @@ describe('#573 logs prune --execute deletes the superseded logs', () => {
   });
 });
 
+describe('#573 the `logs` grammar is a shape, not a bag of known tokens', () => {
+  it('accepts exactly `prune` and an optional --execute', () => {
+    expect(logsUsageError(['prune'])).toBeNull();
+    expect(logsUsageError(['prune', '--execute'])).toBeNull();
+  });
+
+  it('rejects an extra positional, a repeated flag, and a missing verb', () => {
+    expect(logsUsageError([])).toMatch(/subcommand/i);
+    expect(logsUsageError(['--execute'])).toMatch(/subcommand/i);
+    expect(logsUsageError(['prune', 'prune', '--execute'])).toMatch(/at most --execute/);
+    expect(logsUsageError(['prune', '--execute', '--execute'])).toMatch(/at most --execute/);
+    expect(logsUsageError(['rotate'])).toMatch(/Unknown subcommand: rotate/);
+  });
+});
+
 describe('#573 logs prune never touches the audit plane', () => {
   it('leaves ~/.shieldcortex/audit/ byte-identical', async () => {
     seedLogs(25);
@@ -167,9 +182,12 @@ describe('#573 logs prune never touches the audit plane', () => {
 describe('#573 `shieldcortex logs prune` is reachable from the CLI', () => {
   const cli = path.join(process.cwd(), 'dist', 'index.js');
 
-  function run(args: string[]): { status: number | null; stdout: string; stderr: string } {
+  function run(
+    args: string[],
+    extraEnv: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
     const res = spawnSync(process.execPath, [cli, ...args], {
-      env: { ...process.env, HOME: root, SHIELDCORTEX_REPAIR_LOG_KEEP: '20' },
+      env: { ...process.env, HOME: root, SHIELDCORTEX_REPAIR_LOG_KEEP: '20', ...extraEnv },
       encoding: 'utf-8',
       timeout: 60_000,
     });
@@ -243,6 +261,37 @@ describe('#573 `shieldcortex logs prune` is reachable from the CLI', () => {
     expect(res.stderr).toContain('Unknown argument: --exectue');
     expect(res.stdout).not.toContain('[DRY RUN]');
     expect(fs.readdirSync(logsDir)).toHaveLength(25);
+  });
+
+  it('refuses an extra positional — a second verb is not a token to ignore', () => {
+    // Round-2 blocker 5, through the built CLI: every token passed the flat
+    // allow-list, the second `prune` was dropped on the floor, and the command
+    // exited 0 having deleted five records.
+    seedLogs(25);
+    const res = run(['logs', 'prune', 'prune', '--execute']);
+
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('Usage: shieldcortex logs');
+    expect(res.stdout).not.toContain('Deleted');
+    expect(fs.readdirSync(logsDir)).toHaveLength(25);
+  });
+
+  it('exits 1 when the pass was refused, and 0 when only the keep value was', () => {
+    // Round-2 nit 2: a refusal printed its problem and still exited 0, so a
+    // script could not tell "bounded" from "declined to look". A rejected
+    // environment value is the other case and must NOT be a failure — the pass
+    // ran to completion, at the default, and said so.
+    fs.symlinkSync(path.join(root, 'elsewhere'), logsDir);
+    const refused = run(['logs', 'prune', '--execute']);
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toMatch(/Refused/i);
+
+    fs.unlinkSync(logsDir);
+    seedLogs(25);
+    const warned = run(['logs', 'prune', '--execute'], { SHIELDCORTEX_REPAIR_LOG_KEEP: ' ' });
+    expect(warned.status).toBe(0);
+    expect(warned.stdout).toContain('SHIELDCORTEX_REPAIR_LOG_KEEP');
+    expect(fs.readdirSync(logsDir)).toHaveLength(20);
   });
 
   it('is listed in `--help`', () => {

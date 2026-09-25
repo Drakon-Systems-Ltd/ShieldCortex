@@ -147,9 +147,22 @@ describe('#573 blocker 8 — `logs` is registered in the shared strict preflight
 
   it('lets a valid command line through to the dispatcher', async () => {
     const { preflightStrictArgs } = await import('../strict-args-preflight.js');
-    for (const argv of [['logs'], ['logs', 'prune'], ['logs', 'prune', '--execute']]) {
+    for (const argv of [['logs', 'prune'], ['logs', 'prune', '--execute']]) {
       expect(await preflightStrictArgs(argv, deps)).toBeNull();
     }
     expect(said).toEqual([]);
+  });
+
+  it('rejects a command line whose SHAPE is wrong, not just its vocabulary', async () => {
+    // Round-2 blocker 5. Both of these are made entirely of tokens the
+    // allow-list knows, and both used to reach the handler — `logs prune prune
+    // --execute` deleted records and exited 0. The preflight is where that has
+    // to be caught: it is what runs before `main()` spawns anything.
+    const { preflightStrictArgs } = await import('../strict-args-preflight.js');
+    expect(await preflightStrictArgs(['logs', 'prune', 'prune', '--execute'], deps)).toBe(2);
+    expect(said.join('\n')).toContain('takes at most --execute');
+    said.length = 0;
+    expect(await preflightStrictArgs(['logs'], deps)).toBe(2);
+    expect(said.join('\n')).toContain('Usage: shieldcortex logs');
   });
 });

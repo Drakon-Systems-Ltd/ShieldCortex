@@ -190,7 +190,15 @@ export interface RepairLogPruneResult {
   tooYoung: number;
   /** Non-null when the whole pass was refused; nothing was read or removed. */
   refused: string | null;
-  /** Rejected overrides and per-file faults, for the operator to read. */
+  /**
+   * Said out loud, but not a failure: a rejected `SHIELDCORTEX_REPAIR_LOG_KEEP`
+   * that fell back to the default, or a record deliberately left in place.
+   */
+  warnings: string[];
+  /**
+   * A deletion this pass promised and could not make. Separate from
+   * `warnings` because the exit status depends on the difference.
+   */
   errors: string[];
 }
 
@@ -302,13 +310,14 @@ export function pruneRepairLogs(options: RepairLogPruneOptions = {}): RepairLogP
   const requested = options.dir ?? defaultRepairLogDir();
   const execute = options.execute === true;
   const nowMs = options.nowMs ?? Date.now();
+  const warnings: string[] = [];
   const errors: string[] = [];
 
   let keep: number;
   if (options.keep === undefined) {
     const resolved = resolveRepairLogKeep(options.env);
     keep = resolved.keep;
-    errors.push(...resolved.warnings);
+    warnings.push(...resolved.warnings);
   } else {
     // Defence in depth behind resolveRepairLogKeep's minimum: a keep of 0
     // reaching here would mean "delete every repair log", which is not a
@@ -323,7 +332,7 @@ export function pruneRepairLogs(options: RepairLogPruneOptions = {}): RepairLogP
   const dir = plane.resolved ?? requested;
   const empty = (refused: string | null): RepairLogPruneResult => ({
     dir, dryRun: !execute, keep, matched: 0, databases: 0, bytesBefore: 0, kept: 0,
-    deleted: [], freedBytes: 0, tooYoung: 0, refused, errors,
+    deleted: [], freedBytes: 0, tooYoung: 0, refused, warnings, errors,
   });
   if (plane.fault !== null) return empty(plane.fault);
   if (plane.resolved === null) return empty(null);
@@ -350,7 +359,7 @@ export function pruneRepairLogs(options: RepairLogPruneOptions = {}): RepairLogP
     if (st.nlink !== 1) {
       // Unlinking this would free nothing and would not be the deletion we
       // reported: the inode survives under its other name.
-      errors.push(`${name}: has ${st.nlink} hard links — left in place`);
+      warnings.push(`${name}: has ${st.nlink} hard links — left in place`);
       continue;
     }
     const group = m[1] ?? LEGACY_GROUP;
@@ -435,6 +444,7 @@ export function pruneRepairLogs(options: RepairLogPruneOptions = {}): RepairLogP
     freedBytes: deleted.reduce((sum, d) => sum + d.bytes, 0),
     tooYoung,
     refused: null,
+    warnings,
     errors,
   };
 }
