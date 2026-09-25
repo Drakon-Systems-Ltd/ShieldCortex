@@ -72,12 +72,22 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.fix).not.toMatch(/sqlite3 ['"~]/);
   });
 
-  it('flags audit/log files when those dominate', async () => {
+  it('names the audit plane when audit files dominate, and does not promise to prune them', async () => {
+    // This case asserted `/audit\/log files/` — the old text "safe to rotate or
+    // clear under ~/.shieldcortex/{logs,audit}/", which lumped two planes with
+    // very different answers. #573 splits them: the project-key repair logs
+    // have retention and a command, the realtime audit ledger has neither yet
+    // (it is an unread queue with concurrent writers — tracked in #579). So the
+    // remedy must name the audit plane and say plainly that nothing here will
+    // delete security evidence, instead of implying a command covers it.
     writeBytes('memories.db', 2 * KB);
     writeBytes('audit/realtime.jsonl', 40 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
     expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/audit\/log files/);
+    expect(result.fix).toMatch(/audit/);
+    expect(result.fix).toContain('#579');
+    expect(result.fix).not.toMatch(/logs prune --execute/);
+    expect(result.fix).not.toMatch(/memories prune|memories dedupe/);
   });
 
   // ── #110 signature: big DB, tiny memories table ─────────────────────────
