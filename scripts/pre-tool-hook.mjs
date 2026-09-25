@@ -1090,7 +1090,7 @@ const MAX_PROVENANCE_CHARS = 256;
  * must not become an unbounded regex workload.
  */
 const MAX_RAW_EVIDENCE_CHARS = 2048;
-/** What replaces the trailing atom of evidence that may have been cut mid-token. */
+/** What replaces the trailing word of evidence that may have been cut mid-token. */
 const CUT_MARKER = '[REDACTED-cut]';
 
 // ── Evidence contract (review of #586) ────────────────────────────────────
@@ -1117,76 +1117,276 @@ const CUT_MARKER = '[REDACTED-cut]';
 //      the core's own `fmtSpan` already cut the span before the hook saw it.
 //      So the contract is: redact first, bound second, and at ANY boundary
 //      that may have cut a token — the core's 80, this hook's raw cap, or the
-//      post-redaction bound — the trailing atom is replaced by CUT_MARKER
-//      rather than written as a fragment. The only atoms that survive a
-//      boundary are ones too short to be a credential fragment.
+//      post-redaction bound — the trailing whitespace-delimited WORD is
+//      replaced by CUT_MARKER rather than written as a fragment (review r2:
+//      an "atom" bounded by `/ : @ =` let path- and base64-shaped fragments
+//      through). The only words that survive a boundary are ones too short
+//      to be a credential fragment.
+//
+//   3. (review r3) The rules above are whitespace-anchored regexes: they
+//      find a flag or a label and then match a value up to the next space.
+//      That is not what a shell argument is. `curl -su user:pass` bundles
+//      `-s` and `-u` into one cluster the `-u` regex never sees, and
+//      `curl -u "user:pass with spaces"` has its password cut at the first
+//      space inside the quotes — the rest is written out beside the
+//      placeholder. Neither is a new shape to add a rule for; both are the
+//      SAME bug, that these rules do not know what a shell argument is. The
+//      fix is to tokenise the span the way a shell would — quotes make
+//      whitespace part of the value, not a separator — and classify whole
+//      ARGUMENTS as credential-bearing (following a `-u`/`--user`/`--cookie`
+//      family flag, a bundled short-flag cluster ending in `u`, a
+//      `key=value` pair whose key is a secret name, a header-label value, or
+//      URL userinfo). The credential-bearing argument is then replaced
+//      WHOLE — never up to the first space inside it — and the cut-boundary
+//      rule below uses the same tokeniser: a truncation landing inside an
+//      unterminated quote drops the whole argument from its opening quote,
+//      not just the trailing whitespace-word, because whitespace inside an
+//      open quote is value, not a boundary.
 //
 // What stays useful: a short span (`sudo fixture-elevate`) is untouched, a
 // span with a credential inside keeps its shape around a placeholder, and a
 // benign script path in `source` is still the path.
 
 /**
- * Credential shapes the hook redacts itself, before the dist redactor and
- * regardless of which dist it loaded. Every rule keeps the label that names
- * the shape (header name, flag, key) and replaces only the value, so the row
- * still says WHAT was there.
+ * Split `text` into shell-style argument tokens. Whitespace separates
+ * arguments except inside single quotes (fully literal) or double quotes
+ * (`\` escapes `" \ $` \``` only); outside quotes `\` escapes the next
+ * character. Each token records its raw `start`/`end` span, its decoded
+ * `value`, `quote` (the quote character when the ENTIRE token was one
+ * closed quoted run, else `null`) and `truncated` (true when the LAST
+ * token's quote never closed, or ended on a lone trailing `\`, before
+ * `text` ran out — what `value` shows may be only part of the real
+ * argument).
  */
-const LOCAL_CREDENTIAL_RULES = [
-  // scheme://user:pass@host — the user segment excludes `/` and `:` so
-  // `https://host:8080/path` never matches. Also catches the pair when the
-  // `@host` is present but the dist rule missed the scheme.
-  [/\b([a-z][a-z0-9+.-]*:\/\/)([^\s"'`/:@]+):([^\s"'`/@]+)@/gi, '$1[REDACTED-basic-auth]@'],
-  // curl/wget/httpie style `-u user:pass`, `--user user:pass`, `--proxy-user`.
-  // Requires the colon so `useradd -u 1000` and `sort -u` stay clean.
-  [/((?:^|\s)(?:-u|-U|--user|--proxy-user|--auth)(?:\s+|=)["']?)([^\s"':]+:[^\s"']+)/g, '$1[REDACTED-basic-auth]'],
-  // Authorization / Proxy-Authorization header values, with or without a scheme word.
-  [/((?:proxy-)?authorization\s*[:=]\s*["']?)([^"'\n]+)/gi, '$1[REDACTED-authorization]'],
-  // Bearer tokens anywhere, even without the header name.
-  [/(\bbearer\s+)([A-Za-z0-9._~+/=-]{6,})/gi, '$1[REDACTED-bearer]'],
-  // Cookie / Set-Cookie headers: the whole cookie string is the credential.
-  [/((?:set-)?cookie\s*[:=]\s*["']?)([^"'\n]+)/gi, '$1[REDACTED-cookie]'],
-  // curl `-b name=value` / `--cookie name=value` (a bare file path has no `=`).
-  [/((?:^|\s)(?:-b|--cookie)(?:\s+|=)["']?)([^\s"']*=[^\s"']*)/g, '$1[REDACTED-cookie]'],
-  // Cookie- and query-style credential pairs: `session=…`, `sid=…`, `token=…`,
-  // `api_key=…`, `password=…`. The dist redactor's env rules need ≥8 chars of
-  // value; a cookie id or a cut token can be shorter. The whole pair is
-  // replaced, the same way the dist redacts `TOKEN=value`.
-  [/\b(?:session|sess|sessid|sessionid|phpsessid|jsessionid|sid|csrf(?:[-_]?token)?|xsrf(?:[-_]?token)?|auth(?:[-_]?token)?|access[-_]?token|refresh[-_]?token|id[-_]?token|api[-_]?key|apikey|api[-_]?secret|token|secret|password|passwd|pwd|credentials?)\s*=\s*["']?[^\s;&"']+/gi, '[REDACTED-credential]'],
-];
-
-function redactCredentialShapesLocally(text) {
-  let out = text;
-  for (const [re, replacement] of LOCAL_CREDENTIAL_RULES) {
-    out = out.replace(re, replacement);
+function tokenizeShellArgs(text) {
+  const tokens = [];
+  const len = text.length;
+  let i = 0;
+  while (i < len) {
+    while (i < len && /\s/.test(text[i])) i += 1;
+    if (i >= len) break;
+    const start = i;
+    const parts = [];
+    let truncated = false;
+    while (i < len && !/\s/.test(text[i])) {
+      const ch = text[i];
+      if (ch === "'" || ch === '"') {
+        const quote = ch;
+        i += 1;
+        let body = '';
+        let closed = false;
+        while (i < len) {
+          const c = text[i];
+          if (c === quote) { i += 1; closed = true; break; }
+          if (quote === '"' && c === '\\' && i + 1 < len && '"\\$`'.includes(text[i + 1])) {
+            body += text[i + 1];
+            i += 2;
+            continue;
+          }
+          body += c;
+          i += 1;
+        }
+        if (!closed) truncated = true;
+        parts.push({ kind: 'quoted', quote, text: body, closed });
+      } else if (ch === '\\') {
+        if (i + 1 < len) {
+          parts.push({ kind: 'bare', text: text[i + 1] });
+          i += 2;
+        } else {
+          truncated = true;
+          i += 1;
+        }
+      } else {
+        let j = i;
+        while (j < len && !/\s/.test(text[j]) && text[j] !== "'" && text[j] !== '"' && text[j] !== '\\') j += 1;
+        parts.push({ kind: 'bare', text: text.slice(i, j) });
+        i = j;
+      }
+    }
+    const value = parts.map((p) => p.text).join('');
+    const quote = parts.length === 1 && parts[0].kind === 'quoted' && parts[0].closed ? parts[0].quote : null;
+    tokens.push({ start, end: i, value, quote, truncated });
   }
-  return out;
+  return tokens;
+}
+
+/** Flags whose NEXT argument is entirely a credential value. */
+const CREDENTIAL_FLAG_TYPES = new Map([
+  ['-u', 'basic-auth'], ['-U', 'basic-auth'], ['--user', 'basic-auth'],
+  ['--proxy-user', 'basic-auth'], ['--auth', 'basic-auth'],
+  ['-p', 'credential'], ['--password', 'credential'], ['--token', 'credential'],
+  ['--api-key', 'credential'], ['--apikey', 'credential'],
+  ['-b', 'cookie'], ['--cookie', 'cookie'],
+]);
+/**
+ * A bundled short-option cluster ending in `u` — curl's `-su`, `-sSu` — the
+ * credential rides in the NEXT argument, same as a bare `-u`. Curl has no
+ * OTHER bundled password-bearing short flag (its `-p` is `--proxytunnel`,
+ * which takes no value), so only a `u`-ending cluster is treated this way;
+ * `USERPASS_SHAPE_RE` below still has to agree before this fires, so `sort
+ * -u file` (no colon in the next argument) is not mistaken for one.
+ */
+const BUNDLED_USER_FLAG_RE = /^-[A-Za-z]+u$/;
+// Checked against the NEXT token's already-decoded value, which may be a
+// quoted argument with embedded spaces — so whitespace is not excluded here
+// the way it is from the (still whitespace-anchored) key=value/basic-auth
+// regexes elsewhere: a quoted `user:pass with spaces` must still count.
+const USERPASS_SHAPE_RE = /^[^"':]+:[^"']+$/;
+const SECRET_KEY_NAMES = '(?:session|sess|sessid|sessionid|phpsessid|jsessionid|sid|csrf(?:[-_]?token)?|xsrf(?:[-_]?token)?|auth(?:[-_]?token)?|access[-_]?token|refresh[-_]?token|id[-_]?token|api[-_]?key|apikey|api[-_]?secret|token|secret|password|passwd|pwd|credentials?)';
+const SECRET_KEY_ONLY_RE = new RegExp(`^${SECRET_KEY_NAMES}$`, 'i');
+/**
+ * `key=value` pairs inside one already-isolated argument — a query-string
+ * segment, a `--data` body, a bare `key=value` token. The value is bounded
+ * by `&`/`;`/end of argument, NOT whitespace: whitespace inside an argument
+ * only exists because it was quoted, so it is part of the value, not a
+ * separator (this is the r3 fix — the old whole-string version of this rule
+ * stopped at the first space even inside quotes).
+ */
+const KEY_VALUE_RE = new RegExp(`(^|[?&;])${SECRET_KEY_NAMES}\\s*=\\s*["']?[^&;"']*`, 'gi');
+/** `Authorization:` / `Cookie:` as the label starting an argument's value. */
+const HEADER_LABEL_RE = /^((?:proxy-)?authorization|(?:set-)?cookie)\s*[:=]\s*/i;
+/** A bearer token immediately after the word "bearer", inside one argument. */
+const BEARER_RE = /^bearer\s+(.+)$/i;
+/** `scheme://user:pass@host…` — only the userinfo is a credential. */
+// The password segment allows `/` (a base64-shaped credential legitimately
+// contains it) — only whitespace, quotes, backtick and the terminating `@`
+// end it. The username segment stays stricter (`/` excluded) so a bare
+// `scheme://host/path@fragment` is not mistaken for userinfo.
+const USERINFO_RE = /^([a-z][a-z0-9+.-]*:\/\/)([^\s"'`/:@]+):([^\s"'`@]+)@/i;
+
+function renderToken(tok, value) {
+  return tok.quote ? tok.quote + value + tok.quote : value;
 }
 
 /**
- * The trailing atom of `text` — the run of token-alphabet characters after
- * the last separator. This is the unit a truncation boundary can cut through.
+ * Classify one token given what the PREVIOUS token established (`pendingType`,
+ * set when the previous token was a credential flag) and what follows
+ * (`nextTok`, needed only to confirm a bundled-flag guess).
+ *
+ * @returns `{ newValue, nextPending }` — `newValue` is this token's
+ *   replacement (`null` if it needs none) and `nextPending` is the type the
+ *   NEXT token must be redacted as (`null` if none).
  */
-const TRAILING_ATOM_RE = /[A-Za-z0-9_.+~%-]+$/;
-/** An atom too short to be a credential fragment: up to three letters. */
-const HARMLESS_ATOM_RE = /^[A-Za-z]{1,3}$/;
+function classifyShellArgument(tok, pendingType, nextTok) {
+  if (pendingType) return { newValue: `[REDACTED-${pendingType}]`, nextPending: null };
+  const value = tok.value;
+
+  const eq = value.indexOf('=');
+  if (eq > 0) {
+    const flagPart = value.slice(0, eq);
+    const flagType = CREDENTIAL_FLAG_TYPES.get(flagPart);
+    if (flagType) return { newValue: `${flagPart}=[REDACTED-${flagType}]`, nextPending: null };
+    if (SECRET_KEY_ONLY_RE.test(flagPart.replace(/^-+/, ''))) {
+      return { newValue: `${flagPart}=[REDACTED-credential]`, nextPending: null };
+    }
+  }
+
+  const header = HEADER_LABEL_RE.exec(value);
+  if (header) {
+    const label = value.slice(0, header[0].length);
+    const kind = /cookie/i.test(header[1]) ? 'cookie' : 'authorization';
+    // An unquoted label with nothing after it in THIS token (`Authorization:`
+    // as its own word) — the value is the next token. The realistic shape
+    // (`-H "Authorization: Bearer x"`) is already one quoted token and never
+    // reaches this branch.
+    if (header[0].length === value.length) return { newValue: label, nextPending: kind };
+    return { newValue: `${label}[REDACTED-${kind}]`, nextPending: null };
+  }
+
+  const bearer = BEARER_RE.exec(value);
+  if (bearer) return { newValue: value.slice(0, value.length - bearer[1].length) + '[REDACTED-bearer]', nextPending: null };
+
+  const userinfo = USERINFO_RE.exec(value);
+  if (userinfo) {
+    return {
+      newValue: value.slice(0, userinfo[1].length) + '[REDACTED-basic-auth]@' + value.slice(userinfo[0].length),
+      nextPending: null,
+    };
+  }
+
+  KEY_VALUE_RE.lastIndex = 0;
+  const kv = value.replace(KEY_VALUE_RE, (_m, pre) => `${pre}[REDACTED-credential]`);
+  if (kv !== value) return { newValue: kv, nextPending: null };
+
+  let nextPending = null;
+  if (CREDENTIAL_FLAG_TYPES.has(value)) nextPending = CREDENTIAL_FLAG_TYPES.get(value);
+  else if (value.toLowerCase() === 'bearer') nextPending = 'bearer';
+  else if (BUNDLED_USER_FLAG_RE.test(value) && nextTok && USERPASS_SHAPE_RE.test(nextTok.value)) nextPending = 'basic-auth';
+  return { newValue: null, nextPending };
+}
 
 /**
- * Apply the boundary rule: `text` ends where something may have cut a token,
- * so its trailing atom is not evidence, it is a fragment. Replace it.
+ * Tokenise `text` as shell arguments and replace every credential-bearing
+ * ARGUMENT whole — never a substring stopped at the first space inside a
+ * quote. Runs before the dist redactor (see contract above).
+ *
+ * @returns `{ text, truncatedArg }` — `truncatedArg` is true when the LAST
+ *   argument's quote never closed: the field may have been cut mid-argument
+ *   for a reason unrelated to length (a genuine truncation this hook's own
+ *   length checks would not catch), so the caller treats it as possibly cut.
+ */
+function redactCredentialArguments(text) {
+  const tokens = tokenizeShellArgs(text);
+  if (tokens.length === 0) return { text, truncatedArg: false };
+  let out = '';
+  let cursor = 0;
+  let pendingType = null;
+  let truncatedArg = false;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i];
+    out += text.slice(cursor, tok.start);
+    const { newValue, nextPending } = classifyShellArgument(tok, pendingType, tokens[i + 1]);
+    out += newValue === null ? text.slice(tok.start, tok.end) : renderToken(tok, newValue);
+    cursor = tok.end;
+    pendingType = nextPending;
+    if (i === tokens.length - 1 && tok.truncated) truncatedArg = true;
+  }
+  out += text.slice(cursor);
+  return { text: out, truncatedArg };
+}
+
+/**
+ * A trailing word too short to be a credential fragment: one to three pure
+ * letters. Anything else — digits, punctuation, a fourth letter — is
+ * dropped with the argument it ends.
+ */
+const HARMLESS_WORD_RE = /^[A-Za-z]{1,3}$/;
+
+/**
+ * Apply the boundary rule: `text` ends where something may have cut a
+ * token, so its trailing ARGUMENT (shell-tokenised, quote-aware) is not
+ * evidence, it is a fragment. Replace the WHOLE argument with CUT_MARKER —
+ * for an argument still inside an open quote that means dropping back to
+ * the quote's OPENING character, not the last whitespace, because
+ * whitespace inside that quote is value, not a boundary.
+ *
+ * @returns `{ text, marked }` — `marked` is true iff CUT_MARKER was written,
+ *   which is the only time a caller may say the field was cut; or
+ *   `{ withheld: 'cut-inside-token' }` when the trailing argument was the
+ *   whole field and nothing would be left to persist.
  */
 function markCutBoundary(text) {
-  const m = TRAILING_ATOM_RE.exec(text);
-  if (!m || HARMLESS_ATOM_RE.test(m[0])) return text;
-  return text.slice(0, m.index) + CUT_MARKER;
+  const tokens = tokenizeShellArgs(text);
+  const last = tokens[tokens.length - 1];
+  // No token reaches the end (the field ends in whitespace, or is empty):
+  // every argument present is whole, nothing to drop; the marker still says
+  // the field continued past this point.
+  if (!last || last.end !== text.length) return { text: text + CUT_MARKER, marked: true };
+  if (!last.truncated && HARMLESS_WORD_RE.test(last.value)) return { text, marked: false };
+  const head = text.slice(0, last.start);
+  if (!head.trim()) return { withheld: 'cut-inside-token' };
+  return { text: head + CUT_MARKER, marked: true };
 }
 
 /**
  * The single path every persisted free-text evidence field takes:
- * collapse → cap → redact locally → redact with the dist detector → bound →
- * mark any boundary that may have cut a token.
+ * collapse → cap → redact credential ARGUMENTS locally (shell-tokenised) →
+ * redact with the dist detector → bound → mark any boundary that may have
+ * cut a token.
  *
  * @returns `{ text, cut }` or `{ withheld }` with the reason. `cut` is true
- *   when the boundary rule fired (the field ends in CUT_MARKER).
+ *   exactly when the boundary rule wrote CUT_MARKER (the field ends in it);
+ *   `withheld: 'cut-inside-token'` when the cut argument was the whole field.
  */
 function sanitiseEvidenceText(value, redactSpan, bound) {
   if (typeof value !== 'string') return null;
@@ -1202,9 +1402,16 @@ function sanitiseEvidenceText(value, redactSpan, bound) {
     possiblyCut = true;
   }
   if (typeof redactSpan !== 'function') return { withheld: 'redactor-unavailable' };
+  const argRedaction = redactCredentialArguments(raw);
+  // An unterminated quote at the end of `raw` means the LAST argument may be
+  // only part of what was really there, for a reason none of the length
+  // checks above would catch (this hook's own MAX_RAW_EVIDENCE_CHARS cut, or
+  // a genuinely malformed value) — ambiguous truncation is treated the same
+  // as a known one.
+  if (argRedaction.truncatedArg) possiblyCut = true;
   let redacted;
   try {
-    redacted = String(redactSpan(redactCredentialShapesLocally(raw)));
+    redacted = String(redactSpan(argRedaction.text));
   } catch {
     return { withheld: 'redactor-failed' };
   }
@@ -1219,22 +1426,19 @@ function sanitiseEvidenceText(value, redactSpan, bound) {
   if (text.length > limit) {
     text = text.slice(0, limit);
     possiblyCut = true;
-    // If this hook's own cut landed inside a placeholder, the placeholder
-    // stands for a whole credential and carries none of it: keep it whole
-    // (it is bounded by construction) rather than write half a placeholder.
-    // A placeholder that somehow never closes is dropped with the marker.
-    const open = text.lastIndexOf('[REDACTED-');
-    if (open >= 0 && !text.includes(']', open)) {
-      const close = redacted.indexOf(']', open);
-      text = close >= 0 && close - open <= 64
-        ? redacted.slice(0, close + 1)
-        : text.slice(0, open) + CUT_MARKER;
-    }
+    // This hook's own cut may land inside a `[REDACTED-…]` placeholder. No
+    // special case is needed to keep half a placeholder out of the row: a
+    // placeholder contains no whitespace, so a partial one is always inside
+    // the trailing word, and the boundary rule below drops that word whole.
+    // (Only a 1–3 letter word survives the rule, and `[RED` is not one.)
   }
-  if (possiblyCut) text = markCutBoundary(text);
-  // `cut` says the field met a boundary that may have cut a token — whether
-  // the marker, a placeholder or a harmless atom is what ends it.
-  return { text, cut: possiblyCut };
+  if (!possiblyCut) return { text, cut: false };
+  const marked = markCutBoundary(text);
+  if (marked.withheld) return { withheld: marked.withheld };
+  // `cut` is true only when the marker was actually written — and then the
+  // raw trailing word is gone. A field that met a boundary but ended in a
+  // harmless word is persisted as-is and not called cut.
+  return { text: marked.text, cut: marked.marked };
 }
 
 let spanRedactorPromise = null;
