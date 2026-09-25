@@ -158,4 +158,33 @@ describeWithHermes("doctor's Hermes repair moves under every root's lock (#574 r
     // Nothing is left holding the root it just wrote in.
     expect(fs.existsSync(updateLockPath(hermes))).toBe(false);
   });
+
+  it('refuses, moving nothing, when the re-plan reaches a root it did not lock (#574 r5 review)', () => {
+    // The reviewer's interleaving: the survey sees a shadow only in the default
+    // root; while doctor holds that root's lock, a shadow appears in a profile
+    // whose lock another writer holds. The re-plan must not move it.
+    const hermes = path.join(home, '.hermes');
+    const plugins = path.join(hermes, 'plugins');
+    makePlugin(plugins, 'shieldcortex');
+    const defaultShadow = makePlugin(plugins, 'shieldcortex.bak-pre510');
+    const work = path.join(hermes, 'profiles', 'work');
+    const workPlugins = path.join(work, 'plugins');
+    makePlugin(workPlugins, 'shieldcortex');
+
+    let workShadow = '';
+    const result = fixHermesPluginShadowing(home, FROZEN, {}, () => {
+      workShadow = makePlugin(workPlugins, 'shieldcortex.bak-pre510');
+      fs.writeFileSync(updateLockPath(work), FOREIGN);
+    });
+
+    expect(result.moved).toEqual([]);
+    expect(result.changed).toBe(false);
+    expect(result.failed).toBe(true);
+    expect(result.message).toMatch(/layout changed while doctor was taking its locks/);
+    // Both shadows exactly where they were; the foreign lock untouched; ours released.
+    expect(fs.existsSync(path.join(defaultShadow, 'plugin.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(workShadow, 'plugin.yaml'))).toBe(true);
+    expect(fs.readFileSync(updateLockPath(work), 'utf-8')).toBe(FOREIGN);
+    expect(fs.existsSync(updateLockPath(hermes))).toBe(false);
+  });
 });
