@@ -1,6 +1,14 @@
 /**
- * #577 round 3, blocker 2 — the value-flag inventory must be COMPLETE, and
- * provably so rather than by inspection.
+ * #577 round 3, blocker 2 — the value-flag inventory, audited mechanically
+ * rather than by inspection.
+ *
+ * Scope, stated honestly (round-3 review nit): the analyser recognises the
+ * consumer shapes listed below and attributes each to the nearest flag literal
+ * in scope. It does NOT recognise every conceivable shape. For example, the
+ * `--flag=value` form (`eq.slice(prefix.length)`, as in embed-backfill's
+ * `readFlag`) is not a candidate; those flags are covered today only because the
+ * same helper also has an `args[i + 1]` branch. Treat a green run as "no
+ * recognised consumer is missing from its row", not as proof of completeness.
  *
  * `ALLOWLIST_VALUE_FLAGS` was missing `--note`, which `allowlist add` consumes
  * the following token of (`allowlist add ./x.sh --note help`). Nothing failed
