@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from typing import Optional
 import urllib.request
 
 # Unambiguous catastrophic shapes for the fail-closed fallback (issue #59/WS2).
@@ -91,7 +92,16 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:/\*?)?(?:\s|$)", re.I),
     re.compile(r"\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)", re.I),
     re.compile(r"\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log", re.I),
-    re.compile(r"/etc/(passwd|shadow|sudoers)|~/\.ssh|id_rsa|\.aws/credentials|\.env\b", re.I),
+    # #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
+    re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b", re.I),
+    # #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
+    re.compile(
+        r"(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|\"[^\"\n]*\"|[^\s'\"|;&<>\\-][^\s'\"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['\"]?(?:[^\s'\"|;&<>]*/)?"
+        r"(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config/fish/config\.fish\b)|"
+        r"\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['\"]?(?:[^\s'\"|;&<>]*/)?"
+        r"(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config/fish/config\.fish\b)['\"]?\s*(?=$|[|;&\n])",
+        re.I,
+    ),
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?uvx\b", re.I),
     re.compile(r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:pnpm|yarn)\b[^|;&\n]*\bdlx\b", re.I),
     re.compile(r"\b(?:base64|openssl|xxd|cat|http)\b[^\n|]*\|(?:[^\n|]*\|)*\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:bash|sh|zsh|ksh|python\d?|perl|ruby|node)\b(?:\s+-)?\s*(?:[;&|\n]|$)", re.I),
@@ -143,6 +153,45 @@ def fallback_dangerous_match(content: str) -> bool:
     if not content:
         return False
     return any(p.search(content) for p in _FALLBACK_DANGEROUS)
+
+
+# #505: startup-file WRITE target, ported to the blunt fallback. The real guard
+# gates a Write/Edit whose TARGET is a shell startup file on the path alone
+# (`isShellStartupWritePath`): a PATH prepend written there carries no
+# dangerous verb, so no content regex can see it. The DANGEROUS row above
+# covers the SHELL spellings only; a tool write carries the target as a path
+# argument, so in degraded mode the same write was invisible. Mirrors the
+# guard's WRITE_TOOLS / READ_TOOLS split; kept in sync with
+# scripts/pre-tool-hook.mjs and plugins/openclaw/interceptor.ts.
+_FALLBACK_READ_TOOLS = re.compile(
+    r"^(read|read_file|cat|less|more|head|tail|view|open|get|glob|grep|search|find|ls|list|list_files|stat|pwd|which|web_search|websearch)$"
+)
+_FALLBACK_WRITE_TOOLS = re.compile(r"(write|edit|create|update|patch|append|save|mkdir|move|copy|cp|mv|rename|chmod|chown)")
+_FALLBACK_WRITE_PATH_KEYS = ("path", "file_path", "filePath", "file", "target", "destination")
+_FALLBACK_SHELL_STARTUP_PATH = re.compile(
+    r"(?:^|[\\/])(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config[\\/]fish[\\/]config\.fish)$",
+    re.I,
+)
+
+
+def fallback_write_target_match(tool_name, args) -> Optional[str]:
+    """'modify-shell-startup' when a write-family tool targets a shell startup file, else None.
+
+    Read-family tools never gate; a tool with no write-like name never gates
+    here (the pattern table still applies to its surface). Only path-bearing
+    keys are read — never `command`.
+    """
+    seg = (str(tool_name or "").lower().replace("__", "/").replace(".", "/").replace(":", "/")).split("/")
+    seg = next((x for x in reversed(seg) if x), "")
+    if not seg or _FALLBACK_READ_TOOLS.match(seg) or not _FALLBACK_WRITE_TOOLS.search(seg):
+        return None
+    if not isinstance(args, dict):
+        return None
+    for k in _FALLBACK_WRITE_PATH_KEYS:
+        v = args.get(k)
+        if isinstance(v, str) and _FALLBACK_SHELL_STARTUP_PATH.search(v.strip()):
+            return "modify-shell-startup"
+    return None
 
 
 DEFAULT_BASE_URL = os.environ.get("SHIELDCORTEX_API_URL", "http://127.0.0.1:3001")

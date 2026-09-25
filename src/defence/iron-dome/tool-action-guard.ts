@@ -568,6 +568,21 @@ export function isScriptLikeWritePath(path: string): boolean {
   return SCRIPT_WRITE_EXT_RE.test(base) || SHELL_RC_BASENAME_RE.test(base);
 }
 
+/**
+ * #505 (SC-06): a Write/Edit target that is a login/interactive shell startup
+ * file. Distinct from `isScriptLikeWritePath` (which decides whether the
+ * CONTENT is scanned): a startup file is gated on the TARGET alone, because
+ * the payloads that matter there — a PATH prepend, an alias, an `export` —
+ * carry no dangerous verb for the content scan to find, and they run at the
+ * next shell start where no tool call will be seen.
+ */
+export function isShellStartupWritePath(path: string): boolean {
+  const norm = String(path || '').trim().replace(/\\/g, '/');
+  if (!norm) return false;
+  const base = norm.split('/').pop() ?? '';
+  return SHELL_RC_BASENAME_RE.test(base) || /(?:^|\/)\.config\/fish\/config\.fish$/i.test(norm);
+}
+
 const MEMORY_BASENAME_RE = /^(?:MEMORY|CORTEX_MEMORY|CLAUDE)\.md$/i;
 
 /**
@@ -726,6 +741,31 @@ const SYSTEM_INSTALL_RE = /\b(?:apt|apt-get|yum|dnf|brew|gem|cargo)\b[^|;&\n]*\b
 const POLICY_LOCK_ENV_SEAM_RE = /\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=/i;
 const PROTECTED_ROOT_PATH_RE = /\/etc\/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))/i;
 const CLAUDE_SETTINGS_PATH_RE = /(?:^|[\s'"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b/i;
+// #505: the OpenClaw gateway config is the same file for that plane that
+// `~/.claude/settings.json` is for Claude Code — it is where the ShieldCortex
+// plugin is enabled, so rewriting it takes the Guard off that runtime. Same
+// signal, same read carve-out (`policyLockAccessIsReadOnly`), same fallback
+// `lockPath` tag on both outage tables.
+const OPENCLAW_CONFIG_PATH_RE = /(?:^|[\s'"=:(\\/])\.openclaw[\\/]+openclaw\.json\b/i;
+
+// #505 (SC-06): the user-home persistence set an agent actually controls.
+// Named once so the DANGEROUS rows, the Write/Edit path gate and the tests
+// cannot drift apart. `SSH_DIR_PATH_SRC` is the SSH directory behind any home
+// root; `AUTHORIZED_KEYS_PATH_SRC` is that file as a path segment anywhere
+// (`.ssh/authorized_keys`, `/authorized_keys`); `SHELL_STARTUP_FILE_SRC` is a
+// login/interactive startup file by basename (the same set
+// `SHELL_RC_BASENAME_RE` scans the content of, plus fish's config).
+const SSH_DIR_PATH_SRC = String.raw`(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])`;
+const AUTHORIZED_KEYS_PATH_SRC = String.raw`(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b`;
+const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b`;
+// #505: a shell WRITE shape whose destination is a startup file. The write
+// prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of
+// options and earlier operands (`-a`, `--append`, `--`, `/tmp/log`), or
+// `sed` carrying an in-place flag (`-i`, `-i.bak`, a cluster such as `-Ei`,
+// `--in-place[=suffix]`); or a `cp`/`mv`/`install` whose LAST operand is the
+// startup file. Exec surface only: the write-content scan skips this row
+// (#505 Option A; the residual is #588).
+const MODIFY_SHELL_STARTUP_RE = new RegExp(String.raw`(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:${SHELL_STARTUP_FILE_SRC})['"]?\s*(?=$|[|;&\n])`, 'i');
 
 const DANGEROUS: Pattern[] = [
   // `shred` is anchored to command position (issue #89 remainder): start of
@@ -913,7 +953,29 @@ const DANGEROUS: Pattern[] = [
   // test runner once #160 made folded script source scannable on the Claude
   // Code surface. The lookbehind rejects an identifier immediately before the
   // dot; a leading `./`, `/app/`, a bare one, and `.env.local` all still match.
-  { re: /\/etc\/(passwd|shadow|sudoers)|~\/\.ssh|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b/i, signal: 'touch-sensitive-path' },
+  //
+  // #505 (SC-06): `~/.ssh` was the ONLY spelling of the SSH directory this
+  // rule knew, so `/home/<user>/.ssh/authorized_keys` — the path an agent
+  // actually holds once `$HOME` is resolved, and the path the Write tool is
+  // handed — was invisible: an attacker key appended there was allowed while
+  // the same write to `/etc/sudoers.d/` gated. The directory is now matched
+  // behind every home root (`~`, `$HOME`, `/home/<u>`, `/root`, `/Users/<u>`)
+  // and `authorized_keys` is matched as a path segment wherever it sits:
+  // naming that file IS the persistence. Same tier and signal as before, so
+  // the planes, remediation and audit rows need nothing new.
+  { re: new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b`, 'i'), signal: 'touch-sensitive-path' },
+  // #505 (SC-06): a shell write shape whose DESTINATION is a login/interactive
+  // startup file. Content written there runs at the next shell start, outside
+  // any tool call the guard will see — `export PATH=/tmp/evil:$PATH` in
+  // `.bashrc` is a PATH hijack with no dangerous verb in it, which is why
+  // the content scan alone (#93) let it through. Write shapes only: a
+  // redirect (`>`, `>>`, noclobber `>|`), `tee` with any option run or
+  // earlier operand, `sed -i`/`--in-place` (short clusters such as `-Ei` and
+  // suffix forms such as `-i.bak` included — argv parity, not a shell parser),
+  // or a `cp`/`mv`/`install` whose LAST operand is the startup file. Reading or sourcing one is untouched. The Write/Edit
+  // tool path is gated at the verdict site (`isShellStartupWritePath`), where
+  // the target is a path argument rather than shell text.
+  { re: MODIFY_SHELL_STARTUP_RE, signal: 'modify-shell-startup' },
   // The guard's own one-shot approval store (#118). The TTY gate stops the
   // agent using the CLI; without this rule the agent could instead just edit
   // approvals.json (a plain 0600 file owned by the same user) and mint its own
@@ -967,6 +1029,8 @@ const DANGEROUS: Pattern[] = [
   { re: POLICY_LOCK_ENV_SEAM_RE, signal: 'disable-action-guard' },
   { re: PROTECTED_ROOT_PATH_RE, signal: 'disable-action-guard' },
   { re: CLAUDE_SETTINGS_PATH_RE, signal: 'disable-action-guard' },
+  // #505: the OpenClaw plane's equivalent of the settings file above.
+  { re: OPENCLAW_CONFIG_PATH_RE, signal: 'disable-action-guard' },
   // `dd of=` to ANY target (issue #4475.7b): a raw block device is already
   // CATASTROPHIC above (raw-disk-write, checked first); a regular-file target
   // is one tier down — it can silently overwrite/zero arbitrary file content.
@@ -3349,7 +3413,7 @@ function gitStageWritesOrExecs(stage: string): boolean {
   return false;
 }
 /** Either #501 path rule. Built from the same constants the DANGEROUS row uses. */
-const POLICY_LOCK_PATH_RE = new RegExp(`${PROTECTED_ROOT_PATH_RE.source}|${CLAUDE_SETTINGS_PATH_RE.source}`, 'i');
+const POLICY_LOCK_PATH_RE = new RegExp(`${PROTECTED_ROOT_PATH_RE.source}|${CLAUDE_SETTINGS_PATH_RE.source}|${OPENCLAW_CONFIG_PATH_RE.source}`, 'i');
 
 /**
  * Redirect / tee / noclobber. Glued forms (`echo>path`, `echo>$p`) count —
@@ -3612,6 +3676,7 @@ function matchSpansClassified(
 // an actionable message that names the rule, the matched span, and the fix
 // (issue #73 item 5).
 const REMEDIATION: Record<string, string> = {
+  'modify-shell-startup': 'this writes to a shell startup file (.bashrc/.zshrc/.profile/…) whose contents run at the next login — make the change yourself, or approve this exact command from your own terminal with `shieldcortex approve`',
   'pipe-download-to-shell': 'download to a file and inspect it before running (curl -o get.sh URL; less get.sh; sh get.sh)',
   'pipe-download-stdin-exec': 'the inline program executes its stdin, so the fetched bytes still run as code — download to a file and inspect it first',
   'decode-pipe-to-shell': 'the decoded/fetched bytes are executed as code by a bare interpreter — download to a file and inspect it first',
@@ -5207,6 +5272,11 @@ function scanWriteContentPayload(content: string): {
       if (m.signal === 'git-delete-branch' && !gitDeleteBranchInvoked(text)) continue;
       if (m.signal === 'modify-network-firewall' && firewallCallsAreReadOnly(text)) continue;
       if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
+      // #505 (Option A): the startup-file write shape is judged on the exec
+      // surface, not in written content. Regex reading could not tell a
+      // quoted mention from a real write here (#588). A written script that
+      // appends is still gated when it runs: the folded-script scan reads it.
+      if (m.signal === 'modify-shell-startup') continue;
       // #386: quoted install vocabulary in scripts/logs is not an install.
       if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
       if (m.signal === 'install-package' && !packageInstallInvoked(text)) continue;
@@ -6182,6 +6252,18 @@ function evaluateToolCallCore(
       span: fmtSpan(scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0] ?? 'npx/bunx'),
       tier: 'executed',
     });
+  }
+  // #505 (SC-06): a Write/Edit whose TARGET is a shell startup file. The
+  // DANGEROUS row above catches the shell spellings (`>> ~/.bashrc`, `tee`,
+  // `sed -i`); a tool-call write carries the target as a path argument, not
+  // as shell text, so it is gated here on the path alone. Content is still
+  // scanned by #93 (a piped-download line in `.bashrc` stays catastrophic);
+  // this adds the approval gate for the content that scan cannot see —
+  // `export PATH=/tmp/evil:$PATH` has no dangerous verb in it.
+  if (family === 'write' && isShellStartupWritePath(path) && !dangerSignals.includes('modify-shell-startup')) {
+    dangerSignals.push('modify-shell-startup');
+    dangerSpan = dangerSpan ?? fmtSpan(path);
+    dangerEvidence.set('modify-shell-startup', { signal: 'modify-shell-startup', span: fmtSpan(path), tier: 'executed' });
   }
   // An anomalously long command is worth a human nod on its own (issue
   // #86-redos) — flagged here, after every catastrophic check above has

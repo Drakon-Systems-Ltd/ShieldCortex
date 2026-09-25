@@ -39,7 +39,7 @@ export const GUARD_SIGNAL_VOCABULARY = Object.freeze([
   'fork-bomb', 'format-filesystem', 'git-delete-branch', 'git-force-push',
   'git-mutate', 'install-package', 'install-package-global', 'invalid-tool-input',
   'local-package-install', 'missing-handle', 'modify-network-firewall',
-  'modify-scheduler', 'move-or-copy', 'nested-invalid', 'network-egress',
+  'modify-scheduler', 'modify-shell-startup', 'move-or-copy', 'nested-invalid', 'network-egress',
   'not-object', 'opaque-command-substitution', 'opaque-script',
   'opaque-script-invocation', 'oversized-command', 'persistence-risk',
   'pipe-download-module-exec', 'pipe-download-stdin-exec', 'pipe-download-to-shell',

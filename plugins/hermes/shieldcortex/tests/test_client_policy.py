@@ -391,6 +391,50 @@ class FallbackDangerousScanTests(unittest.TestCase):
         for cmd in benign:
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
 
+    def test_505_write_target_gate_startup_files(self):
+        """#505: a write-family tool naming a startup file gates on the path alone."""
+        from sc_client import fallback_write_target_match
+        rc = ".bash" + "rc"
+        for tool, args in [
+            ("write_file", {"file_path": "/home/u/" + rc, "content": "export PATH=/opt/bin:$PATH\n"}),
+            ("edit_file", {"path": "~/.zprofile", "old": "a", "new": "b"}),
+            ("Write", {"file_path": "/home/u/.config/fish/config.fish", "content": "set -x PATH /tmp/evil $PATH"}),
+            ("mcp__fs__write_file", {"path": "/root/.profile", "content": "x"}),
+        ]:
+            self.assertEqual(fallback_write_target_match(tool, args), "modify-shell-startup", (tool, args))
+
+    def test_505_write_target_gate_leaves_reads_and_other_files_alone(self):
+        from sc_client import fallback_write_target_match
+        rc = ".bash" + "rc"
+        for tool, args in [
+            ("read_file", {"file_path": "/home/u/" + rc}),
+            ("grep", {"pattern": "PATH", "path": "/home/u/" + rc}),
+            ("write_file", {"file_path": "/repo/src/cli.ts", "content": "console.log(1)"}),
+            ("write_file", {"file_path": "/home/u/" + rc + ".bak", "content": "x"}),
+            ("write_file", {"file_path": "/home/u/.vimrc", "content": "set number"}),
+            ("terminal", {"command": "echo x >> ~/" + rc}),  # command is the table's job, not this gate's
+            ("write_file", "not-a-dict"),
+        ]:
+            self.assertIsNone(fallback_write_target_match(tool, args), (tool, args))
+
+    def test_505_shell_write_shapes_long_options_and_later_operands(self):
+        from sc_client import fallback_dangerous_match
+        rc = ".bash" + "rc"
+        for cmd in [
+            "echo x >> ~/" + rc, "echo x >| ~/" + rc, "echo x | tee --append ~/" + rc,
+            "echo x | tee /tmp/log ~/" + rc, "echo x | tee -a -- ~/" + rc,
+            "sed --in-place 's/a/b/' ~/" + rc, "sed -Ei 's/a/b/' ~/.profile",
+            "printf x | tee -a \\\n  ~/" + rc,  # escaped newline is continuation, not a boundary
+        ]:
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+        for cmd in [
+            "cat ~/" + rc, "source ~/" + rc, "sed -n '/PATH/p' ~/" + rc, "grep PATH ~/.profile",
+            # round-4 regression pin: a tee operand run stops at the statement boundary
+            "printf x | tee /tmp/log\ncat ~/" + rc, "printf x | tee /tmp/log\nsource ~/.profile",
+            "printf x | tee /tmp/log; cat ~/" + rc,
+        ]:
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+
     def test_fallback_surface_extracts_command_value(self):
         from sc_client import fallback_surface
         s = fallback_surface({"command": "sudo rm x", "description": "harmless words"})

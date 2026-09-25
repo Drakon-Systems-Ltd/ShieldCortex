@@ -27,6 +27,7 @@ try:
         fallback_catastrophic_match,
         fallback_dangerous_match,
         fallback_surface,
+        fallback_write_target_match,
     )
     from .policy import action_guard_decision, resolve_enforce
     from .shadow import detect_shadow, shadow_error_line
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover - standalone import
         fallback_catastrophic_match,
         fallback_dangerous_match,
         fallback_surface,
+        fallback_write_target_match,
     )
     from policy import action_guard_decision, resolve_enforce
     from shadow import detect_shadow, shadow_error_line
@@ -156,7 +158,9 @@ def register(ctx):
         if not verdict.available:
             surface = fallback_surface(tool_args)
             fallback_blocked = fallback_catastrophic_match(surface)
-            fallback_dangerous = fallback_dangerous_match(surface)
+            fallback_dangerous = fallback_dangerous_match(surface) or bool(
+                fallback_write_target_match(tool_name, tool_args)  # #505: tool-write target gate
+            )
             denied = fallback_blocked or (fallback_dangerous and enforce)
             _audit_gate_degraded(tool_name, verdict.reason, denied)
         fallback_denies = fallback_blocked or (fallback_dangerous and enforce)
