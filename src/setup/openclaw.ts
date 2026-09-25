@@ -1837,8 +1837,10 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     // (r4 blocker 1). A linked `hooks/` or `hooks/internal/` is followed by
     // both the install AND the legacy cleanup, so a link there is a write and
     // a DELETE somewhere nobody named. The root is dropped whole, and the
-    // lock it briefly held goes back.
-    const linked = linkedHookInstallPath(configRoot);
+    // lock it briefly held goes back. With `--no-hooks` nothing is copied into
+    // or deleted from the hook tree, so its links are not this run's business
+    // (r5 nit 3); the root itself was already checked by `acquireUpdateLock`.
+    const linked = options.noHooks ? null : linkedHookInstallPath(configRoot);
     if (linked !== null) {
       console.warn(`  Skipped ${configRoot} — ${linked}; nothing written or deleted`);
       acquired.lock.release();

@@ -204,6 +204,8 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
     }));
     expect(result.status).toBe('warn');
     expect(result.summary).toMatch(/packaged hook source not found/);
+    // #574 r5 nit 1: an installed hook left un-refreshed is unfinished work.
+    expect(result.unfinished).toBe(true);
   });
 });
 

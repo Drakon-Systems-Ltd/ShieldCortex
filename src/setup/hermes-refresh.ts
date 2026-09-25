@@ -277,8 +277,8 @@ function writeBounds(scan: HermesPluginScan): string[] {
  * followed both, because neither path is inside a discovered copy. So every
  * component of every path this refresh writes through is checked here, bounded
  * at the Hermes tree. `stageAndPublish` re-checks the three paths it renames,
- * so the SELF-HEAL is covered by construction rather than by remembering to
- * call this first (r3). Returns the refusal reason, or null.
+ * so every publication is covered by construction rather than by remembering
+ * to call this first (r3). Returns the refusal reason, or null.
  */
 function writePathRefusal(scan: HermesPluginScan, targets: string[]): string | null {
   const bounds = writeBounds(scan);

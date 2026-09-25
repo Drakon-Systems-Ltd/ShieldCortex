@@ -57,8 +57,9 @@
  *
  * A failure at 6 leaves the host with no target, so the backup is renamed
  * straight back and both parents are synced again. If THAT fails, the caller
- * names the integration's installer, which is this same publication run from
- * the package.
+ * names the integration's installer (`shieldcortex hermes install` /
+ * `shieldcortex openclaw install`), which copies from the package by its own
+ * route — it does not use this publication routine.
  */
 
 import fs from 'fs';

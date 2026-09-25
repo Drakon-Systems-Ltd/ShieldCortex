@@ -92,6 +92,18 @@ describe('the hook installer refuses a linked hook ancestor (#574 r4 blocker 1)'
     expect(process.exitCode).toBe(1);
   });
 
+  it('does not refuse a linked hooks/ when --no-hooks means the hook tree is never touched (r5 nit 3)', async () => {
+    plantExternalHookTree(external);
+    fs.symlinkSync(external, path.join(openclawRoot, 'hooks'));
+
+    await installOpenClawHook({ noHooks: true, noPlugins: true, restartGateway: false });
+
+    expectExternalTreeIntact(external);
+    expect(fs.lstatSync(path.join(openclawRoot, 'hooks')).isSymbolicLink()).toBe(true);
+    expect(warnings.join('\n')).not.toMatch(/is a symlink; nothing written or deleted/);
+    expect(process.exitCode).not.toBe(1);
+  });
+
   it('writes and deletes nothing through a linked hooks/internal/ directory', async () => {
     // `hooks/` itself is real here, so only the second level is a link — the
     // component the round-3 leaf checks could never see.

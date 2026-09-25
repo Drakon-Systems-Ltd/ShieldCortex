@@ -833,7 +833,7 @@ export async function stepOpenClawHook(
         : { status: 'skip' as const, summary: 'not installed — `shieldcortex openclaw install` adds it' };
     }
     if (!result.sourceAvailable) {
-      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from', detail: [] };
+      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from', detail: [], unfinished: true };
     }
     const written = result.refreshed.length;
     const detail = [
