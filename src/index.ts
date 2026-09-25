@@ -671,6 +671,8 @@ ${bold}COMMANDS${reset}
                                    if anything could not be moved safely)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
+  ${cyan}logs${reset} prune            Keep only the newest project-key-repair-*.json logs
+                        (dry-run; --execute). Audit logs are not managed yet (#579).
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
   ${cyan}allowlist${reset} [add|remove|verify|scan]
@@ -893,6 +895,15 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'sessions') {
     const { handleSessionsCommand } = await import('./cli/sessions.js');
     await handleSessionsCommand(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "logs" subcommand (#573) — retention for the project-key repair
+  // logs, the one on-disk plane nothing ever deleted. Deliberately DB-free, so
+  // it still runs on a host whose database has hit the hard size block.
+  if (process.argv[2] === 'logs') {
+    const { handleLogsCommand } = await import('./cli/logs.js');
+    await handleLogsCommand(process.argv.slice(3));
     return;
   }
 
@@ -1495,7 +1506,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'approve', 'deny', 'allowlist',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'logs', 'approve', 'deny', 'allowlist',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
