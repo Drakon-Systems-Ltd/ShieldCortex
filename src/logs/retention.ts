@@ -304,8 +304,11 @@ function resolvePlane(dir: string): {
   let st: fs.Stats;
   try {
     st = fs.lstatSync(dir);
-  } catch {
-    return { ...none, fault: null }; // absent — nothing under it to prune
+  } catch (err) {
+    // Only absence is "nothing to prune"; an unreachable directory (EACCES on
+    // an ancestor, ENOTDIR, ELOOP) is a failure to report (#573 r4 review nit).
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ...none, fault: null };
+    return { ...none, fault: `${dir} could not be inspected — ${describe(err)}` };
   }
   if (st.isSymbolicLink()) {
     return { ...none, fault: `${dir} is a symlink — refusing to prune repair logs through it` };

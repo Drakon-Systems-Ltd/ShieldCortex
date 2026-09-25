@@ -396,6 +396,21 @@ describe('#573 the audit boundary fails closed', () => {
     expect(result.refused).toBeNull();
   });
 
+  it('reports a logs directory behind an inaccessible ancestor instead of a clean empty pass', () => {
+    if (process.getuid?.() === 0) return;
+    seedLogs(3);
+    const parent = path.dirname(logsDir);
+    fs.chmodSync(parent, 0o000);
+    try {
+      const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+      expect(result.refused).toMatch(/could not be inspected/);
+      expect(result.deleted).toEqual([]);
+    } finally {
+      fs.chmodSync(parent, 0o700);
+    }
+    expect(listed()).toHaveLength(3);
+  });
+
   it('reports an unreadable logs directory instead of a clean empty pass', () => {
     if (process.getuid?.() === 0) return;
     seedLogs(3);
