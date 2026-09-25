@@ -70,6 +70,7 @@ import {
 import {
   journalledSwap,
   journalPath,
+  packagedVersion,
   recoverInterruptedSwap,
   type RecoveryOutcome,
 } from './swap-journal.js';
@@ -219,17 +220,6 @@ export const HERMES_RECOVERY_COMMAND =
 
 function warn(summary: string, detail: string[] = []): HermesRefreshResult {
   return { status: 'warn', summary, detail, refreshed: [] };
-}
-
-/** The package version the staged bytes came from — recorded in the journal. */
-function packagedVersion(): string {
-  try {
-    const pkg = path.resolve(__dirname, '..', '..', 'package.json');
-    const parsed = JSON.parse(fs.readFileSync(pkg, 'utf-8')) as { version?: unknown };
-    return typeof parsed.version === 'string' ? parsed.version : 'unknown';
-  } catch {
-    return 'unknown';
-  }
 }
 
 /**

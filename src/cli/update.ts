@@ -738,7 +738,7 @@ export async function stepOpenClawHook(
     const home = deps.home ?? openclaw.openClawUserHome();
     const refresh = deps.refresh ?? openclaw.refreshInstalledHookFiles;
     const result = refresh(home);
-    const recovered = (result.recovered ?? []).map((line) => scrubHomePath(line, home));
+    const recovered = result.recovered.map((line) => scrubHomePath(line, home));
     if (result.installed.length === 0) {
       return result.failed.length > 0
         ? {
@@ -754,7 +754,7 @@ export async function stepOpenClawHook(
     const detail = [
       ...recovered,
       ...result.refreshed.map((dir) => scrubHomePath(`refreshed ${dir}`, home)),
-      ...(result.backups ?? []).map((b) => scrubHomePath(`previous hook kept at ${b.backup}`, home)),
+      ...result.backups.map((b) => scrubHomePath(`previous hook kept at ${b.backup}`, home)),
       ...result.failed.map((f) => scrubHomePath(`could not refresh ${f.dir}: ${f.error}`, home)),
     ];
     if (result.failed.length > 0) {

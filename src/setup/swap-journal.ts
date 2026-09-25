@@ -63,6 +63,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { describeFsError } from './hermes-plugins.js';
 import { lstatAnswer, releaseReservation } from './fs-answers.js';
 
@@ -101,6 +102,23 @@ export interface RefreshJournal {
 
 export function journalPath(root: string): string {
   return path.join(root, REFRESH_JOURNAL_NAME);
+}
+
+/**
+ * The ShieldCortex version the staged bytes came from, for the journal's
+ * `packagedVersion`. Both integrations record the same answer, so they read it
+ * the same way — `dist/setup/swap-journal.js` → package root / package.json.
+ */
+export function packagedVersion(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const parsed = JSON.parse(
+      fs.readFileSync(path.resolve(here, '..', '..', 'package.json'), 'utf-8'),
+    ) as { version?: unknown };
+    return typeof parsed.version === 'string' ? parsed.version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
 
 /**

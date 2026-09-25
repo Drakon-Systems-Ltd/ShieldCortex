@@ -31,7 +31,7 @@ import {
   releaseReservation,
   reserveBackupDir,
 } from './fs-answers.js';
-import { journalledSwap, journalPath, recoverInterruptedSwap } from './swap-journal.js';
+import { journalledSwap, journalPath, packagedVersion, recoverInterruptedSwap } from './swap-journal.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -388,17 +388,6 @@ function hookStagedComplete(staged: string): boolean {
   return true;
 }
 
-/** The package version recorded in a refresh journal. */
-function hookPackagedVersion(): string {
-  try {
-    const pkg = path.resolve(__dirname, '..', '..', 'package.json');
-    const parsed = JSON.parse(fs.readFileSync(pkg, 'utf-8')) as { version?: unknown };
-    return typeof parsed.version === 'string' ? parsed.version : 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
-
 /** What finishes an interrupted hook refresh. Printed wherever one is left. */
 export const HOOK_RECOVERY_COMMAND =
   'run `shieldcortex update` (or `shieldcortex openclaw install`) to finish it';
@@ -523,7 +512,7 @@ function publishHookDir(dir: string, now: Date): HookPublishResult {
     backup,
     staged,
     stagingRoot: staging,
-    packagedVersion: hookPackagedVersion(),
+    packagedVersion: packagedVersion(),
     now,
   });
   if (outcome.ok) return { ok: true, backup };
