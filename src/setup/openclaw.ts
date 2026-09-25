@@ -251,6 +251,49 @@ function preferredHookDir(hooksDir: string): string {
   return path.join(hooksDir, HOOK_NAME);
 }
 
+/**
+ * Every path the hook installer creates, copies into or DELETES, under one
+ * config root (#574 r4 blocker 1).
+ *
+ * `copyHookFiles` lstats the leaves it writes, but the installer gets to those
+ * leaves through `hooks/` and `hooks/internal/`, which it `mkdir -p`s, and it
+ * `rm -rf`s the legacy layouts before copying anything. The reviewer made
+ * `~/.openclaw/hooks` a link to an external directory: the install overwrote a
+ * `cortex-memory/handler.ts` out there and DELETED an external `shieldcortex/`
+ * as a "legacy variant", then reported success. Listing the deletions beside
+ * the destinations is the point — a removal through a link costs strictly more
+ * than a write does.
+ */
+function hookInstallPaths(configRoot: string): string[] {
+  const hooks = path.join(configRoot, 'hooks');
+  const internal = path.join(hooks, 'internal');
+  return [
+    // The destination, and the legacy layouts `removeLegacyHookVariants`
+    // deletes. `findLinkOnPath` checks every component from `configRoot` down,
+    // so `hooks/` and `hooks/internal/` are covered by the paths beneath them.
+    path.join(hooks, HOOK_NAME),
+    path.join(hooks, 'shieldcortex'),
+    path.join(internal, HOOK_NAME),
+    path.join(internal, 'shieldcortex'),
+  ];
+}
+
+/**
+ * Why this config root cannot be installed into, or null when it can.
+ *
+ * Run BEFORE the first `mkdir`, `copyFileSync` or `rmSync` in the root — a
+ * refusal afterwards is not a refusal. "Could not read" refuses too: it is
+ * never "there is nothing there" (#569 r6).
+ */
+function linkedHookInstallPath(configRoot: string): string | null {
+  for (const target of hookInstallPaths(configRoot)) {
+    const { link, unreadable } = findLinkOnPath(configRoot, target);
+    if (unreadable !== null) return `${unreadable.path} could not be read (${unreadable.error})`;
+    if (link !== null) return `${link} is a symlink`;
+  }
+  return null;
+}
+
 function legacyHookDirs(hooksDir: string): string[] {
   return [
     // Legacy: top-level "shieldcortex" directory created by old installers
@@ -1777,7 +1820,7 @@ export interface OpenClawInstallOptions {
 export async function installOpenClawHook(options: OpenClawInstallOptions = {}): Promise<void> {
   const home = resolveUserHome();
   const held = new Map<string, UpdateLock>();
-  let busy = 0;
+  let unavailable = 0;
   for (const configRoot of hookConfigRoots(home)) {
     // `findAllHooksDirs` creates `~/.openclaw` when the binary is on the box.
     // That is a write, so it happens under the lock or not at all.
@@ -1786,14 +1829,29 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     const acquired = acquireUpdateLock(configRoot, { createRoot });
     if ('busy' in acquired) {
       console.warn(`  Skipped ${configRoot} — ${acquired.busy}; nothing written`);
-      busy += 1;
+      unavailable += 1;
+      continue;
+    }
+    // The hook tree, before the first mkdir/copy/rm anywhere in this root
+    // (r4 blocker 1). A linked `hooks/` or `hooks/internal/` is followed by
+    // both the install AND the legacy cleanup, so a link there is a write and
+    // a DELETE somewhere nobody named. The root is dropped whole, and the
+    // lock it briefly held goes back.
+    const linked = linkedHookInstallPath(configRoot);
+    if (linked !== null) {
+      console.warn(`  Skipped ${configRoot} — ${linked}; nothing written or deleted`);
+      acquired.lock.release();
+      unavailable += 1;
       continue;
     }
     held.set(configRoot, acquired.lock);
   }
-  if (held.size === 0 && busy > 0) {
-    console.error('Nothing was installed: every OpenClaw/Claude config root is locked by another run.');
-    process.exitCode = 1;
+  // A root this run could not write in is a non-zero exit, whether it was one
+  // of them or all of them (r4 nit 1): "installed" must not be the verdict on
+  // a host where the hook the operator asked for is still the old one.
+  if (unavailable > 0) process.exitCode = 1;
+  if (held.size === 0 && unavailable > 0) {
+    console.error('Nothing was installed: every OpenClaw/Claude config root was locked or refused.');
     return;
   }
   try {
