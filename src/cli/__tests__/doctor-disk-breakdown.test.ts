@@ -161,8 +161,8 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.fix).not.toMatch(/^Run `shieldcortex memories prune/);
     expect(result.fix).not.toMatch(/memories prune|memories dedupe|sessions prune/);
     expect(result.fix).toMatch(/No single measured consumer/);
-    // The session_events payload is still visible in the row itself, which is
-    // what an operator needs in order to reach for `sessions prune` knowingly.
+    // The row reports the DB's aggregate size only (no per-table attribution
+    // since #573 r3), so the operator sees how big the DB is, not what is in it.
     expect(result.message).toMatch(/DB /);
   });
 

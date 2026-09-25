@@ -240,12 +240,46 @@ interface DirIdentity {
  * `logs prune` is deliberately usable on a host whose database is at the hard
  * size block — exactly the host that needs it.
  */
-function resolvedAuditPlane(): string | null {
+function resolvedAuditPlane(): { plane: string; fault: null } | { plane: null; fault: string } {
   const configured = process.env.SHIELDCORTEX_AUDIT_DIR?.trim();
+  const target = path.resolve(configured || path.join(os.homedir(), '.shieldcortex', 'audit'));
+  const unresolved = (why: string) => ({
+    plane: null,
+    fault: `the realtime audit plane ${target} could not be resolved (${why}) — refusing, `
+      + 'because a boundary that cannot be located cannot be kept out of (#579)',
+  });
+  // Fail CLOSED (#573 r3 review). Only genuine absence of the path itself — not
+  // even a dangling link there — is "no plane yet", and even then the place it
+  // WOULD be is computed from the nearest existing ancestor, resolved, so a
+  // symlinked ancestor cannot hide an overlap. Any other failure (a dangling
+  // link, EACCES on an intermediate directory) refuses.
   try {
-    return fs.realpathSync(configured || path.join(os.homedir(), '.shieldcortex', 'audit'));
-  } catch {
-    return null;
+    fs.lstatSync(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return unresolved(describe(err));
+    const rest: string[] = [];
+    let probe = target;
+    for (;;) {
+      const parent = path.dirname(probe);
+      rest.unshift(path.basename(probe));
+      probe = parent;
+      try {
+        fs.lstatSync(probe);
+      } catch (inner) {
+        if ((inner as NodeJS.ErrnoException).code === 'ENOENT' && parent !== path.dirname(parent)) continue;
+        return unresolved(describe(inner));
+      }
+      try {
+        return { plane: path.join(fs.realpathSync(probe), ...rest), fault: null };
+      } catch (inner) {
+        return unresolved(describe(inner));
+      }
+    }
+  }
+  try {
+    return { plane: fs.realpathSync(target), fault: null };
+  } catch (err) {
+    return unresolved(describe(err));
   }
 }
 
@@ -282,14 +316,15 @@ function resolvePlane(dir: string): {
   let resolved: string;
   try {
     resolved = fs.realpathSync(dir);
-  } catch {
-    return { ...none, fault: null };
+  } catch (err) {
+    return { ...none, fault: `${dir} could not be resolved — ${describe(err)}` };
   }
   const audit = resolvedAuditPlane();
-  if (audit !== null && isWithin(resolved, audit)) {
+  if (audit.fault !== null) return { ...none, fault: audit.fault };
+  if (isWithin(resolved, audit.plane)) {
     return {
       ...none,
-      fault: `${dir} resolves to ${resolved}, inside the realtime audit plane ${audit} — `
+      fault: `${dir} resolves to ${resolved}, inside the realtime audit plane ${audit.plane} — `
         + 'refusing; that plane has no retention here (#579)',
     };
   }
@@ -340,8 +375,11 @@ export function pruneRepairLogs(options: RepairLogPruneOptions = {}): RepairLogP
   let names: string[];
   try {
     names = fs.readdirSync(dir);
-  } catch {
-    return empty(null); // unreadable — nothing this pass can bound
+  } catch (err) {
+    // Only absence is a quiet no-op; an unreadable directory is a failure the
+    // operator must see, not "Matched: 0" (#573 r3 review nit 1).
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return empty(null);
+    return empty(`${dir} could not be listed — ${describe(err)}`);
   }
 
   interface Candidate { path: string; name: string; group: string; size: number; mtimeMs: number }
@@ -481,8 +519,10 @@ export function prepareRepairLogDir(dbPath: string): string {
     return refuse(`${path.dirname(path.resolve(dbPath))} could not be resolved — ${describe(err)}`);
   }
   const audit = resolvedAuditPlane();
-  if (audit !== null && isWithin(dir, audit)) {
-    refuse(`${dir} is inside the realtime audit plane ${audit}, which this release never writes to (#579)`);
+  if (audit.fault !== null) {
+    refuse(audit.fault);
+  } else if (isWithin(dir, audit.plane)) {
+    refuse(`${dir} is inside the realtime audit plane ${audit.plane}, which this release never writes to (#579)`);
   }
   let st: fs.Stats | null;
   try {

@@ -26,6 +26,7 @@ import path from 'path';
 import {
   DEFAULT_REPAIR_LOG_KEEP,
   defaultRepairLogDir,
+  prepareRepairLogDir,
   pruneRepairLogs,
   REPAIR_LOG_MIN_AGE_MS,
   repairLogDbId,
@@ -343,6 +344,70 @@ describe('#573 blocker 1 — no path resolves into the realtime audit plane', ()
     const result = pruneRepairLogs({ dir: auditDir, keep: 1, execute: true });
     expect(result.refused).toMatch(/audit/i);
     expect(auditManifest()).toEqual(before);
+  });
+});
+
+/**
+ * #573 round-3 review blocker: the audit boundary failed OPEN. Any realpath
+ * failure on the audit path read as "no audit plane", so a dangling audit link
+ * or an unreadable intermediate directory switched the guard off.
+ */
+describe('#573 the audit boundary fails closed', () => {
+  it('prepareRepairLogDir refuses, creating nothing, when the audit path is a dangling link to where the log would go', () => {
+    // Reviewer's layout A: audit -> <db>/logs, target absent. The write would
+    // have created the link's target and landed inside the audit plane.
+    const dbDir = path.join(root, 'db');
+    fs.mkdirSync(dbDir);
+    fs.rmSync(auditDir, { recursive: true, force: true });
+    fs.symlinkSync(path.join(dbDir, 'logs'), auditDir);
+
+    expect(() => prepareRepairLogDir(path.join(dbDir, 'memories.db'))).toThrow(/audit plane/);
+    expect(fs.existsSync(path.join(dbDir, 'logs'))).toBe(false);
+  });
+
+  it('pruneRepairLogs refuses, deleting nothing, when the audit path cannot be resolved', () => {
+    // Reviewer's layout B: audit reachable only through an unreadable
+    // intermediate directory, the same ledger reached through a readable alias.
+    if (process.getuid?.() === 0) return; // root ignores the mode bits
+    const ledger = path.join(root, 'ledger');
+    const ledgerLogs = path.join(ledger, 'logs');
+    seedLogs(3, ledgerLogs);
+    const gate = path.join(root, 'gate');
+    fs.mkdirSync(gate);
+    fs.symlinkSync(ledger, path.join(gate, 'through'));
+    fs.rmSync(auditDir, { recursive: true, force: true });
+    fs.symlinkSync(path.join(gate, 'through'), auditDir);
+    fs.symlinkSync(ledger, path.join(root, 'db-link'));
+    fs.chmodSync(gate, 0o000);
+    try {
+      const result = pruneRepairLogs({ dir: path.join(root, 'db-link', 'logs'), keep: 1, execute: true });
+      expect(result.refused).toMatch(/audit plane .* could not be resolved/);
+      expect(result.deleted).toEqual([]);
+    } finally {
+      fs.chmodSync(gate, 0o700);
+    }
+    expect(listed(ledgerLogs)).toHaveLength(3);
+  });
+
+  it('still treats a genuinely absent audit plane as "no plane yet"', () => {
+    fs.rmSync(auditDir, { recursive: true, force: true });
+    seedLogs(3);
+    const result = pruneRepairLogs({ dir: logsDir, keep: 20, execute: true });
+    expect(result.refused).toBeNull();
+  });
+
+  it('reports an unreadable logs directory instead of a clean empty pass', () => {
+    if (process.getuid?.() === 0) return;
+    seedLogs(3);
+    fs.chmodSync(logsDir, 0o000);
+    try {
+      const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+      expect(result.refused).toMatch(/could not be listed/);
+      expect(result.deleted).toEqual([]);
+    } finally {
+      fs.chmodSync(logsDir, 0o700);
+    }
+    expect(listed()).toHaveLength(3);
   });
 });
 
