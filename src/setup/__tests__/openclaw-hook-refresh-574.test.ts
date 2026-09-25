@@ -14,10 +14,11 @@ import { updateLockPath } from '../host-swap.js';
  *
  * Round 2 replaced it with a JOURNALLED swap; round 3 removed the journal,
  * because a recovery that reads its destination from a file can be told where
- * to write. The set is still staged outside every hook discovery directory,
- * flushed, verified byte-for-byte and swapped in — but a refresh a crash
- * interrupted is now finished by reinstalling the PACKAGE into the standard
- * path, and nothing on disk names a destination.
+ * to write; round 4 removed the healing too, because a `backups/` entry is
+ * also what a SUCCESSFUL refresh leaves, so healing from one reinstalls a hook
+ * the operator has just uninstalled. The set is still staged outside every
+ * hook discovery directory, flushed, verified byte-for-byte and swapped in —
+ * but a missing hook is reported, never written.
  *
  * These cases are the proof, on fake homes under a temp dir — no `$HOME`, no
  * gateway.
@@ -198,7 +199,7 @@ describe('the staged set never becomes a second hook (#574 r2)', () => {
   });
 });
 
-describe('a crash between the hook renames is healed from the package (#574 r3)', () => {
+describe('a crash between the hook renames is reported, never repaired (#574 r4)', () => {
   function crashAfterFirstRename(): ReturnType<typeof refreshInstalledHookFiles> {
     const real = fs.renameSync;
     const spy = jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
@@ -225,47 +226,51 @@ describe('a crash between the hook renames is healed from the package (#574 r3)'
     expect(fs.readdirSync(configRoot).filter((n) => n.startsWith('.shieldcortex-'))).toEqual([]);
   });
 
-  it('is put back by the next refresh, from the package', () => {
+  it('is not put back by the next refresh — absence is reported, not repaired (r3 blocker 1)', () => {
     installStale();
-    crashAfterFirstRename();
+    const crashed = crashAfterFirstRename();
     expect(fs.existsSync(hookDir)).toBe(false);
+    // Said at the moment it is known, with the backup path in the sentence.
+    const backup = fs.readdirSync(path.join(configRoot, 'backups'))[0];
+    expect(crashed.failed[0].error).toContain(path.join(configRoot, 'backups', backup));
 
     const result = refreshInstalledHookFiles(home, { now: FROZEN });
 
-    expect(result.reinstalled).toEqual([hookDir]);
+    expect(fs.existsSync(hookDir)).toBe(false);
     expect(result.refreshed).toEqual([]);
-    expect(hookFilesStale(hookDir)).toBe(false);
-    expect(hookDirsIn(hooksRoot)).toEqual(['cortex-memory']);
-    // A reinstall has nothing to displace, so it reserves no second backup.
+    expect(result.installed).toEqual([]);
     expect(fs.readdirSync(path.join(configRoot, 'backups'))).toHaveLength(1);
   });
 
-  it('leaves a config root that never had the hook alone', () => {
+  it('leaves a config root that never had the hook alone, backup or no backup (r3 blocker 1)', () => {
     fs.mkdirSync(configRoot, { recursive: true });
 
-    const result = refreshInstalledHookFiles(home, { now: FROZEN });
+    expect(refreshInstalledHookFiles(home, { now: FROZEN }).installed).toEqual([]);
+    expect(fs.existsSync(hooksRoot)).toBe(false);
 
-    expect(result.installed).toEqual([]);
-    expect(result.reinstalled).toEqual([]);
+    // The reviewer's planted layout: an EMPTY entry in exactly the shape one
+    // of our own swaps writes. Round 3 installed the package on the strength
+    // of it; a backup-shaped directory is not installation intent.
+    fs.mkdirSync(path.join(configRoot, 'backups', 'cortex-memory-preupdate-planted'), { recursive: true });
+
+    expect(refreshInstalledHookFiles(home, { now: FROZEN }).installed).toEqual([]);
     expect(fs.existsSync(hooksRoot)).toBe(false);
   });
 
-  it('refreshes a PARTIAL hook directory instead of accepting it as installed', () => {
+  it('leaves a PARTIAL hook directory alone rather than adopting it', () => {
     // The reviewer's ENOSPC probe left a target with one file and no HOOK.md.
-    // "The directory exists" is not "the hook is installed".
+    // "The directory exists" is not "the hook is installed" — and "the hook is
+    // missing" is not permission to write one.
     fs.mkdirSync(hookDir, { recursive: true });
     fs.writeFileSync(path.join(hookDir, 'handler.ts'), 'half a hook\n');
     fs.mkdirSync(path.join(configRoot, 'backups', 'cortex-memory-preupdate-old'), { recursive: true });
 
     const result = refreshInstalledHookFiles(home, { now: FROZEN });
 
-    expect(result.reinstalled).toEqual([hookDir]);
-    expect(hookFilesStale(hookDir)).toBe(false);
-    // The husk was kept, not deleted.
-    expect(fs.readFileSync(
-      path.join(configRoot, 'backups', `cortex-memory-preupdate-${STAMP}`, 'cortex-memory', 'handler.ts'),
-      'utf-8',
-    )).toBe('half a hook\n');
+    expect(result.installed).toEqual([]);
+    expect(result.refreshed).toEqual([]);
+    expect(fs.readdirSync(hookDir)).toEqual(['handler.ts']);
+    expect(fs.readdirSync(path.join(configRoot, 'backups'))).toEqual(['cortex-memory-preupdate-old']);
   });
 });
 
@@ -331,11 +336,13 @@ describe('one writer per config root (#574 r2 blocker 3)', () => {
     let inner: ReturnType<typeof refreshInstalledHookFiles> | null = null;
     const real = fs.renameSync;
     jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
-      const out = real(from, to);
+      // BEFORE the displacing rename, not after: the target is still there and
+      // still stale, so the re-entrant run has real work to do and the only
+      // thing that can stop it is the lock.
       if (inner === null && String(to).includes('-preupdate-')) {
         inner = refreshInstalledHookFiles(home, { now: FROZEN });
       }
-      return out;
+      return real(from, to);
     });
 
     const outer = refreshInstalledHookFiles(home, { now: FROZEN });

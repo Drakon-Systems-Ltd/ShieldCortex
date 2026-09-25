@@ -401,18 +401,17 @@ const HAS_HERMES_PROFILE = (() => {
     process.env.HERMES_HOME = profile;
   });
 
-  it('self-heals into the profile, never into the default root', () => {
+  it('installs into neither root when the profile plugin is absent (r3 blocker 1)', () => {
     // The state a crash between the two renames leaves in a profile: the
     // plugin gone from `profiles/work/plugins`, the previous copy in the
-    // profile's own `backups/`.
+    // profile's own `backups/`. Indistinguishable from an uninstall, so the
+    // refresh writes nothing — into the profile or the default root.
     fs.mkdirSync(path.join(profile, 'backups', 'shieldcortex-preupdate-old', 'shieldcortex'), { recursive: true });
 
     const result = refreshHermesPluginCopies(home, { now: FROZEN });
 
-    expect(result.status).toBe('refreshed');
-    expect(hermesPluginCopyStale(profileInstalled).stale).toBe(false);
-    expect(result.detail.join('\n')).toContain(profileInstalled);
-    // The default root is where round 2's install went. Nothing goes there.
+    expect(result.status).toBe('not-installed');
+    expect(fs.existsSync(profileInstalled)).toBe(false);
     expect(fs.existsSync(installed)).toBe(false);
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
   });

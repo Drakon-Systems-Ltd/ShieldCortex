@@ -8,20 +8,25 @@ import {
   refreshHermesPluginCopies,
 } from '../hermes-refresh.js';
 import { probeHermesDiscovery } from '../hermes-plugins.js';
-import { installHermes } from '../hermes.js';
+import { installHermes, uninstallHermes } from '../hermes.js';
 import { updateLockPath } from '../host-swap.js';
 
 /**
- * #574 / #576 round 3 — the crash between the two renames, and the six ways
- * round 2's JOURNAL answer went wrong.
+ * #574 / #576 round 4 — the crash between the two renames, and the two ways
+ * earlier rounds tried to finish somebody else's swap.
  *
  * Round 2 recorded `{target, backup, staged}` in
  * `<hermesHome>/.shieldcortex-refresh-journal.json` and let the next run MOVE
- * THE PATHS IT NAMED. There is no journal now: a refresh that was interrupted
- * is recognised from two computed facts — the standard target has no
- * `plugin.yaml`, and one of our own swaps left a `backups/…-preupdate-*` under
- * this root — and the remedy is to reinstall the packaged tree into that same
- * standard path. Nothing on disk names a destination.
+ * THE PATHS IT NAMED. Round 3 dropped the journal but kept the healing, keyed
+ * on "the standard target has no `plugin.yaml` AND one of our own swaps left a
+ * `backups/…-preupdate-*`" — a predicate the ordinary sequence refresh →
+ * `hermes uninstall` satisfies exactly, so `update` reinstalled the plugin an
+ * operator had just removed.
+ *
+ * So there is no healing either. A refresh rewrites copies that EXIST and are
+ * stale; a swap that dies after the first rename SAYS SO at that moment, with
+ * the backup path and `shieldcortex hermes install` in the same sentence, and
+ * the next run leaves the host exactly as it found it.
  *
  * Every case is a fake home under a temp dir. The real `~/.hermes` is never
  * read or written; `HERMES_HOME` and `HERMES_ENABLE_PROJECT_PLUGINS` are
@@ -136,7 +141,7 @@ function crashAfterFirstRename(): ReturnType<typeof refreshHermesPluginCopies> {
   }
 }
 
-describeWithHermes('a crash between the two renames is healed from the package (r3)', () => {
+describeWithHermes('a crash between the two renames is reported, never repaired (r4)', () => {
   it('leaves the backup and nothing else, and names the command that puts it back', () => {
     installCopy();
     makeStale();
@@ -155,57 +160,72 @@ describeWithHermes('a crash between the two renames is healed from the package (
     expect(fs.readdirSync(hermes).filter((n) => n.startsWith('.shieldcortex-'))).toEqual([]);
   });
 
-  it('is healed by the next `update`, which reinstalls the packaged tree', () => {
+  it('is not recreated by the next `update` — absence is reported, not repaired (r3 blocker 1)', () => {
     installCopy();
     makeStale();
-    crashAfterFirstRename();
+    const crashed = crashAfterFirstRename();
     expect(fs.existsSync(installed)).toBe(false);
+    // The one process that KNOWS the swap was interrupted says so, there and
+    // then, with the backup path and the command in the same sentence.
+    const backup = fs.readdirSync(path.join(hermes, 'backups'))[0];
+    expect(crashed.detail.join('\n')).toContain(path.join(hermes, 'backups', backup));
+    expect(crashed.detail.join('\n')).toMatch(/shieldcortex hermes install/);
 
     const result = refreshHermesPluginCopies(home, { now: FROZEN });
 
-    expect(fs.existsSync(path.join(installed, 'plugin.yaml'))).toBe(true);
-    expect(hermesPluginCopyStale(installed).stale).toBe(false);
-    expect(result.status).toBe('refreshed');
-    expect(result.detail.join('\n')).toMatch(/was missing and was reinstalled from the package/);
-    // The interrupted run's backup is still there. Nothing was added to it:
-    // a reinstall has nothing to displace, so it reserves no second backup.
+    // The later run has no way to tell this from a deliberate uninstall, so it
+    // does not guess: nothing is created, and the backup is left where it is.
+    expect(fs.existsSync(installed)).toBe(false);
+    expect(result.status).toBe('not-installed');
+    expect(result.refreshed).toEqual([]);
     expect(fs.readdirSync(path.join(hermes, 'backups'))).toHaveLength(1);
     expect(fs.readdirSync(hermes).filter((n) => n.startsWith('.shieldcortex-'))).toEqual([]);
   });
 
-  it('leaves a host that never had the plugin alone, backup or no backup', () => {
+  it('a backup-shaped directory grants no installation authority (r3 blocker 1)', () => {
     // No install, and no backup either: not our integration, not our business.
     expect(refreshHermesPluginCopies(home, { now: FROZEN }).status).toBe('not-installed');
     expect(fs.existsSync(installed)).toBe(false);
 
-    // A `backups/` full of somebody else's directories is not evidence: only
-    // the `shieldcortex-preupdate-*` shape one of our own swaps writes is.
-    fs.mkdirSync(path.join(hermes, 'backups', 'some-other-tool'), { recursive: true });
+    // The reviewer's planted layout: an EMPTY `backups/` entry in exactly the
+    // shape one of our own swaps writes, on a host with no plugin. Round 3
+    // read that as "an interrupted refresh" and installed the package.
+    fs.mkdirSync(path.join(hermes, 'backups', 'shieldcortex-preupdate-planted'), { recursive: true });
     expect(refreshHermesPluginCopies(home, { now: FROZEN }).status).toBe('not-installed');
     expect(fs.existsSync(installed)).toBe(false);
   });
 
-  it('refreshes a PARTIAL target rather than accepting it as installed (r2 blocker 5)', () => {
+  it('does not reinstall the plugin after a refresh followed by an uninstall (r3 blocker 1)', async () => {
+    // The ORDINARY sequence, which is the damning one: a successful refresh
+    // leaves a permanent backup, the operator uninstalls, and the next update
+    // must not undo their decision.
+    installCopy();
+    makeStale();
+    expect(refreshHermesPluginCopies(home, { now: FROZEN }).status).toBe('refreshed');
+    expect(fs.readdirSync(path.join(hermes, 'backups'))).toHaveLength(1);
+
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    await uninstallHermes(home);
+    expect(fs.existsSync(installed)).toBe(false);
+
+    expect(refreshHermesPluginCopies(home, { now: FROZEN }).status).toBe('not-installed');
+    expect(fs.existsSync(installed)).toBe(false);
+  });
+
+  it('leaves a PARTIAL target alone rather than adopting it (r2 blocker 5)', () => {
     // The state the reviewer's fault-injection probe left: a target directory
     // holding one file and no manifest, plus the backup from the swap that
-    // failed. "The directory exists" is not "the plugin is installed".
+    // failed. "The directory exists" is not "the plugin is installed" — and
+    // "the plugin is missing" is not permission to write one.
     fs.mkdirSync(installed, { recursive: true });
     fs.writeFileSync(path.join(installed, 'README.md'), 'partial\n');
     fs.mkdirSync(path.join(hermes, 'backups', 'shieldcortex-preupdate-old', 'shieldcortex'), { recursive: true });
 
     const result = refreshHermesPluginCopies(home, { now: FROZEN });
 
-    expect(result.status).toBe('refreshed');
-    expect(hermesPluginCopyStale(installed).stale).toBe(false);
-    // The husk was kept, not deleted, beside the earlier backup.
-    expect(fs.readdirSync(path.join(hermes, 'backups')).sort()).toEqual([
-      'shieldcortex-preupdate-old',
-      `shieldcortex-preupdate-${STAMP}`,
-    ].sort());
-    expect(fs.readFileSync(
-      path.join(hermes, 'backups', `shieldcortex-preupdate-${STAMP}`, 'shieldcortex', 'README.md'),
-      'utf-8',
-    )).toBe('partial\n');
+    expect(result.status).toBe('not-installed');
+    expect(fs.readdirSync(installed)).toEqual(['README.md']);
+    expect(fs.readdirSync(path.join(hermes, 'backups'))).toEqual(['shieldcortex-preupdate-old']);
   });
 
   it('never leaves two `shieldcortex` copies inside the plugins root, at any point', () => {
@@ -314,11 +334,13 @@ describeWithHermes('one writer per Hermes home (r2 blocker 3)', () => {
     // between its two renames. A second `update` on the same host is exactly
     // this interleaving, and round 2's recovery dismantled the first one.
     jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
-      const out = real(from, to);
+      // BEFORE the displacing rename, not after: the target is still there and
+      // still stale, so the re-entrant run has real work to do and the only
+      // thing that can stop it is the lock.
       if (inner === null && String(to).includes('-preupdate-')) {
         inner = refreshHermesPluginCopies(home, { now: FROZEN });
       }
-      return out;
+      return real(from, to);
     });
 
     const outer = refreshHermesPluginCopies(home, { now: FROZEN });

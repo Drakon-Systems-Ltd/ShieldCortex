@@ -751,9 +751,8 @@ export async function stepOpenClawHook(
     if (!result.sourceAvailable) {
       return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from', detail: [] };
     }
-    const written = result.refreshed.length + result.reinstalled.length;
+    const written = result.refreshed.length;
     const detail = [
-      ...result.reinstalled.map((dir) => scrub(`${dir} was missing and was reinstalled from the package`)),
       ...result.refreshed.map((dir) => scrub(`refreshed ${dir}`)),
       ...result.backups.map((b) => scrub(`previous hook kept at ${b.backup}`)),
       ...result.warnings.map(scrub),

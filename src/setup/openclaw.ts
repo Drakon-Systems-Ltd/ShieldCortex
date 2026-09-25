@@ -31,7 +31,7 @@ import {
   releaseReservation,
   reserveBackupDir,
 } from './fs-answers.js';
-import { acquireUpdateLock, preupdateBackupExists, stageAndPublish } from './host-swap.js';
+import { acquireUpdateLock, stageAndPublish } from './host-swap.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -421,8 +421,7 @@ interface HookPublishResult {
   unsynced?: string[];
 }
 /**
- * Replace one hook directory, all or nothing (#574 r2 blocker 2) — or put the
- * packaged set back when there is nothing at the standard path (r3).
+ * Replace one hook directory, all or nothing (#574 r2 blocker 2).
  *
  * The old path overwrote `HOOK.md`, `handler.ts` and `runtime.mjs` one at a
  * time, IN PLACE. A failure on the third left the new handler beside the old
@@ -497,12 +496,6 @@ export interface HookRefreshResult {
   installed: string[];
   /** Directories whose files were re-copied because they were behind the package. */
   refreshed: string[];
-  /**
-   * Directories that were MISSING and were put back from the package, because
-   * one of our own swaps had left a backup for that root (#574 r3). The
-   * self-heal for a crash between the two renames, with no journal in it.
-   */
-  reinstalled: string[];
   /** Installed directories that already matched the packaged source. */
   current: string[];
   /** Directories the copy could not be written to, with the reason. */
@@ -520,8 +513,7 @@ export interface HookRefreshResult {
 }
 
 /**
- * Re-copy the packaged hook over every installed copy that is out of date, and
- * put back a standard copy that an interrupted refresh left missing.
+ * Re-copy the packaged hook over every installed copy that is out of date.
  *
  * The hook is installed by FILE COPY, so upgrading the npm package leaves the
  * gateway running the previous `handler.ts` / `runtime.mjs` until somebody runs
@@ -543,7 +535,6 @@ export function refreshInstalledHookFiles(
   const result: HookRefreshResult = {
     installed: [],
     refreshed: [],
-    reinstalled: [],
     current: [],
     failed: [],
     backups: [],
@@ -561,14 +552,13 @@ export function refreshInstalledHookFiles(
     // still reported, so the caller can tell "nothing to refresh" from
     // "nothing is installed" (they need different words).
     if (!result.sourceAvailable) continue;
-    // The self-heal, with no path read from disk: the standard hook is not
-    // there, and one of our own swaps demonstrably backed a copy up under this
-    // root. The backup is evidence and nothing else — it is never read, moved
-    // or deleted, and the destination comes from `standardHookDir`.
-    const reinstall = !installed
-      && preupdateBackupExists(path.join(configRoot, 'backups'), HOOK_NAME);
-    if (!installed && !reinstall) continue;
-    if (installed && !hookFilesStale(dir)) {
+    // A hook that is not there is not refreshed into existence (r4). A backup
+    // under this root is not installation intent: the same directory is left
+    // behind by a SUCCESSFUL refresh, so healing from it reinstalls the hook
+    // after a deliberate uninstall. Absence is reported by the caller, never
+    // repaired here.
+    if (!installed) continue;
+    if (!hookFilesStale(dir)) {
       result.current.push(dir);
       continue;
     }
@@ -591,12 +581,7 @@ export function refreshInstalledHookFiles(
       result.failed.push({ dir, error: published.error ?? 'refresh failed' });
       continue;
     }
-    if (reinstall) {
-      result.reinstalled.push(dir);
-      result.installed.push(dir);
-    } else {
-      result.refreshed.push(dir);
-    }
+    result.refreshed.push(dir);
     if (typeof published.backup === 'string') result.backups.push({ dir, backup: published.backup });
   }
   return result;

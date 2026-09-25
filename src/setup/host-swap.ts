@@ -37,12 +37,22 @@
  * names the integration's installer, which is this same publication run from
  * the package.
  *
- * A power cut anywhere in 4-5 leaves either the target or the backup on disk
- * and durable. The next `update` sees "a backup exists for this root and the
- * standard target is missing" and reinstalls from the package. It does not
- * read, move or delete that backup: the backup's only role is as EVIDENCE that
- * this host had the integration installed, so a self-heal never conjures an
- * install onto a host that never had one.
+ * ## Why nothing here HEALS a missing target (r4)
+ *
+ * Round 3 went one step further than it could prove: if the standard target
+ * was missing and `backups/<name>-preupdate-*` existed, `update` reinstalled
+ * the packaged set. Review showed the predicate cannot tell the two states
+ * apart. A successful refresh leaves a permanent backup; the operator then
+ * runs `uninstall`; the next `update` reads the same evidence and puts the
+ * integration back. A planted empty `backups/shieldcortex-preupdate-x` does
+ * the same on a host that never had it. Backup-shaped directories are not
+ * installation intent, and nothing short of a stored marker can make them one.
+ *
+ * So a missing target is REPORTED, never repaired. The one moment anybody
+ * knows a swap was interrupted is the moment it fails, inside this function,
+ * with the backup path in hand — so that is where the sentence gets printed
+ * (`targetMissing` below), naming the integration's installer and the backup
+ * to restore from. Nothing deletes a backup, ever.
  */
 
 import fs from 'fs';
@@ -482,24 +492,4 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
   flush(targetParent, staging);
   dropStaging();
   return { ok: true, backup, unsynced };
-}
-
-/**
- * Has this root ever had the integration installed — i.e. did one of OUR OWN
- * swaps put a previous copy under `backups/`?
- *
- * The ONLY use of this answer is the boolean in "a backup exists for this root
- * AND the standard target is missing -> reinstall the packaged set". It yields
- * a `true`, never a path: the reinstall's destination is computed from the
- * resolved home, so a hostile `backups/` entry can at most make a host
- * reinstall the correct package into the correct place.
- *
- * It exists because the alternative — reinstalling whenever the standard
- * target is missing — would install the integration on every host that never
- * had it, which is precisely what `update` must not do.
- */
-export function preupdateBackupExists(backupsRoot: string, prefix: string): boolean {
-  const listing = readdirAnswer(backupsRoot);
-  if (!('value' in listing)) return false;
-  return listing.value.some((entry) => entry.isDirectory() && entry.name.startsWith(`${prefix}-preupdate-`));
 }

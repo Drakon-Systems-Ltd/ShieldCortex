@@ -197,7 +197,6 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
         refreshed: [],
         current: [],
         failed: [],
-        reinstalled: [],
         backups: [],
         warnings: [],
         sourceAvailable: false,

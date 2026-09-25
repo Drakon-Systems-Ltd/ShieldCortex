@@ -38,24 +38,19 @@
  * `<hermesHome>/backups/`, never deleted — the same rule
  * `--fix-hermes-plugin-copies` follows.
  *
- * ## The crash between the two renames, without a journal (r3)
+ * ## The crash between the two renames (r4)
  *
  * Two renames means a window in which `plugins/` holds no copy at all, and a
  * `try/catch` cannot close it: the process that would run the `catch` is gone.
  * Round 2 closed that with an on-disk journal the next run read and ACTED ON;
- * review took it apart six ways, all the same defect (see `host-swap.ts`). So
- * there is no journal and no path-from-disk anywhere here. The packaged plugin
- * ships in this package and is always correct for the installed version, so
- * the recovery is simply an INSTALL:
+ * round 3 replaced it with "a `backups/` entry plus a missing target means
+ * reinstall". Review took both apart (see `host-swap.ts`): the second one
+ * cannot tell an interrupted refresh from a deliberate `hermes uninstall`.
  *
- *     `<hermesHome>/plugins/shieldcortex` has no `plugin.yaml`
- *       AND `<hermesHome>/backups/shieldcortex-preupdate-*` exists
- *       → stage the packaged tree and publish it into that same standard path.
- *
- * Both inputs are computed here — the target from Hermes' own resolved home,
- * the bytes from the package. The backup's only role is as EVIDENCE that this
- * host had the plugin installed, so a self-heal cannot install it onto a host
- * that never had one; it is never read, moved or deleted.
+ * So this refreshes copies that EXIST and are stale, and nothing else. It
+ * never creates a plugin that is absent. A swap that fails after the first
+ * rename says so at that moment, naming `shieldcortex hermes install` and the
+ * backup it left — see `publishJobs`. Nothing deletes a backup.
  */
 
 import fs from 'fs';
@@ -68,7 +63,7 @@ import {
   pathContains,
   SYMLINK_PREFLIGHT_ENTRY_BUDGET,
 } from './fs-answers.js';
-import { acquireUpdateLock, preupdateBackupExists, stageAndPublish } from './host-swap.js';
+import { acquireUpdateLock, stageAndPublish } from './host-swap.js';
 import {
   hermesEnvironment,
   HERMES_PLUGIN_NAME,
@@ -100,12 +95,9 @@ export function hermesPluginSourceDir(): string {
 }
 
 /**
- * The ONE destination any of this ever writes to, for a given Hermes home.
- *
- * Exported because `update`, `doctor` and the self-heal all have to mean the
- * same directory by "the standard target", and because it is the whole answer
- * to "where does a recovery put the plugin": it is computed from the home
- * Hermes itself resolved, and from nothing else (r3).
+ * The conventional install path for a given Hermes home — the one
+ * `hermes install` writes and the one an operator means by "the plugin".
+ * Computed from the home Hermes itself resolved, and from nothing else.
  */
 export function standardHermesTarget(hermesHome: string): string {
   return path.join(hermesHome, 'plugins', HERMES_PLUGIN_NAME);
@@ -113,7 +105,7 @@ export function standardHermesTarget(hermesHome: string): string {
 
 /**
  * Is there an installed plugin at this path — not just a directory, but one
- * carrying the manifest Hermes keys on (r3)?
+ * carrying the manifest Hermes keys on?
  *
  * "The directory exists" is not "the plugin is installed": a partial copy left
  * by a failed install has a `README.md` and no `plugin.yaml`, and treating it
@@ -225,11 +217,7 @@ export interface HermesRefreshResult {
   summary: string;
   /** Extra lines printed under the step: backup paths, refusal detail. */
   detail: string[];
-  /**
-   * The copies actually rewritten, with where the previous one went. `backup`
-   * is null for a REINSTALL — the self-heal path, where the target was missing
-   * and there was therefore nothing to displace.
-   */
+  /** The copies actually rewritten, with where each previous one went. */
   refreshed: Array<{ dir: string; backup: string | null }>;
 }
 
@@ -303,21 +291,19 @@ function writePathRefusal(scan: HermesPluginScan, targets: string[]): string | n
   return null;
 }
 
-/** One directory this run will publish the packaged tree into. */
+/** One existing, stale copy this run will publish the packaged tree over. */
 interface RefreshJob {
-  /** The destination. Always computed here, never read from disk. */
+  /** The destination. Always a copy Hermes reported, never read off disk. */
   dir: string;
   /** The `plugins/` root it sits in. */
   root: string;
-  /** True when there is no copy to displace: a self-heal, so no backup. */
-  reinstall: boolean;
 }
 
 /**
- * Refresh every installed `shieldcortex` copy Hermes actually loads, put the
- * standard one back when an interrupted refresh left it missing, or say why
- * nothing was touched. Never creates an install on a host that never had one,
- * and never restarts anything.
+ * Refresh every installed `shieldcortex` copy Hermes actually loads, or say why
+ * nothing was touched. Only ever rewrites a copy that is already there: it
+ * never creates an install on a host that does not have one, and never
+ * restarts anything.
  *
  * `now` is a test seam for the backup/staging stamp; production passes the
  * current time.
@@ -353,28 +339,14 @@ export function refreshHermesPluginCopies(
     return { status: 'not-installed', summary: 'Hermes not detected', detail: [], refreshed: [] };
   }
 
-  const standard = standardHermesTarget(scan.hermesHome);
   const backupsRoot = path.join(scan.hermesHome, 'backups');
-  // The state a crash between the two renames leaves, recognised WITHOUT
-  // reading anything off disk that could name a path: the standard target has
-  // no manifest, and one of our own swaps demonstrably backed a copy up here.
-  const interrupted = !hermesPluginPresentAt(standard)
-    && preupdateBackupExists(backupsRoot, HERMES_PLUGIN_NAME);
 
   // Without Hermes' own discovery there is no answer to the only question that
   // makes a write safe: which copy does the gateway load (#569 r4). A host with
   // no copy at the conventional path is simply not installed, and saying so is
-  // quieter and just as true as a warning nobody can act on — unless a backup
-  // says it WAS installed, in which case saying "not installed" is how an
-  // operator never learns there is a one-command fix (r3).
+  // quieter and just as true as a warning nobody can act on.
   if (!scan.fromHermes) {
-    if (interrupted) {
-      return warn(
-        `an interrupted refresh left ${standard} missing — ${HERMES_REINSTALL_COMMAND} to put it back`,
-        [scan.undeterminedReason ?? 'Hermes could not be asked which copy it loads'],
-      );
-    }
-    if (!hermesPluginPresentAt(standard)) {
+    if (!hermesPluginPresentAt(standardHermesTarget(scan.hermesHome))) {
       return { status: 'not-installed', summary: 'Hermes plugin not installed', detail: [], refreshed: [] };
     }
     return warn(
@@ -410,14 +382,14 @@ export function refreshHermesPluginCopies(
     seen.add(winner.dir);
     targets.push({ dir: winner.dir, root: rootScan.root });
   }
-  if (targets.length === 0 && !interrupted) {
+  if (targets.length === 0) {
     return { status: 'not-installed', summary: 'Hermes plugin not installed', detail: [], refreshed: [] };
   }
 
   // A copy that fails byte-verification is REFRESHED by the ordinary path; it
   // is never treated as healthy just because the directory is there.
   const stale = targets.filter((t) => hermesPluginCopyStale(t.dir, sourceDir).stale);
-  if (!interrupted && stale.length === 0) {
+  if (stale.length === 0) {
     if (!hermesPluginCopyStale(targets[0].dir, sourceDir).comparable) {
       return warn('packaged Hermes plugin source not found — nothing to compare against');
     }
@@ -429,17 +401,7 @@ export function refreshHermesPluginCopies(
     };
   }
 
-  const jobs: RefreshJob[] = [];
-  if (interrupted) {
-    jobs.push({ dir: standard, root: path.dirname(standard), reinstall: true });
-  }
-  for (const target of stale) {
-    // A heal job already covers the standard target; a stale copy in another
-    // root is its own job.
-    if (!jobs.some((j) => j.dir === target.dir)) {
-      jobs.push({ dir: target.dir, root: target.root, reinstall: false });
-    }
-  }
+  const jobs: RefreshJob[] = stale.map((t) => ({ dir: t.dir, root: t.root }));
 
   const stamp = now.toISOString().replace(/[:.]/g, '-');
 
@@ -514,8 +476,6 @@ function publishJobs(params: {
   const { jobs, scan, sourceDir, backupsRoot, stamp } = params;
   const bound = writeBounds(scan)[0] ?? scan.hermesHome;
   const refreshed: Array<{ dir: string; backup: string | null }> = [];
-  /** Which of them were put back because they were MISSING, not stale. */
-  const reinstalled = new Set<string>();
   const detail: string[] = [];
 
   for (const job of jobs) {
@@ -540,7 +500,6 @@ function publishJobs(params: {
     detail.push(...outcome.unsynced.map((line) => `${job.dir}: ${line}`));
     if (outcome.ok) {
       refreshed.push({ dir: job.dir, backup: outcome.backup });
-      if (job.reinstall) reinstalled.add(job.dir);
       continue;
     }
     detail.push(outcome.targetMissing
@@ -558,14 +517,10 @@ function publishJobs(params: {
     status: partial ? 'warn' : 'refreshed',
     summary: (partial
       ? `refreshed ${refreshed.length} of ${jobs.length} copies`
-      : `refreshed ${refreshed.length} cop${refreshed.length === 1 ? 'y' : 'ies'}` +
-        (reinstalled.size > 0 ? ' (an interrupted refresh was finished from the package)' : '')
+      : `refreshed ${refreshed.length} cop${refreshed.length === 1 ? 'y' : 'ies'}`
     ) + ` — ${HERMES_RESTART_NOTE}`,
     detail: [
-      ...refreshed.map((r) => reinstalled.has(r.dir)
-        ? `${r.dir} was missing and was reinstalled from the package` +
-          (r.backup === null ? '' : `; what was there is kept at ${r.backup}`)
-        : `${r.dir} refreshed; previous copy kept at ${r.backup}`),
+      ...refreshed.map((r) => `${r.dir} refreshed; previous copy kept at ${r.backup}`),
       ...detail,
     ],
     refreshed,
