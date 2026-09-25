@@ -1052,6 +1052,240 @@ function safeSignalList(signals) {
   return [...new Set(out)].slice(0, 25);
 }
 
+// ── #517 (3): the denial record carries its evidence ─────────────────────
+//
+// `denials.jsonl` is the file an operator opens first after an unattended
+// refusal, and until now it named the rules and nothing else — the matched
+// token existed at decision time (the interactive block message prints
+// `rule:` and `matched:`) and was thrown away on the way to the durable row.
+// The guard core already returns the evidence (#192, `verdict.matches`) and
+// the OpenClaw interceptor already persists it; this is the hook plane
+// catching up, not a new evidence source.
+//
+// What is persisted is a PROJECTION, never the command itself — see the r4
+// note below for why redaction was abandoned for this field.
+
+/**
+ * Rules whose matched span IS the secret. The core omits a span for these
+ * (#192); the hook re-asserts it because the dist build it loads is not a
+ * version this file may assume.
+ */
+const SPANLESS_SIGNAL_RE = /^(secret-egress|credential-access)/;
+const MAX_MATCH_ROWS = 25;
+
+// ── Evidence contract (r6 — closed vocabulary; nothing derived from or selected by input) ──
+//
+// r1–r3 tried to make the matched command text safe to KEEP (collapse,
+// bound, credential-redact, tokenise) and each round closed one shape while
+// review found the next. r4 stopped keeping the text and instead persisted
+// a PROJECTION of it — verb, hosts, flag names — built from an allow-list of
+// facts a shell-aware tokeniser could read off the tokens. Review r4 showed
+// that was still input persistence under new JSON keys: the projection
+// visited every token without knowing its semantic ROLE, so a password
+// that happened to begin with two dashes was persisted as a flag name, and
+// a password shaped like a URL contributed its hostname. A character
+// grammar ("looks like a flag", "looks like a host") is not a finite safe
+// vocabulary; it only says what a value is SPELLED like, never whether it
+// was a credential argument.
+//
+// r5 removed hosts, flags and basenames but kept a `verb`: argv[0] looked up
+// in a table in this file, with the table's entry persisted rather than the
+// token. That is still a string SELECTED by the input, through a mechanism
+// (a table keyed on input text) that invites the next round to widen it.
+// r6 takes the reviewer's descope whole: the durable row carries the RULE
+// NAME from the guard's own signal table, two withholding constants, and
+// bounded counts and booleans. There is no field a token can be copied
+// into, and no field a token can be looked up into.
+//
+//   - `signal`        — the rule name, only if it is in `SAFE_SIGNALS`. This
+//                       is the one place a row says WHAT KIND of thing
+//                       matched, and it is the guard's vocabulary, never
+//                       an echo of the command.
+//   - `spanWithheld`  — the constant `'command-text'` on every row that had
+//                       a command-derived span. The span itself is never
+//                       persisted, verbatim, redacted, projected or looked up.
+//   - `argc`          — how many shell-aware tokens the span had, capped at
+//                       `MAX_ARGC`. A bounded count.
+//   - `pipe`          — true when an unquoted token contains `|`. Named for
+//                       exactly what is tested — a pipe operator is present
+//                       — not for what it pipes into.
+//   - `subshell`      — true when an unquoted token contains `$(` or a
+//                       backtick.
+//   - `provenanceWithheld` — the constant `'path'` on every row the core
+//                       gave folded-source provenance for (#184). Paths and
+//                       basenames are input too — `/tmp/<token>.sh` is a
+//                       path — so none of it is persisted; `line` (an
+//                       integer) and `chainDepth` (a capped count of chain
+//                       components) are what survive.
+//
+// No verb, no hosts, no flags, no basenames: each of those was a string
+// copied out of, or chosen by, the input, which is the defect. What an
+// operator loses is diagnostic colour; what they keep is the rule that
+// fired, the row it fired on, the shape of the command (argument count,
+// pipe/subshell) and where in a folded script it was. Richer diagnostic
+// text, if ever wanted, is a separately designed operator-only surface,
+// not this durable file.
+//
+// The credential redactor from `dist/defence/credential-leak` is not on
+// this path: there is no free-text field for it to run over, so the row is
+// identical whether that module is absent, present, or throws.
+// `tokenizeShellArgs` survives because the counts need a shell-aware
+// tokeniser; it never hands a token's raw text back out to anything that
+// persists.
+
+const MAX_CHAIN_DEPTH = 6;
+/** `argc` is a bounded count, not a proxy for the command's length. */
+const MAX_ARGC = 256;
+/**
+ * The hook must not assume the dist it loads bounds a span to any size (see
+ * the file header). Nothing here is a security boundary — the tokeniser is
+ * a single linear pass, not a backtracking regex — this only bounds the WORK
+ * done on a pathologically large string from a compromised or buggy dist.
+ */
+const MAX_PROJECTION_INPUT_CHARS = 8192;
+
+function projectShellShape(tokens) {
+  let pipe = false;
+  let subshell = false;
+  for (const tok of tokens) {
+    if (tok.quote === "'") continue; // single-quoted: shell-literal text, not an operator
+    if (tok.value.includes('|')) pipe = true;
+    if (tok.value.includes('$(') || tok.value.includes('`')) subshell = true;
+  }
+  return { pipe, subshell };
+}
+
+/**
+ * The whole safety mechanism for command-derived evidence (r6): `value` is
+ * tokenised, and what is returned is a constant, a capped token count, and
+ * two booleans. No substring of `value`, redacted or otherwise, is ever
+ * returned, and no string is chosen BY `value` either — there is no table
+ * keyed on its tokens.
+ */
+function projectCommandEvidence(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().slice(0, MAX_PROJECTION_INPUT_CHARS);
+  if (!trimmed) return null;
+  const tokens = tokenizeShellArgs(trimmed);
+  if (tokens.length === 0) return null;
+  const out = { spanWithheld: 'command-text' };
+  out.argc = Math.min(tokens.length, MAX_ARGC);
+  const { pipe, subshell } = projectShellShape(tokens);
+  if (pipe) out.pipe = true;
+  if (subshell) out.subshell = true;
+  return out;
+}
+
+/**
+ * Split `text` into shell-style argument tokens. Whitespace separates
+ * arguments except inside single quotes (fully literal) or double quotes
+ * (`\` escapes `" \ $` \``` only); outside quotes `\` escapes the next
+ * character. Each token records its decoded `value` and `quote` (the quote
+ * character when the ENTIRE token was one closed quoted run, else `null`) —
+ * the only consumers are the count and the two shape booleans, neither of
+ * which persists a token's text or anything chosen by it.
+ */
+function tokenizeShellArgs(text) {
+  const tokens = [];
+  const len = text.length;
+  let i = 0;
+  while (i < len) {
+    while (i < len && /\s/.test(text[i])) i += 1;
+    if (i >= len) break;
+    const parts = [];
+    while (i < len && !/\s/.test(text[i])) {
+      const ch = text[i];
+      if (ch === "'" || ch === '"') {
+        const quote = ch;
+        i += 1;
+        let body = '';
+        let closed = false;
+        while (i < len) {
+          const c = text[i];
+          if (c === quote) { i += 1; closed = true; break; }
+          if (quote === '"' && c === '\\' && i + 1 < len && '"\\$`'.includes(text[i + 1])) {
+            body += text[i + 1];
+            i += 2;
+            continue;
+          }
+          body += c;
+          i += 1;
+        }
+        parts.push({ kind: 'quoted', quote, text: body, closed });
+      } else if (ch === '\\') {
+        if (i + 1 < len) {
+          parts.push({ kind: 'bare', text: text[i + 1] });
+          i += 2;
+        } else {
+          i += 1;
+        }
+      } else {
+        let j = i;
+        while (j < len && !/\s/.test(text[j]) && text[j] !== "'" && text[j] !== '"' && text[j] !== '\\') j += 1;
+        parts.push({ kind: 'bare', text: text.slice(i, j) });
+        i = j;
+      }
+    }
+    const value = parts.map((p) => p.text).join('');
+    const quote = parts.length === 1 && parts[0].kind === 'quoted' && parts[0].closed ? parts[0].quote : null;
+    tokens.push({ value, quote });
+  }
+  return tokens;
+}
+
+const CHAIN_SEPARATOR = '→';
+
+/**
+ * `source`/`chain` (#184 folded-script provenance) are paths, and a path is
+ * input: `/tmp/<token>.sh` is one. r4 kept their basenames when they were
+ * allow-listed shape; r5 keeps no string from them at all. What survives is
+ * that provenance EXISTED (`provenanceWithheld: 'path'`) and how deep the
+ * fold chain was (`chainDepth`, a capped count). `line` is handled by the
+ * caller as the integer it is.
+ */
+function projectProvenance(rawSource, rawChain) {
+  const hasSource = typeof rawSource === 'string' && rawSource.trim().length > 0;
+  const hasChain = typeof rawChain === 'string' && rawChain.trim().length > 0;
+  if (!hasSource && !hasChain) return {};
+  const out = { provenanceWithheld: 'path' };
+  if (hasChain) {
+    const depth = rawChain.split(CHAIN_SEPARATOR).map((p) => p.trim()).filter(Boolean).length;
+    out.chainDepth = Math.min(depth, MAX_CHAIN_DEPTH);
+  }
+  return out;
+}
+
+/**
+ * Project the guard's rule → matched-span evidence for the denial record.
+ * Fail-closed on every axis, and closed-vocabulary by construction: an
+ * unrecognised rule name is dropped; a command-derived span contributes
+ * only what `projectCommandEvidence` counts (never any of its text, and
+ * never a string chosen by it); provenance contributes only that it existed
+ * and how deep it was. Every string on a returned row is one of
+ * `SAFE_SIGNALS`, `'command-text'` or `'path'`.
+ */
+function safeMatchList(matches) {
+  if (!Array.isArray(matches)) return [];
+  const out = [];
+  for (const raw of matches) {
+    if (out.length >= MAX_MATCH_ROWS) break;
+    if (!raw || typeof raw !== 'object') continue;
+    const signal = String(raw.signal ?? '').trim();
+    if (!SAFE_SIGNALS.has(signal)) continue;
+    const row = { signal };
+    if (!SPANLESS_SIGNAL_RE.test(signal)) {
+      const projection = projectCommandEvidence(raw.span);
+      if (projection) Object.assign(row, projection);
+    }
+    // #184: where the match came from folded script source, the row says so
+    // and how deep the fold was — never the path (see projectProvenance).
+    Object.assign(row, projectProvenance(raw.source, raw.chain));
+    if (Number.isInteger(raw.line) && raw.line > 0) row.line = raw.line;
+    out.push(row);
+  }
+  return out;
+}
+
 function looksCredentialishNotifyLabel(text) {
   const value = String(text ?? '').trim();
   if (!value) return false;
@@ -1229,6 +1463,8 @@ function terminalDecisionReason(verdict, outcome, event) {
 function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
   const id = actionId || mintActionId();
   const context = notificationContext(sessionKey, id);
+  // #517 (3): rule → matched-span evidence, projected (r4 — command text withheld).
+  const matches = safeMatchList(verdict.matches);
   const row = {
     event,
     outcome,
@@ -1237,6 +1473,7 @@ function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, 
     tool: safeToolName(toolName),
     surface: redactedActionSurface(toolName, toolInput),
     signals: safeSignalList(verdict.signals),
+    ...(matches.length > 0 ? { matches } : {}),
     severity: verdict.severity === 'catastrophic' ? 'critical' : String(verdict.severity ?? 'unknown'),
     reason: safeGuardOutcomeReason(verdict, outcome, event),
     ...(context.sessionId ? { sessionId: context.sessionId } : {}),
