@@ -252,6 +252,39 @@ describe('#577 — wantsHelp distinguishes the help verb from an option value', 
     expect(helpGate(['--agent', 'help'], 'USAGE')).toBe(0);
   });
 
+  it('the dispatcher sees one verb slot deeper than the command does', () => {
+    // src/index.ts is handed the whole command line, so a subcommand's own verb
+    // sits in the SECOND positional. Both gates must reach the same verdict the
+    // command will, or `audit help` prints usage under a stats banner.
+    expect(wantsHelp(['audit', 'help'], { verbDepth: 2 })).toBe(true);
+    expect(wantsHelp(['audit', 'help'])).toBe(false);   // audit's own gate sees ['help']
+    expect(wantsHelp(['help'], { verbDepth: 2 })).toBe(true);
+    // Still not a help request at either depth — this is the reported defect.
+    expect(wantsHelp(['memories', 'prune', '--project', 'help'], {
+      verbDepth: 2,
+      valueFlags: MEMORIES_VALUE_FLAGS,
+    })).toBe(false);
+    expect(wantsHelp(['openclaw', 'skill', 'install', '--agent', 'help'], {
+      verbDepth: 2,
+      valueFlags: OPENCLAW_VALUE_FLAGS,
+    })).toBe(false);
+  });
+
+  it('the index.ts gates agree with the gate the command itself applies', () => {
+    const cases: Array<[string[], boolean]> = [
+      [['audit', 'help'], true],
+      [['audit', '--help'], true],
+      [['memories', 'prune', '--project', 'help'], false],
+      [['memories', 'migrate-legacy', '--source', 'help'], false],
+      [['openclaw', 'skill', 'install', '--agent', 'help'], false],
+      [['update', '--allow-conversation-access'], false],
+    ];
+    for (const [argv, expected] of cases) {
+      expect({ argv, help: wantsHelp(argv, { verbDepth: 2, valueFlags: MEMORIES_VALUE_FLAGS }) })
+        .toEqual({ argv, help: expected });
+    }
+  });
+
   it('each gated surface declares the options that take a value', () => {
     expect(OPENCLAW_VALUE_FLAGS).toContain('--agent');
     expect(MEMORIES_VALUE_FLAGS).toEqual(expect.arrayContaining(['--project', '--source', '--db', '--limit']));

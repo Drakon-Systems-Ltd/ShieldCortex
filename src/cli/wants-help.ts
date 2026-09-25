@@ -30,6 +30,18 @@ export interface WantsHelpOptions {
    * read as a verb. Omit it only for commands whose options are all boolean.
    */
   valueFlags?: readonly string[];
+  /**
+   * How many leading positionals are verb slots. 1 for a command reading its
+   * OWN arguments — `help` is the verb or it is an argument.
+   *
+   * The two gates in `src/index.ts` see the whole command line, so the
+   * subcommand word occupies the first slot and the subcommand's own verb the
+   * second: `shieldcortex help` and `shieldcortex audit help` are both help,
+   * and `audit`'s own gate (which is handed `['help']`) agrees. Those two gates
+   * only decide whether to skip the npm staleness probe and the stats banner,
+   * so their whole job is to reach the same verdict the command will.
+   */
+  verbDepth?: number;
 }
 
 export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {}): boolean {
@@ -38,6 +50,8 @@ export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {
   if (args.some((a) => a === '--help' || a === '-h')) return true;
 
   const valueFlags = options.valueFlags ?? [];
+  const verbDepth = options.verbDepth ?? 1;
+  let positional = 0;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     // `--flag value` — skip the value; `--flag=value` is one token and falls
@@ -47,9 +61,10 @@ export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {
       continue;
     }
     if (a.startsWith('-') && a !== '-') continue;
-    // First positional reached. `help` here is the verb; anywhere later it is
-    // an argument to a verb that has already been chosen.
-    return a === 'help';
+    positional += 1;
+    if (a === 'help') return true;
+    // Past the verb slots, `help` is an argument to a verb already chosen.
+    if (positional >= verbDepth) return false;
   }
   return false;
 }

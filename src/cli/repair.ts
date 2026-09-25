@@ -35,14 +35,11 @@ const c = (code: string, s: string) => (isTTY ? `\x1b[${code}m${s}\x1b[0m` : s);
  * `--allow-conversation-access` is not read in this file — the plugin-reconcile
  * pass consumes it (#226) — which is precisely why it has to be listed here: a
  * parser that knows only its own function body's flags rejects a working
- * invocation. `--verbose`/`--debug` reach `debugLog()` through the audit
- * logger's database open.
+ * invocation. It is the ONLY such flag: walking repair's call graph, the other
+ * `process.argv` readers are `process.argv[1]` (a path) and `debugLog()`, which
+ * only fires from `initDatabase()` — and repair never opens the memory database.
  */
-export const REPAIR_FLAGS = [
-  '--verbose',
-  '--debug',
-  ALLOW_CONVERSATION_ACCESS_FLAG,
-] as const;
+export const REPAIR_FLAGS = [ALLOW_CONVERSATION_ACCESS_FLAG] as const;
 
 export const REPAIR_HELP = `Usage: shieldcortex repair
 
@@ -55,8 +52,6 @@ Options:
                 Consent, for this run only, to the OpenClaw conversation-access
                 hook gate the plugin reconcile restores. Without it the gate is
                 left exactly as found (#226).
-      --verbose, --debug
-                Print internal startup diagnostics on stderr
   -h, --help    Show this help and exit (repairs nothing)
 
 Environment:

@@ -892,16 +892,16 @@ export async function stepVerifyProtection(
  * Every flag `update` honours. Anything else is an error, not a no-op (#577).
  *
  * The list is the WHOLE call graph's, not this file's: `--allow-conversation-access`
- * is consumed by the plugin reconcile several modules down (#226), and
- * `--debug` by `debugLog()` under `database/init.js`. A strict parser that only
- * knows the flags its own function body reads rejects working invocations — so
- * every `process.argv` reader reachable from `runUpdate` is represented here.
+ * is consumed by the plugin reconcile several modules down (#226). A strict
+ * parser that only knows the flags its own function body reads rejects working
+ * invocations — so every `process.argv` reader reachable from `runUpdate` is
+ * represented here. (The other reachable readers are `process.argv[1]`, a path,
+ * and the re-exec forward, which is this same list round-tripping.)
  */
 export const UPDATE_FLAGS = [
   '--force',
   '-f',
   '--verbose',
-  '--debug',
   ALLOW_CONVERSATION_ACCESS_FLAG,
 ] as const;
 
@@ -914,7 +914,6 @@ MUTATES the host — it installs globally and rewrites hook config.
 Options:
   -f, --force   Reinstall every stage even when already on the latest version
       --verbose Full forensic plugin-reconcile output (default: compact)
-      --debug   Print internal startup diagnostics on stderr
       --allow-conversation-access
                 Consent, for this run only, to the OpenClaw conversation-access
                 hook gate the plugin reconcile restores. Without it the gate is
@@ -926,8 +925,6 @@ Environment:
       Same as --verbose.
   SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1
       Same as --allow-conversation-access.
-  SHIELDCORTEX_DEBUG=1
-      Same as --debug.
   SHIELDCORTEX_UPDATE_REEXEC=1
       Internal. Set by update on the child it launches after the npm install,
       so the second process skips the install and owns the remaining stages.

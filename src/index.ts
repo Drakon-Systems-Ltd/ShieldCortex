@@ -98,7 +98,7 @@ function checkVersionStaleness(): void {
   // own update-notifier hit the registry and write ~/.npm/_logs), so a gate
   // inside the update branch alone could not make `update --help` side-effect
   // free. Nothing here is worth printing above a usage block anyway.
-  if (wantsHelp(process.argv.slice(2), { valueFlags: GLOBAL_VALUE_FLAGS })) return;
+  if (wantsHelp(process.argv.slice(2), { valueFlags: GLOBAL_VALUE_FLAGS, verbDepth: 2 })) return;
 
   try {
     const globalVersion = execSync('npm ls -g shieldcortex --depth=0 --json 2>/dev/null', {
@@ -163,7 +163,7 @@ export function shouldShowInteractiveBanner(argv: string[], mode: ServerMode): b
   const first = argv[2];
   if (!first) return false; // bare invocation → MCP stdio server
   // --help / -h must not query the live DB via the stats banner (#515).
-  if (wantsHelp(argv.slice(2), { valueFlags: GLOBAL_VALUE_FLAGS })) return false;
+  if (wantsHelp(argv.slice(2), { valueFlags: GLOBAL_VALUE_FLAGS, verbDepth: 2 })) return false;
   // A positional (non-flag) first arg means a CLI subcommand was given.
   const hasPositionalCommand = !first.startsWith('-');
   if (hasPositionalCommand) {

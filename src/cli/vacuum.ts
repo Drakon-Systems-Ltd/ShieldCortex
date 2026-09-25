@@ -11,10 +11,11 @@
 import { helpGate } from './help-gate.js';
 
 /**
- * Every flag `vacuum` honours (#577). It parses none itself — but it calls
- * `initDatabase()`, and `debugLog()` under it reads `--verbose`/`--debug`
- * straight out of `process.argv`, so a parser that rejected them would reject a
- * working invocation.
+ * Every flag `vacuum` honours (#577). It parses none itself — but it is the one
+ * gated command that calls `initDatabase()`, and `debugLog()` under it reads
+ * `--verbose`/`--debug` straight out of `process.argv`. A parser that rejected
+ * them would reject a working invocation, so they are named here and in the
+ * usage rather than silently swallowed.
  */
 export const VACUUM_FLAGS = ['--verbose', '--debug'] as const;
 
