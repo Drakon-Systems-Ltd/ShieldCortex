@@ -66,4 +66,15 @@ describe('#577 — a command-aware help request costs nothing at the entry point
     expect(sandbox.npmRan()).toBe(false);
     expect(sandbox.underHome()).toEqual([]);
   });
+
+  it('`allowlist --note -- reviewed help`: the gate reads the argv the handler reads (-- stripped)', () => {
+    // allowlist drops every bare `--` before parsing, so to the handler this is
+    // `--note reviewed help` → the help verb. The global gate must agree, or the
+    // npm staleness preamble runs before usage is printed (round-3 review).
+    const r = sandbox.run(['allowlist', '--note', '--', 'reviewed', 'help']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('Usage: shieldcortex allowlist');
+    expect(sandbox.npmRan()).toBe(false);
+    expect(sandbox.underHome()).toEqual([]);
+  });
 });

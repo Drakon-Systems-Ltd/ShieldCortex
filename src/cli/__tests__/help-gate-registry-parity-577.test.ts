@@ -26,7 +26,7 @@ import {
   type GatedCommand,
 } from '../wants-help.js';
 import { AUDIT_VALUE_FLAGS } from '../audit.js';
-import { ALLOWLIST_VALUE_FLAGS } from '../allowlist.js';
+import { ALLOWLIST_VALUE_FLAGS, runAllowlist } from '../allowlist.js';
 import { SESSIONS_VALUE_FLAGS } from '../sessions.js';
 import { MEMORIES_VALUE_FLAGS } from '../migrate-legacy.js';
 import { OPENCLAW_VALUE_FLAGS } from '../../setup/openclaw.js';
@@ -156,5 +156,27 @@ describe('#577 — one value-flag table, read by every gate', () => {
     // …not even when a global value happens to spell it (MCP stdio, no banner).
     expect(argvWantsHelp(['--db', 'help'])).toBe(false);
     expect(argvWantsHelp(['--mode', 'help'])).toBe(false);
+  });
+
+  it('allowlist: the gate normalises `--` exactly as the handler does (round-3 review)', () => {
+    // runAllowlist drops every bare `--` before its own gate and parser. The
+    // global gate sees raw argv, so parity only holds if the shared gate applies
+    // the same normalisation. Drive the REAL handler, not a copied predicate.
+    const argv = ['--note', '--', 'reviewed', 'help'];
+    const out: string[] = [];
+    const reads: number[] = [];
+    const code = runAllowlist(argv, {
+      log: (m: string) => out.push(m),
+      error: (m: string) => out.push(m),
+      readEntries: () => { reads.push(1); return []; },
+      writeEntries: () => { throw new Error('help must not write'); },
+    });
+    const handlerHelp = code === 0 && out.join('\n').includes('Usage: shieldcortex allowlist') && reads.length === 0;
+    expect(handlerHelp).toBe(true);
+    expect(argvWantsHelp(['allowlist', ...argv])).toBe(handlerHelp);
+    expect(commandWantsHelp('allowlist', argv)).toBe(handlerHelp);
+    // Normal paths unchanged: a `--` before a real note value is still not help.
+    expect(argvWantsHelp(['allowlist', 'add', './x.sh', '--note', '--', 'help'])).toBe(false);
+    expect(commandWantsHelp('allowlist', ['add', './x.sh', '--note', '--', 'help'])).toBe(false);
   });
 });

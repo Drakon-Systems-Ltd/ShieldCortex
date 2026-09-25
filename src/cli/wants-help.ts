@@ -85,8 +85,9 @@ export interface CommandHelpSpec {
   /**
    * The options whose FOLLOWING token the command consumes as a value. Every
    * `args[i + 1]` / `indexOf(flag) + 1` / `flagValue(args, flag)` consumer in
-   * the command's own call graph must be represented here — that inventory is
-   * asserted mechanically by `value-flag-inventory-577.test.ts`.
+   * the command's own call graph must be represented here. The shapes the
+   * analyser recognises are checked by `value-flag-inventory-577.test.ts`; see
+   * its header for what it does not recognise.
    */
   valueFlags: readonly string[];
   /**
@@ -96,6 +97,13 @@ export interface CommandHelpSpec {
    * here and both gates follow.
    */
   verbDepth?: number;
+  /**
+   * The handler drops every bare `--` before reading its argv (`allowlist`).
+   * Both gates must see the tokens the handler parses, so the gate applies the
+   * same normalisation: `allowlist --note -- reviewed help` is the `help` verb
+   * to the handler, and must be to the global gate too (#577 round 3).
+   */
+  stripDoubleDash?: boolean;
 }
 
 /** `audit`: `--deps-path help` is a path to scan (#577). */
@@ -108,6 +116,7 @@ const AUDIT_SPEC: CommandHelpSpec = { valueFlags: ['--deps-path'] };
  */
 const ALLOWLIST_SPEC: CommandHelpSpec = {
   valueFlags: ['--glob', '--hermes-cron', '--openclaw-cron', '--openclaw-cron-db', '--note'],
+  stripDoubleDash: true,
 };
 
 /** `sessions`: `--days help` is a value (rejected later, as a number). */
@@ -187,7 +196,8 @@ export function isGatedCommand(word: string): word is GatedCommand {
  */
 export function commandWantsHelp(command: GatedCommand, args: readonly string[]): boolean {
   const spec = COMMAND_HELP_SPECS[command];
-  return wantsHelp(args, { valueFlags: spec.valueFlags, verbDepth: spec.verbDepth });
+  const tokens = spec.stripDoubleDash ? args.filter((a) => a !== '--') : args;
+  return wantsHelp(tokens, { valueFlags: spec.valueFlags, verbDepth: spec.verbDepth });
 }
 
 /**
