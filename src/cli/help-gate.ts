@@ -15,9 +15,19 @@
  * cannot mutate anything on the help or bad-argument path — the proof is
  * structural, not a matter of ordering luck inside a long function.
  */
-import { wantsHelp } from './wants-help.js';
+import { commandWantsHelp, type GatedCommand } from './wants-help.js';
 
 export interface HelpGateOptions {
+  /**
+   * The command word. NOT a label: it selects the command's row in
+   * `COMMAND_HELP_SPECS`, which is where the value-taking options live (#577
+   * round 3). It is required because the alternative — each gate passing its own
+   * list — is exactly how the global gate came to disagree with `audit` about
+   * whether `audit --deps-path node_modules help` was a help request. The type
+   * only admits a registered command, so a gate cannot be wired to a table row
+   * that does not exist.
+   */
+  command: GatedCommand;
   /**
    * The complete set of arguments the command honours. Omit it to gate on help
    * only — appropriate for the multi-verb dispatchers (`openclaw`, `hermes`,
@@ -26,12 +36,6 @@ export interface HelpGateOptions {
    * allow-list cannot describe.
    */
   known?: readonly string[];
-  /**
-   * The command's value-taking options, forwarded to `wantsHelp` so that a
-   * VALUE spelled `help` (`--agent help`) is not mistaken for the help verb
-   * (#577). Omit for commands whose options are all boolean.
-   */
-  valueFlags?: readonly string[];
   log?: (message: string) => void;
   error?: (message: string) => void;
 }
@@ -47,9 +51,9 @@ export interface HelpGateOptions {
 export function helpGate(
   args: readonly string[],
   help: string,
-  options: HelpGateOptions = {},
+  options: HelpGateOptions,
 ): 0 | 2 | null {
-  if (wantsHelp(args, { valueFlags: options.valueFlags })) {
+  if (commandWantsHelp(options.command, args)) {
     (options.log ?? ((m: string) => process.stdout.write(`${m}\n`)))(help);
     return 0;
   }

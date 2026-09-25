@@ -416,7 +416,7 @@ export async function handleMigrateCommand(
   args: readonly string[] = [],
   deps: { run?: () => Promise<void> } = {},
 ): Promise<void> {
-  const gate = helpGate(args, MIGRATE_HELP, { known: MIGRATE_FLAGS });
+  const gate = helpGate(args, MIGRATE_HELP, { command: 'migrate', known: MIGRATE_FLAGS });
   if (gate !== null) {
     process.exitCode = gate;
     return;

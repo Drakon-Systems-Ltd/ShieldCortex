@@ -219,7 +219,7 @@ export async function handleHermesCommand(
     status?: (home?: string) => Promise<void>;
   } = {},
 ): Promise<void> {
-  if (helpGate([subcommand, ...extraArgs], HERMES_HELP) !== null) return;
+  if (helpGate([subcommand, ...extraArgs], HERMES_HELP, { command: 'hermes' }) !== null) return;
   console.log();
   switch (subcommand) {
     case 'install':

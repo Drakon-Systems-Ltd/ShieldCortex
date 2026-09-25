@@ -88,7 +88,7 @@ export async function runRepair(
   args: string[] = [],
   deps: { run?: (options: RepairOptions) => Promise<void>; env?: NodeJS.ProcessEnv } = {},
 ): Promise<void> {
-  const gate = helpGate(args, REPAIR_HELP, { known: REPAIR_FLAGS });
+  const gate = helpGate(args, REPAIR_HELP, { command: 'repair', known: REPAIR_FLAGS });
   if (gate !== null) {
     process.exitCode = gate;
     return;

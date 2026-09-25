@@ -13,9 +13,16 @@
  * command modules stay lazily imported: only the one actually named is loaded.
  */
 import { helpGate } from './help-gate.js';
+import { isGatedCommand, type GatedCommand } from './wants-help.js';
 
-/** Commands whose arguments are an exhaustive allow-list. */
-const STRICT_COMMANDS: Record<string, () => Promise<{ known: readonly string[]; help: string }>> = {
+/**
+ * Commands whose arguments are an exhaustive allow-list.
+ *
+ * Keyed by `GatedCommand`, so a strict command that is not in the shared help
+ * registry is a compile error rather than a gate that silently reaches its
+ * verdict from an empty table (#577 round 3).
+ */
+const STRICT_COMMANDS: Partial<Record<GatedCommand, () => Promise<{ known: readonly string[]; help: string }>>> = {
   update: async () => {
     const m = await import('./update.js');
     return { known: m.UPDATE_FLAGS, help: m.UPDATE_HELP };
@@ -52,8 +59,10 @@ export async function preflightStrictArgs(
   argv: readonly string[],
   deps: { log?: (message: string) => void; error?: (message: string) => void } = {},
 ): Promise<0 | 2 | null> {
-  const load = STRICT_COMMANDS[argv[0] ?? ''];
+  const command = argv[0] ?? '';
+  if (!isGatedCommand(command)) return null;
+  const load = STRICT_COMMANDS[command];
   if (!load) return null;
   const { known, help } = await load();
-  return helpGate(argv.slice(1), help, { known, log: deps.log, error: deps.error });
+  return helpGate(argv.slice(1), help, { command, known, log: deps.log, error: deps.error });
 }

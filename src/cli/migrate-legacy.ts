@@ -8,7 +8,7 @@ import Database from 'better-sqlite3';
 import { deriveProjectKey } from '../context/derive-project-key.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
-import { wantsHelp } from './wants-help.js';
+import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
 
 interface LegacyMemoryRow {
   id: number;
@@ -419,20 +419,12 @@ function printUsage(): void {
  * invocations — a project key and a source path that happen to spell "help".
  * The help gate has to skip these tokens or it answers "usage" to work it was
  * asked to do, and returns 0 while doing nothing.
+ *
+ * The list itself lives in the shared registry (round 3), because the whole-argv
+ * gates in `src/index.ts` decide about `memories …` too and a second copy of
+ * this inventory is a second chance to get it wrong.
  */
-export const MEMORIES_VALUE_FLAGS = [
-  '--source',        // migrate-legacy
-  '--project',       // prune, dedupe, repair-project-keys, import-native
-  '--salience-lte',  // prune
-  '--older-than',    // prune
-  '--limit',         // dedupe
-  '--db',            // repair-project-keys, purge, recalc
-  '--backup-dir',    // repair-project-keys, purge, recalc
-  '--map',           // repair-project-keys
-  '--scan-paths',    // repair-project-keys
-  '--host-id',       // import-native
-  '--agent-id',      // import-native
-] as const;
+export const MEMORIES_VALUE_FLAGS = COMMAND_HELP_SPECS.memories.valueFlags;
 
 export async function handleMemoriesCommand(
   args: string[],
@@ -451,7 +443,7 @@ export async function handleMemoriesCommand(
   // the subcommand, which calls initDatabase() (creating and migrating the
   // memory DB) before printing anything — and migrate-legacy is dry-run only
   // with an explicit --dry-run, so a help flag performed a real import.
-  if (wantsHelp(args, { valueFlags: MEMORIES_VALUE_FLAGS })) {
+  if (commandWantsHelp('memories', args)) {
     printUsage();
     return;
   }

@@ -23,6 +23,7 @@ import {
 } from '../integrations/openclaw-plugin-state.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
 import { helpGate } from '../cli/help-gate.js';
+import { COMMAND_HELP_SPECS } from '../cli/wants-help.js';
 import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2691,8 +2692,11 @@ uninstall+reinstall round-trip needed for sticky cases.
  * `openclaw`'s value-taking options (#577). `--agent help` is an agent id, not
  * a help request: without this list the help gate printed usage and did nothing
  * for `openclaw skill install --agent help`.
+ *
+ * Re-exported from the shared registry, which `helpGate` below and the
+ * whole-argv gates in `src/index.ts` both read (round 3).
  */
-export const OPENCLAW_VALUE_FLAGS = ['--agent'] as const;
+export const OPENCLAW_VALUE_FLAGS = COMMAND_HELP_SPECS.openclaw.valueFlags;
 
 export async function handleOpenClawCommand(
   subcommand: string,
@@ -2708,7 +2712,7 @@ export async function handleOpenClawCommand(
     skillInstall?: typeof installOpenClawSkill;
   } = {},
 ): Promise<void> {
-  if (helpGate([subcommand, ...extraArgs], OPENCLAW_HELP, { valueFlags: OPENCLAW_VALUE_FLAGS }) !== null) return;
+  if (helpGate([subcommand, ...extraArgs], OPENCLAW_HELP, { command: 'openclaw' }) !== null) return;
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
   const restartGateway = !extraArgs.includes('--no-gateway-restart');

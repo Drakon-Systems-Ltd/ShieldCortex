@@ -982,7 +982,7 @@ export async function handleUpdateCommand(
     error?: (message: string) => void;
   } = {},
 ): Promise<void> {
-  const gate = helpGate(args, UPDATE_HELP, { known: UPDATE_FLAGS, log: deps.log, error: deps.error });
+  const gate = helpGate(args, UPDATE_HELP, { command: 'update', known: UPDATE_FLAGS, log: deps.log, error: deps.error });
   if (gate !== null) {
     process.exitCode = gate;
     return;

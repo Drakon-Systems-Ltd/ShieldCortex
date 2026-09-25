@@ -44,7 +44,7 @@ export function vacuumHelpRequested(
   args: readonly string[],
   deps: { log?: (message: string) => void; error?: (message: string) => void } = {},
 ): boolean {
-  const gate = helpGate(args, VACUUM_HELP, { known: VACUUM_FLAGS, log: deps.log, error: deps.error });
+  const gate = helpGate(args, VACUUM_HELP, { command: 'vacuum', known: VACUUM_FLAGS, log: deps.log, error: deps.error });
   if (gate === null) return false;
   process.exitCode = gate;
   return true;

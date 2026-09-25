@@ -396,7 +396,7 @@ export async function handleUninstallCommand(
     error?: (message: string) => void;
   } = {},
 ): Promise<void> {
-  const gate = helpGate(args, UNINSTALL_HELP, { known: UNINSTALL_FLAGS, log: deps.log, error: deps.error });
+  const gate = helpGate(args, UNINSTALL_HELP, { command: 'uninstall', known: UNINSTALL_FLAGS, log: deps.log, error: deps.error });
   if (gate !== null) {
     process.exitCode = gate;
     return;
