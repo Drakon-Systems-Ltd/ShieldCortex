@@ -205,3 +205,48 @@ export function releaseReservation(reserved: string): void {
     /* an unreleased empty directory under backups/ costs nothing */
   }
 }
+
+/**
+ * The first symlink among the PATH COMPONENTS of `target`, from `base`
+ * downwards (#574/#576 r2 blocker 4).
+ *
+ * `findLinkInTree` above walks the CONTENTS of a directory. That is the wrong
+ * question for a write path: a refresh that moves `<hermesHome>/plugins/x`
+ * into `<hermesHome>/backups/` follows `plugins` and `backups` themselves, and
+ * either of them being a link puts the operator's directory somewhere nobody
+ * asked for — on another volume, inside a discovery root, or into a tree this
+ * command has no business writing to. The reviewer reproduced exactly that
+ * with a symlinked `backups/` and again with a symlinked plugins root.
+ *
+ * The walk is BOUNDED at `base` on purpose. Checking every component up to `/`
+ * would refuse on hosts where `/home` or `/tmp` is legitimately a link, which
+ * is a fact about the box and not about this write. `base` is the integration's
+ * own root — `<hermesHome>`, `~/.openclaw` — and it is CHECKED TOO: it is the
+ * outermost component any of these writes depends on.
+ *
+ * Three answers, as everywhere on this path: a link (refuse), nothing (proceed),
+ * or a component that could not be read (refuse, and say which).
+ */
+export function findLinkOnPath(base: string, target: string): {
+  link: string | null;
+  unreadable: { path: string; error: string } | null;
+} {
+  const from = path.resolve(base);
+  const to = path.resolve(target);
+  if (!pathContains(from, to)) {
+    return { link: null, unreadable: { path: to, error: `is not under ${from}` } };
+  }
+  const rest = path.relative(from, to);
+  const steps = rest === '' ? [] : rest.split(path.sep);
+  let cursor = from;
+  for (let i = 0; i <= steps.length; i += 1) {
+    if (i > 0) cursor = path.join(cursor, steps[i - 1]);
+    const answer = lstatAnswer(cursor);
+    if ('error' in answer) return { link: null, unreadable: { path: cursor, error: answer.error } };
+    // A component that is not there yet cannot be a link, and nothing deeper
+    // can exist either: `mkdir -p` will create real directories under it.
+    if ('absent' in answer) return { link: null, unreadable: null };
+    if (answer.value.isSymbolicLink()) return { link: cursor, unreadable: null };
+  }
+  return { link: null, unreadable: null };
+}
