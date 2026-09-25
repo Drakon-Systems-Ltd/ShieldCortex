@@ -1052,6 +1052,107 @@ function safeSignalList(signals) {
   return [...new Set(out)].slice(0, 25);
 }
 
+// ── #517 (3): the denial record carries its evidence ─────────────────────
+//
+// `denials.jsonl` is the file an operator opens first after an unattended
+// refusal, and until now it named the rules and nothing else — the matched
+// token existed at decision time (the interactive block message prints
+// `rule:` and `matched:`) and was thrown away on the way to the durable row.
+// The guard core already returns the evidence (#192, `verdict.matches`) and
+// the OpenClaw interceptor already persists it; this is the hook plane
+// catching up, not a new evidence source.
+//
+// What is persisted is SANITISED, the same way `signals` is: a rule name the
+// hook does not recognise contributes nothing (the row's `signals` already
+// says `redacted-signal` for it), a span is whitespace-collapsed and bounded,
+// and every span goes through the credential redactor before it is written.
+// The raw command is still not persisted (#284 Face 1); a bounded span of the
+// matched pattern is not the command.
+
+/**
+ * Rules whose matched span IS the secret. The core omits a span for these
+ * (#192); the hook re-asserts it because the dist build it loads is not a
+ * version this file may assume.
+ */
+const SPANLESS_SIGNAL_RE = /^(secret-egress|credential-access)/;
+const MAX_MATCH_ROWS = 25;
+/** The core's own `fmtSpan` bound; re-applied here for the same reason. */
+const MAX_SPAN_CHARS = 80;
+/** A redacted span may grow (placeholders are longer than what they replace). */
+const MAX_REDACTED_SPAN_CHARS = 160;
+const MAX_PROVENANCE_CHARS = 256;
+
+let spanRedactorPromise = null;
+/**
+ * The credential redactor from dist — the same detector the memory pipeline
+ * uses — loaded through the same seam as every other module this hook trusts.
+ * Null when the build predates it or cannot be loaded; the caller then
+ * withholds every span rather than writing one unredacted.
+ */
+function loadSpanRedactor() {
+  if (spanRedactorPromise === null) {
+    spanRedactorPromise = (async () => {
+      try {
+        const mod = await import(
+          pathToFileURL(resolve(hookDistRoot(), 'defence', 'credential-leak', 'index.js')).href
+        );
+        return typeof mod?.redactCredentials === 'function' ? mod.redactCredentials : null;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return spanRedactorPromise;
+}
+
+function safeProvenanceString(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.replace(/[\r\n\t]+/g, ' ').trim();
+  return text ? text.slice(0, MAX_PROVENANCE_CHARS) : null;
+}
+
+/**
+ * Sanitise the guard's rule → matched-span evidence for the denial record.
+ * Fail-closed on every axis: an unrecognised rule name is dropped, a span
+ * with no working redactor is withheld (and the row says why), a redactor
+ * that throws withholds the span too.
+ */
+function safeMatchList(matches, redactSpan) {
+  if (!Array.isArray(matches)) return [];
+  const out = [];
+  for (const raw of matches) {
+    if (out.length >= MAX_MATCH_ROWS) break;
+    if (!raw || typeof raw !== 'object') continue;
+    const signal = String(raw.signal ?? '').trim();
+    if (!SAFE_SIGNALS.has(signal)) continue;
+    const row = { signal };
+    if (!SPANLESS_SIGNAL_RE.test(signal) && typeof raw.span === 'string') {
+      const span = raw.span.replace(/\s+/g, ' ').trim().slice(0, MAX_SPAN_CHARS);
+      if (span) {
+        if (typeof redactSpan !== 'function') {
+          row.spanWithheld = 'redactor-unavailable';
+        } else {
+          try {
+            row.span = String(redactSpan(span)).slice(0, MAX_REDACTED_SPAN_CHARS);
+          } catch {
+            row.spanWithheld = 'redactor-failed';
+          }
+        }
+      }
+    }
+    // #184: where the match came from folded script source, the row names the
+    // file and invocation chain so the operator is not left reading a parent
+    // script that does not contain the matched pattern.
+    const source = safeProvenanceString(raw.source);
+    if (source) row.source = source;
+    if (Number.isInteger(raw.line) && raw.line > 0) row.line = raw.line;
+    const chain = safeProvenanceString(raw.chain);
+    if (chain) row.chain = chain;
+    out.push(row);
+  }
+  return out;
+}
+
 function looksCredentialishNotifyLabel(text) {
   const value = String(text ?? '').trim();
   if (!value) return false;
@@ -1226,9 +1327,11 @@ function terminalDecisionReason(verdict, outcome, event) {
   return `ShieldCortex Action Guard: ${severityPrefix}${safeGuardOutcomeReason(verdict, outcome, event)}${nextStep}${suffix}`;
 }
 
-function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify }) {
+function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, sessionKey, actionId, notify, redactSpan }) {
   const id = actionId || mintActionId();
   const context = notificationContext(sessionKey, id);
+  // #517 (3): rule → matched-span evidence, sanitised and credential-redacted.
+  const matches = safeMatchList(verdict.matches, redactSpan);
   const row = {
     event,
     outcome,
@@ -1237,6 +1340,7 @@ function buildLocalGuardOutcome({ toolName, toolInput, verdict, outcome, event, 
     tool: safeToolName(toolName),
     surface: redactedActionSurface(toolName, toolInput),
     signals: safeSignalList(verdict.signals),
+    ...(matches.length > 0 ? { matches } : {}),
     severity: verdict.severity === 'catastrophic' ? 'critical' : String(verdict.severity ?? 'unknown'),
     reason: safeGuardOutcomeReason(verdict, outcome, event),
     ...(context.sessionId ? { sessionId: context.sessionId } : {}),
@@ -1414,12 +1518,16 @@ function retryBudgetWindow(digestDecision) {
 
 async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict, outcome, event, sessionKey, actionId, retryCtx }) {
   const id = actionId || mintActionId();
+  // #517 (3): the redactor is loaded before the first row is written so both
+  // rows of an event carry the same evidence. A load that fails withholds
+  // spans; it never delays or drops the row.
+  const redactSpan = await loadSpanRedactor();
   // #284 dual-review blocker (SOL): write the denial row FIRST with notify pending,
   // then attempt delivery and append/update status. A hang/crash during notify must
   // not drop the forensics row that operators open first (denials.jsonl).
   const pendingRow = buildLocalGuardOutcome({
     toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
-    notify: { status: 'pending', deliveredVia: null },
+    notify: { status: 'pending', deliveredVia: null }, redactSpan,
   });
   recordLocalGuardOutcome(pendingRow);
 
@@ -1649,7 +1757,7 @@ async function alertGuardOutcome(notifyOrPromise, { toolName, toolInput, verdict
   // first row if delivery hangs.
   const finalRow = buildLocalGuardOutcome({
     toolName, toolInput, verdict, outcome, event, sessionKey, actionId: id,
-    notify: notifyStatus,
+    notify: notifyStatus, redactSpan,
   });
   recordLocalGuardOutcome(finalRow);
 

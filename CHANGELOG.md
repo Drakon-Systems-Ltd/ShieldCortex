@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- **#517 (3) the denial record carries its evidence.** Every `~/.shieldcortex/denials.jsonl` row the Claude Code hook writes (the pending row and the final row of an event, same `actionId`) now carries `matches: [{ signal, span?, source?, line?, chain? }]` — the rule that fired and the bounded text it matched, which the interactive block message already printed as `rule:` / `matched:` and the durable record then threw away. The guard core has returned this since #192 and the OpenClaw interceptor already persists it; this is the hook plane catching up, not a new evidence source. What is written is sanitised the way `signals` is: a rule name the hook does not recognise contributes nothing (the row's `signals` already says `redacted-signal` for it), a span is whitespace-collapsed and bounded to the core's own 80 characters, and every span goes through the credential redactor from `dist/defence/credential-leak` before it is written. `secret-egress` and `credential-access` never contribute a span whatever the core sent. A dist without the redactor, or a redactor that throws, withholds every span and says so on the row (`spanWithheld: "redactor-unavailable" | "redactor-failed"`) rather than writing one unredacted. The raw command is still not persisted (`surface` unchanged, #284 Face 1) and the realtime audit row on this plane is unchanged, so terminal audit rows still carry no command text. Readers of `denials.jsonl` (`guard-policy-replay.mjs`, the cron denial audit) read fields they do not know permissively; verified against their parsers, not assumed.
 
 ## [5.2.1] - 2026-09-25
 
