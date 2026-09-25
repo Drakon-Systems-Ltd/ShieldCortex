@@ -738,24 +738,26 @@ export async function stepOpenClawHook(
     const home = deps.home ?? openclaw.openClawUserHome();
     const refresh = deps.refresh ?? openclaw.refreshInstalledHookFiles;
     const result = refresh(home);
-    const recovered = result.recovered.map((line) => scrubHomePath(line, home));
+    const scrub = (line: string): string => scrubHomePath(line, home);
     if (result.installed.length === 0) {
       return result.failed.length > 0
         ? {
           status: 'warn' as const,
-          summary: 'an interrupted hook refresh could not be finished — run `shieldcortex openclaw install`',
-          detail: result.failed.map((f) => scrubHomePath(f.error, home)),
+          summary: 'the hook could not be refreshed — run `shieldcortex openclaw install`',
+          detail: result.failed.map((f) => scrub(f.error)),
         }
         : { status: 'skip' as const, summary: 'not installed — `shieldcortex openclaw install` adds it' };
     }
     if (!result.sourceAvailable) {
-      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from', detail: recovered };
+      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from', detail: [] };
     }
+    const written = result.refreshed.length + result.reinstalled.length;
     const detail = [
-      ...recovered,
-      ...result.refreshed.map((dir) => scrubHomePath(`refreshed ${dir}`, home)),
-      ...result.backups.map((b) => scrubHomePath(`previous hook kept at ${b.backup}`, home)),
-      ...result.failed.map((f) => scrubHomePath(`could not refresh ${f.dir}: ${f.error}`, home)),
+      ...result.reinstalled.map((dir) => scrub(`${dir} was missing and was reinstalled from the package`)),
+      ...result.refreshed.map((dir) => scrub(`refreshed ${dir}`)),
+      ...result.backups.map((b) => scrub(`previous hook kept at ${b.backup}`)),
+      ...result.warnings.map(scrub),
+      ...result.failed.map((f) => scrub(`could not refresh ${f.dir}: ${f.error}`)),
     ];
     if (result.failed.length > 0) {
       return {
@@ -764,7 +766,7 @@ export async function stepOpenClawHook(
         detail,
       };
     }
-    if (result.refreshed.length === 0) {
+    if (written === 0) {
       return {
         status: 'ok' as const,
         summary: `current (${result.current.length} cop${result.current.length === 1 ? 'y' : 'ies'})`,
@@ -773,7 +775,7 @@ export async function stepOpenClawHook(
     }
     return {
       status: 'ok' as const,
-      summary: `refreshed ${result.refreshed.length} cop${result.refreshed.length === 1 ? 'y' : 'ies'} — restart the gateway to load it`,
+      summary: `refreshed ${written} cop${written === 1 ? 'y' : 'ies'} — restart the gateway to load it`,
       detail: [
         ...detail,
         'the gateway reads the hook once at start-up; the new files take effect on the next restart',

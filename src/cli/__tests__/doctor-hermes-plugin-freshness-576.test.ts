@@ -3,7 +3,6 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { checkHermesPluginFreshness, doctorExitCode } from '../doctor.js';
-import { journalPath, writeJournal, type RefreshJournal } from '../../setup/swap-journal.js';
 import { hermesPluginSourceDir } from '../../setup/hermes-refresh.js';
 import { probeHermesDiscovery } from '../../setup/hermes-plugins.js';
 
@@ -147,55 +146,63 @@ describeWithHermes('checkHermesPluginFreshness (#576)', () => {
   });
 });
 
-describe('an interrupted refresh is reported, never repaired (#576 r2 blocker 1)', () => {
+describe('an interrupted refresh is reported, never repaired (#576 r2/r3 blocker 1)', () => {
   const NO_HERMES = { interpreter: null } as const;
 
-  function crashJournal(target: string): RefreshJournal {
-    return {
-      version: 1,
-      kind: 'hermes-plugin',
-      root: hermes,
-      target,
-      backup: path.join(hermes, 'backups', 'shieldcortex-preupdate-x', 'shieldcortex'),
-      staged: path.join(hermes, '.shieldcortex-staging-x', 'shieldcortex'),
-      stagingRoot: path.join(hermes, '.shieldcortex-staging-x'),
-      packagedVersion: '5.2.0',
-      phase: 'publishing',
-      startedAt: '2026-09-24T12:00:00.000Z',
-      pid: 1,
-    };
+  /**
+   * The state a crash between the two renames leaves, and the ONLY two facts
+   * doctor reads to recognise it: the standard target has no `plugin.yaml`,
+   * and one of our own swaps left a `shieldcortex-preupdate-*` under this
+   * root. Neither of them names a path for anything to act on — doctor does
+   * not act at all, and `update`'s remedy is an install from the package.
+   */
+  function crashState(): void {
+    fs.mkdirSync(path.join(hermes, 'backups', 'shieldcortex-preupdate-2026-09-24T12-00-00-000Z', 'shieldcortex'), {
+      recursive: true,
+    });
   }
 
-  it('WARNS about a journal, names the recovery, and leaves it exactly where it is', async () => {
-    installCopy();
-    writeJournal(crashJournal(installed));
+  it('does not report a host whose plugin the crash removed as "not installed"', async () => {
+    // Without this row it reads as a quiet skip, which is how an operator
+    // never learns there is a one-command fix waiting.
+    crashState();
 
     const result = await checkHermesPluginFreshness(home, NO_HERMES);
 
     expect(result.status).toBe('warn');
-    expect(result.message).toMatch(/interrupted refresh was found/);
+    expect(result.message).toMatch(/interrupted refresh left/);
+    expect(result.message).not.toMatch(/not installed/);
     expect(result.fix).toMatch(/shieldcortex update/);
     expect(result.fix).toMatch(/shieldcortex hermes install/);
-    // Doctor REPORTS; recovery is a write, and doctor writes only behind an
-    // explicit `--fix-*` flag.
-    expect(fs.existsSync(journalPath(hermes))).toBe(true);
   });
 
-  it('does not report a host whose plugin the crash removed as "not installed"', async () => {
-    // The exact post-crash state: `plugins/shieldcortex` gone. Without the
-    // journal row this reads as a quiet skip, which is how an operator never
-    // learns there is a recovery waiting.
-    writeJournal(crashJournal(installed));
+  it('writes nothing — doctor reports, and repairs only behind an explicit --fix', async () => {
+    crashState();
+    const before = fs.readdirSync(hermes).sort();
 
+    await checkHermesPluginFreshness(home, NO_HERMES);
+
+    expect(fs.readdirSync(hermes).sort()).toEqual(before);
+    expect(fs.existsSync(installed)).toBe(false);
+  });
+
+  it('does not claim an interrupted refresh on a host that never installed it', async () => {
+    // No backup means no evidence this host ever had the plugin, and
+    // inventing one would nag every Hermes user who does not use ShieldCortex.
     const result = await checkHermesPluginFreshness(home, NO_HERMES);
+    expect(result.status).toBe('info');
+    expect(result.message).not.toMatch(/interrupted refresh/);
+  });
 
-    expect(result.status).toBe('warn');
-    expect(result.message).not.toMatch(/not installed/);
+  it('is silent once the plugin is back, backup or no backup', async () => {
+    crashState();
+    installCopy();
+    const result = await checkHermesPluginFreshness(home, NO_HERMES);
+    expect(result.status).not.toBe('warn');
   });
 
   it('escalates under --strict like any other warning', async () => {
-    installCopy();
-    writeJournal(crashJournal(installed));
+    crashState();
     const row = await checkHermesPluginFreshness(home, NO_HERMES);
     expect(doctorExitCode([row])).toBe(0);
     expect(doctorExitCode([row], { strict: true })).toBe(1);

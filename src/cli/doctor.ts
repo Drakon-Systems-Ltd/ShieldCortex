@@ -51,7 +51,11 @@ import {
 } from '../setup/hermes-plugins.js';
 // The staleness comparator `update`'s Hermes step decides on, so this row and
 // that step can never disagree about the same host (#576).
-import { hermesPluginCopyStale } from '../setup/hermes-refresh.js';
+import {
+  hermesPluginCopyStale,
+  hermesPluginPresentAt,
+  standardHermesTarget,
+} from '../setup/hermes-refresh.js';
 // The filesystem readers the #569 repair is built on, shared with `update`'s
 // Hermes refresh (#576) so "I could not look" cannot decay into "there is
 // nothing there" in one of the two.
@@ -65,9 +69,11 @@ import {
   reserveBackupDir,
   SYMLINK_PREFLIGHT_ENTRY_BUDGET,
 } from '../setup/fs-answers.js';
-// An interrupted crash-safe swap is a state doctor REPORTS and never repairs:
-// recovery is a write, and doctor writes only behind an explicit `--fix-*`.
-import { journalPath, readJournal } from '../setup/swap-journal.js';
+// An interrupted refresh is a state doctor REPORTS and never repairs: putting
+// the plugin back is a write, and doctor writes only behind an explicit
+// `--fix-*`. It is recognised without reading a path off disk — see
+// `standardHermesTarget` (#576 r3).
+import { preupdateBackupExists } from '../setup/host-swap.js';
 import { isNativeModuleLoadError, NativeModuleLoadError } from '../database/native-load-classify.js';
 // The typed lazy loader — the SAME one every real database open goes through
 // (database/init.ts). Importing it adds no static edge doctor did not already
@@ -3202,22 +3208,27 @@ export async function checkHermesPluginFreshness(
   // Ahead of every other verdict, including "not installed": a refresh that a
   // crash interrupted can be exactly why there is no installed copy to find,
   // and reporting that host as a quiet skip is how the operator never learns
-  // there is a recovery waiting (#576 r2 blocker 1). Doctor only REPORTS it —
-  // recovery is a write, and doctor writes only under an explicit `--fix-*`.
-  const journal = readJournal(scan.hermesHome);
-  if (!('absent' in journal)) {
-    const where = 'journal' in journal ? tildify(journal.journal.target) : tildify(scan.hermesHome);
+  // there is a one-command fix waiting (#576 r2 blocker 1). Doctor only
+  // REPORTS it — putting the plugin back is a write, and doctor writes only
+  // under an explicit `--fix-*`.
+  //
+  // Both halves of the test are computed, never read: the target comes from
+  // the home Hermes resolved, and `backups/` is asked one boolean question —
+  // "did one of our own swaps put a copy here" — which yields no path (r3).
+  const standard = standardHermesTarget(scan.hermesHome);
+  if (!hermesPluginPresentAt(standard)
+    && preupdateBackupExists(path.join(scan.hermesHome, 'backups'), 'shieldcortex')) {
     return {
       label,
       status: 'warn',
       message:
-        `an interrupted refresh was found at ${tildify(journalPath(scan.hermesHome))} — a previous ` +
-        `\`shieldcortex update\` did not finish swapping ${where} into place, so the plugin Hermes ` +
-        'loads may be missing or out of date',
+        `an interrupted refresh left ${tildify(standard)} missing — a previous ` +
+        '`shieldcortex update` did not finish swapping the new plugin into place, so Hermes has ' +
+        'no ShieldCortex plugin to load',
       fix:
-        'Run `shieldcortex update` (or `shieldcortex hermes install`) to finish it — both restore ' +
-        'the previous copy, or publish the verified staged one when there is no previous copy left. ' +
-        'Then restart the Hermes gateway.',
+        'Run `shieldcortex update` (or `shieldcortex hermes install`) — both reinstall the ' +
+        'packaged plugin into that path. The previous copy stays in `backups/`; nothing deletes ' +
+        'it. Then restart the Hermes gateway.',
     };
   }
   if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
