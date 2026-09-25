@@ -2,7 +2,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { checkHermesPluginFreshness } from '../doctor.js';
+import { checkHermesPluginFreshness, doctorExitCode } from '../doctor.js';
+import { journalPath, writeJournal, type RefreshJournal } from '../../setup/swap-journal.js';
 import { hermesPluginSourceDir } from '../../setup/hermes-refresh.js';
 import { probeHermesDiscovery } from '../../setup/hermes-plugins.js';
 
@@ -12,10 +13,12 @@ import { probeHermesDiscovery } from '../../setup/hermes-plugins.js';
  * way and had no such row, so a gateway running the previous `pre_tool_call`
  * gate looked perfectly healthy.
  *
- * The row is WARN at most and never touches the exit code, and it only speaks
- * about the copy Hermes ITSELF says it loads — where that question has no
- * answer, the `Hermes plugin copies` row (#569) is the one with the remedy, and
- * this one stays quiet rather than restating it in yellow.
+ * The row is WARN at most — never a FAIL — and it only speaks about the copy
+ * Hermes ITSELF says it loads: where that question has no answer, the
+ * `Hermes plugin copies` row (#569) is the one with the remedy, and this one
+ * stays quiet rather than restating it in yellow. WARN carries doctor's
+ * ordinary exit contract and no exception to it: exit 0, and exit 1 under
+ * `--strict`, which is documented as "every ⚠️ becomes exit 1".
  */
 let home: string;
 let hermes: string;
@@ -97,9 +100,29 @@ describeWithHermes('checkHermesPluginFreshness (#576)', () => {
     expect(result.message).toMatch(/2 file\(s\) differ/);
     expect(result.fix).toMatch(/shieldcortex hermes install/);
     expect(result.fix).toMatch(/restart the Hermes gateway/);
-    // A stale gate is old code running, not a broken host: the row must not
-    // move doctor's exit code, the same rule the #569 row follows.
+    // A stale gate is old code running, not a broken host: the row never
+    // FAILS, the same rule the #569 row follows, and running the check does
+    // not set an exit code by itself.
     expect(process.exitCode).toBe(exitBefore);
+  });
+
+  it('is exit 0 normally and exit 1 under --strict, like every other WARN', async () => {
+    installCopy();
+    fs.writeFileSync(path.join(installed, '__init__.py'), '# shieldcortex 5.1.0\n');
+
+    const row = await checkHermesPluginFreshness(home);
+
+    // Pinned through the AGGREGATION, not through `process.exitCode` right
+    // after the check: the row joins doctor's ordinary results array, and it
+    // is `doctorExitCode` over that array that decides (r2 review point 5).
+    expect(row.status).toBe('warn');
+    expect(doctorExitCode([row])).toBe(0);
+    expect(doctorExitCode([row], { strict: true })).toBe(1);
+    // And a clean host is 0 under --strict too, so the escalation is the
+    // warning's and not the row's mere presence.
+    installCopy();
+    const clean = await checkHermesPluginFreshness(home);
+    expect(doctorExitCode([clean], { strict: true })).toBe(0);
   });
 
   it('says nothing about freshness while a shadowing copy is in play', async () => {
@@ -121,6 +144,61 @@ describeWithHermes('checkHermesPluginFreshness (#576)', () => {
     const result = await checkHermesPluginFreshness(home);
     expect(result.status).toBe('info');
     expect(result.message).toMatch(/not installed/);
+  });
+});
+
+describe('an interrupted refresh is reported, never repaired (#576 r2 blocker 1)', () => {
+  const NO_HERMES = { interpreter: null } as const;
+
+  function crashJournal(target: string): RefreshJournal {
+    return {
+      version: 1,
+      kind: 'hermes-plugin',
+      root: hermes,
+      target,
+      backup: path.join(hermes, 'backups', 'shieldcortex-preupdate-x', 'shieldcortex'),
+      staged: path.join(hermes, '.shieldcortex-staging-x', 'shieldcortex'),
+      stagingRoot: path.join(hermes, '.shieldcortex-staging-x'),
+      packagedVersion: '5.2.0',
+      phase: 'publishing',
+      startedAt: '2026-09-24T12:00:00.000Z',
+      pid: 1,
+    };
+  }
+
+  it('WARNS about a journal, names the recovery, and leaves it exactly where it is', async () => {
+    installCopy();
+    writeJournal(crashJournal(installed));
+
+    const result = await checkHermesPluginFreshness(home, NO_HERMES);
+
+    expect(result.status).toBe('warn');
+    expect(result.message).toMatch(/interrupted refresh was found/);
+    expect(result.fix).toMatch(/shieldcortex update/);
+    expect(result.fix).toMatch(/shieldcortex hermes install/);
+    // Doctor REPORTS; recovery is a write, and doctor writes only behind an
+    // explicit `--fix-*` flag.
+    expect(fs.existsSync(journalPath(hermes))).toBe(true);
+  });
+
+  it('does not report a host whose plugin the crash removed as "not installed"', async () => {
+    // The exact post-crash state: `plugins/shieldcortex` gone. Without the
+    // journal row this reads as a quiet skip, which is how an operator never
+    // learns there is a recovery waiting.
+    writeJournal(crashJournal(installed));
+
+    const result = await checkHermesPluginFreshness(home, NO_HERMES);
+
+    expect(result.status).toBe('warn');
+    expect(result.message).not.toMatch(/not installed/);
+  });
+
+  it('escalates under --strict like any other warning', async () => {
+    installCopy();
+    writeJournal(crashJournal(installed));
+    const row = await checkHermesPluginFreshness(home, NO_HERMES);
+    expect(doctorExitCode([row])).toBe(0);
+    expect(doctorExitCode([row], { strict: true })).toBe(1);
   });
 });
 

@@ -65,6 +65,9 @@ import {
   reserveBackupDir,
   SYMLINK_PREFLIGHT_ENTRY_BUDGET,
 } from '../setup/fs-answers.js';
+// An interrupted crash-safe swap is a state doctor REPORTS and never repairs:
+// recovery is a write, and doctor writes only behind an explicit `--fix-*`.
+import { journalPath, readJournal } from '../setup/swap-journal.js';
 import { isNativeModuleLoadError, NativeModuleLoadError } from '../database/native-load-classify.js';
 // The typed lazy loader — the SAME one every real database open goes through
 // (database/init.ts). Importing it adds no static edge doctor did not already
@@ -3166,8 +3169,13 @@ function describeProjectSource(project: HermesProjectState): string {
  * `.pytest_cache/` are never installed, so they are never staleness).
  *
  * WARN at most, and never a FAIL: a stale copy is a gate running old code, not
- * a broken host, and this row must not move doctor's exit code (#569's sibling
- * row has the same rule).
+ * a broken host (#569's sibling row has the same rule). WARN carries doctor's
+ * ordinary warning contract and nothing special — exit 0 normally, exit 1
+ * under `--strict`, which is the documented "every ⚠️ becomes exit 1" gate
+ * (docs/openclaw-integration.md). An earlier draft of this comment claimed the
+ * row never changes the exit code at all; it does under `--strict`, like every
+ * other warning, and carving out an exception would silently override the
+ * fleet policy `--strict` exists to express.
  *
  * Only the copy Hermes itself says it loads is examined. Where that question
  * has no answer — no Hermes discovery, an unreadable root, shadowing copies, a
@@ -3190,6 +3198,27 @@ export async function checkHermesPluginFreshness(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label, status: 'info', message: `check skipped — ${msg}` };
+  }
+  // Ahead of every other verdict, including "not installed": a refresh that a
+  // crash interrupted can be exactly why there is no installed copy to find,
+  // and reporting that host as a quiet skip is how the operator never learns
+  // there is a recovery waiting (#576 r2 blocker 1). Doctor only REPORTS it —
+  // recovery is a write, and doctor writes only under an explicit `--fix-*`.
+  const journal = readJournal(scan.hermesHome);
+  if (!('absent' in journal)) {
+    const where = 'journal' in journal ? tildify(journal.journal.target) : tildify(scan.hermesHome);
+    return {
+      label,
+      status: 'warn',
+      message:
+        `an interrupted refresh was found at ${tildify(journalPath(scan.hermesHome))} — a previous ` +
+        `\`shieldcortex update\` did not finish swapping ${where} into place, so the plugin Hermes ` +
+        'loads may be missing or out of date',
+      fix:
+        'Run `shieldcortex update` (or `shieldcortex hermes install`) to finish it — both restore ' +
+        'the previous copy, or publish the verified staged one when there is no previous copy left. ' +
+        'Then restart the Hermes gateway.',
+    };
   }
   if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
   if (scan.undetermined.length > 0 || !scan.fromHermes) {
