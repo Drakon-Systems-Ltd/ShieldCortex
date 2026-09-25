@@ -25,7 +25,10 @@ import path from 'path';
 import {
   DEFAULT_REPAIR_LOG_KEEP,
   pruneRepairLogs,
+  REPAIR_LOG_MIN_AGE_MS,
+  repairLogDbId,
   repairLogDirForDb,
+  repairLogName,
   resolveRepairLogKeep,
 } from '../retention.js';
 
@@ -318,5 +321,225 @@ describe('#573 the repair log belongs beside the database it describes', () => {
 
   it('resolves a relative db path against the cwd rather than guessing', () => {
     expect(repairLogDirForDb('memories.db')).toBe(path.join(process.cwd(), 'logs'));
+  });
+});
+
+// ── Round-2 blockers ──────────────────────────────────────────────────────
+
+describe('#573 blocker 3 — the bound is per database, not per directory', () => {
+  /** One record per database, all in the shared logs directory they resolve to. */
+  function seedForDbs(dbs: string[], perDb = 1): Map<string, string[]> {
+    fs.mkdirSync(logsDir, { recursive: true });
+    const byDb = new Map<string, string[]>();
+    let tick = 0;
+    for (const db of dbs) {
+      const names: string[] = [];
+      for (let i = 0; i < perDb; i++) {
+        const name = repairLogName(db, new Date(1_700_000_000_000 + tick * 1000));
+        const full = path.join(logsDir, name);
+        fs.writeFileSync(full, JSON.stringify({ dbPath: db, i }));
+        const when = new Date(1_700_000_000_000 + tick * 1000);
+        fs.utimesSync(full, when, when);
+        names.push(name);
+        tick++;
+      }
+      byDb.set(db, names);
+    }
+    return byDb;
+  }
+
+  it('keeps every database\'s only record when three share one logs directory', () => {
+    // The reviewer's fixture: three databases in one parent, so
+    // repairLogDirForDb gives all three the SAME logs directory. With keep=1 a
+    // per-directory bound deleted two databases' sole repair record.
+    const dbs = ['a.db', 'b.db', 'c.db'].map((n) => path.join(root, '.shieldcortex', n));
+    expect(new Set(dbs.map(repairLogDirForDb))).toEqual(new Set([logsDir]));
+    seedForDbs(dbs);
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+
+    expect(result.databases).toBe(3);
+    expect(result.deleted).toEqual([]);
+    expect(listed()).toHaveLength(3);
+  });
+
+  it('applies the keep count within each database independently', () => {
+    const dbs = ['busy.db', 'quiet.db'].map((n) => path.join(root, '.shieldcortex', n));
+    const byDb = seedForDbs(dbs, 4);
+    // Give `quiet.db` only one record; `busy.db` keeps its four.
+    for (const name of byDb.get(dbs[1])!.slice(1)) fs.unlinkSync(path.join(logsDir, name));
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 2, execute: true });
+
+    // Two of busy's four go; quiet's single record is untouched.
+    expect(result.deleted.map((d) => path.basename(d.path)).sort())
+      .toEqual(byDb.get(dbs[0])!.slice(0, 2).sort());
+    expect(fs.existsSync(path.join(logsDir, byDb.get(dbs[1])![0]))).toBe(true);
+  });
+
+  it('groups records written before #573 together as one legacy set', () => {
+    // No id in the name, so they cannot be attributed to a database — one
+    // group, bounded as a whole, which is the only honest reading.
+    const legacy = seedLogs(5);
+    const withId = seedForDbs([path.join(root, '.shieldcortex', 'x.db')], 3);
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 2, execute: true });
+
+    expect(result.databases).toBe(2);
+    const gone = result.deleted.map((d) => path.basename(d.path));
+    expect(gone).toEqual(expect.arrayContaining(legacy.slice(0, 3)));
+    expect(gone).toContain(withId.get(path.join(root, '.shieldcortex', 'x.db'))![0]);
+    expect(gone).toHaveLength(4);
+  });
+
+  it('names the database in the filename the writer produces', () => {
+    const a = repairLogName(path.join(root, 'a.db'), new Date(0));
+    const b = repairLogName(path.join(root, 'b.db'), new Date(0));
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^project-key-repair-[0-9a-f]{12}-1970-01-01T00-00-00-000Z\.json$/);
+    // Stable across calls and independent of how the path was spelled.
+    expect(repairLogDbId(path.join(root, 'a.db')))
+      .toBe(repairLogDbId(path.join(root, '.', 'a.db')));
+  });
+});
+
+describe('#573 blocker 2 — a record younger than an hour is never a candidate', () => {
+  it('spares every record in a burst that is still inside the hour', () => {
+    // The reviewer's case is a record a writer has open. The rule that makes
+    // one ineligible AT ALL is its age: three repairs inside a few minutes put
+    // two past a keep of 1, and one of those two may be the log currently
+    // being serialised. None of them are candidates yet.
+    const names = seedLogs(3);
+    const now = 1_700_000_002_000 + 60_000; // newest record is a minute old
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true, nowMs: now });
+
+    expect(result.tooYoung).toBe(2);
+    expect(result.deleted).toEqual([]);
+    expect(listed()).toEqual([...names].sort());
+  });
+
+  it('spares the young ones and deletes the old ones in the same pass', () => {
+    const now = 1_700_000_000_000 + 3 * REPAIR_LOG_MIN_AGE_MS;
+    /** One record at a chosen age, named for its age so failures read plainly. */
+    const at = (label: string, ageMs: number): string => {
+      const name = `project-key-repair-2026-01-01T00-00-00-${label}Z.json`;
+      const full = path.join(logsDir, name);
+      fs.writeFileSync(full, 'x');
+      fs.utimesSync(full, new Date(now - ageMs), new Date(now - ageMs));
+      return name;
+    };
+    const oldest = at('001', 2 * REPAIR_LOG_MIN_AGE_MS);
+    const older = at('002', REPAIR_LOG_MIN_AGE_MS + 1000);
+    const young = at('003', 60_000);
+    const youngest = at('004', 1000);
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true, nowMs: now });
+
+    // Three are past a keep of 1; the one inside the hour is spared.
+    expect(result.tooYoung).toBe(1);
+    expect(result.deleted.map((d) => path.basename(d.path))).toEqual([oldest, older]);
+    expect(listed()).toEqual([young, youngest].sort());
+  });
+
+  it('deletes the same record once it is over an hour old', () => {
+    const names = seedLogs(2);
+    const mtime = 1_700_000_001_000;
+    const result = pruneRepairLogs({
+      dir: logsDir, keep: 1, execute: true, nowMs: mtime + REPAIR_LOG_MIN_AGE_MS,
+    });
+    expect(result.tooYoung).toBe(0);
+    expect(result.deleted.map((d) => path.basename(d.path))).toEqual([names[0]]);
+  });
+
+  it('leaves a record that changed between selection and unlink', () => {
+    // Identity, not just "is it still a regular file": a candidate an
+    // appending writer touched mid-pass is no longer the file that was chosen.
+    const names = seedLogs(3);
+    const victim = path.join(logsDir, names[1]);
+    const realUnlink = fs.unlinkSync.bind(fs);
+    let touched = false;
+    jest.spyOn(fs, 'unlinkSync').mockImplementation(((target: fs.PathLike) => {
+      realUnlink(target);
+      if (!touched) {
+        touched = true;
+        fs.appendFileSync(victim, 'appended by a live writer');
+      }
+    }) as typeof fs.unlinkSync);
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+
+    expect(touched).toBe(true);
+    expect(fs.existsSync(victim)).toBe(true);
+    expect(result.errors.join('\n')).toMatch(/changed since it was selected/);
+  });
+
+  it('leaves a record that is hard-linked somewhere else', () => {
+    const names = seedLogs(3);
+    const linked = path.join(logsDir, names[0]);
+    fs.linkSync(linked, path.join(root, 'kept-by-someone-else.json'));
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+
+    expect(fs.existsSync(linked)).toBe(true);
+    expect(result.errors.join('\n')).toMatch(/hard links/);
+    expect(result.deleted.map((d) => path.basename(d.path))).toEqual([names[1]]);
+  });
+});
+
+describe('#573 blocker 1 — a replaced logs directory stops the pass', () => {
+  it('deletes nothing more once the directory is no longer the one listed', () => {
+    // The reviewer's traversal: the validated directory is swapped for a
+    // symlink to ANOTHER database's logs directory after the listing. Checking
+    // only the final file component cannot see that; the directory's pinned
+    // (dev, ino) can.
+    const names = seedLogs(4);
+    const otherDbLogs = path.join(root, 'other', 'logs');
+    const otherNames = seedLogs(2, otherDbLogs);
+
+    const realUnlink = fs.unlinkSync.bind(fs);
+    let swapped = false;
+    jest.spyOn(fs, 'unlinkSync').mockImplementation(((target: fs.PathLike) => {
+      realUnlink(target);
+      if (!swapped) {
+        swapped = true;
+        for (const n of fs.readdirSync(logsDir)) realUnlink(path.join(logsDir, n));
+        fs.rmdirSync(logsDir);
+        fs.symlinkSync(otherDbLogs, logsDir);
+      }
+    }) as typeof fs.unlinkSync);
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+
+    expect(swapped).toBe(true);
+    // The other database's records are all still there.
+    expect(fs.readdirSync(otherDbLogs).sort()).toEqual([...otherNames].sort());
+    expect(result.errors.join('\n')).toMatch(/no longer the directory that was listed/);
+    expect(result.deleted.map((d) => path.basename(d.path))).toEqual([names[0]]);
+  });
+
+  it('stops when the directory is replaced by a different real directory', () => {
+    const names = seedLogs(4);
+    const decoy = path.join(root, 'decoy-logs');
+    const decoyNames = seedLogs(3, decoy);
+
+    const realUnlink = fs.unlinkSync.bind(fs);
+    let swapped = false;
+    jest.spyOn(fs, 'unlinkSync').mockImplementation(((target: fs.PathLike) => {
+      realUnlink(target);
+      if (!swapped) {
+        swapped = true;
+        for (const n of fs.readdirSync(logsDir)) realUnlink(path.join(logsDir, n));
+        fs.rmdirSync(logsDir);
+        fs.renameSync(decoy, logsDir);
+      }
+    }) as typeof fs.unlinkSync);
+
+    const result = pruneRepairLogs({ dir: logsDir, keep: 1, execute: true });
+
+    expect(swapped).toBe(true);
+    expect(fs.readdirSync(logsDir).sort()).toEqual([...decoyNames].sort());
+    expect(result.errors.join('\n')).toMatch(/no longer the directory that was listed/);
+    expect(result.deleted.map((d) => path.basename(d.path))).toEqual([names[0]]);
   });
 });

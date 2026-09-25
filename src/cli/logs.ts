@@ -53,10 +53,13 @@ export function renderRepairLogPrune(
     return;
   }
 
-  log(`  Matched: ${result.matched} file${result.matched === 1 ? '' : 's'} · ${formatBytes(result.bytesBefore)}`);
+  log(
+    `  Matched: ${result.matched} file${result.matched === 1 ? '' : 's'} · ` +
+    `${formatBytes(result.bytesBefore)} · ${result.databases} database${result.databases === 1 ? '' : 's'}`,
+  );
   log(
     `  ${result.dryRun ? 'Would delete' : 'Deleted'}: ${result.deleted.length} · ` +
-    `kept: ${result.kept} (newest ${result.keep})`,
+    `kept: ${result.kept} (newest ${result.keep} per database)`,
   );
   for (const deletion of result.deleted.slice(0, MAX_LISTED)) {
     log(
@@ -68,6 +71,12 @@ export function renderRepairLogPrune(
     log(`      … and ${result.deleted.length - MAX_LISTED} more`);
   }
   log(`  ${result.dryRun ? 'Would free' : 'Freed'}: ${formatBytes(result.freedBytes)}`);
+  if (result.tooYoung > 0) {
+    log(
+      `  Kept ${result.tooYoung} past the bound for being under an hour old ` +
+      '(a repair may still be writing one).',
+    );
+  }
   for (const err of result.errors) log(`  ⚠ ${err}`);
   if (result.dryRun && result.deleted.length > 0) {
     log('  Re-run with --execute to apply.');
@@ -109,9 +118,20 @@ export function logsUsageLines(): string[] {
     '      These are diagnostics written by `memories repair-project-keys`.',
     '      They have no reader and are not security evidence, so retention is',
     '      just "keep the newest N": an unlink of a regular file, with no',
-    '      rewrite, no rename and no temporary file. Only that exact name is',
-    '      ever touched, only directly in the logs directory, and a logs path',
-    '      reachable through a symlink refuses the whole pass.',
+    '      rewrite, no rename and no temporary file.',
+    '',
+    '      The bound is PER DATABASE. Each record names the database it',
+    '      describes, and repairs of one database never evict another\'s — a',
+    '      logs directory can hold records for several databases, because the',
+    '      log is written beside the database it repaired.',
+    '',
+    '      A record written in the LAST HOUR is never deleted, whatever the',
+    '      keep count says: that is how a log a repair is still writing stays',
+    '      ineligible. It becomes a candidate on the next run.',
+    '',
+    '      Only that exact name is ever touched, only directly in the logs',
+    '      directory, only regular files with a single hard link, and a logs',
+    '      path reachable through a symlink refuses the whole pass.',
     '',
     '      NOT MANAGED YET: the realtime audit logs under',
     '      ~/.shieldcortex/audit/ have no retention. They are an unread queue',
@@ -120,10 +140,10 @@ export function logsUsageLines(): string[] {
     '      #579. This command never reads, writes or removes an audit file.',
     '',
     'Environment:',
-    `  SHIELDCORTEX_REPAIR_LOG_KEEP   newest repair logs kept (default ${DEFAULT_REPAIR_LOG_KEEP},`,
-    '                                 whole number of at least 1; anything else',
-    '                                 is refused with a warning and the default',
-    '                                 is used)',
+    `  SHIELDCORTEX_REPAIR_LOG_KEEP   newest repair logs kept PER DATABASE`,
+    `                                 (default ${DEFAULT_REPAIR_LOG_KEEP}, whole number of at least 1;`,
+    '                                 anything else is refused with a warning',
+    '                                 and the default is used)',
   ];
 }
 
