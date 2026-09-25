@@ -724,21 +724,37 @@ function scrubHomePath(text: string, home: string): string {
  * appears on any run that changed the package.
  */
 export async function stepOpenClawHook(
-  home: string,
-  deps: { refresh?: (home: string) => HookRefreshShape } = {},
+  deps: { refresh?: (home: string) => HookRefreshShape; home?: string } = {},
 ): Promise<StepResult> {
   return await step('OpenClaw hook', async () => {
-    const refresh = deps.refresh
-      ?? (await import('../setup/openclaw.js')).refreshInstalledHookFiles;
+    const openclaw = await import('../setup/openclaw.js');
+    // The OpenClaw home, resolved by OpenClaw's own resolver — the one
+    // `defaultHookDestDir()` (and therefore doctor) uses. `runUpdate` used to
+    // pass `os.homedir()` in here, which silently beat both `OPENCLAW_HOME`
+    // and the sudo resolution: with `HOME=A` and `OPENCLAW_HOME=B` the update
+    // refreshed A and left B stale, while doctor kept warning about B. There
+    // is deliberately no positional parameter any more, so a caller cannot
+    // reintroduce that by passing the wrong home (#574 r2 blocker 3).
+    const home = deps.home ?? openclaw.openClawUserHome();
+    const refresh = deps.refresh ?? openclaw.refreshInstalledHookFiles;
     const result = refresh(home);
+    const recovered = (result.recovered ?? []).map((line) => scrubHomePath(line, home));
     if (result.installed.length === 0) {
-      return { status: 'skip' as const, summary: 'not installed — `shieldcortex openclaw install` adds it' };
+      return result.failed.length > 0
+        ? {
+          status: 'warn' as const,
+          summary: 'an interrupted hook refresh could not be finished — run `shieldcortex openclaw install`',
+          detail: result.failed.map((f) => scrubHomePath(f.error, home)),
+        }
+        : { status: 'skip' as const, summary: 'not installed — `shieldcortex openclaw install` adds it' };
     }
     if (!result.sourceAvailable) {
-      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from' };
+      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from', detail: recovered };
     }
     const detail = [
+      ...recovered,
       ...result.refreshed.map((dir) => scrubHomePath(`refreshed ${dir}`, home)),
+      ...(result.backups ?? []).map((b) => scrubHomePath(`previous hook kept at ${b.backup}`, home)),
       ...result.failed.map((f) => scrubHomePath(`could not refresh ${f.dir}: ${f.error}`, home)),
     ];
     if (result.failed.length > 0) {
@@ -749,7 +765,11 @@ export async function stepOpenClawHook(
       };
     }
     if (result.refreshed.length === 0) {
-      return `current (${result.current.length} cop${result.current.length === 1 ? 'y' : 'ies'})`;
+      return {
+        status: 'ok' as const,
+        summary: `current (${result.current.length} cop${result.current.length === 1 ? 'y' : 'ies'})`,
+        detail,
+      };
     }
     return {
       status: 'ok' as const,
@@ -773,18 +793,23 @@ export async function stepOpenClawHook(
  * runs plugin discovery once at start-up, so the step says so.
  */
 export async function stepHermesPlugin(
-  home: string,
-  deps: { refresh?: (home: string) => HermesRefreshShape } = {},
+  deps: { refresh?: (home: string) => HermesRefreshShape; home?: string } = {},
 ): Promise<StepResult> {
   return await step('Hermes plugin', async () => {
+    // Hermes' own root resolution runs inside the probe; what this has to get
+    // right is WHOSE environment the probe runs under. `os.homedir()` is the
+    // process's home — `/root` under sudo — so it went the same way the
+    // OpenClaw step did (#576 r2 blocker 3). `HERMES_HOME` is deliberately not
+    // read here: it travels unexpanded to Hermes, which resolves it itself.
+    const { hermesUserHome } = await import('../setup/user-home.js');
+    const home = deps.home ?? hermesUserHome();
     const refresh = deps.refresh
       ?? (await import('../setup/hermes-refresh.js')).refreshHermesPluginCopies;
     const result = refresh(home);
     const detail = result.detail.map((line) => scrubHomePath(line, home));
     const summary = scrubHomePath(result.summary, home);
-    if (result.status === 'not-installed') return { status: 'skip' as const, summary };
+    if (result.status === 'not-installed') return { status: 'skip' as const, summary, detail };
     if (result.status === 'warn') return { status: 'warn' as const, summary, detail };
-    if (result.status === 'current') return { status: 'ok' as const, summary };
     return { status: 'ok' as const, summary, detail };
   });
 }
@@ -1022,8 +1047,8 @@ export async function runUpdate(): Promise<void> {
   // The two FILE-COPIED host integrations the upgrade path used to walk past
   // (#574, #576). Both refresh only what is already installed, and neither
   // restarts the host that loads it.
-  const hookResult = await stepOpenClawHook(home);
-  const hermesResult = await stepHermesPlugin(home);
+  const hookResult = await stepOpenClawHook();
+  const hermesResult = await stepHermesPlugin();
   await stepClaudeHooks(home);
   await stepStatePermissions();
 

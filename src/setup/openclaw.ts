@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync, execSync, spawnSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { gatewayRestartAdvice, gatewayBootLogAdvice } from './gateway-restart-command.js';
 import {
@@ -22,6 +22,16 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import { summariseCommandOutput } from '../integrations/child-output.js';
+import { invokingUserHome, OPENCLAW_HOME_MARKERS } from './user-home.js';
+import {
+  deviceUnder,
+  findLinkOnPath,
+  lstatAnswer,
+  pathContains,
+  releaseReservation,
+  reserveBackupDir,
+} from './fs-answers.js';
+import { journalledSwap, journalPath, recoverInterruptedSwap } from './swap-journal.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,15 +96,6 @@ export function isDockerEnvironment(): boolean {
 }
 
 /**
- * A conservative POSIX-portable username. SUDO_USER is environment-controlled
- * and, in some sudo setups, attacker-influenceable — anything outside this
- * shape is ignored entirely rather than looked up (#429). Also excludes
- * leading dashes (argv option injection) and slashes/dots that could turn the
- * direct home-directory probes below into path traversal.
- */
-const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
-
-/**
  * Resolve the operator home the installer will write under.
  *
  * #472: OPENCLAW_HOME (absolute, or `~/…`) wins, matching OpenClaw's
@@ -103,8 +104,10 @@ const SAFE_USERNAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
  * which this CLI cannot know, so probing them would write into the
  * live tree while a throwaway profile thought it was isolated.
  *
- * When run under sudo, os.homedir() returns /root/.
- * We check SUDO_USER first and resolve their actual home.
+ * Everything after the override is `invokingUserHome` (#429's SUDO_USER
+ * resolution), shared with the Hermes side since #574/#576 r2: under sudo
+ * `os.homedir()` is `/root`, and an `update` that refreshed /root's hooks
+ * refreshed nothing the operator runs.
  */
 function resolveUserHome(): string {
   const explicit = process.env.OPENCLAW_HOME?.trim();
@@ -121,55 +124,21 @@ function resolveUserHome(): string {
     // relative / ~user: fall through to sudo / os.homedir, never cwd.
   }
 
-  const sudoUser = process.env.SUDO_USER;
-  if (sudoUser && SAFE_USERNAME.test(sudoUser)) {
-    // Try getent passwd (reliable on Linux) — argv-array, no shell.
-    try {
-      const entry = execFileSync('getent', ['passwd', sudoUser], {
-        encoding: 'utf-8',
-        timeout: 5000,
-      }).trim();
-      const homeDir = entry.split(':')[5];
-      if (homeDir && fs.existsSync(homeDir)) {
-        return homeDir;
-      }
-    } catch {
-      // getent not available (macOS) — probe the standard locations
-    }
+  return invokingUserHome(OPENCLAW_HOME_MARKERS);
+}
 
-    // Fallback: the standard home locations, probed directly. Replaces a
-    // `eval echo ~${sudoUser}` shell eval (#429) — same answer on any box
-    // where that expansion would have worked, with no shell involved.
-    for (const homeDir of [`/Users/${sudoUser}`, `/home/${sudoUser}`]) {
-      if (fs.existsSync(homeDir)) {
-        return homeDir;
-      }
-    }
-  }
-
-  const home = os.homedir();
-
-  // If we're root without SUDO_USER (e.g. after `sudo su -`),
-  // search /home/* for a user who has .openclaw/ or .claude/ configured.
-  if (home === '/root' || (process.getuid && process.getuid() === 0)) {
-    try {
-      const users = fs.readdirSync('/home');
-      for (const username of users) {
-        const userHome = path.join('/home', username);
-        try {
-          if (!fs.statSync(userHome).isDirectory()) continue;
-        } catch { continue; }
-        if (fs.existsSync(path.join(userHome, '.openclaw')) ||
-            fs.existsSync(path.join(userHome, '.claude'))) {
-          return userHome;
-        }
-      }
-    } catch {
-      // /home not readable
-    }
-  }
-
-  return home;
+/**
+ * The OpenClaw home every OpenClaw surface of `update` must resolve through
+ * (#574 r2 blocker 3).
+ *
+ * `runUpdate` used to hand `os.homedir()` to the hook-refresh step, which
+ * defeated exactly this function: with `OPENCLAW_HOME` set the update
+ * refreshed the wrong tree, and under sudo it refreshed root's. Exported so
+ * the update path and `defaultHookDestDir()` (which doctor uses) cannot
+ * disagree about the same host.
+ */
+export function openClawUserHome(): string {
+  return resolveUserHome();
 }
 
 /**
@@ -376,6 +345,209 @@ function copyHookFiles(sourceDir: string, destDir: string): void {
 }
 
 /**
+ * Where a cortex-memory hook can be installed: the CONFIG roots, not the
+ * `hooks/` directories inside them.
+ *
+ * Everything the refresh writes outside the live hook directory — the staging
+ * tree, `backups/`, the journal — goes HERE, one level above `hooks/`. That is
+ * the whole safety argument for the OpenClaw side: `loadHooksFromDir` in
+ * OpenClaw enumerates the SUBDIRECTORIES of `<configDir>/hooks` and loads any
+ * one that holds a `HOOK.md`, keying them by hook name with later sources
+ * winning. A staging directory inside `hooks/` therefore IS a second
+ * `cortex-memory` hook for as long as it exists — the #569 shadowing shape,
+ * on the OpenClaw plane. `<configRoot>/backups/` and
+ * `<configRoot>/.shieldcortex-hook-staging-*` are not enumerated by anything.
+ *
+ * (The one residual: an operator who puts `~/.openclaw` itself in
+ * `hooks.internal.load.extraDirs` makes OpenClaw scan its children. Even then
+ * the staged set loses — `extra` is the LOWEST-precedence source and the
+ * managed `hooks/cortex-memory` still wins the name.)
+ */
+function hookConfigRoots(home: string): string[] {
+  return [path.join(home, '.openclaw'), path.join(home, '.claude')];
+}
+
+/**
+ * Is a STAGED hook set complete — every packaged file present and byte-equal?
+ *
+ * Stricter than `hookFilesStale`, on purpose. That comparator SKIPS a file the
+ * package does not ship, because it cannot claim staleness against a source it
+ * cannot read. This one is the gate in front of a PUBLICATION: a hook
+ * directory with a handler and no runtime is a broken hook, so an incomplete
+ * packaged set means nothing is published at all.
+ */
+function hookStagedComplete(staged: string): boolean {
+  for (const file of HOOK_FILES) {
+    try {
+      const src = fs.readFileSync(path.join(HOOK_SOURCE, file));
+      if (!src.equals(fs.readFileSync(path.join(staged, file)))) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The package version recorded in a refresh journal. */
+function hookPackagedVersion(): string {
+  try {
+    const pkg = path.resolve(__dirname, '..', '..', 'package.json');
+    const parsed = JSON.parse(fs.readFileSync(pkg, 'utf-8')) as { version?: unknown };
+    return typeof parsed.version === 'string' ? parsed.version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** What finishes an interrupted hook refresh. Printed wherever one is left. */
+export const HOOK_RECOVERY_COMMAND =
+  'run `shieldcortex update` (or `shieldcortex openclaw install`) to finish it';
+
+interface HookPublishResult {
+  ok: boolean;
+  /** Where the previous hook directory was kept. Set only on success. */
+  backup?: string;
+  error?: string;
+}
+
+/**
+ * Replace one installed hook directory, all or nothing (#574 r2 blocker 2).
+ *
+ * The old path overwrote `HOOK.md`, `handler.ts` and `runtime.mjs` one at a
+ * time, in place. A failure on the third left the new handler beside the old
+ * runtime — a mismatched pair that the gateway would import on its next
+ * restart, and which no amount of error reporting undoes. The reviewer
+ * reproduced exactly that.
+ *
+ * So the full set is staged outside every hook discovery directory, verified
+ * byte-for-byte against the packaged source, and only then swapped in through
+ * the same journalled two-rename publication the Hermes plugin uses — the
+ * previous directory going to `<configRoot>/backups/`, never deleted. A
+ * failure anywhere before the swap leaves the working set exactly where it
+ * was, untouched.
+ */
+function publishHookDir(dir: string, now: Date): HookPublishResult {
+  const hooksRoot = path.dirname(dir);
+  const configRoot = path.dirname(hooksRoot);
+  const backupsRoot = path.join(configRoot, 'backups');
+  const stamp = now.toISOString().replace(/[:.]/g, '-');
+
+  // Every component of every path about to be written through, checked before
+  // the first write: a symlinked `hooks/`, hook directory or `backups/` sends
+  // the operator's files somewhere nobody asked for.
+  for (const target of [hooksRoot, dir, backupsRoot]) {
+    const { link, unreadable } = findLinkOnPath(configRoot, target);
+    if (unreadable !== null) {
+      return { ok: false, error: `${unreadable.path} could not be read (${unreadable.error}); nothing written` };
+    }
+    if (link !== null) {
+      return { ok: false, error: `${link} is a symlink; nothing written` };
+    }
+  }
+
+  let staging: string;
+  try {
+    staging = reserveBackupDir(configRoot, `.shieldcortex-hook-staging-${stamp}`);
+  } catch (err: unknown) {
+    return { ok: false, error: `could not stage the new hook — ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const staged = path.join(staging, HOOK_NAME);
+  const cleanupStaging = (): void => {
+    try {
+      fs.rmSync(staging, { recursive: true, force: true });
+    } catch { /* our own staging dir; a leftover costs nothing */ }
+  };
+
+  // Staging and backups are outside hook discovery by construction; prove it
+  // rather than assert it, because the construction is one `path.dirname` away
+  // from being wrong.
+  for (const outside of [staging, backupsRoot, journalPath(configRoot)]) {
+    if (pathContains(hooksRoot, outside)) {
+      cleanupStaging();
+      return { ok: false, error: `${outside} is inside ${hooksRoot}, which OpenClaw loads hooks from; nothing written` };
+    }
+  }
+
+  try {
+    copyHookFiles(HOOK_SOURCE, staged);
+  } catch (err: unknown) {
+    cleanupStaging();
+    return { ok: false, error: `could not stage the new hook — ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!hookStagedComplete(staged)) {
+    cleanupStaging();
+    return { ok: false, error: 'the staged hook did not verify against the packaged source; nothing written' };
+  }
+
+  // `rename(2)` refuses to cross a filesystem, and this never turns a move
+  // into a copy-then-delete of the operator's directory.
+  const destDevice = deviceUnder(backupsRoot);
+  const sourceStat = lstatAnswer(dir);
+  const stagedDevice = deviceUnder(staged);
+  if ('error' in destDevice || 'error' in sourceStat || 'error' in stagedDevice) {
+    cleanupStaging();
+    return { ok: false, error: 'could not stat the move endpoints; nothing written' };
+  }
+  if ('absent' in sourceStat) {
+    cleanupStaging();
+    return { ok: false, error: 'the hook directory disappeared while refreshing; left alone' };
+  }
+  if (
+    ('value' in destDevice && sourceStat.value.dev !== destDevice.value) ||
+    ('value' in stagedDevice && stagedDevice.value !== sourceStat.value.dev)
+  ) {
+    cleanupStaging();
+    return {
+      ok: false,
+      error: `is on a different filesystem from ${backupsRoot} (EXDEV) — refresh it by hand with ` +
+        '`shieldcortex openclaw install`',
+    };
+  }
+
+  let reserved: string;
+  try {
+    reserved = reserveBackupDir(backupsRoot, `cortex-memory-preupdate-${stamp}`);
+  } catch (err: unknown) {
+    cleanupStaging();
+    return {
+      ok: false,
+      error: `no backup destination could be reserved under ${backupsRoot} — ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const backup = path.join(reserved, HOOK_NAME);
+
+  const outcome = journalledSwap({
+    kind: 'openclaw-hook',
+    root: configRoot,
+    target: dir,
+    backup,
+    staged,
+    stagingRoot: staging,
+    packagedVersion: hookPackagedVersion(),
+    now,
+  });
+  if (outcome.ok) return { ok: true, backup };
+  if (outcome.targetMissing) {
+    // Nothing is cleaned up here: the staged set and the journal beside it are
+    // the only way back for a host that now has no hook directory.
+    return {
+      ok: false,
+      error: `the new hook could not be swapped in — ${outcome.error}, AND the previous copy could ` +
+        `not be restored; it is at ${backup}. The staged replacement and the refresh journal ` +
+        `(${journalPath(configRoot)}) were LEFT for recovery — ${HOOK_RECOVERY_COMMAND}`,
+    };
+  }
+  releaseReservation(reserved);
+  cleanupStaging();
+  return {
+    ok: false,
+    error: outcome.stage === 'publishing'
+      ? `the new hook could not be swapped in — ${outcome.error}; the previous set was restored`
+      : `${outcome.error}; the previous set is untouched`,
+  };
+}
+
+/**
  * The installed cortex-memory hook directories that ACTUALLY EXIST (#574).
  *
  * Deliberately not `findAllHooksDirs`: that one CREATES `hooks/` under any
@@ -401,6 +573,14 @@ export interface HookRefreshResult {
   /** Directories the copy could not be written to, with the reason. */
   failed: Array<{ dir: string; error: string }>;
   /**
+   * What an interrupted earlier refresh left behind, and what was done about
+   * it — one line per config root that had a journal (#574 r2 blocker 2).
+   * Empty on the overwhelmingly common path where there was nothing to finish.
+   */
+  recovered: string[];
+  /** Where each replaced hook directory was kept. Never deleted. */
+  backups: Array<{ dir: string; backup: string }>;
+  /**
    * False when the PACKAGED hook source is missing, in which case nothing was
    * compared and nothing was copied — `hookFilesStale` cannot answer against a
    * source it cannot read, and neither can this.
@@ -423,12 +603,33 @@ export interface HookRefreshResult {
  * `hookFilesStale` decides, so this and `doctor`'s staleness row can never
  * disagree about the same directory.
  */
-export function refreshInstalledHookFiles(home: string = resolveUserHome()): HookRefreshResult {
+export function refreshInstalledHookFiles(
+  home: string = resolveUserHome(),
+  opts: { now?: Date } = {},
+): HookRefreshResult {
+  const now = opts.now ?? new Date();
+  // BEFORE anything is enumerated: finish a refresh a crash interrupted.
+  // Without this the host that most needs help — the one whose
+  // `hooks/cortex-memory` is missing because the process died between the two
+  // renames — reads as "not installed" and is walked straight past.
+  const recovered: string[] = [];
+  const failed: Array<{ dir: string; error: string }> = [];
+  for (const configRoot of hookConfigRoots(home)) {
+    const outcome = recoverInterruptedSwap(configRoot, { stagedIsComplete: hookStagedComplete });
+    if (outcome.status === 'blocked') {
+      failed.push({ dir: configRoot, error: outcome.detail.join('; ') });
+    } else if (outcome.status !== 'none') {
+      recovered.push(...outcome.detail);
+    }
+  }
+
   const result: HookRefreshResult = {
     installed: installedHookDirs(home),
     refreshed: [],
     current: [],
-    failed: [],
+    failed,
+    recovered,
+    backups: [],
     sourceAvailable: hookSourceAvailable(),
   };
   // No source, no comparison and no copy — but the installed copies are still
@@ -440,11 +641,12 @@ export function refreshInstalledHookFiles(home: string = resolveUserHome()): Hoo
       result.current.push(dir);
       continue;
     }
-    try {
-      copyHookFiles(HOOK_SOURCE, dir);
+    const published = publishHookDir(dir, now);
+    if (published.ok) {
       result.refreshed.push(dir);
-    } catch (err: unknown) {
-      result.failed.push({ dir, error: err instanceof Error ? err.message : String(err) });
+      if (published.backup !== undefined) result.backups.push({ dir, backup: published.backup });
+    } else {
+      result.failed.push({ dir, error: published.error ?? 'refresh failed' });
     }
   }
   return result;
@@ -1592,6 +1794,15 @@ export interface OpenClawInstallOptions {
 }
 
 export async function installOpenClawHook(options: OpenClawInstallOptions = {}): Promise<void> {
+  // The documented manual remedy has to also be the recovery: an operator
+  // whose `update` was interrupted mid-swap runs `openclaw install`, and the
+  // hook directory must be back before anything else looks for it (#574 r2).
+  // The first-install copy below is deliberately left as it was — it writes
+  // into a directory nothing is loading yet, so it has no window to lose.
+  for (const configRoot of hookConfigRoots(resolveUserHome())) {
+    const outcome = recoverInterruptedSwap(configRoot, { stagedIsComplete: hookStagedComplete });
+    for (const line of outcome.detail) console.log(`  ${line}`);
+  }
   const hooksDirs = findAllHooksDirs();
 
   if (hooksDirs.length === 0) {

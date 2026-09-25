@@ -105,15 +105,22 @@ describe('refreshInstalledHookFiles — the copy half of `openclaw install` (#57
   it('reports the directory it could not write, and keeps going', () => {
     installStaleHook(openclawHook);
     installStaleHook(claudeHook);
-    // A directory where a file belongs: `copyFileSync` raises EISDIR whoever is
-    // running, which a mode-based fixture cannot promise under root.
-    fs.rmSync(path.join(claudeHook, 'handler.ts'));
-    fs.mkdirSync(path.join(claudeHook, 'handler.ts'));
+    // A FILE where `backups/` belongs: `mkdir -p` raises EEXIST/ENOTDIR
+    // whoever is running, which a mode-based fixture cannot promise under
+    // root. Since the refresh publishes a staged directory rather than
+    // overwriting files in place, the fault has to land on the publication
+    // path — corrupting a file inside the live hook no longer stops anything,
+    // because the whole directory is replaced.
+    fs.writeFileSync(path.join(home, '.claude', 'backups'), 'not a directory\n');
 
     const result = refreshInstalledHookFiles(home);
 
     expect(result.refreshed).toEqual([openclawHook]);
     expect(result.failed.map((f) => f.dir)).toEqual([claudeHook]);
+    // The set that could not be republished is byte-for-byte what it was.
+    for (const file of HOOK_FILES) {
+      expect(fs.readFileSync(path.join(claudeHook, file), 'utf-8')).toBe(`// shieldcortex 5.1.0 ${file}\n`);
+    }
   });
 });
 
@@ -121,7 +128,7 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
   it('skips a host with no installed hook, and names the command that adds it', async () => {
     const out = captureStdout();
     try {
-      const result = await stepOpenClawHook(home);
+      const result = await stepOpenClawHook({ home });
       expect(result.status).toBe('skip');
       expect(result.summary).toMatch(/not installed/);
       expect(out.lines()).toMatch(/shieldcortex openclaw install/);
@@ -136,7 +143,7 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
     const out = captureStdout();
     let result;
     try {
-      result = await stepOpenClawHook(home);
+      result = await stepOpenClawHook({ home });
     } finally {
       out.restore();
     }
@@ -158,7 +165,7 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
     const out = captureStdout();
     let result;
     try {
-      result = await stepOpenClawHook(home);
+      result = await stepOpenClawHook({ home });
     } finally {
       out.restore();
     }
@@ -169,12 +176,11 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
 
   it('warns — never fails the flow — when a copy could not be written', async () => {
     installStaleHook(openclawHook);
-    fs.rmSync(path.join(openclawHook, 'runtime.mjs'));
-    fs.mkdirSync(path.join(openclawHook, 'runtime.mjs'));
+    fs.writeFileSync(path.join(home, '.openclaw', 'backups'), 'not a directory\n');
     const out = captureStdout();
     let result;
     try {
-      result = await stepOpenClawHook(home);
+      result = await stepOpenClawHook({ home });
     } finally {
       out.restore();
     }
@@ -184,12 +190,15 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
   });
 
   it('warns rather than claiming currency when the packaged source is missing', async () => {
-    const result = await runQuietly(() => stepOpenClawHook(home, {
+    const result = await runQuietly(() => stepOpenClawHook({
+      home,
       refresh: () => ({
         installed: [openclawHook],
         refreshed: [],
         current: [],
         failed: [],
+        recovered: [],
+        backups: [],
         sourceAvailable: false,
       }),
     }));
@@ -212,7 +221,8 @@ describe('stepHermesPlugin — what `update` reports (#576)', () => {
   const base: HermesRefreshResult = { status: 'current', summary: '', detail: [], refreshed: [] };
 
   it('skips quietly when there is no installed copy', async () => {
-    const result = await runQuietly(() => stepHermesPlugin(home, {
+    const result = await runQuietly(() => stepHermesPlugin({
+      home,
       refresh: () => ({ ...base, status: 'not-installed', summary: 'Hermes plugin not installed' }),
     }));
     expect(result.status).toBe('skip');
@@ -220,7 +230,8 @@ describe('stepHermesPlugin — what `update` reports (#576)', () => {
   });
 
   it('reports a refresh with the restart the gateway needs', async () => {
-    const result = await runQuietly(() => stepHermesPlugin(home, {
+    const result = await runQuietly(() => stepHermesPlugin({
+      home,
       refresh: () => ({
         ...base,
         status: 'refreshed',
@@ -242,7 +253,8 @@ describe('stepHermesPlugin — what `update` reports (#576)', () => {
     // credential. That reads `previous copy kept at ~[REDACTED-high_entropy]`
     // and loses the only fact the line carries.
     const backup = `${home}/.hermes/backups/shieldcortex-preupdate-2026-09-24T23-10-23-474Z/shieldcortex`;
-    const result = await runQuietly(() => stepHermesPlugin(home, {
+    const result = await runQuietly(() => stepHermesPlugin({
+      home,
       refresh: () => ({
         ...base,
         status: 'refreshed',
@@ -258,7 +270,8 @@ describe('stepHermesPlugin — what `update` reports (#576)', () => {
   });
 
   it('reports "current" as a pass with no detail', async () => {
-    const result = await runQuietly(() => stepHermesPlugin(home, {
+    const result = await runQuietly(() => stepHermesPlugin({
+      home,
       refresh: () => ({ ...base, status: 'current', summary: 'current (1 copy)' }),
     }));
     expect(result.status).toBe('ok');
@@ -266,7 +279,8 @@ describe('stepHermesPlugin — what `update` reports (#576)', () => {
   });
 
   it('surfaces a refusal as a warn that carries the reason and the remedy', async () => {
-    const result = await runQuietly(() => stepHermesPlugin(home, {
+    const result = await runQuietly(() => stepHermesPlugin({
+      home,
       refresh: () => ({
         ...base,
         status: 'warn',
