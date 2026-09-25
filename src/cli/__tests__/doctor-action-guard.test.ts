@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { checkActionGuard, doctorExitCode, fixActionGuardConfig } from '../doctor.js';
+import { checkActionGuard, doctorExitCode, fixActionGuardConfig, policyLockRows } from '../doctor.js';
 import { normaliseWebhookUrl } from '../../defence/iron-dome/notify-config.js';
 import { handleCloudConfig } from '../../cloud/cli.js';
 import {
@@ -48,6 +48,8 @@ beforeEach(() => {
   prevOpenclawHome = process.env.OPENCLAW_HOME;
   openclawHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-ag-doctor-oc-'));
   process.env.OPENCLAW_HOME = openclawHome;
+  // Claude wiring reads os.homedir()/.claude — never the operator tree.
+  jest.spyOn(os, 'homedir').mockReturnValue(openclawHome);
 });
 
 afterEach(() => {
@@ -653,6 +655,52 @@ describe('doctor — NOTIFY fail tracks the live OpenClaw plane, not leftover si
     expect(notify!.status).toBe('warn');
     expect(notify!.fix ?? '').not.toMatch(/--action-guard-notify-webhook/);
     expect(notify!.fix ?? '').toMatch(/do not add a webhook/i);
+  });
+
+  function wireClaudeHook(): void {
+    const dir = path.join(os.homedir(), '.claude');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: 'shieldcortex hook pre-tool' }] }] } }),
+    );
+  }
+
+  it('#536 FAILs NOTIFY when Claude Code hook is wired and signed Enforce even if plugin is off', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    writePluginConfig({ actionGuard: { enabled: true, enforce: false } });
+    wireClaudeHook();
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify).toBeDefined();
+    expect(notify!.status).toBe('fail');
+    expect(notify!.message).toMatch(/Claude Code hook/i);
+    expect(notify!.fix ?? '').toMatch(/--action-guard-notify-webhook/);
+    expect(notify!.fix ?? '').not.toMatch(/--action-guard-enable/);
+    expect(doctorExitCode(results.filter((r) => /notify/i.test(r.label)))).toBe(1);
+  });
+
+  it('#536 FAILs policy-lock when Claude Code hook is gating and the lock is absent', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    writePluginConfig({ actionGuard: { enabled: true, enforce: false } });
+    wireClaudeHook();
+    const lock = policyLockRows().find((r) => r.label.includes('policy lock'))!;
+    expect(lock.status).toBe('fail');
+    expect(lock.message).toMatch(/Claude Code hook/i);
+    expect(lock.message).not.toMatch(/Guard is off on this host/i);
+    expect(lock.fix ?? '').toMatch(/protect/i);
+  });
+
+  it('#536 leftover signed Enforce + plugin-off stays WARN when Claude is unwired', async () => {
+    writeConfig({ actionGuard: { enabled: true, enforce: true } });
+    writePluginConfig({ actionGuard: { enabled: false, enforce: false } });
+    const results = await checkActionGuard();
+    const notify = results.find((r) => /notify/i.test(r.label));
+    expect(notify!.status).toBe('warn');
+    const lock = policyLockRows().find((r) => r.label.includes('policy lock'))!;
+    expect(lock.status).toBe('warn');
+    expect(lock.message).toMatch(/Guard is off on this host/i);
+    expect(lock.fix ?? '').toMatch(/Do not run protect/i);
   });
 });
 

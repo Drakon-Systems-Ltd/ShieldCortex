@@ -34,6 +34,20 @@ export interface HostTable {
   rows: HostRow[];
 }
 
+/** Live Action Guard planes for the HOSTS headline. Product fact, not a switch. */
+export type OpenClawGatePosture = 'enforcing' | 'observe-only' | 'off' | 'unknown';
+
+export interface HostGatePlanes {
+  /** Signed config is enabled AND enforce (warn-mode is not Enforce). */
+  signedEnforce: boolean;
+  /** Signed config enabled, even in warn-mode. OpenClaw liveGating uses this today. */
+  signedEnabled: boolean;
+  claudeWired: boolean;
+  openclaw: OpenClawGatePosture;
+}
+
+export type GuardHeadline = 'off' | 'on' | 'mixed';
+
 export interface HostTableDeps {
   openclawBinaryPresent?: (home: string) => boolean;
 }
@@ -144,6 +158,32 @@ function claudeWired(home: string): boolean {
       return typeof cmd === 'string' && cmd.includes('shieldcortex');
     });
   });
+}
+
+/** Claude Code PreToolUse is a ShieldCortex command, not stray text + empty PreToolUse. */
+export function claudeToolGateWired(homeArg?: string): boolean {
+  return claudeWired(resolveTableHome(homeArg));
+}
+
+/**
+ * Headline for the HOSTS table. `mixed` is one bound plane enforcing and
+ * another bound plane observe-only/off — not "Guard off".
+ */
+export function guardHeadlineFromPlanes(planes: HostGatePlanes): GuardHeadline {
+  const claudeEnforcing = planes.claudeWired && planes.signedEnforce;
+  const ocEnforcing = planes.signedEnabled && planes.openclaw === 'enforcing';
+  const ocObserve = planes.openclaw === 'observe-only' || planes.openclaw === 'off';
+  if (claudeEnforcing && ocObserve) return 'mixed';
+  if (claudeEnforcing || ocEnforcing) return 'on';
+  return 'off';
+}
+
+export function claudePlaneEnforcing(planes: HostGatePlanes): boolean {
+  return planes.claudeWired && planes.signedEnforce;
+}
+
+export function openclawPlaneEnforcing(planes: HostGatePlanes): boolean {
+  return planes.signedEnabled && planes.openclaw === 'enforcing';
 }
 
 /**
@@ -333,16 +373,19 @@ export function wiredHosts(table: HostTable): HostRow[] {
   return table.rows.filter((r) => r.wired);
 }
 
-export function formatHostTable(table: HostTable, version?: string): string[] {
+export function formatHostTable(table: HostTable, version?: string, planes?: HostGatePlanes): string[] {
   const lines: string[] = [];
-  lines.push(version ? `ShieldCortex  ${version}    Guard off` : 'ShieldCortex    Guard off');
+  const headline = planes ? guardHeadlineFromPlanes(planes) : 'off';
+  const guardLabel = headline === 'on' ? 'Guard on' : headline === 'mixed' ? 'Guard mixed' : 'Guard off';
+  lines.push(version ? `ShieldCortex  ${version}    ${guardLabel}` : `ShieldCortex    ${guardLabel}`);
   lines.push('');
   const width = Math.max(...table.rows.map((r) => r.label.length), 10);
   for (const r of table.rows) {
     const present = r.present ? 'present' : 'absent ';
     const wired = !r.present ? '—' : r.wired ? 'wired   ' : 'not wired';
     const kind = r.kind === 'bound' ? 'memory + tool gate' : 'memory only — not a gate';
-    lines.push(`  ${r.label.padEnd(width)}  ${present}  ${wired}  ${kind}`);
+    const posture = rowGatePosture(r, planes);
+    lines.push(`  ${r.label.padEnd(width)}  ${present}  ${wired}  ${kind}${posture ? `  ${posture}` : ''}`);
   }
   const todo = presentUnwired(table);
   if (todo.length > 0) {
@@ -351,6 +394,19 @@ export function formatHostTable(table: HostTable, version?: string): string[] {
     for (const r of todo) lines.push(`  ${r.wireCommand}`);
   }
   return lines;
+}
+
+function rowGatePosture(r: HostRow, planes?: HostGatePlanes): string | undefined {
+  if (!planes || !r.present || r.kind !== 'bound') return undefined;
+  if (r.id === 'claude') {
+    if (!planes.claudeWired) return undefined;
+    return planes.signedEnforce ? 'enforcing' : 'off';
+  }
+  if (r.id === 'openclaw') {
+    if (planes.openclaw === 'unknown') return undefined;
+    return planes.openclaw;
+  }
+  return undefined;
 }
 
 export function isInteractiveTerminal(
