@@ -24,6 +24,7 @@ import crypto from 'crypto';
 import Database from 'better-sqlite3';
 
 import { repairProjectKeys } from '../cli/migrate-legacy.js';
+import { repairLogName } from '../logs/retention.js';
 
 let fakeHome: string;
 let dbHome: string;
@@ -134,5 +135,144 @@ describe('#573 the repair log follows the database it describes', () => {
     const body = JSON.parse(fs.readFileSync(report.logPath as string, 'utf-8'));
     expect(body.dbPath).toBe(dbPath);
     expect(body.totalRowsAffected).toBe(3);
+  });
+});
+
+// ── Round-2 blockers 4 and 5 ──────────────────────────────────────────────
+
+/** The project keys currently stored, so "did it commit?" is a fact. */
+function projectsIn(target: string): string[] {
+  const db = new Database(target, { readonly: true });
+  try {
+    return (db.prepare('SELECT DISTINCT project FROM memories ORDER BY project').all() as
+      Array<{ project: string }>).map((r) => r.project);
+  } finally {
+    db.close();
+  }
+}
+
+describe('#573 blocker 5 — the destination is settled before the database is', () => {
+  it('refuses, and commits nothing, when a regular file sits at <db-dir>/logs', async () => {
+    // The reviewer's reproduction: mkdir threw EEXIST with the rewrite already
+    // applied, so the project had changed, no log existed, and the exception
+    // never said the repair had committed.
+    const blocker = path.join(dbHome, '.shieldcortex', 'logs');
+    fs.writeFileSync(blocker, 'not a directory');
+
+    await expect(repairProjectKeys({
+      dbPath, map: { myrepo: 'acme-myrepo' }, execute: true, noConfirm: true,
+    })).rejects.toThrow(/refusing to repair/i);
+
+    expect(projectsIn(dbPath)).toEqual(['acme-myrepo', 'myrepo']);
+    expect(fs.readFileSync(blocker, 'utf-8')).toBe('not a directory');
+    // No backup either: the repair did not start.
+    expect(fs.readdirSync(path.join(dbHome, '.shieldcortex')).filter((n) => n.includes('.bak.')))
+      .toEqual([]);
+  });
+
+  it('refuses, and commits nothing, when <db-dir>/logs is a symlink', async () => {
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-elsewhere-'));
+    fs.symlinkSync(elsewhere, path.join(dbHome, '.shieldcortex', 'logs'));
+    try {
+      await expect(repairProjectKeys({
+        dbPath, map: { myrepo: 'acme-myrepo' }, execute: true, noConfirm: true,
+      })).rejects.toThrow(/symlink/i);
+
+      expect(projectsIn(dbPath)).toEqual(['acme-myrepo', 'myrepo']);
+      expect(fs.readdirSync(elsewhere)).toEqual([]);
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when the destination is not writable', async () => {
+    const logs = path.join(dbHome, '.shieldcortex', 'logs');
+    fs.mkdirSync(logs, { recursive: true });
+    fs.chmodSync(logs, 0o500);
+    try {
+      await expect(repairProjectKeys({
+        dbPath, map: { myrepo: 'acme-myrepo' }, execute: true, noConfirm: true,
+      })).rejects.toThrow(/not writable/i);
+      expect(projectsIn(dbPath)).toEqual(['acme-myrepo', 'myrepo']);
+    } finally {
+      fs.chmodSync(logs, 0o700);
+    }
+  });
+
+  it('names both the commit and the rollback point when only the log write fails', async () => {
+    // Disk-full shape: the destination passed every pre-check, then the create
+    // itself failed. The rewrite stands, so the error must say so.
+    const realOpen = fs.openSync.bind(fs);
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, flags: string, mode?: number) => {
+      if (typeof p === 'string' && /project-key-repair-/.test(p)) {
+        const err = new Error('ENOSPC: no space left on device') as NodeJS.ErrnoException;
+        err.code = 'ENOSPC';
+        throw err;
+      }
+      return realOpen(p, flags as never, mode as never);
+    }) as typeof fs.openSync);
+
+    const failure = await repairProjectKeys({
+      dbPath, map: { myrepo: 'acme-myrepo' }, execute: true, noConfirm: true,
+    }).then(() => null, (err: Error) => err);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure!.message).toMatch(/Repair COMMITTED/);
+    expect(failure!.message).toMatch(/3 row\(s\)/);
+    expect(failure!.message).toMatch(/\.bak\./);       // names the rollback point
+    expect(failure!.message).toMatch(/ENOSPC/);
+    // And it is telling the truth: the rewrite really is committed.
+    expect(projectsIn(dbPath)).toEqual(['acme-myrepo']);
+  });
+});
+
+describe('#573 blocker 4 — the record is created exclusively', () => {
+  it('never follows a preplanted symlink carrying the record\'s own name', async () => {
+    // The reviewer's reproduction: with a fixed clock, preplant the expected
+    // filename as a symlink to a realtime audit JSONL. The repair overwrote
+    // the security evidence with repair JSON and the symlink survived.
+    const evidence = path.join(fakeHome, '.shieldcortex', 'audit', 'realtime-2026-09-25.jsonl');
+    fs.mkdirSync(path.dirname(evidence), { recursive: true });
+    fs.writeFileSync(evidence, '{"event":"blocked","id":1}\n');
+    const before = fs.readFileSync(evidence);
+
+    const logs = path.join(dbHome, '.shieldcortex', 'logs');
+    fs.mkdirSync(logs, { recursive: true });
+    const fixed = new Date('2026-09-25T05:43:44.000Z');
+    jest.useFakeTimers().setSystemTime(fixed);
+    try {
+      const planted = path.join(logs, repairLogName(dbPath, fixed));
+      fs.symlinkSync(evidence, planted);
+
+      const report = await repairProjectKeys({
+        dbPath, map: { myrepo: 'acme-myrepo' }, execute: true, noConfirm: true,
+      });
+
+      // The evidence is byte-identical and the link still points at it.
+      expect(fs.readFileSync(evidence)).toEqual(before);
+      expect(fs.lstatSync(planted).isSymbolicLink()).toBe(true);
+      // The record went somewhere else, and is a real file.
+      expect(report.logPath).not.toBe(planted);
+      expect(fs.lstatSync(report.logPath as string).isFile()).toBe(true);
+      expect(JSON.parse(fs.readFileSync(report.logPath as string, 'utf-8')).dbPath).toBe(dbPath);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('refuses a <db-dir>/logs pointed at the realtime audit plane, leaving it untouched', async () => {
+    const audit = path.join(fakeHome, '.shieldcortex', 'audit');
+    fs.mkdirSync(audit, { recursive: true });
+    fs.writeFileSync(path.join(audit, 'realtime-2026-09-25.jsonl'), '{"event":"blocked"}\n');
+    const manifest = fs.readdirSync(audit).map((n) => [n, fs.readFileSync(path.join(audit, n), 'utf-8')]);
+    fs.symlinkSync(audit, path.join(dbHome, '.shieldcortex', 'logs'));
+
+    await expect(repairProjectKeys({
+      dbPath, map: { myrepo: 'acme-myrepo' }, execute: true, noConfirm: true,
+    })).rejects.toThrow(/symlink/i);
+
+    expect(fs.readdirSync(audit).map((n) => [n, fs.readFileSync(path.join(audit, n), 'utf-8')]))
+      .toEqual(manifest);
+    expect(projectsIn(dbPath)).toEqual(['acme-myrepo', 'myrepo']);
   });
 });

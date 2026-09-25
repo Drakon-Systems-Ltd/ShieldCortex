@@ -1,5 +1,4 @@
 import fs from 'fs';
-import { mkdirSecure } from '../setup/state-permissions.js';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
@@ -9,7 +8,7 @@ import { deriveProjectKey } from '../context/derive-project-key.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
 import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
-import { repairLogDirForDb } from '../logs/retention.js';
+import { prepareRepairLogDir, writeRepairLogRecord } from '../logs/retention.js';
 
 interface LegacyMemoryRow {
   id: number;
@@ -987,6 +986,14 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
       }
     }
 
+    // #573 — settle the evidence destination BEFORE the database is touched.
+    //
+    // This used to happen after the commit, so a regular file (or a symlink)
+    // at `<db-dir>/logs` threw with the rewrite already applied and no log
+    // written, and the exception never said the commit had happened. A
+    // refusal here means nothing has changed yet, and nothing will.
+    const logsDir = prepareRepairLogDir(dbPath);
+
     // Budget-aware safety backup (#148). This copy is a full duplicate of the
     // database, and on a host whose DB is a large fraction of the disk limit it
     // used to consume the entire remaining budget without looking — turning a
@@ -1047,31 +1054,29 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
     // already does (`${dbPath}.bak.<ts>`). For the real DB at
     // ~/.shieldcortex/memories.db this resolves to the documented
     // ~/.shieldcortex/logs/ and nothing moves; for a temp DB the log is born
-    // and dies with the temp tree.
-    const logsDir = repairLogDirForDb(dbPath);
-    mkdirSecure(logsDir);
-    const logPath = path.join(
-      logsDir,
-      `project-key-repair-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
-    );
-    fs.writeFileSync(
-      logPath,
-      JSON.stringify(
-        {
-          dbPath,
-          backupPath,
-          appliedAt: new Date().toISOString(),
-          rewrites: proposals,
-          totalRowsAffected: report.applied,
-        },
-        null,
-        2
-      ),
-      'utf-8'
-    );
-    report.logPath = logPath;
+    // and dies with the temp tree. The record is created exclusively, so a
+    // preplanted symlink carrying its name is never followed.
+    try {
+      report.logPath = writeRepairLogRecord(logsDir, dbPath, {
+        dbPath,
+        backupPath,
+        appliedAt: new Date().toISOString(),
+        rewrites: proposals,
+        totalRowsAffected: report.applied,
+      });
+    } catch (err) {
+      // The rewrite is COMMITTED and only its evidence is missing. Saying
+      // nothing, or reporting the write fault alone, would leave the operator
+      // unable to tell which happened — so name both, and the rollback point.
+      const why = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Repair COMMITTED — ${report.applied} row(s) rewritten in ${dbPath} — but its log ` +
+        `could not be written to ${logsDir}: ${why}. The rewrite stands; roll back with the ` +
+        `backup at ${backupPath} if you did not want it.`
+      );
+    }
     console.log(`Applied: ${report.applied} rows`);
-    console.log(`Log:     ${logPath}`);
+    console.log(`Log:     ${report.logPath}`);
   } finally {
     db.close();
   }
@@ -1086,5 +1091,14 @@ async function runRepairProjectKeys(args: string[]): Promise<void> {
   const dbPath = flagValue(args, '--db');
   const includeStm = args.includes('--include-stm');
   const execute = args.includes('--execute');
-  await repairProjectKeys({ dbPath, map, scanPaths, onlyProject, includeStm, execute });
+  try {
+    await repairProjectKeys({ dbPath, map, scanPaths, onlyProject, includeStm, execute });
+  } catch (err) {
+    // #573: a refused destination (nothing changed) and a committed rewrite
+    // whose log could not be written both arrive here. Print the reason as
+    // written — it already distinguishes the two — and exit non-zero, rather
+    // than letting it surface as "Failed to start shieldcortex server".
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
 }

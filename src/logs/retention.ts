@@ -403,3 +403,89 @@ export function pruneRepairLogs(options: RepairLogPruneOptions = {}): RepairLogP
     errors,
   };
 }
+
+/**
+ * Resolve, create and prove the record destination BEFORE the database is
+ * touched (#573 round 2, blockers 4 and 5).
+ *
+ * The repair used to `mkdirSecure` the logs directory AFTER committing its
+ * rewrite. A regular file sitting at `<db-dir>/logs` therefore threw EEXIST
+ * with the project keys already changed and no per-rewrite log written — the
+ * operator had a silently-unlogged repair and an exception that never said the
+ * commit had happened. And because nothing checked the path's shape, a `logs`
+ * symlinked at the realtime audit directory made the repair write its JSON
+ * into the audit plane.
+ *
+ * So the destination is settled first, and a refusal here means the repair
+ * never runs and nothing has changed:
+ *   - every component from a `.shieldcortex` ancestor down must not be a
+ *     symlink, and the destination itself must be a directory;
+ *   - it is created (0700) if absent, then re-checked, because a recursive
+ *     `mkdir` onto an existing symlink-to-directory succeeds silently;
+ *   - it must be writable and searchable by this process, so "disk full" is
+ *     the only write failure left that the pre-check could not have caught.
+ *
+ * Throws with an operator-facing reason. Returns the directory to write into.
+ */
+export function prepareRepairLogDir(dbPath: string): string {
+  const dir = repairLogDirForDb(dbPath);
+  const refuse = (why: string): never => {
+    throw new Error(`refusing to repair ${dbPath}: its repair log cannot be written — ${why}`);
+  };
+  const before = checkPlane(dir);
+  if (before.fault) refuse(before.fault);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    refuse(`${dir} could not be created — ${describe(err)}`);
+  }
+  const after = checkPlane(dir);
+  if (after.fault) refuse(after.fault);
+  if (after.id === null) refuse(`${dir} is not a directory`);
+  try {
+    fs.accessSync(dir, fs.constants.W_OK | fs.constants.X_OK);
+  } catch (err) {
+    refuse(`${dir} is not writable — ${describe(err)}`);
+  }
+  return dir;
+}
+
+/**
+ * Create one repair-log record, exclusively.
+ *
+ * `'wx'` is `O_CREAT | O_EXCL`, which fails rather than following a symlink at
+ * the final component and never truncates an existing file. A preplanted
+ * `project-key-repair-<id>-<stamp>.json` symlink aimed at a realtime audit file
+ * used to be followed and the evidence overwritten; now that name is simply
+ * EEXIST and the record takes the next free suffix. Both shapes match the
+ * retention regex, so a suffixed record is still bounded.
+ *
+ * Returns the path written. Throws only when no unique name could be created or
+ * the write itself failed — the caller must report that as a partial success,
+ * because by then the rewrite is committed.
+ */
+export function writeRepairLogRecord(
+  dir: string,
+  dbPath: string,
+  body: unknown,
+  when: Date = new Date(),
+): string {
+  const base = repairLogName(dbPath, when);
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const target = path.join(dir, attempt === 0 ? base : base.replace(/\.json$/, `-${attempt}.json`));
+    let fd: number;
+    try {
+      fd = fs.openSync(target, 'wx', 0o600);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+      throw err;
+    }
+    try {
+      fs.writeFileSync(fd, JSON.stringify(body, null, 2), 'utf-8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    return target;
+  }
+  throw new Error(`no unique name available for a repair log in ${dir} (tried ${base} and 31 suffixes)`);
+}
