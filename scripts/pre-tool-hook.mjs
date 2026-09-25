@@ -1073,160 +1073,133 @@ function safeSignalList(signals) {
 const SPANLESS_SIGNAL_RE = /^(secret-egress|credential-access)/;
 const MAX_MATCH_ROWS = 25;
 
-// ── Evidence contract (r4 — allow-list projection, not redaction) ─────────
+// ── Evidence contract (r5 — closed vocabulary, not projection of input) ──
 //
-// Three independent review rounds (r1–r3) each found a new credential-
-// bearing shell-argument shape that the previous approach — collapse,
-// bound, run a credential redactor over the matched span — still let
-// through whole: a header value glued to its flag with `=`
-// (`--header="Cookie: sid=<value>"`) and a value attached to a bundled
-// short-flag cluster with no separator at all (`-bsid=<value>`) both
-// persisted the complete secret in denials.jsonl. Each round closed one
-// shape and review found the next, because a shell command line is an
-// open-ended grammar and a redactor is a denylist over it: it can always be
-// one shape behind.
+// r1–r3 tried to make the matched command text safe to KEEP (collapse,
+// bound, credential-redact, tokenise) and each round closed one shape while
+// review found the next. r4 stopped keeping the text and instead persisted
+// a PROJECTION of it — verb, hosts, flag names — built from an allow-list of
+// facts a shell-aware tokeniser could read off the tokens. Review r4 showed
+// that was still input persistence under new JSON keys: the projection
+// visited every token without knowing its semantic ROLE, so a password
+// that happened to begin with two dashes was persisted as a flag name, and
+// a password shaped like a URL contributed its hostname. A character
+// grammar ("looks like a flag", "looks like a host") is not a finite safe
+// vocabulary; it only says what a value is SPELLED like, never whether it
+// was a credential argument.
 //
-// The fix that closes the CLASS, not the next shape, is to stop asking "is
-// this text safe to keep" and start asking "what SPECIFIC facts about this
-// text are safe to compute". Nothing from a command-derived span is ever
-// persisted verbatim, redacted or otherwise — `spanWithheld: 'command-text'`
-// says so on every row that had one. What is persisted instead is built
-// ONLY from this allow-list, each fact proven by the tokeniser, never
-// copied from the input:
+// r5 closes the class by construction: NO string persisted on a match row
+// is ever derived from the input. Every string field is drawn from a table
+// in this file, and every other field is a bounded number or a boolean:
 //
-//   - `verb`   — the first shell token, only if it is a bare command-name
-//                shape (`/^[A-Za-z0-9_.-]{1,32}$/`); a token that fails
-//                that shape (quotes, spaces, a credential-looking argv[0])
-//                contributes no verb rather than a fragment of one.
-//   - `argc`   — how many shell-aware tokens the span had. A count, not text.
-//   - `hosts`  — bare hostnames pulled out of URL-shaped tokens, with
-//                userinfo (`user:pass@`), port, path, query and fragment
-//                all DROPPED before the host is even looked at — `curl
-//                https://alice:S3cr3t@host/token?x=T` contributes `host`
-//                and nothing else. Validated against a strict hostname
-//                grammar; a numeric-label host is kept only when it is a
-//                genuine, in-range IPv4 address, so a dotted string that
-//                merely LOOKS like one cannot smuggle other data through it.
-//   - `flags`  — flag NAMES only, value discarded at the first `=`. A
-//                single-dash cluster (`-bsid=…`, `-su`) is folded to its
-//                first letter (`-b`, `-s`): the letters after the first in
-//                a short-option cluster are themselves the vector the r3
-//                and r4 reproductions used to carry an attached value, so
-//                the cluster is never trusted past its first letter. A
-//                long flag (`--header=…`) keeps its full name.
-//   - `pipeToShell` / `subshell` — booleans, cheaply read off the tokens
-//                (a bare `|`, a `$(` or backtick), never the text itself.
+//   - `signal`        — the rule name, only if it is in `SAFE_SIGNALS`.
+//   - `spanWithheld`  — the constant `'command-text'` on every row that had
+//                       a command-derived span. The span itself is never
+//                       persisted, verbatim, redacted or projected.
+//   - `verb`          — an entry of `KNOWN_VERBS` (the table below), when
+//                       the basename of argv[0] is one. The persisted string
+//                       is the TABLE's entry, not the token. Anything else
+//                       (a path, an env assignment, a quoted run, a word
+//                       the table does not know) contributes no verb.
+//   - `argc`          — how many shell-aware tokens the span had. A count.
+//   - `pipe`          — true when an unquoted token contains `|`. Named for
+//                       exactly what is tested — a pipe operator is present
+//                       — not for what it pipes into.
+//   - `subshell`      — true when an unquoted token contains `$(` or a
+//                       backtick.
+//   - `provenanceWithheld` — the constant `'path'` on every row the core
+//                       gave folded-source provenance for (#184). Paths and
+//                       basenames are input too — `/tmp/<token>.sh` is a
+//                       path — so none of it is persisted; `line` (an
+//                       integer) and `chainDepth` (a capped count of chain
+//                       components) are what survive.
 //
-// Nothing else survives: no quoted-argument contents, no `key=value`
-// values, no URL path/query, no header value. The two r4 reproductions are
-// covered by construction, not by a new rule aimed at them specifically:
-// `--header=` is a flag name that stops at `=`, so the quoted
-// `"Cookie: sid=…"` after it is never inspected past that point; `-bsid=`
-// is a single-dash cluster folded to `-b`, so the attached `sid=<value>`
-// never contributes a flag name either.
+// No hosts, no flags, no basenames: each of those was a string copied out
+// of the input on the strength of its spelling, which is the defect. What
+// an operator loses is diagnostic colour; what they keep is the rule that
+// fired, the row it fired on, the shape of the command (verb from a known
+// set, argument count, pipe/subshell) and where in a folded script it was.
+// Richer diagnostic text, if ever wanted, is a separately designed
+// operator-only surface, not this durable file.
 //
-// Provenance (`source`, `chain`) is free text from the same untrusted place
-// a span is — a folded script's path can be `/tmp/<token>.sh` (#184) — so it
-// gets the same treatment: only the FILE NAME (basename) of each path
-// component survives, and only when that name is itself allow-listed shape
-// (`[A-Za-z0-9._-]{1,64}`, no 16-or-longer alphanumeric run — a hash- or
-// token-shaped name). `line` is an integer and needs none of this.
-//
-// The credential redactor from `dist/defence/credential-leak` is no longer
-// on this path — there is no free-text command field left for it to run
-// over, and an unreachable "safety" layer is worse than none, so r2/r3's
-// tokeniser-redaction machinery (`sanitiseEvidenceText`,
-// `redactCredentialArguments`, the cut-boundary rule, the credential-flag
-// tables) is deleted rather than kept dead. `tokenizeShellArgs` survives:
-// the projection still needs a shell-aware tokeniser, it just never hands a
-// token's raw text back out.
+// The credential redactor from `dist/defence/credential-leak` is not on
+// this path: there is no free-text field for it to run over, so the row is
+// identical whether that module is absent, present, or throws.
+// `tokenizeShellArgs` survives because the verb lookup and the counts need
+// a shell-aware tokeniser; it never hands a token's raw text back out to
+// anything that persists.
 
-const VERB_RE = /^[A-Za-z0-9_.-]{1,32}$/;
-/** A flag token up to `=`; whatever follows `=` is never captured or kept. */
-const FLAG_RE = /^-{1,2}[A-Za-z][A-Za-z0-9-]{0,31}(?=$|=)/;
-const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
-/** A URL-shaped token: only the host (capture group 1) is ever read from a match. */
-const URL_TOKEN_RE = /^[a-z][a-z0-9+.-]*:\/\/(?:[^\s@/]*@)?([^\s/:?#]+)(?::\d+)?(?:[/?#].*)?$/i;
-const MAX_HOSTS = 5;
-const MAX_FLAGS = 12;
+/**
+ * The only strings `verb` can ever be. Lookup is by the lower-cased
+ * basename of argv[0]; the value persisted is the entry from this set, so a
+ * token that is not in it contributes nothing rather than a fragment of
+ * itself. Extending this table is a code change, reviewed as one; it is
+ * never extended from input.
+ */
+const KNOWN_VERBS = new Set([
+  // privilege / identity
+  'sudo', 'su', 'doas', 'pkexec', 'runas',
+  // shells and interpreters
+  'sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'cmd', 'powershell', 'pwsh',
+  'python', 'python3', 'node', 'perl', 'ruby', 'php', 'osascript', 'eval', 'exec', 'source',
+  // network
+  'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'nc', 'ncat', 'netcat', 'socat', 'telnet', 'ftp',
+  // filesystem
+  'rm', 'mv', 'cp', 'dd', 'ln', 'chmod', 'chown', 'chgrp', 'shred', 'truncate',
+  'mount', 'umount', 'tee', 'cat', 'echo', 'printf', 'sed', 'awk', 'find', 'xargs', 'tar', 'zip', 'unzip',
+  // encoding / crypto
+  'base64', 'xxd', 'openssl', 'gpg',
+  // processes / services / scheduling
+  'kill', 'pkill', 'killall', 'systemctl', 'service', 'launchctl', 'crontab', 'at', 'nohup', 'env', 'export',
+  // package / container / cloud
+  'npm', 'npx', 'pip', 'pip3', 'brew', 'apt', 'apt-get', 'yum', 'dnf', 'docker', 'kubectl', 'git',
+  'aws', 'gcloud', 'az',
+  // firewalls
+  'iptables', 'ip6tables', 'nft', 'ufw',
+]);
+/** argv[0] is looked up only when it is a bare word or a path ending in one — the lookup key never persists. */
+const VERB_KEY_RE = /^(?:[^\s'"`$]*[\\/])?([A-Za-z0-9_.+-]{1,32})$/;
+const MAX_CHAIN_DEPTH = 6;
 /**
  * The hook must not assume the dist it loads bounds a span to any size (see
  * the file header). Nothing here is a security boundary — the tokeniser is
- * a single linear pass, not a backtracking regex, and every persisted list
- * is already capped — this only bounds the WORK done on a pathologically
- * large string from a compromised or buggy dist before that capping applies.
+ * a single linear pass, not a backtracking regex — this only bounds the WORK
+ * done on a pathologically large string from a compromised or buggy dist.
  */
 const MAX_PROJECTION_INPUT_CHARS = 8192;
 
-function isValidIPv4(host) {
-  const parts = host.split('.');
-  if (parts.length !== 4) return false;
-  return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255 && (p.length === 1 || p[0] !== '0'));
-}
-
 /**
- * A hostname-grammar match whose labels are ALL digits is kept only when it
- * is a genuine, in-range IPv4 address — otherwise it merely LOOKS like one
- * (out-of-range octets, the wrong number of labels) and is dropped rather
- * than persisted on the strength of that resemblance.
+ * `verb` is a lookup, not a copy: the token's lower-cased basename is used
+ * as a KEY into `KNOWN_VERBS`, and what comes back — or nothing — is what
+ * persists. The token itself never does.
  */
-function safeHostname(host) {
-  if (!HOSTNAME_RE.test(host)) return false;
-  const allNumericLabels = host.split('.').every((label) => /^[0-9]+$/.test(label));
-  return allNumericLabels ? isValidIPv4(host) : true;
-}
-
-function projectVerb(tokens) {
-  const first = tokens[0]?.value;
-  return typeof first === 'string' && VERB_RE.test(first) ? first : undefined;
-}
-
-function projectHosts(tokens) {
-  const hosts = [];
-  for (const tok of tokens) {
-    const m = URL_TOKEN_RE.exec(tok.value);
-    if (!m) continue;
-    const host = m[1].toLowerCase();
-    if (!safeHostname(host) || hosts.includes(host)) continue;
-    hosts.push(host);
-    if (hosts.length >= MAX_HOSTS) break;
-  }
-  return hosts;
-}
-
-function projectFlags(tokens) {
-  const flags = [];
-  for (const tok of tokens) {
-    const m = FLAG_RE.exec(tok.value);
-    if (!m) continue;
-    const full = m[0];
-    // A single-dash cluster is folded to its first letter: `-bsid=…` and
-    // `-su` both carry a value past the first letter (an attached value, or
-    // the next argument is the value) — exactly the vector r3/r4 needed
-    // redacting — so the cluster is never trusted past that first letter.
-    const name = full.startsWith('--') ? full : full.slice(0, 2);
-    if (flags.includes(name)) continue;
-    flags.push(name);
-    if (flags.length >= MAX_FLAGS) break;
-  }
-  return flags;
+function lookupVerb(tokens) {
+  const first = tokens[0];
+  if (!first || first.quote !== null || typeof first.value !== 'string') return undefined;
+  const m = VERB_KEY_RE.exec(first.value);
+  if (!m) return undefined;
+  const key = m[1].toLowerCase();
+  if (!KNOWN_VERBS.has(key)) return undefined;
+  for (const entry of KNOWN_VERBS) if (entry === key) return entry;
+  return undefined;
 }
 
 function projectShellShape(tokens) {
-  let pipeToShell = false;
+  let pipe = false;
   let subshell = false;
   for (const tok of tokens) {
     if (tok.quote === "'") continue; // single-quoted: shell-literal text, not an operator
-    if (tok.value.includes('|')) pipeToShell = true;
+    if (tok.value.includes('|')) pipe = true;
     if (tok.value.includes('$(') || tok.value.includes('`')) subshell = true;
   }
-  return { pipeToShell, subshell };
+  return { pipe, subshell };
 }
 
 /**
- * The whole safety mechanism for command-derived evidence (r4): `value` is
- * tokenised and only the allow-listed facts above are read off it. Nothing
- * else — not a substring, not a redacted copy — is ever returned.
+ * The whole safety mechanism for command-derived evidence (r5): `value` is
+ * tokenised, and what is returned is a verb LOOKED UP in a table, a token
+ * count, and two booleans. No substring of `value`, redacted or otherwise,
+ * is ever returned.
  */
 function projectCommandEvidence(value) {
   if (typeof value !== 'string') return null;
@@ -1235,15 +1208,11 @@ function projectCommandEvidence(value) {
   const tokens = tokenizeShellArgs(trimmed);
   if (tokens.length === 0) return null;
   const out = { spanWithheld: 'command-text' };
-  const verb = projectVerb(tokens);
+  const verb = lookupVerb(tokens);
   if (verb) out.verb = verb;
   out.argc = tokens.length;
-  const hosts = projectHosts(tokens);
-  if (hosts.length > 0) out.hosts = hosts;
-  const flags = projectFlags(tokens);
-  if (flags.length > 0) out.flags = flags;
-  const { pipeToShell, subshell } = projectShellShape(tokens);
-  if (pipeToShell) out.pipeToShell = true;
+  const { pipe, subshell } = projectShellShape(tokens);
+  if (pipe) out.pipe = true;
   if (subshell) out.subshell = true;
   return out;
 }
@@ -1305,60 +1274,36 @@ function tokenizeShellArgs(text) {
   return tokens;
 }
 
-const PATH_COMPONENT_RE = /^[A-Za-z0-9._-]{1,64}$/;
-/** A run this long inside an otherwise-allowed component is hash/token shaped, not a normal filename. */
-const LONG_ALNUM_RUN_RE = /[A-Za-z0-9]{16,}/;
 const CHAIN_SEPARATOR = '→';
-const MAX_CHAIN_COMPONENTS = 6;
-
-function basenameOf(text) {
-  const trimmed = text.trim().replace(/[\\/]+$/, '');
-  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
-}
-
-function safePathComponent(text) {
-  const base = basenameOf(text);
-  if (!PATH_COMPONENT_RE.test(base) || LONG_ALNUM_RUN_RE.test(base)) return null;
-  return base;
-}
 
 /**
- * `source`/`chain` never persist as given — only the FILE NAME of each path
- * component, and only when that name is itself allow-listed shape. Either
- * field failing its check withholds BOTH: an operator sees one honest
- * reason, not a partially-redacted source beside a withheld chain.
+ * `source`/`chain` (#184 folded-script provenance) are paths, and a path is
+ * input: `/tmp/<token>.sh` is one. r4 kept their basenames when they were
+ * allow-listed shape; r5 keeps no string from them at all. What survives is
+ * that provenance EXISTED (`provenanceWithheld: 'path'`) and how deep the
+ * fold chain was (`chainDepth`, a capped count). `line` is handled by the
+ * caller as the integer it is.
  */
 function projectProvenance(rawSource, rawChain) {
-  let source;
-  if (typeof rawSource === 'string' && rawSource.trim()) {
-    source = safePathComponent(rawSource);
-    if (source === null) return { withheld: 'unsafe-path' };
+  const hasSource = typeof rawSource === 'string' && rawSource.trim().length > 0;
+  const hasChain = typeof rawChain === 'string' && rawChain.trim().length > 0;
+  if (!hasSource && !hasChain) return {};
+  const out = { provenanceWithheld: 'path' };
+  if (hasChain) {
+    const depth = rawChain.split(CHAIN_SEPARATOR).map((p) => p.trim()).filter(Boolean).length;
+    out.chainDepth = Math.min(depth, MAX_CHAIN_DEPTH);
   }
-  let chain;
-  if (typeof rawChain === 'string' && rawChain.trim()) {
-    const parts = rawChain.split(CHAIN_SEPARATOR).map((p) => p.trim()).filter(Boolean).slice(0, MAX_CHAIN_COMPONENTS);
-    const bases = [];
-    for (const part of parts) {
-      const base = safePathComponent(part);
-      if (base === null) return { withheld: 'unsafe-path' };
-      bases.push(base);
-    }
-    if (bases.length > 0) chain = bases.join(' > ');
-  }
-  const out = {};
-  if (source) out.source = source;
-  if (chain) out.chain = chain;
   return out;
 }
 
 /**
  * Project the guard's rule → matched-span evidence for the denial record.
- * Fail-closed on every axis: an unrecognised rule name is dropped, every
- * command-derived span goes through `projectCommandEvidence` (never kept
- * verbatim), and unsafe provenance withholds and says why
- * (`provenanceWithheld: 'unsafe-path'`). `line` is an integer and needs
- * none of that.
+ * Fail-closed on every axis, and closed-vocabulary by construction: an
+ * unrecognised rule name is dropped; a command-derived span contributes
+ * only what `projectCommandEvidence` looks up or counts (never any of its
+ * text); provenance contributes only that it existed and how deep it was.
+ * Every string on a returned row is one of `SAFE_SIGNALS`, `KNOWN_VERBS`,
+ * `'command-text'` or `'path'`.
  */
 function safeMatchList(matches) {
   if (!Array.isArray(matches)) return [];
@@ -1373,16 +1318,9 @@ function safeMatchList(matches) {
       const projection = projectCommandEvidence(raw.span);
       if (projection) Object.assign(row, projection);
     }
-    // #184: where the match came from folded script source, the row names the
-    // file so the operator is not left reading a parent script that does not
-    // contain the matched pattern. Both fields are free text from the same
-    // place the span came from and get the same treatment.
-    const provenance = projectProvenance(raw.source, raw.chain);
-    if (provenance.withheld) row.provenanceWithheld = provenance.withheld;
-    else {
-      if (provenance.source) row.source = provenance.source;
-      if (provenance.chain) row.chain = provenance.chain;
-    }
+    // #184: where the match came from folded script source, the row says so
+    // and how deep the fold was — never the path (see projectProvenance).
+    Object.assign(row, projectProvenance(raw.source, raw.chain));
     if (Number.isInteger(raw.line) && raw.line > 0) row.line = raw.line;
     out.push(row);
   }
