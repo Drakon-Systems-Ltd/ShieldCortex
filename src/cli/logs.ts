@@ -10,11 +10,8 @@
  * usable on a host whose DB is at the hard size block — exactly the host that
  * needs it.
  *
- * SCOPE. The realtime audit ledger under `~/.shieldcortex/audit/` is NOT
- * managed here and this command says so rather than implying otherwise: it is
- * an unread queue with concurrent writers, a projector cursor and stop-hook
- * recovery reading it, and bounding it safely is a separate piece of work
- * (#579).
+ * The rules it applies, and why the realtime audit ledger is not among them,
+ * are in src/logs/retention.ts; the help text below states them for operators.
  */
 
 import path from 'path';

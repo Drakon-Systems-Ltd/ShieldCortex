@@ -1041,21 +1041,12 @@ export async function repairProjectKeys(opts: RepairOptions = {}): Promise<Repai
 
     // 5. Per-rewrite JSON log, BESIDE THE DATABASE IT DESCRIBES (#573).
     //
-    // This used to be an unconditional write to `os.homedir()/.shieldcortex/
-    // logs/` no matter which database had been repaired. Every run against a
-    // throwaway DB — a test, a probe, `--db <tmp>`, a repair of a scratch copy
-    // — therefore deposited a permanent file in the operator's REAL home,
-    // describing a database that had since been deleted. Measured on the #573
-    // host: 3,508 repair logs, 3,508 of them for a DB outside
-    // ~/.shieldcortex, not one for the live one. That is the entire observed
-    // growth rate.
-    //
-    // The log now follows the database, exactly as the safety backup above
-    // already does (`${dbPath}.bak.<ts>`). For the real DB at
-    // ~/.shieldcortex/memories.db this resolves to the documented
-    // ~/.shieldcortex/logs/ and nothing moves; for a temp DB the log is born
-    // and dies with the temp tree. The record is created exclusively, so a
-    // preplanted symlink carrying its name is never followed.
+    // This used to write to `os.homedir()/.shieldcortex/logs/` whichever
+    // database had been repaired, so every run against a throwaway DB left a
+    // permanent file in the operator's real home describing a database that no
+    // longer existed. It now follows the DB, exactly as the safety backup above
+    // already does — see src/logs/retention.ts for the measurements and the
+    // rules that bound the result.
     try {
       report.logPath = writeRepairLogRecord(logsDir, dbPath, {
         dbPath,
