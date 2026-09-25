@@ -18,7 +18,7 @@
  */
 
 import path from 'path';
-import { commandWantsHelp } from './wants-help.js';
+import { helpGate } from './help-gate.js';
 import {
   DEFAULT_REPAIR_LOG_KEEP,
   defaultRepairLogDir,
@@ -147,36 +147,39 @@ export function logsUsageLines(): string[] {
   ];
 }
 
+/**
+ * Everything `shieldcortex logs` accepts — the verb included, because the
+ * shared gate checks whole tokens (#577). An exhaustive list is what lets the
+ * strict preflight in `src/cli/strict-args-preflight.ts` reject `--exectue`
+ * BEFORE `main()` shells out to `npm ls -g`.
+ */
+export const LOGS_FLAGS = ['prune', '--execute'] as const;
+
+/** The same usage text, as one string, for the shared gate. */
+export const LOGS_HELP = logsUsageLines().join('\n');
+
 export async function handleLogsCommand(args: string[]): Promise<void> {
-  // A help request prints the usage and SUCCEEDS (#515): asking what a command
-  // is going to do must never be answered with an error, and must never run
-  // the command. Bare `logs` with no subcommand is still a usage error and
-  // exits 1, exactly as `sessions` does.
-  //
-  // #577: the help flag counts ANYWHERE on the line, through the shared gate —
-  // `logs prune --execute --help` must print usage, not delete logs.
-  if (commandWantsHelp('logs', args)) {
-    for (const line of logsUsageLines()) console.log(line);
+  // The shared #577 gate decides both questions: a help flag ANYWHERE prints
+  // usage and exits 0 without running anything (`logs prune --execute --help`
+  // must not delete), and an unknown token exits 2 with usage on stderr —
+  // the same code and the same convention as `update --bogus`. The preflight
+  // in main() has already reached this verdict on the same table; running it
+  // again here is the same answer, not a second, divergent one.
+  const gate = helpGate(args, LOGS_HELP, { command: 'logs', known: LOGS_FLAGS });
+  if (gate !== null) {
+    process.exitCode = gate;
     return;
   }
   if (args[0] === 'prune') {
-    // #577: unknown flags are refused before anything touches the disk, so a
-    // typo such as `--exectue` is an error, not a silent dry run, and a
-    // misspelt `--help` is never mistaken for consent to delete.
-    const unknown = args.slice(1).filter((a) => a !== '--execute');
-    if (unknown.length > 0) {
-      console.error(`Unknown option for 'logs prune': ${unknown.join(' ')}`);
-      for (const line of logsUsageLines()) console.error(line);
-      process.exit(1);
-    }
     try {
       await runLogsPrune(args.slice(1));
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
+      process.exitCode = 1;
     }
     return;
   }
-  for (const line of logsUsageLines()) console.log(line);
-  process.exit(1);
+  // A recognised token, but no verb (`logs`, `logs --execute`). Usage error.
+  process.stderr.write(`${LOGS_HELP}\n`);
+  process.exitCode = 2;
 }

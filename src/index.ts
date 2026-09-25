@@ -617,6 +617,24 @@ async function main() {
     return;
   }
 
+  // Handle "logs" subcommand (#573) — retention for the project-key repair
+  // logs, the one on-disk plane nothing ever deleted.
+  //
+  // Dispatched HERE, ahead of the staleness preamble and the stats banner,
+  // for the same reason `hook` is: both would undo what this command is for.
+  // `logs prune` is the disk-pressure relief valve — the command an operator
+  // reaches for when doctor says the budget is full — and `npm ls -g` lets
+  // npm's update-notifier reach the registry and write ~/.npm/_logs, while the
+  // banner opens the database this command deliberately does not need. Neither
+  // is worth a byte of the operator's HOME on a DRY RUN that promises to change
+  // nothing. Its arguments were already validated by the strict preflight
+  // above, so a typo never reaches this line.
+  if (process.argv[2] === 'logs') {
+    const { handleLogsCommand } = await import('./cli/logs.js');
+    await handleLogsCommand(process.argv.slice(3));
+    return;
+  }
+
   // Warn if npx is serving a stale cached version
   checkVersionStaleness();
   const parsedArgs = parseArgs();
@@ -895,15 +913,6 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'sessions') {
     const { handleSessionsCommand } = await import('./cli/sessions.js');
     await handleSessionsCommand(process.argv.slice(3));
-    return;
-  }
-
-  // Handle "logs" subcommand (#573) — retention for the project-key repair
-  // logs, the one on-disk plane nothing ever deleted. Deliberately DB-free, so
-  // it still runs on a host whose database has hit the hard size block.
-  if (process.argv[2] === 'logs') {
-    const { handleLogsCommand } = await import('./cli/logs.js');
-    await handleLogsCommand(process.argv.slice(3));
     return;
   }
 

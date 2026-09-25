@@ -193,10 +193,13 @@ describe('#573 `shieldcortex logs prune` is reachable from the CLI', () => {
   });
 
   it('is a known command, so `logs` with no subcommand prints its own help', () => {
+    // #577 convention: a usage error puts usage on STDERR and exits 2, the
+    // same as `update --bogus`. `logs` with no verb is one.
     const res = run(['logs']);
     expect(res.stderr).not.toContain('Unknown command');
-    expect(res.stdout).toContain('Usage: shieldcortex logs');
-    expect(res.stdout).toContain('#579');
+    expect(res.stderr).toContain('Usage: shieldcortex logs');
+    expect(res.stderr).toContain('#579');
+    expect(res.status).toBe(2);
   });
 
   it('answers a help request with usage and exit 0, and never runs the prune', () => {
@@ -209,7 +212,7 @@ describe('#573 `shieldcortex logs prune` is reachable from the CLI', () => {
     }
     expect(fs.readdirSync(logsDir)).toHaveLength(25);
     // Bare `logs` is a usage error, not a help request.
-    expect(run(['logs']).status).toBe(1);
+    expect(run(['logs']).status).toBe(2);
   });
 
   it('a help flag anywhere on the line wins over --execute, through the shared #577 gate', () => {
@@ -227,7 +230,7 @@ describe('#573 `shieldcortex logs prune` is reachable from the CLI', () => {
     // Past the verb, `help` is an argument (the #577 rule every gated command
     // follows) — so `prune help` is an unknown argument: refused, nothing run.
     const verbArg = run(['logs', 'prune', 'help']);
-    expect(verbArg.status).toBe(1);
+    expect(verbArg.status).toBe(2);
     expect(verbArg.stdout).not.toContain('[DRY RUN]');
     expect(fs.readdirSync(logsDir)).toHaveLength(25);
   });
@@ -235,8 +238,9 @@ describe('#573 `shieldcortex logs prune` is reachable from the CLI', () => {
   it('refuses an unknown prune flag before touching the disk', () => {
     seedLogs(25);
     const res = run(['logs', 'prune', '--exectue']);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain("Unknown option for 'logs prune': --exectue");
+    // Exit 2 through the shared #577 gate — the same code as `update --bogus`.
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('Unknown argument: --exectue');
     expect(res.stdout).not.toContain('[DRY RUN]');
     expect(fs.readdirSync(logsDir)).toHaveLength(25);
   });

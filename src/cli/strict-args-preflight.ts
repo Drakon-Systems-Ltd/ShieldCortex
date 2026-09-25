@@ -43,6 +43,14 @@ const STRICT_COMMANDS: Partial<Record<GatedCommand, () => Promise<{ known: reado
     const m = await import('./vacuum.js');
     return { known: m.VACUUM_FLAGS, help: m.VACUUM_HELP };
   },
+  // #573: `logs prune --execute` deletes files, and its whole argument surface
+  // is two tokens — so it belongs here rather than in the help-only group.
+  // Without it, `logs prune --execute --exectue` exited 1 only AFTER the npm
+  // staleness subprocess had written ~/.npm/_logs and update-notifier state.
+  logs: async () => {
+    const m = await import('./logs.js');
+    return { known: m.LOGS_FLAGS, help: m.LOGS_HELP };
+  },
 };
 STRICT_COMMANDS.compact = STRICT_COMMANDS.vacuum; // documented alias
 
