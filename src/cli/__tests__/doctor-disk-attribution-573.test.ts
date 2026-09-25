@@ -82,6 +82,14 @@ interface DbShape {
   varied?: boolean;
   /** Shadow the dbstat vtab with a view, so attribution is genuinely absent. */
   breakDbstat?: boolean;
+  /** Bytes in `defence_audit`, spread over `auditRows` rows (default 1). */
+  auditBytes?: number;
+  auditRows?: number;
+  /**
+   * Bytes in an ORDINARY table called `memories_fts_backup` — not an FTS index,
+   * just a name a LIKE pattern used to claim (#573 round 2, blocker 7).
+   */
+  ftsBackupBytes?: number;
 }
 
 function buildDb(shape: DbShape): void {
@@ -127,6 +135,19 @@ function buildDb(shape: DbShape): void {
       insThreat.run('f'.repeat(chunk));
     }
     db.prepare('DELETE FROM threat_nodes WHERE id > ?').run(before.m ?? 0);
+  }
+  if (shape.auditBytes) {
+    const auditRows = shape.auditRows ?? 1;
+    const perAudit = Math.max(1, Math.floor(shape.auditBytes / auditRows));
+    const insAudit = db.prepare('INSERT INTO defence_audit (reason) VALUES (?)');
+    for (let i = 0; i < auditRows; i++) insAudit.run('a'.repeat(perAudit));
+  }
+  if (shape.ftsBackupBytes) {
+    db.prepare('CREATE TABLE memories_fts_backup (id INTEGER PRIMARY KEY, content TEXT)').run();
+    const insBackup = db.prepare('INSERT INTO memories_fts_backup (content) VALUES (?)');
+    for (let written = 0; written < shape.ftsBackupBytes; written += chunk) {
+      insBackup.run('b'.repeat(chunk));
+    }
   }
   if (shape.breakDbstat) db.prepare('CREATE VIEW dbstat AS SELECT 1 AS irrelevant').run();
   db.prepare('COMMIT').run();
@@ -266,5 +287,96 @@ describe('#573 memory deletion needs positive page-level attribution', () => {
     expect(result.status).toBe('fail');
     expect(result.fix).toMatch(/shieldcortex logs prune --execute/);
     expect(result.fix).not.toMatch(DELETION_ADVICE);
+  });
+});
+
+// ── Round-2 blockers 6 and 7 ──────────────────────────────────────────────
+
+describe('#573 blocker 6 — a consumer is only "the bulk" when it is measured to be', () => {
+  it('does not blame one byte of defence_audit for a threat-graph database', async () => {
+    // The reviewer's fixture exactly: 1 B of memories, 500 KB of threat_nodes,
+    // 1 B in defence_audit, no free pages. The old condition compared audit
+    // bytes ONLY against session bytes (1 > 0), so doctor announced "the bulk
+    // is defence-audit rows … ~1 B" and recommended a vacuum with nothing to
+    // reclaim.
+    buildDb({ memoryBytes: 1, threatBytes: 500 * KB, auditBytes: 1 });
+
+    const result = await checkDiskUsage(scDir, 256 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).not.toMatch(/bulk is defence-audit/);
+    expect(result.fix).not.toMatch(DELETION_ADVICE);
+    expect(result.fix).not.toMatch(/shieldcortex vacuum/);
+    expect(result.fix).toMatch(/shieldcortex stats/);
+  });
+
+  it('DOES blame defence_audit when it genuinely holds the file', async () => {
+    // The other side of the same rule: the branch must still fire when the
+    // measurement supports it, or the fix above is just a mute button.
+    buildDb({ memoryBytes: 1, auditBytes: 400 * KB, auditRows: 400 });
+
+    const result = await checkDiskUsage(scDir, 256 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).toMatch(/bulk is defence-audit rows/);
+    expect(result.fix).toMatch(/400 rows/);
+    expect(result.fix).not.toMatch(DELETION_ADVICE);
+  });
+
+  it('recommends no vacuum, and no blanket clearing, for a state file and no database', async () => {
+    // The reviewer's second fixture: a large state file, no DB at all. It was
+    // told to vacuum, and handed a list of five directories as "safe to rotate
+    // or clear" — including state/ (worker freshness, locks) and quarantine/
+    // (items awaiting review).
+    writeBytes('state/worker.json', 40 * KB);
+
+    const result = await checkDiskUsage(scDir, 32 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).not.toMatch(/shieldcortex vacuum/);
+    expect(result.fix).not.toMatch(/safe to rotate or clear/);
+    expect(result.fix).toMatch(/No single measured consumer/);
+    expect(result.fix).toMatch(/Inspect before removing anything/);
+  });
+
+  it('withholds vacuum advice below the 20% free-page floor, and gives it above', async () => {
+    buildDb({ memoryBytes: 1, threatBytes: 500 * KB });
+    const tight = await checkDiskUsage(scDir, 256 * KB);
+    expect(tight.fix).not.toMatch(/shieldcortex vacuum/);
+
+    fs.rmSync(path.join(scDir, 'memories.db'));
+    buildDb({ memoryBytes: 1, threatBytes: 100 * KB, freedThreatBytes: 400 * KB });
+    const loose = await checkDiskUsage(scDir, 256 * KB);
+    expect(loose.fix).toMatch(/shieldcortex vacuum/);
+    expect(loose.fix).toMatch(/free pages/);
+  });
+});
+
+describe('#573 blocker 7 — a name prefix is not ownership by the search index', () => {
+  it('does not claim the pages of an ordinary table called memories_fts_backup', async () => {
+    // The reviewer's fixture: 1 B of memories and 500 KB in an ORDINARY table
+    // named `memories_fts_backup`. Under `tbl_name LIKE 'memories_fts%'` doctor
+    // reported memories owning 99% of the used pages and recommended
+    // `memories prune`/`dedupe`, neither of which can reclaim another table.
+    buildDb({ memoryBytes: 1, withFts: true, ftsBackupBytes: 500 * KB });
+
+    const result = await checkDiskUsage(scDir, 256 * KB);
+
+    expect(result.status).toBe('fail');
+    expect(result.fix).not.toMatch(DELETION_ADVICE);
+    expect(result.fix).toMatch(/holds only \d+% of its used pages/);
+    expect(result.fix).toMatch(/shieldcortex stats/);
+  });
+
+  it('still counts the real FTS5 index, so the rule is precision and not silence', async () => {
+    // Same shape as the fixture above minus the impostor table: the genuine
+    // external-content FTS5 index and its shadow tables must still be counted
+    // as the memory system's, or blocker 7's fix would simply withdraw all
+    // prune advice.
+    buildDb({ memoryBytes: 400 * KB, memoryRows: 400, withFts: true, varied: true });
+
+    const result = await checkDiskUsage(scDir, 512 * KB);
+
+    expect(result.fix).toMatch(/shieldcortex memories prune --execute/);
   });
 });

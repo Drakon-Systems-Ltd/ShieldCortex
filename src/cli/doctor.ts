@@ -2085,19 +2085,44 @@ function readDbPageAttribution(dbPath: string): DbPageAttribution | null {
 
     let memoryPages: number | null = null;
     try {
-      // Which schema objects belong to the memories table: the table itself,
-      // every index on it (including sqlite_autoindex_*), and the FTS5 virtual
-      // table's shadow tables (memories_fts_data/_idx/_docsize/_config) with
-      // their own indexes. Omitting the shadow tables understates a
-      // memories-dominated DB badly — for external-content FTS the index can
-      // be a large share of the pages the memory system actually occupies.
-      const owned = db.prepare(`
-        SELECT name FROM sqlite_master
-         WHERE type IN ('table', 'index')
-           AND (tbl_name = 'memories' OR tbl_name LIKE 'memories_fts%' OR name LIKE 'memories_fts%')
-      `).all() as Array<{ name: string }>;
-      const mine = new Set<string>(owned.map((r) => r.name));
-      mine.add('memories');
+      // Which schema objects belong to the memories table, BY FACT rather than
+      // by name prefix (#573 round 2, blocker 7). The first attempt matched
+      // `tbl_name LIKE 'memories_fts%'`, which claimed the pages of any
+      // ordinary table someone had left lying around under that prefix — an
+      // operator's `memories_fts_backup` holding 500 KB put the memory system
+      // at 99% of the used pages and earned a `memories prune` that could not
+      // have reclaimed a byte of it. LIKE also reads `_` as a
+      // single-character wildcard, so the pattern was broader still.
+      //
+      // The facts, in order: the `memories` table and every index whose
+      // `tbl_name` IS `memories`; the real FTS5 virtual table, identified by
+      // its CREATE VIRTUAL TABLE … USING fts5 statement; and that table's five
+      // shadow tables, named exactly. Anything else is someone else's.
+      const mine = new Set<string>(['memories']);
+      const fts = (db.prepare(`
+        SELECT name, sql FROM sqlite_master
+         WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%USING fts5%'
+      `).all() as Array<{ name: string; sql: string }>)
+        // The memory system's index over `memories`: either the schema's own
+        // name, or an external-content FTS5 table declaring `content=memories`.
+        .filter((t) => t.name === 'memories_fts' || /content\s*=\s*'?memories'?/i.test(t.sql));
+      for (const t of fts) {
+        mine.add(t.name);
+        // FTS5's shadow tables have fixed suffixes; `_content` exists only for
+        // a contentless-of-its-own index, so absent names simply never match.
+        for (const suffix of ['_data', '_idx', '_content', '_docsize', '_config']) {
+          mine.add(`${t.name}${suffix}`);
+        }
+      }
+      // Indexes ON the tables above — `memories`' own, and the implicit
+      // `sqlite_autoindex_memories_fts_idx_1` that FTS5's `_idx` shadow table
+      // carries. `tbl_name` is an exact comparison against a set we built from
+      // facts, so no name pattern is involved.
+      for (const r of db.prepare(
+        "SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'",
+      ).all() as Array<{ name: string; tbl_name: string }>) {
+        if (mine.has(r.tbl_name)) mine.add(r.name);
+      }
       const rows = db.prepare('SELECT name, COUNT(*) AS pages FROM dbstat GROUP BY name').all() as
         Array<{ name: string; pages: number }>;
       let total = 0;
@@ -2306,26 +2331,56 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       pages.usedPages > 0 &&
       pages.memoryPages >= pages.usedPages * 0.5;
 
+    /**
+     * #573 round 2 — "the bulk" is a claim about the FILE, not about the three
+     * tables we happen to measure.
+     *
+     * The audit branch below used to read `auditBytes > sessionEventBytes`, so
+     * a database holding one byte of memories, 500 KB of threat_nodes and ONE
+     * BYTE of defence_audit was reported as "the bulk is defence-audit rows …
+     * ~1 B" and sent to vacuum. Half of a measured total is not enough on its
+     * own either: the measured total there was two bytes.
+     *
+     * A consumer may be named only when it holds at least 40% of the live DB
+     * file AND at least half of what was measured — so an unmeasured table
+     * (the threat graph) cannot be attributed to a measured one by omission.
+     */
+    const namesTheBulk = (bytes: number, consumers: DbRowConsumers): boolean => {
+      const measured = consumers.memoriesBytes + consumers.sessionEventBytes + consumers.auditBytes;
+      return liveDbSize > 0 && bytes >= liveDbSize * 0.4 && measured > 0 && bytes >= measured * 0.5;
+    };
+
+    /**
+     * Free pages worth a `vacuum`. Below this the command runs a full rewrite
+     * of the file to reclaim a rounding error, so recommending it is advice
+     * that wastes the operator's time and teaches them to ignore us.
+     */
+    const VACUUM_FREE_FLOOR_PCT = 20;
+    const freePagePct = (pages: DbPageAttribution): number =>
+      pages.pageCount > 0 ? (pages.freePages / pages.pageCount) * 100 : 0;
+
     /** What to say when attribution cannot justify deleting anything. */
     const inspectInstead = (): string => {
       const pages = dbPages();
       const lead = `The database is the largest term at ${formatBytes(liveDbSize)}, but `;
       if (pages === null) {
         return `${lead}it could not be read to attribute its contents, so nothing here is `
-          + 'evidence that deleting memories would help. Inspect it with `shieldcortex stats`; '
-          + '`shieldcortex vacuum` compacts it in place if it turns out to be mostly free pages.';
+          + 'evidence that deleting anything would help. Inspect it with `shieldcortex stats`, '
+          + 'and `shieldcortex doctor --verbose` for the full breakdown.';
       }
       const why = pages.memoryPages === null
         ? 'this SQLite build has no `dbstat`, so its pages cannot be attributed to a table — '
           + 'and a file size is not evidence that deleting memories would help.'
         : `the memories table holds only ${Math.round((pages.memoryPages / Math.max(1, pages.usedPages)) * 100)}% `
           + 'of its used pages, so deleting memories is not the fix.';
-      const freePct = pages.pageCount > 0 ? (pages.freePages / pages.pageCount) * 100 : 0;
-      const tail = freePct > 25
+      const freePct = freePagePct(pages);
+      const tail = freePct >= VACUUM_FREE_FLOOR_PCT
         ? ` ${formatBytes(pages.freeBytes)} of the file (${freePct.toFixed(0)}%) is free pages — `
           + 'run `shieldcortex vacuum` to reclaim it, and `shieldcortex stats` to see what the rest is.'
-        : ` Only ${freePct.toFixed(0)}% of it is free pages, so \`shieldcortex vacuum\` would reclaim `
-          + 'little. Inspect what is in it with `shieldcortex stats`.';
+        // Below the floor, name no command at all: mentioning `vacuum` even to
+        // dismiss it is the sentence an operator skims and then runs.
+        : ` Only ${freePct.toFixed(0)}% of it is free pages, so compacting it would reclaim little. `
+          + 'Inspect what is in it with `shieldcortex stats`.';
       return `${lead}${why}${tail}`;
     };
 
@@ -2380,25 +2435,45 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         if (
           consumers &&
           consumers.sessionEventCount > 0 &&
-          consumers.sessionEventBytes > liveDbSize * 0.4 &&
-          consumers.sessionEventBytes > consumers.auditBytes
+          namesTheBulk(consumers.sessionEventBytes, consumers)
         ) {
           return `The database is ${formatBytes(liveDbSize)} but the memories table holds only ${consumers.memoriesCount} memor${consumers.memoriesCount === 1 ? 'y' : 'ies'} — the bulk is session-capture rows (session_events: ${consumers.sessionEventCount} rows, ${formatBytes(consumers.sessionEventBytes)} of payload), which memories prune/dedupe and vacuum alone can't shrink. Run \`shieldcortex sessions prune --execute\` (deletes events older than 30 days; --days N to adjust), then \`shieldcortex vacuum\` to reclaim the freed pages on disk.`;
         }
-        if (consumers && consumers.auditBytes > consumers.sessionEventBytes) {
+        if (consumers && consumers.auditCount > 0 && namesTheBulk(consumers.auditBytes, consumers)) {
           // Audit-dominated: the worker's Phase 8a audit retention (90d + row
           // cap) bounds this over time; don't send the user to a sessions
           // prune that would be a no-op.
-          return `The database is ${formatBytes(liveDbSize)} — the bulk is defence-audit rows (defence_audit: ${consumers.auditCount} rows, ~${formatBytes(consumers.auditBytes)}), which the background worker's audit retention trims over time (90-day window + row cap). Reclaim free space with \`shieldcortex vacuum\` (compacts the DB in place via the bundled engine — no sqlite3 CLI needed).`;
+          const pages = dbPages();
+          const reclaim = pages && freePagePct(pages) >= VACUUM_FREE_FLOOR_PCT
+            ? ` ${formatBytes(pages.freeBytes)} of the file (${freePagePct(pages).toFixed(0)}%) is `
+              + 'already free pages — `shieldcortex vacuum` reclaims that on disk (in place, via the '
+              + 'bundled engine — no sqlite3 CLI needed).'
+            : ' Its pages are nearly all in use, so compacting it now would reclaim little — wait '
+              + 'for retention to trim some rows.';
+          return `The database is ${formatBytes(liveDbSize)} — the bulk is defence-audit rows `
+            + `(defence_audit: ${consumers.auditCount} rows, ~${formatBytes(consumers.auditBytes)}), `
+            + "which the background worker's audit retention trims over time (90-day window + row "
+            + `cap).${reclaim}`;
         }
         return inspectInstead();
       }
-      return `No single managed plane dominates: DB ${formatBytes(liveDbSize)}, audit `
-        + `${formatBytes(auditLogSize)}, repair logs ${formatBytes(repairLogSize)}, other `
-        + `${formatBytes(otherSize)}. The rest lives under ~/.shieldcortex/{logs,recall-log,`
-        + 'precompact-log,quarantine,state} and is safe to rotate or clear by hand; '
-        + '`shieldcortex stats` shows what the database holds, and `shieldcortex vacuum` '
-        + 'reclaims its free pages.';
+      // No measured plane is the bulk. The old text here listed five
+      // directories as "safe to rotate or clear" and recommended `vacuum`
+      // regardless — a blanket instruction that covered `state/` (worker
+      // freshness, locks) and `quarantine/` (items awaiting review) and was
+      // offered to a fixture holding nothing but a state file and no database
+      // at all (#573 round 2, blocker 6). Report the measurement and ask the
+      // operator to look; naming no command is the honest answer.
+      const pages = dbPages();
+      const vacuumNote = pages && freePagePct(pages) >= VACUUM_FREE_FLOOR_PCT
+        ? ` ${formatBytes(pages.freeBytes)} of the database (${freePagePct(pages).toFixed(0)}%) is `
+          + 'free pages, which `shieldcortex vacuum` reclaims.'
+        : '';
+      return `No single measured consumer: DB ${formatBytes(liveDbSize)}, audit `
+        + `${formatBytes(auditLogSize)}, repair logs ${formatBytes(repairLogSize)}, everything else `
+        + `${formatBytes(otherSize)}. Inspect before removing anything — `
+        + '`shieldcortex doctor --verbose` for the full breakdown and `shieldcortex stats` for what '
+        + `the database holds.${vacuumNote}`;
     };
 
     if (pct >= 95) {

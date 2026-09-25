@@ -60,16 +60,20 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.message).toMatch(/DB .* · backups .* · logs/);
   });
 
-  it('points at `shieldcortex vacuum` when the live DB itself is the bulk', async () => {
+  it('never tells the operator to run the sqlite3 binary, even on an unreadable DB', async () => {
+    // This fixture is 60 KB of filler, not a SQLite file, so no page-level
+    // attribution is possible at all. #573 round 2 (blocker 6) narrowed the
+    // rule: `vacuum` is recommended only when measured free pages are at least
+    // 20% of the file, and "could not read it" is never a measurement — so the
+    // advice here is inspection. What has not changed, and is this case's whole
+    // point: the remedy must never name the `sqlite3` CLI, which is not bundled
+    // and was absent on the fleet agent that hit this.
     writeBytes('memories.db', 60 * KB);
     const result = await checkDiskUsage(tmpDir, 32 * KB);
     expect(result.status).toBe('fail');
-    // Must be the native command, NOT an invocation of the `sqlite3` binary — that
-    // CLI is not bundled and is absent on minimal boxes (a fleet agent had none).
-    // Mentioning "no sqlite3 CLI needed" in prose is fine; recommending you RUN
-    // `sqlite3 ~/… 'VACUUM'` is the bug. Forbid only the command form.
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
     expect(result.fix).not.toMatch(/sqlite3 ['"~]/);
+    expect(result.fix).toMatch(/could not be read to attribute its contents/);
+    expect(result.fix).toMatch(/shieldcortex stats/);
   });
 
   it('names the audit plane when audit files dominate, and does not promise to prune them', async () => {
@@ -174,8 +178,12 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(/sessions prune/);
     expect(result.fix).not.toMatch(/bulk is session-capture/);
-    // Vacuum guidance is retained for the audit-dominated case.
-    expect(result.fix).toMatch(/shieldcortex vacuum/);
+    expect(result.fix).toMatch(/bulk is defence-audit rows/);
+    // Vacuum is no longer offered unconditionally here (#573 round 2, blocker
+    // 6): this fixture has essentially no free pages, so a full file rewrite
+    // would reclaim nothing. The remedy says to wait for retention instead.
+    expect(result.fix).not.toMatch(/shieldcortex vacuum/);
+    expect(result.fix).toMatch(/wait for retention/);
   });
 
   it('does not claim session capture is the bulk when the memories table dominates', async () => {
