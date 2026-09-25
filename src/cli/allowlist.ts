@@ -29,7 +29,7 @@ import {
   type ReviewedScriptEntry,
 } from '../defence/iron-dome/reviewed-scripts.js';
 import { getReviewedScriptsRaw, setReviewedScripts } from '../cloud/config.js';
-import { wantsHelp } from './wants-help.js';
+import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
 
 export const ALLOWLIST_HELP = `Usage: shieldcortex allowlist [list|add|remove|verify|scan]
 
@@ -174,6 +174,13 @@ export function pinReviewedScript(target: string, note: string | undefined, deps
   return { ok: true, entry };
 }
 
+/**
+ * `allowlist`'s value-taking options — a glob, a path or an `add --note` reason
+ * may spell "help" (#577). Re-exported from the shared registry so this command
+ * and the whole-argv gates in `src/index.ts` read one table (round 3).
+ */
+export const ALLOWLIST_VALUE_FLAGS = COMMAND_HELP_SPECS.allowlist.valueFlags;
+
 export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number | Promise<number> {
   const now = deps.now ?? Date.now();
   const log = deps.log ?? ((m: string) => console.log(m));
@@ -185,7 +192,7 @@ export function runAllowlist(argv: string[], deps: AllowlistDeps = {}): number |
   const sub = args[0];
 
   // --help / -h must not list, pin, or scan. Check before any config read.
-  if (wantsHelp(args)) {
+  if (commandWantsHelp('allowlist', args)) {
     log(ALLOWLIST_HELP);
     return 0;
   }

@@ -33,6 +33,9 @@ import {
   reserveBackupDir,
 } from './fs-answers.js';
 import { acquireUpdateLock, stageAndPublish, type UpdateLock } from './host-swap.js';
+import { helpGate } from '../cli/help-gate.js';
+import { COMMAND_HELP_SPECS } from '../cli/wants-help.js';
+import { resolveConversationAccessConsent } from './conversation-access-consent.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -774,29 +777,15 @@ export function hasConversationAccessGrant(entry: { hooks?: unknown } | undefine
 }
 
 /**
- * Has the operator asked for conversation access on THIS run (#226)?
- *
- * The grant lets a non-bundled plugin read every prompt and every model
- * response on the box. Issue #225 is explicit that it is "the operator's call
- * per box — the installer must never set it silently", and OpenClaw made it a
- * separate key, defaulting off, for the same reason. So installing ShieldCortex
- * does not grant it; ASKING for it does, either way round:
- *
- *   shieldcortex openclaw install --allow-conversation-access
- *   SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1 shieldcortex openclaw install
- *
- * Anything else — including a plain install on an interactive terminal — leaves
- * the gate untouched and prints the one-line remedy. Doctor fails on it
- * separately, so the gap is reported until a human closes it.
+ * Re-exported so every existing `from './openclaw.js'` import keeps working;
+ * the rule itself moved to its own module in #577 so that `update` and `repair`
+ * can parse the consent at their entry point without importing the installer.
  */
-export function resolveConversationAccessConsent(input: {
-  argv?: string[];
-  env?: NodeJS.ProcessEnv;
-}): boolean {
-  const argv = input.argv ?? [];
-  if (argv.includes('--allow-conversation-access')) return true;
-  return (input.env ?? {}).SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS === '1';
-}
+export {
+  resolveConversationAccessConsent,
+  ALLOW_CONVERSATION_ACCESS_FLAG,
+  ALLOW_CONVERSATION_ACCESS_ENV,
+} from './conversation-access-consent.js';
 
 /**
  * Read the conversation-access grant straight off the config on disk (#226).
@@ -2945,7 +2934,59 @@ export function uninstallOpenClawSkill(home: string = resolveUserHome()): { remo
   return { removed, skipped };
 }
 
-export async function handleOpenClawCommand(subcommand: string, extraArgs: string[] = []): Promise<void> {
+export const OPENCLAW_HELP = `Usage: shieldcortex openclaw <install|uninstall|status|repair|inspect-runtime|skill install>
+
+Install options:
+  --no-hooks              Skip hook installation (useful in Docker/CI)
+  --no-plugins            Skip plugin installation (useful in Docker/CI)
+  --no-gateway-restart    Skip the auto gateway restart after install
+  --allow-conversation-access
+                          Grant OpenClaw conversation-hook access to the plugin
+                          (plugins.entries[id].hooks.allowConversationAccess=true).
+                          REQUIRED for llm_input/llm_output scanning, and for the
+                          conversation firewall on 2026.5.9-beta.1+. Off by default:
+                          it lets the plugin read every prompt and model response
+                          on this box, which is your call, not the installer's.
+  -h, --help              Show this help and exit (installs nothing)
+
+Repair: diagnose + safely fix duplicate-plugin-id state surfaced by
+\`shieldcortex doctor\`. Preserves the customer's OpenClaw-side plugin
+config (interceptor settings, cloud API key, allowlist) across the
+uninstall+reinstall round-trip needed for sticky cases.
+`;
+
+/**
+ * `shieldcortex openclaw <verb>` entry point.
+ *
+ * #577: `openclaw install --help` installed the hook and plugin and restarted
+ * the gateway — `--help` simply was not one of the flags `extraArgs` was checked
+ * for. The gate runs before the switch, so no verb can mutate on a help flag.
+ */
+/**
+ * `openclaw`'s value-taking options (#577). `--agent help` is an agent id, not
+ * a help request: without this list the help gate printed usage and did nothing
+ * for `openclaw skill install --agent help`.
+ *
+ * Re-exported from the shared registry, which `helpGate` below and the
+ * whole-argv gates in `src/index.ts` both read (round 3).
+ */
+export const OPENCLAW_VALUE_FLAGS = COMMAND_HELP_SPECS.openclaw.valueFlags;
+
+export async function handleOpenClawCommand(
+  subcommand: string,
+  extraArgs: string[] = [],
+  deps: {
+    install?: typeof installOpenClawHook;
+    /**
+     * Injectable skill installer (#577). The `--agent <id>` value is the reason
+     * this seam exists: `--agent help` used to be eaten by the help gate, and
+     * the regression test has to watch the value ARRIVE here without ClawHub
+     * installing anything on the box running the suite.
+     */
+    skillInstall?: typeof installOpenClawSkill;
+  } = {},
+): Promise<void> {
+  if (helpGate([subcommand, ...extraArgs], OPENCLAW_HELP, { command: 'openclaw' }) !== null) return;
   const noHooks = extraArgs.includes('--no-hooks');
   const noPlugins = extraArgs.includes('--no-plugins');
   const restartGateway = !extraArgs.includes('--no-gateway-restart');
@@ -2955,7 +2996,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
 
   switch (subcommand) {
     case 'install':
-      await installOpenClawHook({ noHooks, noPlugins, restartGateway, grantConversationAccess });
+      await (deps.install ?? installOpenClawHook)({ noHooks, noPlugins, restartGateway, grantConversationAccess });
       break;
     case 'uninstall':
       await uninstallOpenClawHook();
@@ -2983,7 +3024,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
           console.error('--agent requires an agent id');
           process.exit(1);
         }
-        const ok = await installOpenClawSkill(resolveUserHome(), agent);
+        const ok = await (deps.skillInstall ?? installOpenClawSkill)(resolveUserHome(), agent);
         if (!ok) process.exit(1);
       } else if (verb === 'uninstall') {
         uninstallOpenClawSkill();
@@ -2994,24 +3035,7 @@ export async function handleOpenClawCommand(subcommand: string, extraArgs: strin
       break;
     }
     default:
-      console.log('Usage: shieldcortex openclaw <install|uninstall|status|repair|inspect-runtime|skill install>');
-      console.log('');
-      console.log('Install options:');
-      console.log('  --no-hooks              Skip hook installation (useful in Docker/CI)');
-      console.log('  --no-plugins            Skip plugin installation (useful in Docker/CI)');
-      console.log('  --no-gateway-restart    Skip the auto gateway restart after install');
-      console.log('  --allow-conversation-access');
-      console.log('                          Grant OpenClaw conversation-hook access to the plugin');
-      console.log('                          (plugins.entries[id].hooks.allowConversationAccess=true).');
-      console.log('                          REQUIRED for llm_input/llm_output scanning, and for the');
-      console.log('                          conversation firewall on 2026.5.9-beta.1+. Off by default:');
-      console.log('                          it lets the plugin read every prompt and model response');
-      console.log('                          on this box, which is your call, not the installer\'s.');
-      console.log('');
-      console.log('Repair: diagnose + safely fix duplicate-plugin-id state surfaced by');
-      console.log('`shieldcortex doctor`. Preserves the customer\'s OpenClaw-side plugin');
-      console.log('config (interceptor settings, cloud API key, allowlist) across the');
-      console.log('uninstall+reinstall round-trip needed for sticky cases.');
+      console.log(OPENCLAW_HELP.trimEnd());
       process.exit(1);
   }
 }

@@ -18,6 +18,7 @@ import { uninstallHermes } from './hermes.js';
 import { uninstallCopilot } from './copilot.js';
 import { looksLikeShieldcortex } from './json-config.js';
 import { formatKeptSummary } from './uninstall-manifest.js';
+import { helpGate } from '../cli/help-gate.js';
 
 /**
  * Check if the current process is running in an agent context.
@@ -359,4 +360,50 @@ export async function uninstallAll(options?: {
   console.log('\nTo clear the npx cache:');
   console.log('  npx cache clean shieldcortex  (npm 9+)');
   console.log('  rm -rf ~/.npm/_npx             (older npm)\n');
+}
+
+/** Every flag `uninstall` honours — `--confirm` is read by requireConfirmation. */
+export const UNINSTALL_FLAGS = ['--confirm', '--keep-logs', '--deep', '--no-gateway-restart'] as const;
+
+export const UNINSTALL_HELP = `Usage: shieldcortex uninstall [options]
+
+Remove ShieldCortex from this host: background service, OpenClaw hook and
+plugin, Claude Code hooks, the CLAUDE.md block, and the Claude / Codex / Copilot
+MCP entries. Prompts for confirmation unless --confirm is given (and refuses
+without a TTY).
+
+Options:
+      --confirm             Skip the interactive prompt (required with no TTY)
+      --keep-logs           Keep the service logs
+      --deep                Also purge leftover OpenClaw residue
+      --no-gateway-restart  Do not restart the OpenClaw gateway afterwards
+  -h, --help                Show this help and exit (removes nothing)
+`;
+
+/**
+ * `shieldcortex uninstall` entry point (#577).
+ *
+ * The dispatcher used to read the three flags inline and call `uninstallAll`
+ * unconditionally, so `uninstall --help` fell through to the "are you sure you
+ * want to fully uninstall ShieldCortex?" prompt instead of printing usage — and
+ * `uninstall --help --confirm` would have removed everything.
+ */
+export async function handleUninstallCommand(
+  args: readonly string[],
+  deps: {
+    run?: (options: { keepLogs: boolean; deep: boolean; restartGateway: boolean }) => Promise<void>;
+    log?: (message: string) => void;
+    error?: (message: string) => void;
+  } = {},
+): Promise<void> {
+  const gate = helpGate(args, UNINSTALL_HELP, { command: 'uninstall', known: UNINSTALL_FLAGS, log: deps.log, error: deps.error });
+  if (gate !== null) {
+    process.exitCode = gate;
+    return;
+  }
+  await (deps.run ?? uninstallAll)({
+    keepLogs: args.includes('--keep-logs'),
+    deep: args.includes('--deep'),
+    restartGateway: !args.includes('--no-gateway-restart'),
+  });
 }

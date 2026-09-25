@@ -8,6 +8,7 @@ import Database from 'better-sqlite3';
 import { deriveProjectKey } from '../context/derive-project-key.js';
 import { redactForPersistence } from '../defence/sensitivity/pii.js';
 import { planBackup, pruneOldBackups, DISK_LIMIT_BYTES } from './backup-budget.js';
+import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
 
 interface LegacyMemoryRow {
   id: number;
@@ -411,7 +412,41 @@ function printUsage(): void {
   console.log('      Backup auto-saved before any change; purge later with `prune`.');
 }
 
-export async function handleMemoriesCommand(args: string[]): Promise<void> {
+/**
+ * Every value-taking option across the `memories` verbs (#577).
+ *
+ * `prune --project help`, `migrate-legacy --source help` and friends are real
+ * invocations — a project key and a source path that happen to spell "help".
+ * The help gate has to skip these tokens or it answers "usage" to work it was
+ * asked to do, and returns 0 while doing nothing.
+ *
+ * The list itself lives in the shared registry (round 3), because the whole-argv
+ * gates in `src/index.ts` decide about `memories …` too and a second copy of
+ * this inventory is a second chance to get it wrong.
+ */
+export const MEMORIES_VALUE_FLAGS = COMMAND_HELP_SPECS.memories.valueFlags;
+
+export async function handleMemoriesCommand(
+  args: string[],
+  deps: {
+    /**
+     * Injectable importer (#577). `--source <path>` is why this seam exists:
+     * `--source help` was swallowed by the help gate, and the regression test
+     * has to watch the VALUE arrive without opening the operator's database —
+     * `migrateLegacy` resolves its target from `os.homedir()`, which a test
+     * process cannot move.
+     */
+    migrateLegacy?: typeof migrateLegacy;
+  } = {},
+): Promise<void> {
+  // #577: `memories prune --help` / `migrate-legacy --help` fell straight into
+  // the subcommand, which calls initDatabase() (creating and migrating the
+  // memory DB) before printing anything — and migrate-legacy is dry-run only
+  // with an explicit --dry-run, so a help flag performed a real import.
+  if (commandWantsHelp('memories', args)) {
+    printUsage();
+    return;
+  }
   const sub = args[0];
   if (sub === 'import-native') {
     const { handleNativeImportCommand } = await import('./import-native.js');
@@ -424,7 +459,7 @@ export async function handleMemoriesCommand(args: string[]): Promise<void> {
     const sources = sourceIdx !== -1 && args[sourceIdx + 1]
       ? [args[sourceIdx + 1]]
       : undefined;
-    const report = migrateLegacy({ sources, dryRun });
+    const report = (deps.migrateLegacy ?? migrateLegacy)({ sources, dryRun });
     printReport(report);
     return;
   }

@@ -16,6 +16,11 @@
 import { ensureNativeBinding } from '../setup/native-binding.js';
 import { secureStatePermissions } from '../setup/state-permissions.js';
 import { getConfigDir } from '../cloud/config.js';
+import { helpGate } from './help-gate.js';
+import {
+  resolveConversationAccessConsent,
+  ALLOW_CONVERSATION_ACCESS_FLAG,
+} from '../setup/conversation-access-consent.js';
 import { createRequire } from 'module';
 
 const require = createRequire(import.meta.url);
@@ -24,7 +29,74 @@ const pkg = require('../../package.json') as { version: string };
 const isTTY = Boolean(process.stdout.isTTY);
 const c = (code: string, s: string) => (isTTY ? `\x1b[${code}m${s}\x1b[0m` : s);
 
-export async function runRepair(_args: string[] = []): Promise<void> {
+/**
+ * Every flag `repair` honours (#577).
+ *
+ * `--allow-conversation-access` is not read in this file — the plugin-reconcile
+ * pass consumes it (#226) — which is precisely why it has to be listed here: a
+ * parser that knows only its own function body's flags rejects a working
+ * invocation. It is the ONLY such flag: walking repair's call graph, the other
+ * `process.argv` readers are `process.argv[1]` (a path) and `debugLog()`, which
+ * only fires from `initDatabase()` — and repair never opens the memory database.
+ */
+export const REPAIR_FLAGS = [ALLOW_CONVERSATION_ACCESS_FLAG] as const;
+
+export const REPAIR_HELP = `Usage: shieldcortex repair
+
+Heal a broken install in place. Rebuilds and re-verifies the better-sqlite3
+native binding, reconciles the OpenClaw realtime plugin's install metadata, and
+re-hardens the state-tree permissions. This MUTATES the install.
+
+Options:
+      --allow-conversation-access
+                Consent, for this run only, to the OpenClaw conversation-access
+                hook gate the plugin reconcile restores. Without it the gate is
+                left exactly as found (#226).
+  -h, --help    Show this help and exit (repairs nothing)
+
+Environment:
+  SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1
+      Let the plugin-reconcile pass execute remediation (it reloads the OpenClaw
+      gateway). Diagnosis only without it.
+  SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1
+      Same as --allow-conversation-access.
+  SHIELDCORTEX_CONFIG_DIR
+      State tree to re-harden (default ~/.shieldcortex).
+`;
+
+export interface RepairOptions {
+  /** Operator consent to close the OpenClaw conversation-access gate (#226). */
+  allowConversationAccess: boolean;
+}
+
+/** The one place repair's arguments are read (#577). */
+export function parseRepairOptions(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): RepairOptions {
+  return { allowConversationAccess: resolveConversationAccessConsent({ argv: args, env }) };
+}
+
+/**
+ * `shieldcortex repair` entry point (#577).
+ *
+ * The arguments used to be named `_args` and dropped on the floor, so
+ * `repair --help` rebuilt the native binding, reloaded plugin state and
+ * chmod'd the state tree instead of printing usage. Gate first, mutate second.
+ */
+export async function runRepair(
+  args: string[] = [],
+  deps: { run?: (options: RepairOptions) => Promise<void>; env?: NodeJS.ProcessEnv } = {},
+): Promise<void> {
+  const gate = helpGate(args, REPAIR_HELP, { command: 'repair', known: REPAIR_FLAGS });
+  if (gate !== null) {
+    process.exitCode = gate;
+    return;
+  }
+  await (deps.run ?? repairInstall)(parseRepairOptions(args, deps.env ?? process.env));
+}
+
+async function repairInstall(options: RepairOptions): Promise<void> {
   process.stdout.write(`\n  ${c('35', '◆')} ${c('1', 'ShieldCortex repair')}\n\n`);
   process.stdout.write(`  ${c('90', 'Checking the native database engine (better-sqlite3)…')}\n`);
 
@@ -63,7 +135,7 @@ export async function runRepair(_args: string[] = []): Promise<void> {
     return; // A broken engine blocks the reconciler (it needs to read the index).
   }
 
-  await runPluginReconcilePass();
+  await runPluginReconcilePass(options);
   runStatePermissionPass();
 }
 
@@ -111,11 +183,16 @@ function runStatePermissionPass(): void {
  * honest state. Best-effort — a host without OpenClaw simply reports "not
  * detected" and returns cleanly.
  */
-async function runPluginReconcilePass(): Promise<void> {
+async function runPluginReconcilePass(options: RepairOptions): Promise<void> {
   process.stdout.write(`\n  ${c('90', 'Checking the OpenClaw realtime plugin (install metadata + honest load state)…')}\n`);
   try {
     const { reconcileOpenClawPluginState, formatReconcileReport } = await import('../setup/openclaw-reconcile.js');
-    const result = await reconcileOpenClawPluginState({ expectedVersion: pkg.version });
+    const result = await reconcileOpenClawPluginState({
+      expectedVersion: pkg.version,
+      // #577: parsed once in runRepair, not re-read from process.argv inside
+      // the reconciler — repair's own parser has to be able to see this flag.
+      grantConversationAccess: options.allowConversationAccess,
+    });
     for (const line of formatReconcileReport(result)) {
       process.stdout.write(`  ${line}\n`);
     }
