@@ -760,6 +760,8 @@ export async function stepOpenClawHook(
     const detail = [
       ...result.refreshed.map((dir) => scrub(`refreshed ${dir}`)),
       ...result.backups.map((b) => scrub(`previous hook kept at ${b.backup}`)),
+      ...result.vanished.map((dir) => scrub(`${dir}: not installed, nothing to refresh`)),
+      ...result.degraded.map((d) => scrub(`${d.dir}: refreshed, durability not confirmed: ${d.error}`)),
       ...result.warnings.map(scrub),
       ...result.failed.map((f) => scrub(`could not refresh ${f.dir}: ${f.error}`)),
     ];
@@ -767,6 +769,25 @@ export async function stepOpenClawHook(
       return {
         status: 'warn' as const,
         summary: `${result.failed.length} cop${result.failed.length === 1 ? 'y' : 'ies'} could not be refreshed — run \`shieldcortex openclaw install\``,
+        detail,
+      };
+    }
+    // Published, but the device refused to flush a rename parent (r4 nit 2).
+    // The bytes are in place and may not survive a power cut, which is neither
+    // a failed refresh nor a clean one.
+    if (result.degraded.length > 0) {
+      return {
+        status: 'warn' as const,
+        summary: `refreshed ${written} cop${written === 1 ? 'y' : 'ies'}, durability not confirmed`,
+        detail,
+      };
+    }
+    // Installed and stale when it was discovered, gone by the time the lock
+    // was held (r4 blocker 3). Skipped, never reinstalled.
+    if (result.vanished.length > 0) {
+      return {
+        status: 'warn' as const,
+        summary: `${result.vanished.length} cop${result.vanished.length === 1 ? 'y was' : 'ies were'} removed mid-refresh — run \`shieldcortex openclaw install\` to reinstall`,
         detail,
       };
     }

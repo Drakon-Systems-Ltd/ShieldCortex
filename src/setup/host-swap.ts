@@ -14,14 +14,20 @@
  * integration the operator just removed — and an empty planted one installs it
  * on a host that never had it.
  *
- * So this publishes over targets the CALLER already found, and never creates
- * one. A planted journal, a planted `.shieldcortex-staging-*` and a hostile
- * `backups/` entry are all inert. A swap that dies after the first rename is
- * reported at that moment (`targetMissing` below), naming the integration's
- * installer and the backup to restore from; nothing deletes a backup, ever.
+ * So this publishes over targets the CALLER already found, re-checks that one
+ * is still there, and never creates one. A planted journal, a planted
+ * `.shieldcortex-staging-*` and a hostile `backups/` entry are all inert. A
+ * swap whose second rename FAILS is reported at that moment (`targetMissing`
+ * below); a process KILLED between the two has nothing left to report with, so
+ * the backup path and the installer command are written to stderr before the
+ * first rename instead. Nothing deletes a backup, ever.
  *
  * ## What a publication does, in order
  *
+ *   0. `lstat` the target: there has to BE one. An absent target is refused
+ *      (r4 blocker 3) — this publishes over an installed copy and has no
+ *      install branch at all, so a target that vanished between the caller's
+ *      discovery and this call is never recreated here;
  *   1. preflight — no symlink on any component of the target, the backup or
  *      the staged tree, bounded at the integration root;
  *   2. `fsync` every staged file and every staged directory, so the bytes are
@@ -30,14 +36,24 @@
  *   4. `fsync` the backup's newly created ancestry — the reservation,
  *      `backups/` and the integration root — so the name that will hold the
  *      displaced copy is durable BEFORE the copy is displaced;
- *   5. `rename(target -> backup)` when there is a target to displace, then
- *      `fsync` both parent directories;
+ *   5. say on stderr, synchronously, where the copy is about to go and what
+ *      reinstalls it, then `rename(target -> backup)` and `fsync` both parent
+ *      directories;
  *   6. `rename(staged -> target)`, then `fsync` both parent directories.
+ *
+ * Step 5's line is written with `fs.writeSync(2, …)` BEFORE the rename for one
+ * reason: a process killed between the two renames never reaches any reporting
+ * this function returns, and the host is left with no installed copy. The line
+ * is the only thing that survives a `SIGKILL`, so it carries the backup path
+ * and the installer command (r4 blocker 4).
  *
  * Steps 2, 4 and every other flush distinguish "this platform will not sync a
  * directory fd" from "the device refused" (`DIR_SYNC_UNSUPPORTED`). The first
- * is reported and carried on with; the second is fatal before the first rename
- * and reported after it.
+ * is reported and carried on with; the second is fatal before the first rename.
+ * AFTER a rename there is nothing left to abort, so both parents are still
+ * flushed — neither is skipped because the other failed — and a refusal is
+ * returned as `unconfirmed`, which callers report as "refreshed, durability
+ * not confirmed" rather than as a clean success (r4 nit 2).
  *
  * A failure at 6 leaves the host with no target, so the backup is renamed
  * straight back and both parents are synced again. If THAT fails, the caller
@@ -317,7 +333,7 @@ export interface StagedInstallParams {
 }
 
 export type StagedInstallOutcome =
-  | { ok: true; backup: string | null; unsynced: string[] }
+  | { ok: true; backup: string; unsynced: string[]; unconfirmed: string[] }
   | {
     ok: false;
     error: string;
@@ -330,6 +346,7 @@ export type StagedInstallOutcome =
     /** Where the displaced copy is, when `targetMissing`. Never deleted. */
     backup: string | null;
     unsynced: string[];
+    unconfirmed: string[];
   };
 
 /**
@@ -339,19 +356,21 @@ export type StagedInstallOutcome =
  * Round 2 had this sequence written out twice, once per integration, and the
  * two copies had already drifted: only one of them checked both rename hops
  * for EXDEV. One routine is the point. Its inputs are the caller's own path
- * arithmetic plus a `stage` callback that reads the package, so a self-heal
- * and an ordinary refresh are the same call with the same preflights — there
- * is no second, quieter path to forget to harden.
+ * arithmetic plus a `stage` callback that reads the package, so both
+ * integrations publish through the same preflights — there is no second,
+ * quieter path to forget to harden.
  *
- * Whether the old copy is backed up is decided HERE, by `lstat` on the target:
- * a refresh displaces what it finds, a self-heal over an empty path has
- * nothing to displace, and a self-heal over a half-written husk still keeps
- * the husk. The caller does not get to assert which case it is.
+ * This REFRESHES, and only refreshes. `lstat` on the target decides whether
+ * there is anything to do at all: something must be there to displace, or the
+ * call is refused having written nothing. There is no install branch to reach
+ * by racing the caller's discovery (r4 blocker 3), and the caller does not get
+ * to assert which case it is.
  */
 export function stageAndPublish(params: StagedInstallParams): StagedInstallOutcome {
   const unsynced: string[] = [];
+  const unconfirmed: string[] = [];
   const fail = (error: string): StagedInstallOutcome =>
-    ({ ok: false, error, targetMissing: false, backup: null, unsynced });
+    ({ ok: false, error, targetMissing: false, backup: null, unsynced, unconfirmed });
   const why = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
   // `lstat`, not `existsSync`: a permission error must never read as "nothing
@@ -360,7 +379,14 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
   if ('error' in present) {
     return fail(`${params.target} could not be read (${present.error}); nothing written`);
   }
-  const displace = 'value' in present;
+  // Absent REFUSES (r4 blocker 3). Publishing into an empty path here was an
+  // install, reached by two refreshers interleaving: B selects a stale target,
+  // A fails its swap and leaves that target absent, B takes the lock and this
+  // call put the plugin back on a host the operator may have just uninstalled
+  // it from. A refresh has nothing to do when there is nothing installed.
+  if ('absent' in present) {
+    return fail(`${params.target} is not installed, nothing to refresh; ${params.reinstallCommand} to install it`);
+  }
 
   let staging: string;
   try {
@@ -393,8 +419,7 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
   // `rename(2)` refuses to cross a filesystem, and this never turns a move
   // into a copy-then-delete of the operator's directory. EVERY hop is checked
   // before the first one runs.
-  const devices = [deviceUnder(staged), deviceUnder(targetParent)];
-  if (displace) devices.push(deviceUnder(params.backupsRoot));
+  const devices = [deviceUnder(staged), deviceUnder(targetParent), deviceUnder(params.backupsRoot)];
   if (devices.some((d) => 'error' in d)) return refuse('could not stat the move endpoints; nothing written');
   if (new Set(devices.filter((d): d is { value: number } => 'value' in d).map((d) => d.value)).size > 1) {
     return refuse(
@@ -403,26 +428,20 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
     );
   }
 
-  let reserved: string | null = null;
-  let backup: string | null = null;
-  if (displace) {
-    try {
-      reserved = reserveBackupDir(params.backupsRoot, `${params.backupPrefix}-preupdate-${params.stamp}`);
-    } catch (err: unknown) {
-      return refuse(`no backup destination could be reserved under ${params.backupsRoot} — ${why(err)}`);
-    }
-    backup = path.join(reserved, path.basename(params.target));
+  let reserved: string;
+  try {
+    reserved = reserveBackupDir(params.backupsRoot, `${params.backupPrefix}-preupdate-${params.stamp}`);
+  } catch (err: unknown) {
+    return refuse(`no backup destination could be reserved under ${params.backupsRoot} — ${why(err)}`);
   }
+  const backup = path.join(reserved, path.basename(params.target));
   /** Give the reservation back when the move it was made for did not happen. */
-  const giveBack = (): void => {
-    if (reserved !== null) releaseReservation(reserved);
-  };
+  const giveBack = (): void => releaseReservation(reserved);
 
-  // Every component of every path about to be renamed. A refresh and a
-  // self-heal are the same call, so neither can have a preflight the other
-  // does not — which is what a separate "recovery" path cost in round 2.
+  // Every component of every path about to be renamed. Both integrations
+  // publish through this one routine, so neither can have a preflight the
+  // other does not — which is what a second write path cost in round 2.
   for (const checked of [params.target, backup, staged]) {
-    if (checked === null) continue;
     const { link, unreadable } = findLinkOnPath(params.bound, checked);
     if (unreadable !== null) {
       giveBack();
@@ -458,31 +477,51 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
     }
     return null;
   };
-  /** After a rename there is nothing left to abort, so the note is the answer. */
+  /**
+   * After a rename there is nothing left to abort, so the note is the answer —
+   * but EVERY directory is still attempted (r4 nit 2). Stopping at the first
+   * refusal left the other rename parent never flushed at all, and a device
+   * that refused one of them is exactly the host where the second one matters.
+   * A refusal here is `unconfirmed`, not `unsynced`: the platform was willing
+   * and the device said no, which is a degraded refresh, not a clean one.
+   */
   const note = (...dirs: string[]): void => {
-    const failed = flush(...dirs);
-    if (failed !== null) unsynced.push(failed);
+    for (const dir of dirs) {
+      const answer = syncDir(dir);
+      if ('error' in answer) unconfirmed.push(answer.error);
+      else if ('unsupported' in answer) unsynced.push(answer.unsupported);
+    }
   };
 
-  // Displace the old copy, if there is one.
-  if (backup !== null) {
-    // The backup's ANCESTRY first (r3 blocker 5): `backups/` and the
-    // reservation inside it are both brand new, and the rename below can
-    // become durable before either NAME does — leaving a host whose plugin is
-    // gone and whose backup is not reachably on the medium.
-    const ancestry = flush(reserved!, params.backupsRoot, path.dirname(params.backupsRoot));
-    if (ancestry !== null) {
-      giveBack();
-      return refuse(`${ancestry}; nothing written`);
-    }
-    try {
-      fs.renameSync(params.target, backup);
-    } catch (err: unknown) {
-      giveBack();
-      return refuse(`could not be moved to ${backup} — ${describeFsError(err)}`);
-    }
-    note(targetParent, path.dirname(backup));
+  // The backup's ANCESTRY first (r3 blocker 5): `backups/` and the reservation
+  // inside it are both brand new, and the rename below can become durable
+  // before either NAME does — leaving a host whose plugin is gone and whose
+  // backup is not reachably on the medium.
+  const ancestry = flush(reserved, params.backupsRoot, path.dirname(params.backupsRoot));
+  if (ancestry !== null) {
+    giveBack();
+    return refuse(`${ancestry}; nothing written`);
   }
+  // The last thing this process is guaranteed to have said if it is killed in
+  // the window that opens on the next line (r4 blocker 4). `writeSync` on fd 2
+  // returns only once the bytes are handed over, so a SIGKILL a microsecond
+  // later cannot lose it — unlike anything returned from here, which a
+  // terminated process never gets to report.
+  try {
+    fs.writeSync(
+      2,
+      `shieldcortex: moving ${params.target} aside to ${backup} to publish the packaged copy. ` +
+      `If this run is killed now, ${params.target} will be absent — ${params.reinstallCommand} ` +
+      'to put the packaged copy back, or move the backup above into place.\n',
+    );
+  } catch { /* a closed or full stderr must not abort a publication */ }
+  try {
+    fs.renameSync(params.target, backup);
+  } catch (err: unknown) {
+    giveBack();
+    return refuse(`could not be moved to ${backup} — ${describeFsError(err)}`);
+  }
+  note(targetParent, path.dirname(backup));
 
   // Publish.
   try {
@@ -490,16 +529,10 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
   } catch (err: unknown) {
     const error = describeFsError(err);
     dropStaging();
-    // Nothing was displaced, so nothing is missing that was not missing before
-    // this call: the host is exactly where it started.
-    if (backup === null) {
-      giveBack();
-      return { ok: false, error, targetMissing: false, backup: null, unsynced };
-    }
     try {
       fs.renameSync(backup, params.target);
     } catch {
-      return { ok: false, error, targetMissing: true, backup, unsynced };
+      return { ok: false, error, targetMissing: true, backup, unsynced, unconfirmed };
     }
     note(targetParent, path.dirname(backup));
     giveBack();
@@ -511,9 +544,10 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
       targetMissing: false,
       backup: null,
       unsynced,
+      unconfirmed,
     };
   }
   note(targetParent, staging);
   dropStaging();
-  return { ok: true, backup, unsynced };
+  return { ok: true, backup, unsynced, unconfirmed };
 }

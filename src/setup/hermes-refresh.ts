@@ -61,6 +61,7 @@ import { fileURLToPath } from 'url';
 import {
   findLinkInTree,
   findLinkOnPath,
+  lstatAnswer,
   pathContains,
   SYMLINK_PREFLIGHT_ENTRY_BUDGET,
 } from './fs-answers.js';
@@ -484,6 +485,14 @@ function publishJobs(params: {
   const bounds = writeBounds(scan);
   const refreshed: Array<{ dir: string; backup: string | null }> = [];
   const detail: string[] = [];
+  /** Roots skipped whole because somebody else held the lock. */
+  const busy: string[] = [];
+  /** Targets that were gone by the time this held the lock (r4 blocker 3). */
+  const vanished: string[] = [];
+  /** Targets somebody else had already brought up to date (r4 blocker 3). */
+  const alreadyCurrent: string[] = [];
+  /** Published copies whose post-rename flush the device refused (r4 nit 2). */
+  const degraded: string[] = [];
 
   const byOwner = new Map<string, RefreshJob[]>();
   for (const job of jobs) {
@@ -500,10 +509,32 @@ function publishJobs(params: {
     const acquired = acquireUpdateLock(owner, { now, bound: bounds.find((b) => pathContains(b, owner)) });
     if ('busy' in acquired) {
       detail.push(`${owner}: ${acquired.busy} — nothing written in this root`);
+      busy.push(owner);
       continue;
     }
     try {
       for (const job of ownerJobs) {
+        // Hermes' discovery ran BEFORE this lock existed, so both of its
+        // answers about this copy are claims about a tree that another
+        // refresher — or an uninstall — may have changed since (r4 blocker 3).
+        // Re-ask them here, where the lock makes them hold.
+        const present = lstatAnswer(job.dir);
+        if ('error' in present) {
+          detail.push(`${job.dir}: could not be read (${present.error}); nothing written`);
+          continue;
+        }
+        if ('absent' in present) {
+          // Skipped, never reinstalled: this cannot tell a swap that died
+          // mid-flight from an uninstall that landed while it queued.
+          vanished.push(job.dir);
+          detail.push(`${job.dir}: not installed, nothing to refresh`);
+          continue;
+        }
+        if (!hermesPluginCopyStale(job.dir, sourceDir).stale) {
+          alreadyCurrent.push(job.dir);
+          detail.push(`${job.dir}: already current — another run refreshed it first`);
+          continue;
+        }
         const outcome = stageAndPublish({
           bound: bounds.find((b) => pathContains(b, job.dir)) ?? owner,
           target: job.dir,
@@ -525,6 +556,10 @@ function publishJobs(params: {
         detail.push(...outcome.unsynced.map((line) => `${job.dir}: ${line}`));
         if (outcome.ok) {
           refreshed.push({ dir: job.dir, backup: outcome.backup });
+          for (const line of outcome.unconfirmed) {
+            degraded.push(job.dir);
+            detail.push(`${job.dir}: refreshed, durability not confirmed: ${line}`);
+          }
           continue;
         }
         detail.push(outcome.targetMissing
@@ -538,15 +573,30 @@ function publishJobs(params: {
     }
   }
 
-  if (refreshed.length === 0) {
-    return warn(`could not refresh ${jobs.length} cop${jobs.length === 1 ? 'y' : 'ies'}`, detail);
+  // Everything the re-check under the lock took off the list: there was
+  // nothing left to publish, so "could not refresh" would be the wrong
+  // sentence for it.
+  const attempted = jobs.length - vanished.length - alreadyCurrent.length;
+  if (attempted === 0 && busy.length === 0) {
+    return vanished.length > 0
+      ? warn(
+        `${vanished.length} cop${vanished.length === 1 ? 'y was' : 'ies were'} removed while the ` +
+        `refresh was waiting for the lock — nothing written (${HERMES_REINSTALL_COMMAND} to install)`,
+        detail,
+      )
+      : { status: 'current', summary: `current (${alreadyCurrent.length} cop${alreadyCurrent.length === 1 ? 'y' : 'ies'})`, detail, refreshed: [] };
   }
-  const partial = refreshed.length < jobs.length;
+  if (refreshed.length === 0) {
+    return warn(`could not refresh ${jobs.length - vanished.length - alreadyCurrent.length} cop${attempted === 1 ? 'y' : 'ies'}`, detail);
+  }
+  const partial = refreshed.length < attempted || busy.length > 0 || vanished.length > 0;
   return {
-    status: partial ? 'warn' : 'refreshed',
-    summary: (partial
-      ? `refreshed ${refreshed.length} of ${jobs.length} copies`
-      : `refreshed ${refreshed.length} cop${refreshed.length === 1 ? 'y' : 'ies'}`
+    status: partial || degraded.length > 0 ? 'warn' : 'refreshed',
+    summary: (degraded.length > 0
+      ? `refreshed ${refreshed.length} cop${refreshed.length === 1 ? 'y' : 'ies'}, durability not confirmed`
+      : partial
+        ? `refreshed ${refreshed.length} of ${attempted} copies`
+        : `refreshed ${refreshed.length} cop${refreshed.length === 1 ? 'y' : 'ies'}`
     ) + ` — ${HERMES_RESTART_NOTE}`,
     detail: [
       ...refreshed.map((r) => `${r.dir} refreshed; previous copy kept at ${r.backup}`),

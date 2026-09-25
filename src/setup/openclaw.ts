@@ -431,11 +431,13 @@ const HOOK_REINSTALL_COMMAND = 'run `shieldcortex openclaw install`';
 
 interface HookPublishResult {
   ok: boolean;
-  /** Where the previous hook directory was kept. Null when there was none. */
+  /** Where the previous hook directory was kept. Never deleted. */
   backup?: string | null;
   error?: string;
   /** Directories the platform refused to flush. Reported, never swallowed. */
   unsynced?: string[];
+  /** Post-rename flushes the DEVICE refused: refreshed, durability unproven. */
+  unconfirmed?: string[];
 }
 /**
  * Replace one hook directory, all or nothing (#574 r2 blocker 2).
@@ -483,10 +485,13 @@ function publishHookDir(dir: string, now: Date): HookPublishResult {
     verify: hookStagedDifference,
     reinstallCommand: `${HOOK_REINSTALL_COMMAND} by hand`,
   });
-  if (outcome.ok) return { ok: true, backup: outcome.backup, unsynced: outcome.unsynced };
+  if (outcome.ok) {
+    return { ok: true, backup: outcome.backup, unsynced: outcome.unsynced, unconfirmed: outcome.unconfirmed };
+  }
   return {
     ok: false,
     unsynced: outcome.unsynced,
+    unconfirmed: outcome.unconfirmed,
     error: outcome.targetMissing
       ? `the new hook could not be swapped in — ${outcome.error}, AND the previous copy could not ` +
         `be restored; it is at ${outcome.backup}. ${HOOK_REINSTALL_COMMAND} to put the packaged ` +
@@ -515,6 +520,19 @@ export interface HookRefreshResult {
   refreshed: string[];
   /** Installed directories that already matched the packaged source. */
   current: string[];
+  /**
+   * Copies that were installed and stale at discovery and GONE by the time
+   * this held the lock (r4 blocker 3). Skipped, never reinstalled: a refresh
+   * cannot tell a half-finished swap from an uninstall that happened while it
+   * was queueing for the lock.
+   */
+  vanished: string[];
+  /**
+   * Copies that were published but whose parent-directory flush the device
+   * refused (r4 nit 2) — refreshed, durability not confirmed. Not a clean
+   * success and not a failed refresh.
+   */
+  degraded: Array<{ dir: string; error: string }>;
   /** Directories the copy could not be written to, with the reason. */
   failed: Array<{ dir: string; error: string }>;
   /** Where each replaced hook directory was kept. Never deleted. */
@@ -553,6 +571,8 @@ export function refreshInstalledHookFiles(
     installed: [],
     refreshed: [],
     current: [],
+    vanished: [],
+    degraded: [],
     failed: [],
     backups: [],
     warnings: [],
@@ -585,18 +605,33 @@ export function refreshInstalledHookFiles(
       result.failed.push({ dir, error: `${acquired.busy}; nothing written` });
       continue;
     }
-    let published: HookPublishResult;
+    let published: HookPublishResult | null = null;
     try {
+      // Discovery above ran BEFORE the lock, so everything it decided is a
+      // claim about a tree another refresher or an uninstall may have changed
+      // since (r4 blocker 3). Both answers are re-asked here, under the lock
+      // that makes them hold: a copy that is gone is skipped rather than
+      // recreated, and one somebody else has already refreshed is current.
+      if (!hookInstalledAt(dir)) {
+        result.vanished.push(dir);
+        continue;
+      }
+      if (!hookFilesStale(dir)) {
+        result.current.push(dir);
+        continue;
+      }
       published = publishHookDir(dir, now);
     } finally {
       acquired.lock.release();
     }
+    if (published === null) continue;
     result.warnings.push(...(published.unsynced ?? []));
     if (!published.ok) {
       result.failed.push({ dir, error: published.error ?? 'refresh failed' });
       continue;
     }
     result.refreshed.push(dir);
+    for (const error of published.unconfirmed ?? []) result.degraded.push({ dir, error });
     if (typeof published.backup === 'string') result.backups.push({ dir, backup: published.backup });
   }
   return result;
