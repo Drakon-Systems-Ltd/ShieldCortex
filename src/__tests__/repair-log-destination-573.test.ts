@@ -73,8 +73,10 @@ function repairLogsUnder(root: string): string[] {
 }
 
 beforeEach(() => {
-  fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-fakehome-'));
-  dbHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-scratchdb-'));
+  // Resolved: the writer settles its destination with realpath, and on macOS
+  // os.tmpdir() is /var/... while its real path is /private/var/...
+  fakeHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-fakehome-')));
+  dbHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sc-573-scratchdb-')));
   dbPath = path.join(dbHome, '.shieldcortex', 'memories.db');
   seedDb(dbPath);
   // The defect is about os.homedir(), so point it at a home we own: a
