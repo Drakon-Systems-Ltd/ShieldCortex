@@ -64,7 +64,7 @@
 import fs from 'fs';
 import path from 'path';
 import { describeFsError } from './hermes-plugins.js';
-import { lstatAnswer } from './fs-answers.js';
+import { lstatAnswer, releaseReservation } from './fs-answers.js';
 
 /** The journal's file name. One unresolved swap per root, by construction. */
 export const REFRESH_JOURNAL_NAME = '.shieldcortex-refresh-journal.json';
@@ -384,6 +384,12 @@ export function recoverInterruptedSwap(
       );
     }
     dropStaging(j.stagingRoot);
+    // The reservation the interrupted run made for the backup is now an empty
+    // directory under `backups/` with nothing to say for itself. Same rule as
+    // the staging tree: a directory this command created and then did not
+    // fill is ours to take back. `rmdir(2)` refuses a non-empty one, so a
+    // reservation that somehow acquired contents is left standing.
+    releaseReservation(path.dirname(j.backup));
     clearJournal(root);
     return {
       status: 'restored',

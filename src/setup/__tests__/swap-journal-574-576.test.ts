@@ -113,6 +113,9 @@ describe('recovery from a crash after rename 1 (the state with no installed copy
     // run must not try to finish it again.
     expect(fs.existsSync(journalPath(root))).toBe(false);
     expect(fs.existsSync(stagingRoot)).toBe(false);
+    // And the reservation the interrupted run made for that backup, now empty,
+    // is given back rather than left under `backups/` saying nothing.
+    expect(fs.existsSync(backupRoot)).toBe(false);
     expect(outcome.detail.join('\n')).toMatch(/previous copy was restored/);
   });
 

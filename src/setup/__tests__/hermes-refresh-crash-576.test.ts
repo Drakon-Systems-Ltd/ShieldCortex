@@ -150,6 +150,10 @@ describeWithHermes('a crash between the two renames (r2 blocker 1)', () => {
     // Resolved means resolved.
     expect(fs.existsSync(journalPath(hermes))).toBe(false);
     expect(fs.readdirSync(hermes).filter((n) => n.startsWith('.shieldcortex-staging'))).toEqual([]);
+    // Exactly one backup: the interrupted run's reservation was emptied by the
+    // restore and given back, so `backups/` holds the copy this run displaced
+    // and no empty directory beside it.
+    expect(fs.readdirSync(path.join(hermes, 'backups'))).toHaveLength(1);
   });
 
   it('never leaves two `shieldcortex` copies inside the plugins root, at any point', () => {
