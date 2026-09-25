@@ -14,7 +14,7 @@ import { scanHermesPluginCopies } from './hermes-plugins.js';
 // The install set and the staleness comparator are one rule, not two (#576):
 // whatever `copyDir` skips below is exactly what `hermesPluginCopyStale` (and
 // therefore `update` and `doctor`) declines to compare.
-import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir } from './hermes-refresh.js';
+import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir, recoverHermesRefresh } from './hermes-refresh.js';
 
 function pluginSourceDir(): string {
   return hermesPluginSourceDir();
@@ -153,6 +153,15 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
     console.error('Hermes plugin source not found. Package may be missing plugins/hermes.');
     console.error(`Expected: ${src}`);
     process.exit(1);
+  }
+
+  // The documented manual remedy is also the recovery (#576 r2 blocker 1): an
+  // operator whose `update` was interrupted between the two renames of a swap
+  // runs `shieldcortex hermes install`, and this finishes that swap before the
+  // copy below overlays anything. Scans `<home>/.hermes`, which is where
+  // `pluginDestDir` writes and therefore where the journal was left.
+  for (const line of recoverHermesRefresh(hermesHomeDir(home)).detail) {
+    console.log(line);
   }
 
   const dest = pluginDestDir(home);
