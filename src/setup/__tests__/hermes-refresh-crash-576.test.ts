@@ -324,7 +324,7 @@ describeWithHermes('planted files name no destination (r2 blockers 1 and 2)', ()
   });
 });
 
-describeWithHermes('one writer per Hermes home (r2 blocker 3)', () => {
+describeWithHermes('one writer per Hermes root (r2 blocker 3, r3 blocker 2)', () => {
   it('a second refresh that starts mid-swap refuses and writes nothing', () => {
     installCopy();
     makeStale();
@@ -348,7 +348,7 @@ describeWithHermes('one writer per Hermes home (r2 blocker 3)', () => {
     expect(outer.status).toBe('refreshed');
     expect(inner).not.toBeNull();
     expect(inner!.status).toBe('warn');
-    expect(inner!.summary).toMatch(/another ShieldCortex update\/install is running/);
+    expect(inner!.detail.join('\n')).toMatch(/another ShieldCortex update\/install is running/);
     expect(inner!.refreshed).toEqual([]);
     // Exactly ONE writer: one backup, one staging directory (already cleaned),
     // and a plugin that verifies against the package.
@@ -383,11 +383,12 @@ describeWithHermes('one writer per Hermes home (r2 blocker 3)', () => {
     const blocked = refreshHermesPluginCopies(home, { now: FROZEN });
 
     expect(blocked.status).toBe('warn');
-    expect(blocked.summary).toMatch(/another ShieldCortex update\/install is running/);
+    const said = blocked.detail.join('\n');
+    expect(said).toMatch(/another ShieldCortex update\/install is running/);
     // Named, attributed, and left exactly as it was for the operator to judge.
-    expect(blocked.summary).toContain(lock);
-    expect(blocked.summary).toMatch(/recorded pid 4194304/);
-    expect(blocked.summary).not.toMatch(/ten minutes/);
+    expect(said).toContain(lock);
+    expect(said).toMatch(/recorded pid 4194304/);
+    expect(said).not.toMatch(/ten minutes/);
     expect(fs.readFileSync(lock, 'utf-8')).toBe(`shieldcortex-update 4194304 ${old} sometoken\n`);
     expect(hermesPluginCopyStale(installed).stale).toBe(true);
   });
@@ -403,8 +404,8 @@ describeWithHermes('one writer per Hermes home (r2 blocker 3)', () => {
     const blocked = refreshHermesPluginCopies(home, { now: FROZEN });
 
     expect(blocked.status).toBe('warn');
-    expect(blocked.summary).toMatch(/not a lock record/);
-    expect(blocked.summary).toMatch(/confirmed no ShieldCortex update or install is running/);
+    expect(blocked.detail.join('\n')).toMatch(/not a lock record/);
+    expect(blocked.detail.join('\n')).toMatch(/confirmed no ShieldCortex update or install is running/);
     expect(fs.readFileSync(lock, 'utf-8')).toBe('');
   });
 });

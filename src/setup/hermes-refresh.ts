@@ -34,9 +34,22 @@
  * sort AFTER the install and win the key on any gateway that started in that
  * window. The staging directory therefore lives beside the plugins root
  * (`<hermesHome>/.shieldcortex-staging-*`), never inside it, and the install
- * is swapped in with two renames. The old copy is MOVED to
- * `<hermesHome>/backups/`, never deleted — the same rule
- * `--fix-hermes-plugin-copies` follows.
+ * is swapped in with two renames. The old copy is MOVED to the OWNING root's
+ * `backups/`, never deleted — the same rule `--fix-hermes-plugin-copies`
+ * follows.
+ *
+ * ## One root, one lock, one `backups/` (r4)
+ *
+ * Hermes discovers plugins in several roots at once — the default home and
+ * every profile under it — and a single `HERMES_HOME=…/profiles/work` refresh
+ * sees all of them. Round 3 wrote every one of those copies under the ACTIVE
+ * home's lock, into the ACTIVE home's `backups/`, so a profile refresh walked
+ * over the default root while `hermes install` held the default root's lock,
+ * and a default-home run displaced a profile's plugin into the wrong tree
+ * (where its restore then could not find it). Every target is now published
+ * under the lock of the root that owns it, into that root's own `backups/`; a
+ * root whose lock is busy is skipped whole, and the run still reports a
+ * warning so the caller exits non-zero.
  *
  * ## The crash between the two renames (r4)
  *
@@ -101,6 +114,14 @@ export function hermesPluginSourceDir(): string {
  */
 export function standardHermesTarget(hermesHome: string): string {
   return path.join(hermesHome, 'plugins', HERMES_PLUGIN_NAME);
+}
+
+/**
+ * Where a root keeps the copies a refresh displaced. One per OWNING root, so a
+ * profile's previous plugin never lands in the default home's tree (r4).
+ */
+function backupsUnder(owner: string): string {
+  return path.join(owner, 'backups');
 }
 
 /**
@@ -297,6 +318,12 @@ interface RefreshJob {
   dir: string;
   /** The `plugins/` root it sits in. */
   root: string;
+  /**
+   * The integration root that OWNS it — `<hermesHome>`, or a profile root
+   * under it. Its lock is the one this job is published under and its
+   * `backups/` is where the displaced copy goes (r4).
+   */
+  owner: string;
 }
 
 /**
@@ -338,8 +365,6 @@ export function refreshHermesPluginCopies(
   if (!scan.present) {
     return { status: 'not-installed', summary: 'Hermes not detected', detail: [], refreshed: [] };
   }
-
-  const backupsRoot = path.join(scan.hermesHome, 'backups');
 
   // Without Hermes' own discovery there is no answer to the only question that
   // makes a write safe: which copy does the gateway load (#569 r4). A host with
@@ -401,7 +426,10 @@ export function refreshHermesPluginCopies(
     };
   }
 
-  const jobs: RefreshJob[] = stale.map((t) => ({ dir: t.dir, root: t.root }));
+  // `plugins/` sits directly under the root that owns it, so the owner is one
+  // `dirname` away — and it is the ONLY thing that decides which lock and
+  // which `backups/` this job uses.
+  const jobs: RefreshJob[] = stale.map((t) => ({ dir: t.dir, root: t.root, owner: path.dirname(t.root) }));
 
   const stamp = now.toISOString().replace(/[:.]/g, '-');
 
@@ -409,10 +437,10 @@ export function refreshHermesPluginCopies(
   // will live under. Checked as ONE preflight, before the first write, because
   // a refusal after a partial write is not a refusal.
   const refusal = writePathRefusal(scan, [
-    backupsRoot,
+    ...jobs.map((j) => backupsUnder(j.owner)),
     ...jobs.map((j) => j.root),
     ...jobs.map((j) => j.dir),
-    ...jobs.map((j) => path.dirname(j.root)),
+    ...jobs.map((j) => j.owner),
   ]);
   if (refusal !== null) return warn(refusal);
 
@@ -420,7 +448,7 @@ export function refreshHermesPluginCopies(
   // the one being refreshed: a `backups/` inside a sibling profile's plugins
   // root would be a shadowing copy the moment the old install landed in it.
   const roots = discoveryRoots(scan);
-  for (const outside of [backupsRoot, ...jobs.map((j) => path.dirname(j.root))]) {
+  for (const outside of [...jobs.map((j) => backupsUnder(j.owner)), ...jobs.map((j) => j.owner)]) {
     const inside = roots.find((root) => pathContains(root, outside));
     if (inside !== undefined) {
       return warn(
@@ -454,61 +482,80 @@ export function refreshHermesPluginCopies(
     }
   }
 
-  // One writer per integration root. `hermes install` takes the same lock, so
-  // two commands can never interleave their renames over one plugins tree.
-  // Bounded at the Hermes tree, so a symlinked home or profile root is refused
-  // before the lock file itself is created (r3 blocker 4).
-  const acquired = acquireUpdateLock(scan.hermesHome, { now, bound: writeBounds(scan)[0] });
-  if ('busy' in acquired) return warn(`${acquired.busy} — nothing written`);
-  try {
-    return publishJobs({ jobs, scan, sourceDir, backupsRoot, stamp });
-  } finally {
-    acquired.lock.release();
-  }
+  return publishJobs({ jobs, scan, sourceDir, stamp, now });
 }
 
-/** The write half, run under the root's lock and nowhere else. */
+/**
+ * The write half: each root's jobs under that root's own lock (r4).
+ *
+ * A root whose lock is held by another run is skipped WHOLE and named. It is
+ * not retried, not waited for and not written to in any way — and because the
+ * other roots still run, the result is a partial refresh, which `update`
+ * reports as a warning and exits non-zero on.
+ */
 function publishJobs(params: {
   jobs: RefreshJob[];
   scan: HermesPluginScan;
   sourceDir: string;
-  backupsRoot: string;
   stamp: string;
+  now: Date;
 }): HermesRefreshResult {
-  const { jobs, scan, sourceDir, backupsRoot, stamp } = params;
-  const bound = writeBounds(scan)[0] ?? scan.hermesHome;
+  const { jobs, scan, sourceDir, stamp, now } = params;
+  const bounds = writeBounds(scan);
   const refreshed: Array<{ dir: string; backup: string | null }> = [];
   const detail: string[] = [];
 
+  const byOwner = new Map<string, RefreshJob[]>();
   for (const job of jobs) {
-    const outcome = stageAndPublish({
-      bound,
-      target: job.dir,
-      // Beside the plugins root, never inside it: a staged `plugin.yaml` under
-      // `plugins/` IS a shadowing copy for as long as it exists (#569).
-      stagingParent: path.dirname(job.root),
-      backupsRoot,
-      stamp,
-      stagingPrefix: '.shieldcortex-staging',
-      backupPrefix: HERMES_PLUGIN_NAME,
-      stage: (staged) => copyPluginTree(sourceDir, staged),
-      verify: (staged) => {
-        const verdict = hermesPluginCopyStale(staged, sourceDir);
-        if (!verdict.comparable) return 'the packaged source could not be read';
-        return verdict.stale ? (verdict.reason ?? 'it differs from the package') : null;
-      },
-      reinstallCommand: `${HERMES_REINSTALL_COMMAND} by hand`,
-    });
-    detail.push(...outcome.unsynced.map((line) => `${job.dir}: ${line}`));
-    if (outcome.ok) {
-      refreshed.push({ dir: job.dir, backup: outcome.backup });
+    const existing = byOwner.get(job.owner);
+    if (existing === undefined) byOwner.set(job.owner, [job]);
+    else existing.push(job);
+  }
+
+  for (const [owner, ownerJobs] of byOwner) {
+    // `hermes install` takes this same lock, so an install and a refresh can
+    // never interleave their renames over one root's `plugins/` tree. Bounded
+    // at the outermost Hermes path that contains the root, so a symlinked home
+    // or profile root is refused before the lock file is created (r3 blocker 4).
+    const acquired = acquireUpdateLock(owner, { now, bound: bounds.find((b) => pathContains(b, owner)) });
+    if ('busy' in acquired) {
+      detail.push(`${owner}: ${acquired.busy} — nothing written in this root`);
       continue;
     }
-    detail.push(outcome.targetMissing
-      ? `${job.dir}: the new copy could not be swapped in — ${outcome.error}, AND the previous ` +
-        `copy could not be restored; it is at ${outcome.backup}. ${HERMES_REINSTALL_COMMAND} to ` +
-        'put the packaged plugin back'
-      : `${job.dir}: ${outcome.error}`);
+    try {
+      for (const job of ownerJobs) {
+        const outcome = stageAndPublish({
+          bound: bounds.find((b) => pathContains(b, job.dir)) ?? owner,
+          target: job.dir,
+          // Beside the plugins root, never inside it: a staged `plugin.yaml`
+          // under `plugins/` IS a shadowing copy while it exists (#569).
+          stagingParent: owner,
+          backupsRoot: backupsUnder(owner),
+          stamp,
+          stagingPrefix: '.shieldcortex-staging',
+          backupPrefix: HERMES_PLUGIN_NAME,
+          stage: (staged) => copyPluginTree(sourceDir, staged),
+          verify: (staged) => {
+            const verdict = hermesPluginCopyStale(staged, sourceDir);
+            if (!verdict.comparable) return 'the packaged source could not be read';
+            return verdict.stale ? (verdict.reason ?? 'it differs from the package') : null;
+          },
+          reinstallCommand: `${HERMES_REINSTALL_COMMAND} by hand`,
+        });
+        detail.push(...outcome.unsynced.map((line) => `${job.dir}: ${line}`));
+        if (outcome.ok) {
+          refreshed.push({ dir: job.dir, backup: outcome.backup });
+          continue;
+        }
+        detail.push(outcome.targetMissing
+          ? `${job.dir}: the new copy could not be swapped in — ${outcome.error}, AND the previous ` +
+            `copy could not be restored; it is at ${outcome.backup}. ${HERMES_REINSTALL_COMMAND} to ` +
+            'put the packaged plugin back'
+          : `${job.dir}: ${outcome.error}`);
+      }
+    } finally {
+      acquired.lock.release();
+    }
   }
 
   if (refreshed.length === 0) {

@@ -416,6 +416,86 @@ const HAS_HERMES_PROFILE = (() => {
     expect(fs.existsSync(path.join(hermes, 'backups'))).toBe(false);
   });
 
+  it('locks and backs up each root separately, refreshing both (r3 blocker 3)', () => {
+    // Hermes discovers BOTH roots from a profile HERMES_HOME. Round 3 wrote
+    // every copy under the active home's lock, into the active home's
+    // `backups/` — so a profile run displaced the default root's plugin into
+    // the profile's tree, where its restore could not find it.
+    installCopy();
+    makeStale();
+    installCopy(profileInstalled);
+    makeStale(profileInstalled);
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('refreshed');
+    expect(result.refreshed.map((r) => r.dir).sort()).toEqual([installed, profileInstalled].sort());
+    expect(hermesPluginCopyStale(installed).stale).toBe(false);
+    expect(hermesPluginCopyStale(profileInstalled).stale).toBe(false);
+    // One displaced copy per root, each under the root that owned it.
+    expect(backupDirs()).toEqual([`shieldcortex-preupdate-${STAMP}`]);
+    expect(fs.readdirSync(path.join(profile, 'backups'))).toEqual([`shieldcortex-preupdate-${STAMP}`]);
+    expect(fs.existsSync(
+      path.join(hermes, 'backups', `shieldcortex-preupdate-${STAMP}`, 'shieldcortex', 'plugin.yaml'),
+    )).toBe(true);
+    // Both locks were given back.
+    expect(fs.existsSync(path.join(hermes, '.shieldcortex-update.lock'))).toBe(false);
+    expect(fs.existsSync(path.join(profile, '.shieldcortex-update.lock'))).toBe(false);
+  });
+
+  it('skips a root whose lock is held and refreshes the rest (r3 blocker 3)', () => {
+    installCopy();
+    makeStale();
+    installCopy(profileInstalled);
+    makeStale(profileInstalled);
+    // The reviewer's probe: hold the DEFAULT root's lock, then refresh with
+    // HERMES_HOME pointing at the profile. Round 3 refreshed both copies.
+    const defaultLock = path.join(hermes, '.shieldcortex-update.lock');
+    const body = 'shieldcortex-update 4194304 2026-09-24T11:00:00.000Z foreign\n';
+    fs.writeFileSync(defaultLock, body);
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    // The profile was refreshed; the default root was not touched at all.
+    expect(result.refreshed.map((r) => r.dir)).toEqual([profileInstalled]);
+    expect(hermesPluginCopyStale(profileInstalled).stale).toBe(false);
+    expect(hermesPluginCopyStale(installed).stale).toBe(true);
+    expect(backupDirs()).toEqual([]);
+    expect(fs.readFileSync(defaultLock, 'utf-8')).toBe(body);
+    // Reported, and reported as a WARN so `update` exits non-zero.
+    expect(result.status).toBe('warn');
+    expect(result.detail.join('\n')).toContain(hermes);
+    expect(result.detail.join('\n')).toMatch(/another ShieldCortex update\/install is running/);
+  });
+
+  it('a failed publish in one root never moves another root\'s plugin (r3 blocker 3)', () => {
+    installCopy();
+    makeStale();
+    installCopy(profileInstalled);
+    makeStale(profileInstalled);
+    const real = fs.renameSync;
+    // The default root's publication dies after its displacing rename — the
+    // state that in round 3 left the profile's plugin in the wrong backups/.
+    jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (String(to) === installed) throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
+      return real(from, to);
+    });
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('warn');
+    expect(result.refreshed.map((r) => r.dir)).toEqual([profileInstalled]);
+    // The profile's plugin is current and its displaced copy is in ITS OWN
+    // backups/; the default root's failure is confined to the default root.
+    expect(hermesPluginCopyStale(profileInstalled).stale).toBe(false);
+    expect(fs.readdirSync(path.join(profile, 'backups'))).toEqual([`shieldcortex-preupdate-${STAMP}`]);
+    expect(fs.existsSync(installed)).toBe(false);
+    expect(fs.existsSync(
+      path.join(hermes, 'backups', `shieldcortex-preupdate-${STAMP}`, 'shieldcortex', 'plugin.yaml'),
+    )).toBe(true);
+    expect(result.detail.join('\n')).toMatch(/shieldcortex hermes install/);
+  });
+
   it('refreshes the profile copy and leaves the default root untouched', () => {
     installCopy(profileInstalled);
     fs.writeFileSync(path.join(profileInstalled, '__init__.py'), '# shieldcortex 5.1.0\n');
