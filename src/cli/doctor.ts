@@ -52,6 +52,7 @@ import {
 // The staleness comparator `update`'s Hermes step decides on, so this row and
 // that step can never disagree about the same host (#576).
 import { hermesPluginCopyStale } from '../setup/hermes-refresh.js';
+import { acquireUpdateLock, updateLockPath, type UpdateLock } from '../setup/host-swap.js';
 // The filesystem readers the #569 repair is built on, shared with `update`'s
 // Hermes refresh (#576) so "I could not look" cannot decay into "there is
 // nothing there" in one of the two.
@@ -3312,6 +3313,16 @@ export interface HermesShadowFixResult {
  * is the state hardest to reason about afterwards, and the operator has to look
  * at the layout either way.
  *
+ * The plan is also built TWICE (#574 r4 blocker 2). The first pass writes
+ * nothing; it exists only to name the roots the moves would leave and the root
+ * `backups/` is written into. Those roots' update locks — the same ones
+ * `update`'s refresh and `shieldcortex hermes install` take — are acquired, in
+ * sorted order so two doctors cannot deadlock, and the plan is then rebuilt
+ * under them and executed. Anything the first pass concluded is a claim about
+ * a tree nothing was holding still; a busy lock moves nothing at all and names
+ * the root, because a partial repair under a partial set of locks is the state
+ * this command exists to avoid.
+ *
  * The refusals, in the order they are decided:
  *   - No Hermes discovery at all: nothing is planned and nothing moves (#569
  *     r4). Which copy the gateway loads is exactly the question that could not
@@ -3382,6 +3393,63 @@ export function fixHermesPluginShadowing(
   now: Date = new Date(),
   opts: HermesScanOptions = {},
 ): HermesShadowFixResult {
+  // SURVEY first, writing nothing, only to learn which roots this would touch
+  // (#574 r4 blocker 2). Until this round the repair moved directories with no
+  // lock at all, so it could relocate a plugin that `update`'s refresh or
+  // `hermes install` was mid-swap on, under their supposedly exclusive lock.
+  const survey = planHermesShadowFix(home, now, opts, false);
+  if (survey.plan.length === 0) return survey.result;
+
+  // Every root a copy would leave, plus the root `backups/` is written into.
+  // Sorted, so two doctors racing each other take them in the same order and
+  // cannot deadlock holding one another's first lock.
+  const roots = [...new Set([
+    ...survey.plan.map((copy) => path.dirname(copy.root)),
+    path.dirname(survey.backupsRoot),
+  ])].sort();
+  const held: UpdateLock[] = [];
+  for (const root of roots) {
+    const acquired = acquireUpdateLock(root);
+    if ('busy' in acquired) {
+      for (const lock of held) lock.release();
+      // Nothing at all: a partial repair under a partial set of locks is the
+      // state this command exists to avoid.
+      return {
+        moved: [],
+        refused: survey.plan.map((copy) => ({
+          dir: copy.dir,
+          reason: `nothing was moved: ${tildify(updateLockPath(root))} — ${acquired.busy}`,
+        })),
+        changed: false,
+        failed: true,
+        fromHermes: survey.result.fromHermes,
+        message:
+          `nothing was moved: ${tildify(root)} could not be taken exclusively — ${acquired.busy}`,
+      };
+    }
+    held.push(acquired.lock);
+  }
+  try {
+    // RE-PLAN under the locks and act only on what that plan says. The survey
+    // above read a tree nothing was holding still; everything it concluded is
+    // a claim about a state that may have changed since.
+    return planHermesShadowFix(home, now, opts, true).result;
+  } finally {
+    for (const lock of held) lock.release();
+  }
+}
+
+/**
+ * The scan, the preflights and — when `execute` — the moves. Returns the plan
+ * as well as the result so the caller above can lock the roots it names.
+ */
+function planHermesShadowFix(
+  home: string,
+  now: Date,
+  opts: HermesScanOptions,
+  execute: boolean,
+): { result: HermesShadowFixResult; plan: HermesPluginCopy[]; backupsRoot: string } {
+  const surveyed = (result: HermesShadowFixResult) => ({ result, plan: [], backupsRoot: '' });
   const scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
   const moved: HermesShadowMove[] = [];
   const refused: Array<{ dir: string; reason: string }> = [];
@@ -3417,7 +3485,7 @@ export function fixHermesPluginShadowing(
   // something out from under.
   if (scan.undetermined.length > 0) {
     for (const entry of scan.undetermined) refuseUndetermined(entry.path, entry.error);
-    return {
+    return surveyed({
       moved,
       refused,
       changed: false,
@@ -3428,24 +3496,24 @@ export function fixHermesPluginShadowing(
         `${undeterminedSummary(scan.undetermined.map((e) => ({ path: tildify(e.path), error: e.error })))}. ` +
         'A directory that cannot be read is not an empty directory, so there is no safe plan ' +
         'to execute in any root',
-    };
+    });
   }
 
   if (!scan.present) {
-    return {
+    return surveyed({
       moved,
       refused,
       changed: false,
       failed: false,
       fromHermes: false,
       message: 'Hermes not detected — nothing to move',
-    };
+    });
   }
 
   // Without Hermes' own discovery there is no plan to make: which copy the
   // gateway loads is the question that could not be answered (#569 r4).
   if (!scan.fromHermes) {
-    return {
+    return surveyed({
       moved,
       refused,
       changed: false,
@@ -3455,7 +3523,7 @@ export function fixHermesPluginShadowing(
         'nothing was moved: could not determine which copy Hermes loads ' +
         `(${scan.undeterminedReason ?? 'reason unrecorded'}). ` +
         'Install Hermes, or point the doctor at its python.',
-    };
+    });
   }
 
   // ── Project plugins are never ours to move (#569 r7) ──────────────────
@@ -3837,7 +3905,10 @@ export function fixHermesPluginShadowing(
   // since changed, and "carry on and see" is how a partial repair becomes an
   // unexplainable one. What completed and what did not is then said exactly.
   let stopped: string | null = null;
-  const attempted = abandoned ? [] : plan;
+  // The survey pass (`execute === false`) stops here: it exists to name the
+  // roots the caller must lock, and moving anything before those locks are
+  // held is the defect it was added for.
+  const attempted = abandoned || !execute ? [] : plan;
   for (const { copy } of attempted) {
     if (stopped !== null) break;
     let reserved: string;
@@ -3904,12 +3975,17 @@ export function fixHermesPluginShadowing(
   if (parts.length === 0) parts.push('nothing to move (no shadowing copies)');
 
   return {
-    moved,
-    refused,
-    changed: moved.length > 0,
-    failed,
-    fromHermes: true,
-    message: parts.join('; '),
+    result: {
+      moved,
+      refused,
+      changed: moved.length > 0,
+      failed,
+      fromHermes: true,
+      message: parts.join('; '),
+    },
+    // An abandoned plan moves nothing, so there is nothing to lock for.
+    plan: abandoned ? [] : plan.map((entry) => entry.copy),
+    backupsRoot,
   };
 }
 

@@ -584,6 +584,43 @@ export async function stepOpenClawPlugin(
   if (!legacy && !registration.registered) {
     return await step('OpenClaw plugin', async () => ({ status: 'skip' as const, summary: 'not installed' }));
   }
+  // Everything below this line WRITES in `~/.openclaw` — it deletes the legacy
+  // extension directory and hands the native installer the same root — so it
+  // takes that root's lock like every other writer (#574 r4 blocker 2). It
+  // used to run outside the lock entirely, which meant `update` could delete
+  // an extension directory that `openclaw install` was copying into under its
+  // supposedly exclusive lock. Loaded lazily: this step is skipped on most
+  // hosts and the module reaches the filesystem on import.
+  const { acquireUpdateLock } = await import('../setup/host-swap.js');
+  const acquired = acquireUpdateLock(path.join(home, '.openclaw'));
+  if ('busy' in acquired) {
+    // Attention, not a pass: the plugin on this host is still the old one.
+    return await step('OpenClaw plugin', async () => ({
+      status: 'warn' as const,
+      summary: 'skipped — ~/.openclaw could not be taken exclusively',
+      detail: [scrubHomePath(acquired.busy, home)],
+    }));
+  }
+  try {
+    return await stepOpenClawPluginLocked(home, { run, rm, readVersion, readCliVersion: deps.readCliVersion, extDir, legacy });
+  } finally {
+    acquired.lock.release();
+  }
+}
+
+/** The writing half of the step above, with `~/.openclaw`'s lock already held. */
+async function stepOpenClawPluginLocked(
+  home: string,
+  ctx: {
+    run: typeof runQuiet;
+    rm: typeof fs.rmSync;
+    readVersion: typeof readInstalledRealtimePluginVersion;
+    readCliVersion?: typeof readPackageVersion;
+    extDir: string;
+    legacy: boolean;
+  },
+): Promise<StepResult> {
+  const { run, rm, readVersion, extDir, legacy } = ctx;
   return await step('OpenClaw plugin', async () => {
     // Drop any legacy file-copied extension so OpenClaw's registry copy is the
     // single source of truth (prevents the dup-install state doctor flags).
@@ -610,7 +647,7 @@ export async function stepOpenClawPlugin(
       // Report the ACTUAL on-disk transition, not just command success — the old
       // "updated via openclaw" was printed even when the version never moved.
       const after = readVersion(home);
-      const expected = (deps.readCliVersion ?? readPackageVersion)();
+      const expected = (ctx.readCliVersion ?? readPackageVersion)();
       const comparable = Boolean(after && semver.valid(after) && semver.valid(expected));
       const lag = comparable && semver.lt(after!, expected);
       const changed = before && after && before !== after ? `${before} → ${after}` : null;
