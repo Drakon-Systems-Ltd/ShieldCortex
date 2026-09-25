@@ -1106,17 +1106,20 @@ const MAX_MATCH_ROWS = 25;
 //                       persisted, verbatim, redacted, projected or looked up.
 //   - `argc`          — how many shell-aware tokens the span had, capped at
 //                       `MAX_ARGC`. A bounded count.
-//   - `pipe`          — true when an unquoted token contains `|`. Named for
-//                       exactly what is tested — a pipe operator is present
-//                       — not for what it pipes into.
-//   - `subshell`      — true when an unquoted token contains `$(` or a
-//                       backtick.
+//   - `pipe`          — true when a `|` appears in an unquoted, unescaped
+//                       run of the span — i.e. where the shell would read a
+//                       pipe OPERATOR (#587: a `"a|b"`, `'a|b'` or `\|` is
+//                       text and does not set it). Named for exactly what
+//                       is tested — an operator is present — not for what
+//                       it pipes into.
+//   - `subshell`      — true when `$(` or a backtick appears outside single
+//                       quotes (inside double quotes they still execute).
 //   - `provenanceWithheld` — the constant `'path'` on every row the core
 //                       gave folded-source provenance for (#184). Paths and
 //                       basenames are input too — `/tmp/<token>.sh` is a
 //                       path — so none of it is persisted; `line` (an
-//                       integer) and `chainDepth` (a capped count of chain
-//                       components) are what survive.
+//                       integer clamped to `MAX_LINE`) and `chainDepth` (a
+//                       capped count of chain components) are what survive.
 //
 // No verb, no hosts, no flags, no basenames: each of those was a string
 // copied out of, or chosen by, the input, which is the defect. What an
@@ -1137,10 +1140,20 @@ const MAX_CHAIN_DEPTH = 6;
 /** `argc` is a bounded count, not a proxy for the command's length. */
 const MAX_ARGC = 256;
 /**
+ * `line` is clamped for symmetry with `argc` / `chainDepth` (#587). The core
+ * folds at most `MAX_SCRIPT_BYTES` (262 144) bytes of a script, so no real
+ * line number exceeds it; a larger value is a buggy or hostile dist, and is
+ * clamped rather than trusted. A bounded integer carries no input either way.
+ */
+const MAX_LINE = 262_144;
+/**
  * The hook must not assume the dist it loads bounds a span to any size (see
  * the file header). Nothing here is a security boundary — the tokeniser is
- * a single linear pass, not a backtracking regex — this only bounds the WORK
- * done on a pathologically large string from a compromised or buggy dist.
+ * a single linear pass, not a backtracking regex — this bounds the work the
+ * projection does on a pathologically large string from a compromised or
+ * buggy dist: the ORIGINAL span is cut to this many characters before
+ * anything (including the trim) reads it, so whitespace inside the cap
+ * counts against it (#587).
  */
 const MAX_PROJECTION_INPUT_CHARS = 8192;
 
@@ -1149,7 +1162,9 @@ function projectShellShape(tokens) {
   let subshell = false;
   for (const tok of tokens) {
     if (tok.quote === "'") continue; // single-quoted: shell-literal text, not an operator
-    if (tok.value.includes('|')) pipe = true;
+    // #587: only a `|` in an unquoted, unescaped run is an operator; `"a|b"`,
+    // `a'|'b` and `\|` are text. `tok.bare` holds exactly those runs.
+    if (tok.bare.some((run) => run.includes('|'))) pipe = true;
     if (tok.value.includes('$(') || tok.value.includes('`')) subshell = true;
   }
   return { pipe, subshell };
@@ -1164,7 +1179,9 @@ function projectShellShape(tokens) {
  */
 function projectCommandEvidence(value) {
   if (typeof value !== 'string') return null;
-  const trimmed = value.trim().slice(0, MAX_PROJECTION_INPUT_CHARS);
+  // Cut first, then trim: the cap bounds every operation on the original
+  // string, not only the tokenisation (#587).
+  const trimmed = value.slice(0, MAX_PROJECTION_INPUT_CHARS).trim();
   if (!trimmed) return null;
   const tokens = tokenizeShellArgs(trimmed);
   if (tokens.length === 0) return null;
@@ -1180,10 +1197,12 @@ function projectCommandEvidence(value) {
  * Split `text` into shell-style argument tokens. Whitespace separates
  * arguments except inside single quotes (fully literal) or double quotes
  * (`\` escapes `" \ $` \``` only); outside quotes `\` escapes the next
- * character. Each token records its decoded `value` and `quote` (the quote
- * character when the ENTIRE token was one closed quoted run, else `null`) —
- * the only consumers are the count and the two shape booleans, neither of
- * which persists a token's text or anything chosen by it.
+ * character. Each token records its decoded `value`, its `quote` (the quote
+ * character when the ENTIRE token was one closed quoted run, else `null`)
+ * and `bare` — the unquoted, unescaped runs of the token, the only places
+ * the shell would read an operator character (#587). The only consumers are
+ * the count and the two shape booleans, neither of which persists a token's
+ * text or anything chosen by it.
  */
 function tokenizeShellArgs(text) {
   const tokens = [];
@@ -1214,7 +1233,8 @@ function tokenizeShellArgs(text) {
         parts.push({ kind: 'quoted', quote, text: body, closed });
       } else if (ch === '\\') {
         if (i + 1 < len) {
-          parts.push({ kind: 'bare', text: text[i + 1] });
+          // An escaped character is text to the shell, never an operator.
+          parts.push({ kind: 'escaped', text: text[i + 1] });
           i += 2;
         } else {
           i += 1;
@@ -1228,7 +1248,8 @@ function tokenizeShellArgs(text) {
     }
     const value = parts.map((p) => p.text).join('');
     const quote = parts.length === 1 && parts[0].kind === 'quoted' && parts[0].closed ? parts[0].quote : null;
-    tokens.push({ value, quote });
+    const bare = parts.filter((p) => p.kind === 'bare').map((p) => p.text);
+    tokens.push({ value, quote, bare });
   }
   return tokens;
 }
@@ -1280,7 +1301,8 @@ function safeMatchList(matches) {
     // #184: where the match came from folded script source, the row says so
     // and how deep the fold was — never the path (see projectProvenance).
     Object.assign(row, projectProvenance(raw.source, raw.chain));
-    if (Number.isInteger(raw.line) && raw.line > 0) row.line = raw.line;
+    // #587: clamped like argc / chainDepth — a bounded integer, whatever the dist sent.
+    if (Number.isInteger(raw.line) && raw.line > 0) row.line = Math.min(raw.line, MAX_LINE);
     out.push(row);
   }
   return out;
