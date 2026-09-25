@@ -358,7 +358,7 @@ describeWithHermes('one writer per Hermes home (r2 blocker 3)', () => {
   });
 
   it('`hermes install` refuses while the lock is held, and writes nothing', async () => {
-    fs.writeFileSync(updateLockPath(hermes), `shieldcortex-update ${process.pid} ${new Date().toISOString()}\n`);
+    fs.writeFileSync(updateLockPath(hermes), `shieldcortex-update ${process.pid} ${new Date().toISOString()} t\n`);
     const errors: string[] = [];
     jest.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a.join(' ')); });
     jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -369,22 +369,43 @@ describeWithHermes('one writer per Hermes home (r2 blocker 3)', () => {
     expect(fs.existsSync(installed)).toBe(false);
   });
 
-  it('a stale lock — dead pid AND older than ten minutes — does not block a refresh', () => {
+  it('never reclaims a lock, however stale it looks (r3 blocker 2)', () => {
     installCopy();
     makeStale();
-    // pid 2^22 is above every Linux default `pid_max`, so it is never live.
+    // pid 2^22 is above every Linux default `pid_max`, so it is never live;
+    // the stamp is eleven minutes old. Round 3 deleted this file and carried
+    // on, and the read-then-unlink that did it could delete a LIVE lock that
+    // replaced it in between.
     const old = new Date(FROZEN.getTime() - 11 * 60 * 1000).toISOString();
-    fs.writeFileSync(updateLockPath(hermes), `shieldcortex-update 4194304 ${old}\n`);
+    const lock = updateLockPath(hermes);
+    fs.writeFileSync(lock, `shieldcortex-update 4194304 ${old} sometoken\n`);
 
-    expect(refreshHermesPluginCopies(home, { now: FROZEN }).status).toBe('refreshed');
-
-    // A DEAD pid with a FRESH stamp still holds it: half an argument is not
-    // enough to delete somebody else's lock.
-    makeStale();
-    fs.writeFileSync(updateLockPath(hermes), `shieldcortex-update 4194304 ${FROZEN.toISOString()}\n`);
     const blocked = refreshHermesPluginCopies(home, { now: FROZEN });
+
     expect(blocked.status).toBe('warn');
     expect(blocked.summary).toMatch(/another ShieldCortex update\/install is running/);
+    // Named, attributed, and left exactly as it was for the operator to judge.
+    expect(blocked.summary).toContain(lock);
+    expect(blocked.summary).toMatch(/recorded pid 4194304/);
+    expect(blocked.summary).not.toMatch(/ten minutes/);
+    expect(fs.readFileSync(lock, 'utf-8')).toBe(`shieldcortex-update 4194304 ${old} sometoken\n`);
+    expect(hermesPluginCopyStale(installed).stale).toBe(true);
+  });
+
+  it('refuses on a lock nobody can parse, and says so (r3 nit 2)', () => {
+    installCopy();
+    makeStale();
+    // What a SIGKILL between the exclusive create and the write leaves: an
+    // empty file no age and no pid check can ever clear.
+    const lock = updateLockPath(hermes);
+    fs.writeFileSync(lock, '');
+
+    const blocked = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(blocked.status).toBe('warn');
+    expect(blocked.summary).toMatch(/not a lock record/);
+    expect(blocked.summary).toMatch(/confirmed no ShieldCortex update or install is running/);
+    expect(fs.readFileSync(lock, 'utf-8')).toBe('');
   });
 });
 

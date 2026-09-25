@@ -456,7 +456,9 @@ export function refreshHermesPluginCopies(
 
   // One writer per integration root. `hermes install` takes the same lock, so
   // two commands can never interleave their renames over one plugins tree.
-  const acquired = acquireUpdateLock(scan.hermesHome, { now });
+  // Bounded at the Hermes tree, so a symlinked home or profile root is refused
+  // before the lock file itself is created (r3 blocker 4).
+  const acquired = acquireUpdateLock(scan.hermesHome, { now, bound: writeBounds(scan)[0] });
   if ('busy' in acquired) return warn(`${acquired.busy} — nothing written`);
   try {
     return publishJobs({ jobs, scan, sourceDir, backupsRoot, stamp });

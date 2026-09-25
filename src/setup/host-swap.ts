@@ -57,6 +57,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { describeFsError } from './hermes-plugins.js';
 import {
   deviceUnder,
@@ -70,9 +71,6 @@ import {
 /** One exclusive lock per integration root. Same name on both integrations. */
 export const UPDATE_LOCK_NAME = '.shieldcortex-update.lock';
 
-/** A lock older than this whose holder is gone is a crash leftover, not a run. */
-export const STALE_LOCK_MS = 10 * 60 * 1000;
-
 export function updateLockPath(root: string): string {
   return path.join(root, UPDATE_LOCK_NAME);
 }
@@ -81,7 +79,7 @@ export function updateLockPath(root: string): string {
 export const LOCK_BUSY_REASON = 'another ShieldCortex update/install is running';
 
 export interface UpdateLock {
-  /** Idempotent, and never removes a lock this process does not hold. */
+  /** Idempotent, and never removes a lock this handle did not create. */
   release(): void;
 }
 
@@ -90,15 +88,14 @@ export type LockResult = { lock: UpdateLock } | { busy: string };
 /** `O_NOFOLLOW` where the platform has it; 0 (and no protection) on Windows. */
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 
-const LOCK_LINE = /^shieldcortex-update (\d+) (\S+)$/m;
+const LOCK_LINE = /^shieldcortex-update (\d+) (\S+) (\S+)$/m;
 
 /**
  * Read a lock file WITHOUT following it. A symlink at the lock path is not a
- * lock we wrote, so it is never parsed, never replaced and never unlinked —
- * the run simply refuses, which is the safe answer for a path somebody else
- * is clearly using.
+ * lock we wrote, so it is never parsed and never removed — the run simply
+ * refuses, which is the safe answer for a path somebody else is clearly using.
  */
-function readLock(target: string): { pid: number; at: number } | null {
+function readLock(target: string): { pid: string; at: string; token: string } | null {
   let fd: number;
   try {
     fd = fs.openSync(target, fs.constants.O_RDONLY | NOFOLLOW);
@@ -107,9 +104,7 @@ function readLock(target: string): { pid: number; at: number } | null {
   }
   try {
     const found = fs.readFileSync(fd, 'utf-8').trim().match(LOCK_LINE);
-    if (found === null) return null;
-    const at = Date.parse(found[2]);
-    return { pid: Number(found[1]), at: Number.isNaN(at) ? 0 : at };
+    return found === null ? null : { pid: found[1], at: found[2], token: found[3] };
   } catch {
     return null;
   } finally {
@@ -117,34 +112,48 @@ function readLock(target: string): { pid: number; at: number } | null {
   }
 }
 
-/** EPERM means the pid exists and is not ours to signal — which is ALIVE. */
-function processAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: unknown) {
-    return (err as NodeJS.ErrnoException)?.code === 'EPERM';
-  }
-}
-
 /**
- * Take the one write lock for an integration root.
+ * Take the one write lock for an integration root — or refuse.
  *
  * `open(O_CREAT|O_EXCL|O_NOFOLLOW)` is the check and the act in one syscall, so
- * there is no window between "is anyone writing" and "I am writing". A lock is
- * only ever cleared when BOTH of the things that could make it a lie are true:
- * its recorded pid is dead, and it is older than ten minutes. A live pid holds
- * the lock however old the file is, and a fresh file holds it however dead the
- * pid looks — pids are recycled, and half an argument is not enough to delete
- * somebody else's lock.
+ * there is no window between "is anyone writing" and "I am writing".
+ *
+ * ## Nothing here reclaims a lock (r4)
+ *
+ * Round 3 deleted a lock whose recorded pid was dead and whose stamp was over
+ * ten minutes old. Review found the race that costs: A reads a stale lock, B
+ * reads it too, removes it, acquires its own and starts writing — and then A
+ * resumes at its `unlink`, deletes B's LIVE lock and acquires the pathname. An
+ * `unlink` by pathname after a read cannot establish ownership of what is at
+ * that pathname now, and the promise the message made ("ignored ten minutes
+ * later") was not true either: a SIGKILL between the exclusive create and the
+ * write leaves a record nothing can parse and no age can clear, and a recycled
+ * pid keeps a dead lock alive indefinitely.
+ *
+ * So an existing lock is simply an existing lock. The refusal names the file
+ * and reports whatever record it holds, and clearing it is a decision an
+ * operator makes with knowledge this process does not have: whether anything
+ * else is running.
+ *
+ * `bound` is the outermost path component the root is validated from, and the
+ * validation happens BEFORE the lock is created (review blocker 4): a
+ * symlinked `~/.openclaw`, `~/.hermes` or profile root is refused having
+ * written nothing at all, lock included. It defaults to the root itself, which
+ * checks exactly that one component.
  */
 export function acquireUpdateLock(
   root: string,
-  opts: { now?: Date; createRoot?: boolean } = {},
+  opts: { now?: Date; createRoot?: boolean; bound?: string } = {},
 ): LockResult {
   const now = opts.now ?? new Date();
   const target = updateLockPath(root);
+
+  const { link, unreadable } = findLinkOnPath(opts.bound ?? root, root);
+  if (unreadable !== null) {
+    return { busy: `${unreadable.path} could not be read (${unreadable.error}); nothing written` };
+  }
+  if (link !== null) return { busy: `${link} is a symlink; nothing written` };
+
   if (opts.createRoot === true) {
     try {
       fs.mkdirSync(root, { recursive: true });
@@ -152,53 +161,54 @@ export function acquireUpdateLock(
       return { busy: `${root} could not be created — ${describeFsError(err)}` };
     }
   }
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const fd = fs.openSync(
-        target,
-        fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | NOFOLLOW,
-        0o600,
-      );
-      try {
-        fs.writeFileSync(fd, `shieldcortex-update ${process.pid} ${now.toISOString()}\n`);
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-      return { lock: { release: () => releaseLock(target) } };
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') {
-        return { busy: `the update lock at ${target} could not be taken — ${describeFsError(err)}` };
-      }
-    }
-    if (attempt > 0) break;
-    const held = readLock(target);
-    if (held === null || processAlive(held.pid) || now.getTime() - held.at < STALE_LOCK_MS) break;
-    try {
-      fs.unlinkSync(target);
-    } catch {
-      break;
-    }
-  }
-  // Naming the file matters: a run that is SIGKILLed mid-swap leaves its lock
-  // behind, and the conjunction above then holds it for up to ten minutes. An
-  // operator who knows nothing else is running can delete it and carry on.
-  return {
-    busy: `${LOCK_BUSY_REASON} (${target}) — a lock left behind by a killed run is ignored ` +
-      'ten minutes later, or can be deleted once you know nothing else is writing',
-  };
-}
 
-function releaseLock(target: string): void {
-  const held = readLock(target);
-  // Only ever the lock this process wrote. A lock whose pid moved on belongs
-  // to whoever cleared and retook it, and it is not ours to remove.
-  if (held === null || held.pid !== process.pid) return;
+  // The token is what makes `release` safe. A pid is not an identity: the same
+  // process can acquire, release and acquire again, and round 3's pid-only
+  // release then deleted the SECOND lock when the first handle was released
+  // twice (review nit 1).
+  const token = randomUUID();
   try {
-    fs.unlinkSync(target);
-  } catch {
-    /* a leftover lock is cleared as stale by the next run ten minutes later */
+    const fd = fs.openSync(
+      target,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | NOFOLLOW,
+      0o600,
+    );
+    try {
+      fs.writeFileSync(fd, `shieldcortex-update ${process.pid} ${now.toISOString()} ${token}\n`);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') {
+      return { busy: `the update lock at ${target} could not be taken — ${describeFsError(err)}` };
+    }
+    const held = readLock(target);
+    return {
+      busy: `${LOCK_BUSY_REASON} (${target}) — ` +
+        (held === null
+          ? 'its contents are not a lock record, so there is no run to identify'
+          : `recorded pid ${held.pid}, taken ${held.at}`) +
+        '; delete that file only once you have confirmed no ShieldCortex update or install is ' +
+        'running, because nothing removes it for you',
+    };
   }
+
+  let released = false;
+  return {
+    lock: {
+      release: () => {
+        if (released) return;
+        released = true;
+        // Only ever the file this call created. A lock carrying a different
+        // token belongs to whoever cleared this one and took it afterwards.
+        if (readLock(target)?.token !== token) return;
+        try {
+          fs.unlinkSync(target);
+        } catch { /* a leftover lock is the operator's to clear */ }
+      },
+    },
+  };
 }
 
 /**

@@ -359,7 +359,7 @@ describe('one writer per config root (#574 r2 blocker 3)', () => {
 
   it('a held lock stops the refresh before it writes anything', () => {
     installStale();
-    fs.writeFileSync(updateLockPath(configRoot), `shieldcortex-update ${process.pid} ${FROZEN.toISOString()}\n`);
+    fs.writeFileSync(updateLockPath(configRoot), `shieldcortex-update ${process.pid} ${FROZEN.toISOString()} t\n`);
 
     const result = refreshInstalledHookFiles(home, { now: FROZEN });
 
