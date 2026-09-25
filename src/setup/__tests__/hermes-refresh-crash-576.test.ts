@@ -452,4 +452,116 @@ describeWithHermes('the staged tree is durable before it is reachable (r2 blocke
     // And the staged directory itself, so the NAMES are durable too.
     expect(before.has(staged)).toBe(true);
   });
+
+  it('flushes the new backup ancestry before displacing the target (r3 blocker 5)', () => {
+    installCopy();
+    makeStale();
+    const byFd = new Map<number, string>();
+    const synced: string[] = [];
+    let atFirstRename: string[] | null = null;
+
+    const realOpen = fs.openSync;
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (realOpen as (...a: unknown[]) => number)(p, ...rest);
+      byFd.set(fd, String(p));
+      return fd;
+    }) as typeof fs.openSync);
+    const realFsync = fs.fsyncSync;
+    jest.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      synced.push(byFd.get(fd) ?? `fd:${fd}`);
+      return realFsync(fd);
+    });
+    const realRename = fs.renameSync;
+    jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      atFirstRename ??= [...synced];
+      return realRename(from, to);
+    });
+
+    expect(refreshHermesPluginCopies(home, { now: FROZEN }).status).toBe('refreshed');
+
+    // `backups/` and the reservation inside it are BOTH brand new, and the
+    // rename that empties `plugins/` can reach the medium before either name
+    // does. Round 3 flushed neither.
+    const backups = path.join(hermes, 'backups');
+    const before = new Set(atFirstRename ?? []);
+    expect(before.has(path.join(backups, `shieldcortex-preupdate-${STAMP}`))).toBe(true);
+    expect(before.has(backups)).toBe(true);
+    expect(before.has(hermes)).toBe(true);
+  });
+});
+
+describeWithHermes('a device that refuses a flush is not a platform that cannot (r3 blocker 5)', () => {
+  /** Fail every DIRECTORY fsync with `code`, leaving file fsyncs alone. */
+  function failDirectoryFsync(code: string, only?: (dir: string) => boolean): void {
+    const byFd = new Map<number, string>();
+    const realOpen = fs.openSync;
+    jest.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (realOpen as (...a: unknown[]) => number)(p, ...rest);
+      byFd.set(fd, String(p));
+      return fd;
+    }) as typeof fs.openSync);
+    const realFsync = fs.fsyncSync;
+    jest.spyOn(fs, 'fsyncSync').mockImplementation((fd: number) => {
+      const target = byFd.get(fd);
+      const isDir = target !== undefined && fs.existsSync(target) && fs.statSync(target).isDirectory();
+      if (isDir && (only === undefined || only(target))) {
+        throw Object.assign(new Error(`${code}: simulated`), { code });
+      }
+      return realFsync(fd);
+    });
+  }
+
+  it('an EIO on the backup ancestry aborts before anything is moved', () => {
+    installCopy();
+    makeStale();
+    const backups = path.join(hermes, 'backups');
+    // Only the backup ancestry: the staged tree flushes cleanly, so the abort
+    // is provably the pre-rename ancestry check and not an earlier refusal.
+    failDirectoryFsync('EIO', (dir) => dir === backups || dir.startsWith(`${backups}${path.sep}`));
+    const renames: string[] = [];
+    const realRename = fs.renameSync;
+    jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      renames.push(String(to));
+      return realRename(from, to);
+    });
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('warn');
+    expect(result.refreshed).toEqual([]);
+    expect(result.detail.join('\n')).toMatch(/could not be flushed.*EIO/);
+    expect(result.detail.join('\n')).toMatch(/nothing written/);
+    // Not one rename ran, and the stale copy is exactly where it was.
+    expect(renames).toEqual([]);
+    expect(hermesPluginCopyStale(installed).stale).toBe(true);
+    expect(fs.readdirSync(hermes).filter((n) => n.startsWith('.shieldcortex-'))).toEqual([]);
+  });
+
+  it('an EIO anywhere in the flush path is never a successful refresh', () => {
+    installCopy();
+    makeStale();
+    // The reviewer's injection: EVERY directory fsync fails. Round 3 returned
+    // a refreshed copy with `failed: []`.
+    failDirectoryFsync('EIO');
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('warn');
+    expect(result.refreshed).toEqual([]);
+    expect(hermesPluginCopyStale(installed).stale).toBe(true);
+  });
+
+  it('a platform that simply cannot flush a directory still refreshes, and says so', () => {
+    installCopy();
+    makeStale();
+    // EINVAL is what a filesystem without directory-fd fsync answers. Failing
+    // the refresh there would break every host of that kind.
+    failDirectoryFsync('EINVAL');
+
+    const result = refreshHermesPluginCopies(home, { now: FROZEN });
+
+    expect(result.status).toBe('refreshed');
+    expect(hermesPluginCopyStale(installed).stale).toBe(false);
+    expect(result.detail.join('\n')).toMatch(/could not be flushed.*EINVAL/);
+  });
 });

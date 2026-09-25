@@ -28,11 +28,19 @@
  *   2. `fsync` every staged file and every staged directory, so the bytes are
  *      on the medium BEFORE any rename makes them reachable;
  *   3. verify the staged tree byte-for-byte against the package;
- *   4. `rename(target -> backup)` when there is a target to displace, then
+ *   4. `fsync` the backup's newly created ancestry — the reservation,
+ *      `backups/` and the integration root — so the name that will hold the
+ *      displaced copy is durable BEFORE the copy is displaced;
+ *   5. `rename(target -> backup)` when there is a target to displace, then
  *      `fsync` both parent directories;
- *   5. `rename(staged -> target)`, then `fsync` both parent directories.
+ *   6. `rename(staged -> target)`, then `fsync` both parent directories.
  *
- * A failure at 5 leaves the host with no target, so the backup is renamed
+ * Steps 2, 4 and every other flush distinguish "this platform will not sync a
+ * directory fd" from "the device refused" (`DIR_SYNC_UNSUPPORTED`). The first
+ * is reported and carried on with; the second is fatal before the first rename
+ * and reported after it.
+ *
+ * A failure at 6 leaves the host with no target, so the backup is renamed
  * straight back and both parents are synced again. If THAT fails, the caller
  * names the integration's installer, which is this same publication run from
  * the package.
@@ -212,21 +220,44 @@ export function acquireUpdateLock(
 }
 
 /**
- * `fsync` a directory so the NAMES in it are durable, not just the bytes of
- * the files. Best effort BY PLATFORM, not by accident: several filesystems and
- * every Windows build refuse a directory fd outright, and a refresh must not
- * fail on a host where the call is simply unavailable. Every refusal is
- * RETURNED (see `SyncReport.unsynced`) and surfaced by the caller, so the one
- * thing the previous round was faulted for — swallowing them — cannot happen.
+ * Codes that mean "this platform or filesystem does not flush a directory fd",
+ * as opposed to "the flush was attempted and the device said no" (r3 blocker 5).
+ *
+ * The distinction is the whole point. Several filesystems and every Windows
+ * build refuse a directory fd outright, and a refresh must not fail on a host
+ * where the call is simply unavailable — but round 3 put EVERY refusal in the
+ * same bucket, so an injected `EIO` on every directory flush still produced a
+ * published copy reported as a clean refresh. `EIO`, `ENOSPC` and their
+ * relatives are the device answering, and they are fatal.
+ *
+ * `EACCES`/`EPERM` are on the unsupported side deliberately: they mean the
+ * directory could not be OPENED for reading, which is a permission fact about
+ * the host rather than a persistence failure — and if the rename that follows
+ * really cannot happen, the rename itself says so.
  */
-function syncDir(dir: string): string | null {
+const DIR_SYNC_UNSUPPORTED: ReadonlySet<string> = new Set([
+  'EACCES', 'EBADF', 'EINVAL', 'EISDIR', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM',
+]);
+
+type DirSync = { ok: true } | { unsupported: string } | { error: string };
+
+/**
+ * `fsync` a directory so the NAMES in it are durable, not just the bytes of
+ * the files. Three answers, never two: it worked, the platform will not do it,
+ * or it was tried and failed.
+ */
+function syncDir(dir: string): DirSync {
   let fd: number | null = null;
   try {
     fd = fs.openSync(dir, 'r');
     fs.fsyncSync(fd);
-    return null;
+    return { ok: true };
   } catch (err: unknown) {
-    return `${dir} could not be flushed (${describeFsError(err)})`;
+    const code = (err as NodeJS.ErrnoException)?.code;
+    const said = `${dir} could not be flushed (${describeFsError(err)})`;
+    return typeof code === 'string' && DIR_SYNC_UNSUPPORTED.has(code)
+      ? { unsupported: said }
+      : { error: said };
   } finally {
     if (fd !== null) {
       try { fs.closeSync(fd); } catch { /* already gone */ }
@@ -235,9 +266,13 @@ function syncDir(dir: string): string | null {
 }
 
 export interface SyncReport {
-  /** A FILE that could not be flushed, or a tree that could not be walked. */
+  /**
+   * A FILE that could not be flushed, a tree that could not be walked, or a
+   * DIRECTORY the device refused to flush. All three are fatal: nothing has
+   * been published yet, so refusing costs an operator one warning.
+   */
   error: string | null;
-  /** Directories the platform would not flush. Reported, never swallowed. */
+  /** Directories the platform cannot flush. Reported, never swallowed. */
   unsynced: string[];
 }
 
@@ -287,8 +322,9 @@ export function syncTree(root: string): SyncReport {
   }
   const unsynced: string[] = [];
   for (const dir of dirs.reverse()) {
-    const failed = syncDir(dir);
-    if (failed !== null) unsynced.push(failed);
+    const answer = syncDir(dir);
+    if ('error' in answer) return { error: answer.error, unsynced };
+    if ('unsupported' in answer) unsynced.push(answer.unsupported);
   }
   return { error: null, unsynced };
 }
@@ -452,22 +488,44 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
     return refuse(`the staged copy did not verify against the packaged source (${difference}); nothing written`);
   }
 
-  const flush = (...dirs: string[]): void => {
+  /**
+   * Flush directories, keeping "the platform will not" apart from "the device
+   * said no". Returns the first real failure, or null.
+   */
+  const flush = (...dirs: string[]): string | null => {
     for (const dir of dirs) {
-      const failed = syncDir(dir);
-      if (failed !== null) unsynced.push(failed);
+      const answer = syncDir(dir);
+      if ('error' in answer) return answer.error;
+      if ('unsupported' in answer) unsynced.push(answer.unsupported);
     }
+    return null;
+  };
+  /** After a rename there is nothing left to abort, so the note is the answer. */
+  const note = (...dirs: string[]): void => {
+    const failed = flush(...dirs);
+    if (failed !== null) unsynced.push(failed);
   };
 
   // Displace the old copy, if there is one.
   if (backup !== null) {
+    // The backup's ANCESTRY first (r3 blocker 5). `backups/` and the
+    // reservation inside it were both created moments ago, and the rename
+    // below can become durable before either name does — leaving a host whose
+    // plugin is gone and whose backup is not reachably on the medium. A real
+    // failure here aborts with nothing moved; a platform that will not flush a
+    // directory is reported and carries on.
+    const ancestry = flush(reserved!, params.backupsRoot, path.dirname(params.backupsRoot));
+    if (ancestry !== null) {
+      giveBack();
+      return refuse(`${ancestry}; nothing written`);
+    }
     try {
       fs.renameSync(params.target, backup);
     } catch (err: unknown) {
       giveBack();
       return refuse(`could not be moved to ${backup} — ${describeFsError(err)}`);
     }
-    flush(targetParent, path.dirname(backup));
+    note(targetParent, path.dirname(backup));
   }
 
   // Publish.
@@ -487,7 +545,7 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
     } catch {
       return { ok: false, error, targetMissing: true, backup, unsynced };
     }
-    flush(targetParent, path.dirname(backup));
+    note(targetParent, path.dirname(backup));
     giveBack();
     // Said out loud, because "the refresh failed" and "the refresh failed and
     // your plugin is gone" are different sentences for an operator.
@@ -499,7 +557,7 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
       unsynced,
     };
   }
-  flush(targetParent, staging);
+  note(targetParent, staging);
   dropStaging();
   return { ok: true, backup, unsynced };
 }
