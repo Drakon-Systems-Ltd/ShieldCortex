@@ -1574,3 +1574,18 @@ export function undeterminedSummary(entries: HermesUndetermined[]): string {
   const more = rest > 0 ? `; and ${rest} more path${rest === 1 ? '' : 's'}` : '';
   return `could not read ${named}${more}`;
 }
+
+/**
+ * Every directory a repair over this scan has to protect: each discovered
+ * `shieldcortex` copy, plus EVERY other plugin directory Hermes found a
+ * manifest in — any key, categories included, in every protective root and in
+ * the project directory (#569 r7).
+ *
+ * Deduplicated, copies first, so a refusal names the copy rather than an
+ * equivalent path whenever it can. Shared by `doctor --fix-hermes-plugin-copies`
+ * and by `update`'s Hermes refresh (#576): both walk this list for symlinks
+ * before they touch anything, and two copies of it would be two answers.
+ */
+export function protectedDirs(scan: HermesPluginScan): string[] {
+  return [...new Set([...scan.copies.map((c) => c.dir), ...scan.discovered])];
+}

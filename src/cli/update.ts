@@ -35,6 +35,11 @@ import {
 // Type-only: erased at compile time, so this adds no runtime edge to the
 // native-binding module (which `stepVerifyEngine` still imports lazily).
 import type { EnsureResult } from '../setup/native-binding.js';
+// Type-only again: the two host-copy refreshers are loaded lazily inside their
+// steps (they reach fs and, for Hermes, a python probe), so `update` keeps
+// paying for them only on the run that uses them.
+import type { HookRefreshResult as HookRefreshShape } from '../setup/openclaw.js';
+import type { HermesRefreshResult as HermesRefreshShape } from '../setup/hermes-refresh.js';
 // Classification only — the side-effect-free classifier module, never the
 // better-sqlite3 loader.
 import { isPackagedPrebuildLoadError } from '../database/native-load-classify.js';
@@ -82,6 +87,46 @@ interface StepResult {
   detail?: string[];
   /** True when `detail` is a reduction of longer output (#221). */
   truncated?: boolean;
+  /**
+   * The step did not do the work it was asked to: a root another run holds, an
+   * integration copy it could not refresh, a copy that vanished mid-swap, a
+   * durability it could not confirm. `update` exits NON-ZERO on any of these
+   * (#574/#576 r4 nit 1) — the warning was printed and the exit code was still
+   * 0, so an unattended upgrade that refreshed nothing at all looked from a
+   * script exactly like one that refreshed everything.
+   */
+  unfinished?: boolean;
+}
+
+/**
+ * What `update` exits with, and what its closing panel calls the run.
+ *
+ * Lifted out of `runUpdate` so the decision is reachable from a test: the flow
+ * around it resolves the registry, spawns npm and re-execs the new CLI. A step
+ * that did not finish the work it was asked to — a busy integration root, a
+ * copy it could not publish, one that vanished mid-swap, a durability the
+ * device would not confirm — is NON-ZERO (#574/#576 r4 nit 1). It was printed
+ * as a warning and exited 0, so from a script an unattended upgrade that
+ * refreshed nothing looked exactly like one that refreshed everything.
+ *
+ * INCOMPLETE rather than FAILED when that is all that went wrong: the upgrade
+ * itself landed, and npm failing is a different sentence.
+ */
+export function updateVerdict(args: {
+  failed: boolean;
+  attention: boolean;
+  unfinished: boolean;
+}): { exitCode: number; verdict: VerdictKind } {
+  const exitCode = args.failed || args.unfinished ? 1 : 0;
+  return {
+    exitCode,
+    verdict: deriveUpdateVerdict({
+      exitCode,
+      failed: args.failed,
+      incomplete: args.unfinished && !args.failed,
+      attention: args.attention,
+    }),
+  };
 }
 
 export async function step(
@@ -579,6 +624,44 @@ export async function stepOpenClawPlugin(
   if (!legacy && !registration.registered) {
     return await step('OpenClaw plugin', async () => ({ status: 'skip' as const, summary: 'not installed' }));
   }
+  // Everything below this line WRITES in `~/.openclaw` — it deletes the legacy
+  // extension directory and hands the native installer the same root — so it
+  // takes that root's lock like every other writer (#574 r4 blocker 2). It
+  // used to run outside the lock entirely, which meant `update` could delete
+  // an extension directory that `openclaw install` was copying into under its
+  // supposedly exclusive lock. Loaded lazily: this step is skipped on most
+  // hosts and the module reaches the filesystem on import.
+  const { acquireUpdateLock } = await import('../setup/host-swap.js');
+  const acquired = acquireUpdateLock(path.join(home, '.openclaw'));
+  if ('busy' in acquired) {
+    // Attention, not a pass: the plugin on this host is still the old one.
+    return await step('OpenClaw plugin', async () => ({
+      status: 'warn' as const,
+      summary: 'skipped — ~/.openclaw could not be taken exclusively',
+      detail: [scrubHomePath(acquired.busy, home)],
+      unfinished: true,
+    }));
+  }
+  try {
+    return await stepOpenClawPluginLocked(home, { run, rm, readVersion, readCliVersion: deps.readCliVersion, extDir, legacy });
+  } finally {
+    acquired.lock.release();
+  }
+}
+
+/** The writing half of the step above, with `~/.openclaw`'s lock already held. */
+async function stepOpenClawPluginLocked(
+  home: string,
+  ctx: {
+    run: typeof runQuiet;
+    rm: typeof fs.rmSync;
+    readVersion: typeof readInstalledRealtimePluginVersion;
+    readCliVersion?: typeof readPackageVersion;
+    extDir: string;
+    legacy: boolean;
+  },
+): Promise<StepResult> {
+  const { run, rm, readVersion, extDir, legacy } = ctx;
   return await step('OpenClaw plugin', async () => {
     // Drop any legacy file-copied extension so OpenClaw's registry copy is the
     // single source of truth (prevents the dup-install state doctor flags).
@@ -605,7 +688,7 @@ export async function stepOpenClawPlugin(
       // Report the ACTUAL on-disk transition, not just command success — the old
       // "updated via openclaw" was printed even when the version never moved.
       const after = readVersion(home);
-      const expected = (deps.readCliVersion ?? readPackageVersion)();
+      const expected = (ctx.readCliVersion ?? readPackageVersion)();
       const comparable = Boolean(after && semver.valid(after) && semver.valid(expected));
       const lag = comparable && semver.lt(after!, expected);
       const changed = before && after && before !== after ? `${before} → ${after}` : null;
@@ -685,6 +768,161 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
         truncated: report.truncated,
       };
     }
+  });
+}
+
+/**
+ * Home-scrub one of OUR OWN report lines — and nothing more (#574/#576).
+ *
+ * `sanitiseForReport` is built for text a CHILD PROCESS produced, where npm can
+ * echo an NPM_TOKEN back at us: it redacts any 20-character fragment that looks
+ * high-entropy. `shieldcortex-preupdate-2026-09-24T23-10-23-474Z` — the backup
+ * directory now holding the operator's previous plugin — is exactly such a
+ * fragment, and redacting it destroys the one fact the line exists to carry.
+ * These lines are built here out of paths this process computed, carry no child
+ * output and no environment value, so the home scrub is the whole treatment
+ * they need.
+ */
+function scrubHomePath(text: string, home: string): string {
+  return home.length > 1 ? text.split(home).join('~') : text;
+}
+
+/**
+ * Refresh the FILE-COPIED cortex-memory hook (#574).
+ *
+ * `update` already advances the npm package, the registry-managed plugin and
+ * the ClawHub skill — but the hook at `~/.openclaw/hooks/cortex-memory/` is
+ * plain files that `installOpenClawHook` copies, and nothing here re-copied
+ * them. Every upgrade left the old handler in place until an operator noticed
+ * the doctor warning, so hosts that upgrade unattended kept a stale hook
+ * indefinitely.
+ *
+ * Deliberately NOT done here: `openclaw plugins install` (that is the step
+ * above) and the gateway restart. The gateway imports the handler once into its
+ * long-lived process, so the refreshed files do NOTHING until it restarts — and
+ * a restart from this step would kill every in-flight turn on the host, which
+ * is the caution the installer documents and the reason `restartOpenClawGateway`
+ * refuses without a TTY or an explicit env. So the step SAYS a restart is
+ * needed and leaves it to the operator; the footer's restart line already
+ * appears on any run that changed the package.
+ */
+export async function stepOpenClawHook(
+  deps: { refresh?: (home: string) => HookRefreshShape; home?: string } = {},
+): Promise<StepResult> {
+  return await step('OpenClaw hook', async () => {
+    const openclaw = await import('../setup/openclaw.js');
+    // The OpenClaw home, resolved by OpenClaw's own resolver — the one
+    // `defaultHookDestDir()` (and therefore doctor) uses. `runUpdate` used to
+    // pass `os.homedir()` in here, which silently beat both `OPENCLAW_HOME`
+    // and the sudo resolution: with `HOME=A` and `OPENCLAW_HOME=B` the update
+    // refreshed A and left B stale, while doctor kept warning about B. There
+    // is deliberately no positional parameter any more, so a caller cannot
+    // reintroduce that by passing the wrong home (#574 r2 blocker 3).
+    const home = deps.home ?? openclaw.openClawUserHome();
+    const refresh = deps.refresh ?? openclaw.refreshInstalledHookFiles;
+    const result = refresh(home);
+    const scrub = (line: string): string => scrubHomePath(line, home);
+    if (result.installed.length === 0) {
+      return result.failed.length > 0
+        ? {
+          status: 'warn' as const,
+          summary: 'the hook could not be refreshed — run `shieldcortex openclaw install`',
+          detail: result.failed.map((f) => scrub(f.error)),
+          unfinished: true,
+        }
+        : { status: 'skip' as const, summary: 'not installed — `shieldcortex openclaw install` adds it' };
+    }
+    if (!result.sourceAvailable) {
+      return { status: 'warn' as const, summary: 'packaged hook source not found — nothing to copy from', detail: [], unfinished: true };
+    }
+    const written = result.refreshed.length;
+    const detail = [
+      ...result.refreshed.map((dir) => scrub(`refreshed ${dir}`)),
+      ...result.backups.map((b) => scrub(`previous hook kept at ${b.backup}`)),
+      ...result.vanished.map((dir) => scrub(`${dir}: not installed, nothing to refresh`)),
+      ...result.degraded.map((d) => scrub(`${d.dir}: refreshed, durability not confirmed: ${d.error}`)),
+      ...result.warnings.map(scrub),
+      ...result.failed.map((f) => scrub(`could not refresh ${f.dir}: ${f.error}`)),
+    ];
+    if (result.failed.length > 0) {
+      return {
+        status: 'warn' as const,
+        summary: `${result.failed.length} cop${result.failed.length === 1 ? 'y' : 'ies'} could not be refreshed — run \`shieldcortex openclaw install\``,
+        detail,
+        unfinished: true,
+      };
+    }
+    // Published, but the device refused to flush a rename parent (r4 nit 2).
+    // The bytes are in place and may not survive a power cut, which is neither
+    // a failed refresh nor a clean one.
+    if (result.degraded.length > 0) {
+      return {
+        status: 'warn' as const,
+        summary: `refreshed ${written} cop${written === 1 ? 'y' : 'ies'}, durability not confirmed`,
+        detail,
+        unfinished: true,
+      };
+    }
+    // Installed and stale when it was discovered, gone by the time the lock
+    // was held (r4 blocker 3). Skipped, never reinstalled.
+    if (result.vanished.length > 0) {
+      return {
+        status: 'warn' as const,
+        summary: `${result.vanished.length} cop${result.vanished.length === 1 ? 'y was' : 'ies were'} removed mid-refresh — run \`shieldcortex openclaw install\` to reinstall`,
+        detail,
+        unfinished: true,
+      };
+    }
+    if (written === 0) {
+      return {
+        status: 'ok' as const,
+        summary: `current (${result.current.length} cop${result.current.length === 1 ? 'y' : 'ies'})`,
+        detail,
+      };
+    }
+    return {
+      status: 'ok' as const,
+      summary: `refreshed ${written} cop${written === 1 ? 'y' : 'ies'} — restart the gateway to load it`,
+      detail: [
+        ...detail,
+        'the gateway reads the hook once at start-up; the new files take effect on the next restart',
+      ],
+    };
+  });
+}
+
+/**
+ * Refresh the FILE-COPIED Hermes plugin (#576) — the Hermes counterpart of the
+ * step above, and subject to #569's rule about which copy that is.
+ *
+ * All the judgement lives in `refreshHermesPluginCopies`: it writes only where
+ * Hermes' own discovery answered completely and cleanly, only over a copy that
+ * already exists, and never inside a `plugins/` root. This step is its
+ * reporting surface. The gateway is never restarted from here either — Hermes
+ * runs plugin discovery once at start-up, so the step says so.
+ */
+export async function stepHermesPlugin(
+  deps: { refresh?: (home: string) => HermesRefreshShape; home?: string } = {},
+): Promise<StepResult> {
+  return await step('Hermes plugin', async () => {
+    // Hermes' own root resolution runs inside the probe; what this has to get
+    // right is WHOSE environment the probe runs under. `os.homedir()` is the
+    // process's home — `/root` under sudo — so it went the same way the
+    // OpenClaw step did (#576 r2 blocker 3). `HERMES_HOME` is deliberately not
+    // read here: it travels unexpanded to Hermes, which resolves it itself.
+    const { hermesUserHome } = await import('../setup/user-home.js');
+    const home = deps.home ?? hermesUserHome();
+    const refresh = deps.refresh
+      ?? (await import('../setup/hermes-refresh.js')).refreshHermesPluginCopies;
+    const result = refresh(home);
+    const detail = result.detail.map((line) => scrubHomePath(line, home));
+    const summary = scrubHomePath(result.summary, home);
+    if (result.status === 'not-installed') return { status: 'skip' as const, summary, detail };
+    // Every `warn` this refresher returns is work it was asked for and did not
+    // finish: a busy root, a copy it could not publish, one that vanished, a
+    // durability it could not confirm (r4 nit 1).
+    if (result.status === 'warn') return { status: 'warn' as const, summary, detail, unfinished: true };
+    return { status: 'ok' as const, summary, detail };
   });
 }
 
@@ -1035,6 +1273,11 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
 
   const pluginResult = await stepOpenClawPlugin(home);
   const skillResult = await stepOpenClawSkill(home);
+  // The two FILE-COPIED host integrations the upgrade path used to walk past
+  // (#574, #576). Both refresh only what is already installed, and neither
+  // restarts the host that loads it.
+  const hookResult = await stepOpenClawHook();
+  const hermesResult = await stepHermesPlugin();
   await stepClaudeHooks(home);
   await stepStatePermissions();
 
@@ -1131,26 +1374,32 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   }
   if (engineFailure) details.push(engineFailure.detail);
   if (keyAttention) details.push('keys: ambiguous project-key collisions remain');
+  // A host integration that could not be refreshed is a stale gate still
+  // running, so the panel names it rather than leaving it scrolled off above.
+  if (hookResult.status === 'warn') details.push(`hook: ${sanitiseDisplayField(hookResult.summary ?? 'could not be refreshed')}`);
+  if (hermesResult.status === 'warn') details.push(`hermes: ${sanitiseDisplayField(hermesResult.summary ?? 'could not be refreshed')}`);
 
   // Unproven is attention, not failure. Only true unprotected / npm fail exit 1.
   const failed = protection.status === 'failed' || npmStatus === 'failed';
+  // A host integration this run did not finish refreshing — a busy root, a
+  // copy it could not publish, one that vanished mid-swap, a durability it
+  // could not confirm. Distinct from an npm failure, and still non-zero: the
+  // gate running on that host is the old one, and an unattended upgrade that
+  // refreshed nothing at all used to exit 0 (r4 nit 1).
+  const unfinished = [pluginResult, hookResult, hermesResult].some((r) => r.unfinished === true);
   const attention =
     keyAttention ||
     pluginResult.status === 'warn' ||
     skillResult.status === 'warn' ||
+    hookResult.status === 'warn' ||
+    hermesResult.status === 'warn' ||
     Boolean(engineResult.remediation) ||
     protection.status === 'unproven' ||
     protection.status === 'warn' ||
     protection.status === 'blocked';
 
-  if (failed) process.exitCode = 1;
-  else process.exitCode = 0;
-  const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
-  const verdict: VerdictKind = deriveUpdateVerdict({
-    exitCode,
-    failed,
-    attention,
-  });
+  const { exitCode, verdict } = updateVerdict({ failed, attention, unfinished });
+  process.exitCode = exitCode;
 
   const next: string[] = [];
   // Prefer next from protection detail (openclaw gateway restart) over generic doctor when present.
