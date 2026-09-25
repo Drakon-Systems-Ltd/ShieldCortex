@@ -130,6 +130,10 @@ import {
   repairJobsFor,
   scanHostTable,
   writeRepairAgentBrief,
+  claudeToolGateWired,
+  claudePlaneEnforcing,
+  type HostGatePlanes,
+  type OpenClawGatePosture,
 } from '../setup/host-table.js';
 import {
   correlateCronDenials,
@@ -4143,6 +4147,33 @@ function pluginPlaneDisarmed(live: ReturnType<typeof readOpenClawPluginGuardLive
   );
 }
 
+function openclawGatePosture(live: ReturnType<typeof readOpenClawPluginGuardLive>): OpenClawGatePosture {
+  if (!live.readable) return 'unknown';
+  if (live.pluginEnabled === false) return 'off';
+  if (pluginPlaneDisarmed(live)) return 'observe-only';
+  return 'enforcing';
+}
+
+/** #536: any live enforcing plane, not only the OpenClaw plugin flags. */
+export function readHostGatePlanes(hostHome?: string): HostGatePlanes {
+  let signedEnabled = false;
+  let signedEnforce = false;
+  try {
+    const core = getActionGuardCoreConfig();
+    signedEnabled = core.enabled;
+    signedEnforce = core.enabled && core.enforce;
+  } catch {
+    signedEnabled = false;
+    signedEnforce = false;
+  }
+  return {
+    signedEnabled,
+    signedEnforce,
+    claudeWired: claudeToolGateWired(hostHome),
+    openclaw: openclawGatePosture(readOpenClawPluginGuardLive()),
+  };
+}
+
 export async function checkActionGuard(): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const label = 'Action guard';
@@ -4229,6 +4260,8 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       top && k in top ? `actionGuard.${k}` : `interceptor.actionGuard.${k}`;
     const pluginLive = readOpenClawPluginGuardLive();
     const pluginOff = pluginPlaneDisarmed(pluginLive);
+    const planes = readHostGatePlanes();
+    const claudeGating = claudePlaneEnforcing(planes);
     const pluginOffFix =
       'Do not add a webhook and do not enable Action Guard from this line. Signed config, plugin entry, and running interceptor are three planes. Headless denials staying local is expected while Guard is off.';
 
@@ -4297,11 +4330,12 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
       // webhook URL the transport will actually deliver to.
       const denialSink = notifyOn && webhook !== undefined;
       const signedArmed = effective.enabled && effective.enforce;
-      // "Armed" = signed enabled + enforce AND the plugin plane is not visibly
-      // disarmed. Signed Enforce leftover against an explicit plugin-off is
-      // the Jarvis 5.0.1 1-fail: not a live gate, so not armed. Missing plugin
-      // config cannot prove the plugin is off — that still counts as armed.
-      const armed = signedArmed && !pluginOff;
+      // "Armed" = signed enabled + enforce AND any live plane is gating.
+      // OpenClaw plugin-off is not a live gate (#501 / Jarvis 5.0.6).
+      // Claude Code PreToolUse wired + signed Enforce IS a live gate (#536).
+      // Missing plugin config cannot prove the plugin is off — that still
+      // counts as armed on the OpenClaw side.
+      const armed = signedArmed && (!pluginOff || claudeGating);
       if (!denialSink) {
         const openclawOnly = notifyOn && openclaw && !webhook;
         // FAIL, not WARN, for ANY armed no-sink (#517 (c), 22 Sep 2026).
@@ -4327,7 +4361,9 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
         // hosts stay WARN: under-configured, not enforcing. Plugin-off stays
         // WARN (Jarvis 5.0.6: leftover signed Enforce is not a live gate).
         const status: CheckResult['status'] = armed ? 'fail' : 'warn';
-        const prefix = pluginOff && signedArmed
+        const prefix = claudeGating && pluginOff
+          ? 'Action Guard is enforcing on the Claude Code hook (OpenClaw plugin is observe-only/off) with'
+          : pluginOff && signedArmed
           ? 'Action Guard signed config says Enforce, but the OpenClaw plugin is off, and, when re-enabled, would run with'
           : pluginOff
             ? 'Action Guard OpenClaw plugin is off, and, when re-enabled, would run with'
@@ -4363,7 +4399,7 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
                 : `actionGuard.notify.webhookUrl unset${notifyOn ? '' : ', notify.enabled is not true'}`) +
               `) — unattended denials stay in the audit log and session-guard index only. ` +
               `The #242 cron incidents were this shape.`,
-          fix: (pluginOff || !armed) ? pluginOffFix : webhookFix,
+          fix: armed ? webhookFix : pluginOffFix,
         });
       }
 
@@ -4458,10 +4494,12 @@ export function policyLockRows(): CheckResult[] {
   })();
   const pluginLive = readOpenClawPluginGuardLive();
   const pluginOff = pluginPlaneDisarmed(pluginLive);
-  // Unreadable roster is not proof of a live gate (same class as NOTIFY:
-  // pluginOff === false is not armed). FAIL the lock only when we can see
-  // a live OpenClaw plane that is actually gating.
-  const liveGating = signedOn && pluginLive.readable && !pluginOff;
+  const planes = readHostGatePlanes();
+  // Unreadable roster is not proof of a live OpenClaw gate. Claude Code
+  // PreToolUse wired + signed Enforce is a live gate even when the plugin
+  // is observe-only (#536).
+  const liveGating = claudePlaneEnforcing(planes)
+    || (signedOn && pluginLive.readable && !pluginOff);
 
   switch (summary.status) {
     case 'locked':
@@ -4492,7 +4530,9 @@ export function policyLockRows(): CheckResult[] {
         status: liveGating ? 'fail' : 'warn',
         message:
           `${summary.headline}${liveGating
-            ? ' — Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice'
+            ? (claudePlaneEnforcing(planes) && pluginOff
+              ? ' — Action Guard is live on the Claude Code hook (OpenClaw plugin is not), but a one-line edit to config.json switches it off and nothing would notice'
+              : ' — Action Guard is live, but a one-line edit to config.json switches it off and nothing would notice')
             : ' — Guard is off on this host. A lock is optional. This is not unprotected.'}`,
         fix: liveGating
           ? `${PROTECT_HINT} to pin the security-critical keys to a root-owned file this user cannot write.`
@@ -8574,7 +8614,7 @@ export async function runDoctor(
     color: shouldColorDoctor(),
     style,
     width: Number(process.env.COLUMNS || process.stdout?.columns || 80) || 80,
-    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? '')),
+    hostTableLines: formatHostTable(hostTable, String(pkg.version ?? ''), readHostGatePlanes()),
     nextCommand,
   });
   for (const line of reportLines) console.log(line);
