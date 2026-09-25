@@ -2359,6 +2359,21 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const freePagePct = (pages: DbPageAttribution): number =>
       pages.pageCount > 0 ? (pages.freePages / pages.pageCount) * 100 : 0;
 
+    /**
+     * The one sentence about free pages, so every branch says it the same way.
+     * Empty below the floor: naming `vacuum` even to dismiss it is the sentence
+     * an operator skims and then runs.
+     */
+    const freePageNote = (): string => {
+      const pages = dbPages();
+      if (pages === null) return '';
+      const pct = freePagePct(pages);
+      if (pct < VACUUM_FREE_FLOOR_PCT) return '';
+      return ` ${formatBytes(pages.freeBytes)} of the database (${pct.toFixed(0)}%) is free pages — `
+        + '`shieldcortex vacuum` reclaims that on disk (in place, via the bundled engine — no '
+        + 'sqlite3 CLI needed).';
+    };
+
     /** What to say when attribution cannot justify deleting anything. */
     const inspectInstead = (): string => {
       const pages = dbPages();
@@ -2373,15 +2388,10 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           + 'and a file size is not evidence that deleting memories would help.'
         : `the memories table holds only ${Math.round((pages.memoryPages / Math.max(1, pages.usedPages)) * 100)}% `
           + 'of its used pages, so deleting memories is not the fix.';
-      const freePct = freePagePct(pages);
-      const tail = freePct >= VACUUM_FREE_FLOOR_PCT
-        ? ` ${formatBytes(pages.freeBytes)} of the file (${freePct.toFixed(0)}%) is free pages — `
-          + 'run `shieldcortex vacuum` to reclaim it, and `shieldcortex stats` to see what the rest is.'
-        // Below the floor, name no command at all: mentioning `vacuum` even to
-        // dismiss it is the sentence an operator skims and then runs.
-        : ` Only ${freePct.toFixed(0)}% of it is free pages, so compacting it would reclaim little. `
-          + 'Inspect what is in it with `shieldcortex stats`.';
-      return `${lead}${why}${tail}`;
+      const note = freePageNote()
+        || ` Only ${freePagePct(pages).toFixed(0)}% of it is free pages, so compacting it would `
+           + 'reclaim little.';
+      return `${lead}${why}${note} Inspect what is in it with \`shieldcortex stats\`.`;
     };
 
     const remedy = (): string => {
@@ -2443,13 +2453,9 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           // Audit-dominated: the worker's Phase 8a audit retention (90d + row
           // cap) bounds this over time; don't send the user to a sessions
           // prune that would be a no-op.
-          const pages = dbPages();
-          const reclaim = pages && freePagePct(pages) >= VACUUM_FREE_FLOOR_PCT
-            ? ` ${formatBytes(pages.freeBytes)} of the file (${freePagePct(pages).toFixed(0)}%) is `
-              + 'already free pages — `shieldcortex vacuum` reclaims that on disk (in place, via the '
-              + 'bundled engine — no sqlite3 CLI needed).'
-            : ' Its pages are nearly all in use, so compacting it now would reclaim little — wait '
-              + 'for retention to trim some rows.';
+          const reclaim = freePageNote()
+            || ' Its pages are nearly all in use, so compacting it now would reclaim little — wait '
+               + 'for retention to trim some rows.';
           return `The database is ${formatBytes(liveDbSize)} — the bulk is defence-audit rows `
             + `(defence_audit: ${consumers.auditCount} rows, ~${formatBytes(consumers.auditBytes)}), `
             + "which the background worker's audit retention trims over time (90-day window + row "
@@ -2464,16 +2470,11 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
       // offered to a fixture holding nothing but a state file and no database
       // at all (#573 round 2, blocker 6). Report the measurement and ask the
       // operator to look; naming no command is the honest answer.
-      const pages = dbPages();
-      const vacuumNote = pages && freePagePct(pages) >= VACUUM_FREE_FLOOR_PCT
-        ? ` ${formatBytes(pages.freeBytes)} of the database (${freePagePct(pages).toFixed(0)}%) is `
-          + 'free pages, which `shieldcortex vacuum` reclaims.'
-        : '';
       return `No single measured consumer: DB ${formatBytes(liveDbSize)}, audit `
         + `${formatBytes(auditLogSize)}, repair logs ${formatBytes(repairLogSize)}, everything else `
         + `${formatBytes(otherSize)}. Inspect before removing anything — `
         + '`shieldcortex doctor --verbose` for the full breakdown and `shieldcortex stats` for what '
-        + `the database holds.${vacuumNote}`;
+        + `the database holds.${freePageNote()}`;
     };
 
     if (pct >= 95) {
