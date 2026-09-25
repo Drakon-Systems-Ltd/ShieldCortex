@@ -8,6 +8,23 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- (none yet)
+
+### Fixed
+- (none yet)
+
+## [5.2.1] - 2026-09-25
+
+Patch on 5.2.0. Action Guard stays off by default. Node floor unchanged (`^22.14.0 || >=24.0.0`). Cloud pin stays `^5.0.0`.
+
+**Three things to know before you upgrade:**
+- **`shieldcortex update` now refreshes your installed OpenClaw hook and Hermes plugin (#574, #576).** Only copies that are installed and out of date are refreshed; nothing you removed is reinstalled. If an update is interrupted mid-swap it prints the backup path and the reinstall command. A leftover `.shieldcortex-update.lock` is never cleared automatically — remove it only after confirming no update/install is running.
+- **`--help` never runs a command any more (#577).** On 5.1.0/5.2.0, `shieldcortex update --help` performed the upgrade.
+- **`shieldcortex doctor`'s DISK row no longer recommends deleting memories or sessions (#573).** It reports measured sizes and suggests `logs prune` or `vacuum` only when its own measurement supports it. Repair logs now live beside the database they describe; old ones are removed only when you run `shieldcortex logs prune --execute`.
+
+Also in this release: doctor's HOSTS headline and live-gating account for the Claude Code hook (#536). Known follow-ups: realtime audit-log retention (#579); symlink audit of the remaining OpenClaw installer copy paths and the plugin step's exit status (#583).
+
+### Added
 - **#573 `shieldcortex logs prune`:** retention for `~/.shieldcortex/logs/project-key-repair-*.json`, the one on-disk plane nothing ever deleted (3,508 files on the reporting host, peak 357 in a day). Keeps the newest 20 **per database** (`SHIELDCORTEX_REPAIR_LOG_KEEP`, a whole number of at least 1 — anything else is refused with a warning and the default used): each record now carries a short stable id of the database it describes, so repairs of one database can never evict another's only record where several share a logs directory, and records written before this change form one `legacy` group. A record written in the last hour is never deleted, whatever the keep count says, which is what makes a log a repair is still writing ineligible. Dry-run by default, `--execute` to act. Operator-invoked only: doctor recommends it when repair logs are the measured consumer, and nothing prunes this plane behind your back. Only the exact name a repair writes — `project-key-repair-[<db id>-]<timestamp>[-<n>].json` and nothing else, so an operator's `project-key-repair-config.json` sitting in the same directory is left alone — only directly in the logs directory, only regular files with a single hard link, identity re-checked immediately before the `unlink`. No compression, no rename, no temporary file. The directory is fully resolved before anything is listed and its identity pinned and re-checked before every deletion; a symlinked logs path, or one resolving inside the realtime audit ledger, refuses the whole pass and says why. The command takes exactly `prune` and an optional `--execute` — an extra positional is a usage error, not a token quietly dropped on the way to deleting files — and a refusal or a failed deletion exits 1, while a rejected `SHIELDCORTEX_REPAIR_LOG_KEEP` is a warning and exits 0. `logs` is in the shared #577 strict preflight, so a bad argument exits 2 before any subprocess runs, and it is dispatched ahead of the npx-staleness probe and the stats banner — the disk-pressure relief valve must not spend bytes of your HOME on an npm registry lookup, least of all on a dry run.
 
 ### Fixed
