@@ -31,7 +31,7 @@ import {
   releaseReservation,
   reserveBackupDir,
 } from './fs-answers.js';
-import { acquireUpdateLock, stageAndPublish } from './host-swap.js';
+import { acquireUpdateLock, stageAndPublish, type UpdateLock } from './host-swap.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -200,14 +200,21 @@ function isOpenClawInstalled(): boolean {
  *
  * Only returns user-space directories that survive package updates.
  * Creates the hooks/ subdirectory if the parent config dir exists.
+ *
+ * `locked` restricts it to config roots whose update lock the caller is
+ * holding (#574 r3 blocker 6). Creating `hooks/` is a WRITE, and it used to
+ * happen on every root before any lock was taken — so an install ran against a
+ * root a concurrent refresh was mid-swap in. Callers that are not writing
+ * (status, claude-md) pass nothing and see every root, as before.
  */
-export function findAllHooksDirs(): string[] {
+export function findAllHooksDirs(locked?: ReadonlySet<string>): string[] {
   const home = resolveUserHome();
   const dirs: string[] = [];
+  const permitted = (dir: string): boolean => locked === undefined || locked.has(dir);
 
   // If openclaw is installed but config dir doesn't exist yet, create it
   const openclawDir = path.join(home, '.openclaw');
-  if (!fs.existsSync(openclawDir) && isOpenClawInstalled()) {
+  if (permitted(openclawDir) && !fs.existsSync(openclawDir) && isOpenClawInstalled()) {
     try {
       fs.mkdirSync(openclawDir, { recursive: true });
     } catch {
@@ -222,7 +229,7 @@ export function findAllHooksDirs(): string[] {
 
   for (const { config, hooks } of candidates) {
     const configDir = path.join(home, config);
-    if (fs.existsSync(configDir)) {
+    if (permitted(configDir) && fs.existsSync(configDir)) {
       if (!fs.existsSync(hooks)) {
         try {
           fs.mkdirSync(hooks, { recursive: true });
@@ -1728,11 +1735,59 @@ export interface OpenClawInstallOptions {
   restartGateway?: boolean;
 }
 
+/**
+ * Take the update lock on every config root this install may write in, BEFORE
+ * the first write (#574 r3 blocker 6).
+ *
+ * Round 3 took the lock inside the hook-copy loop, so everything ahead of it —
+ * `findAllHooksDirs` creating `hooks/`, `cleanupLegacyPlugin` rewriting
+ * `openclaw.json` — ran unlocked, and everything after it (the plugin install,
+ * the registration rewrite, the gateway restart) ran outside it. The reviewer
+ * drove both with the lock held. A root that is busy is now dropped from the
+ * install entirely: no `hooks/`, no config rewrite, no plugin, no restart.
+ */
 export async function installOpenClawHook(options: OpenClawInstallOptions = {}): Promise<void> {
-  const hooksDirs = findAllHooksDirs();
+  const home = resolveUserHome();
+  const held = new Map<string, UpdateLock>();
+  let busy = 0;
+  for (const configRoot of hookConfigRoots(home)) {
+    // `findAllHooksDirs` creates `~/.openclaw` when the binary is on the box.
+    // That is a write, so it happens under the lock or not at all.
+    const createRoot = configRoot === path.join(home, '.openclaw') && isOpenClawInstalled();
+    if (!createRoot && !fs.existsSync(configRoot)) continue;
+    const acquired = acquireUpdateLock(configRoot, { createRoot });
+    if ('busy' in acquired) {
+      console.warn(`  Skipped ${configRoot} — ${acquired.busy}; nothing written`);
+      busy += 1;
+      continue;
+    }
+    held.set(configRoot, acquired.lock);
+  }
+  if (held.size === 0 && busy > 0) {
+    console.error('Nothing was installed: every OpenClaw/Claude config root is locked by another run.');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    await writeOpenClawInstall(options, home, new Set(held.keys()));
+  } finally {
+    for (const lock of held.values()) lock.release();
+  }
+}
+
+/** The install itself, with every lock it needs already held. */
+async function writeOpenClawInstall(
+  options: OpenClawInstallOptions,
+  home: string,
+  locked: ReadonlySet<string>,
+): Promise<void> {
+  const hooksDirs = findAllHooksDirs(locked);
+  // Every write below this line that touches `~/.openclaw` — the config
+  // cleanup, the snapshot, the plugin, the registration, the restart — is
+  // gated on holding that root's lock.
+  const openClawWritable = locked.has(path.join(home, '.openclaw'));
 
   if (hooksDirs.length === 0) {
-    const home = resolveUserHome();
     console.error('Could not find OpenClaw or Claude Code config directory.');
     console.error('');
     console.error('Debug info:');
@@ -1756,7 +1811,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   }
 
   // Clean up legacy plugin entry that caused config validation errors
-  cleanupLegacyPlugin();
+  if (openClawWritable) cleanupLegacyPlugin();
 
   // Docker / container: warn about environment
   if (isDockerEnvironment()) {
@@ -1773,14 +1828,7 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
     // Install to ALL detected hook directories
     for (const hooksDir of hooksDirs) {
       const destDir = preferredHookDir(hooksDir);
-      // The same lock `update`'s refresh step takes, so an install and a
-      // refresh can never interleave their writes over one hooks tree (r3).
-      const acquired = acquireUpdateLock(path.dirname(hooksDir));
-      if ('busy' in acquired) {
-        console.warn(`  Skipped ${destDir} — ${acquired.busy}; nothing written`);
-        continue;
-      }
-      try {
+      {
         try {
           // Clean up legacy paths BEFORE installing to avoid duplicate hooks
           const legacyDirsBeforeInstall = detectLegacyHookVariants(hooksDir);
@@ -1820,8 +1868,6 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
             console.warn(`  Warning: Could not install hook to ${destDir}: ${(err as Error).message}`);
           }
         }
-      } finally {
-        acquired.lock.release();
       }
     }
 
@@ -1839,11 +1885,12 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   }
 
   // #214: snapshot openclaw.json before any path that can rewrite it.
-  if (!options.noPlugins) snapshotOpenClawConfig();
+  const noPlugins = options.noPlugins === true || !openClawWritable;
+  if (!noPlugins) snapshotOpenClawConfig();
 
   // Install the real-time plugin to the extensions directory
   const pluginInstallMode = installPlugin({
-    noPlugins: options.noPlugins,
+    noPlugins,
     grantConversationAccess: options.grantConversationAccess,
   });
 
@@ -1947,7 +1994,9 @@ export async function installOpenClawHook(options: OpenClawInstallOptions = {}):
   // capability paths skipped (--no-hooks AND --no-plugins), or no work
   // landed (installed === 0 AND plugin skipped).
   const didInstallSomething = installed > 0 || pluginInstallMode !== 'skipped';
-  const restartRequested = options.restartGateway !== false;
+  // A restart while another run is mid-swap in `~/.openclaw` boots the gateway
+  // on a half-published tree, so it waits for that root's lock like the writes.
+  const restartRequested = options.restartGateway !== false && openClawWritable;
   if (restartRequested && didInstallSomething) {
     const { restartOpenClawGateway } = await import('./deep-clean.js');
     const result = await restartOpenClawGateway();
