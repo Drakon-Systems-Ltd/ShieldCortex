@@ -155,8 +155,16 @@ const CLOSED_BOOLEAN_KEYS = ['pipe', 'subshell'];
  * text by the ADR-002 harness suite and again below), so membership — not a
  * character grammar — is what this suite pins. A rule name that merely LOOKS
  * like a signal must fail the invariant.
+ *
+ * The vocabulary's marker entry is the literal `'redacted-signal'` (the name
+ * Half A of the ADR-002 harness projects unknown signals to); the hook's own
+ * substitute string is `REDACTED_SIGNAL_LABEL`. Neither is a rule, so neither
+ * is a member of the pinned set.
  */
-const SAFE_SIGNAL_SET = new Set<string>(GUARD_SIGNAL_VOCABULARY.filter((s) => s !== REDACTED_SIGNAL_LABEL));
+const VOCABULARY_MARKER = 'redacted-signal';
+const SAFE_SIGNAL_SET = new Set<string>(
+  GUARD_SIGNAL_VOCABULARY.filter((s) => s !== VOCABULARY_MARKER && s !== REDACTED_SIGNAL_LABEL),
+);
 /** #587 (4): `line` is clamped like `argc` / `chainDepth`; a folded script never exceeds the core's 262 144-byte cap. */
 const MAX_LINE = 262_144;
 
@@ -750,8 +758,9 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
   it('#587 (3): the closed-vocabulary invariant pins SAFE_SIGNALS membership, not a spelling — a grammar-valid stranger fails it, and the mirrored table equals the hook\'s', () => {
     // A name that satisfies the old grammar check but is not a rule the hook knows.
     expect(() => expectClosedVocabulary([{ signal: 'looks-like-a-rule-but-is-not' }])).toThrow(/not a SAFE_SIGNALS member/);
-    // The redaction marker is a substitute for a signal, never a match-row signal.
+    // The redaction markers are substitutes for a signal, never a match-row signal.
     expect(() => expectClosedVocabulary([{ signal: REDACTED_SIGNAL_LABEL }])).toThrow(/not a SAFE_SIGNALS member/);
+    expect(() => expectClosedVocabulary([{ signal: VOCABULARY_MARKER }])).toThrow(/not a SAFE_SIGNALS member/);
     expect(() => expectClosedVocabulary([{ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', argc: 4, pipe: true }])).not.toThrow();
 
     // The set this suite pins against is the hook's own table, read from its source.
