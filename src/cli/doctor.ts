@@ -3197,14 +3197,11 @@ export async function checkHermesPluginFreshness(
     return { label, status: 'info', message: `check skipped — ${msg}` };
   }
   // There is deliberately NO "an interrupted refresh left the plugin missing"
-  // row here (r4). Round 3 had one, keyed on "the standard target is absent
-  // AND `backups/<name>-preupdate-*` exists". Review showed that predicate is
-  // also satisfied by the ordinary sequence refresh → uninstall, so the row
-  // told operators their deliberate uninstall was a crash. A backup directory
-  // is not a record of intent, and doctor has no stored marker to read one
-  // from. The one process that KNOWS a swap was interrupted is the one whose
-  // swap failed, so that sentence is printed by `update` at the moment of
-  // failure, with the backup path in hand — and nowhere else.
+  // row (r4). Round 3 had one, keyed on "the target is absent AND
+  // `backups/<name>-preupdate-*` exists" — a predicate the ordinary sequence
+  // refresh → uninstall also satisfies, so it told operators their deliberate
+  // uninstall was a crash. Doctor has no stored marker to read intent from.
+  // `update` prints that sentence when its own swap fails, and nowhere else.
   if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
   if (scan.undetermined.length > 0 || !scan.fromHermes) {
     return {

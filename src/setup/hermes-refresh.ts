@@ -40,30 +40,18 @@
  *
  * ## One root, one lock, one `backups/` (r4)
  *
- * Hermes discovers plugins in several roots at once — the default home and
- * every profile under it — and a single `HERMES_HOME=…/profiles/work` refresh
- * sees all of them. Round 3 wrote every one of those copies under the ACTIVE
- * home's lock, into the ACTIVE home's `backups/`, so a profile refresh walked
- * over the default root while `hermes install` held the default root's lock,
- * and a default-home run displaced a profile's plugin into the wrong tree
- * (where its restore then could not find it). Every target is now published
- * under the lock of the root that owns it, into that root's own `backups/`; a
- * root whose lock is busy is skipped whole, and the run still reports a
- * warning so the caller exits non-zero.
+ * Hermes discovers several roots at once — the default home and every profile
+ * under it — so one `HERMES_HOME=…/profiles/work` refresh sees all of them.
+ * Round 3 wrote every copy under the ACTIVE home's lock, into the ACTIVE
+ * home's `backups/`, so a profile refresh walked over the default root while
+ * `hermes install` held that root's lock, and a default-home run displaced a
+ * profile's plugin into the wrong tree. Each target is now published under the
+ * lock of the root that OWNS it, into that root's own `backups/`; a busy root
+ * is skipped whole and the run still warns, so the caller exits non-zero.
  *
- * ## The crash between the two renames (r4)
- *
- * Two renames means a window in which `plugins/` holds no copy at all, and a
- * `try/catch` cannot close it: the process that would run the `catch` is gone.
- * Round 2 closed that with an on-disk journal the next run read and ACTED ON;
- * round 3 replaced it with "a `backups/` entry plus a missing target means
- * reinstall". Review took both apart (see `host-swap.ts`): the second one
- * cannot tell an interrupted refresh from a deliberate `hermes uninstall`.
- *
- * So this refreshes copies that EXIST and are stale, and nothing else. It
- * never creates a plugin that is absent. A swap that fails after the first
- * rename says so at that moment, naming `shieldcortex hermes install` and the
- * backup it left — see `publishJobs`. Nothing deletes a backup.
+ * And a crash between the two renames is REPORTED, never finished: see
+ * `host-swap.ts` for why neither a journal nor a `backups/` entry can
+ * authorise a reinstall. Nothing here creates a plugin that is absent.
  */
 
 import fs from 'fs';
@@ -112,7 +100,7 @@ export function hermesPluginSourceDir(): string {
  * `hermes install` writes and the one an operator means by "the plugin".
  * Computed from the home Hermes itself resolved, and from nothing else.
  */
-export function standardHermesTarget(hermesHome: string): string {
+function standardHermesTarget(hermesHome: string): string {
   return path.join(hermesHome, 'plugins', HERMES_PLUGIN_NAME);
 }
 
@@ -134,7 +122,7 @@ function backupsUnder(owner: string): string {
  * with its manifest but whose bytes are behind the package is a different
  * thing again — that one is STALE, and the ordinary refresh handles it.
  */
-export function hermesPluginPresentAt(dir: string): boolean {
+function hermesPluginPresentAt(dir: string): boolean {
   return fs.existsSync(path.join(dir, 'plugin.yaml'));
 }
 
@@ -318,11 +306,7 @@ interface RefreshJob {
   dir: string;
   /** The `plugins/` root it sits in. */
   root: string;
-  /**
-   * The integration root that OWNS it — `<hermesHome>`, or a profile root
-   * under it. Its lock is the one this job is published under and its
-   * `backups/` is where the displaced copy goes (r4).
-   */
+  /** The root that OWNS it: its lock, and its `backups/`, are the ones used. */
   owner: string;
 }
 
@@ -426,9 +410,8 @@ export function refreshHermesPluginCopies(
     };
   }
 
-  // `plugins/` sits directly under the root that owns it, so the owner is one
-  // `dirname` away — and it is the ONLY thing that decides which lock and
-  // which `backups/` this job uses.
+  // `plugins/` sits directly under its owning root, and that owner is the ONLY
+  // thing deciding which lock and which `backups/` a job uses.
   const jobs: RefreshJob[] = stale.map((t) => ({ dir: t.dir, root: t.root, owner: path.dirname(t.root) }));
 
   const stamp = now.toISOString().replace(/[:.]/g, '-');
@@ -486,12 +469,9 @@ export function refreshHermesPluginCopies(
 }
 
 /**
- * The write half: each root's jobs under that root's own lock (r4).
- *
- * A root whose lock is held by another run is skipped WHOLE and named. It is
- * not retried, not waited for and not written to in any way — and because the
- * other roots still run, the result is a partial refresh, which `update`
- * reports as a warning and exits non-zero on.
+ * The write half: each root's jobs under that root's own lock (r4). A busy root
+ * is skipped WHOLE and named — never retried, never waited for — and the other
+ * roots still run, so the partial result is the warning `update` exits 1 on.
  */
 function publishJobs(params: {
   jobs: RefreshJob[];
@@ -515,8 +495,8 @@ function publishJobs(params: {
   for (const [owner, ownerJobs] of byOwner) {
     // `hermes install` takes this same lock, so an install and a refresh can
     // never interleave their renames over one root's `plugins/` tree. Bounded
-    // at the outermost Hermes path that contains the root, so a symlinked home
-    // or profile root is refused before the lock file is created (r3 blocker 4).
+    // at the outermost Hermes path containing it, so a symlinked home or
+    // profile root is refused before the lock exists (r3 blocker 4).
     const acquired = acquireUpdateLock(owner, { now, bound: bounds.find((b) => pathContains(b, owner)) });
     if ('busy' in acquired) {
       detail.push(`${owner}: ${acquired.busy} — nothing written in this root`);

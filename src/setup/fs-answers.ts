@@ -252,20 +252,15 @@ export function findLinkOnPath(base: string, target: string): {
 }
 
 /**
- * Refuse an overlay copy onto a symlink, at the exact path about to be written
- * (#574/#576 r3 blocker 4, second half).
+ * Refuse an overlay copy onto a symlink, at the exact leaf about to be written
+ * (#574/#576 r3 blocker 4).
  *
- * Both installers copy the packaged set OVER whatever is at the destination,
- * file by file. `fs.copyFileSync` and `fs.mkdirSync` FOLLOW a link at the
- * destination, so a symlink planted at `plugins/shieldcortex/shadow.py` — or
- * at the plugin directory itself — makes an install truncate a file somewhere
- * else on the box. The reviewer reproduced that with an explicit fake home.
- *
- * This is the file-level counterpart of `findLinkOnPath`, which checks the
- * COMPONENTS of a path; here every leaf the copy will write is checked too.
- * Absence is fine — nothing is there to follow. Unreadable is a refusal, for
- * the reason everything else in this module is: "I could not look" must never
- * become "there is nothing there".
+ * `findLinkOnPath` above checks the COMPONENTS of a path. Both installers
+ * additionally copy the packaged set OVER whatever is at the destination, file
+ * by file, and `copyFileSync`/`mkdirSync` FOLLOW a link there — so one planted
+ * at `plugins/shieldcortex/shadow.py`, or at the plugin directory itself,
+ * truncates a file elsewhere on the box. Absent is fine; unreadable refuses,
+ * because "I could not look" is never "there is nothing there".
  */
 export function refuseLinkedDestination(dest: string): void {
   const answer = lstatAnswer(dest);

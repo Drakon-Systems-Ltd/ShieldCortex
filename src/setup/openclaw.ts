@@ -202,11 +202,10 @@ function isOpenClawInstalled(): boolean {
  * Only returns user-space directories that survive package updates.
  * Creates the hooks/ subdirectory if the parent config dir exists.
  *
- * `locked` restricts it to config roots whose update lock the caller is
- * holding (#574 r3 blocker 6). Creating `hooks/` is a WRITE, and it used to
- * happen on every root before any lock was taken — so an install ran against a
- * root a concurrent refresh was mid-swap in. Callers that are not writing
- * (status, claude-md) pass nothing and see every root, as before.
+ * `locked` restricts it to config roots whose update lock the caller holds
+ * (#574 r3 blocker 6): creating `hooks/` is a WRITE, and it used to happen on
+ * every root before any lock was taken. Non-writing callers (status,
+ * claude-md) pass nothing and see every root, as before.
  */
 export function findAllHooksDirs(locked?: ReadonlySet<string>): string[] {
   const home = resolveUserHome();
@@ -337,11 +336,9 @@ export function hookFilesStale(destDir: string = defaultHookDestDir()): boolean 
 }
 
 /**
- * Overlay the packaged hook onto `destDir`, refusing every destination that is
- * a SYMLINK (#574 r3 blocker 4). `copyFileSync` follows a link at the
- * destination and truncates its referent, so a link planted at
- * `hooks/cortex-memory/runtime.mjs` makes the installer overwrite a file
- * somewhere else. Throws; the caller reports it and installs nothing there.
+ * Overlay the packaged hook onto `destDir`, refusing any destination that is a
+ * SYMLINK (#574 r3 blocker 4) — `copyFileSync` follows one and truncates its
+ * referent. Throws; the caller reports it and installs nothing there.
  */
 function copyHookFiles(sourceDir: string, destDir: string): void {
   refuseLinkedDestination(destDir);
@@ -569,11 +566,9 @@ export function refreshInstalledHookFiles(
     // still reported, so the caller can tell "nothing to refresh" from
     // "nothing is installed" (they need different words).
     if (!result.sourceAvailable) continue;
-    // A hook that is not there is not refreshed into existence (r4). A backup
-    // under this root is not installation intent: the same directory is left
-    // behind by a SUCCESSFUL refresh, so healing from it reinstalls the hook
-    // after a deliberate uninstall. Absence is reported by the caller, never
-    // repaired here.
+    // A hook that is not there is not refreshed into existence (r4): a backup
+    // under this root is what a SUCCESSFUL refresh leaves too, so healing from
+    // one reinstalls a hook the operator uninstalled.
     if (!installed) continue;
     if (!hookFilesStale(dir)) {
       result.current.push(dir);
@@ -1749,12 +1744,11 @@ export interface OpenClawInstallOptions {
  * Take the update lock on every config root this install may write in, BEFORE
  * the first write (#574 r3 blocker 6).
  *
- * Round 3 took the lock inside the hook-copy loop, so everything ahead of it —
- * `findAllHooksDirs` creating `hooks/`, `cleanupLegacyPlugin` rewriting
- * `openclaw.json` — ran unlocked, and everything after it (the plugin install,
- * the registration rewrite, the gateway restart) ran outside it. The reviewer
- * drove both with the lock held. A root that is busy is now dropped from the
- * install entirely: no `hooks/`, no config rewrite, no plugin, no restart.
+ * Round 3 locked inside the hook-copy loop, so `findAllHooksDirs` creating
+ * `hooks/` and `cleanupLegacyPlugin` rewriting `openclaw.json` ran ahead of
+ * it, and the plugin install, the registration rewrite and the gateway restart
+ * ran after it. The reviewer drove both ends with the lock held. A busy root is
+ * now dropped whole: no `hooks/`, no config rewrite, no plugin, no restart.
  */
 export async function installOpenClawHook(options: OpenClawInstallOptions = {}): Promise<void> {
   const home = resolveUserHome();
@@ -1838,45 +1832,43 @@ async function writeOpenClawInstall(
     // Install to ALL detected hook directories
     for (const hooksDir of hooksDirs) {
       const destDir = preferredHookDir(hooksDir);
-      {
-        try {
-          // Clean up legacy paths BEFORE installing to avoid duplicate hooks
-          const legacyDirsBeforeInstall = detectLegacyHookVariants(hooksDir);
-          if (legacyDirsBeforeInstall.length > 0) {
-            console.log(`Detected legacy OpenClaw hook layout in ${hooksDir} — migrating to ${destDir}`);
-          }
-          for (const removedDir of removeLegacyHookVariants(hooksDir)) {
-            console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
-            migratedLegacy++;
-          }
+      try {
+        // Clean up legacy paths BEFORE installing to avoid duplicate hooks
+        const legacyDirsBeforeInstall = detectLegacyHookVariants(hooksDir);
+        if (legacyDirsBeforeInstall.length > 0) {
+          console.log(`Detected legacy OpenClaw hook layout in ${hooksDir} — migrating to ${destDir}`);
+        }
+        for (const removedDir of removeLegacyHookVariants(hooksDir)) {
+          console.log(`Removed legacy cortex-memory hook from ${removedDir}`);
+          migratedLegacy++;
+        }
 
-          copyHookFiles(HOOK_SOURCE, destDir);
+        copyHookFiles(HOOK_SOURCE, destDir);
 
-          console.log(`Installed cortex-memory hook to ${destDir}`);
-          installed++;
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException).code;
-          const framework = destDir.includes(`${path.sep}.claude${path.sep}`)
-            ? 'Claude Code'
-            : destDir.includes(`${path.sep}.openclaw${path.sep}`)
-              ? 'OpenClaw'
-              : null;
-          if (code === 'EACCES' || code === 'EPERM') {
-            if (framework === 'Claude Code') {
-              console.warn(`  Skipped ${framework} hook install at ${destDir} (permission denied).`);
-              console.warn('    This only affects Claude Code memory-sync. OpenClaw integration is unaffected.');
-              console.warn(`    To fix: sudo chown -R "$USER":"$USER" ~/.claude`);
-            } else if (framework === 'OpenClaw') {
-              console.warn(`  Skipped ${framework} hook install at ${destDir} (permission denied).`);
-              console.warn('    OpenClaw memory capture will not run until this is fixed.');
-              console.warn(`    To fix: sudo chown -R "$USER":"$USER" ~/.openclaw`);
-            } else {
-              console.warn(`  Skipped ${destDir} (permission denied)`);
-            }
+        console.log(`Installed cortex-memory hook to ${destDir}`);
+        installed++;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        const framework = destDir.includes(`${path.sep}.claude${path.sep}`)
+          ? 'Claude Code'
+          : destDir.includes(`${path.sep}.openclaw${path.sep}`)
+            ? 'OpenClaw'
+            : null;
+        if (code === 'EACCES' || code === 'EPERM') {
+          if (framework === 'Claude Code') {
+            console.warn(`  Skipped ${framework} hook install at ${destDir} (permission denied).`);
+            console.warn('    This only affects Claude Code memory-sync. OpenClaw integration is unaffected.');
+            console.warn(`    To fix: sudo chown -R "$USER":"$USER" ~/.claude`);
+          } else if (framework === 'OpenClaw') {
+            console.warn(`  Skipped ${framework} hook install at ${destDir} (permission denied).`);
+            console.warn('    OpenClaw memory capture will not run until this is fixed.');
+            console.warn(`    To fix: sudo chown -R "$USER":"$USER" ~/.openclaw`);
           } else {
-            // Never throw — warn gracefully
-            console.warn(`  Warning: Could not install hook to ${destDir}: ${(err as Error).message}`);
+            console.warn(`  Skipped ${destDir} (permission denied)`);
           }
+        } else {
+          // Never throw — warn gracefully
+          console.warn(`  Warning: Could not install hook to ${destDir}: ${(err as Error).message}`);
         }
       }
     }

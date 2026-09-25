@@ -19,7 +19,7 @@ import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir } from './hermes-refresh.js
 // an install and a refresh must never interleave their renames over the same
 // `plugins/` tree.
 import { acquireUpdateLock } from './host-swap.js';
-import { refuseLinkedDestination } from './fs-answers.js';
+import { findLinkOnPath, refuseLinkedDestination } from './fs-answers.js';
 
 function pluginSourceDir(): string {
   return hermesPluginSourceDir();
@@ -135,11 +135,10 @@ function warnOnShadowingCopies(home: string): void {
 }
 
 /**
- * Overlay the packaged tree onto `dest`, refusing every destination that is a
- * SYMLINK (#576 r3 blocker 4). `mkdirSync` and `copyFileSync` both follow a
- * link at the destination, so one planted at `plugins/shieldcortex/shadow.py`
- * makes this installer truncate a file elsewhere on the box — which the
- * reviewer reproduced. Throws; the caller reports and writes nothing further.
+ * Overlay the packaged tree onto `dest`, refusing any destination that is a
+ * SYMLINK (#576 r3 blocker 4) — `mkdirSync`/`copyFileSync` follow one, so a
+ * link at `plugins/shieldcortex/shadow.py` truncates a file elsewhere on the
+ * box. Throws; the caller reports it and writes nothing further.
  */
 function copyDir(src: string, dest: string): void {
   refuseLinkedDestination(dest);
@@ -187,6 +186,12 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
   }
   const dest = pluginDestDir(home);
   try {
+    // `copyDir` refuses a linked destination at every level it creates, but
+    // the components ABOVE it are created by one `mkdir -p` that would follow
+    // a symlinked `plugins/` straight out of the tree. Same bound as the lock.
+    const { link, unreadable } = findLinkOnPath(hermesHomeDir(home), dest);
+    if (unreadable !== null) throw new Error(`${unreadable.path} could not be read (${unreadable.error}); nothing written`);
+    if (link !== null) throw new Error(`${link} is a symlink; nothing written`);
     copyDir(src, dest);
   } catch (err: unknown) {
     console.error(`Hermes plugin install refused — ${err instanceof Error ? err.message : String(err)}`);

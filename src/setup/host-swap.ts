@@ -1,25 +1,24 @@
 /**
  * ShieldCortex — publishing the packaged copy of a file-copied host
- * integration, and the one lock that serialises it (#574 / #576, round 3).
+ * integration, and the one lock that serialises it (#574 / #576).
  *
- * ## Why there is no journal here
+ * ## Why nothing here finishes somebody else's swap
  *
  * Round 2 shipped a crash journal: the swap wrote `{target, backup, staged}`
- * to disk before the first rename, and the next run READ THAT FILE AND MOVED
- * THE PATHS IT NAMED. Review found six ways that ends badly, and every one of
- * them is the same defect — a recovery that takes its destination from a file
- * is a recovery that can be told where to write. Constraining the schema does
- * not fix it: any validation is a guess about which paths "belong" to a
- * transaction nobody can authenticate.
+ * to disk and the next run READ THAT FILE AND MOVED THE PATHS IT NAMED. Round
+ * 3 dropped the journal but kept the healing, on "the standard target is
+ * missing AND `backups/<name>-preupdate-*` exists". Review took both apart,
+ * and it is one lesson: a recovery that infers authority from the filesystem
+ * can be handed that authority. A journal names paths; a backup directory is
+ * also what a SUCCESSFUL refresh leaves, so healing from one reinstalls an
+ * integration the operator just removed — and an empty planted one installs it
+ * on a host that never had it.
  *
- * So the journal is gone, and with it the whole idea of finishing somebody
- * else's swap. The packaged plugin and hook ship inside this npm package and
- * are always correct for the installed version, so the only recovery anyone
- * ever needs is "the standard target is missing or does not match the package
- * -> copy the packaged set into the STANDARD target again". The inputs are the
- * resolved home, the integration's layout and the package; nothing on disk
- * supplies a destination, so a planted journal, a planted
- * `.shieldcortex-staging-*` or a hostile `backups/` entry is inert.
+ * So this publishes over targets the CALLER already found, and never creates
+ * one. A planted journal, a planted `.shieldcortex-staging-*` and a hostile
+ * `backups/` entry are all inert. A swap that dies after the first rename is
+ * reported at that moment (`targetMissing` below), naming the integration's
+ * installer and the backup to restore from; nothing deletes a backup, ever.
  *
  * ## What a publication does, in order
  *
@@ -44,23 +43,6 @@
  * straight back and both parents are synced again. If THAT fails, the caller
  * names the integration's installer, which is this same publication run from
  * the package.
- *
- * ## Why nothing here HEALS a missing target (r4)
- *
- * Round 3 went one step further than it could prove: if the standard target
- * was missing and `backups/<name>-preupdate-*` existed, `update` reinstalled
- * the packaged set. Review showed the predicate cannot tell the two states
- * apart. A successful refresh leaves a permanent backup; the operator then
- * runs `uninstall`; the next `update` reads the same evidence and puts the
- * integration back. A planted empty `backups/shieldcortex-preupdate-x` does
- * the same on a host that never had it. Backup-shaped directories are not
- * installation intent, and nothing short of a stored marker can make them one.
- *
- * So a missing target is REPORTED, never repaired. The one moment anybody
- * knows a swap was interrupted is the moment it fails, inside this function,
- * with the backup path in hand — so that is where the sentence gets printed
- * (`targetMissing` below), naming the integration's installer and the backup
- * to restore from. Nothing deletes a backup, ever.
  */
 
 import fs from 'fs';
@@ -126,28 +108,19 @@ function readLock(target: string): { pid: string; at: string; token: string } | 
  * `open(O_CREAT|O_EXCL|O_NOFOLLOW)` is the check and the act in one syscall, so
  * there is no window between "is anyone writing" and "I am writing".
  *
- * ## Nothing here reclaims a lock (r4)
+ * NOTHING here reclaims a lock (r3 blocker 2). Round 3 deleted one whose pid
+ * was dead and whose stamp was over ten minutes old, which races two
+ * contenders into deleting each other's live lock — an `unlink` by pathname
+ * after a separate read cannot establish ownership of what is at that pathname
+ * now. The ten-minute promise was false anyway: a kill between the exclusive
+ * create and the write leaves a record no age check clears, and a recycled pid
+ * keeps a dead lock alive indefinitely. So an existing lock is simply an
+ * existing lock; clearing it needs knowledge this process does not have.
  *
- * Round 3 deleted a lock whose recorded pid was dead and whose stamp was over
- * ten minutes old. Review found the race that costs: A reads a stale lock, B
- * reads it too, removes it, acquires its own and starts writing — and then A
- * resumes at its `unlink`, deletes B's LIVE lock and acquires the pathname. An
- * `unlink` by pathname after a read cannot establish ownership of what is at
- * that pathname now, and the promise the message made ("ignored ten minutes
- * later") was not true either: a SIGKILL between the exclusive create and the
- * write leaves a record nothing can parse and no age can clear, and a recycled
- * pid keeps a dead lock alive indefinitely.
- *
- * So an existing lock is simply an existing lock. The refusal names the file
- * and reports whatever record it holds, and clearing it is a decision an
- * operator makes with knowledge this process does not have: whether anything
- * else is running.
- *
- * `bound` is the outermost path component the root is validated from, and the
- * validation happens BEFORE the lock is created (review blocker 4): a
- * symlinked `~/.openclaw`, `~/.hermes` or profile root is refused having
- * written nothing at all, lock included. It defaults to the root itself, which
- * checks exactly that one component.
+ * `bound` is the outermost component the root is validated from, and the
+ * validation runs BEFORE the lock is created (blocker 4): a symlinked
+ * `~/.openclaw`, `~/.hermes` or profile root is refused having written nothing
+ * at all, lock included. It defaults to the root itself.
  */
 export function acquireUpdateLock(
   root: string,
@@ -220,20 +193,12 @@ export function acquireUpdateLock(
 }
 
 /**
- * Codes that mean "this platform or filesystem does not flush a directory fd",
- * as opposed to "the flush was attempted and the device said no" (r3 blocker 5).
- *
- * The distinction is the whole point. Several filesystems and every Windows
- * build refuse a directory fd outright, and a refresh must not fail on a host
- * where the call is simply unavailable — but round 3 put EVERY refusal in the
- * same bucket, so an injected `EIO` on every directory flush still produced a
- * published copy reported as a clean refresh. `EIO`, `ENOSPC` and their
- * relatives are the device answering, and they are fatal.
- *
- * `EACCES`/`EPERM` are on the unsupported side deliberately: they mean the
- * directory could not be OPENED for reading, which is a permission fact about
- * the host rather than a persistence failure — and if the rename that follows
- * really cannot happen, the rename itself says so.
+ * Codes that mean "this platform has no directory fsync", as opposed to "it
+ * was attempted and the device said no" (r3 blocker 5). Round 3 bucketed EVERY
+ * refusal the first way, so an injected `EIO` on every directory flush still
+ * produced a published copy reported as a clean refresh. `EACCES`/`EPERM` sit
+ * on the unsupported side on purpose: they mean the directory would not OPEN,
+ * and if the following rename cannot happen, the rename itself says so.
  */
 const DIR_SYNC_UNSUPPORTED: ReadonlySet<string> = new Set([
   'EACCES', 'EBADF', 'EINVAL', 'EISDIR', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM',
@@ -266,11 +231,7 @@ function syncDir(dir: string): DirSync {
 }
 
 export interface SyncReport {
-  /**
-   * A FILE that could not be flushed, a tree that could not be walked, or a
-   * DIRECTORY the device refused to flush. All three are fatal: nothing has
-   * been published yet, so refusing costs an operator one warning.
-   */
+  /** An unflushable FILE, an unwalkable tree, or a DIRECTORY the device refused. */
   error: string | null;
   /** Directories the platform cannot flush. Reported, never swallowed. */
   unsynced: string[];
@@ -488,10 +449,7 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
     return refuse(`the staged copy did not verify against the packaged source (${difference}); nothing written`);
   }
 
-  /**
-   * Flush directories, keeping "the platform will not" apart from "the device
-   * said no". Returns the first real failure, or null.
-   */
+  /** Flush, keeping "will not" apart from "refused". First real failure, or null. */
   const flush = (...dirs: string[]): string | null => {
     for (const dir of dirs) {
       const answer = syncDir(dir);
@@ -508,12 +466,10 @@ export function stageAndPublish(params: StagedInstallParams): StagedInstallOutco
 
   // Displace the old copy, if there is one.
   if (backup !== null) {
-    // The backup's ANCESTRY first (r3 blocker 5). `backups/` and the
-    // reservation inside it were both created moments ago, and the rename
-    // below can become durable before either name does — leaving a host whose
-    // plugin is gone and whose backup is not reachably on the medium. A real
-    // failure here aborts with nothing moved; a platform that will not flush a
-    // directory is reported and carries on.
+    // The backup's ANCESTRY first (r3 blocker 5): `backups/` and the
+    // reservation inside it are both brand new, and the rename below can
+    // become durable before either NAME does — leaving a host whose plugin is
+    // gone and whose backup is not reachably on the medium.
     const ancestry = flush(reserved!, params.backupsRoot, path.dirname(params.backupsRoot));
     if (ancestry !== null) {
       giveBack();
