@@ -389,7 +389,7 @@ function hookStagedComplete(staged: string): boolean {
 }
 
 /** What finishes an interrupted hook refresh. Printed wherever one is left. */
-export const HOOK_RECOVERY_COMMAND =
+const HOOK_RECOVERY_COMMAND =
   'run `shieldcortex update` (or `shieldcortex openclaw install`) to finish it';
 
 interface HookPublishResult {

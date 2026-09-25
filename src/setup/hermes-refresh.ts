@@ -215,7 +215,7 @@ export const HERMES_RESTART_NOTE =
   'restart the Hermes gateway to load it — plugin discovery only re-runs at start-up';
 
 /** What finishes an interrupted refresh. Printed wherever one is left behind. */
-export const HERMES_RECOVERY_COMMAND =
+const HERMES_RECOVERY_COMMAND =
   'run `shieldcortex update` (or `shieldcortex hermes install`) to finish it';
 
 function warn(summary: string, detail: string[] = []): HermesRefreshResult {
@@ -286,11 +286,18 @@ function writePathRefusal(scan: HermesPluginScan, targets: string[]): string | n
   for (const target of targets) {
     const base = bounds.find((b) => pathContains(b, target));
     if (base === undefined) {
-      return `${target} is outside the Hermes tree this refresh may write in`;
+      return `${target} is outside the Hermes tree this refresh may write in — nothing written ` +
+        `(${FIX_POINTER})`;
     }
     const { link, unreadable } = findLinkOnPath(base, target);
-    if (unreadable !== null) return `${unreadable.path} could not be read (${unreadable.error})`;
-    if (link !== null) return `${link} is a symlink`;
+    if (unreadable !== null) {
+      return `${unreadable.path} could not be read (${unreadable.error}) — nothing written ` +
+        `(${FIX_POINTER})`;
+    }
+    if (link !== null) {
+      return `${link} is a symlink — nothing written; a link on the write path puts the copy ` +
+        `somewhere nobody asked for (${FIX_POINTER})`;
+    }
   }
   return null;
 }
@@ -441,12 +448,7 @@ export function refreshHermesPluginCopies(
     ...stale.map((t) => path.dirname(t.root)),
   ];
   const refusal = writePathRefusal(scan, writePaths);
-  if (refusal !== null) {
-    return withCarried(warn(
-      `${refusal} — nothing written; a link on the write path puts the copy somewhere nobody ` +
-      `asked for (${FIX_POINTER})`,
-    ));
-  }
+  if (refusal !== null) return withCarried(warn(refusal));
 
   // Staging and backups must be outside EVERY root Hermes discovers, not only
   // the one being refreshed: a `backups/` inside a sibling profile's plugins
