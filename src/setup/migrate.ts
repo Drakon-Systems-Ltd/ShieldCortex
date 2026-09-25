@@ -11,6 +11,7 @@ import path from 'path';
 import os from 'os';
 import { execSync } from 'child_process';
 import { getBetterSqlite3 } from '../database/better-sqlite3-guard.js';
+import { helpGate } from '../cli/help-gate.js';
 
 const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 const CLAUDE_MD_PATH = path.join(os.homedir(), '.claude', 'CLAUDE.md');
@@ -386,7 +387,44 @@ export function migrateOpenClawHooks(): { migrated: boolean; cleanedLegacy: bool
   return { migrated, cleanedLegacy };
 }
 
-export async function handleMigrateCommand(): Promise<void> {
+/**
+ * `migrate` honours no flags at all (#577) — and unlike the other gated
+ * commands that is provable rather than assumed: nothing in its call graph
+ * reads `process.argv`, so there is no deep flag to list.
+ */
+export const MIGRATE_FLAGS = [] as const;
+
+export const MIGRATE_HELP = `Usage: shieldcortex migrate
+
+Migrate an existing Claude Cortex / Claude Memory install to ShieldCortex: swap
+the MCP server and hooks in ~/.claude/settings.json, copy or merge the memory
+database, update ~/.claude/CLAUDE.md, migrate clawdbot → openclaw hooks, and
+remove the superseded npm packages and services. This MUTATES the host; it takes
+no arguments.
+
+Options:
+  -h, --help   Show this help and exit (migrates nothing)
+`;
+
+/**
+ * `shieldcortex migrate` entry point (#577).
+ *
+ * This took no arguments at all, so `migrate --help` ran the whole six-stage
+ * migration — settings rewrite included — with no usage printed.
+ */
+export async function handleMigrateCommand(
+  args: readonly string[] = [],
+  deps: { run?: () => Promise<void> } = {},
+): Promise<void> {
+  const gate = helpGate(args, MIGRATE_HELP, { command: 'migrate', known: MIGRATE_FLAGS });
+  if (gate !== null) {
+    process.exitCode = gate;
+    return;
+  }
+  await (deps.run ?? migrateAll)();
+}
+
+async function migrateAll(): Promise<void> {
   console.log('Migrating from Claude Cortex → ShieldCortex...\n');
 
   console.log('[1/6] Settings (MCP server + hooks)');

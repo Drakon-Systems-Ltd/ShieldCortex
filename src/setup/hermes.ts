@@ -12,6 +12,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { scanHermesPluginCopies } from './hermes-plugins.js';
+import { helpGate } from '../cli/help-gate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -193,23 +194,45 @@ export async function hermesStatus(home: string = os.homedir()): Promise<void> {
   console.log('  Turn gate / freeze: not bound');
 }
 
-export async function handleHermesCommand(subcommand: string): Promise<void> {
+export const HERMES_HELP = `Usage: shieldcortex hermes <install|uninstall|status>
+
+Installs the Hermes pre_tool_call plugin (Action Guard).
+This is a deny plane. Codex/Cursor MCP install is not.
+
+Options:
+  -h, --help   Show this help and exit (installs nothing)
+`;
+
+/**
+ * `shieldcortex hermes <verb>` entry point.
+ *
+ * #577: the dispatcher passed only argv[3], so the `--help` in
+ * `hermes install --help` was invisible and the plugin was copied into
+ * ~/.hermes/plugins anyway. `extraArgs` exists so the gate can see it.
+ */
+export async function handleHermesCommand(
+  subcommand: string,
+  extraArgs: readonly string[] = [],
+  deps: {
+    install?: (home?: string) => Promise<void>;
+    uninstall?: (home?: string) => Promise<void>;
+    status?: (home?: string) => Promise<void>;
+  } = {},
+): Promise<void> {
+  if (helpGate([subcommand, ...extraArgs], HERMES_HELP, { command: 'hermes' }) !== null) return;
   console.log();
   switch (subcommand) {
     case 'install':
-      await installHermes();
+      await (deps.install ?? installHermes)();
       break;
     case 'uninstall':
-      await uninstallHermes();
+      await (deps.uninstall ?? uninstallHermes)();
       break;
     case 'status':
-      await hermesStatus();
+      await (deps.status ?? hermesStatus)();
       break;
     default:
-      console.log('Usage: shieldcortex hermes <install|uninstall|status>');
-      console.log();
-      console.log('Installs the Hermes pre_tool_call plugin (Action Guard).');
-      console.log('This is a deny plane. Codex/Cursor MCP install is not.');
+      console.log(HERMES_HELP.trimEnd());
       process.exit(1);
   }
 }

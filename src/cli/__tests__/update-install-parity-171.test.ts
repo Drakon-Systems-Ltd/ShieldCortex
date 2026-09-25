@@ -75,7 +75,8 @@ describe('#171 — update ends by verifying protection, like repair', () => {
 
   it('runUpdate invokes it', () => {
     const body = bodyOf('runUpdate');
-    expect(body).toMatch(/await stepVerifyProtection\(home\)/);
+    // `home` first, then the verbosity parsed once at the entry point (#577).
+    expect(body).toMatch(/await stepVerifyProtection\(home[,)]/);
   });
 
   it('skips cleanly when no plugin is registered — a Claude-Code-only box is not an error', () => {

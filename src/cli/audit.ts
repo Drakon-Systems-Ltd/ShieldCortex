@@ -35,7 +35,7 @@ import {
 } from '../audit/index.js';
 import type { AuditReport, AuditSeverity, ScannerResult, AuditFinding } from '../audit/types.js';
 import { toSarif } from '../xray/sarif.js';
-import { wantsHelp } from './wants-help.js';
+import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
 
 export const AUDIT_HELP = `Usage: shieldcortex audit [options]
 
@@ -132,8 +132,15 @@ function parseAuditArgs(args: string[]): AuditOptions {
 /**
  * Run the full audit.
  */
+/**
+ * `audit`'s value-taking options — `--deps-path help` is a path (#577).
+ * Re-exported from the shared registry, which is what the whole-argv gates in
+ * `src/index.ts` read too: one table, so they cannot disagree (round 3).
+ */
+export const AUDIT_VALUE_FLAGS = COMMAND_HELP_SPECS.audit.valueFlags;
+
 export async function handleAuditCommand(args: string[]): Promise<void> {
-  if (wantsHelp(args)) {
+  if (commandWantsHelp('audit', args)) {
     console.log(AUDIT_HELP);
     return;
   }

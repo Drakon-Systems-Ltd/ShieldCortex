@@ -32,8 +32,12 @@ describe('openclaw install — auto gateway restart (v4.12.6)', () => {
   });
 
   it('handleOpenClawCommand passes restartGateway to installOpenClawHook', () => {
+    // `\)?\(` tolerates the #577 injectable default —
+    // `(deps.install ?? installOpenClawHook)({ … })` — while still matching a
+    // bare `installOpenClawHook({ … })`. What must not rot is the options
+    // object the install case hands over, so capture that.
     const installCase = openclawSource.match(
-      /case\s+['"]install['"]:\s*\n[\s\S]*?installOpenClawHook\(([^)]*)\)/,
+      /case\s+['"]install['"]:\s*\n[\s\S]*?installOpenClawHook\)?\(\s*\{([^}]*)\}/,
     );
     expect(installCase).not.toBeNull();
     expect(installCase![1]).toMatch(/restartGateway/);
