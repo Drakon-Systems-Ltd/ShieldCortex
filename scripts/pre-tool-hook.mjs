@@ -1076,11 +1076,166 @@ function safeSignalList(signals) {
  */
 const SPANLESS_SIGNAL_RE = /^(secret-egress|credential-access)/;
 const MAX_MATCH_ROWS = 25;
-/** The core's own `fmtSpan` bound; re-applied here for the same reason. */
+/**
+ * The core's own `fmtSpan` bound; re-applied here for the same reason. A
+ * redacted field may grow past it by exactly the placeholders' growth, never
+ * by more raw content (see `sanitiseEvidenceText`).
+ */
 const MAX_SPAN_CHARS = 80;
-/** A redacted span may grow (placeholders are longer than what they replace). */
-const MAX_REDACTED_SPAN_CHARS = 160;
 const MAX_PROVENANCE_CHARS = 256;
+/**
+ * Hard cap on what the redactor is ever asked to look at. The core bounds
+ * its spans to 80, but this hook does not get to assume the dist it loads is
+ * a version that does; an unbounded string from a substitute or older build
+ * must not become an unbounded regex workload.
+ */
+const MAX_RAW_EVIDENCE_CHARS = 2048;
+/** What replaces the trailing atom of evidence that may have been cut mid-token. */
+const CUT_MARKER = '[REDACTED-cut]';
+
+// ── Evidence contract (review of #586) ────────────────────────────────────
+//
+// Two things the first cut of this got wrong, both found in independent
+// review:
+//
+//   1. The dist redactor is a memory-pipeline detector. It knows provider
+//      token shapes, env-style `KEY=value` pairs and `scheme://user:pass@host`
+//      URLs, and does not know `-u user:pass`, `--cookie sid=…` or a
+//      `Cookie:` header whose value is too short or too plain for the entropy
+//      net. A pipe-download-to-shell span is the WHOLE command, so a real one
+//      carries the credential the download used. The hook therefore runs its
+//      own recogniser for those shapes FIRST and the dist redactor second;
+//      neither is trusted to be complete on its own. And `source` / `chain`
+//      (#184 folded-source provenance) are free text from the same untrusted
+//      place a span is — a script path can be `/tmp/<token>.sh` — so they go
+//      through the same pipeline, not around it.
+//
+//   2. Bounding to 80 BEFORE redaction let a token that would have been
+//      redacted whole survive as a fragment: cut at the boundary it no longer
+//      matches its provider pattern and is too short for the entropy net.
+//      Swapping the order in the hook is necessary but not sufficient, because
+//      the core's own `fmtSpan` already cut the span before the hook saw it.
+//      So the contract is: redact first, bound second, and at ANY boundary
+//      that may have cut a token — the core's 80, this hook's raw cap, or the
+//      post-redaction bound — the trailing atom is replaced by CUT_MARKER
+//      rather than written as a fragment. The only atoms that survive a
+//      boundary are ones too short to be a credential fragment.
+//
+// What stays useful: a short span (`sudo fixture-elevate`) is untouched, a
+// span with a credential inside keeps its shape around a placeholder, and a
+// benign script path in `source` is still the path.
+
+/**
+ * Credential shapes the hook redacts itself, before the dist redactor and
+ * regardless of which dist it loaded. Every rule keeps the label that names
+ * the shape (header name, flag, key) and replaces only the value, so the row
+ * still says WHAT was there.
+ */
+const LOCAL_CREDENTIAL_RULES = [
+  // scheme://user:pass@host — the user segment excludes `/` and `:` so
+  // `https://host:8080/path` never matches. Also catches the pair when the
+  // `@host` is present but the dist rule missed the scheme.
+  [/\b([a-z][a-z0-9+.-]*:\/\/)([^\s"'`/:@]+):([^\s"'`/@]+)@/gi, '$1[REDACTED-basic-auth]@'],
+  // curl/wget/httpie style `-u user:pass`, `--user user:pass`, `--proxy-user`.
+  // Requires the colon so `useradd -u 1000` and `sort -u` stay clean.
+  [/((?:^|\s)(?:-u|-U|--user|--proxy-user|--auth)(?:\s+|=)["']?)([^\s"':]+:[^\s"']+)/g, '$1[REDACTED-basic-auth]'],
+  // Authorization / Proxy-Authorization header values, with or without a scheme word.
+  [/((?:proxy-)?authorization\s*[:=]\s*["']?)([^"'\n]+)/gi, '$1[REDACTED-authorization]'],
+  // Bearer tokens anywhere, even without the header name.
+  [/(\bbearer\s+)([A-Za-z0-9._~+/=-]{6,})/gi, '$1[REDACTED-bearer]'],
+  // Cookie / Set-Cookie headers: the whole cookie string is the credential.
+  [/((?:set-)?cookie\s*[:=]\s*["']?)([^"'\n]+)/gi, '$1[REDACTED-cookie]'],
+  // curl `-b name=value` / `--cookie name=value` (a bare file path has no `=`).
+  [/((?:^|\s)(?:-b|--cookie)(?:\s+|=)["']?)([^\s"']*=[^\s"']*)/g, '$1[REDACTED-cookie]'],
+  // Cookie- and query-style credential pairs: `session=…`, `sid=…`, `token=…`,
+  // `api_key=…`, `password=…`. The dist redactor's env rules need ≥8 chars of
+  // value; a cookie id or a cut token can be shorter. The whole pair is
+  // replaced, the same way the dist redacts `TOKEN=value`.
+  [/\b(?:session|sess|sessid|sessionid|phpsessid|jsessionid|sid|csrf(?:[-_]?token)?|xsrf(?:[-_]?token)?|auth(?:[-_]?token)?|access[-_]?token|refresh[-_]?token|id[-_]?token|api[-_]?key|apikey|api[-_]?secret|token|secret|password|passwd|pwd|credentials?)\s*=\s*["']?[^\s;&"']+/gi, '[REDACTED-credential]'],
+];
+
+function redactCredentialShapesLocally(text) {
+  let out = text;
+  for (const [re, replacement] of LOCAL_CREDENTIAL_RULES) {
+    out = out.replace(re, replacement);
+  }
+  return out;
+}
+
+/**
+ * The trailing atom of `text` — the run of token-alphabet characters after
+ * the last separator. This is the unit a truncation boundary can cut through.
+ */
+const TRAILING_ATOM_RE = /[A-Za-z0-9_.+~%-]+$/;
+/** An atom too short to be a credential fragment: up to three letters. */
+const HARMLESS_ATOM_RE = /^[A-Za-z]{1,3}$/;
+
+/**
+ * Apply the boundary rule: `text` ends where something may have cut a token,
+ * so its trailing atom is not evidence, it is a fragment. Replace it.
+ */
+function markCutBoundary(text) {
+  const m = TRAILING_ATOM_RE.exec(text);
+  if (!m || HARMLESS_ATOM_RE.test(m[0])) return text;
+  return text.slice(0, m.index) + CUT_MARKER;
+}
+
+/**
+ * The single path every persisted free-text evidence field takes:
+ * collapse → cap → redact locally → redact with the dist detector → bound →
+ * mark any boundary that may have cut a token.
+ *
+ * @returns `{ text, cut }` or `{ withheld }` with the reason. `cut` is true
+ *   when the boundary rule fired (the field ends in CUT_MARKER).
+ */
+function sanitiseEvidenceText(value, redactSpan, bound) {
+  if (typeof value !== 'string') return null;
+  let raw = value.replace(/\s+/g, ' ').trim();
+  if (!raw) return null;
+  // The core's fmtSpan cuts at exactly `bound`; a value of exactly that
+  // length may have been cut before the hook saw it, and the hook cannot
+  // tell — so it is treated as if it was. A longer value was not cut by
+  // that bound; if it needs cutting here, the cut below says so.
+  let possiblyCut = raw.length === bound;
+  if (raw.length > MAX_RAW_EVIDENCE_CHARS) {
+    raw = raw.slice(0, MAX_RAW_EVIDENCE_CHARS);
+    possiblyCut = true;
+  }
+  if (typeof redactSpan !== 'function') return { withheld: 'redactor-unavailable' };
+  let redacted;
+  try {
+    redacted = String(redactSpan(redactCredentialShapesLocally(raw)));
+  } catch {
+    return { withheld: 'redactor-failed' };
+  }
+  // Bound AFTER redaction. A placeholder carries none of the raw text, so
+  // the bound grows by the placeholders' own length and by nothing else:
+  // never more than `bound` characters of raw content, whatever the
+  // placeholders replaced was longer or shorter than them.
+  const placeholderChars = (redacted.match(/\[REDACTED-[^\]]*\]/g) ?? [])
+    .reduce((n, p) => n + p.length, 0);
+  const limit = Math.min(bound + placeholderChars, bound * 2);
+  let text = redacted;
+  if (text.length > limit) {
+    text = text.slice(0, limit);
+    possiblyCut = true;
+    // If this hook's own cut landed inside a placeholder, the placeholder
+    // stands for a whole credential and carries none of it: keep it whole
+    // (it is bounded by construction) rather than write half a placeholder.
+    // A placeholder that somehow never closes is dropped with the marker.
+    const open = text.lastIndexOf('[REDACTED-');
+    if (open >= 0 && !text.includes(']', open)) {
+      const close = redacted.indexOf(']', open);
+      text = close >= 0 && close - open <= 64
+        ? redacted.slice(0, close + 1)
+        : text.slice(0, open) + CUT_MARKER;
+    }
+  }
+  if (possiblyCut) text = markCutBoundary(text);
+  // `cut` says the field met a boundary that may have cut a token — whether
+  // the marker, a placeholder or a harmless atom is what ends it.
+  return { text, cut: possiblyCut };
+}
 
 let spanRedactorPromise = null;
 /**
@@ -1105,17 +1260,13 @@ function loadSpanRedactor() {
   return spanRedactorPromise;
 }
 
-function safeProvenanceString(value) {
-  if (typeof value !== 'string') return null;
-  const text = value.replace(/[\r\n\t]+/g, ' ').trim();
-  return text ? text.slice(0, MAX_PROVENANCE_CHARS) : null;
-}
-
 /**
  * Sanitise the guard's rule → matched-span evidence for the denial record.
- * Fail-closed on every axis: an unrecognised rule name is dropped, a span
- * with no working redactor is withheld (and the row says why), a redactor
- * that throws withholds the span too.
+ * Fail-closed on every axis: an unrecognised rule name is dropped, every
+ * free-text field (span, source, chain) takes `sanitiseEvidenceText`, and
+ * with no working redactor every one of them is withheld and the row says
+ * why (`spanWithheld` / `provenanceWithheld`). `line` is an integer and
+ * needs none of that.
  */
 function safeMatchList(matches, redactSpan) {
   if (!Array.isArray(matches)) return [];
@@ -1126,28 +1277,29 @@ function safeMatchList(matches, redactSpan) {
     const signal = String(raw.signal ?? '').trim();
     if (!SAFE_SIGNALS.has(signal)) continue;
     const row = { signal };
-    if (!SPANLESS_SIGNAL_RE.test(signal) && typeof raw.span === 'string') {
-      const span = raw.span.replace(/\s+/g, ' ').trim().slice(0, MAX_SPAN_CHARS);
-      if (span) {
-        if (typeof redactSpan !== 'function') {
-          row.spanWithheld = 'redactor-unavailable';
-        } else {
-          try {
-            row.span = String(redactSpan(span)).slice(0, MAX_REDACTED_SPAN_CHARS);
-          } catch {
-            row.spanWithheld = 'redactor-failed';
-          }
-        }
+    if (!SPANLESS_SIGNAL_RE.test(signal)) {
+      const span = sanitiseEvidenceText(raw.span, redactSpan, MAX_SPAN_CHARS);
+      if (span?.withheld) row.spanWithheld = span.withheld;
+      else if (span?.text) {
+        row.span = span.text;
+        if (span.cut) row.spanCut = true;
       }
     }
     // #184: where the match came from folded script source, the row names the
     // file and invocation chain so the operator is not left reading a parent
-    // script that does not contain the matched pattern.
-    const source = safeProvenanceString(raw.source);
-    if (source) row.source = source;
+    // script that does not contain the matched pattern. Both are free text
+    // from the same place the span came from and get the same treatment.
+    const source = sanitiseEvidenceText(raw.source, redactSpan, MAX_PROVENANCE_CHARS);
+    const chain = sanitiseEvidenceText(raw.chain, redactSpan, MAX_PROVENANCE_CHARS);
+    const provenanceWithheld = source?.withheld ?? chain?.withheld;
+    if (provenanceWithheld) {
+      row.provenanceWithheld = provenanceWithheld;
+    } else {
+      if (source?.text) row.source = source.text;
+      if (chain?.text) row.chain = chain.text;
+      if (source?.cut || chain?.cut) row.provenanceCut = true;
+    }
     if (Number.isInteger(raw.line) && raw.line > 0) row.line = raw.line;
-    const chain = safeProvenanceString(raw.chain);
-    if (chain) row.chain = chain;
     out.push(row);
   }
   return out;
