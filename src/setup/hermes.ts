@@ -19,6 +19,7 @@ import { HERMES_UNCOPIED_DIRS, hermesPluginSourceDir } from './hermes-refresh.js
 // an install and a refresh must never interleave their renames over the same
 // `plugins/` tree.
 import { acquireUpdateLock } from './host-swap.js';
+import { refuseLinkedDestination } from './fs-answers.js';
 
 function pluginSourceDir(): string {
   return hermesPluginSourceDir();
@@ -133,7 +134,15 @@ function warnOnShadowingCopies(home: string): void {
   console.warn();
 }
 
+/**
+ * Overlay the packaged tree onto `dest`, refusing every destination that is a
+ * SYMLINK (#576 r3 blocker 4). `mkdirSync` and `copyFileSync` both follow a
+ * link at the destination, so one planted at `plugins/shieldcortex/shadow.py`
+ * makes this installer truncate a file elsewhere on the box — which the
+ * reviewer reproduced. Throws; the caller reports and writes nothing further.
+ */
 function copyDir(src: string, dest: string): void {
+  refuseLinkedDestination(dest);
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     if (HERMES_UNCOPIED_DIRS.has(entry.name)) continue;
@@ -142,6 +151,7 @@ function copyDir(src: string, dest: string): void {
     if (entry.isDirectory()) {
       copyDir(from, to);
     } else {
+      refuseLinkedDestination(to);
       fs.copyFileSync(from, to);
     }
   }
@@ -178,6 +188,10 @@ export async function installHermes(home: string = os.homedir()): Promise<void> 
   const dest = pluginDestDir(home);
   try {
     copyDir(src, dest);
+  } catch (err: unknown) {
+    console.error(`Hermes plugin install refused — ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
   } finally {
     acquired.lock.release();
   }

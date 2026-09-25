@@ -565,3 +565,53 @@ describeWithHermes('a device that refuses a flush is not a platform that cannot 
     expect(result.detail.join('\n')).toMatch(/could not be flushed.*EINVAL/);
   });
 });
+
+describe('the installers never write through a symlinked destination (r3 blocker 4)', () => {
+  /** Swallow the installer's own reporting, keeping what it said. */
+  function quietInstall(): string[] {
+    const said: string[] = [];
+    jest.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { said.push(a.join(' ')); });
+    jest.spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { said.push(a.join(' ')); });
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    return said;
+  }
+
+  it('`hermes install` refuses a linked file inside the plugin directory', async () => {
+    // The reviewer's layout: an ordinary install, then a link planted at one
+    // of the files the NEXT install overlays. `copyFileSync` follows it and
+    // truncates the referent, which is outside the Hermes tree entirely.
+    const victim = path.join(elsewhere, 'payroll.csv');
+    fs.writeFileSync(victim, 'do not overwrite me\n');
+    fs.mkdirSync(installed, { recursive: true });
+    fs.symlinkSync(victim, path.join(installed, 'shadow.py'));
+    const saved = process.exitCode;
+    const said = quietInstall();
+
+    try {
+      await installHermes(home);
+    } finally {
+      process.exitCode = saved;
+    }
+
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('do not overwrite me\n');
+    expect(fs.lstatSync(path.join(installed, 'shadow.py')).isSymbolicLink()).toBe(true);
+    expect(said.join('\n')).toMatch(/is a symlink; nothing written/);
+  });
+
+  it('`hermes install` refuses a linked plugin directory', async () => {
+    const victimDir = path.join(elsewhere, 'somebody-elses-plugin');
+    fs.mkdirSync(victimDir, { recursive: true });
+    fs.symlinkSync(victimDir, installed);
+    const saved = process.exitCode;
+    const said = quietInstall();
+
+    try {
+      await installHermes(home);
+    } finally {
+      process.exitCode = saved;
+    }
+
+    expect(fs.readdirSync(victimDir)).toEqual([]);
+    expect(said.join('\n')).toMatch(/is a symlink; nothing written/);
+  });
+});

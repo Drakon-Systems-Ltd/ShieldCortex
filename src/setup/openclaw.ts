@@ -28,6 +28,7 @@ import {
   findLinkOnPath,
   lstatAnswer,
   pathContains,
+  refuseLinkedDestination,
   releaseReservation,
   reserveBackupDir,
 } from './fs-answers.js';
@@ -335,12 +336,21 @@ export function hookFilesStale(destDir: string = defaultHookDestDir()): boolean 
   return false;
 }
 
+/**
+ * Overlay the packaged hook onto `destDir`, refusing every destination that is
+ * a SYMLINK (#574 r3 blocker 4). `copyFileSync` follows a link at the
+ * destination and truncates its referent, so a link planted at
+ * `hooks/cortex-memory/runtime.mjs` makes the installer overwrite a file
+ * somewhere else. Throws; the caller reports it and installs nothing there.
+ */
 function copyHookFiles(sourceDir: string, destDir: string): void {
+  refuseLinkedDestination(destDir);
   fs.mkdirSync(destDir, { recursive: true });
 
   for (const file of HOOK_FILES) {
     const src = path.join(sourceDir, file);
     const dest = path.join(destDir, file);
+    refuseLinkedDestination(dest);
     fs.copyFileSync(src, dest);
 
     try {

@@ -250,3 +250,27 @@ export function findLinkOnPath(base: string, target: string): {
   }
   return { link: null, unreadable: null };
 }
+
+/**
+ * Refuse an overlay copy onto a symlink, at the exact path about to be written
+ * (#574/#576 r3 blocker 4, second half).
+ *
+ * Both installers copy the packaged set OVER whatever is at the destination,
+ * file by file. `fs.copyFileSync` and `fs.mkdirSync` FOLLOW a link at the
+ * destination, so a symlink planted at `plugins/shieldcortex/shadow.py` — or
+ * at the plugin directory itself — makes an install truncate a file somewhere
+ * else on the box. The reviewer reproduced that with an explicit fake home.
+ *
+ * This is the file-level counterpart of `findLinkOnPath`, which checks the
+ * COMPONENTS of a path; here every leaf the copy will write is checked too.
+ * Absence is fine — nothing is there to follow. Unreadable is a refusal, for
+ * the reason everything else in this module is: "I could not look" must never
+ * become "there is nothing there".
+ */
+export function refuseLinkedDestination(dest: string): void {
+  const answer = lstatAnswer(dest);
+  if ('error' in answer) throw new Error(`${dest} could not be read (${answer.error}); nothing written`);
+  if ('value' in answer && answer.value.isSymbolicLink()) {
+    throw new Error(`${dest} is a symlink; nothing written`);
+  }
+}
