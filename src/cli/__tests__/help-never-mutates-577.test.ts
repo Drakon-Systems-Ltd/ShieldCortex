@@ -85,29 +85,32 @@ async function withConsole(fn: () => Promise<void>): Promise<Captured & { exitCo
 }
 
 describe('#577 — helpGate is the shared, side-effect-free parser', () => {
+  // `command` names the row of the shared registry the gate reads (#577 round 3);
+  // `update` is the row with no value-taking options, which is what these
+  // argument-shape assertions are about.
   it('stops on --help / -h / help and prints the usage it was given', () => {
     for (const args of [['--help'], ['-h'], ['help'], ['--force', '--help']]) {
       const out: string[] = [];
-      expect(helpGate(args, 'USAGE', { log: (m) => out.push(m) })).toBe(0);
+      expect(helpGate(args, 'USAGE', { command: 'update', log: (m) => out.push(m) })).toBe(0);
       expect(out).toEqual(['USAGE']);
     }
   });
 
   it('lets the honoured flags through', () => {
-    expect(helpGate([], 'USAGE', { known: [] })).toBeNull();
-    expect(helpGate(['--force'], 'USAGE', { known: ['--force'] })).toBeNull();
+    expect(helpGate([], 'USAGE', { command: 'update', known: [] })).toBeNull();
+    expect(helpGate(['--force'], 'USAGE', { command: 'update', known: ['--force'] })).toBeNull();
   });
 
   it('rejects unknown flags and extra positionals with the usage on stderr', () => {
     const err: string[] = [];
     const out: string[] = [];
-    expect(helpGate(['--bogus'], 'USAGE', { known: ['--force'], log: (m) => out.push(m), error: (m) => err.push(m) })).toBe(2);
+    expect(helpGate(['--bogus'], 'USAGE', { command: 'update', known: ['--force'], log: (m) => out.push(m), error: (m) => err.push(m) })).toBe(2);
     expect(out).toEqual([]);
     expect(err.join('\n')).toContain('Unknown argument: --bogus');
     expect(err.join('\n')).toContain('USAGE');
 
     const err2: string[] = [];
-    expect(helpGate(['5.3.0', '--nope'], 'USAGE', { known: [], error: (m) => err2.push(m) })).toBe(2);
+    expect(helpGate(['5.3.0', '--nope'], 'USAGE', { command: 'update', known: [], error: (m) => err2.push(m) })).toBe(2);
     expect(err2.join('\n')).toContain('Unknown arguments: 5.3.0 --nope');
   });
 });
@@ -429,8 +432,8 @@ describe('#577 — the DB-opening prune/compact commands print usage instead', (
     const at = indexSrc.indexOf('function checkVersionStaleness');
     expect(at).toBeGreaterThan(-1);
     const body = indexSrc.slice(at, indexSrc.indexOf('\n}', at));
-    expect(body).toMatch(/wantsHelp\(/);
-    expect(body.indexOf('wantsHelp(')).toBeLessThan(body.indexOf('execSync('));
+    expect(body).toMatch(/argvWantsHelp\(/);
+    expect(body.indexOf('argvWantsHelp(')).toBeLessThan(body.indexOf('execSync('));
   });
 
   it('`vacuum --help` stops the caller and prints usage', () => {

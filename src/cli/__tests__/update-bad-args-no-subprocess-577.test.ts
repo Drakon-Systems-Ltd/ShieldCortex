@@ -14,72 +14,15 @@
  * claim — exit 2, no marker, and not one byte written under HOME.
  */
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { cliEntry, makeEntryPointSandbox, type EntryPointSandbox } from './entry-point-harness-577.js';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const cliEntry = path.join(repoRoot, 'dist', 'index.js');
+let sandbox: EntryPointSandbox;
+const runCli = (args: string[]) => sandbox.run(args);
+const walk = () => sandbox.underHome();
 
-let tmp = '';
-let home = '';
-let binDir = '';
-
-/** Every path under `dir`, relative — the proof that nothing was written. */
-function walk(dir: string, base = dir): string[] {
-  const out: string[] = [];
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, e.name);
-    out.push(path.relative(base, full));
-    if (e.isDirectory()) out.push(...walk(full, base));
-  }
-  return out;
-}
-
-function runCli(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  // A copy of the environment with HOME moved and every inherited
-  // SHIELDCORTEX_* variable dropped, so the child cannot reach this box's
-  // state tree. The fake npm goes first on PATH.
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined) continue;
-    if (k.startsWith('SHIELDCORTEX_') || k === 'CLAUDE_MEMORY_DB') continue;
-    env[k] = v;
-  }
-  env.HOME = home;
-  env.USERPROFILE = home;
-  env.npm_config_cache = path.join(home, '.npm');
-  env.PATH = `${binDir}${path.delimiter}${env.PATH ?? ''}`;
-  const r = spawnSync(process.execPath, [cliEntry, ...args], {
-    env,
-    encoding: 'utf-8',
-    timeout: 60_000,
-  });
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-}
-
-beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sc577-entry-'));
-  home = path.join(tmp, 'home');
-  binDir = path.join(tmp, 'bin');
-  fs.mkdirSync(home);
-  fs.mkdirSync(binDir);
-  // Marker lands OUTSIDE HOME, so the "HOME is empty" assertion and the "npm
-  // never ran" assertion are independent of each other.
-  const marker = path.join(tmp, 'npm-was-executed');
-  fs.writeFileSync(
-    path.join(binDir, 'npm'),
-    `#!/bin/sh\necho "$@" >> ${JSON.stringify(marker)}\nmkdir -p "$HOME/.npm/_logs"\ntouch "$HOME/.npm/_logs/debug.log"\nexit 0\n`,
-    { mode: 0o755 },
-  );
-});
-
-afterEach(() => {
-  if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
-  tmp = '';
-});
+beforeEach(() => { sandbox = makeEntryPointSandbox(); });
+afterEach(() => { sandbox.cleanup(); });
 
 describe('#577 — `shieldcortex update --bogus` at the real entry point', () => {
   it('has the built CLI to drive', () => {
@@ -92,8 +35,8 @@ describe('#577 — `shieldcortex update --bogus` at the real entry point', () =>
     expect(r.stderr).toContain('Unknown argument: --bogus');
     expect(r.stderr).toContain('Usage: shieldcortex update');
     expect(r.stdout).toBe('');
-    expect(fs.existsSync(path.join(tmp, 'npm-was-executed'))).toBe(false);
-    expect(walk(home)).toEqual([]);
+    expect(sandbox.npmRan()).toBe(false);
+    expect(walk()).toEqual([]);
   });
 
   it('`update --help` is free too — exit 0, usage on stdout, HOME untouched', () => {
@@ -101,8 +44,8 @@ describe('#577 — `shieldcortex update --bogus` at the real entry point', () =>
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('Usage: shieldcortex update');
     expect(r.stdout).toContain('--allow-conversation-access');
-    expect(fs.existsSync(path.join(tmp, 'npm-was-executed'))).toBe(false);
-    expect(walk(home)).toEqual([]);
+    expect(sandbox.npmRan()).toBe(false);
+    expect(walk()).toEqual([]);
   });
 
   it('`update --allow-conversation-access --help` prints usage, not an argument error', () => {
@@ -110,7 +53,7 @@ describe('#577 — `shieldcortex update --bogus` at the real entry point', () =>
     expect(r.status).toBe(0);
     expect(r.stderr).toBe('');
     expect(r.stdout).toContain('Usage: shieldcortex update');
-    expect(walk(home)).toEqual([]);
+    expect(walk()).toEqual([]);
   });
 
   it('the other strict commands reject a bad argument just as cheaply', () => {
@@ -118,8 +61,8 @@ describe('#577 — `shieldcortex update --bogus` at the real entry point', () =>
       const r = runCli([cmd, '--bogus']);
       expect({ cmd, status: r.status }).toEqual({ cmd, status: 2 });
       expect(r.stderr).toContain('Unknown argument: --bogus');
-      expect(fs.existsSync(path.join(tmp, 'npm-was-executed'))).toBe(false);
-      expect({ cmd, under: walk(home) }).toEqual({ cmd, under: [] });
+      expect(sandbox.npmRan()).toBe(false);
+      expect({ cmd, under: walk() }).toEqual({ cmd, under: [] });
     }
   });
 });

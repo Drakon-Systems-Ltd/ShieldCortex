@@ -19,12 +19,18 @@
  *
  * Every test here fails if its fix is reverted — the two gates are the subject,
  * not the scaffolding.
+ *
+ * Round 3 moved the value-flag inventory into one shared registry, so the global
+ * gate assertions below go through `argvWantsHelp`. Its exhaustive registry
+ * parity is in help-gate-registry-parity-577.test.ts, the inventory audit in
+ * value-flag-inventory-577.test.ts, and the runtime consent proof in
+ * consent-reaches-reconcile-577.test.ts.
  */
 import { describe, expect, it, jest } from '@jest/globals';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { wantsHelp, GLOBAL_VALUE_FLAGS } from '../wants-help.js';
+import { argvWantsHelp, wantsHelp, GLOBAL_VALUE_FLAGS } from '../wants-help.js';
 import { helpGate } from '../help-gate.js';
 import {
   UPDATE_FLAGS,
@@ -32,7 +38,6 @@ import {
   handleUpdateCommand,
   parseUpdateOptions,
   reexecUpdatedCli,
-  stepVerifyProtection,
   type UpdateOptions,
 } from '../update.js';
 import {
@@ -119,40 +124,10 @@ describe('#577 — update accepts and threads --allow-conversation-access', () =
     expect(UPDATE_HELP).toContain('SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS');
   });
 
-  it('consent reaches the reconcile as a parameter, not a deep process.argv read', async () => {
-    // stepVerifyProtection owns the reconcile call. Reading the plugin registry
-    // out of an empty temp HOME returns "not registered", so point it at a home
-    // that IS registered and watch the option arrive.
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sc577-consent-'));
-    try {
-      const openclaw = path.join(tmp, '.openclaw');
-      fs.mkdirSync(openclaw, { recursive: true });
-      fs.writeFileSync(
-        path.join(openclaw, 'openclaw.json'),
-        JSON.stringify({ plugins: { entries: { 'shieldcortex-realtime': { enabled: true } } } }),
-      );
-      const prevArgv = process.argv;
-      // The old code read consent from process.argv here. Leave the flag OUT of
-      // argv so only the threaded parameter can produce `true`.
-      process.argv = [process.argv[0], process.argv[1], 'update'];
-      try {
-        await withConsole(async () => {
-          await stepVerifyProtection(tmp, { verbose: false, allowConversationAccess: true });
-        });
-      } finally {
-        process.argv = prevArgv;
-      }
-      // The reconcile is dynamically imported and reads the host; what matters
-      // is that the option is declared on the call it makes.
-      const code = codeOf('../update.ts');
-      const at = code.indexOf('export async function stepVerifyProtection');
-      const body = code.slice(at, code.indexOf('\n}', at));
-      expect(body).toContain('grantConversationAccess: options.allowConversationAccess');
-      expect(body).not.toContain('process.argv');
-    } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
-    }
-  });
+  // The behavioural proof that consent ARRIVES at the reconcile — a spy at that
+  // boundary, with and without the flag — lives in
+  // consent-reaches-reconcile-577.test.ts: it has to mock the reconcile module,
+  // which this suite's static imports of update.ts/repair.ts would defeat.
 
   it('the re-exec argv round-trips the flag through the new parser', async () => {
     let launched: string[] = [];
@@ -203,19 +178,6 @@ describe('#577 — repair accepts and threads --allow-conversation-access', () =
     expect(REPAIR_HELP).toContain('SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS');
   });
 
-  it('the reconcile pass takes the consent as a parameter, not from process.argv', () => {
-    const code = codeOf('../repair.ts');
-    expect(code).toContain('grantConversationAccess: options.allowConversationAccess');
-    expect(code).not.toContain('process.argv');
-  });
-
-  it('the reconciler no longer reads process.argv when the caller supplied consent', () => {
-    const code = codeOf('../../setup/openclaw-reconcile.ts');
-    const at = code.indexOf('async function defaultRestoreRegistration');
-    const body = code.slice(at, code.indexOf('\n}', at));
-    expect(body).not.toContain('process.argv');
-    expect(body).toContain('grantConversationAccess');
-  });
 });
 
 // ── Blocker 2: a value spelled "help" is a value ─────────────────────────────
@@ -244,44 +206,42 @@ describe('#577 — wantsHelp distinguishes the help verb from an option value', 
     expect(wantsHelp(['--agent', 'help'])).toBe(true);
   });
 
-  it('helpGate forwards the value-flag list', () => {
+  it('helpGate reads the value-flag list out of the command\'s registry row', () => {
     // The reported invocation is fixed by the verb-position rule alone…
-    expect(helpGate(['skill', 'install', '--agent', 'help'], 'USAGE', { valueFlags: OPENCLAW_VALUE_FLAGS })).toBeNull();
+    expect(helpGate(['skill', 'install', '--agent', 'help'], 'USAGE', { command: 'openclaw' })).toBeNull();
     // …and the list is what stops a value BEING the first positional.
-    expect(helpGate(['--agent', 'help'], 'USAGE', { valueFlags: OPENCLAW_VALUE_FLAGS })).toBeNull();
-    expect(helpGate(['--agent', 'help'], 'USAGE')).toBe(0);
+    expect(helpGate(['--agent', 'help'], 'USAGE', { command: 'openclaw' })).toBeNull();
+    // A command whose row has no `--agent` reads that token as the verb — so the
+    // table decides, never the call site (#577 round 3).
+    expect(helpGate(['--agent', 'help'], 'USAGE', { command: 'update' })).toBe(0);
   });
 
-  it('the dispatcher sees one verb slot deeper than the command does', () => {
-    // src/index.ts is handed the whole command line, so a subcommand's own verb
-    // sits in the SECOND positional. Both gates must reach the same verdict the
-    // command will, or `audit help` prints usage under a stats banner.
-    expect(wantsHelp(['audit', 'help'], { verbDepth: 2 })).toBe(true);
+  it('the whole-argv gate strips the command word and asks that command', () => {
+    // src/index.ts is handed the whole command line. Round 2 counted a slot
+    // deeper with a flat flag list; round 3 finds the command word and hands the
+    // rest to the command's own row, so the verdict IS the handler's verdict.
+    expect(argvWantsHelp(['audit', 'help'])).toBe(true);
     expect(wantsHelp(['audit', 'help'])).toBe(false);   // audit's own gate sees ['help']
-    expect(wantsHelp(['help'], { verbDepth: 2 })).toBe(true);
-    // Still not a help request at either depth — this is the reported defect.
-    expect(wantsHelp(['memories', 'prune', '--project', 'help'], {
-      verbDepth: 2,
-      valueFlags: MEMORIES_VALUE_FLAGS,
-    })).toBe(false);
-    expect(wantsHelp(['openclaw', 'skill', 'install', '--agent', 'help'], {
-      verbDepth: 2,
-      valueFlags: OPENCLAW_VALUE_FLAGS,
-    })).toBe(false);
+    expect(argvWantsHelp(['help'])).toBe(true);
+    // Not a help request at either level — this is the round-2 reported defect.
+    expect(argvWantsHelp(['memories', 'prune', '--project', 'help'])).toBe(false);
+    expect(argvWantsHelp(['openclaw', 'skill', 'install', '--agent', 'help'])).toBe(false);
+    // …and this is the round-3 one: a value flag the global gate did not know.
+    expect(argvWantsHelp(['audit', '--deps-path', 'node_modules', 'help'])).toBe(true);
   });
 
   it('the index.ts gates agree with the gate the command itself applies', () => {
     const cases: Array<[string[], boolean]> = [
       [['audit', 'help'], true],
       [['audit', '--help'], true],
+      [['audit', '--deps-path', 'node_modules', 'help'], true],
       [['memories', 'prune', '--project', 'help'], false],
       [['memories', 'migrate-legacy', '--source', 'help'], false],
       [['openclaw', 'skill', 'install', '--agent', 'help'], false],
       [['update', '--allow-conversation-access'], false],
     ];
     for (const [argv, expected] of cases) {
-      expect({ argv, help: wantsHelp(argv, { verbDepth: 2, valueFlags: MEMORIES_VALUE_FLAGS }) })
-        .toEqual({ argv, help: expected });
+      expect({ argv, help: argvWantsHelp(argv) }).toEqual({ argv, help: expected });
     }
   });
 
