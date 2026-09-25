@@ -1073,7 +1073,7 @@ function safeSignalList(signals) {
 const SPANLESS_SIGNAL_RE = /^(secret-egress|credential-access)/;
 const MAX_MATCH_ROWS = 25;
 
-// ── Evidence contract (r5 — closed vocabulary, not projection of input) ──
+// ── Evidence contract (r6 — closed vocabulary; nothing derived from or selected by input) ──
 //
 // r1–r3 tried to make the matched command text safe to KEEP (collapse,
 // bound, credential-redact, tokenise) and each round closed one shape while
@@ -1088,20 +1088,24 @@ const MAX_MATCH_ROWS = 25;
 // vocabulary; it only says what a value is SPELLED like, never whether it
 // was a credential argument.
 //
-// r5 closes the class by construction: NO string persisted on a match row
-// is ever derived from the input. Every string field is drawn from a table
-// in this file, and every other field is a bounded number or a boolean:
+// r5 removed hosts, flags and basenames but kept a `verb`: argv[0] looked up
+// in a table in this file, with the table's entry persisted rather than the
+// token. That is still a string SELECTED by the input, through a mechanism
+// (a table keyed on input text) that invites the next round to widen it.
+// r6 takes the reviewer's descope whole: the durable row carries the RULE
+// NAME from the guard's own signal table, two withholding constants, and
+// bounded counts and booleans. There is no field a token can be copied
+// into, and no field a token can be looked up into.
 //
-//   - `signal`        — the rule name, only if it is in `SAFE_SIGNALS`.
+//   - `signal`        — the rule name, only if it is in `SAFE_SIGNALS`. This
+//                       is the one place a row says WHAT KIND of thing
+//                       matched, and it is the guard's vocabulary, never
+//                       an echo of the command.
 //   - `spanWithheld`  — the constant `'command-text'` on every row that had
 //                       a command-derived span. The span itself is never
-//                       persisted, verbatim, redacted or projected.
-//   - `verb`          — an entry of `KNOWN_VERBS` (the table below), when
-//                       the basename of argv[0] is one. The persisted string
-//                       is the TABLE's entry, not the token. Anything else
-//                       (a path, an env assignment, a quoted run, a word
-//                       the table does not know) contributes no verb.
-//   - `argc`          — how many shell-aware tokens the span had. A count.
+//                       persisted, verbatim, redacted, projected or looked up.
+//   - `argc`          — how many shell-aware tokens the span had, capped at
+//                       `MAX_ARGC`. A bounded count.
 //   - `pipe`          — true when an unquoted token contains `|`. Named for
 //                       exactly what is tested — a pipe operator is present
 //                       — not for what it pipes into.
@@ -1114,52 +1118,24 @@ const MAX_MATCH_ROWS = 25;
 //                       integer) and `chainDepth` (a capped count of chain
 //                       components) are what survive.
 //
-// No hosts, no flags, no basenames: each of those was a string copied out
-// of the input on the strength of its spelling, which is the defect. What
-// an operator loses is diagnostic colour; what they keep is the rule that
-// fired, the row it fired on, the shape of the command (verb from a known
-// set, argument count, pipe/subshell) and where in a folded script it was.
-// Richer diagnostic text, if ever wanted, is a separately designed
-// operator-only surface, not this durable file.
+// No verb, no hosts, no flags, no basenames: each of those was a string
+// copied out of, or chosen by, the input, which is the defect. What an
+// operator loses is diagnostic colour; what they keep is the rule that
+// fired, the row it fired on, the shape of the command (argument count,
+// pipe/subshell) and where in a folded script it was. Richer diagnostic
+// text, if ever wanted, is a separately designed operator-only surface,
+// not this durable file.
 //
 // The credential redactor from `dist/defence/credential-leak` is not on
 // this path: there is no free-text field for it to run over, so the row is
 // identical whether that module is absent, present, or throws.
-// `tokenizeShellArgs` survives because the verb lookup and the counts need
-// a shell-aware tokeniser; it never hands a token's raw text back out to
-// anything that persists.
+// `tokenizeShellArgs` survives because the counts need a shell-aware
+// tokeniser; it never hands a token's raw text back out to anything that
+// persists.
 
-/**
- * The only strings `verb` can ever be. Lookup is by the lower-cased
- * basename of argv[0]; the value persisted is the entry from this set, so a
- * token that is not in it contributes nothing rather than a fragment of
- * itself. Extending this table is a code change, reviewed as one; it is
- * never extended from input.
- */
-const KNOWN_VERBS = new Set([
-  // privilege / identity
-  'sudo', 'su', 'doas', 'pkexec', 'runas',
-  // shells and interpreters
-  'sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'cmd', 'powershell', 'pwsh',
-  'python', 'python3', 'node', 'perl', 'ruby', 'php', 'osascript', 'eval', 'exec', 'source',
-  // network
-  'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'nc', 'ncat', 'netcat', 'socat', 'telnet', 'ftp',
-  // filesystem
-  'rm', 'mv', 'cp', 'dd', 'ln', 'chmod', 'chown', 'chgrp', 'shred', 'truncate',
-  'mount', 'umount', 'tee', 'cat', 'echo', 'printf', 'sed', 'awk', 'find', 'xargs', 'tar', 'zip', 'unzip',
-  // encoding / crypto
-  'base64', 'xxd', 'openssl', 'gpg',
-  // processes / services / scheduling
-  'kill', 'pkill', 'killall', 'systemctl', 'service', 'launchctl', 'crontab', 'at', 'nohup', 'env', 'export',
-  // package / container / cloud
-  'npm', 'npx', 'pip', 'pip3', 'brew', 'apt', 'apt-get', 'yum', 'dnf', 'docker', 'kubectl', 'git',
-  'aws', 'gcloud', 'az',
-  // firewalls
-  'iptables', 'ip6tables', 'nft', 'ufw',
-]);
-/** argv[0] is looked up only when it is a bare word or a path ending in one — the lookup key never persists. */
-const VERB_KEY_RE = /^(?:[^\s'"`$]*[\\/])?([A-Za-z0-9_.+-]{1,32})$/;
 const MAX_CHAIN_DEPTH = 6;
+/** `argc` is a bounded count, not a proxy for the command's length. */
+const MAX_ARGC = 256;
 /**
  * The hook must not assume the dist it loads bounds a span to any size (see
  * the file header). Nothing here is a security boundary — the tokeniser is
@@ -1167,22 +1143,6 @@ const MAX_CHAIN_DEPTH = 6;
  * done on a pathologically large string from a compromised or buggy dist.
  */
 const MAX_PROJECTION_INPUT_CHARS = 8192;
-
-/**
- * `verb` is a lookup, not a copy: the token's lower-cased basename is used
- * as a KEY into `KNOWN_VERBS`, and what comes back — or nothing — is what
- * persists. The token itself never does.
- */
-function lookupVerb(tokens) {
-  const first = tokens[0];
-  if (!first || first.quote !== null || typeof first.value !== 'string') return undefined;
-  const m = VERB_KEY_RE.exec(first.value);
-  if (!m) return undefined;
-  const key = m[1].toLowerCase();
-  if (!KNOWN_VERBS.has(key)) return undefined;
-  for (const entry of KNOWN_VERBS) if (entry === key) return entry;
-  return undefined;
-}
 
 function projectShellShape(tokens) {
   let pipe = false;
@@ -1196,10 +1156,11 @@ function projectShellShape(tokens) {
 }
 
 /**
- * The whole safety mechanism for command-derived evidence (r5): `value` is
- * tokenised, and what is returned is a verb LOOKED UP in a table, a token
- * count, and two booleans. No substring of `value`, redacted or otherwise,
- * is ever returned.
+ * The whole safety mechanism for command-derived evidence (r6): `value` is
+ * tokenised, and what is returned is a constant, a capped token count, and
+ * two booleans. No substring of `value`, redacted or otherwise, is ever
+ * returned, and no string is chosen BY `value` either — there is no table
+ * keyed on its tokens.
  */
 function projectCommandEvidence(value) {
   if (typeof value !== 'string') return null;
@@ -1208,9 +1169,7 @@ function projectCommandEvidence(value) {
   const tokens = tokenizeShellArgs(trimmed);
   if (tokens.length === 0) return null;
   const out = { spanWithheld: 'command-text' };
-  const verb = lookupVerb(tokens);
-  if (verb) out.verb = verb;
-  out.argc = tokens.length;
+  out.argc = Math.min(tokens.length, MAX_ARGC);
   const { pipe, subshell } = projectShellShape(tokens);
   if (pipe) out.pipe = true;
   if (subshell) out.subshell = true;
@@ -1223,8 +1182,8 @@ function projectCommandEvidence(value) {
  * (`\` escapes `" \ $` \``` only); outside quotes `\` escapes the next
  * character. Each token records its decoded `value` and `quote` (the quote
  * character when the ENTIRE token was one closed quoted run, else `null`) —
- * no token ever has its raw text or position handed back to a caller, so
- * that is all a projection needs.
+ * the only consumers are the count and the two shape booleans, neither of
+ * which persists a token's text or anything chosen by it.
  */
 function tokenizeShellArgs(text) {
   const tokens = [];
@@ -1300,10 +1259,10 @@ function projectProvenance(rawSource, rawChain) {
  * Project the guard's rule → matched-span evidence for the denial record.
  * Fail-closed on every axis, and closed-vocabulary by construction: an
  * unrecognised rule name is dropped; a command-derived span contributes
- * only what `projectCommandEvidence` looks up or counts (never any of its
- * text); provenance contributes only that it existed and how deep it was.
- * Every string on a returned row is one of `SAFE_SIGNALS`, `KNOWN_VERBS`,
- * `'command-text'` or `'path'`.
+ * only what `projectCommandEvidence` counts (never any of its text, and
+ * never a string chosen by it); provenance contributes only that it existed
+ * and how deep it was. Every string on a returned row is one of
+ * `SAFE_SIGNALS`, `'command-text'` or `'path'`.
  */
 function safeMatchList(matches) {
   if (!Array.isArray(matches)) return [];
