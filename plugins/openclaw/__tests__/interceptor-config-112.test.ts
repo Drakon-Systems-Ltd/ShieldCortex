@@ -270,7 +270,7 @@ describe('#310 — OpenClaw native approval cards', () => {
     const v = evaluateToolCall('process', { action: 'write', sessionId: 's1', data: 'x' });
     const text = formatActionGuardPrompt('process', v, { action: 'write', sessionId: 's1', data: 'x' });
     expect(text).toMatch(/^🛡️ ShieldCortex needs a yes/m);
-    expect(text).toContain('Jarvis wants to type into a running command (write)');
+    expect(text).toContain('Your agent wants to type into a running command (write)');
     expect(text).toContain('Allow once is this call only');
     expect(text).toContain('[Allow once]  [Deny]');
     expect(text.split('\n')[0]).not.toMatch(/invalid_tool_input/);
@@ -289,7 +289,7 @@ describe('#310 — OpenClaw native approval cards', () => {
       signals: ['invalid-tool-input', 'unknown-keys'],
     };
     const text = formatActionGuardPrompt('mystery', v, { action: 'list' });
-    expect(text).toContain('Jarvis used mystery, which ShieldCortex does not fully recognise yet');
+    expect(text).toContain('Your agent used mystery, which ShieldCortex does not fully recognise yet');
     expect(text).toContain('It does not teach the tool');
     expect(text.split('\n')[0]).not.toMatch(/invalid_tool_input/);
   });
