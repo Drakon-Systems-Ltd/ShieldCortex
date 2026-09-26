@@ -6,6 +6,7 @@ import {
   GUARD_PRECISION_CORPUS,
   type GuardCorpusEntry,
 } from '../defence/iron-dome/guard-precision-corpus.js';
+import { measuredOpenClawSpawnRevisions } from '../defence/iron-dome/tool-input-schema.js';
 
 /**
  * #182 — the Action Guard precision gate.
@@ -67,5 +68,61 @@ describe('#182 guard precision gate — measured rates', () => {
 
     expect(falsePositives.map((e) => e.args.command)).toEqual([]);
     expect(falseNegatives.map((e) => e.args.command)).toEqual([]);
+  });
+});
+
+/**
+ * #596 — the `sessions_spawn` fixtures say what they prove.
+ *
+ * The precision rows above are DECISION-only: a spawn row stays `allow` whether
+ * or not every key in it is a declared host field, because an undeclared key is
+ * dropped as contract drift rather than denied. So a row labelled "all 28
+ * declared fields" that quietly carried a key the host never declared
+ * (`category`, `timeoutSeconds` — #595 review) would still be green while its
+ * label overclaimed. These pins bind each label to the measured revision table
+ * in `tool-input-schema.ts`: put a stowaway key back and THIS goes red, not the
+ * decision gate.
+ */
+describe('#596 sessions_spawn fixture honesty — labels pinned to the measured contract', () => {
+  const revisions = measuredOpenClawSpawnRevisions();
+  const measured2026_8_1 = revisions.find((r) => r.hostVersion === '2026.8.1');
+  const measuredUnion = new Set(revisions.flatMap((r) => r.keys));
+  const spawnRows = SAFE_CORPUS.filter((e) => e.tool.endsWith('sessions_spawn'));
+  const keysOf = (e: GuardCorpusEntry): string[] => Object.keys(e.args).sort();
+  /** The one row that DELIBERATELY carries an undeclared key, to prove drift is dropped, not denied. */
+  const DRIFT_PROBE_KEY = 'speculativeNewHostField';
+
+  it('the 2026.8.1 revision the labels refer to is in the measured table, at 28 keys', () => {
+    expect(measured2026_8_1).toBeDefined();
+    expect(measured2026_8_1!.keys).toHaveLength(28);
+  });
+
+  it("the 'all 28 declared fields' row carries EXACTLY the measured 2026.8.1 key set", () => {
+    const rows = spawnRows.filter((e) => e.why.includes('all 28 declared fields'));
+    expect(rows.map((e) => e.why)).toHaveLength(1);
+    // Exact equality, both directions: a stowaway key (never declared) and a
+    // missing key (declared, not exercised) both falsify the label.
+    expect(keysOf(rows[0]!)).toEqual(measured2026_8_1!.keys);
+  });
+
+  it("the 'Feb field set' row is a strict subset of the measured 2026.8.1 keys", () => {
+    const rows = spawnRows.filter((e) => e.why.includes('Feb field set'));
+    expect(rows.map((e) => e.why)).toHaveLength(1);
+    const keys = keysOf(rows[0]!);
+    const declared = new Set(measured2026_8_1!.keys);
+    expect(keys.filter((k) => !declared.has(k))).toEqual([]);
+    expect(keys.length).toBeLessThan(measured2026_8_1!.keys.length);
+  });
+
+  it('no sessions_spawn SAFE row carries a key no measured host declares, except the drift probe', () => {
+    const stowaways = spawnRows
+      .map((e) => ({
+        why: e.why,
+        unmeasured: keysOf(e).filter((k) => !measuredUnion.has(k) && k !== DRIFT_PROBE_KEY),
+      }))
+      .filter((r) => r.unmeasured.length > 0);
+    expect(stowaways).toEqual([]);
+    // The exception must still be exercised somewhere, or the carve-out is dead text.
+    expect(spawnRows.filter((e) => DRIFT_PROBE_KEY in e.args)).toHaveLength(1);
   });
 });
