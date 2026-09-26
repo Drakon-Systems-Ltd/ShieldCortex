@@ -87,6 +87,45 @@ function matchBrace(src, open) {
 }
 
 /**
+ * Does the spread expression that ended at `i` END the property there? A spread
+ * is only a bare named spread (or a gated block) when the next significant
+ * character is the property separator or the end of the literal body. Anything
+ * else — `...X && { … }`, `...X.member`, `...X ?? Y`, `...X ? {…} : {…} || Z` —
+ * is an expression this walker does not evaluate, and its declared set is NOT
+ * the named object's; it must be refused, never counted as the bare spread.
+ * Returns the index of the terminator (`,` or body end), or -1.
+ */
+function spreadTerminator(body, i) {
+  let j = i;
+  while (j < body.length) {
+    const skipped = skipOpaque(body, j);
+    if (skipped !== j) { j = skipped; continue; }
+    if (/\s/.test(body[j])) { j++; continue; }
+    return body[j] === ',' ? j : -1;
+  }
+  return j;
+}
+
+/** Advance from `i` to the next top-level `,` in `body` (or its end), skipping nested brackets. */
+function skipToPropertyEnd(body, i) {
+  let j = i;
+  while (j < body.length) {
+    const skipped = skipOpaque(body, j);
+    if (skipped !== j) { j = skipped; continue; }
+    const c = body[j];
+    if (c === ',') return j;
+    if (c === '{' || c === '(' || c === '[') {
+      const e = matchBrace(body, j);
+      if (e === -1) throw new Error('unbalanced value');
+      j = e + 1;
+      continue;
+    }
+    j++;
+  }
+  return j;
+}
+
+/**
  * Declared top-level keys of the object literal whose `{` sits at `open`.
  *
  * Returns `{ keys, unresolved }`: `keys` in declaration order, de-duplicated;
@@ -124,8 +163,6 @@ export function declaredTopLevelKeys(src, open, seen = new Set()) {
           const branchClose = matchBrace(body, branchOpen);
           if (branchClose === -1) throw new Error('unbalanced gated block');
           const inner = declaredTopLevelKeys(body, branchOpen, seen);
-          inner.keys.forEach(push);
-          unresolved.push(...inner.unresolved);
           // the alternative branch
           const after = body.slice(branchClose + 1);
           const alt = after.match(/^\s*:\s*\{/);
@@ -134,15 +171,38 @@ export function declaredTopLevelKeys(src, open, seen = new Set()) {
           const altClose = matchBrace(body, altOpen);
           if (altClose === -1) throw new Error('unbalanced alternative branch');
           const innerAlt = declaredTopLevelKeys(body, altOpen, seen);
+          const gatedEnd = spreadTerminator(body, altClose + 1);
+          if (gatedEnd === -1) {
+            // `...c ? {…} : {…} <more>` — the block is an operand of a wider
+            // expression; its branches are not simply the declared fields.
+            unresolved.push(body.slice(i, skipToPropertyEnd(body, altClose + 1)).replace(/\s+/g, ' ').slice(0, 60).trim());
+            i = skipToPropertyEnd(body, altClose + 1);
+            atPropertyStart = false;
+            continue;
+          }
+          inner.keys.forEach(push);
+          unresolved.push(...inner.unresolved);
           innerAlt.keys.forEach(push);
           unresolved.push(...innerAlt.unresolved);
-          i = altClose + 1;
+          i = gatedEnd;
           atPropertyStart = false;
           continue;
         }
         const named = rest.match(/^\s*([A-Za-z_$][\w$]*)/);
         if (named) {
           const name = named[1];
+          const afterName = i + 3 + named[0].length;
+          const end = spreadTerminator(body, afterName);
+          if (end === -1) {
+            // `...NAME <more>` — `&& {…}`, `.member`, `?? …`, `(…)`: the IDENT
+            // is only the prefix of an expression whose value this walker does
+            // not compute. Refuse it; do NOT count NAME's own fields.
+            const propEnd = skipToPropertyEnd(body, afterName);
+            unresolved.push(body.slice(i, propEnd).replace(/\s+/g, ' ').slice(0, 60).trim());
+            i = propEnd;
+            atPropertyStart = false;
+            continue;
+          }
           if (seen.has(name)) throw new Error(`cyclic spread of ${name}`);
           const decl = src.indexOf(`const ${name} = {`);
           if (decl === -1) {
@@ -153,7 +213,7 @@ export function declaredTopLevelKeys(src, open, seen = new Set()) {
             inner.keys.forEach(push);
             unresolved.push(...inner.unresolved);
           }
-          i += 3 + named[0].length;
+          i = end;
           atPropertyStart = false;
           continue;
         }

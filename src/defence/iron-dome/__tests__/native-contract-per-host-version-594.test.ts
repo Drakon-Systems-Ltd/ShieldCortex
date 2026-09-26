@@ -165,6 +165,54 @@ describe('2. the measurer reads the host bundle shape', () => {
     expect(unresolved).toEqual(['IMPORTED_ELSEWHERE']);
   });
 
+  // A named spread is only "the named object's fields" when the expression ENDS
+  // at the name. Tars's #595 finding: `...NAME && {…}` and `...NAME.member`
+  // measured the identical base set with unresolved:[] — a false success that
+  // would record a set the host no longer declares.
+  const NAMED_FIELDS = ['placement', 'visible', 'worktree'];
+  it.each([
+    ['a logical operand', '...VISIBLE_SESSIONS_SPAWN_SCHEMA && { hostFieldShippedNextMonth: Type.String() },'],
+    ['a member access', '...VISIBLE_SESSIONS_SPAWN_SCHEMA.nextRevision,'],
+    ['a nullish fallback', '...VISIBLE_SESSIONS_SPAWN_SCHEMA ?? {},'],
+    ['a call', '...VISIBLE_SESSIONS_SPAWN_SCHEMA(),'],
+    ['a logical operand as the LAST property', '...VISIBLE_SESSIONS_SPAWN_SCHEMA && { x: 1 }'],
+  ])('refuses a named spread that is only the prefix of %s; the name\'s own fields are NOT counted', (_label, expr) => {
+    const src = expr.endsWith(',')
+      ? BUNDLE.replace('...VISIBLE_SESSIONS_SPAWN_SCHEMA,', expr)
+      : BUNDLE.replace('...VISIBLE_SESSIONS_SPAWN_SCHEMA,', '').replace(
+          '...params.acpAvailable ? { streamTo: Type.Optional(Type.String()) } : { legacyOnly: Type.Optional(Type.String()) }',
+          `...params.acpAvailable ? { streamTo: Type.Optional(Type.String()) } : { legacyOnly: Type.Optional(Type.String()) },\n\t\t${expr}`,
+        );
+    const { fields, unresolved } = measureSessionsSpawnSource(src);
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0]).toMatch(/^\.\.\.VISIBLE_SESSIONS_SPAWN_SCHEMA/);
+    for (const f of NAMED_FIELDS) expect(fields).not.toContain(f);
+    expect(fields).not.toContain('hostFieldShippedNextMonth');
+    expect(fields).not.toContain('x');
+    // the walk resumes correctly after the refused property
+    expect(fields).toEqual(expect.arrayContaining(['task', 'label', 'mode', 'attachments', 'thread', 'collect']));
+  });
+
+  it('refuses a gated block that is itself an operand of a wider expression', () => {
+    const src = BUNDLE.replace(
+      '...params.threadAvailable ? { thread: Type.Optional(Type.Boolean()) } : {},',
+      '...params.threadAvailable ? { thread: Type.Optional(Type.Boolean()) } : {} || { later: 1 },',
+    );
+    const { fields, unresolved } = measureSessionsSpawnSource(src);
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0]).toMatch(/^\.\.\.params\.threadAvailable/);
+    expect(fields).not.toContain('thread');
+    expect(fields).not.toContain('later');
+    expect(fields).toEqual(expect.arrayContaining(NAMED_FIELDS));
+  });
+
+  it('a bare named spread followed by a comment still terminates', () => {
+    const src = BUNDLE.replace('...VISIBLE_SESSIONS_SPAWN_SCHEMA,', '...VISIBLE_SESSIONS_SPAWN_SCHEMA /* shared */ , // base');
+    const { fields, unresolved } = measureSessionsSpawnSource(src);
+    expect(unresolved).toEqual([]);
+    expect(fields).toEqual(expect.arrayContaining(NAMED_FIELDS));
+  });
+
   it('fails loudly when the builder anchor is absent', () => {
     expect(() => measureSessionsSpawnSource('const x = { a: 1 };')).toThrow(/anchor not found/);
   });
