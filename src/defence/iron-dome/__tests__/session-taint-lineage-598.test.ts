@@ -3,10 +3,12 @@ import {
   bandForSpan,
   spanTaints,
   createSessionTaintLineage,
+  isTaintMarker,
   MAX_LINEAGE_ENTRIES,
   TRUST_BANDS,
   type SessionIdentity,
   type SpanProvenance,
+  type TaintMarker,
   type TrustBand,
 } from '../session-taint-lineage.js';
 import type { ProvenanceLabel } from '../../types.js';
@@ -177,7 +179,7 @@ describe('§2.2 — the store: keyed by host-owned identity, session-lifetime, n
     const s = host('sess-D');
     store.ingest(s, web);
     expect(Object.keys(store).sort()).toEqual(
-      ['endSession', 'ingest', 'inherit', 'memoryRecalled', 'memoryWritten', 'peerReturn', 'size', 'state'],
+      ['endSession', 'endedSize', 'ingest', 'inherit', 'memoryRecalled', 'memoryWritten', 'peerReturn', 'size', 'state'],
     );
     for (let i = 0; i < 5; i++) store.ingest(s, ownWords);
     expect(store.state(s)).toMatchObject({ ok: true, state: { tainted: true, origin: { spanId: 'span-web-1' } } });
@@ -217,13 +219,27 @@ describe('§2.2 — the store: keyed by host-owned identity, session-lifetime, n
     expect(store.size()).toBe(0);
   });
 
-  it('the host ending the session releases the record; a new session is a new identity', () => {
+  it('the host ending the session retires the live record but does not forget the taint (ended, not cleared)', () => {
     const store = createSessionTaintLineage();
     const s = host('sess-F');
     store.ingest(s, web);
+    expect(store.state(s)).toMatchObject({ ok: true, state: { tainted: true, ended: false } });
     expect(store.endSession(s)).toEqual({ ok: true });
     expect(store.size()).toBe(0);
-    expect(store.state(s)).toMatchObject({ ok: true, state: { tainted: false } });
+    expect(store.endedSize()).toBe(1);
+    // Not silently clean: the snapshot still answers, and says it ended.
+    expect(store.state(s)).toMatchObject({ ok: true, state: { tainted: true, ended: true, origin: { spanId: 'span-web-1' } } });
+    // Idempotent; ending twice neither errors nor clears.
+    expect(store.endSession(s)).toEqual({ ok: true });
+    expect(store.endedSize()).toBe(1);
+  });
+
+  it('ending a clean session records nothing: there is nothing to remember', () => {
+    const store = createSessionTaintLineage();
+    expect(store.endSession(host('never-tainted'))).toEqual({ ok: true });
+    expect(store.size()).toBe(0);
+    expect(store.endedSize()).toBe(0);
+    expect(store.state(host('never-tainted'))).toMatchObject({ ok: true, state: { tainted: false } });
   });
 
   it('lineage is bounded: rows beyond the cap are counted, never silently dropped', () => {
@@ -273,7 +289,8 @@ describe('§2.2 — lifetime: taint is inherited by children, memory and peer re
     const store = createSessionTaintLineage();
     const writer = host('writer');
     store.ingest(writer, web);
-    expect(store.memoryWritten('mem-tainted', writer)).toEqual({ ok: true, tainted: true });
+    const w = store.memoryWritten('mem-tainted', writer);
+    expect(w).toMatchObject({ ok: true, tainted: true, marker: { v: 1, memoryRef: 'mem-tainted', fromSessionId: 'writer', spanId: 'span-web-1', band: 'untrusted-external' } });
 
     const fresh = host('fresh');
     expect(store.state(fresh)).toMatchObject({ ok: true, state: { tainted: false } });
@@ -288,20 +305,23 @@ describe('§2.2 — lifetime: taint is inherited by children, memory and peer re
 
   it('a memory written from a clean session carries no marker, and recalling it does not taint', () => {
     const store = createSessionTaintLineage();
-    expect(store.memoryWritten('mem-clean', host('clean-writer'))).toEqual({ ok: true, tainted: false });
-    expect(store.memoryRecalled('mem-clean', host('reader'))).toMatchObject({ ok: true, state: { tainted: false } });
+    expect(store.memoryWritten('mem-clean', host('clean-writer'))).toEqual({ ok: true, tainted: false, marker: null });
+    expect(store.memoryRecalled('mem-clean', host('reader'))).toMatchObject({ ok: true, state: { tainted: false }, evidence: 'known-clean' });
   });
 
   it('a memory marker is never unset by a later clean write of the same reference', () => {
     const store = createSessionTaintLineage();
     store.ingest(host('w1'), web);
     store.memoryWritten('mem-x', host('w1'));
-    expect(store.memoryWritten('mem-x', host('w2-clean'))).toEqual({ ok: true, tainted: true });
+    expect(store.memoryWritten('mem-x', host('w2-clean'))).toMatchObject({ ok: true, tainted: true, marker: { fromSessionId: 'w1' } });
   });
 
-  it('an empty memory reference is refused', () => {
+  it('an empty memory reference is refused on write AND on recall', () => {
     const store = createSessionTaintLineage();
     expect(store.memoryWritten('', host('w'))).toMatchObject({ ok: false, refused: 'empty-identity' });
+    expect(store.memoryRecalled('', host('r'))).toMatchObject({ ok: false, refused: 'empty-identity' });
+    expect(store.memoryRecalled('', host('r'), { taint: null })).toMatchObject({ ok: false, refused: 'empty-identity' });
+    expect(store.size()).toBe(0);
   });
 
   it('a return from a peer whose session is tainted IN THE STORE taints the receiver, even signature-verified', () => {
@@ -330,5 +350,219 @@ describe('§2.2 — lifetime: taint is inherited by children, memory and peer re
     const store = createSessionTaintLineage();
     store.ingest(host('x'), web);
     expect(store.state(host('y'))).toMatchObject({ ok: true, state: { tainted: false } });
+  });
+});
+
+describe('§2.2 lifecycle — ending a producer never launders what it produced (#599 finding 1)', () => {
+  const signed: SpanProvenance = { label: 'agent_message', attestation: 'host', signatureVerified: true, spanId: 'late-reply' };
+
+  it('end-before-delivery: a signed return from a tainted peer that ended before delivery still taints the receiver', () => {
+    const store = createSessionTaintLineage();
+    const peer = host('peer-P');
+    store.ingest(peer, web);
+    // Same return, delivered BEFORE the end, taints — that is the baseline.
+    expect(store.peerReturn(host('rx-early'), peer, signed)).toMatchObject({ ok: true, state: { tainted: true } });
+    expect(store.endSession(peer)).toEqual({ ok: true });
+    // Delivered AFTER the end, with no copied lineage on the span: still taints.
+    const late = store.peerReturn(host('rx-late'), peer, signed);
+    expect(late).toMatchObject({
+      ok: true,
+      state: { tainted: true, ended: false, origin: { route: 'peer-return', fromSessionId: 'peer-P', band: 'signed-peer', spanId: 'late-reply' } },
+    });
+    expect(late.ok && late.state.tainted && late.state.origin.reason).toMatch(/peer ended before delivery; snapshot/);
+  });
+
+  it('late write: a memory written from a tainted session after it ended still carries the marker', () => {
+    const store = createSessionTaintLineage();
+    const writer = host('writer-late');
+    store.ingest(writer, web);
+    store.endSession(writer);
+    expect(store.memoryWritten('mem-late', writer)).toMatchObject({ ok: true, tainted: true, marker: { fromSessionId: 'writer-late', spanId: 'span-web-1' } });
+    expect(store.memoryRecalled('mem-late', host('reader'))).toMatchObject({ ok: true, state: { tainted: true, origin: { memoryRef: 'mem-late' } }, evidence: 'local-marker' });
+  });
+
+  it('late spawn: a child recorded after its tainted parent ended still inherits', () => {
+    const store = createSessionTaintLineage();
+    store.ingest(host('parent-late'), web);
+    store.endSession(host('parent-late'));
+    const r = store.inherit(host('child-late'), host('parent-late'), 'inherit-spawn');
+    expect(r).toMatchObject({ ok: true, state: { tainted: true, origin: { route: 'inherit-spawn', fromSessionId: 'parent-late', spanId: 'span-web-1' } } });
+    expect(r.ok && r.state.tainted && r.state.origin.reason).toMatch(/parent ended before the spawn was recorded; snapshot/);
+  });
+
+  it('an ended session cannot be the SUBJECT of anything: ingest, inherit-into, receive, recall are refused, not silently clean', () => {
+    const store = createSessionTaintLineage();
+    const s = host('ended-S');
+    store.ingest(s, web);
+    store.endSession(s);
+    const refused = { ok: false, refused: 'session-ended' };
+    expect(store.ingest(s, ownWords)).toMatchObject(refused);
+    expect(store.ingest(s, web)).toMatchObject(refused);
+    expect(store.inherit(s, host('some-parent'), 'inherit-fork')).toMatchObject(refused);
+    expect(store.peerReturn(s, host('some-peer'), signed)).toMatchObject(refused);
+    expect(store.memoryRecalled('mem-any', s, { taint: null })).toMatchObject(refused);
+    // The snapshot is intact and still says ended + tainted; nothing was re-keyed as live.
+    expect(store.state(s)).toMatchObject({ ok: true, state: { tainted: true, ended: true } });
+    expect(store.size()).toBe(0);
+    expect(store.endedSize()).toBe(1);
+  });
+
+  it('a content-asserted identity cannot end a session even after it ended — the refusal is unchanged', () => {
+    const store = createSessionTaintLineage();
+    store.ingest(host('sess-Z'), web);
+    store.endSession(host('sess-Z'));
+    expect(store.endSession(content('sess-Z'))).toMatchObject({ ok: false, refused: 'content-asserted-identity' });
+    expect(store.state(host('sess-Z'))).toMatchObject({ ok: true, state: { tainted: true, ended: true } });
+  });
+
+  it('there is still no TTL and no clear on an ended snapshot', () => {
+    const c = clock();
+    const store = createSessionTaintLineage({ now: c.now });
+    store.ingest(host('old'), web);
+    store.endSession(host('old'));
+    c.advance(365 * 24 * 60 * 60 * 1000);
+    expect(store.peerReturn(host('rx'), host('old'), signed)).toMatchObject({ ok: true, state: { tainted: true } });
+  });
+});
+
+describe('§2.2 memory — the marker travels in the frame, so two independent instances agree (#599 finding 2)', () => {
+  function writeInA(): TaintMarker {
+    const A = createSessionTaintLineage();
+    const writer = host('writer-A');
+    A.ingest(writer, web);
+    const w = A.memoryWritten('mem-1', writer);
+    if (!(w.ok && w.tainted)) throw new Error('expected a tainted write');
+    return w.marker;
+  }
+
+  it('the marker is portable plain data that validates', () => {
+    const m = writeInA();
+    expect(isTaintMarker(m)).toBe(true);
+    expect(isTaintMarker(JSON.parse(JSON.stringify(m)))).toBe(true);
+    expect(m).toMatchObject({ v: 1, memoryRef: 'mem-1', fromSessionId: 'writer-A', route: 'ingest', band: 'untrusted-external', spanId: 'span-web-1' });
+    expect(Object.isFrozen(m)).toBe(true);
+  });
+
+  it('a recall in a DIFFERENT instance that consumes the frame marker taints the recalling session', () => {
+    const m = writeInA();
+    const B = createSessionTaintLineage();
+    const reader = host('reader-B');
+    const r = B.memoryRecalled('mem-1', reader, { taint: JSON.parse(JSON.stringify(m)) });
+    expect(r).toMatchObject({
+      ok: true,
+      evidence: 'marker',
+      state: { tainted: true, origin: { route: 'memory-recall', band: 'stored-memory', memoryRef: 'mem-1', fromSessionId: 'writer-A', spanId: 'span-web-1' } },
+    });
+    // B now knows the reference: a second recall there needs no frame.
+    expect(B.memoryRecalled('mem-1', host('reader-B2'))).toMatchObject({ ok: true, evidence: 'local-marker', state: { tainted: true } });
+  });
+
+  it('a recall with NO evidence — unseen here, no frame — is missing provenance and fails closed', () => {
+    const B = createSessionTaintLineage();
+    const r = B.memoryRecalled('mem-never-seen', host('reader'));
+    expect(r).toMatchObject({ ok: true, evidence: 'missing', state: { tainted: true, origin: { route: 'memory-recall', band: 'stored-memory', memoryRef: 'mem-never-seen', spanId: null } } });
+    expect(r.ok && r.state.tainted && r.state.origin.reason).toMatch(/fail-closed/);
+  });
+
+  it('known-clean is distinguished from missing: a frame that attests clean, or a clean write through this store, does not taint', () => {
+    const B = createSessionTaintLineage();
+    expect(B.memoryRecalled('mem-frame-clean', host('r1'), { taint: null })).toMatchObject({ ok: true, evidence: 'known-clean', state: { tainted: false } });
+    B.memoryWritten('mem-local-clean', host('clean-writer'));
+    expect(B.memoryRecalled('mem-local-clean', host('r2'))).toMatchObject({ ok: true, evidence: 'known-clean', state: { tainted: false } });
+    expect(B.size()).toBe(0);
+  });
+
+  it.each([
+    ['a string', 'tainted'],
+    ['true', true],
+    ['an empty object', {}],
+    ['a marker missing its version', { memoryRef: 'mem-1', fromSessionId: 'w', writtenAtMs: 1, route: 'ingest', spanId: null, band: 'web', reason: '', atMs: 1 }],
+    ['a marker with an unknown band', { v: 1, memoryRef: 'mem-1', fromSessionId: 'w', writtenAtMs: 1, route: 'ingest', spanId: null, band: 'operator-ish', reason: '', atMs: 1 }],
+    ['a marker for a different reference', { v: 1, memoryRef: 'mem-OTHER', fromSessionId: 'w', writtenAtMs: 1, route: 'ingest', spanId: null, band: 'web', reason: '', atMs: 1 }],
+  ])('a frame whose taint field is not a valid marker for this reference is missing evidence, fail-closed: %s', (_n, taint) => {
+    const B = createSessionTaintLineage();
+    expect(B.memoryRecalled('mem-1', host('r'), { taint })).toMatchObject({ ok: true, evidence: 'missing', state: { tainted: true } });
+  });
+
+  it('a frame claiming clean cannot launder a reference this store marked: local marker wins', () => {
+    const A = createSessionTaintLineage();
+    A.ingest(host('w'), web);
+    A.memoryWritten('mem-marked', host('w'));
+    expect(A.memoryRecalled('mem-marked', host('r'), { taint: null })).toMatchObject({ ok: true, evidence: 'local-marker', state: { tainted: true } });
+  });
+
+  it('markers hydrate a fresh instance on construction; invalid entries are ignored and stay fail-closed', () => {
+    const m = writeInA();
+    const C = createSessionTaintLineage({ memoryMarkers: [m, 'junk', { v: 2 }] });
+    expect(C.memoryRecalled('mem-1', host('r'))).toMatchObject({ ok: true, evidence: 'local-marker', state: { tainted: true, origin: { fromSessionId: 'writer-A' } } });
+    expect(C.memoryRecalled('mem-2', host('r2'))).toMatchObject({ ok: true, evidence: 'missing', state: { tainted: true } });
+  });
+
+  it('a marker handed to a caller is frozen; mutating it changes nothing in the store', () => {
+    const A = createSessionTaintLineage();
+    A.ingest(host('w'), web);
+    const w = A.memoryWritten('mem-m', host('w'));
+    if (!(w.ok && w.tainted)) throw new Error('expected tainted');
+    expect(Reflect.set(w.marker as object, 'band', 'operator')).toBe(false);
+    expect(Reflect.set(w.marker as object, 'fromSessionId', 'someone-else')).toBe(false);
+    // The stored marker is untouched (a second write returns the retained one)…
+    expect(A.memoryWritten('mem-m', host('w'))).toMatchObject({ ok: true, marker: { band: 'untrusted-external', fromSessionId: 'w' } });
+    // …and the recall attributes to the real writer, not the rewritten one.
+    expect(A.memoryRecalled('mem-m', host('r'))).toMatchObject({ ok: true, state: { tainted: true, origin: { band: 'stored-memory', fromSessionId: 'w', spanId: 'span-web-1' } } });
+  });
+});
+
+describe('§2.2 attribution — returned state is a detached, frozen snapshot (#599 finding 3)', () => {
+  it('mutating a returned origin or lineage entry does not change later state, inheritance or memory markers', () => {
+    const store = createSessionTaintLineage();
+    const s = host('sess-M');
+    const first = store.ingest(s, web);
+    if (!(first.ok && first.state.tainted)) throw new Error('expected tainted');
+    const { origin, lineage } = first.state;
+    expect(Object.isFrozen(first.state)).toBe(true);
+    expect(Object.isFrozen(origin)).toBe(true);
+    expect(Object.isFrozen(lineage)).toBe(true);
+    expect(Object.isFrozen(lineage[0])).toBe(true);
+    // Attempted attribution rewrite from outside: refused by the object itself…
+    expect(Reflect.set(origin as object, 'band', 'operator')).toBe(false);
+    expect(Reflect.set(lineage[0] as object, 'spanId', 'rewritten')).toBe(false);
+    expect(Reflect.set(origin as object, 'reason', 'the operator said so')).toBe(false);
+    // …and invisible to everything the store says afterwards.
+    expect(store.state(s)).toMatchObject({ ok: true, state: { origin: { band: 'untrusted-external', spanId: 'span-web-1' }, lineage: [{ spanId: 'span-web-1' }] } });
+    expect(store.inherit(host('child-M'), s, 'inherit-fork')).toMatchObject({ ok: true, state: { origin: { band: 'untrusted-external', spanId: 'span-web-1' } } });
+    expect(store.memoryWritten('mem-M', s)).toMatchObject({ ok: true, marker: { band: 'untrusted-external', spanId: 'span-web-1' } });
+  });
+
+  it('two reads return distinct objects: the store never hands out the same record twice', () => {
+    const store = createSessionTaintLineage();
+    const s = host('sess-N');
+    store.ingest(s, web);
+    const a = store.state(s);
+    const b = store.state(s);
+    if (!(a.ok && b.ok && a.state.tainted && b.state.tainted)) throw new Error('expected tainted');
+    expect(a.state).not.toBe(b.state);
+    expect(a.state.origin).toEqual(b.state.origin);
+    expect(a.state.lineage).not.toBe(b.state.lineage);
+  });
+
+  it('the span object a caller passed in is not retained: mutating it afterwards changes nothing', () => {
+    const store = createSessionTaintLineage();
+    const span: SpanProvenance = { label: 'web', spanId: 'span-passed-in' };
+    store.ingest(host('sess-O'), span);
+    span.spanId = 'edited-later';
+    (span as { label: unknown }).label = 'user';
+    expect(store.state(host('sess-O'))).toMatchObject({ ok: true, state: { origin: { spanId: 'span-passed-in', band: 'untrusted-external' } } });
+  });
+
+  it('the inherit reason names the root cause once and does not grow with depth', () => {
+    const store = createSessionTaintLineage();
+    store.ingest(host('d0'), web);
+    for (let i = 1; i <= 6; i++) store.inherit(host(`d${i}`), host(`d${i - 1}`), 'inherit-spawn');
+    const r1 = store.state(host('d1'));
+    const r6 = store.state(host('d6'));
+    if (!(r1.ok && r6.ok && r1.state.tainted && r6.state.tainted)) throw new Error('expected tainted');
+    expect(r6.state.origin.reason).toBe(r1.state.origin.reason);
+    expect(r6.state.origin.reason).toMatch(/^inherited from tainted session: /);
+    expect((r6.state.origin.reason.match(/inherited from tainted session/g) ?? []).length).toBe(1);
   });
 });

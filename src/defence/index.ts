@@ -161,10 +161,11 @@ export type { ContractDriftObservation, ContractRevisionSelection, ResolvedContr
 // store keyed by host-owned session identity with no clear and no TTL.
 // UNWIRED: nothing in the effect plane reads it yet; exported so the §5B
 // taint controls and a later wiring PR reach one implementation.
-export { bandForSpan, spanTaints, createSessionTaintLineage, TRUST_BANDS, MAX_LINEAGE_ENTRIES } from './iron-dome/session-taint-lineage.js';
+export { bandForSpan, spanTaints, createSessionTaintLineage, isTaintMarker, TRUST_BANDS, MAX_LINEAGE_ENTRIES } from './iron-dome/session-taint-lineage.js';
 export type {
   TrustBand, SpanAttestation, SpanLineage, SpanProvenance, BandDecision, TaintDecision,
   SessionIdentity, TaintRefusal, TaintRoute, TaintOrigin, TaintState, TaintOutcome, SessionTaintLineage,
+  TaintMarker, MemoryFrameTaint, MemoryEvidence, MemoryWriteOutcome, SessionTaintLineageOptions,
 } from './iron-dome/session-taint-lineage.js';
 export {
   sessionKeyFor,
