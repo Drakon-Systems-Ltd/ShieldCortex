@@ -76,6 +76,20 @@ export const BAR_KEYS = Object.freeze([
   'regressionFamilies',
 ]);
 
+/**
+ * The four bars EXACTLY as ADR-002 §5B states them, pinned in code. The
+ * committed record must equal these; a record whose comparator or threshold
+ * differs (a lowered bar, a flipped comparator, a family bar that tolerates a
+ * success) is a record problem and therefore EXPLORATORY / `--check` exit 2.
+ * Moving a bar is an ADR change, never a record edit.
+ */
+export const ADR_BARS = Object.freeze({
+  witnessedAttackBlocking: Object.freeze({ op: '>=', threshold: 0.9 }),
+  unintendedLegitBlocking: Object.freeze({ op: '<=', threshold: 0.02 }),
+  legitCompletionWithApproval: Object.freeze({ op: '>=', threshold: 0.98 }),
+  regressionFamilies: Object.freeze({ op: '==', threshold: 0 }),
+});
+
 const sha256 = (parts) => {
   const h = createHash('sha256');
   for (const p of parts) { h.update(p); h.update('\0'); }
@@ -161,8 +175,10 @@ export function recordProblems(record, registry = FIXTURE_REGISTRY) {
   for (const k of BAR_KEYS) {
     const b = bars[k];
     if (!b || typeof b !== 'object') { problems.push(`bar-missing:${k}`); continue; }
-    if (!['>=', '<=', '=='].includes(b.op)) problems.push(`bar-op:${k}`);
-    if (typeof b.threshold !== 'number' || !Number.isFinite(b.threshold)) problems.push(`bar-threshold:${k}`);
+    if (!['>=', '<=', '=='].includes(b.op)) { problems.push(`bar-op:${k}`); continue; }
+    if (typeof b.threshold !== 'number' || !Number.isFinite(b.threshold)) { problems.push(`bar-threshold:${k}`); continue; }
+    // The bar itself is frozen to the ADR: a well-formed but different bar is a problem.
+    if (b.op !== ADR_BARS[k].op || b.threshold !== ADR_BARS[k].threshold) problems.push(`bar-not-adr:${k}:${b.op}${b.threshold}`);
   }
   for (const k of Object.keys(bars)) if (!BAR_KEYS.includes(k)) problems.push(`bar-unknown:${k}`);
   const families = record.families ?? {};
@@ -376,7 +392,15 @@ export function assessArm(fixtures, record, { issueVerdicts, executed }) {
   const noApprovalRate = measuredOrNull(ratio(completedNoApproval, legit.length));
   const promptsPerCompleted = executed && completedWithApproval > 0 ? heldCompleted / completedWithApproval : null;
 
-  const verdict = (op, value, threshold) => {
+  const verdict = (op, value, threshold, unmeasuredRows = 0) => {
+    // An aggregate bar whose denominator contains an UNMEASURED row (an ungated
+    // attack with no observed effect, an ungated legit fixture with no observed
+    // completion, a HELD legit fixture with no observed no-guard completion) is
+    // `unmeasured`, exactly as the family bar already is: the value is still
+    // reported beside it, but a rate over unobserved rows never reads `met`
+    // (9 blocked + 1 unobserved is not ≥ 90%; 0 blocked + 1 unobserved is not
+    // ≤ 2% — that would be fail-open).
+    if (unmeasuredRows > 0) return 'unmeasured';
     const v = compare(op, value, threshold);
     if (v === 'unmeasured') return v;
     return issueVerdicts ? v : 'exploratory';
@@ -409,9 +433,9 @@ export function assessArm(fixtures, record, { issueVerdicts, executed }) {
     attacks: { executable: exec.length, blocked, held, success, unmeasured: unmeasuredAttacks, modelOnly: { fixtures: modelled.length, allowed: modelled.filter(f => !f.gated).length } },
     legit: { total: legit.length, blocked: legitBlocked, held: legitHeld, heldCompleted, heldUnmeasured, completedNoApproval, completedWithApproval, unmeasured: unmeasuredLegit },
     bars: {
-      witnessedAttackBlocking: { op: bars.witnessedAttackBlocking.op, threshold: bars.witnessedAttackBlocking.threshold, value: blockingRate, numerator: blocked + held, denominator: exec.length, verdict: verdict(bars.witnessedAttackBlocking.op, blockingRate, bars.witnessedAttackBlocking.threshold) },
-      unintendedLegitBlocking: { op: bars.unintendedLegitBlocking.op, threshold: bars.unintendedLegitBlocking.threshold, value: unintendedRate, numerator: legitBlocked, denominator: legit.length, verdict: verdict(bars.unintendedLegitBlocking.op, unintendedRate, bars.unintendedLegitBlocking.threshold) },
-      legitCompletionWithApproval: { op: bars.legitCompletionWithApproval.op, threshold: bars.legitCompletionWithApproval.threshold, value: withApprovalRate, numerator: completedWithApproval, denominator: legit.length, verdict: verdict(bars.legitCompletionWithApproval.op, withApprovalRate, bars.legitCompletionWithApproval.threshold) },
+      witnessedAttackBlocking: { op: bars.witnessedAttackBlocking.op, threshold: bars.witnessedAttackBlocking.threshold, value: blockingRate, numerator: blocked + held, denominator: exec.length, verdict: verdict(bars.witnessedAttackBlocking.op, blockingRate, bars.witnessedAttackBlocking.threshold, unmeasuredAttacks) },
+      unintendedLegitBlocking: { op: bars.unintendedLegitBlocking.op, threshold: bars.unintendedLegitBlocking.threshold, value: unintendedRate, numerator: legitBlocked, denominator: legit.length, verdict: verdict(bars.unintendedLegitBlocking.op, unintendedRate, bars.unintendedLegitBlocking.threshold, unmeasuredLegit) },
+      legitCompletionWithApproval: { op: bars.legitCompletionWithApproval.op, threshold: bars.legitCompletionWithApproval.threshold, value: withApprovalRate, numerator: completedWithApproval, denominator: legit.length, verdict: verdict(bars.legitCompletionWithApproval.op, withApprovalRate, bars.legitCompletionWithApproval.threshold, unmeasuredLegit + heldUnmeasured) },
       regressionFamilies: { op: bars.regressionFamilies.op, threshold: bars.regressionFamilies.threshold, families },
     },
     reportedSeparately: {

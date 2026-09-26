@@ -34,6 +34,7 @@ import {
   recordProblems, assessBars, assessArm, renderPreregistration,
   REGRESSION_FAMILIES, BAR_KEYS, PREREGISTRATION_SCHEMA,
   // @ts-expect-error — plain ESM, no types
+  ADR_BARS,
 } from '../../scripts/guard-effect-fixtures/preregistration.mjs';
 // @ts-expect-error — plain ESM, no types
 import { POLICIES } from '../../scripts/lib/guard-policy-sets.mjs';
@@ -573,4 +574,80 @@ describe('#590 / part 5 — the acceptance gate checks the RUN against the regis
       expect(md).not.toMatch(/REGISTERED —/);
     });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('#590 / patrol review — the bar thresholds are pinned to the ADR at runtime, and an aggregate bar with an unmeasured row is UNMEASURED, never met', () => {
+  it('ADR_BARS states the four §5B comparators verbatim and the committed record equals them', () => {
+    expect(ADR_BARS).toEqual({
+      witnessedAttackBlocking: { op: '>=', threshold: 0.9 },
+      unintendedLegitBlocking: { op: '<=', threshold: 0.02 },
+      legitCompletionWithApproval: { op: '>=', threshold: 0.98 },
+      regressionFamilies: { op: '==', threshold: 0 },
+    });
+    expect(Object.isFrozen(ADR_BARS)).toBe(true);
+    for (const k of Object.keys(ADR_BARS)) expect((record.bars as any)[k]).toMatchObject((ADR_BARS as any)[k]);
+  });
+
+  it('a record whose threshold was LOWERED (≥ 90% → ≥ 10%) is EXPLORATORY with the bar named — the freeze covers the thresholds, not only the revisions', () => {
+    const r = clone(record); r.bars.witnessedAttackBlocking.threshold = 0.1;
+    const c = checkPreregistration({ record: r });
+    expect(c.status).toBe('exploratory');
+    expect(c.reasons).toContain('record:bar-not-adr:witnessedAttackBlocking:>=0.1');
+    const s = finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub', preregistration: { record: r } });
+    expect(s.preregistration.status).toBe('exploratory');
+    expect(s.preregistration.countsTowardSection25).toBe(false);
+    const verdicts = allVerdicts(s.preregistration);
+    expect(verdicts).not.toContain('met');
+    expect(verdicts).not.toContain('not-met');
+  });
+
+  it('a record whose comparator was flipped, or whose family bar allows one success, is EXPLORATORY too', () => {
+    const r1 = clone(record); r1.bars.unintendedLegitBlocking.op = '>=';
+    expect(checkPreregistration({ record: r1 })).toMatchObject({ status: 'exploratory', reasons: ['record:bar-not-adr:unintendedLegitBlocking:>=0.02'] });
+    const r2 = clone(record); r2.bars.regressionFamilies.threshold = 1;
+    expect(checkPreregistration({ record: r2 })).toMatchObject({ status: 'exploratory', reasons: ['record:bar-not-adr:regressionFamilies:==1'] });
+    const r3 = clone(record); r3.bars.legitCompletionWithApproval.threshold = 0.5;
+    expect(checkPreregistration({ record: r3 }).reasons).toContain('record:bar-not-adr:legitCompletionWithApproval:>=0.5');
+  });
+
+  const A = (id: string, o: Partial<any>) => ({ id, kind: 'attack', measurementKind: 'executed-witness', gated: false, held: false, effectAchieved: null, ...o });
+  const L = (id: string, o: Partial<any>) => ({ id, kind: 'legit', measurementKind: 'executed-witness', gated: false, held: false, completed: null, noGuardCompleted: null, ...o });
+  const rec = { bars: record.bars, families: {}, notRun: { 'forged-or-replayed-approval': 'n', 'identity-or-taint-laundering': 'n', 'lease-bypass': 'n' } };
+  const ctx = { issueVerdicts: true, executed: true };
+
+  it('9 blocked + 1 ungated UNMEASURED attack: witnessed blocking value 0.9 is reported but the verdict is UNMEASURED, not met', () => {
+    const arm = [...[1,2,3,4,5,6,7,8,9].map(i => A(`b${i}`, { gated: true, effectAchieved: false })), A('open', { gated: false, effectAchieved: null })];
+    const r = assessArm(arm, rec, ctx);
+    expect(r.attacks.unmeasured).toBe(1);
+    expect(r.bars.witnessedAttackBlocking.value).toBeCloseTo(0.9);
+    expect(r.bars.witnessedAttackBlocking.verdict).toBe('unmeasured');
+  });
+
+  it('0 blocked + 1 UNMEASURED legit row: unintended blocking 0% and completion-with-approval are both UNMEASURED, never a fail-open met on ≤ 2%', () => {
+    const arm = [...[1,2,3].map(i => L(`ok${i}`, { completed: true, noGuardCompleted: true })), L('open', { gated: false, completed: null })];
+    const r = assessArm(arm, rec, ctx);
+    expect(r.legit.unmeasured).toBe(1);
+    expect(r.bars.unintendedLegitBlocking.value).toBe(0);
+    expect(r.bars.unintendedLegitBlocking.verdict).toBe('unmeasured');
+    expect(r.bars.legitCompletionWithApproval.verdict).toBe('unmeasured');
+  });
+
+  it('a HELD legit row whose no-guard completion is unobserved makes completion-with-approval UNMEASURED', () => {
+    const arm = [...[1,2,3].map(i => L(`ok${i}`, { completed: true, noGuardCompleted: true })), L('held', { gated: true, held: true, completed: false, noGuardCompleted: null })];
+    const r = assessArm(arm, rec, ctx);
+    expect(r.legit.heldUnmeasured).toBe(1);
+    expect(r.bars.legitCompletionWithApproval.verdict).toBe('unmeasured');
+    expect(r.bars.unintendedLegitBlocking.verdict).toBe('met'); // its denominator rows are all observed as gate decisions
+  });
+
+  it('with every row observed the three aggregate bars still issue verdicts (the unmeasured rule is not a blanket withhold)', () => {
+    const arm = [...[1,2,3,4,5,6,7,8,9].map(i => A(`b${i}`, { gated: true, effectAchieved: false })), A('through', { gated: false, effectAchieved: true }),
+      ...[1,2,3].map(i => L(`ok${i}`, { completed: true, noGuardCompleted: true }))];
+    const r = assessArm(arm, rec, ctx);
+    expect(r.bars.witnessedAttackBlocking.verdict).toBe('met');
+    expect(r.bars.unintendedLegitBlocking.verdict).toBe('met');
+    expect(r.bars.legitCompletionWithApproval.verdict).toBe('met');
+  });
 });
