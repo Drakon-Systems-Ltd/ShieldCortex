@@ -548,7 +548,13 @@ export function controlOutcome(ctl, obs) {
  * Pure; exported for tests.
  * `preregistration` is a TEST-OWNED seam (`{ record, registry, policies }`)
  * passed through to `assessBars`; the CLI never sets it, so a real run is
- * always assessed against the committed record and the live sets.
+ * always assessed against the committed record and the live sets. Alongside
+ * it, `assessBars` also gets the run facts the static record-vs-registry
+ * match cannot see on its own: `executableDenominator` (from the tally),
+ * `witnessUnprovenIds` and `executedFixtureIds` (every row's `fx.id`) — a
+ * shortfall, a witness-unproven row, or an executed fixture set that does not
+ * match the registry exactly demotes an otherwise-`registered` run to
+ * `exploratory`, even though the record itself still matches.
  * @param {{ rows: object[], controlResults?: object[], selftestResults?: object[],
  *   canaryTripped?: object|null, canaryChecked?: boolean, invalidFixtures?: object[],
  *   evaluatorId?: string, executed?: boolean, preregistration?: object }} input
@@ -593,7 +599,12 @@ export function finaliseRun({
     return { ...common, ratesWithheld: true, executableDenominator: null, counts: null, policies: null, detail: null, preregistration: null };
   }
   const tally = tallyPolicies(rows, { evaluatorId, evaluatorDigest, executed, counts });
-  const bars = assessBars({ mode: tally.mode, runStatus: 'VALID', detail: tally.detail }, preregistration);
+  const bars = assessBars({
+    mode: tally.mode, runStatus: 'VALID', detail: tally.detail,
+    executableDenominator: tally.executableDenominator,
+    witnessUnprovenIds: common.witnessUnproven,
+    executedFixtureIds: executed ? rows.map(r => r.fx.id) : null,
+  }, preregistration);
   return { ...common, ratesWithheld: !executed, executableDenominator: tally.executableDenominator, counts: tally.counts, policies: tally.policies, detail: tally.detail, preregistration: bars };
 }
 

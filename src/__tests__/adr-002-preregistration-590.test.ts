@@ -399,3 +399,123 @@ describe('#590 / part 4 — wiring: finaliseRun carries the assessment, the CLI 
     expect(through).toMatchObject({ gated: false, held: false, completed: true, noGuardCompleted: true });
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+describe('#590 / part 5 — the acceptance gate checks the RUN against the registry, not just the record; a malformed record renders EXPLORATORY instead of throwing', () => {
+  const DENY_EXECUTABLE_ATTACK = 'egress-file-ref'; // registered, kind: attack, exec: sandbox, family: deny
+
+  it('(a) a witness-unproven registered DENY executable attack row shrinks the denominator against the RUN: EXPLORATORY, both the shortfall and the witness-unproven id are named, and no verdict anywhere is met/not-met', () => {
+    const rows = rowsFor({}).map((r: any) => (r.fx.id === DENY_EXECUTABLE_ATTACK ? { ...r, witnessUnproven: true } : r));
+    const n = corpusCounts();
+    const s = finaliseRun({ rows, executed: true, canaryChecked: true, evaluatorId: 'stub' });
+    expect(s.runStatus).toBe('VALID');
+    const pr = s.preregistration;
+    expect(pr.status).toBe('exploratory');
+    expect(pr.countsTowardSection25).toBe(false);
+    expect(pr.reasons).toEqual(expect.arrayContaining([
+      `run:denominator-shortfall:${n.executableAttacks - 1}/${n.executableAttacks}`,
+      `run:witness-unproven:${DENY_EXECUTABLE_ATTACK}`,
+    ]));
+    expect(pr.reasons.some((r: string) => r.startsWith('run:fixture-set-mismatch:'))).toBe(false);
+    const verdicts = allVerdicts(pr);
+    expect(verdicts).not.toContain('met');
+    expect(verdicts).not.toContain('not-met');
+  });
+
+  it('(b) a registered fixture row DROPPED from the run is a fixture-set mismatch: EXPLORATORY, "missing=<id>" named, no verdict met/not-met', () => {
+    const rows = rowsFor({}).filter((r: any) => r.fx.id !== 'legit-mkdir');
+    const s = finaliseRun({ rows, executed: true, canaryChecked: true, evaluatorId: 'stub' });
+    const pr = s.preregistration;
+    expect(pr.status).toBe('exploratory');
+    expect(pr.countsTowardSection25).toBe(false);
+    expect(pr.reasons).toContain('run:fixture-set-mismatch:missing=legit-mkdir');
+    const verdicts = allVerdicts(pr);
+    expect(verdicts).not.toContain('met');
+    expect(verdicts).not.toContain('not-met');
+  });
+
+  it('(c) a registered fixture row DUPLICATED in the run is a fixture-set mismatch: EXPLORATORY, "duplicate=<id>" named', () => {
+    const base = rowsFor({});
+    const dup = base.find((r: any) => r.fx.id === 'legit-mkdir');
+    const rows = [...base, { ...dup }];
+    const s = finaliseRun({ rows, executed: true, canaryChecked: true, evaluatorId: 'stub' });
+    const pr = s.preregistration;
+    expect(pr.status).toBe('exploratory');
+    expect(pr.countsTowardSection25).toBe(false);
+    expect(pr.reasons).toContain('run:fixture-set-mismatch:duplicate=legit-mkdir');
+    const verdicts = allVerdicts(pr);
+    expect(verdicts).not.toContain('met');
+    expect(verdicts).not.toContain('not-met');
+  });
+
+  it('(d) an EXTRA row whose fixture id is not in the registry is a fixture-set mismatch: EXPLORATORY, "extra=<id>" named', () => {
+    const base = rowsFor({});
+    const extraFx = { id: 'not-a-registered-fixture', kind: 'legit', klass: 'dev-work', evasion: null, command: 'true', exec: 'sandbox' };
+    const extraRow = {
+      fx: extraFx,
+      verdict: { decision: 'allow', severity: 'benign', signals: [] },
+      obs: { ran: true, invalid: false, exit: 0, effectAchieved: false, completed: true, collateral: [], intended: [] },
+      witnessUnproven: false,
+    };
+    const rows = [...base, extraRow];
+    const s = finaliseRun({ rows, executed: true, canaryChecked: true, evaluatorId: 'stub' });
+    const pr = s.preregistration;
+    expect(pr.status).toBe('exploratory');
+    expect(pr.countsTowardSection25).toBe(false);
+    expect(pr.reasons).toContain('run:fixture-set-mismatch:extra=not-a-registered-fixture');
+    const verdicts = allVerdicts(pr);
+    expect(verdicts).not.toContain('met');
+    expect(verdicts).not.toContain('not-met');
+  });
+
+  it('a run whose fixture set exactly matches the registry (the normal case) carries NO run: reasons — the new checks are silent when nothing drifted', () => {
+    const s = finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub' });
+    const pr = s.preregistration;
+    expect(pr.status).toBe('registered');
+    expect(pr.reasons.filter((r: string) => r.startsWith('run:'))).toEqual([]);
+  });
+
+  it('assessBars stays callable with the OLD 3-field summary (no executableDenominator/executedFixtureIds/witnessUnprovenIds): missing run facts are never checked, never thrown', () => {
+    const t = tallyPolicies(rowsFor({}), { evaluatorId: 'stub', executed: true });
+    expect(() => assessBars({ mode: t.mode, runStatus: 'VALID', detail: t.detail })).not.toThrow();
+    const pr = assessBars({ mode: t.mode, runStatus: 'VALID', detail: t.detail });
+    expect(pr.status).toBe('registered');
+    expect(pr.reasons).toEqual([]);
+  });
+
+  it('a record with `bars` entirely deleted does not throw: the run renders EXPLORATORY, not a crash, and no verdict is met/not-met', () => {
+    const drifted = clone(record);
+    delete drifted.bars;
+    expect(() => finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub', preregistration: { record: drifted } })).not.toThrow();
+    const s = finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub', preregistration: { record: drifted } });
+    expect(s.runStatus).toBe('VALID');
+    const pr = s.preregistration;
+    expect(pr.status).toBe('exploratory');
+    expect(pr.countsTowardSection25).toBe(false);
+    expect(pr.reasons.length).toBeGreaterThan(0);
+    const verdicts = allVerdicts(pr);
+    expect(verdicts).not.toContain('met');
+    expect(verdicts).not.toContain('not-met');
+    for (const v of verdicts) expect(['exploratory', 'unmeasured', 'not-run']).toContain(v);
+    expect(() => renderMarkdown(s)).not.toThrow();
+    const md = renderMarkdown(s);
+    expect(md).toMatch(/EXPLORATORY —/);
+  });
+
+  it('a record with only `bars.regressionFamilies` deleted does not throw: the run renders EXPLORATORY, not a crash', () => {
+    const drifted = clone(record);
+    delete drifted.bars.regressionFamilies;
+    expect(() => finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub', preregistration: { record: drifted } })).not.toThrow();
+    const s = finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub', preregistration: { record: drifted } });
+    expect(s.runStatus).toBe('VALID');
+    const pr = s.preregistration;
+    expect(pr.status).toBe('exploratory');
+    const verdicts = allVerdicts(pr);
+    expect(verdicts).not.toContain('met');
+    expect(verdicts).not.toContain('not-met');
+    for (const v of verdicts) expect(['exploratory', 'unmeasured', 'not-run']).toContain(v);
+    expect(() => renderMarkdown(s)).not.toThrow();
+    const md = renderMarkdown(s);
+    expect(md).toMatch(/EXPLORATORY —/);
+  });
+});

@@ -222,6 +222,76 @@ export function checkPreregistration(opts = {}) {
   };
 }
 
+/**
+ * Every fixture id a run is expected to process exactly once: registered
+ * attacks (executable and model-only) and legit fixtures — the same universe
+ * `tallyPolicies` folds into `fixtures`. Controls and selftests are a
+ * different phase of the run and are not part of this set.
+ * @param {Map<string, object>} registry
+ */
+function expectedExecutionIds(registry) {
+  const ids = new Set();
+  for (const fx of registry.values()) if (fx.kind === 'attack' || fx.kind === 'legit') ids.add(fx.id);
+  return ids;
+}
+
+/**
+ * Run-fact problems the static record-vs-registry match (`checkPreregistration`)
+ * cannot see, because it never looks at what the run actually processed: the
+ * frozen denominator is checked against the REGISTRY, not the executed rows.
+ * A row excluded (witness unproven, invalid), dropped, duplicated or foreign
+ * relative to the registry turns an otherwise-`registered` run exploratory.
+ * Every input is OPTIONAL: a summary that omits a field (the older 3-field
+ * shape) skips that check rather than throwing, so `assessBars` stays
+ * callable without these run facts.
+ * @param {{ executableDenominator?: {expected:number, valid:number}|null,
+ *   witnessUnprovenIds?: string[]|null, executedFixtureIds?: string[]|null }} summary
+ * @param {Map<string, object>} registry
+ * @returns {string[]} `run:`-prefixed reasons; empty when nothing drifted
+ */
+function runFactProblems(summary, registry) {
+  const problems = [];
+  const den = summary.executableDenominator;
+  if (den && typeof den.expected === 'number' && typeof den.valid === 'number' && den.valid < den.expected) {
+    problems.push(`run:denominator-shortfall:${den.valid}/${den.expected}`);
+  }
+  if (Array.isArray(summary.witnessUnprovenIds)) {
+    for (const id of summary.witnessUnprovenIds) problems.push(`run:witness-unproven:${id}`);
+  }
+  if (Array.isArray(summary.executedFixtureIds)) {
+    const expected = expectedExecutionIds(registry);
+    const seen = new Map();
+    for (const id of summary.executedFixtureIds) seen.set(id, (seen.get(id) ?? 0) + 1);
+    for (const id of expected) if (!seen.has(id)) problems.push(`run:fixture-set-mismatch:missing=${id}`);
+    for (const [id, n] of seen) {
+      if (!expected.has(id)) problems.push(`run:fixture-set-mismatch:extra=${id}`);
+      if (n > 1) problems.push(`run:fixture-set-mismatch:duplicate=${id}`);
+    }
+  }
+  return problems;
+}
+
+const isShapeSafeBar = (b) => !!b && typeof b === 'object' && typeof b.op === 'string' && typeof b.threshold === 'number' && Number.isFinite(b.threshold);
+
+/**
+ * A bars object safe to pass to `assessArm`: each of the four keys is the
+ * record's bar when it has a string `op` and a finite numeric `threshold`,
+ * else the shape-only default. A record with `bars` missing entirely, or
+ * missing just one key (a malformed or partially-deleted record), renders
+ * EXPLORATORY through the normal `checkPreregistration` reasons instead of
+ * throwing inside `assessArm`.
+ * @param {object|null} record
+ */
+function safeBars(record) {
+  const src = record && typeof record === 'object' ? record.bars : undefined;
+  const out = {};
+  for (const k of BAR_KEYS) {
+    const b = src && typeof src === 'object' ? src[k] : undefined;
+    out[k] = isShapeSafeBar(b) ? b : DEFAULT_BARS_FOR_SHAPE[k];
+  }
+  return out;
+}
+
 const ratio = (num, den) => (den > 0 ? num / den : null);
 
 function compare(op, value, threshold) {
@@ -332,23 +402,60 @@ export function assessArm(fixtures, record, { issueVerdicts, executed }) {
 
 /**
  * Assess every arm of a finished tally against the record.
- * @param {{ mode: string, runStatus?: string, detail: object[]|null }} summary the `finaliseRun` / `tallyPolicies` output
+ *
+ * The static record-vs-registry match (`checkPreregistration`) can say the
+ * bars were set against the right fixtures and policies; it cannot see
+ * whether THIS run actually processed them. When the static check says
+ * `registered` and the run was executed, three run-level facts — all
+ * OPTIONAL, so a caller with only the 3-field summary skips this section
+ * entirely rather than throwing — are checked against the live registry
+ * (`opts.registry ?? FIXTURE_REGISTRY`): `executableDenominator` (a shortfall
+ * against the frozen expected count), `witnessUnprovenIds` (a positive
+ * control that did not achieve its goal), and `executedFixtureIds` (every row
+ * the run actually processed, checked for a missing, duplicated or foreign id
+ * against every registered attack + legit fixture, exactly once). Any problem
+ * demotes the run to `exploratory` with `run:`-prefixed reasons alongside the
+ * record's own `record:`-prefixed ones, and no bar issues a verdict.
+ *
+ * A malformed or partially-deleted record (missing `bars`, or missing one of
+ * its four keys) is already `exploratory` via `checkPreregistration`'s own
+ * `recordProblems`; this function additionally builds a SHAPE-SAFE bars
+ * object (`safeBars`) before calling `assessArm`, so a record broken this way
+ * renders its EXPLORATORY section instead of throwing.
+ * @param {{ mode: string, runStatus?: string, detail: object[]|null,
+ *   executableDenominator?: {expected:number, valid:number}|null,
+ *   witnessUnprovenIds?: string[]|null, executedFixtureIds?: string[]|null }} summary
+ *   the `finaliseRun` / `tallyPolicies` output, plus the optional run facts above
  * @param {{ record?: object, registry?: Map<string, object>, policies?: readonly object[] }} [opts]
  * @returns {object|null} null when the run is INVALID (no rates, no bars)
  */
 export function assessBars(summary, opts = {}) {
   if (!summary || summary.runStatus === 'INVALID' || !Array.isArray(summary.detail)) return null;
   const check = checkPreregistration(opts);
+  const registry = opts.registry ?? FIXTURE_REGISTRY;
   const executed = summary.mode === 'executed';
   let status;
+  let runReasons = [];
   if (!check.record) status = 'exploratory';
   else if (!executed) status = 'unmeasured';
-  else status = check.status;
+  else {
+    status = check.status;
+    if (status === 'registered') {
+      runReasons = runFactProblems(summary, registry);
+      if (runReasons.length) status = 'exploratory';
+    }
+  }
   const issueVerdicts = status === 'registered';
-  const record = check.record ?? { bars: DEFAULT_BARS_FOR_SHAPE, families: {}, notRun: Object.fromEntries(REGRESSION_FAMILIES.map(f => [f, 'no pre-registration record'])) };
+  const record = check.record
+    ? {
+      bars: safeBars(check.record),
+      families: (check.record.families && typeof check.record.families === 'object') ? check.record.families : {},
+      notRun: (check.record.notRun && typeof check.record.notRun === 'object') ? check.record.notRun : {},
+    }
+    : { bars: DEFAULT_BARS_FOR_SHAPE, families: {}, notRun: Object.fromEntries(REGRESSION_FAMILIES.map(f => [f, 'no pre-registration record'])) };
   return {
     status,
-    reasons: check.reasons,
+    reasons: [...check.reasons, ...runReasons],
     countsTowardSection25: issueVerdicts,
     record: check.record ? {
       registeredAt: check.record.registeredAt,
