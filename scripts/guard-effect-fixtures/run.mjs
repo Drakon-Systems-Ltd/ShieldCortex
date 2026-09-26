@@ -57,6 +57,17 @@
  * mutations; `collateral` lists only changes to targets the fixture is NOT
  * about.
  *
+ * Pre-registered bars (ADR §5B, #590): `preregistration.json` records the four
+ * acceptance bars with the fixture revision and policy revision they were set
+ * against. Every run checks the record against the live registry and policy
+ * sets and reports its status — `registered` (bars apply), `exploratory`
+ * (something drifted; measured values shown, no verdict counts toward §2.5)
+ * or `unmeasured` (not-run mode). Per arm, each bar sits beside its measured
+ * value; each regression family has its own denominator and a family with no
+ * fixture is NOT RUN, never a pass; completion with the approval path, with no
+ * approval path, and prompts per completed task are reported side by side.
+ * An INVALID run reports no bars, as it reports no rates.
+ *
  * NOT-RUN mode (round-3 finding 2): without `--execute` NOTHING runs, so there
  * is no observation to report. The run is `mode: 'not-run'`: every non-gated
  * effect/completion is `null` (unmeasured), executed-witness rates are `null`,
@@ -84,6 +95,7 @@ import {
   STATE_DIR, FIREWALL_STATE, EGRESS_LOG, SCHEDULER_STORE,
 } from './witness.mjs';
 import { builtEvaluatorAdapter } from './adapter.mjs';
+import { assessBars, renderPreregistration } from './preregistration.mjs';
 import { POLICIES, gates } from '../lib/guard-policy-sets.mjs';
 
 /**
@@ -454,6 +466,13 @@ export function tallyPolicies(rows, { evaluatorId = 'unknown', evaluatorDigest =
         measurementKind: fx.exec === 'model-only' ? 'modelled' : (executed ? 'executed-witness' : 'not-run'),
         decision: verdict.decision, severity: verdict.severity, signals: verdict.signals,
         gated, effectAchieved, completed, exit: observed(row) ? obs.exit : null,
+        // ADR §5B (#590): a gated call is HELD (approval-required) or blocked; the
+        // no-guard observation is kept beside the per-policy outcome so a held
+        // legit fixture can be scored as "completed with one prompt" on the
+        // approval path, and a held attack as stopped-but-not-blocked.
+        held: gated && verdict.decision !== 'block',
+        noGuardEffect: observed(row) ? obs.effectAchieved === true : null,
+        noGuardCompleted: observed(row) ? obs.completed === true : null,
         evidence: observed(row) ? obs.evidence : undefined,
         collateral: observed(row) && obs.collateral?.length ? obs.collateral : undefined,
         intended: observed(row) && obs.intended?.length ? obs.intended : undefined,
@@ -527,13 +546,23 @@ export function controlOutcome(ctl, obs) {
  * reasons and NO rates (policies/detail are null) — it is a broken instrument,
  * not a measurement, and is never presented as "zero attack success".
  * Pure; exported for tests.
+ * `preregistration` is a TEST-OWNED seam (`{ record, registry, policies }`)
+ * passed through to `assessBars`; the CLI never sets it, so a real run is
+ * always assessed against the committed record and the live sets. Alongside
+ * it, `assessBars` also gets the run facts the static record-vs-registry
+ * match cannot see on its own: `executableDenominator` (from the tally),
+ * `witnessUnprovenIds` and `executedFixtureIds` (every row's `fx.id`) — a
+ * shortfall, a witness-unproven row, or an executed fixture set that does not
+ * match the registry exactly demotes an otherwise-`registered` run to
+ * `exploratory`, even though the record itself still matches.
  * @param {{ rows: object[], controlResults?: object[], selftestResults?: object[],
  *   canaryTripped?: object|null, canaryChecked?: boolean, invalidFixtures?: object[],
- *   evaluatorId?: string, executed?: boolean }} input
+ *   evaluatorId?: string, executed?: boolean, preregistration?: object }} input
  */
 export function finaliseRun({
   rows, controlResults = [], selftestResults = [], canaryTripped = null, canaryChecked = false,
   invalidFixtures = [], evaluatorId = 'unknown', evaluatorDigest = null, executed = true, counts = corpusCounts(),
+  preregistration = {},
 }) {
   const invalidReasons = [];
   if (canaryTripped) invalidReasons.push(`canary-tripped:${canaryTripped.fixture}`);
@@ -566,10 +595,17 @@ export function finaliseRun({
     witnessUnproven: executed ? rows.filter(r => r.witnessUnproven).map(r => r.fx.id) : null,
   };
   if (invalidReasons.length) {
-    return { ...common, ratesWithheld: true, executableDenominator: null, counts: null, policies: null, detail: null };
+    // No rates, so no bars either: an INVALID run is a broken instrument.
+    return { ...common, ratesWithheld: true, executableDenominator: null, counts: null, policies: null, detail: null, preregistration: null };
   }
   const tally = tallyPolicies(rows, { evaluatorId, evaluatorDigest, executed, counts });
-  return { ...common, ratesWithheld: !executed, executableDenominator: tally.executableDenominator, counts: tally.counts, policies: tally.policies, detail: tally.detail };
+  const bars = assessBars({
+    mode: tally.mode, runStatus: 'VALID', detail: tally.detail,
+    executableDenominator: tally.executableDenominator,
+    witnessUnprovenIds: common.witnessUnproven,
+    executedFixtureIds: executed ? rows.map(r => r.fx.id) : null,
+  }, preregistration);
+  return { ...common, ratesWithheld: !executed, executableDenominator: tally.executableDenominator, counts: tally.counts, policies: tally.policies, detail: tally.detail, preregistration: bars };
 }
 
 
@@ -695,6 +731,7 @@ export function renderMarkdown(s) {
     out.push('### RUN INVALID — rates withheld', '');
     for (const r of s.invalidReasons) out.push(`- ${r}`);
     out.push('');
+    renderPreregistration(out, null);
     renderControls(out, s);
     return out.join('\n');
   }
@@ -721,6 +758,7 @@ export function renderMarkdown(s) {
     }
     out.push('');
   }
+  renderPreregistration(out, s.preregistration);
   out.push(`### Modelled decisions (${s.counts.modelledAttacks} unconfinable model-only shapes; NOT executed, NOT blended)`, '');
   out.push('| policy | allowed-to-run | gated |');
   out.push('|---|---|---|');
