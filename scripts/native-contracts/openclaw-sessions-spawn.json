@@ -1,6 +1,6 @@
 {
   "contract": "openclaw.sessions_spawn",
-  "what": "The DECLARED top-level fields of OpenClaw's `sessions_spawn` tool schema, per host version, as measured — never as guessed. `src/defence/iron-dome/tool-input-schema.ts` carries the same revisions and a test pins the two together, so the reviewed contract cannot be widened by hand without a measurement landing here first (ADR-002 §5C, #594).",
+  "what": "The DECLARED top-level fields of OpenClaw's `sessions_spawn` tool schema, per host version, as measured from that release's shipped `dist` schema \u2014 never as transcribed or guessed. `src/defence/iron-dome/tool-input-schema.ts` carries the same revisions and a test pins the two together, so the reviewed contract cannot be widened by hand without a measurement landing here first (ADR-002 \u00a75C, #594).",
   "how": "node scripts/measure-native-contract.mjs --root <openclaw install root>  (append the printed revision; keep ascending by hostVersion). `--check` verifies an install against this record.",
   "revisions": [
     {
@@ -9,12 +9,12 @@
         "agentId",
         "attachAs",
         "attachments",
-        "category",
         "cleanup",
         "collect",
         "context",
         "cwd",
         "fastMode",
+        "group",
         "groupId",
         "label",
         "lightContext",
@@ -30,17 +30,17 @@
         "taskName",
         "thinking",
         "thread",
-        "timeoutSeconds",
         "visible",
         "worktree",
         "worktreeBaseRef",
         "worktreeName"
       ],
       "evidence": {
-        "kind": "source-read",
-        "note": "The 28-field bag measured from `createSessionsSpawnToolSchema` / `VISIBLE_SESSIONS_SPAWN_SCHEMA` in the host source at the 30 Aug 2026 widening, plus `timeoutSeconds`, which the pre-visible shipped schema still accepted. The version string is the one the sibling `openclaw.exec` bag in the same module records for the same measurement era; it was not re-measured from a shipped dist. Kept as the floor revision for hosts older than the first dist-measured one."
+        "kind": "dist-schema",
+        "file": "dist/sessions-spawn-tool-DIwPpNhU.js",
+        "script": "scripts/measure-native-contract.mjs"
       },
-      "measuredOn": "2026-08-30"
+      "measuredOn": "2026-09-26"
     },
     {
       "hostVersion": "2026.9.6",

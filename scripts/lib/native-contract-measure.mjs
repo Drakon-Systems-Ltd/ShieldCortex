@@ -17,7 +17,9 @@
  * reported, never judged (see the drift split in `tool-input-schema.ts`).
  *
  * Node core only; no product import. The parser is a bounded brace walker over
- * the shipped bundle text — it does not execute host code.
+ * the shipped bundle text — it does not execute host code. The bundle is
+ * `dist/sessions-spawn-tool-<hash>.mjs` on current releases and `.js` on older
+ * ones (2026.8.1); both are located.
  */
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -29,7 +31,7 @@ const IDENT = /^[A-Za-z_$][\w$]*$/;
 export const SESSIONS_SPAWN_ANCHORS = Object.freeze({
   fn: 'function createSessionsSpawnToolSchema(',
   object: 'const schema = {',
-  distGlob: /^sessions-spawn-tool-.*\.mjs$/,
+  distGlob: /^sessions-spawn-tool-.*\.(mjs|js)$/,
 });
 
 /**
@@ -98,8 +100,10 @@ function matchBrace(src, open) {
 function spreadTerminator(body, i) {
   let j = i;
   while (j < body.length) {
-    const skipped = skipOpaque(body, j);
-    if (skipped !== j) { j = skipped; continue; }
+    // Comments only: a string or template after the name (`...NAME \`tag\``) is
+    // part of an expression, not whitespace before the separator.
+    const isComment = body[j] === '/' && (body[j + 1] === '/' || body[j + 1] === '*');
+    if (isComment) { j = skipOpaque(body, j); continue; }
     if (/\s/.test(body[j])) { j++; continue; }
     return body[j] === ',' ? j : -1;
   }
@@ -175,8 +179,9 @@ export function declaredTopLevelKeys(src, open, seen = new Set()) {
           if (gatedEnd === -1) {
             // `...c ? {…} : {…} <more>` — the block is an operand of a wider
             // expression; its branches are not simply the declared fields.
-            unresolved.push(body.slice(i, skipToPropertyEnd(body, altClose + 1)).replace(/\s+/g, ' ').slice(0, 60).trim());
-            i = skipToPropertyEnd(body, altClose + 1);
+            const propEnd = skipToPropertyEnd(body, altClose + 1);
+            unresolved.push(body.slice(i, propEnd).replace(/\s+/g, ' ').slice(0, 60).trim());
+            i = propEnd;
             atPropertyStart = false;
             continue;
           }
@@ -264,8 +269,22 @@ export function declaredTopLevelKeys(src, open, seen = new Set()) {
 export function measureSessionsSpawnSource(src) {
   const fn = src.indexOf(SESSIONS_SPAWN_ANCHORS.fn);
   if (fn === -1) throw new Error(`anchor not found: ${SESSIONS_SPAWN_ANCHORS.fn}`);
-  const obj = src.indexOf(SESSIONS_SPAWN_ANCHORS.object, fn);
-  if (obj === -1) throw new Error(`anchor not found after builder: ${SESSIONS_SPAWN_ANCHORS.object}`);
+  // Bound the object anchor to the builder's OWN body. The `(` is the anchor's
+  // last character; its matching `)` ends the parameter list, and the next `{`
+  // opens the body. A `const schema = {` outside that body is some other
+  // function's — never this contract.
+  const paramOpen = fn + SESSIONS_SPAWN_ANCHORS.fn.length - 1;
+  const paramClose = matchBrace(src, paramOpen);
+  if (paramClose === -1) throw new Error('builder anchor: unbalanced parameter list');
+  let bodyOpen = paramClose + 1;
+  while (bodyOpen < src.length && /\s/.test(src[bodyOpen])) bodyOpen++;
+  if (src[bodyOpen] !== '{') throw new Error('builder anchor: no function body after the parameter list');
+  const bodyClose = matchBrace(src, bodyOpen);
+  if (bodyClose === -1) throw new Error('builder anchor: unbalanced function body');
+  const obj = src.indexOf(SESSIONS_SPAWN_ANCHORS.object, bodyOpen);
+  if (obj === -1 || obj > bodyClose) {
+    throw new Error(`builder does not declare ${SESSIONS_SPAWN_ANCHORS.object} in its own body — shape not measurable`);
+  }
   const open = obj + SESSIONS_SPAWN_ANCHORS.object.length - 1;
   const { keys, unresolved } = declaredTopLevelKeys(src, open);
   return { fields: [...keys].sort(), unresolved };

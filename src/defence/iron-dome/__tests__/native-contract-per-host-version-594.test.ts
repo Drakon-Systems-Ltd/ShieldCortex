@@ -30,7 +30,8 @@
  *                       the audit row carries the revision.
  */
 import { afterEach, describe, expect, it } from '@jest/globals';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   enforceToolInput,
@@ -49,6 +50,7 @@ import { createInterceptor, DEFAULT_CONFIG, describeDriftRevision } from '../../
 import {
   measureSessionsSpawnSource,
   declaredTopLevelKeys,
+  measureInstalledHost,
   // @ts-expect-error — plain ESM, no types
 } from '../../../../scripts/lib/native-contract-measure.mjs';
 
@@ -77,7 +79,6 @@ const ORDINARY_DISPATCH: Record<string, unknown> = {
 const DECLARED_SINCE_OLDEST = {
   expectsCompletionMessage: true,
   completionTarget: 'parent',
-  group: 'Reviews',
   projectId: 'proj-1',
   projectGitUrl: 'https://github.com/example/example',
   placement: { kind: 'local' },
@@ -108,16 +109,36 @@ describe('1. the table is pinned to the measurement record', () => {
     for (const r of revisions) {
       const rec = record.revisions.find((x) => x.hostVersion === r.hostVersion)!;
       expect(r.keys).toEqual([...rec.fields].sort());
-      expect(rec.evidence.kind).toMatch(/^(dist-schema|source-read)$/);
       expect(rec.measuredOn).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     }
   });
 
-  it('the current release was measured from the shipped dist, not transcribed', () => {
+  it('EVERY revision was measured from a shipped dist bundle — none transcribed', () => {
+    // The first cut carried a hand-transcribed 2026.8.1 bag that the released
+    // package contradicted (category/timeoutSeconds present, group absent).
+    for (const rec of record.revisions) {
+      expect(rec.evidence.kind).toBe('dist-schema');
+      expect((rec.evidence as { file?: string }).file).toMatch(/^dist\/sessions-spawn-tool-[^/]+\.(mjs|js)$/);
+    }
+    const oldest = record.revisions[0]!;
     const newest = record.revisions[record.revisions.length - 1]!;
-    expect(newest.evidence.kind).toBe('dist-schema');
     expect(newest.fields).toEqual(expect.arrayContaining(Object.keys(DECLARED_SINCE_OLDEST)));
-    expect(newest.fields).not.toContain('category');
+    for (const k of Object.keys(DECLARED_SINCE_OLDEST)) expect(oldest.fields).not.toContain(k);
+    // `category` was never a declared input at any measured release;
+    // `timeoutSeconds` belongs to another tool. `group` is declared at both.
+    for (const rec of record.revisions) {
+      expect(rec.fields).not.toContain('category');
+      expect(rec.fields).not.toContain('timeoutSeconds');
+      expect(rec.fields).toContain('group');
+    }
+  });
+
+  it('no measured revision has removed a field: each revision is a superset of the one before', () => {
+    for (let i = 1; i < record.revisions.length; i++) {
+      const prev = new Set(record.revisions[i - 1]!.fields);
+      const next = new Set(record.revisions[i]!.fields);
+      for (const k of prev) expect(next.has(k)).toBe(true);
+    }
   });
 });
 
@@ -215,6 +236,55 @@ describe('2. the measurer reads the host bundle shape', () => {
 
   it('fails loudly when the builder anchor is absent', () => {
     expect(() => measureSessionsSpawnSource('const x = { a: 1 };')).toThrow(/anchor not found/);
+  });
+
+  it('refuses a builder that does not declare `const schema = {` in its OWN body — never reads a later function\'s', () => {
+    // Tars's #595 probe: at r2 this measured fields:[wrong], unresolved:[].
+    const src = 'function createSessionsSpawnToolSchema(params) {return Type.Object(buildIt(params));} '
+      + 'function unrelated() {const schema = {wrong:1}; return schema;}';
+    expect(() => measureSessionsSpawnSource(src)).toThrow(/does not declare const schema = \{ in its own body/);
+    // …and a body whose `const schema = {` sits inside a nested block is still its own
+    const nested = 'function createSessionsSpawnToolSchema(p) { if (p) { const schema = { a: 1 }; return schema; } } function other() { const schema = { wrong: 1 }; }';
+    expect(measureSessionsSpawnSource(nested)).toEqual({ fields: ['a'], unresolved: [] });
+  });
+
+  it('a named spread followed by a template or string is an expression, not a terminated spread', () => {
+    const src = BUNDLE.replace('...VISIBLE_SESSIONS_SPAWN_SCHEMA,', '...VISIBLE_SESSIONS_SPAWN_SCHEMA `tag`,');
+    const { fields, unresolved } = measureSessionsSpawnSource(src);
+    expect(unresolved).toHaveLength(1);
+    expect(fields).not.toContain('placement');
+  });
+
+  describe('the locator finds the shipped bundle whichever extension the release used', () => {
+    const roots: string[] = [];
+    const fixtureRoot = (version: string, bundleNames: string[]) => {
+      const root = mkdtempSync(path.join(os.tmpdir(), 'sc-594-host-'));
+      roots.push(root);
+      writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'openclaw', version }));
+      mkdirSync(path.join(root, 'dist'));
+      for (const n of bundleNames) writeFileSync(path.join(root, 'dist', n), BUNDLE);
+      writeFileSync(path.join(root, 'dist', 'unrelated-tool-XYZ.js'), 'const schema = { wrong: 1 };');
+      return root;
+    };
+    afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
+
+    it.each([
+      ['2026.9.6', 'sessions-spawn-tool-AW-VALLJ.mjs'],
+      ['2026.8.1', 'sessions-spawn-tool-DIwPpNhU.js'],
+    ])('host %s ships %s: measured, with the file named in the evidence', (version, bundle) => {
+      const rev = measureInstalledHost(fixtureRoot(version, [bundle]), { today: new Date('2026-09-26T00:00:00Z') });
+      expect(rev).toEqual({
+        hostVersion: version,
+        fields: ['attachments', 'collect', 'label', 'legacyOnly', 'mode', 'outputSchema', 'placement', 'streamTo', 'task', 'thread', 'visible', 'worktree'],
+        evidence: { kind: 'dist-schema', file: `dist/${bundle}`, script: 'scripts/measure-native-contract.mjs' },
+        measuredOn: '2026-09-26',
+      });
+    });
+
+    it('zero or two candidate bundles is a refusal, not a guess', () => {
+      expect(() => measureInstalledHost(fixtureRoot('2026.8.1', []))).toThrow(/found 0/);
+      expect(() => measureInstalledHost(fixtureRoot('2026.8.1', ['sessions-spawn-tool-A.js', 'sessions-spawn-tool-B.mjs']))).toThrow(/found 2/);
+    });
   });
 
   it('declaredTopLevelKeys ignores braces inside strings and comments', () => {
@@ -325,7 +395,7 @@ describe('4. ordinary coordinator dispatch is quiet at the pinned release, loud 
 
   it('an unknown host is judged by the union: no measured field is reported', () => {
     expect(nativeHostVersion('openclaw')).toBeNull();
-    const all = { ...ORDINARY_DISPATCH, ...DECLARED_SINCE_OLDEST, category: 'Review', timeoutSeconds: 5 };
+    const all = { ...ORDINARY_DISPATCH, ...DECLARED_SINCE_OLDEST, group: 'Reviews' };
     expect(enforceToolInput('sessions_spawn', all)).toMatchObject({ ok: true, strippedKeys: [] });
     expect(contractDriftFor('sessions_spawn', all)).toBeNull();
   });
@@ -345,13 +415,26 @@ describe('5. unknown-field reporting is preserved at every selection', () => {
     expect(evaluateToolCall('sessions_spawn', args)).toMatchObject({ decision: 'allow' });
   });
 
-  it(`a field the host REMOVED (category) is reported at ${NEWEST} — a dropped field never keeps semantics`, () => {
-    setNativeHostVersion('openclaw', NEWEST);
-    const d = contractDriftFor('sessions_spawn', { task: 'work', category: 'Review' });
-    expect(d?.droppedKeys).toEqual(['category']);
-    expect(d?.revision).toMatchObject({ measuredAt: NEWEST, selection: 'exact' });
+  it(`a field one revision declares and another does not is reported at the revision that lacks it (placement: ${OLDEST} vs ${NEWEST})`, () => {
+    // No measured release has REMOVED a field (section 1 pins that), so the
+    // only live witness of "reported at the revision that lacks it" is a field
+    // ADDED at the newer release, judged by the older one. The rule is set
+    // membership at the judging revision either way; a removed field would
+    // read the same, at the release that removed it.
     setNativeHostVersion('openclaw', OLDEST);
-    expect(contractDriftFor('sessions_spawn', { task: 'work', category: 'Review' })).toBeNull();
+    const d = contractDriftFor('sessions_spawn', { task: 'work', placement: { kind: 'local' } });
+    expect(d?.droppedKeys).toEqual(['placement']);
+    expect(d?.revision).toMatchObject({ measuredAt: OLDEST, selection: 'exact' });
+    setNativeHostVersion('openclaw', NEWEST);
+    expect(contractDriftFor('sessions_spawn', { task: 'work', placement: { kind: 'local' } })).toBeNull();
+  });
+
+  it(`a field declared at BOTH releases (group) is quiet at ${OLDEST} and ${NEWEST} — the transcribed bag reported it at ${OLDEST}`, () => {
+    for (const v of [OLDEST, NEWEST]) {
+      setNativeHostVersion('openclaw', v);
+      expect(enforceToolInput('sessions_spawn', { task: 'work', visible: true, group: 'Reviews' })).toMatchObject({ ok: true, strippedKeys: [] });
+      expect(contractDriftFor('sessions_spawn', { task: 'work', visible: true, group: 'Reviews' })).toBeNull();
+    }
   });
 
   it.each(ALL_SELECTIONS)('host $host ($selection): an evidence key stays fail-closed', ({ host }) => {

@@ -305,9 +305,9 @@ const WEB_RUN_KEYS = new Set<string>([
  * `scripts/native-contracts/openclaw-sessions-spawn.json` is the measurement
  * record these revisions are transcribed from, and
  * `scripts/measure-native-contract.mjs` regenerates a revision from a host's
- * shipped `dist` schema. `native-contract-drift.test.ts` pins this table to the
- * record, so a revision cannot be edited here without a measurement landing
- * there first.
+ * shipped `dist` schema. `native-contract-per-host-version-594.test.ts` pins
+ * this table to the record, so a revision cannot be edited here without a
+ * measurement landing there first.
  *
  * Not one key in any revision is a GUARD_EVIDENCE_KEY — the invariant that
  * makes the whole contract inert to the scanners, pinned per revision.
@@ -321,9 +321,12 @@ export interface MeasuredContractRevision {
 
 const OPENCLAW_SPAWN_REVISIONS: readonly MeasuredContractRevision[] = [
   {
-    // The 30 Aug 2026 bag (28 fields) plus the pre-visible schema's
-    // `timeoutSeconds`. Floor revision for anything older than the first
-    // dist-measured host.
+    // Measured from the released 2026.8.1 package's shipped
+    // `dist/sessions-spawn-tool-*.js` (28 fields). The earlier hand-transcribed
+    // bag carried `category` (an internal gateway mapping, never a declared
+    // input) and `timeoutSeconds` (another tool's field) and lacked `group`;
+    // the measurement corrected all three (#595 review). Floor revision for
+    // anything older.
     hostVersion: '2026.8.1',
     keys: new Set<string>([
       'task', 'taskName', 'label', 'runtime', 'agentId', 'model',
@@ -332,19 +335,17 @@ const OPENCLAW_SPAWN_REVISIONS: readonly MeasuredContractRevision[] = [
       // swarm block (config-gated upstream)
       'collect', 'outputSchema', 'fastMode', 'groupId',
       // visible-session family
-      'visible', 'category', 'worktree', 'worktreeName', 'worktreeBaseRef',
+      'visible', 'group', 'worktree', 'worktreeName', 'worktreeBaseRef',
       'attachments', 'attachAs',
       // ACP block (config-gated upstream)
       'resumeSessionId', 'streamTo',
-      // Back-compat: the shipped pre-visible schema still accepts timeoutSeconds.
-      'timeoutSeconds',
     ]),
   },
   {
     // Measured from the shipped `dist/sessions-spawn-tool-*.mjs` on 26 Sep
-    // 2026: `category` and `timeoutSeconds` are gone; `expectsCompletionMessage`,
-    // `completionTarget`, `group`, `projectId`, `projectGitUrl` and `placement`
-    // are declared.
+    // 2026 (33 fields): `expectsCompletionMessage`, `completionTarget`,
+    // `projectId`, `projectGitUrl` and `placement` are declared in addition to
+    // the 2026.8.1 set; no field has been removed between the two.
     hostVersion: '2026.9.6',
     keys: new Set<string>([
       'task', 'taskName', 'label', 'runtime', 'agentId', 'model',
