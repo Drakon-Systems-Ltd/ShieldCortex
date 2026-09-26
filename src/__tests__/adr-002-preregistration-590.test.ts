@@ -33,8 +33,8 @@ import {
   loadPreregistration, fixtureRevision, policyRevision, frozenDenominators, checkPreregistration,
   recordProblems, assessBars, assessArm, renderPreregistration,
   REGRESSION_FAMILIES, BAR_KEYS, PREREGISTRATION_SCHEMA,
-  // @ts-expect-error — plain ESM, no types
   ADR_BARS,
+  // @ts-expect-error — plain ESM, no types
 } from '../../scripts/guard-effect-fixtures/preregistration.mjs';
 // @ts-expect-error — plain ESM, no types
 import { POLICIES } from '../../scripts/lib/guard-policy-sets.mjs';
