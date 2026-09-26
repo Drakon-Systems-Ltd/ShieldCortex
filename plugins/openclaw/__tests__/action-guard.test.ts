@@ -196,7 +196,7 @@ describe('interceptor — native contract drift', () => {
     cleanup: 'delete', sandbox: 'inherit', context: 'bounded', lightContext: true,
     collect: true,
     outputSchema: { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'] },
-    fastMode: 'auto', groupId: 'swarm-1', visible: true, category: 'Review',
+    fastMode: 'auto', groupId: 'swarm-1', visible: true, group: 'Reviews',
     worktree: true, worktreeName: 'wt-review', worktreeBaseRef: 'main',
     attachments: [{ name: 'notes.txt', content: 'hello', encoding: 'utf8' }],
     attachAs: { mountPath: '/mnt/attachments' },
