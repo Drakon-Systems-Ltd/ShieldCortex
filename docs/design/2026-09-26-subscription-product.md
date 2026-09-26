@@ -352,3 +352,12 @@ One feature per PR, each opened as a draft with a failing test first. Order is c
 
 - Written by Claude, model **Opus 5.5** (`claude-opus-5-5`), running in Claude Code — `claude --version`: `2.1.283 (Claude Code)`.
 - Exploration was read-only: no install, test, build or `openclaw` command, and `~/.shieldcortex` / `~/.openclaw` were not touched. All file/line claims come from reading `origin/main` a2b448eb in the `sc-wt-subscription` worktree.
+
+## Hosting cost (Fly.io, verified 26 Sep 2026)
+
+
+Existing footprint (org "personal", region lhr): `shieldcortex-api` 2 × shared-cpu-1x 768MB (scale-to-zero, one running), `shieldcortex` site 1 × 256MB (stopped), `shieldcortex-db` Fly Postgres 1 machine + 1GB volume. Approx $8/month today.
+
+Fly list prices, lhr (docs.fly.io/about/pricing, markup 1.1346): shared-cpu-1x 256MB $2.21, 768MB $5.04, 1GB $6.46, 2GB $12.14 per always-on machine-month; stopped machine rootfs $0.15/GB; volumes $0.15/GB; dedicated IPv4 $2; egress $0.02/GB (NA/EU); Standard support $29/month (lapsed Aug 2026).
+
+Paid layer on the same API app: one always-on 768MB–1GB machine for licence checks (+$5–7), a second for availability when paying customers exist (+$5–7), volume growth for evidence/policy history (+$1–2). Estimate +$10–20/month → total ~$20–30/month (£15–25) until real load. Signing keys never live on Fly: feed and evidence packs are signed at release time on the operator's box (keys in 1Password), Fly only serves signed artefacts and verifies licences.
