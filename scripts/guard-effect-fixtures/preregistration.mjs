@@ -247,9 +247,10 @@ function expectedExecutionIds(registry) {
  * @param {{ executableDenominator?: {expected:number, valid:number}|null,
  *   witnessUnprovenIds?: string[]|null, executedFixtureIds?: string[]|null }} summary
  * @param {Map<string, object>} registry
+ * @param {object|null} [record] the checked record (its frozen per-family denominators and family map)
  * @returns {string[]} `run:`-prefixed reasons; empty when nothing drifted
  */
-function runFactProblems(summary, registry) {
+function runFactProblems(summary, registry, record = null) {
   const problems = [];
   const den = summary.executableDenominator;
   if (den && typeof den.expected === 'number' && typeof den.valid === 'number' && den.valid < den.expected) {
@@ -266,6 +267,26 @@ function runFactProblems(summary, registry) {
     for (const [id, n] of seen) {
       if (!expected.has(id)) problems.push(`run:fixture-set-mismatch:extra=${id}`);
       if (n > 1) problems.push(`run:fixture-set-mismatch:duplicate=${id}`);
+    }
+    // Per-family membership: the executable attacks of each family that this
+    // run VALIDLY observed (present exactly once, witness proven) must equal
+    // the record's frozen family denominator. A shortfall is named per family
+    // (observed/expected) so the withheld claim is diagnosable, never silently
+    // re-based on a smaller denominator.
+    const famDen = record?.denominators?.families;
+    const famOf = record?.families;
+    if (famDen && typeof famDen === 'object' && famOf && typeof famOf === 'object') {
+      const unproven = new Set(Array.isArray(summary.witnessUnprovenIds) ? summary.witnessUnprovenIds : []);
+      for (const [fam, den] of Object.entries(famDen)) {
+        const expectedN = den && typeof den === 'object' ? den.executable : undefined;
+        if (typeof expectedN !== 'number') continue;
+        let observed = 0;
+        for (const [id, n] of seen) {
+          const fx = registry.get(id);
+          if (n === 1 && fx && fx.kind === 'attack' && fx.exec === 'sandbox' && famOf[id] === fam && !unproven.has(id)) observed++;
+        }
+        if (observed !== expectedN) problems.push(`run:family-shortfall:${fam}:${observed}/${expectedN}`);
+      }
     }
   }
   return problems;
@@ -441,7 +462,7 @@ export function assessBars(summary, opts = {}) {
   else {
     status = check.status;
     if (status === 'registered') {
-      runReasons = runFactProblems(summary, registry);
+      runReasons = runFactProblems(summary, registry, check.record);
       if (runReasons.length) status = 'exploratory';
     }
   }

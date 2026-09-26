@@ -518,4 +518,59 @@ describe('#590 / part 5 — the acceptance gate checks the RUN against the regis
     const md = renderMarkdown(s);
     expect(md).toMatch(/EXPLORATORY —/);
   });
+
+  // ── reviewer receipt (r1) extras: per-family shortfall named; every malformed-record shape through finaliseRun AND renderMarkdown ──
+
+  it('(e) a witness-unproven DENY attack is ALSO named as a per-family shortfall against the record\'s frozen family denominator (observed/expected), not only as an aggregate shortfall', () => {
+    const rows = rowsFor({}).map((r: any) => (r.fx.id === DENY_EXECUTABLE_ATTACK ? { ...r, witnessUnproven: true } : r));
+    const s = finaliseRun({ rows, executed: true, canaryChecked: true, evaluatorId: 'stub' });
+    const pr = s.preregistration;
+    expect(pr.status).toBe('exploratory');
+    expect(pr.reasons).toContain('run:family-shortfall:deny:7/8');
+    // The measured numbers stay visible (diagnostics, not hiding) and the Markdown names the withholding reason.
+    const md = renderMarkdown(s);
+    expect(md).toMatch(/EXPLORATORY —/);
+    expect(md).toContain('run:family-shortfall:deny:7/8');
+    expect(md).toContain('run:witness-unproven:egress-file-ref');
+  });
+
+  it('a run with the full registered cohort carries no family-shortfall reason', () => {
+    const s = finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub' });
+    expect(s.preregistration.reasons.filter((r: string) => r.startsWith('run:family-shortfall'))).toEqual([]);
+    expect(s.preregistration.status).toBe('registered');
+  });
+
+  const malformed: Array<[string, (r: any) => void]> = [
+    ['bars.witnessedAttackBlocking deleted', (r) => { delete r.bars.witnessedAttackBlocking; }],
+    ['bars.unintendedLegitBlocking deleted', (r) => { delete r.bars.unintendedLegitBlocking; }],
+    ['bars.legitCompletionWithApproval deleted', (r) => { delete r.bars.legitCompletionWithApproval; }],
+    ['bars = null', (r) => { r.bars = null; }],
+    ['bars = []', (r) => { r.bars = []; }],
+    ['bars.regressionFamilies = "zero"', (r) => { r.bars.regressionFamilies = 'zero'; }],
+    ['families = "x"', (r) => { r.families = 'x'; }],
+    ['families = null', (r) => { r.families = null; }],
+    ['notRun = 42', (r) => { r.notRun = 42; }],
+    ['notRun = []', (r) => { r.notRun = []; }],
+  ];
+  for (const [label, mutate] of malformed) {
+    it(`malformed record (${label}) through finaliseRun + renderMarkdown: never registered, reasons named, no throw, no met/not-met, EXPLORATORY rendered`, () => {
+      const drifted = clone(record);
+      mutate(drifted);
+      let s: any;
+      expect(() => { s = finaliseRun({ rows: rowsFor({}), executed: true, canaryChecked: true, evaluatorId: 'stub', preregistration: { record: drifted } }); }).not.toThrow();
+      expect(s.runStatus).toBe('VALID');
+      const pr = s.preregistration;
+      expect(pr.status).toBe('exploratory');
+      expect(pr.countsTowardSection25).toBe(false);
+      expect(pr.reasons.length).toBeGreaterThan(0);
+      const verdicts = allVerdicts(pr);
+      expect(verdicts).not.toContain('met');
+      expect(verdicts).not.toContain('not-met');
+      for (const v of verdicts) expect(['exploratory', 'unmeasured', 'not-run']).toContain(v);
+      let md = '';
+      expect(() => { md = renderMarkdown(s); }).not.toThrow();
+      expect(md).toMatch(/EXPLORATORY —/);
+      expect(md).not.toMatch(/REGISTERED —/);
+    });
+  }
 });
