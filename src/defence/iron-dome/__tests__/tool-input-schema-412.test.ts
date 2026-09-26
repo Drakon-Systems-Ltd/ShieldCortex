@@ -94,7 +94,7 @@ describe('Action Guard P0 exact web/delegation contracts', () => {
   };
   const openClawFields: Record<string, unknown> = {
     task: 'inspect tests', label: 'review', runtime: 'subagent', agentId: 'edith', model: 'default',
-    thinking: 'medium', cwd: '/workspace', runTimeoutSeconds: 60, timeoutSeconds: 90,
+    thinking: 'medium', cwd: '/workspace', runTimeoutSeconds: 60,
     thread: true, mode: 'run', cleanup: 'delete', sandbox: 'inherit', attachments: [],
     context: 'bounded context', taskName: 'review_tests',
   };

@@ -148,6 +148,14 @@ export type {
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
+// #594 (ADR-002 §5C): the reviewed native contracts are judged per HOST
+// VERSION. The adapter that knows the host version records it here once; the
+// drift observation then names the judging revision and why it was chosen.
+export {
+  setNativeHostVersion, nativeHostVersion, resolveOpenClawSpawnContract, currentOpenClawSpawnContract,
+  measuredOpenClawSpawnRevisions, compareHostVersions,
+} from './iron-dome/tool-input-schema.js';
+export type { ContractDriftObservation, ContractRevisionSelection, ResolvedContractRevision, MeasuredContractRevision } from './iron-dome/tool-input-schema.js';
 export {
   sessionKeyFor,
   sessionKeySalt,

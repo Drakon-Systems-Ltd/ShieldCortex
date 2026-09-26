@@ -79,7 +79,7 @@ const LIVE_SPAWN_FIELDS: Record<string, unknown> = {
   fastMode: 'auto',
   groupId: 'swarm-1',
   visible: true,
-  category: 'Review',
+  group: 'Reviews',
   worktree: true,
   worktreeName: 'wt-review',
   worktreeBaseRef: 'main',
