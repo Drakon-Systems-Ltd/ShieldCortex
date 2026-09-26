@@ -52,6 +52,30 @@ export interface ContractDriftLike {
   contract: string;
   droppedKeys: string[];
   truncated?: boolean;
+  /** #594: the measured revision that judged the call and why it was chosen
+   *  (`exact` / `floor` / `beyond` / `below` / `unknown-host`). Absent on an
+   *  older dist or a single-revision contract. */
+  revision?: { measuredAt: string; hostVersion: string | null; selection: string };
+}
+
+/**
+ * One clause for the CONTRACT DRIFT warning naming the judging revision and
+ * what the selection means for the operator (#594). `floor` and `beyond` are
+ * the two that say "the measurement is older than the host — re-measure";
+ * `unknown-host` says the host never stated a version. Bounded: the host
+ * version was neutralised and length-capped where the observation was minted.
+ */
+export function describeDriftRevision(rev: ContractDriftLike['revision']): string {
+  if (!rev) return '';
+  const host = rev.hostVersion ?? 'unknown';
+  switch (rev.selection) {
+    case 'exact': return `; judged by revision ${rev.measuredAt} = host ${host}`;
+    case 'floor': return `; judged by revision ${rev.measuredAt}, the nearest measured below host ${host} — re-measure the host`;
+    case 'beyond': return `; judged by revision ${rev.measuredAt}, older than host ${host} — re-measure the host`;
+    case 'below': return `; judged by revision ${rev.measuredAt}, newer than host ${host}`;
+    case 'unknown-host': return `; judged by ${rev.measuredAt} — host version unknown`;
+    default: return `; judged by revision ${rev.measuredAt} (${rev.selection}; host ${host})`;
+  }
 }
 
 export interface ToolGuardVerdictLike {
@@ -1585,8 +1609,12 @@ export function createInterceptor(
       : undefined;
     if (v.decision === 'allow' && drift && actionGuardCfg.auditAllows !== false) {
       const d = drift.contractDrift;
+      // #594: the clause after the contract label names the judging revision
+      // and the selection reason, so a drift row on a host newer than the
+      // newest measurement reads as "re-measure" rather than as noise. The
+      // dropped-field list stays LAST, as data, exactly as before.
       log.warn(
-        `[shieldcortex] action-guard CONTRACT DRIFT ${context.toolName} (${d.contract}): dropped unread field(s) ${d.droppedKeys.join(', ')}${d.truncated ? ', …' : ''}`,
+        `[shieldcortex] action-guard CONTRACT DRIFT ${context.toolName} (${d.contract}${describeDriftRevision(d.revision)}): dropped unread field(s) ${d.droppedKeys.join(', ')}${d.truncated ? ', …' : ''}`,
       );
     }
 

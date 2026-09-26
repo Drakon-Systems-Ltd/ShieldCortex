@@ -65,6 +65,10 @@ type DefenceModule = {
    *  probe in {@link inlinePolicyLockPresent} rather than by failing open. */
   readPolicyLock?: (options?: { audit?: boolean; warn?: boolean }) => unknown;
   applyPolicyLock?: (raw: Record<string, unknown>, state: unknown) => Record<string, unknown>;
+  /** #594: records the host version the reviewed native contracts are judged
+   *  against. Optional — absent on an older dist, and then the contract is
+   *  judged as `unknown-host` exactly as before this member existed. */
+  setNativeHostVersion?: (host: 'openclaw', version: string | null) => void;
   runDefencePipeline?: (...args: any[]) => any;
   scanToolResponse?: (
     toolName: string,
@@ -924,6 +928,26 @@ function detectHostOpenClawFromDisk(): HostOpenClawProbe {
 /** Convenience for callers that only want the version string. */
 export function detectHostOpenClawVersion(): string | null {
   return detectHostOpenClaw().version;
+}
+
+/**
+ * #594 (ADR-002 §5C): hand the detected host version to the guard so the
+ * reviewed `sessions_spawn` contract is judged by the revision measured at
+ * this host. Returns what was recorded (null = unknown host, which the guard
+ * reads as the union of measured revisions — never a guess). Never throws:
+ * an older installed dist has no setter, and a throwing one must not take
+ * interceptor construction down.
+ */
+export function recordHostVersionForGuard(defenceMod: DefenceModule | null | undefined): string | null {
+  const setter = (defenceMod as { setNativeHostVersion?: unknown } | null | undefined)?.setNativeHostVersion;
+  if (typeof setter !== 'function') return null;
+  const version = detectHostOpenClaw().version;
+  try {
+    (setter as (host: 'openclaw', v: string | null) => void)('openclaw', version);
+  } catch {
+    return null;
+  }
+  return version;
 }
 
 export type GateSupport = 'supported' | 'unsupported' | 'unknown';
@@ -4226,6 +4250,15 @@ export default {
         const degradedPipeline: Parameters<typeof createInterceptor>[1] = () => {
           throw new Error('ShieldCortex: defence pipeline unavailable (dist missing or incomplete)');
         };
+
+        // #594 (ADR-002 §5C): tell the guard which host version its reviewed
+        // native contracts are being judged against, so `sessions_spawn` is
+        // judged by the revision MEASURED at this host rather than by one flat
+        // bag. Same evidence order as the conversation gate: the runtime's own
+        // version first, the install's package.json second, and null (which the
+        // guard reads as "unknown host — union of measured revisions") when
+        // neither is available. Absent on an older dist; then nothing changes.
+        recordHostVersionForGuard(defenceMod);
 
         interceptorReady = createInterceptor(
           interceptorConfig,

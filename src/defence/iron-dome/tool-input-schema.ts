@@ -243,7 +243,14 @@ interface ShellControlSchema {
  */
 interface ExactSpecialSchema {
   /** Closed set of DECLARED host fields. */
-  allowed: Set<string>;
+  allowed: ReadonlySet<string>;
+  /**
+   * For a contract measured PER HOST VERSION: which revision `allowed` is, and
+   * how it was selected for the host that made the call. Carried into the
+   * drift observation so a dropped key is reported WITH the reason the
+   * judging revision might be stale (#594). Absent on single-revision bags.
+   */
+  revision?: ResolvedContractRevision;
   /**
    * Declared fields whose VALUE no ShieldCortex reader ever consults, and whose
    * live shape `validateNested` cannot express. `sessions_spawn.outputSchema`
@@ -275,34 +282,224 @@ const WEB_RUN_KEYS = new Set<string>([
 ]);
 
 /**
- * The LIVE OpenClaw `sessions_spawn` contract — all 28 declared top-level
- * fields of `createSessionsSpawnToolSchema` (`sessions-spawn-tool.ts`) with
- * every capability flag on, including the swarm block
- * (`collect`/`outputSchema`/`fastMode`/`groupId`), the visible-session family
- * (`VISIBLE_SESSIONS_SPAWN_SCHEMA`: `visible`/`category`/`worktree`/
- * `worktreeName`/`worktreeBaseRef`) and the ACP block
- * (`resumeSessionId`/`streamTo`).
+ * ── The OpenClaw `sessions_spawn` contract, PER HOST VERSION (ADR-002 §5C, #594) ──
  *
- * The February bag carried 16 of these; the other 13 hard-denied every modern
- * spawn — `{task, runtime, visible, worktree}` blocked on `visible`. Measured,
- * not guessed. Not one of these keys is a GUARD_EVIDENCE_KEY, which is the
- * invariant that makes the whole contract inert to the scanners
- * (`native-contract-drift.test.ts` pins it).
+ * One flat bag was the fourth-widening trap: every host schema move was met by
+ * a hand-widening (#436, #445, the 13-of-28 round), and between widenings the
+ * host declared fields the bag did not carry, so ordinary coordinator dispatch
+ * (`expectsCompletionMessage`) wrote a CONTRACT DRIFT warning on every routine
+ * call — a channel the operator learns to ignore, which is how the next real
+ * move goes unnoticed.
+ *
+ * The contract is now a table of MEASURED REVISIONS, ascending by host version.
+ * Each revision is the declared top-level field set of
+ * `createSessionsSpawnToolSchema` with every capability flag on — the base
+ * block, the swarm block, `VISIBLE_SESSIONS_SPAWN_SCHEMA`, the attachment block
+ * and the ACP block. The revision that judges a call is SELECTED from the host
+ * version the plugin detects (`setNativeHostVersion`); see
+ * {@link resolveOpenClawSpawnContract} for the selection rule. Nothing is
+ * guessed upward: a host newer than every measurement is judged by the newest
+ * revision and the observation SAYS SO, so a drifted key on such a host reads
+ * as "re-measure", not as noise.
+ *
+ * `scripts/native-contracts/openclaw-sessions-spawn.json` is the measurement
+ * record these revisions are transcribed from, and
+ * `scripts/measure-native-contract.mjs` regenerates a revision from a host's
+ * shipped `dist` schema. `native-contract-drift.test.ts` pins this table to the
+ * record, so a revision cannot be edited here without a measurement landing
+ * there first.
+ *
+ * Not one key in any revision is a GUARD_EVIDENCE_KEY — the invariant that
+ * makes the whole contract inert to the scanners, pinned per revision.
  */
-const OPENCLAW_SPAWN_KEYS = new Set<string>([
-  'task', 'taskName', 'label', 'runtime', 'agentId', 'model',
-  'runTimeoutSeconds', 'thinking', 'cwd', 'thread', 'mode', 'cleanup',
-  'sandbox', 'context', 'lightContext',
-  // swarm block (config-gated upstream)
-  'collect', 'outputSchema', 'fastMode', 'groupId',
-  // visible-session family
-  'visible', 'category', 'worktree', 'worktreeName', 'worktreeBaseRef',
-  'attachments', 'attachAs',
-  // ACP block (config-gated upstream)
-  'resumeSessionId', 'streamTo',
-  // Back-compat: the shipped pre-visible schema still accepts timeoutSeconds.
-  'timeoutSeconds',
-]);
+export interface MeasuredContractRevision {
+  /** The host version string the fields were measured at (CalVer `YYYY.M.D`). */
+  hostVersion: string;
+  /** Declared top-level field names at that version. */
+  keys: ReadonlySet<string>;
+}
+
+const OPENCLAW_SPAWN_REVISIONS: readonly MeasuredContractRevision[] = [
+  {
+    // The 30 Aug 2026 bag (28 fields) plus the pre-visible schema's
+    // `timeoutSeconds`. Floor revision for anything older than the first
+    // dist-measured host.
+    hostVersion: '2026.8.1',
+    keys: new Set<string>([
+      'task', 'taskName', 'label', 'runtime', 'agentId', 'model',
+      'runTimeoutSeconds', 'thinking', 'cwd', 'thread', 'mode', 'cleanup',
+      'sandbox', 'context', 'lightContext',
+      // swarm block (config-gated upstream)
+      'collect', 'outputSchema', 'fastMode', 'groupId',
+      // visible-session family
+      'visible', 'category', 'worktree', 'worktreeName', 'worktreeBaseRef',
+      'attachments', 'attachAs',
+      // ACP block (config-gated upstream)
+      'resumeSessionId', 'streamTo',
+      // Back-compat: the shipped pre-visible schema still accepts timeoutSeconds.
+      'timeoutSeconds',
+    ]),
+  },
+  {
+    // Measured from the shipped `dist/sessions-spawn-tool-*.mjs` on 26 Sep
+    // 2026: `category` and `timeoutSeconds` are gone; `expectsCompletionMessage`,
+    // `completionTarget`, `group`, `projectId`, `projectGitUrl` and `placement`
+    // are declared.
+    hostVersion: '2026.9.6',
+    keys: new Set<string>([
+      'task', 'taskName', 'label', 'runtime', 'agentId', 'model',
+      'runTimeoutSeconds', 'thinking', 'cwd', 'thread', 'mode', 'cleanup',
+      'expectsCompletionMessage', 'completionTarget',
+      'sandbox', 'context', 'lightContext',
+      // swarm block (config-gated upstream)
+      'collect', 'outputSchema', 'fastMode', 'groupId',
+      // visible-session family
+      'placement', 'visible', 'group', 'projectId', 'projectGitUrl',
+      'worktree', 'worktreeName', 'worktreeBaseRef',
+      'attachments', 'attachAs',
+      // ACP block (config-gated upstream)
+      'resumeSessionId', 'streamTo',
+    ]),
+  },
+];
+
+/** The measured revisions, oldest first, as plain arrays — for the record pin test. */
+export function measuredOpenClawSpawnRevisions(): { hostVersion: string; keys: string[] }[] {
+  return OPENCLAW_SPAWN_REVISIONS.map((r) => ({ hostVersion: r.hostVersion, keys: [...r.keys].sort() }));
+}
+
+/**
+ * How a revision was chosen for the host that made the call:
+ *   - `exact`        the host version equals a measured revision;
+ *   - `floor`        the host lies BETWEEN measurements; judged by the nearest
+ *                    older revision, so a field the host added since is
+ *                    reported as drift — correctly, and with this reason;
+ *   - `beyond`       the host is NEWER than every measurement; judged by the
+ *                    newest revision. Drift here means "re-measure";
+ *   - `below`        the host is OLDER than every measurement; judged by the
+ *                    oldest revision;
+ *   - `unknown-host` no usable host version; judged by the UNION of measured
+ *                    revisions, so no measured field is reported and only a
+ *                    field no measured host ever declared is.
+ * The selection never widens a verdict: whichever revision judges the call,
+ * an undeclared key is dropped and reported, and an evidence key is
+ * fail-closed, exactly as before.
+ */
+export type ContractRevisionSelection = 'exact' | 'floor' | 'beyond' | 'below' | 'unknown-host';
+
+export interface ResolvedContractRevision {
+  /** The revision(s) that judged the call: a version, or `union:<v1>,<v2>` for `unknown-host`. */
+  measuredAt: string;
+  /** The host version the selection was made for (bounded, neutralised), or null. */
+  hostVersion: string | null;
+  selection: ContractRevisionSelection;
+  keys: ReadonlySet<string>;
+}
+
+/** Longest host version string carried into an observation. Host-supplied text; bound it. */
+const HOST_VERSION_MAX_LEN = 32;
+const HOST_VERSION_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/**
+ * CalVer / semver-shaped comparison: exactly three numeric parts and an
+ * optional `-prerelease` tail (a prerelease sorts below its release). Returns
+ * null for any other shape — an unparseable version is UNKNOWN, never a guess.
+ * Mirrors `compareOpenClawVersions` in the OpenClaw plugin, which `src` cannot
+ * import.
+ */
+export function compareHostVersions(a: string, b: string): number | null {
+  const parse = (v: string): { nums: number[]; pre: string[] } | null => {
+    const m = String(v ?? '').trim().match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+    if (!m) return null;
+    return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return null;
+  for (let i = 0; i < 3; i++) {
+    if (pa.nums[i] !== pb.nums[i]) return pa.nums[i]! < pb.nums[i]! ? -1 : 1;
+  }
+  if (pa.pre.length === 0 && pb.pre.length === 0) return 0;
+  if (pa.pre.length === 0) return 1;
+  if (pb.pre.length === 0) return -1;
+  const n = Math.max(pa.pre.length, pb.pre.length);
+  for (let i = 0; i < n; i++) {
+    const x = pa.pre[i];
+    const y = pb.pre[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xn = /^\d+$/.test(x);
+    const yn = /^\d+$/.test(y);
+    if (xn && yn) {
+      if (Number(x) !== Number(y)) return Number(x) < Number(y) ? -1 : 1;
+      continue;
+    }
+    if (xn !== yn) return xn ? -1 : 1;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Select the measured revision for a host version. Pure; see
+ * {@link ContractRevisionSelection} for the rule. A null, empty or unparseable
+ * version is `unknown-host`.
+ */
+export function resolveOpenClawSpawnContract(hostVersion: string | null | undefined): ResolvedContractRevision {
+  const revisions = OPENCLAW_SPAWN_REVISIONS;
+  const raw = typeof hostVersion === 'string' ? hostVersion.trim() : '';
+  const bounded = raw.replace(HOST_VERSION_CONTROL_CHARS, ' ').slice(0, HOST_VERSION_MAX_LEN);
+  const parsable = raw !== '' && compareHostVersions(raw, revisions[0]!.hostVersion) !== null;
+  if (!parsable) {
+    const union = new Set<string>();
+    for (const r of revisions) for (const k of r.keys) union.add(k);
+    return {
+      measuredAt: `union:${revisions.map((r) => r.hostVersion).join(',')}`,
+      hostVersion: raw === '' ? null : bounded,
+      selection: 'unknown-host',
+      keys: union,
+    };
+  }
+  const oldest = revisions[0]!;
+  const newest = revisions[revisions.length - 1]!;
+  if (compareHostVersions(raw, oldest.hostVersion)! < 0) {
+    return { measuredAt: oldest.hostVersion, hostVersion: bounded, selection: 'below', keys: oldest.keys };
+  }
+  if (compareHostVersions(raw, newest.hostVersion)! > 0) {
+    return { measuredAt: newest.hostVersion, hostVersion: bounded, selection: 'beyond', keys: newest.keys };
+  }
+  let chosen = oldest;
+  for (const r of revisions) {
+    const c = compareHostVersions(raw, r.hostVersion)!;
+    if (c === 0) return { measuredAt: r.hostVersion, hostVersion: bounded, selection: 'exact', keys: r.keys };
+    if (c > 0) chosen = r;
+  }
+  return { measuredAt: chosen.hostVersion, hostVersion: bounded, selection: 'floor', keys: chosen.keys };
+}
+
+/**
+ * The host version the reviewed native contracts are judged against, set once
+ * by the adapter that knows it (the OpenClaw plugin, from `api.runtime.version`
+ * or the install's `package.json`). Module state, like the plugin's own
+ * recorded runtime version: `validateToolInput` is a pure function called from
+ * every plane and cannot be handed a host on each call. Unset (the Claude Code
+ * hook, the MCP server, tests) means `unknown-host` — the union of measured
+ * revisions — never a guess at a version.
+ */
+const _nativeHostVersion: Record<'openclaw', string | null> = { openclaw: null };
+
+export function setNativeHostVersion(host: 'openclaw', version: string | null | undefined): void {
+  _nativeHostVersion[host] = typeof version === 'string' && version.trim() !== '' ? version.trim() : null;
+}
+
+export function nativeHostVersion(host: 'openclaw'): string | null {
+  return _nativeHostVersion[host];
+}
+
+/** The revision judging `openclaw.sessions_spawn` right now, for the recorded host version. */
+export function currentOpenClawSpawnContract(): ResolvedContractRevision {
+  return resolveOpenClawSpawnContract(_nativeHostVersion.openclaw);
+}
 
 /**
  * Collaboration `spawn_agent` is a SEPARATE contract, not a synonym. No
@@ -401,8 +598,13 @@ function exactSpecialSchemaFor(toolName: string): ExactSpecialSchema | null {
     return { allowed: WEB_RUN_KEYS, family: 'network', contract: 'web.run' };
   }
   if (OPENCLAW_SPAWN_ALIASES.has(exact)) {
+    // Judged by the measured revision selected for the recorded host version
+    // (#594). Resolved per call: the plugin records the host version at
+    // interceptor build, which may be after the first evaluation.
+    const revision = currentOpenClawSpawnContract();
     return {
-      allowed: OPENCLAW_SPAWN_KEYS,
+      allowed: revision.keys,
+      revision,
       inert: OPENCLAW_SPAWN_INERT,
       family: 'read',
       contract: 'openclaw.sessions_spawn',
@@ -647,7 +849,7 @@ export function schemaFamilyForTool(
   return 'unknown';
 }
 
-function allowedKeysFor(toolName: string): Set<string> {
+function allowedKeysFor(toolName: string): ReadonlySet<string> {
   const special = exactSpecialSchemaFor(toolName);
   if (special) return special.allowed;
   // #436: the native control plane is narrower than its exec family, not wider.
@@ -901,6 +1103,19 @@ export interface ContractDriftObservation {
   droppedKeys: string[];
   /** True when more keys drifted than `CONTRACT_DRIFT_MAX_KEYS` reports. */
   truncated?: boolean;
+  /**
+   * For a contract measured per host version (#594): the revision that judged
+   * the call, the host version it was selected for (bounded, neutralised; null
+   * when the host stated none) and the selection reason. This is what turns a
+   * drift row from "noise" into "re-measure the host at <version>": a `beyond`
+   * or `floor` selection says the measurement is older than the host. Absent
+   * on single-revision contracts.
+   */
+  revision?: {
+    measuredAt: string;
+    hostVersion: string | null;
+    selection: ContractRevisionSelection;
+  };
 }
 
 /**
@@ -936,16 +1151,19 @@ const DRIFT_KEY_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
  * forgets.
  */
 export function contractDriftFor(toolName: string, raw: unknown): ContractDriftObservation | null {
-  const contract = exactSpecialContractName(toolName);
-  if (!contract) return null;
+  const special = exactSpecialSchemaFor(toolName);
+  if (!special) return null;
+  const contract = special.contract;
   const validated = validateToolInput(toolName, raw, 'enforce');
   if (!validated.ok || validated.strippedKeys.length === 0) return null;
   const droppedKeys = validated.strippedKeys
     .slice(0, CONTRACT_DRIFT_MAX_KEYS)
     .map((k) => k.replace(DRIFT_KEY_CONTROL_CHARS, ' ').slice(0, CONTRACT_DRIFT_MAX_KEY_LEN));
+  const rev = special.revision;
   return {
     contract,
     droppedKeys,
     ...(validated.strippedKeys.length > CONTRACT_DRIFT_MAX_KEYS ? { truncated: true } : {}),
+    ...(rev ? { revision: { measuredAt: rev.measuredAt, hostVersion: rev.hostVersion, selection: rev.selection } } : {}),
   };
 }
