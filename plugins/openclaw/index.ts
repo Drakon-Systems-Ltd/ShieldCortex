@@ -3998,6 +3998,31 @@ function resolveBrokerRuntime(
 
 export const __testables = { resolveBrokerRuntime };
 
+/**
+ * OpenClaw 2026.9+ load modes. During `cli-metadata` and `setup-only` the
+ * host's `api.runtime` getter throws on purpose (#602). Optional chaining
+ * does not help — the access itself throws. Detect the mode from fields
+ * that do not touch runtime.
+ */
+type PluginLoadMode = 'full' | 'cli-metadata' | 'setup-only' | 'unknown';
+
+function readPluginLoadMode(api: PluginApi): PluginLoadMode {
+  const bag = api as {
+    loadMode?: unknown;
+    mode?: unknown;
+    registrationMode?: unknown;
+  };
+  const candidate = bag.loadMode ?? bag.mode ?? bag.registrationMode;
+  if (candidate === 'cli-metadata' || candidate === 'setup-only' || candidate === 'full') {
+    return candidate;
+  }
+  return 'unknown';
+}
+
+function isHostMetadataRuntimeUnavailable(message: string): boolean {
+  return /runtime is intentionally unavailable during ['"]?(cli-metadata|setup-only)['"]?/i.test(message);
+}
+
 export default {
   id: PLUGIN_ID,
   name: "ShieldCortex Real-time Scanner",
@@ -4013,6 +4038,14 @@ export default {
 
 
   register(api: PluginApi) {
+    // #602: a metadata/setup pass is not a plugin load. Do not latch
+    // `_registered` — a later `full` register in the same process must still
+    // attach hooks. Do not touch `api.runtime`.
+    const loadMode = readPluginLoadMode(api);
+    if (loadMode === 'cli-metadata' || loadMode === 'setup-only') {
+      return;
+    }
+
     if (_registered) return;
     _registered = true;
 
@@ -4552,6 +4585,14 @@ export default {
       // distinct from a routed one — if the host doesn't even provide a
       // logger, which would itself be a broken host.
       const msg = err instanceof Error ? err.message : String(err);
+      // #602: if the host omitted loadMode but runtime still refused a
+      // metadata pass, that is not a dead plugin. Unlatch so a later full
+      // register can proceed. Real init failures stay loud (#134).
+      if (loadMode !== 'full' && isHostMetadataRuntimeUnavailable(msg)) {
+        _registered = false;
+        _registrationError = null;
+        return;
+      }
       _registrationError = msg;
       const warn = (api.logger as any)?.warn;
       if (typeof warn === 'function') {

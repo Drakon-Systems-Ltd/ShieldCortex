@@ -11,7 +11,7 @@ All notable changes to this project will be documented in this file.
 - (none yet)
 
 ### Fixed
-- (none yet)
+- **#602 OpenClaw plugin: `register()` no longer treats a CLI metadata pass as “scanning is off”.** OpenClaw 2026.9.6 runs `register()` in `cli-metadata` mode for `plugins list` and `--help`, and `api.runtime` throws on purpose in that mode. The plugin used to catch that and print a failed-to-initialize warning plus a scanning-off line, so every CLI invocation looked unprotected even when the gateway load was fine. Metadata and setup-only passes now return before any runtime access, do not latch the once-per-process register flag, and do not print those warnings. A genuine full-mode init failure is still loud (#134). The manifest now declares `cliCommands` for `shieldcortex-status` so the host does not need runtime to list the command.
 
 ## [5.2.1] - 2026-09-26
 
