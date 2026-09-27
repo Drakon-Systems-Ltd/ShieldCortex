@@ -186,6 +186,17 @@ jobs:
         if: steps.plugin_version_check.outputs.plugin_already_published == 'true'
         run: echo "⚠️ Skipping plugin npm publish - @drakon-systems/shieldcortex-realtime version already exists on npm"
 
+      # #604 (Tars review P1): the one AFFIRMATIVE fact the release/ClawHub steps
+      # below may rely on. This step has no `if:` of its own, so Actions' implicit
+      # success() gate applies: it runs only when every step before it succeeded
+      # or was legitimately skipped by its own condition — CI checks, build, test,
+      # tag guard, both version checks, both publishes (or their validated
+      # already-published skips). Everything after it may only ever run behind a
+      # failure of the propagation wait, never behind a failure of anything here.
+      - name: Release readiness — every pre-publish gate passed
+        id: release_ready
+        run: echo "release_ready=true"
+
       # Verify both packages actually landed on npm at the expected version,
       # AND that the plugin tarball has the shape OpenClaw 2026.5.4+ requires
       # (compiled dist/ + openclaw.hooks in package.json). Catches the
@@ -281,7 +292,7 @@ jobs:
       # Also runs behind an npm propagation timeout (#604) — see the ClawHub
       # gate below for why that one failure is let through and no other.
       - name: Create GitHub Release
-        if: ${{ !cancelled() && (success() || steps.npm_propagation.outcome == 'failure') }}
+        if: ${{ !cancelled() && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
@@ -308,7 +319,8 @@ jobs:
       # `skipped`, which is not `failure`, and ClawHub would ship a release
       # that never published.
       - name: Install ClawHub CLI
-        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && (success() || steps.npm_propagation.outcome == 'failure') }}
+        id: clawhub_cli
+        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         run: npm install -g clawhub
 
       # Publish + verify in one place (scripts/clawhub-sync.mjs), so the release
@@ -328,7 +340,7 @@ jobs:
       # Both failures are red, but they say which one happened — republishing a
       # 'pending' version just burns a version number on an "already exists".
       - name: Sync + verify ClawHub
-        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && (success() || steps.npm_propagation.outcome == 'failure') }}
+        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.tag.outputs.version }}
