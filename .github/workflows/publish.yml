@@ -24,23 +24,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      # #604: the old `git fetch origin main --depth=1` made origin/main shallow,
+      # so once main had moved past the tag every RE-RUN of a tag publish failed
+      # here (v5.2.1 attempts 3 and 4, 27 Sep 2026) even though the tag commit
+      # is on main. Checkout is already fetch-depth 0; fetch main fully and ask
+      # git the ancestry question directly.
       - name: Ensure tag commit is on main
         run: |
-          git fetch origin main --depth=1
-          git branch -r --contains "$GITHUB_SHA" | grep -q "origin/main"
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
       - uses: actions/setup-node@v4
         with:
           node-version: '22.14.0'
           registry-url: https://registry.npmjs.org
 
-      - name: Wait for CI checks to complete (up to 5 minutes)
+      - name: Wait for CI checks to complete (up to 20 minutes)
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
             const ref = context.sha;
-            const maxWait = 300_000; // 5 minutes
+            const maxWait = 1_200_000; // 20 minutes — build-and-test alone takes ~10 min (v5.2.1: 23:08 → 23:18Z), so 5 min only ever worked when CI had already finished before the tag landed (#604)
             const interval = 15_000; // 15 seconds
             const start = Date.now();
 
@@ -181,6 +186,17 @@ jobs:
         if: steps.plugin_version_check.outputs.plugin_already_published == 'true'
         run: echo "⚠️ Skipping plugin npm publish - @drakon-systems/shieldcortex-realtime version already exists on npm"
 
+      # #604 (Tars review P1): the one AFFIRMATIVE fact the release/ClawHub steps
+      # below may rely on. This step has no `if:` of its own, so Actions' implicit
+      # success() gate applies: it runs only when every step before it succeeded
+      # or was legitimately skipped by its own condition — CI checks, build, test,
+      # tag guard, both version checks, both publishes (or their validated
+      # already-published skips). Everything after it may only ever run behind a
+      # failure of the propagation wait, never behind a failure of anything here.
+      - name: Release readiness — every pre-publish gate passed
+        id: release_ready
+        run: echo "release_ready=true"
+
       # Verify both packages actually landed on npm at the expected version,
       # AND that the plugin tarball has the shape OpenClaw 2026.5.4+ requires
       # (compiled dist/ + openclaw.hooks in package.json). Catches the
@@ -189,8 +205,27 @@ jobs:
       # and left the plugin sub-package on a stale (and broken) version while
       # the main package shipped fine — and the OpenClaw-validator class of
       # bug where the plugin technically published but couldn't be installed.
-      # Registry propagation lags metadata by up to 3 min after publish; poll.
+      # Registry propagation lags metadata after publish — v5.2.1 (26 Sep 2026)
+      # took ~7.5 min for the ROOT package to list even though it was published
+      # first (plugin listed 23:21Z, root 23:28Z), so the old 3-min window ended
+      # this job red with both packages landed and ClawHub sync skipped (#604).
+      # Poll for up to 10 min.
+      #
+      # Two steps, not one (#604): this one can only fail on the registry not
+      # listing a version the publish steps already accepted, so the release and
+      # ClawHub steps below may run behind its failure. The tarball-shape step
+      # after it is a real defect check and they must NOT run behind that.
+      #
+      # Scope of that recovery branch, stated plainly (Tars review r2): when
+      # propagation times out the shape step is SKIPPED, not passed — the
+      # release and the ClawHub sync then ship with the plugin tarball shape
+      # UNVERIFIED (ClawHub ships the skill dir, not that tarball; the GitHub
+      # Release is notes + tag). And the ClawHub steps are independent of the
+      # GitHub Release step: a failed Release behind a propagation timeout does
+      # not block CLI install/sync — that is the standing "ClawHub stays
+      # independent" design from #200, kept on purpose and pinned by test.
       - name: Verify both packages landed on npm at the expected version
+        id: npm_propagation
         env:
           MAIN_VERSION: ${{ steps.tag.outputs.version }}
         run: |
@@ -200,17 +235,17 @@ jobs:
           echo "Expected main:   $MAIN"
           echo "Expected plugin: $PLUGIN"
 
-          # Poll npm until both packages report the expected version (max ~3min).
+          # Poll npm until both packages report the expected version (max 10 min).
           # Tarball replication lags published metadata, so poll the published
           # tag too — a missing tarball is the actual blocker for `npm install`.
-          for i in $(seq 1 18); do
+          for i in $(seq 1 60); do
             MAIN_LATEST=$(npm view shieldcortex@$MAIN version 2>/dev/null || echo "")
             PLUGIN_LATEST=$(npm view @drakon-systems/shieldcortex-realtime@$PLUGIN version 2>/dev/null || echo "")
             if [ "$MAIN_LATEST" = "$MAIN" ] && [ "$PLUGIN_LATEST" = "$PLUGIN" ]; then
               echo "Both packages visible on npm after ${i}0s"
               break
             fi
-            echo "Waiting for npm propagation (${i}/18) — main=$MAIN_LATEST plugin=$PLUGIN_LATEST"
+            echo "Waiting for npm propagation (${i}/60, $((i*10))s) — main=$MAIN_LATEST plugin=$PLUGIN_LATEST"
             sleep 10
           done
 
@@ -226,6 +261,11 @@ jobs:
             exit 1
           fi
 
+      - name: Verify plugin tarball shape
+        id: npm_shape
+        run: |
+          set -e
+          PLUGIN=$(node -p "require('./plugins/openclaw/package.json').version")
           # Pull the just-published plugin tarball and confirm OpenClaw 2026.5.4+
           # will accept it (we hit both of these silently in plugin v4.12.14):
           #   - dist/index.js must be present (validator demands compiled output)
@@ -258,7 +298,10 @@ jobs:
       # was stale, Release step was skipped, had to be created manually.)
       # Always runs: a rerun after partial npm success must still create the
       # missing release; the action updates an existing one in place.
+      # Also runs behind an npm propagation timeout (#604) — see the ClawHub
+      # gate below for why that one failure is let through and no other.
       - name: Create GitHub Release
+        if: ${{ !cancelled() && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
@@ -273,8 +316,20 @@ jobs:
       # ClawHub independently. The latest CLI clears the MIT-0 gate; the final
       # verify step is LOUD (no silent masking) but non-fatal so a ClawHub hiccup
       # can't fail the npm/GitHub release.
+      # A propagation TIMEOUT is not a failed publish — the job stays red (loud),
+      # but ClawHub must not be skipped behind it (#604: 5.2.1 sat at 5.2.0 on
+      # ClawHub after both npm packages had landed).
+      #
+      # The gate lets exactly that one failure through: success(), or the
+      # propagation step itself failed. That step only runs when everything
+      # before it passed, so its failure proves tests, tag guard and both
+      # publishes were good. Gating on "neither publish step failed" is NOT
+      # enough: a red `npm test` or tag guard leaves both publish steps
+      # `skipped`, which is not `failure`, and ClawHub would ship a release
+      # that never published.
       - name: Install ClawHub CLI
-        if: env.HAS_CLAWHUB_TOKEN == 'true'
+        id: clawhub_cli
+        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         run: npm install -g clawhub
 
       # Publish + verify in one place (scripts/clawhub-sync.mjs), so the release
@@ -294,7 +349,7 @@ jobs:
       # Both failures are red, but they say which one happened — republishing a
       # 'pending' version just burns a version number on an "already exists".
       - name: Sync + verify ClawHub
-        if: env.HAS_CLAWHUB_TOKEN == 'true'
+        if: ${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.tag.outputs.version }}
