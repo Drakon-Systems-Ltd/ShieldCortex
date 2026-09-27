@@ -32,6 +32,13 @@
   "commandAliases": {
     "shieldcortex-status": "shieldcortex-status"
   },
+  "cliCommands": [
+    {
+      "name": "shieldcortex-status",
+      "description": "Show ShieldCortex real-time scanner status",
+      "hasSubcommands": false
+    }
+  ],
   "uiHints": {
     "binaryPath": {
       "label": "ShieldCortex Binary Path",

@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
   - **Review closures (#599 r2, two contract defects found by built-dist probes):** *(P1) memory marker monotonic:* a valid frame marker now upgrades a reference this store had recorded as known-clean, not only an unseen one — the observed taint is kept for later frame-less recalls (`local-marker`) and a later clean write cannot launder it. *(P2) ended is lifecycle, not a taint attribute:* `endSession` records the ended identity whether or not the session was tainted, so a clean-ended id is refused as a subject (ingest, inherit-into, peer receive, memory recall) exactly like a tainted-ended one; the untainted state now carries `ended` too. Producer behaviour is unchanged: a clean-ended session's late write is clean and its late child is clean; `endedSize()` still counts retained taint snapshots only.
 
 ### Fixed
-- (none yet)
+- **#602 OpenClaw plugin: `register()` no longer treats a CLI metadata pass as “scanning is off”.** OpenClaw 2026.9.6 runs `register()` in `cli-metadata` mode for `plugins list` and `--help`, and `api.runtime` throws on purpose in that mode. The plugin used to catch that and print a failed-to-initialize warning plus a scanning-off line, so every CLI invocation looked unprotected even when the gateway load was fine. Metadata and setup-only passes now return before any runtime access, do not latch the once-per-process register flag, and do not print those warnings. A genuine full-mode init failure is still loud (#134). The manifest now declares `cliCommands` for `shieldcortex-status` so the host does not need runtime to list the command.
 
 ## [5.2.1] - 2026-09-26
 
