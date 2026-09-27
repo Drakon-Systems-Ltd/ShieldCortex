@@ -269,7 +269,12 @@ export type TaintState =
        */
       ended: boolean;
     }
-  | { tainted: false; sessionId: string };
+  | {
+      tainted: false;
+      sessionId: string;
+      /** The host has reported this session ended: nothing can enter it or be recalled into it, clean or not. */
+      ended: boolean;
+    };
 
 export type TaintOutcome =
   | { ok: true; state: TaintState }
@@ -376,15 +381,21 @@ export interface SessionTaintLineage {
   /** Read the taint state. A refused identity cannot be read either. An ended tainted session reads as tainted and ended. */
   state(session: SessionIdentity): TaintOutcome;
   /**
-   * The host reports the session ended. Retires the record — host lifecycle,
-   * not a clear: a tainted session's snapshot is kept for its in-flight
-   * products, and anything inherited or written from it keeps its own taint.
+   * The host reports the session ended. Records the ended IDENTITY whether or
+   * not the session was tainted — from now on it is refused as a subject —
+   * and retires any taint record: host lifecycle, not a clear. A tainted
+   * session's snapshot is kept for its in-flight products, and anything
+   * inherited or written from it (clean or tainted) keeps its own status.
    * Idempotent.
    */
   endSession(session: SessionIdentity): { ok: true } | { ok: false; refused: TaintRefusal; reason: string };
   /** Live tainted sessions. */
   size(): number;
-  /** Ended tainted sessions whose snapshot is retained. Unbounded by design: eviction would be laundering. */
+  /**
+   * Ended tainted sessions whose snapshot is retained. Unbounded by design:
+   * eviction would be laundering. (Ended CLEAN identities are tracked too,
+   * for subject refusal, but carry no snapshot and are not counted here.)
+   */
   endedSize(): number;
 }
 
@@ -443,7 +454,15 @@ export interface SessionTaintLineageOptions {
 export function createSessionTaintLineage(options: SessionTaintLineageOptions = {}): SessionTaintLineage {
   const now = options.now ?? (() => Date.now());
   const live = new Map<string, TaintRecord>();
+  /** Retained taint snapshots of ended sessions. */
   const ended = new Map<string, TaintRecord>();
+  /**
+   * Every identity the host has reported ended, tainted or not. Lifecycle is
+   * tracked apart from taint: an ended CLEAN id must be refused as a subject
+   * too, or a late delivery / id reuse into it would be silently accepted
+   * (#599 r2 P2). No eviction: forgetting an ended id is what allows reuse.
+   */
+  const endedIds = new Set<string>();
   /** `null` = written clean by a session this store knows; a marker = tainted. */
   const memories = new Map<string, TaintMarker | null>();
   for (const m of options.memoryMarkers ?? []) {
@@ -459,13 +478,13 @@ export function createSessionTaintLineage(options: SessionTaintLineageOptions = 
   }
 
   function refuseEnded(session: SessionIdentity, what: string): { ok: false; refused: TaintRefusal; reason: string } | null {
-    if (!ended.has(session.id)) return null;
-    return { ok: false, refused: 'session-ended', reason: `${what} an ended session is ambiguous (late delivery or id reuse) — refused; its snapshot is kept, not cleared (§2.2 lifetime)` };
+    if (!endedIds.has(session.id)) return null;
+    return { ok: false, refused: 'session-ended', reason: `${what} an ended session is ambiguous (late delivery or id reuse) — refused; any snapshot is kept, not cleared (§2.2 lifetime)` };
   }
 
   function view(sessionId: string): TaintState {
     const f = find(sessionId);
-    if (!f) return { tainted: false, sessionId };
+    if (!f) return Object.freeze({ tainted: false as const, sessionId, ended: endedIds.has(sessionId) });
     const { rec } = f;
     return Object.freeze({
       tainted: true as const,
@@ -579,7 +598,11 @@ export function createSessionTaintLineage(options: SessionTaintLineageOptions = 
         evidence = 'local-marker';
       } else if (frame !== undefined && isTaintMarker(frame.taint) && frame.taint.memoryRef === memoryRef) {
         marker = freezeMarker(frame.taint);
-        if (local === undefined) memories.set(memoryRef, marker);
+        // Monotonic: unseen OR known-clean is promoted to the observed marker.
+        // The local clean fact described an earlier write; the frame says the
+        // reference has since carried tainted content, and that is never
+        // forgotten by a later frame-less recall or clean write (#599 r2 P1).
+        if (!local) memories.set(memoryRef, marker);
         evidence = 'marker';
       } else if (local === null || (frame !== undefined && frame.taint === null)) {
         evidence = 'known-clean';
@@ -610,6 +633,7 @@ export function createSessionTaintLineage(options: SessionTaintLineageOptions = 
     endSession(session) {
       const r = refuse(session);
       if (r) return r;
+      endedIds.add(session.id);
       const rec = live.get(session.id);
       if (rec) {
         live.delete(session.id);

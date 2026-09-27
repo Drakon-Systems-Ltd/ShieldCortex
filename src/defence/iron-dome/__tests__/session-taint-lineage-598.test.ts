@@ -143,7 +143,7 @@ describe('§2.2 — the store: keyed by host-owned identity, session-lifetime, n
     const c = clock();
     const store = createSessionTaintLineage({ now: c.now });
     const s = host('sess-A');
-    expect(store.state(s)).toEqual({ ok: true, state: { tainted: false, sessionId: 'sess-A' } });
+    expect(store.state(s)).toEqual({ ok: true, state: { tainted: false, sessionId: 'sess-A', ended: false } });
 
     const r = store.ingest(s, web);
     expect(r.ok).toBe(true);
@@ -423,6 +423,38 @@ describe('§2.2 lifecycle — ending a producer never launders what it produced 
     c.advance(365 * 24 * 60 * 60 * 1000);
     expect(store.peerReturn(host('rx'), host('old'), signed)).toMatchObject({ ok: true, state: { tainted: true } });
   });
+
+  it('a CLEAN session that ended is refused as a SUBJECT exactly like a tainted one — ended is lifecycle, not a taint attribute (#599 r2 P2)', () => {
+    const store = createSessionTaintLineage();
+    const s = host('clean-ended');
+    expect(store.ingest(s, ownWords)).toMatchObject({ ok: true, state: { tainted: false } });
+    expect(store.endSession(s)).toEqual({ ok: true });
+    const refused = { ok: false, refused: 'session-ended' };
+    // Late delivery or id reuse into a clean-ended id is just as ambiguous: refused, not silently accepted.
+    expect(store.ingest(s, web)).toMatchObject(refused);
+    expect(store.ingest(s, ownWords)).toMatchObject(refused);
+    expect(store.inherit(s, host('some-parent'), 'inherit-fork')).toMatchObject(refused);
+    expect(store.peerReturn(s, host('some-peer'), signed)).toMatchObject(refused);
+    expect(store.memoryRecalled('mem-any', s, { taint: null })).toMatchObject(refused);
+    expect(store.memoryRecalled('mem-any', s)).toMatchObject(refused);
+    // Nothing was keyed as live and no taint snapshot was invented; the state reads clean AND ended.
+    expect(store.state(s)).toEqual({ ok: true, state: { tainted: false, sessionId: 'clean-ended', ended: true } });
+    expect(store.size()).toBe(0);
+    expect(store.endedSize()).toBe(0);
+    // Idempotent.
+    expect(store.endSession(s)).toEqual({ ok: true });
+  });
+
+  it('a clean-ended session is still a valid PRODUCER: its late write is clean and its late child is clean (snapshot behaviour unchanged)', () => {
+    const store = createSessionTaintLineage();
+    const s = host('clean-producer');
+    store.ingest(s, ownWords);
+    store.endSession(s);
+    expect(store.memoryWritten('mem-from-clean-ended', s)).toEqual({ ok: true, tainted: false, marker: null });
+    expect(store.memoryRecalled('mem-from-clean-ended', host('reader'))).toMatchObject({ ok: true, evidence: 'known-clean', state: { tainted: false } });
+    expect(store.inherit(host('child-of-clean-ended'), s, 'inherit-spawn')).toMatchObject({ ok: true, state: { tainted: false } });
+    expect(store.peerReturn(host('rx-from-clean-ended'), s, signed)).toMatchObject({ ok: true, state: { tainted: false } });
+  });
 });
 
 describe('§2.2 memory — the marker travels in the frame, so two independent instances agree (#599 finding 2)', () => {
@@ -470,6 +502,30 @@ describe('§2.2 memory — the marker travels in the frame, so two independent i
     B.memoryWritten('mem-local-clean', host('clean-writer'));
     expect(B.memoryRecalled('mem-local-clean', host('r2'))).toMatchObject({ ok: true, evidence: 'known-clean', state: { tainted: false } });
     expect(B.size()).toBe(0);
+  });
+
+  it('a valid frame marker upgrades a known-clean local entry, monotonically: the observed taint is kept for frame-less recalls and later clean writes (#599 r2 P1)', () => {
+    const A = createSessionTaintLineage();
+    const B = createSessionTaintLineage();
+    // B knows mem-2 as clean: written through B by a session B has seen nothing bad from.
+    expect(B.memoryWritten('mem-2', host('clean-writer-B'))).toEqual({ ok: true, tainted: false, marker: null });
+    // Elsewhere, a web-tainted session overwrites the same reference; the marker travels in the frame.
+    const writer = host('writer-A');
+    A.ingest(writer, web);
+    const w = A.memoryWritten('mem-2', writer);
+    if (!(w.ok && w.tainted)) throw new Error('expected a tainted write');
+    // B consumes the frame marker: taints, evidence from the frame.
+    expect(B.memoryRecalled('mem-2', host('r1'), { taint: JSON.parse(JSON.stringify(w.marker)) })).toMatchObject({
+      ok: true, evidence: 'marker', state: { tainted: true, origin: { memoryRef: 'mem-2', fromSessionId: 'writer-A' } },
+    });
+    // The accepted marker must have REPLACED the clean entry: a frame-less recall in B is now local-marker, not known-clean.
+    expect(B.memoryRecalled('mem-2', host('r2'))).toMatchObject({ ok: true, evidence: 'local-marker', state: { tainted: true, origin: { memoryRef: 'mem-2', fromSessionId: 'writer-A' } } });
+    // And a later clean write through B does not launder it: the marker, once set, stays.
+    expect(B.memoryWritten('mem-2', host('clean-writer-B2'))).toMatchObject({ ok: true, tainted: true, marker: { memoryRef: 'mem-2', fromSessionId: 'writer-A' } });
+    // Control: the clean entry that never saw a marker is still known-clean.
+    expect(B.memoryRecalled('mem-local-clean-ctrl', host('r3'))).toMatchObject({ ok: true, evidence: 'missing' });
+    B.memoryWritten('mem-local-clean-ctrl', host('clean-writer-B3'));
+    expect(B.memoryRecalled('mem-local-clean-ctrl', host('r4'))).toMatchObject({ ok: true, evidence: 'known-clean', state: { tainted: false } });
   });
 
   it.each([
