@@ -34,6 +34,10 @@ jobs:
           node-version: '22.14.0'
           registry-url: https://registry.npmjs.org
 
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest && npm --version
+
       - name: Wait for CI checks to complete (up to 5 minutes)
         uses: actions/github-script@v7
         with:
@@ -134,9 +138,8 @@ jobs:
 
       - name: Publish to npm
         if: steps.version_check.outputs.already_published == 'false'
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Trusted Publishing: the job's OIDC id-token is the credential; no NPM_TOKEN.
+        run: npm publish --provenance
 
       - name: Skip root publish (already exists)
         if: steps.version_check.outputs.already_published == 'true'
@@ -173,9 +176,7 @@ jobs:
 
       - name: Publish plugin to npm
         if: steps.plugin_version_check.outputs.plugin_already_published == 'false'
-        run: cd plugins/openclaw && npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: cd plugins/openclaw && npm publish --access public --provenance
 
       - name: Skip plugin publish (already exists)
         if: steps.plugin_version_check.outputs.plugin_already_published == 'true'
