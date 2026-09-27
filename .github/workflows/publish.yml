@@ -35,8 +35,11 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest && npm --version
+      # Pinned, not @latest: npm 12.x requires Node ^22.22.2 || ^24.15.0 || >=26,
+      # so `npm@latest` on the 22.14.0 runner breaks before publishing (review on
+      # #608). 11.20.0 declares engines ^20.17.0 || >=22.9.0. Bump deliberately.
+      - name: Upgrade npm for trusted publishing (pinned)
+        run: npm install -g npm@11.20.0 && npm --version
 
       - name: Wait for CI checks to complete (up to 5 minutes)
         uses: actions/github-script@v7
