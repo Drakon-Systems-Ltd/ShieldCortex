@@ -171,6 +171,22 @@ describe('#604 — plugin step reads the end state after a timeout or non-zero e
     expect(r.rerun).toBe(PLUGIN_RERUN);
   });
 
+  it('#606 r1 (3): child exited 0 but the installed version is unreadable — unresolved, with the re-run', async () => {
+    const f = fakeOpenClaw({ install: async () => ({ stdout: '', stderr: '' }) });
+    const r = await plugin(f.run, null);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain('installed version unreadable');
+    expect(r.rerun).toBe(PLUGIN_RERUN);
+  });
+
+  it('#606 r1 (3): child exited 0 but the plugin is still behind the CLI — unresolved, with the re-run', async () => {
+    const f = fakeOpenClaw({ install: async () => ({ stdout: '', stderr: '' }) });
+    const r = await plugin(f.run, '5.1.0');
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain(`still v5.1.0 — CLI is v${PKG}`);
+    expect(r.rerun).toBe(PLUGIN_RERUN);
+  });
+
   it('parses the plugin list past leading log lines and ignores a non-semver version', () => {
     expect(parsePluginListVersion(`[plugins] loading…\n${pluginList('5.2.1')}`)).toBe('5.2.1');
     expect(parsePluginListVersion(pluginList('garbage'))).toBeNull();
@@ -231,6 +247,57 @@ describe('#604 — skill step reads the end state after a timeout or non-zero ex
     });
     const r = await skill(f.run);
     expect(r.summary).toBe(`v${PKG} installed`);
+  });
+
+  it('#606 r1 (1): two copies, exit 1 naming the other copy, nothing changed — warn + re-run, never "verified"', async () => {
+    // A second, older copy that a failing child merely mentions in its output.
+    const other = join(home, '.openclaw', 'skills', 'shieldcortex');
+    writeSkill(other, '5.1.0');
+    const past = new Date(Date.now() - 3600_000);
+    utimesSync(join(other, 'SKILL.md'), past, past);
+    const f = fakeOpenClaw({
+      install: () => Promise.reject(childError({ exitCode: 1, stdout: `checked ${other}\n`, stderr: 'install failed', command: SKILL_RERUN })),
+    });
+    const r = await skill(f.run);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain('reinstall failed');
+    expect(r.summary).not.toContain('verified');
+    expect(r.summary).not.toContain('ClawHub');
+    expect(r.detail?.join('\n')).toContain(`installed is still v5.2.0, target v${PKG} — re-run: ${SKILL_RERUN}`);
+    expect(r.rerun).toBe(SKILL_RERUN);
+  });
+
+  it('#606 r1 (2): old copy rewritten during the run, then EACCES — a changed file is not a completed install', async () => {
+    const f = fakeOpenClaw({
+      install: () => { writeSkill(skillDir, '5.1.0'); return Promise.reject(childError({ exitCode: 1, stderr: 'EACCES: permission denied', command: SKILL_RERUN })); },
+    });
+    const r = await skill(f.run);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain('reinstall failed');
+    expect(r.summary).not.toContain('verified');
+    expect(r.summary).not.toContain('ClawHub');
+    expect(r.detail?.join('\n')).toContain(`installed is still v5.1.0, target v${PKG} — re-run: ${SKILL_RERUN}`);
+    expect(r.rerun).toBe(SKILL_RERUN);
+  });
+
+  it('#606 r1 (1): after a failure the end state is read at the measured directory, not one the child named', async () => {
+    const other = join(home, 'elsewhere', 'skills', 'shieldcortex');
+    const f = fakeOpenClaw({
+      install: () => { writeSkill(other, PKG); return Promise.reject(timedOut(SKILL_RERUN)); },
+    });
+    const r = await skill(f.run);
+    // The target landed somewhere else; the copy this box is measured on is still 5.2.0.
+    expect(r.status).toBe('warn');
+    expect(r.detail?.join('\n')).toContain(`installed is still v5.2.0, target v${PKG}`);
+    expect(r.rerun).toBe(SKILL_RERUN);
+  });
+
+  it('#606 r1 (3): child exited 0 but the version is unreadable — unresolved, with the re-run', async () => {
+    const f = fakeOpenClaw({ install: async () => { writeSkill(skillDir, null); return { stdout: '', stderr: '' }; } });
+    const r = await skill(f.run);
+    expect(r.status).toBe('warn');
+    expect(r.summary).toContain('installed but version unreadable');
+    expect(r.rerun).toBe(SKILL_RERUN);
   });
 });
 

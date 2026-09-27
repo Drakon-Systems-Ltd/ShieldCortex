@@ -747,6 +747,7 @@ export async function stepOpenClawPlugin(
       summary: 'skipped — ~/.openclaw could not be taken exclusively',
       detail: [scrubHomePath(acquired.busy, home)],
       unfinished: true,
+      rerun: PLUGIN_RERUN,
     }));
   }
   try {
@@ -809,9 +810,15 @@ async function stepOpenClawPluginLocked(
           status: 'warn' as const,
           summary: `${transition} — legacy copy left behind`,
           detail: [sanitiseForReport(`could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })],
+          ...(lag || !comparable ? { rerun: PLUGIN_RERUN } : {}),
         };
       }
-      return { status: lag || !comparable ? 'warn' as const : 'ok' as const, summary: transition };
+      // #606 r1 (3): a child that exited 0 but left the plugin behind the CLI, or
+      // a version this step cannot read, has not done the work it was asked to —
+      // it is unresolved, and the footer must carry the command that finishes it.
+      return lag || !comparable
+        ? { status: 'warn' as const, summary: transition, rerun: PLUGIN_RERUN }
+        : { status: 'ok' as const, summary: transition };
     } catch (err) {
       // Don't propagate — surface as warn instead of failing the whole flow.
       //
@@ -911,9 +918,12 @@ export async function stepOpenClawSkill(
     const args = (deps.resolveArgs ?? ((b: string) => setup.resolveSkillInstallArgs(b, { home })))(bin);
     const expected = (deps.readCliVersion ?? readPackageVersion)();
     const timeoutMs = openClawStepTimeoutMs();
-    const startedMs = Date.now();
     let lastArgs = args;
     let lastStdout = '';
+    // #606 r1 (1): the copy this run is measured against. On failure the end
+    // state is read from THIS directory, never from a path the failing child
+    // happened to mention — a box with two copies (workspace v5.2.0 and
+    // ~/.openclaw/skills v5.1.0) otherwise compares different installations.
     const before = skillEndState(home, '', { findDirs, readSkillVersion });
     try {
       const out = await setup.runSkillInstallWithRetry(args, (a) => {
@@ -922,7 +932,14 @@ export async function stepOpenClawSkill(
       });
       lastStdout = out?.stdout ?? '';
       const end = skillEndState(home, lastStdout, { findDirs, readSkillVersion });
-      if (!end.version) return { status: 'warn' as const, summary: 'installed but version unreadable' };
+      // #606 r1 (3): exit 0 with no readable version is unresolved, not merely warned.
+      if (!end.version) {
+        return {
+          status: 'warn' as const,
+          summary: `installed but version unreadable (${end.reason}) — re-run: openclaw ${lastArgs.join(' ')}`,
+          rerun: `openclaw ${lastArgs.join(' ')}`,
+        };
+      }
       const lag = clawHubLagNote(end.version, expected);
       return lag ? { status: 'ok' as const, summary: `v${end.version} installed — ${lag}` } : `v${end.version} installed`;
     } catch (err) {
@@ -943,19 +960,20 @@ export async function stepOpenClawSkill(
         };
       }
       const how = describeInstallEnd(err, timeoutMs);
-      const end = skillEndState(home, `${e.stdout ?? ''}\n${e.stderr ?? ''}`, { findDirs, readSkillVersion });
-      // Landed = the target version is there, or SKILL.md was rewritten during
-      // this run (a --force reinstall of the same version changes nothing else).
-      const landed = Boolean(end.version) && (
-        (semver.valid(end.version!) && semver.valid(expected) && semver.gte(end.version!, expected)) ||
-        (end.mtimeMs !== null && end.mtimeMs >= startedMs) ||
-        (before.version !== null && end.version !== before.version)
-      );
+      // #606 r1 (1)+(2): after a failure the ONLY thing that recovers the step is
+      // the target version confirmed at the directory measured before the run.
+      // A rewritten file is not a completed install (a touched v5.1.0 with an
+      // EACCES exit must stay warn + re-run), a changed version at some other
+      // path is a different installation, and neither is proof of what the
+      // registry serves — so no ClawHub-lag certainty is derived here either.
+      const end = skillEndState(home, '', { findDirs, readSkillVersion, dir: before.dir });
+      const landed = Boolean(end.version)
+        && semver.valid(end.version!) !== null && semver.valid(expected) !== null
+        && semver.gte(end.version!, expected);
       if (landed) {
-        const lag = clawHubLagNote(end.version!, expected);
         return {
           status: 'ok' as const,
-          summary: `v${end.version} installed (slow — install ${how}; end state verified)${lag ? ` — ${lag}` : ''}`,
+          summary: `v${end.version} installed (slow — install ${how}; end state verified)`,
           detail: e.timedOut ? [] : report.detail,
         };
       }
@@ -989,19 +1007,24 @@ function clawHubLagNote(skillVersion: string, packageVersion: string): string | 
 export function skillEndState(
   home: string,
   installOutput: string,
-  deps: { findDirs: (home: string) => string[]; readSkillVersion: (dir: string) => string | null },
-): { version: string | null; mtimeMs: number | null; reason: string } {
-  const reported = [...installOutput.matchAll(/(\/[^\s'"`]*\/skills\/shieldcortex)(?=[\s'"`/]|$)/g)]
+  deps: {
+    findDirs: (home: string) => string[];
+    readSkillVersion: (dir: string) => string | null;
+    /** #606 r1 (1): read THIS directory, ignoring `installOutput` and discovery. */
+    dir?: string | null;
+  },
+): { version: string | null; mtimeMs: number | null; reason: string; dir: string | null } {
+  const reported = deps.dir ? [] : [...installOutput.matchAll(/(\/[^\s'"`]*\/skills\/shieldcortex)(?=[\s'"`/]|$)/g)]
     .map((m) => m[1])
     .filter((d) => fs.existsSync(path.join(d, 'SKILL.md')));
-  const dir = reported[0] ?? deps.findDirs(home)[0];
-  if (!dir) return { version: null, mtimeMs: null, reason: 'no installed skill directory found' };
+  const dir = deps.dir ?? reported[0] ?? deps.findDirs(home)[0] ?? null;
+  if (!dir) return { version: null, mtimeMs: null, reason: 'no installed skill directory found', dir: null };
   const version = deps.readSkillVersion(dir);
   let mtimeMs: number | null = null;
   try { mtimeMs = fs.statSync(path.join(dir, 'SKILL.md')).mtimeMs; } catch { /* unreadable */ }
   return version
-    ? { version, mtimeMs, reason: '' }
-    : { version: null, mtimeMs, reason: `SKILL.md version unreadable in ${scrubHomePath(dir, home)}` };
+    ? { version, mtimeMs, reason: '', dir }
+    : { version: null, mtimeMs, reason: `SKILL.md version unreadable in ${scrubHomePath(dir, home)}`, dir };
 }
 
 /**
