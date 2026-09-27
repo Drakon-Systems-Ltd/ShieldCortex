@@ -57,18 +57,35 @@ function evalAtom(atom: string): boolean {
   return m[2] === '==' ? left === right : left !== right;
 }
 
+/**
+ * Evaluate a step `if:` the way Actions does for the subset this workflow uses:
+ * `steps.X.outputs.Y`, `steps.X.outcome` (#604), `env.Y`, string `==`/`!=`,
+ * `success()` (no earlier step failed), `cancelled()`, `!`, `&&`, `||` and
+ * parentheses, with or without the `${{ }}` wrapper.
+ */
 function evalGhIf(
   expr: string | undefined,
   outputs: Record<string, Record<string, string>>,
   env: Record<string, string>,
+  outcomes: Record<string, string> = {},
+  status: { failed: boolean; cancelled: boolean } = { failed: false, cancelled: false },
 ): boolean {
   if (!expr) return true;
-  const resolved = expr
+  const inner = expr.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
+  const resolved = inner
     .replace(/steps\.([A-Za-z0-9_]+)\.outputs\.([A-Za-z0-9_]+)/g, (_all, step: string, key: string) =>
       JSON.stringify(outputs[step]?.[key] ?? ''),
     )
-    .replace(/env\.([A-Za-z0-9_]+)/g, (_all, key: string) => JSON.stringify(env[key] ?? ''));
-  return resolved.split('&&').every((part) => evalAtom(part));
+    .replace(/steps\.([A-Za-z0-9_]+)\.outcome/g, (_all, step: string) => JSON.stringify(outcomes[step] ?? 'skipped'))
+    .replace(/env\.([A-Za-z0-9_]+)/g, (_all, key: string) => JSON.stringify(env[key] ?? ''))
+    .replace(/success\(\)/g, String(!status.failed && !status.cancelled))
+    .replace(/cancelled\(\)/g, String(status.cancelled))
+    // every remaining atom is a quoted-string comparison; fold it to a boolean
+    .replace(/("(?:\\.|[^"])*"|'(?:\\.|[^'])*')\s*(==|!=)\s*("(?:\\.|[^"])*"|'(?:\\.|[^'])*')/g, (atom) => String(evalAtom(atom)));
+  if (!/^[\s()!&|truefals]+$/.test(resolved)) {
+    throw new Error(`unhandled GitHub if expression: ${expr} -> ${resolved}`);
+  }
+  return Boolean(new Function(`return (${resolved});`)());
 }
 
 function simulate(opts: { rootPublished: boolean; pluginPublished: boolean; hasClawhub?: boolean }): Record<string, boolean> {
@@ -76,10 +93,14 @@ function simulate(opts: { rootPublished: boolean; pluginPublished: boolean; hasC
   const outputs: Record<string, Record<string, string>> = {};
   const env = { HAS_CLAWHUB_TOKEN: opts.hasClawhub === false ? '' : 'true' };
   const ran: Record<string, boolean> = {};
+  // #604: `steps.X.outcome` for a step that did not run is 'skipped'; nothing
+  // fails in these recovery scenarios, so a step that runs succeeds.
+  const outcomes: Record<string, string> = {};
 
   for (const step of steps) {
-    const shouldRun = evalGhIf(step.if, outputs, env);
+    const shouldRun = evalGhIf(step.if, outputs, env, outcomes);
     ran[step.name] = shouldRun;
+    if (step.id) outcomes[step.id] = shouldRun ? 'success' : 'skipped';
     if (!shouldRun) continue;
     if (step.id === 'version_check') {
       outputs.version_check = { already_published: opts.rootPublished ? 'true' : 'false' };
@@ -136,8 +157,13 @@ describe('publish.yml — per-package recovery', () => {
     expect(simulate({ rootPublished: true, pluginPublished: true })[verify!.name]).toBe(true);
   });
 
-  it('GitHub Release creation/update always runs', () => {
-    expect(byName['Create GitHub Release']?.if).toBeUndefined();
+  it('GitHub Release creation/update runs on every successful publish and on an already-published rerun (#604 gate)', () => {
+    // #604: no longer unconditional — it requires the release-readiness checkpoint
+    // and runs behind exactly one failure (npm propagation), pinned in
+    // publish-workflow-gates-604.test.ts. Here: every recovery scenario still reaches it.
+    expect(byName['Create GitHub Release']?.if).toBe(
+      "${{ !cancelled() && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+    );
     expect(simulate({ rootPublished: true, pluginPublished: false })['Create GitHub Release']).toBe(true);
     expect(simulate({ rootPublished: true, pluginPublished: true })['Create GitHub Release']).toBe(true);
   });
@@ -152,8 +178,17 @@ describe('publish.yml — per-package recovery', () => {
   });
 
   it('ClawHub remains independent of npm already_published', () => {
-    expect(byName['Install ClawHub CLI']?.if).toBe("env.HAS_CLAWHUB_TOKEN == 'true'");
-    expect(byName['Sync + verify ClawHub']?.if).toBe("env.HAS_CLAWHUB_TOKEN == 'true'");
+    // #604: gated on the token, the readiness checkpoint and (for sync) the CLI
+    // install — never on already_published. Full gate semantics are pinned in
+    // publish-workflow-gates-604.test.ts.
+    expect(byName['Install ClawHub CLI']?.if).toBe(
+      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+    );
+    expect(byName['Sync + verify ClawHub']?.if).toBe(
+      "${{ !cancelled() && env.HAS_CLAWHUB_TOKEN == 'true' && steps.release_ready.outcome == 'success' && steps.clawhub_cli.outcome == 'success' && (success() || steps.npm_propagation.outcome == 'failure') }}",
+    );
+    expect(byName['Install ClawHub CLI']?.if).not.toMatch(/already_published/);
+    expect(byName['Sync + verify ClawHub']?.if).not.toMatch(/already_published/);
     expect(byName['Skip ClawHub sync (missing token)']?.if).toBe("env.HAS_CLAWHUB_TOKEN != 'true'");
     const ran = simulate({ rootPublished: true, pluginPublished: false, hasClawhub: true });
     expect(ran['Sync + verify ClawHub']).toBe(true);
