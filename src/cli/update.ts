@@ -96,6 +96,42 @@ interface StepResult {
    * script exactly like one that refreshed everything.
    */
   unfinished?: boolean;
+  /**
+   * The exact command that finishes this step by hand (#604). Set only when the
+   * step could not confirm its own end state — the footer lists every such step
+   * instead of closing the run on a bare "✓ done".
+   */
+  rerun?: string;
+}
+
+/** Default budget for each OpenClaw install child (#604). 120 s was measured
+ * short: a plugin install that landed at 126.6 s was reported as failed. */
+export const DEFAULT_OPENCLAW_STEP_TIMEOUT_MS = 300_000;
+
+/**
+ * The per-command timeout for the OpenClaw plugin and skill installs, overridable
+ * with `SHIELDCORTEX_UPDATE_OPENCLAW_TIMEOUT_MS` (#604). Anything that is not a
+ * positive integer falls back to the default rather than disabling the timeout.
+ */
+export function openClawStepTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.SHIELDCORTEX_UPDATE_OPENCLAW_TIMEOUT_MS?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return DEFAULT_OPENCLAW_STEP_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : DEFAULT_OPENCLAW_STEP_TIMEOUT_MS;
+}
+
+/** How a timed-out or non-zero install reads in a step line, e.g. "timed out after 300s". */
+function describeInstallEnd(err: unknown, timeoutMs: number): string {
+  const e = err as CapturedError;
+  if (e?.timedOut) return `timed out after ${Math.round(timeoutMs / 1000)}s`;
+  if (typeof e?.exitCode === 'number') return `exited ${e.exitCode}`;
+  return 'did not finish';
+}
+
+/** A step left unresolved: what it was and the exact command that finishes it. */
+export interface UnresolvedStep {
+  label: string;
+  rerun: string;
 }
 
 /**
@@ -308,12 +344,28 @@ function header(currentVersion: string, latestVersion: string | null): void {
   }
 }
 
-export function footer(totalMs: number, mainUpdated: boolean, latest: LatestVersionResult): void {
+export function footer(
+  totalMs: number,
+  mainUpdated: boolean,
+  latest: LatestVersionResult,
+  unresolved: UnresolvedStep[] = [],
+): void {
   const elapsed = (totalMs / 1000).toFixed(1) + 's';
   process.stdout.write(
     `\n  ${paint('gray', '──────────────────────────────────────────────────────────────')}\n`,
   );
-  if (mainUpdated) {
+  if (unresolved.length > 0) {
+    // #604: a run that could not confirm a step's end state must not close on
+    // a bare "✓ done" — name each open step and the command that finishes it.
+    const n = unresolved.length;
+    process.stdout.write(
+      `  ${paint('yellow', '⚠')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed} · ${n} step${n === 1 ? '' : 's'} unresolved`)}${mainUpdated ? `  ${paint('cyan', '·')}  ${paint('yellow', 'restart Claude Code / OpenClaw gateway')}` : ''}\n`,
+    );
+    for (const u of unresolved) {
+      process.stdout.write(`     ${paint('gray', `${u.label}: re-run`)} ${u.rerun}\n`);
+    }
+    process.stdout.write('\n');
+  } else if (mainUpdated) {
     process.stdout.write(
       `  ${paint('green', '✓')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed}`)}  ${paint('cyan', '·')}  ${paint('yellow', 'restart Claude Code / OpenClaw gateway')}\n\n`,
     );
@@ -596,6 +648,61 @@ export function isRealtimePluginRegistered(home: string): boolean {
   return readRealtimePluginRegistration(home).registered;
 }
 
+const PLUGIN_INSTALL_ARGS = ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'];
+const PLUGIN_RERUN = `openclaw ${PLUGIN_INSTALL_ARGS.join(' ')}`;
+
+/** A read of what a step actually left on the host: a version, or why none could be read. */
+export type EndState = { version: string } | { version: null; reason: string };
+
+/**
+ * The `shieldcortex-realtime` version out of `openclaw plugins list --json`, or
+ * null. Tolerates plugin log lines ahead of the JSON document; an entry without
+ * a valid semver version is not a version.
+ */
+export function parsePluginListVersion(stdout: string, id = 'shieldcortex-realtime'): string | null {
+  // A log line can itself start with `[` ("[plugins] loading…"), so try each
+  // line that could open the document until one parses.
+  let json: unknown = undefined;
+  for (const m of stdout.matchAll(/^[[{]/gm)) {
+    try {
+      json = JSON.parse(stdout.slice(m.index));
+      break;
+    } catch { /* not the document — keep looking */ }
+  }
+  if (json === undefined) return null;
+  const list = Array.isArray(json) ? json
+    : json && typeof json === 'object' && Array.isArray((json as { plugins?: unknown }).plugins)
+      ? (json as { plugins: unknown[] }).plugins
+      : null;
+  if (!list) return null;
+  const entry = list.find((p) => (p as { id?: unknown } | null)?.id === id) as { version?: unknown } | undefined;
+  return typeof entry?.version === 'string' && semver.valid(entry.version) ? entry.version : null;
+}
+
+/**
+ * After an install child timed out or exited non-zero, read what is REALLY
+ * installed (#604): the child can outlive its budget and land anyway (measured:
+ * reported failed at 120.1 s, plugin 5.2.1 loaded at 126.6 s). OpenClaw's own
+ * plugin list first, then the on-disk package; never a guess.
+ */
+export async function readRealtimePluginEndState(
+  home: string,
+  deps: { run: typeof runQuiet; readVersion: typeof readInstalledRealtimePluginVersion },
+): Promise<EndState> {
+  let listReason = 'openclaw plugins list --json listed no shieldcortex-realtime version';
+  try {
+    const { stdout } = await deps.run('openclaw', ['plugins', 'list', '--json'],
+      { timeout: 60000, env: { ...process.env, HOME: home } });
+    const v = parsePluginListVersion(stdout);
+    if (v) return { version: v };
+  } catch (err) {
+    listReason = `openclaw plugins list --json failed (${describeRunFailure(err).reason})`;
+  }
+  const onDisk = deps.readVersion(home);
+  if (onDisk && semver.valid(onDisk)) return { version: onDisk };
+  return { version: null, reason: `${listReason}; installed package version unreadable` };
+}
+
 /** `run`/`rm` are injectable so the failure paths can be tested without a real spawn or a root-owned dir. */
 export async function stepOpenClawPlugin(
   home: string,
@@ -678,13 +785,14 @@ async function stepOpenClawPluginLocked(
       }
     }
     const before = readVersion(home);
+    const timeoutMs = openClawStepTimeoutMs();
     try {
       // `openclaw plugins update` no-ops when OpenClaw recorded an exact-pinned
       // spec (observed 2026-06-09: the index pinned @4.30.2 → "up to date" while
       // npm had 4.31.0). A forced @latest install reliably advances the plugin
       // AND rewrites the tracked spec to @latest so future updates work.
-      await run('openclaw', ['plugins', 'install', '--force', '@drakon-systems/shieldcortex-realtime@latest'],
-        { timeout: 120000, env: { ...process.env, HOME: home } });
+      await run('openclaw', PLUGIN_INSTALL_ARGS,
+        { timeout: timeoutMs, env: { ...process.env, HOME: home } });
       // Report the ACTUAL on-disk transition, not just command success — the old
       // "updated via openclaw" was printed even when the version never moved.
       const after = readVersion(home);
@@ -713,19 +821,60 @@ async function stepOpenClawPluginLocked(
       // this line for five days because that message was discarded here while
       // `runQuiet` had it in hand the whole time.
       const report = describeRunFailure(err);
+      const purgeDetail = purgeFailure
+        ? [sanitiseForReport(`also: could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })]
+        : [];
+      const e = err as CapturedError;
+      // #604: a timeout or a non-zero exit says how the CHILD ended, not what it
+      // left behind. Read the end state before calling the step failed.
+      if (!e?.spawnFailed && (e?.timedOut || typeof e?.exitCode === 'number')) {
+        const end = await readRealtimePluginEndState(home, { run, readVersion });
+        const expected = (ctx.readCliVersion ?? readPackageVersion)();
+        const how = describeInstallEnd(err, timeoutMs);
+        if (end.version && semver.valid(expected) && semver.gte(end.version, expected)) {
+          return {
+            status: purgeFailure ? 'warn' as const : 'ok' as const,
+            summary: e.timedOut
+              ? `v${end.version} installed (slow — install ${how}; end state verified)`
+              : `v${end.version} installed — install ${how}, but the target version is in place`,
+            detail: [...(e.timedOut ? [] : report.detail), ...purgeDetail],
+            truncated: e.timedOut ? undefined : report.truncated,
+          };
+        }
+        const endLine = end.version !== null
+          ? `installed is v${end.version}, target v${expected} — re-run: ${PLUGIN_RERUN}`
+          : `end state unknown (${end.reason}) — re-run: ${PLUGIN_RERUN}`;
+        return {
+          status: 'warn' as const,
+          summary: `update failed — ${report.reason}`,
+          detail: [...report.detail, endLine, ...purgeDetail],
+          truncated: report.truncated,
+          rerun: PLUGIN_RERUN,
+        };
+      }
       return {
         status: 'warn' as const,
         summary: `update failed — ${report.reason}`,
-        detail: purgeFailure
-          ? [...report.detail, sanitiseForReport(`also: could not remove legacy extension at ${extDir}: ${purgeFailure}`, { home })]
-          : report.detail,
+        detail: [...report.detail, ...purgeDetail],
         truncated: report.truncated,
+        rerun: PLUGIN_RERUN,
       };
     }
   });
 }
 
-async function stepOpenClawSkill(home: string): Promise<StepResult> {
+/** Every seam is injectable so the #604 end-state branches are testable without a real `openclaw`. */
+export async function stepOpenClawSkill(
+  home: string,
+  deps: {
+    run?: typeof runQuiet;
+    resolveBin?: (home: string) => string | null;
+    resolveArgs?: (bin: string) => string[];
+    findDirs?: (home: string) => string[];
+    readSkillVersion?: (dir: string) => string | null;
+    readCliVersion?: typeof readPackageVersion;
+  } = {},
+): Promise<StepResult> {
   // #179: this step used to be four stacked failures — it spawned a bare
   // `openclaw` (invisible to non-interactive PATH on two of five fleet hosts),
   // omitted the acknowledge flag ClawHub now requires (so even a resolvable
@@ -736,39 +885,123 @@ async function stepOpenClawSkill(home: string): Promise<StepResult> {
   // (#456 — OpenClaw 2026.8.1 removed `--acknowledge-clawhub-risk`, so a
   // hardcoded flag is a bet against the installed binary), verify-by-reading,
   // and the skip names the command that installs.
-  const { resolveOpenClawBinary, resolveSkillInstallArgs, runSkillInstallWithRetry, findInstalledSkillDirs, readInstalledSkillVersion } =
-    await import('../setup/openclaw.js');
-  if (findInstalledSkillDirs(home).length === 0) {
+  //
+  // #604: after a timeout or non-zero exit, read what landed before calling it
+  // failed; and a forced @latest install that lands a version older than this
+  // package is ClawHub lagging npm, not a fault on this box — say so.
+  const setup = await import('../setup/openclaw.js');
+  const findDirs = deps.findDirs ?? setup.findInstalledSkillDirs;
+  const readSkillVersion = deps.readSkillVersion ?? setup.readInstalledSkillVersion;
+  const run = deps.run ?? runQuiet;
+  if (findDirs(home).length === 0) {
     return await step('OpenClaw skill', async () => ({
       status: 'skip' as const,
       summary: 'not installed — `shieldcortex openclaw skill install` adds it',
     }));
   }
   return await step('OpenClaw skill', async () => {
-    const bin = resolveOpenClawBinary(home);
-    if (!bin) return { status: 'warn' as const, summary: 'openclaw binary not found — run `shieldcortex openclaw skill install`' };
+    const bin = (deps.resolveBin ?? setup.resolveOpenClawBinary)(home);
+    if (!bin) {
+      return {
+        status: 'warn' as const,
+        summary: 'openclaw binary not found — run `shieldcortex openclaw skill install`',
+        rerun: 'shieldcortex openclaw skill install',
+      };
+    }
+    const args = (deps.resolveArgs ?? ((b: string) => setup.resolveSkillInstallArgs(b, { home })))(bin);
+    const expected = (deps.readCliVersion ?? readPackageVersion)();
+    const timeoutMs = openClawStepTimeoutMs();
+    const startedMs = Date.now();
+    let lastArgs = args;
+    let lastStdout = '';
+    const before = skillEndState(home, '', { findDirs, readSkillVersion });
     try {
-      await runSkillInstallWithRetry(resolveSkillInstallArgs(bin, { home }), (args) => runQuiet(bin, args, {
-        timeout: 120000,
-        env: { ...process.env, HOME: home },
-      }));
-      const dirs = findInstalledSkillDirs(home);
-      const v = dirs.length > 0 ? readInstalledSkillVersion(dirs[0]) : null;
-      return v ? `v${v} installed` : { status: 'warn' as const, summary: 'installed but version unreadable' };
+      const out = await setup.runSkillInstallWithRetry(args, (a) => {
+        lastArgs = a;
+        return run(bin, a, { timeout: timeoutMs, env: { ...process.env, HOME: home } });
+      });
+      lastStdout = out?.stdout ?? '';
+      const end = skillEndState(home, lastStdout, { findDirs, readSkillVersion });
+      if (!end.version) return { status: 'warn' as const, summary: 'installed but version unreadable' };
+      const lag = clawHubLagNote(end.version, expected);
+      return lag ? { status: 'ok' as const, summary: `v${end.version} installed — ${lag}` } : `v${end.version} installed`;
     } catch (err) {
       // #221: same defect as the plugin step, and worse here — ClawHub skill
       // installs fail for several distinct reasons (moderation lag, the
       // acknowledge flag, an invalid OpenClaw config) and all of them read
       // identically once the reason is dropped.
       const report = describeRunFailure(err);
+      const e = err as CapturedError;
+      const rerun = `openclaw ${lastArgs.join(' ')}`;
+      if (e?.spawnFailed || !(e?.timedOut || typeof e?.exitCode === 'number')) {
+        return {
+          status: 'warn' as const,
+          summary: `reinstall failed — ${report.reason}`,
+          detail: report.detail,
+          truncated: report.truncated,
+          rerun,
+        };
+      }
+      const how = describeInstallEnd(err, timeoutMs);
+      const end = skillEndState(home, `${e.stdout ?? ''}\n${e.stderr ?? ''}`, { findDirs, readSkillVersion });
+      // Landed = the target version is there, or SKILL.md was rewritten during
+      // this run (a --force reinstall of the same version changes nothing else).
+      const landed = Boolean(end.version) && (
+        (semver.valid(end.version!) && semver.valid(expected) && semver.gte(end.version!, expected)) ||
+        (end.mtimeMs !== null && end.mtimeMs >= startedMs) ||
+        (before.version !== null && end.version !== before.version)
+      );
+      if (landed) {
+        const lag = clawHubLagNote(end.version!, expected);
+        return {
+          status: 'ok' as const,
+          summary: `v${end.version} installed (slow — install ${how}; end state verified)${lag ? ` — ${lag}` : ''}`,
+          detail: e.timedOut ? [] : report.detail,
+        };
+      }
+      const endLine = end.version
+        ? `installed is still v${end.version}, target v${expected} — re-run: ${rerun}`
+        : `end state unknown (${end.reason}) — re-run: ${rerun}`;
       return {
         status: 'warn' as const,
         summary: `reinstall failed — ${report.reason}`,
-        detail: report.detail,
+        detail: [...report.detail, endLine],
         truncated: report.truncated,
+        rerun,
       };
     }
   });
+}
+
+/** `v<skill>` older than `v<package>` after a forced @latest install: ClawHub is behind npm. */
+function clawHubLagNote(skillVersion: string, packageVersion: string): string | null {
+  if (!semver.valid(skillVersion) || !semver.valid(packageVersion)) return null;
+  return semver.lt(skillVersion, packageVersion)
+    ? `latest on ClawHub is v${skillVersion}, behind package v${packageVersion} (ClawHub lags npm; not a fault on this box)`
+    : null;
+}
+
+/**
+ * What skill copy is installed now (#604): the directory the install command
+ * reported, if its output named one that holds a SKILL.md, else the first known
+ * skills dir. `mtimeMs` lets a caller tell a rewrite from a copy left untouched.
+ */
+export function skillEndState(
+  home: string,
+  installOutput: string,
+  deps: { findDirs: (home: string) => string[]; readSkillVersion: (dir: string) => string | null },
+): { version: string | null; mtimeMs: number | null; reason: string } {
+  const reported = [...installOutput.matchAll(/(\/[^\s'"`]*\/skills\/shieldcortex)(?=[\s'"`/]|$)/g)]
+    .map((m) => m[1])
+    .filter((d) => fs.existsSync(path.join(d, 'SKILL.md')));
+  const dir = reported[0] ?? deps.findDirs(home)[0];
+  if (!dir) return { version: null, mtimeMs: null, reason: 'no installed skill directory found' };
+  const version = deps.readSkillVersion(dir);
+  let mtimeMs: number | null = null;
+  try { mtimeMs = fs.statSync(path.join(dir, 'SKILL.md')).mtimeMs; } catch { /* unreadable */ }
+  return version
+    ? { version, mtimeMs, reason: '' }
+    : { version: null, mtimeMs, reason: `SKILL.md version unreadable in ${scrubHomePath(dir, home)}` };
 }
 
 /**
@@ -1163,6 +1396,10 @@ Environment:
       Same as --verbose.
   SHIELDCORTEX_ALLOW_CONVERSATION_ACCESS=1
       Same as --allow-conversation-access.
+  SHIELDCORTEX_UPDATE_OPENCLAW_TIMEOUT_MS=<ms>
+      Budget for each OpenClaw plugin / skill install child (default 300000).
+      A child that runs past it is stopped, then the installed version is read
+      back before the step is reported as failed.
   SHIELDCORTEX_UPDATE_REEXEC=1
       Internal. Set by update on the child it launches after the npm install,
       so the second process skips the install and owns the remaining stages.
@@ -1281,7 +1518,13 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   await stepClaudeHooks(home);
   await stepStatePermissions();
 
-  footer(Date.now() - flowStart, mainUpdated, latest);
+  // #604: every step that could not confirm its own end state, with the exact
+  // command that finishes it — the footer and the closing panel both name them.
+  const unresolved: UnresolvedStep[] = [
+    { label: 'OpenClaw plugin', result: pluginResult },
+    { label: 'OpenClaw skill', result: skillResult },
+  ].flatMap(({ label, result }) => (result.rerun ? [{ label, rerun: result.rerun }] : []));
+  footer(Date.now() - flowStart, mainUpdated, latest, unresolved);
 
   const protection: StepResult = reexecFailed
     ? { status: 'unproven', summary: 'protection unproven', detail: ['New CLI could not be started; re-run update before verifying protection.', 'next: shieldcortex update'] }
@@ -1414,6 +1657,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
     next.push('shieldcortex doctor --ai');
   }
   if (keyAttention) next.push('shieldcortex doctor --fix-project-keys');
+  for (const u of unresolved) if (!next.includes(u.rerun)) next.push(u.rerun);
 
   const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
   const panel = renderUpdatePanel(
