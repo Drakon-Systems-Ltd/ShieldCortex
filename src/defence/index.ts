@@ -156,6 +156,17 @@ export {
   measuredOpenClawSpawnRevisions, compareHostVersions,
 } from './iron-dome/tool-input-schema.js';
 export type { ContractDriftObservation, ContractRevisionSelection, ResolvedContractRevision, MeasuredContractRevision } from './iron-dome/tool-input-schema.js';
+// #598 (ADR-002 §2.1/§2.2): the taint and lineage contract as a pure core —
+// band from provenance (fail-closed), taint by band or content lineage, a
+// store keyed by host-owned session identity with no clear and no TTL.
+// UNWIRED: nothing in the effect plane reads it yet; exported so the §5B
+// taint controls and a later wiring PR reach one implementation.
+export { bandForSpan, spanTaints, createSessionTaintLineage, isTaintMarker, TRUST_BANDS, MAX_LINEAGE_ENTRIES } from './iron-dome/session-taint-lineage.js';
+export type {
+  TrustBand, SpanAttestation, SpanLineage, SpanProvenance, BandDecision, TaintDecision,
+  SessionIdentity, TaintRefusal, TaintRoute, TaintOrigin, TaintState, TaintOutcome, SessionTaintLineage,
+  TaintMarker, MemoryFrameTaint, MemoryEvidence, MemoryWriteOutcome, SessionTaintLineageOptions,
+} from './iron-dome/session-taint-lineage.js';
 export {
   sessionKeyFor,
   sessionKeySalt,
