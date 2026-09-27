@@ -156,6 +156,21 @@ describe('#604 publish.yml — release and ClawHub run behind a propagation time
     const s = job({ npm_propagation: 'cancelled' });
     expect([s.release, s.clawhub_cli, s.clawhub_sync]).toEqual(['skipped', 'skipped', 'skipped']);
   });
+  it('propagation timeout: tarball shape is UNVERIFIED on that branch (skipped, not passed) — documented, not hidden', () => {
+    const s = job({ npm_propagation: 'failure' });
+    expect(s.npm_shape).toBe('skipped');
+    expect(s.npm_shape).not.toBe('success');
+    expect([s.release, s.clawhub_sync]).toEqual(['success', 'success']);
+  });
+  it('propagation timeout + failed GitHub Release: ClawHub recovery is independent of the Release step (by design, #200)', () => {
+    const s = job({ npm_propagation: 'failure', release: 'failure' });
+    expect(s.release).toBe('failure');
+    expect([s.clawhub_cli, s.clawhub_sync]).toEqual(['success', 'success']);
+  });
+  it('normal publish + failed GitHub Release: ClawHub does NOT run (success() is false and propagation did not fail)', () => {
+    const s = job({ release: 'failure' });
+    expect([s.clawhub_cli, s.clawhub_sync]).toEqual(['skipped', 'skipped']);
+  });
   it('ClawHub CLI install failure: sync does not run, even behind a propagation timeout', () => {
     const s = job({ npm_propagation: 'failure', clawhub_cli: 'failure' });
     expect(s.release).toBe('success');

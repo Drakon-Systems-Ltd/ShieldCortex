@@ -215,6 +215,15 @@ jobs:
       # listing a version the publish steps already accepted, so the release and
       # ClawHub steps below may run behind its failure. The tarball-shape step
       # after it is a real defect check and they must NOT run behind that.
+      #
+      # Scope of that recovery branch, stated plainly (Tars review r2): when
+      # propagation times out the shape step is SKIPPED, not passed — the
+      # release and the ClawHub sync then ship with the plugin tarball shape
+      # UNVERIFIED (ClawHub ships the skill dir, not that tarball; the GitHub
+      # Release is notes + tag). And the ClawHub steps are independent of the
+      # GitHub Release step: a failed Release behind a propagation timeout does
+      # not block CLI install/sync — that is the standing "ClawHub stays
+      # independent" design from #200, kept on purpose and pinned by test.
       - name: Verify both packages landed on npm at the expected version
         id: npm_propagation
         env:
