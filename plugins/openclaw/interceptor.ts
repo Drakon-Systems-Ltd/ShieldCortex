@@ -822,6 +822,14 @@ function isNativeProcessTool(toolName: string): boolean {
 }
 
 /**
+ * #600: the card's subject. It used to say "Jarvis" on every OpenClaw host,
+ * whatever the agent was called (and on every customer install). The
+ * interceptor has no trustworthy display name to hand — OpenClaw's agentId is
+ * usually `main` — so the card names the role, not a person.
+ */
+export const AGENT_SUBJECT = 'Your agent';
+
+/**
  * The plain sentence the card LEADS with.
  *
  * The operator's complaint was not that the card was wrong, it was that
@@ -846,13 +854,13 @@ function actionGuardLead(
     : '';
   const phrase = isNativeProcessTool(toolName) ? NATIVE_PROCESS_PHRASE[verb] : undefined;
   if (phrase) {
-    return `Jarvis wants to ${phrase} (${verb}). Allow once is this call only.`;
+    return `${AGENT_SUBJECT} wants to ${phrase} (${verb}). Allow once is this call only.`;
   }
   if (isSchemaInvalid(v)) {
-    return `Jarvis used ${toolName}, which ShieldCortex does not fully recognise yet. `
+    return `${AGENT_SUBJECT} used ${toolName}, which ShieldCortex does not fully recognise yet. `
       + 'Allow once lets this one call through. It does not teach the tool.';
   }
-  return `Jarvis wants to use ${toolName}, and ShieldCortex rated this call ${v.severity}. `
+  return `${AGENT_SUBJECT} wants to use ${toolName}, and ShieldCortex rated this call ${v.severity}. `
     + 'Allow once is this call only.';
 }
 
