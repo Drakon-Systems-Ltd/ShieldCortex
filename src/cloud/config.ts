@@ -905,6 +905,20 @@ export interface ActionGuardCoreConfig {
   /** When true, gate dangerous ops. When false, warn-mode — dangerous ops log
    *  but are not gated (catastrophic may still block). Default ON when absent. */
   enforce: boolean;
+  /** #509 enforce-when-ready: with `enforce`, run in shadow mode until this
+   *  install's audit proves the readiness bars. `=== true` only. Surfaces that
+   *  do not implement the gate (the OpenClaw plugin today) ignore it and
+   *  enforce — the tighter reading. */
+  readinessGate: boolean;
+}
+
+/** The four operator-facing postures (#509). */
+export type ActionGuardPosture = 'off' | 'watch-only' | 'enforce' | 'enforce-when-ready';
+
+export function actionGuardPosture(core: ActionGuardCoreConfig): ActionGuardPosture {
+  if (!core.enabled) return 'off';
+  if (!core.enforce) return 'watch-only';
+  return core.readinessGate ? 'enforce-when-ready' : 'enforce';
 }
 
 /**
@@ -926,6 +940,7 @@ export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
   return {
     enabled: merged.enabled === true,
     enforce: merged.enforce !== false,
+    readinessGate: merged.readinessGate === true,
   };
 }
 
@@ -943,11 +958,16 @@ export function setActionGuardCoreConfig(updates: Partial<ActionGuardCoreConfig>
   refuseIfPolicyLockForbids([
     ...(updates.enabled !== undefined ? [{ key: 'actionGuard.enabled' as const, value: updates.enabled }] : []),
     ...(updates.enforce !== undefined ? [{ key: 'actionGuard.enforce' as const, value: updates.enforce }] : []),
+    // #509: enforce-when-ready runs ADVISORY until proven, so a lock that pins
+    // `enforce: true` must refuse it exactly as it refuses `enforce: false`.
+    ...(updates.readinessGate === true ? [{ key: 'actionGuard.enforce' as const, value: false }] : []),
   ]);
   mutateRawConfig((raw) => {
     const guard = actionGuardBlock(raw);
     if (updates.enabled !== undefined) guard.enabled = updates.enabled;
     if (updates.enforce !== undefined) guard.enforce = updates.enforce;
+    if (updates.readinessGate === true) guard.readinessGate = true;
+    else if (updates.readinessGate === false) delete guard.readinessGate;
     raw.actionGuard = guard;
   });
   if (updates.enabled === undefined && updates.enforce === undefined) {

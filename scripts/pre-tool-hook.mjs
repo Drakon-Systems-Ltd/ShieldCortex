@@ -18,6 +18,13 @@
  *     narrows or stays neutral, it never WIDENS what the user's settings allow.
  *   - benign / read-only / pure-print → no output at all.
  *
+ * Enforce-when-ready (#509, `actionGuard.readinessGate: true` on an enforcing
+ * guard): the dangerous tier runs in SHADOW — audited as `would_hold` /
+ * `would_block`, no decision emitted — until this install's own audit shows
+ * both ADR-002 §5B bars (see src/defence/iron-dome/guard-readiness.ts). The
+ * catastrophic tier is unchanged in every posture. A policy lock disables the
+ * gate (the lock pins enforcement).
+ *
  * Prompt-surface rule: "ask" is only meaningful where Claude Code will actually
  * raise a prompt. In `bypassPermissions` and `dontAsk` the harness shows no
  * prompt, and when `permission_mode` is absent or unrecognised we cannot tell.
@@ -367,6 +374,11 @@ function flattenActionGuardConfig(config) {
       enforce: raw.enforce !== false,
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
       auditAllows: raw.auditAllows !== false,
+      // #509 enforce-when-ready: exactly `true` opts an ENFORCING guard into
+      // shadow mode until this install's audit proves both readiness bars.
+      // Anything else is absent — the flag can only be turned on on purpose,
+      // and without it `enforce` means what it always meant.
+      readinessGate: raw.readinessGate === true,
       // #143, passed through RAW. normaliseBrokerConfig in dist is the single
       // place that knows which values would loosen an invariant; re-implementing
       // half of it here is how the two halves end up disagreeing. Absent or
@@ -573,6 +585,86 @@ async function loadLease() {
   } catch {
     return null;
   }
+}
+
+/**
+ * Load the #509 readiness gate. Null when the dist build predates it; the
+ * caller then ENFORCES (the tighter answer) — a posture that cannot measure
+ * readiness must not fall back to shadow, which would be the looser one.
+ * Memoised: the reach-evidence writers below reuse the same module.
+ */
+let readinessModPromise = null;
+function loadReadiness() {
+  if (!readinessModPromise) {
+    readinessModPromise = (async () => {
+      try {
+        const mod = await import(
+          pathToFileURL(resolve(hookDistRoot(), 'defence', 'iron-dome', 'guard-readiness.js')).href
+        );
+        return typeof mod.resolveReadiness === 'function'
+          && typeof mod.describeHumanChannel === 'function'
+          && typeof mod.recordApprovalReach === 'function'
+          ? mod
+          : null;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return readinessModPromise;
+}
+
+/**
+ * #509 approval-reach evidence for one request that was put (or failed to be
+ * put) to the configured human channel. Written only when a channel is
+ * configured: the bar measures THAT channel's reliability, and "no channel"
+ * already makes the install not-ready on its own. Best-effort and silent — a
+ * missing evidence row can only keep an install from becoming ready.
+ */
+async function recordReachEvidence(cfg, hash, phase, answer, channel, reason) {
+  try {
+    const mod = await loadReadiness();
+    if (!mod || !mod.describeHumanChannel(cfg.notify).configured) return;
+    mod.recordApprovalReach({ hash, phase, answer, channel, reason, origin: 'claude-code-hook' });
+  } catch {
+    /* evidence is best-effort */
+  }
+}
+
+/**
+ * #509 demotion: loud by construction. stderr always; an audited notify row
+ * always; a plain-message delivery on the configured denial channel when one
+ * exists (the OpenClaw card channel carries approvals only, so an openclaw-only
+ * install gets stderr + audit + doctor FAIL — see docs). The transition row
+ * itself was already appended by resolveReadiness.
+ */
+async function announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra) {
+  const verdict = { severity: 'high', decision: 'require_approval', signals: ['readiness-demoted'] };
+  let line = 'ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready).';
+  try { line = readinessMod.describeDemotion(resolved.demotionReason); } catch { /* keep the fallback */ }
+  console.error(`[shieldcortex] ⚠️ ${line}`);
+  let result = null;
+  try {
+    const notify = await getNotify();
+    const channel = notify?.denialChannel;
+    if (channel && notify.deliverOperatorNotification && notify.buildActionGuardOutcomeNotification) {
+      const n = notify.buildActionGuardOutcomeNotification({
+        event: 'action_guard_warning',
+        outcome: 'readiness_demoted',
+        tool: safeToolName(toolName),
+        surface: 'redacted action surface',
+        signals: verdict.signals,
+        severity: 'high',
+        reason: '',
+        origin: 'claude-code-hook',
+        detectedAt: new Date().toISOString(),
+      });
+      result = await notify.deliverOperatorNotification(n, { channels: [channel], timeoutMs: notify.config.timeoutMs });
+    }
+  } catch {
+    result = { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: 'demotion notice failed' } }] };
+  }
+  recordNotifyAudit(toolName, verdict, {}, { ...baseExtra, readinessTransition: 'demote' }, result);
 }
 
 /**
@@ -875,6 +967,8 @@ const SAFE_SIGNALS = new Set([
   'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
   'type-coercion', 'missing-handle', 'write-content-catastrophic',
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
+  // #509: the enforce-when-ready gate's own demotion notice.
+  'readiness-demoted',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -2791,12 +2885,45 @@ process.stdin.on('end', async () => {
       return;
     }
 
+    // ── #509 enforce-when-ready ───────────────────────────────────────────
+    // Only an ENFORCING guard can be gated, and never on a host with a policy
+    // lock: the lock pins enforcement, and a readiness flag must not become a
+    // way around it. Resolved on every call (a fresh cache makes that one
+    // small file read) so a demotion is announced when it happens, not at the
+    // next dangerous call. Any failure here ENFORCES — the tighter answer.
+    const whenReady = cfg.enforce && cfg.readinessGate === true && !inlinePolicyLockPresent();
+    let shadow = false;
+    if (whenReady) {
+      const readinessMod = await loadReadiness();
+      if (!readinessMod) {
+        console.error('[shieldcortex] enforce-when-ready: the readiness module is missing from this build — ENFORCING. Run `shieldcortex repair`.');
+      } else {
+        try {
+          const resolved = readinessMod.resolveReadiness({ channel: readinessMod.describeHumanChannel(cfg.notify) });
+          shadow = resolved.mode === 'shadow';
+          if (resolved.transition === 'demote') {
+            await announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra);
+          } else if (resolved.transition === 'promote') {
+            console.error('[shieldcortex] enforce-when-ready: both readiness bars hold — Action Guard is now ENFORCING dangerous-tier verdicts.');
+          }
+        } catch (err) {
+          shadow = false;
+          console.error(`[shieldcortex] enforce-when-ready: readiness could not be resolved (${safeDiagnosticReason(err?.message ?? err)}) — ENFORCING.`);
+        }
+      }
+    }
+
     if (verdict.decision === 'allow') {
       // Issue #95: audit RECOGNISED allows (severity above benign) so forensics
       // can tell "scanned & allowed" from "never scanned". Benign allows stay
       // unaudited — volume discipline, mirrored with the plugin interceptor.
       if (verdict.severity !== 'benign' && cfg.auditAllows !== false) {
         writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
+      } else if (whenReady) {
+        // #509: the FP bar's denominator is EVERY gated call, so under this
+        // posture a benign allow leaves a minimal row too — no command text,
+        // no args; the one extra row per call is the measurement's price.
+        writeAuditEntry(safeToolName(toolName), { decision: 'allow', severity: 'benign', signals: [] }, { tally: 'redacted' }, 'allow', 'allowed', { ...baseExtra, readinessTally: true });
       }
       process.exit(0);
     }
@@ -2871,6 +2998,30 @@ process.stdin.on('end', async () => {
         writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', baseExtra);
         process.exit(0); // Defer to Claude Code's own permission system.
       }
+    }
+
+    // #509 SHADOW: enforce-when-ready has not (or no longer) proven both bars.
+    // The verdict is exactly the guard's; it is recorded as the stop it WOULD
+    // have been — `would_hold` where enforcing would ask, `would_block` where
+    // it would deny for want of a prompt surface — and the call proceeds.
+    // Placed where advisory mode sits, so it inherits advisory's limits: the
+    // catastrophic tier returned above, and an unscanned schema rejection
+    // (#436) is NOT shadowed — "could not look" is never an allow.
+    if (shadow && !unscannedBlock) {
+      const wouldOutcome = noPromptSurfaceReason(permissionMode) ? 'would_block' : 'would_hold';
+      writeAuditEntry(
+        safeToolName(toolName),
+        safeApprovalVerdict(verdict),
+        redactedAuditArgs(toolName, toolInput),
+        'require_approval',
+        wouldOutcome,
+        { ...baseExtra, shadow: true, posture: 'enforce-when-ready' },
+      );
+      console.error(
+        `[shieldcortex] Action Guard (shadow, enforce-when-ready): ${wouldOutcome === 'would_block' ? 'would have BLOCKED' : 'would have HELD for approval'} ` +
+        `${safeToolName(toolName)} [${safeSignalList(verdict.signals).join(', ')}] — not enforced until this install proves its readiness bars (\`shieldcortex guard readiness\`).`,
+      );
+      process.exit(0);
     }
 
     if (!cfg.enforce && !unscannedBlock) {
@@ -3056,6 +3207,14 @@ process.stdin.on('end', async () => {
           sessionKey: baseExtra.sessionKey,
         });
         recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result);
+        // #509 approval-reach evidence: a delivered request waits for its
+        // answer (the store or the card waiter writes it, keyed to this hash);
+        // one that never left is already known NOT to have reached anyone.
+        if (result?.deliveredVia) {
+          await recordReachEvidence(cfg, fullHash, 'request', undefined, safeNotifyLabel(result.deliveredVia) ?? 'channel');
+        } else {
+          await recordReachEvidence(cfg, fullHash, 'resolved', 'unreached', null, 'request not delivered to the configured channel');
+        }
       }
     }
     // #139: ask ONLY where a prompt can actually be raised. Under
@@ -3080,6 +3239,14 @@ process.stdin.on('end', async () => {
       baseExtra,
       retryCtx,
     );
+    // #509: a denial for want of a prompt surface put no decision to a human
+    // at all — on the approval-reach bar that is a request that did NOT reach
+    // one. (Same pure function emitApprovalRequired just branched on.)
+    if (noPromptSurfaceForHold) {
+      let dnpHash = null;
+      try { dnpHash = approvals ? approvals.hashToolCall(toolName, toolInput) : null; } catch { dnpHash = null; }
+      await recordReachEvidence(cfg, dnpHash ?? mintActionId(), 'resolved', 'no_surface', null, noPromptSurfaceForHold);
+    }
     process.exit(0);
   } catch (error) {
     console.error(`[shieldcortex] action-guard hook error: ${error?.message ?? error}`);

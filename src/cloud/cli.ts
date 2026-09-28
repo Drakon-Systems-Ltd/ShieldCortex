@@ -69,7 +69,13 @@ export function handleCloudConfig(args: string[]): void {
       .filter(Boolean)
       .join(' + ');
     const agCore = getActionGuardCoreConfig();
-    const agStatus = !agCore.enabled ? 'Off' : agCore.enforce ? 'Enforce' : 'Advisory (warn-mode)';
+    const agStatus = !agCore.enabled
+      ? 'Off'
+      : !agCore.enforce
+        ? 'Advisory (warn-mode)'
+        : agCore.readinessGate
+          ? 'Enforce when ready (see `shieldcortex guard readiness`)'
+          : 'Enforce';
     console.log(`  Defence Mode: ${mode}`);
     console.log(`  Tool-Output Firewall: ${toolFirewall.scanToolResponses ? toolFirewall.toolResponseMode : 'Off'}`);
     console.log(`  Action Guard: ${agStatus}`);
@@ -396,13 +402,27 @@ export function handleCloudConfig(args: string[]): void {
   if (args.includes('--action-guard-enforce')) {
     // Enforce implies enabled: enforcing a disabled guard is nonsense, so this
     // flag also switches the guard on rather than writing a dead enforce key.
-    applyActionGuardCore({ enabled: true, enforce: true }, 'Action Guard ENFORCE — dangerous ops require approval / block.');
+    applyActionGuardCore({ enabled: true, enforce: true, readinessGate: false }, 'Action Guard ENFORCE — dangerous ops require approval / block.');
+    changed = true;
+  }
+
+  if (args.includes('--action-guard-enforce-when-ready')) {
+    // #509. Enabled + enforce + the readiness gate: the Claude Code hook runs
+    // in shadow mode until this install's own audit proves both bars.
+    applyActionGuardCore(
+      { enabled: true, enforce: true, readinessGate: true },
+      'Action Guard ENFORCE WHEN READY — dangerous ops are logged, not stopped, until this install has measured ' +
+        '≤ 2% would-stop over ≥ 500 calls / 7 days AND ≥ 98% of approval requests answered by a human through a configured ' +
+        'channel. Needs a human approval channel (--action-guard-notify-openclaw or --action-guard-notify-webhook). ' +
+        'Catastrophic ops block in every posture. Check progress: shieldcortex guard readiness. ' +
+        'The OpenClaw plugin surface does not implement the gate yet and enforces from the start.',
+    );
     changed = true;
   }
 
   if (args.includes('--action-guard-advisory')) {
     applyActionGuardCore(
-      { enforce: false },
+      { enforce: false, readinessGate: false },
       'Action Guard ADVISORY (warn-mode) — dangerous ops log but are not gated (catastrophic still blocks when enabled).',
     );
     changed = true;
@@ -596,10 +616,14 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --tool-firewall-off / --tool-firewall-on  Disable / enable tool-output scanning');
     console.log('  --allow-revoke-by-source / --disallow-revoke-by-source  Enable/disable destructive forget --fromSource (default: disabled)');
     console.log('  --policy-status          Show the OS-owned policy lock: pinned keys, or why there is none');
-    console.log('  --action-guard-enable    Enable Action Guard tool-call gating (default: on)');
-    console.log('  --action-guard-disable   Disable Action Guard entirely — tool calls are NOT gated');
-    console.log('  --action-guard-enforce   Gate dangerous ops (approval/block); also enables the guard');
-    console.log('  --action-guard-advisory  Warn-mode — dangerous ops log but are not gated (catastrophic still blocks)');
+    console.log('  --action-guard-enable    Turn Action Guard on, keeping the current enforce/advisory setting (default: off)');
+    console.log('  --action-guard-disable   Turn Action Guard off entirely — tool calls are NOT gated (the default)');
+    console.log('  --action-guard-enforce   Gate dangerous ops (approval/block) from now on; also enables the guard');
+    console.log('  --action-guard-enforce-when-ready  Log dangerous ops (shadow) until this install measures ≤ 2% would-stop');
+    console.log('                           and ≥ 98% of approvals answered by a human, then gate them. Needs a notify');
+    console.log('                           channel; progress: shieldcortex guard readiness. Claude Code hook only —');
+    console.log('                           the OpenClaw plugin enforces from the start. Also enables the guard');
+    console.log('  --action-guard-advisory  Watch only — dangerous ops log but are not gated (catastrophic still blocks)');
     console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
     console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
     console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
@@ -671,7 +695,7 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
  * propagating, because a genuinely broken config should still be loud.
  */
 function applyActionGuardCore(
-  updates: { enabled?: boolean; enforce?: boolean },
+  updates: { enabled?: boolean; enforce?: boolean; readinessGate?: boolean },
   successLine: string,
 ): void {
   let pluginSync: OpenClawPluginGuardSync;
