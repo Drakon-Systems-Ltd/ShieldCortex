@@ -12,7 +12,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { runTestApproval, buildReadinessSummary, type ReadinessSummary } from '../guard.js';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { statSync, writeFileSync } from 'node:fs';
+
+import { runGuardCommand, runTestApproval, buildReadinessSummary, type ReadinessSummary } from '../guard.js';
+import { currentReadinessPin, readinessPaths } from '../../defence/iron-dome/guard-readiness.js';
 import { checkActionGuardReadiness } from '../doctor.js';
 import { offerActionGuardPosture, POSTURE_CHOICES } from '../../setup/action-guard-posture.js';
 import { handleCloudConfig } from '../../cloud/cli.js';
@@ -178,7 +183,7 @@ describe('#509 doctor readiness row', () => {
     expect(pass.status).toBe('pass');
     const [warn] = await checkActionGuardReadiness({ summary: fakeSummary({ mode: 'shadow', demoted: false }) });
     expect(warn.status).toBe('warn');
-    expect(warn.message).toMatch(/not proven yet/);
+    expect(warn.message).toMatch(/not ready yet/);
     const [fail] = await checkActionGuardReadiness({ summary: fakeSummary({ mode: 'shadow', demoted: true }) });
     expect(fail.status).toBe('fail');
     expect(fail.message).toMatch(/DEMOTED/);
@@ -211,13 +216,27 @@ describe('#509 doctor readiness row', () => {
 // ── setup ───────────────────────────────────────────────────────────────────
 
 describe('#509 setup posture question', () => {
-  it('offers exactly Off / Watch only / Enforce when ready (recommended), each explained', () => {
-    expect(POSTURE_CHOICES.map((c) => c.title)).toEqual(['Off', 'Watch only', 'Enforce when ready (recommended)']);
+  it('offers exactly Off / Watch only / Enforce when ready, none marked recommended, each explained', () => {
+    expect(POSTURE_CHOICES.map((c) => c.title)).toEqual(['Off', 'Watch only', 'Enforce when ready']);
     const ewr = POSTURE_CHOICES[2].body;
     expect(ewr).toMatch(/2%/);
     expect(ewr).toMatch(/98%/);
     expect(ewr).toMatch(/approval channel/);
     expect(ewr).toMatch(/Starts exactly like Watch only/);
+    // Addendum 1 (B): the third condition is stated, and so is today's consequence.
+    expect(ewr).toMatch(/independently reviewed evidence/);
+    expect(ewr).toMatch(/keeps watching and does not enforce/);
+  });
+
+  it('Addendum 1 (F): no setup text says or implies safe/protected, and nothing is marked recommended', async () => {
+    const lines: string[] = [];
+    await offerActionGuardPosture({ tty: true, ask: async () => '3', log: (l) => lines.push(l), apply: () => {}, current: () => 'off', channelConfigured: () => false });
+    await offerActionGuardPosture({ tty: false, ask: async () => '', log: (l) => lines.push(l) });
+    const text = [...POSTURE_CHOICES.flatMap((c) => [c.title, c.body]), ...lines].join('\n');
+    expect(text).not.toMatch(/\bsafe(ly|ty)?\b/i);
+    expect(text).not.toMatch(/protect/i);
+    expect(text).not.toMatch(/recommended/i);
+    expect(text).not.toMatch(/false.positive|§5B/i);
   });
 
   it('non-interactive: changes nothing, prints how to choose', async () => {
@@ -271,5 +290,94 @@ describe('#509 config flags and --help honesty', () => {
     expect(help).toMatch(/--action-guard-enable[^\n]*default: off/);
     expect(help).toMatch(/--action-guard-enforce-when-ready/);
     expect(help).toMatch(/the OpenClaw plugin enforces from the start/);
+    expect(help).toMatch(/reviewed[\s\S]{0,40}effectiveness evidence/);
+    expect(help).not.toMatch(/false.positive|upper bound|§5B|protected/i);
+  });
+});
+
+// ── Addendum 1 (E): doctor and `guard readiness` report, never flip ─────────
+
+describe('#509 doctor and guard readiness are read-only (Addendum 1 E)', () => {
+  /** Every file under the isolated config dir → mtime + sha256. */
+  function snapshot(): Record<string, string> {
+    const root = join(home, '.shieldcortex');
+    const out: Record<string, string> = {};
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        const st = statSync(p);
+        if (st.isDirectory()) walk(p);
+        else out[p.slice(root.length)] = `${st.mtimeMs}:${createHash('sha256').update(readFileSync(p)).digest('hex')}`;
+      }
+    };
+    walk(root);
+    return out;
+  }
+
+  /** An enforcing install whose evidence has gone: the hook's NEXT call would
+   *  demote and rewrite state. A reader must report that and change nothing. */
+  function seedDueForDemotion(): void {
+    setNotify({ enabled: true, openclaw: true });
+    const now = Date.now();
+    const pin = currentReadinessPin();
+    const auditDir = join(home, '.shieldcortex', 'audit');
+    mkdirSync(auditDir, { recursive: true });
+    const t = { type: 'readiness_transition', origin: 'claude-code-hook', from: 'shadow', to: 'enforcing', ts: new Date(now - 2 * DAY).toISOString(), auditEventId: 'p1', readinessPin: pin };
+    appendFileSync(join(auditDir, `realtime-${t.ts.slice(0, 10)}.jsonl`), `${JSON.stringify(t)}\n`);
+    const statePath = readinessPaths({ home }).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      mode: 'enforcing',
+      computedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+      pin,
+      failingSince: new Date(now - 3 * 60 * 60_000).toISOString(),
+      lastPromotedAt: t.ts,
+    }));
+  }
+
+  it('doctor\'s readiness row and `guard readiness` (text + --json) leave posture, mode and every file byte-identical', async () => {
+    seedDueForDemotion();
+    const coreBefore = getActionGuardCoreConfig();
+    const before = snapshot();
+    expect(Object.keys(before).some((k) => k.endsWith('guard-readiness.json'))).toBe(true);
+
+    const [row] = await checkActionGuardReadiness({ summary: () => buildReadinessSummary({ home }) });
+    // It reports the pending demotion as the FAIL it is…
+    expect(row.status).toBe('fail');
+    expect(row.message).toMatch(/DEMOTED/);
+    expect(await runGuardCommand(['readiness'], { home })).toBe(1);
+    expect(await runGuardCommand(['readiness', '--json'], { home })).toBe(1);
+
+    // …and flips nothing: no promotion, no demotion, no state or audit write.
+    expect(snapshot()).toEqual(before);
+    clearCloudConfigCache();
+    expect(getActionGuardCoreConfig()).toEqual(coreBefore);
+    const state = JSON.parse(readFileSync(readinessPaths({ home }).statePath, 'utf8'));
+    expect(state.mode).toBe('enforcing');
+    expect(auditRows().filter((r) => r.type === 'readiness_transition').map((r) => r.to)).toEqual(['enforcing']);
+  });
+
+  it('the BUILT `shieldcortex guard readiness` leaves the isolated tree byte-identical too', () => {
+    seedDueForDemotion();
+    const before = snapshot();
+    const cli = resolve(here, '..', '..', '..', 'dist', 'index.js');
+    const run = spawnSync(process.execPath, [cli, 'guard', 'readiness'], {
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: home,
+        USERPROFILE: home,
+        SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'),
+        OPENCLAW_HOME: join(home, 'openclaw-home'),
+        NO_UPDATE_NOTIFIER: '1',
+      },
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    expect(run.stdout).toMatch(/DEMOTED from enforcing/);
+    expect(run.stdout).toMatch(/Readiness proxies \(operability\)/);
+    expect(run.stdout).not.toMatch(/upper bound|FP bar/);
+    expect(run.status).toBe(1);
+    expect(snapshot()).toEqual(before);
   });
 });
