@@ -54,7 +54,8 @@ export const POSTURE_CHOICES: ReadonlyArray<{ key: string; choice: PostureChoice
       'workable to run here, not how well it stops attacks. The third is independently reviewed evidence that ' +
       'this version of the guard stops attacks. None has been published yet, so for now this choice keeps ' +
       'watching and does not enforce. It also needs a human approval channel (the OpenClaw approval card or a ' +
-      'webhook); without one it never enforces. If a condition later fails it drops back to watching and tells ' +
+      'webhook) and a webhook that can carry a demotion notice; without them it never enforces. If a condition ' +
+      'later fails it drops back to watching and tells ' +
       'you loudly. Today this gate applies to the Claude Code hook; the OpenClaw plugin enforces from the start.',
   },
 ];
@@ -83,6 +84,7 @@ export interface PostureDeps {
   current?: () => ActionGuardPosture;
   apply?: (choice: PostureChoice) => void;
   channelConfigured?: () => boolean;
+  webhookConfigured?: () => boolean;
 }
 
 function defaultApply(choice: PostureChoice): void {
@@ -97,6 +99,11 @@ function defaultApply(choice: PostureChoice): void {
       reason: `posture set to enforce-when-ready by \`shieldcortex setup\` (was ${previousPosture})`,
     });
   }
+}
+
+function defaultWebhookConfigured(): boolean {
+  const n = getActionGuardNotifyConfig();
+  return n.enabled && !!n.webhookUrl;
 }
 
 function defaultChannelConfigured(): boolean {
@@ -146,6 +153,10 @@ export async function offerActionGuardPosture(deps: PostureDeps): Promise<Postur
       log('It will not enforce until you configure a human approval channel:');
       log('  shieldcortex config --action-guard-notify-openclaw        (approval card on your OpenClaw channel)');
       log('  shieldcortex config --action-guard-notify-webhook <url>   (one-way webhook)');
+    }
+    if (!(deps.webhookConfigured ?? defaultWebhookConfigured)()) {
+      log('It will also not enforce without a webhook, which is how a later demotion reaches you (the OpenClaw card carries approvals only):');
+      log('  shieldcortex config --action-guard-notify-webhook <url>');
     }
     log('Watch progress with: shieldcortex guard readiness   (add round-trips with: shieldcortex guard test-approval)');
   }

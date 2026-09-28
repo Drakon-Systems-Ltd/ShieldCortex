@@ -63,20 +63,26 @@
  *
  * ## Tamper direction
  *
- * The audit log and the state file below are same-UID files. Inflating
- * readiness only tightens. Deflating it — forged would-stop rows, deleted
- * approval answers, a corrupted line, a removed state file — loosens, so it is
- * never silent: readiness is RECOMPUTED from evidence at least every
- * {@link READINESS_CACHE_TTL_MS}; a recompute that turns an enforcing install
- * into a shadow one is a DEMOTION, which is audited, reported to the operator
- * and makes `shieldcortex doctor` FAIL. The state file is a cache and a memory
- * of the last mode, never the source of truth: a missing state falls back to
- * the last transition row in the audit log, and wherever state and audit
- * disagree the ENFORCING answer wins. The state file (and its lock and temp
- * files) live in the approval store's own directory, `~/.shieldcortex/approvals`
- * — deliberately NOT under a `SHIELDCORTEX_CONFIG_DIR` override — so the
- * guard's existing `touch-approval-store` path rule (core, hook fallback,
- * OpenClaw fallback) gates an agent writing it wherever the config lives.
+ * The audit log, the state file and the transition record are same-UID
+ * files. Inflating readiness only tightens. Deflating it — forged would-stop
+ * rows, deleted approval answers, a corrupted line, a removed or forged state
+ * file, a lost transition record — loosens, so it is never silent:
+ *  - readiness is RECOMPUTED from evidence at least every
+ *    {@link READINESS_CACHE_TTL_MS}, and every complete audit line is parsed
+ *    and validated first: one malformed record invalidates the measurement;
+ *  - a recompute that turns an enforcing install into a shadow one is a
+ *    DEMOTION: audited, announced to the operator, `shieldcortex doctor` FAIL;
+ *  - the durable transition record (see TRANSITION RECORD) is the authority
+ *    for "was this install enforcing". The state file is a cache that may only
+ *    TIGHTEN: a cached mode that disagrees with the record is a tamper signal
+ *    and is recomputed, and a missing or unreadable record is UNKNOWN, treated
+ *    as potentially demoted — never as never-ready;
+ *  - promotion needs a channel that can push the demotion notice.
+ * The state file, the record (and their lock and temp files) live in the
+ * approval store's own directory, `~/.shieldcortex/approvals` — deliberately
+ * NOT under a `SHIELDCORTEX_CONFIG_DIR` override — so the guard's existing
+ * `touch-approval-store` path rule (core, hook fallback, OpenClaw fallback)
+ * gates an agent writing them wherever the config lives.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
