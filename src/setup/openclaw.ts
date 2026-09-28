@@ -287,10 +287,21 @@ function hookInstallPaths(configRoot: string): string[] {
  */
 function linkedHookInstallPath(configRoot: string): string | null {
   for (const target of hookInstallPaths(configRoot)) {
-    const { link, unreadable } = findLinkOnPath(configRoot, target);
-    if (unreadable !== null) return `${unreadable.path} could not be read (${unreadable.error})`;
-    if (link !== null) return `${link} is a symlink`;
+    const reason = linkedWriteReason(configRoot, target);
+    if (reason !== null) return reason;
   }
+  return null;
+}
+
+/**
+ * Why a write under `base` cannot proceed, or null when it can (#583).
+ * A link or an unreadable component anywhere from the integration root to
+ * the destination is a refusal — `copyFileSync` / `mkdirSync` follow one.
+ */
+function linkedWriteReason(base: string, target: string): string | null {
+  const { link, unreadable } = findLinkOnPath(base, target);
+  if (unreadable !== null) return `${unreadable.path} could not be read (${unreadable.error})`;
+  if (link !== null) return `${link} is a symlink`;
   return null;
 }
 
@@ -1195,10 +1206,26 @@ export function snapshotOpenClawConfig(homeArg?: string): string | null {
   const configPath = homeArg
     ? path.join(homeArg, '.openclaw', 'openclaw.json')
     : openClawConfigPath();
-  if (!fs.existsSync(configPath)) return null;
+  const openclawDir = path.dirname(configPath);
+  const src = lstatAnswer(configPath);
+  if ('absent' in src) return null;
+  if ('error' in src) {
+    console.warn(`  Skipped openclaw.json snapshot — ${configPath} could not be read (${src.error}); nothing written`);
+    return null;
+  }
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const dest = `${configPath}.sc-preinstall.bak-${ts}`;
+  // #583: copyFileSync follows a link at the source, the destination, or any
+  // ancestor. A planted destination overwrites whatever the link names.
+  for (const target of [configPath, dest]) {
+    const reason = linkedWriteReason(openclawDir, target);
+    if (reason !== null) {
+      console.warn(`  Skipped openclaw.json snapshot — ${reason}; nothing written`);
+      return null;
+    }
+  }
   try {
+    refuseLinkedDestination(dest);
     fs.copyFileSync(configPath, dest);
     return dest;
   } catch {
@@ -1496,6 +1523,29 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
     return 'native-link';
   }
 
+  const home = resolveUserHome();
+  const openclawDir = path.join(home, '.openclaw');
+  const requiredFiles = ['index.js', 'interceptor.js', 'intercept-ingest.js', 'openclaw.plugin.json'];
+  const extensionsDirProbe = path.join(openclawDir, 'extensions');
+  const destDirProbe = path.join(extensionsDirProbe, PLUGIN_DIR_NAME);
+  // #583: the fallback copy writes through mkdir/copyFileSync, which follow a
+  // link at extensions/, the plugin dir, or any leaf. Refuse before the first
+  // write. Native install (above) does not use this tree.
+  const copyTargets = [
+    extensionsDirProbe,
+    destDirProbe,
+    ...requiredFiles.map((file) => path.join(destDirProbe, file)),
+    path.join(destDirProbe, 'package.json'),
+  ];
+  for (const target of copyTargets) {
+    const reason = linkedWriteReason(openclawDir, target);
+    if (reason !== null) {
+      console.warn(`  Skipped plugin copy — ${reason}; nothing written`);
+      process.exitCode = 1;
+      return 'skipped';
+    }
+  }
+
   const pluginSource = resolvePluginSource();
   if (!fs.existsSync(pluginSource)) {
     // #251: when native install was refused (e.g. invalid OpenClaw config) and
@@ -1525,6 +1575,7 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
 
   const destDir = path.join(extensionsDir, PLUGIN_DIR_NAME);
   try {
+    refuseLinkedDestination(destDir);
     fs.mkdirSync(destDir, { recursive: true });
 
     const requiredFiles = ['index.js', 'interceptor.js', 'intercept-ingest.js', 'openclaw.plugin.json'];
@@ -1532,6 +1583,7 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
       const src = path.join(pluginSource, file);
       const dest = path.join(destDir, file);
       if (fs.existsSync(src)) {
+        refuseLinkedDestination(dest);
         fs.copyFileSync(src, dest);
       } else {
         console.warn(`  Warning: ${file} not found in plugin source (${pluginSource})`);
@@ -1560,6 +1612,7 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
         // Keep existing version if package.json can't be read
       }
 
+      refuseLinkedDestination(indexDest);
       fs.writeFileSync(indexDest, pluginCode, 'utf-8');
     } catch (e) {
       console.warn(`  Warning: Could not patch plugin imports/version: ${(e as Error).message}`);
@@ -1568,7 +1621,9 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
     // Write package.json with "type": "module" to prevent ESM reparsing warnings
     try {
       const pluginPkg = { name: 'shieldcortex-realtime-local', type: 'module', private: true };
-      fs.writeFileSync(path.join(destDir, 'package.json'), JSON.stringify(pluginPkg, null, 2) + '\n', 'utf-8');
+      const pkgDest = path.join(destDir, 'package.json');
+      refuseLinkedDestination(pkgDest);
+      fs.writeFileSync(pkgDest, JSON.stringify(pluginPkg, null, 2) + '\n', 'utf-8');
     } catch { /* non-critical */ }
 
     // Verify readability
@@ -1588,6 +1643,7 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
       if (fs.existsSync(manifestPath)) {
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
         manifest.version = pluginVersion;
+        refuseLinkedDestination(manifestPath);
         fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
       }
     } catch { /* keep whatever version the manifest has */ }

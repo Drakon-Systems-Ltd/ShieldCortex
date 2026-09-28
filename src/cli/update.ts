@@ -857,6 +857,7 @@ async function stepOpenClawPluginLocked(
           detail: [...report.detail, endLine, ...purgeDetail],
           truncated: report.truncated,
           rerun: PLUGIN_RERUN,
+          unfinished: true,
         };
       }
       return {
@@ -865,6 +866,7 @@ async function stepOpenClawPluginLocked(
         detail: [...report.detail, ...purgeDetail],
         truncated: report.truncated,
         rerun: PLUGIN_RERUN,
+        unfinished: true,
       };
     }
   });
