@@ -1,0 +1,386 @@
+/**
+ * #509 — the enforce-when-ready readiness gate: the two ADR-002 §5B bars
+ * measured from an install's own audit log, the hysteresis rule, and the
+ * tamper direction (deflation is never silent).
+ *
+ * Every test runs against a throwaway audit directory and state path; the
+ * live ~/.shieldcortex is never read.
+ */
+import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  APPROVAL_MIN_SAMPLE,
+  DEMOTE_AFTER_FAILING_MS,
+  FP_MIN_SAMPLE,
+  READINESS_CACHE_TTL_MS,
+  REPROMOTE_COOLDOWN_MS,
+  computeReadiness,
+  decideMode,
+  describeHumanChannel,
+  isDemoted,
+  readReadinessState,
+  readinessPaths,
+  recordApprovalReach,
+  resolveReadiness,
+  type ReadinessPaths,
+} from '../guard-readiness.js';
+import { approvalsDir } from '../action-approvals.js';
+import { evaluateToolCall } from '../tool-action-guard.js';
+
+const DAY = 24 * 60 * 60 * 1000;
+const NOW = Date.parse('2026-09-28T12:00:00.000Z');
+const CHANNEL = { configured: true, kind: 'openclaw-card' };
+const NO_CHANNEL = { configured: false, kind: null };
+
+let root: string;
+let paths: ReadinessPaths;
+let seq = 0;
+
+function row(ts: number, fields: Record<string, unknown>): Record<string, unknown> {
+  seq += 1;
+  return { ts: new Date(ts).toISOString(), auditEventId: `e${seq.toString(16).padStart(8, '0')}`, ...fields };
+}
+
+function write(rows: Array<Record<string, unknown>>): void {
+  mkdirSync(paths.auditDir, { recursive: true });
+  for (const r of rows) {
+    const date = String(r.ts).slice(0, 10);
+    appendFileSync(join(paths.auditDir, `realtime-${date}.jsonl`), `${JSON.stringify(r)}\n`);
+  }
+}
+
+function call(ts: number, outcome: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const action = outcome === 'allowed' ? 'allow' : 'require_approval';
+  return row(ts, { type: 'intercept', origin: 'claude-code-hook', tool: 'Bash', severity: outcome === 'allowed' ? 'low' : 'high', action, outcome, ...extra });
+}
+
+/** `total` real calls spread evenly over `spanDays`, `stops` of them would-holds. */
+function calls(total: number, stops: number, spanDays = 8): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < total; i += 1) {
+    const ts = NOW - spanDays * DAY + Math.floor((i * spanDays * DAY) / total) + 1000;
+    out.push(call(ts, i < stops ? 'would_hold' : 'allowed'));
+  }
+  return out;
+}
+
+/** `answered` reached round-trips + `unanswered` expired requests, within the last day. */
+function reach(answered: number, unanswered: number, opts: { at?: number; synthetic?: boolean } = {}): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const base = opts.at ?? NOW - DAY;
+  for (let i = 0; i < answered + unanswered; i += 1) {
+    const reachId = `r${i.toString(16).padStart(8, '0')}${opts.at ?? ''}`;
+    const t = base + i * 1000;
+    out.push(row(t, { type: 'approval_reach', reachId, phase: 'request', ...(opts.synthetic ? { synthetic: true } : {}) }));
+    if (i < answered) out.push(row(t + 60_000, { type: 'approval_reach', reachId, phase: 'answer', answer: i % 2 ? 'deny' : 'approve' }));
+  }
+  return out;
+}
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'sc-readiness-'));
+  paths = {
+    auditDir: join(root, 'audit'),
+    statePath: join(root, 'approvals', 'guard-readiness.json'),
+    readAuditDirs: [join(root, 'audit')],
+  };
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe('#509 FP bar', () => {
+  it('below the minimum sample ⇒ not ready, however clean', () => {
+    write(calls(FP_MIN_SAMPLE - 1, 0));
+    write(reach(20, 0));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.fp.total).toBe(FP_MIN_SAMPLE - 1);
+    expect(r.fp.pass).toBe(false);
+    expect(r.fp.missing).toMatch(/only 499 of the 500/);
+    expect(r.ready).toBe(false);
+  });
+
+  it('2.1% would-stop ⇒ not ready', () => {
+    write(calls(1000, 21));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.fp.rate).toBeCloseTo(0.021, 5);
+    expect(r.fp.pass).toBe(false);
+    expect(r.fp.missing).toMatch(/2\.1%/);
+  });
+
+  it('1.9% would-stop ⇒ the FP bar passes', () => {
+    write(calls(1000, 19));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.fp.rate).toBeCloseTo(0.019, 5);
+    expect(r.fp.pass).toBe(true);
+  });
+
+  it('enough calls but under 7 days of span ⇒ not ready', () => {
+    write(calls(1000, 0, 3));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.fp.pass).toBe(false);
+    expect(r.fp.missing).toMatch(/span/);
+  });
+
+  it('gate_degraded rows, notify rows, test/proof origins, synthetic rows and lease refusals are excluded', () => {
+    write(calls(1000, 19));
+    const t = NOW - 2 * DAY;
+    const noise: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 50; i += 1) {
+      noise.push(call(t + i, 'failure_allowed', { action: 'gate_degraded' }));
+      noise.push(call(t + i, 'notified', { action: 'notify' }));
+      noise.push(call(t + i, 'would_hold', { origin: 'guard-proof' }));
+      noise.push(call(t + i, 'would_hold', { origin: 'openclaw-interceptor' }));
+      noise.push(call(t + i, 'would_hold', { synthetic: true }));
+      noise.push(call(t + i, 'auto_denied', { threats: ['session-lease', 'frozen'] }));
+    }
+    write(noise);
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.fp.total).toBe(1000);
+    expect(r.fp.stops).toBe(19);
+    expect(r.fp.pass).toBe(true);
+  });
+
+  it('catastrophic stops count in the denominator but never as a false positive', () => {
+    const rows = calls(1000, 19);
+    for (let i = 0; i < 30; i += 1) rows.push(call(NOW - DAY + i, 'auto_denied', { severity: 'critical', action: 'auto_deny' }));
+    write(rows);
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.fp.total).toBe(1030);
+    expect(r.fp.stops).toBe(19);
+  });
+});
+
+describe('#509 approval-reach bar', () => {
+  beforeEach(() => write(calls(1000, 0)));
+
+  it('97% answered ⇒ not ready', () => {
+    write(reach(97, 3));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.approval.rate).toBeCloseTo(0.97, 5);
+    expect(r.approval.pass).toBe(false);
+    expect(r.ready).toBe(false);
+  });
+
+  it('98% answered ⇒ ready', () => {
+    write(reach(98, 2));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.approval.rate).toBeCloseTo(0.98, 5);
+    expect(r.approval.pass).toBe(true);
+    expect(r.ready).toBe(true);
+    expect(r.missing).toEqual([]);
+  });
+
+  it('no configured channel ⇒ not ready, full stop', () => {
+    write(reach(100, 0));
+    const r = computeReadiness({ channel: NO_CHANNEL, paths, now: NOW });
+    expect(r.approval.pass).toBe(false);
+    expect(r.approval.missing).toMatch(/no human approval channel/);
+    expect(r.ready).toBe(false);
+  });
+
+  it('below the minimum sample ⇒ not ready', () => {
+    write(reach(APPROVAL_MIN_SAMPLE - 1, 0));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.approval.pass).toBe(false);
+  });
+
+  it('a last reached round-trip older than 7 days ⇒ not ready', () => {
+    write(reach(30, 0, { at: NOW - 8 * DAY }));
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.approval.rate).toBe(1);
+    expect(r.approval.pass).toBe(false);
+    expect(r.approval.missing).toMatch(/last 7 days/);
+  });
+
+  it('transcript-only / no-surface / undelivered requests are resolved but never a reach', () => {
+    write(reach(98, 0));
+    write([
+      row(NOW - DAY, { type: 'approval_reach', reachId: 'x1', phase: 'resolved', answer: 'no_surface' }),
+      row(NOW - DAY, { type: 'approval_reach', reachId: 'x2', phase: 'resolved', answer: 'unreached' }),
+      row(NOW - DAY, { type: 'approval_reach', reachId: 'x3', phase: 'resolved', answer: 'unreached' }),
+    ]);
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.approval.resolved).toBe(101);
+    expect(r.approval.reached).toBe(98);
+    expect(r.approval.pass).toBe(false);
+  });
+
+  it('an answer later than the answer window is a timeout; an unanswered fresh request is pending', () => {
+    write(reach(20, 0));
+    write([
+      row(NOW - DAY, { type: 'approval_reach', reachId: 'late', phase: 'request' }),
+      row(NOW - DAY + 30 * 60_000, { type: 'approval_reach', reachId: 'late', phase: 'answer', answer: 'approve' }),
+      row(NOW - 60_000, { type: 'approval_reach', reachId: 'fresh', phase: 'request' }),
+    ]);
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.approval.resolved).toBe(21);
+    expect(r.approval.reached).toBe(20);
+    expect(r.approval.pending).toBe(1);
+  });
+
+  it('recordApprovalReach pairs by hash: request + human answer is a reach', () => {
+    const hash = 'a'.repeat(64);
+    recordApprovalReach({ hash, phase: 'request', channel: 'openclaw' }, { auditDir: paths.auditDir, now: NOW - 5 * 60_000 });
+    recordApprovalReach({ hash, phase: 'answer', answer: 'deny' }, { auditDir: paths.auditDir, now: NOW - 4 * 60_000 });
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.approval.reached).toBe(1);
+    expect(r.approval.lastRoundTripAt).toBe(new Date(NOW - 4 * 60_000).toISOString());
+    const raw = readdirSync(paths.auditDir).map((f) => readFileSync(join(paths.auditDir, f), 'utf8')).join('');
+    expect(raw).not.toContain(hash); // only the derived reach id is written
+  });
+});
+
+describe('#509 describeHumanChannel', () => {
+  it('needs enabled:true and a real channel', () => {
+    expect(describeHumanChannel(undefined).configured).toBe(false);
+    expect(describeHumanChannel({ enabled: 'yes', openclaw: true }).configured).toBe(false);
+    expect(describeHumanChannel({ enabled: true }).configured).toBe(false);
+    expect(describeHumanChannel({ enabled: true, webhookUrl: 'ftp://x' }).configured).toBe(false);
+    expect(describeHumanChannel({ enabled: true, webhookUrl: 'https://hooks.example.com/x' })).toEqual({ configured: true, kind: 'webhook' });
+    expect(describeHumanChannel({ enabled: true, openclaw: true })).toEqual({ configured: true, kind: 'openclaw-card' });
+  });
+});
+
+describe('#509 hysteresis', () => {
+  it('promotes as soon as both bars hold', () => {
+    expect(decideMode({ prevMode: null, ready: true, now: NOW })).toEqual({ mode: 'enforcing', transition: 'promote' });
+  });
+
+  it('one failing recompute does not demote; failing for the full grace does', () => {
+    const first = decideMode({ prevMode: 'enforcing', ready: false, now: NOW });
+    expect(first.mode).toBe('enforcing');
+    expect(first.transition).toBeNull();
+    const later = decideMode({ prevMode: 'enforcing', ready: false, failingSince: first.failingSince, now: NOW + DEMOTE_AFTER_FAILING_MS - 1 });
+    expect(later.mode).toBe('enforcing');
+    const demoted = decideMode({ prevMode: 'enforcing', ready: false, failingSince: first.failingSince, now: NOW + DEMOTE_AFTER_FAILING_MS });
+    expect(demoted).toEqual({ mode: 'shadow', transition: 'demote' });
+  });
+
+  it('no re-promotion inside the cooldown after a demotion', () => {
+    const lastDemotedAt = new Date(NOW).toISOString();
+    expect(decideMode({ prevMode: 'shadow', ready: true, lastDemotedAt, now: NOW + REPROMOTE_COOLDOWN_MS - 1 }).mode).toBe('shadow');
+    expect(decideMode({ prevMode: 'shadow', ready: true, lastDemotedAt, now: NOW + REPROMOTE_COOLDOWN_MS }).transition).toBe('promote');
+  });
+});
+
+describe('#509 resolveReadiness — transitions are audited, deflation is never silent', () => {
+  function readyEvidence(): void {
+    write(calls(1000, 5));
+    write(reach(25, 0));
+  }
+  function transitions(): Array<Record<string, unknown>> {
+    if (!existsSync(paths.auditDir)) return [];
+    return readdirSync(paths.auditDir)
+      .flatMap((f) => readFileSync(join(paths.auditDir, f), 'utf8').split('\n').filter(Boolean))
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r.type === 'readiness_transition');
+  }
+
+  it('fresh store: shadow, no transition, and the state file is written', () => {
+    const r = resolveReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.mode).toBe('shadow');
+    expect(r.transition).toBeNull();
+    expect(readReadinessState(paths.statePath)?.mode).toBe('shadow');
+  });
+
+  it('promotion is audited and cached for one TTL', () => {
+    readyEvidence();
+    const r = resolveReadiness({ channel: CHANNEL, paths, now: NOW });
+    expect(r.mode).toBe('enforcing');
+    expect(r.transition).toBe('promote');
+    expect(transitions().map((t) => t.to)).toEqual(['enforcing']);
+    const again = resolveReadiness({ channel: CHANNEL, paths, now: NOW + READINESS_CACHE_TTL_MS - 1 });
+    expect(again.cached).toBe(true);
+    expect(again.mode).toBe('enforcing');
+  });
+
+  it('forged would-block rows cause a VISIBLE demotion (transition row + isDemoted), never a silent one', () => {
+    readyEvidence();
+    expect(resolveReadiness({ channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
+    // Same-UID forgery: 200 would-block rows appended to the audit.
+    const forged: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 200; i += 1) forged.push(call(NOW + i, 'would_block'));
+    write(forged);
+    // Past the TTL: recompute sees the failing bar and starts the grace clock.
+    const t1 = NOW + READINESS_CACHE_TTL_MS;
+    const during = resolveReadiness({ channel: CHANNEL, paths, now: t1 });
+    expect(during.mode).toBe('enforcing');
+    expect(during.transition).toBeNull();
+    // Still failing after the grace: demoted, audited, with the reason.
+    const t2 = t1 + DEMOTE_AFTER_FAILING_MS;
+    const out = resolveReadiness({ channel: CHANNEL, paths, now: t2 });
+    expect(out.mode).toBe('shadow');
+    expect(out.transition).toBe('demote');
+    expect(out.demotionReason).toMatch(/would stop/);
+    const tr = transitions();
+    expect(tr.map((t) => t.to)).toEqual(['enforcing', 'shadow']);
+    expect(String(tr[1].reason)).toMatch(/would stop/);
+    expect(isDemoted(readReadinessState(paths.statePath), computeReadiness({ channel: CHANNEL, paths, now: t2 }))).toBe(true);
+  });
+
+  it('a deleted state file does not quietly end enforcement: the audit remembers the mode', () => {
+    readyEvidence();
+    expect(resolveReadiness({ channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
+    rmSync(paths.statePath);
+    // Evidence still holds → still enforcing, and no spurious promotion row.
+    const r = resolveReadiness({ channel: CHANNEL, paths, now: NOW + 1 });
+    expect(r.mode).toBe('enforcing');
+    expect(r.transition).toBeNull();
+    expect(transitions()).toHaveLength(1);
+  });
+
+  it('a state file rewritten to "shadow" does not outrank an enforcing audit on recompute', () => {
+    readyEvidence();
+    resolveReadiness({ channel: CHANNEL, paths, now: NOW });
+    writeFileSync(paths.statePath, JSON.stringify({ version: 1, mode: 'shadow', computedAt: new Date(NOW - 2 * READINESS_CACHE_TTL_MS).toISOString() }));
+    const r = resolveReadiness({ channel: CHANNEL, paths, now: NOW + 1 });
+    expect(r.mode).toBe('enforcing');
+    expect(r.transition).toBeNull();
+  });
+
+  it('deleted approval evidence + missing state still demotes loudly (the audit remembers it was enforcing)', () => {
+    readyEvidence();
+    resolveReadiness({ channel: CHANNEL, paths, now: NOW });
+    rmSync(paths.statePath);
+    // Wipe every approval_reach row, keep the rest (including the transition).
+    for (const f of readdirSync(paths.auditDir)) {
+      const p = join(paths.auditDir, f);
+      const kept = readFileSync(p, 'utf8').split('\n').filter((l) => l && !l.includes('"approval_reach"'));
+      writeFileSync(p, kept.map((l) => `${l}\n`).join(''));
+    }
+    const first = resolveReadiness({ channel: CHANNEL, paths, now: NOW + 1 });
+    expect(first.mode).toBe('enforcing'); // grace starts
+    const out = resolveReadiness({ channel: CHANNEL, paths, now: NOW + 1 + READINESS_CACHE_TTL_MS + DEMOTE_AFTER_FAILING_MS });
+    expect(out.transition).toBe('demote');
+    expect(transitions().map((t) => t.to)).toEqual(['enforcing', 'shadow']);
+  });
+});
+
+describe('#509 readiness state is inside the guarded approval store', () => {
+  it('lives in the approvals directory', () => {
+    const home = mkdtempSync(join(tmpdir(), 'sc-readiness-home-'));
+    try {
+      const p = readinessPaths({ home });
+      expect(p.statePath.startsWith(approvalsDir(home))).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('an agent write to it is gated by the existing touch-approval-store rule', () => {
+    for (const command of [
+      'echo \'{"version":1,"mode":"shadow"}\' > ~/.shieldcortex/approvals/guard-readiness.json',
+      'rm ~/.shieldcortex/approvals/guard-readiness.json',
+    ]) {
+      const v = evaluateToolCall('Bash', { command });
+      expect(v.decision).not.toBe('allow');
+      expect(v.signals).toContain('touch-approval-store');
+    }
+    const w = evaluateToolCall('Write', { file_path: `${process.env.HOME ?? '/home/u'}/.shieldcortex/approvals/guard-readiness.json`, content: '{}' });
+    expect(w.decision).not.toBe('allow');
+  });
+});

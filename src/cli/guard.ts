@@ -79,13 +79,15 @@ function lockPresent(): boolean {
   }
 }
 
-export function buildReadinessSummary(opts: { now?: number } = {}): ReadinessSummary {
+export function buildReadinessSummary(opts: { now?: number; home?: string } = {}): ReadinessSummary {
   const now = opts.now ?? Date.now();
   const core = getActionGuardCoreConfig();
   const lockOverrides = core.readinessGate && lockPresent();
   const posture = lockOverrides ? 'enforce' : actionGuardPosture(core);
   const channel = describeHumanChannel(rawActionGuard().notify);
-  const paths = readinessPaths();
+  // `home` pins the evidence tree (tests); production reads the configured
+  // root plus the hook's home-directory audit.
+  const paths = readinessPaths({ home: opts.home });
   const report = computeReadiness({ channel, paths, now });
   const state = readReadinessState(paths.statePath);
 

@@ -4684,6 +4684,15 @@ export async function checkActionGuardReadiness(
   deps: { summary?: () => import('./guard.js').ReadinessSummary } = {},
 ): Promise<CheckResult[]> {
   const label = 'Action guard readiness';
+  if (!deps.summary) {
+    // Cheap pre-check: no gate configured → no audit read at all.
+    try {
+      const core = getActionGuardCoreConfig();
+      if (!core.enabled || !core.enforce || !core.readinessGate) return [];
+    } catch {
+      return [];
+    }
+  }
   let summary: import('./guard.js').ReadinessSummary;
   try {
     summary = deps.summary ? deps.summary() : (await import('./guard.js')).buildReadinessSummary();
