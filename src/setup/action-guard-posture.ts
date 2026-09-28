@@ -1,0 +1,139 @@
+/**
+ * `shieldcortex setup` — the explicit Action Guard posture question (#509).
+ *
+ * Setup never turns the guard on by itself. In a terminal it ASKS, in plain
+ * words, with three choices; pressing Enter keeps whatever is configured now.
+ * Without a terminal it changes nothing (the default stays off) and prints how
+ * to choose. Plain `enforce` is not offered here on purpose: an install that
+ * wants enforcement from minute one can still say so with
+ * `shieldcortex config --action-guard-enforce`.
+ */
+
+import {
+  actionGuardPosture,
+  getActionGuardCoreConfig,
+  getActionGuardNotifyConfig,
+  setActionGuardCoreConfig,
+  type ActionGuardPosture,
+} from '../cloud/config.js';
+import { PolicyLockRefusal } from '../defence/iron-dome/policy-lock.js';
+
+export type PostureChoice = 'off' | 'watch-only' | 'enforce-when-ready';
+
+export const POSTURE_CHOICES: ReadonlyArray<{ key: string; choice: PostureChoice; title: string; body: string }> = [
+  {
+    key: '1',
+    choice: 'off',
+    title: 'Off',
+    body:
+      'The Action Guard does not look at tool calls at all. Nothing is logged and nothing is stopped. ' +
+      'This is the default and changes nothing about how your agents run today.',
+  },
+  {
+    key: '2',
+    choice: 'watch-only',
+    title: 'Watch only',
+    body:
+      'The guard checks every tool call and writes what it thinks to the local audit log, but only the ' +
+      'catastrophic tier (things like wiping a disk or piping a download into a shell) is ever stopped. ' +
+      'Dangerous-but-sometimes-legitimate actions are logged as warnings and run.',
+  },
+  {
+    key: '3',
+    choice: 'enforce-when-ready',
+    title: 'Enforce when ready (recommended)',
+    body:
+      'Starts exactly like Watch only. It switches to enforcing — dangerous actions then need your approval ' +
+      'or are blocked — only once this machine has proven two things from its own audit log: that the guard ' +
+      'would have stopped no more than 2% of real tool calls (at least 500 calls over at least 7 days), and ' +
+      'that at least 98% of approval requests reached you and got an answer. It needs a human approval channel ' +
+      '(the OpenClaw approval card or a webhook); without one it never enforces. If either bar later fails it ' +
+      'drops back to watching and tells you loudly. Today this gate applies to the Claude Code hook; the ' +
+      'OpenClaw plugin enforces from the start.',
+  },
+];
+
+const CURRENT_TEXT: Record<ActionGuardPosture, string> = {
+  off: 'Off',
+  'watch-only': 'Watch only',
+  enforce: 'Enforce (always)',
+  'enforce-when-ready': 'Enforce when ready',
+};
+
+export function describeChooseCommands(): string[] {
+  return [
+    'Action Guard: left as configured. Choose a posture any time:',
+    '  shieldcortex config --action-guard-disable              # Off (the default)',
+    '  shieldcortex config --action-guard-advisory             # Watch only',
+    '  shieldcortex config --action-guard-enforce-when-ready   # Enforce when ready (needs an approval channel)',
+    'Or re-run `shieldcortex setup` in a terminal to be asked.',
+  ];
+}
+
+export interface PostureDeps {
+  tty: boolean;
+  ask: (question: string) => Promise<string>;
+  log?: (line: string) => void;
+  current?: () => ActionGuardPosture;
+  apply?: (choice: PostureChoice) => void;
+  channelConfigured?: () => boolean;
+}
+
+function defaultApply(choice: PostureChoice): void {
+  if (choice === 'off') setActionGuardCoreConfig({ enabled: false });
+  else if (choice === 'watch-only') setActionGuardCoreConfig({ enabled: true, enforce: false, readinessGate: false });
+  else setActionGuardCoreConfig({ enabled: true, enforce: true, readinessGate: true });
+}
+
+function defaultChannelConfigured(): boolean {
+  const n = getActionGuardNotifyConfig();
+  return n.enabled && (n.openclaw || !!n.webhookUrl);
+}
+
+/**
+ * Ask (TTY) or explain (no TTY). Returns the choice applied, or null when
+ * nothing changed.
+ */
+export async function offerActionGuardPosture(deps: PostureDeps): Promise<PostureChoice | null> {
+  const log = deps.log ?? ((l: string) => console.log(l));
+  if (!deps.tty) {
+    log('');
+    for (const line of describeChooseCommands()) log(line);
+    return null;
+  }
+  const current = (deps.current ?? (() => actionGuardPosture(getActionGuardCoreConfig())))();
+  log('');
+  log('Action Guard — how should ShieldCortex treat what your agents DO (shell commands, file writes)?');
+  log(`Currently: ${CURRENT_TEXT[current]}.`);
+  for (const c of POSTURE_CHOICES) {
+    log('');
+    log(`  ${c.key}) ${c.title}`);
+    log(`     ${c.body}`);
+  }
+  log('');
+  const answer = (await deps.ask('Choose 1, 2 or 3 (Enter keeps the current setting): ')).trim().toLowerCase();
+  const picked = POSTURE_CHOICES.find((c) => c.key === answer || c.choice === answer);
+  if (!picked) {
+    log(answer ? `Not a choice ("${answer}") — Action Guard left as ${CURRENT_TEXT[current]}.` : `Action Guard left as ${CURRENT_TEXT[current]}.`);
+    return null;
+  }
+  try {
+    (deps.apply ?? defaultApply)(picked.choice);
+  } catch (err) {
+    if (err instanceof PolicyLockRefusal) {
+      log(err.message);
+      return null;
+    }
+    throw err;
+  }
+  log(`Action Guard set to: ${picked.title.replace(' (recommended)', '')}.`);
+  if (picked.choice === 'enforce-when-ready') {
+    if (!(deps.channelConfigured ?? defaultChannelConfigured)()) {
+      log('It will not enforce until you configure a human approval channel:');
+      log('  shieldcortex config --action-guard-notify-openclaw        (approval card on your OpenClaw channel)');
+      log('  shieldcortex config --action-guard-notify-webhook <url>   (one-way webhook)');
+    }
+    log('Watch progress with: shieldcortex guard readiness   (add round-trips with: shieldcortex guard test-approval)');
+  }
+  return picked.choice;
+}

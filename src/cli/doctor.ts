@@ -4668,6 +4668,65 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
   };
 }
 
+// ── Check 8a-ter: enforce-when-ready readiness (#509) ─────
+/**
+ * Only speaks for the enforce-when-ready posture — off and watch-only are
+ * already WARNed by checkActionGuard, and are deliberate choices (#516: no
+ * FAIL for a deliberately-off guard). Under the posture:
+ *   - ENFORCING (both bars hold)                → pass
+ *   - shadow, never enforced yet                → warn: not proven yet, and why
+ *   - shadow AFTER having enforced (demoted)    → FAIL: the operator opted into
+ *     enforcement and is not getting it — a violated contract they chose.
+ * Readiness is recomputed from the audit evidence here, never read as a stored
+ * boolean; the state file only contributes "was it enforcing before".
+ */
+export async function checkActionGuardReadiness(
+  deps: { summary?: () => import('./guard.js').ReadinessSummary } = {},
+): Promise<CheckResult[]> {
+  const label = 'Action guard readiness';
+  let summary: import('./guard.js').ReadinessSummary;
+  try {
+    summary = deps.summary ? deps.summary() : (await import('./guard.js')).buildReadinessSummary();
+  } catch (err) {
+    return [{ label, status: 'warn', message: `could not compute readiness (${(err as Error).message})` }];
+  }
+  if (summary.posture !== 'enforce-when-ready') {
+    if (summary.lockOverrides) {
+      return [{ label, status: 'info', message: 'readiness gate is configured but a policy lock pins enforcement — the gate is ignored and the guard enforces' }];
+    }
+    return [];
+  }
+  const { fp, approval } = summary.report;
+  const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
+  const bars =
+    `FP ${pct(fp.rate)} (${fp.stops}/${fp.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
+    `approval reach ${pct(approval.rate)} (${approval.reached}/${approval.resolved}, need ≥ 98% over ≥ 20) via ` +
+    `${approval.channel.configured ? approval.channel.kind : 'no channel'}; last round-trip ${approval.lastRoundTripAt ?? 'never'}`;
+  const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
+  if (summary.mode === 'enforcing') {
+    return [{ label, status: 'pass', message: `enforce when ready: ENFORCING — ${bars}` }];
+  }
+  if (summary.demoted) {
+    return [{
+      label,
+      status: 'fail',
+      message:
+        `enforce when ready: DEMOTED to shadow — dangerous ops are logged but NOT stopped. ` +
+        `${summary.state?.lastDemotionReason ? `Reason: ${summary.state.lastDemotionReason}. ` : ''}${bars}.${missing}`,
+      fix:
+        'You chose enforcement and are not getting it. Run `shieldcortex guard readiness` for the evidence. ' +
+        'Fix what is missing (channel, round-trips via `shieldcortex guard test-approval`); if the would-stops look ' +
+        'forged, inspect ~/.shieldcortex/audit. Do not switch to plain enforce or off from this row without deciding to.',
+    }];
+  }
+  return [{
+    label,
+    status: 'warn',
+    message: `enforce when ready: SHADOW (not proven yet) — dangerous ops are logged, not stopped. ${bars}.${missing}`,
+    fix: 'Nothing is broken: the guard enforces automatically once both bars hold. Progress: `shieldcortex guard readiness`.',
+  }];
+}
+
 // ── Check 8a-bis: Cron denial honesty (#375) ──────────────
 /**
  * A guard denial inside a scheduled turn does not fail the turn: OpenClaw
@@ -8503,6 +8562,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkActionGuardReadiness,
     checkCronDenials,
     checkThreatGraph,
     checkAttestationCoverage,
