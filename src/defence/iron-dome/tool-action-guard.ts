@@ -1504,7 +1504,10 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
  * systemInstallInvoked). One pass over tokens per statement.
  *
  * CLI disable: command-position shieldcortex (or npx/node wrapper, or $var
- * fail-closed) plus a disable/advisory/deactivate flag in the rest.
+ * fail-closed) plus a disable/advisory/deactivate flag in the rest. #509:
+ * `--action-guard-enforce-when-ready` is in the same class — on an enforcing
+ * install it drops to shadow until readiness is proven. From off or watch
+ * only it is a tightening, and stays ungated there because nothing enforces.
  * Global uninstall: command-position npm-family (or $var fail-closed) plus
  * uninstall-class verb as the first non-flag, last-wins global, whole-token
  * package. Recurses into bash -c / collectExecutableBodies. eval is a
@@ -1520,7 +1523,7 @@ function stripTokDecor(tok: string): string {
 }
 function isGuardDisableFlag(tok: string): boolean {
   const t = stripTokDecor(tok);
-  return /^--action-guard-(?:disable|advisory)$/i.test(t);
+  return /^--action-guard-(?:disable|advisory|enforce-when-ready)$/i.test(t);
 }
 function argvIsGlobalUninstallOfGuard(rest: readonly string[], base: string): boolean {
   let verb: string | null = null;

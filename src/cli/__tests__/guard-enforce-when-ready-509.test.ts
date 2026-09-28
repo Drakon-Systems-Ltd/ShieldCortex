@@ -17,7 +17,13 @@ import { spawnSync } from 'node:child_process';
 import { statSync, writeFileSync } from 'node:fs';
 
 import { runGuardCommand, runTestApproval, buildReadinessSummary, type ReadinessSummary } from '../guard.js';
-import { currentReadinessPin, readinessPaths } from '../../defence/iron-dome/guard-readiness.js';
+import {
+  currentReadinessPin,
+  initReadinessTransitions,
+  readTransitionRecord,
+  readinessPaths,
+  transitionsPathFor,
+} from '../../defence/iron-dome/guard-readiness.js';
 import { checkActionGuardReadiness } from '../doctor.js';
 import { offerActionGuardPosture, POSTURE_CHOICES } from '../../setup/action-guard-posture.js';
 import { handleCloudConfig } from '../../cloud/cli.js';
@@ -205,11 +211,31 @@ describe('#509 doctor readiness row', () => {
     expect(row.status).toBe('fail');
   });
 
-  it('a fresh install under the posture is WARN, not FAIL', async () => {
+  it('a fresh install under the posture (record started by config) is WARN, not FAIL', async () => {
     setNotify({ enabled: true, openclaw: true });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
     const [row] = await checkActionGuardReadiness({ summary: () => buildReadinessSummary({ home }) });
     expect(row.status).toBe('warn');
     expect(row.message).toMatch(/only 0 of the 500/);
+  });
+
+  it('r3: the posture with NO transition record is unknown ⇒ doctor FAIL (potentially demoted), and doctor writes nothing', async () => {
+    setNotify({ enabled: true, openclaw: true, webhookUrl: 'https://hooks.example/x' });
+    const [row] = await checkActionGuardReadiness({ summary: () => buildReadinessSummary({ home }) });
+    expect(row.status).toBe('fail');
+    expect(row.message).toMatch(/transition record missing/);
+    expect(row.message).toMatch(/potentially DEMOTED/);
+    expect(existsSync(transitionsPathFor(readinessPaths({ home })))).toBe(false);
+  });
+
+  it('r3: a recent tamper report in the record is shown by doctor', async () => {
+    setNotify({ enabled: true, openclaw: true, webhookUrl: 'https://hooks.example/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    appendFileSync(transitionsPathFor(readinessPaths({ home })), `${JSON.stringify({ ts: new Date().toISOString(), event: 'tamper', reason: 'the readiness cache said shadow while the durable transition record says enforcing' })}\n`);
+    const rows = await checkActionGuardReadiness({ summary: () => buildReadinessSummary({ home }) });
+    const tamper = rows.find((r) => r.label === 'Action guard readiness tamper');
+    expect(tamper?.status).toBe('warn');
+    expect(tamper?.message).toMatch(/cache said shadow/);
   });
 });
 
@@ -276,6 +302,12 @@ describe('#509 config flags and --help honesty', () => {
     handleCloudConfig(['--action-guard-enforce-when-ready']);
     clearCloudConfigCache();
     expect(getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: true });
+    // r3: choosing the posture starts the durable transition record; choosing
+    // it again (no change of posture) adds nothing.
+    const rec = () => readTransitionRecord(transitionsPathFor(readinessPaths({ home })));
+    expect(rec().entries.map((e) => e.event)).toEqual(['init']);
+    handleCloudConfig(['--action-guard-enforce-when-ready']);
+    expect(rec().entries.map((e) => e.event)).toEqual(['init']);
     handleCloudConfig(['--action-guard-enforce']);
     clearCloudConfigCache();
     expect(getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });

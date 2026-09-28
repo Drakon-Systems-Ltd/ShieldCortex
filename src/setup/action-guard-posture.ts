@@ -20,6 +20,7 @@ import {
   type ActionGuardPosture,
 } from '../cloud/config.js';
 import { PolicyLockRefusal } from '../defence/iron-dome/policy-lock.js';
+import { initReadinessTransitions } from '../defence/iron-dome/guard-readiness.js';
 
 export type PostureChoice = 'off' | 'watch-only' | 'enforce-when-ready';
 
@@ -87,7 +88,15 @@ export interface PostureDeps {
 function defaultApply(choice: PostureChoice): void {
   if (choice === 'off') setActionGuardCoreConfig({ enabled: false });
   else if (choice === 'watch-only') setActionGuardCoreConfig({ enabled: true, enforce: false, readinessGate: false });
-  else setActionGuardCoreConfig({ enabled: true, enforce: true, readinessGate: true });
+  else {
+    const previousPosture = actionGuardPosture(getActionGuardCoreConfig());
+    setActionGuardCoreConfig({ enabled: true, enforce: true, readinessGate: true });
+    // #509: start the durable transition record (a change of posture only).
+    initReadinessTransitions({
+      postureChanged: previousPosture !== 'enforce-when-ready',
+      reason: `posture set to enforce-when-ready by \`shieldcortex setup\` (was ${previousPosture})`,
+    });
+  }
 }
 
 function defaultChannelConfigured(): boolean {

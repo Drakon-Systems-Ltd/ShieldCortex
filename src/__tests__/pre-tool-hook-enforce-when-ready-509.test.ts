@@ -88,6 +88,9 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
       ].join('\n'),
     );
     writeConfig({ readinessGate: true, ...PROXIES_ONLY });
+    // What `shieldcortex config --action-guard-enforce-when-ready` does:
+    // start the durable transition record.
+    appendRecord({ ts: new Date(Date.now() - 30 * DAY).toISOString(), event: 'init', to: 'shadow', reason: 'test posture' });
   });
 
   afterEach(() => {
@@ -111,6 +114,16 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
 
   const auditDir = () => join(home, '.shieldcortex', 'audit');
   const statePath = () => join(home, '.shieldcortex', 'approvals', 'guard-readiness.json');
+  const recordPath = () => join(home, '.shieldcortex', 'approvals', 'guard-readiness-transitions.jsonl');
+
+  function appendRecord(entry: Record<string, unknown>): void {
+    mkdirSync(dirname(recordPath()), { recursive: true });
+    appendFileSync(recordPath(), `${JSON.stringify(entry)}\n`);
+  }
+
+  function recordEntries(): Array<Record<string, unknown>> {
+    return readFileSync(recordPath(), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
 
   function rows(): Array<Record<string, unknown>> {
     if (!existsSync(auditDir())) return [];
@@ -141,8 +154,8 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     }
     for (let i = 0; i < 25; i += 1) {
       const t = now - DAY + i * 60_000;
-      list.push({ ts: new Date(t).toISOString(), type: 'approval_reach', reachId: `seed-${i}`, phase: 'request' });
-      list.push({ ts: new Date(t + 30_000).toISOString(), type: 'approval_reach', reachId: `seed-${i}`, phase: 'answer', answer: 'approve' });
+      list.push({ ts: new Date(t).toISOString(), type: 'approval_reach', reachId: `seed-${i}`, attemptId: `seed-a${i}`, phase: 'request' });
+      list.push({ ts: new Date(t + 30_000).toISOString(), type: 'approval_reach', reachId: `seed-${i}`, attemptId: `seed-a${i}`, phase: 'answer', answer: 'approve' });
     }
     seed(list);
   }
@@ -248,8 +261,8 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     }
     for (let i = 0; i < 25; i += 1) {
       const t = now - DAY + i * 60_000;
-      list.push({ ts: new Date(t).toISOString(), type: 'approval_reach', reachId: `old-${i}`, phase: 'request', readinessPin: old });
-      list.push({ ts: new Date(t + 30_000).toISOString(), type: 'approval_reach', reachId: `old-${i}`, phase: 'answer', answer: 'approve', readinessPin: old });
+      list.push({ ts: new Date(t).toISOString(), type: 'approval_reach', reachId: `old-${i}`, attemptId: `old-a${i}`, phase: 'request', readinessPin: old });
+      list.push({ ts: new Date(t + 30_000).toISOString(), type: 'approval_reach', reachId: `old-${i}`, attemptId: `old-a${i}`, phase: 'answer', answer: 'approve', readinessPin: old });
     }
     seed(list);
     const r = runHook(DANGEROUS, 'default');
@@ -265,6 +278,10 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     expect(reach).toHaveLength(1);
     expect(reach[0].phase).toBe('request');
     expect(reach[0].channel).toBe('webhook');
+    // The attempt's correlation id is the one the approval store minted.
+    const store = JSON.parse(readFileSync(join(home, '.shieldcortex', 'approvals', 'approvals.json'), 'utf8'));
+    expect(typeof reach[0].attemptId).toBe('string');
+    expect(store.records.map((r: { reachAttemptId?: string }) => r.reachAttemptId)).toContain(reach[0].attemptId);
   });
 
   it('forged would-block rows demote LOUDLY through the hook: stderr, audited transition, notify row, channel notice — then shadow', () => {
@@ -305,6 +322,8 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
       { ts: new Date(now - 2 * DAY).toISOString(), type: 'readiness_transition', origin: 'claude-code-hook', from: 'shadow', to: 'enforcing' },
       { ts: new Date(now - 10 * 60_000).toISOString(), type: 'readiness_transition', origin: 'claude-code-hook', from: 'enforcing', to: 'shadow', reason: 'test' },
     ]);
+    appendRecord({ ts: new Date(now - 2 * DAY).toISOString(), event: 'promote', to: 'enforcing', pin });
+    appendRecord({ ts: new Date(now - 10 * 60_000).toISOString(), event: 'demote', to: 'shadow', pin, reason: 'test' });
     mkdirSync(dirname(statePath()), { recursive: true });
     writeFileSync(statePath(), JSON.stringify({
       version: 1,
@@ -368,5 +387,66 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     // Declared, assigned from the resolved mode, reset on error — never branched on.
     expect(between).not.toMatch(/if \([^)]*\bshadow\b/);
     expect(shadowReads.length).toBeGreaterThan(0);
+  });
+  // ── Round 3 (GPT-6 review of a850d3ee) ──────────────────────────────────
+
+  const WHEN_READY_FLAG = { command: 'shieldcortex config --action-guard-enforce-when-ready' };
+
+  it('r3 finding 1: on a plain-enforcing install, `config --action-guard-enforce-when-ready` needs approval like --action-guard-advisory', () => {
+    writeConfig({});
+    const asked = runHook(WHEN_READY_FLAG, 'default');
+    expect(asked.decision).toBe('ask');
+    const audited = rows().filter((r) => r.type === 'intercept' && r.action === 'require_approval');
+    // (The signal name itself is not on the audit's safe-signal list, so the
+    // row records the gated verdict, not which rule fired.)
+    expect(audited).toHaveLength(1);
+    expect(runHook(WHEN_READY_FLAG, 'bypassPermissions').decision).toBe('deny');
+    expect(runHook({ command: 'shieldcortex config --action-guard-advisory' }, 'default').decision).toBe('ask');
+  });
+
+  it('r3 finding 1: from OFF or watch-only it is a tightening and stays ungated', () => {
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
+    expect(runHook(WHEN_READY_FLAG, 'default').decision).toBeUndefined();
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: false } }));
+    const watch = runHook(WHEN_READY_FLAG, 'default');
+    expect(watch.decision).toBeUndefined();
+  });
+
+  it('r3 finding 2: promoted, then a forged fresh shadow cache + failing evidence ⇒ a LOUD demotion through the hook, never a silent one', () => {
+    seedReadyHistory();
+    expect(runHook(BENIGN).stderr).toMatch(/now ENFORCING/);
+    const now = Date.now();
+    const forged: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 300; i += 1) {
+      forged.push({ ts: new Date(now - 1000 + i).toISOString(), type: 'intercept', origin: 'claude-code-hook', tool: 'Bash', severity: 'high', action: 'require_approval', outcome: 'would_block' });
+    }
+    seed(forged);
+    writeFileSync(statePath(), JSON.stringify({ version: 1, mode: 'shadow', computedAt: new Date().toISOString(), pin }));
+
+    const r = runHook(BENIGN);
+    expect(r.stderr).toMatch(/tamper signal/);
+    expect(r.stderr).toMatch(/DEMOTED to shadow mode/);
+    expect(rows().filter((x) => x.type === 'readiness_transition').map((x) => x.to)).toEqual(['enforcing', 'shadow']);
+    expect(rows().some((x) => x.type === 'readiness_tamper')).toBe(true);
+    const notices = readFileSync(evidenceFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(notices.some((n) => n.outcome === 'readiness_demoted')).toBe(true);
+    expect(recordEntries().map((e) => e.event)).toEqual(['init', 'promote', 'tamper', 'demote']);
+  });
+
+  it('r3 finding 2: promoted, forged fresh shadow cache, evidence still ready ⇒ the dangerous call is still ENFORCED', () => {
+    seedReadyHistory();
+    expect(runHook(BENIGN).stderr).toMatch(/now ENFORCING/);
+    for (let i = 0; i < 3; i += 1) {
+      writeFileSync(statePath(), JSON.stringify({ version: 1, mode: 'shadow', computedAt: new Date().toISOString(), pin }));
+      expect(runHook(DANGEROUS, 'default').decision).toBe('ask');
+    }
+  });
+
+  it('r3 finding 3: a lost transition record is announced as a demotion by the hook, never read as never-ready', () => {
+    rmSync(recordPath());
+    const r = runHook(BENIGN);
+    expect(r.stderr).toMatch(/DEMOTED to shadow mode/);
+    expect(r.stderr).toMatch(/transition record is missing or unreadable/);
+    expect(recordEntries().map((e) => e.event)).toEqual(['demote']);
   });
 });

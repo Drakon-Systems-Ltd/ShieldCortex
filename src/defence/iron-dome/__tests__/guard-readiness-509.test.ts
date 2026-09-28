@@ -32,6 +32,11 @@ import {
   readinessPaths,
   recordApprovalReach,
   resolveReadiness,
+  initReadinessTransitions,
+  readTransitionRecord,
+  transitionsPathFor,
+  NO_NOTICE_CHANNEL_MESSAGE,
+  UNKNOWN_RECORD_REASON,
   type ReadinessPaths,
   type ReadinessPin,
 } from '../guard-readiness.js';
@@ -41,8 +46,9 @@ import { applyPolicyLock, applyStrictFailClosedPosture } from '../policy-lock.js
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.parse('2026-09-28T12:00:00.000Z');
-const CHANNEL = { configured: true, kind: 'openclaw-card' };
-const NO_CHANNEL = { configured: false, kind: null };
+/** A card channel plus a webhook: approvals AND pushed demotion notices. */
+const CHANNEL = { configured: true, kind: 'openclaw-card', pushesNotices: true };
+const NO_CHANNEL = { configured: false, kind: null, pushesNotices: false };
 const PIN = currentReadinessPin() as ReadinessPin;
 /** The operability proxies alone: the effectiveness condition switched off,
  *  as `actionGuard.readinessRequireEffectivenessEvidence: false` would. */
@@ -91,8 +97,9 @@ function reach(answered: number, unanswered: number, opts: { at?: number; synthe
   for (let i = 0; i < answered + unanswered; i += 1) {
     const reachId = `r${i.toString(16).padStart(8, '0')}${opts.at ?? ''}`;
     const t = base + i * 1000;
-    out.push(row(t, { type: 'approval_reach', reachId, phase: 'request', ...(opts.synthetic ? { synthetic: true } : {}) }));
-    if (i < answered) out.push(row(t + 60_000, { type: 'approval_reach', reachId, phase: 'answer', answer: i % 2 ? 'deny' : 'approve' }));
+    const attemptId = `a-${reachId}`;
+    out.push(row(t, { type: 'approval_reach', reachId, attemptId, phase: 'request', ...(opts.synthetic ? { synthetic: true } : {}) }));
+    if (i < answered) out.push(row(t + 60_000, { type: 'approval_reach', reachId, attemptId, phase: 'answer', answer: i % 2 ? 'deny' : 'approve' }));
   }
   return out;
 }
@@ -104,6 +111,8 @@ beforeEach(() => {
     statePath: join(root, 'approvals', 'guard-readiness.json'),
     readAuditDirs: [join(root, 'audit')],
   };
+  // The posture was chosen (config/setup start the durable record) long ago.
+  initReadinessTransitions({ postureChanged: true, reason: 'test posture', paths, now: NOW - 60 * DAY });
 });
 
 afterEach(() => {
@@ -230,9 +239,9 @@ describe('#509 approval reachability (readiness proxy)', () => {
   it('an answer later than the answer window is a timeout; an unanswered fresh request is pending', () => {
     write(reach(20, 0));
     write([
-      row(NOW - DAY, { type: 'approval_reach', reachId: 'late', phase: 'request' }),
-      row(NOW - DAY + 30 * 60_000, { type: 'approval_reach', reachId: 'late', phase: 'answer', answer: 'approve' }),
-      row(NOW - 60_000, { type: 'approval_reach', reachId: 'fresh', phase: 'request' }),
+      row(NOW - DAY, { type: 'approval_reach', reachId: 'late', attemptId: 'late-1', phase: 'request' }),
+      row(NOW - DAY + 30 * 60_000, { type: 'approval_reach', reachId: 'late', attemptId: 'late-1', phase: 'answer', answer: 'approve' }),
+      row(NOW - 60_000, { type: 'approval_reach', reachId: 'fresh', attemptId: 'fresh-1', phase: 'request' }),
     ]);
     const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.resolved).toBe(21);
@@ -240,10 +249,10 @@ describe('#509 approval reachability (readiness proxy)', () => {
     expect(r.reachability.pending).toBe(1);
   });
 
-  it('recordApprovalReach pairs by hash: request + human answer is a reach', () => {
+  it('recordApprovalReach pairs by attempt id: request + human answer to THAT attempt is a reach', () => {
     const hash = 'a'.repeat(64);
-    recordApprovalReach({ hash, phase: 'request', channel: 'openclaw' }, { auditDir: paths.auditDir, now: NOW - 5 * 60_000 });
-    recordApprovalReach({ hash, phase: 'answer', answer: 'deny' }, { auditDir: paths.auditDir, now: NOW - 4 * 60_000 });
+    recordApprovalReach({ hash, attemptId: 'att-1', phase: 'request', channel: 'openclaw' }, { auditDir: paths.auditDir, now: NOW - 5 * 60_000 });
+    recordApprovalReach({ hash, attemptId: 'att-1', phase: 'answer', answer: 'deny' }, { auditDir: paths.auditDir, now: NOW - 4 * 60_000 });
     const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.reached).toBe(1);
     expect(r.reachability.lastRoundTripAt).toBe(new Date(NOW - 4 * 60_000).toISOString());
@@ -258,8 +267,8 @@ describe('#509 describeHumanChannel', () => {
     expect(describeHumanChannel({ enabled: 'yes', openclaw: true }).configured).toBe(false);
     expect(describeHumanChannel({ enabled: true }).configured).toBe(false);
     expect(describeHumanChannel({ enabled: true, webhookUrl: 'ftp://x' }).configured).toBe(false);
-    expect(describeHumanChannel({ enabled: true, webhookUrl: 'https://hooks.example.com/x' })).toEqual({ configured: true, kind: 'webhook' });
-    expect(describeHumanChannel({ enabled: true, openclaw: true })).toEqual({ configured: true, kind: 'openclaw-card' });
+    expect(describeHumanChannel({ enabled: true, webhookUrl: 'https://hooks.example.com/x' })).toEqual({ configured: true, kind: 'webhook', pushesNotices: true });
+    expect(describeHumanChannel({ enabled: true, openclaw: true })).toEqual({ configured: true, kind: 'openclaw-card', pushesNotices: false });
   });
 });
 
@@ -613,7 +622,7 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
     const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
     expect(r.integrity.unparseableLines).toBe(1);
     expect(r.ready).toBe(false);
-    expect(r.missing.join('\n')).toMatch(/could not be parsed/);
+    expect(r.missing.join('\n')).toMatch(/malformed audit record/);
   });
 
   it('a trailing append still in flight (no newline) is not counted as corrupt', () => {

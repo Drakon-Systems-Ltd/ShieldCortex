@@ -94,7 +94,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 // ==================== THRESHOLDS ====================
 // Operability thresholds chosen for this posture. They are readiness proxies,
@@ -163,6 +163,11 @@ export interface HumanChannel {
   configured: boolean;
   /** 'openclaw-card' | 'webhook' | null */
   kind: string | null;
+  /** A channel that can PUSH a plain notice (a demotion) to the operator, not
+   *  only carry an approval card: today, the webhook. The OpenClaw card
+   *  channel is approval-only (openclaw-approval-channel.ts refuses anything
+   *  with no live decision behind it), so an OpenClaw-only install has none. */
+  pushesNotices: boolean;
 }
 
 /** The adapter + policy version evidence is pinned to. */
@@ -231,6 +236,11 @@ export interface EvidenceIntegrity {
   missing: string | null;
 }
 
+export interface NoticeChannelCondition {
+  pass: boolean;
+  missing: string | null;
+}
+
 export interface ReadinessReport {
   computedAt: string;
   /** The version in force; null when it could not be determined. */
@@ -239,7 +249,10 @@ export interface ReadinessReport {
   reachability: ReachabilityProxy;
   effectiveness: EffectivenessCondition;
   integrity: EvidenceIntegrity;
-  /** Both operability proxies pass on sound, pinned evidence. */
+  /** A configured channel can push a demotion notice (precondition). */
+  noticeChannel: NoticeChannelCondition;
+  /** Both operability proxies pass on sound, pinned evidence, and a demotion
+   *  notice could reach the operator. */
   proxiesMet: boolean;
   /** All three conditions hold: the install may enforce. */
   ready: boolean;
@@ -271,6 +284,9 @@ export interface ReadinessPaths {
   auditDir: string;
   /** Every audit directory evidence is read from (deduplicated). */
   readAuditDirs: string[];
+  /** The durable, append-only transition record. Defaults to
+   *  `guard-readiness-transitions.jsonl` beside the state file. */
+  transitionsPath?: string;
 }
 
 // ==================== PATHS ====================
@@ -282,7 +298,17 @@ export interface ReadinessPaths {
 export function readinessRoot(home?: string): string {
   if (home !== undefined) return join(home, '.shieldcortex');
   const override = process.env.SHIELDCORTEX_CONFIG_DIR?.trim();
-  return override || join(homedir(), '.shieldcortex');
+  return override || join(userHome(), '.shieldcortex');
+}
+
+/**
+ * `$HOME` when set, else `os.homedir()`. On POSIX these are the same value
+ * (libuv reads `$HOME` first); reading the variable directly also keeps a
+ * test runner that sandboxes `process.env` (Jest) from resolving the real
+ * home and writing into the operator's live store.
+ */
+function userHome(): string {
+  return process.env.HOME?.trim() || homedir();
 }
 
 /**
@@ -296,14 +322,22 @@ export function readinessRoot(home?: string): string {
 export function readinessPaths(opts: { home?: string } = {}): ReadinessPaths {
   const root = readinessRoot(opts.home);
   const auditDir = join(root, 'audit');
-  const homeRoot = join(opts.home ?? homedir(), '.shieldcortex');
+  const homeRoot = join(opts.home ?? userHome(), '.shieldcortex');
   const hookAudit = join(homeRoot, 'audit');
   const readAuditDirs = Array.from(new Set([auditDir, hookAudit]));
   return {
     statePath: join(homeRoot, 'approvals', 'guard-readiness.json'),
     auditDir,
     readAuditDirs,
+    transitionsPath: join(homeRoot, 'approvals', TRANSITIONS_FILE),
   };
+}
+
+/** The durable transition record's file name (inside the approval store). */
+export const TRANSITIONS_FILE = 'guard-readiness-transitions.jsonl';
+
+export function transitionsPathFor(paths: ReadinessPaths): string {
+  return paths.transitionsPath ?? join(dirname(paths.statePath), TRANSITIONS_FILE);
 }
 
 // ==================== PIN ====================
@@ -400,22 +434,29 @@ function findEffectivenessEvidence(
  * up as unreached requests in the evidence, which is where they belong.
  */
 export function describeHumanChannel(rawNotify: unknown): HumanChannel {
-  if (!rawNotify || typeof rawNotify !== 'object' || Array.isArray(rawNotify)) {
-    return { configured: false, kind: null };
-  }
+  const none: HumanChannel = { configured: false, kind: null, pushesNotices: false };
+  if (!rawNotify || typeof rawNotify !== 'object' || Array.isArray(rawNotify)) return none;
   const n = rawNotify as Record<string, unknown>;
-  if (n.enabled !== true) return { configured: false, kind: null };
-  if (n.openclaw === true) return { configured: true, kind: 'openclaw-card' };
+  if (n.enabled !== true) return none;
+  let webhook = false;
   if (typeof n.webhookUrl === 'string') {
     try {
       const u = new URL(n.webhookUrl.trim());
-      if (u.protocol === 'https:' || u.protocol === 'http:') return { configured: true, kind: 'webhook' };
+      webhook = u.protocol === 'https:' || u.protocol === 'http:';
     } catch {
-      /* not a URL — no channel */
+      /* not a URL — no webhook */
     }
   }
-  return { configured: false, kind: null };
+  if (n.openclaw === true) return { configured: true, kind: 'openclaw-card', pushesNotices: webhook };
+  if (webhook) return { configured: true, kind: 'webhook', pushesNotices: true };
+  return none;
 }
+
+/** Why an install without a notice-pushing channel cannot be promoted. */
+export const NO_NOTICE_CHANNEL_MESSAGE =
+  'no channel can push a demotion notice: the OpenClaw card channel carries approvals only, so promotion also needs ' +
+  '`shieldcortex config --action-guard-notify-webhook <url>` — without it the install stays in shadow, because a later ' +
+  'demotion could not reach you';
 
 // ==================== ROW WRITERS ====================
 
@@ -443,9 +484,22 @@ function appendRow(auditDir: string, row: Record<string, unknown>, now: Date): b
   }
 }
 
+/** A fresh correlation id for ONE delivered approval attempt. */
+export function newReachAttemptId(): string {
+  return randomBytes(12).toString('hex');
+}
+
 export interface ReachRowInput {
   /** The full approval hash (or a synthetic one for test-approval). */
   hash: string;
+  /**
+   * The correlation id of the ONE delivery attempt this row is about. A
+   * request row carries it (one is minted when absent); an answer counts only
+   * when it names the attempt it answers. The hash alone is not enough: the
+   * same command asked ten times is ten attempts, and one answer must not
+   * erase the nine that expired.
+   */
+  attemptId?: string;
   /** request = put to the channel; answer = the human's reply or its absence;
    *  resolved = request and outcome known together (undelivered, no surface). */
   phase: 'request' | 'answer' | 'resolved';
@@ -477,6 +531,8 @@ export function recordApprovalReach(
     ts: now.toISOString(),
     auditEventId: randomBytes(16).toString('hex'),
   };
+  const attemptId = input.attemptId ?? (input.phase === 'answer' ? undefined : newReachAttemptId());
+  if (attemptId) row.attemptId = String(attemptId).slice(0, 64);
   if (pin) row.readinessPin = pin;
   if (input.answer) row.answer = input.answer;
   if (input.channel) row.channel = String(input.channel).slice(0, 40);
@@ -521,8 +577,31 @@ function listAuditFiles(dir: string, sinceMs: number): Array<{ path: string; dat
     .map((e) => ({ path: join(dir, e.name), date: e.m![1] }));
 }
 
-/** Only these lines are parsed; the rest of the audit is skipped unread. */
-const LINE_PREFILTER = /"claude-code-hook"|"approval_reach"|"readiness_transition"/;
+const REACH_PHASES = new Set(['request', 'answer', 'resolved']);
+
+/**
+ * Whether a parsed record is well-formed. EVERY complete line is parsed and
+ * checked before any origin/type filter — a prefilter on raw text would let a
+ * corrupted would-stop row drop out of the count unnoticed, which improves
+ * the measured rate instead of invalidating it. Any JSON object is a valid
+ * audit record; the evidence types this module counts must also have the
+ * fields it reads, with the right types.
+ */
+function isWellFormedRecord(row: unknown): row is Record<string, unknown> {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  const r = row as Record<string, unknown>;
+  const evidence =
+    (r.type === 'intercept' && r.origin === 'claude-code-hook') ||
+    r.type === 'approval_reach' ||
+    r.type === 'readiness_transition';
+  if (!evidence) return true;
+  if (typeof r.ts !== 'string' || !Number.isFinite(Date.parse(r.ts))) return false;
+  if (r.type === 'intercept') return typeof r.outcome === 'string' && typeof r.action === 'string';
+  if (r.type === 'approval_reach') {
+    return typeof r.reachId === 'string' && typeof r.phase === 'string' && REACH_PHASES.has(r.phase);
+  }
+  return r.to === 'enforcing' || r.to === 'shadow';
+}
 
 function readEvidence(dirs: string[], sinceMs: number, nowMs: number): {
   rows: ParsedRow[];
@@ -561,22 +640,25 @@ function readEvidence(dirs: string[], sinceMs: number, nowMs: number): {
     }
     bytesRead += size;
     const lines = text.split('\n');
-    // A final segment with no newline is an append still in flight, not a
-    // corrupt row: leave it for the next recompute.
+    // Only the LAST segment, and only when it has no trailing newline, is an
+    // append still in flight rather than a corrupt row: leave it for the next
+    // recompute. (With a trailing newline the last segment is empty.) Every
+    // other line is complete and must parse.
     lines.pop();
     for (const line of lines) {
-      if (!line || !LINE_PREFILTER.test(line)) continue;
-      let row: Record<string, unknown>;
+      if (!line) continue;
+      let parsed: unknown;
       try {
-        row = JSON.parse(line) as Record<string, unknown>;
+        parsed = JSON.parse(line);
       } catch {
         unparseableLines += 1;
         continue;
       }
-      if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      if (!isWellFormedRecord(parsed)) {
         unparseableLines += 1;
         continue;
       }
+      const row = parsed;
       const ts = Date.parse(String(row.ts ?? ''));
       // Future-dated rows are not evidence of anything that happened.
       if (!Number.isFinite(ts) || ts < sinceMs || ts > nowMs + 60_000) continue;
@@ -669,6 +751,11 @@ export function computeReadiness(opts: {
 
   // ── Approval reachability ──
   const rcSince = nowMs - REACHABILITY_WINDOW_MS;
+  // One entry per delivered ATTEMPT, keyed by its correlation id — never by
+  // the command hash: the same command asked ten times is ten attempts, and a
+  // later answer must not erase the earlier ones that expired. An answer
+  // counts only for the attempt it names; one with no attempt id binds to
+  // nothing (it can only leave its attempt looking unanswered — tighter).
   const requests = new Map<string, { ts: number }>();
   const answers = new Map<string, Array<{ ts: number; answer: string }>>();
   let resolved = 0;
@@ -678,13 +765,13 @@ export function computeReadiness(opts: {
   let lastRoundTrip = -Infinity;
   for (const { ts, row } of rows) {
     if (row.type !== 'approval_reach' || ts < rcSince) continue;
-    const id = typeof row.reachId === 'string' ? row.reachId : '';
-    if (!id) continue;
+    const attempt = typeof row.attemptId === 'string' && row.attemptId ? row.attemptId : null;
     if (row.phase === 'answer') {
-      // Answers join to a pinned request by id; the request carries the pin.
-      const list = answers.get(id) ?? [];
+      // Answers join to a pinned request by attempt id; the request carries the pin.
+      if (!attempt) continue;
+      const list = answers.get(attempt) ?? [];
       list.push({ ts, answer: String(row.answer ?? '') });
-      answers.set(id, list);
+      answers.set(attempt, list);
       continue;
     }
     if (!samePin(row.readinessPin, pin)) {
@@ -692,8 +779,10 @@ export function computeReadiness(opts: {
       continue;
     }
     if (row.phase === 'request') {
-      const prev = requests.get(id);
-      if (!prev || ts > prev.ts) requests.set(id, { ts });
+      // A request row without an attempt id is still an attempt: it stays in
+      // the denominator, and no answer can bind to it.
+      const key = attempt ?? `unbound:${String(row.auditEventId ?? '')}:${ts}:${requests.size}`;
+      if (!requests.has(key)) requests.set(key, { ts });
     } else if (row.phase === 'resolved') {
       // Outcome known at request time: undelivered / no surface. Never a reach.
       resolved += 1;
@@ -740,11 +829,20 @@ export function computeReadiness(opts: {
     missing: rcMissing,
   };
 
+  // ── A demotion must be able to reach the operator ──
+  // Promotion is refused where a later demotion could not be pushed: a
+  // loosening nobody hears about is the one outcome this posture forbids.
+  const noticeChannel: NoticeChannelCondition = opts.channel.configured && !opts.channel.pushesNotices
+    ? { pass: false, missing: NO_NOTICE_CHANNEL_MESSAGE }
+    : { pass: opts.channel.configured, missing: null };
+
   // ── Evidence integrity: unreadable or unparseable is never a pass ──
   const integrityProblems: string[] = [];
   if (!pin) integrityProblems.push('the adapter/policy version in force could not be determined, so no evidence can be pinned to it');
   if (unreadableFiles > 0) integrityProblems.push(`${unreadableFiles} audit evidence file(s) could not be read`);
-  if (unparseableLines > 0) integrityProblems.push(`${unparseableLines} audit evidence line(s) could not be parsed`);
+  if (unparseableLines > 0) {
+    integrityProblems.push(`${unparseableLines} malformed audit record(s) inside the evidence window (a line that is not a well-formed record)`);
+  }
   const integrity: EvidenceIntegrity = {
     unreadableFiles,
     unparseableLines,
@@ -775,13 +873,13 @@ export function computeReadiness(opts: {
     }
   }
 
-  const proxiesMet = intervention.pass && reachability.pass && integrity.pass;
+  const proxiesMet = intervention.pass && reachability.pass && integrity.pass && noticeChannel.pass;
   const ready = proxiesMet && effectiveness.pass;
   let missing: string[];
   if (proxiesMet && !effectiveness.pass) {
     missing = [AWAITING_EFFECTIVENESS_MESSAGE];
   } else {
-    missing = [intervention.missing, reachability.missing, integrity.missing, effectiveness.missing]
+    missing = [intervention.missing, reachability.missing, noticeChannel.missing, integrity.missing, effectiveness.missing]
       .filter((m): m is string => m !== null);
   }
   if (truncated) {
@@ -794,6 +892,7 @@ export function computeReadiness(opts: {
     reachability,
     effectiveness,
     integrity,
+    noticeChannel,
     proxiesMet,
     ready,
     missing,
@@ -834,6 +933,141 @@ function isFreshState(state: ReadinessState | null, now: number, ttl: number, pi
   if (!state || !samePin(state.pin, pin)) return false;
   const age = now - Date.parse(state.computedAt);
   return age >= 0 && age < ttl;
+}
+
+// ==================== TRANSITION RECORD ====================
+
+/**
+ * The durable, append-only record of this install's mode transitions:
+ * `guard-readiness-transitions.jsonl` beside the state file, inside the
+ * approval store, so the same `touch-approval-store` path rule gates an agent
+ * writing it. Unlike the audit it is never rotated, never windowed and never
+ * cut by a read budget, so a promotion made months ago is still remembered.
+ * It is the AUTHORITY for "was this install enforcing": the state file is only
+ * a cache that may TIGHTEN (a cached `enforcing` is applied as-is) and is
+ * never trusted to loosen (a cached `shadow` that disagrees with the record is
+ * recomputed, and reported as tampering).
+ *
+ * A missing, unreadable or malformed record while the posture is on is
+ * UNKNOWN, never "never ready": unknown is treated as potentially demoted —
+ * announced, audited, and a doctor FAIL.
+ */
+export type TransitionEvent = 'init' | 'promote' | 'demote' | 'recover' | 'tamper';
+
+export interface TransitionEntry {
+  ts: string;
+  event: TransitionEvent;
+  /** The mode after this entry; absent on a tamper report. */
+  to?: ReadinessMode;
+  pin?: ReadinessPin | null;
+  reason?: string;
+}
+
+export interface TransitionRecord {
+  status: 'ok' | 'missing' | 'unreadable';
+  entries: TransitionEntry[];
+  /** The newest entry that sets a mode. */
+  last: TransitionEntry | null;
+  /** The newest tamper report. */
+  lastTamper: TransitionEntry | null;
+}
+
+const TRANSITION_EVENTS = new Set<string>(['init', 'promote', 'demote', 'recover', 'tamper']);
+
+function isTransitionEntry(e: unknown): e is TransitionEntry {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) return false;
+  const r = e as Record<string, unknown>;
+  if (typeof r.ts !== 'string' || !Number.isFinite(Date.parse(r.ts))) return false;
+  if (typeof r.event !== 'string' || !TRANSITION_EVENTS.has(r.event)) return false;
+  if (r.event === 'tamper') return true;
+  return r.to === 'enforcing' || r.to === 'shadow';
+}
+
+/** Read the record. Any malformed complete line makes the whole record
+ *  unreadable; a final line with no newline is an append in flight. */
+export function readTransitionRecord(path: string): TransitionRecord {
+  const fail = (status: 'missing' | 'unreadable'): TransitionRecord => ({ status, entries: [], last: null, lastTamper: null });
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    return fail((err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'missing' : 'unreadable');
+  }
+  const lines = text.split('\n');
+  lines.pop();
+  const entries: TransitionEntry[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return fail('unreadable');
+    }
+    if (!isTransitionEntry(parsed)) return fail('unreadable');
+    entries.push(parsed);
+  }
+  let last: TransitionEntry | null = null;
+  let lastTamper: TransitionEntry | null = null;
+  for (const e of entries) {
+    if (e.event === 'tamper') lastTamper = e;
+    else last = e;
+  }
+  return { status: 'ok', entries, last, lastTamper };
+}
+
+/** The mode the record says this install is in; `unknown` when it cannot say. */
+export function durableMode(record: TransitionRecord): ReadinessMode | 'unknown' {
+  return record.status === 'ok' && record.last?.to ? record.last.to : 'unknown';
+}
+
+function appendTransition(path: string, entry: TransitionEntry): boolean {
+  let fd: number | undefined;
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    fd = openSync(path, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink > 1) return false;
+    writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+/** A corrupt record is kept for inspection, never appended to. */
+function quarantineRecord(path: string, now: number): void {
+  try {
+    renameSync(path, `${path}.corrupt-${now}`);
+  } catch {
+    /* a record that cannot be moved stays unreadable, i.e. unknown */
+  }
+}
+
+/**
+ * Start the record for a newly chosen enforce-when-ready posture (config and
+ * setup call this). Appends an `init` (shadow) entry only when the posture
+ * was not already enforce-when-ready, or when no record exists — re-running
+ * the command on an install that already has a record changes nothing, so it
+ * cannot clear a recorded demotion.
+ */
+export function initReadinessTransitions(opts: {
+  postureChanged: boolean;
+  reason: string;
+  home?: string;
+  paths?: ReadinessPaths;
+  now?: number;
+}): boolean {
+  const now = opts.now ?? Date.now();
+  const path = transitionsPathFor(opts.paths ?? readinessPaths({ home: opts.home }));
+  const record = readTransitionRecord(path);
+  if (record.status === 'ok' && record.last && !opts.postureChanged) return false;
+  if (record.status === 'unreadable') quarantineRecord(path, now);
+  return appendTransition(path, { ts: new Date(now).toISOString(), event: 'init', to: 'shadow', reason: opts.reason.slice(0, 200) });
 }
 
 // ==================== DECISION ====================
@@ -882,32 +1116,95 @@ export function decideMode(input: {
   return { mode: 'shadow', transition: null };
 }
 
-/** The last KNOWN mode: state or audit transition, enforcing wins a disagreement. */
-export function previousMode(state: ReadinessState | null, report: ReadinessReport): ReadinessMode | null {
+/**
+ * The last KNOWN mode. The durable record is the authority; the state file
+ * and the audit's transition rows can only RAISE it to enforcing (enforcing
+ * wins any disagreement). With no durable answer, the state/audit answer.
+ */
+export function previousMode(
+  state: ReadinessState | null,
+  report: ReadinessReport,
+  durable: ReadinessMode | 'unknown' = 'unknown',
+): ReadinessMode | null {
   const auditMode = report.lastTransition?.to ?? null;
-  return state?.mode === 'enforcing' || auditMode === 'enforcing' ? 'enforcing' : state?.mode ?? auditMode;
+  if (durable === 'enforcing' || state?.mode === 'enforcing' || auditMode === 'enforcing') return 'enforcing';
+  if (durable === 'shadow') return 'shadow';
+  return state?.mode ?? auditMode;
+}
+
+/** The unknown-record reason, shared by the announcement and doctor. */
+export const UNKNOWN_RECORD_REASON =
+  'the durable readiness transition record is missing or unreadable, so whether this install was enforcing is ' +
+  'unknown — treated as potentially demoted';
+
+export interface EvidenceDecision extends ModeDecision {
+  /** The decision was forced by an unknown record. */
+  unknown?: boolean;
+}
+
+/**
+ * The hysteresis rule applied with the durable record. An UNKNOWN record is
+ * treated as potentially demoted: unless the evidence promotes, or the state
+ * or audit still say enforcing (then the normal grace applies), the answer is
+ * shadow WITH a demotion — announced, never silent, never "never ready".
+ */
+export function decideFromEvidence(input: {
+  state: ReadinessState | null;
+  report: ReadinessReport;
+  durable: ReadinessMode | 'unknown';
+  now: number;
+  /** The cache disagreed with the durable record on this call. */
+  tampered?: boolean;
+}): EvidenceDecision {
+  const { state, report, durable, now } = input;
+  const prevMode = previousMode(state, report, durable);
+  // A tampered cache cannot be trusted for the grace clock either (its
+  // failingSince is the forger's): if the evidence says not ready, the
+  // demotion protocol runs now — announced, never silent.
+  if (input.tampered && prevMode === 'enforcing' && !report.ready) {
+    return { mode: 'shadow', transition: 'demote' };
+  }
+  const base = { failingSince: state?.failingSince, lastDemotedAt: state?.lastDemotedAt, ready: report.ready, now };
+  if (durable === 'unknown') {
+    if (prevMode === 'enforcing') return decideMode({ ...base, prevMode });
+    const d = decideMode({ ...base, prevMode: null });
+    if (d.transition === 'promote') return d;
+    return { mode: 'shadow', transition: 'demote', unknown: true };
+  }
+  return decideMode({ ...base, prevMode });
 }
 
 /**
  * The mode the hook would apply right now, WITHOUT writing anything: a fresh
- * cache as-is, else the evidence through the same hysteresis rule. Used by
- * `guard readiness` and `doctor`, which report and never flip.
+ * cache that agrees with the durable record (or a fresh `enforcing`, which
+ * can only tighten), else the evidence through the same rule. Used by
+ * `guard readiness` and `doctor`, which report and never flip. Without a
+ * record (legacy callers) the fresh cache is taken as-is.
  */
 export function previewMode(opts: {
   state: ReadinessState | null;
   report: ReadinessReport;
   now: number;
   ttlMs?: number;
+  record?: TransitionRecord;
 }): ReadinessMode {
   const { state, report, now } = opts;
-  if (isFreshState(state, now, opts.ttlMs ?? READINESS_CACHE_TTL_MS, report.pin)) return state!.mode;
-  return decideMode({
-    prevMode: previousMode(state, report),
-    failingSince: state?.failingSince,
-    lastDemotedAt: state?.lastDemotedAt,
-    ready: report.ready,
-    now,
-  }).mode;
+  const durable = opts.record ? durableMode(opts.record) : null;
+  let tampered = false;
+  if (isFreshState(state, now, opts.ttlMs ?? READINESS_CACHE_TTL_MS, report.pin)) {
+    if (durable === null || state!.mode === durable) return state!.mode;
+    tampered = durable !== 'unknown';
+  }
+  if (durable === null) {
+    return decideMode({
+      prevMode: previousMode(state, report),
+      failingSince: state?.failingSince,
+      lastDemotedAt: state?.lastDemotedAt,
+      ready: report.ready,
+      now,
+    }).mode;
+  }
+  return decideFromEvidence({ state, report, durable, now, tampered }).mode;
 }
 
 export interface ResolvedReadiness {
@@ -919,6 +1216,8 @@ export interface ResolvedReadiness {
   state: ReadinessState | null;
   /** Human-readable reason for a demotion, when one happened now. */
   demotionReason?: string;
+  /** Set when a tamper signal was recorded on this call. */
+  tamper?: string;
 }
 
 function tryLock(lockPath: string, now: number): boolean {
@@ -944,16 +1243,19 @@ function tryLock(lockPath: string, now: number): boolean {
 
 /**
  * The per-call entry point used by the hook. The ONLY writer of readiness
- * state: `guard readiness` and `doctor` use {@link previewMode} instead.
+ * state and of the transition record's promote/demote entries: `guard
+ * readiness` and `doctor` use {@link previewMode} instead.
  *
- * Fresh state (younger than {@link READINESS_CACHE_TTL_MS}, not future-dated,
- * computed under the pin in force) is reused as-is — the cheap path, and the
- * documented residual: a state file forged outside the tool surface holds its
- * mode for at most one TTL before evidence overrules it. Otherwise readiness
- * is recomputed from evidence, the hysteresis rule applied, and any
- * transition audited. A missing or stale state is never read as "shadow": the
- * previous mode then comes from the audit's own transition rows, so deleting
- * the state file cannot quietly end enforcement.
+ * The cache may only TIGHTEN. A fresh state (younger than
+ * {@link READINESS_CACHE_TTL_MS}, not future-dated, computed under the pin in
+ * force) is reused only when its mode matches the durable transition record.
+ * A cached mode that disagrees — above all a cached `shadow` on an install
+ * the record says was promoted — is a tamper signal: it is recorded (in the
+ * record and the audit) and readiness is recomputed from evidence. If the
+ * evidence then says shadow, that is a demotion with the full protocol
+ * (announced by the hook, audited, doctor FAIL). Refreshing `computedAt`
+ * therefore buys nothing. A missing or unreadable record is UNKNOWN and is
+ * treated as potentially demoted (see {@link decideFromEvidence}).
  */
 export function resolveReadiness(opts: {
   channel: HumanChannel;
@@ -969,9 +1271,18 @@ export function resolveReadiness(opts: {
   const paths = opts.paths ?? readinessPaths({ home: opts.home });
   const ttl = opts.ttlMs ?? READINESS_CACHE_TTL_MS;
   const pin = opts.pin === undefined ? currentReadinessPin() : opts.pin;
+  const recordPath = transitionsPathFor(paths);
+  const record = readTransitionRecord(recordPath);
+  const durable = durableMode(record);
   const state = readReadinessState(paths.statePath);
+  let tamper: string | undefined;
   if (isFreshState(state, now, ttl, pin)) {
-    return { mode: state!.mode, cached: true, transition: null, report: null, state };
+    if (state!.mode === durable) {
+      return { mode: state!.mode, cached: true, transition: null, report: null, state };
+    }
+    if (durable !== 'unknown') {
+      tamper = `the readiness cache said ${state!.mode} while the durable transition record says ${durable}; the cache was not trusted`;
+    }
   }
 
   const report = computeReadiness({
@@ -982,14 +1293,15 @@ export function resolveReadiness(opts: {
     requireEffectivenessEvidence: opts.requireEffectivenessEvidence,
     effectivenessRegistry: opts.effectivenessRegistry,
   });
-  const prevMode = previousMode(state, report);
-  const decision = decideMode({
-    prevMode,
-    failingSince: state?.failingSince,
-    lastDemotedAt: state?.lastDemotedAt,
-    ready: report.ready,
-    now,
-  });
+  const prevMode = previousMode(state, report, durable);
+  const decision = decideFromEvidence({ state, report, durable, now, tampered: tamper !== undefined });
+  // No transition, but the record does not say this mode: re-anchor it with a
+  // `recover` entry so the record and the applied mode agree again.
+  const anchor = !decision.transition && decision.mode !== durable;
+  if (anchor && durable === 'unknown') {
+    tamper = `the durable transition record was ${record.status === 'missing' ? 'missing' : 'unreadable'}; ` +
+      'enforcing carried over from the readiness state / audit log';
+  }
 
   const lockPath = `${paths.statePath}.lock`;
   if (!tryLock(lockPath, now)) {
@@ -1001,6 +1313,22 @@ export function resolveReadiness(opts: {
   }
   try {
     const nowIso = new Date(now).toISOString();
+    if (record.status === 'unreadable') quarantineRecord(recordPath, now);
+    if (tamper) {
+      appendTransition(recordPath, { ts: nowIso, event: 'tamper', pin, reason: tamper.slice(0, 400) });
+      appendRow(
+        paths.auditDir,
+        {
+          type: 'readiness_tamper',
+          origin: 'claude-code-hook',
+          ts: nowIso,
+          auditEventId: randomBytes(16).toString('hex'),
+          ...(pin ? { readinessPin: pin } : {}),
+          reason: tamper.slice(0, 400),
+        },
+        new Date(now),
+      );
+    }
     let demotionReason: string | undefined;
     const next: ReadinessState = {
       version: 1,
@@ -1016,10 +1344,25 @@ export function resolveReadiness(opts: {
     if (decision.transition === 'promote') {
       next.lastPromotedAt = nowIso;
     } else if (decision.transition === 'demote') {
-      demotionReason = report.missing.join('; ') || 'readiness evidence no longer holds';
-      if (!state) demotionReason += ' (readiness state file was missing; last mode taken from the audit log)';
+      demotionReason = decision.unknown
+        ? `${UNKNOWN_RECORD_REASON}${report.missing.length > 0 ? `; ${report.missing.join('; ')}` : ''}`
+        : report.missing.join('; ') || 'readiness evidence no longer holds';
+      if (!state && !decision.unknown) demotionReason += ' (readiness state file was missing; last mode taken from the transition record)';
+      if (tamper) demotionReason += ` (${tamper})`;
       next.lastDemotedAt = nowIso;
       next.lastDemotionReason = demotionReason;
+    }
+    if (decision.transition || anchor) {
+      // The durable record first: if this process dies before the state is
+      // written, the next call sees the record, distrusts the stale cache and
+      // recomputes — it never loses the transition.
+      appendTransition(recordPath, {
+        ts: nowIso,
+        event: decision.transition ?? 'recover',
+        to: decision.mode,
+        pin,
+        ...(demotionReason ? { reason: demotionReason.slice(0, 400) } : {}),
+      });
     }
     if (decision.transition) {
       appendRow(
@@ -1027,7 +1370,7 @@ export function resolveReadiness(opts: {
         {
           type: 'readiness_transition',
           origin: 'claude-code-hook',
-          from: prevMode ?? 'shadow',
+          from: decision.unknown ? 'unknown' : prevMode ?? 'shadow',
           to: decision.mode,
           transition: decision.transition,
           ts: nowIso,
@@ -1042,7 +1385,7 @@ export function resolveReadiness(opts: {
       );
     }
     writeReadinessState(paths.statePath, next);
-    return { mode: decision.mode, cached: false, transition: decision.transition, report, state: next, demotionReason };
+    return { mode: decision.mode, cached: false, transition: decision.transition, report, state: next, demotionReason, tamper };
   } finally {
     try { rmSync(lockPath, { force: true }); } catch { /* stale lock self-heals */ }
   }
@@ -1051,16 +1394,24 @@ export function resolveReadiness(opts: {
 /**
  * Whether the install is in a DEMOTED state: it enforced before, and now it
  * does not. Doctor FAILs on this — the operator chose enforcement and is not
- * getting it. Read from both the state file and the audit, loosest-evidence
- * wins (either one saying "demoted and not re-promoted" is enough).
+ * getting it. With the durable record: its newest mode entry is a demotion,
+ * or the record is unknown (treated as potentially demoted). Without one
+ * (legacy callers): the state file or the audit, either saying so is enough.
  */
-export function isDemoted(state: ReadinessState | null, report: ReadinessReport | null): boolean {
+export function isDemoted(state: ReadinessState | null, report: ReadinessReport | null, record?: TransitionRecord): boolean {
+  if (record) {
+    if (durableMode(record) === 'unknown') return true;
+    return record.last?.event === 'demote';
+  }
   const stateDemoted =
     !!state && state.mode === 'shadow' && !!state.lastDemotedAt &&
     (!state.lastPromotedAt || Date.parse(state.lastDemotedAt) >= Date.parse(state.lastPromotedAt));
   const auditDemoted = report?.lastTransition?.to === 'shadow';
   return stateDemoted || auditDemoted;
 }
+
+/** How recent a tamper report doctor still shows. */
+export const TAMPER_REPORT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Plain-English one-liner for stderr / notifications. */
 export function describeDemotion(reason: string | undefined): string {

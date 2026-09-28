@@ -4714,11 +4714,33 @@ export async function checkActionGuardReadiness(
     `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
     `effectiveness evidence ${!effectiveness.required ? 'not required' : effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
+  // A recent tamper signal (a readiness cache that disagreed with the durable
+  // transition record) is reported alongside whatever the mode row says.
+  const tamper: CheckResult[] = summary.recentTamper
+    ? [{
+      label: 'Action guard readiness tamper',
+      status: 'warn',
+      message: `readiness tamper signal at ${summary.recentTamper.ts}: ${summary.recentTamper.reason ?? 'the readiness cache disagreed with the transition record'}`,
+      fix: 'Something other than the hook wrote the readiness cache or transition record under ~/.shieldcortex/approvals. Find out what; the hook recomputed from evidence and did not trust it.',
+    }]
+    : [];
+  if (summary.recordUnknown) {
+    return [{
+      label,
+      status: 'fail',
+      message:
+        `enforce when ready: transition record ${summary.record.status === 'ok' ? 'empty' : summary.record.status} — ` +
+        `the last mode is unknown and is treated as potentially DEMOTED (current mode: ${summary.mode}). ${bars}.${missing}`,
+      fix:
+        'The record at ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl was removed or damaged. Find out what did it. ' +
+        'The hook records the unknown state as a demotion on its next call; the FAIL clears on the next promotion.',
+    }, ...tamper];
+  }
   if (summary.mode === 'enforcing') {
-    return [{ label, status: 'pass', message: `enforce when ready: ENFORCING — ${bars}` }];
+    return [{ label, status: 'pass', message: `enforce when ready: ENFORCING — ${bars}` }, ...tamper];
   }
   if (summary.demoted) {
-    return [{
+    return [...tamper, {
       label,
       status: 'fail',
       message:
@@ -4735,7 +4757,7 @@ export async function checkActionGuardReadiness(
     status: 'warn',
     message: `enforce when ready: SHADOW (not ready yet) — dangerous ops are logged, not stopped. ${bars}.${missing}`,
     fix: 'Nothing is broken: the guard enforces automatically once all three readiness conditions hold. Progress: `shieldcortex guard readiness`.',
-  }];
+  }, ...tamper];
 }
 
 // ── Check 8a-bis: Cron denial honesty (#375) ──────────────

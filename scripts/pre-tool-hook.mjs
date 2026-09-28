@@ -631,11 +631,11 @@ function loadReadiness() {
  * already makes the install not-ready on its own. Best-effort and silent — a
  * missing evidence row can only keep an install from becoming ready.
  */
-async function recordReachEvidence(cfg, hash, phase, answer, channel, reason) {
+async function recordReachEvidence(cfg, hash, phase, answer, channel, reason, attemptId) {
   try {
     const mod = await loadReadiness();
     if (!mod || !mod.describeHumanChannel(cfg.notify).configured) return;
-    mod.recordApprovalReach({ hash, phase, answer, channel, reason, origin: 'claude-code-hook' });
+    mod.recordApprovalReach({ hash, attemptId, phase, answer, channel, reason, origin: 'claude-code-hook' });
   } catch {
     /* evidence is best-effort */
   }
@@ -643,10 +643,11 @@ async function recordReachEvidence(cfg, hash, phase, answer, channel, reason) {
 
 /**
  * #509 demotion: loud by construction. stderr always; an audited notify row
- * always; a plain-message delivery on the configured denial channel when one
- * exists (the OpenClaw card channel carries approvals only, so an openclaw-only
- * install gets stderr + audit + doctor FAIL — see docs). The transition row
- * itself was already appended by resolveReadiness.
+ * always; a plain-message delivery on the configured denial channel (the
+ * webhook). The OpenClaw card channel carries approvals only, so readiness
+ * refuses to PROMOTE an install without a webhook (NO_NOTICE_CHANNEL_MESSAGE):
+ * a promoted install always has a channel this notice can reach. The
+ * transition row itself was already appended by resolveReadiness.
  */
 async function announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra) {
   const verdict = { severity: 'high', decision: 'require_approval', signals: ['readiness-demoted'] };
@@ -2247,7 +2248,7 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: outage fallback must gate self-disable / global uninstall / config.json writes.
-  { re: /--action-guard-(?:disable|advisory)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
+  { re: /--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -2920,6 +2921,9 @@ process.stdin.on('end', async () => {
             }),
           });
           shadow = resolved.mode === 'shadow';
+          if (resolved.tamper) {
+            console.error(`[shieldcortex] ⚠️ enforce-when-ready: readiness tamper signal — ${String(resolved.tamper).slice(0, 300)}. Recorded; run \`shieldcortex doctor\`.`);
+          }
           if (resolved.transition === 'demote') {
             await announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra);
           } else if (resolved.transition === 'promote') {
@@ -3177,14 +3181,18 @@ process.stdin.on('end', async () => {
     // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact
     // only when something can actually hold. Promptless denials are terminal:
     // no pending approval, no retry hash, no operator affordance.
+    // #509: the pending record mints this attempt's reach correlation id; the
+    // request row below carries it and the human's answer binds to it.
+    let reachAttemptId;
     if (approvals && !noPromptSurfaceForHold) {
       try {
-        approvals.recordPending({
+        const pending = approvals.recordPending({
           tool: toolName,
           input: toolInput,
           summary: describeToolCall(toolName, toolInput),
           signals: verdict.signals,
         });
+        reachAttemptId = typeof pending?.reachAttemptId === 'string' ? pending.reachAttemptId : undefined;
       } catch {
         // As above: never widen, never wedge.
       }
@@ -3231,7 +3239,7 @@ process.stdin.on('end', async () => {
         // answer (the store or the card waiter writes it, keyed to this hash);
         // one that never left is already known NOT to have reached anyone.
         if (result?.deliveredVia) {
-          await recordReachEvidence(cfg, fullHash, 'request', undefined, safeNotifyLabel(result.deliveredVia) ?? 'channel');
+          await recordReachEvidence(cfg, fullHash, 'request', undefined, safeNotifyLabel(result.deliveredVia) ?? 'channel', undefined, reachAttemptId);
         } else {
           await recordReachEvidence(cfg, fullHash, 'resolved', 'unreached', null, 'request not delivered to the configured channel');
         }

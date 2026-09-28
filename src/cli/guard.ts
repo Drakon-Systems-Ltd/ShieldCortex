@@ -30,7 +30,13 @@ import {
   REACHABILITY_MIN_RATE,
   REACHABILITY_MIN_SAMPLE,
   REACH_ANSWER_WINDOW_MS,
+  TAMPER_REPORT_WINDOW_MS,
+  UNKNOWN_RECORD_REASON,
   computeReadiness,
+  durableMode,
+  newReachAttemptId,
+  readTransitionRecord,
+  transitionsPathFor,
   describeHumanChannel,
   effectivenessEvidenceRequired,
   isDemoted,
@@ -44,6 +50,8 @@ import {
   type ReadinessReport,
   type ReadinessState,
   type ReachAnswer,
+  type TransitionEntry,
+  type TransitionRecord,
 } from '../defence/iron-dome/guard-readiness.js';
 import type { OperatorNotification, NotifyChannel } from '../defence/iron-dome/operator-notify.js';
 import { isInteractive } from './approve.js';
@@ -60,6 +68,13 @@ export interface ReadinessSummary {
   report: ReadinessReport;
   state: ReadinessState | null;
   demoted: boolean;
+  /** The durable transition record, read-only. */
+  record: TransitionRecord;
+  /** The record is missing or unreadable under the posture: treated as
+   *  potentially demoted. */
+  recordUnknown: boolean;
+  /** The newest tamper report in the record, when recent. */
+  recentTamper: TransitionEntry | null;
 }
 
 function rawActionGuard(): Record<string, unknown> {
@@ -98,18 +113,25 @@ export function buildReadinessSummary(opts: { now?: number; home?: string } = {}
     requireEffectivenessEvidence: effectivenessEvidenceRequired(rawGuard),
   });
   const state = readReadinessState(paths.statePath);
+  const record = readTransitionRecord(transitionsPathFor(paths));
 
   let mode: ReadinessSummary['mode'];
   if (posture === 'off') mode = 'off';
   else if (posture === 'watch-only') mode = 'watch-only';
   else if (posture === 'enforce') mode = 'enforcing';
   // What the hook would apply, computed without writing anything.
-  else mode = previewMode({ state, report, now });
+  else mode = previewMode({ state, report, now, record });
   // Demoted = a recorded demotion, or one the hook will make on its next call
   // (it was enforcing, and the preview says shadow). Reported, never written.
+  const durable = durableMode(record);
   const demoted = posture === 'enforce-when-ready' && mode === 'shadow' &&
-    (isDemoted(state, report) || previousMode(state, report) === 'enforcing');
-  return { posture, lockOverrides, mode, channel, report, state, demoted };
+    (isDemoted(state, report, record) || previousMode(state, report, durable) === 'enforcing');
+  const recordUnknown = posture === 'enforce-when-ready' && durable === 'unknown';
+  const tamperAt = record.lastTamper ? Date.parse(record.lastTamper.ts) : NaN;
+  const recentTamper = posture === 'enforce-when-ready' && Number.isFinite(tamperAt) && now - tamperAt <= TAMPER_REPORT_WINDOW_MS
+    ? record.lastTamper
+    : null;
+  return { posture, lockOverrides, mode, channel, report, state, demoted, record, recordUnknown, recentTamper };
 }
 
 function pct(rate: number | null): string {
@@ -154,6 +176,14 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
   ];
   if (iv.otherVersion + rc.otherVersion > 0) {
     lines.push(`Not counted:   ${iv.otherVersion + rc.otherVersion} evidence row(s) from another adapter/policy version`);
+  }
+  if (s.recordUnknown) {
+    lines.push(`Transition record: ${s.record.status === 'ok' ? 'EMPTY' : s.record.status.toUpperCase()} — ${UNKNOWN_RECORD_REASON}`);
+  } else if (s.record.last) {
+    lines.push(`Transition record: last ${s.record.last.event} → ${s.record.last.to} at ${s.record.last.ts}`);
+  }
+  if (s.recentTamper) {
+    lines.push(`TAMPER SIGNAL: ${s.recentTamper.ts} — ${s.recentTamper.reason ?? 'readiness cache disagreed with the transition record'}`);
   }
   if (s.state?.lastDemotedAt) {
     lines.push(`Last demotion: ${s.state.lastDemotedAt}${s.state.lastDemotionReason ? ` — ${s.state.lastDemotionReason}` : ''}`);
@@ -247,8 +277,10 @@ export async function runTestApproval(deps: TestApprovalDeps = {}): Promise<{ co
   }
   // 256 random bits: cannot equal any real pending request's hash.
   const hash = randomBytes(32).toString('hex');
+  // One attempt, one correlation id: the answer binds to this request only.
+  const attemptId = newReachAttemptId();
   const record = (phase: 'request' | 'answer' | 'resolved', answer?: ReachAnswer, reason?: string) =>
-    recordApprovalReach({ hash, phase, answer, channel: channel.kind, reason, synthetic: true, origin: 'guard-test-approval' }, { now: now() });
+    recordApprovalReach({ hash, attemptId, phase, answer, channel: channel.kind, reason, synthetic: true, origin: 'guard-test-approval' }, { now: now() });
 
   if (channel.kind === 'openclaw-card') {
     const bin = deps.openclawBin

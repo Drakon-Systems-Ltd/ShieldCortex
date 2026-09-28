@@ -36,7 +36,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 import { classifyFamily } from './tool-action-guard.js';
-import { recordApprovalReach } from './guard-readiness.js';
+import { newReachAttemptId, recordApprovalReach } from './guard-readiness.js';
 
 /** Default lifetime of an operator approval before it must be re-granted. */
 export const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -66,6 +66,10 @@ export interface ApprovalRecord {
   consumedAt?: number;
   /** Lifetime granted at approval time. */
   ttlMs?: number;
+  /** #509: correlation id of the latest delivery attempt for this request.
+   *  Re-minted on every refusal, so an answer binds to one attempt and the
+   *  attempts before it keep their own (expired) outcome. */
+  reachAttemptId?: string;
 }
 
 interface ApprovalFile {
@@ -215,7 +219,10 @@ export function recordPending(
   if (existing) {
     // Leave an approved record untouched — refreshing it here would let a
     // repeated refusal extend an approval the operator time-boxed.
-    if (!existing.approvedAt) existing.requestedAt = now;
+    if (!existing.approvedAt) {
+      existing.requestedAt = now;
+      existing.reachAttemptId = newReachAttemptId();
+    }
     writeFileAtomic({ version: 1, records }, opts.home);
     return existing;
   }
@@ -226,6 +233,7 @@ export function recordPending(
     summary: entry.summary.replace(/\s+/g, ' ').trim().slice(0, 300),
     signals: entry.signals.slice(0, 8),
     requestedAt: now,
+    reachAttemptId: newReachAttemptId(),
   };
   records.push(record);
   writeFileAtomic({ version: 1, records }, opts.home);
@@ -264,7 +272,7 @@ export function approveRequest(
   writeFileAtomic({ version: 1, records }, opts.home);
   // #509: a human answered. Evidence for approval reachability, keyed to the
   // same hash the request row carried; an answer with no request is ignored.
-  recordApprovalReach({ hash: record.hash, phase: 'answer', answer: 'approve', origin: 'approval-store' }, { home: opts.home, now });
+  recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'approve', origin: 'approval-store' }, { home: opts.home, now });
   return { ok: true, record };
 }
 
@@ -304,7 +312,7 @@ export function denyRequest(
   const remaining = records.filter((r) => r.hash !== record.hash);
   writeFileAtomic({ version: 1, records: remaining }, opts.home);
   // #509: a "no" is a human answer too — it reached someone.
-  recordApprovalReach({ hash: record.hash, phase: 'answer', answer: 'deny', origin: 'approval-store' }, { home: opts.home, now });
+  recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'deny', origin: 'approval-store' }, { home: opts.home, now });
   return { ok: true, record: denied };
 }
 

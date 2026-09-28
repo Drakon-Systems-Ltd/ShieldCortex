@@ -26,6 +26,7 @@ import {
   setActionGuardNotifyConfig,
   getActionGuardCoreConfig,
   setActionGuardCoreConfig,
+  actionGuardPosture,
   setMemoryInjectContract,
   setMemoryPlane,
   setMemoryHostPosture,
@@ -48,6 +49,7 @@ import { reconcileSyncQueue } from './sync-queue.js';
 import { setUpsellState } from '../cli/upsell-state.js';
 import { policyStatusLines } from '../cli/protect.js';
 import { PolicyLockRefusal } from '../defence/iron-dome/policy-lock.js';
+import { initReadinessTransitions } from '../defence/iron-dome/guard-readiness.js';
 
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
@@ -409,6 +411,7 @@ export function handleCloudConfig(args: string[]): void {
   if (args.includes('--action-guard-enforce-when-ready')) {
     // #509. Enabled + enforce + the readiness gate: the Claude Code hook runs
     // in shadow mode until this install meets all three readiness conditions.
+    const previousPosture = actionGuardPosture(getActionGuardCoreConfig());
     applyActionGuardCore(
       { enabled: true, enforce: true, readinessGate: true },
       'Action Guard ENFORCE WHEN READY — dangerous ops are logged, not stopped, until three conditions hold: two readiness ' +
@@ -419,6 +422,13 @@ export function handleCloudConfig(args: string[]): void {
         'Catastrophic ops block in every posture. Check progress: shieldcortex guard readiness. ' +
         'The OpenClaw plugin surface does not implement the gate yet and enforces from the start.',
     );
+    // Start the durable transition record. Only a CHANGE of posture adds an
+    // entry; re-running this on an enforce-when-ready install cannot clear a
+    // recorded demotion.
+    initReadinessTransitions({
+      postureChanged: previousPosture !== 'enforce-when-ready',
+      reason: `posture set to enforce-when-ready by \`shieldcortex config\` (was ${previousPosture})`,
+    });
     changed = true;
   }
 
