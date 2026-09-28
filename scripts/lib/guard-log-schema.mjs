@@ -43,7 +43,7 @@ export const GUARD_SIGNAL_VOCABULARY = Object.freeze([
   'not-object', 'opaque-command-substitution', 'opaque-script',
   'opaque-script-invocation', 'oversized-command', 'persistence-risk',
   'pipe-download-module-exec', 'pipe-download-stdin-exec', 'pipe-download-to-shell',
-  'privilege-escalation', 'raw-disk-write', 'recursive-find-delete',
+  'privilege-escalation', 'raw-disk-write', 'readiness-demoted', 'recursive-find-delete',
   'recursive-force-delete', 'recursive-perms-on-root', 'recursive-perms-system-dir',
   'redirect-to-block-device', 'registry-code-exec', 'reviewed-script',
   'secret-egress', 'secret-egress-fold', 'service-restart', 'session-lease',
