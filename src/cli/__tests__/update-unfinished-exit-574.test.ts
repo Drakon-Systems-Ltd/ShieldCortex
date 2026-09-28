@@ -81,6 +81,33 @@ describe("update exits non-zero on work it did not finish (#574/#576 r4 nit 1)",
     expect(updateVerdict({ failed: false, attention: true, unfinished: result.unfinished === true }).exitCode).toBe(1);
   });
 
+  it('flags the OpenClaw plugin step as unfinished when native install fails without landing', async () => {
+    const configRoot = path.join(home, '.openclaw');
+    fs.mkdirSync(path.join(configRoot, 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(configRoot, 'plugins', 'installs.json'),
+      JSON.stringify({ installRecords: { 'shieldcortex-realtime': {} } }),
+    );
+
+    const result = await stepOpenClawPlugin(home, {
+      run: (async () => {
+        const err = Object.assign(new Error('exit 1: openclaw plugins install'), {
+          exitCode: 1,
+          command: 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest',
+          stdout: '',
+          stderr: 'OpenClaw config is invalid',
+        });
+        throw err;
+      }) as never,
+      readPluginVersion: () => null,
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.unfinished).toBe(true);
+    expect(result.rerun).toMatch(/openclaw plugins install/);
+    expect(updateVerdict({ failed: false, attention: true, unfinished: result.unfinished === true }).exitCode).toBe(1);
+  });
+
   it('flags the OpenClaw plugin step as unfinished when the root is locked', async () => {
     const configRoot = path.join(home, '.openclaw');
     fs.mkdirSync(path.join(configRoot, 'extensions', 'shieldcortex-realtime'), { recursive: true });
