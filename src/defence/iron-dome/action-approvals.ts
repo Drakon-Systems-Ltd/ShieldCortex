@@ -36,6 +36,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 import { classifyFamily } from './tool-action-guard.js';
+import { recordApprovalReach } from './guard-readiness.js';
 
 /** Default lifetime of an operator approval before it must be re-granted. */
 export const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -261,6 +262,9 @@ export function approveRequest(
   record.approvedAt = now;
   record.ttlMs = opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
   writeFileAtomic({ version: 1, records }, opts.home);
+  // #509: a human answered. Evidence for the approval-reach bar, keyed to the
+  // same hash the request row carried; an answer with no request is ignored.
+  recordApprovalReach({ hash: record.hash, phase: 'answer', answer: 'approve', origin: 'approval-store' }, { home: opts.home, now });
   return { ok: true, record };
 }
 
@@ -299,6 +303,8 @@ export function denyRequest(
   const denied: ApprovalRecord = { ...record, deniedAt: now };
   const remaining = records.filter((r) => r.hash !== record.hash);
   writeFileAtomic({ version: 1, records: remaining }, opts.home);
+  // #509: a "no" is a human answer too — it reached someone.
+  recordApprovalReach({ hash: record.hash, phase: 'answer', answer: 'deny', origin: 'approval-store' }, { home: opts.home, now });
   return { ok: true, record: denied };
 }
 
