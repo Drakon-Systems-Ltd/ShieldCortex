@@ -470,7 +470,7 @@ function safeActionGuardSignals(signals: unknown): string[] {
 function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string): string {
   if (event === 'action_guard_warning') {
     if (outcome === 'readiness_demoted') {
-      return 'Action Guard (enforce when ready) was DEMOTED to shadow mode: dangerous tool calls are now logged but NOT stopped, because this install no longer meets its readiness bars. Run `shieldcortex guard readiness` for details.';
+      return 'Action Guard (enforce when ready) was DEMOTED to shadow mode: dangerous tool calls are now logged but NOT stopped, because this install no longer meets its readiness conditions. Run `shieldcortex guard readiness` for details.';
     }
     return outcome === 'failure_allowed'
       ? 'Action Guard was unavailable or advisory-only and the tool call was not blocked; inspect local audit for details.'

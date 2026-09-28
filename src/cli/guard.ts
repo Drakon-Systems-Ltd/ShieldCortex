@@ -2,9 +2,10 @@
  * `shieldcortex guard readiness` and `shieldcortex guard test-approval` (#509).
  *
  * `readiness` shows what the enforce-when-ready gate sees: the posture, the
- * mode the hook is in, each bar's measured value against its threshold and
- * sample size, the last live round-trip, and in plain English what is
- * missing. It recomputes from the audit evidence and writes nothing.
+ * mode the hook is in, each readiness proxy's measured value against its
+ * threshold and sample size, the effectiveness-evidence condition, the last
+ * live round-trip, and in plain English what is missing. It recomputes from
+ * the audit evidence and writes nothing — it never promotes or demotes.
  *
  * `test-approval` puts a clearly labelled SYNTHETIC approval request through
  * the configured human channel and records whether a human answered — the
@@ -13,7 +14,7 @@
  * pending request can share, and the card's answer is only ever written as a
  * `synthetic` reach row. TTY-only, like `approve`: an agent with piped stdio
  * must not be able to spam unanswerable cards (each one would count against
- * the bar and force a demotion).
+ * approval reachability and force a demotion).
  */
 
 import { execFile } from 'node:child_process';
@@ -23,16 +24,18 @@ import readline from 'node:readline/promises';
 import { actionGuardPosture, getActionGuardCoreConfig, readRawConfig, type ActionGuardPosture } from '../cloud/config.js';
 import { readPolicyLock } from '../defence/iron-dome/policy-lock.js';
 import {
-  APPROVAL_MIN_RATE,
-  APPROVAL_MIN_SAMPLE,
-  FP_MAX_RATE,
-  FP_MIN_SAMPLE,
-  FP_MIN_SPAN_MS,
+  INTERVENTION_MAX_RATE,
+  INTERVENTION_MIN_SAMPLE,
+  INTERVENTION_MIN_SPAN_MS,
+  REACHABILITY_MIN_RATE,
+  REACHABILITY_MIN_SAMPLE,
   REACH_ANSWER_WINDOW_MS,
   computeReadiness,
-  decideMode,
   describeHumanChannel,
+  effectivenessEvidenceRequired,
   isDemoted,
+  previewMode,
+  previousMode,
   readReadinessState,
   readinessPaths,
   recordApprovalReach,
@@ -41,7 +44,6 @@ import {
   type ReadinessReport,
   type ReadinessState,
   type ReachAnswer,
-  READINESS_CACHE_TTL_MS,
 } from '../defence/iron-dome/guard-readiness.js';
 import type { OperatorNotification, NotifyChannel } from '../defence/iron-dome/operator-notify.js';
 import { isInteractive } from './approve.js';
@@ -84,36 +86,29 @@ export function buildReadinessSummary(opts: { now?: number; home?: string } = {}
   const core = getActionGuardCoreConfig();
   const lockOverrides = core.readinessGate && lockPresent();
   const posture = lockOverrides ? 'enforce' : actionGuardPosture(core);
-  const channel = describeHumanChannel(rawActionGuard().notify);
+  const rawGuard = rawActionGuard();
+  const channel = describeHumanChannel(rawGuard.notify);
   // `home` pins the evidence tree (tests); production reads the configured
   // root plus the hook's home-directory audit.
   const paths = readinessPaths({ home: opts.home });
-  const report = computeReadiness({ channel, paths, now });
+  const report = computeReadiness({
+    channel,
+    paths,
+    now,
+    requireEffectivenessEvidence: effectivenessEvidenceRequired(rawGuard),
+  });
   const state = readReadinessState(paths.statePath);
 
   let mode: ReadinessSummary['mode'];
   if (posture === 'off') mode = 'off';
   else if (posture === 'watch-only') mode = 'watch-only';
   else if (posture === 'enforce') mode = 'enforcing';
-  else {
-    // What the hook would apply: a fresh cache as-is, else the evidence
-    // through the same hysteresis rule (without writing anything).
-    const age = state ? now - Date.parse(state.computedAt) : Infinity;
-    if (state && age >= 0 && age < READINESS_CACHE_TTL_MS) {
-      mode = state.mode;
-    } else {
-      const auditMode = report.lastTransition?.to ?? null;
-      const prevMode = state?.mode === 'enforcing' || auditMode === 'enforcing' ? 'enforcing' : state?.mode ?? auditMode;
-      mode = decideMode({
-        prevMode,
-        failingSince: state?.failingSince,
-        lastDemotedAt: state?.lastDemotedAt,
-        ready: report.ready,
-        now,
-      }).mode;
-    }
-  }
-  const demoted = posture === 'enforce-when-ready' && mode === 'shadow' && isDemoted(state, report);
+  // What the hook would apply, computed without writing anything.
+  else mode = previewMode({ state, report, now });
+  // Demoted = a recorded demotion, or one the hook will make on its next call
+  // (it was enforcing, and the preview says shadow). Reported, never written.
+  const demoted = posture === 'enforce-when-ready' && mode === 'shadow' &&
+    (isDemoted(state, report) || previousMode(state, report) === 'enforcing');
   return { posture, lockOverrides, mode, channel, report, state, demoted };
 }
 
@@ -125,7 +120,7 @@ const POSTURE_TEXT: Record<ActionGuardPosture, string> = {
   off: 'off — tool calls are not gated',
   'watch-only': 'watch only — dangerous ops are logged, not stopped (catastrophic still blocks)',
   enforce: 'enforce — dangerous ops need approval or are blocked',
-  'enforce-when-ready': 'enforce when ready — shadow until this install proves both readiness bars',
+  'enforce-when-ready': 'enforce when ready — shadow until this install meets all three readiness conditions',
 };
 
 const MODE_TEXT: Record<ReadinessSummary['mode'], string> = {
@@ -137,17 +132,29 @@ const MODE_TEXT: Record<ReadinessSummary['mode'], string> = {
 
 export function formatReadinessLines(s: ReadinessSummary): string[] {
   const { report } = s;
-  const fp = report.fp;
-  const ap = report.approval;
+  const iv = report.intervention;
+  const rc = report.reachability;
+  const ef = report.effectiveness;
+  const effectivenessText = !ef.required
+    ? 'not required (actionGuard.readinessRequireEffectivenessEvidence is false)'
+    : ef.evidence
+      ? `reviewed by ${ef.evidence.reviewedBy} on ${ef.evidence.reviewedAt} (${ef.evidence.reference})  PASS`
+      : 'REQUIRED — none reviewed for this version  not met';
   const lines = [
     `Posture:       ${POSTURE_TEXT[s.posture]}${s.lockOverrides ? ' (policy lock pins enforcement; readiness gate ignored)' : ''}`,
     `Current mode:  ${MODE_TEXT[s.mode]}${s.demoted ? ' — DEMOTED from enforcing' : ''}`,
-    `FP bar:        ${pct(fp.rate)} would-stop (${fp.stops}/${fp.total} calls over ${(fp.spanMs / 86_400_000).toFixed(1)} days) ` +
-      `— need ≤ ${pct(FP_MAX_RATE)} over ≥ ${FP_MIN_SAMPLE} calls and ≥ ${FP_MIN_SPAN_MS / 86_400_000} days  ${fp.pass ? 'PASS' : 'not met'}`,
-    `Approval bar:  ${pct(ap.rate)} answered by a human (${ap.reached}/${ap.resolved}${ap.pending ? `, ${ap.pending} pending` : ''}) ` +
-      `via ${ap.channel.configured ? ap.channel.kind : 'NO CHANNEL'} — need ≥ ${pct(APPROVAL_MIN_RATE)} over ≥ ${APPROVAL_MIN_SAMPLE}  ${ap.pass ? 'PASS' : 'not met'}`,
-    `Last live round-trip: ${ap.lastRoundTripAt ?? 'never'}`,
+    `Version pin:   ${report.pin ? `${report.pin.adapter} / ${report.pin.policy}` : 'UNKNOWN — no evidence can count'}`,
+    'Readiness proxies (operability):',
+    `  Operational intervention rate: ${pct(iv.rate)} would-stop (${iv.stops}/${iv.total} calls over ${(iv.spanMs / 86_400_000).toFixed(1)} days) ` +
+      `— need ≤ ${pct(INTERVENTION_MAX_RATE)} over ≥ ${INTERVENTION_MIN_SAMPLE} calls and ≥ ${INTERVENTION_MIN_SPAN_MS / 86_400_000} days  ${iv.pass ? 'PASS' : 'not met'}`,
+    `  Approval reachability:         ${pct(rc.rate)} answered by a human (${rc.reached}/${rc.resolved}${rc.pending ? `, ${rc.pending} pending` : ''}) ` +
+      `via ${rc.channel.configured ? rc.channel.kind : 'NO CHANNEL'} — need ≥ ${pct(REACHABILITY_MIN_RATE)} over ≥ ${REACHABILITY_MIN_SAMPLE}  ${rc.pass ? 'PASS' : 'not met'}`,
+    `  Last live round-trip:          ${rc.lastRoundTripAt ?? 'never'}`,
+    `Effectiveness evidence: ${effectivenessText}`,
   ];
+  if (iv.otherVersion + rc.otherVersion > 0) {
+    lines.push(`Not counted:   ${iv.otherVersion + rc.otherVersion} evidence row(s) from another adapter/policy version`);
+  }
   if (s.state?.lastDemotedAt) {
     lines.push(`Last demotion: ${s.state.lastDemotedAt}${s.state.lastDemotionReason ? ` — ${s.state.lastDemotionReason}` : ''}`);
   }
@@ -155,10 +162,11 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
     lines.push('Missing:');
     for (const m of report.missing) lines.push(`  - ${m}`);
   } else {
-    lines.push('Missing: nothing — both bars hold.');
+    lines.push('Missing: nothing — all three readiness conditions hold.');
   }
   lines.push(
-    'Note: every would-stop counts as a possible false positive, so the FP figure is an upper bound.',
+    'Note: the two proxies say how often the guard would intervene and whether approvals reach a human. ' +
+      'They are not a false-positive rate and not the ADR-002 §5B bars, and they say nothing about whether the guard stops attacks.',
   );
   return lines;
 }
@@ -313,16 +321,17 @@ function report(answer: ReachAnswer, log: (l: string) => void): { code: number; 
     log(`Round-trip recorded: a human answered (${answer}). Nothing was approved or denied — this was a test.`);
     return { code: 0, answer };
   }
-  log(`Round-trip recorded as NOT reaching a human (${answer}). This counts against the approval-reach bar.`);
+  log(`Round-trip recorded as NOT reaching a human (${answer}). This counts against approval reachability.`);
   return { code: 1, answer };
 }
 
 // ==================== dispatcher ====================
 
-export async function runGuardCommand(argv: string[]): Promise<number> {
+export async function runGuardCommand(argv: string[], opts: { home?: string } = {}): Promise<number> {
   const sub = argv[0];
   if (sub === 'readiness') {
-    const summary = buildReadinessSummary();
+    // Read-only: reports the mode, never promotes, demotes or writes state.
+    const summary = buildReadinessSummary({ home: opts.home });
     if (argv.includes('--json')) {
       console.log(JSON.stringify(summary, null, 2));
     } else {
@@ -333,7 +342,7 @@ export async function runGuardCommand(argv: string[]): Promise<number> {
   if (sub === 'test-approval') {
     return (await runTestApproval()).code;
   }
-  console.log('Usage: shieldcortex guard readiness [--json]    Show the enforce-when-ready readiness bars (#509)');
+  console.log('Usage: shieldcortex guard readiness [--json]    Show the enforce-when-ready readiness conditions (#509)');
   console.log('       shieldcortex guard test-approval         Send a synthetic approval request through your channel');
   return sub === '--help' || sub === '-h' || sub === 'help' ? 0 : 1;
 }

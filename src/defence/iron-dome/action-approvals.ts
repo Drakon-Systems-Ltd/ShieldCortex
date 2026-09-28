@@ -262,7 +262,7 @@ export function approveRequest(
   record.approvedAt = now;
   record.ttlMs = opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
   writeFileAtomic({ version: 1, records }, opts.home);
-  // #509: a human answered. Evidence for the approval-reach bar, keyed to the
+  // #509: a human answered. Evidence for approval reachability, keyed to the
   // same hash the request row carried; an answer with no request is ignored.
   recordApprovalReach({ hash: record.hash, phase: 'answer', answer: 'approve', origin: 'approval-store' }, { home: opts.home, now });
   return { ok: true, record };

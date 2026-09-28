@@ -38,7 +38,7 @@
  *
  * #509: silence and failure are also evidence. A card that expires
  * unanswered or a request the gateway refused appends an `approval_reach`
- * answer row (`timeout` / `unreached`) — the approval-reach bar counts it as
+ * answer row (`timeout` / `unreached`) — approval reachability counts it as
  * NOT reaching a human. An answered card is recorded by the store itself
  * (approveRequest / denyRequest), so it is counted exactly once.
  */

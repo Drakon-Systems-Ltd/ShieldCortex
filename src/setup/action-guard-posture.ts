@@ -6,7 +6,10 @@
  * Without a terminal it changes nothing (the default stays off) and prints how
  * to choose. Plain `enforce` is not offered here on purpose: an install that
  * wants enforcement from minute one can still say so with
- * `shieldcortex config --action-guard-enforce`.
+ * `shieldcortex config --action-guard-enforce`. No choice is marked as the
+ * recommended one (Addendum 1 F): that waits on the operator's decision about
+ * the effectiveness-evidence condition, and no choice is described as making
+ * the machine safe or protected.
  */
 
 import {
@@ -41,15 +44,17 @@ export const POSTURE_CHOICES: ReadonlyArray<{ key: string; choice: PostureChoice
   {
     key: '3',
     choice: 'enforce-when-ready',
-    title: 'Enforce when ready (recommended)',
+    title: 'Enforce when ready',
     body:
       'Starts exactly like Watch only. It switches to enforcing — dangerous actions then need your approval ' +
-      'or are blocked — only once this machine has proven two things from its own audit log: that the guard ' +
-      'would have stopped no more than 2% of real tool calls (at least 500 calls over at least 7 days), and ' +
-      'that at least 98% of approval requests reached you and got an answer. It needs a human approval channel ' +
-      '(the OpenClaw approval card or a webhook); without one it never enforces. If either bar later fails it ' +
-      'drops back to watching and tells you loudly. Today this gate applies to the Claude Code hook; the ' +
-      'OpenClaw plugin enforces from the start.',
+      'or are blocked — only once three conditions hold. Two are measured from this machine\'s own audit log: ' +
+      'the guard would have intervened on no more than 2% of real tool calls (at least 500 calls over at least ' +
+      '7 days), and at least 98% of approval requests reached you and got an answer. These say the guard is ' +
+      'workable to run here, not how well it stops attacks. The third is independently reviewed evidence that ' +
+      'this version of the guard stops attacks. None has been published yet, so for now this choice keeps ' +
+      'watching and does not enforce. It also needs a human approval channel (the OpenClaw approval card or a ' +
+      'webhook); without one it never enforces. If a condition later fails it drops back to watching and tells ' +
+      'you loudly. Today this gate applies to the Claude Code hook; the OpenClaw plugin enforces from the start.',
   },
 ];
 
@@ -126,7 +131,7 @@ export async function offerActionGuardPosture(deps: PostureDeps): Promise<Postur
     }
     throw err;
   }
-  log(`Action Guard set to: ${picked.title.replace(' (recommended)', '')}.`);
+  log(`Action Guard set to: ${picked.title}.`);
   if (picked.choice === 'enforce-when-ready') {
     if (!(deps.channelConfigured ?? defaultChannelConfigured)()) {
       log('It will not enforce until you configure a human approval channel:');

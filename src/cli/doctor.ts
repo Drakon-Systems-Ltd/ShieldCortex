@@ -4673,12 +4673,13 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
  * Only speaks for the enforce-when-ready posture — off and watch-only are
  * already WARNed by checkActionGuard, and are deliberate choices (#516: no
  * FAIL for a deliberately-off guard). Under the posture:
- *   - ENFORCING (both bars hold)                → pass
- *   - shadow, never enforced yet                → warn: not proven yet, and why
+ *   - ENFORCING (readiness conditions hold)     → pass
+ *   - shadow, never enforced yet                → warn: not ready yet, and why
  *   - shadow AFTER having enforced (demoted)    → FAIL: the operator opted into
  *     enforcement and is not getting it — a violated contract they chose.
  * Readiness is recomputed from the audit evidence here, never read as a stored
- * boolean; the state file only contributes "was it enforcing before".
+ * boolean; the state file only contributes "was it enforcing before". Doctor
+ * reports and never flips: nothing here promotes, demotes or writes state.
  */
 export async function checkActionGuardReadiness(
   deps: { summary?: () => import('./guard.js').ReadinessSummary } = {},
@@ -4705,12 +4706,13 @@ export async function checkActionGuardReadiness(
     }
     return [];
   }
-  const { fp, approval } = summary.report;
+  const { intervention, reachability, effectiveness } = summary.report;
   const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
   const bars =
-    `FP ${pct(fp.rate)} (${fp.stops}/${fp.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
-    `approval reach ${pct(approval.rate)} (${approval.reached}/${approval.resolved}, need ≥ 98% over ≥ 20) via ` +
-    `${approval.channel.configured ? approval.channel.kind : 'no channel'}; last round-trip ${approval.lastRoundTripAt ?? 'never'}`;
+    `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
+    `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
+    `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
+    `effectiveness evidence ${!effectiveness.required ? 'not required' : effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
   if (summary.mode === 'enforcing') {
     return [{ label, status: 'pass', message: `enforce when ready: ENFORCING — ${bars}` }];
@@ -4731,8 +4733,8 @@ export async function checkActionGuardReadiness(
   return [{
     label,
     status: 'warn',
-    message: `enforce when ready: SHADOW (not proven yet) — dangerous ops are logged, not stopped. ${bars}.${missing}`,
-    fix: 'Nothing is broken: the guard enforces automatically once both bars hold. Progress: `shieldcortex guard readiness`.',
+    message: `enforce when ready: SHADOW (not ready yet) — dangerous ops are logged, not stopped. ${bars}.${missing}`,
+    fix: 'Nothing is broken: the guard enforces automatically once all three readiness conditions hold. Progress: `shieldcortex guard readiness`.',
   }];
 }
 

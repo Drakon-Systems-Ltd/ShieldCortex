@@ -20,10 +20,14 @@
  *
  * Enforce-when-ready (#509, `actionGuard.readinessGate: true` on an enforcing
  * guard): the dangerous tier runs in SHADOW — audited as `would_hold` /
- * `would_block`, no decision emitted — until this install's own audit shows
- * both ADR-002 §5B bars (see src/defence/iron-dome/guard-readiness.ts). The
- * catastrophic tier is unchanged in every posture. A policy lock disables the
- * gate (the lock pins enforcement).
+ * `would_block`, no decision emitted — until this install meets all three
+ * readiness conditions: the two operability proxies (operational intervention
+ * rate, approval reachability) measured from its own audit, plus reviewed
+ * effectiveness evidence, required by default (see
+ * src/defence/iron-dome/guard-readiness.ts). These proxies are not the
+ * ADR-002 §5B bars. The catastrophic tier and the session-lease floor are
+ * unchanged in every posture and mode. A policy lock disables the gate (the
+ * lock pins enforcement).
  *
  * Prompt-surface rule: "ask" is only meaningful where Claude Code will actually
  * raise a prompt. In `bypassPermissions` and `dontAsk` the harness shows no
@@ -375,10 +379,14 @@ function flattenActionGuardConfig(config) {
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
       auditAllows: raw.auditAllows !== false,
       // #509 enforce-when-ready: exactly `true` opts an ENFORCING guard into
-      // shadow mode until this install's audit proves both readiness bars.
+      // shadow mode until this install meets the readiness conditions.
       // Anything else is absent — the flag can only be turned on on purpose,
       // and without it `enforce` means what it always meant.
       readinessGate: raw.readinessGate === true,
+      // #509 Addendum 1 (B), passed through RAW: guard-readiness.js
+      // effectivenessEvidenceRequired() is the one place that reads it
+      // (only a literal `false` stops requiring reviewed evidence).
+      readinessRequireEffectivenessEvidence: raw.readinessRequireEffectivenessEvidence,
       // #143, passed through RAW. normaliseBrokerConfig in dist is the single
       // place that knows which values would loosen an invariant; re-implementing
       // half of it here is how the two halves end up disagreeing. Absent or
@@ -604,6 +612,8 @@ function loadReadiness() {
         return typeof mod.resolveReadiness === 'function'
           && typeof mod.describeHumanChannel === 'function'
           && typeof mod.recordApprovalReach === 'function'
+          && typeof mod.effectivenessEvidenceRequired === 'function'
+          && typeof mod.currentReadinessPin === 'function'
           ? mod
           : null;
       } catch {
@@ -615,9 +625,9 @@ function loadReadiness() {
 }
 
 /**
- * #509 approval-reach evidence for one request that was put (or failed to be
- * put) to the configured human channel. Written only when a channel is
- * configured: the bar measures THAT channel's reliability, and "no channel"
+ * #509 approval-reachability evidence for one request that was put (or failed
+ * to be put) to the configured human channel. Written only when a channel is
+ * configured: the proxy measures THAT channel's reachability, and "no channel"
  * already makes the install not-ready on its own. Best-effort and silent — a
  * missing evidence row can only keep an install from becoming ready.
  */
@@ -2899,12 +2909,21 @@ process.stdin.on('end', async () => {
         console.error('[shieldcortex] enforce-when-ready: the readiness module is missing from this build — ENFORCING. Run `shieldcortex repair`.');
       } else {
         try {
-          const resolved = readinessMod.resolveReadiness({ channel: readinessMod.describeHumanChannel(cfg.notify) });
+          // Pin every row this call writes to the adapter + policy version in
+          // force: only same-version rows count as readiness evidence.
+          const pin = readinessMod.currentReadinessPin();
+          if (pin) baseExtra.readinessPin = pin;
+          const resolved = readinessMod.resolveReadiness({
+            channel: readinessMod.describeHumanChannel(cfg.notify),
+            requireEffectivenessEvidence: readinessMod.effectivenessEvidenceRequired({
+              readinessRequireEffectivenessEvidence: cfg.readinessRequireEffectivenessEvidence,
+            }),
+          });
           shadow = resolved.mode === 'shadow';
           if (resolved.transition === 'demote') {
             await announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra);
           } else if (resolved.transition === 'promote') {
-            console.error('[shieldcortex] enforce-when-ready: both readiness bars hold — Action Guard is now ENFORCING dangerous-tier verdicts.');
+            console.error('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts.');
           }
         } catch (err) {
           shadow = false;
@@ -2920,7 +2939,7 @@ process.stdin.on('end', async () => {
       if (verdict.severity !== 'benign' && cfg.auditAllows !== false) {
         writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
       } else if (whenReady) {
-        // #509: the FP bar's denominator is EVERY gated call, so under this
+        // #509: the intervention proxy's denominator is EVERY gated call, so under this
         // posture a benign allow leaves a minimal row too — no command text,
         // no args; the one extra row per call is the measurement's price.
         writeAuditEntry(safeToolName(toolName), { decision: 'allow', severity: 'benign', signals: [] }, { tally: 'redacted' }, 'allow', 'allowed', { ...baseExtra, readinessTally: true });
@@ -3000,7 +3019,8 @@ process.stdin.on('end', async () => {
       }
     }
 
-    // #509 SHADOW: enforce-when-ready has not (or no longer) proven both bars.
+    // #509 SHADOW: enforce-when-ready does not (or no longer) meet its
+    // readiness conditions.
     // The verdict is exactly the guard's; it is recorded as the stop it WOULD
     // have been — `would_hold` where enforcing would ask, `would_block` where
     // it would deny for want of a prompt surface — and the call proceeds.
@@ -3019,7 +3039,7 @@ process.stdin.on('end', async () => {
       );
       console.error(
         `[shieldcortex] Action Guard (shadow, enforce-when-ready): ${wouldOutcome === 'would_block' ? 'would have BLOCKED' : 'would have HELD for approval'} ` +
-        `${safeToolName(toolName)} [${safeSignalList(verdict.signals).join(', ')}] — not enforced until this install proves its readiness bars (\`shieldcortex guard readiness\`).`,
+        `${safeToolName(toolName)} [${safeSignalList(verdict.signals).join(', ')}] — not enforced until this install meets its readiness conditions (\`shieldcortex guard readiness\`).`,
       );
       process.exit(0);
     }
@@ -3240,7 +3260,7 @@ process.stdin.on('end', async () => {
       retryCtx,
     );
     // #509: a denial for want of a prompt surface put no decision to a human
-    // at all — on the approval-reach bar that is a request that did NOT reach
+    // at all — for approval reachability that is a request that did NOT reach
     // one. (Same pure function emitApprovalRequired just branched on.)
     if (noPromptSurfaceForHold) {
       let dnpHash = null;
