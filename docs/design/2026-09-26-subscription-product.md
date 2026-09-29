@@ -30,6 +30,8 @@ Every change below answers a lettered item in Tars's review. Section numbers are
 
 ## Open question for Michael
 
+> **DECIDED 29 Sep 2026 22:19 UTC — "Cloud too".** The owner approved Cloud scope, Phase 1 and public engagement in one message. Cloud work starts in **sandbox** (test Stripe, test root, sandbox issuer and anchor signer). Production signing keys, live billing and any new paid infrastructure remain **separate later approvals**. The "if client-only" branch below is kept for the record and no longer applies.
+
 **Can this engagement change the Cloud API (the `ShieldCortex-internal` repo / `api.shieldcortex.ai`), or must it stay client-only?**
 
 Four paid features need a server half this repo does not contain: issuing entitlement-bearing licence keys from Stripe, issuing device certificates, hosting and signing the threat feed, and accepting ledger anchors. The definition of done ("install → pay → verify") depends on it.
