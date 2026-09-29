@@ -135,7 +135,9 @@ function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> 
   // `denied_no_prompt_surface` is a NEW event, so no existing receiver can be
   // relying on the shape of its body — the `approval_requested` body is
   // unchanged but for the added `event` key.
-  if (!denied) payload.denyCommand = `shieldcortex deny ${n.shortHash}`;
+  // #509 r5 (finding 5): bound to the attempt exactly like `approveCommand`,
+  // so a replayed deny from an earlier payload cannot remove a newer request.
+  if (!denied) payload.denyCommand = `shieldcortex deny ${n.shortHash}${n.attemptId ? ` --attempt ${n.attemptId}` : ''}`;
   if (denied && n.deniedReason) payload.deniedReason = n.deniedReason;
   if (n.sessionId) payload.sessionId = n.sessionId;
   if (n.cwd) payload.cwd = n.cwd;

@@ -441,12 +441,13 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
   'type-coercion', 'missing-handle', 'write-content-catastrophic',
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
-  // #509: the enforce-when-ready gate demoting itself to shadow mode.
-  'readiness-demoted',
+  // #509: the enforce-when-ready gate demoting itself to shadow mode, and
+  // (r5) promoting itself to enforcing — both announced when they happen.
+  'readiness-demoted', 'readiness-promoted',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
-  'readiness_demoted',
+  'readiness_demoted', 'readiness_promoted',
 ]);
 const SAFE_ACTION_GUARD_SEVERITIES = new Set(['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown']);
 
@@ -482,6 +483,9 @@ function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string):
   if (event === 'action_guard_warning') {
     if (outcome === 'readiness_demoted') {
       return 'Action Guard (enforce when ready) was DEMOTED to shadow mode: dangerous tool calls are now logged but NOT stopped, because this install no longer meets its readiness conditions. Run `shieldcortex guard readiness` for details.';
+    }
+    if (outcome === 'readiness_promoted') {
+      return 'Action Guard (enforce when ready) was PROMOTED to enforcing: dangerous tool calls now need approval. If you did not expect this, run `shieldcortex doctor` — a promotion you were not told about means the readiness journal was written by something other than the hook.';
     }
     return outcome === 'failure_allowed'
       ? 'Action Guard was unavailable or advisory-only and the tool call was not blocked; inspect local audit for details.'

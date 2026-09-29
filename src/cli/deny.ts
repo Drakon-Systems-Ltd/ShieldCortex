@@ -111,7 +111,7 @@ export function runDeny(argv: string[], deps: DenyDeps = {}): number {
   const outcome = denyRequest(hash, { home, now, attemptId });
   if (!outcome.ok) {
     if (outcome.reason === 'stale-attempt') {
-      err(`Attempt ${attemptId} is not the current request for ${hash} — it expired and the command was asked again. Nothing was denied.`);
+      err(`Attempt ${attemptId} is not the current request for ${hash} — it expired, or the command was asked again. Nothing was denied.`);
     } else if (outcome.reason === 'already-approved') {
       err(`Approval ${hash} was already granted — it cannot be denied after the fact.`);
       err('If this was a mistake, let the approval expire; it is single-use.');

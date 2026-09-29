@@ -4712,8 +4712,25 @@ export async function checkActionGuardReadiness(
     `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
     `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
     `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
-    `effectiveness evidence ${!effectiveness.required ? 'not required' : effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
+    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
+  // #509 r5: the promotion notice is the detection control for a forged
+  // journal, so doctor names the newest promotion the journal records for the
+  // operator to hold against the notices they received. One that was never
+  // announced is a warning of its own.
+  const promotion = summary.lastPromotion;
+  const promotionRows: CheckResult[] = promotion
+    ? [{
+      label: 'Action guard last promotion',
+      status: promotion.notice === 'delivered' ? 'info' : 'warn',
+      message: `last promotion to enforcing: ${(await import('./guard.js')).describePromotionNotice(promotion)}`,
+      ...(promotion.notice === 'delivered'
+        ? {}
+        : {
+          fix: 'No promotion notice reached you for this promotion. If you do not recognise it, the transition journal under ~/.shieldcortex/approvals may have been written by something other than the hook — run `shieldcortex guard readiness` and inspect it.',
+        }),
+    }]
+    : [];
   // A recent tamper signal (a readiness cache that disagreed with the durable
   // transition record) is reported alongside whatever the mode row says.
   const tamper: CheckResult[] = summary.recentTamper
@@ -4734,13 +4751,13 @@ export async function checkActionGuardReadiness(
       fix:
         'The record at ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl was removed or damaged. Find out what did it. ' +
         'The hook records the unknown state as a demotion on its next call; the FAIL clears on the next promotion.',
-    }, ...tamper];
+    }, ...tamper, ...promotionRows];
   }
   if (summary.mode === 'enforcing') {
-    return [{ label, status: 'pass', message: `enforce when ready: ENFORCING — ${bars}` }, ...tamper];
+    return [{ label, status: 'pass', message: `enforce when ready: ENFORCING — ${bars}` }, ...tamper, ...promotionRows];
   }
   if (summary.demoted) {
-    return [...tamper, {
+    return [...tamper, ...promotionRows, {
       label,
       status: 'fail',
       message:
@@ -4757,7 +4774,7 @@ export async function checkActionGuardReadiness(
     status: 'warn',
     message: `enforce when ready: SHADOW (not ready yet) — dangerous ops are logged, not stopped. ${bars}.${missing}`,
     fix: 'Nothing is broken: the guard enforces automatically once all three readiness conditions hold. Progress: `shieldcortex guard readiness`.',
-  }, ...tamper];
+  }, ...tamper, ...promotionRows];
 }
 
 // ── Check 8a-bis: Cron denial honesty (#375) ──────────────

@@ -23,7 +23,7 @@
  * `would_block`, no decision emitted — until this install meets all three
  * readiness conditions: the two operability proxies (operational intervention
  * rate, approval reachability) measured from its own audit, plus reviewed
- * effectiveness evidence, required by default (see
+ * effectiveness evidence, always required (see
  * src/defence/iron-dome/guard-readiness.ts). These proxies are not the
  * ADR-002 §5B bars. The catastrophic tier, the session-lease floor and the
  * guard self-protection floor (GUARD_SELF_PROTECTION_SIGNALS: the guard's own
@@ -385,10 +385,8 @@ function flattenActionGuardConfig(config) {
       // Anything else is absent — the flag can only be turned on on purpose,
       // and without it `enforce` means what it always meant.
       readinessGate: raw.readinessGate === true,
-      // #509 Addendum 1 (B), passed through RAW: guard-readiness.js
-      // effectivenessEvidenceRequired() is the one place that reads it
-      // (only a literal `false` stops requiring reviewed evidence).
-      readinessRequireEffectivenessEvidence: raw.readinessRequireEffectivenessEvidence,
+      // #509 option A: reviewed effectiveness evidence is always required;
+      // there is no config key that drops it, so none is read here.
       // #143, passed through RAW. normaliseBrokerConfig in dist is the single
       // place that knows which values would loosen an invariant; re-implementing
       // half of it here is how the two halves end up disagreeing. Absent or
@@ -614,7 +612,6 @@ function loadReadiness() {
         return typeof mod.resolveReadiness === 'function'
           && typeof mod.describeHumanChannel === 'function'
           && typeof mod.recordApprovalReach === 'function'
-          && typeof mod.effectivenessEvidenceRequired === 'function'
           && typeof mod.currentReadinessPin === 'function'
           ? mod
           : null;
@@ -652,10 +649,29 @@ async function recordReachEvidence(cfg, hash, phase, answer, channel, reason, at
  * transition row itself was already appended by resolveReadiness.
  */
 async function announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra) {
-  const verdict = { severity: 'high', decision: 'require_approval', signals: ['readiness-demoted'] };
   let line = 'ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready).';
   try { line = readinessMod.describeDemotion(resolved.demotionReason); } catch { /* keep the fallback */ }
   console.error(`[shieldcortex] ⚠️ ${line}`);
+  await announceTransition(readinessMod, resolved, 'demote', toolName, getNotify, baseExtra);
+}
+
+/**
+ * #509 r5: a PROMOTION is announced the moment it happens, on the same push
+ * channel a demotion uses (promotion is refused without one). The floor stops
+ * the agent's ordinary tool calls from editing guard state, but a same-UID
+ * process that deliberately evades the classifier can still forge the
+ * journal; the notice is the out-of-band detection control for that — a
+ * promotion the operator never heard about is the signal. Whether the notice
+ * was delivered is journalled beside the promotion, and doctor reports both.
+ */
+async function announcePromotion(readinessMod, resolved, toolName, getNotify, baseExtra) {
+  console.error('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts.');
+  await announceTransition(readinessMod, resolved, 'promote', toolName, getNotify, baseExtra);
+}
+
+async function announceTransition(readinessMod, resolved, which, toolName, getNotify, baseExtra) {
+  const promote = which === 'promote';
+  const verdict = { severity: 'high', decision: 'require_approval', signals: [promote ? 'readiness-promoted' : 'readiness-demoted'] };
   let result = null;
   try {
     const notify = await getNotify();
@@ -663,7 +679,7 @@ async function announceDemotion(readinessMod, resolved, toolName, getNotify, bas
     if (channel && notify.deliverOperatorNotification && notify.buildActionGuardOutcomeNotification) {
       const n = notify.buildActionGuardOutcomeNotification({
         event: 'action_guard_warning',
-        outcome: 'readiness_demoted',
+        outcome: promote ? 'readiness_promoted' : 'readiness_demoted',
         tool: safeToolName(toolName),
         surface: 'redacted action surface',
         signals: verdict.signals,
@@ -675,9 +691,23 @@ async function announceDemotion(readinessMod, resolved, toolName, getNotify, bas
       result = await notify.deliverOperatorNotification(n, { channels: [channel], timeoutMs: notify.config.timeoutMs });
     }
   } catch {
-    result = { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: 'demotion notice failed' } }] };
+    result = { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: `${which} notice failed` } }] };
   }
-  recordNotifyAudit(toolName, verdict, {}, { ...baseExtra, readinessTransition: 'demote' }, result);
+  recordNotifyAudit(toolName, verdict, {}, { ...baseExtra, readinessTransition: which }, result);
+  if (resolved.transitionAt) {
+    const failure = result?.attempts?.find?.((a) => a?.result?.delivered === false)?.result?.reason;
+    try {
+      readinessMod.recordTransitionNotice?.({
+        of: which,
+        transitionAt: resolved.transitionAt,
+        delivered: Boolean(result?.deliveredVia),
+        channel: result?.deliveredVia ?? null,
+        reason: result ? (result.deliveredVia ? undefined : safeDiagnosticReason(failure ?? 'no channel accepted the notice')) : 'no push notice channel was available',
+      });
+    } catch {
+      /* an unrecorded notice reads as "no notice attempt recorded" — the louder answer */
+    }
+  }
 }
 
 /**
@@ -982,8 +1012,8 @@ const SAFE_SIGNALS = new Set([
   'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
   'type-coercion', 'missing-handle', 'write-content-catastrophic',
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
-  // #509: the enforce-when-ready gate's own demotion notice.
-  'readiness-demoted',
+  // #509: the enforce-when-ready gate's own demotion and promotion notices.
+  'readiness-demoted', 'readiness-promoted',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -2949,9 +2979,6 @@ process.stdin.on('end', async () => {
           if (pin) baseExtra.readinessPin = pin;
           const resolved = readinessMod.resolveReadiness({
             channel: readinessMod.describeHumanChannel(cfg.notify),
-            requireEffectivenessEvidence: readinessMod.effectivenessEvidenceRequired({
-              readinessRequireEffectivenessEvidence: cfg.readinessRequireEffectivenessEvidence,
-            }),
           });
           shadow = resolved.mode === 'shadow';
           if (resolved.tamper) {
@@ -2960,7 +2987,7 @@ process.stdin.on('end', async () => {
           if (resolved.transition === 'demote') {
             await announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra);
           } else if (resolved.transition === 'promote') {
-            console.error('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts.');
+            await announcePromotion(readinessMod, resolved, toolName, getNotify, baseExtra);
           }
         } catch (err) {
           shadow = false;

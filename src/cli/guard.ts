@@ -38,14 +38,15 @@ import {
   readTransitionRecord,
   transitionsPathFor,
   describeHumanChannel,
-  effectivenessEvidenceRequired,
   isDemoted,
+  lastPromotion,
   previewMode,
   previousMode,
   readReadinessState,
   readinessPaths,
   recordApprovalReach,
   type HumanChannel,
+  type PromotionNotice,
   type ReadinessMode,
   type ReadinessReport,
   type ReadinessState,
@@ -75,6 +76,9 @@ export interface ReadinessSummary {
   recordUnknown: boolean;
   /** The newest tamper report in the record, when recent. */
   recentTamper: TransitionEntry | null;
+  /** #509 r5: the newest promotion in the journal and whether its notice was
+   *  delivered — for the operator to compare with the notices they received. */
+  lastPromotion: PromotionNotice | null;
 }
 
 function rawActionGuard(): Record<string, unknown> {
@@ -106,12 +110,7 @@ export function buildReadinessSummary(opts: { now?: number; home?: string } = {}
   // `home` pins the evidence tree (tests); production reads the configured
   // root plus the hook's home-directory audit.
   const paths = readinessPaths({ home: opts.home });
-  const report = computeReadiness({
-    channel,
-    paths,
-    now,
-    requireEffectivenessEvidence: effectivenessEvidenceRequired(rawGuard),
-  });
+  const report = computeReadiness({ channel, paths, now });
   const state = readReadinessState(paths.statePath);
   const record = readTransitionRecord(transitionsPathFor(paths));
 
@@ -131,7 +130,24 @@ export function buildReadinessSummary(opts: { now?: number; home?: string } = {}
   const recentTamper = posture === 'enforce-when-ready' && Number.isFinite(tamperAt) && now - tamperAt <= TAMPER_REPORT_WINDOW_MS
     ? record.lastTamper
     : null;
-  return { posture, lockOverrides, mode, channel, report, state, demoted, record, recordUnknown, recentTamper };
+  return {
+    posture, lockOverrides, mode, channel, report, state, demoted, record, recordUnknown, recentTamper,
+    lastPromotion: lastPromotion(record),
+  };
+}
+
+/**
+ * One line on the newest promotion, from the journal, for the operator to
+ * hold against the notices they actually received (#509 r5: a promotion is
+ * announced when it happens; one they never heard about is the signal).
+ */
+export function describePromotionNotice(p: PromotionNotice): string {
+  const notice = p.notice === 'delivered'
+    ? `notice delivered${p.channel ? ` via ${p.channel}` : ''}`
+    : p.notice === 'failed'
+      ? `notice NOT delivered${p.reason ? ` (${p.reason})` : ''}`
+      : 'NO notice attempt recorded';
+  return `${p.promotedAt} (from the transition journal) — ${notice}. If you did not receive a promotion notice at that time, treat the journal as forged.`;
 }
 
 function pct(rate: number | null): string {
@@ -157,11 +173,9 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
   const iv = report.intervention;
   const rc = report.reachability;
   const ef = report.effectiveness;
-  const effectivenessText = !ef.required
-    ? 'not required (actionGuard.readinessRequireEffectivenessEvidence is false)'
-    : ef.evidence
-      ? `reviewed by ${ef.evidence.reviewedBy} on ${ef.evidence.reviewedAt} (${ef.evidence.reference})  PASS`
-      : 'REQUIRED — none reviewed for this version  not met';
+  const effectivenessText = ef.evidence
+    ? `reviewed by ${ef.evidence.reviewedBy} on ${ef.evidence.reviewedAt} (${ef.evidence.reference})  PASS`
+    : 'REQUIRED — none reviewed for this version  not met';
   const lines = [
     `Posture:       ${POSTURE_TEXT[s.posture]}${s.lockOverrides ? ' (policy lock pins enforcement; readiness gate ignored)' : ''}`,
     `Current mode:  ${MODE_TEXT[s.mode]}${s.demoted ? ' — DEMOTED from enforcing' : ''}`,
@@ -181,6 +195,9 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
     lines.push(`Transition record: ${s.record.status === 'ok' ? 'EMPTY' : s.record.status.toUpperCase()} — ${UNKNOWN_RECORD_REASON}`);
   } else if (s.record.last) {
     lines.push(`Transition record: last ${s.record.last.event} → ${s.record.last.to} at ${s.record.last.ts}`);
+  }
+  if (s.lastPromotion) {
+    lines.push(`Last promotion: ${describePromotionNotice(s.lastPromotion)}`);
   }
   if (s.recentTamper) {
     lines.push(`TAMPER SIGNAL: ${s.recentTamper.ts} — ${s.recentTamper.reason ?? 'readiness cache disagreed with the transition record'}`);

@@ -417,7 +417,7 @@ export function handleCloudConfig(args: string[]): void {
       'Action Guard ENFORCE WHEN READY — dangerous ops are logged, not stopped, until three conditions hold: two readiness ' +
         'proxies measured here (operational intervention rate ≤ 2% over ≥ 500 calls / 7 days, and approval reachability ' +
         '≥ 98% of requests answered by a human through a configured channel) AND reviewed effectiveness evidence for this ' +
-        'guard version. That evidence is required by default and none has been published, so today this posture stays in shadow. ' +
+        'guard version. That evidence is always required and none has been published, so today this posture stays in shadow. ' +
         'Needs a human approval channel (--action-guard-notify-openclaw or --action-guard-notify-webhook), and a webhook ' +
         'so a later demotion notice can reach you (--action-guard-notify-webhook). ' +
         'Catastrophic ops block in every posture. Check progress: shieldcortex guard readiness. ' +
@@ -634,7 +634,7 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --action-guard-enforce   Gate dangerous ops (approval/block) from now on; also enables the guard');
     console.log('  --action-guard-enforce-when-ready  Log dangerous ops (shadow) until two readiness proxies hold here');
     console.log('                           (≤ 2% would-stop, ≥ 98% of approvals answered by a human) AND reviewed');
-    console.log('                           effectiveness evidence exists for this version — required by default, none');
+    console.log('                           effectiveness evidence exists for this version — always required, none');
     console.log('                           published yet, so it stays in shadow today. Needs a webhook;');
     console.log('                           progress: shieldcortex guard readiness. Claude Code hook only —');
     console.log('                           the OpenClaw plugin enforces from the start. Also enables the guard');

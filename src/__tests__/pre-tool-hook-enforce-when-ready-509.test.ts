@@ -14,10 +14,14 @@
  * The OpenClaw card channel is deliberately NOT configured here: it would
  * dial a real gateway.
  *
- * Addendum 1: promotion needs the two readiness proxies AND reviewed
- * effectiveness evidence (required by default, none shipped), so the
- * promotion tests set `readinessRequireEffectivenessEvidence: false` and one
- * test proves the default never promotes. Seeded evidence is pinned to the
+ * Addendum 1 / owner decision 29 Sep 2026 (option A): promotion ALWAYS needs
+ * the two readiness proxies AND reviewed effectiveness evidence, and no
+ * setting drops it. None ships, so the promotion tests run against a dist
+ * whose guard-readiness.js carries a reviewed-evidence entry for the pin under
+ * test (`writeReadinessShim(true)`) — standing for a future build that ships
+ * reviewed evidence, never a config key. The shipped registry (empty) is
+ * proven never to promote, including with the removed legacy key set to
+ * `false` in config. Seeded evidence is pinned to the
  * adapter + policy version of the build under test. The floors — the
  * catastrophic tier and the session-lease freeze — are asserted identical in
  * shadow, enforcing and demoted states.
@@ -37,8 +41,6 @@ const DANGEROUS = { command: 'sudo modprobe softdog' };
 const BENIGN = { command: 'ls -la' };
 const FROZEN_PUBLISH = { command: 'npm publish' };
 const DAY = 24 * 60 * 60 * 1000;
-/** Promotion on the two proxies alone (Addendum 1 B switched off). */
-const PROXIES_ONLY = { readinessRequireEffectivenessEvidence: false };
 
 interface HookResult { decision?: string; reason?: string; stderr: string }
 
@@ -69,9 +71,10 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     const shimIron = join(distRoot, 'defence', 'iron-dome');
     mkdirSync(shimIron, { recursive: true });
     for (const f of readdirSync(realIron)) {
-      if (!f.endsWith('.js') || f === 'webhook-notify-channel.js') continue;
+      if (!f.endsWith('.js') || f === 'webhook-notify-channel.js' || f === 'guard-readiness.js') continue;
       writeFileSync(join(shimIron, f), `export * from ${JSON.stringify(pathToFileURL(join(realIron, f)).href)};\n`);
     }
+    writeReadinessShim(true);
     writeFileSync(
       join(shimIron, 'webhook-notify-channel.js'),
       [
@@ -87,7 +90,7 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
         '}',
       ].join('\n'),
     );
-    writeConfig({ readinessGate: true, ...PROXIES_ONLY });
+    writeConfig({ readinessGate: true });
     // What `shieldcortex config --action-guard-enforce-when-ready` does:
     // start the durable transition record.
     appendRecord({ ts: new Date(Date.now() - 30 * DAY).toISOString(), event: 'init', to: 'shadow', reason: 'test posture' });
@@ -97,6 +100,29 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     rmSync(home, { recursive: true, force: true });
     rmSync(distRoot, { recursive: true, force: true });
   });
+
+  /**
+   * guard-readiness.js in the shim dist. `true`: the real module, except that
+   * the hook's resolveReadiness sees one reviewed-evidence entry for the pin
+   * in force — a build that ships reviewed evidence. `false`: the real module
+   * as shipped (empty registry).
+   */
+  function writeReadinessShim(reviewed: boolean): void {
+    const real = JSON.stringify(pathToFileURL(join(REAL_DIST, 'defence', 'iron-dome', 'guard-readiness.js')).href);
+    const target = join(distRoot, 'defence', 'iron-dome', 'guard-readiness.js');
+    if (!reviewed) {
+      writeFileSync(target, `export * from ${real};\n`);
+      return;
+    }
+    writeFileSync(target, [
+      `import * as real from ${real};`,
+      `export * from ${real};`,
+      'const pin = real.currentReadinessPin();',
+      'const REVIEWED = pin ? [{ ...pin, reviewedAt: new Date(Date.now() - 86400000).toISOString(),',
+      "  reviewedBy: 'test fixture reviewer', reference: 'test fixture: a build shipping reviewed evidence', cases: 60 }] : [];",
+      'export function resolveReadiness(opts) { return real.resolveReadiness({ ...opts, effectivenessRegistry: REVIEWED }); }',
+    ].join('\n'));
+  }
 
   function writeConfig(extra: Record<string, unknown>): void {
     writeFileSync(
@@ -184,7 +210,7 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     return { decision: out.permissionDecision, reason: out.permissionDecisionReason, stderr };
   }
 
-  it('#509 regression: proxies not met → audited as a would-stop and NOT stopped; proxies met (evidence not required) → the same call is enforced', () => {
+  it('#509 regression: proxies not met → audited as a would-stop and NOT stopped; proxies met + reviewed evidence in the build → the same call is enforced', () => {
     // Fresh isolated store, posture enforce-when-ready, no evidence.
     const shadowHeld = runHook(DANGEROUS, 'default');
     expect(shadowHeld.decision).toBeUndefined();
@@ -231,7 +257,8 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     expect(existsSync(statePath())).toBe(false);
   });
 
-  it('Addendum 1 (B) default: effectiveness evidence REQUIRED — perfect proxies, and the same call stays in shadow with no promotion', () => {
+  it('option A: effectiveness evidence ALWAYS required — the shipped (empty) registry with perfect proxies stays in shadow, no promotion', () => {
+    writeReadinessShim(false);
     writeConfig({ readinessGate: true });
     seedReadyHistory();
     for (let i = 0; i < 3; i += 1) {
@@ -432,7 +459,9 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     expect(rows().some((x) => x.type === 'readiness_tamper')).toBe(true);
     const notices = readFileSync(evidenceFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     expect(notices.some((n) => n.outcome === 'readiness_demoted')).toBe(true);
-    expect(recordEntries().map((e) => e.event)).toEqual(['init', 'promote', 'tamper', 'demote']);
+    expect(recordEntries().map((e) => e.event).filter((e) => e !== 'notice')).toEqual(['init', 'promote', 'tamper', 'demote']);
+    // r5: both transitions were announced, and the journal says so.
+    expect(recordEntries().filter((e) => e.event === 'notice').map((e) => [e.of, e.delivered])).toEqual([['promote', true], ['demote', true]]);
   });
 
   it('r3 finding 2: promoted, forged fresh shadow cache, evidence still ready ⇒ the dangerous call is still ENFORCED', () => {
@@ -449,6 +478,68 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     const r = runHook(BENIGN);
     expect(r.stderr).toMatch(/DEMOTED to shadow mode/);
     expect(r.stderr).toMatch(/transition record is missing or unreadable/);
-    expect(recordEntries().map((e) => e.event)).toEqual(['demote']);
+    expect(recordEntries().map((e) => e.event).filter((e) => e !== 'notice')).toEqual(['demote']);
+  });
+
+  // ── Round 5 ────────────────────────────────────────────────────────────
+
+  it('r5 finding 2: GPT-6 fixture — 500 calls / 8 days / 20 answered, valid webhook, EMPTY registry, legacy key false ⇒ never promotes', () => {
+    writeReadinessShim(false);
+    writeConfig({ readinessGate: true, readinessRequireEffectivenessEvidence: false });
+    const now = Date.now();
+    const list: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 500; i += 1) {
+      list.push({ ts: new Date(now - 8 * DAY + Math.floor((i * 8 * DAY) / 500) + 1000).toISOString(), type: 'intercept', origin: 'claude-code-hook', tool: 'Bash', severity: 'low', action: 'allow', outcome: 'allowed' });
+    }
+    for (let i = 0; i < 20; i += 1) {
+      const t = now - DAY + i * 60_000;
+      list.push({ ts: new Date(t).toISOString(), type: 'approval_reach', reachId: `g-${i}`, attemptId: `g-a${i}`, phase: 'request' });
+      list.push({ ts: new Date(t + 30_000).toISOString(), type: 'approval_reach', reachId: `g-${i}`, attemptId: `g-a${i}`, phase: 'answer', answer: 'approve' });
+    }
+    seed(list);
+    const r = runHook(DANGEROUS, 'default');
+    expect(r.decision).toBeUndefined();
+    expect(r.stderr).not.toMatch(/now ENFORCING/);
+    expect(rows().filter((x) => x.type === 'readiness_transition')).toHaveLength(0);
+    const st = JSON.parse(readFileSync(statePath(), 'utf8'));
+    expect(st.mode).toBe('shadow');
+    expect(st.missing).toEqual(['operability proxies met; awaiting reviewed effectiveness evidence']);
+    expect(recordEntries().some((e) => e.event === 'promote')).toBe(false);
+  });
+
+  it('r5 finding 1: a promotion is announced on the push channel when it happens, and the journal records the notice as delivered', () => {
+    seedReadyHistory();
+    const r = runHook(BENIGN);
+    expect(r.stderr).toMatch(/now ENFORCING/);
+    const notices = readFileSync(evidenceFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(notices.filter((n) => n.outcome === 'readiness_promoted')).toHaveLength(1);
+    const promote = recordEntries().find((e) => e.event === 'promote')!;
+    const notice = recordEntries().find((e) => e.event === 'notice')!;
+    expect(notice).toMatchObject({ of: 'promote', transitionTs: promote.ts, delivered: true, channel: 'webhook' });
+    expect(rows().some((x) => x.action === 'notify' && x.readinessTransition === 'promote' && x.outcome === 'notified')).toBe(true);
+  });
+
+  it('r5 finding 1: a promotion whose notice was NOT delivered is recorded as such, and the readiness summary reports it', async () => {
+    writeFileSync(
+      join(distRoot, 'defence', 'iron-dome', 'webhook-notify-channel.js'),
+      "export function createWebhookNotifyChannel() { return { name: 'webhook', async send() { return { delivered: false, reason: 'receiver down' }; } }; }\n",
+    );
+    seedReadyHistory();
+    expect(runHook(BENIGN).stderr).toMatch(/now ENFORCING/);
+    const promote = recordEntries().find((e) => e.event === 'promote')!;
+    const notice = recordEntries().find((e) => e.event === 'notice')!;
+    expect(notice).toMatchObject({ of: 'promote', transitionTs: promote.ts, delivered: false });
+    const mod = await import(pathToFileURL(join(REAL_DIST, 'defence', 'iron-dome', 'guard-readiness.js')).href);
+    const p = mod.lastPromotion(mod.readTransitionRecord(recordPath()));
+    expect(p).toMatchObject({ promotedAt: promote.ts, notice: 'failed' });
+  });
+
+  it('r5 finding 1: a promotion with NO notice attempt (the hook died, or a forged journal) reads as "none"', async () => {
+    const mod = await import(pathToFileURL(join(REAL_DIST, 'defence', 'iron-dome', 'guard-readiness.js')).href);
+    const at = new Date(Date.now() - DAY).toISOString();
+    appendRecord({ ts: at, event: 'promote', to: 'enforcing', pin });
+    expect(mod.lastPromotion(mod.readTransitionRecord(recordPath()))).toEqual({ promotedAt: at, notice: 'none' });
+    const { describePromotionNotice } = await import(pathToFileURL(join(REAL_DIST, 'cli', 'guard.js')).href);
+    expect(describePromotionNotice({ promotedAt: at, notice: 'none' })).toMatch(/NO notice attempt recorded/);
   });
 });

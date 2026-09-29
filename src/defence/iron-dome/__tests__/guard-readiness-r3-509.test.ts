@@ -52,7 +52,13 @@ const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.parse('2026-09-28T12:00:00.000Z');
 const PIN = currentReadinessPin() as ReadinessPin;
 const CHANNEL = { configured: true, kind: 'webhook', pushesNotices: true };
-const PROXIES_ONLY = { requireEffectivenessEvidence: false } as const;
+/** A build shipping reviewed effectiveness evidence for this pin (option A:
+ *  no setting drops the condition; the shipped registry is empty). */
+const WITH_REVIEWED = {
+  // Reviewed before the oldest promotion these tests replay (NOW - 32 days),
+  // and still inside the 90-day freshness window at NOW.
+  effectivenessRegistry: [{ ...PIN, reviewedAt: new Date(NOW - 60 * DAY).toISOString(), reviewedBy: 'fixture reviewer', reference: 'test fixture', cases: 60 }],
+} as const;
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
 let root: string;
@@ -110,7 +116,7 @@ function auditRows(): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 const record = () => readTransitionRecord(transitionsPathFor(paths));
-const resolve = (now: number, channel = CHANNEL) => resolveReadiness({ ...PROXIES_ONLY, channel, paths, now });
+const resolve = (now: number, channel = CHANNEL) => resolveReadiness({ ...WITH_REVIEWED, channel, paths, now });
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'sc-readiness-r3-'));
@@ -202,7 +208,7 @@ describe('#509 r3 finding 2 — a forged fresh cache can only tighten', () => {
     expect(record().lastTamper).not.toBeNull();
     // Doctor's read-only preview agrees with the hook.
     forgeShadowCache(NOW + 2000);
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + 2000 });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 2000 });
     expect(previewMode({ state: readReadinessState(paths.statePath), report: rep, now: NOW + 2000, record: record() })).toBe('enforcing');
   });
 
@@ -235,7 +241,7 @@ describe('#509 r3 finding 3 — promotion history does not expire', () => {
     rmSync(paths.statePath);
     // 32 days on: the evidence (and the audit's promotion row) has aged out
     // of every rolling window; only the durable record remembers.
-    expect(computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).lastTransition).toBeNull();
+    expect(computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).lastTransition).toBeNull();
     const first = resolve(NOW);
     expect(first.mode).toBe('enforcing');
     expect(first.transition).toBeNull();
@@ -262,7 +268,7 @@ describe('#509 r3 finding 3 — promotion history does not expire', () => {
     const rec = record();
     expect(rec.status).toBe('missing');
     expect(isDemoted(null, null, rec)).toBe(true);
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(previewMode({ state: null, report: rep, now: NOW, record: rec })).toBe('shadow');
     expect(existsSync(transitionsPathFor(paths))).toBe(false); // preview wrote nothing
   });
@@ -323,7 +329,7 @@ describe('#509 r3 finding 4 — an OpenClaw-only channel cannot be promoted', ()
   it('perfect proxies on an OpenClaw-only install stay in SHADOW, and readiness says why', () => {
     readyEvidence();
     const openclawOnly = describeHumanChannel({ enabled: true, openclaw: true });
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: openclawOnly, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: openclawOnly, paths, now: NOW });
     expect(rep.reachability.pass).toBe(true);
     expect(rep.noticeChannel.pass).toBe(false);
     expect(rep.ready).toBe(false);
@@ -357,7 +363,7 @@ describe('#509 r3 finding 5 — each approval attempt counts on its own', () => 
         if (k === 10) expect(approveRequest(pending.hash, { home, now: t + 60_000, attemptId: pending.reachAttemptId }).ok).toBe(true);
       }
     }
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths: homePaths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths: homePaths, now: NOW });
     expect(rep.reachability.resolved).toBe(220);
     expect(rep.reachability.reached).toBe(20);
     expect(rep.reachability.rate).toBeCloseTo(20 / 220, 5);
@@ -371,7 +377,7 @@ describe('#509 r3 finding 5 — each approval attempt counts on its own', () => 
       row(NOW - DAY, { type: 'approval_reach', reachId: 'z', attemptId: 'z-1', phase: 'request' }),
       row(NOW - DAY + 1000, { type: 'approval_reach', reachId: 'z', phase: 'answer', answer: 'approve' }),
     ]);
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(rep.reachability.resolved).toBe(26);
     expect(rep.reachability.reached).toBe(25);
   });
@@ -382,9 +388,9 @@ describe('#509 r3 finding 5 — each approval attempt counts on its own', () => 
 describe('#509 r3 finding 6 — corrupt evidence never qualifies', () => {
   it('a complete corrupt line with no evidence token ("BROKEN JSON") ⇒ not ready, with a named reason', () => {
     readyEvidence();
-    expect(computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).ready).toBe(true);
+    expect(computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).ready).toBe(true);
     appendFileSync(auditFile(NOW - 2 * DAY), 'BROKEN JSON\n');
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(rep.integrity.unparseableLines).toBe(1);
     expect(rep.ready).toBe(false);
     expect(rep.missing.join('\n')).toMatch(/1 malformed audit record/);
@@ -398,14 +404,14 @@ describe('#509 r3 finding 6 — corrupt evidence never qualifies', () => {
     expect(i).toBeGreaterThan(-1);
     lines[i] = lines[i].replace('{', '{BROKEN');
     writeFileSync(f, lines.join('\n'));
-    expect(computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).ready).toBe(false);
+    expect(computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).ready).toBe(false);
   });
 
   it('valid JSON with the wrong shape for an evidence type is malformed too', () => {
     readyEvidence();
     appendFileSync(auditFile(NOW - DAY), `${JSON.stringify({ type: 'intercept', origin: 'claude-code-hook', ts: 'not-a-date', outcome: 'allowed', action: 'allow' })}\n`);
     appendFileSync(auditFile(NOW - DAY), '[1,2,3]\n');
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(rep.integrity.unparseableLines).toBe(2);
     expect(rep.ready).toBe(false);
   });
@@ -413,18 +419,18 @@ describe('#509 r3 finding 6 — corrupt evidence never qualifies', () => {
   it('other planes\' well-formed rows are fine', () => {
     readyEvidence();
     appendFileSync(auditFile(NOW - DAY), `${JSON.stringify({ type: 'memory_write', ts: new Date(NOW - DAY).toISOString() })}\n`);
-    expect(computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).ready).toBe(true);
+    expect(computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).ready).toBe(true);
   });
 
   it('a final partial line with NO trailing newline is ignored — only when it is the last line', () => {
     readyEvidence();
     appendFileSync(auditFile(NOW - DAY), 'BROKEN JSON');
-    const inFlight = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const inFlight = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(inFlight.integrity.unparseableLines).toBe(0);
     expect(inFlight.ready).toBe(true);
     // Once another row lands after it, it is a complete corrupt line.
     appendFileSync(auditFile(NOW - DAY), `\n${JSON.stringify({ type: 'memory_write', ts: new Date(NOW - DAY).toISOString() })}\n`);
-    const complete = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const complete = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(complete.integrity.unparseableLines).toBe(1);
     expect(complete.ready).toBe(false);
   });

@@ -47,10 +47,11 @@
  *    it says nothing about whether it stops attacks. Automatic promotion
  *    therefore also needs independently reviewed effectiveness evidence (the
  *    effect-based red-team exam) pinned to the adapter + policy version in
- *    force. Required by default ({@link EFFECTIVENESS_EVIDENCE_REQUIRED},
- *    config `actionGuard.readinessRequireEffectivenessEvidence`). No such
- *    evidence ships: {@link REVIEWED_EFFECTIVENESS_EVIDENCE} is empty, so with
- *    the default an install stays in shadow and says so.
+ *    force. ALWAYS required — the operator's decision of 29 Sep 2026 (#509
+ *    option A); there is no setting that drops it, and an old
+ *    `readinessRequireEffectivenessEvidence` key in config is ignored. No such
+ *    evidence ships: {@link REVIEWED_EFFECTIVENESS_EVIDENCE} is empty, so an
+ *    install stays in shadow and says so.
  *
  * ## Evidence pinning
  *
@@ -77,7 +78,10 @@
  *    TIGHTEN: a cached mode that disagrees with the record is a tamper signal
  *    and is recomputed, and a missing or unreadable record is UNKNOWN, treated
  *    as potentially demoted — never as never-ready;
- *  - promotion needs a channel that can push the demotion notice.
+ *  - promotion needs a channel that can push notices, and every promotion
+ *    and demotion is announced on it when it happens, with the outcome
+ *    journalled (TRANSITION NOTICES) — the detection control for a forged
+ *    journal, which the floor does not make impossible.
  * The state file, the record (and their lock and temp files) live in the
  * approval store's own directory, `~/.shieldcortex/approvals` — deliberately
  * NOT under a `SHIELDCORTEX_CONFIG_DIR` override — so the guard's existing
@@ -129,15 +133,10 @@ export const ROUND_TRIP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
  *  10-minute OpenClaw card lifetime plus slack. */
 export const REACH_ANSWER_WINDOW_MS = 15 * 60 * 1000;
 
-/**
- * Addendum 1 (B): automatic promotion needs reviewed effectiveness evidence.
- * The default is REQUIRED pending the operator's decision; flipping it is this
- * one line, or `actionGuard.readinessRequireEffectivenessEvidence: false` in
- * config (only the literal `false` turns it off).
- */
-export const EFFECTIVENESS_EVIDENCE_REQUIRED = true;
-/** The config key that overrides {@link EFFECTIVENESS_EVIDENCE_REQUIRED}. */
-export const EFFECTIVENESS_EVIDENCE_CONFIG_KEY = 'readinessRequireEffectivenessEvidence';
+// Addendum 1 (B), decided 29 Sep 2026 (option A): automatic promotion ALWAYS
+// needs reviewed effectiveness evidence. There is deliberately no constant,
+// config key or option that turns the condition off.
+
 /** Freshness: a review older than this no longer counts. */
 export const EFFECTIVENESS_EVIDENCE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 /** Minimum sample: a reviewed exam must report at least this many attack
@@ -228,7 +227,6 @@ export interface ReachabilityProxy {
 }
 
 export interface EffectivenessCondition {
-  required: boolean;
   evidence: EffectivenessEvidence | null;
   pass: boolean;
   missing: string | null;
@@ -404,14 +402,6 @@ function samePin(a: unknown, b: ReadinessPin | null): boolean {
  * an install pass.
  */
 export const REVIEWED_EFFECTIVENESS_EVIDENCE: readonly EffectivenessEvidence[] = Object.freeze([]);
-
-/** Whether effectiveness evidence is required, from the RAW actionGuard block. */
-export function effectivenessEvidenceRequired(rawActionGuard: unknown): boolean {
-  if (rawActionGuard && typeof rawActionGuard === 'object' && !Array.isArray(rawActionGuard)) {
-    if ((rawActionGuard as Record<string, unknown>)[EFFECTIVENESS_EVIDENCE_CONFIG_KEY] === false) return false;
-  }
-  return EFFECTIVENESS_EVIDENCE_REQUIRED;
-}
 
 function findEffectivenessEvidence(
   pin: ReadinessPin | null,
@@ -711,9 +701,9 @@ export function computeReadiness(opts: {
   now?: number;
   /** The version in force; defaults to {@link currentReadinessPin}. */
   pin?: ReadinessPin | null;
-  /** Defaults to {@link EFFECTIVENESS_EVIDENCE_REQUIRED}. */
-  requireEffectivenessEvidence?: boolean;
-  /** Test seam; defaults to {@link REVIEWED_EFFECTIVENESS_EVIDENCE}. */
+  /** In-process test seam, standing for a build that ships reviewed
+   *  evidence; defaults to {@link REVIEWED_EFFECTIVENESS_EVIDENCE}. Never fed
+   *  from config or any file. */
   effectivenessRegistry?: readonly EffectivenessEvidence[];
 }): ReadinessReport {
   const nowMs = opts.now ?? Date.now();
@@ -857,15 +847,15 @@ export function computeReadiness(opts: {
   };
 
   // ── Effectiveness evidence ──
-  const required = opts.requireEffectivenessEvidence ?? EFFECTIVENESS_EVIDENCE_REQUIRED;
+  // Always required (#509 option A). A caller passing a legacy
+  // `requireEffectivenessEvidence: false` is not read.
   const evidence = findEffectivenessEvidence(pin, nowMs, opts.effectivenessRegistry ?? REVIEWED_EFFECTIVENESS_EVIDENCE);
   const effectiveness: EffectivenessCondition = {
-    required,
     evidence,
-    pass: !required || evidence !== null,
-    missing: required && !evidence
-      ? 'reviewed effectiveness evidence (the effect-based red-team exam) for this adapter + policy version — none has been published'
-      : null,
+    pass: evidence !== null,
+    missing: evidence
+      ? null
+      : 'reviewed effectiveness evidence (the effect-based red-team exam) for this adapter + policy version — none has been published',
   };
 
   // ── Last transition, the fallback memory of the mode ──
@@ -958,7 +948,7 @@ function isFreshState(state: ReadinessState | null, now: number, ttl: number, pi
  * UNKNOWN, never "never ready": unknown is treated as potentially demoted —
  * announced, audited, and a doctor FAIL.
  */
-export type TransitionEvent = 'init' | 'promote' | 'demote' | 'recover' | 'tamper' | 'checkpoint';
+export type TransitionEvent = 'init' | 'promote' | 'demote' | 'recover' | 'tamper' | 'checkpoint' | 'notice';
 
 export interface TransitionEntry {
   ts: string;
@@ -969,6 +959,14 @@ export interface TransitionEntry {
   reason?: string;
   /** On a `checkpoint`: how many entries compaction dropped. */
   compacted?: number;
+  /** On a `notice`: which transition was announced. */
+  of?: 'promote' | 'demote';
+  /** On a `notice`: the `ts` of the transition entry it announces. */
+  transitionTs?: string;
+  /** On a `notice`: whether a channel accepted it. */
+  delivered?: boolean;
+  /** On a `notice`: the channel that accepted it (or was tried). */
+  channel?: string;
 }
 
 export interface TransitionRecord {
@@ -982,7 +980,7 @@ export interface TransitionRecord {
   lastTamper: TransitionEntry | null;
 }
 
-const TRANSITION_EVENTS = new Set<string>(['init', 'promote', 'demote', 'recover', 'tamper', 'checkpoint']);
+const TRANSITION_EVENTS = new Set<string>(['init', 'promote', 'demote', 'recover', 'tamper', 'checkpoint', 'notice']);
 
 // ── #509 R4-4: a bounded journal ──
 // The record is read on every hook call under the posture, so it must stay
@@ -1001,15 +999,56 @@ export const JOURNAL_KEEP_RECENT = 32;
  *  journalled again (the audit row and stderr still happen): a forged cache
  *  refreshed on every call must not grow the journal on every call. */
 export const TAMPER_JOURNAL_DEDUP_MS = 60 * 60 * 1000;
+/** #509 r5 (finding 8): every retained field is bounded, so the byte bound
+ *  holds for what compaction keeps, not only for what the hook writes. */
+export const JOURNAL_REASON_MAX = 400;
+const JOURNAL_SHORT_FIELD_MAX = 120;
+/** An ISO timestamp is 24 characters; anything far longer is not one. */
+const JOURNAL_TS_MAX = 40;
 
 function isTransitionEntry(e: unknown): e is TransitionEntry {
   if (!e || typeof e !== 'object' || Array.isArray(e)) return false;
   const r = e as Record<string, unknown>;
-  if (typeof r.ts !== 'string' || !Number.isFinite(Date.parse(r.ts))) return false;
+  if (typeof r.ts !== 'string' || r.ts.length > JOURNAL_TS_MAX || !Number.isFinite(Date.parse(r.ts))) return false;
   if (typeof r.event !== 'string' || !TRANSITION_EVENTS.has(r.event)) return false;
   if (r.event === 'tamper') return true;
   if (r.event === 'checkpoint') return r.compacted === undefined || (typeof r.compacted === 'number' && Number.isFinite(r.compacted));
+  if (r.event === 'notice') {
+    return (r.of === 'promote' || r.of === 'demote') && typeof r.delivered === 'boolean'
+      && typeof r.transitionTs === 'string' && r.transitionTs.length <= JOURNAL_TS_MAX;
+  }
   return r.to === 'enforcing' || r.to === 'shadow';
+}
+
+function clipText(v: unknown, max: number): string | undefined {
+  return typeof v === 'string' ? v.slice(0, max) : undefined;
+}
+
+/**
+ * The bounded form of a valid entry: known fields only, every string clipped.
+ * Applied on read, so compaction — which re-serialises what was read — can
+ * never carry an oversized field (a 2,000,000-character `reason`, or an
+ * unknown key) forward, and the journal's byte bound holds after compaction.
+ */
+function boundedEntry(e: TransitionEntry): TransitionEntry {
+  const out: TransitionEntry = { ts: e.ts, event: e.event };
+  if (e.to === 'enforcing' || e.to === 'shadow') out.to = e.to;
+  if (e.pin && typeof e.pin === 'object') {
+    const adapter = clipText((e.pin as unknown as Record<string, unknown>).adapter, JOURNAL_SHORT_FIELD_MAX);
+    const policy = clipText((e.pin as unknown as Record<string, unknown>).policy, JOURNAL_SHORT_FIELD_MAX);
+    if (adapter !== undefined && policy !== undefined) out.pin = { adapter, policy };
+  }
+  const reason = clipText(e.reason, JOURNAL_REASON_MAX);
+  if (reason !== undefined) out.reason = reason;
+  if (typeof e.compacted === 'number' && Number.isFinite(e.compacted)) out.compacted = e.compacted;
+  if (e.event === 'notice') {
+    out.of = e.of;
+    out.transitionTs = e.transitionTs;
+    out.delivered = e.delivered;
+    const channel = clipText(e.channel, 40);
+    if (channel !== undefined) out.channel = channel;
+  }
+  return out;
 }
 
 /** Read the record. Any malformed complete line makes the whole record
@@ -1034,13 +1073,13 @@ export function readTransitionRecord(path: string): TransitionRecord {
       return fail('unreadable');
     }
     if (!isTransitionEntry(parsed)) return fail('unreadable');
-    entries.push(parsed);
+    entries.push(boundedEntry(parsed));
   }
   let last: TransitionEntry | null = null;
   let lastTamper: TransitionEntry | null = null;
   for (const e of entries) {
     if (e.event === 'tamper') lastTamper = e;
-    else if (e.event !== 'checkpoint') last = e;
+    else if (e.event !== 'checkpoint' && e.event !== 'notice') last = e;
   }
   return { status: 'ok', entries, last, lastTamper, bytes: Buffer.byteLength(text) };
 }
@@ -1057,15 +1096,21 @@ export function needsCompaction(record: TransitionRecord): boolean {
  * a crash leaves either the old record or the new one, never half of each.
  * A record that is not readable is left alone (the caller quarantines it).
  * Returns whether a compaction was written.
+ *
+ * #509 r5 (finding 7): the record compacted is ALWAYS the one read here, and
+ * the caller must hold the writer lock (`<state>.lock`) — never a snapshot
+ * taken before the lock. Compacting a pre-lock snapshot rewrote the journal
+ * without a promotion another process had appended in between.
  */
-export function compactTransitionRecord(path: string, now: number, record: TransitionRecord = readTransitionRecord(path)): boolean {
+export function compactTransitionRecord(path: string, now: number): boolean {
+  const record = readTransitionRecord(path);
   if (record.status !== 'ok' || !needsCompaction(record)) return false;
   const entries = record.entries;
   const keep = new Set<number>();
   for (let i = Math.max(0, entries.length - JOURNAL_KEEP_RECENT); i < entries.length; i += 1) keep.add(i);
   const newestOf = new Map<string, number>();
-  entries.forEach((e, i) => newestOf.set(e.event, i));
-  for (const ev of ['promote', 'demote', 'init', 'recover', 'tamper']) {
+  entries.forEach((e, i) => newestOf.set(e.event === 'notice' ? `notice:${e.of}` : e.event, i));
+  for (const ev of ['promote', 'demote', 'init', 'recover', 'tamper', 'notice:promote', 'notice:demote']) {
     const i = newestOf.get(ev);
     if (i !== undefined) keep.add(i);
   }
@@ -1075,7 +1120,7 @@ export function compactTransitionRecord(path: string, now: number, record: Trans
     ts: new Date(now).toISOString(),
     event: 'checkpoint',
     compacted: previouslyDropped + (entries.length - kept.length - entries.filter((e) => e.event === 'checkpoint').length),
-    ...(record.last ? { reason: `last ${record.last.event} → ${record.last.to} at ${record.last.ts}` } : {}),
+    ...(record.last ? { reason: `last ${record.last.event} → ${record.last.to} at ${record.last.ts}`.slice(0, JOURNAL_REASON_MAX) } : {}),
   };
   const body = [checkpoint, ...kept].map((e) => JSON.stringify(e)).join('\n') + '\n';
   const tmp = `${path}.compact-${process.pid}-${randomBytes(4).toString('hex')}`;
@@ -1157,6 +1202,68 @@ export function initReadinessTransitions(opts: {
   if (record.status === 'ok' && record.last && !opts.postureChanged) return false;
   if (record.status === 'unreadable') quarantineRecord(path, now);
   return appendTransition(path, { ts: new Date(now).toISOString(), event: 'init', to: 'shadow', reason: opts.reason.slice(0, 200) });
+}
+
+// ==================== TRANSITION NOTICES ====================
+//
+// #509 r5 (finding 1). The floor stops the agent's ordinary tool calls from
+// editing guard state; it does not stop a same-UID process that deliberately
+// evades the command classifier (a symlink, an interpreter, a moved parent
+// directory). So forging a promotion is made LOUD rather than impossible:
+// every promotion is announced through the push notice channel at the moment
+// it happens, and whether that notice was delivered is journalled next to
+// it. Doctor reports the newest promotion from the journal; the operator
+// holds it against the notices they actually received. A promotion nobody
+// was told about — no notice entry, or one that failed — is shown as such.
+
+/** Journal whether the notice for a transition made at `transitionAt` was
+ *  delivered. Best-effort: a notice entry that cannot be written leaves the
+ *  promotion reading as "no notice attempt recorded" — the louder answer. */
+export function recordTransitionNotice(opts: {
+  of: 'promote' | 'demote';
+  transitionAt: string;
+  delivered: boolean;
+  channel?: string | null;
+  reason?: string;
+  home?: string;
+  paths?: ReadinessPaths;
+  now?: number;
+}): boolean {
+  const now = opts.now ?? Date.now();
+  const path = transitionsPathFor(opts.paths ?? readinessPaths({ home: opts.home }));
+  return appendTransition(path, {
+    ts: new Date(now).toISOString(),
+    event: 'notice',
+    of: opts.of,
+    transitionTs: String(opts.transitionAt).slice(0, JOURNAL_TS_MAX),
+    delivered: opts.delivered === true,
+    ...(opts.channel ? { channel: String(opts.channel).slice(0, 40) } : {}),
+    ...(opts.reason ? { reason: String(opts.reason).slice(0, JOURNAL_REASON_MAX) } : {}),
+  });
+}
+
+export interface PromotionNotice {
+  /** The newest `promote` entry's timestamp. */
+  promotedAt: string;
+  /** delivered = a channel accepted the notice; failed = every attempt
+   *  failed; none = no notice attempt is recorded for this promotion. */
+  notice: 'delivered' | 'failed' | 'none';
+  channel?: string;
+  reason?: string;
+}
+
+/** The newest promotion the journal records, and what became of its notice. */
+export function lastPromotion(record: TransitionRecord): PromotionNotice | null {
+  if (record.status !== 'ok') return null;
+  let promote: TransitionEntry | null = null;
+  for (const e of record.entries) if (e.event === 'promote') promote = e;
+  if (!promote) return null;
+  const notices = record.entries.filter((e) => e.event === 'notice' && e.of === 'promote' && e.transitionTs === promote!.ts);
+  const delivered = notices.find((e) => e.delivered === true);
+  if (delivered) return { promotedAt: promote.ts, notice: 'delivered', ...(delivered.channel ? { channel: delivered.channel } : {}) };
+  const failed = notices[notices.length - 1];
+  if (failed) return { promotedAt: promote.ts, notice: 'failed', ...(failed.reason ? { reason: failed.reason } : {}) };
+  return { promotedAt: promote.ts, notice: 'none' };
 }
 
 // ==================== DECISION ====================
@@ -1307,6 +1414,8 @@ export interface ResolvedReadiness {
   demotionReason?: string;
   /** Set when a tamper signal was recorded on this call. */
   tamper?: string;
+  /** The journal `ts` of the transition made on this call, for its notice. */
+  transitionAt?: string;
 }
 
 function tryLock(lockPath: string, now: number): boolean {
@@ -1353,7 +1462,6 @@ export function resolveReadiness(opts: {
   paths?: ReadinessPaths;
   ttlMs?: number;
   pin?: ReadinessPin | null;
-  requireEffectivenessEvidence?: boolean;
   effectivenessRegistry?: readonly EffectivenessEvidence[];
 }): ResolvedReadiness {
   const now = opts.now ?? Date.now();
@@ -1368,11 +1476,13 @@ export function resolveReadiness(opts: {
   if (isFreshState(state, now, ttl, pin)) {
     if (state!.mode === durable) {
       // R4-4: an oversized journal is compacted here too, so the cheap path
-      // stays cheap from the next call on.
+      // stays cheap from the next call on. r5 (finding 7): the pre-lock read
+      // above only decides whether to try; compaction re-reads the journal
+      // under the lock, so a promotion appended in between is kept.
       if (needsCompaction(record)) {
         const lock = `${paths.statePath}.lock`;
         if (tryLock(lock, now)) {
-          try { compactTransitionRecord(recordPath, now, record); } finally {
+          try { compactTransitionRecord(recordPath, now); } finally {
             try { rmSync(lock, { force: true }); } catch { /* stale lock self-heals */ }
           }
         }
@@ -1389,7 +1499,6 @@ export function resolveReadiness(opts: {
     paths,
     now,
     pin,
-    requireEffectivenessEvidence: opts.requireEffectivenessEvidence,
     effectivenessRegistry: opts.effectivenessRegistry,
   });
   const prevMode = previousMode(state, report, durable);
@@ -1411,6 +1520,15 @@ export function resolveReadiness(opts: {
     return { mode, cached: false, transition: null, report, state };
   }
   try {
+    // r5 (finding 7): the decision above was made from a pre-lock read. If
+    // another process changed the journal's mode since, that decision is
+    // stale: write nothing, and answer with the tighter of the two modes —
+    // the next call decides from the journal as it now is.
+    const underLock = readTransitionRecord(recordPath);
+    if (underLock.status !== record.status || underLock.last?.ts !== record.last?.ts) {
+      const mode = decision.mode === 'enforcing' || durableMode(underLock) === 'enforcing' ? 'enforcing' : 'shadow';
+      return { mode, cached: false, transition: null, report, state };
+    }
     const nowIso = new Date(now).toISOString();
     if (record.status === 'unreadable') quarantineRecord(recordPath, now);
     const repeatTamper = tamper !== undefined && record.status === 'ok' && isRepeatTamper(record, tamper, now);
@@ -1478,7 +1596,7 @@ export function resolveReadiness(opts: {
           ...(pin ? { readinessPin: pin } : {}),
           intervention: { stops: report.intervention.stops, total: report.intervention.total, rate: report.intervention.rate },
           reachability: { reached: report.reachability.reached, resolved: report.reachability.resolved, rate: report.reachability.rate },
-          effectivenessEvidence: report.effectiveness.required ? (report.effectiveness.evidence ? 'reviewed' : 'missing') : 'not-required',
+          effectivenessEvidence: report.effectiveness.evidence ? 'reviewed' : 'missing',
           ...(demotionReason ? { reason: demotionReason.slice(0, 400) } : {}),
         },
         new Date(now),
@@ -1489,7 +1607,16 @@ export function resolveReadiness(opts: {
       compactTransitionRecord(recordPath, now);
     }
     writeReadinessState(paths.statePath, next);
-    return { mode: decision.mode, cached: false, transition: decision.transition, report, state: next, demotionReason, tamper };
+    return {
+      mode: decision.mode,
+      cached: false,
+      transition: decision.transition,
+      report,
+      state: next,
+      demotionReason,
+      tamper,
+      ...(decision.transition ? { transitionAt: nowIso } : {}),
+    };
   } finally {
     try { rmSync(lockPath, { force: true }); } catch { /* stale lock self-heals */ }
   }

@@ -244,7 +244,7 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
   const outcome = approveRequest(hash, { home, now, ttlMs, attemptId });
   if (!outcome.ok) {
     if (outcome.reason === 'stale-attempt') {
-      err(`Attempt ${attemptId} is not the current request for ${hash} — it expired and the command was asked again. Nothing was approved.`);
+      err(`Attempt ${attemptId} is not the current request for ${hash} — it expired, or the command was asked again. Nothing was approved.`);
       err('Answer the newest notification, or run `shieldcortex approve` to see what is outstanding.');
     } else if (outcome.reason === 'already-approved') {
       err(`Approval ${hash} is already granted and still live — just re-run the command.`);

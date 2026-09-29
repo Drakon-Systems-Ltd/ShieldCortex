@@ -55,14 +55,26 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
     const shimIron = join(distRoot, 'defence', 'iron-dome');
     mkdirSync(shimIron, { recursive: true });
     for (const f of readdirSync(realIron)) {
-      if (!f.endsWith('.js') || f === 'webhook-notify-channel.js') continue;
+      if (!f.endsWith('.js') || f === 'webhook-notify-channel.js' || f === 'guard-readiness.js') continue;
       writeFileSync(join(shimIron, f), `export * from ${JSON.stringify(pathToFileURL(join(realIron, f)).href)};\n`);
     }
     writeFileSync(
       join(shimIron, 'webhook-notify-channel.js'),
       "export function createWebhookNotifyChannel() { return { name: 'webhook', async send() { return { delivered: true }; } }; }\n",
     );
-    writeConfig({ enforce: true, readinessGate: true, readinessRequireEffectivenessEvidence: false });
+    // Option A: promotion needs reviewed effectiveness evidence and no config
+    // key drops it. The shim dist stands for a build that ships a reviewed
+    // entry for the pin under test (the shipped registry is empty).
+    const realReadiness = JSON.stringify(pathToFileURL(join(realIron, 'guard-readiness.js')).href);
+    writeFileSync(join(shimIron, 'guard-readiness.js'), [
+      `import * as real from ${realReadiness};`,
+      `export * from ${realReadiness};`,
+      'const pin = real.currentReadinessPin();',
+      'const REVIEWED = pin ? [{ ...pin, reviewedAt: new Date(Date.now() - 86400000).toISOString(),',
+      "  reviewedBy: 'test fixture reviewer', reference: 'test fixture: a build shipping reviewed evidence', cases: 60 }] : [];",
+      'export function resolveReadiness(opts) { return real.resolveReadiness({ ...opts, effectivenessRegistry: REVIEWED }); }',
+    ].join('\n'));
+    writeConfig({ enforce: true, readinessGate: true });
     appendRecord({ ts: new Date(Date.now() - 30 * DAY).toISOString(), event: 'init', to: 'shadow', reason: 'test posture' });
   });
 
@@ -222,7 +234,7 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
     for (const mode of ['shadow', 'demoted', 'enforcing']) {
       rmSync(shieldDir(), { recursive: true, force: true });
       mkdirSync(shieldDir(), { recursive: true });
-      writeConfig({ enforce: true, readinessGate: true, readinessRequireEffectivenessEvidence: false });
+      writeConfig({ enforce: true, readinessGate: true });
       appendRecord({ ts: new Date(Date.now() - 30 * DAY).toISOString(), event: 'init', to: 'shadow', reason: 'test posture' });
       if (mode === 'demoted') seedDemoted();
       if (mode === 'enforcing') {

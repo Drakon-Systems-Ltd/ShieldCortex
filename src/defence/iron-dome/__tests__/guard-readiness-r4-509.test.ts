@@ -42,7 +42,11 @@ const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.parse('2026-09-28T12:00:00.000Z');
 const PIN = currentReadinessPin() as ReadinessPin;
 const CHANNEL = { configured: true, kind: 'webhook', pushesNotices: true };
-const PROXIES_ONLY = { requireEffectivenessEvidence: false } as const;
+/** A build shipping reviewed effectiveness evidence for this pin (option A:
+ *  no setting drops the condition; the shipped registry is empty). */
+const WITH_REVIEWED = {
+  effectivenessRegistry: [{ ...PIN, reviewedAt: new Date(NOW - DAY).toISOString(), reviewedBy: 'fixture reviewer', reference: 'test fixture', cases: 60 }],
+} as const;
 
 let root: string;
 let home: string;
@@ -90,7 +94,7 @@ describe('#509 R4-2 — a late answer binds to the attempt it names, or to nothi
     expect(consumeApproval('Bash', input, { home, now: t0 + 22 * 60 * 1000 })).toBeNull();
     // Neither attempt got an answer row.
     expect(reachRows().filter((r) => r.phase === 'answer')).toHaveLength(0);
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(rep.reachability.resolved).toBe(2);
     expect(rep.reachability.reached).toBe(0);
   });
@@ -110,7 +114,7 @@ describe('#509 R4-2 — a late answer binds to the attempt it names, or to nothi
     const t0 = NOW - DAY;
     const a = deliver(input, t0);
     expect(approveRequest(a.hash.slice(0, 12), { home, now: t0 + 60_000, attemptId: a.attemptId }).ok).toBe(true);
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(rep.reachability.reached).toBe(1);
     expect(rep.reachability.resolved).toBe(1);
   });
@@ -123,7 +127,7 @@ describe('#509 R4-2 — a late answer binds to the attempt it names, or to nothi
     expect(out.ok).toBe(true);
     expect(out.ok && out.record.reachAttemptId).toBe(b.attemptId);
     expect(consumeApproval('Bash', input, { home, now: t0 + 22 * 60 * 1000 })).not.toBeNull();
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(rep.reachability.reached).toBe(0);
     expect(rep.reachability.resolved).toBe(2);
   });
@@ -186,7 +190,7 @@ describe('#509 R4-2 — the attempt id rides the notification, the card waiter a
     expect(out).toEqual({ acted: 'approved', ok: false });
     expect(consumeApproval('Bash', input, { home, now: at + 1000 })).toBeNull();
     expect(reachRows().filter((r) => r.phase === 'answer')).toHaveLength(0);
-    const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const rep = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(rep.reachability.reached).toBe(0);
   });
 
@@ -253,7 +257,7 @@ describe('#509 R4-3 — readiness and the transport agree on which webhooks exis
 
 describe('#509 R4-4 — the transition journal is bounded', () => {
   const CH = CHANNEL;
-  const resolveAt = (now: number) => resolveReadiness({ ...PROXIES_ONLY, channel: CH, paths, now });
+  const resolveAt = (now: number) => resolveReadiness({ ...WITH_REVIEWED, channel: CH, paths, now });
 
   function seedJournal(n: number, promoteAt: number): void {
     const lines: string[] = [];

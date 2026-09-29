@@ -36,7 +36,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 import { classifyFamily } from './tool-action-guard.js';
-import { newReachAttemptId, recordApprovalReach } from './guard-readiness.js';
+import { REACH_ANSWER_WINDOW_MS, newReachAttemptId, recordApprovalReach } from './guard-readiness.js';
 
 /** Default lifetime of an operator approval before it must be re-granted. */
 export const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -258,12 +258,19 @@ export type DenyOutcome =
  * `undefined` is the #118 terminal path (`shieldcortex approve <hash>` typed at
  * a TTY): it acts on the current attempt, as it always has, but it is NOT a
  * reach through the channel, so it records no reachability evidence.
+ *
+ * #509 r5 (finding 4a): an explicit attempt also has a lifetime. An answer
+ * arriving more than {@link REACH_ANSWER_WINDOW_MS} after that attempt was
+ * delivered is the same as an answer to a superseded one — the channel
+ * already counted it as a timeout — so it grants nothing either.
  */
-function attemptMatches(record: ApprovalRecord, attemptId: string | undefined): boolean | 'terminal' {
+function attemptMatches(record: ApprovalRecord, attemptId: string | undefined, now: number): boolean | 'terminal' {
   if (attemptId === undefined) return 'terminal';
-  return typeof record.reachAttemptId === 'string'
+  if (!(typeof record.reachAttemptId === 'string'
     && record.reachAttemptId.length > 0
-    && attemptId === record.reachAttemptId;
+    && attemptId === record.reachAttemptId)) return false;
+  const age = now - record.requestedAt;
+  return Number.isFinite(age) && age >= 0 && age <= REACH_ANSWER_WINDOW_MS;
 }
 
 /**
@@ -283,9 +290,12 @@ export function approveRequest(
 
   if (matches.length !== 1) return { ok: false, reason: 'not-found' };
   const record = matches[0];
-  if (record.approvedAt) return { ok: false, reason: 'already-approved' };
-  const bound = attemptMatches(record, opts.attemptId);
+  // r5 (finding 4b): the attempt is validated BEFORE `already-approved`, so an
+  // answer to a superseded attempt reads as stale — and records no reach —
+  // even after the current attempt was approved.
+  const bound = attemptMatches(record, opts.attemptId, now);
   if (bound === false) return { ok: false, reason: 'stale-attempt' };
+  if (record.approvedAt) return { ok: false, reason: 'already-approved' };
 
   record.approvedAt = now;
   record.ttlMs = opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
@@ -329,9 +339,9 @@ export function denyRequest(
 
   if (matches.length !== 1) return { ok: false, reason: 'not-found' };
   const record = matches[0];
-  if (record.approvedAt) return { ok: false, reason: 'already-approved' };
-  const bound = attemptMatches(record, opts.attemptId);
+  const bound = attemptMatches(record, opts.attemptId, now);
   if (bound === false) return { ok: false, reason: 'stale-attempt' };
+  if (record.approvedAt) return { ok: false, reason: 'already-approved' };
 
   const denied: ApprovalRecord = { ...record, deniedAt: now };
   const remaining = records.filter((r) => r.hash !== record.hash);

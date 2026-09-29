@@ -16,7 +16,6 @@ import { fileURLToPath } from 'node:url';
 import {
   AWAITING_EFFECTIVENESS_MESSAGE,
   DEMOTE_AFTER_FAILING_MS,
-  EFFECTIVENESS_EVIDENCE_REQUIRED,
   INTERVENTION_MIN_SAMPLE,
   REACHABILITY_MIN_SAMPLE,
   READINESS_CACHE_TTL_MS,
@@ -26,7 +25,6 @@ import {
   currentReadinessPin,
   decideMode,
   describeHumanChannel,
-  effectivenessEvidenceRequired,
   isDemoted,
   readReadinessState,
   readinessPaths,
@@ -50,9 +48,13 @@ const NOW = Date.parse('2026-09-28T12:00:00.000Z');
 const CHANNEL = { configured: true, kind: 'openclaw-card', pushesNotices: true };
 const NO_CHANNEL = { configured: false, kind: null, pushesNotices: false };
 const PIN = currentReadinessPin() as ReadinessPin;
-/** The operability proxies alone: the effectiveness condition switched off,
- *  as `actionGuard.readinessRequireEffectivenessEvidence: false` would. */
-const PROXIES_ONLY = { requireEffectivenessEvidence: false } as const;
+/** Stands for a build that ships reviewed effectiveness evidence for this
+ *  pin. The shipped registry is empty, and (option A, 29 Sep 2026) there is
+ *  no setting that drops the condition — so promotion tests pass evidence
+ *  through the in-process registry seam. */
+const WITH_REVIEWED = {
+  effectivenessRegistry: [{ ...PIN, reviewedAt: new Date(NOW - DAY).toISOString(), reviewedBy: 'fixture reviewer', reference: 'test fixture', cases: 60 }],
+} as const;
 
 let root: string;
 let paths: ReadinessPaths;
@@ -123,7 +125,7 @@ describe('#509 operational intervention rate (readiness proxy)', () => {
   it('below the minimum sample ⇒ not ready, however clean', () => {
     write(calls(INTERVENTION_MIN_SAMPLE - 1, 0));
     write(reach(20, 0));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.total).toBe(INTERVENTION_MIN_SAMPLE - 1);
     expect(r.intervention.pass).toBe(false);
     expect(r.intervention.missing).toMatch(/only 499 of the 500/);
@@ -132,7 +134,7 @@ describe('#509 operational intervention rate (readiness proxy)', () => {
 
   it('2.1% would-stop ⇒ not ready', () => {
     write(calls(1000, 21));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.rate).toBeCloseTo(0.021, 5);
     expect(r.intervention.pass).toBe(false);
     expect(r.intervention.missing).toMatch(/2\.1%/);
@@ -140,14 +142,14 @@ describe('#509 operational intervention rate (readiness proxy)', () => {
 
   it('1.9% would-stop ⇒ the intervention proxy passes', () => {
     write(calls(1000, 19));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.rate).toBeCloseTo(0.019, 5);
     expect(r.intervention.pass).toBe(true);
   });
 
   it('enough calls but under 7 days of span ⇒ not ready', () => {
     write(calls(1000, 0, 3));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.pass).toBe(false);
     expect(r.intervention.missing).toMatch(/span/);
   });
@@ -165,7 +167,7 @@ describe('#509 operational intervention rate (readiness proxy)', () => {
       noise.push(call(t + i, 'auto_denied', { threats: ['session-lease', 'frozen'] }));
     }
     write(noise);
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.total).toBe(1000);
     expect(r.intervention.stops).toBe(19);
     expect(r.intervention.pass).toBe(true);
@@ -175,7 +177,7 @@ describe('#509 operational intervention rate (readiness proxy)', () => {
     const rows = calls(1000, 19);
     for (let i = 0; i < 30; i += 1) rows.push(call(NOW - DAY + i, 'auto_denied', { severity: 'critical', action: 'auto_deny' }));
     write(rows);
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.total).toBe(1030);
     expect(r.intervention.stops).toBe(19);
   });
@@ -186,7 +188,7 @@ describe('#509 approval reachability (readiness proxy)', () => {
 
   it('97% answered ⇒ not ready', () => {
     write(reach(97, 3));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.rate).toBeCloseTo(0.97, 5);
     expect(r.reachability.pass).toBe(false);
     expect(r.ready).toBe(false);
@@ -194,7 +196,7 @@ describe('#509 approval reachability (readiness proxy)', () => {
 
   it('98% answered ⇒ ready', () => {
     write(reach(98, 2));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.rate).toBeCloseTo(0.98, 5);
     expect(r.reachability.pass).toBe(true);
     expect(r.ready).toBe(true);
@@ -203,7 +205,7 @@ describe('#509 approval reachability (readiness proxy)', () => {
 
   it('no configured channel ⇒ not ready, full stop', () => {
     write(reach(100, 0));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: NO_CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: NO_CHANNEL, paths, now: NOW });
     expect(r.reachability.pass).toBe(false);
     expect(r.reachability.missing).toMatch(/no human approval channel/);
     expect(r.ready).toBe(false);
@@ -211,13 +213,13 @@ describe('#509 approval reachability (readiness proxy)', () => {
 
   it('below the minimum sample ⇒ not ready', () => {
     write(reach(REACHABILITY_MIN_SAMPLE - 1, 0));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.pass).toBe(false);
   });
 
   it('a last reached round-trip older than 7 days ⇒ not ready', () => {
     write(reach(30, 0, { at: NOW - 8 * DAY }));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.rate).toBe(1);
     expect(r.reachability.pass).toBe(false);
     expect(r.reachability.missing).toMatch(/last 7 days/);
@@ -230,7 +232,7 @@ describe('#509 approval reachability (readiness proxy)', () => {
       row(NOW - DAY, { type: 'approval_reach', reachId: 'x2', phase: 'resolved', answer: 'unreached' }),
       row(NOW - DAY, { type: 'approval_reach', reachId: 'x3', phase: 'resolved', answer: 'unreached' }),
     ]);
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.resolved).toBe(101);
     expect(r.reachability.reached).toBe(98);
     expect(r.reachability.pass).toBe(false);
@@ -243,7 +245,7 @@ describe('#509 approval reachability (readiness proxy)', () => {
       row(NOW - DAY + 30 * 60_000, { type: 'approval_reach', reachId: 'late', attemptId: 'late-1', phase: 'answer', answer: 'approve' }),
       row(NOW - 60_000, { type: 'approval_reach', reachId: 'fresh', attemptId: 'fresh-1', phase: 'request' }),
     ]);
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.resolved).toBe(21);
     expect(r.reachability.reached).toBe(20);
     expect(r.reachability.pending).toBe(1);
@@ -253,7 +255,7 @@ describe('#509 approval reachability (readiness proxy)', () => {
     const hash = 'a'.repeat(64);
     recordApprovalReach({ hash, attemptId: 'att-1', phase: 'request', channel: 'openclaw' }, { auditDir: paths.auditDir, now: NOW - 5 * 60_000 });
     recordApprovalReach({ hash, attemptId: 'att-1', phase: 'answer', answer: 'deny' }, { auditDir: paths.auditDir, now: NOW - 4 * 60_000 });
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.reachability.reached).toBe(1);
     expect(r.reachability.lastRoundTripAt).toBe(new Date(NOW - 4 * 60_000).toISOString());
     const raw = readdirSync(paths.auditDir).map((f) => readFileSync(join(paths.auditDir, f), 'utf8')).join('');
@@ -308,7 +310,7 @@ describe('#509 resolveReadiness — transitions are audited, deflation is never 
   }
 
   it('fresh store: shadow, no transition, and the state file is written', () => {
-    const r = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.mode).toBe('shadow');
     expect(r.transition).toBeNull();
     expect(readReadinessState(paths.statePath)?.mode).toBe('shadow');
@@ -316,45 +318,45 @@ describe('#509 resolveReadiness — transitions are audited, deflation is never 
 
   it('promotion is audited and cached for one TTL', () => {
     readyEvidence();
-    const r = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.mode).toBe('enforcing');
     expect(r.transition).toBe('promote');
     expect(transitions().map((t) => t.to)).toEqual(['enforcing']);
-    const again = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + READINESS_CACHE_TTL_MS - 1 });
+    const again = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + READINESS_CACHE_TTL_MS - 1 });
     expect(again.cached).toBe(true);
     expect(again.mode).toBe('enforcing');
   });
 
   it('forged would-block rows cause a VISIBLE demotion (transition row + isDemoted), never a silent one', () => {
     readyEvidence();
-    expect(resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
+    expect(resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
     // Same-UID forgery: 200 would-block rows appended to the audit.
     const forged: Array<Record<string, unknown>> = [];
     for (let i = 0; i < 200; i += 1) forged.push(call(NOW + i, 'would_block'));
     write(forged);
     // Past the TTL: recompute sees the failing bar and starts the grace clock.
     const t1 = NOW + READINESS_CACHE_TTL_MS;
-    const during = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: t1 });
+    const during = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: t1 });
     expect(during.mode).toBe('enforcing');
     expect(during.transition).toBeNull();
     // Still failing after the grace: demoted, audited, with the reason.
     const t2 = t1 + DEMOTE_AFTER_FAILING_MS;
-    const out = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: t2 });
+    const out = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: t2 });
     expect(out.mode).toBe('shadow');
     expect(out.transition).toBe('demote');
     expect(out.demotionReason).toMatch(/would intervene/);
     const tr = transitions();
     expect(tr.map((t) => t.to)).toEqual(['enforcing', 'shadow']);
     expect(String(tr[1].reason)).toMatch(/would intervene/);
-    expect(isDemoted(readReadinessState(paths.statePath), computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: t2 }))).toBe(true);
+    expect(isDemoted(readReadinessState(paths.statePath), computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: t2 }))).toBe(true);
   });
 
   it('a deleted state file does not quietly end enforcement: the audit remembers the mode', () => {
     readyEvidence();
-    expect(resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
+    expect(resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
     rmSync(paths.statePath);
     // Evidence still holds → still enforcing, and no spurious promotion row.
-    const r = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + 1 });
+    const r = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1 });
     expect(r.mode).toBe('enforcing');
     expect(r.transition).toBeNull();
     expect(transitions()).toHaveLength(1);
@@ -362,16 +364,16 @@ describe('#509 resolveReadiness — transitions are audited, deflation is never 
 
   it('a state file rewritten to "shadow" does not outrank an enforcing audit on recompute', () => {
     readyEvidence();
-    resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     writeFileSync(paths.statePath, JSON.stringify({ version: 1, mode: 'shadow', computedAt: new Date(NOW - 2 * READINESS_CACHE_TTL_MS).toISOString() }));
-    const r = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + 1 });
+    const r = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1 });
     expect(r.mode).toBe('enforcing');
     expect(r.transition).toBeNull();
   });
 
   it('deleted approval evidence + missing state still demotes loudly (the audit remembers it was enforcing)', () => {
     readyEvidence();
-    resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     rmSync(paths.statePath);
     // Wipe every approval_reach row, keep the rest (including the transition).
     for (const f of readdirSync(paths.auditDir)) {
@@ -379,9 +381,9 @@ describe('#509 resolveReadiness — transitions are audited, deflation is never 
       const kept = readFileSync(p, 'utf8').split('\n').filter((l) => l && !l.includes('"approval_reach"'));
       writeFileSync(p, kept.map((l) => `${l}\n`).join(''));
     }
-    const first = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + 1 });
+    const first = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1 });
     expect(first.mode).toBe('enforcing'); // grace starts
-    const out = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + 1 + READINESS_CACHE_TTL_MS + DEMOTE_AFTER_FAILING_MS });
+    const out = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1 + READINESS_CACHE_TTL_MS + DEMOTE_AFTER_FAILING_MS });
     expect(out.transition).toBe('demote');
     expect(transitions().map((t) => t.to)).toEqual(['enforcing', 'shadow']);
   });
@@ -489,14 +491,10 @@ describe('#509 effectiveness evidence (Addendum 1 B)', () => {
     ...over,
   });
 
-  it('defaults to REQUIRED, and the only way off is a literal false in config', () => {
-    expect(EFFECTIVENESS_EVIDENCE_REQUIRED).toBe(true);
-    expect(effectivenessEvidenceRequired(undefined)).toBe(true);
-    expect(effectivenessEvidenceRequired({})).toBe(true);
-    expect(effectivenessEvidenceRequired({ readinessRequireEffectivenessEvidence: true })).toBe(true);
-    expect(effectivenessEvidenceRequired({ readinessRequireEffectivenessEvidence: 'false' })).toBe(true);
-    expect(effectivenessEvidenceRequired({ readinessRequireEffectivenessEvidence: 0 })).toBe(true);
-    expect(effectivenessEvidenceRequired({ readinessRequireEffectivenessEvidence: false })).toBe(false);
+  it('option A: always REQUIRED — a legacy `requireEffectivenessEvidence: false` is not read', () => {
+    perfectProxies();
+    const legacy = { requireEffectivenessEvidence: false } as object;
+    expect(computeReadiness({ channel: CHANNEL, paths, now: NOW, ...legacy }).ready).toBe(false);
   });
 
   it('no evidence ships: the reviewed registry is empty and frozen', () => {
@@ -508,7 +506,7 @@ describe('#509 effectiveness evidence (Addendum 1 B)', () => {
     perfectProxies();
     const r = computeReadiness({ channel: CHANNEL, paths, now: NOW });
     expect(r.proxiesMet).toBe(true);
-    expect(r.effectiveness).toEqual({ required: true, evidence: null, pass: false, missing: expect.any(String) });
+    expect(r.effectiveness).toEqual({ evidence: null, pass: false, missing: expect.any(String) });
     expect(r.ready).toBe(false);
     expect(r.missing).toEqual(['operability proxies met; awaiting reviewed effectiveness evidence']);
     expect(AWAITING_EFFECTIVENESS_MESSAGE).toBe('operability proxies met; awaiting reviewed effectiveness evidence');
@@ -529,12 +527,12 @@ describe('#509 effectiveness evidence (Addendum 1 B)', () => {
     expect(r.missing.some((m) => /reviewed effectiveness evidence/.test(m))).toBe(true);
   });
 
-  it('NOT required: the same perfect proxies promote', () => {
+  it('reviewed evidence for this pin in the build: the same perfect proxies promote', () => {
     perfectProxies();
-    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW, requireEffectivenessEvidence: false });
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW, ...WITH_REVIEWED });
     expect(r.ready).toBe(true);
     expect(r.missing).toEqual([]);
-    const out = resolveReadiness({ channel: CHANNEL, paths, now: NOW, requireEffectivenessEvidence: false });
+    const out = resolveReadiness({ channel: CHANNEL, paths, now: NOW, ...WITH_REVIEWED });
     expect(out.mode).toBe('enforcing');
     expect(out.transition).toBe('promote');
   });
@@ -571,7 +569,7 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
     });
     write(rows);
     write(unpinned);
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.total).toBe(0);
     expect(r.intervention.otherVersion).toBe(1000);
     expect(r.reachability.resolved).toBe(0);
@@ -581,12 +579,12 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
   it('a version change invalidates earlier evidence — and a cached mode computed under the old pin', () => {
     write(calls(1000, 0));
     write(reach(30, 0));
-    expect(resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
-    const after = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + 1, pin: OTHER });
+    expect(resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
+    const after = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1, pin: OTHER });
     expect(after.ready).toBe(false);
     expect(after.intervention.otherVersion).toBe(1000);
     // Inside the old TTL, but the pin changed: recomputed, not served from cache.
-    const again = resolveReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW + 1, pin: OTHER });
+    const again = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1, pin: OTHER });
     expect(again.cached).toBe(false);
     expect(again.report?.ready).toBe(false);
   });
@@ -594,14 +592,14 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
   it('an undeterminable pin is never ready', () => {
     write(calls(1000, 0));
     write(reach(30, 0));
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW, pin: null });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW, pin: null });
     expect(r.ready).toBe(false);
     expect(r.integrity.pass).toBe(false);
     expect(r.missing.join('\n')).toMatch(/could not be determined/);
   });
 
   it('missing audit directory ⇒ not ready', () => {
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(existsSync(paths.auditDir)).toBe(false);
     expect(r.ready).toBe(false);
     expect(r.intervention.total).toBe(0);
@@ -609,17 +607,17 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
 
   it('empty audit directory, and an empty evidence file ⇒ not ready', () => {
     mkdirSync(paths.auditDir, { recursive: true });
-    expect(computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).ready).toBe(false);
+    expect(computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).ready).toBe(false);
     writeFileSync(join(paths.auditDir, `realtime-${new Date(NOW).toISOString().slice(0, 10)}.jsonl`), '');
-    expect(computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).ready).toBe(false);
+    expect(computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).ready).toBe(false);
   });
 
   it('an unparseable evidence line ⇒ not ready, even when the rest would pass', () => {
     write(calls(1000, 0));
     write(reach(30, 0));
-    expect(computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW }).ready).toBe(true);
+    expect(computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).ready).toBe(true);
     appendFileSync(join(paths.auditDir, `realtime-${new Date(NOW - DAY).toISOString().slice(0, 10)}.jsonl`), '{"type":"intercept","origin":"claude-code-hook",CORRUPT\n');
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.integrity.unparseableLines).toBe(1);
     expect(r.ready).toBe(false);
     expect(r.missing.join('\n')).toMatch(/malformed audit record/);
@@ -629,7 +627,7 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
     write(calls(1000, 0));
     write(reach(30, 0));
     appendFileSync(join(paths.auditDir, `realtime-${new Date(NOW - DAY).toISOString().slice(0, 10)}.jsonl`), '{"type":"intercept","origin":"claude-code-h');
-    const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+    const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.integrity.unparseableLines).toBe(0);
     expect(r.ready).toBe(true);
   });
@@ -642,7 +640,7 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
     expect(existsSync(f)).toBe(true);
     chmodSync(f, 0o000);
     try {
-      const r = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths, now: NOW });
+      const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
       expect(r.integrity.unreadableFiles).toBe(1);
       expect(r.ready).toBe(false);
       expect(r.missing.join('\n')).toMatch(/could not be read/);

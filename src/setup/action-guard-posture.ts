@@ -7,9 +7,8 @@
  * to choose. Plain `enforce` is not offered here on purpose: an install that
  * wants enforcement from minute one can still say so with
  * `shieldcortex config --action-guard-enforce`. No choice is marked as the
- * recommended one (Addendum 1 F): that waits on the operator's decision about
- * the effectiveness-evidence condition, and no choice is described as making
- * the machine safe or protected.
+ * recommended one (Addendum 1 F), and no choice is described as making the
+ * machine safe or protected.
  */
 
 import {
