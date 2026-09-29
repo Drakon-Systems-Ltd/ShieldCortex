@@ -781,6 +781,29 @@ function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolN
   return null;
 }
 
+// #509 R4-1: the guard self-protection floor. DUPLICATED from tool-action-guard.ts
+// `GUARD_SELF_PROTECTION_SIGNALS` (this plugin does not import the guard
+// module); held equal by enforcement-surface-parity. A verdict carrying one of
+// these is enforced even under `enforce:false` advisory.
+export const SELF_PROTECTION_SIGNALS: readonly string[] = ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard'];
+
+function isSelfProtectionVerdict(signals: readonly string[] | undefined): boolean {
+  return Array.isArray(signals) && signals.some(s => SELF_PROTECTION_SIGNALS.includes(s));
+}
+
+/** A self-protection signal the WS2 fallback scan matches over EVERY row, or null. */
+function fallbackSelfProtectionMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
+  const text = fallbackExecSurface(args);
+  if (!text) return null;
+  const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
+  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (!SELF_PROTECTION_SIGNALS.includes(signal)) continue;
+    if (lockReadOnly && lockPath === true) continue;
+    if (re.test(text)) return signal;
+  }
+  return null;
+}
+
 /** One-line summary of tool args for audit previews (bounded, no secrets dumped). */
 export function summariseToolArgs(args: Record<string, unknown> | undefined): string {
   if (!args) return '';
@@ -1472,10 +1495,12 @@ export function createInterceptor(
 
     // 2. Dangerous — route through failurePolicy (the "can't obtain a verdict"
     //    policy; a degraded guard is precisely that). enforce:false → advisory.
-    const dangerousSignal = fallbackDangerousMatch(context.arguments, context.toolName);
+    const selfProtectSignal = fallbackSelfProtectionMatch(context.arguments, context.toolName);
+    const dangerousSignal = selfProtectSignal ?? fallbackDangerousMatch(context.arguments, context.toolName);
     if (dangerousSignal) {
       const dBase = { ...degradedBase, severity: 'high' as Severity, threats: ['fallback-scan', dangerousSignal], anomalyScore: 0.6 };
-      if (!actionGuardCfg.enforce) {
+      // #509 R4-1: the self-protection floor is never advisory.
+      if (!actionGuardCfg.enforce && !selfProtectSignal) {
         emitAudit({ ...dBase, action: 'gate_degraded', outcome: 'failure_allowed' });
         log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — advisory (enforce:false), allowing dangerous ${context.toolName} [${dangerousSignal}]`);
         return;
@@ -1709,7 +1734,8 @@ export function createInterceptor(
     // require_approval — ENFORCED by default (P1/WS1). `enforce:false` opts back
     // down to warn-and-allow (advisory) for operators who want the old behaviour.
     // #436: an unscanned schema rejection must not become an advisory allow.
-    if (!actionGuardCfg.enforce && !unscannedBlock) {
+    // #509 R4-1: nor may the guard self-protection floor.
+    if (!actionGuardCfg.enforce && !unscannedBlock && !isSelfProtectionVerdict(v.signals)) {
       log.warn(`[shieldcortex] ⚠️ Action Guard: ${context.toolName} — ${v.reason}`);
       emitAudit({ ...base, action: 'warn', outcome: 'warned' });
       return;

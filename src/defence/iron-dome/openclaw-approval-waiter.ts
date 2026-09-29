@@ -52,6 +52,10 @@ import { WAIT_DECISION_TIMEOUT_MS } from './openclaw-approval-channel.js';
 export interface WaiterArgs {
   paramsB64: string;
   hash: string;
+  /** #509 R4-2: the delivered attempt the card was minted for. The tap is
+   *  bound to it: once a newer attempt for the same command replaced it, the
+   *  tap grants nothing and is reach evidence for nobody. */
+  attemptId?: string;
   openclawBin: string;
   receiptPath: string;
 }
@@ -69,6 +73,11 @@ export function parseWaiterArgs(argv: string[]): WaiterArgs | null {
   // The hash is about to be matched against the store — refuse anything that
   // does not look like one rather than forward surprises.
   if (!/^[0-9a-f]{12,64}$/i.test(hash)) return null;
+  const attemptId = get('--attempt');
+  if (argv.includes('--attempt')) {
+    if (!attemptId || !/^[0-9a-f]{8,64}$/i.test(attemptId)) return null;
+    return { paramsB64, hash, attemptId, openclawBin, receiptPath };
+  }
   return { paramsB64, hash, openclawBin, receiptPath };
 }
 
@@ -133,32 +142,37 @@ export async function runWaiter(
     // Deliberately NOT cleared: the channel's poll window is short, and a
     // fast failure must still be readable when it looks. The receipt dir is
     // tmp — the OS owns its lifecycle.
-    recordReach({ hash: args.hash, phase: 'answer', answer: 'unreached', reason: 'gateway request failed', origin: 'approval-waiter' });
+    recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'unreached', reason: 'gateway request failed', origin: 'approval-waiter' });
     return { acted: 'nothing', reason: call.reason };
   }
 
   clearReceipt(args.receiptPath);
 
   if (!call.ok) {
-    recordReach({ hash: args.hash, phase: 'answer', answer: 'unreached', reason: call.reason, origin: 'approval-waiter' });
+    recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'unreached', reason: call.reason, origin: 'approval-waiter' });
     return { acted: 'nothing', reason: call.reason };
   }
   const decision = call.decision;
 
+  // #509 R4-2: the tap names its attempt. A stale one (a newer attempt for
+  // the same command replaced it) grants nothing and records nothing. Any
+  // other miss (already answered elsewhere, pruned) still proves a human was
+  // reached FOR THIS ATTEMPT, so it is recorded against the attempt id — and
+  // with no attempt id it binds to nothing, as before.
+  const bind = args.attemptId ? { attemptId: args.attemptId } : {};
   if (decision === 'allow-once') {
-    const outcome = approveImpl(args.hash);
-    // The store records the reach on success; a tap that found no record
-    // (already answered elsewhere, expired) still proves a human was reached.
-    if (!outcome.ok) recordReach({ hash: args.hash, phase: 'answer', answer: 'approve', origin: 'approval-waiter' });
+    const outcome = approveImpl(args.hash, bind);
+    if (!outcome.ok && outcome.reason !== 'stale-attempt') recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'approve', origin: 'approval-waiter' });
     return { acted: 'approved', ok: outcome.ok };
   }
   if (decision === 'deny') {
-    const outcome = denyImpl(args.hash);
-    if (!outcome.ok) recordReach({ hash: args.hash, phase: 'answer', answer: 'deny', origin: 'approval-waiter' });
+    const outcome = denyImpl(args.hash, bind);
+    if (!outcome.ok && outcome.reason !== 'stale-attempt') recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'deny', origin: 'approval-waiter' });
     return { acted: 'denied', ok: outcome.ok };
   }
   recordReach({
     hash: args.hash,
+    attemptId: args.attemptId,
     phase: 'answer',
     answer: decision === null ? 'timeout' : 'unreached',
     reason: decision === null ? 'card expired unanswered' : 'unrecognised decision',

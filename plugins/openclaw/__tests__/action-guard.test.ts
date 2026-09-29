@@ -78,6 +78,29 @@ describe('interceptor — Action Guard wiring', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('#509 R4-1: advisory never covers the guard self-protection floor — guard state/config writes are still gated', async () => {
+    const i = makeInterceptor({ actionGuard: { enabled: true, enforce: false } });
+    for (const args of [
+      { command: 'echo {} >> ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl' },
+      { command: 'echo {} > ~/.shieldcortex/config.json' },
+      { command: 'shieldcortex config --action-guard-disable' },
+    ]) {
+      await expect(i.handleToolCall({ toolName: 'Bash', arguments: args, requireApproval: async () => false })).rejects.toThrow(/denied by user/);
+    }
+    // The posture still means something for an ordinary dangerous op.
+    await expect(
+      i.handleToolCall({ toolName: 'Bash', arguments: { command: 'sudo systemctl stop ssh' }, requireApproval: async () => false }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('#509 R4-1: guard unavailable + advisory — the outage scan still gates guard state writes', async () => {
+    const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { ...DEFAULT_CONFIG.actionGuard, enabled: true, enforce: false } } as any, okPipeline as any, {});
+    await expect(
+      i.handleToolCall({ toolName: 'Bash', arguments: { command: 'echo {} >> ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl' }, requireApproval: async () => false }),
+    ).rejects.toThrow();
+    await expect(i.handleToolCall({ toolName: 'Bash', arguments: { command: 'sudo systemctl stop ssh' } })).resolves.toBeUndefined();
+  });
+
   it('enforce mode: a DENIED dangerous op throws', async () => {
     const i = makeInterceptor({ actionGuard: { enabled: true, enforce: true } });
     await expect(

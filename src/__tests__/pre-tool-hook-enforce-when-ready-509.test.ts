@@ -376,7 +376,7 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     const gate = src.indexOf('const whenReady = cfg.enforce && cfg.readinessGate === true');
     const lease = src.indexOf("leaseGate && leaseGate.decision.verdict !== 'allow'");
     const terminal = src.indexOf("if (verdict.decision === 'block' && TERMINAL_BLOCK_SEVERITIES.has(verdict.severity))");
-    const shadowBranch = src.indexOf('if (shadow && !unscannedBlock)');
+    const shadowBranch = src.indexOf('if (shadow && !unscannedBlock && !selfProtected)');
     for (const at of [gate, lease, terminal, shadowBranch]) expect(at).toBeGreaterThan(-1);
     expect(lease).toBeLessThan(gate);
     expect(gate).toBeLessThan(terminal);
@@ -404,12 +404,14 @@ describe('#509 — enforce-when-ready through the real Claude Code hook', () => 
     expect(runHook({ command: 'shieldcortex config --action-guard-advisory' }, 'default').decision).toBe('ask');
   });
 
-  it('r3 finding 1: from OFF or watch-only it is a tightening and stays ungated', () => {
+  it('r3 finding 1: from OFF it is a tightening and stays ungated; from watch-only the R4-1 self-protection floor holds it', () => {
     writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
     expect(runHook(WHEN_READY_FLAG, 'default').decision).toBeUndefined();
+    // R4-1 (ROUND4.md): `disable-action-guard`, including this flag, is on the
+    // floor in EVERY posture — watch-only too. A tightening held for approval
+    // is the disclosed cost (design doc, residuals).
     writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: false } }));
-    const watch = runHook(WHEN_READY_FLAG, 'default');
-    expect(watch.decision).toBeUndefined();
+    expect(runHook(WHEN_READY_FLAG, 'default').decision).toBe('ask');
   });
 
   it('r3 finding 2: promoted, then a forged fresh shadow cache + failing evidence ⇒ a LOUD demotion through the hook, never a silent one', () => {

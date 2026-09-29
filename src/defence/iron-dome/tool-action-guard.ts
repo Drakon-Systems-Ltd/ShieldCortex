@@ -1506,8 +1506,10 @@ function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
  * CLI disable: command-position shieldcortex (or npx/node wrapper, or $var
  * fail-closed) plus a disable/advisory/deactivate flag in the rest. #509:
  * `--action-guard-enforce-when-ready` is in the same class — on an enforcing
- * install it drops to shadow until readiness is proven. From off or watch
- * only it is a tightening, and stays ungated there because nothing enforces.
+ * install it drops to shadow until readiness is proven. From off it is a
+ * tightening and ungated (a disabled guard does not run). From watch only it
+ * is a tightening too, but `disable-action-guard` is on the #509 R4-1
+ * self-protection floor, which holds in every posture, so it is held there.
  * Global uninstall: command-position npm-family (or $var fail-closed) plus
  * uninstall-class verb as the first non-flag, last-wins global, whole-token
  * package. Recurses into bash -c / collectExecutableBodies. eval is a
@@ -3547,6 +3549,44 @@ const PATH_TARGET_SIGNALS = new Set([
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config',
   'disable-action-guard',
 ]);
+
+/**
+ * #509 R4-1 — the guard SELF-PROTECTION FLOOR. A verdict carrying any of these
+ * signals is enforced in every posture and mode: the enforce-when-ready shadow,
+ * a demotion, and watch-only (`enforce:false`) advisory never turn it into a
+ * would-hold or a warning. Same standing as the catastrophic tier and the
+ * session-lease floor.
+ *
+ * Why: the readiness state, the durable transition record and the one-shot
+ * approvals all live in the approval store, and the guard's config and policy
+ * lock decide whether it runs at all. If shadow mode let the agent write them,
+ * the agent could forge the evidence that keeps the guard in shadow. The
+ * boundary is the tool-call surface: a same-UID process writing these files
+ * outside an agent tool call is not seen here (a policy lock answers that).
+ *
+ *   - `touch-approval-store`   approvals.json, guard-readiness.json, the
+ *                              transition record (all under ~/.shieldcortex/approvals)
+ *   - `touch-decisions-ledger` DECISIONS.md and the lease store (#227)
+ *   - `touch-guard-config`     ~/.shieldcortex/config.json (#500)
+ *   - `disable-action-guard`   the disable/advisory/enforce-when-ready flags,
+ *                              uninstall, and the #501/#505 policy-lock and
+ *                              settings/env seams
+ *
+ * The ONE list. The Claude Code hook reads it from this module; its outage
+ * fallback, the OpenClaw interceptor and the Hermes client carry duplicates
+ * held equal by enforcement-surface-parity.
+ */
+export const GUARD_SELF_PROTECTION_SIGNALS: readonly string[] = Object.freeze([
+  'touch-approval-store',
+  'touch-decisions-ledger',
+  'touch-guard-config',
+  'disable-action-guard',
+]);
+
+/** True when a verdict's signals put it on the self-protection floor. */
+export function isGuardSelfProtectionVerdict(signals: readonly string[] | undefined): boolean {
+  return Array.isArray(signals) && signals.some(s => GUARD_SELF_PROTECTION_SIGNALS.includes(s));
+}
 
 /** #342 — interpreter-API recursive-delete call spans (not shell verbs). */
 const INTERPRETER_RECURSIVE_DELETE_SPAN =

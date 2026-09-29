@@ -117,6 +117,7 @@ function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> 
     event,
     hash: n.hash,
     shortHash: n.shortHash,
+    ...(n.attemptId ? { attemptId: n.attemptId } : {}),
     tool: n.tool,
     command: n.command,
     signals: n.signals,
@@ -126,7 +127,7 @@ function buildApprovalPayload(n: OperatorNotification): Record<string, unknown> 
     text: formatOperatorNotification(n),
     approveCommand: denied
       ? `shieldcortex approve --denial ${n.actionId ?? '<actionId>'}`
-      : `shieldcortex approve ${n.shortHash}`,
+      : `shieldcortex approve ${n.shortHash}${n.attemptId ? ` --attempt ${n.attemptId}` : ''}`,
     ts: new Date().toISOString(),
   };
   // Present only where they mean something: `denyCommand` on a live hold (on a

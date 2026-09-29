@@ -101,6 +101,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { normaliseNotifyConfig } from './notify-config.js';
 
 // ==================== THRESHOLDS ====================
 // Operability thresholds chosen for this posture. They are readiness proxies,
@@ -433,26 +434,25 @@ function findEffectivenessEvidence(
 
 /**
  * Whether a human approval channel is configured, from the RAW
- * `actionGuard.notify` block. Mirrors notify-config.ts's acceptance rules
- * without importing it (this module is loaded by the hook on every call under
- * the posture; keep it dependency-free): enabled must be exactly true, and a
- * webhook must be an http(s) URL. `openclaw: true` counts — its failures show
- * up as unreached requests in the evidence, which is where they belong.
+ * `actionGuard.notify` block, decided by the transport's OWN validator
+ * (`normaliseNotifyConfig`, the function the hook's `loadNotify` builds its
+ * channels from). #509 R4-3: a private copy of the rules drifted — a
+ * 2,074-character URL the transport drops passed here, so promotion could rest
+ * on a notice channel that did not exist. `openclaw: true` counts as an
+ * approval channel — its failures show up as unreached requests in the
+ * evidence, which is where they belong — but only a webhook the transport
+ * will actually build pushes demotion notices.
  */
 export function describeHumanChannel(rawNotify: unknown): HumanChannel {
   const none: HumanChannel = { configured: false, kind: null, pushesNotices: false };
-  if (!rawNotify || typeof rawNotify !== 'object' || Array.isArray(rawNotify)) return none;
-  const n = rawNotify as Record<string, unknown>;
-  if (n.enabled !== true) return none;
-  let webhook = false;
-  if (typeof n.webhookUrl === 'string') {
-    try {
-      const u = new URL(n.webhookUrl.trim());
-      webhook = u.protocol === 'https:' || u.protocol === 'http:';
-    } catch {
-      /* not a URL — no webhook */
-    }
+  let n: ReturnType<typeof normaliseNotifyConfig>;
+  try {
+    n = normaliseNotifyConfig(rawNotify);
+  } catch {
+    return none;
   }
+  if (n.enabled !== true) return none;
+  const webhook = typeof n.webhookUrl === 'string' && n.webhookUrl.length > 0;
   if (n.openclaw === true) return { configured: true, kind: 'openclaw-card', pushesNotices: webhook };
   if (webhook) return { configured: true, kind: 'webhook', pushesNotices: true };
   return none;
@@ -958,7 +958,7 @@ function isFreshState(state: ReadinessState | null, now: number, ttl: number, pi
  * UNKNOWN, never "never ready": unknown is treated as potentially demoted —
  * announced, audited, and a doctor FAIL.
  */
-export type TransitionEvent = 'init' | 'promote' | 'demote' | 'recover' | 'tamper';
+export type TransitionEvent = 'init' | 'promote' | 'demote' | 'recover' | 'tamper' | 'checkpoint';
 
 export interface TransitionEntry {
   ts: string;
@@ -967,18 +967,40 @@ export interface TransitionEntry {
   to?: ReadinessMode;
   pin?: ReadinessPin | null;
   reason?: string;
+  /** On a `checkpoint`: how many entries compaction dropped. */
+  compacted?: number;
 }
 
 export interface TransitionRecord {
   status: 'ok' | 'missing' | 'unreadable';
   entries: TransitionEntry[];
+  /** Bytes read (0 when missing/unreadable) — the compaction trigger. */
+  bytes?: number;
   /** The newest entry that sets a mode. */
   last: TransitionEntry | null;
   /** The newest tamper report. */
   lastTamper: TransitionEntry | null;
 }
 
-const TRANSITION_EVENTS = new Set<string>(['init', 'promote', 'demote', 'recover', 'tamper']);
+const TRANSITION_EVENTS = new Set<string>(['init', 'promote', 'demote', 'recover', 'tamper', 'checkpoint']);
+
+// ── #509 R4-4: a bounded journal ──
+// The record is read on every hook call under the posture, so it must stay
+// small. It is compacted (atomically rewritten) once it passes either bound:
+// a `checkpoint` entry saying how much was dropped, then — in their original
+// order — the newest promote, demote, init, recover and tamper entries, plus
+// the most recent JOURNAL_KEEP_RECENT. The newest mode-setting entry is
+// always among them, so compaction never changes what the record says.
+/** Entries at which the journal is compacted. */
+export const JOURNAL_MAX_ENTRIES = 256;
+/** Bytes at which the journal is compacted (a compacted one is far smaller). */
+export const JOURNAL_MAX_BYTES = 128 * 1024;
+/** Most recent entries kept verbatim by compaction. */
+export const JOURNAL_KEEP_RECENT = 32;
+/** A tamper report identical to the newest one within this window is not
+ *  journalled again (the audit row and stderr still happen): a forged cache
+ *  refreshed on every call must not grow the journal on every call. */
+export const TAMPER_JOURNAL_DEDUP_MS = 60 * 60 * 1000;
 
 function isTransitionEntry(e: unknown): e is TransitionEntry {
   if (!e || typeof e !== 'object' || Array.isArray(e)) return false;
@@ -986,6 +1008,7 @@ function isTransitionEntry(e: unknown): e is TransitionEntry {
   if (typeof r.ts !== 'string' || !Number.isFinite(Date.parse(r.ts))) return false;
   if (typeof r.event !== 'string' || !TRANSITION_EVENTS.has(r.event)) return false;
   if (r.event === 'tamper') return true;
+  if (r.event === 'checkpoint') return r.compacted === undefined || (typeof r.compacted === 'number' && Number.isFinite(r.compacted));
   return r.to === 'enforcing' || r.to === 'shadow';
 }
 
@@ -1017,9 +1040,69 @@ export function readTransitionRecord(path: string): TransitionRecord {
   let lastTamper: TransitionEntry | null = null;
   for (const e of entries) {
     if (e.event === 'tamper') lastTamper = e;
-    else last = e;
+    else if (e.event !== 'checkpoint') last = e;
   }
-  return { status: 'ok', entries, last, lastTamper };
+  return { status: 'ok', entries, last, lastTamper, bytes: Buffer.byteLength(text) };
+}
+
+/** Whether a readable record has outgrown its bounds. */
+export function needsCompaction(record: TransitionRecord): boolean {
+  return record.status === 'ok'
+    && (record.entries.length > JOURNAL_MAX_ENTRIES || (record.bytes ?? 0) > JOURNAL_MAX_BYTES);
+}
+
+/**
+ * Compact the journal in place (see JOURNAL_MAX_ENTRIES). Atomic: the new
+ * record is written to a fresh private file and renamed over the old one, so
+ * a crash leaves either the old record or the new one, never half of each.
+ * A record that is not readable is left alone (the caller quarantines it).
+ * Returns whether a compaction was written.
+ */
+export function compactTransitionRecord(path: string, now: number, record: TransitionRecord = readTransitionRecord(path)): boolean {
+  if (record.status !== 'ok' || !needsCompaction(record)) return false;
+  const entries = record.entries;
+  const keep = new Set<number>();
+  for (let i = Math.max(0, entries.length - JOURNAL_KEEP_RECENT); i < entries.length; i += 1) keep.add(i);
+  const newestOf = new Map<string, number>();
+  entries.forEach((e, i) => newestOf.set(e.event, i));
+  for (const ev of ['promote', 'demote', 'init', 'recover', 'tamper']) {
+    const i = newestOf.get(ev);
+    if (i !== undefined) keep.add(i);
+  }
+  const kept = [...keep].sort((a, b) => a - b).map((i) => entries[i]).filter((e) => e.event !== 'checkpoint');
+  const previouslyDropped = entries.reduce((n, e) => n + (e.event === 'checkpoint' && typeof e.compacted === 'number' ? e.compacted : 0), 0);
+  const checkpoint: TransitionEntry = {
+    ts: new Date(now).toISOString(),
+    event: 'checkpoint',
+    compacted: previouslyDropped + (entries.length - kept.length - entries.filter((e) => e.event === 'checkpoint').length),
+    ...(record.last ? { reason: `last ${record.last.event} → ${record.last.to} at ${record.last.ts}` } : {}),
+  };
+  const body = [checkpoint, ...kept].map((e) => JSON.stringify(e)).join('\n') + '\n';
+  const tmp = `${path}.compact-${process.pid}-${randomBytes(4).toString('hex')}`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(fd, body);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+    return true;
+  } catch {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+    try { rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    return false;
+  }
+}
+
+/** Whether this tamper report repeats the newest journalled one inside the
+ *  dedup window (then it is not journalled again). */
+function isRepeatTamper(record: TransitionRecord, reason: string, now: number): boolean {
+  const t = record.lastTamper;
+  if (!t || t.reason !== reason.slice(0, 400)) return false;
+  const at = Date.parse(t.ts);
+  return Number.isFinite(at) && now - at >= 0 && now - at < TAMPER_JOURNAL_DEDUP_MS;
 }
 
 /** The mode the record says this install is in; `unknown` when it cannot say. */
@@ -1284,6 +1367,16 @@ export function resolveReadiness(opts: {
   let tamper: string | undefined;
   if (isFreshState(state, now, ttl, pin)) {
     if (state!.mode === durable) {
+      // R4-4: an oversized journal is compacted here too, so the cheap path
+      // stays cheap from the next call on.
+      if (needsCompaction(record)) {
+        const lock = `${paths.statePath}.lock`;
+        if (tryLock(lock, now)) {
+          try { compactTransitionRecord(recordPath, now, record); } finally {
+            try { rmSync(lock, { force: true }); } catch { /* stale lock self-heals */ }
+          }
+        }
+      }
       return { mode: state!.mode, cached: true, transition: null, report: null, state };
     }
     if (durable !== 'unknown') {
@@ -1320,7 +1413,8 @@ export function resolveReadiness(opts: {
   try {
     const nowIso = new Date(now).toISOString();
     if (record.status === 'unreadable') quarantineRecord(recordPath, now);
-    if (tamper) {
+    const repeatTamper = tamper !== undefined && record.status === 'ok' && isRepeatTamper(record, tamper, now);
+    if (tamper && !repeatTamper) {
       appendTransition(recordPath, { ts: nowIso, event: 'tamper', pin, reason: tamper.slice(0, 400) });
       appendRow(
         paths.auditDir,
@@ -1389,6 +1483,10 @@ export function resolveReadiness(opts: {
         },
         new Date(now),
       );
+    }
+    // R4-4: keep the journal bounded (re-read: this call may have appended).
+    if (record.status !== 'missing' && (needsCompaction(record) || record.entries.length + 3 > JOURNAL_MAX_ENTRIES)) {
+      compactTransitionRecord(recordPath, now);
     }
     writeReadinessState(paths.statePath, next);
     return { mode: decision.mode, cached: false, transition: decision.transition, report, state: next, demotionReason, tamper };

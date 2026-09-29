@@ -155,6 +155,35 @@ def fallback_dangerous_match(content: str) -> bool:
     return any(p.search(content) for p in _FALLBACK_DANGEROUS)
 
 
+# #509 R4-1: the guard self-protection floor. DUPLICATED from tool-action-guard.ts
+# `GUARD_SELF_PROTECTION_SIGNALS`; held equal by enforcement-surface-parity. A
+# verdict carrying one of these is enforced even when enforce=False (advisory).
+SELF_PROTECTION_SIGNALS = (
+    "touch-approval-store",
+    "touch-decisions-ledger",
+    "touch-guard-config",
+    "disable-action-guard",
+)
+
+# The outage-scan shapes for those signals: the guard's own approval store
+# (readiness state + transition record live there too), the lease ledger, the
+# config file, and the disable/uninstall shapes already in _FALLBACK_DANGEROUS.
+_FALLBACK_SELF_PROTECTION = [
+    re.compile(r"\.shieldcortex[\\/]+approvals\b", re.I),
+    re.compile(r"\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b", re.I),
+    re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I),
+    re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I),
+    re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I),
+]
+
+
+def fallback_self_protection_match(content: str) -> bool:
+    """True when `content` touches guard state or config (never advisory)."""
+    if not content:
+        return False
+    return any(p.search(content) for p in _FALLBACK_SELF_PROTECTION)
+
+
 # #505: startup-file WRITE target, ported to the blunt fallback. The real guard
 # gates a Write/Edit whose TARGET is a shell startup file on the path alone
 # (`isShellStartupWritePath`): a PATH prepend written there carries no

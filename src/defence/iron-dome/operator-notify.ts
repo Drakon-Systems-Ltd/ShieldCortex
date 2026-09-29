@@ -105,6 +105,12 @@ export interface OperatorNotification {
    *  reply — tap, webhook, or terminal — must be bound to. */
   hash: string;
   shortHash: string;
+  /** #509 R4-2: the delivered attempt this notification is. A reply binds to
+   *  it: `shieldcortex approve <hash> --attempt <id>` (and the card waiter)
+   *  grant nothing once a newer attempt for the same command replaced it.
+   *  Absent on a caller that predates attempt ids — then the printed commands
+   *  are the #118 hash-only form. */
+  attemptId?: string;
   tool: string;
   /** The exact command/target the guard flagged — never a paraphrase. */
   command: string;
@@ -251,6 +257,8 @@ export interface NotifyChannel {
 
 export interface RequestOperatorApprovalInput {
   hash: string;
+  /** #509 R4-2 — see `OperatorNotification.attemptId`. */
+  attemptId?: string;
   tool: string;
   command: string;
   signals: string[];
@@ -336,6 +344,8 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
   const denied = input.event === 'denied_no_prompt_surface';
   const actionId = optionalText(input.actionId);
   const denialTarget = actionId ?? '<actionId>';
+  const attemptId = typeof input.attemptId === 'string' && /^[0-9a-f]{8,64}$/i.test(input.attemptId) ? input.attemptId : undefined;
+  const attemptArg = attemptId ? ` --attempt ${attemptId}` : '';
   const notification: OperatorNotification = {
     event: denied ? 'denied_no_prompt_surface' : 'approval_requested',
     hash: input.hash,
@@ -349,8 +359,9 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
     // Live hold: #118 hash. DNP: spendable fingerprint, never bare approve.
     fallbackHint: denied
       ? `shieldcortex approve --denial ${denialTarget}   (authorises a RETRY — the blocked call is already gone)`
-      : `shieldcortex approve ${shortHash}   |   shieldcortex deny ${shortHash}`,
+      : `shieldcortex approve ${shortHash}${attemptArg}   |   shieldcortex deny ${shortHash}${attemptArg}`,
   };
+  if (!denied && attemptId) notification.attemptId = attemptId;
   if (denied && actionId) notification.actionId = actionId;
   if (denied) {
     const deniedReason = optionalText(input.deniedReason);
@@ -710,8 +721,9 @@ export function formatOperatorNotification(n: AnyOperatorNotification): string {
     lines.push('To authorise a RETRY, run in YOUR terminal:');
     lines.push(`  shieldcortex approve --denial ${n.actionId ?? '<actionId>'}`);
   } else {
-    lines.push(`[Approve]  shieldcortex approve ${n.shortHash}`);
-    lines.push(`[Deny]     shieldcortex deny ${n.shortHash}`);
+    const attemptArg = n.attemptId ? ` --attempt ${n.attemptId}` : '';
+    lines.push(`[Approve]  shieldcortex approve ${n.shortHash}${attemptArg}`);
+    lines.push(`[Deny]     shieldcortex deny ${n.shortHash}${attemptArg}`);
   }
   return truncate(lines.join('\n'), 4_000);
 }

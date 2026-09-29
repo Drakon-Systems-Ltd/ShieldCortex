@@ -242,11 +242,29 @@ export function recordPending(
 
 export type ApproveOutcome =
   | { ok: true; record: ApprovalRecord }
-  | { ok: false; reason: 'not-found' | 'already-approved' };
+  | { ok: false; reason: 'not-found' | 'already-approved' | 'stale-attempt' };
 
 export type DenyOutcome =
   | { ok: true; record: ApprovalRecord }
-  | { ok: false; reason: 'not-found' | 'already-approved' };
+  | { ok: false; reason: 'not-found' | 'already-approved' | 'stale-attempt' };
+
+/**
+ * #509 R4-2: which delivered attempt an answer is for. A channel answer (card
+ * tap, a reply to a notice) names the attempt it was shown; it binds only when
+ * that is the record's CURRENT attempt, compared exactly. An answer to an
+ * earlier attempt — expired and replaced by a newer delivery of the same
+ * command — grants nothing and is evidence for nobody.
+ *
+ * `undefined` is the #118 terminal path (`shieldcortex approve <hash>` typed at
+ * a TTY): it acts on the current attempt, as it always has, but it is NOT a
+ * reach through the channel, so it records no reachability evidence.
+ */
+function attemptMatches(record: ApprovalRecord, attemptId: string | undefined): boolean | 'terminal' {
+  if (attemptId === undefined) return 'terminal';
+  return typeof record.reachAttemptId === 'string'
+    && record.reachAttemptId.length > 0
+    && attemptId === record.reachAttemptId;
+}
 
 /**
  * Mark a pending request approved. Matches on the full hash or any unambiguous
@@ -255,7 +273,7 @@ export type DenyOutcome =
  */
 export function approveRequest(
   hashOrPrefix: string,
-  opts: { home?: string; now?: number; ttlMs?: number } = {},
+  opts: { home?: string; now?: number; ttlMs?: number; attemptId?: string } = {},
 ): ApproveOutcome {
   const now = opts.now ?? Date.now();
   const file = readFile(opts.home);
@@ -266,13 +284,18 @@ export function approveRequest(
   if (matches.length !== 1) return { ok: false, reason: 'not-found' };
   const record = matches[0];
   if (record.approvedAt) return { ok: false, reason: 'already-approved' };
+  const bound = attemptMatches(record, opts.attemptId);
+  if (bound === false) return { ok: false, reason: 'stale-attempt' };
 
   record.approvedAt = now;
   record.ttlMs = opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
   writeFileAtomic({ version: 1, records }, opts.home);
-  // #509: a human answered. Evidence for approval reachability, keyed to the
-  // same hash the request row carried; an answer with no request is ignored.
-  recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'approve', origin: 'approval-store' }, { home: opts.home, now });
+  // #509: a human answered THIS attempt through the channel. Evidence for
+  // approval reachability, bound to the attempt the answer named. A terminal
+  // hash-only answer (R4-2) is not a channel reach and records nothing.
+  if (bound === true) {
+    recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'approve', origin: 'approval-store' }, { home: opts.home, now });
+  }
   return { ok: true, record };
 }
 
@@ -296,7 +319,7 @@ export function approveRequest(
  */
 export function denyRequest(
   hashOrPrefix: string,
-  opts: { home?: string; now?: number } = {},
+  opts: { home?: string; now?: number; attemptId?: string } = {},
 ): DenyOutcome {
   const now = opts.now ?? Date.now();
   const file = readFile(opts.home);
@@ -307,12 +330,16 @@ export function denyRequest(
   if (matches.length !== 1) return { ok: false, reason: 'not-found' };
   const record = matches[0];
   if (record.approvedAt) return { ok: false, reason: 'already-approved' };
+  const bound = attemptMatches(record, opts.attemptId);
+  if (bound === false) return { ok: false, reason: 'stale-attempt' };
 
   const denied: ApprovalRecord = { ...record, deniedAt: now };
   const remaining = records.filter((r) => r.hash !== record.hash);
   writeFileAtomic({ version: 1, records: remaining }, opts.home);
-  // #509: a "no" is a human answer too — it reached someone.
-  recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'deny', origin: 'approval-store' }, { home: opts.home, now });
+  // #509: a "no" is a human answer too — it reached someone (same binding).
+  if (bound === true) {
+    recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'deny', origin: 'approval-store' }, { home: opts.home, now });
+  }
   return { ok: true, record: denied };
 }
 

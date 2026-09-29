@@ -354,7 +354,7 @@ describe('#509 r3 finding 5 — each approval attempt counts on its own', () => 
         const pending = recordPending({ tool: 'Bash', input, summary: `deploy ${c}`, signals: ['x'] }, { home, now: t });
         expect(typeof pending.reachAttemptId).toBe('string');
         recordApprovalReach({ hash: pending.hash, attemptId: pending.reachAttemptId, phase: 'request', channel: 'webhook' }, { home, now: t });
-        if (k === 10) expect(approveRequest(pending.hash, { home, now: t + 60_000 }).ok).toBe(true);
+        if (k === 10) expect(approveRequest(pending.hash, { home, now: t + 60_000, attemptId: pending.reachAttemptId }).ok).toBe(true);
       }
     }
     const rep = computeReadiness({ ...PROXIES_ONLY, channel: CHANNEL, paths: homePaths, now: NOW });

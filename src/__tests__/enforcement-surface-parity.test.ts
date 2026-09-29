@@ -455,3 +455,39 @@ describe("#501 — the lock's own attack surface is signalled on BOTH fallback t
     }
   });
 });
+
+describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated verbatim', () => {
+  const hermesClientSrc = fs.readFileSync(path.join(repoRoot, 'plugins', 'hermes', 'shieldcortex', 'sc_client.py'), 'utf-8');
+
+  function listAfter(src: string, marker: RegExp): string[] {
+    const m = marker.exec(src);
+    expect(m).not.toBeNull();
+    const body = src.slice(m!.index + m![0].length);
+    const close = body.search(/[\])]/);
+    return [...body.slice(0, close).matchAll(/['"]([a-z-]+)['"]/g)].map((x) => x[1]);
+  }
+
+  it('the hook fallback, the OpenClaw plugin and the Hermes client carry exactly the exported list', async () => {
+    const { GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
+    const canonical = [...GUARD_SELF_PROTECTION_SIGNALS];
+    expect(canonical).toEqual(['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard']);
+    expect(listAfter(hookSrc, /const FALLBACK_SELF_PROTECTION_SIGNALS = \[/)).toEqual(canonical);
+    expect(listAfter(pluginSrc, /export const SELF_PROTECTION_SIGNALS: readonly string\[\] = \[/)).toEqual(canonical);
+    expect(listAfter(hermesClientSrc, /^SELF_PROTECTION_SIGNALS = \(/m)).toEqual(canonical);
+  });
+
+  it('every surface consults the floor before its shadow/advisory allow', () => {
+    expect(hookSrc).toMatch(/if \(shadow && !unscannedBlock && !selfProtected\)/);
+    expect(hookSrc).toMatch(/if \(!cfg\.enforce && !unscannedBlock && !selfProtected\)/);
+    expect(hookSrc).toMatch(/if \(!cfg\.enforce && !selfProtectSignal\)/);
+    expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !unscannedBlock && !isSelfProtectionVerdict\(v\.signals\)/);
+    expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !selfProtectSignal/);
+  });
+
+  it('every hook fallback row carrying a floor signal is also a dangerous row (the outage scan sees it)', () => {
+    for (const sig of ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard']) {
+      expect({ sig, inHook: hookSrc.includes(`signal: '${sig}'`), inPlugin: pluginSrc.includes(`signal: '${sig}'`) })
+        .toEqual({ sig, inHook: true, inPlugin: true });
+    }
+  });
+});

@@ -25,9 +25,11 @@
  * rate, approval reachability) measured from its own audit, plus reviewed
  * effectiveness evidence, required by default (see
  * src/defence/iron-dome/guard-readiness.ts). These proxies are not the
- * ADR-002 §5B bars. The catastrophic tier and the session-lease floor are
- * unchanged in every posture and mode. A policy lock disables the gate (the
- * lock pins enforcement).
+ * ADR-002 §5B bars. The catastrophic tier, the session-lease floor and the
+ * guard self-protection floor (GUARD_SELF_PROTECTION_SIGNALS: the guard's own
+ * state, config, lease ledger and policy lock) are enforced in every posture
+ * and mode — never shadowed, never advisory. A policy lock disables the gate
+ * (the lock pins enforcement).
  *
  * Prompt-surface rule: "ask" is only meaningful where Claude Code will actually
  * raise a prompt. In `bypassPermissions` and `dontAsk` the harness shows no
@@ -899,7 +901,7 @@ function safeDiagnosticApprovalReason(reason) {
   return `${lead}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
 }
 
-async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey }) {
+async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey, attemptId }) {
   if (!notify) return null;
   const denied = typeof noPromptSurface === 'string' && noPromptSurface.length > 0;
   // A denial cannot go to an interactive Approve/Deny card — there is nothing
@@ -914,6 +916,8 @@ async function pingOperator(notify, { toolName, toolInput, verdict, hash, noProm
     const result = await notify.requestOperatorApproval(
       {
         hash,
+        // #509 R4-2: the reply (card tap or `approve --attempt`) binds to this attempt.
+        attemptId: typeof attemptId === 'string' ? attemptId : undefined,
         tool: safeToolName(toolName),
         command: safeApprovalCommand(toolName, toolInput),
         signals: displayVerdict.signals,
@@ -2432,6 +2436,33 @@ function fallbackDangerousMatch(toolInput, toolName) {
   return null;
 }
 
+// #509 R4-1: the guard self-protection floor. DUPLICATED from
+// tool-action-guard.ts `GUARD_SELF_PROTECTION_SIGNALS` for the outage path,
+// where the dist module is exactly what failed to load; the live path reads
+// the guard's own export. Held equal by enforcement-surface-parity.
+const FALLBACK_SELF_PROTECTION_SIGNALS = ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard'];
+
+/** The self-protection signals the live guard exports, else the duplicate. */
+function selfProtectionSignals(guard) {
+  const list = guard?.GUARD_SELF_PROTECTION_SIGNALS;
+  return Array.isArray(list) && list.length > 0 ? list : FALLBACK_SELF_PROTECTION_SIGNALS;
+}
+
+/** A self-protection signal the WS2 fallback scan matches, or null. Checked
+ *  over EVERY row, not just the first match, so a command that also trips an
+ *  earlier row (`rm …/approvals/x`) still lands on the floor. */
+function fallbackSelfProtectionMatch(toolInput, toolName) {
+  const text = fallbackExecSurface(toolInput);
+  if (!text) return null;
+  const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
+  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (!FALLBACK_SELF_PROTECTION_SIGNALS.includes(signal)) continue;
+    if (lockReadOnly && lockPath === true) continue;
+    if (re.test(text)) return signal;
+  }
+  return null;
+}
+
 // ==================== AUDIT (local JSONL) ====================
 // Same file the OpenClaw plugin appends to (~/.shieldcortex/audit/realtime-*.jsonl)
 // so `shieldcortex` audit tooling reads one unified stream; `origin`
@@ -2733,9 +2764,11 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
   }
 
   // 2. Dangerous — gate to the permission dialog; enforce:false opts to advisory.
-  const dangerousSignal = fallbackDangerousMatch(toolInput, toolName);
+  const selfProtectSignal = fallbackSelfProtectionMatch(toolInput, toolName);
+  const dangerousSignal = selfProtectSignal ?? fallbackDangerousMatch(toolInput, toolName);
   if (dangerousSignal) {
-    if (!cfg.enforce) {
+    // #509 R4-1: the self-protection floor is never advisory.
+    if (!cfg.enforce && !selfProtectSignal) {
       const fallbackWarnVerdict = { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal], reason: `Guard unavailable: ${failureSummary}; enforce:false advisory` };
       const actionId = writeTerminalOutcomeAudit(
         toolName,
@@ -3006,6 +3039,14 @@ process.stdin.on('end', async () => {
     // tiers exited above, so anything still a `block` here is by definition a
     // refusal the guard did not reach a scanned conclusion about.
     const unscannedBlock = isSchemaInvalid(verdict) || verdict.decision === 'block';
+    // #509 R4-1: the guard self-protection floor. A verdict touching the
+    // guard's own state (approval store, readiness state, transition record),
+    // its config, lease ledger or policy lock is held in EVERY posture and
+    // mode — neither the enforce-when-ready shadow nor watch-only advisory
+    // turns it into a would-hold or a warning. Otherwise shadow mode would let
+    // the agent forge the very evidence that keeps the guard in shadow.
+    const floorSignals = selfProtectionSignals(guard);
+    const selfProtected = Array.isArray(verdict.signals) && verdict.signals.some((s) => floorSignals.includes(s));
 
     // require_approval — the dangerous tier.
     // Per-operator autoApprove allowlist (family / action / signal match, same
@@ -3030,8 +3071,9 @@ process.stdin.on('end', async () => {
     // it would deny for want of a prompt surface — and the call proceeds.
     // Placed where advisory mode sits, so it inherits advisory's limits: the
     // catastrophic tier returned above, and an unscanned schema rejection
-    // (#436) is NOT shadowed — "could not look" is never an allow.
-    if (shadow && !unscannedBlock) {
+    // (#436) is NOT shadowed — "could not look" is never an allow — and neither
+    // is the guard self-protection floor (R4-1, `selfProtected` above).
+    if (shadow && !unscannedBlock && !selfProtected) {
       const wouldOutcome = noPromptSurfaceReason(permissionMode) ? 'would_block' : 'would_hold';
       writeAuditEntry(
         safeToolName(toolName),
@@ -3048,7 +3090,7 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    if (!cfg.enforce && !unscannedBlock) {
+    if (!cfg.enforce && !unscannedBlock && !selfProtected) {
       const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
@@ -3229,6 +3271,7 @@ process.stdin.on('end', async () => {
           toolInput,
           verdict,
           hash: fullHash,
+          attemptId: reachAttemptId,
           noPromptSurface: null,
           // Which job died. Absent on a harness that does not report them —
           // rendered only when present, never as "undefined".
