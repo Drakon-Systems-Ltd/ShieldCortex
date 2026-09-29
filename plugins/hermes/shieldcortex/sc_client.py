@@ -114,6 +114,8 @@ _FALLBACK_DANGEROUS = [
 # args object (a benign `description` must never gate).
 _FALLBACK_SURFACE_KEYS = (
     "command", "cmd", "script", "code", "input", "shell", "run",
+    # #509 r6 S2: typed-shell payload keys, kept in sync with the other two.
+    "data", "text", "literal",
     "path", "file_path", "filePath", "file", "target", "destination", "dir", "directory",
     "url", "uri", "endpoint", "href", "host", "to",
 )
@@ -179,6 +181,20 @@ SELF_PROTECTION_SIGNALS = (
 # DECISIONS on a shared table, not only the signal names.
 _FALLBACK_SELF_PROTECTION = [
     (re.compile(r"\.shieldcortex[\\/]+approvals\b", re.I), False),
+    # #509 r6 S2: the r5 classifier shapes, verbatim from the other two
+    # fallbacks — the guard directory itself moved/copied over/deleted (verb at
+    # command position), and guard state reached relatively after `cd` into it.
+    (re.compile(
+        r"(?:^|[;&|(\n`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n]*?\s)?"
+        r"[\"']?[^\s;&|\"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*[\"']?(?=$|[\s;&|)])",
+        re.I,
+    ), False),
+    (re.compile(
+        r"(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?[\"']?[^\s;&|\"'`]*\.shieldcortex[\\/]*[\"']?(?=$|[\s;&|)])[\s\S]*?"
+        r"(?:(?:^|[\s;&|(<>='\"])(?:\.[\\/])?(?:approvals|DECISIONS\.md|leases|config\.json)(?=$|[\s;&|)\\/'\"])|"
+        r"[;&|(\n]\s*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n]*?\s)?[\"']?[.\\/*]*[.*][.\\/*]*[\"']?(?=$|[\s;&|)]))",
+        re.I,
+    ), False),
     (re.compile(r"\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b", re.I), False),
     (re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I), False),
     (re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I), False),

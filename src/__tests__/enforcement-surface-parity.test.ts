@@ -525,12 +525,26 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
     'ls /etc/shieldcortex',
     'sudo systemctl stop ssh',
     'ls -la',
+    // #509 r6 S2: the r5 classifier shapes (and the N1 false positives, which
+    // must stay off the floor in an outage too).
+    'mv ~/.shieldcortex /tmp/x',
+    'sudo mv "$HOME/.shieldcortex/" /tmp/x',
+    'cp -r /tmp/forged/. ~/.shieldcortex/',
+    'rmdir ~/.shieldcortex/approvals',
+    'cd ~/.shieldcortex; printf x > approvals/y',
+    'cd ~/.shieldcortex && echo {} > config.json',
+    'pushd /home/u/.shieldcortex/ && tee leases/x < /tmp/y',
+    'cd ~/.shieldcortex; mv * /tmp/x',
+    'npm install --prefix ~/.shieldcortex/',
+    'echo "rm ~/.shieldcortex"',
+    'mv ~/notes.txt /tmp/x',
+    'cd /tmp/build && mv ./* /tmp/out',
   ];
   /** Stricter than the core ON PURPOSE: during an outage every fallback (hook,
    *  OpenClaw, Hermes) holds any access to the approval store, reads included
    *  — the #89 read carve-out lives in the core only. Fail-closed, so it is
    *  asserted rather than compared. */
-  const STRICTER_IN_OUTAGE = ['cat ~/.shieldcortex/approvals/approvals.json'];
+  const STRICTER_IN_OUTAGE = ['cat ~/.shieldcortex/approvals/approvals.json', 'cd ~/.shieldcortex && ls approvals'];
 
   it('Hermes (outage, advisory) blocks exactly the commands the core classifier puts on the floor', async () => {
     const { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
@@ -571,4 +585,72 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
       fs.rmSync(tmpHome, { recursive: true, force: true });
     }
   });
+
+  // #509 r6 S2: the same table through the OTHER two outage fallbacks — the
+  // OpenClaw interceptor with its evaluator throwing, and the Claude Code hook
+  // with no dist to load — both advisory, so only the floor holds a call.
+  it('OpenClaw (evaluator down) and the Claude Code hook (no dist) hold exactly the same commands, advisory', async () => {
+    const { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
+    const { createInterceptor, DEFAULT_CONFIG } = await import('../../plugins/openclaw/interceptor.js');
+    const expected = [
+      ...TABLE.map((command) => ({
+        command,
+        floor: evaluateToolCall('Bash', { command }).signals.some((s: string) => GUARD_SELF_PROTECTION_SIGNALS.includes(s)),
+      })),
+      ...STRICTER_IN_OUTAGE.map((command) => ({ command, floor: true })),
+    ];
+    const okPipeline = () => ({
+      allowed: true,
+      firewall: { result: 'ALLOW' as const, reason: '', threatIndicators: [] as string[], anomalyScore: 0, blockedPatterns: [] as string[] },
+      trust: { score: 0.5 }, sensitivity: { level: 'INTERNAL' }, fragmentation: null, auditId: 1,
+    });
+    const openclaw = createInterceptor(
+      { ...DEFAULT_CONFIG, actionGuard: { ...DEFAULT_CONFIG.actionGuard, enabled: true, enforce: false, autoApprove: [] } } as never,
+      okPipeline as never,
+      { evaluateToolCall: (() => { throw new Error('evaluator down'); }) as never },
+    );
+    const openclawDecisions: Array<{ command: string; floor: boolean }> = [];
+    for (const { command } of expected) {
+      const held = await openclaw.handleToolCall({ toolName: 'Bash', arguments: { command } }).then(() => false, () => true);
+      openclawDecisions.push({ command, floor: held });
+    }
+    expect(openclawDecisions).toEqual(expected);
+
+    // OpenClaw's native `process` tool: its typed-shell payload keys are part
+    // of the outage surface too.
+    for (const key of ['data', 'text', 'literal']) {
+      const held = await openclaw.handleToolCall({
+        toolName: 'process',
+        arguments: { action: 'write', sessionId: 'shell-1', [key]: 'cd ~/.shieldcortex; printf x > approvals/y\n' },
+      }).then(() => false, () => true);
+      const ordinary = await openclaw.handleToolCall({
+        toolName: 'process',
+        arguments: { action: 'write', sessionId: 'shell-1', [key]: 'ls -la\n' },
+      }).then(() => false, () => true);
+      expect({ key, held, ordinary }).toEqual({ key, held: true, ordinary: false });
+    }
+
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-hook-'));
+    const emptyDist = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-dist-'));
+    const { spawnSync } = await import('node:child_process');
+    try {
+      fs.mkdirSync(path.join(tmpHome, '.shieldcortex'), { recursive: true });
+      fs.writeFileSync(path.join(tmpHome, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: false } }));
+      const hookDecisions = expected.map(({ command }) => {
+        const run = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'pre-tool-hook.mjs')], {
+          input: JSON.stringify({ permission_mode: 'default', tool_name: 'Bash', tool_input: { command } }),
+          env: { ...process.env, HOME: tmpHome, SHIELDCORTEX_DIST_ROOT: emptyDist, SHIELDCORTEX_CONFIG_DIR: path.join(tmpHome, '.shieldcortex') },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        const out = run.stdout.trim();
+        const decision = out ? JSON.parse(out).hookSpecificOutput?.permissionDecision : 'allow';
+        return { command, floor: decision === 'ask' || decision === 'deny' };
+      });
+      expect(hookDecisions).toEqual(expected);
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+      fs.rmSync(emptyDist, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
