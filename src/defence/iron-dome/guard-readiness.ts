@@ -158,6 +158,11 @@ export const REPROMOTE_COOLDOWN_MS = 60 * 60 * 1000;
 
 /** Read budget per recompute, newest files first. */
 export const MAX_READINESS_BYTES = 64 * 1024 * 1024;
+/** r9 (T4): the longest audit line read as a record — far above any row the
+ *  writers produce. A longer line (or a file with no newline at all) is one
+ *  unparseable line, and the sliced reader drops to the next newline instead
+ *  of re-splitting an ever-growing carry on every slice. */
+export const MAX_EVIDENCE_LINE_CHARS = 1024 * 1024;
 /** A recompute lock older than this is abandoned. */
 const LOCK_STALE_MS = 60 * 1000;
 
@@ -679,6 +684,19 @@ interface Evidence {
   oldestDateRead: string | null;
   /** r8 (SF6): day files read inside the budget. */
   filesRead: number;
+  /** r9 (T3): rows dropped at ingest, counted where the report shows them. */
+  otherIntervention: number;
+  otherReach: number;
+  adapterRows: number;
+}
+
+/** r9 (T3): whose report the read is for — so a row that cannot count for
+ *  it is dropped as it is read instead of kept for the whole window. */
+interface EvidenceFor {
+  adapter: ReadinessAdapter;
+  pin: ReadinessPin | null;
+  ivSince: number;
+  rcSince: number;
 }
 
 /**
@@ -710,8 +728,12 @@ function completeLines(text: string): string[] {
 
 /** Parse and admit one line — the one rule, shared by the sync and the
  *  sliced async reader so they can never count differently. */
-function ingestLine(ev: Evidence, seen: Set<string>, line: string, sinceMs: number, nowMs: number): void {
+function ingestLine(ev: Evidence, seen: Set<string>, line: string, sinceMs: number, nowMs: number, want: EvidenceFor): void {
   if (!line) return;
+  if (line.length > MAX_EVIDENCE_LINE_CHARS) {
+    ev.unparseableLines += 1;
+    return;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -727,19 +749,49 @@ function ingestLine(ev: Evidence, seen: Set<string>, line: string, sinceMs: numb
   const ts = Date.parse(String(row.ts ?? ''));
   // Future-dated rows are not evidence of anything that happened.
   if (!Number.isFinite(ts) || ts < sinceMs || ts > nowMs + 60_000) return;
+  // r9 (T3): keep only what evaluateEvidence reads for THIS adapter; the
+  // rest is a count at most. Well-formedness was checked first, so a corrupt
+  // row still invalidates the measurement wherever it came from.
+  let keep = false;
+  let otherIv = false;
+  let otherRc = false;
+  if (isCountedCall(row)) {
+    if (ts >= want.ivSince) {
+      if (isAdapterEvidence(row, want.pin, want.adapter)) keep = true;
+      else otherIv = true;
+    }
+  } else if (row.type === 'approval_reach') {
+    if (ts >= want.rcSince) {
+      // Answers bind to a request by attempt id, whatever their origin; few.
+      if (row.phase === 'answer') keep = typeof row.attemptId === 'string' && row.attemptId !== '';
+      else if (isAdapterEvidence(row, want.pin, want.adapter)) keep = true;
+      else otherRc = true;
+    }
+  } else if (row.type === 'readiness_transition') {
+    // A row with no origin predates r7 and was written by the hook.
+    keep = (row.origin ?? READINESS_ADAPTER) === want.adapter;
+  }
+  const mine = row.origin === want.adapter && row.readinessPin !== undefined && row.readinessPin !== null;
+  if (!keep && !otherIv && !otherRc && !mine) return;
   const id = typeof row.auditEventId === 'string' ? row.auditEventId : null;
   if (id) {
     if (seen.has(id)) return;
     seen.add(id);
   }
-  ev.rows.push({ ts, row });
+  if (mine) ev.adapterRows += 1;
+  if (otherIv) ev.otherIntervention += 1;
+  if (otherRc) ev.otherReach += 1;
+  if (keep) ev.rows.push({ ts, row });
 }
 
 function emptyEvidence(): Evidence {
-  return { rows: [], bytesRead: 0, truncated: false, unreadableFiles: 0, unparseableLines: 0, oldestDateRead: null, filesRead: 0 };
+  return {
+    rows: [], bytesRead: 0, truncated: false, unreadableFiles: 0, unparseableLines: 0, oldestDateRead: null, filesRead: 0,
+    otherIntervention: 0, otherReach: 0, adapterRows: 0,
+  };
 }
 
-function readEvidence(dirs: string[], sinceMs: number, nowMs: number, budget: number): Evidence {
+function readEvidence(dirs: string[], sinceMs: number, nowMs: number, budget: number, want: EvidenceFor): Evidence {
   const ev = emptyEvidence();
   const seen = new Set<string>();
   for (const f of evidenceFiles(dirs, sinceMs)) {
@@ -764,7 +816,10 @@ function readEvidence(dirs: string[], sinceMs: number, nowMs: number, budget: nu
     ev.bytesRead += size;
     ev.oldestDateRead = f.date;
     ev.filesRead += 1;
-    for (const line of completeLines(text)) ingestLine(ev, seen, line, sinceMs, nowMs);
+    for (const line of completeLines(text)) ingestLine(ev, seen, line, sinceMs, nowMs, want);
+    // r9 (T4): an unterminated tail too long to be an append in flight is a
+    // malformed line — as the sliced reader counts it.
+    if (text.length - text.lastIndexOf('\n') - 1 > MAX_EVIDENCE_LINE_CHARS) ev.unparseableLines += 1;
   }
   return ev;
 }
@@ -778,11 +833,19 @@ function readEvidence(dirs: string[], sinceMs: number, nowMs: number, budget: nu
  * the sync reader; the last segment with no trailing newline is an append in
  * flight, left for the next recompute, exactly as there.
  */
-async function readEvidenceAsync(dirs: string[], sinceMs: number, nowMs: number, budget: number): Promise<Evidence> {
+async function readEvidenceAsync(
+  dirs: string[],
+  sinceMs: number,
+  nowMs: number,
+  budget: number,
+  want: EvidenceFor,
+  signal?: AbortSignal,
+): Promise<Evidence> {
   const ev = emptyEvidence();
   const seen = new Set<string>();
   const yieldToLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
   for (const f of evidenceFiles(dirs, sinceMs)) {
+    signal?.throwIfAborted();
     let size = 0;
     try {
       size = (await statAsync(f.path)).size;
@@ -800,16 +863,35 @@ async function readEvidenceAsync(dirs: string[], sinceMs: number, nowMs: number,
       const buf = Buffer.allocUnsafe(EVIDENCE_SLICE_BYTES);
       const decoder = new StringDecoder('utf8');
       let carry = '';
+      // r9 (T4): inside a line already counted as oversized — drop to its end.
+      let skipping = false;
       for (let pos = 0; pos < size;) {
         const { bytesRead } = await fh.read(buf, 0, Math.min(EVIDENCE_SLICE_BYTES, size - pos), pos);
+        signal?.throwIfAborted();
         if (bytesRead === 0) break;
         pos += bytesRead;
-        const lines = (carry + decoder.write(buf.subarray(0, bytesRead))).split('\n');
+        let text = decoder.write(buf.subarray(0, bytesRead));
+        if (skipping) {
+          const nl = text.indexOf('\n');
+          if (nl < 0) {
+            await yieldToLoop();
+            continue;
+          }
+          text = text.slice(nl + 1);
+          skipping = false;
+        }
+        const lines = (carry + text).split('\n');
         carry = lines.pop() ?? '';
-        for (const line of lines) ingestLine(ev, seen, line, sinceMs, nowMs);
+        for (const line of lines) ingestLine(ev, seen, line, sinceMs, nowMs, want);
+        if (carry.length > MAX_EVIDENCE_LINE_CHARS) {
+          ev.unparseableLines += 1;
+          carry = '';
+          skipping = true;
+        }
         await yieldToLoop();
       }
-    } catch {
+    } catch (err) {
+      if (signal?.aborted) throw err;
       ev.unreadableFiles += 1;
       continue;
     } finally {
@@ -880,6 +962,10 @@ export interface ComputeReadinessOptions {
   /** r8 (SF6) test seam: the audit read budget (default
    *  {@link MAX_READINESS_BYTES}). Never fed from config. */
   readBudgetBytes?: number;
+  /** r9 (T3) test seam: told how many rows the read kept. */
+  onEvidenceRead?: (e: { rowsKept: number }) => void;
+  /** r9 (T1): the async read stops (rejects) once this is aborted. */
+  signal?: AbortSignal;
 }
 
 function computeInputs(opts: ComputeReadinessOptions) {
@@ -889,7 +975,8 @@ function computeInputs(opts: ComputeReadinessOptions) {
   const pin = opts.pin === undefined ? currentReadinessPin(adapter) : opts.pin;
   const since = nowMs - Math.max(INTERVENTION_WINDOW_MS, REACHABILITY_WINDOW_MS);
   const budget = opts.readBudgetBytes ?? MAX_READINESS_BYTES;
-  return { nowMs, adapter, paths, pin, since, budget };
+  const want: EvidenceFor = { adapter, pin, ivSince: nowMs - INTERVENTION_WINDOW_MS, rcSince: nowMs - REACHABILITY_WINDOW_MS };
+  return { nowMs, adapter, paths, pin, since, budget, want };
 }
 
 /**
@@ -898,7 +985,9 @@ function computeInputs(opts: ComputeReadinessOptions) {
  */
 export function computeReadiness(opts: ComputeReadinessOptions): ReadinessReport {
   const inp = computeInputs(opts);
-  return evaluateEvidence(opts, inp, readEvidence(inp.paths.readAuditDirs, inp.since, inp.nowMs, inp.budget));
+  const ev = readEvidence(inp.paths.readAuditDirs, inp.since, inp.nowMs, inp.budget, inp.want);
+  opts.onEvidenceRead?.({ rowsKept: ev.rows.length });
+  return evaluateEvidence(opts, inp, ev);
 }
 
 /**
@@ -907,7 +996,9 @@ export function computeReadiness(opts: ComputeReadinessOptions): ReadinessReport
  */
 export async function computeReadinessAsync(opts: ComputeReadinessOptions): Promise<ReadinessReport> {
   const inp = computeInputs(opts);
-  return evaluateEvidence(opts, inp, await readEvidenceAsync(inp.paths.readAuditDirs, inp.since, inp.nowMs, inp.budget));
+  const ev = await readEvidenceAsync(inp.paths.readAuditDirs, inp.since, inp.nowMs, inp.budget, inp.want, opts.signal);
+  opts.onEvidenceRead?.({ rowsKept: ev.rows.length });
+  return evaluateEvidence(opts, inp, ev);
 }
 
 function evaluateEvidence(
@@ -922,7 +1013,7 @@ function evaluateEvidence(
   // ── Operational intervention rate ──
   let stops = 0;
   let total = 0;
-  let ivOther = 0;
+  let ivOther = ev.otherIntervention;
   let oldest = Infinity;
   let newest = -Infinity;
   const ivSince = nowMs - INTERVENTION_WINDOW_MS;
@@ -973,7 +1064,7 @@ function evaluateEvidence(
   let resolved = 0;
   let reached = 0;
   let pending = 0;
-  let rcOther = 0;
+  let rcOther = ev.otherReach;
   let lastRoundTrip = -Infinity;
   for (const { ts, row } of rows) {
     if (row.type !== 'approval_reach' || ts < rcSince) continue;
@@ -1076,9 +1167,8 @@ function evaluateEvidence(
 
   // ── Last transition, the fallback memory of the mode ──
   let lastTransition: ReadinessReport['lastTransition'] = null;
-  let adapterRows = 0;
+  const adapterRows = ev.adapterRows;
   for (const { ts, row } of rows) {
-    if (row.origin === adapter && row.readinessPin !== undefined && row.readinessPin !== null) adapterRows += 1;
     if (row.type !== 'readiness_transition') continue;
     // r7: another adapter's transition is not this adapter's mode (a row
     // with no origin predates r7 and was written by the hook).
@@ -1833,9 +1923,15 @@ export function resolveReadiness(opts: ResolveReadinessOptions): ResolvedReadine
  * one.
  */
 export async function resolveReadinessAsync(opts: ResolveReadinessOptions): Promise<ResolvedReadiness> {
+  opts.signal?.throwIfAborted();
   const begun = beginResolve(opts);
   if ('done' in begun) return begun.done;
-  return finishResolve(opts, begun, await computeReadinessAsync(begun.computeOpts));
+  const report = await computeReadinessAsync({ ...begun.computeOpts, signal: opts.signal });
+  // r9 (T1): the caller gave up on this resolve (the gateway's timeout) and
+  // has already enforced without it. A read that settles late writes nothing:
+  // a transition journalled here would never be announced.
+  opts.signal?.throwIfAborted();
+  return finishResolve(opts, begun, report);
 }
 
 export interface ResolveReadinessOptions {
@@ -1852,6 +1948,8 @@ export interface ResolveReadinessOptions {
   /** #509 r7: which adapter is asking (default the Claude Code hook). Its own
    *  evidence, state file, journal and lock — see READINESS_ADAPTERS. */
   adapter?: ReadinessAdapter;
+  /** r9 (T1), async resolve only: once aborted, it rejects and writes nothing. */
+  signal?: AbortSignal;
 }
 
 /** What the pre-compute half of a resolve read, for the post-compute half. */
