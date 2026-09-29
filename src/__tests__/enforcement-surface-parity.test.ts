@@ -665,18 +665,34 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
 describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and demoted states', () => {
   const DAY = 24 * 60 * 60 * 1000;
   const REAL_DIST = path.join(repoRoot, 'dist');
+  const CATASTROPHIC_MARK = 'sc-parity-catastrophic-tier';
+  const CATASTROPHIC_VERDICT = { decision: 'block', severity: 'catastrophic', family: 'fs', action: 'recursive-delete', reason: 'catastrophic (parity fixture)', signals: ['recursive-force-delete'] };
   const INPUTS: Array<[string, Record<string, unknown>]> = [
     ['dangerous', { command: 'sudo modprobe softdog' }],
     ['benign', { command: 'ls -la' }],
     ['self-protection floor', { command: `echo {} > ~/${['.shieldcortex', 'approvals', 'parity-r7.json'].join('/')}` }],
     ['unscanned (schema-invalid)', { command: 'ls', evil: 'x' }],
+    // r8 (N3): the catastrophic tier and a real session-lease freeze (a FROZEN
+    // record in the isolated DECISIONS.md) — floors in every state. The
+    // catastrophic command text cannot be written into this file (the Action
+    // Guard refuses it), so a marker stands for it and BOTH surfaces' evaluator
+    // gives it the guard's verdict for that tier (see CATASTROPHIC_VERDICT).
+    ['catastrophic', { command: CATASTROPHIC_MARK }],
+    ['lease (frozen scope)', { command: 'npm publish' }],
   ];
 
-  async function decisions(state: 'shadow' | 'promoted' | 'demoted'): Promise<{ hook: Record<string, string>; openclaw: Record<string, string> }> {
+  /** r8 (N3): 'hook-only' / 'openclaw-only' — ONE surface's evidence is
+   *  seeded, and BOTH hold reviewed effectiveness evidence, so the other
+   *  surface would promote if it counted that evidence. */
+  type State = 'shadow' | 'promoted' | 'demoted' | 'hook-only' | 'openclaw-only';
+
+  async function decisions(state: State): Promise<{ hook: Record<string, string>; openclaw: Record<string, string> }> {
+    const reviewedState = state === 'promoted' || state === 'hook-only' || state === 'openclaw-only';
     const { pathToFileURL } = await import('node:url');
     const { spawnSync } = await import('node:child_process');
     const readiness = await import('../defence/iron-dome/guard-readiness.js');
     const { evaluateToolCall } = await import('../defence/iron-dome/tool-action-guard.js');
+    const lease = await import('../defence/iron-dome/session-lease-store.js');
     const { createInterceptor, DEFAULT_CONFIG } = await import('../../plugins/openclaw/interceptor.js');
     const { buildReadinessRuntime } = await import('../../plugins/openclaw/index.js');
     const distReadiness = await import(pathToFileURL(path.join(REAL_DIST, 'defence', 'iron-dome', 'guard-readiness.js')).href);
@@ -698,7 +714,7 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
       const shimIron = path.join(distRoot, 'defence', 'iron-dome');
       fs.mkdirSync(shimIron, { recursive: true });
       for (const f of fs.readdirSync(realIron)) {
-        if (!f.endsWith('.js') || f === 'webhook-notify-channel.js' || f === 'guard-readiness.js') continue;
+        if (!f.endsWith('.js') || f === 'webhook-notify-channel.js' || f === 'guard-readiness.js' || f === 'tool-action-guard.js') continue;
         fs.writeFileSync(path.join(shimIron, f), `export * from ${JSON.stringify(pathToFileURL(path.join(realIron, f)).href)};\n`);
       }
       const realReadiness = JSON.stringify(pathToFileURL(path.join(realIron, 'guard-readiness.js')).href);
@@ -706,9 +722,20 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
         `import * as real from ${realReadiness};`,
         `export * from ${realReadiness};`,
         'const pin = real.currentReadinessPin();',
-        `const REVIEWED = ${state === 'promoted'} && pin ? [{ ...pin, reviewedAt: new Date(Date.now() - 86400000).toISOString(), reviewedBy: 'parity fixture', reference: 'parity fixture', cases: 60 }] : [];`,
+        `const REVIEWED = ${reviewedState} && pin ? [{ ...pin, reviewedAt: new Date(Date.now() - 86400000).toISOString(), reviewedBy: 'parity fixture', reference: 'parity fixture', cases: 60 }] : [];`,
         'export function resolveReadiness(opts) { return real.resolveReadiness({ ...opts, effectivenessRegistry: REVIEWED }); }',
       ].join('\n'));
+      // The real evaluator, except the catastrophic marker (see INPUTS).
+      const realGuard = JSON.stringify(pathToFileURL(path.join(realIron, 'tool-action-guard.js')).href);
+      fs.writeFileSync(path.join(shimIron, 'tool-action-guard.js'), [
+        `import * as real from ${realGuard};`,
+        `export * from ${realGuard};`,
+        `export function evaluateToolCall(tool, args, ...rest) { return args?.command === ${JSON.stringify(CATASTROPHIC_MARK)} ? ${JSON.stringify(CATASTROPHIC_VERDICT)} : real.evaluateToolCall(tool, args, ...rest); }`,
+      ].join('\n'));
+      // A standing freeze on npm publishes: the real session-lease plane refuses
+      // `npm publish` on both surfaces.
+      fs.mkdirSync(sc, { recursive: true });
+      fs.writeFileSync(path.join(sc, 'DECISIONS.md'), '| FROZEN | 2026-09-28 | nobody publishes to npm until review |\n');
       fs.writeFileSync(path.join(shimIron, 'webhook-notify-channel.js'),
         "export function createWebhookNotifyChannel() { return { name: 'webhook', async send() { return { delivered: true }; } }; }\n");
       const notify = { enabled: true, webhookUrl: 'https://hooks.example.invalid/parity' };
@@ -745,10 +772,8 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
         }
         fs.writeFileSync(journal, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
       }
-      if (state === 'promoted') {
-        seed('claude-code-hook', pins.hook);
-        seed('openclaw-interceptor', pins.openclaw);
-      }
+      if (state === 'promoted' || state === 'hook-only') seed('claude-code-hook', pins.hook);
+      if (state === 'promoted' || state === 'openclaw-only') seed('openclaw-interceptor', pins.openclaw);
 
       const hook: Record<string, string> = {};
       for (const [name, input] of INPUTS) {
@@ -770,7 +795,7 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
       });
       const rt = buildReadinessRuntime(readiness as never, notify, {
         home,
-        effectivenessRegistry: state === 'promoted'
+        effectivenessRegistry: reviewedState
           ? [{ ...pins.openclaw, reviewedAt: new Date(Date.now() - DAY).toISOString(), reviewedBy: 'parity fixture', reference: 'parity fixture', cases: 60 }]
           : [],
         deliver: async () => ({ deliveredVia: 'webhook', attempts: [{ channel: 'webhook', result: { delivered: true } }] }),
@@ -778,7 +803,15 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
       const openclawGuard = createInterceptor(
         { ...DEFAULT_CONFIG, actionGuard: { ...DEFAULT_CONFIG.actionGuard, enabled: true, enforce: true, readinessGate: true, notify }, logger: { info: () => {}, warn: () => {} } } as never,
         okPipeline as never,
-        { evaluateToolCall: evaluateToolCall as never, readiness: rt } as never,
+        {
+          evaluateToolCall: ((tool: string, args: Record<string, unknown>, ...rest: unknown[]) => (args?.command === CATASTROPHIC_MARK
+            ? CATASTROPHIC_VERDICT
+            : (evaluateToolCall as (...a: unknown[]) => unknown)(tool, args, ...rest))) as never,
+          // As the plugin wires it (index.ts): the real fs-backed lease plane.
+          checkActionLease: (tool: string, args: Record<string, unknown>, sessionId?: string) =>
+            lease.evaluateToolCallLease(tool, args, { self: sessionId ?? '' }),
+          readiness: rt,
+        } as never,
       );
       const openclaw: Record<string, string> = {};
       for (const [name, input] of INPUTS) {
@@ -798,10 +831,13 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
     }
   }
 
+  const FLOORS = { 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card', catastrophic: 'blocked', 'lease (frozen scope)': 'blocked' };
+  const SHADOWED = { dangerous: 'allowed', benign: 'allowed', ...FLOORS };
+  const ENFORCED = { dangerous: 'card', benign: 'allowed', ...FLOORS };
   const EXPECTED: Record<'shadow' | 'promoted' | 'demoted', Record<string, string>> = {
-    shadow: { dangerous: 'allowed', benign: 'allowed', 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card' },
-    promoted: { dangerous: 'card', benign: 'allowed', 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card' },
-    demoted: { dangerous: 'allowed', benign: 'allowed', 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card' },
+    shadow: SHADOWED,
+    promoted: ENFORCED,
+    demoted: SHADOWED,
   };
 
   for (const state of ['shadow', 'promoted', 'demoted'] as const) {
@@ -811,4 +847,19 @@ describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and 
       expect(hook).toEqual(EXPECTED[state]);
     }, 120_000);
   }
+
+  // r8 (N3): readiness is per surface. One surface's evidence never promotes
+  // the other, even when both hold reviewed effectiveness evidence — and the
+  // floors hold on the one still watching.
+  it('hook promoted, OpenClaw not: only the hook enforces the dangerous call', async () => {
+    const { hook, openclaw } = await decisions('hook-only');
+    expect(hook).toEqual(ENFORCED);
+    expect(openclaw).toEqual(SHADOWED);
+  }, 120_000);
+
+  it('OpenClaw promoted, hook not: only OpenClaw enforces the dangerous call', async () => {
+    const { hook, openclaw } = await decisions('openclaw-only');
+    expect(openclaw).toEqual(ENFORCED);
+    expect(hook).toEqual(SHADOWED);
+  }, 120_000);
 });
