@@ -3254,6 +3254,14 @@ type DeliveryResult = { deliveredVia: string | null; attempts: Array<{ channel: 
 export const OPENCLAW_READINESS_ADAPTER = 'openclaw-interceptor';
 
 /**
+ * #509 r9 (T1): the longest a gated call waits on the readiness recompute.
+ * Every gated tool call on the gateway waits on the one shared read, so a
+ * stalled read must not become a stalled gateway. A healthy 64 MB recompute
+ * takes well under a second; past this bound the calls ENFORCE.
+ */
+export const READINESS_RESOLVE_TIMEOUT_MS = 8_000;
+
+/**
  * #509 r7: the enforce-when-ready gate for the OpenClaw interceptor, built
  * from guard-readiness.ts as the installed `shieldcortex/defence` exports it
  * — the SAME implementation the Claude Code hook loads from dist — bound to
@@ -3275,6 +3283,8 @@ export function buildReadinessRuntime(
     home?: string;
     effectivenessRegistry?: readonly unknown[];
     deliver?: (which: 'promote' | 'demote' | 'start') => Promise<DeliveryResult | null>;
+    /** r9 (T1): tests only — the async resolve bound, in ms. */
+    resolveTimeoutMs?: number;
   } = {},
 ): ReadinessRuntime | undefined {
   if (
@@ -3339,14 +3349,34 @@ export function buildReadinessRuntime(
   // instead of each starting a read. Only the call that started it carries the
   // transition (and so announces it); the others get the mode alone. A dist
   // without the async resolver keeps the sync one.
+  //
+  // r9 (T1): every gated call waits on this read, so it is raced against
+  // READINESS_RESOLVE_TIMEOUT_MS. On timeout the starter and every joiner
+  // reject — the interceptor ENFORCES and warns once for the shared failure —
+  // the slot is freed so the next call retries, and the read is aborted: an
+  // aborted resolve writes no transition or state, however late it settles.
+  const timeoutMs = seams.resolveTimeoutMs ?? READINESS_RESOLVE_TIMEOUT_MS;
   let inFlight: Promise<ResolvedReadinessLike> | null = null;
   function resolve(): ResolvedReadinessLike | Promise<ResolvedReadinessLike> {
     if (typeof readiness.resolveReadinessAsync !== 'function') return readiness.resolveReadiness!(resolveOpts());
     if (inFlight) return inFlight.then((r) => ({ mode: r.mode, transition: null }));
-    const p = readiness.resolveReadinessAsync(resolveOpts());
+    const abort = new AbortController();
+    const read = readiness.resolveReadinessAsync({ ...resolveOpts(), signal: abort.signal });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        reject(new Error(`the readiness recompute timed out after ${timeoutMs / 1000} s`));
+      }, timeoutMs);
+      timer.unref?.();
+    });
+    const p = Promise.race([read, timedOut]);
     inFlight = p;
-    const clear = () => { if (inFlight === p) inFlight = null; };
-    p.then(clear, clear);
+    const settle = () => {
+      clearTimeout(timer);
+      if (inFlight === p) inFlight = null;
+    };
+    p.then(settle, settle);
     return p;
   }
 

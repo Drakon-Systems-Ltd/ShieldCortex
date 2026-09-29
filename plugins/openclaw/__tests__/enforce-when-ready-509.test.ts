@@ -11,6 +11,7 @@ import plugin, {
   __setDefenceModuleForTest,
   __setRuntimeForTest,
   buildReadinessRuntime,
+  READINESS_RESOLVE_TIMEOUT_MS,
 } from '../index.js';
 import { __resetReadinessWarningsForTest, createInterceptor, DEFAULT_CONFIG, type ReadinessRuntime } from '../interceptor.js';
 
@@ -811,5 +812,138 @@ describe('#509 r7 — openclaw.json cannot switch the gate on', () => {
       __setRuntimeForTest(null);
       __resetConfigStateForTest();
     }
+  });
+});
+
+// ==================== round 9 ====================
+
+/** The runtime over `readiness`, with `resolveReadinessAsync` replaced: the
+ *  first `stubbed` calls get `first()`, later calls the real resolver. */
+function stubbedRuntime(
+  first: (opts: Record<string, unknown>) => Promise<unknown>,
+  opts: { stubbed?: number; announced?: string[]; timeoutMs?: number } = {},
+): { rt: ReadinessRuntime; calls: Array<Record<string, unknown>> } {
+  const calls: Array<Record<string, unknown>> = [];
+  const mod = {
+    ...readiness,
+    resolveReadinessAsync: (o: Record<string, unknown>) => {
+      calls.push(o);
+      return calls.length <= (opts.stubbed ?? 1) ? first(o) : readiness.resolveReadinessAsync(o as never);
+    },
+  };
+  const rt = buildReadinessRuntime(mod as never, NOTIFY, {
+    home,
+    effectivenessRegistry: [],
+    resolveTimeoutMs: opts.timeoutMs ?? 150,
+    deliver: async (which) => {
+      opts.announced?.push(which);
+      return { deliveredVia: 'webhook', attempts: [{ channel: 'webhook', result: { delivered: true } }] };
+    },
+  });
+  expect(rt).toBeDefined();
+  return { rt: rt!, calls };
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => { setTimeout(r, ms); });
+/** A decision, or 'hung' when it has not settled within `ms`. */
+function within(p: Promise<Decision>, ms = 3000): Promise<Decision | 'hung'> {
+  return Promise.race([p, sleep(ms).then(() => 'hung' as const)]);
+}
+
+describe('#509 r9 T1 — a stalled readiness read never hangs the gateway', () => {
+  it('the bound is a 5–10 s constant', () => {
+    expect(READINESS_RESOLVE_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
+    expect(READINESS_RESOLVE_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
+  });
+
+  it('a read that never settles: the call and its joiners ENFORCE within the bound, one warning, and a later call recovers', async () => {
+    const announced: string[] = [];
+    const { rt, calls } = stubbedRuntime(() => new Promise(() => { /* never settles */ }), { announced });
+    const i = interceptor({}, { readiness: rt });
+    const started = Date.now();
+    const out = await Promise.all([within(decide(i, DANGEROUS)), within(decide(i, DANGEROUS)), within(decide(i, DANGEROUS))]);
+    expect(out).toEqual(['card', 'card', 'card']);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(calls).toHaveLength(1); // the joiners shared the one read
+    expect(i.warnings.filter((w) => /readiness/.test(w) && /timed out/.test(w))).toHaveLength(1);
+    expect(announced).toEqual([]);
+    // The timed-out read was told to stop, so a late settle writes nothing.
+    expect((calls[0].signal as AbortSignal | undefined)?.aborted).toBe(true);
+    // inFlight was cleared: the next call starts a fresh read and resolves (shadow).
+    expect(await within(decide(i, DANGEROUS))).toBe('allowed');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a timed-out read that settles later is discarded: its transition is never announced or applied', async () => {
+    let settle: (v: unknown) => void = () => {};
+    const announced: string[] = [];
+    const { rt } = stubbedRuntime(() => new Promise((r) => { settle = r; }), { announced });
+    const i = interceptor({}, { readiness: rt });
+    expect(await within(decide(i, DANGEROUS))).toBe('card');
+    settle({ mode: 'shadow', transition: 'demote', transitionAt: new Date().toISOString(), demotionReason: 'late' });
+    await sleep(20);
+    expect(announced).toEqual([]);
+    expect(i.warnings.some((w) => /DEMOTED/.test(w))).toBe(false);
+  });
+});
+
+describe('#509 r9 T2 — a rejected async resolve fails closed', () => {
+  it('single call: ENFORCES, nothing announced, and the next call resolves normally', async () => {
+    const announced: string[] = [];
+    const { rt, calls } = stubbedRuntime(async () => { throw new Error('audit read failed (test)'); }, { announced });
+    const i = interceptor({}, { readiness: rt });
+    expect(await within(decide(i, DANGEROUS))).toBe('card');
+    expect(announced).toEqual([]);
+    expect(i.warnings.filter((w) => /could not be resolved/.test(w))).toHaveLength(1);
+    expect(await within(decide(i, DANGEROUS))).toBe('allowed');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('shared in-flight recompute rejects: the starter and every joiner ENFORCE, one warning, inFlight cleared', async () => {
+    const announced: string[] = [];
+    const { rt, calls } = stubbedRuntime(
+      () => sleep(40).then(() => { throw new Error('audit read failed (test)'); }),
+      { announced },
+    );
+    const i = interceptor({}, { readiness: rt });
+    const out = await Promise.all([within(decide(i, DANGEROUS)), within(decide(i, DANGEROUS)), within(decide(i, DANGEROUS))]);
+    expect(out).toEqual(['card', 'card', 'card']);
+    expect(calls).toHaveLength(1);
+    expect(announced).toEqual([]);
+    expect(i.warnings.filter((w) => /could not be resolved/.test(w))).toHaveLength(1);
+    expect(await within(decide(i, DANGEROUS))).toBe('allowed');
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe('#509 r9 T5 — the transition notify row carries the starting call\'s context', () => {
+  it('a call that runs while the promotion is announced does not lend the notify row its args or strip its pin', async () => {
+    seedReadyHistory(OPENCLAW);
+    let release: () => void = () => {};
+    const delivering = new Promise<void>((r) => { release = r; });
+    let entered: () => void = () => {};
+    const inDeliver = new Promise<void>((r) => { entered = r; });
+    const rt = buildReadinessRuntime(readiness as never, NOTIFY, {
+      home,
+      effectivenessRegistry: reviewed(OPENCLAW),
+      deliver: async () => {
+        entered();
+        await delivering;
+        return { deliveredVia: 'webhook', attempts: [{ channel: 'webhook', result: { delivered: true } }] };
+      },
+    });
+    const i = interceptor({}, {
+      readiness: rt,
+      bindAudit: (e: Record<string, unknown>, args?: Record<string, unknown>) => ({ ...e, boundCommand: args?.command ?? null }),
+    });
+    const gated = decide(i, BENIGN);
+    await inDeliver;
+    await i.handleToolCall({ toolName: 'remember', arguments: { title: 't', content: 'a note to keep' } } as never);
+    release();
+    expect(await gated).toBe('allowed');
+    const notify = rows().filter((r) => r.action === 'notify');
+    expect(notify).toEqual([
+      expect.objectContaining({ readinessTransition: 'promote', boundCommand: BENIGN.command, readinessPin: pinOf(OPENCLAW) }),
+    ]);
   });
 });

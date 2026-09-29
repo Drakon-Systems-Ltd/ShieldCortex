@@ -1600,7 +1600,12 @@ export function createInterceptor(
     }
   }
 
-  async function resolveReadinessGate(toolName: string): Promise<{
+  const readinessFailuresWarned = new WeakSet<object>();
+
+  async function resolveReadinessGate(
+    toolName: string,
+    own: { sessionId: string | undefined; args: Record<string, unknown> | undefined },
+  ): Promise<{
     whenReady: boolean;
     shadow: boolean;
     pin: { adapter: string; policy: string } | undefined;
@@ -1624,6 +1629,12 @@ export function createInterceptor(
       const resolved = await readiness.resolve();
       callReadinessPin = pin; // a call that ran during the await cleared it
       const shadow = resolved.mode === 'shadow';
+      // r9 (T5): the notify row is written after `await announce`, when a
+      // call that ran meanwhile owns the shared context: stamp it with THIS
+      // call's session, args and pin.
+      let sessionKey: string | undefined;
+      try { sessionKey = options?.sessionGuard?.keyFor(own.sessionId) ?? undefined; } catch { /* unkeyed row */ }
+      const notifyCtx: CapturedAuditContext = { sessionKey, args: own.args, readinessPin: pin };
       if (resolved.tamper) {
         log.warn(`[shieldcortex] ⚠️ enforce-when-ready: readiness tamper signal — ${String(resolved.tamper).slice(0, 300)}. Recorded; run \`shieldcortex doctor\`.`);
       }
@@ -1631,10 +1642,10 @@ export function createInterceptor(
         let line = 'ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready).';
         try { line = readiness.describeDemotion(resolved.demotionReason); } catch { /* keep the fallback */ }
         log.warn(`[shieldcortex] ⚠️ ${line}`);
-        recordTransitionNotify('demote', toolName, await readiness.announce('demote', resolved, toolName));
+        recordTransitionNotify('demote', toolName, await readiness.announce('demote', resolved, toolName), notifyCtx);
       } else if (resolved.transition === 'promote') {
         log.warn('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts on OpenClaw.');
-        recordTransitionNotify('promote', toolName, await readiness.announce('promote', resolved, toolName));
+        recordTransitionNotify('promote', toolName, await readiness.announce('promote', resolved, toolName), notifyCtx);
       } else if (resolved.started) {
         // r8 (SF4): the record did not exist (posture chosen before OpenClaw
         // was gated); this call started it in shadow. Said once — the next
@@ -1642,11 +1653,17 @@ export function createInterceptor(
         let line = 'enforce-when-ready: the OpenClaw plugin now watches first — dangerous tool calls are logged, NOT stopped, until it meets its readiness conditions.';
         try { line = readiness.describeStart?.() ?? line; } catch { /* keep the fallback */ }
         log.warn(`[shieldcortex] ⚠️ ${line}`);
-        recordTransitionNotify('start', toolName, await readiness.announce('start', resolved, toolName));
+        recordTransitionNotify('start', toolName, await readiness.announce('start', resolved, toolName), notifyCtx);
       }
       return { whenReady, shadow, pin };
     } catch (err) {
-      log.warn(`[shieldcortex] enforce-when-ready: readiness could not be resolved (${String(err instanceof Error ? err.message : err).slice(0, 200)}) — ENFORCING.`);
+      // r9: calls that shared one failed recompute (timeout or rejection) get
+      // the same error — said once, not once per waiting call.
+      const shared = typeof err === 'object' && err !== null;
+      if (!shared || !readinessFailuresWarned.has(err)) {
+        if (shared) readinessFailuresWarned.add(err);
+        log.warn(`[shieldcortex] enforce-when-ready: readiness could not be resolved (${String(err instanceof Error ? err.message : err).slice(0, 200)}) — ENFORCING.`);
+      }
       return { whenReady, shadow: false, pin };
     }
   }
@@ -1659,16 +1676,17 @@ export function createInterceptor(
     which: 'promote' | 'demote' | 'start',
     toolName: string,
     result: { deliveredVia: string | null } | null | void,
+    captured: CapturedAuditContext,
   ): void {
     const status = !result ? 'not_configured' : result.deliveredVia ? 'delivered' : 'error';
     const outcome = status === 'delivered' ? 'notified' : status === 'error' ? 'notify_failed' : 'notify_not_configured';
-    emitAudit({
+    emitAuditWith({
       type: 'intercept', tool: toolName, severity: 'high', firewallResult: 'ACTION_GUARD',
       threats: [`readiness-${which === 'start' ? 'started' : `${which}d`}`], anomalyScore: 0, trustScore: 0,
       sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
       action: 'notify', outcome, preview: `${toolName} :: readiness ${which} notice`, ts: new Date().toISOString(),
       readinessTransition: which, notify: { status, deliveredVia: result?.deliveredVia ?? null },
-    });
+    }, captured);
   }
 
   /** #509 approval-reach evidence for one request put to (or kept from) a
@@ -1890,7 +1908,7 @@ export function createInterceptor(
     // #509 enforce-when-ready: resolved here — after the lease floor and the
     // evaluation, before any verdict is applied — exactly where the hook does.
     const own = { sessionId: lastSessionId, args: lastCallArgs };
-    const gate = await resolveReadinessGate(context.toolName);
+    const gate = await resolveReadinessGate(context.toolName, own);
     // r8 (SF6): the gate awaits the readiness recompute, and a call that ran
     // meanwhile overwrote the in-flight context (its entry clears the pin).
     // Put this call's back before it writes its rows.
