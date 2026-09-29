@@ -654,3 +654,161 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
     }
   }, 120_000);
 });
+
+// #509 round 7 (Tars, PR #610): "enforce when ready" must mean the same thing
+// on both surfaces. The Claude Code hook (BUILT, driven end to end) and the
+// OpenClaw interceptor (real evaluator, real guard-readiness bound to its own
+// adapter) answer the SAME inputs in the same readiness state, compared by
+// the DECISION each actually made — allowed / card (ask) / blocked — never by
+// config. Each surface's readiness is its own: the promoted state seeds each
+// adapter's own pinned evidence and reviewed-evidence registry.
+describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and demoted states', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const REAL_DIST = path.join(repoRoot, 'dist');
+  const INPUTS: Array<[string, Record<string, unknown>]> = [
+    ['dangerous', { command: 'sudo modprobe softdog' }],
+    ['benign', { command: 'ls -la' }],
+    ['self-protection floor', { command: `echo {} > ~/${['.shieldcortex', 'approvals', 'parity-r7.json'].join('/')}` }],
+    ['unscanned (schema-invalid)', { command: 'ls', evil: 'x' }],
+  ];
+
+  async function decisions(state: 'shadow' | 'promoted' | 'demoted'): Promise<{ hook: Record<string, string>; openclaw: Record<string, string> }> {
+    const { pathToFileURL } = await import('node:url');
+    const { spawnSync } = await import('node:child_process');
+    const readiness = await import('../defence/iron-dome/guard-readiness.js');
+    const { evaluateToolCall } = await import('../defence/iron-dome/tool-action-guard.js');
+    const { createInterceptor, DEFAULT_CONFIG } = await import('../../plugins/openclaw/interceptor.js');
+    const { buildReadinessRuntime } = await import('../../plugins/openclaw/index.js');
+    const distReadiness = await import(pathToFileURL(path.join(REAL_DIST, 'defence', 'iron-dome', 'guard-readiness.js')).href);
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-r7-'));
+    const distRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-r7-dist-'));
+    const sc = path.join(home, '.shieldcortex');
+    const audit = path.join(sc, 'audit');
+    const saved = { HOME: process.env.HOME, CFG: process.env.SHIELDCORTEX_CONFIG_DIR, AUDIT: process.env.SHIELDCORTEX_AUDIT_DIR };
+    process.env.HOME = home;
+    process.env.SHIELDCORTEX_CONFIG_DIR = sc;
+    process.env.SHIELDCORTEX_AUDIT_DIR = audit;
+    try {
+      fs.mkdirSync(audit, { recursive: true });
+      // The hook's dist: real modules, a recording webhook (nothing leaves the
+      // box), and — for 'promoted' only — a registry holding reviewed evidence
+      // for the hook's pin (a build that ships it; never config).
+      const realIron = path.join(REAL_DIST, 'defence', 'iron-dome');
+      const shimIron = path.join(distRoot, 'defence', 'iron-dome');
+      fs.mkdirSync(shimIron, { recursive: true });
+      for (const f of fs.readdirSync(realIron)) {
+        if (!f.endsWith('.js') || f === 'webhook-notify-channel.js' || f === 'guard-readiness.js') continue;
+        fs.writeFileSync(path.join(shimIron, f), `export * from ${JSON.stringify(pathToFileURL(path.join(realIron, f)).href)};\n`);
+      }
+      const realReadiness = JSON.stringify(pathToFileURL(path.join(realIron, 'guard-readiness.js')).href);
+      fs.writeFileSync(path.join(shimIron, 'guard-readiness.js'), [
+        `import * as real from ${realReadiness};`,
+        `export * from ${realReadiness};`,
+        'const pin = real.currentReadinessPin();',
+        `const REVIEWED = ${state === 'promoted'} && pin ? [{ ...pin, reviewedAt: new Date(Date.now() - 86400000).toISOString(), reviewedBy: 'parity fixture', reference: 'parity fixture', cases: 60 }] : [];`,
+        'export function resolveReadiness(opts) { return real.resolveReadiness({ ...opts, effectivenessRegistry: REVIEWED }); }',
+      ].join('\n'));
+      fs.writeFileSync(path.join(shimIron, 'webhook-notify-channel.js'),
+        "export function createWebhookNotifyChannel() { return { name: 'webhook', async send() { return { delivered: true }; } }; }\n");
+      const notify = { enabled: true, webhookUrl: 'https://hooks.example.invalid/parity' };
+      fs.writeFileSync(path.join(sc, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true, readinessGate: true, notify } }));
+
+      const pins = { hook: distReadiness.currentReadinessPin(), openclaw: readiness.currentReadinessPin('openclaw-interceptor')! };
+      let seq = 0;
+      const seed = (adapter: 'claude-code-hook' | 'openclaw-interceptor', pin: unknown) => {
+        const now = Date.now();
+        const lines: string[] = [];
+        const row = (r: Record<string, unknown>) => { seq += 1; lines.push(JSON.stringify({ auditEventId: `p${seq}`, readinessPin: pin, ...r })); };
+        for (let i = 0; i < 1000; i += 1) {
+          const stop = i < 5;
+          row({ ts: new Date(now - 8 * DAY + Math.floor((i * 8 * DAY) / 1000) + 1000).toISOString(), type: 'intercept', origin: adapter, tool: 'Bash', severity: stop ? 'high' : 'low', action: stop ? 'require_approval' : 'allow', outcome: stop ? 'would_hold' : 'allowed' });
+        }
+        for (let i = 0; i < 25; i += 1) {
+          const t = now - DAY + i * 60_000;
+          row({ ts: new Date(t).toISOString(), type: 'approval_reach', origin: adapter, reachId: `${adapter}${i}`, attemptId: `${adapter}a${i}`, phase: 'request' });
+          row({ ts: new Date(t + 30_000).toISOString(), type: 'approval_reach', origin: adapter, reachId: `${adapter}${i}`, attemptId: `${adapter}a${i}`, phase: 'answer', answer: 'approve' });
+        }
+        // Rows are spread over 9 days: one file per day, as the audit writes them.
+        for (const l of lines) {
+          const day = String(JSON.parse(l).ts).slice(0, 10);
+          fs.appendFileSync(path.join(audit, `realtime-${day}.jsonl`), `${l}\n`);
+        }
+      };
+      for (const adapter of ['claude-code-hook', 'openclaw-interceptor'] as const) {
+        const journal = readiness.transitionsPathFor(readiness.readinessPaths({ home, adapter }));
+        fs.mkdirSync(path.dirname(journal), { recursive: true });
+        const entries: Array<Record<string, unknown>> = [{ ts: new Date(Date.now() - 30 * DAY).toISOString(), event: 'init', to: 'shadow' }];
+        if (state === 'demoted') {
+          entries.push({ ts: new Date(Date.now() - 3 * DAY).toISOString(), event: 'promote', to: 'enforcing' });
+          entries.push({ ts: new Date(Date.now() - 2 * DAY).toISOString(), event: 'demote', to: 'shadow', reason: 'parity fixture' });
+        }
+        fs.writeFileSync(journal, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      }
+      if (state === 'promoted') {
+        seed('claude-code-hook', pins.hook);
+        seed('openclaw-interceptor', pins.openclaw);
+      }
+
+      const hook: Record<string, string> = {};
+      for (const [name, input] of INPUTS) {
+        const run = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'pre-tool-hook.mjs')], {
+          input: JSON.stringify({ session_id: 'parity-r7', cwd: '/tmp', hook_event_name: 'PreToolUse', permission_mode: 'default', tool_name: 'Bash', tool_input: input }),
+          env: { ...process.env, HOME: home, USERPROFILE: home, SHIELDCORTEX_DIST_ROOT: distRoot, SHIELDCORTEX_CONFIG_DIR: sc },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        const out = run.stdout.trim();
+        const d = out ? JSON.parse(out).hookSpecificOutput?.permissionDecision : undefined;
+        hook[name] = d === 'ask' ? 'card' : d === 'deny' ? 'blocked' : 'allowed';
+      }
+
+      const okPipeline = () => ({
+        allowed: true,
+        firewall: { result: 'ALLOW' as const, reason: '', threatIndicators: [] as string[], anomalyScore: 0, blockedPatterns: [] as string[] },
+        trust: { score: 0.5 }, sensitivity: { level: 'INTERNAL' }, fragmentation: null, auditId: 1,
+      });
+      const rt = buildReadinessRuntime(readiness as never, notify, {
+        home,
+        effectivenessRegistry: state === 'promoted'
+          ? [{ ...pins.openclaw, reviewedAt: new Date(Date.now() - DAY).toISOString(), reviewedBy: 'parity fixture', reference: 'parity fixture', cases: 60 }]
+          : [],
+        deliver: async () => ({ deliveredVia: 'webhook', attempts: [{ channel: 'webhook', result: { delivered: true } }] }),
+      });
+      const openclawGuard = createInterceptor(
+        { ...DEFAULT_CONFIG, actionGuard: { ...DEFAULT_CONFIG.actionGuard, enabled: true, enforce: true, readinessGate: true, notify }, logger: { info: () => {}, warn: () => {} } } as never,
+        okPipeline as never,
+        { evaluateToolCall: evaluateToolCall as never, readiness: rt } as never,
+      );
+      const openclaw: Record<string, string> = {};
+      for (const [name, input] of INPUTS) {
+        let asked = false;
+        const res = await openclawGuard.handleToolCall({
+          toolName: 'Bash', arguments: input, requireApproval: async () => { asked = true; return false; },
+        } as never).then(() => 'ok', () => 'threw');
+        openclaw[name] = asked ? 'card' : res === 'ok' ? 'allowed' : 'blocked';
+      }
+      return { hook, openclaw };
+    } finally {
+      if (saved.HOME === undefined) delete process.env.HOME; else process.env.HOME = saved.HOME;
+      if (saved.CFG === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR; else process.env.SHIELDCORTEX_CONFIG_DIR = saved.CFG;
+      if (saved.AUDIT === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR; else process.env.SHIELDCORTEX_AUDIT_DIR = saved.AUDIT;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(distRoot, { recursive: true, force: true });
+    }
+  }
+
+  const EXPECTED: Record<'shadow' | 'promoted' | 'demoted', Record<string, string>> = {
+    shadow: { dangerous: 'allowed', benign: 'allowed', 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card' },
+    promoted: { dangerous: 'card', benign: 'allowed', 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card' },
+    demoted: { dangerous: 'allowed', benign: 'allowed', 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card' },
+  };
+
+  for (const state of ['shadow', 'promoted', 'demoted'] as const) {
+    it(`${state}: the same inputs get the same decision on both surfaces`, async () => {
+      const { hook, openclaw } = await decisions(state);
+      expect(openclaw).toEqual(hook);
+      expect(hook).toEqual(EXPECTED[state]);
+    }, 120_000);
+  }
+});
