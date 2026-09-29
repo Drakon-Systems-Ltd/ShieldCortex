@@ -409,8 +409,9 @@ export function handleCloudConfig(args: string[]): void {
   }
 
   if (args.includes('--action-guard-enforce-when-ready')) {
-    // #509. Enabled + enforce + the readiness gate: the Claude Code hook runs
-    // in shadow mode until this install meets all three readiness conditions.
+    // #509. Enabled + enforce + the readiness gate: the Claude Code hook and
+    // the OpenClaw interceptor each run in shadow mode until that adapter
+    // meets all three readiness conditions (r7). Hermes ignores the gate.
     const previousPosture = actionGuardPosture(getActionGuardCoreConfig());
     applyActionGuardCore(
       { enabled: true, enforce: true, readinessGate: true },
@@ -421,7 +422,8 @@ export function handleCloudConfig(args: string[]): void {
         'Needs a human approval channel (--action-guard-notify-openclaw or --action-guard-notify-webhook), and a webhook ' +
         'so a later demotion notice can reach you (--action-guard-notify-webhook). ' +
         'Catastrophic ops block in every posture. Check progress: shieldcortex guard readiness. ' +
-        'The OpenClaw plugin surface does not implement the gate yet and enforces from the start.',
+        'The Claude Code hook and the OpenClaw plugin are each measured and promoted on their own calls; ' +
+        'the Hermes plugin does not implement the gate and enforces immediately.',
     );
     // Start the durable transition record. Only a CHANGE of posture adds an
     // entry; re-running this on an enforce-when-ready install cannot clear a
@@ -636,8 +638,9 @@ export function handleCloudConfig(args: string[]): void {
     console.log('                           (≤ 2% would-stop, ≥ 98% of approvals answered by a human) AND reviewed');
     console.log('                           effectiveness evidence exists for this version — always required, none');
     console.log('                           published yet, so it stays in shadow today. Needs a webhook;');
-    console.log('                           progress: shieldcortex guard readiness. Claude Code hook only —');
-    console.log('                           the OpenClaw plugin enforces from the start. Also enables the guard');
+    console.log('                           progress: shieldcortex guard readiness. Claude Code hook and OpenClaw');
+    console.log('                           plugin, each measured on its own calls; Hermes ignores the gate and');
+    console.log('                           enforces immediately. Also enables the guard');
     console.log('  --action-guard-advisory  Watch only — dangerous ops log but are not gated (catastrophic still blocks)');
     console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
     console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');

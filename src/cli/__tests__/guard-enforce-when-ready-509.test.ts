@@ -292,6 +292,10 @@ describe('#509 setup posture question', () => {
     clearCloudConfigCache();
     expect(getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: true });
     expect(lines.join('\n')).toMatch(/will not enforce until you configure a human approval channel/);
+    // r7: OpenClaw is gated too; Hermes is named plainly as not gated.
+    expect(lines.join('\n')).not.toMatch(/OpenClaw plugin enforces from the start/);
+    expect(lines.join('\n')).toMatch(/Claude Code hook and to the OpenClaw plugin; each is measured on its own/);
+    expect(lines.join('\n')).toMatch(/Hermes plugin does not implement this gate: it ignores it and enforces immediately/);
   });
 });
 
@@ -306,8 +310,12 @@ describe('#509 config flags and --help honesty', () => {
     // it again (no change of posture) adds nothing.
     const rec = () => readTransitionRecord(transitionsPathFor(readinessPaths({ home })));
     expect(rec().entries.map((e) => e.event)).toEqual(['init']);
+    // r7: each gated adapter has its own journal; the posture starts both.
+    const ocRec = () => readTransitionRecord(transitionsPathFor(readinessPaths({ home, adapter: 'openclaw-interceptor' })));
+    expect(ocRec().entries.map((e) => e.event)).toEqual(['init']);
     handleCloudConfig(['--action-guard-enforce-when-ready']);
     expect(rec().entries.map((e) => e.event)).toEqual(['init']);
+    expect(ocRec().entries.map((e) => e.event)).toEqual(['init']);
     handleCloudConfig(['--action-guard-enforce']);
     clearCloudConfigCache();
     expect(getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
@@ -321,7 +329,10 @@ describe('#509 config flags and --help honesty', () => {
     expect(help).not.toMatch(/--action-guard-enable[^\n]*default: on/);
     expect(help).toMatch(/--action-guard-enable[^\n]*default: off/);
     expect(help).toMatch(/--action-guard-enforce-when-ready/);
-    expect(help).toMatch(/the OpenClaw plugin enforces from the start/);
+    // r7: the OpenClaw plugin implements the gate now; Hermes still does not.
+    expect(help).not.toMatch(/OpenClaw plugin enforces from the start/);
+    expect(help).toMatch(/Claude Code hook and OpenClaw\s+plugin, each measured on its own calls/);
+    expect(help).toMatch(/Hermes ignores the gate and\s+enforces immediately/);
     expect(help).toMatch(/reviewed[\s\S]{0,40}effectiveness evidence/);
     expect(help).not.toMatch(/false.positive|upper bound|§5B|protected/i);
   });
@@ -411,5 +422,95 @@ describe('#509 doctor and guard readiness are read-only (Addendum 1 E)', () => {
     expect(run.stdout).not.toMatch(/upper bound|FP bar/);
     expect(run.status).toBe(1);
     expect(snapshot()).toEqual(before);
+  });
+});
+
+// ── r7: per surface (Claude Code hook, OpenClaw plugin); Hermes named ──────
+
+describe('#509 r7 — doctor and `guard readiness` report readiness per surface', () => {
+  const OC = 'openclaw-interceptor' as const;
+  const ocJournal = () => transitionsPathFor(readinessPaths({ home, adapter: OC }));
+
+  function appendOc(entry: Record<string, unknown>): void {
+    mkdirSync(dirname(ocJournal()), { recursive: true });
+    appendFileSync(ocJournal(), `${JSON.stringify(entry)}\n`);
+  }
+
+  it('doctor: one row per surface, and a plain Hermes row; an OpenClaw demotion FAILs under the OpenClaw label only', async () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    appendOc({ ts: new Date(Date.now() - 3 * DAY).toISOString(), event: 'promote', to: 'enforcing' });
+    appendOc({ ts: new Date(Date.now() - 2 * DAY).toISOString(), event: 'demote', to: 'shadow', reason: 'test demotion' });
+    const rows = await checkActionGuardReadiness();
+    const byLabel = Object.fromEntries(rows.map((r) => [r.label, r]));
+    expect(byLabel['Action guard readiness (Claude Code hook)']?.status).toBe('warn');
+    expect(byLabel['Action guard readiness (OpenClaw plugin)']?.status).toBe('fail');
+    expect(byLabel['Action guard readiness (OpenClaw plugin)']?.message).toMatch(/DEMOTED to shadow/);
+    expect(byLabel['Action guard last promotion (OpenClaw plugin)']).toBeDefined();
+    expect(byLabel['Action guard last promotion (Claude Code hook)']).toBeUndefined();
+    expect(byLabel['Action guard readiness (Hermes plugin)']).toMatchObject({
+      status: 'info',
+      message: expect.stringMatching(/Hermes plugin does not implement the enforce-when-ready gate: it ignores it and enforces immediately/),
+    });
+  });
+
+  it('doctor: an unexplained OpenClaw demotion FAILs and names the OpenClaw journal', async () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    appendOc({ ts: new Date(Date.now() - 3 * DAY).toISOString(), event: 'promote', to: 'enforcing' });
+    appendOc({ ts: new Date(Date.now() - DAY).toISOString(), event: 'init', to: 'shadow', reason: 'forged' });
+    const rows = await checkActionGuardReadiness();
+    const oc = rows.find((r) => r.label === 'Action guard readiness (OpenClaw plugin)')!;
+    expect(oc.status).toBe('fail');
+    expect(oc.message).toMatch(/UNEXPLAINED DEMOTION/);
+    expect(oc.fix).toContain('guard-readiness-transitions.openclaw-interceptor.jsonl');
+    expect(rows.find((r) => r.label === 'Action guard readiness (Claude Code hook)')?.status).toBe('warn');
+  });
+
+  it('doctor and `guard readiness` stay read-only for BOTH surfaces', async () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    appendOc({ ts: new Date(Date.now() - 3 * DAY).toISOString(), event: 'promote', to: 'enforcing' });
+    const read = () => [readinessPaths({ home }), readinessPaths({ home, adapter: OC })]
+      .flatMap((p) => [p.statePath, transitionsPathFor(p)])
+      .map((f) => (existsSync(f) ? readFileSync(f, 'utf8') : null));
+    const before = read();
+    await checkActionGuardReadiness();
+    await runGuardCommand(['readiness'], { home });
+    await runGuardCommand(['readiness', '--surface', 'openclaw', '--json'], { home });
+    expect(read()).toEqual(before);
+    expect(auditRows()).toEqual([]);
+  });
+
+  it('`guard readiness` prints both surfaces and the Hermes line; `--surface openclaw --json` is that surface only', async () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    const logs: string[] = [];
+    (console.log as unknown as jest.Mock).mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    expect(await runGuardCommand(['readiness'], { home })).toBe(0);
+    const text = logs.join('\n');
+    expect(text).toMatch(/Surface: {7}Claude Code hook/);
+    expect(text).toMatch(/Surface: {7}OpenClaw plugin/);
+    expect(text).toMatch(/Version pin: {3}openclaw-interceptor@/);
+    expect(text).toMatch(/Hermes plugin: does not implement the enforce-when-ready gate — it ignores it and enforces immediately/);
+    logs.length = 0;
+    await runGuardCommand(['readiness', '--surface', 'openclaw', '--json'], { home });
+    const json = JSON.parse(logs.join('\n')) as ReadinessSummary;
+    expect(json).toMatchObject({ adapter: OC, surface: 'OpenClaw plugin', posture: 'enforce-when-ready', mode: 'shadow' });
+    expect(await runGuardCommand(['readiness', '--surface', 'hermes'], { home })).toBe(1);
+  });
+
+  it('`guard test-approval --surface openclaw` earns evidence for OpenClaw only', async () => {
+    setNotify({ enabled: true, openclaw: true });
+    const r = await runTestApproval({
+      isTTY: true, log: () => {}, error: () => {}, adapter: OC,
+      openclawBin: async () => '/nonexistent/openclaw',
+      cardRoundTrip: async () => ({ ok: true, decision: 'allow-once' }),
+    });
+    expect(r).toEqual({ code: 0, answer: 'approve' });
+    const request = auditRows().find((x) => x.type === 'approval_reach' && x.phase === 'request')!;
+    expect((request.readinessPin as { adapter: string }).adapter).toBe(currentReadinessPin(OC)!.adapter);
+    expect(buildReadinessSummary({ home, adapter: OC }).report.reachability.reached).toBe(1);
+    expect(buildReadinessSummary({ home }).report.reachability.reached).toBe(0);
   });
 });

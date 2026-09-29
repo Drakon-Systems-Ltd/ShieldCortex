@@ -44,6 +44,7 @@ import {
   readReadinessState,
   readinessPaths,
   recordApprovalReach,
+  READINESS_ADAPTERS,
   trustedDurableMode,
   unexplainedDemotion,
   type HumanChannel,
@@ -52,6 +53,7 @@ import {
   type ReadinessReport,
   type ReadinessState,
   type ReachAnswer,
+  type ReadinessAdapter,
   type TransitionEntry,
   type TransitionRecord,
 } from '../defence/iron-dome/guard-readiness.js';
@@ -60,11 +62,36 @@ import { isInteractive } from './approve.js';
 
 // ==================== SUMMARY (shared with doctor) ====================
 
+/** #509 r7: the surfaces that implement the gate, as the operator knows them. */
+export const SURFACE_LABELS: Record<ReadinessAdapter, string> = {
+  'claude-code-hook': 'Claude Code hook',
+  'openclaw-interceptor': 'OpenClaw plugin',
+};
+
+/** `--surface` values for `guard readiness` / `guard test-approval`. */
+const SURFACE_FLAGS: Record<string, ReadinessAdapter> = {
+  'claude-code': 'claude-code-hook',
+  'claude-code-hook': 'claude-code-hook',
+  openclaw: 'openclaw-interceptor',
+  'openclaw-interceptor': 'openclaw-interceptor',
+};
+
+/** The Hermes plugin does not implement the gate (out of scope for #509). */
+export const HERMES_READINESS_LINE =
+  'Hermes plugin: does not implement the enforce-when-ready gate — it ignores it and enforces immediately.';
+
 export interface ReadinessSummary {
+  /** #509 r7: whose readiness this is. Each gated surface is measured,
+   *  promoted and demoted on its own calls. */
+  adapter: ReadinessAdapter;
+  /** The surface's operator-facing name. */
+  surface: string;
+  /** Where this surface's transition journal lives. */
+  journalPath: string;
   posture: ActionGuardPosture;
   /** A policy lock pins enforcement; the readiness gate is then ignored. */
   lockOverrides: boolean;
-  /** What the Claude Code hook applies to dangerous-tier verdicts right now. */
+  /** What this surface applies to dangerous-tier verdicts right now. */
   mode: 'off' | 'watch-only' | ReadinessMode;
   channel: HumanChannel;
   report: ReadinessReport;
@@ -101,8 +128,9 @@ function lockPresent(): boolean {
   }
 }
 
-export function buildReadinessSummary(opts: { now?: number; home?: string } = {}): ReadinessSummary {
+export function buildReadinessSummary(opts: { now?: number; home?: string; adapter?: ReadinessAdapter } = {}): ReadinessSummary {
   const now = opts.now ?? Date.now();
+  const adapter = opts.adapter ?? 'claude-code-hook';
   const core = getActionGuardCoreConfig();
   const lockOverrides = core.readinessGate && lockPresent();
   const posture = lockOverrides ? 'enforce' : actionGuardPosture(core);
@@ -110,8 +138,8 @@ export function buildReadinessSummary(opts: { now?: number; home?: string } = {}
   const channel = describeHumanChannel(rawGuard.notify);
   // `home` pins the evidence tree (tests); production reads the configured
   // root plus the hook's home-directory audit.
-  const paths = readinessPaths({ home: opts.home });
-  const report = computeReadiness({ channel, paths, now });
+  const paths = readinessPaths({ home: opts.home, adapter });
+  const report = computeReadiness({ channel, paths, now, adapter });
   const state = readReadinessState(paths.statePath);
   const record = readTransitionRecord(transitionsPathFor(paths));
 
@@ -133,9 +161,15 @@ export function buildReadinessSummary(opts: { now?: number; home?: string } = {}
     ? record.lastTamper
     : null;
   return {
+    adapter, surface: SURFACE_LABELS[adapter], journalPath: transitionsPathFor(paths),
     posture, lockOverrides, mode, channel, report, state, demoted, record, recordUnknown, recentTamper,
     lastPromotion: lastPromotion(record),
   };
+}
+
+/** #509 r7: one summary per gated surface (Claude Code hook, OpenClaw). */
+export function buildReadinessSummaries(opts: { now?: number; home?: string } = {}): ReadinessSummary[] {
+  return READINESS_ADAPTERS.map((adapter) => buildReadinessSummary({ ...opts, adapter }));
 }
 
 /**
@@ -186,6 +220,7 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
     ? `reviewed by ${ef.evidence.reviewedBy} on ${ef.evidence.reviewedAt} (${ef.evidence.reference})  PASS`
     : 'REQUIRED — none reviewed for this version  not met';
   const lines = [
+    `Surface:       ${s.surface}`,
     `Posture:       ${POSTURE_TEXT[s.posture]}${s.lockOverrides ? ' (policy lock pins enforcement; readiness gate ignored)' : ''}`,
     `Current mode:  ${MODE_TEXT[s.mode]}${s.demoted ? ' — DEMOTED from enforcing' : ''}`,
     `Version pin:   ${report.pin ? `${report.pin.adapter} / ${report.pin.policy}` : 'UNKNOWN — no evidence can count'}`,
@@ -245,6 +280,9 @@ export interface TestApprovalDeps {
   log?: (line: string) => void;
   error?: (line: string) => void;
   openclawBin?: () => Promise<string | null>;
+  /** #509 r7: which surface's reachability evidence the round-trip is for
+   *  (default the Claude Code hook). Evidence is pinned per surface. */
+  adapter?: ReadinessAdapter;
 }
 
 function syntheticNotification(hash: string, code: string | null): OperatorNotification {
@@ -310,7 +348,10 @@ export async function runTestApproval(deps: TestApprovalDeps = {}): Promise<{ co
   // One attempt, one correlation id: the answer binds to this request only.
   const attemptId = newReachAttemptId();
   const record = (phase: 'request' | 'answer' | 'resolved', answer?: ReachAnswer, reason?: string) =>
-    recordApprovalReach({ hash, attemptId, phase, answer, channel: channel.kind, reason, synthetic: true, origin: 'guard-test-approval' }, { now: now() });
+    recordApprovalReach(
+      { hash, attemptId, phase, answer, channel: channel.kind, reason, synthetic: true, origin: 'guard-test-approval' },
+      { now: now(), adapter: deps.adapter ?? 'claude-code-hook' },
+    );
 
   if (channel.kind === 'openclaw-card') {
     const bin = deps.openclawBin
@@ -391,20 +432,42 @@ function report(answer: ReachAnswer, log: (l: string) => void): { code: number; 
 
 export async function runGuardCommand(argv: string[], opts: { home?: string } = {}): Promise<number> {
   const sub = argv[0];
+  // #509 r7: readiness is per surface. `--surface claude-code|openclaw`
+  // picks one; without it `readiness` reports every gated surface and
+  // `test-approval` earns evidence for the Claude Code hook (as before).
+  const surfaceAt = argv.indexOf('--surface');
+  const surfaceArg = surfaceAt >= 0 ? argv[surfaceAt + 1] : undefined;
+  const surface = surfaceArg !== undefined ? SURFACE_FLAGS[surfaceArg] : undefined;
+  if (surfaceArg !== undefined && !surface) {
+    console.error(`Unknown --surface "${surfaceArg}" — use claude-code or openclaw.`);
+    return 1;
+  }
   if (sub === 'readiness') {
     // Read-only: reports the mode, never promotes, demotes or writes state.
-    const summary = buildReadinessSummary({ home: opts.home });
+    const summaries = surface
+      ? [buildReadinessSummary({ home: opts.home, adapter: surface })]
+      : buildReadinessSummaries({ home: opts.home });
+    const hermes = summaries.some((s) => s.posture === 'enforce-when-ready') ? HERMES_READINESS_LINE : null;
     if (argv.includes('--json')) {
-      console.log(JSON.stringify(summary, null, 2));
+      console.log(JSON.stringify(surface ? summaries[0] : { surfaces: summaries, hermes }, null, 2));
     } else {
-      for (const line of formatReadinessLines(summary)) console.log(line);
+      summaries.forEach((summary, i) => {
+        if (i > 0) console.log('');
+        for (const line of formatReadinessLines(summary)) console.log(line);
+      });
+      if (hermes && !surface) {
+        console.log('');
+        console.log(hermes);
+      }
     }
-    return summary.demoted ? 1 : 0;
+    return summaries.some((s) => s.demoted) ? 1 : 0;
   }
   if (sub === 'test-approval') {
-    return (await runTestApproval()).code;
+    return (await runTestApproval({ adapter: surface })).code;
   }
-  console.log('Usage: shieldcortex guard readiness [--json]    Show the enforce-when-ready readiness conditions (#509)');
-  console.log('       shieldcortex guard test-approval         Send a synthetic approval request through your channel');
+  console.log('Usage: shieldcortex guard readiness [--surface claude-code|openclaw] [--json]');
+  console.log('                                  Show the enforce-when-ready readiness conditions, per surface (#509)');
+  console.log('       shieldcortex guard test-approval [--surface claude-code|openclaw]');
+  console.log('                                  Send a synthetic approval request through your channel');
   return sub === '--help' || sub === '-h' || sub === 'help' ? 0 : 1;
 }

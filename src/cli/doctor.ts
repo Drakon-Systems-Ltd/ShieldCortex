@@ -4680,12 +4680,30 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
  * Readiness is recomputed from the audit evidence here, never read as a stored
  * boolean; the state file only contributes "was it enforcing before". Doctor
  * reports and never flips: nothing here promotes, demotes or writes state.
+ *
+ * #509 r7: readiness is PER SURFACE. The Claude Code hook and the OpenClaw
+ * plugin each measure, promote and demote on their own calls, so each gets
+ * its own rows (labels suffixed with the surface). The Hermes plugin does not
+ * implement the gate; one info row says so plainly. `deps.summary` (tests)
+ * checks one surface under the unsuffixed labels, as before.
  */
 export async function checkActionGuardReadiness(
-  deps: { summary?: () => import('./guard.js').ReadinessSummary } = {},
+  deps: {
+    summary?: () => import('./guard.js').ReadinessSummary;
+    summaries?: () => import('./guard.js').ReadinessSummary[];
+  } = {},
 ): Promise<CheckResult[]> {
   const label = 'Action guard readiness';
-  if (!deps.summary) {
+  if (deps.summary) {
+    let summary: import('./guard.js').ReadinessSummary;
+    try {
+      summary = deps.summary();
+    } catch (err) {
+      return [{ label, status: 'warn', message: `could not compute readiness (${(err as Error).message})` }];
+    }
+    return readinessRowsForSurface(summary, '');
+  }
+  if (!deps.summaries) {
     // Cheap pre-check: no gate configured → no audit read at all.
     try {
       const core = getActionGuardCoreConfig();
@@ -4694,12 +4712,30 @@ export async function checkActionGuardReadiness(
       return [];
     }
   }
-  let summary: import('./guard.js').ReadinessSummary;
+  let summaries: import('./guard.js').ReadinessSummary[];
   try {
-    summary = deps.summary ? deps.summary() : (await import('./guard.js')).buildReadinessSummary();
+    summaries = deps.summaries ? deps.summaries() : (await import('./guard.js')).buildReadinessSummaries();
   } catch (err) {
     return [{ label, status: 'warn', message: `could not compute readiness (${(err as Error).message})` }];
   }
+  const rows: CheckResult[] = [];
+  for (const s of summaries) rows.push(...await readinessRowsForSurface(s, ` (${s.surface})`));
+  if (summaries.some((s) => s.posture === 'enforce-when-ready')) {
+    rows.push({
+      label: `${label} (Hermes plugin)`,
+      status: 'info',
+      message: 'the Hermes plugin does not implement the enforce-when-ready gate: it ignores it and enforces immediately',
+    });
+  }
+  return rows;
+}
+
+async function readinessRowsForSurface(
+  summary: import('./guard.js').ReadinessSummary,
+  suffix: string,
+): Promise<CheckResult[]> {
+  const label = `Action guard readiness${suffix}`;
+  const journalFile = summary.journalPath ?? '~/.shieldcortex/approvals/guard-readiness-transitions.jsonl';
   if (summary.posture !== 'enforce-when-ready') {
     if (summary.lockOverrides) {
       return [{ label, status: 'info', message: 'readiness gate is configured but a policy lock pins enforcement — the gate is ignored and the guard enforces' }];
@@ -4721,7 +4757,7 @@ export async function checkActionGuardReadiness(
   const promotion = summary.lastPromotion;
   const promotionRows: CheckResult[] = promotion
     ? [{
-      label: 'Action guard last promotion',
+      label: `Action guard last promotion${suffix}`,
       status: promotion.notice === 'delivered' ? 'info' : 'warn',
       message: `last promotion to enforcing: ${(await import('./guard.js')).describePromotionNotice(promotion)}`,
       ...(promotion.notice === 'delivered'
@@ -4737,7 +4773,7 @@ export async function checkActionGuardReadiness(
   // transition record) is reported alongside whatever the mode row says.
   const tamper: CheckResult[] = summary.recentTamper
     ? [{
-      label: 'Action guard readiness tamper',
+      label: `Action guard readiness tamper${suffix}`,
       status: 'warn',
       message: `readiness tamper signal at ${summary.recentTamper.ts}: ${summary.recentTamper.reason ?? 'the readiness cache disagreed with the transition record'}`,
       fix: 'Something other than the hook wrote the readiness cache or transition record under ~/.shieldcortex/approvals. Find out what; the hook recomputed from evidence and did not trust it.',
@@ -4757,7 +4793,7 @@ export async function checkActionGuardReadiness(
         `after a promotion to enforcing${promotion ? ` (${promotion.promotedAt})` : ''} with no demotion between (current mode: ${summary.mode}). ${bars}.${missing}`,
       fix:
         'The hook only leaves enforcing through a recorded, announced demotion, so something other than the hook wrote ' +
-        '~/.shieldcortex/approvals/guard-readiness-transitions.jsonl. Find out what. The hook does not trust the entry: it keeps ' +
+        `${journalFile}. Find out what. The hook does not trust the entry: it keeps ` +
         'enforcing while the evidence holds and otherwise demotes with the full protocol; the FAIL clears once it has re-recorded the mode.',
     }, ...tamper, ...promotionRows];
   }
@@ -4769,7 +4805,7 @@ export async function checkActionGuardReadiness(
         `enforce when ready: transition record ${summary.record.status === 'ok' ? 'empty' : summary.record.status} — ` +
         `the last mode is unknown and is treated as potentially DEMOTED (current mode: ${summary.mode}). ${bars}.${missing}`,
       fix:
-        'The record at ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl was removed or damaged. Find out what did it. ' +
+        `The record at ${journalFile} was removed or damaged. Find out what did it. ` +
         'The hook records the unknown state as a demotion on its next call; the FAIL clears on the next promotion.',
     }, ...tamper, ...promotionRows];
   }

@@ -906,9 +906,10 @@ export interface ActionGuardCoreConfig {
    *  but are not gated (catastrophic may still block). Default ON when absent. */
   enforce: boolean;
   /** #509 enforce-when-ready: with `enforce`, run in shadow mode until this
-   *  install meets the readiness conditions. `=== true` only. Surfaces that
-   *  do not implement the gate (the OpenClaw plugin today) ignore it and
-   *  enforce — the tighter reading. */
+   *  install meets the readiness conditions. `=== true` only. The Claude
+   *  Code hook and the OpenClaw plugin each implement it (per adapter); the
+   *  Hermes plugin does not, and ignores it and enforces — the tighter
+   *  reading. */
   readinessGate: boolean;
 }
 

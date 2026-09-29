@@ -4,9 +4,11 @@
  * Operator direction (28 Sep 2026): "Go and build the version that the
  * false-positive rate is measured low and approvals reliably reach a human."
  * Under the `enforce-when-ready` posture (`actionGuard.readinessGate: true` on
- * top of `enabled` + `enforce`) the Claude Code hook runs the guard in SHADOW
- * mode — every verdict computed and audited, a would-stop recorded but not
- * applied — and enforces only while THREE readiness conditions hold.
+ * top of `enabled` + `enforce`) each gated adapter — the Claude Code hook and
+ * (r7) the OpenClaw interceptor, see READINESS_ADAPTERS — runs the guard in
+ * SHADOW mode — every verdict computed and audited, a would-stop recorded but
+ * not applied — and enforces only while THREE readiness conditions hold for
+ * THAT adapter. The Hermes plugin does not implement the gate.
  *
  * What is measured here are READINESS PROXIES for operability, not the
  * ADR-002 §5B bars. §5B's ≤ 2% is unintended blocking of legitimate work on
@@ -25,7 +27,7 @@
  * ## The three conditions
  *
  * 1. Operational intervention rate (proxy) — over the last
- *    {@link INTERVENTION_WINDOW_MS} of real Claude Code hook calls:
+ *    {@link INTERVENTION_WINDOW_MS} of real calls through the adapter:
  *    (would-stop + stop, excluding catastrophic) ÷ all audited calls ≤
  *    {@link INTERVENTION_MAX_RATE}, with at least
  *    {@link INTERVENTION_MIN_SAMPLE} calls spanning at least

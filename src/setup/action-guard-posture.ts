@@ -23,6 +23,10 @@ import { initReadinessTransitions } from '../defence/iron-dome/guard-readiness.j
 
 export type PostureChoice = 'off' | 'watch-only' | 'enforce-when-ready';
 
+/** #509 r7: Hermes does not implement the readiness gate (out of scope). */
+export const HERMES_GATE_NOTE =
+  'The Hermes plugin does not implement this gate: it ignores it and enforces immediately.';
+
 export const POSTURE_CHOICES: ReadonlyArray<{ key: string; choice: PostureChoice; title: string; body: string }> = [
   {
     key: '1',
@@ -55,7 +59,8 @@ export const POSTURE_CHOICES: ReadonlyArray<{ key: string; choice: PostureChoice
       'watching and does not enforce. It also needs a human approval channel (the OpenClaw approval card or a ' +
       'webhook) and a webhook that can carry a demotion notice; without them it never enforces. If a condition ' +
       'later fails it drops back to watching and tells ' +
-      'you loudly. Today this gate applies to the Claude Code hook; the OpenClaw plugin enforces from the start.',
+      'you loudly. The gate applies to the Claude Code hook and to the OpenClaw plugin; each is measured on its ' +
+      'own tool calls and switches to enforcing on its own. ' + HERMES_GATE_NOTE,
   },
 ];
 
@@ -158,6 +163,7 @@ export async function offerActionGuardPosture(deps: PostureDeps): Promise<Postur
       log('  shieldcortex config --action-guard-notify-webhook <url>');
     }
     log('Watch progress with: shieldcortex guard readiness   (add round-trips with: shieldcortex guard test-approval)');
+    log(HERMES_GATE_NOTE);
   }
   return picked.choice;
 }
