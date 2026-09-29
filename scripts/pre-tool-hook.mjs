@@ -2531,6 +2531,27 @@ function emitDecision(permissionDecision, reason) {
       },
     }),
   );
+  // #613: after the decision is on stdout, never before — the report cannot
+  // delay or alter it.
+  if (permissionDecision === 'deny') posture('writeReport', { denial: true });
+}
+
+// ==================== POSTURE SELF-REPORT (#613) ====================
+//
+// The writer lives in ./lib/posture-self-report.mjs and is loaded with a
+// guarded dynamic import at the top of the stdin handler. A missing, broken or
+// throwing copy leaves `postureMod` null or swallowed here: the report is
+// best-effort evidence and must never reach an allow / ask / deny decision.
+
+let postureMod = null;
+
+function posture(fn, ...args) {
+  try {
+    const f = postureMod?.[fn];
+    if (typeof f === 'function') f(...args);
+  } catch {
+    // Best-effort. A posture report must never reach the gate.
+  }
 }
 
 /**
@@ -2604,6 +2625,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
  */
 async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permissionMode, notify, baseExtra = {}) {
   const failureSummary = safeDiagnosticReason(failureNote);
+  posture('noteScanner', 'degraded', 'guard-unavailable');
   // 1. Catastrophic — hard deny, always.
   if (fallbackCatastrophicMatch(toolInput)) {
     const fallbackVerdict = { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'], reason: `Guard unavailable: ${failureSummary}; fallback catastrophic scan matched` };
@@ -2702,7 +2724,18 @@ process.stdin.on('end', async () => {
     // the plugin uses, with an inline probe behind it so a missing dist cannot
     // fail OPEN on a host that has a lock file.
     const cfg = await loadActionGuardConfig();
-    if (!cfg.enabled) process.exit(0);
+    // #613: guarded — a missing or broken writer is simply no report.
+    try {
+      postureMod = await import('./lib/posture-self-report.mjs');
+    } catch {
+      postureMod = null;
+    }
+    posture('noteContext', hookConfigDir(), input);
+    posture('noteConfig', cfg);
+    if (!cfg.enabled) {
+      posture('writeReport');
+      process.exit(0);
+    }
 
     let hookData;
     try {
@@ -2717,6 +2750,7 @@ process.stdin.on('end', async () => {
     // that as "cannot confirm a prompt surface", not as "prompting is fine".
     const permissionMode = hookData.permission_mode;
     if (!toolName) process.exit(0);
+    posture('noteTool', toolName);
     const baseExtra = hookSessionExtras(hookData, permissionMode);
     let notifyPromise;
     const getNotify = () => {
@@ -2762,6 +2796,7 @@ process.stdin.on('end', async () => {
 
     const guard = await loadGuard();
     bindingMod = await loadBinding();
+    if (guard) posture('noteScanner', 'available');
     if (!guard) {
       await handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode, await getNotify(), baseExtra); // always exits
       return;
