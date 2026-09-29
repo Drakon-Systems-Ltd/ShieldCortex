@@ -3342,7 +3342,7 @@ export function buildReadinessRuntime(
       } catch {
         result = { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: `${which} notice failed` } }] };
       }
-      if (!resolved.transitionAt || typeof readiness.recordTransitionNotice !== 'function') return;
+      if (!resolved.transitionAt || typeof readiness.recordTransitionNotice !== 'function') return result;
       const failure = result?.attempts?.find?.((a) => a?.result?.delivered === false)?.result?.reason;
       try {
         readiness.recordTransitionNotice({
@@ -3359,6 +3359,7 @@ export function buildReadinessRuntime(
       } catch {
         /* an unrecorded notice reads as "no notice attempt recorded" — the louder answer */
       }
+      return result;
     },
   };
 }

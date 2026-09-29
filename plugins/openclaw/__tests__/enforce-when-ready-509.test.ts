@@ -11,7 +11,7 @@ import plugin, {
   __setRuntimeForTest,
   buildReadinessRuntime,
 } from '../index.js';
-import { createInterceptor, DEFAULT_CONFIG, type ReadinessRuntime } from '../interceptor.js';
+import { __resetReadinessWarningsForTest, createInterceptor, DEFAULT_CONFIG, type ReadinessRuntime } from '../interceptor.js';
 
 /**
  * #509 round 7 — the OpenClaw interceptor honours `actionGuard.readinessGate`
@@ -184,6 +184,7 @@ async function decide(
 
 beforeEach(() => {
   for (const k of ENV_KEYS) saved[k] = process.env[k];
+  __resetReadinessWarningsForTest();
   home = mkdtempSync(join(tmpdir(), 'sc-509-oc-'));
   mkdirSync(join(home, '.shieldcortex'), { recursive: true });
   process.env.HOME = home;
@@ -534,6 +535,142 @@ describe('#509 r7 req 6 — transitions announced on OpenClaw\'s own notify path
     const i = interceptor({}, { readiness: rt });
     await decide(i, BENIGN);
     expect(journal(OPENCLAW)).toContainEqual(expect.objectContaining({ event: 'notice', of: 'promote', delivered: false, reason: 'HTTP 503' }));
+  });
+});
+
+// ==================== round 8 ====================
+
+const EVALUATOR_THROWS = 'sc-test-evaluator-throws';
+
+/** The r7 evaluator, except that one marker command makes it throw — the
+ *  guard-unavailable (WS2 fallback) path. */
+const throwingEvaluator = ((tool: string, args: Record<string, unknown>, ...rest: unknown[]) => {
+  if (args?.command === EVALUATOR_THROWS) throw new Error('evaluator exploded (test)');
+  return (evaluator as unknown as (...a: unknown[]) => unknown)(tool, args, ...rest);
+}) as never;
+
+/** A memory-write pipeline that QUARANTINEs: severity high, action `warn`
+ *  under the default config — a `warned` row, which the OpenClaw readiness
+ *  count would read as a stop if it were pinned. */
+const quarantinePipeline = () => ({
+  ...okPipeline(),
+  allowed: false,
+  firewall: { result: 'QUARANTINE' as const, reason: 'test', threatIndicators: ['test-threat'], anomalyScore: 0.7, blockedPatterns: [] as string[] },
+});
+
+function pinnedRowsOf(list: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return list.filter((r) => r.readinessPin !== undefined);
+}
+
+describe('#509 r8 SF1 — a row written before the gate resolves carries no stale readiness pin', () => {
+  function gatedInterceptor(options: Record<string, unknown> = {}, pipeline: unknown = okPipeline) {
+    const warnings: string[] = [];
+    const i = createInterceptor(
+      {
+        ...DEFAULT_CONFIG,
+        actionGuard: { ...DEFAULT_CONFIG.actionGuard, enabled: true, enforce: true, readinessGate: true },
+        logger: { info: () => {}, warn: (m: string) => { warnings.push(m); } },
+      } as never,
+      pipeline as never,
+      { evaluateToolCall: throwingEvaluator, readiness: runtime(), ...options } as never,
+    );
+    return { ...i, warnings };
+  }
+
+  it('lease refusal after a gated call: no pin, not counted', async () => {
+    const i = gatedInterceptor({
+      checkActionLease: (_t: string, args: Record<string, unknown>) => (args.command === 'npm publish'
+        ? { scope: 'publish', decision: { verdict: 'frozen', reason: 'publish is frozen (test lease)' } }
+        : null),
+    });
+    expect(await decide(i, BENIGN)).toBe('allowed');
+    expect(await decide(i, { command: 'npm publish' })).toBe('blocked');
+    const lease = rows().find((r) => Array.isArray(r.threats) && (r.threats as string[]).includes('session-lease'))!;
+    expect(lease).toBeDefined();
+    expect(lease.readinessPin).toBeUndefined();
+    // Only the gated call's tally row is OpenClaw readiness evidence.
+    expect(pinnedRowsOf(rows()).map((r) => r.readinessTally)).toEqual([true]);
+  });
+
+  it('guard unavailable (evaluator throws) after a gated call: the fallback row has no pin', async () => {
+    const i = gatedInterceptor();
+    expect(await decide(i, BENIGN)).toBe('allowed');
+    await decide(i, { command: EVALUATOR_THROWS });
+    const degraded = rows().filter((r) => r.firewallResult === 'ACTION_GUARD_FALLBACK');
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0].readinessPin).toBeUndefined();
+    expect(pinnedRowsOf(rows())).toHaveLength(1);
+  });
+
+  it('memory-write pipeline row after a gated call: no pin, and it is not an OpenClaw stop', async () => {
+    const i = gatedInterceptor({}, quarantinePipeline);
+    expect(await decide(i, BENIGN)).toBe('allowed');
+    await i.handleToolCall({ toolName: 'remember', arguments: { title: 't', content: 'a note to keep' } } as never);
+    const memory = rows().find((r) => r.tool === 'remember')!;
+    expect(memory).toMatchObject({ outcome: 'warned' });
+    expect(memory.readinessPin).toBeUndefined();
+    const report = readiness.computeReadiness({ channel: readiness.describeHumanChannel(NOTIFY), home, adapter: OPENCLAW });
+    expect(report.intervention).toMatchObject({ total: 1, stops: 0 });
+  });
+});
+
+describe('#509 r8 SF5 — tally rows stay local: no per-call cloud traffic', () => {
+  it('a benign gated call writes its tally row to disk and hands nothing to onAuditEntry (the cloud sink)', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const i = interceptor({}, { readiness: runtime(), onAuditEntry: (e: Record<string, unknown>) => { sent.push(e); } });
+    expect(await decide(i, BENIGN)).toBe('allowed');
+    expect(await decide(i, BENIGN)).toBe('allowed');
+    expect(rows().filter((r) => r.readinessTally === true)).toHaveLength(2);
+    expect(sent).toEqual([]);
+  });
+
+  it('a verdict row (would-hold) still reaches onAuditEntry as before', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const i = interceptor({}, { readiness: runtime(), onAuditEntry: (e: Record<string, unknown>) => { sent.push(e); } });
+    expect(await decide(i, DANGEROUS)).toBe('allowed');
+    expect(sent.map((e) => e.outcome)).toEqual(['would_hold']);
+  });
+});
+
+describe('#509 r8 N1 — "readiness module is missing" is said once per process, not per call', () => {
+  it('three gated calls across two interceptors: one warning', async () => {
+    __resetReadinessWarningsForTest();
+    const a = interceptor({});
+    const b = interceptor({});
+    expect(await decide(a, DANGEROUS)).toBe('card');
+    expect(await decide(a, BENIGN)).toBe('allowed');
+    expect(await decide(b, DANGEROUS)).toBe('card');
+    const all = [...a.warnings, ...b.warnings].filter((w) => /readiness module is missing from this build/.test(w));
+    expect(all).toHaveLength(1);
+  });
+});
+
+describe('#509 r8 N2 — an OpenClaw transition leaves a notify audit row, as the hook does', () => {
+  it('promotion: a local notify row naming the transition and its delivery; not a counted call', async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    await inState('promoted', { onAuditEntry: (e: Record<string, unknown>) => { sent.push(e); } });
+    const notify = rows().filter((r) => r.type === 'intercept' && r.action === 'notify');
+    expect(notify).toEqual([
+      expect.objectContaining({ origin: OPENCLAW, outcome: 'notified', readinessTransition: 'promote', notify: { status: 'delivered', deliveredVia: 'webhook' } }),
+    ]);
+    expect(sent.filter((e) => e.action === 'notify')).toEqual([]);
+    // One tally row is the only counted call.
+    const report = readiness.computeReadiness({ channel: readiness.describeHumanChannel(NOTIFY), home, adapter: OPENCLAW, effectivenessRegistry: reviewed(OPENCLAW) });
+    expect(report.intervention.total).toBe(1001);
+  });
+
+  it('a notice that failed: the notify row says so (notify_failed)', async () => {
+    seedReadyHistory(OPENCLAW);
+    const rt = buildReadinessRuntime(readiness as never, NOTIFY, {
+      home,
+      effectivenessRegistry: reviewed(OPENCLAW),
+      deliver: async () => ({ deliveredVia: null, attempts: [{ channel: 'webhook', result: { delivered: false, reason: 'HTTP 503' } }] }),
+    });
+    const i = interceptor({}, { readiness: rt });
+    await decide(i, BENIGN);
+    expect(rows().filter((r) => r.action === 'notify')).toEqual([
+      expect.objectContaining({ outcome: 'notify_failed', readinessTransition: 'promote', notify: { status: 'error', deliveredVia: null } }),
+    ]);
   });
 });
 

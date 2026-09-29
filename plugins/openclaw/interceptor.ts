@@ -90,8 +90,14 @@ export interface ReadinessRuntime {
   /** `describeDemotion`: the plain-English demotion line. */
   describeDemotion: (reason: string | undefined) => string;
   /** Announce a transition on OpenClaw's own notify path and journal whether
-   *  the notice was delivered (`recordTransitionNotice`). Never throws. */
-  announce: (which: 'promote' | 'demote', resolved: ResolvedReadinessLike, toolName: string) => Promise<void>;
+   *  the notice was delivered (`recordTransitionNotice`). Never throws.
+   *  Resolves to the delivery (null = no push channel was available), which
+   *  the interceptor records as a notify audit row (r8 N2). */
+  announce: (
+    which: 'promote' | 'demote',
+    resolved: ResolvedReadinessLike,
+    toolName: string,
+  ) => Promise<{ deliveredVia: string | null } | null | void>;
 }
 
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
@@ -344,13 +350,17 @@ export interface InterceptAuditEntry {
   sensitivityLevel: string;           // from the pipeline result's sensitivity level
   fragmentationScore: number | null;  // from the pipeline result's fragmentation score, or null
   pipelineDurationMs: number;         // wall-clock ms around the runDefencePipeline call
-  action: InterceptAction | 'auto_deny' | 'rate_limit' | 'allow' | 'gate_degraded';
+  action: InterceptAction | 'auto_deny' | 'rate_limit' | 'allow' | 'gate_degraded'
+    // #509 r8 (N2) — a readiness transition notice, not a verdict.
+    | 'notify';
   outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied' | 'allowed'
     // #372 — card-held decisions, written when the operator answers rather than
     // when the hold is taken. `action` for these rows is 'require_approval'.
     | ApprovalDecisionOutcome
     // #509 — enforce-when-ready shadow: the stop the guard WOULD have made.
-    | 'would_hold' | 'would_block';
+    | 'would_hold' | 'would_block'
+    // #509 r8 (N2) — the hook's notify outcomes, on `action: 'notify'` rows.
+    | 'notified' | 'notify_failed' | 'notify_not_configured';
   /** #509 — set on a shadowed (not applied) dangerous-tier verdict. */
   shadow?: true;
   posture?: 'enforce-when-ready';
@@ -358,8 +368,13 @@ export interface InterceptAuditEntry {
    *  Present only under the enforce-when-ready posture. */
   readinessPin?: { adapter: string; policy: string };
   /** #509 — a benign allow's minimal row (no args): the intervention
-   *  proxy's denominator is every gated call. */
+   *  proxy's denominator is every gated call. Local only (r8 SF5). */
   readinessTally?: true;
+  /** #509 r8 (N2) — on an `action: 'notify'` row: the readiness transition
+   *  it announced, as the hook records it. Local only. */
+  readinessTransition?: 'promote' | 'demote';
+  /** #509 r8 (N2) — the notice's delivery, on a notify row. */
+  notify?: { status: 'delivered' | 'error' | 'not_configured'; deliveredVia: string | null };
   preview: string;
   ts: string;
   /** The approval broker's record for this call (#143). Present on exactly the
@@ -1024,6 +1039,11 @@ export function noteAuditSinkFailure(err: unknown, dir: string = auditDir()): vo
 }
 export function __resetAuditSinkFailuresForTest(): void { auditSinkFailures = 0; }
 
+/** #509 r8 (N1): "the readiness module is missing" is a property of the
+ *  installed build, not of a call — said once per gateway process. */
+let readinessMissingWarned = false;
+export function __resetReadinessWarningsForTest(): void { readinessMissingWarned = false; }
+
 function writeAuditEntry(entry: InterceptAuditEntry): void {
   const dir = auditDir();
   try {
@@ -1361,6 +1381,11 @@ export function createInterceptor(
     const bound = bindAudit ? bindAudit(withOrigin, captured.args) : withOrigin;
     writeAuditEntry(bound);
     try { options?.sessionGuard?.index(bound); } catch { /* never wedge the turn */ }
+    // #509 r8 (SF5): readiness bookkeeping stays on this machine. A tally row
+    // is written for EVERY gated call, and `onAuditEntry` is the cloud sink —
+    // one POST per tool call is traffic the hook never makes. The transition
+    // notify row is local too, as the hook's is.
+    if (entry.readinessTally === true || entry.readinessTransition !== undefined) return;
     onAuditEntry?.(bound);
   }
 
@@ -1571,7 +1596,10 @@ export function createInterceptor(
     const whenReady = actionGuardCfg.enforce === true && actionGuardCfg.readinessGate === true && !policyLocked();
     if (!whenReady) return { whenReady, shadow: false };
     if (!readiness) {
-      log.warn('[shieldcortex] enforce-when-ready: the readiness module is missing from this build — ENFORCING. Run `shieldcortex repair`.');
+      if (!readinessMissingWarned) {
+        readinessMissingWarned = true;
+        log.warn('[shieldcortex] enforce-when-ready: the readiness module is missing from this build — ENFORCING. Run `shieldcortex repair`.');
+      }
       return { whenReady, shadow: false };
     }
     try {
@@ -1588,16 +1616,36 @@ export function createInterceptor(
         let line = 'ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready).';
         try { line = readiness.describeDemotion(resolved.demotionReason); } catch { /* keep the fallback */ }
         log.warn(`[shieldcortex] ⚠️ ${line}`);
-        await readiness.announce('demote', resolved, toolName);
+        recordTransitionNotify('demote', toolName, await readiness.announce('demote', resolved, toolName));
       } else if (resolved.transition === 'promote') {
         log.warn('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts on OpenClaw.');
-        await readiness.announce('promote', resolved, toolName);
+        recordTransitionNotify('promote', toolName, await readiness.announce('promote', resolved, toolName));
       }
       return { whenReady, shadow };
     } catch (err) {
       log.warn(`[shieldcortex] enforce-when-ready: readiness could not be resolved (${String(err instanceof Error ? err.message : err).slice(0, 200)}) — ENFORCING.`);
       return { whenReady, shadow: false };
     }
+  }
+
+  /** #509 r8 (N2): the transition notice as an audit row — `action: 'notify'`
+   *  with the hook's outcomes (pre-tool-hook.mjs recordNotifyAudit), so the
+   *  audit shows the notice beside the `readiness_transition` row. Not a
+   *  verdict: readiness never counts a notify row. Local only (SF5). */
+  function recordTransitionNotify(
+    which: 'promote' | 'demote',
+    toolName: string,
+    result: { deliveredVia: string | null } | null | void,
+  ): void {
+    const status = !result ? 'not_configured' : result.deliveredVia ? 'delivered' : 'error';
+    const outcome = status === 'delivered' ? 'notified' : status === 'error' ? 'notify_failed' : 'notify_not_configured';
+    emitAudit({
+      type: 'intercept', tool: toolName, severity: 'high', firewallResult: 'ACTION_GUARD',
+      threats: [which === 'promote' ? 'readiness-promoted' : 'readiness-demoted'], anomalyScore: 0, trustScore: 0,
+      sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
+      action: 'notify', outcome, preview: `${toolName} :: readiness ${which} notice`, ts: new Date().toISOString(),
+      readinessTransition: which, notify: { status, deliveredVia: result?.deliveredVia ?? null },
+    });
   }
 
   /** #509 approval-reach evidence for one request put to (or kept from) a
@@ -1858,7 +1906,7 @@ export function createInterceptor(
             type: 'intercept', tool: context.toolName, severity: 'low', firewallResult: 'ACTION_GUARD',
             threats: [], anomalyScore: 0, trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null,
             pipelineDurationMs: 0, action: 'allow', outcome: 'allowed', preview: `${context.toolName} :: tally`,
-            ts: new Date().toISOString(), readinessTally: true,
+            ts: new Date().toISOString(), readinessTally: true, // local only (r8 SF5)
           },
           { args: { tally: 'redacted' }, readinessPin: callReadinessPin },
         );
@@ -2093,6 +2141,11 @@ export function createInterceptor(
   async function handleToolCall(context: ToolCallContext): Promise<void> {
     lastSessionId = context.sessionId;
     lastCallArgs = context.arguments;
+    // #509 r8 (SF1): the pin is per call. Cleared here, set only where the
+    // readiness gate resolves (resolveReadinessGate) — as the hook stamps it —
+    // so a row written before that (lease refusal, guard-unavailable fallback)
+    // or off the Action Guard path (memory writes) is never OpenClaw evidence.
+    callReadinessPin = undefined;
     // Remember the NAME only. This is the entirety of what the approval broker's
     // judge will ever learn about the session — see buildSessionSummary.
     noteToolForSession(context.toolName);
