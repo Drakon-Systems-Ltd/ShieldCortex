@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readd
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import * as defence from '../../../src/defence/index.js';
 import * as readiness from '../../../src/defence/iron-dome/guard-readiness.js';
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
 import plugin, {
@@ -712,6 +713,73 @@ describe('#509 r8 SF4 — upgrade path: OpenClaw with no record starts watching 
     await decide(i, DANGEROUS);
     expect(announced).toEqual(['demote']);
     expect(journal(OPENCLAW).map((e) => e.event)).toEqual(['demote', 'notice']);
+  });
+});
+
+describe('#509 r8 SF6 — the gateway recompute never holds the event loop for the whole read', () => {
+  /** ~6 MB of benign OpenClaw calls over 8 days on top of a ready history:
+   *  read and parsed in one go, this holds the loop for tens of ms. */
+  function seedBulk(): void {
+    const now = Date.now();
+    const list: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 3000; i += 1) {
+      const ts = new Date(now - 8 * DAY + Math.floor((i * 8 * DAY) / 3000) + 2000).toISOString();
+      list.push({ ts, type: 'intercept', origin: OPENCLAW, tool: 'Bash', severity: 'low', action: 'allow', outcome: 'allowed', preview: 'x'.repeat(2000) });
+    }
+    seed(list, pinOf(OPENCLAW));
+  }
+
+  /** The runtime exactly as the plugin builds it: from the `shieldcortex/defence` barrel. */
+  function barrelRuntime(announced: string[] = []): ReadinessRuntime {
+    const rt = buildReadinessRuntime(defence as never, NOTIFY, {
+      home,
+      effectivenessRegistry: reviewed(OPENCLAW),
+      deliver: async (which) => {
+        announced.push(which);
+        return { deliveredVia: 'webhook', attempts: [{ channel: 'webhook', result: { delivered: true } }] };
+      },
+    });
+    expect(rt).toBeDefined();
+    return rt!;
+  }
+
+  it('the plugin-built runtime recomputes in slices: the event loop keeps turning while it reads', async () => {
+    seedReadyHistory(OPENCLAW);
+    seedBulk();
+    const rt = barrelRuntime();
+    let ticks = 0;
+    let stop = false;
+    const tick = (): void => { ticks += 1; if (!stop) setImmediate(tick); };
+    setImmediate(tick);
+    const resolved = await rt.resolve();
+    stop = true;
+    expect(resolved).toMatchObject({ mode: 'enforcing', transition: 'promote' });
+    expect(ticks).toBeGreaterThan(5);
+  });
+
+  it('gated calls that arrive while a recompute runs share it: one read, one promotion, announced once', async () => {
+    seedReadyHistory(OPENCLAW);
+    seedBulk();
+    const announced: string[] = [];
+    const i = interceptor({}, { readiness: barrelRuntime(announced) });
+    const out = await Promise.all([decide(i, DANGEROUS), decide(i, DANGEROUS), decide(i, BENIGN)]);
+    expect(out).toEqual(['card', 'card', 'allowed']);
+    expect(announced).toEqual(['promote']);
+    expect(journal(OPENCLAW).filter((e) => e.event === 'promote')).toHaveLength(1);
+    expect(i.warnings.filter((w) => /now ENFORCING/.test(w))).toHaveLength(1);
+  });
+
+  it('a call that runs while the gate awaits the recompute does not strip the waiting call\'s pin', async () => {
+    const i = interceptor({}, { readiness: barrelRuntime() });
+    const gated = decide(i, DANGEROUS); // shadow: would-hold, allowed
+    // A memory write lands while the gated call awaits its resolve; its entry
+    // clears the in-flight pin (SF1).
+    await i.handleToolCall({ toolName: 'remember', arguments: { title: 't', content: 'a note to keep' } } as never);
+    expect(await gated).toBe('allowed');
+    const held = rows().find((r) => r.outcome === 'would_hold')!;
+    expect(held.readinessPin).toEqual(pinOf(OPENCLAW));
+    const report = readiness.computeReadiness({ channel: readiness.describeHumanChannel(NOTIFY), home, adapter: OPENCLAW });
+    expect(report.intervention).toMatchObject({ total: 1, stops: 1 });
   });
 });
 

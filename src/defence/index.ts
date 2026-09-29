@@ -254,6 +254,8 @@ export {
 export {
   READINESS_ADAPTERS,
   resolveReadiness,
+  // r8 (SF6): the gateway's resolve — the evidence read yields to its loop.
+  resolveReadinessAsync,
   currentReadinessPin,
   describeHumanChannel,
   describeDemotion,

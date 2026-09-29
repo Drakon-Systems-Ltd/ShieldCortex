@@ -40,7 +40,7 @@ import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
-import type { ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime } from './interceptor.js';
+import type { ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime, ResolvedReadinessLike } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
@@ -124,15 +124,10 @@ type DefenceModule = {
    *  the Action Guard outcome notice its transitions are announced with. All
    *  optional: an older dist without them makes a gated posture ENFORCE. */
   READINESS_ADAPTERS?: readonly string[];
-  resolveReadiness?: (opts: Record<string, unknown>) => {
-    mode: 'shadow' | 'enforcing';
-    transition: 'promote' | 'demote' | null;
-    tamper?: string;
-    demotionReason?: string;
-    transitionAt?: string;
-    /** r8 (SF4): this call started OpenClaw's record (watching first). */
-    started?: true;
-  };
+  resolveReadiness?: (opts: Record<string, unknown>) => ResolvedReadinessLike;
+  /** r8 (SF6): the same resolve with the evidence recompute read in slices
+   *  that yield — what the gateway uses when the dist has it. */
+  resolveReadinessAsync?: (opts: Record<string, unknown>) => Promise<ResolvedReadinessLike>;
   /** r8 (SF4): the one-time "now watches first" line. */
   adapterStartedMessage?: (adapter: string) => string;
   currentReadinessPin?: (adapter?: string) => { adapter: string; policy: string } | null;
@@ -3332,13 +3327,31 @@ export function buildReadinessRuntime(
     });
   }
 
+  const resolveOpts = () => ({
+    channel: channel(),
+    adapter,
+    ...home,
+    ...(seams.effectivenessRegistry ? { effectivenessRegistry: seams.effectivenessRegistry } : {}),
+  });
+  // r8 (SF6): this gate runs on the gateway's own event loop. With the async
+  // resolver the evidence recompute (up to 64 MB of audit, once per cache TTL)
+  // is read in slices that yield, and calls arriving while it runs share it
+  // instead of each starting a read. Only the call that started it carries the
+  // transition (and so announces it); the others get the mode alone. A dist
+  // without the async resolver keeps the sync one.
+  let inFlight: Promise<ResolvedReadinessLike> | null = null;
+  function resolve(): ResolvedReadinessLike | Promise<ResolvedReadinessLike> {
+    if (typeof readiness.resolveReadinessAsync !== 'function') return readiness.resolveReadiness!(resolveOpts());
+    if (inFlight) return inFlight.then((r) => ({ mode: r.mode, transition: null }));
+    const p = readiness.resolveReadinessAsync(resolveOpts());
+    inFlight = p;
+    const clear = () => { if (inFlight === p) inFlight = null; };
+    p.then(clear, clear);
+    return p;
+  }
+
   return {
-    resolve: () => readiness.resolveReadiness!({
-      channel: channel(),
-      adapter,
-      ...home,
-      ...(seams.effectivenessRegistry ? { effectivenessRegistry: seams.effectivenessRegistry } : {}),
-    }),
+    resolve,
     pin: () => readiness.currentReadinessPin!(adapter),
     channelConfigured: () => channel().configured === true,
     recordReach: (row) => {

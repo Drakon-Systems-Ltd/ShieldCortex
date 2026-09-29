@@ -75,8 +75,10 @@ export interface ResolvedReadinessLike {
  * interceptor ENFORCES (the tighter answer), exactly as the hook does.
  */
 export interface ReadinessRuntime {
-  /** `resolveReadiness` for this adapter. May throw — the caller enforces. */
-  resolve: () => ResolvedReadinessLike;
+  /** `resolveReadiness` for this adapter — `resolveReadinessAsync` on the
+   *  gateway (r8 SF6), so the evidence read never holds its event loop. May
+   *  throw or reject — the caller enforces. */
+  resolve: () => ResolvedReadinessLike | Promise<ResolvedReadinessLike>;
   /** `currentReadinessPin` for this adapter; stamped on every row. */
   pin: () => { adapter: string; policy: string } | null;
   /** A human approval channel is configured (`describeHumanChannel`). */
@@ -1598,23 +1600,29 @@ export function createInterceptor(
     }
   }
 
-  async function resolveReadinessGate(toolName: string): Promise<{ whenReady: boolean; shadow: boolean }> {
+  async function resolveReadinessGate(toolName: string): Promise<{
+    whenReady: boolean;
+    shadow: boolean;
+    pin: { adapter: string; policy: string } | undefined;
+  }> {
     callReadinessPin = undefined;
     const whenReady = actionGuardCfg.enforce === true && actionGuardCfg.readinessGate === true && !policyLocked();
-    if (!whenReady) return { whenReady, shadow: false };
+    if (!whenReady) return { whenReady, shadow: false, pin: undefined };
     if (!readiness) {
       if (!readinessMissingWarned) {
         readinessMissingWarned = true;
         log.warn('[shieldcortex] enforce-when-ready: the readiness module is missing from this build — ENFORCING. Run `shieldcortex repair`.');
       }
-      return { whenReady, shadow: false };
+      return { whenReady, shadow: false, pin: undefined };
     }
+    // Pin every row this call writes to the adapter + policy version in
+    // force: only same-version rows count as readiness evidence.
+    let pin: { adapter: string; policy: string } | undefined;
     try {
-      // Pin every row this call writes to the adapter + policy version in
-      // force: only same-version rows count as readiness evidence.
-      const pin = readiness.pin();
-      if (pin) callReadinessPin = pin;
-      const resolved = readiness.resolve();
+      pin = readiness.pin() ?? undefined;
+      callReadinessPin = pin;
+      const resolved = await readiness.resolve();
+      callReadinessPin = pin; // a call that ran during the await cleared it
       const shadow = resolved.mode === 'shadow';
       if (resolved.tamper) {
         log.warn(`[shieldcortex] ⚠️ enforce-when-ready: readiness tamper signal — ${String(resolved.tamper).slice(0, 300)}. Recorded; run \`shieldcortex doctor\`.`);
@@ -1636,10 +1644,10 @@ export function createInterceptor(
         log.warn(`[shieldcortex] ⚠️ ${line}`);
         recordTransitionNotify('start', toolName, await readiness.announce('start', resolved, toolName));
       }
-      return { whenReady, shadow };
+      return { whenReady, shadow, pin };
     } catch (err) {
       log.warn(`[shieldcortex] enforce-when-ready: readiness could not be resolved (${String(err instanceof Error ? err.message : err).slice(0, 200)}) — ENFORCING.`);
-      return { whenReady, shadow: false };
+      return { whenReady, shadow: false, pin };
     }
   }
 
@@ -1881,7 +1889,14 @@ export function createInterceptor(
 
     // #509 enforce-when-ready: resolved here — after the lease floor and the
     // evaluation, before any verdict is applied — exactly where the hook does.
+    const own = { sessionId: lastSessionId, args: lastCallArgs };
     const gate = await resolveReadinessGate(context.toolName);
+    // r8 (SF6): the gate awaits the readiness recompute, and a call that ran
+    // meanwhile overwrote the in-flight context (its entry clears the pin).
+    // Put this call's back before it writes its rows.
+    lastSessionId = own.sessionId;
+    lastCallArgs = own.args;
+    callReadinessPin = gate.pin;
 
     if (v.decision === 'allow') {
       // Issue #95: a RECOGNISED allow (the guard evaluated a known operation
