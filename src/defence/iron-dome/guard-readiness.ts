@@ -325,18 +325,29 @@ function userHome(): string {
  * `approvals.json` (action-approvals.ts `approvalsDir`), which ignores the
  * override on purpose: that is the directory the path rules protect.
  */
-export function readinessPaths(opts: { home?: string } = {}): ReadinessPaths {
+export function readinessPaths(opts: { home?: string; adapter?: ReadinessAdapter } = {}): ReadinessPaths {
   const root = readinessRoot(opts.home);
   const auditDir = join(root, 'audit');
   const homeRoot = join(opts.home ?? userHome(), '.shieldcortex');
   const hookAudit = join(homeRoot, 'audit');
-  const readAuditDirs = Array.from(new Set([auditDir, hookAudit]));
+  // r7: the OpenClaw interceptor writes its rows to SHIELDCORTEX_AUDIT_DIR
+  // when the gateway sets it (interceptor.ts auditDir), so that directory is
+  // read too — never when a test pins `home`.
+  const interceptorAudit = opts.home === undefined ? process.env.SHIELDCORTEX_AUDIT_DIR?.trim() : undefined;
+  const readAuditDirs = Array.from(new Set([auditDir, hookAudit, ...(interceptorAudit ? [interceptorAudit] : [])]));
+  const suffix = adapterFileSuffix(opts.adapter ?? READINESS_ADAPTER);
   return {
-    statePath: join(homeRoot, 'approvals', 'guard-readiness.json'),
+    statePath: join(homeRoot, 'approvals', `guard-readiness${suffix}.json`),
     auditDir,
     readAuditDirs,
-    transitionsPath: join(homeRoot, 'approvals', TRANSITIONS_FILE),
+    transitionsPath: join(homeRoot, 'approvals', `guard-readiness-transitions${suffix}.jsonl`),
   };
+}
+
+/** The Claude Code hook keeps the original file names (an install that
+ *  already has a journal keeps it); every other adapter has its own. */
+function adapterFileSuffix(adapter: ReadinessAdapter): string {
+  return adapter === 'claude-code-hook' ? '' : `.${adapter}`;
 }
 
 /** The durable transition record's file name (inside the approval store). */
@@ -348,10 +359,25 @@ export function transitionsPathFor(paths: ReadinessPaths): string {
 
 // ==================== PIN ====================
 
-/** The enforcement adapter this module gates. */
-export const READINESS_ADAPTER = 'claude-code-hook';
+/**
+ * The enforcement adapters that implement the gate (#509 r7). Each is its own
+ * readiness subject: its evidence rows (by audit `origin` AND pin), its state
+ * file, its transition journal and its promotion are separate, so the Claude
+ * Code hook's evidence never promotes the OpenClaw interceptor and the
+ * reverse. The adapter id is the `origin` each writes on its audit rows.
+ * Hermes does not implement the gate; it ignores it and enforces.
+ */
+export const READINESS_ADAPTERS = ['claude-code-hook', 'openclaw-interceptor'] as const;
+export type ReadinessAdapter = (typeof READINESS_ADAPTERS)[number];
 
-let cachedPin: ReadinessPin | null | undefined;
+/** The default adapter (the Claude Code hook) — every caller that names none. */
+export const READINESS_ADAPTER: ReadinessAdapter = 'claude-code-hook';
+
+export function isReadinessAdapter(v: unknown): v is ReadinessAdapter {
+  return typeof v === 'string' && (READINESS_ADAPTERS as readonly string[]).includes(v);
+}
+
+const cachedPins = new Map<ReadinessAdapter, ReadinessPin | null>();
 
 function readSibling(rel: string): string | null {
   try {
@@ -362,12 +388,14 @@ function readSibling(rel: string): string | null {
 }
 
 /**
- * The adapter + policy version in force: the hook adapter at this package's
- * version, and a digest of the guard's rule module as built. Null when either
- * cannot be read — and a null pin is never ready. Memoised per process.
+ * The adapter + policy version in force: the given adapter (default the hook)
+ * at this package's version, and a digest of the guard's rule module as
+ * built. Null when either cannot be read — and a null pin is never ready.
+ * Memoised per process and adapter.
  */
-export function currentReadinessPin(): ReadinessPin | null {
-  if (cachedPin !== undefined) return cachedPin;
+export function currentReadinessPin(adapter: ReadinessAdapter = READINESS_ADAPTER): ReadinessPin | null {
+  if (!isReadinessAdapter(adapter)) return null;
+  if (cachedPins.has(adapter)) return cachedPins.get(adapter)!;
   let version: string | null = null;
   const pkg = readSibling('../../../package.json');
   if (pkg) {
@@ -379,19 +407,32 @@ export function currentReadinessPin(): ReadinessPin | null {
     }
   }
   const rules = readSibling('./tool-action-guard.js') ?? readSibling('./tool-action-guard.ts');
-  cachedPin = version && rules
+  const pin = version && rules
     ? {
-      adapter: `${READINESS_ADAPTER}@${version}`,
+      adapter: `${adapter}@${version}`,
       policy: `tool-action-guard:${createHash('sha256').update(rules).digest('hex').slice(0, 16)}`,
     }
     : null;
-  return cachedPin;
+  cachedPins.set(adapter, pin);
+  return pin;
 }
 
 function samePin(a: unknown, b: ReadinessPin | null): boolean {
   if (!b || !a || typeof a !== 'object') return false;
   const p = a as Record<string, unknown>;
   return p.adapter === b.adapter && p.policy === b.policy;
+}
+
+/**
+ * #509 r7: whether an evidence row counts for THIS adapter at the version in
+ * force. The pin names the adapter (`openclaw-interceptor@x.y.z`), so a row
+ * pinned by another adapter never matches; a verdict row must also carry this
+ * adapter's audit origin. The hook promoting must not promote OpenClaw, nor
+ * the reverse. The one place that decides it.
+ */
+function isAdapterEvidence(row: Record<string, unknown>, pin: ReadinessPin | null, adapter: ReadinessAdapter): boolean {
+  if (row.type === 'intercept' && row.origin !== adapter) return false;
+  return samePin(row.readinessPin, pin);
 }
 
 // ==================== EFFECTIVENESS ====================
@@ -515,14 +556,15 @@ export interface ReachRowInput {
  */
 export function recordApprovalReach(
   input: ReachRowInput,
-  opts: { home?: string; now?: number; auditDir?: string; pin?: ReadinessPin | null } = {},
+  opts: { home?: string; now?: number; auditDir?: string; pin?: ReadinessPin | null; adapter?: ReadinessAdapter } = {},
 ): boolean {
   const now = new Date(opts.now ?? Date.now());
-  const auditDir = opts.auditDir ?? readinessPaths({ home: opts.home }).auditDir;
-  const pin = opts.pin === undefined ? currentReadinessPin() : opts.pin;
+  const adapter = opts.adapter ?? READINESS_ADAPTER;
+  const auditDir = opts.auditDir ?? readinessPaths({ home: opts.home, adapter }).auditDir;
+  const pin = opts.pin === undefined ? currentReadinessPin(adapter) : opts.pin;
   const row: Record<string, unknown> = {
     type: 'approval_reach',
-    origin: input.origin ?? 'claude-code-hook',
+    origin: input.origin ?? adapter,
     reachId: reachIdFor(input.hash),
     phase: input.phase,
     ts: now.toISOString(),
@@ -551,6 +593,24 @@ const STOP_OUTCOMES = new Set([
   'warned',
   'auto_denied',
 ]);
+
+/** #509 r7: the OpenClaw interceptor's own words for a stop. A card hold
+ *  writes no row until the operator answers (#372), so every card outcome —
+ *  including an approval — is the row for a call the guard held; a denial on
+ *  the failure policy (no approver) or by the operator is a stop too. */
+const OPENCLAW_STOP_OUTCOMES = new Set([
+  ...STOP_OUTCOMES,
+  'failure_denied',
+  'denied',
+  'approved_once',
+  'card_denied',
+  'card_timeout',
+  'card_cancelled',
+]);
+
+function stopOutcomes(adapter: ReadinessAdapter): ReadonlySet<string> {
+  return adapter === 'openclaw-interceptor' ? OPENCLAW_STOP_OUTCOMES : STOP_OUTCOMES;
+}
 
 /** Rows that are not a verdict on a tool call. */
 const NON_VERDICT_ACTIONS = new Set(['gate_degraded', 'notify']);
@@ -588,7 +648,7 @@ function isWellFormedRecord(row: unknown): row is Record<string, unknown> {
   if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
   const r = row as Record<string, unknown>;
   const evidence =
-    (r.type === 'intercept' && r.origin === 'claude-code-hook') ||
+    (r.type === 'intercept' && isReadinessAdapter(r.origin)) ||
     r.type === 'approval_reach' ||
     r.type === 'readiness_transition';
   if (!evidence) return true;
@@ -670,11 +730,12 @@ function readEvidence(dirs: string[], sinceMs: number, nowMs: number): {
   return { rows, bytesRead, truncated, unreadableFiles, unparseableLines };
 }
 
-/** A real, verdict-bearing Claude Code hook call (any version). */
+/** A real, verdict-bearing call through a gated adapter (any adapter, any
+ *  version — {@link isAdapterEvidence} then decides whose it is). */
 function isCountedCall(row: Record<string, unknown>): boolean {
   if (row.type !== 'intercept') return false;
   // Exact origin: rows from other planes, canaries and proofs never count.
-  if (row.origin !== 'claude-code-hook') return false;
+  if (!isReadinessAdapter(row.origin)) return false;
   if (row.synthetic === true) return false;
   if (NON_VERDICT_ACTIONS.has(String(row.action))) return false;
   const threats = Array.isArray(row.threats) ? row.threats : [];
@@ -706,12 +767,16 @@ export function computeReadiness(opts: {
    *  evidence; defaults to {@link REVIEWED_EFFECTIVENESS_EVIDENCE}. Never fed
    *  from config or any file. */
   effectivenessRegistry?: readonly EffectivenessEvidence[];
+  /** #509 r7: whose readiness this is (default the Claude Code hook). */
+  adapter?: ReadinessAdapter;
 }): ReadinessReport {
   const nowMs = opts.now ?? Date.now();
-  const paths = opts.paths ?? readinessPaths({ home: opts.home });
-  const pin = opts.pin === undefined ? currentReadinessPin() : opts.pin;
+  const adapter = opts.adapter ?? READINESS_ADAPTER;
+  const paths = opts.paths ?? readinessPaths({ home: opts.home, adapter });
+  const pin = opts.pin === undefined ? currentReadinessPin(adapter) : opts.pin;
   const since = nowMs - Math.max(INTERVENTION_WINDOW_MS, REACHABILITY_WINDOW_MS);
   const { rows, bytesRead, truncated, unreadableFiles, unparseableLines } = readEvidence(paths.readAuditDirs, since, nowMs);
+  const stopSet = stopOutcomes(adapter);
 
   // ── Operational intervention rate ──
   let stops = 0;
@@ -722,7 +787,7 @@ export function computeReadiness(opts: {
   const ivSince = nowMs - INTERVENTION_WINDOW_MS;
   for (const { ts, row } of rows) {
     if (ts < ivSince || !isCountedCall(row)) continue;
-    if (!samePin(row.readinessPin, pin)) {
+    if (!isAdapterEvidence(row, pin, adapter)) {
       ivOther += 1;
       continue;
     }
@@ -730,7 +795,7 @@ export function computeReadiness(opts: {
     oldest = Math.min(oldest, ts);
     newest = Math.max(newest, ts);
     const catastrophic = row.severity === 'critical';
-    if (!catastrophic && STOP_OUTCOMES.has(String(row.outcome))) stops += 1;
+    if (!catastrophic && stopSet.has(String(row.outcome))) stops += 1;
   }
   const spanMs = total > 0 ? newest - oldest : 0;
   const ivRate = total > 0 ? stops / total : null;
@@ -771,7 +836,7 @@ export function computeReadiness(opts: {
       answers.set(attempt, list);
       continue;
     }
-    if (!samePin(row.readinessPin, pin)) {
+    if (!isAdapterEvidence(row, pin, adapter)) {
       rcOther += 1;
       continue;
     }
@@ -863,6 +928,9 @@ export function computeReadiness(opts: {
   let lastTransition: ReadinessReport['lastTransition'] = null;
   for (const { ts, row } of rows) {
     if (row.type !== 'readiness_transition') continue;
+    // r7: another adapter's transition is not this adapter's mode (a row
+    // with no origin predates r7 and was written by the hook).
+    if ((row.origin ?? READINESS_ADAPTER) !== adapter) continue;
     const to = row.to === 'enforcing' ? 'enforcing' : row.to === 'shadow' ? 'shadow' : null;
     if (!to) continue;
     if (!lastTransition || ts >= Date.parse(lastTransition.ts)) {
@@ -1233,6 +1301,10 @@ function quarantineRecord(path: string, now: number): void {
  * was not already enforce-when-ready, or when no record exists — re-running
  * the command on an install that already has a record changes nothing, so it
  * cannot clear a recorded demotion.
+ *
+ * r7: with neither `adapter` nor `paths`, every gated adapter's record is
+ * started (the posture is one config key; each adapter keeps its own
+ * journal). The return value is the default adapter's (the hook's).
  */
 export function initReadinessTransitions(opts: {
   postureChanged: boolean;
@@ -1240,9 +1312,18 @@ export function initReadinessTransitions(opts: {
   home?: string;
   paths?: ReadinessPaths;
   now?: number;
+  adapter?: ReadinessAdapter;
 }): boolean {
+  if (!opts.paths && !opts.adapter) {
+    let result = false;
+    for (const adapter of READINESS_ADAPTERS) {
+      const r = initReadinessTransitions({ ...opts, adapter });
+      if (adapter === READINESS_ADAPTER) result = r;
+    }
+    return result;
+  }
   const now = opts.now ?? Date.now();
-  const paths = opts.paths ?? readinessPaths({ home: opts.home });
+  const paths = opts.paths ?? readinessPaths({ home: opts.home, adapter: opts.adapter });
   const path = transitionsPathFor(paths);
   return withWriterLock(paths, now, () => {
     const record = readTransitionRecord(path);
@@ -1307,9 +1388,11 @@ export function recordTransitionNotice(opts: {
   home?: string;
   paths?: ReadinessPaths;
   now?: number;
+  /** r7: whose transition this notice announces (default the hook). */
+  adapter?: ReadinessAdapter;
 }): boolean {
   const now = opts.now ?? Date.now();
-  const paths = opts.paths ?? readinessPaths({ home: opts.home });
+  const paths = opts.paths ?? readinessPaths({ home: opts.home, adapter: opts.adapter });
   return withWriterLock(paths, now, () => appendTransition(transitionsPathFor(paths), {
     ts: new Date(now).toISOString(),
     event: 'notice',
@@ -1546,11 +1629,16 @@ export function resolveReadiness(opts: {
   /** Test seam: runs between the pre-lock journal read and taking the
    *  writer lock — where another process's write can interleave. */
   beforeLock?: () => void;
+  /** #509 r7: which adapter is asking (default the Claude Code hook). Its own
+   *  evidence, state file, journal and lock — see READINESS_ADAPTERS. */
+  adapter?: ReadinessAdapter;
 }): ResolvedReadiness {
   const now = opts.now ?? Date.now();
-  const paths = opts.paths ?? readinessPaths({ home: opts.home });
+  const adapter = opts.adapter ?? READINESS_ADAPTER;
+  if (!isReadinessAdapter(adapter)) throw new Error(`unknown readiness adapter: ${String(adapter).slice(0, 40)}`);
+  const paths = opts.paths ?? readinessPaths({ home: opts.home, adapter });
   const ttl = opts.ttlMs ?? READINESS_CACHE_TTL_MS;
-  const pin = opts.pin === undefined ? currentReadinessPin() : opts.pin;
+  const pin = opts.pin === undefined ? currentReadinessPin(adapter) : opts.pin;
   const recordPath = transitionsPathFor(paths);
   const record = readTransitionRecord(recordPath);
   const recorded = durableMode(record);
@@ -1591,6 +1679,7 @@ export function resolveReadiness(opts: {
     now,
     pin,
     effectivenessRegistry: opts.effectivenessRegistry,
+    adapter,
   });
   const prevMode = previousMode(state, report, durable);
   const decision = decideFromEvidence({ state, report, durable, now, tampered: tamper !== undefined });
@@ -1630,7 +1719,7 @@ export function resolveReadiness(opts: {
         paths.auditDir,
         {
           type: 'readiness_tamper',
-          origin: 'claude-code-hook',
+          origin: adapter,
           ts: nowIso,
           auditEventId: randomBytes(16).toString('hex'),
           ...(pin ? { readinessPin: pin } : {}),
@@ -1679,7 +1768,7 @@ export function resolveReadiness(opts: {
         paths.auditDir,
         {
           type: 'readiness_transition',
-          origin: 'claude-code-hook',
+          origin: adapter,
           from: decision.unknown ? 'unknown' : prevMode ?? 'shadow',
           to: decision.mode,
           transition: decision.transition,

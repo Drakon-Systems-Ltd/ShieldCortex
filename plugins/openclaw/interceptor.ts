@@ -41,6 +41,57 @@ export interface ActionGuardConfig {
    *  this plugin's duplicated `createReviewedScriptCheck` — see the build-
    *  boundary note at that function). Absent/malformed = nothing is exempt. */
   reviewedScripts?: unknown[];
+  /** #509 enforce-when-ready: with `enforce`, run in SHADOW (dangerous-tier
+   *  verdicts logged as would-stop, not applied) until this adapter meets its
+   *  readiness conditions. `=== true` only; ignored under a policy lock. The
+   *  readiness decision itself is guard-readiness.ts, injected as
+   *  {@link ReadinessRuntime} — never re-implemented here. */
+  readinessGate?: boolean;
+  /** RAW operator-notify config (#143), passed through untouched to the
+   *  readiness runtime; `normaliseNotifyConfig` is the boundary. */
+  notify?: Record<string, unknown>;
+}
+
+/** #509: what guard-readiness.ts `resolveReadiness` answers (structural —
+ *  this plugin never imports the main package at compile time). */
+export interface ResolvedReadinessLike {
+  mode: 'shadow' | 'enforcing';
+  transition: 'promote' | 'demote' | null;
+  tamper?: string;
+  demotionReason?: string;
+  /** The journal `ts` of a transition made on this call. */
+  transitionAt?: string;
+}
+
+/**
+ * #509 r7: the enforce-when-ready gate for THIS adapter, built by the plugin
+ * (`buildReadinessRuntime` in index.ts) from `shieldcortex/defence`'s
+ * guard-readiness exports, bound to the `openclaw-interceptor` adapter: its
+ * own evidence, state file and transition journal. Absent while the posture
+ * asks for the gate = the module is missing from this build, and the
+ * interceptor ENFORCES (the tighter answer), exactly as the hook does.
+ */
+export interface ReadinessRuntime {
+  /** `resolveReadiness` for this adapter. May throw — the caller enforces. */
+  resolve: () => ResolvedReadinessLike;
+  /** `currentReadinessPin` for this adapter; stamped on every row. */
+  pin: () => { adapter: string; policy: string } | null;
+  /** A human approval channel is configured (`describeHumanChannel`). */
+  channelConfigured: () => boolean;
+  /** `recordApprovalReach` pinned to this adapter. Best-effort, never throws. */
+  recordReach: (row: {
+    attemptId: string;
+    phase: 'request' | 'answer' | 'resolved';
+    answer?: 'approve' | 'deny' | 'timeout' | 'unreached' | 'no_surface';
+    channel?: string | null;
+    reason?: string;
+  }) => void;
+  newAttemptId: () => string;
+  /** `describeDemotion`: the plain-English demotion line. */
+  describeDemotion: (reason: string | undefined) => string;
+  /** Announce a transition on OpenClaw's own notify path and journal whether
+   *  the notice was delivered (`recordTransitionNotice`). Never throws. */
+  announce: (which: 'promote' | 'demote', resolved: ResolvedReadinessLike, toolName: string) => Promise<void>;
 }
 
 /** Structural shape of a Tool Action Guard verdict (kept local to avoid a
@@ -275,6 +326,8 @@ interface DecisionAuditCarrier {
 interface CapturedAuditContext {
   sessionKey?: string;
   args?: Record<string, unknown>;
+  /** #509: the readiness pin in force when the call was held. */
+  readinessPin?: { adapter: string; policy: string };
 }
 
 export interface InterceptAuditEntry {
@@ -295,7 +348,18 @@ export interface InterceptAuditEntry {
   outcome: 'approved' | 'denied' | 'auto_denied' | 'logged' | 'warned' | 'failure_allowed' | 'failure_denied' | 'allowed'
     // #372 — card-held decisions, written when the operator answers rather than
     // when the hold is taken. `action` for these rows is 'require_approval'.
-    | ApprovalDecisionOutcome;
+    | ApprovalDecisionOutcome
+    // #509 — enforce-when-ready shadow: the stop the guard WOULD have made.
+    | 'would_hold' | 'would_block';
+  /** #509 — set on a shadowed (not applied) dangerous-tier verdict. */
+  shadow?: true;
+  posture?: 'enforce-when-ready';
+  /** #509 — the adapter + policy version this row is readiness evidence for.
+   *  Present only under the enforce-when-ready posture. */
+  readinessPin?: { adapter: string; policy: string };
+  /** #509 — a benign allow's minimal row (no args): the intervention
+   *  proxy's denominator is every gated call. */
+  readinessTally?: true;
   preview: string;
   ts: string;
   /** The approval broker's record for this call (#143). Present on exactly the
@@ -1239,6 +1303,12 @@ interface InterceptorOptions {
    *  disk. Injected from `shieldcortex/defence` at runtime so this plugin does
    *  not grow a second schema. Absent = unbound (older installed package). */
   bindAudit?: (entry: InterceptAuditEntry, args?: Record<string, unknown>) => InterceptAuditEntry;
+  /** #509 r7 — the enforce-when-ready gate (see {@link ReadinessRuntime}). */
+  readiness?: ReadinessRuntime;
+  /** #509 r7 — whether an OS policy lock is on disk. The lock pins
+   *  enforcement, so the readiness gate is ignored under it (as in the hook).
+   *  A probe that throws counts as locked — the tighter answer. */
+  policyLockPresent?: () => boolean;
 }
 
 /** How many recent tool NAMES the judge is told about. Names only, never
@@ -1274,6 +1344,9 @@ export function createInterceptor(
   const judgeLimiter = new RateLimiter(options?.maxJudgeCallsPerMinute ?? 20);
   /** Bare tool names seen this session, newest last. See buildSessionSummary. */
   const recentTools: string[] = [];
+  /** #509: the readiness pin for the in-flight call — set only under the
+   *  enforce-when-ready posture, so only those rows are readiness evidence. */
+  let callReadinessPin: { adapter: string; policy: string } | undefined;
 
   /** The one write path every intercept row takes. `captured` is normally the
    *  in-flight call (emitAudit below); #372 hands it a hold-time snapshot so a
@@ -1283,6 +1356,7 @@ export function createInterceptor(
       ...entry,
       origin: 'openclaw-interceptor',
       ...(captured.sessionKey ? { sessionKey: captured.sessionKey } : {}),
+      ...(captured.readinessPin ? { readinessPin: captured.readinessPin } : {}),
     };
     const bound = bindAudit ? bindAudit(withOrigin, captured.args) : withOrigin;
     writeAuditEntry(bound);
@@ -1294,6 +1368,7 @@ export function createInterceptor(
     emitAuditWith(entry, {
       sessionKey: options?.sessionGuard?.keyFor(lastSessionId) ?? undefined,
       args: lastCallArgs,
+      readinessPin: callReadinessPin,
     });
   }
 
@@ -1323,7 +1398,11 @@ export function createInterceptor(
     // Shallow-snapshot the args: reference capture would let in-place mutation
     // of the params object between hold and resolution rewrite the one
     // forensic binding this row exists to protect (review nit, both reviewers).
-    const captured: CapturedAuditContext = { sessionKey, args: lastCallArgs ? { ...lastCallArgs } : undefined };
+    const captured: CapturedAuditContext = {
+      sessionKey,
+      args: lastCallArgs ? { ...lastCallArgs } : undefined,
+      readinessPin: callReadinessPin,
+    };
     const held: Omit<InterceptAuditEntry, 'action' | 'outcome'> = { ...auditBase };
     let written = false;
     err.decisionAudit = (outcome) => {
@@ -1470,6 +1549,82 @@ export function createInterceptor(
     if (typeof broker.approvalTimeoutMs === 'function') return broker.approvalTimeoutMs(broker.config, severity);
     return Math.min(broker.config.approvalTimeoutMs.sensitive, broker.config.approvalTimeoutMs.dangerous);
   }
+
+  // ── #509 enforce-when-ready ──────────────────────────────────────────────
+  // Same conditions as the Claude Code hook (pre-tool-hook.mjs): only an
+  // ENFORCING guard can be gated, and never under a policy lock — the lock
+  // pins enforcement, and a readiness flag must not become a way around it.
+  // Resolved on every gated call so a transition is announced when it
+  // happens. Every failure here ENFORCES — the tighter answer.
+  const readiness = options?.readiness;
+
+  function policyLocked(): boolean {
+    try {
+      return options?.policyLockPresent?.() === true;
+    } catch {
+      return true;
+    }
+  }
+
+  async function resolveReadinessGate(toolName: string): Promise<{ whenReady: boolean; shadow: boolean }> {
+    callReadinessPin = undefined;
+    const whenReady = actionGuardCfg.enforce === true && actionGuardCfg.readinessGate === true && !policyLocked();
+    if (!whenReady) return { whenReady, shadow: false };
+    if (!readiness) {
+      log.warn('[shieldcortex] enforce-when-ready: the readiness module is missing from this build — ENFORCING. Run `shieldcortex repair`.');
+      return { whenReady, shadow: false };
+    }
+    try {
+      // Pin every row this call writes to the adapter + policy version in
+      // force: only same-version rows count as readiness evidence.
+      const pin = readiness.pin();
+      if (pin) callReadinessPin = pin;
+      const resolved = readiness.resolve();
+      const shadow = resolved.mode === 'shadow';
+      if (resolved.tamper) {
+        log.warn(`[shieldcortex] ⚠️ enforce-when-ready: readiness tamper signal — ${String(resolved.tamper).slice(0, 300)}. Recorded; run \`shieldcortex doctor\`.`);
+      }
+      if (resolved.transition === 'demote') {
+        let line = 'ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready).';
+        try { line = readiness.describeDemotion(resolved.demotionReason); } catch { /* keep the fallback */ }
+        log.warn(`[shieldcortex] ⚠️ ${line}`);
+        await readiness.announce('demote', resolved, toolName);
+      } else if (resolved.transition === 'promote') {
+        log.warn('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts on OpenClaw.');
+        await readiness.announce('promote', resolved, toolName);
+      }
+      return { whenReady, shadow };
+    } catch (err) {
+      log.warn(`[shieldcortex] enforce-when-ready: readiness could not be resolved (${String(err instanceof Error ? err.message : err).slice(0, 200)}) — ENFORCING.`);
+      return { whenReady, shadow: false };
+    }
+  }
+
+  /** #509 approval-reach evidence for one request put to (or kept from) a
+   *  human — written only when a channel is configured, like the hook's.
+   *  Best-effort: a missing row can only keep the adapter from being ready. */
+  function recordReach(row: Parameters<ReadinessRuntime['recordReach']>[0]): void {
+    try {
+      if (readiness && readiness.channelConfigured()) readiness.recordReach(row);
+    } catch { /* evidence is best-effort */ }
+  }
+
+  function newReachAttempt(): string | null {
+    try {
+      return readiness && readiness.channelConfigured() ? readiness.newAttemptId() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The card's answer, as reachability evidence. Only a human tapping a
+   *  button is a reach; a timeout or a cancelled card is not. */
+  const CARD_REACH_ANSWER: Record<ApprovalDecisionOutcome, 'approve' | 'deny' | 'timeout' | 'unreached'> = {
+    approved_once: 'approve',
+    card_denied: 'deny',
+    card_timeout: 'timeout',
+    card_cancelled: 'unreached',
+  };
 
   // WS2 fail-closed path (issue #59): when the real guard was never wired in or
   // throws, run the dependency-free fallback scan. Three tiers, so no dangerous
@@ -1661,17 +1816,24 @@ export function createInterceptor(
       );
     }
 
+    // #509 enforce-when-ready: resolved here — after the lease floor and the
+    // evaluation, before any verdict is applied — exactly where the hook does.
+    const gate = await resolveReadinessGate(context.toolName);
+
     if (v.decision === 'allow') {
       // Issue #95: a RECOGNISED allow (the guard evaluated a known operation
       // family and let it through — severity above benign) leaves an audit
       // entry, so forensics can distinguish "scanned & allowed" from "never
       // scanned". Benign allows stay unaudited by design (volume discipline);
       // `actionGuard.auditAllows: false` opts the recognised entries off too.
+      let wrote = false;
       if (actionGuardCfg.auditAllows !== false) {
         if (v.severity !== 'benign') {
           const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
           emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...(drift ?? {}), action: 'allow', outcome: 'allowed' });
+          wrote = true;
         } else if (drift) {
+          wrote = true;
           // A benign allow is normally unaudited — but drift is the one thing
           // about it worth keeping, so it rides on ONE row of its own rather
           // than doubling the recognised-allow row above. The preview is the
@@ -1685,6 +1847,21 @@ export function createInterceptor(
             outcome: 'allowed',
           });
         }
+      }
+      if (!wrote && gate.whenReady) {
+        // #509: the intervention proxy's denominator is EVERY gated call, so
+        // under this posture a benign allow leaves a minimal row too — the
+        // tool name only, no args, no command text; the one extra row per call
+        // is the measurement's price (same as the hook).
+        emitAuditWith(
+          {
+            type: 'intercept', tool: context.toolName, severity: 'low', firewallResult: 'ACTION_GUARD',
+            threats: [], anomalyScore: 0, trustScore: 0, sensitivityLevel: 'INTERNAL', fragmentationScore: null,
+            pipelineDurationMs: 0, action: 'allow', outcome: 'allowed', preview: `${context.toolName} :: tally`,
+            ts: new Date().toISOString(), readinessTally: true,
+          },
+          { args: { tally: 'redacted' }, readinessPin: callReadinessPin },
+        );
       }
       return;
     }
@@ -1747,6 +1924,26 @@ export function createInterceptor(
       }
     }
 
+    // #509 SHADOW: enforce-when-ready does not (or no longer) meet its
+    // readiness conditions. The verdict is exactly the guard's; it is recorded
+    // as the stop it WOULD have been — `would_hold` where enforcing would put
+    // a card to a human, `would_block` where there is no approver and the
+    // failure policy would decide — and the call proceeds. Placed where
+    // advisory sits (and before the broker), so it inherits advisory's
+    // limits: the catastrophic tier threw above; an unscanned schema
+    // rejection or sub-catastrophic block (#436) is never shadowed; and
+    // neither is the guard self-protection floor (R4-1). The session-lease
+    // floor refused before the guard ran.
+    if (gate.shadow && !unscannedBlock && !selfProtected) {
+      const wouldOutcome = typeof context.requireApproval === 'function' ? 'would_hold' : 'would_block';
+      emitAudit({ ...base, action: 'require_approval', outcome: wouldOutcome, shadow: true, posture: 'enforce-when-ready' });
+      log.warn(
+        `[shieldcortex] Action Guard (shadow, enforce-when-ready): ${wouldOutcome === 'would_block' ? 'would have BLOCKED' : 'would have HELD for approval'} ` +
+        `${context.toolName} [${v.signals.join(', ')}] — not enforced until this install meets its readiness conditions (\`shieldcortex guard readiness\`).`,
+      );
+      return;
+    }
+
     // require_approval — ENFORCED by default (P1/WS1). `enforce:false` opts back
     // down to warn-and-allow (advisory) for operators who want the old behaviour.
     // #436: an unscanned schema rejection must not become an advisory allow.
@@ -1799,6 +1996,12 @@ export function createInterceptor(
       const brokerDenies = brokered ? broker!.timeoutOutcome(brokered) === 'deny' : false;
       const deny = failAction === 'deny' || brokerDenies || selfProtected;
       emitAudit({ ...auditBase, action: 'require_approval', outcome: deny ? 'failure_denied' : 'failure_allowed' });
+      // #509: no approver means the decision was put to no human — for
+      // approval reachability, a request that did NOT reach one.
+      const unattendedAttempt = newReachAttempt();
+      if (unattendedAttempt) {
+        recordReach({ attemptId: unattendedAttempt, phase: 'resolved', answer: 'no_surface', reason: 'no approver on this session (unattended)' });
+      }
       if (deny) {
         log.warn(`[shieldcortex] action-guard DENIED (unattended, no approver) ${context.toolName}: ${v.reason} [${v.signals.join(", ")}]`);
         throw new Error(`ShieldCortex: tool call blocked — ${v.reason} (no approver, failure policy: deny)`);
@@ -1811,6 +2014,11 @@ export function createInterceptor(
       throw new Error('ShieldCortex: tool call auto-denied (approval rate limit exceeded)');
     }
 
+    // #509 approval reach: one delivered attempt, one correlation id. An
+    // answer binds only to the attempt it names (round 4, R4-2) — here the
+    // closure on this card — so ten asks of the same command are ten
+    // attempts, and one answer never erases the nine that went unanswered.
+    const reachAttempt = newReachAttempt();
     let approved: boolean;
     try {
       approved = await withApprovalDeadline(
@@ -1825,7 +2033,28 @@ export function createInterceptor(
         // #372: still no row for the hold — but the card leaves carrying the
         // closure that writes one the moment the operator answers.
         attachDecisionAudit(err, auditBase);
+        if (reachAttempt) {
+          // #509: the card IS the OpenClaw approval channel. Its request row
+          // now; its answer — bound to THIS attempt — when the host reports
+          // the operator's decision. Only a button a human pressed is a reach.
+          recordReach({ attemptId: reachAttempt, phase: 'request', channel: 'openclaw-card' });
+          const writeDecision = err.decisionAudit;
+          let answered = false;
+          err.decisionAudit = (outcome) => {
+            writeDecision?.(outcome);
+            if (answered || !Object.hasOwn(CARD_REACH_ANSWER, outcome)) return;
+            answered = true;
+            recordReach({ attemptId: reachAttempt, phase: 'answer', answer: CARD_REACH_ANSWER[outcome], channel: 'openclaw-card' });
+          };
+        }
         throw err;
+      }
+      if (reachAttempt) {
+        const timedOut = err instanceof ApprovalTimeout;
+        recordReach(timedOut
+          ? { attemptId: reachAttempt, phase: 'request', channel: 'openclaw-approver' }
+          : { attemptId: reachAttempt, phase: 'resolved', answer: 'unreached', reason: 'the approver failed before a human answered' });
+        if (timedOut) recordReach({ attemptId: reachAttempt, phase: 'answer', answer: 'timeout', channel: 'openclaw-approver' });
       }
       if (brokered && err instanceof ApprovalTimeout) {
         // The asymmetric path. Silence is only ever a yes for something the
@@ -1850,6 +2079,9 @@ export function createInterceptor(
       return;
     }
 
+    // A synchronous approver (a host older than the #310 card) answering
+    // inside the turn is not the OpenClaw approval channel, so its answer is
+    // no reach evidence either way; only its failures above count, against.
     if (approved) {
       emitAudit({ ...auditBase, action: 'require_approval', outcome: 'approved' });
       return;

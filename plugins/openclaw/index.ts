@@ -40,7 +40,7 @@ import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
 import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
-import type { ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime } from './interceptor.js';
+import type { ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
@@ -120,6 +120,24 @@ type DefenceModule = {
     notification: unknown,
     deps: { channels: NotifyChannelLike[]; timeoutMs?: number },
   ) => Promise<{ deliveredVia: string | null; attempts: Array<{ channel: string; result: { delivered: boolean; reason?: string } }> }>;
+  /** #509 r7 — the enforce-when-ready readiness gate (guard-readiness.ts) and
+   *  the Action Guard outcome notice its transitions are announced with. All
+   *  optional: an older dist without them makes a gated posture ENFORCE. */
+  READINESS_ADAPTERS?: readonly string[];
+  resolveReadiness?: (opts: Record<string, unknown>) => {
+    mode: 'shadow' | 'enforcing';
+    transition: 'promote' | 'demote' | null;
+    tamper?: string;
+    demotionReason?: string;
+    transitionAt?: string;
+  };
+  currentReadinessPin?: (adapter?: string) => { adapter: string; policy: string } | null;
+  describeHumanChannel?: (rawNotify: unknown) => { configured: boolean; kind: string | null; pushesNotices: boolean };
+  describeDemotion?: (reason: string | undefined) => string;
+  recordApprovalReach?: (input: Record<string, unknown>, opts?: Record<string, unknown>) => boolean;
+  recordTransitionNotice?: (opts: Record<string, unknown>) => boolean;
+  newReachAttemptId?: () => string;
+  buildActionGuardOutcomeNotification?: (input: Record<string, unknown>) => Record<string, unknown>;
   /** #260 — session-guard index + degraded-run summary. Optional so an older
    *  installed dist degrades to "no index" rather than crashing the hook. */
   sessionKeyFor?: (value: string | undefined, opts?: { home?: string; salt?: string }) => string | null;
@@ -484,6 +502,9 @@ interface InterceptorUserConfig {
      *  DROPPED here, so the plugin could not reach an operator at all even on a
      *  box where the Claude Code hook could. */
     notify?: Record<string, unknown>;
+    /** #509 enforce-when-ready — honoured from the shield config only (see
+     *  mergeConfigs). */
+    readinessGate?: boolean;
   };
   /** Conversation firewall posture (#225). See CONVERSATION_POSTURES. */
   conversation?: { posture?: ConversationPosture };
@@ -1656,6 +1677,14 @@ function normaliseActionGuardBlock(
     if (typeof rawGuard.auditAllows === "boolean") guard.auditAllows = rawGuard.auditAllows;
     else dropped?.push(`${pathPrefix}.auditAllows`);
   }
+  // #509 r7: enforce-when-ready. Carried here, but mergeConfigs honours it
+  // ONLY from the shield config (the signed file the CLI writes): the
+  // openclaw.json entry is an unsigned same-UID file, and turning the gate ON
+  // from there would move an enforcing guard into shadow — a loosening.
+  if (rawGuard.readinessGate !== undefined) {
+    if (typeof rawGuard.readinessGate === "boolean") guard.readinessGate = rawGuard.readinessGate;
+    else dropped?.push(`${pathPrefix}.readinessGate`);
+  }
   if (rawGuard.autoApprove !== undefined) {
     if (Array.isArray(rawGuard.autoApprove) && rawGuard.autoApprove.every((entry) => typeof entry === "string")) {
       // #115: defensive copy — downstream (initInterceptor's spread into
@@ -1787,6 +1816,10 @@ function mergeConfigs(base: SCConfig, override: SCConfig): SCConfig {
       const guard: NonNullable<InterceptorUserConfig['actionGuard']> = { ...bg, ...og };
       if (bg.notify || og.notify) guard.notify = { ...bg.notify, ...og.notify };
       if (bg.broker || og.broker) guard.broker = { ...bg.broker, ...og.broker };
+      // #509 r7: the readiness gate comes from the BASE (shield config) only.
+      // An openclaw.json entry cannot switch an enforcing guard into shadow.
+      if (bg.readinessGate === true) guard.readinessGate = true;
+      else delete guard.readinessGate;
       merged.interceptor.actionGuard = guard;
     }
   }
@@ -3179,6 +3212,158 @@ export function __setGatewayNotifyContextForTest(ctx: GatewayNotifyContext | nul
 }
 
 /**
+ * The operator's push channels, in order (#225, reused by the #509 readiness
+ * notices): the gateway's own message seam WHERE the runtime provides one —
+ * it would go first, because it would reach the operator on a channel they
+ * already read, but `_gatewayNotifyContext` is null on every build we have
+ * inspected — then the configured webhook, which is what actually carries a
+ * notice off the box today.
+ */
+function buildOperatorNotifyChannels(
+  mod: DefenceModule,
+  notify: { openclaw: boolean; webhookUrl?: string; webhookSecret?: string },
+): NotifyChannelLike[] {
+  const channels: NotifyChannelLike[] = [];
+  if (notify.openclaw === true && _gatewayNotifyContext) {
+    const gatewayChannel = createGatewayNotifyChannel(_gatewayNotifyContext);
+    if (gatewayChannel) channels.push(gatewayChannel);
+  }
+  if (notify.webhookUrl && typeof mod.createWebhookNotifyChannel === 'function') {
+    channels.push(
+      mod.createWebhookNotifyChannel({
+        url: notify.webhookUrl,
+        // The signing key. Passed straight through and never logged — see
+        // notify-config.ts, which is the only place this value is parsed.
+        secret: notify.webhookSecret,
+      }),
+    );
+  }
+  return channels;
+}
+
+type DeliveryResult = { deliveredVia: string | null; attempts: Array<{ channel: string; result: { delivered: boolean; reason?: string } }> };
+
+/** The adapter the OpenClaw interceptor resolves readiness as (#509 r7). */
+export const OPENCLAW_READINESS_ADAPTER = 'openclaw-interceptor';
+
+/**
+ * #509 r7: the enforce-when-ready gate for the OpenClaw interceptor, built
+ * from guard-readiness.ts as the installed `shieldcortex/defence` exports it
+ * — the SAME implementation the Claude Code hook loads from dist — bound to
+ * the `openclaw-interceptor` adapter (its own evidence, state file,
+ * transition journal and lock). Returns undefined when the build lacks any
+ * piece, or predates per-adapter readiness (no `READINESS_ADAPTERS` naming
+ * this adapter: an older module would read and write the HOOK's journal);
+ * the interceptor then ENFORCES under the posture, as the hook does.
+ *
+ * Transitions are announced on OpenClaw's own notify path — the channels the
+ * #225 conversation alerts use — with the Action Guard outcome notice, and
+ * whether it was delivered is journalled beside the transition. `seams` is
+ * for tests only (evidence tree, reviewed-evidence registry, delivery).
+ */
+export function buildReadinessRuntime(
+  mod: DefenceModule | null | undefined,
+  rawNotify: unknown,
+  seams: {
+    home?: string;
+    effectivenessRegistry?: readonly unknown[];
+    deliver?: (which: 'promote' | 'demote') => Promise<DeliveryResult | null>;
+  } = {},
+): ReadinessRuntime | undefined {
+  if (
+    !mod ||
+    typeof mod.resolveReadiness !== 'function' ||
+    typeof mod.currentReadinessPin !== 'function' ||
+    typeof mod.describeHumanChannel !== 'function' ||
+    typeof mod.recordApprovalReach !== 'function' ||
+    typeof mod.newReachAttemptId !== 'function' ||
+    !Array.isArray(mod.READINESS_ADAPTERS) ||
+    !mod.READINESS_ADAPTERS.includes(OPENCLAW_READINESS_ADAPTER)
+  ) {
+    return undefined;
+  }
+  const adapter = OPENCLAW_READINESS_ADAPTER;
+  const readiness = mod;
+  const channel = () => readiness.describeHumanChannel!(rawNotify);
+  const home = seams.home !== undefined ? { home: seams.home } : {};
+
+  async function deliver(which: 'promote' | 'demote', toolName: string): Promise<DeliveryResult | null> {
+    if (seams.deliver) return seams.deliver(which);
+    if (typeof readiness.normaliseNotifyConfig !== 'function' || typeof readiness.deliverOperatorNotification !== 'function'
+      || typeof readiness.buildActionGuardOutcomeNotification !== 'function') {
+      return null;
+    }
+    const notify = readiness.normaliseNotifyConfig(rawNotify);
+    if (!notify.enabled) return null;
+    const channels = buildOperatorNotifyChannels(readiness, notify);
+    if (channels.length === 0) return null;
+    const n = readiness.buildActionGuardOutcomeNotification({
+      event: 'action_guard_warning',
+      outcome: which === 'promote' ? 'readiness_promoted' : 'readiness_demoted',
+      tool: toolName,
+      surface: 'redacted action surface',
+      signals: [which === 'promote' ? 'readiness-promoted' : 'readiness-demoted'],
+      severity: 'high',
+      reason: '',
+      origin: adapter,
+      detectedAt: new Date().toISOString(),
+    });
+    // Bounded like the conversation alert: this sits inside a gate the
+    // gateway awaits.
+    return readiness.deliverOperatorNotification(n, {
+      channels,
+      timeoutMs: Math.min(notify.timeoutMs ?? CONVERSATION_NOTIFY_MAX_MS, CONVERSATION_NOTIFY_MAX_MS),
+    });
+  }
+
+  return {
+    resolve: () => readiness.resolveReadiness!({
+      channel: channel(),
+      adapter,
+      ...home,
+      ...(seams.effectivenessRegistry ? { effectivenessRegistry: seams.effectivenessRegistry } : {}),
+    }),
+    pin: () => readiness.currentReadinessPin!(adapter),
+    channelConfigured: () => channel().configured === true,
+    recordReach: (row) => {
+      readiness.recordApprovalReach!(
+        { hash: row.attemptId, ...row, origin: adapter },
+        { adapter, ...home },
+      );
+    },
+    newAttemptId: () => readiness.newReachAttemptId!(),
+    describeDemotion: (reason) => (typeof readiness.describeDemotion === 'function'
+      ? readiness.describeDemotion(reason)
+      : `ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready). Reason: ${reason ?? 'readiness evidence no longer holds'}.`),
+    announce: async (which, resolved, toolName) => {
+      let result: DeliveryResult | null = null;
+      try {
+        result = await deliver(which, toolName);
+      } catch {
+        result = { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: `${which} notice failed` } }] };
+      }
+      if (!resolved.transitionAt || typeof readiness.recordTransitionNotice !== 'function') return;
+      const failure = result?.attempts?.find?.((a) => a?.result?.delivered === false)?.result?.reason;
+      try {
+        readiness.recordTransitionNotice({
+          of: which,
+          transitionAt: resolved.transitionAt,
+          delivered: Boolean(result?.deliveredVia),
+          channel: result?.deliveredVia ?? null,
+          reason: result
+            ? (result.deliveredVia ? undefined : redactNotifyDetail(failure ?? 'no channel accepted the notice').slice(0, 200))
+            : 'no push notice channel was available',
+          adapter,
+          ...home,
+        });
+      } catch {
+        /* an unrecorded notice reads as "no notice attempt recorded" — the louder answer */
+      }
+    },
+  };
+}
+
+/**
  * Route a conversation-firewall detection to a HUMAN (#225).
  *
  * This is the "sink" the issue is named for: before it existed, a HIGH verdict
@@ -3227,25 +3412,7 @@ export async function notifyOperatorOfConversationThreat(input: {
     const notify = mod.normaliseNotifyConfig(raw);
     if (!notify.enabled) return { configured: false, delivered: false, via: null, detail: 'notify disabled' };
 
-    const channels: NotifyChannelLike[] = [];
-    // The gateway's own message seam, WHERE the runtime provides one. It would
-    // go first, because it would reach the operator on a channel they already
-    // read — but `_gatewayNotifyContext` is null on every build we have
-    // inspected, so in practice this list starts at the webhook below.
-    if (notify.openclaw === true && _gatewayNotifyContext) {
-      const gatewayChannel = createGatewayNotifyChannel(_gatewayNotifyContext);
-      if (gatewayChannel) channels.push(gatewayChannel);
-    }
-    if (notify.webhookUrl && typeof mod.createWebhookNotifyChannel === 'function') {
-      channels.push(
-        mod.createWebhookNotifyChannel({
-          url: notify.webhookUrl,
-          // The signing key. Passed straight through and never logged — see
-          // notify-config.ts, which is the only place this value is parsed.
-          secret: notify.webhookSecret,
-        }),
-      );
-    }
+    const channels = buildOperatorNotifyChannels(mod, notify);
     if (channels.length === 0) {
       return { configured: true, delivered: false, via: null, detail: 'notify enabled but no channel is configured/buildable on this host' };
     }
@@ -4345,6 +4512,12 @@ export default {
                 args: args ?? {},
               }) as typeof entry
             : undefined,
+          // #509 r7: enforce-when-ready, from guard-readiness.ts via the same
+          // module seam — undefined on a build without it, and then a gated
+          // posture ENFORCES. The lock probe is the inline one the posture
+          // itself fails closed on: a lock pins enforcement, gate ignored.
+          readiness: buildReadinessRuntime(defenceMod, interceptorConfig.actionGuard?.notify),
+          policyLockPresent: inlinePolicyLockPresent,
         });
         const guardState = !canRunPipeline
           ? 'Action Guard: DEGRADED (WS2 fallback scan only)'

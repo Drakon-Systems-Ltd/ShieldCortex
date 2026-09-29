@@ -242,9 +242,25 @@ export {
   formatOperatorNotification,
   formatConversationThreatNotification,
   buildConversationThreatNotification,
+  buildActionGuardOutcomeNotification,
   deliverOperatorNotification,
   isConversationThreatNotification,
 } from './iron-dome/operator-notify.js';
+
+// #509 r7: the enforce-when-ready readiness gate, for the OpenClaw
+// interceptor — the SAME implementation the Claude Code hook imports from
+// dist, reached through the barrel because that is the plugin's only way in.
+// Each adapter resolves its own readiness (`adapter: 'openclaw-interceptor'`).
+export {
+  READINESS_ADAPTERS,
+  resolveReadiness,
+  currentReadinessPin,
+  describeHumanChannel,
+  describeDemotion,
+  recordApprovalReach,
+  recordTransitionNotice,
+  newReachAttemptId,
+} from './iron-dome/guard-readiness.js';
 export type {
   OperatorNotification,
   ConversationThreatNotification,
