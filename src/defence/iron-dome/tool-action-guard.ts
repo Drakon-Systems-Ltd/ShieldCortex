@@ -3588,14 +3588,96 @@ export function guardStateCdRelativeSignals(surface: string): string[] {
   return signals;
 }
 
-/** A move / copy / delete / link whose operand IS the guard directory, or its
- *  `approvals` directory, rather than a file inside it. */
-const GUARD_DIR_OPERAND_MUTATION_RE =
-  /(?:^|[\s;&|(])(?:mv|cp|rm|rmdir|rsync|ln|install)\b[^;&|\n]*?\s["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?(?=$|[\s;&|)])/i;
+/** Verbs that move, copy over, delete or link a directory operand. */
+const GUARD_DIR_MUTATION_VERB_RE = /^(?:mv|cp|rm|rmdir|rsync|ln|install)$/i;
+/** An operand that IS the guard directory, or its `approvals` directory,
+ *  rather than a file inside it. */
+const GUARD_DIR_OPERAND_RE = /^["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?$/i;
+/** After a `cd` into the guard directory: the directory itself, or all of it. */
+const GUARD_DIR_ALL_RELATIVE_RE = /^["']?[.\\/*]*[.*][.\\/*]*["']?$/;
+/** Leading words that keep the NEXT word at command position. */
+const COMMAND_PREFIX_WORD_RE = /^(?:sudo|doas|env|nohup|command|exec|time|nice)$/i;
 
-/** Whether a command moves, copies over, deletes or links the guard directory itself. */
+/**
+ * #509 r6 (N1): the simple commands of a shell string — split at the
+ * separators the shell honours (`;` `&` `|` `(` `)` newline, backtick, `$(`)
+ * but never inside quotes, except that `$(…)` and backticks inside double
+ * quotes still run. The first word of each is at command position; a verb
+ * inside quoted text (`echo "a; rm …"`) or later in a command (`npm install
+ * --prefix …`) is not.
+ */
+function commandPositionSlices(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  /** Quote state to restore when a `$(`/backtick opened inside double quotes closes. */
+  const outer: Array<'"' | null> = [];
+  const cut = () => { if (cur.trim()) out.push(cur.trim()); cur = ''; };
+  for (let i = 0; i < cmd.length; i += 1) {
+    const c = cmd[i]!;
+    if (c === '\\' && quote !== "'") { cur += c + (cmd[i + 1] ?? ''); i += 1; continue; }
+    if (quote === "'") { if (c === "'") quote = null; cur += c; continue; }
+    if (quote === '"') {
+      if (c === '"') { quote = null; cur += c; continue; }
+      if (c === '`' || (c === '$' && cmd[i + 1] === '(')) {
+        if (c === '$') i += 1;
+        outer.push('"');
+        quote = null;
+        cut();
+        continue;
+      }
+      cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; cur += c; continue; }
+    if ((c === ')' || c === '`') && outer.length > 0) { cut(); quote = outer.pop()!; continue; }
+    if (';&|()\n`'.includes(c)) { cut(); continue; }
+    cur += c;
+  }
+  cut();
+  return out;
+}
+
+/** A slice's command word and its operands, past env assignments and
+ *  prefix words like `sudo` (and their flags). */
+function commandWords(slice: string): { verb: string; operands: string[] } {
+  const toks = slice.split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (i < toks.length) {
+    if (/^[A-Za-z_]\w*=/.test(toks[i]!)) { i += 1; continue; }
+    if (COMMAND_PREFIX_WORD_RE.test(toks[i]!)) {
+      i += 1;
+      while (i < toks.length && toks[i]!.startsWith('-')) i += 1;
+      continue;
+    }
+    break;
+  }
+  const word = (toks[i] ?? '').replace(/^["']|["']$/g, '');
+  return { verb: word.split('/').pop() ?? word, operands: toks.slice(i + 1) };
+}
+
+/**
+ * Whether a command moves, copies over, deletes or links the guard directory
+ * itself — the verb at command position, the operand the guard directory (or
+ * `approvals/`), or, after a `cd` into the guard directory in the same
+ * command, `.` or a glob that takes all of it.
+ */
 export function guardDirItselfMutated(surface: string): boolean {
-  return GUARD_DIR_OPERAND_MUTATION_RE.test(String(surface || ''));
+  let inGuardDir = false;
+  for (const slice of commandPositionSlices(String(surface || ''))) {
+    const { verb, operands } = commandWords(slice);
+    if (/^(?:cd|pushd)$/i.test(verb)) {
+      inGuardDir = GUARD_DIR_CD_RE.test(slice);
+      continue;
+    }
+    if (!GUARD_DIR_MUTATION_VERB_RE.test(verb)) continue;
+    for (const op of operands) {
+      if (op.startsWith('-')) continue;
+      if (GUARD_DIR_OPERAND_RE.test(op)) return true;
+      if (inGuardDir && GUARD_DIR_ALL_RELATIVE_RE.test(op)) return true;
+    }
+  }
+  return false;
 }
 
 // `disable-action-guard` is here for the #501 PATH/env rules only. The #500
