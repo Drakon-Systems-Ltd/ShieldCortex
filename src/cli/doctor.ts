@@ -4726,9 +4726,11 @@ export async function checkActionGuardReadiness(
       message: `last promotion to enforcing: ${(await import('./guard.js')).describePromotionNotice(promotion)}`,
       ...(promotion.notice === 'delivered'
         ? {}
-        : {
-          fix: 'No promotion notice reached you for this promotion. If you do not recognise it, the transition journal under ~/.shieldcortex/approvals may have been written by something other than the hook — run `shieldcortex guard readiness` and inspect it.',
-        }),
+        : promotion.notice === 'failed'
+          ? { fix: 'The hook tried to announce this promotion and the notice channel did not accept it. Check the channel (`shieldcortex guard test-approval`).' }
+          : {
+            fix: 'No notice attempt is recorded for this promotion, and the hook records one with every promotion it makes. If you do not recognise it, the transition journal under ~/.shieldcortex/approvals may have been written by something other than the hook — run `shieldcortex guard readiness` and inspect it.',
+          }),
     }]
     : [];
   // A recent tamper signal (a readiness cache that disagreed with the durable
@@ -4741,6 +4743,24 @@ export async function checkActionGuardReadiness(
       fix: 'Something other than the hook wrote the readiness cache or transition record under ~/.shieldcortex/approvals. Find out what; the hook recomputed from evidence and did not trust it.',
     }]
     : [];
+  // #509 r6 (S1): the newest mode entry is an init/recover → shadow after a
+  // promotion with no demotion between. The hook never leaves enforcing that
+  // way, so this is a forged demotion that kept the real promotion in place —
+  // a FAIL, not "not ready yet".
+  const forged = (await import('../defence/iron-dome/guard-readiness.js')).unexplainedDemotion(summary.record);
+  if (forged) {
+    return [{
+      label,
+      status: 'fail',
+      message:
+        `enforce when ready: UNEXPLAINED DEMOTION — the transition journal's newest entry is ${forged.event} → shadow at ${forged.ts}, ` +
+        `after a promotion to enforcing${promotion ? ` (${promotion.promotedAt})` : ''} with no demotion between (current mode: ${summary.mode}). ${bars}.${missing}`,
+      fix:
+        'The hook only leaves enforcing through a recorded, announced demotion, so something other than the hook wrote ' +
+        '~/.shieldcortex/approvals/guard-readiness-transitions.jsonl. Find out what. The hook does not trust the entry: it keeps ' +
+        'enforcing while the evidence holds and otherwise demotes with the full protocol; the FAIL clears once it has re-recorded the mode.',
+    }, ...tamper, ...promotionRows];
+  }
   if (summary.recordUnknown) {
     return [{
       label,

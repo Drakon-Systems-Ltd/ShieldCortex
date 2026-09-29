@@ -97,6 +97,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -993,6 +994,11 @@ const TRANSITION_EVENTS = new Set<string>(['init', 'promote', 'demote', 'recover
 export const JOURNAL_MAX_ENTRIES = 256;
 /** Bytes at which the journal is compacted (a compacted one is far smaller). */
 export const JOURNAL_MAX_BYTES = 128 * 1024;
+/** #509 r6 (N4): the most the journal read takes into memory; anything
+ *  larger is unreadable (unknown — the loud path). Far above the compaction
+ *  bound (the hook compacts past JOURNAL_MAX_BYTES), and above the R4-4
+ *  100,000-entry flood (~16 MiB), which is still compacted, not quarantined. */
+export const JOURNAL_READ_MAX_BYTES = 32 * 1024 * 1024;
 /** Most recent entries kept verbatim by compaction. */
 export const JOURNAL_KEEP_RECENT = 32;
 /** A tamper report identical to the newest one within this window is not
@@ -1056,10 +1062,24 @@ function boundedEntry(e: TransitionEntry): TransitionEntry {
 export function readTransitionRecord(path: string): TransitionRecord {
   const fail = (status: 'missing' | 'unreadable'): TransitionRecord => ({ status, entries: [], last: null, lastTamper: null });
   let text: string;
+  let fd: number | undefined;
   try {
-    text = readFileSync(path, 'utf8');
+    // #509 r6 (N4): never more than the cap into memory. A journal over it
+    // is unreadable — unknown, the loud path — not something to parse.
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    if (size > JOURNAL_READ_MAX_BYTES) return fail('unreadable');
+    const buf = Buffer.alloc(Math.min(size, JOURNAL_READ_MAX_BYTES) + 1);
+    let got = 0;
+    for (let n = 1; n > 0 && got < buf.length; got += n) n = readSync(fd, buf, got, buf.length - got, got);
+    if (got > JOURNAL_READ_MAX_BYTES) return fail('unreadable');
+    text = buf.toString('utf8', 0, got);
   } catch (err) {
     return fail((err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'missing' : 'unreadable');
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
   }
   const lines = text.split('\n');
   lines.pop();
@@ -1155,6 +1175,31 @@ export function durableMode(record: TransitionRecord): ReadinessMode | 'unknown'
   return record.status === 'ok' && record.last?.to ? record.last.to : 'unknown';
 }
 
+/**
+ * #509 r6 (S1): a demotion nobody announced. The hook only ever leaves
+ * enforcing through a `demote` entry (announced, audited, a doctor FAIL), and
+ * re-choosing the posture records one too. So a newest mode entry that is an
+ * `init` or `recover` to shadow, after a `promote` with no `demote` between
+ * them, was written by something else — the same-UID forgery that keeps the
+ * real promotion in place and quietly drops to shadow. Returns that entry.
+ */
+export function unexplainedDemotion(record: TransitionRecord): TransitionEntry | null {
+  const last = record.status === 'ok' ? record.last : null;
+  if (!last || (last.event !== 'init' && last.event !== 'recover') || last.to !== 'shadow') return null;
+  for (let i = record.entries.lastIndexOf(last) - 1; i >= 0; i -= 1) {
+    const e = record.entries[i]!;
+    if (e.event === 'demote') return null;
+    if (e.event === 'promote') return last;
+  }
+  return null;
+}
+
+/** The mode the record is TRUSTED for: an unexplained demotion is not
+ *  trusted, so the promotion before it stands (fail toward enforcing). */
+export function trustedDurableMode(record: TransitionRecord): ReadinessMode | 'unknown' {
+  return unexplainedDemotion(record) ? 'enforcing' : durableMode(record);
+}
+
 function appendTransition(path: string, entry: TransitionEntry): boolean {
   let fd: number | undefined;
   try {
@@ -1197,11 +1242,45 @@ export function initReadinessTransitions(opts: {
   now?: number;
 }): boolean {
   const now = opts.now ?? Date.now();
-  const path = transitionsPathFor(opts.paths ?? readinessPaths({ home: opts.home }));
-  const record = readTransitionRecord(path);
-  if (record.status === 'ok' && record.last && !opts.postureChanged) return false;
-  if (record.status === 'unreadable') quarantineRecord(path, now);
-  return appendTransition(path, { ts: new Date(now).toISOString(), event: 'init', to: 'shadow', reason: opts.reason.slice(0, 200) });
+  const paths = opts.paths ?? readinessPaths({ home: opts.home });
+  const path = transitionsPathFor(paths);
+  return withWriterLock(paths, now, () => {
+    const record = readTransitionRecord(path);
+    if (record.status === 'ok' && record.last && !opts.postureChanged) return false;
+    if (record.status === 'unreadable') quarantineRecord(path, now);
+    const ts = new Date(now).toISOString();
+    // #509 r6 (S1): re-choosing the posture on an install the record says is
+    // enforcing restarts it in shadow — a real demotion, recorded as one, so
+    // the `init` after it is not read as an unexplained (forged) demotion.
+    if (durableMode(record) === 'enforcing') {
+      appendTransition(path, { ts, event: 'demote', to: 'shadow', reason: `posture re-selected: ${opts.reason}`.slice(0, 200) });
+    }
+    return appendTransition(path, { ts, event: 'init', to: 'shadow', reason: opts.reason.slice(0, 200) });
+  });
+}
+
+/** How often, and how far apart, a journal writer retries a busy lock. */
+const WRITER_LOCK_RETRIES = 10;
+const WRITER_LOCK_RETRY_MS = 20;
+
+/**
+ * #509 r6 (N3): run a journal append under the writer lock (`<state>.lock`)
+ * that resolveReadiness and compaction hold, so an append can never land
+ * between compaction's read and its rename and be lost. Retries briefly; a
+ * lock it cannot get means no append (false) — for a notice, the louder
+ * "no notice attempt recorded".
+ */
+function withWriterLock(paths: ReadinessPaths, now: number, fn: () => boolean): boolean {
+  const lockPath = `${paths.statePath}.lock`;
+  for (let i = 0; !tryLock(lockPath, now); i += 1) {
+    if (i >= WRITER_LOCK_RETRIES) return false;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, WRITER_LOCK_RETRY_MS);
+  }
+  try {
+    return fn();
+  } finally {
+    try { rmSync(lockPath, { force: true }); } catch { /* stale lock self-heals */ }
+  }
 }
 
 // ==================== TRANSITION NOTICES ====================
@@ -1230,8 +1309,8 @@ export function recordTransitionNotice(opts: {
   now?: number;
 }): boolean {
   const now = opts.now ?? Date.now();
-  const path = transitionsPathFor(opts.paths ?? readinessPaths({ home: opts.home }));
-  return appendTransition(path, {
+  const paths = opts.paths ?? readinessPaths({ home: opts.home });
+  return withWriterLock(paths, now, () => appendTransition(transitionsPathFor(paths), {
     ts: new Date(now).toISOString(),
     event: 'notice',
     of: opts.of,
@@ -1239,7 +1318,7 @@ export function recordTransitionNotice(opts: {
     delivered: opts.delivered === true,
     ...(opts.channel ? { channel: String(opts.channel).slice(0, 40) } : {}),
     ...(opts.reason ? { reason: String(opts.reason).slice(0, JOURNAL_REASON_MAX) } : {}),
-  });
+  }));
 }
 
 export interface PromotionNotice {
@@ -1385,10 +1464,11 @@ export function previewMode(opts: {
   record?: TransitionRecord;
 }): ReadinessMode {
   const { state, report, now } = opts;
-  const durable = opts.record ? durableMode(opts.record) : null;
-  let tampered = false;
+  const durable = opts.record ? trustedDurableMode(opts.record) : null;
+  // r6 (S1): an unexplained demotion is a tamper signal, as the hook treats it.
+  let tampered = !!opts.record && unexplainedDemotion(opts.record) !== null;
   if (isFreshState(state, now, opts.ttlMs ?? READINESS_CACHE_TTL_MS, report.pin)) {
-    if (durable === null || state!.mode === durable) return state!.mode;
+    if (durable === null || (!tampered && state!.mode === durable)) return state!.mode;
     tampered = durable !== 'unknown';
   }
   if (durable === null) {
@@ -1463,6 +1543,9 @@ export function resolveReadiness(opts: {
   ttlMs?: number;
   pin?: ReadinessPin | null;
   effectivenessRegistry?: readonly EffectivenessEvidence[];
+  /** Test seam: runs between the pre-lock journal read and taking the
+   *  writer lock — where another process's write can interleave. */
+  beforeLock?: () => void;
 }): ResolvedReadiness {
   const now = opts.now ?? Date.now();
   const paths = opts.paths ?? readinessPaths({ home: opts.home });
@@ -1470,17 +1553,25 @@ export function resolveReadiness(opts: {
   const pin = opts.pin === undefined ? currentReadinessPin() : opts.pin;
   const recordPath = transitionsPathFor(paths);
   const record = readTransitionRecord(recordPath);
-  const durable = durableMode(record);
+  const recorded = durableMode(record);
+  // r6 (S1): an unexplained demotion is not trusted — the promotion before it
+  // stands, and the entry is a tamper signal like a forged cache.
+  const forged = unexplainedDemotion(record);
+  const durable = forged ? 'enforcing' : recorded;
   const state = readReadinessState(paths.statePath);
-  let tamper: string | undefined;
+  let tamper: string | undefined = forged
+    ? `the transition record's newest entry is an unexplained demotion (${forged.event} → shadow at ${forged.ts} after a promotion, ` +
+      'with no demote between); it was not trusted'
+    : undefined;
   if (isFreshState(state, now, ttl, pin)) {
-    if (state!.mode === durable) {
+    if (!forged && state!.mode === durable) {
       // R4-4: an oversized journal is compacted here too, so the cheap path
       // stays cheap from the next call on. r5 (finding 7): the pre-lock read
       // above only decides whether to try; compaction re-reads the journal
       // under the lock, so a promotion appended in between is kept.
       if (needsCompaction(record)) {
         const lock = `${paths.statePath}.lock`;
+        opts.beforeLock?.();
         if (tryLock(lock, now)) {
           try { compactTransitionRecord(recordPath, now); } finally {
             try { rmSync(lock, { force: true }); } catch { /* stale lock self-heals */ }
@@ -1489,7 +1580,7 @@ export function resolveReadiness(opts: {
       }
       return { mode: state!.mode, cached: true, transition: null, report: null, state };
     }
-    if (durable !== 'unknown') {
+    if (!tamper && durable !== 'unknown') {
       tamper = `the readiness cache said ${state!.mode} while the durable transition record says ${durable}; the cache was not trusted`;
     }
   }
@@ -1505,13 +1596,14 @@ export function resolveReadiness(opts: {
   const decision = decideFromEvidence({ state, report, durable, now, tampered: tamper !== undefined });
   // No transition, but the record does not say this mode: re-anchor it with a
   // `recover` entry so the record and the applied mode agree again.
-  const anchor = !decision.transition && decision.mode !== durable;
+  const anchor = !decision.transition && decision.mode !== recorded;
   if (anchor && durable === 'unknown') {
     tamper = `the durable transition record was ${record.status === 'missing' ? 'missing' : 'unreadable'}; ` +
       'enforcing carried over from the readiness state / audit log';
   }
 
   const lockPath = `${paths.statePath}.lock`;
+  opts.beforeLock?.();
   if (!tryLock(lockPath, now)) {
     // Someone else is recomputing: answer from evidence, write nothing, and
     // never announce a transition twice. A would-be demotion keeps enforcing

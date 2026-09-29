@@ -269,15 +269,20 @@ describe('#509 r5 finding 7 — compaction re-reads the journal under the lock',
     for (let i = 0; i < 400; i += 1) lines.push({ ts: new Date(NOW - 10 * DAY + i).toISOString(), event: 'tamper', pin: PIN, reason: `r${i}` });
     writeJournal(lines);
     const path = transitionsPathFor(paths);
-    // A: the pre-lock read of an oversized journal that needs compacting.
-    const snapshot = readTransitionRecord(path);
-    expect(needsCompaction(snapshot)).toBe(true);
-    // B: promotes (journal entry + enforcing cache) and releases the lock.
-    appendFileSync(path, `${JSON.stringify({ ts: new Date(NOW - 1000).toISOString(), event: 'promote', to: 'enforcing', pin: PIN })}\n`);
-    writeFileSync(paths.statePath, JSON.stringify({ version: 1, mode: 'enforcing', computedAt: new Date(NOW - 1000).toISOString(), pin: PIN }));
-    // A: acquires the lock and compacts, still holding its snapshot.
-    (compactTransitionRecord as unknown as (...a: unknown[]) => boolean)(path, NOW, snapshot);
+    expect(needsCompaction(readTransitionRecord(path))).toBe(true);
+    // A: the hook's cheap cached path. Its snapshot is its OWN pre-lock read
+    // inside resolveReadiness (r6 N3: the test used to pass a snapshot that
+    // compactTransitionRecord ignored, so it could not catch the bug). B
+    // promotes between A's read and A's lock, via the seam that runs exactly
+    // there; A then compacts under the lock.
+    writeFileSync(paths.statePath, JSON.stringify({ version: 1, mode: 'shadow', computedAt: new Date(NOW - 1000).toISOString(), pin: PIN }));
+    const r = (resolveReadiness as unknown as (o: Record<string, unknown>) => ReturnType<typeof resolveReadiness>)({
+      channel: WEBHOOK, paths, now: NOW,
+      beforeLock: () => appendFileSync(path, `${JSON.stringify({ ts: new Date(NOW - 500).toISOString(), event: 'promote', to: 'enforcing', pin: PIN })}\n`),
+    });
+    expect(r.cached).toBe(true);
     const rec = readTransitionRecord(path);
+    expect(rec.entries[0].event).toBe('checkpoint'); // A did compact
     expect(rec.entries.filter((e) => e.event === 'promote')).toHaveLength(1);
     expect(durableMode(rec)).toBe('enforcing');
   });
