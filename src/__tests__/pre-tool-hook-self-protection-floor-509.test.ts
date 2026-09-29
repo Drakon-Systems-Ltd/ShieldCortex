@@ -255,4 +255,46 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
       expect(before.includes('"forged"')).toBe(false);
     }
   });
+
+  // ── Round 5 ────────────────────────────────────────────────────────────
+
+  it('r5 finding 3: autoApprove never releases the floor — `autoApprove: ["exec", "touch-approval-store"]` still holds a guard-state write, in shadow and enforcing', () => {
+    const write = { command: 'echo {} >> ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl' };
+    for (const mode of ['shadow', 'enforcing']) {
+      rmSync(shieldDir(), { recursive: true, force: true });
+      mkdirSync(shieldDir(), { recursive: true });
+      writeConfig({ enforce: true, readinessGate: true, autoApprove: ['exec', 'touch-approval-store', 'approval'] });
+      appendRecord({ ts: new Date(Date.now() - 30 * DAY).toISOString(), event: 'init', to: 'shadow', reason: 'test posture' });
+      if (mode === 'enforcing') {
+        seedReadyHistory();
+        expect(runHook('Bash', BENIGN).stderr).toMatch(/now ENFORCING/);
+      }
+      expect({ mode, d: runHook('Bash', write, 'default').decision }).toEqual({ mode, d: 'ask' });
+      expect({ mode, d: runHook('Bash', write, 'bypassPermissions').decision }).toEqual({ mode, d: 'deny' });
+      expect(rows().some((r) => r.type === 'intercept' && r.outcome === 'approved')).toBe(false);
+    }
+    // Plain enforce too; and the allowlist still works for an ordinary op.
+    writeConfig({ enabled: true, enforce: true, autoApprove: ['exec', 'touch-approval-store'] });
+    expect(runHook('Bash', write, 'default').decision).toBe('ask');
+    writeConfig({ enabled: true, enforce: true, autoApprove: ['privilege-escalation'] });
+    expect(runHook('Bash', DANGEROUS, 'default').decision).toBeUndefined();
+  });
+
+  it('r5 finding 1: the concrete classifier gaps are held through the hook — relative path after `cd ~/.shieldcortex`, and moving/copying the guard directory itself', () => {
+    const writes: Array<Record<string, unknown>> = [
+      { command: "cd ~/.shieldcortex; printf '{}' > approvals/guard-readiness.json" },
+      { command: 'cd ~/.shieldcortex && echo x >> ./approvals/guard-readiness-transitions.jsonl' },
+      { command: 'cd "$HOME/.shieldcortex" && echo {} > config.json' },
+      { command: 'mv ~/.shieldcortex /tmp/sc-review-state-backup' },
+      { command: 'cp -r /tmp/forged/. ~/.shieldcortex/' },
+      { command: 'rmdir ~/.shieldcortex/approvals' },
+      { command: 'mv ~/.shieldcortex/approvals /tmp/x' },
+    ];
+    for (const input of writes) {
+      expect({ input, d: runHook('Bash', input, 'default').decision }).toEqual({ input, d: 'ask' });
+      expect({ input, d: runHook('Bash', input, 'bypassPermissions').decision }).toEqual({ input, d: 'deny' });
+    }
+    // (Pure inspection after the cd is covered at the classifier:
+    // guard-readiness-r5-509.test.ts.)
+  });
 });

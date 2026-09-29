@@ -3077,9 +3077,11 @@ process.stdin.on('end', async () => {
 
     // require_approval — the dangerous tier.
     // Per-operator autoApprove allowlist (family / action / signal match, same
-    // matching as the plugin). Never applies to catastrophic — that returned above.
+    // matching as the plugin). Never applies to catastrophic — that returned
+    // above — nor (#509 r5) to the self-protection floor: no standing
+    // allowlist entry may approve a write to the guard's own state.
     const autoApprove = cfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock) {
+    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected) {
       const hay = [verdict.family, verdict.action, ...verdict.signals].map((s) => String(s).toLowerCase());
       const matched = autoApprove.some((a) => {
         const n = a.toLowerCase();
@@ -3235,7 +3237,9 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock) {
+    // #509 r5: the broker cannot pre-clear the self-protection floor either;
+    // only a human answer releases a write to the guard's own state.
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected) {
       const brokerAudit = safeBrokerAudit(brokered.audit);
       writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
       console.error(`[shieldcortex] approval broker PRE-CLEARED ${safeToolName(toolName)}: ${safeDiagnosticReason(brokered.reason)} [${safeSignalList(verdict.signals).join(', ')}]`);

@@ -165,7 +165,7 @@ def register(ctx):
                 fallback_write_target_match(tool_name, tool_args)  # #505: tool-write target gate
             )
             # #509 R4-1: guard state/config is never advisory.
-            fallback_self_protected = fallback_self_protection_match(surface)
+            fallback_self_protected = fallback_self_protection_match(surface, tool_name)
             denied = fallback_blocked or fallback_self_protected or (fallback_dangerous and enforce)
             _audit_gate_degraded(tool_name, verdict.reason, denied)
         fallback_denies = fallback_blocked or fallback_self_protected or (fallback_dangerous and enforce)

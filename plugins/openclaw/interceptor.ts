@@ -1513,7 +1513,10 @@ export function createInterceptor(
       // branch exists to hold. On a locked host the value is pinned to `deny`
       // upstream by the policy lock (`withGuardPosture`); this is the floor
       // for the value that actually arrives.
-      const failAction: FailureAction = config.failurePolicy.high === 'allow' ? 'allow' : 'deny';
+      //
+      // #509 r5: never for the self-protection floor — an evaluator outage is
+      // not a way to write the guard's own state.
+      const failAction: FailureAction = config.failurePolicy.high === 'allow' && !selfProtectSignal ? 'allow' : 'deny';
       emitAudit({ ...dBase, action: 'gate_degraded', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
       if (failAction === 'deny') {
         log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback matched a DANGEROUS op [${dangerousSignal}] — DENYING ${context.toolName} (fail-closed, failure policy: deny)`);
@@ -1718,8 +1721,14 @@ export function createInterceptor(
     // hatch that lets enforce-by-default coexist with unattended agents doing
     // legitimate dangerous work. It NEVER applies to catastrophic ops — those
     // hard-block above, before this branch is reached.
+    //
+    // #509 r5: nothing but a human answer releases the self-protection floor.
+    // A verdict touching the guard's own state or config skips autoApprove and
+    // broker pre-clear, and every failure-policy exit below (unattended,
+    // approver error) DENIES it whatever `failurePolicy` says.
+    const selfProtected = isSelfProtectionVerdict(v.signals);
     const autoApprove = actionGuardCfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock) {
+    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected) {
       const hay = [v.family, v.action, ...v.signals].map(s => String(s).toLowerCase());
       const matched = autoApprove.some(a => {
         const n = a.toLowerCase();
@@ -1735,7 +1744,7 @@ export function createInterceptor(
     // down to warn-and-allow (advisory) for operators who want the old behaviour.
     // #436: an unscanned schema rejection must not become an advisory allow.
     // #509 R4-1: nor may the guard self-protection floor.
-    if (!actionGuardCfg.enforce && !unscannedBlock && !isSelfProtectionVerdict(v.signals)) {
+    if (!actionGuardCfg.enforce && !unscannedBlock && !selfProtected) {
       log.warn(`[shieldcortex] ⚠️ Action Guard: ${context.toolName} — ${v.reason}`);
       emitAudit({ ...base, action: 'warn', outcome: 'warned' });
       return;
@@ -1759,7 +1768,7 @@ export function createInterceptor(
       throw new Error(`ShieldCortex: tool call blocked — ${brokered.reason}`);
     }
 
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock) {
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected) {
       // Reversible, on-host, in-context, judge-confident: proceed without
       // waiting. Loud on purpose — a release nobody approved must never be a
       // silent one, because the audit row is the only thing that will ever tell
@@ -1781,7 +1790,7 @@ export function createInterceptor(
       // that reaches here denies even where failurePolicy would have allowed.
       const failAction = config.failurePolicy[severity];
       const brokerDenies = brokered ? broker!.timeoutOutcome(brokered) === 'deny' : false;
-      const deny = failAction === 'deny' || brokerDenies;
+      const deny = failAction === 'deny' || brokerDenies || selfProtected;
       emitAudit({ ...auditBase, action: 'require_approval', outcome: deny ? 'failure_denied' : 'failure_allowed' });
       if (deny) {
         log.warn(`[shieldcortex] action-guard DENIED (unattended, no approver) ${context.toolName}: ${v.reason} [${v.signals.join(", ")}]`);
@@ -1816,7 +1825,7 @@ export function createInterceptor(
         // broker already pre-cleared — and that returned long before here — so
         // in practice this is always a deny. It reads the broker's own derived
         // flag rather than re-deriving its own idea of what is safe.
-        const outcome = broker!.timeoutOutcome(brokered);
+        const outcome = selfProtected ? 'deny' : broker!.timeoutOutcome(brokered);
         emitAudit({ ...auditBase, action: 'require_approval', outcome: outcome === 'approve' ? 'approved' : 'auto_denied' });
         if (outcome === 'approve') {
           log.warn(`[shieldcortex] approval broker: no answer in ${err.timeoutMs}ms — auto-approving pre-cleared ${context.toolName}`);
@@ -1825,8 +1834,8 @@ export function createInterceptor(
         log.warn(`[shieldcortex] approval broker: no answer in ${err.timeoutMs}ms — DENYING ${context.toolName} (fail-closed)`);
         throw new Error(`ShieldCortex: tool call blocked — no answer from the operator within ${err.timeoutMs}ms (fail-closed)`);
       }
-      const failAction = config.failurePolicy[severity];
-      log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}`);
+      const failAction: FailureAction = selfProtected ? 'deny' : config.failurePolicy[severity];
+      log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}${selfProtected ? ' (self-protection floor)' : ''}`);
       emitAudit({ ...auditBase, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
       if (failAction === 'deny') {
         throw new Error('ShieldCortex: tool call blocked — approval error, failure policy: deny');

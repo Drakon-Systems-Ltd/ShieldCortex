@@ -168,20 +168,84 @@ SELF_PROTECTION_SIGNALS = (
 # The outage-scan shapes for those signals: the guard's own approval store
 # (readiness state + transition record live there too), the lease ledger, the
 # config file, and the disable/uninstall shapes already in _FALLBACK_DANGEROUS.
+#
+# #509 r5 (finding 9): plus the #501 policy-lock rows the other two fallbacks
+# carry at `disable-action-guard` — the env seams that choose the lock reader,
+# the OS lock root, and the harness/host settings files that load the guard.
+# Without them an outage with SHIELDCORTEX_ENFORCE=0 let
+# `echo {} > ~/.claude/settings.json` through. Kept in sync with
+# FALLBACK_DANGEROUS_PATTERNS in scripts/pre-tool-hook.mjs and
+# plugins/openclaw/interceptor.ts; enforcement-surface-parity compares the
+# DECISIONS on a shared table, not only the signal names.
 _FALLBACK_SELF_PROTECTION = [
-    re.compile(r"\.shieldcortex[\\/]+approvals\b", re.I),
-    re.compile(r"\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b", re.I),
-    re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I),
-    re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I),
-    re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I),
+    (re.compile(r"\.shieldcortex[\\/]+approvals\b", re.I), False),
+    (re.compile(r"\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b", re.I), False),
+    (re.compile(r"--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b", re.I), False),
+    (re.compile(r"\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems/shieldcortex-realtime)\b", re.I), False),
+    (re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I), False),
+    (re.compile(r"\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=", re.I), False),
+    # (pattern, lock_path): a lock-path row is skipped for pure inspection.
+    (re.compile(r"/etc/shieldcortex(?:\.conf\b|[\\/]|(?![\w.-]))", re.I), True),
+    (re.compile(r"(?:^|[\s'\"=:(\\/])\.claude[\\/]+settings(?:\.local)?\.json\b", re.I), True),
+    (re.compile(r"(?:^|[\s'\"=:(\\/])\.openclaw[\\/]+openclaw\.json\b", re.I), True),
 ]
 
+# The hook's fallbackLockPathAccessIsReadOnly, ported: pure shell inspection
+# of a lock path is not an attempt on it. Fail-closed on an env-seam
+# assignment, a redirect, nested execution and any unknown verb.
+_FALLBACK_LOCK_ENV_SEAM = re.compile(r"\bSHIELDCORTEX_(?:DIST_ROOT|PROTECTED_ROOT)\s*=", re.I)
+_FALLBACK_LOCK_READ_VERB = re.compile(
+    r"^(?:ls|dir|cat|head|tail|less|more|stat|file|wc|grep|egrep|fgrep|rg|ag|ack|realpath|readlink|basename|dirname|test|\[|echo|printf|jq)$",
+    re.I,
+)
+_FALLBACK_GIT_READ_SUB = re.compile(r"^(?:log|show|diff|status|blame|ls-files)$", re.I)
+_FALLBACK_REDIRECT = re.compile(r">{1,2}\|?(?!&\d)")
+_FALLBACK_NESTED_EXEC = re.compile(r"\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{", re.I)
 
-def fallback_self_protection_match(content: str) -> bool:
+
+def _fallback_git_stage_writes(stage: str) -> bool:
+    for raw in stage.split():
+        token = raw.replace("'", "").replace('"', "")
+        if re.match(r"^-o(?:$|[^-])", token) or re.match(r"^--(?:output|ext-diff)\b", token, re.I):
+            return True
+    return False
+
+
+def _fallback_lock_access_is_read_only(text: str, tool_name=None) -> bool:
+    if not text or _FALLBACK_LOCK_ENV_SEAM.search(text):
+        return False
+    seg = [x for x in re.split(r"__|\.|:|/", str(tool_name or "").lower()) if x]
+    if seg and _FALLBACK_READ_TOOLS.match(seg[-1]):
+        return True
+    if _FALLBACK_REDIRECT.search(text) or _FALLBACK_NESTED_EXEC.search(text):
+        return False
+    saw_stage = False
+    for raw in re.split(r"[\n;&|]+", text):
+        stage = raw.strip()
+        if not stage:
+            continue
+        saw_stage = True
+        stage = re.sub(r"^(?:[A-Za-z_]\w*=\S*\s+)+", "", stage)
+        stage = re.sub(r"^sudo\s+(?:-E\s+)?", "", stage)
+        toks = stage.split()
+        word = toks[0] if toks else ""
+        base = word.split("/")[-1] or word
+        if re.match(r"^git$", base, re.I):
+            sub = next((t for t in toks[1:] if not t.startswith("-")), "")
+            if not _FALLBACK_GIT_READ_SUB.match(sub) or _fallback_git_stage_writes(stage):
+                return False
+            continue
+        if not _FALLBACK_LOCK_READ_VERB.match(base):
+            return False
+    return saw_stage
+
+
+def fallback_self_protection_match(content: str, tool_name=None) -> bool:
     """True when `content` touches guard state or config (never advisory)."""
     if not content:
         return False
-    return any(p.search(content) for p in _FALLBACK_SELF_PROTECTION)
+    lock_read_only = _fallback_lock_access_is_read_only(content, tool_name)
+    return any(p.search(content) for p, lock_path in _FALLBACK_SELF_PROTECTION if not (lock_path and lock_read_only))
 
 
 # #505: startup-file WRITE target, ported to the blunt fallback. The real guard

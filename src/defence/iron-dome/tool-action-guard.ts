@@ -3542,6 +3542,62 @@ function shellAccessIsReadOnly(text: string, opts: ReadOnlyShellOptions): boolea
   return true;
 }
 
+// ── #509 r5: guard-state paths the path rules cannot see ─────────────────────
+//
+// The path rules match `.shieldcortex/approvals` and friends as literal text.
+// Two cheap, concrete spellings reach the same files without that text:
+//   1. `cd ~/.shieldcortex; printf … > approvals/guard-readiness.json` — a
+//      RELATIVE path after changing into the guard directory in the same
+//      command;
+//   2. `mv|cp|rm ~/.shieldcortex …` — moving, copying over or deleting the
+//      guard directory (or `approvals/`) itself, which carries the store with
+//      it.
+// This is BEST-EFFORT, not a boundary. A same-UID agent with a shell can
+// always reach a file by indirection (symlinks, interpreters, moving a parent
+// directory, a `cd` in an earlier call); the classifier does not try to
+// resolve those. The detection control for a forged readiness journal is the
+// promotion notice (guard-readiness.ts, TRANSITION NOTICES).
+
+/** A `cd`/`pushd` into the guard directory (not deeper: that path already
+ *  names the store and is matched by the path rules). */
+const GUARD_DIR_CD_RE = /(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?["']?[^\s;&|"'`]*\.shieldcortex[\\/]*["']?(?=$|[\s;&|)])/i;
+
+/** Relative names of guard state, as they appear after such a `cd`. */
+const GUARD_STATE_RELATIVE_RULES: ReadonlyArray<{ re: RegExp; signal: string }> = [
+  { re: /(?:^|[\s;&|(<>='"])(?:\.[\\/])?approvals(?=$|[\s;&|)\\/'"])/i, signal: 'touch-approval-store' },
+  { re: /(?:^|[\s;&|(<>='"])(?:\.[\\/])?(?:DECISIONS\.md|leases)(?=$|[\s;&|)\\/'"])/i, signal: 'touch-decisions-ledger' },
+  { re: /(?:^|[\s;&|(<>='"])(?:\.[\\/])?config\.json(?=$|[\s;&|)'"])/i, signal: 'touch-guard-config' },
+];
+
+/** Verbs that only observe, plus the directory changes themselves. */
+const GUARD_DIR_READONLY_VERB_RE = new RegExp(`^(?:${[...STORE_READONLY_VERBS, 'cd', 'pushd', 'popd'].join('|')})$`, 'i');
+
+/**
+ * Signals for guard state reached by a relative path after a `cd` into the
+ * guard directory in the same command. Pure inspection (`cd ~/.shieldcortex &&
+ * ls approvals`) is not a mutation — the same #89 bar as the path rules.
+ */
+export function guardStateCdRelativeSignals(surface: string): string[] {
+  const text = String(surface || '');
+  const cd = GUARD_DIR_CD_RE.exec(text);
+  if (!cd) return [];
+  const after = text.slice(cd.index + cd[0].length);
+  const signals = GUARD_STATE_RELATIVE_RULES.filter(r => r.re.test(after)).map(r => r.signal);
+  if (signals.length === 0) return [];
+  if (shellAccessIsReadOnly(text, { pathRe: GUARD_DIR_CD_RE, verbRe: GUARD_DIR_READONLY_VERB_RE })) return [];
+  return signals;
+}
+
+/** A move / copy / delete / link whose operand IS the guard directory, or its
+ *  `approvals` directory, rather than a file inside it. */
+const GUARD_DIR_OPERAND_MUTATION_RE =
+  /(?:^|[\s;&|(])(?:mv|cp|rm|rmdir|rsync|ln|install)\b[^;&|\n]*?\s["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?(?=$|[\s;&|)])/i;
+
+/** Whether a command moves, copies over, deletes or links the guard directory itself. */
+export function guardDirItselfMutated(surface: string): boolean {
+  return GUARD_DIR_OPERAND_MUTATION_RE.test(String(surface || ''));
+}
+
 // `disable-action-guard` is here for the #501 PATH/env rules only. The #500
 // COMMAND shapes reach the signal through `guardDisableInvoked`, which never
 // goes through `matchSpans`, so this set cannot widen them.
@@ -3561,8 +3617,11 @@ const PATH_TARGET_SIGNALS = new Set([
  * approvals all live in the approval store, and the guard's config and policy
  * lock decide whether it runs at all. If shadow mode let the agent write them,
  * the agent could forge the evidence that keeps the guard in shadow. The
- * boundary is the tool-call surface: a same-UID process writing these files
- * outside an agent tool call is not seen here (a policy lock answers that).
+ * floor stops the agent's ORDINARY tool calls from editing that state. It
+ * does not stop a same-UID process that deliberately evades this classifier
+ * (a symlink, an interpreter, an earlier `cd`, moving the parent directory);
+ * the out-of-band promotion notice is the detection control for that, and a
+ * policy lock the answer (#509 r5).
  *
  *   - `touch-approval-store`   approvals.json, guard-readiness.json, the
  *                              transition record (all under ~/.shieldcortex/approvals)
@@ -5451,6 +5510,34 @@ function openclawProcessVerdict(args: Record<string, unknown>): ToolGuardVerdict
     );
   }
 
+  // #509 r5: text typed into a live shell is a shell command. Beyond the
+  // catastrophic pass above, a payload the command classifier puts on the
+  // self-protection floor (a write to the guard's own state or config) keeps
+  // that signal, so no plane treats it as an ordinary process mutation that
+  // advisory, shadow, autoApprove or a failure policy could release.
+  for (const key of OPENCLAW_PROCESS_PAYLOAD_KEYS) {
+    const payload = args[key];
+    if (typeof payload !== 'string' || payload === '') continue;
+    let inner: ToolGuardVerdict;
+    try {
+      inner = evaluateToolCall('Bash', { command: payload });
+    } catch {
+      continue;
+    }
+    const floor = (inner.signals ?? []).filter(s => GUARD_SELF_PROTECTION_SIGNALS.includes(s));
+    if (floor.length === 0) continue;
+    const signals = ['openclaw-process-mutate', ...floor];
+    return verdict(
+      'require_approval',
+      'dangerous',
+      'exec',
+      'execute_command',
+      buildReason(`OpenClaw process ${key} payload touches the guard's own state`, floor, inner.matches?.[0]?.span),
+      signals,
+      (inner.matches ?? []).filter(m => floor.includes(m.signal)).map(m => ({ signal: m.signal, span: m.span })),
+    );
+  }
+
   const action = openclawProcessAction(args);
 
   const inspect = action ? OPENCLAW_PROCESS_INSPECT.get(action) : undefined;
@@ -6213,6 +6300,19 @@ function evaluateToolCallCore(
     if (!dangerEvidence.has('disable-action-guard')) {
       dangerEvidence.set('disable-action-guard', { signal: 'disable-action-guard', span: 'guard self-protection', tier: 'executed' });
     }
+  }
+  // #509 r5: guard state reached relatively after `cd ~/.shieldcortex`, or the
+  // guard directory itself moved/copied over/deleted. Best-effort (see
+  // guardStateCdRelativeSignals). Both only fire on a mutating command (the
+  // cd helper applies its own read-only test; the operand rule is a mutation
+  // verb), so the #89 read-only carve-out below leaves them in place.
+  const guardDirSignals = guardStateCdRelativeSignals(scanSurface);
+  if (guardDirItselfMutated(scanSurface)) guardDirSignals.push('touch-approval-store');
+  for (const sig of guardDirSignals) {
+    if (dangerSignals.includes(sig)) continue;
+    dangerSignals.push(sig);
+    dangerSpan = dangerSpan ?? 'guard self-protection';
+    if (!dangerEvidence.has(sig)) dangerEvidence.set(sig, { signal: sig, span: 'guard self-protection', tier: 'executed' });
   }
   if (dangerSignals.includes('git-delete-branch') && !gitDeleteBranchInvoked(scanSurface)) {
     dangerSignals = dangerSignals.filter(sig => sig !== 'git-delete-branch');

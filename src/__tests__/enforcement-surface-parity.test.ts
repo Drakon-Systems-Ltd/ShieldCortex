@@ -480,14 +480,95 @@ describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated 
     expect(hookSrc).toMatch(/if \(shadow && !unscannedBlock && !selfProtected\)/);
     expect(hookSrc).toMatch(/if \(!cfg\.enforce && !unscannedBlock && !selfProtected\)/);
     expect(hookSrc).toMatch(/if \(!cfg\.enforce && !selfProtectSignal\)/);
-    expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !unscannedBlock && !isSelfProtectionVerdict\(v\.signals\)/);
+    expect(pluginSrc).toMatch(/const selfProtected = isSelfProtectionVerdict\(v\.signals\);/);
+    expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !unscannedBlock && !selfProtected\)/);
     expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !selfProtectSignal/);
+  });
+
+  it('r5 finding 3: every auto-approval and failure-allow exit consults the floor, in both planes', () => {
+    expect(hookSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
+    expect(hookSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
+    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    expect(pluginSrc).toMatch(/const deny = failAction === 'deny' \|\| brokerDenies \|\| selfProtected;/);
+    expect(pluginSrc).toMatch(/const failAction: FailureAction = selfProtected \? 'deny' : config\.failurePolicy\[severity\];/);
+    expect(pluginSrc).toMatch(/config\.failurePolicy\.high === 'allow' && !selfProtectSignal \? 'allow' : 'deny'/);
   });
 
   it('every hook fallback row carrying a floor signal is also a dangerous row (the outage scan sees it)', () => {
     for (const sig of ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard']) {
       expect({ sig, inHook: hookSrc.includes(`signal: '${sig}'`), inPlugin: pluginSrc.includes(`signal: '${sig}'`) })
         .toEqual({ sig, inHook: true, inPlugin: true });
+    }
+  });
+});
+
+describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core floor on the same inputs', () => {
+  // Comparing signal names let the Hermes fallback miss whole rows (the
+  // harness settings file, the policy lock) while the names still matched.
+  // So this runs the REAL Hermes pre_tool_call — scanner unavailable,
+  // SHIELDCORTEX_ENFORCE=0 (advisory) — over a shared table and compares its
+  // block/allow with whether the core classifier puts the same command on
+  // the self-protection floor.
+  const TABLE = [
+    'echo {} > ~/.claude/settings.json',
+    'echo {} > /etc/shieldcortex/policy.json',
+    'echo {} > ~/.openclaw/openclaw.json',
+    'SHIELDCORTEX_DIST_ROOT=/tmp/evil shieldcortex doctor',
+    'echo {} >> ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl',
+    'cp forged.json ~/.shieldcortex/approvals/guard-readiness.json',
+    'echo {} > ~/.shieldcortex/config.json',
+    'echo x >> ~/.shieldcortex/DECISIONS.md',
+    'shieldcortex config --action-guard-disable',
+    'npm uninstall -g shieldcortex',
+    'cat ~/.claude/settings.json',
+    'ls /etc/shieldcortex',
+    'sudo systemctl stop ssh',
+    'ls -la',
+  ];
+  /** Stricter than the core ON PURPOSE: during an outage every fallback (hook,
+   *  OpenClaw, Hermes) holds any access to the approval store, reads included
+   *  — the #89 read carve-out lives in the core only. Fail-closed, so it is
+   *  asserted rather than compared. */
+  const STRICTER_IN_OUTAGE = ['cat ~/.shieldcortex/approvals/approvals.json'];
+
+  it('Hermes (outage, advisory) blocks exactly the commands the core classifier puts on the floor', async () => {
+    const { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
+    const core = TABLE.map((command) => ({
+      command,
+      floor: evaluateToolCall('Bash', { command }).signals.some((s: string) => GUARD_SELF_PROTECTION_SIGNALS.includes(s)),
+    }));
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-hermes-'));
+    const script = [
+      'import json, sys',
+      `sys.path.insert(0, ${JSON.stringify(path.join(repoRoot, 'plugins', 'hermes'))})`,
+      `sys.path.insert(0, ${JSON.stringify(path.join(repoRoot, 'plugins', 'hermes', 'shieldcortex'))})`,
+      'import shieldcortex as plugin',
+      'from sc_client import ActionGuardVerdict',
+      'plugin.evaluate_tool_call = lambda *a, **k: ActionGuardVerdict("allow", [], "scanner unavailable", available=False)',
+      'hooks = {}',
+      'class Ctx:',
+      '    def register_hook(self, name, fn): hooks[name] = fn',
+      'plugin.register(Ctx())',
+      'table = json.loads(sys.stdin.read())',
+      'print(json.dumps([{"command": c, "floor": hooks["pre_tool_call"]("terminal", {"command": c}) is not None} for c in table]))',
+    ].join('\n');
+    const { spawnSync } = await import('node:child_process');
+    try {
+      const run = spawnSync('python3', ['-c', script], {
+        input: JSON.stringify([...TABLE, ...STRICTER_IN_OUTAGE]),
+        env: { ...process.env, HOME: tmpHome, SHIELDCORTEX_ENFORCE: '0' },
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      expect({ status: run.status, stderr: run.status === 0 ? '' : run.stderr }).toEqual({ status: 0, stderr: '' });
+      const hermes = JSON.parse(run.stdout.trim().split('\n').pop() as string) as Array<{ command: string; floor: boolean }>;
+      expect(hermes.slice(0, TABLE.length)).toEqual(core);
+      expect(hermes.slice(TABLE.length)).toEqual(STRICTER_IN_OUTAGE.map((command) => ({ command, floor: true })));
+      // The table is not vacuous: both answers occur.
+      expect(core.some((c) => c.floor) && core.some((c) => !c.floor)).toBe(true);
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
     }
   });
 });
