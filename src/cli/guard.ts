@@ -46,6 +46,7 @@ import {
   recordApprovalReach,
   READINESS_ADAPTERS,
   READINESS_ADAPTER_ACTORS,
+  adapterNotStarted,
   testApprovalCommand,
   trustedDurableMode,
   unexplainedDemotion,
@@ -104,6 +105,9 @@ export interface ReadinessSummary {
   /** The record is missing or unreadable under the posture: treated as
    *  potentially demoted. */
   recordUnknown: boolean;
+  /** r8 (SF4): this surface has never run gated on this host — reported as
+   *  not in use, never as a FAIL (see `adapterNotStarted`). */
+  notInUse: boolean;
   /** The newest tamper report in the record, when recent. */
   recentTamper: TransitionEntry | null;
   /** #509 r5: the newest promotion in the journal and whether its notice was
@@ -155,16 +159,21 @@ export function buildReadinessSummary(opts: { now?: number; home?: string; adapt
   // (it was enforcing, and the preview says shadow). Reported, never written.
   // r6 (S1): an unexplained demotion in the record is not trusted.
   const durable = trustedDurableMode(record);
-  const demoted = posture === 'enforce-when-ready' && mode === 'shadow' &&
+  // r8 (SF4): a late-gated surface that has never run gated here (e.g. no
+  // OpenClaw on this host, or an install that chose the posture before
+  // OpenClaw was gated) is not in use — not a demotion, not an unknown record.
+  // Its first gated call starts its record, watching first.
+  const notInUse = posture === 'enforce-when-ready' && adapterNotStarted({ adapter, record, state, report });
+  const demoted = !notInUse && posture === 'enforce-when-ready' && mode === 'shadow' &&
     (isDemoted(state, report, record) || previousMode(state, report, durable) === 'enforcing');
-  const recordUnknown = posture === 'enforce-when-ready' && durable === 'unknown';
+  const recordUnknown = !notInUse && posture === 'enforce-when-ready' && durable === 'unknown';
   const tamperAt = record.lastTamper ? Date.parse(record.lastTamper.ts) : NaN;
   const recentTamper = posture === 'enforce-when-ready' && Number.isFinite(tamperAt) && now - tamperAt <= TAMPER_REPORT_WINDOW_MS
     ? record.lastTamper
     : null;
   return {
     adapter, surface: SURFACE_LABELS[adapter], journalPath: transitionsPathFor(paths),
-    posture, lockOverrides, mode, channel, report, state, demoted, record, recordUnknown, recentTamper,
+    posture, lockOverrides, mode, channel, report, state, demoted, record, recordUnknown, notInUse, recentTamper,
     lastPromotion: lastPromotion(record),
   };
 }
@@ -214,6 +223,13 @@ const MODE_TEXT: Record<ReadinessSummary['mode'], string> = {
   enforcing: 'ENFORCING — dangerous ops need approval or are blocked',
 };
 
+/** r8 (SF4): what "not in use" means for a surface, shared with doctor. */
+export function notInUseText(adapter: ReadinessAdapter): string {
+  const who = READINESS_ADAPTER_ACTORS[adapter];
+  return `${who} has not run gated here (no readiness record, state or evidence), so there is nothing to measure. ` +
+    `If it runs on this host, its first gated call starts its record watching first (shadow) and announces it.`;
+}
+
 export function formatReadinessLines(s: ReadinessSummary): string[] {
   const { report } = s;
   const iv = report.intervention;
@@ -225,7 +241,9 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
   const lines = [
     `Surface:       ${s.surface}`,
     `Posture:       ${POSTURE_TEXT[s.posture]}${s.lockOverrides ? ' (policy lock pins enforcement; readiness gate ignored)' : ''}`,
-    `Current mode:  ${MODE_TEXT[s.mode]}${s.demoted ? ' — DEMOTED from enforcing' : ''}`,
+    s.notInUse
+      ? `Current mode:  NOT IN USE on this host — ${notInUseText(s.adapter)}`
+      : `Current mode:  ${MODE_TEXT[s.mode]}${s.demoted ? ' — DEMOTED from enforcing' : ''}`,
     `Version pin:   ${report.pin ? `${report.pin.adapter} / ${report.pin.policy}` : 'UNKNOWN — no evidence can count'}`,
     'Readiness proxies (operability):',
     `  Operational intervention rate: ${pct(iv.rate)} would-stop (${iv.stops}/${iv.total} calls over ${(iv.spanMs / 86_400_000).toFixed(1)} days) ` +

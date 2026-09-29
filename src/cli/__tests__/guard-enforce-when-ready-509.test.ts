@@ -598,3 +598,69 @@ describe('#509 r8 SF3 — remediation text names the surface it is about', () =>
     expectOpenClawCommands(logs.join('\n'));
   });
 });
+
+describe('#509 r8 SF4 — upgrade path: a surface never used here is "not in use", not a FAIL', () => {
+  const OC = 'openclaw-interceptor' as const;
+  const ocPaths = () => readinessPaths({ home, adapter: OC });
+
+  /** An install that chose the posture before OpenClaw was gated: the hook's
+   *  journal only. */
+  function upgradedInstall(): void {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'chosen before r7', home, adapter: 'claude-code-hook' });
+    expect(existsSync(transitionsPathFor(ocPaths()))).toBe(false);
+  }
+
+  it('doctor: the OpenClaw row is info "not in use" — no FAIL anywhere; the hook row is unchanged', async () => {
+    upgradedInstall();
+    const rows = await checkActionGuardReadiness();
+    expect(rows.filter((r) => r.status === 'fail')).toEqual([]);
+    const oc = rows.find((r) => r.label === 'Action guard readiness (OpenClaw plugin)')!;
+    expect(oc.status).toBe('info');
+    expect(oc.message).toMatch(/not in use on this host/);
+    expect(oc.message).toMatch(/watching first/);
+    expect(rows.find((r) => r.label === 'Action guard readiness (Claude Code hook)')?.status).toBe('warn');
+  });
+
+  it('`guard readiness` exits 0 and says "not in use" for OpenClaw (all surfaces and --surface openclaw)', async () => {
+    upgradedInstall();
+    const logs: string[] = [];
+    (console.log as unknown as jest.Mock).mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    expect(await runGuardCommand(['readiness'], { home })).toBe(0);
+    expect(logs.join('\n')).toMatch(/Current mode: {2}NOT IN USE on this host/);
+    expect(await runGuardCommand(['readiness', '--surface', 'openclaw'], { home })).toBe(0);
+    const json = buildReadinessSummary({ home, adapter: OC });
+    expect(json).toMatchObject({ notInUse: true, recordUnknown: false, demoted: false });
+  });
+
+  it('OpenClaw HAS been used under the posture (its state file is there), journal gone: still the loud FAIL', async () => {
+    upgradedInstall();
+    mkdirSync(dirname(ocPaths().statePath), { recursive: true });
+    writeFileSync(ocPaths().statePath, JSON.stringify({ version: 1, mode: 'shadow', computedAt: new Date(Date.now() - DAY).toISOString() }));
+    const oc = (await checkActionGuardReadiness()).find((r) => r.label === 'Action guard readiness (OpenClaw plugin)')!;
+    expect(oc.status).toBe('fail');
+    expect(oc.message).toMatch(/transition record missing/);
+    expect(buildReadinessSummary({ home, adapter: OC }).notInUse).toBe(false);
+  });
+
+  it('OpenClaw evidence in the audit (pinned OpenClaw rows), journal gone: still the loud FAIL', async () => {
+    upgradedInstall();
+    const auditDir = join(home, '.shieldcortex', 'audit');
+    mkdirSync(auditDir, { recursive: true });
+    const ts = new Date(Date.now() - DAY).toISOString();
+    appendFileSync(join(auditDir, `realtime-${ts.slice(0, 10)}.jsonl`), `${JSON.stringify({
+      type: 'intercept', origin: OC, tool: 'Bash', action: 'allow', outcome: 'allowed', ts, auditEventId: 'oc1',
+      readinessPin: currentReadinessPin(OC), readinessTally: true,
+    })}\n`);
+    const oc = (await checkActionGuardReadiness()).find((r) => r.label === 'Action guard readiness (OpenClaw plugin)')!;
+    expect(oc.status).toBe('fail');
+  });
+
+  it('the Claude Code hook with no journal is never "not in use": the r3 loud FAIL stands', async () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home, adapter: OC });
+    const hook = (await checkActionGuardReadiness()).find((r) => r.label === 'Action guard readiness (Claude Code hook)')!;
+    expect(hook.status).toBe('fail');
+    expect(buildReadinessSummary({ home }).notInUse).toBe(false);
+  });
+});

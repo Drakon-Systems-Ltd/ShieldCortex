@@ -443,11 +443,12 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
   // #509: the enforce-when-ready gate demoting itself to shadow mode, and
   // (r5) promoting itself to enforcing — both announced when they happen.
-  'readiness-demoted', 'readiness-promoted',
+  // r8: a surface starting its record, watching first.
+  'readiness-demoted', 'readiness-promoted', 'readiness-started',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
-  'readiness_demoted', 'readiness_promoted',
+  'readiness_demoted', 'readiness_promoted', 'readiness_started',
 ]);
 const SAFE_ACTION_GUARD_SEVERITIES = new Set(['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown']);
 
@@ -483,6 +484,9 @@ function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string):
   if (event === 'action_guard_warning') {
     if (outcome === 'readiness_demoted') {
       return 'Action Guard (enforce when ready) was DEMOTED to shadow mode: dangerous tool calls are now logged but NOT stopped, because this install no longer meets its readiness conditions. Run `shieldcortex guard readiness` for details.';
+    }
+    if (outcome === 'readiness_started') {
+      return 'Action Guard (enforce when ready) on this surface now WATCHES FIRST: it had no readiness record (the posture was chosen before this surface implemented the gate, when it enforced from the start). Dangerous tool calls here are now logged, not stopped, until it meets its own readiness conditions; the catastrophic floors still enforce. Run `shieldcortex guard readiness`.';
     }
     if (outcome === 'readiness_promoted') {
       return 'Action Guard (enforce when ready) was PROMOTED to enforcing: dangerous tool calls now need approval. If you did not expect this, run `shieldcortex doctor` — a promotion you were not told about means the readiness journal was written by something other than the hook.';

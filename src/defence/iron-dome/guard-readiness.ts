@@ -268,6 +268,10 @@ export interface ReadinessReport {
   missing: string[];
   /** The newest readiness_transition row found in the audit, if any. */
   lastTransition: { to: ReadinessMode; ts: string } | null;
+  /** #509 r8 (SF4): rows in the window this adapter wrote under the posture
+   *  (its origin, carrying a readiness pin of any version) — evidence that
+   *  the adapter has run gated on this host. */
+  adapterRows: number;
   bytesRead: number;
   truncated: boolean;
 }
@@ -943,7 +947,9 @@ export function computeReadiness(opts: {
 
   // ── Last transition, the fallback memory of the mode ──
   let lastTransition: ReadinessReport['lastTransition'] = null;
+  let adapterRows = 0;
   for (const { ts, row } of rows) {
+    if (row.origin === adapter && row.readinessPin !== undefined && row.readinessPin !== null) adapterRows += 1;
     if (row.type !== 'readiness_transition') continue;
     // r7: another adapter's transition is not this adapter's mode (a row
     // with no origin predates r7 and was written by the hook).
@@ -979,6 +985,7 @@ export function computeReadiness(opts: {
     ready,
     missing,
     lastTransition,
+    adapterRows,
     bytesRead,
     truncated,
   };
@@ -1512,6 +1519,47 @@ export const UNKNOWN_RECORD_REASON =
   'the durable readiness transition record is missing or unreadable, so whether this install was enforcing is ' +
   'unknown — treated as potentially demoted';
 
+/**
+ * #509 r8 (SF4): adapters that gained the gate after the posture existed
+ * (OpenClaw, r7). An install that chose enforce-when-ready before that has a
+ * journal for the hook only — and OpenClaw, which then ignored the gate,
+ * enforced from the start. The hook is NOT here: its journal has been started
+ * with the posture from the beginning, so a missing hook record is always the
+ * loud unknown (r3).
+ */
+const ADAPTERS_GATED_LATE: ReadonlySet<ReadinessAdapter> = new Set(['openclaw-interceptor']);
+
+/**
+ * #509 r8 (SF4): the adapter has never run gated on this host — no journal
+ * (missing, not damaged), no readiness state file, no transition row and no
+ * pinned row of its own in the audit window. Such an adapter is "not in use"
+ * (doctor / `guard readiness`, never a FAIL) and its first gated call STARTS
+ * its record (watching first, announced) instead of recording an unknown-record
+ * demotion. Any trace of it having run keeps the r3 loud path: a journal that
+ * existed and went missing is still treated as potentially demoted.
+ */
+export function adapterNotStarted(input: {
+  adapter: ReadinessAdapter;
+  record: TransitionRecord;
+  state: ReadinessState | null;
+  report: ReadinessReport;
+}): boolean {
+  return ADAPTERS_GATED_LATE.has(input.adapter) &&
+    input.record.status === 'missing' &&
+    input.state === null &&
+    input.report.lastTransition === null &&
+    input.report.adapterRows === 0;
+}
+
+/** The one-time announcement when a late-gated adapter starts its record. */
+export function adapterStartedMessage(adapter: ReadinessAdapter): string {
+  const who = READINESS_ADAPTER_ACTORS[adapter];
+  return `enforce-when-ready: ${who} now watches first — it had no readiness record on this host (the posture was chosen ` +
+    `before ${who} implemented the gate, when it enforced from the start). Its dangerous tool calls are now logged as ` +
+    'would-stop, NOT stopped, until it meets its own readiness conditions; the catastrophic, exfil, lease and ' +
+    `self-protection floors still enforce. Progress: \`shieldcortex guard readiness${adapter === 'openclaw-interceptor' ? ' --surface openclaw' : ''}\`.`;
+}
+
 export interface EvidenceDecision extends ModeDecision {
   /** The decision was forced by an unknown record. */
   unknown?: boolean;
@@ -1596,6 +1644,9 @@ export interface ResolvedReadiness {
   tamper?: string;
   /** The journal `ts` of the transition made on this call, for its notice. */
   transitionAt?: string;
+  /** r8 (SF4): this call started a late-gated adapter's record (watching
+   *  first). The caller announces {@link adapterStartedMessage} once. */
+  started?: true;
 }
 
 function tryLock(lockPath: string, now: number): boolean {
@@ -1698,6 +1749,12 @@ export function resolveReadiness(opts: {
     effectivenessRegistry: opts.effectivenessRegistry,
     adapter,
   });
+  // r8 (SF4): a late-gated adapter that has never run gated here STARTS its
+  // record — watching first, announced once by the caller — rather than
+  // recording an unknown-record demotion it never earned.
+  if (adapterNotStarted({ adapter, record, state, report })) {
+    return startAdapterRecord({ adapter, paths, recordPath, report, pin, now, beforeLock: opts.beforeLock });
+  }
   const prevMode = previousMode(state, report, durable);
   const decision = decideFromEvidence({ state, report, durable, now, tampered: tamper !== undefined });
   // No transition, but the record does not say this mode: re-anchor it with a
@@ -1815,6 +1872,47 @@ export function resolveReadiness(opts: {
       tamper,
       ...(decision.transition ? { transitionAt: nowIso } : {}),
     };
+  } finally {
+    try { rmSync(lockPath, { force: true }); } catch { /* stale lock self-heals */ }
+  }
+}
+
+/**
+ * #509 r8 (SF4): start a late-gated adapter's record — an `init → shadow`
+ * journal entry and a shadow state — under the writer lock, re-checking there
+ * that nobody started it meanwhile (then: shadow, nothing written, nothing
+ * announced; the writer announces). `started` tells the caller to announce.
+ */
+function startAdapterRecord(input: {
+  adapter: ReadinessAdapter;
+  paths: ReadinessPaths;
+  recordPath: string;
+  report: ReadinessReport;
+  pin: ReadinessPin | null;
+  now: number;
+  beforeLock?: () => void;
+}): ResolvedReadiness {
+  const { adapter, paths, recordPath, report, pin, now } = input;
+  const quiet: ResolvedReadiness = { mode: 'shadow', cached: false, transition: null, report, state: null };
+  const lockPath = `${paths.statePath}.lock`;
+  input.beforeLock?.();
+  if (!tryLock(lockPath, now)) return quiet;
+  try {
+    if (readTransitionRecord(recordPath).status !== 'missing' || readReadinessState(paths.statePath) !== null) return quiet;
+    const nowIso = new Date(now).toISOString();
+    const who = READINESS_ADAPTER_ACTORS[adapter];
+    if (!appendTransition(recordPath, {
+      ts: nowIso,
+      event: 'init',
+      to: 'shadow',
+      pin,
+      reason: `${who} started watching first: no readiness record existed (the posture predates its gate)`,
+    })) {
+      return quiet;
+    }
+    const next: ReadinessState = { version: 1, mode: 'shadow', computedAt: nowIso, pin, missing: report.missing };
+    writeReadinessState(paths.statePath, next);
+    return { mode: 'shadow', cached: false, transition: null, report, state: next, started: true };
   } finally {
     try { rmSync(lockPath, { force: true }); } catch { /* stale lock self-heals */ }
   }

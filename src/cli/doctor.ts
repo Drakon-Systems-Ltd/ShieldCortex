@@ -4748,6 +4748,14 @@ async function readinessRowsForSurface(
     }
     return [];
   }
+  // r8 (SF4): a surface that has never run gated here — no OpenClaw on this
+  // host, or an install that chose the posture before OpenClaw was gated — is
+  // not a violated contract. Info, not FAIL; any trace of it having run keeps
+  // the loud unknown-record path below.
+  if (summary.notInUse) {
+    const { notInUseText } = await import('./guard.js');
+    return [{ label, status: 'info', message: `enforce when ready: not in use on this host — ${notInUseText(summary.adapter)}` }];
+  }
   const { intervention, reachability, effectiveness } = summary.report;
   const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
   const bars =

@@ -130,7 +130,11 @@ type DefenceModule = {
     tamper?: string;
     demotionReason?: string;
     transitionAt?: string;
+    /** r8 (SF4): this call started OpenClaw's record (watching first). */
+    started?: true;
   };
+  /** r8 (SF4): the one-time "now watches first" line. */
+  adapterStartedMessage?: (adapter: string) => string;
   currentReadinessPin?: (adapter?: string) => { adapter: string; policy: string } | null;
   describeHumanChannel?: (rawNotify: unknown) => { configured: boolean; kind: string | null; pushesNotices: boolean };
   describeDemotion?: (reason: string | undefined) => string;
@@ -3275,7 +3279,7 @@ export function buildReadinessRuntime(
   seams: {
     home?: string;
     effectivenessRegistry?: readonly unknown[];
-    deliver?: (which: 'promote' | 'demote') => Promise<DeliveryResult | null>;
+    deliver?: (which: 'promote' | 'demote' | 'start') => Promise<DeliveryResult | null>;
   } = {},
 ): ReadinessRuntime | undefined {
   if (
@@ -3295,7 +3299,11 @@ export function buildReadinessRuntime(
   const channel = () => readiness.describeHumanChannel!(rawNotify);
   const home = seams.home !== undefined ? { home: seams.home } : {};
 
-  async function deliver(which: 'promote' | 'demote', toolName: string): Promise<DeliveryResult | null> {
+  // r8 (SF4): 'start' = OpenClaw started its record, watching first.
+  const NOTICE_OUTCOME = { promote: 'readiness_promoted', demote: 'readiness_demoted', start: 'readiness_started' } as const;
+  const NOTICE_SIGNAL = { promote: 'readiness-promoted', demote: 'readiness-demoted', start: 'readiness-started' } as const;
+
+  async function deliver(which: 'promote' | 'demote' | 'start', toolName: string): Promise<DeliveryResult | null> {
     if (seams.deliver) return seams.deliver(which);
     if (typeof readiness.normaliseNotifyConfig !== 'function' || typeof readiness.deliverOperatorNotification !== 'function'
       || typeof readiness.buildActionGuardOutcomeNotification !== 'function') {
@@ -3307,10 +3315,10 @@ export function buildReadinessRuntime(
     if (channels.length === 0) return null;
     const n = readiness.buildActionGuardOutcomeNotification({
       event: 'action_guard_warning',
-      outcome: which === 'promote' ? 'readiness_promoted' : 'readiness_demoted',
+      outcome: NOTICE_OUTCOME[which],
       tool: toolName,
       surface: 'redacted action surface',
-      signals: [which === 'promote' ? 'readiness-promoted' : 'readiness-demoted'],
+      signals: [NOTICE_SIGNAL[which]],
       severity: 'high',
       reason: '',
       origin: adapter,
@@ -3343,6 +3351,9 @@ export function buildReadinessRuntime(
     describeDemotion: (reason) => (typeof readiness.describeDemotion === 'function'
       ? readiness.describeDemotion(reason)
       : `ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready). Reason: ${reason ?? 'readiness evidence no longer holds'}.`),
+    describeStart: () => (typeof readiness.adapterStartedMessage === 'function'
+      ? readiness.adapterStartedMessage(adapter)
+      : 'enforce-when-ready: the OpenClaw plugin now watches first — it had no readiness record on this host. Its dangerous tool calls are logged as would-stop, NOT stopped, until it meets its own readiness conditions.'),
     announce: async (which, resolved, toolName) => {
       let result: DeliveryResult | null = null;
       try {

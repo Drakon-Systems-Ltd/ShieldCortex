@@ -674,6 +674,47 @@ describe('#509 r8 N2 — an OpenClaw transition leaves a notify audit row, as th
   });
 });
 
+describe('#509 r8 SF4 — upgrade path: OpenClaw with no record starts watching first, announced once', () => {
+  /** The posture was chosen before OpenClaw was gated: no OpenClaw journal. */
+  function upgraded(): void {
+    rmSync(journalPath(OPENCLAW), { force: true });
+  }
+
+  it('first gated call: journal started (init → shadow), announced once as "watching first" — not a demotion, not tamper', async () => {
+    upgraded();
+    const announced: string[] = [];
+    const i = interceptor({}, { readiness: runtime({ announced }) });
+    expect(await decide(i, DANGEROUS)).toBe('allowed');
+    expect(await decide(i, DANGEROUS)).toBe('allowed');
+    expect(announced).toEqual(['start']);
+    const started = i.warnings.filter((w) => /OpenClaw plugin now watches first/.test(w));
+    expect(started).toHaveLength(1);
+    expect(i.warnings.some((w) => /DEMOTED|tamper/i.test(w))).toBe(false);
+    const j = journal(OPENCLAW);
+    expect(j.map((e) => e.event)).toEqual(['init']);
+    expect(j[0]).toMatchObject({ to: 'shadow', reason: expect.stringMatching(/watching first/) });
+    expect(rows().filter((r) => r.type === 'readiness_transition' || r.type === 'readiness_tamper')).toEqual([]);
+    expect(rows().filter((r) => r.action === 'notify')).toEqual([
+      expect.objectContaining({ readinessTransition: 'start', outcome: 'notified' }),
+    ]);
+    // The hook's journal is untouched.
+    expect(journal(HOOK).map((e) => e.event)).toEqual(['init']);
+  });
+
+  it('OpenClaw had run under the posture (state file present), journal gone: the r3 loud path — a demotion, not a quiet start', async () => {
+    upgraded();
+    const statePath = readiness.readinessPaths({ home, adapter: OPENCLAW }).statePath;
+    mkdirSync(dirname(statePath), { recursive: true });
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(statePath, JSON.stringify({ version: 1, mode: 'shadow', computedAt: new Date(Date.now() - DAY).toISOString(), pin: pinOf(OPENCLAW) }));
+    const announced: string[] = [];
+    const i = interceptor({}, { readiness: runtime({ announced }) });
+    await decide(i, DANGEROUS);
+    expect(announced).toEqual(['demote']);
+    expect(journal(OPENCLAW).map((e) => e.event)).toEqual(['demote', 'notice']);
+  });
+});
+
 describe('#509 r7 — openclaw.json cannot switch the gate on', () => {
   it('readinessGate in the plugin entry only is ignored: the guard enforces', async () => {
     const hooks: Record<string, (...args: any[]) => any> = {};

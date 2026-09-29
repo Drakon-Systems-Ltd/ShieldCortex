@@ -260,6 +260,7 @@ export {
   recordApprovalReach,
   recordTransitionNotice,
   newReachAttemptId,
+  adapterStartedMessage,
 } from './iron-dome/guard-readiness.js';
 export type {
   OperatorNotification,

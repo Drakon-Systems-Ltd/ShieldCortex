@@ -61,6 +61,9 @@ export interface ResolvedReadinessLike {
   demotionReason?: string;
   /** The journal `ts` of a transition made on this call. */
   transitionAt?: string;
+  /** r8 (SF4): this call started OpenClaw's readiness record (watching
+   *  first) — announced once. */
+  started?: true;
 }
 
 /**
@@ -89,12 +92,16 @@ export interface ReadinessRuntime {
   newAttemptId: () => string;
   /** `describeDemotion`: the plain-English demotion line. */
   describeDemotion: (reason: string | undefined) => string;
+  /** r8 (SF4): `adapterStartedMessage` — the one-time "now watches first"
+   *  line. Optional: a runtime without it gets the interceptor's fallback. */
+  describeStart?: () => string;
   /** Announce a transition on OpenClaw's own notify path and journal whether
    *  the notice was delivered (`recordTransitionNotice`). Never throws.
    *  Resolves to the delivery (null = no push channel was available), which
-   *  the interceptor records as a notify audit row (r8 N2). */
+   *  the interceptor records as a notify audit row (r8 N2). `start` (r8 SF4)
+   *  is the record starting, watching first — not a mode transition. */
   announce: (
-    which: 'promote' | 'demote',
+    which: 'promote' | 'demote' | 'start',
     resolved: ResolvedReadinessLike,
     toolName: string,
   ) => Promise<{ deliveredVia: string | null } | null | void>;
@@ -372,7 +379,7 @@ export interface InterceptAuditEntry {
   readinessTally?: true;
   /** #509 r8 (N2) — on an `action: 'notify'` row: the readiness transition
    *  it announced, as the hook records it. Local only. */
-  readinessTransition?: 'promote' | 'demote';
+  readinessTransition?: 'promote' | 'demote' | 'start';
   /** #509 r8 (N2) — the notice's delivery, on a notify row. */
   notify?: { status: 'delivered' | 'error' | 'not_configured'; deliveredVia: string | null };
   preview: string;
@@ -1620,6 +1627,14 @@ export function createInterceptor(
       } else if (resolved.transition === 'promote') {
         log.warn('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts on OpenClaw.');
         recordTransitionNotify('promote', toolName, await readiness.announce('promote', resolved, toolName));
+      } else if (resolved.started) {
+        // r8 (SF4): the record did not exist (posture chosen before OpenClaw
+        // was gated); this call started it in shadow. Said once — the next
+        // call finds the record.
+        let line = 'enforce-when-ready: the OpenClaw plugin now watches first — dangerous tool calls are logged, NOT stopped, until it meets its readiness conditions.';
+        try { line = readiness.describeStart?.() ?? line; } catch { /* keep the fallback */ }
+        log.warn(`[shieldcortex] ⚠️ ${line}`);
+        recordTransitionNotify('start', toolName, await readiness.announce('start', resolved, toolName));
       }
       return { whenReady, shadow };
     } catch (err) {
@@ -1633,7 +1648,7 @@ export function createInterceptor(
    *  audit shows the notice beside the `readiness_transition` row. Not a
    *  verdict: readiness never counts a notify row. Local only (SF5). */
   function recordTransitionNotify(
-    which: 'promote' | 'demote',
+    which: 'promote' | 'demote' | 'start',
     toolName: string,
     result: { deliveredVia: string | null } | null | void,
   ): void {
@@ -1641,7 +1656,7 @@ export function createInterceptor(
     const outcome = status === 'delivered' ? 'notified' : status === 'error' ? 'notify_failed' : 'notify_not_configured';
     emitAudit({
       type: 'intercept', tool: toolName, severity: 'high', firewallResult: 'ACTION_GUARD',
-      threats: [which === 'promote' ? 'readiness-promoted' : 'readiness-demoted'], anomalyScore: 0, trustScore: 0,
+      threats: [`readiness-${which === 'start' ? 'started' : `${which}d`}`], anomalyScore: 0, trustScore: 0,
       sensitivityLevel: 'INTERNAL', fragmentationScore: null, pipelineDurationMs: 0,
       action: 'notify', outcome, preview: `${toolName} :: readiness ${which} notice`, ts: new Date().toISOString(),
       readinessTransition: which, notify: { status, deliveredVia: result?.deliveredVia ?? null },
