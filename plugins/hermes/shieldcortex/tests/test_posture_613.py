@@ -29,10 +29,10 @@ from shieldcortex.sc_client import ActionGuardVerdict  # noqa: E402
 
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 REQUIRED_KEYS = {
-    "schema", "version", "runtime", "profile", "plane", "loaded", "configured_posture",
-    "scanner", "policy_hash", "runtime_version", "plugin_id", "plugin_version",
-    "plugin_hash", "instance_id", "written_at", "last_denial_at", "degraded_intervals",
+    "schema", "version", "runtime", "profile", "plane", "instance", "runtime_version", "plugin",
+    "heartbeat_at", "loaded", "configured_posture", "scanner", "policy_hash", "degraded_intervals", "denials",
 }
+DENIAL_KEYS = {"at", "tested_path", "instance", "plugin_hash", "policy_hash", "configured_posture"}
 
 
 class FakeCtx:
@@ -56,7 +56,7 @@ class PostureCase(unittest.TestCase):
         os.environ.pop("HERMES_HOME", None)
 
     def report_path(self, profile="default"):
-        return os.path.join(self.config_dir, "posture", "hermes--%s.json" % profile)
+        return posture.report_path(self.config_dir, profile)
 
     def read_report(self, profile="default"):
         with open(self.report_path(profile), encoding="utf-8") as fh:
@@ -76,15 +76,21 @@ class WriterTests(PostureCase):
         self.assertEqual(r["plane"], "tool-gate")
         self.assertIs(r["loaded"], True)
         self.assertRegex(r["policy_hash"], SHA)
-        self.assertRegex(r["plugin_hash"], SHA)
+        self.assertRegex(r["plugin"]["hash"], SHA)
+        self.assertEqual(r["instance"]["liveness"], "process")
+        self.assertEqual(r["instance"]["pid"], os.getpid())
+        self.assertEqual(os.path.basename(self.report_path()), r["instance"]["key"] + ".json")
+        self.assertEqual(r["denials"], {"blocked_action": None, "synthetic_probe": None, "blocked_action_count": 0})
 
     def test_atomic_private_and_bounded(self):
         posture.write_self_report(
             self.config_dir, profile="default", configured_posture="enforce",
             scanner="degraded", degraded_reason="x" * 10_000)
         d = os.path.dirname(self.report_path())
-        self.assertEqual(os.listdir(d), ["hermes--default.json"])
+        self.assertEqual(os.listdir(d), [os.path.basename(self.report_path())])
         self.assertEqual(os.stat(self.report_path()).st_mode & 0o077, 0)
+        for directory in (d, os.path.dirname(d), os.path.dirname(os.path.dirname(d))):
+            self.assertEqual(os.stat(directory).st_mode & 0o077, 0)
         self.assertLessEqual(os.path.getsize(self.report_path()), posture.MAX_BYTES)
         r = self.read_report()
         self.assertLessEqual(len(r["degraded_intervals"][0]["reason"]), 120)
@@ -106,6 +112,42 @@ class WriterTests(PostureCase):
         self.assertEqual(posture.profile_id("/home/u/.hermes"), "default")
         self.assertEqual(posture.profile_id("/home/u/.hermes/profiles/Work"), "work")
         self.assertEqual(posture.profile_id("/home/u/.hermes/profiles/../../etc"), "default")
+
+    def test_heartbeat_never_refreshes_a_denial(self):
+        posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce",
+                                  scanner="available", policy={"enforce": True}, denial=True,
+                                  denial_path="pre_tool_call:terminal", now=1_790_000_000.0)
+        posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce",
+                                  scanner="available", policy={"enforce": True}, now=1_790_000_600.0)
+        r = self.read_report()
+        self.assertEqual(set(r["denials"]["blocked_action"]), DENIAL_KEYS)
+        self.assertEqual(r["denials"]["blocked_action"]["at"], posture._iso(1_790_000_000.0))
+        self.assertEqual(r["heartbeat_at"], posture._iso(1_790_000_600.0))
+        self.assertNotEqual(r["heartbeat_at"], r["denials"]["blocked_action"]["at"])
+        self.assertEqual(r["denials"]["blocked_action"]["tested_path"], "pre_tool_call:terminal")
+        self.assertEqual(r["denials"]["blocked_action_count"], 1)
+
+    def test_probe_is_separate_and_never_counted(self):
+        posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce",
+                                  scanner="available", denial=True, denial_kind="synthetic-probe",
+                                  denial_path="probe:terminal")
+        r = self.read_report()
+        self.assertIsNone(r["denials"]["blocked_action"])
+        self.assertEqual(r["denials"]["synthetic_probe"]["tested_path"], "probe:terminal")
+        self.assertEqual(r["denials"]["blocked_action_count"], 0)
+
+    def test_a_denial_from_another_instance_is_never_carried_forward(self):
+        posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce",
+                                  scanner="available", denial=True)
+        path = self.report_path()
+        with open(path, encoding="utf-8") as fh:
+            body = json.load(fh)
+        body["denials"]["blocked_action"]["instance"] = "p1-s1"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(body, fh)
+        posture.write_self_report(self.config_dir, profile="default", configured_posture="enforce",
+                                  scanner="available")
+        self.assertIsNone(self.read_report()["denials"]["blocked_action"])
 
     def test_open_interval_closes_when_scanner_recovers(self):
         posture.write_self_report(self.config_dir, profile="default",
@@ -150,7 +192,9 @@ class RegisterTests(PostureCase):
         with mock.patch.object(shieldcortex, "evaluate_tool_call", return_value=block):
             out = ctx.hooks["pre_tool_call"]("terminal", {"command": "whatever"})
         self.assertEqual(out["action"], "block")
-        self.assertIsNotNone(self.read_report()["last_denial_at"])
+        denied = self.read_report()["denials"]["blocked_action"]
+        self.assertEqual(denied["tested_path"], "pre_tool_call:terminal")
+        self.assertEqual(denied["configured_posture"], "enforce")
 
 
 VERDICTS = [

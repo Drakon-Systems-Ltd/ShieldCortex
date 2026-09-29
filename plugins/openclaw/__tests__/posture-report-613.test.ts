@@ -7,9 +7,10 @@ import plugin, {
   __setDefenceModuleForTest,
   __setRuntimeForTest,
 } from '../index.js';
-import { writePostureSelfReport } from '../posture-report.js';
+import { __resetPostureStateForTest, writePostureSelfReport } from '../posture-report.js';
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
 import { parseSelfReport } from '../../../src/posture/posture-record.js';
+import { collectPostureRecords, linuxProcessStart } from '../../../src/posture/collect.js';
 
 /**
  * #613 — the OpenClaw plugin's process-side posture self-report.
@@ -56,6 +57,7 @@ beforeEach(() => {
   process.env.SHIELDCORTEX_CONFIG_DIR = configDir;
   delete process.env.OPENCLAW_PROFILE;
   __resetConfigStateForTest();
+  __resetPostureStateForTest();
   __setRuntimeForTest({
     callCortex: async () => null,
     isOpenClawAutoMemoryEnabled: () => false,
@@ -72,12 +74,17 @@ afterEach(() => {
   else process.env.OPENCLAW_PROFILE = prevProfile;
 });
 
-const reportFile = (profile = 'default') => path.join(configDir, 'posture', `openclaw--${profile}.json`);
+const reportDir = (profile = 'default') => path.join(configDir, 'posture', 'openclaw', profile);
+const reportFile = (profile = 'default') => {
+  const files = fs.readdirSync(reportDir(profile)).filter((f) => f.endsWith('.json'));
+  if (files.length !== 1) throw new Error(`expected one report, found ${files.join(', ')}`);
+  return path.join(reportDir(profile), files[0]);
+};
 
 function readReport(profile = 'default') {
   const text = fs.readFileSync(reportFile(profile), 'utf8');
   const parsed = parseSelfReport(text, Buffer.byteLength(text));
-  if (parsed.kind !== 'valid') throw new Error(`invalid report: ${parsed.reason}`);
+  if (parsed.kind !== 'valid') throw new Error(`invalid report: ${parsed.kind === "invalid" ? parsed.reason : parsed.kind}`);
   return parsed.report;
 }
 
@@ -87,14 +94,51 @@ describe('#613 writer', () => {
     const r = readReport();
     expect(r.runtime).toBe('openclaw');
     expect(r.policy_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(fs.readdirSync(path.join(configDir, 'posture'))).toEqual(['openclaw--default.json']);
+    expect(r.instance.liveness).toBe('process');
+    expect(r.instance.pid).toBe(process.pid);
+    expect(fs.readdirSync(reportDir())).toEqual([`${r.instance.key}.json`]);
     expect(fs.statSync(reportFile()).mode & 0o077).toBe(0);
+    for (const d of [path.join(configDir, 'posture'), path.join(configDir, 'posture', 'openclaw'), reportDir()]) {
+      expect(fs.statSync(d).mode & 0o077).toBe(0);
+    }
   });
 
   it('never throws when the directory is unwritable, and reports false', () => {
     fs.writeFileSync(path.join(configDir, 'posture'), 'a file');
     expect(() => writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available' })).not.toThrow();
     expect(writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available' })).toBe(false);
+  });
+
+  it('this live process reads back as current and loaded through the real collector (Linux start check)', () => {
+    if (process.platform !== 'linux' || !linuxProcessStart(process.pid)) return;
+    writePostureSelfReport({ configDir, profile: 'default', configuredPosture: 'enforce', scanner: 'available', policy: { enforce: true } });
+    const home = path.join(root, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    const [rec] = collectPostureRecords({ home, configDir, hostDeps: { openclawBinaryPresent: () => false } })
+      .filter((x) => x.runtime === 'openclaw');
+    expect(rec.liveness.value).toBe('alive');
+    expect(rec.membership).toBe('current');
+    expect(rec.runtime_loaded.value).toBe('yes');
+  });
+
+  it('a denial keeps its own timestamp and identity; a later policy change leaves it obsolete, not refreshed', () => {
+    writePostureSelfReport({ configDir, configuredPosture: 'enforce', scanner: 'available', policy: { enforce: true }, nowMs: Date.parse('2026-09-29T10:00:00.000Z') });
+    writePostureSelfReport({ configDir, denial: { kind: 'blocked-action', testedPath: 'before_tool_call:Bash' }, nowMs: Date.parse('2026-09-29T10:01:00.000Z') });
+    writePostureSelfReport({ configDir, policy: { enforce: true, autoApprove: ['x'] }, nowMs: Date.parse('2026-09-29T10:02:00.000Z') });
+    const r = readReport();
+    expect(r.heartbeat_at).toBe('2026-09-29T10:02:00.000Z');
+    expect(r.denials.blocked_action!.at).toBe('2026-09-29T10:01:00.000Z');
+    expect(r.denials.blocked_action!.tested_path).toBe('before_tool_call:Bash');
+    expect(r.denials.blocked_action!.policy_hash).not.toBe(r.policy_hash);
+    expect(r.denials.blocked_action_count).toBe(1);
+  });
+
+  it('a synthetic probe is recorded separately and never counted', () => {
+    writePostureSelfReport({ configDir, configuredPosture: 'enforce', scanner: 'available', denial: { kind: 'synthetic-probe', testedPath: 'probe:Bash' } });
+    const r = readReport();
+    expect(r.denials.synthetic_probe!.tested_path).toBe('probe:Bash');
+    expect(r.denials.blocked_action).toBeNull();
+    expect(r.denials.blocked_action_count).toBe(0);
   });
 
   it('bounds free text so the file stays under the size cap', () => {
@@ -124,31 +168,52 @@ describe('#613 register() self-report', () => {
     const { api } = makeApi({});
     plugin.register(api);
     expect(readReport('night').profile).toBe('night');
+    expect(fs.existsSync(reportDir('default'))).toBe(false);
   });
 
-  it('a block from before_tool_call is recorded as an observed denial', async () => {
+  it('a block from before_tool_call is recorded as a blocked action (unattended cron session)', async () => {
+    const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true, enforce: true } } });
+    plugin.register(api);
+    // No operator on a cron run: the dangerous tier denies instead of carding.
+    const result = await hooks['before_tool_call'](
+      { toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } },
+      { sessionId: 'agent:main:cron:nightly' },
+    );
+    expect(result?.block).toBe(true);
+    const r = readReport();
+    expect(r.denials.blocked_action!.tested_path).toBe('before_tool_call:Bash');
+    expect(r.denials.blocked_action!.configured_posture).toBe('enforce');
+    expect(r.denials.blocked_action_count).toBe(1);
+    expect(r.denials.synthetic_probe).toBeNull();
+  });
+
+  it('an approval card is not a denial', async () => {
     const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true, enforce: true } } });
     plugin.register(api);
     const result = await hooks['before_tool_call']({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } });
-    expect(Boolean(result && (result.requireApproval || result.block))).toBe(true);
-    if (result?.block) expect(readReport().last_denial_at).not.toBeNull();
+    expect(result?.requireApproval).toBeDefined();
+    expect(readReport().denials.blocked_action).toBeNull();
   });
 });
 
 describe('#613 a self-report failure never changes a decision', () => {
-  const calls = [
-    { toolName: 'Bash', params: { command: 'ls -la' } },
-    { toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } },
-    { toolName: 'Bash', params: { command: 'crontab -e' } },
+  const cron = { sessionId: 'agent:main:cron:nightly' };
+  const calls: Array<[Record<string, unknown>, Record<string, unknown> | undefined]> = [
+    [{ toolName: 'Bash', params: { command: 'ls -la' } }, undefined],
+    [{ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } }, undefined],
+    [{ toolName: 'Bash', params: { command: 'crontab -e' } }, undefined],
+    [{ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } }, cron],
+    [{ toolName: 'Bash', params: { command: 'ls -la' } }, cron],
   ];
 
   async function decisions(): Promise<string[]> {
     __resetConfigStateForTest();
+    __resetPostureStateForTest();
     const { api, hooks } = makeApi({ interceptor: { actionGuard: { enabled: true, enforce: true } } });
     plugin.register(api);
     const out: string[] = [];
-    for (const c of calls) {
-      const r = await hooks['before_tool_call'](c);
+    for (const [event, ctx] of calls) {
+      const r = await hooks['before_tool_call'](event, ctx);
       out.push(r === undefined ? 'allow' : r.block ? 'block' : r.requireApproval ? 'approval' : JSON.stringify(r));
     }
     return out;
@@ -160,7 +225,6 @@ describe('#613 a self-report failure never changes a decision', () => {
     fs.writeFileSync(path.join(configDir, 'posture'), 'blocked');
     const blocked = await decisions();
     expect(blocked).toEqual(normal);
-    expect(normal).toContain('allow');
-    expect(normal.some((d) => d !== 'allow')).toBe(true);
+    expect(new Set(normal)).toEqual(new Set(['allow', 'approval', 'block']));
   });
 });
