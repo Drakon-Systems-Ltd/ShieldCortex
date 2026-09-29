@@ -106,6 +106,8 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { open as openAsync, stat as statAsync } from 'node:fs/promises';
+import { StringDecoder } from 'node:string_decoder';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { normaliseNotifyConfig } from './notify-config.js';
@@ -666,74 +668,158 @@ function isWellFormedRecord(row: unknown): row is Record<string, unknown> {
   return r.to === 'enforcing' || r.to === 'shadow';
 }
 
-function readEvidence(dirs: string[], sinceMs: number, nowMs: number): {
+interface Evidence {
   rows: ParsedRow[];
   bytesRead: number;
   truncated: boolean;
   unreadableFiles: number;
   unparseableLines: number;
-} {
+  /** r8 (SF6): the oldest day file read (YYYY-MM-DD) — with `truncated`, how
+   *  far back the budget let the measurement reach. */
+  oldestDateRead: string | null;
+  /** r8 (SF6): day files read inside the budget. */
+  filesRead: number;
+}
+
+/**
+ * r8 (SF6): bytes read, decoded and parsed between two yields to the event
+ * loop on the async path — a few ms of JSON.parse on the gateway's thread.
+ */
+const EVIDENCE_SLICE_BYTES = 256 * 1024;
+
+/** The audit files that can hold evidence since `sinceMs`, newest first — so
+ *  a budget cut drops the OLDEST evidence. */
+function evidenceFiles(dirs: string[], sinceMs: number): Array<{ path: string; date: string }> {
   const files = dirs.flatMap((d) => listAuditFiles(d, sinceMs));
-  // Newest first, so a budget cut drops the OLDEST evidence.
   files.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  return files;
+}
+
+/**
+ * Split one file's text into the complete lines to parse. Only the LAST
+ * segment, and only when it has no trailing newline, is an append still in
+ * flight rather than a corrupt row: leave it for the next recompute. (With a
+ * trailing newline the last segment is empty.) Every other line is complete
+ * and must parse.
+ */
+function completeLines(text: string): string[] {
+  const lines = text.split('\n');
+  lines.pop();
+  return lines;
+}
+
+/** Parse and admit one line — the one rule, shared by the sync and the
+ *  sliced async reader so they can never count differently. */
+function ingestLine(ev: Evidence, seen: Set<string>, line: string, sinceMs: number, nowMs: number): void {
+  if (!line) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    ev.unparseableLines += 1;
+    return;
+  }
+  if (!isWellFormedRecord(parsed)) {
+    ev.unparseableLines += 1;
+    return;
+  }
+  const row = parsed;
+  const ts = Date.parse(String(row.ts ?? ''));
+  // Future-dated rows are not evidence of anything that happened.
+  if (!Number.isFinite(ts) || ts < sinceMs || ts > nowMs + 60_000) return;
+  const id = typeof row.auditEventId === 'string' ? row.auditEventId : null;
+  if (id) {
+    if (seen.has(id)) return;
+    seen.add(id);
+  }
+  ev.rows.push({ ts, row });
+}
+
+function emptyEvidence(): Evidence {
+  return { rows: [], bytesRead: 0, truncated: false, unreadableFiles: 0, unparseableLines: 0, oldestDateRead: null, filesRead: 0 };
+}
+
+function readEvidence(dirs: string[], sinceMs: number, nowMs: number, budget: number): Evidence {
+  const ev = emptyEvidence();
   const seen = new Set<string>();
-  const rows: ParsedRow[] = [];
-  let bytesRead = 0;
-  let truncated = false;
-  let unreadableFiles = 0;
-  let unparseableLines = 0;
-  for (const f of files) {
+  for (const f of evidenceFiles(dirs, sinceMs)) {
     let size = 0;
     try {
       size = statSync(f.path).size;
     } catch {
-      unreadableFiles += 1;
+      ev.unreadableFiles += 1;
       continue;
     }
-    if (bytesRead + size > MAX_READINESS_BYTES) {
-      truncated = true;
+    if (ev.bytesRead + size > budget) {
+      ev.truncated = true;
       break;
     }
     let text: string;
     try {
       text = readFileSync(f.path, 'utf8');
     } catch {
-      unreadableFiles += 1;
+      ev.unreadableFiles += 1;
       continue;
     }
-    bytesRead += size;
-    const lines = text.split('\n');
-    // Only the LAST segment, and only when it has no trailing newline, is an
-    // append still in flight rather than a corrupt row: leave it for the next
-    // recompute. (With a trailing newline the last segment is empty.) Every
-    // other line is complete and must parse.
-    lines.pop();
-    for (const line of lines) {
-      if (!line) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        unparseableLines += 1;
-        continue;
-      }
-      if (!isWellFormedRecord(parsed)) {
-        unparseableLines += 1;
-        continue;
-      }
-      const row = parsed;
-      const ts = Date.parse(String(row.ts ?? ''));
-      // Future-dated rows are not evidence of anything that happened.
-      if (!Number.isFinite(ts) || ts < sinceMs || ts > nowMs + 60_000) continue;
-      const id = typeof row.auditEventId === 'string' ? row.auditEventId : null;
-      if (id) {
-        if (seen.has(id)) continue;
-        seen.add(id);
-      }
-      rows.push({ ts, row });
-    }
+    ev.bytesRead += size;
+    ev.oldestDateRead = f.date;
+    ev.filesRead += 1;
+    for (const line of completeLines(text)) ingestLine(ev, seen, line, sinceMs, nowMs);
   }
-  return { rows, bytesRead, truncated, unreadableFiles, unparseableLines };
+  return ev;
+}
+
+/**
+ * r8 (SF6): the same read for the OpenClaw gateway, where readiness runs on
+ * the gateway's own event loop. Each file is read off-thread in
+ * {@link EVIDENCE_SLICE_BYTES} slices, and each slice is decoded and parsed
+ * before a yield, so a 64 MB audit never holds the loop for more than one
+ * slice. Same budget, same order, same admission rule ({@link ingestLine}) as
+ * the sync reader; the last segment with no trailing newline is an append in
+ * flight, left for the next recompute, exactly as there.
+ */
+async function readEvidenceAsync(dirs: string[], sinceMs: number, nowMs: number, budget: number): Promise<Evidence> {
+  const ev = emptyEvidence();
+  const seen = new Set<string>();
+  const yieldToLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+  for (const f of evidenceFiles(dirs, sinceMs)) {
+    let size = 0;
+    try {
+      size = (await statAsync(f.path)).size;
+    } catch {
+      ev.unreadableFiles += 1;
+      continue;
+    }
+    if (ev.bytesRead + size > budget) {
+      ev.truncated = true;
+      break;
+    }
+    let fh: Awaited<ReturnType<typeof openAsync>> | undefined;
+    try {
+      fh = await openAsync(f.path, 'r');
+      const buf = Buffer.allocUnsafe(EVIDENCE_SLICE_BYTES);
+      const decoder = new StringDecoder('utf8');
+      let carry = '';
+      for (let pos = 0; pos < size;) {
+        const { bytesRead } = await fh.read(buf, 0, Math.min(EVIDENCE_SLICE_BYTES, size - pos), pos);
+        if (bytesRead === 0) break;
+        pos += bytesRead;
+        const lines = (carry + decoder.write(buf.subarray(0, bytesRead))).split('\n');
+        carry = lines.pop() ?? '';
+        for (const line of lines) ingestLine(ev, seen, line, sinceMs, nowMs);
+        await yieldToLoop();
+      }
+    } catch {
+      ev.unreadableFiles += 1;
+      continue;
+    } finally {
+      await fh?.close().catch(() => { /* ignore */ });
+    }
+    ev.bytesRead += size;
+    ev.oldestDateRead = f.date;
+    ev.filesRead += 1;
+  }
+  return ev;
 }
 
 /** A real, verdict-bearing call through a gated adapter (any adapter, any
@@ -769,15 +855,16 @@ function fmtPct(rate: number): string {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
+function fmtMb(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
+}
+
 function fmtDays(ms: number): string {
   return `${(ms / (24 * 60 * 60 * 1000)).toFixed(1)} days`;
 }
 
-/**
- * Compute the three conditions from the evidence. Pure with respect to its
- * inputs: nothing is written, and no stored boolean is consulted.
- */
-export function computeReadiness(opts: {
+export interface ComputeReadinessOptions {
   channel: HumanChannel;
   paths?: ReadinessPaths;
   home?: string;
@@ -790,13 +877,46 @@ export function computeReadiness(opts: {
   effectivenessRegistry?: readonly EffectivenessEvidence[];
   /** #509 r7: whose readiness this is (default the Claude Code hook). */
   adapter?: ReadinessAdapter;
-}): ReadinessReport {
+  /** r8 (SF6) test seam: the audit read budget (default
+   *  {@link MAX_READINESS_BYTES}). Never fed from config. */
+  readBudgetBytes?: number;
+}
+
+function computeInputs(opts: ComputeReadinessOptions) {
   const nowMs = opts.now ?? Date.now();
   const adapter = opts.adapter ?? READINESS_ADAPTER;
   const paths = opts.paths ?? readinessPaths({ home: opts.home, adapter });
   const pin = opts.pin === undefined ? currentReadinessPin(adapter) : opts.pin;
   const since = nowMs - Math.max(INTERVENTION_WINDOW_MS, REACHABILITY_WINDOW_MS);
-  const { rows, bytesRead, truncated, unreadableFiles, unparseableLines } = readEvidence(paths.readAuditDirs, since, nowMs);
+  const budget = opts.readBudgetBytes ?? MAX_READINESS_BYTES;
+  return { nowMs, adapter, paths, pin, since, budget };
+}
+
+/**
+ * Compute the three conditions from the evidence. Pure with respect to its
+ * inputs: nothing is written, and no stored boolean is consulted.
+ */
+export function computeReadiness(opts: ComputeReadinessOptions): ReadinessReport {
+  const inp = computeInputs(opts);
+  return evaluateEvidence(opts, inp, readEvidence(inp.paths.readAuditDirs, inp.since, inp.nowMs, inp.budget));
+}
+
+/**
+ * r8 (SF6): {@link computeReadiness} for a caller on a shared event loop (the
+ * OpenClaw gateway): the same answer, read and parsed in slices that yield.
+ */
+export async function computeReadinessAsync(opts: ComputeReadinessOptions): Promise<ReadinessReport> {
+  const inp = computeInputs(opts);
+  return evaluateEvidence(opts, inp, await readEvidenceAsync(inp.paths.readAuditDirs, inp.since, inp.nowMs, inp.budget));
+}
+
+function evaluateEvidence(
+  opts: ComputeReadinessOptions,
+  inp: ReturnType<typeof computeInputs>,
+  ev: Evidence,
+): ReadinessReport {
+  const { nowMs, adapter, pin, budget } = inp;
+  const { rows, bytesRead, truncated, unreadableFiles, unparseableLines } = ev;
   const stopSet = stopOutcomes(adapter);
 
   // ── Operational intervention rate ──
@@ -821,7 +941,16 @@ export function computeReadiness(opts: {
   const spanMs = total > 0 ? newest - oldest : 0;
   const ivRate = total > 0 ? stops / total : null;
   let ivMissing: string | null = null;
-  if (total < INTERVENTION_MIN_SAMPLE) {
+  // r8 (SF6): a budget cut that leaves less than the span this proxy needs
+  // makes the span (or the sample) unmeetable however long the install runs —
+  // say THAT, not "observed calls span 6.3 days".
+  const readFromMs = ev.oldestDateRead ? Date.parse(`${ev.oldestDateRead}T00:00:00.000Z`) : nowMs;
+  const budgetCutsSpan = truncated && nowMs - readFromMs < INTERVENTION_MIN_SPAN_MS;
+  if (budgetCutsSpan && (total < INTERVENTION_MIN_SAMPLE || spanMs < INTERVENTION_MIN_SPAN_MS)) {
+    ivMissing = `not enough history measured: the audit is larger than the ${fmtMb(budget)} read budget, so only its newest ` +
+      `${ev.filesRead} day file(s) (${fmtMb(bytesRead)}) were read — less than the ${fmtDays(INTERVENTION_MIN_SPAN_MS)} of calls ` +
+      'this proxy needs, so it cannot pass on this host; the install stays in shadow until the daily audit volume is smaller';
+  } else if (total < INTERVENTION_MIN_SAMPLE) {
     ivMissing = `only ${total} of the ${INTERVENTION_MIN_SAMPLE} real tool calls needed have been observed on this version`;
   } else if (spanMs < INTERVENTION_MIN_SPAN_MS) {
     ivMissing = `observed calls span ${fmtDays(spanMs)}; at least ${fmtDays(INTERVENTION_MIN_SPAN_MS)} are needed`;
@@ -971,7 +1100,7 @@ export function computeReadiness(opts: {
       .filter((m): m is string => m !== null);
   }
   if (truncated) {
-    missing.push(`the audit exceeded the ${MAX_READINESS_BYTES / (1024 * 1024)} MB read budget; only the newest evidence was counted`);
+    missing.push(`the audit exceeded the ${fmtMb(budget)} read budget; only the newest evidence was counted`);
   }
   return {
     computedAt: new Date(nowMs).toISOString(),
@@ -1686,7 +1815,30 @@ function tryLock(lockPath: string, now: number): boolean {
  * therefore buys nothing. A missing or unreadable record is UNKNOWN and is
  * treated as potentially demoted (see {@link decideFromEvidence}).
  */
-export function resolveReadiness(opts: {
+export function resolveReadiness(opts: ResolveReadinessOptions): ResolvedReadiness {
+  const begun = beginResolve(opts);
+  if ('done' in begun) return begun.done;
+  return finishResolve(opts, begun, computeReadiness(begun.computeOpts));
+}
+
+/**
+ * r8 (SF6): {@link resolveReadiness} for the OpenClaw gateway, which runs the
+ * gate on its own event loop. The same decision, locks and journal writes; only
+ * the evidence recompute (up to {@link MAX_READINESS_BYTES} of audit, every
+ * {@link READINESS_CACHE_TTL_MS}) is read and parsed in slices that yield, so
+ * the gateway is never held for the whole read. Between the pre-lock read and
+ * the decision another writer may interleave; the under-lock journal re-check
+ * (r5 finding 7) already turns that into "write nothing, answer the tighter
+ * mode". The cheap path (a fresh cache agreeing with the journal) is the sync
+ * one.
+ */
+export async function resolveReadinessAsync(opts: ResolveReadinessOptions): Promise<ResolvedReadiness> {
+  const begun = beginResolve(opts);
+  if ('done' in begun) return begun.done;
+  return finishResolve(opts, begun, await computeReadinessAsync(begun.computeOpts));
+}
+
+export interface ResolveReadinessOptions {
   channel: HumanChannel;
   home?: string;
   now?: number;
@@ -1700,7 +1852,24 @@ export function resolveReadiness(opts: {
   /** #509 r7: which adapter is asking (default the Claude Code hook). Its own
    *  evidence, state file, journal and lock — see READINESS_ADAPTERS. */
   adapter?: ReadinessAdapter;
-}): ResolvedReadiness {
+}
+
+/** What the pre-compute half of a resolve read, for the post-compute half. */
+interface ResolveContext {
+  now: number;
+  adapter: ReadinessAdapter;
+  paths: ReadinessPaths;
+  pin: ReadinessPin | null;
+  recordPath: string;
+  record: TransitionRecord;
+  recorded: ReadinessMode | 'unknown';
+  durable: ReadinessMode | 'unknown';
+  state: ReadinessState | null;
+  tamper: string | undefined;
+  computeOpts: ComputeReadinessOptions;
+}
+
+function beginResolve(opts: ResolveReadinessOptions): { done: ResolvedReadiness } | ResolveContext {
   const now = opts.now ?? Date.now();
   const adapter = opts.adapter ?? READINESS_ADAPTER;
   if (!isReadinessAdapter(adapter)) throw new Error(`unknown readiness adapter: ${String(adapter).slice(0, 40)}`);
@@ -1734,21 +1903,21 @@ export function resolveReadiness(opts: {
           }
         }
       }
-      return { mode: state!.mode, cached: true, transition: null, report: null, state };
+      return { done: { mode: state!.mode, cached: true, transition: null, report: null, state } };
     }
     if (!tamper && durable !== 'unknown') {
       tamper = `the readiness cache said ${state!.mode} while the durable transition record says ${durable}; the cache was not trusted`;
     }
   }
+  return {
+    now, adapter, paths, pin, recordPath, record, recorded, durable, state, tamper,
+    computeOpts: { channel: opts.channel, paths, now, pin, effectivenessRegistry: opts.effectivenessRegistry, adapter },
+  };
+}
 
-  const report = computeReadiness({
-    channel: opts.channel,
-    paths,
-    now,
-    pin,
-    effectivenessRegistry: opts.effectivenessRegistry,
-    adapter,
-  });
+function finishResolve(opts: ResolveReadinessOptions, ctx: ResolveContext, report: ReadinessReport): ResolvedReadiness {
+  const { now, adapter, paths, pin, recordPath, record, recorded, durable, state } = ctx;
+  let tamper = ctx.tamper;
   // r8 (SF4): a late-gated adapter that has never run gated here STARTS its
   // record — watching first, announced once by the caller — rather than
   // recording an unknown-record demotion it never earned.
