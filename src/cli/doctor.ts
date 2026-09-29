@@ -4736,6 +4736,12 @@ async function readinessRowsForSurface(
 ): Promise<CheckResult[]> {
   const label = `Action guard readiness${suffix}`;
   const journalFile = summary.journalPath ?? '~/.shieldcortex/approvals/guard-readiness-transitions.jsonl';
+  // r8 (SF3): remediation in the words of the surface this row is about —
+  // its own journal writer, and the test-approval that earns ITS evidence.
+  const readinessMod = await import('../defence/iron-dome/guard-readiness.js');
+  const actor = readinessMod.READINESS_ADAPTER_ACTORS[summary.adapter] ?? 'the Claude Code hook';
+  const Actor = `${actor[0]!.toUpperCase()}${actor.slice(1)}`;
+  const testApproval = readinessMod.testApprovalCommand(summary.adapter);
   if (summary.posture !== 'enforce-when-ready') {
     if (summary.lockOverrides) {
       return [{ label, status: 'info', message: 'readiness gate is configured but a policy lock pins enforcement — the gate is ignored and the guard enforces' }];
@@ -4759,13 +4765,13 @@ async function readinessRowsForSurface(
     ? [{
       label: `Action guard last promotion${suffix}`,
       status: promotion.notice === 'delivered' ? 'info' : 'warn',
-      message: `last promotion to enforcing: ${(await import('./guard.js')).describePromotionNotice(promotion)}`,
+      message: `last promotion to enforcing: ${(await import('./guard.js')).describePromotionNotice(promotion, summary.adapter)}`,
       ...(promotion.notice === 'delivered'
         ? {}
         : promotion.notice === 'failed'
-          ? { fix: 'The hook tried to announce this promotion and the notice channel did not accept it. Check the channel (`shieldcortex guard test-approval`).' }
+          ? { fix: `${Actor} tried to announce this promotion and the notice channel did not accept it. Check the channel (\`${testApproval}\`).` }
           : {
-            fix: 'No notice attempt is recorded for this promotion, and the hook records one with every promotion it makes. If you do not recognise it, the transition journal under ~/.shieldcortex/approvals may have been written by something other than the hook — run `shieldcortex guard readiness` and inspect it.',
+            fix: `No notice attempt is recorded for this promotion, and ${actor} records one with every promotion it makes. If you do not recognise it, ${journalFile} may have been written by something other than ${actor} — run \`shieldcortex guard readiness\` and inspect it.`,
           }),
     }]
     : [];
@@ -4776,14 +4782,14 @@ async function readinessRowsForSurface(
       label: `Action guard readiness tamper${suffix}`,
       status: 'warn',
       message: `readiness tamper signal at ${summary.recentTamper.ts}: ${summary.recentTamper.reason ?? 'the readiness cache disagreed with the transition record'}`,
-      fix: 'Something other than the hook wrote the readiness cache or transition record under ~/.shieldcortex/approvals. Find out what; the hook recomputed from evidence and did not trust it.',
+      fix: `Something other than ${actor} wrote the readiness cache or transition record under ~/.shieldcortex/approvals. Find out what; ${actor} recomputed from evidence and did not trust it.`,
     }]
     : [];
   // #509 r6 (S1): the newest mode entry is an init/recover → shadow after a
   // promotion with no demotion between. The hook never leaves enforcing that
   // way, so this is a forged demotion that kept the real promotion in place —
   // a FAIL, not "not ready yet".
-  const forged = (await import('../defence/iron-dome/guard-readiness.js')).unexplainedDemotion(summary.record);
+  const forged = readinessMod.unexplainedDemotion(summary.record);
   if (forged) {
     return [{
       label,
@@ -4792,8 +4798,8 @@ async function readinessRowsForSurface(
         `enforce when ready: UNEXPLAINED DEMOTION — the transition journal's newest entry is ${forged.event} → shadow at ${forged.ts}, ` +
         `after a promotion to enforcing${promotion ? ` (${promotion.promotedAt})` : ''} with no demotion between (current mode: ${summary.mode}). ${bars}.${missing}`,
       fix:
-        'The hook only leaves enforcing through a recorded, announced demotion, so something other than the hook wrote ' +
-        `${journalFile}. Find out what. The hook does not trust the entry: it keeps ` +
+        `${Actor} only leaves enforcing through a recorded, announced demotion, so something other than ${actor} wrote ` +
+        `${journalFile}. Find out what. ${Actor} does not trust the entry: it keeps ` +
         'enforcing while the evidence holds and otherwise demotes with the full protocol; the FAIL clears once it has re-recorded the mode.',
     }, ...tamper, ...promotionRows];
   }
@@ -4806,7 +4812,7 @@ async function readinessRowsForSurface(
         `the last mode is unknown and is treated as potentially DEMOTED (current mode: ${summary.mode}). ${bars}.${missing}`,
       fix:
         `The record at ${journalFile} was removed or damaged. Find out what did it. ` +
-        'The hook records the unknown state as a demotion on its next call; the FAIL clears on the next promotion.',
+        `${Actor} records the unknown state as a demotion on its next call; the FAIL clears on the next promotion.`,
     }, ...tamper, ...promotionRows];
   }
   if (summary.mode === 'enforcing') {
@@ -4821,7 +4827,7 @@ async function readinessRowsForSurface(
         `${summary.state?.lastDemotionReason ? `Reason: ${summary.state.lastDemotionReason}. ` : ''}${bars}.${missing}`,
       fix:
         'You chose enforcement and are not getting it. Run `shieldcortex guard readiness` for the evidence. ' +
-        'Fix what is missing (channel, round-trips via `shieldcortex guard test-approval`); if the would-stops look ' +
+        `Fix what is missing (channel, round-trips via \`${testApproval}\`); if the would-stops look ` +
         'forged, inspect ~/.shieldcortex/audit. Do not switch to plain enforce or off from this row without deciding to.',
     }];
   }

@@ -1678,8 +1678,12 @@ function normaliseActionGuardBlock(
     else dropped?.push(`${pathPrefix}.auditAllows`);
   }
   // #509 r7: enforce-when-ready. Carried here, but mergeConfigs honours it
-  // ONLY from the shield config (the signed file the CLI writes): the
-  // openclaw.json entry is an unsigned same-UID file, and turning the gate ON
+  // ONLY from the shield config: `$SHIELDCORTEX_CONFIG_DIR/config.json`
+  // (default ~/.shieldcortex/config.json) as the runtime's loadShieldConfig
+  // reads it — plain JSON; the CLI signs it (`_sig`) but this path does NOT
+  // verify that signature. What it has is the guard's self-protection floor
+  // (`touch-guard-config`): the agent's tool calls cannot edit it; a same-UID
+  // process can. The openclaw.json entry has neither, and turning the gate ON
   // from there would move an enforcing guard into shadow — a loosening.
   if (rawGuard.readinessGate !== undefined) {
     if (typeof rawGuard.readinessGate === "boolean") guard.readinessGate = rawGuard.readinessGate;
@@ -1814,10 +1818,14 @@ function mergeConfigs(base: SCConfig, override: SCConfig): SCConfig {
       const bg = b.actionGuard ?? {};
       const og = o.actionGuard ?? {};
       const guard: NonNullable<InterceptorUserConfig['actionGuard']> = { ...bg, ...og };
+      // The notify block — the readiness human channel and the transition
+      // notices' route (#509) — is merged from BOTH files, the openclaw.json
+      // entry winning per key; neither is signature-checked on this path.
       if (bg.notify || og.notify) guard.notify = { ...bg.notify, ...og.notify };
       if (bg.broker || og.broker) guard.broker = { ...bg.broker, ...og.broker };
-      // #509 r7: the readiness gate comes from the BASE (shield config) only.
-      // An openclaw.json entry cannot switch an enforcing guard into shadow.
+      // #509 r7: the readiness gate comes from the BASE (the shield config,
+      // floor-protected, see normaliseActionGuardBlock) only. An openclaw.json
+      // entry cannot switch an enforcing guard into shadow.
       if (bg.readinessGate === true) guard.readinessGate = true;
       else delete guard.readinessGate;
       merged.interceptor.actionGuard = guard;

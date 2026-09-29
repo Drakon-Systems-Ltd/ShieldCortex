@@ -746,6 +746,21 @@ function isCountedCall(row: Record<string, unknown>): boolean {
   return true;
 }
 
+/** #509 r8 (SF3): the command that earns round-trips for THIS adapter —
+ *  evidence is pinned per surface, so a plain `test-approval` (the hook's)
+ *  never helps OpenClaw. */
+export function testApprovalCommand(adapter: ReadinessAdapter = READINESS_ADAPTER): string {
+  return adapter === 'openclaw-interceptor'
+    ? 'shieldcortex guard test-approval --surface openclaw'
+    : 'shieldcortex guard test-approval';
+}
+
+/** #509 r8 (SF3): who writes an adapter's journal, in operator words. */
+export const READINESS_ADAPTER_ACTORS: Record<ReadinessAdapter, string> = {
+  'claude-code-hook': 'the Claude Code hook',
+  'openclaw-interceptor': 'the OpenClaw plugin',
+};
+
 function fmtPct(rate: number): string {
   return `${(rate * 100).toFixed(1)}%`;
 }
@@ -875,11 +890,11 @@ export function computeReadiness(opts: {
   if (!opts.channel.configured) {
     rcMissing = 'no human approval channel is configured (run `shieldcortex config --action-guard-notify-openclaw` or `--action-guard-notify-webhook <url>`)';
   } else if (resolved < REACHABILITY_MIN_SAMPLE) {
-    rcMissing = `only ${resolved} of the ${REACHABILITY_MIN_SAMPLE} answered-or-expired approval requests needed on this version (run \`shieldcortex guard test-approval\` to add round-trips)`;
+    rcMissing = `only ${resolved} of the ${REACHABILITY_MIN_SAMPLE} answered-or-expired approval requests needed on this version (run \`${testApprovalCommand(adapter)}\` to add round-trips)`;
   } else if (rcRate !== null && rcRate < REACHABILITY_MIN_RATE) {
     rcMissing = `a human answered ${fmtPct(rcRate)} of approval requests (${reached}/${resolved}); the threshold is ≥ ${fmtPct(REACHABILITY_MIN_RATE)}`;
   } else if (!roundTripFresh) {
-    rcMissing = 'no approval request has reached a human in the last 7 days (run `shieldcortex guard test-approval`)';
+    rcMissing = `no approval request has reached a human in the last 7 days (run \`${testApprovalCommand(adapter)}\`)`;
   }
   const reachability: ReachabilityProxy = {
     channel: opts.channel,

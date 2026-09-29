@@ -514,3 +514,87 @@ describe('#509 r7 — doctor and `guard readiness` report readiness per surface'
     expect(buildReadinessSummary({ home }).report.reachability.reached).toBe(0);
   });
 });
+
+// ── r8 ─────────────────────────────────────────────────────────────────────
+
+describe('#509 r8 SF2 — CHANGELOG says which surface ignores the gate', () => {
+  it('the Unreleased #509 entry does not say OpenClaw ignores readinessGate; it names Hermes', () => {
+    const text = readFileSync(resolve(here, '../../../CHANGELOG.md'), 'utf8');
+    const unreleased = text.slice(text.indexOf('## [Unreleased]'), text.indexOf('\n## [', text.indexOf('## [Unreleased]') + 5));
+    const entry = unreleased.slice(unreleased.indexOf('**#509 Action Guard'), unreleased.indexOf('\n- **', unreleased.indexOf('**#509 Action Guard')));
+    expect(entry).not.toMatch(/OpenClaw plugin ignores `?readinessGate/);
+    expect(entry).not.toMatch(/OpenClaw[^.]*enforces from the start/);
+    expect(entry).toMatch(/Hermes plugin does not implement[^.]*ignores `?readinessGate`? and enforces from the start/);
+  });
+});
+
+describe('#509 r8 N4 — the OpenClaw config source is described as what it is', () => {
+  it('nothing calls the shield config the plugin reads a "signed file": the plugin never checks its `_sig`', () => {
+    const repo = resolve(here, '../../..');
+    const runtime = readFileSync(join(repo, 'hooks/openclaw/cortex-memory/runtime.mjs'), 'utf8');
+    // The loader parses config.json as plain JSON — no signature check.
+    expect(runtime).toMatch(/JSON\.parse\(await fs\.readFile\(configPath/);
+    expect(runtime).not.toMatch(/_sig/);
+    for (const f of ['plugins/openclaw/index.ts', 'docs/design/2026-09-28-509-enforce-when-ready.md']) {
+      expect(readFileSync(join(repo, f), 'utf8')).not.toMatch(/the signed file the CLI writes/);
+    }
+  });
+});
+
+describe('#509 r8 SF3 — remediation text names the surface it is about', () => {
+  const OC = 'openclaw-interceptor' as const;
+  const ocJournal = () => transitionsPathFor(readinessPaths({ home, adapter: OC }));
+  function appendOc(entry: Record<string, unknown>): void {
+    mkdirSync(dirname(ocJournal()), { recursive: true });
+    appendFileSync(ocJournal(), `${JSON.stringify(entry)}\n`);
+  }
+  const textOf = (rows: Array<{ message: string; fix?: string }>) => rows.map((r) => `${r.message} ${r.fix ?? ''}`).join('\n');
+  /** Every `guard test-approval` in the text carries `--surface openclaw`. */
+  function expectOpenClawCommands(text: string): void {
+    const uses = text.match(/shieldcortex guard test-approval[^`)]*/g) ?? [];
+    expect(uses.length).toBeGreaterThan(0);
+    for (const u of uses) expect(u).toContain('--surface openclaw');
+    expect(text).not.toMatch(/\bthe hook\b/i);
+  }
+
+  it('readiness "missing" lines: OpenClaw names `--surface openclaw`; the hook keeps the plain command', () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    const oc = buildReadinessSummary({ home, adapter: OC }).report.missing.join('\n');
+    expect(oc).toContain('shieldcortex guard test-approval --surface openclaw');
+    const hook = buildReadinessSummary({ home }).report.missing.join('\n');
+    expect(hook).toContain('shieldcortex guard test-approval');
+    expect(hook).not.toContain('--surface openclaw');
+  });
+
+  it('doctor OpenClaw rows (shadow, failed promotion notice, unknown record): OpenClaw command, never "the hook"', async () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    const promotedAt = new Date(Date.now() - 3 * DAY).toISOString();
+    appendOc({ ts: promotedAt, event: 'promote', to: 'enforcing' });
+    appendOc({ ts: promotedAt, event: 'notice', of: 'promote', transitionTs: promotedAt, delivered: false, reason: 'HTTP 503' });
+    appendOc({ ts: new Date(Date.now() - 2 * DAY).toISOString(), event: 'demote', to: 'shadow', reason: 'test demotion' });
+    const rows = (await checkActionGuardReadiness()).filter((r) => r.label.endsWith('(OpenClaw plugin)'));
+    expect(rows.map((r) => r.label)).toEqual(['Action guard last promotion (OpenClaw plugin)', 'Action guard readiness (OpenClaw plugin)']);
+    expectOpenClawCommands(textOf(rows));
+    // A damaged OpenClaw record (it HAS a journal): still the loud FAIL, in OpenClaw's words.
+    writeFileSync(ocJournal(), '{not json\n');
+    const unknown = (await checkActionGuardReadiness()).find((r) => r.label === 'Action guard readiness (OpenClaw plugin)')!;
+    expect(unknown.status).toBe('fail');
+    expect(textOf([unknown])).not.toMatch(/\bthe hook\b/i);
+    expect(unknown.fix).toMatch(/the OpenClaw plugin records the unknown state/i);
+  });
+
+  it('`guard readiness` text for OpenClaw: OpenClaw command, never "the hook"', async () => {
+    setNotify({ enabled: true, webhookUrl: 'https://hooks.example.invalid/x' });
+    initReadinessTransitions({ postureChanged: true, reason: 'test', home });
+    const t = new Date(Date.now() - 3 * DAY).toISOString();
+    appendOc({ ts: t, event: 'promote', to: 'enforcing' });
+    appendOc({ ts: t, event: 'notice', of: 'promote', transitionTs: t, delivered: false, reason: 'HTTP 503' });
+    appendOc({ ts: new Date(Date.now() - DAY).toISOString(), event: 'init', to: 'shadow', reason: 'forged' });
+    const logs: string[] = [];
+    (console.log as unknown as jest.Mock).mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    await runGuardCommand(['readiness', '--surface', 'openclaw'], { home });
+    expectOpenClawCommands(logs.join('\n'));
+  });
+});

@@ -45,6 +45,8 @@ import {
   readinessPaths,
   recordApprovalReach,
   READINESS_ADAPTERS,
+  READINESS_ADAPTER_ACTORS,
+  testApprovalCommand,
   trustedDurableMode,
   unexplainedDemotion,
   type HumanChannel,
@@ -177,20 +179,21 @@ export function buildReadinessSummaries(opts: { now?: number; home?: string } = 
  * hold against the notices they actually received (#509 r5: a promotion is
  * announced when it happens; one they never heard about is the signal).
  */
-export function describePromotionNotice(p: PromotionNotice): string {
+export function describePromotionNotice(p: PromotionNotice, adapter: ReadinessAdapter = 'claude-code-hook'): string {
   // r6 (N2): a notice that failed to send is a channel problem, not forgery;
-  // the hook records an attempt with every promotion, so NO attempt is the
-  // forgery signal.
+  // the surface records an attempt with every promotion, so NO attempt is the
+  // forgery signal. r8 (SF3): in the words of the surface it is about.
+  const actor = READINESS_ADAPTER_ACTORS[adapter];
   if (p.notice === 'delivered') {
     return `${p.promotedAt} (from the transition journal) — notice delivered${p.channel ? ` via ${p.channel}` : ''}. ` +
       'If you did not receive a promotion notice at that time, treat the journal as forged.';
   }
   if (p.notice === 'failed') {
     return `${p.promotedAt} (from the transition journal) — the promotion notice failed to send${p.reason ? ` (${p.reason})` : ''}. ` +
-      'Check your notice channel: `shieldcortex guard test-approval`.';
+      `Check your notice channel: \`${testApprovalCommand(adapter)}\`.`;
   }
   return `${p.promotedAt} (from the transition journal) — NO notice attempt recorded: possible forgery. ` +
-    'The hook records a notice attempt with every promotion it makes; if you did not make this one, inspect the journal.';
+    `${actor[0]!.toUpperCase()}${actor.slice(1)} records a notice attempt with every promotion it makes; if you did not make this one, inspect the journal.`;
 }
 
 function pct(rate: number | null): string {
@@ -241,11 +244,11 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
     lines.push(`Transition record: last ${s.record.last.event} → ${s.record.last.to} at ${s.record.last.ts}`);
   }
   if (s.lastPromotion) {
-    lines.push(`Last promotion: ${describePromotionNotice(s.lastPromotion)}`);
+    lines.push(`Last promotion: ${describePromotionNotice(s.lastPromotion, s.adapter)}`);
   }
   const forged = unexplainedDemotion(s.record);
   if (forged) {
-    lines.push(`UNEXPLAINED DEMOTION: ${forged.event} → shadow at ${forged.ts} after a promotion, with no demotion between — not how the hook demotes; not trusted.`);
+    lines.push(`UNEXPLAINED DEMOTION: ${forged.event} → shadow at ${forged.ts} after a promotion, with no demotion between — not how ${READINESS_ADAPTER_ACTORS[s.adapter]} demotes; not trusted.`);
   }
   if (s.recentTamper) {
     lines.push(`TAMPER SIGNAL: ${s.recentTamper.ts} — ${s.recentTamper.reason ?? 'readiness cache disagreed with the transition record'}`);
