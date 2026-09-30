@@ -134,6 +134,7 @@ describe('shieldcortex ledger verify', () => {
     const src = readFileSync(path.join(repoRoot, 'src', 'index.ts'), 'utf-8');
     expect(src).toMatch(/process\.argv\[2\] === 'ledger'/);
     expect(src).toMatch(/runLedgerCommand\(process\.argv\.slice\(3\)\)/);
+    expect(src).toMatch(/ledger\$\{reset\} verify \[--json\]/);
   });
 });
 

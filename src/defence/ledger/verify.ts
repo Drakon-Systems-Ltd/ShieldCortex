@@ -513,7 +513,9 @@ export function formatLedgerReport(r: LedgerReport): string {
   }
   const u = r.unchainedHistory;
   if (u && (u.count > 0 || u.coverageStartsAt)) {
-    if (u.coverageStartsAt) {
+    if (u.coverageStartsAt && u.count === 0) {
+      out.push(`  coverage starts ${u.coverageStartsAt}; no unchained history before it.`);
+    } else if (u.coverageStartsAt) {
       out.push(`  unchained history — coverage starts ${u.coverageStartsAt}: ${u.count} audit row(s) (ids ≤ ${u.maxId}) were written before the chain existed. They are not chained and were never hashed into it.`);
     } else {
       out.push(`  unchained history: ${u.count} audit row(s); this database has no chain yet.`);

@@ -705,6 +705,7 @@ ${bold}COMMANDS${reset}
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
+  ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
   ${cyan}setup${reset}                 Install ShieldCortex into your project
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
