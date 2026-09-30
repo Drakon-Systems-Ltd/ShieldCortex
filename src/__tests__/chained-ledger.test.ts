@@ -493,6 +493,20 @@ describe('epochs', () => {
     expect(formatLedgerReport(report)).toMatch(/epoch 1/);
   });
 
+  it('deleting the tail of a closed epoch is caught by the next epoch naming its head', () => {
+    initDatabase(':memory:');
+    const db = getDatabase();
+    for (let i = 0; i < 4; i++) logAudit(entry({ reason: `e0 ${i}` }));
+    resetLedgerEpoch(db, 'reset');
+    logAudit(entry({ reason: 'e1' }));
+    expect(verifyLedger(db).status).toBe('consistent');
+    db.prepare('DELETE FROM defence_audit WHERE epoch = 0 AND seq >= 3').run();
+    const r = verifyLedger(db);
+    expect(r.status).toBe('inconsistent');
+    expect(r.epochs[1].previousHeadCheck).toBe('differs');
+    expect(r.problems.map((p) => p.kind)).toEqual(['epoch-link-mismatch']);
+  });
+
   it('a wiped ledger_meta over surviving chained rows starts a new epoch with the same ledger_id', () => {
     const dir = tmpDir();
     try {
