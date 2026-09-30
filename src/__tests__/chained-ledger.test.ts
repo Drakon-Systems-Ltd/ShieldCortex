@@ -11,7 +11,7 @@
  * processes) live in chained-ledger-multiprocess.test.ts.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
@@ -267,10 +267,14 @@ describe('migration from a populated pre-ledger DB: no retrofit', () => {
     initDatabase(dbPath);
     const db = getDatabase();
     const meta = readLedgerMeta(db)!;
-    expect(meta.unchained_max_id).toBe(preMax);
-    expect(meta.unchained_count).toBe(preCount);
-    const pre = auditChain(db).filter((r) => r.id <= preMax);
-    expect(pre).toHaveLength(preCount);
+    // Every row that existed before the chain is unchained history: the
+    // pre-existing rows, plus any marker the older migrations themselves wrote
+    // earlier in the same startup (the v4.29 backfill marker, for one).
+    expect(meta.unchained_max_id).toBeGreaterThanOrEqual(preMax);
+    const pre = auditChain(db).filter((r) => r.id <= meta.unchained_max_id);
+    expect(pre.length).toBeGreaterThanOrEqual(preCount);
+    expect(meta.unchained_count).toBe(pre.length);
+    expect(pre.filter((r) => r.id <= preMax)).toHaveLength(preCount);
     for (const r of pre) {
       expect(r.ledger_id).toBeNull();
       expect(r.seq).toBeNull();
@@ -283,7 +287,7 @@ describe('migration from a populated pre-ledger DB: no retrofit', () => {
     logAudit(entry({ reason: 'first chained row' }));
     const report = verifyLedger(db);
     expect(report.status).toBe('consistent');
-    expect(report.unchainedHistory).toMatchObject({ count: preCount, maxId: preMax });
+    expect(report.unchainedHistory).toMatchObject({ count: pre.length, maxId: meta.unchained_max_id });
     expect(report.unchainedHistory!.coverageStartsAt).toBe(meta.chain_started_at);
     expect(formatLedgerReport(report)).toContain(`unchained history — coverage starts ${meta.chain_started_at}`);
   }
@@ -347,6 +351,23 @@ describe('heartbeat', () => {
     expect(JSON.parse(hb[0].payload)).toMatchObject({ interval_ms: HOUR });
     expect(writeHeartbeatIfDue(db, { intervalMs: HOUR, now: t0 + HOUR + 2000 })).toBe(false);
     expect(verifyLedger(db, { now: t0 + HOUR + 3000, heartbeatIntervalMs: HOUR }).status).toBe('consistent');
+  });
+
+  it('the brain worker light tick writes the heartbeat when it is due (wiring, not just the helper)', async () => {
+    const db = getDatabase();
+    const { BrainWorker } = await import('../worker/brain-worker.js');
+    const worker = new BrainWorker({ profile: 'mcp' });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await worker.triggerLightTick();
+      expect(markers(db, 'heartbeat')).toHaveLength(0); // a row was just written: not due
+      db.prepare('UPDATE ledger_meta SET head_timestamp = ? WHERE id = 1').run(new Date(Date.now() - 2 * HOUR).toISOString());
+      await worker.triggerLightTick();
+      expect(markers(db, 'heartbeat')).toHaveLength(1);
+      expect(verifyLedger(db).status).toBe('consistent');
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it('silence covered by heartbeats is not a missing interval; silence without them is', () => {
@@ -417,10 +438,14 @@ describe('audit-write failure never changes a verdict', () => {
       const pages = (db.pragma('page_count', { simple: true }) as number);
       db.pragma(`max_page_count = ${pages}`);
       // Prove the disk really is "full" for the audit table.
-      const filler = 'x'.repeat(8192);
+      // Fill every free byte: big rows first, then ever smaller ones, until
+      // even a 1-byte row no longer fits.
+      const fill = db.prepare("INSERT INTO defence_audit (source_type, source_identifier, trust_score, firewall_result, reason) VALUES ('t','fill',0,'ALLOW',?)");
       let fullSeen = false;
-      for (let i = 0; i < 50 && !fullSeen; i++) {
-        try { db.prepare("INSERT INTO defence_audit (source_type, source_identifier, trust_score, firewall_result, reason) VALUES ('t','fill',0,'ALLOW',?)").run(filler); } catch (e) { fullSeen = /full/i.test(String(e)); }
+      for (const size of [8192, 1024, 128, 16, 1]) {
+        for (let i = 0; i < 10_000; i++) {
+          try { fill.run('x'.repeat(size)); } catch (e) { fullSeen = /full/i.test(String(e)); break; }
+        }
       }
       expect(fullSeen).toBe(true);
 

@@ -337,6 +337,13 @@ CREATE TABLE IF NOT EXISTS defence_audit (
   pipeline_duration_ms INTEGER,
   source_attested INTEGER,              -- threat-graph Phase B: 1 = identity system-derived or strict-mode; NULL = legacy/unplumbed
   risk_modifier REAL,                   -- threat-graph Phase B: advisory trust modifier computed for this scan
+  -- #617 chained ledger (design §5.7). NULL on unchained (pre-migration) rows.
+  ledger_id TEXT,                       -- random 128-bit id of this database's ledger (hex)
+  epoch INTEGER,                        -- ledger epoch; a reset starts epoch+1 at seq 0
+  seq INTEGER,                          -- position in the chain, shared with ledger_marker
+  prev_hash TEXT,                       -- row_hash of seq-1 (all zeros at seq 0)
+  content_digest TEXT,                  -- H(canonical(row content)); kept in ledger_skeleton when pruned
+  row_hash TEXT,                        -- H(domain | prev_hash | seq | content_digest)
   FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE SET NULL
 );
 
@@ -347,6 +354,48 @@ CREATE INDEX IF NOT EXISTS idx_audit_source ON defence_audit(source_type);
 CREATE INDEX IF NOT EXISTS idx_audit_project ON defence_audit(project);
 CREATE INDEX IF NOT EXISTS idx_audit_operation ON defence_audit(operation);
 CREATE INDEX IF NOT EXISTS idx_audit_source_ident_ts ON defence_audit(source_type, source_identifier, timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_chain ON defence_audit(ledger_id, epoch, seq);
+
+-- #617 chained ledger (design §5.7). One ledger per database: ledger_meta holds
+-- its identity, current epoch and head (updated in the same transaction as
+-- every chained append). ledger_marker holds the chained rows that are not
+-- security events (epoch-start, heartbeat, lost-coverage, checkpoint) so the
+-- stats, threat-graph and digest readers of defence_audit never see them; the
+-- two tables share one seq space. ledger_skeleton keeps (seq, content_digest)
+-- for pruned rows so a pruned range can still be recomputed.
+CREATE TABLE IF NOT EXISTS ledger_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  ledger_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  head_seq INTEGER NOT NULL,
+  head_hash TEXT NOT NULL,
+  head_timestamp TEXT NOT NULL,
+  chain_started_at TEXT NOT NULL,
+  unchained_max_id INTEGER NOT NULL DEFAULT 0,
+  unchained_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ledger_marker (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ledger_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('epoch-start', 'heartbeat', 'lost-coverage', 'checkpoint')),
+  timestamp TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  prev_hash TEXT NOT NULL,
+  content_digest TEXT NOT NULL,
+  row_hash TEXT NOT NULL,
+  UNIQUE(ledger_id, epoch, seq)
+);
+
+CREATE TABLE IF NOT EXISTS ledger_skeleton (
+  ledger_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  content_digest TEXT NOT NULL,
+  PRIMARY KEY (ledger_id, epoch, seq)
+);
 
 -- Defence: cumulative audit aggregate (single row, id=1). Retention purges roll
 -- the to-be-deleted rows' lifetime-stat contributions into this row BEFORE

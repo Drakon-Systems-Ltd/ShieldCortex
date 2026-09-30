@@ -16,12 +16,15 @@ import { spawn, spawnSync } from 'child_process';
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { verifyLedger, readLedgerMeta } from '../defence/ledger/index.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
-const tsx = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
+// tsx as an --import loader (not the tsx CLI, which runs the script in a
+// grandchild): the process we SIGKILL must be the one we spawned.
+const tsxLoader = pathToFileURL(path.join(repoRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs')).href;
+const nodeArgs = (script: string, args: string[]): string[] => ['--import', tsxLoader, script, ...args];
 const initTs = path.join(repoRoot, 'src', 'database', 'init.ts');
 const loggerTs = path.join(repoRoot, 'src', 'defence', 'audit', 'logger.ts');
 const ledgerTs = path.join(repoRoot, 'src', 'defence', 'ledger', 'index.ts');
@@ -75,7 +78,7 @@ function childEnv(): NodeJS.ProcessEnv {
 
 function runWriter(dbPath: string, count: number, tag: string, mode = ''): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; err: string }> {
   return new Promise((resolve) => {
-    const child = spawn(tsx, [childScript, dbPath, String(count), tag, mode], { env: childEnv(), cwd: repoRoot });
+    const child = spawn(process.execPath, nodeArgs(childScript, [dbPath, String(count), tag, mode]), { env: childEnv(), cwd: repoRoot });
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => { out += d; });
@@ -85,8 +88,8 @@ function runWriter(dbPath: string, count: number, tag: string, mode = ''): Promi
 }
 
 describe('multi-process ledger gates', () => {
-  it('tsx is available to run child writers', () => {
-    expect(existsSync(tsx)).toBe(true);
+  it('the tsx loader is available to run child writers', () => {
+    expect(existsSync(fileURLToPath(tsxLoader))).toBe(true);
   });
 
   it('crash mid-write (SIGKILL inside the transaction) leaves no half-chained row', async () => {
@@ -118,11 +121,11 @@ describe('multi-process ledger gates', () => {
   it('concurrent writer processes serialise through the DB transaction', async () => {
     const dbPath = path.join(work, 'concurrent.db');
     // Create the ledger once so the writers race on appends, not on genesis.
-    const init = spawnSync(tsx, [childScript, dbPath, '0', 'init'], { env: childEnv(), cwd: repoRoot });
+    const init = spawnSync(process.execPath, nodeArgs(childScript, [dbPath, '0', 'init']), { env: childEnv(), cwd: repoRoot });
     expect(init.status).toBe(0);
 
     const WRITERS = 4;
-    const EACH = 40;
+    const EACH = 150;
     const results = await Promise.all(
       Array.from({ length: WRITERS }, (_, i) => runWriter(dbPath, EACH, `w${i}`)),
     );
@@ -136,6 +139,11 @@ describe('multi-process ledger gates', () => {
       const seqs = (db.prepare('SELECT seq FROM defence_audit WHERE seq IS NOT NULL ORDER BY seq').all() as { seq: number }[]).map((r) => r.seq);
       expect(seqs).toHaveLength(WRITERS * EACH);
       expect(new Set(seqs).size).toBe(seqs.length);
+      // The writers really overlapped: in seq order the writer changes many
+      // times, not just WRITERS-1 times as it would for back-to-back runs.
+      const tags = (db.prepare('SELECT source_identifier AS t FROM defence_audit WHERE seq IS NOT NULL ORDER BY seq').all() as { t: string }[]).map((x) => x.t);
+      const switches = tags.filter((t, i) => i > 0 && t !== tags[i - 1]).length;
+      expect(switches).toBeGreaterThan(WRITERS * 2);
       const r = verifyLedger(db);
       expect(r.status).toBe('consistent');
       expect(r.gaps).toEqual([]);

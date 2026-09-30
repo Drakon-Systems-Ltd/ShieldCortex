@@ -1166,6 +1166,14 @@ ${bold}DOCS${reset}
     return;
   }
 
+  // Handle "ledger" subcommand (#617) — read-only verification of the chained
+  // audit ledger. Exit 0 consistent, 1 inconsistent, 2 usage / no database.
+  if (process.argv[2] === 'ledger') {
+    const { runLedgerCommand } = await import('./cli/ledger.js');
+    process.exitCode = runLedgerCommand(process.argv.slice(3));
+    return;
+  }
+
   // Handle "audit" subcommand — full security audit of agent environment
   if (process.argv[2] === 'audit') {
     const { handleAuditCommand } = await import('./cli/audit.js');
