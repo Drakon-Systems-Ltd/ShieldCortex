@@ -608,6 +608,25 @@ describe('retention checkpoints', () => {
     expect(r.problems.some((x) => x.kind === 'skeleton-mismatch')).toBe(true);
   });
 
+  it('a coherent edit of the row just before a pruned range is caught by the checkpoint start_hash', () => {
+    const db = getDatabase();
+    logAudit(entry({ reason: 'kept before range' }));
+    for (let i = 0; i < 4; i++) logAudit(entry({ timestamp: daysAgo(200 - i), reason: `old ${i}` }));
+    logAudit(entry({ reason: 'kept after range' }));
+    purgeOldAuditEntries(90, { keepSkeleton: true });
+    expect(verifyLedger(db).status).toBe('consistent');
+    // Edit the retained row before the range and re-seal it (digest + row_hash).
+    const before = db.prepare("SELECT * FROM defence_audit WHERE reason = 'kept before range'").get() as Record<string, unknown>;
+    db.prepare("UPDATE defence_audit SET reason = 'kept before range (edited)' WHERE id = ?").run(before.id);
+    const edited = db.prepare('SELECT * FROM defence_audit WHERE id = ?').get(before.id) as Record<string, unknown>;
+    const d = contentDigest(auditRowContent(edited, String(edited.ledger_id), Number(edited.epoch)));
+    db.prepare('UPDATE defence_audit SET content_digest = ?, row_hash = ? WHERE id = ?')
+      .run(d, rowHash(String(edited.prev_hash), Number(edited.seq), d), before.id);
+    const r = verifyLedger(db);
+    expect(r.status).toBe('inconsistent');
+    expect(r.problems.map((p) => p.kind)).toEqual(['checkpoint-mismatch']);
+  });
+
   it('size-pressure pruning (non-contiguous rows) keeps the chain verifiable', () => {
     const db = getDatabase();
     for (let i = 0; i < 20; i++) {
@@ -682,6 +701,39 @@ describe('verifier: what the local chain detects, and what it does not', () => {
     const db = getDatabase();
     db.prepare('UPDATE defence_audit SET prev_hash = ? WHERE seq = 3').run('a'.repeat(64));
     expect(verifyLedger(db).firstBad).toMatchObject({ seq: 3 });
+  });
+
+  it('a relinked row whose own row_hash was recomputed is still caught by the link check', () => {
+    const db = getDatabase();
+    const r3 = db.prepare('SELECT content_digest FROM defence_audit WHERE seq = 3').get() as { content_digest: string };
+    const fakePrev = 'a'.repeat(64);
+    db.prepare('UPDATE defence_audit SET prev_hash = ?, row_hash = ? WHERE seq = 3').run(fakePrev, rowHash(fakePrev, 3, r3.content_digest));
+    const r = verifyLedger(db);
+    expect(r.firstBad).toMatchObject({ seq: 3, kind: 'prev-hash-mismatch' });
+  });
+
+  it('a rewritten row_hash alone is caught at that row, not one later', () => {
+    const db = getDatabase();
+    db.prepare('UPDATE defence_audit SET row_hash = ? WHERE seq = 3').run('b'.repeat(64));
+    expect(verifyLedger(db).firstBad).toMatchObject({ seq: 3, kind: 'row-hash-mismatch' });
+  });
+
+  it('seq 0 must be the epoch-start row even when rehashed coherently', () => {
+    const db = getDatabase();
+    db.prepare("UPDATE ledger_marker SET kind = 'heartbeat' WHERE seq = 0").run();
+    coherentlyRehash(db);
+    const r = verifyLedger(db);
+    expect(r.status).toBe('inconsistent');
+    expect(r.problems.map((p) => p.kind)).toEqual(['epoch-start-missing']);
+  });
+
+  it('a coherently rehashed row from another ledger is still foreign', () => {
+    const db = getDatabase();
+    db.prepare("UPDATE defence_audit SET ledger_id = 'ffffffffffffffffffffffffffffffff' WHERE seq = 2").run();
+    coherentlyRehash(db);
+    const r = verifyLedger(db);
+    expect(r.status).toBe('inconsistent');
+    expect(r.problems.map((p) => p.kind)).toEqual(['foreign-ledger']);
   });
 
   it('a duplicate seq across tables is inconsistent', () => {

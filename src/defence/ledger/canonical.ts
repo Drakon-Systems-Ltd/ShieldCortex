@@ -53,7 +53,8 @@ function encode(value: unknown, path: string): string {
       return value ? 'true' : 'false';
     case 'number':
       if (!Number.isFinite(value)) throw new Error(`canonical: non-finite number at ${path}`);
-      return JSON.stringify(Object.is(value, -0) ? 0 : value);
+      // JSON.stringify writes -0 as 0 (Number::toString), so no special case.
+      return JSON.stringify(value);
     case 'object': {
       if (Array.isArray(value)) {
         return `[${value.map((v, i) => encode(v, `${path}[${i}]`)).join(',')}]`;
