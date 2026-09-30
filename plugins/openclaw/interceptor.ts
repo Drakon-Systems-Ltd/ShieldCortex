@@ -335,9 +335,21 @@ interface DecisionAuditCarrier {
 
 /** #372 — what an audit row needs from the tool call that produced it,
  *  snapshotted at hold time. A card decision lands minutes later, by which
- *  point the interceptor's live `lastSessionId`/`lastCallArgs` may describe a
- *  completely different call — attributing the decision to THAT call would be
+ *  point the interceptor may be serving a completely different call — attributing the decision to THAT call would be
  *  a forgery in exactly the record forensics trusts. */
+/** #509 r10 — the one context a tool call's audit rows are written from.
+ *  Captured at `handleToolCall` entry, before the first await, and passed by
+ *  parameter from there on. Shared closure state cannot do this job: a call
+ *  yields at the readiness recompute, the broker judge and the approval
+ *  request, and whichever call ran last would own the rows of all of them.
+ *  `sessionId` and `args` never change after capture (args is a frozen
+ *  shallow copy); `readinessPin` is set once, by the readiness gate. */
+interface CallAuditContext {
+  readonly sessionId: string | undefined;
+  readonly args: Readonly<Record<string, unknown>> | undefined;
+  readinessPin?: { adapter: string; policy: string };
+}
+
 interface CapturedAuditContext {
   sessionKey?: string;
   args?: Record<string, unknown>;
@@ -1360,10 +1372,7 @@ export function createInterceptor(
   const rateLimiter = new RateLimiter(options?.maxPromptsPerMinute ?? 5);
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
-  let lastSessionId: string | undefined;
   const bindAudit = options?.bindAudit;
-  /** Args of the in-flight tool call — used only to mint #224 actionKey. */
-  let lastCallArgs: Record<string, unknown> | undefined;
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
@@ -1373,12 +1382,8 @@ export function createInterceptor(
   const judgeLimiter = new RateLimiter(options?.maxJudgeCallsPerMinute ?? 20);
   /** Bare tool names seen this session, newest last. See buildSessionSummary. */
   const recentTools: string[] = [];
-  /** #509: the readiness pin for the in-flight call — set only under the
-   *  enforce-when-ready posture, so only those rows are readiness evidence. */
-  let callReadinessPin: { adapter: string; policy: string } | undefined;
-
   /** The one write path every intercept row takes. `captured` is normally the
-   *  in-flight call (emitAudit below); #372 hands it a hold-time snapshot so a
+   *  row's own call (emitAudit below); #372 hands it a hold-time snapshot so a
    *  decision that arrives after the turn moved on still lands on ITS call. */
   function emitAuditWith(entry: InterceptAuditEntry, captured: CapturedAuditContext): void {
     const withOrigin: InterceptAuditEntry = {
@@ -1398,11 +1403,13 @@ export function createInterceptor(
     onAuditEntry?.(bound);
   }
 
-  function emitAudit(entry: InterceptAuditEntry): void {
+  /** A row for `call` — the call that produced it, never whichever call the
+   *  interceptor happens to be serving now (#509 r10). */
+  function emitAudit(entry: InterceptAuditEntry, call: CallAuditContext): void {
     emitAuditWith(entry, {
-      sessionKey: options?.sessionGuard?.keyFor(lastSessionId) ?? undefined,
-      args: lastCallArgs,
-      readinessPin: callReadinessPin,
+      sessionKey: options?.sessionGuard?.keyFor(call.sessionId) ?? undefined,
+      args: call.args,
+      readinessPin: call.readinessPin,
     });
   }
 
@@ -1423,19 +1430,20 @@ export function createInterceptor(
   function attachDecisionAudit(
     err: Error & DecisionAuditCarrier,
     auditBase: Omit<InterceptAuditEntry, 'action' | 'outcome'>,
+    call: CallAuditContext,
   ): void {
     let sessionKey: string | undefined;
     // Resolving the key is new work on the card path — nothing used to call
     // keyFor here. A throwing resolver costs the row its key; it must never
     // turn a mintable card into an approval error.
-    try { sessionKey = options?.sessionGuard?.keyFor(lastSessionId) ?? undefined; } catch { /* unkeyed row */ }
-    // Shallow-snapshot the args: reference capture would let in-place mutation
-    // of the params object between hold and resolution rewrite the one
-    // forensic binding this row exists to protect (review nit, both reviewers).
+    try { sessionKey = options?.sessionGuard?.keyFor(call.sessionId) ?? undefined; } catch { /* unkeyed row */ }
+    // The args are the call's entry snapshot (#509 r10), so in-place mutation
+    // of the params object between entry and resolution cannot rewrite the
+    // one forensic binding this row exists to protect.
     const captured: CapturedAuditContext = {
       sessionKey,
-      args: lastCallArgs ? { ...lastCallArgs } : undefined,
-      readinessPin: callReadinessPin,
+      args: call.args,
+      readinessPin: call.readinessPin,
     };
     const held: Omit<InterceptAuditEntry, 'action' | 'outcome'> = { ...auditBase };
     let written = false;
@@ -1604,13 +1612,12 @@ export function createInterceptor(
 
   async function resolveReadinessGate(
     toolName: string,
-    own: { sessionId: string | undefined; args: Record<string, unknown> | undefined },
+    call: CallAuditContext,
   ): Promise<{
     whenReady: boolean;
     shadow: boolean;
     pin: { adapter: string; policy: string } | undefined;
   }> {
-    callReadinessPin = undefined;
     const whenReady = actionGuardCfg.enforce === true && actionGuardCfg.readinessGate === true && !policyLocked();
     if (!whenReady) return { whenReady, shadow: false, pin: undefined };
     if (!readiness) {
@@ -1625,16 +1632,16 @@ export function createInterceptor(
     let pin: { adapter: string; policy: string } | undefined;
     try {
       pin = readiness.pin() ?? undefined;
-      callReadinessPin = pin;
+      // Set once, on this call's own context (#509 r10): every row this call
+      // writes from here on is pinned, and no other call can clear it.
+      call.readinessPin = pin;
       const resolved = await readiness.resolve();
-      callReadinessPin = pin; // a call that ran during the await cleared it
       const shadow = resolved.mode === 'shadow';
-      // r9 (T5): the notify row is written after `await announce`, when a
-      // call that ran meanwhile owns the shared context: stamp it with THIS
-      // call's session, args and pin.
+      // r9 (T5): the notify row is written after `await announce`; it is
+      // stamped with THIS call's session, args and pin.
       let sessionKey: string | undefined;
-      try { sessionKey = options?.sessionGuard?.keyFor(own.sessionId) ?? undefined; } catch { /* unkeyed row */ }
-      const notifyCtx: CapturedAuditContext = { sessionKey, args: own.args, readinessPin: pin };
+      try { sessionKey = options?.sessionGuard?.keyFor(call.sessionId) ?? undefined; } catch { /* unkeyed row */ }
+      const notifyCtx: CapturedAuditContext = { sessionKey, args: call.args, readinessPin: pin };
       if (resolved.tamper) {
         log.warn(`[shieldcortex] ⚠️ enforce-when-ready: readiness tamper signal — ${String(resolved.tamper).slice(0, 300)}. Recorded; run \`shieldcortex doctor\`.`);
       }
@@ -1726,7 +1733,7 @@ export function createInterceptor(
   //                     opts down to advisory.
   //   3. no match     → benign/unknown: fail OPEN (a degraded guard must not
   //                     wedge normal work) but leave a visible breadcrumb.
-  function handleGuardUnavailable(context: ToolCallContext, reason: string): void {
+  function handleGuardUnavailable(context: ToolCallContext, reason: string, call: CallAuditContext): void {
     const preview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`.slice(0, 200);
     const degradedBase = {
       type: 'intercept' as const, tool: context.toolName,
@@ -1739,7 +1746,7 @@ export function createInterceptor(
       emitAudit({
         ...degradedBase, severity: 'critical', threats: ['fallback-scan'], anomalyScore: 1,
         action: 'auto_deny', outcome: 'auto_denied',
-      });
+      }, call);
       log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback scan matched a catastrophic pattern — DENYING ${context.toolName} (fail-closed, WS2)`);
       throw new Error(`ShieldCortex: tool call blocked — action guard unavailable (${reason}), fallback catastrophic scan matched`);
     }
@@ -1752,7 +1759,7 @@ export function createInterceptor(
       const dBase = { ...degradedBase, severity: 'high' as Severity, threats: ['fallback-scan', dangerousSignal], anomalyScore: 0.6 };
       // #509 R4-1: the self-protection floor is never advisory.
       if (!actionGuardCfg.enforce && !selfProtectSignal) {
-        emitAudit({ ...dBase, action: 'gate_degraded', outcome: 'failure_allowed' });
+        emitAudit({ ...dBase, action: 'gate_degraded', outcome: 'failure_allowed' }, call);
         log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — advisory (enforce:false), allowing dangerous ${context.toolName} [${dangerousSignal}]`);
         return;
       }
@@ -1768,7 +1775,7 @@ export function createInterceptor(
       // #509 r5: never for the self-protection floor — an evaluator outage is
       // not a way to write the guard's own state.
       const failAction: FailureAction = config.failurePolicy.high === 'allow' && !selfProtectSignal ? 'allow' : 'deny';
-      emitAudit({ ...dBase, action: 'gate_degraded', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
+      emitAudit({ ...dBase, action: 'gate_degraded', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' }, call);
       if (failAction === 'deny') {
         log.warn(`[shieldcortex] action-guard UNAVAILABLE (${reason}) and fallback matched a DANGEROUS op [${dangerousSignal}] — DENYING ${context.toolName} (fail-closed, failure policy: deny)`);
         throw new Error(`ShieldCortex: tool call blocked — action guard unavailable (${reason}), dangerous fallback match [${dangerousSignal}], failure policy: deny`);
@@ -1778,13 +1785,13 @@ export function createInterceptor(
 
     // 3. No match — benign/unknown. Fail open, but never silently: the
     //    gate_degraded breadcrumb makes the outage window auditable.
-    emitAudit({ ...degradedBase, severity: 'low', threats: ['fallback-scan'], anomalyScore: 0.1, action: 'gate_degraded', outcome: 'failure_allowed' });
+    emitAudit({ ...degradedBase, severity: 'low', threats: ['fallback-scan'], anomalyScore: 0.1, action: 'gate_degraded', outcome: 'failure_allowed' }, call);
     log.warn(`[shieldcortex] ⚠️ action-guard unavailable (${reason}) — allowing ${context.toolName} (fallback matched nothing; fail-open)`);
   }
 
   // Action Guard: gates non-memory tool calls (shell / file / network / git).
   // This is what makes "Iron Dome protects what the agent DOES" true at runtime.
-  async function runActionGuard(context: ToolCallContext): Promise<void> {
+  async function runActionGuard(context: ToolCallContext, call: CallAuditContext): Promise<void> {
     if (!actionGuardCfg.enabled) return;
 
     // Session action lease (#227) — EARLY, before the guard evaluator (which may
@@ -1809,7 +1816,7 @@ export function createInterceptor(
         emitAudit({
           ...guardAuditBase(context.toolName, { decision: 'block', severity: 'high', family: 'exec', action: `session-lease:${leaseGate.scope}`, reason: leaseGate.decision.reason, signals: ['session-lease', leaseGate.decision.verdict] } as ToolGuardVerdictLike, `${context.toolName} :: ${summariseToolArgs(context.arguments)}`),
           action: 'auto_deny', outcome: 'auto_denied',
-        });
+        }, call);
         log.warn(`[shieldcortex] action-guard SESSION-LEASE refused ${context.toolName} [${leaseGate.scope}/${leaseGate.decision.verdict}]: ${leaseGate.decision.reason}`);
         throw new Error(`ShieldCortex: tool call blocked — ${leaseGate.decision.reason}`);
       }
@@ -1820,7 +1827,7 @@ export function createInterceptor(
     }
 
     if (typeof evaluateToolCall !== 'function') {
-      handleGuardUnavailable(context, 'evaluateToolCall not wired');
+      handleGuardUnavailable(context, 'evaluateToolCall not wired', call);
       return;
     }
 
@@ -1838,7 +1845,7 @@ export function createInterceptor(
           : {}),
       });
     } catch (err) {
-      handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`);
+      handleGuardUnavailable(context, `action-guard error: ${err instanceof Error ? err.message : err}`, call);
       return;
     }
 
@@ -1907,14 +1914,9 @@ export function createInterceptor(
 
     // #509 enforce-when-ready: resolved here — after the lease floor and the
     // evaluation, before any verdict is applied — exactly where the hook does.
-    const own = { sessionId: lastSessionId, args: lastCallArgs };
-    const gate = await resolveReadinessGate(context.toolName, own);
-    // r8 (SF6): the gate awaits the readiness recompute, and a call that ran
-    // meanwhile overwrote the in-flight context (its entry clears the pin).
-    // Put this call's back before it writes its rows.
-    lastSessionId = own.sessionId;
-    lastCallArgs = own.args;
-    callReadinessPin = gate.pin;
+    // Every row below is written from `call`, this call's own context
+    // (#509 r10) — nothing a call running during this await can touch.
+    const gate = await resolveReadinessGate(context.toolName, call);
 
     if (v.decision === 'allow') {
       // Issue #95: a RECOGNISED allow (the guard evaluated a known operation
@@ -1926,7 +1928,7 @@ export function createInterceptor(
       if (actionGuardCfg.auditAllows !== false) {
         if (v.severity !== 'benign') {
           const allowPreview = `${context.toolName} :: ${summariseToolArgs(context.arguments)}`;
-          emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...(drift ?? {}), action: 'allow', outcome: 'allowed' });
+          emitAudit({ ...guardAuditBase(context.toolName, v, allowPreview), ...(drift ?? {}), action: 'allow', outcome: 'allowed' }, call);
           wrote = true;
         } else if (drift) {
           wrote = true;
@@ -1941,7 +1943,7 @@ export function createInterceptor(
             ...drift,
             action: 'allow',
             outcome: 'allowed',
-          });
+          }, call);
         }
       }
       if (!wrote && gate.whenReady) {
@@ -1956,7 +1958,7 @@ export function createInterceptor(
             pipelineDurationMs: 0, action: 'allow', outcome: 'allowed', preview: `${context.toolName} :: tally`,
             ts: new Date().toISOString(), readinessTally: true, // local only (r8 SF5)
           },
-          { args: { tally: 'redacted' }, readinessPin: callReadinessPin },
+          { args: { tally: 'redacted' }, readinessPin: call.readinessPin },
         );
       }
       return;
@@ -1988,7 +1990,7 @@ export function createInterceptor(
       if (leaseGate?.acquired) {
         try { options?.releaseActionLease?.(context.toolName, context.arguments || {}, context.sessionId); } catch { /* self-heals */ }
       }
-      emitAudit({ ...base, action: 'auto_deny', outcome: 'auto_denied' });
+      emitAudit({ ...base, action: 'auto_deny', outcome: 'auto_denied' }, call);
       // Surface the block to the gateway log (journald). Blocks are recorded in
       // the ShieldCortex audit jsonl, but were otherwise invisible to an operator
       // tailing the gateway; a denial — especially a false positive — must be seen.
@@ -2015,7 +2017,7 @@ export function createInterceptor(
         return hay.some(h => h === n || h.includes(n));
       });
       if (matched) {
-        emitAudit({ ...base, action: 'require_approval', outcome: 'approved' });
+        emitAudit({ ...base, action: 'require_approval', outcome: 'approved' }, call);
         return;
       }
     }
@@ -2032,7 +2034,7 @@ export function createInterceptor(
     // floor refused before the guard ran.
     if (gate.shadow && !unscannedBlock && !selfProtected) {
       const wouldOutcome = typeof context.requireApproval === 'function' ? 'would_hold' : 'would_block';
-      emitAudit({ ...base, action: 'require_approval', outcome: wouldOutcome, shadow: true, posture: 'enforce-when-ready' });
+      emitAudit({ ...base, action: 'require_approval', outcome: wouldOutcome, shadow: true, posture: 'enforce-when-ready' }, call);
       log.warn(
         `[shieldcortex] Action Guard (shadow, enforce-when-ready): ${wouldOutcome === 'would_block' ? 'would have BLOCKED' : 'would have HELD for approval'} ` +
         `${context.toolName} [${v.signals.join(', ')}] — not enforced until this install meets its readiness conditions (\`shieldcortex guard readiness\`).`,
@@ -2046,7 +2048,7 @@ export function createInterceptor(
     // #509 R4-1: nor may the guard self-protection floor.
     if (!actionGuardCfg.enforce && !unscannedBlock && !selfProtected) {
       log.warn(`[shieldcortex] ⚠️ Action Guard: ${context.toolName} — ${v.reason}`);
-      emitAudit({ ...base, action: 'warn', outcome: 'warned' });
+      emitAudit({ ...base, action: 'warn', outcome: 'warned' }, call);
       return;
     }
 
@@ -2063,7 +2065,7 @@ export function createInterceptor(
     if (brokered?.outcome === 'harden') {
       // The judge found something the rules did not. Deny outright rather than
       // offer the operator a button to be socially-engineered into tapping.
-      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'auto_denied' });
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'auto_denied' }, call);
       log.warn(`[shieldcortex] approval broker HARDENED ${context.toolName} to a denial: ${brokered.reason}`);
       throw new Error(`ShieldCortex: tool call blocked — ${brokered.reason}`);
     }
@@ -2073,7 +2075,7 @@ export function createInterceptor(
       // waiting. Loud on purpose — a release nobody approved must never be a
       // silent one, because the audit row is the only thing that will ever tell
       // the operator it happened.
-      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'approved' });
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'approved' }, call);
       log.warn(`[shieldcortex] approval broker PRE-CLEARED ${context.toolName} without waiting for the operator: ${brokered.reason} [${v.signals.join(', ')}]`);
       return;
     }
@@ -2091,7 +2093,7 @@ export function createInterceptor(
       const failAction = config.failurePolicy[severity];
       const brokerDenies = brokered ? broker!.timeoutOutcome(brokered) === 'deny' : false;
       const deny = failAction === 'deny' || brokerDenies || selfProtected;
-      emitAudit({ ...auditBase, action: 'require_approval', outcome: deny ? 'failure_denied' : 'failure_allowed' });
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: deny ? 'failure_denied' : 'failure_allowed' }, call);
       // #509: no approver means the decision was put to no human — for
       // approval reachability, a request that did NOT reach one.
       const unattendedAttempt = newReachAttempt();
@@ -2106,7 +2108,7 @@ export function createInterceptor(
     }
 
     if (!rateLimiter.shouldAllow()) {
-      emitAudit({ ...auditBase, action: 'rate_limit', outcome: 'auto_denied' });
+      emitAudit({ ...auditBase, action: 'rate_limit', outcome: 'auto_denied' }, call);
       throw new Error('ShieldCortex: tool call auto-denied (approval rate limit exceeded)');
     }
 
@@ -2128,7 +2130,7 @@ export function createInterceptor(
       if (isTypedApprovalRequest(err)) {
         // #372: still no row for the hold — but the card leaves carrying the
         // closure that writes one the moment the operator answers.
-        attachDecisionAudit(err, auditBase);
+        attachDecisionAudit(err, auditBase, call);
         if (reachAttempt) {
           // #509: the card IS the OpenClaw approval channel. Its request row
           // now; its answer — bound to THIS attempt — when the host reports
@@ -2158,7 +2160,7 @@ export function createInterceptor(
         // in practice this is always a deny. It reads the broker's own derived
         // flag rather than re-deriving its own idea of what is safe.
         const outcome = selfProtected ? 'deny' : broker!.timeoutOutcome(brokered);
-        emitAudit({ ...auditBase, action: 'require_approval', outcome: outcome === 'approve' ? 'approved' : 'auto_denied' });
+        emitAudit({ ...auditBase, action: 'require_approval', outcome: outcome === 'approve' ? 'approved' : 'auto_denied' }, call);
         if (outcome === 'approve') {
           log.warn(`[shieldcortex] approval broker: no answer in ${err.timeoutMs}ms — auto-approving pre-cleared ${context.toolName}`);
           return;
@@ -2168,7 +2170,7 @@ export function createInterceptor(
       }
       const failAction: FailureAction = selfProtected ? 'deny' : config.failurePolicy[severity];
       log.warn(`[shieldcortex] ⚠️ requireApproval error: ${err instanceof Error ? err.message : err} — failure policy: ${failAction}${selfProtected ? ' (self-protection floor)' : ''}`);
-      emitAudit({ ...auditBase, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' });
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed' }, call);
       if (failAction === 'deny') {
         throw new Error('ShieldCortex: tool call blocked — approval error, failure policy: deny');
       }
@@ -2179,21 +2181,26 @@ export function createInterceptor(
     // inside the turn is not the OpenClaw approval channel, so its answer is
     // no reach evidence either way; only its failures above count, against.
     if (approved) {
-      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'approved' });
+      emitAudit({ ...auditBase, action: 'require_approval', outcome: 'approved' }, call);
       return;
     }
-    emitAudit({ ...auditBase, action: 'require_approval', outcome: 'denied' });
+    emitAudit({ ...auditBase, action: 'require_approval', outcome: 'denied' }, call);
     throw new Error('ShieldCortex: tool call denied by user');
   }
 
   async function handleToolCall(context: ToolCallContext): Promise<void> {
-    lastSessionId = context.sessionId;
-    lastCallArgs = context.arguments;
-    // #509 r8 (SF1): the pin is per call. Cleared here, set only where the
-    // readiness gate resolves (resolveReadinessGate) — as the hook stamps it —
-    // so a row written before that (lease refusal, guard-unavailable fallback)
-    // or off the Action Guard path (memory writes) is never OpenClaw evidence.
-    callReadinessPin = undefined;
+    // #509 r10: this call's audit context, captured before the first await
+    // and passed by parameter to everything that writes a row for it. The
+    // args are a frozen shallow copy (the #224 actionKey and #372 decision
+    // row bind to what the call was, not to later mutation of the params).
+    // #509 r8 (SF1): the pin starts unset and only the readiness gate sets it
+    // — as the hook stamps it — so a row written before that (lease refusal,
+    // guard-unavailable fallback) or off the Action Guard path (memory
+    // writes) is never OpenClaw evidence.
+    const call: CallAuditContext = {
+      sessionId: context.sessionId,
+      args: context.arguments ? Object.freeze({ ...context.arguments }) : undefined,
+    };
     // Remember the NAME only. This is the entirety of what the approval broker's
     // judge will ever learn about the session — see buildSessionSummary.
     noteToolForSession(context.toolName);
@@ -2201,7 +2208,7 @@ export function createInterceptor(
     // Non-memory tools go through the Action Guard (what the agent DOES); the
     // memory-write tools continue through the content defence pipeline below.
     if (!(WATCHED_TOOLS as readonly string[]).includes(context.toolName)) {
-      await runActionGuard(context);
+      await runActionGuard(context, call);
       return;
     }
 
@@ -2221,7 +2228,7 @@ export function createInterceptor(
         action: 'auto_deny', outcome: 'auto_denied',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(xrayEntry);
+      emitAudit(xrayEntry, call);
       throw new Error(`ShieldCortex: tool call blocked by X-Ray memory guard (risk: ${xrayResult.riskLevel}, findings: ${xrayResult.findings.length})`);
     }
 
@@ -2259,7 +2266,7 @@ export function createInterceptor(
         action: 'require_approval', outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       if (failAction === 'deny') {
         throw new Error('ShieldCortex: tool call blocked — pipeline error, failure policy: deny');
       }
@@ -2273,7 +2280,7 @@ export function createInterceptor(
         action: 'auto_deny', outcome: 'auto_denied',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       throw new Error('ShieldCortex: tool call auto-denied (previously denied content)');
     }
 
@@ -2286,7 +2293,7 @@ export function createInterceptor(
         action: 'log', outcome: 'logged',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       return;
     }
 
@@ -2298,7 +2305,7 @@ export function createInterceptor(
         action: 'warn', outcome: 'warned',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       return;
     }
 
@@ -2314,7 +2321,7 @@ export function createInterceptor(
         outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       if (failAction === 'deny') {
         throw new Error(`ShieldCortex: tool call blocked — requireApproval unavailable, failure policy: deny`);
       }
@@ -2329,7 +2336,7 @@ export function createInterceptor(
         action: 'rate_limit', outcome: 'auto_denied',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       denyCache.addDenial(context.toolName, fullContent);
       throw new Error('ShieldCortex: tool call auto-denied (rate limit exceeded)');
     }
@@ -2350,7 +2357,7 @@ export function createInterceptor(
           type: 'intercept', tool: context.toolName, severity, firewallResult,
           threats, anomalyScore, trustScore, sensitivityLevel, fragmentationScore, pipelineDurationMs,
           preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
-        });
+        }, call);
         throw err;
       }
       const failAction = config.failurePolicy[severity];
@@ -2362,7 +2369,7 @@ export function createInterceptor(
         outcome: failAction === 'deny' ? 'failure_denied' : 'failure_allowed',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       if (failAction === 'deny') {
         throw new Error(`ShieldCortex: tool call blocked — requireApproval error, failure policy: deny`);
       }
@@ -2376,7 +2383,7 @@ export function createInterceptor(
         action: 'require_approval', outcome: 'approved',
         preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
       };
-      emitAudit(entry);
+      emitAudit(entry, call);
       return;
     }
 
@@ -2388,7 +2395,7 @@ export function createInterceptor(
       action: 'require_approval', outcome: 'denied',
       preview: fullContent.slice(0, 200), ts: new Date().toISOString(),
     };
-    emitAudit(entry);
+    emitAudit(entry, call);
     throw new Error('ShieldCortex: tool call denied by user');
   }
 
