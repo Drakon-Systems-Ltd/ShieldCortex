@@ -35,16 +35,27 @@
  * Exits 0 in every case — a detached waiter has nobody to report to, and
  * its outcome is legible where it matters: in the store (a record now
  * approved/denied) and in the guard's own audit of the eventual retry.
+ *
+ * #509: silence and failure are also evidence. A card that expires
+ * unanswered or a request the gateway refused appends an `approval_reach`
+ * answer row (`timeout` / `unreached`) — approval reachability counts it as
+ * NOT reaching a human. An answered card is recorded by the store itself
+ * (approveRequest / denyRequest), so it is counted exactly once.
  */
 import { execFile } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { approveRequest, denyRequest } from './action-approvals.js';
+import { recordApprovalReach } from './guard-readiness.js';
 import { WAIT_DECISION_TIMEOUT_MS } from './openclaw-approval-channel.js';
 
 export interface WaiterArgs {
   paramsB64: string;
   hash: string;
+  /** #509 R4-2: the delivered attempt the card was minted for. The tap is
+   *  bound to it: once a newer attempt for the same command replaced it, the
+   *  tap grants nothing and is reach evidence for nobody. */
+  attemptId?: string;
   openclawBin: string;
   receiptPath: string;
 }
@@ -62,6 +73,11 @@ export function parseWaiterArgs(argv: string[]): WaiterArgs | null {
   // The hash is about to be matched against the store — refuse anything that
   // does not look like one rather than forward surprises.
   if (!/^[0-9a-f]{12,64}$/i.test(hash)) return null;
+  const attemptId = get('--attempt');
+  if (argv.includes('--attempt')) {
+    if (!attemptId || !/^[0-9a-f]{8,64}$/i.test(attemptId)) return null;
+    return { paramsB64, hash, attemptId, openclawBin, receiptPath };
+  }
   return { paramsB64, hash, openclawBin, receiptPath };
 }
 
@@ -96,12 +112,16 @@ export async function runWaiter(
     execFileImpl?: typeof execFile;
     approveImpl?: typeof approveRequest;
     denyImpl?: typeof denyRequest;
+    recordReachImpl?: typeof recordApprovalReach;
     waitTimeoutMs?: number;
   } = {},
 ): Promise<WaiterOutcome> {
   const execFileImpl = deps.execFileImpl ?? execFile;
   const approveImpl = deps.approveImpl ?? approveRequest;
   const denyImpl = deps.denyImpl ?? denyRequest;
+  const recordReach = (input: Parameters<typeof recordApprovalReach>[0]): void => {
+    try { (deps.recordReachImpl ?? recordApprovalReach)(input); } catch { /* evidence is best-effort */ }
+  };
   const waitTimeoutMs = deps.waitTimeoutMs ?? WAIT_DECISION_TIMEOUT_MS;
 
   let paramsJson: string;
@@ -116,11 +136,72 @@ export async function runWaiter(
 
   writeReceipt(args.receiptPath, { phase: 'requesting' });
 
+  const call = await callApprovalGateway(execFileImpl, args.openclawBin, paramsJson, waitTimeoutMs);
+  if (!call.ok && call.stage === 'request') {
+    writeReceipt(args.receiptPath, { phase: 'failed', reason: call.reason });
+    // Deliberately NOT cleared: the channel's poll window is short, and a
+    // fast failure must still be readable when it looks. The receipt dir is
+    // tmp — the OS owns its lifecycle.
+    recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'unreached', reason: 'gateway request failed', origin: 'approval-waiter' });
+    return { acted: 'nothing', reason: call.reason };
+  }
+
+  clearReceipt(args.receiptPath);
+
+  if (!call.ok) {
+    recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'unreached', reason: call.reason, origin: 'approval-waiter' });
+    return { acted: 'nothing', reason: call.reason };
+  }
+  const decision = call.decision;
+
+  // #509 R4-2: the tap names its attempt. A stale one (a newer attempt for
+  // the same command replaced it) grants nothing and records nothing. Any
+  // other miss (already answered elsewhere, pruned) still proves a human was
+  // reached FOR THIS ATTEMPT, so it is recorded against the attempt id — and
+  // with no attempt id it binds to nothing, as before.
+  const bind = args.attemptId ? { attemptId: args.attemptId } : {};
+  if (decision === 'allow-once') {
+    const outcome = approveImpl(args.hash, bind);
+    if (!outcome.ok && outcome.reason !== 'stale-attempt') recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'approve', origin: 'approval-waiter' });
+    return { acted: 'approved', ok: outcome.ok };
+  }
+  if (decision === 'deny') {
+    const outcome = denyImpl(args.hash, bind);
+    if (!outcome.ok && outcome.reason !== 'stale-attempt') recordReach({ hash: args.hash, attemptId: args.attemptId, phase: 'answer', answer: 'deny', origin: 'approval-waiter' });
+    return { acted: 'denied', ok: outcome.ok };
+  }
+  recordReach({
+    hash: args.hash,
+    attemptId: args.attemptId,
+    phase: 'answer',
+    answer: decision === null ? 'timeout' : 'unreached',
+    reason: decision === null ? 'card expired unanswered' : 'unrecognised decision',
+    origin: 'approval-waiter',
+  });
+  return {
+    acted: 'nothing',
+    reason: `no actionable decision (${decision === null ? 'card expired unanswered' : String(decision)})`,
+  };
+}
+
+/**
+ * One `plugin.approval.request` round-trip on ONE connection: request the
+ * card, block until the gateway reports the tap (or its expiry). Returns the
+ * raw decision value, which callers map — this function grants nothing.
+ * Shared with `shieldcortex guard test-approval` (#509), whose synthetic card
+ * must travel the exact path a real one does.
+ */
+export async function callApprovalGateway(
+  execFileImpl: typeof execFile,
+  openclawBin: string,
+  paramsJson: string,
+  waitTimeoutMs: number,
+): Promise<{ ok: true; decision: unknown } | { ok: false; stage: 'request' | 'parse'; reason: string }> {
   let stdout: string;
   try {
     stdout = await new Promise<string>((resolvePromise, rejectPromise) => {
       execFileImpl(
-        args.openclawBin,
+        openclawBin,
         [
           'gateway', 'call', 'plugin.approval.request',
           '--json',
@@ -133,36 +214,14 @@ export async function runWaiter(
       );
     });
   } catch (err) {
-    const reason = `request failed: ${err instanceof Error ? err.message : String(err)}`;
-    writeReceipt(args.receiptPath, { phase: 'failed', reason });
-    // Deliberately NOT cleared: the channel's poll window is short, and a
-    // fast failure must still be readable when it looks. The receipt dir is
-    // tmp — the OS owns its lifecycle.
-    return { acted: 'nothing', reason };
+    return { ok: false, stage: 'request', reason: `request failed: ${err instanceof Error ? err.message : String(err)}` };
   }
-
-  clearReceipt(args.receiptPath);
-
-  let decision: unknown;
   try {
     const parsed = JSON.parse(stdout) as { decision?: unknown };
-    decision = parsed?.decision;
+    return { ok: true, decision: parsed?.decision };
   } catch {
-    return { acted: 'nothing', reason: 'unparseable decision response' };
+    return { ok: false, stage: 'parse', reason: 'unparseable decision response' };
   }
-
-  if (decision === 'allow-once') {
-    const outcome = approveImpl(args.hash);
-    return { acted: 'approved', ok: outcome.ok };
-  }
-  if (decision === 'deny') {
-    const outcome = denyImpl(args.hash);
-    return { acted: 'denied', ok: outcome.ok };
-  }
-  return {
-    acted: 'nothing',
-    reason: `no actionable decision (${decision === null ? 'card expired unanswered' : String(decision)})`,
-  };
 }
 
 /** Detached entrypoint:

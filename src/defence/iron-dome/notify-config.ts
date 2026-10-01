@@ -108,6 +108,11 @@ export function normaliseWebhookUrl(v: unknown): string | undefined {
     return undefined;
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+  // #509 r5 (finding 6): a URL carrying credentials (`https://user:pass@…`) is
+  // refused. The transport cannot send it — Node's fetch rejects a request
+  // URL with userinfo — so accepting it here let readiness count a notice
+  // channel that could never deliver. It also keeps a secret out of the URL.
+  if (parsed.username !== '' || parsed.password !== '') return undefined;
   return trimmed;
 }
 

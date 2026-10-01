@@ -13,9 +13,9 @@ opt back into advisory without touching the fail-open behaviour.
 from __future__ import annotations
 
 try:
-    from .sc_client import ActionGuardVerdict, Verdict  # as a Hermes package
+    from .sc_client import SELF_PROTECTION_SIGNALS, ActionGuardVerdict, Verdict  # as a Hermes package
 except ImportError:  # pragma: no cover - standalone (tests add the package dir to sys.path)
-    from sc_client import ActionGuardVerdict, Verdict
+    from sc_client import SELF_PROTECTION_SIGNALS, ActionGuardVerdict, Verdict
 
 
 # v4.47.2: the gate ENFORCES by default. Only an explicit opt-out disables it —
@@ -90,6 +90,7 @@ def action_guard_decision(
     enforce: bool = True,
     fallback_blocked: bool = False,
     fallback_dangerous: bool = False,
+    fallback_self_protected: bool = False,
 ):
     """Map an Action Guard verdict to a Hermes hook decision.
 
@@ -97,8 +98,19 @@ def action_guard_decision(
     block when enforcing (same unattended fail-closed the OpenClaw interceptor
     already applies). ``allow`` is None. Scanner-down uses the same fallback
     contract as :func:`tool_call_decision`.
+
+    #509 R4-1: a verdict (or outage-scan match) on the guard self-protection
+    floor — ``SELF_PROTECTION_SIGNALS`` — blocks even when ``enforce=False``.
     """
     if not verdict.available:
+        if fallback_self_protected:
+            return {
+                "action": "block",
+                "message": (
+                    "ShieldCortex blocked this action — scanner unreachable and the "
+                    "call touches the guard's own state or config (never advisory)"
+                ),
+            }
         return tool_call_decision(
             Verdict("ERROR", [], verdict.reason, available=False),
             enforce=enforce,
@@ -108,7 +120,8 @@ def action_guard_decision(
     if verdict.decision == "block":
         detail = verdict.reason or "policy violation"
         return {"action": "block", "message": f"ShieldCortex blocked this action — {detail}"}
-    if verdict.decision == "require_approval" and enforce:
+    self_protected = any(s in SELF_PROTECTION_SIGNALS for s in verdict.signals)
+    if verdict.decision == "require_approval" and (enforce or self_protected):
         detail = verdict.reason or "requires approval"
         return {"action": "block", "message": f"ShieldCortex blocked this action — {detail}"}
     return None
