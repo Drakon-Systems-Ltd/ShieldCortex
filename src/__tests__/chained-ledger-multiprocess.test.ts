@@ -5,7 +5,11 @@
  *    half-chained row and a head that still matches the chain.
  *  - concurrent writers: several processes append to one database at once;
  *    they serialise through the DB transaction, so seq is unique and the
- *    chain verifies end to end.
+ *    chain verifies end to end. The writers are released together through a
+ *    file barrier once every child has loaded and opened the DB, and each
+ *    reports when it began and finished appending — the test asserts those
+ *    windows overlap, so a serial run (child start-up skew on a cold macOS
+ *    runner once made 4 writers run back to back) cannot pass as concurrent.
  *
  * Children run the TypeScript sources through tsx with an isolated HOME.
  */
@@ -13,7 +17,7 @@
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import Database from 'better-sqlite3';
 import { spawn, spawnSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -41,9 +45,26 @@ beforeAll(() => {
 import { initDatabase, closeDatabase } from ${JSON.stringify(initTs)};
 import { logAudit } from ${JSON.stringify(loggerTs)};
 import { __setLedgerFaultForTests } from ${JSON.stringify(ledgerTs)};
-const [dbPath, countArg, tag, mode] = process.argv.slice(2);
+import { existsSync as goExists, writeFileSync as writeReady } from 'fs';
+import { join as joinPath } from 'path';
+const [dbPath, countArg, tag, mode, barrierDir] = process.argv.slice(2);
 initDatabase(dbPath);
 const count = Number(countArg);
+// Start barrier: announce readiness only once the loader has done its work and
+// the DB is open, then spin until the parent drops the go file. Without it,
+// start-up skew between children lets one writer finish every append before
+// the next has loaded, and the race is serial in disguise.
+if (barrierDir) {
+  writeReady(joinPath(barrierDir, 'ready-' + tag), '');
+  const go = joinPath(barrierDir, 'go');
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 30_000;
+  while (!goExists(go)) {
+    if (Date.now() > deadline) { process.stderr.write('barrier timeout'); process.exit(3); }
+    Atomics.wait(nap, 0, 0, 1);
+  }
+}
+const start = Date.now();
 let ok = 0;
 for (let i = 0; i < count; i++) {
   if (mode === 'crash' && i === count - 1) {
@@ -58,8 +79,9 @@ for (let i = 0; i < count; i++) {
   });
   if (id > 0) ok++;
 }
+const end = Date.now();
 closeDatabase();
-process.stdout.write(String(ok));
+process.stdout.write(JSON.stringify({ ok, start, end }));
 `);
 });
 
@@ -76,15 +98,23 @@ function childEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function runWriter(dbPath: string, count: number, tag: string, mode = ''): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; err: string }> {
+function runWriter(dbPath: string, count: number, tag: string, mode = '', barrierDir = ''): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; err: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, nodeArgs(childScript, [dbPath, String(count), tag, mode]), { env: childEnv(), cwd: repoRoot });
+    const child = spawn(process.execPath, nodeArgs(childScript, [dbPath, String(count), tag, mode, barrierDir]), { env: childEnv(), cwd: repoRoot });
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     child.on('close', (code, signal) => resolve({ code, signal, out, err }));
   });
+}
+
+async function waitFor(ready: () => boolean, what: () => string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what()}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 describe('multi-process ledger gates', () => {
@@ -126,28 +156,49 @@ describe('multi-process ledger gates', () => {
 
     const WRITERS = 4;
     const EACH = 150;
-    const results = await Promise.all(
-      Array.from({ length: WRITERS }, (_, i) => runWriter(dbPath, EACH, `w${i}`)),
+    const tags = Array.from({ length: WRITERS }, (_, i) => `w${i}`);
+    const barrierDir = path.join(work, 'barrier');
+    mkdirSync(barrierDir);
+    const pending = Promise.all(tags.map((t) => runWriter(dbPath, EACH, t, '', barrierDir)));
+    // Release the writers only once every one of them is loaded and has the
+    // DB open, so they contend for appends rather than for start-up.
+    const readyFile = (t: string) => path.join(barrierDir, `ready-${t}`);
+    await waitFor(
+      () => tags.every((t) => existsSync(readyFile(t))),
+      () => `writers to reach the barrier (missing: ${tags.filter((t) => !existsSync(readyFile(t))).join(', ')})`,
+      60_000,
     );
+    writeFileSync(path.join(barrierDir, 'go'), '');
+    const results = await pending;
+
     for (const r of results) {
       expect({ code: r.code, err: r.code === 0 ? '' : r.err }).toEqual({ code: 0, err: '' });
-      expect(r.out).toBe(String(EACH));
     }
+    const timings = results.map((r) => JSON.parse(r.out) as { ok: number; start: number; end: number });
+    expect(timings.map((t) => t.ok)).toEqual(tags.map(() => EACH));
 
     const db = new Database(dbPath, { readonly: true });
     try {
+      // Product contract first, so a fixture that failed to overlap can never
+      // hide a broken chain: seq unique and dense, chain verifies end to end.
       const seqs = (db.prepare('SELECT seq FROM defence_audit WHERE seq IS NOT NULL ORDER BY seq').all() as { seq: number }[]).map((r) => r.seq);
       expect(seqs).toHaveLength(WRITERS * EACH);
       expect(new Set(seqs).size).toBe(seqs.length);
-      // The writers really overlapped: in seq order the writer changes many
-      // times, not just WRITERS-1 times as it would for back-to-back runs.
-      const tags = (db.prepare('SELECT source_identifier AS t FROM defence_audit WHERE seq IS NOT NULL ORDER BY seq').all() as { t: string }[]).map((x) => x.t);
-      const switches = tags.filter((t, i) => i > 0 && t !== tags[i - 1]).length;
-      expect(switches).toBeGreaterThan(WRITERS * 2);
       const r = verifyLedger(db);
       expect(r.status).toBe('consistent');
       expect(r.gaps).toEqual([]);
       expect(r.head?.seq).toBe(WRITERS * EACH);
     } finally { db.close(); }
+
+    // Fixture contract: the writers really were appending at the same time —
+    // every writer began before any writer finished. This is the sound measure
+    // of overlap. Counting writer switches in seq order is not: with
+    // busy_timeout a writer that has just committed re-takes the WAL write
+    // lock before a sleeping rival wakes, so that count reflects lock hand-off
+    // order, not whether the processes overlapped.
+    const latestStart = Math.max(...timings.map((t) => t.start));
+    const earliestEnd = Math.min(...timings.map((t) => t.end));
+    expect({ overlapped: latestStart < earliestEnd, latestStart, earliestEnd, timings })
+      .toEqual(expect.objectContaining({ overlapped: true }));
   }, 120_000);
 });
