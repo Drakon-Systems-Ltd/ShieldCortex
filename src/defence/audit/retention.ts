@@ -17,6 +17,8 @@
  */
 
 import { getDatabase, checkDatabaseSize } from '../../database/init.js';
+import { recordPrunedAuditRows } from '../ledger/chain.js';
+import { resolveLedgerConfig } from '../ledger/config.js';
 
 /** Default age-based retention window. */
 export const DEFAULT_RETENTION_DAYS = 90;
@@ -113,9 +115,13 @@ function rollIntoAggregate(delta: AggregateDelta): void {
  * so a crash can't drop rows without first banking their stats (which would make
  * lifetime totals regress). Returns the number of rows deleted.
  */
-export function purgeOldAuditEntries(retentionDays: number = DEFAULT_RETENTION_DAYS): number {
+export function purgeOldAuditEntries(
+  retentionDays: number = DEFAULT_RETENTION_DAYS,
+  options: { keepSkeleton?: boolean } = {},
+): number {
   const db = getDatabase();
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  const keepSkeleton = options.keepSkeleton ?? resolveLedgerConfig().keepSkeleton;
 
   return db.transaction(() => {
     const where = 'timestamp < ?';
@@ -125,6 +131,9 @@ export function purgeOldAuditEntries(retentionDays: number = DEFAULT_RETENTION_D
     if (delta.total_scans === 0) return 0; // nothing to do; skip the aggregate write
 
     rollIntoAggregate(delta);
+    // #617: chained checkpoint + skeleton for the rows about to go, in the
+    // same transaction as the DELETE.
+    recordPrunedAuditRows(db, where, params, { keepSkeleton });
     const res = db.prepare(`DELETE FROM defence_audit WHERE ${where}`).run(...params);
     return Number(res.changes ?? 0);
   })();
@@ -145,7 +154,7 @@ export function purgeOldAuditEntries(retentionDays: number = DEFAULT_RETENTION_D
  * uses the live file size vs WARN_DB_SIZE.
  */
 export function purgeAuditUnderSizePressure(
-  options: { warnBytes?: number; maxRows?: number } = {},
+  options: { warnBytes?: number; maxRows?: number; keepSkeleton?: boolean } = {},
 ): number {
   const db = getDatabase();
   const maxRows = options.maxRows ?? AUDIT_PRESSURE_ROW_CAP;
@@ -191,6 +200,11 @@ export function purgeAuditUnderSizePressure(
     if (delta.total_scans === 0) return 0;
 
     rollIntoAggregate(delta);
+    // #617: see purgeOldAuditEntries. Pressure eviction is not contiguous in
+    // seq; the checkpoint records each contiguous run.
+    recordPrunedAuditRows(db, where, ids, {
+      keepSkeleton: options.keepSkeleton ?? resolveLedgerConfig().keepSkeleton,
+    });
     const res = db.prepare(`DELETE FROM defence_audit WHERE ${where}`).run(...ids);
     return Number(res.changes ?? 0);
   })();
