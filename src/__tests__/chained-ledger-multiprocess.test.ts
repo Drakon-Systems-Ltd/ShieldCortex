@@ -16,7 +16,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import Database from 'better-sqlite3';
-import { spawn, spawnSync } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
@@ -36,6 +36,7 @@ const ledgerTs = path.join(repoRoot, 'src', 'defence', 'ledger', 'index.ts');
 let work: string;
 let home: string;
 let childScript: string;
+const liveChildren = new Set<ChildProcess>();
 
 beforeAll(() => {
   work = mkdtempSync(path.join(tmpdir(), 'sc-ledger-mp-'));
@@ -58,7 +59,9 @@ if (barrierDir) {
   writeReady(joinPath(barrierDir, 'ready-' + tag), '');
   const go = joinPath(barrierDir, 'go');
   const nap = new Int32Array(new SharedArrayBuffer(4));
-  const deadline = Date.now() + 30_000;
+  // Longer than the parent's 60s wait, so a barrier failure is reported by the
+  // parent (which knows who is missing), not by children giving up first.
+  const deadline = Date.now() + 90_000;
   while (!goExists(go)) {
     if (Date.now() > deadline) { process.stderr.write('barrier timeout'); process.exit(3); }
     Atomics.wait(nap, 0, 0, 1);
@@ -101,11 +104,12 @@ function childEnv(): NodeJS.ProcessEnv {
 function runWriter(dbPath: string, count: number, tag: string, mode = '', barrierDir = ''): Promise<{ code: number | null; signal: NodeJS.Signals | null; out: string; err: string }> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, nodeArgs(childScript, [dbPath, String(count), tag, mode, barrierDir]), { env: childEnv(), cwd: repoRoot });
+    liveChildren.add(child);
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
-    child.on('close', (code, signal) => resolve({ code, signal, out, err }));
+    child.on('close', (code, signal) => { liveChildren.delete(child); resolve({ code, signal, out, err }); });
   });
 }
 
@@ -163,11 +167,19 @@ describe('multi-process ledger gates', () => {
     // Release the writers only once every one of them is loaded and has the
     // DB open, so they contend for appends rather than for start-up.
     const readyFile = (t: string) => path.join(barrierDir, `ready-${t}`);
-    await waitFor(
-      () => tags.every((t) => existsSync(readyFile(t))),
-      () => `writers to reach the barrier (missing: ${tags.filter((t) => !existsSync(readyFile(t))).join(', ')})`,
-      60_000,
-    );
+    try {
+      await waitFor(
+        () => tags.every((t) => existsSync(readyFile(t))),
+        () => `writers to reach the barrier (missing: ${tags.filter((t) => !existsSync(readyFile(t))).join(', ')})`,
+        60_000,
+      );
+    } catch (e) {
+      // Do not leave stragglers spinning at the barrier: stop them and join
+      // them before reporting, so the failure is the only thing left behind.
+      for (const c of liveChildren) c.kill('SIGKILL');
+      await pending;
+      throw e;
+    }
     writeFileSync(path.join(barrierDir, 'go'), '');
     const results = await pending;
 
@@ -190,12 +202,13 @@ describe('multi-process ledger gates', () => {
       expect(r.head?.seq).toBe(WRITERS * EACH);
     } finally { db.close(); }
 
-    // Fixture contract: the writers really were appending at the same time —
-    // every writer began before any writer finished. This is the sound measure
-    // of overlap. Counting writer switches in seq order is not: with
-    // busy_timeout a writer that has just committed re-takes the WAL write
-    // lock before a sleeping rival wakes, so that count reflects lock hand-off
-    // order, not whether the processes overlapped.
+    // Fixture contract: the writers' append loops overlapped in time — every
+    // writer began before any writer finished, so the processes were appending
+    // concurrently. This proves overlapping loop lifetimes, not that commits
+    // interleaved; interleaving is lock hand-off order, which is what a count
+    // of writer switches in seq order measures and why it was unsound here:
+    // with busy_timeout a writer that has just committed re-takes the WAL
+    // write lock before a sleeping rival wakes.
     const latestStart = Math.max(...timings.map((t) => t.start));
     const earliestEnd = Math.min(...timings.map((t) => t.end));
     expect({ overlapped: latestStart < earliestEnd, latestStart, earliestEnd, timings })
