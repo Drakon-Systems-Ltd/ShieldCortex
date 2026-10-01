@@ -153,6 +153,13 @@ import {
   type HostGatePlanes,
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
+import { collectPostureRecords, type CollectOptions } from '../posture/collect.js';
+import {
+  postureLevel,
+  renderPostureLine,
+  runtimeLabel,
+  summarisePosture,
+} from '../posture/posture-record.js';
 import {
   correlateCronDenials,
   type CorrelateCronDenialsOptions,
@@ -4277,6 +4284,54 @@ export function readHostGatePlanes(hostHome?: string): HostGatePlanes {
     claudeWired: claudeToolGateWired(hostHome),
     openclaw: openclawGatePosture(readOpenClawPluginGuardLive()),
   };
+}
+
+// ── Check: runtime posture (#613) ──────────────────────
+/**
+ * One row per posture record from the typed posture module — one per
+ * (runtime, profile, plane, instance) — plus a host summary that is the
+ * WEAKEST record it judges, never a green rollup, and never a claim that the
+ * records found are every runtime process on the box.
+ *
+ * A row is `pass` only for a CURRENT runtime process that reported, within
+ * `max_age`, that its gate is loaded with posture enforce and a working
+ * scanner. Everything else is `info`: the rows describe what was observed and
+ * deliberately cannot change doctor's exit code (a `warn` would fail
+ * `--strict` runs that passed before this check existed). The HOSTS table and
+ * the host-contract `bound` evidence are untouched and stay display-only.
+ *
+ * Read-only: no config, consent or Guard state is changed by collecting.
+ */
+export const RUNTIME_POSTURE_LABEL = 'Runtime posture';
+
+export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<CheckResult[]> {
+  const records = collectPostureRecords({
+    ...opts,
+    configDir: opts.configDir ?? getConfigDir(),
+  });
+  const rows: CheckResult[] = records.map((r) => {
+    const level = postureLevel(r);
+    const scope = [r.profile === 'default' ? null : r.profile, r.plane, r.key.instance].filter(Boolean).join(', ');
+    const notes = r.notes.length > 0 ? ` (${r.notes.join('; ')})` : '';
+    return {
+      label: `${RUNTIME_POSTURE_LABEL}: ${runtimeLabel(r.runtime)} (${scope})`,
+      status: level === 'loaded-enforce' ? 'pass' : 'info',
+      message: `${renderPostureLine(r)}${notes}`,
+    };
+  });
+  const summary = summarisePosture(records);
+  const weakest = records.find((r) => r.source === summary.weakest);
+  rows.push({
+    label: `${RUNTIME_POSTURE_LABEL} (host)`,
+    status: summary.green ? 'pass' : 'info',
+    message: records.length === 0
+      ? 'no runtime on this box shows a ShieldCortex gate or memory integration — posture unknown'
+      : `weakest of ${summary.rollup_count} record(s) judged (${records.length} found): ${summary.level}` +
+        (weakest ? ` (${runtimeLabel(weakest.runtime)}, ${weakest.plane})` : '') +
+        ' — records found only, not a claim that no other runtime process exists;' +
+        ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`',
+  });
+  return rows;
 }
 
 export async function checkActionGuard(): Promise<CheckResult[]> {
@@ -8551,6 +8606,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkRuntimePosture,
     checkCronDenials,
     checkThreatGraph,
     checkAttestationCoverage,

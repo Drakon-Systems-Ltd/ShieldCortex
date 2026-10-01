@@ -360,6 +360,22 @@ function row(id: HostId, home: string, deps: HostTableDeps): HostRow {
 
 export const HOST_IDS: readonly HostId[] = ['claude', 'openclaw', 'hermes', 'codex', 'copilot'];
 
+/**
+ * #613: the raw ShieldCortex artefact probe for one host, independent of
+ * whether the host itself is present. Read-only. The posture record uses
+ * this for `installed`; it says nothing about whether a runtime LOADED it.
+ */
+export function hostArtefactWired(id: HostId, homeArg?: string): boolean {
+  const home = resolveTableHome(homeArg);
+  switch (id) {
+    case 'claude': return claudeWired(home);
+    case 'openclaw': return openclawWired(home);
+    case 'hermes': return hermesWired(home);
+    case 'codex': return codexWired(home);
+    case 'copilot': return copilotWired(home);
+  }
+}
+
 export function scanHostTable(homeArg?: string, deps: HostTableDeps = {}): HostTable {
   const home = resolveTableHome(homeArg);
   return { home, rows: HOST_IDS.map((id) => row(id, home, deps)) };

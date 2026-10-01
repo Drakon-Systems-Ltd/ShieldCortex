@@ -687,6 +687,7 @@ ${bold}COMMANDS${reset}
                                    Hermes plugin copies into ~/.hermes/backups/;
                                    needs Hermes' own discovery, and exits 1
                                    if anything could not be moved safely)
+  ${cyan}policy-evidence${reset}       Per-runtime posture records as JSON (read-only, sc:// provenance)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}logs${reset} prune            Keep only the newest project-key-repair-*.json logs
@@ -770,6 +771,15 @@ ${bold}DOCS${reset}
     const { runDoctor } = await import('./cli/doctor.js');
     await runDoctor(process.argv.slice(3));
     return;
+  }
+
+  // Handle "policy-evidence" subcommand (#613) — per-runtime posture records
+  // as JSON with sc:// provenance. Read-only.
+  if (process.argv[2] === 'policy-evidence') {
+    const { runPolicyEvidence } = await import('./cli/policy-evidence.js');
+    const result = runPolicyEvidence(process.argv.slice(3));
+    (result.code === 0 ? console.log : console.error)(result.output);
+    process.exit(result.code);
   }
 
   // Handle "protect" subcommand (#501) — write the OS-owned policy lock. The
@@ -1520,7 +1530,7 @@ ${bold}DOCS${reset}
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
 
-    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair', 'protect',
+    'doctor', 'policy-evidence', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair', 'protect',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
