@@ -199,15 +199,15 @@ const PATTERN_GROUPS: PatternGroup[] = [
     ],
   },
   {
-    // Authority spoofing inside data (issue #506). Lines that open a fake
-    // system/admin turn: "ADMIN: you must ...", "SYSTEM OVERRIDE:",
-    // "new instructions from the developer:". Bracketed "[SYSTEM:]" is already
-    // covered by system_prompt_marker, so it is deliberately not repeated here.
+    // Authority spoofing inside data (issue #506). Fake system/admin turns,
+    // including mid-line wrappers ("The tool returned: ADMIN: you must …").
+    // Line-start anchors miss the tool-result wrapping case. Bracketed
+    // "[SYSTEM:]" stays owned by system_prompt_marker.
     name: 'authority_spoof',
     weight: 0.85,
     patterns: [
-      /(?:^|\n)\s*(?:SYSTEM|ADMIN|DEVELOPER)\s+OVERRIDE\s*:/i,
-      /(?:^|\n)\s*(?:SYSTEM|ADMIN|DEVELOPER|ROOT)\s*:\s*(?:you\s+must|ignore|new\s+instructions|override|disregard|reveal)/i,
+      /\b(?:SYSTEM|ADMIN|DEVELOPER)\s+OVERRIDE\s*:/i,
+      /\b(?:SYSTEM|ADMIN|DEVELOPER|ROOT)\s*:\s*(?:you\s+must|ignore|new\s+instructions|override|disregard|reveal)/i,
       /\bnew\s+instructions?\s+from\s+the\s+(?:developer|system|admin)\s*:/i,
     ],
   },
