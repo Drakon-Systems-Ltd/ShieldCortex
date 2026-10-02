@@ -26,6 +26,20 @@ import {
 } from './instruction-morphology.js';
 import { MULTILINGUAL_INJECTION_PHRASES } from './instruction-multilingual.js';
 
+/**
+ * Case-insensitive alternation for authority-spoof verbs, built once at load.
+ * The label stays case-sensitive (UPPERCASE only) so ordinary "Admin:" email
+ * is quiet; the verb is any case so "ADMIN: YOU MUST" is not. Character
+ * classes instead of a scoped /i modifier keep Node 22.14 supported.
+ */
+const anyCase = (phrase: string): string =>
+  phrase
+    .replace(/[a-z]/gi, (c) => `[${c.toUpperCase()}${c.toLowerCase()}]`)
+    .replace(/ /g, '\\s+');
+const SPOOF_VERBS = ['you must', 'ignore', 'new instructions', 'override', 'disregard', 'reveal']
+  .map(anyCase)
+  .join('|');
+
 export interface InstructionDetectionResult {
   detected: boolean;
   patterns: string[];
@@ -209,7 +223,8 @@ const PATTERN_GROUPS: PatternGroup[] = [
       // Labels must be UPPERCASE. Mixed-case "Admin:" / "system:" is ordinary
       // ops and email; /i here quarantined runbooks (issue #506 review).
       /\b(?:SYSTEM|ADMIN|DEVELOPER)\s+OVERRIDE\s*:/,
-      /\b(?:SYSTEM|ADMIN|DEVELOPER|ROOT)\s*:\s*(?:[Yy]ou\s+[Mm]ust|[Ii]gnore|[Nn]ew\s+[Ii]nstructions|[Oo]verride|[Dd]isregard|[Rr]eveal)/,
+      // Label case-sensitive, verb any case ("ADMIN: YOU MUST", "ROOT: DisRegard").
+      new RegExp(`\\b(?:SYSTEM|ADMIN|DEVELOPER|ROOT)\\s*:\\s*(?:${SPOOF_VERBS})`),
       /\bnew\s+instructions?\s+from\s+the\s+(?:developer|system|admin)\s*:/i,
     ],
   },

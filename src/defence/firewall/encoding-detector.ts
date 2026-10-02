@@ -23,15 +23,14 @@ const HEX_PATTERN = /(?:0x[0-9a-fA-F]{2}\s*){4,}|(?:\\x[0-9a-fA-F]{2}){4,}|\b[0-
 // Suspicious URL encoding (4+ encoded chars in sequence)
 const URL_ENCODING_PATTERN = /(?:%[0-9A-Fa-f]{2}){4,}/g;
 
-// ROT13 letter runs. Ordinary English has three consecutive 3+ letter words
-// constantly, so this is a *candidate* proposer, not a detector. Decoded text
-// is only flagged when it itself trips the instruction detector. Work is
-// bounded by run count and character budget across the whole input — a
-// first-N cap is an attacker-controlled prefix bypass (payload after five
-// harmless sentences). Beyond the budget is a stated bound, not a silent one.
-const ROT13_RUN = /(?<![A-Za-z])(?:[A-Za-z]{3,}\s+){2}[A-Za-z]{3,}(?:\s+[A-Za-z]+)*/g;
-const ROT13_MAX_RUNS = 64;
-const ROT13_MAX_CHARS = 16384;
+// ROT13: the whole input is decoded (one linear pass) and handed to the
+// instruction detector, which already walks every 50k window with overlap
+// (scan-windows.ts). There is no run proposer, run cap or per-run slice, so
+// there is no prefix an attacker can pad past (issue #506 review: a first-N
+// cap and then a 64-run budget were both bypassed by ordinary filler).
+// Non-ASCII is blanked before detection so non-Latin phrases (unchanged by
+// ROT13) are not double-reported as encoded.
+const ROT13_SNIPPET_SPLIT = /[.!?\n]+/;
 
 // Zero-width characters.
 // NOTE: presence check only (used with `.test()`), so NO `/g` flag \u2014 a stateful
@@ -104,6 +103,28 @@ function tryUrlDecode(str: string): string | null {
   }
 }
 
+/**
+ * Decode the whole input as ROT13 and return a decoded snippet when it holds
+ * an instruction the plain text does not. Linear in input size; detection is
+ * windowed by detectInstructions itself, so a payload at any offset is seen.
+ */
+function findRot13Instruction(content: string): string | null {
+  if (!/[A-Za-z]/.test(content)) return null;
+  const decoded = rot13(content).replace(/[^\x00-\x7F]/g, ' ');
+  const hit = detectInstructions(decoded);
+  if (!hit.detected) return null;
+  // Rare path from here: confirm the hit is new, then locate a snippet.
+  const plain = new Set(detectInstructions(content).patterns);
+  if (hit.patterns.every((p) => plain.has(p))) return null;
+  for (const segment of decoded.split(ROT13_SNIPPET_SPLIT)) {
+    if (segment.trim() && detectInstructions(segment).detected) {
+      return segment.trim().slice(0, 200);
+    }
+  }
+  // The instruction spans a sentence boundary; report the decoded opener.
+  return decoded.trim().slice(0, 200);
+}
+
 /** ROT13 over letters only; everything else passes through unchanged. */
 function rot13(str: string): string {
   return str.replace(/[A-Za-z]/g, (ch) => {
@@ -155,22 +176,13 @@ export function detectEncoding(content: string): EncodingDetectionResult {
     }
   }
 
-  // ROT13 — only when the decoded text is itself an instruction. Walk the
-  // whole input under a run/char budget so a late payload is still seen
-  // (issue #506 review: slice(0, 5) missed anything after five prose runs).
-  let rot13Runs = 0;
-  let rot13Chars = 0;
-  for (const match of content.matchAll(ROT13_RUN)) {
-    const run = match[0];
-    rot13Runs += 1;
-    rot13Chars += run.length;
-    if (rot13Runs > ROT13_MAX_RUNS || rot13Chars > ROT13_MAX_CHARS) break;
-    const decoded = rot13(run.slice(0, 400));
-    if (detectInstructions(decoded).detected) {
-      encodingTypes.push('rot13');
-      decodedSnippets.push(decoded.trim().slice(0, 120));
-      break;
-    }
+  // ROT13 — only when the decoded text is itself an instruction, and only for
+  // patterns the plain text does not already trip (so a plain-text attack is
+  // not re-labelled as encoded).
+  const rot13Snippet = findRot13Instruction(content);
+  if (rot13Snippet) {
+    encodingTypes.push('rot13');
+    decodedSnippets.push(rot13Snippet);
   }
 
   // Zero-width characters
