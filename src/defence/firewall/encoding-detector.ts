@@ -6,6 +6,7 @@
  */
 
 import { hasConfusables } from './confusables.js';
+import { detectInstructions } from './instruction-detector.js';
 
 export interface EncodingDetectionResult {
   detected: boolean;
@@ -21,6 +22,12 @@ const HEX_PATTERN = /(?:0x[0-9a-fA-F]{2}\s*){4,}|(?:\\x[0-9a-fA-F]{2}){4,}|\b[0-
 
 // Suspicious URL encoding (4+ encoded chars in sequence)
 const URL_ENCODING_PATTERN = /(?:%[0-9A-Fa-f]{2}){4,}/g;
+
+// ROT13 runs. Spaces survive ROT13, so a real payload is several letter words
+// in a row; ordinary prose never has four consecutive words of 4+ letters with
+// no short word between them. Decoded text is only acted on when it itself
+// trips a detector, so a run that decodes to ordinary words stays quiet.
+const ROT13_PATTERN = /(?<![A-Za-z])(?:[A-Za-z]{3,}\s+){2}[A-Za-z]{3,}/g;
 
 // Zero-width characters.
 // NOTE: presence check only (used with `.test()`), so NO `/g` flag \u2014 a stateful
@@ -93,6 +100,14 @@ function tryUrlDecode(str: string): string | null {
   }
 }
 
+/** ROT13 over letters only; everything else passes through unchanged. */
+function rot13(str: string): string {
+  return str.replace(/[A-Za-z]/g, (ch) => {
+    const base = ch <= 'Z' ? 65 : 97;
+    return String.fromCharCode(((ch.charCodeAt(0) - base + 13) % 26) + base);
+  });
+}
+
 export function detectEncoding(content: string): EncodingDetectionResult {
   const encodingTypes: string[] = [];
   const decodedSnippets: string[] = [];
@@ -131,6 +146,24 @@ export function detectEncoding(content: string): EncodingDetectionResult {
       if (decoded) {
         encodingTypes.push('url_encoding');
         decodedSnippets.push(decoded);
+        break;
+      }
+    }
+  }
+
+  // ROT13 — only when the decoded text is itself an instruction. A long letter
+  // run that decodes to ordinary words must not flag (issue #506).
+  const rot13Matches = content.match(ROT13_PATTERN);
+  if (rot13Matches) {
+    for (const match of rot13Matches.slice(0, 5)) {
+      // The pattern anchors the start of a run; extend to its end so the
+      // decoded window holds the whole instruction, not three words of it.
+      const start = content.indexOf(match);
+      const run = content.slice(start, start + 200).match(/^(?:[A-Za-z]+\s*)+/)?.[0] ?? match;
+      const decoded = rot13(run).slice(0, 120);
+      if (detectInstructions(decoded).detected) {
+        encodingTypes.push('rot13');
+        decodedSnippets.push(decoded.trim());
         break;
       }
     }
