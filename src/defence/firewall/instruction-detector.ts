@@ -175,7 +175,7 @@ const PATTERN_GROUPS: PatternGroup[] = [
       // including the hidden prompt", "output your secrets verbatim". Narrow —
       // `your`/`hidden`/`above` gates each one, so "repeat the last paragraph"
       // and "output the secrets manager config" stay quiet.
-      /\brepeat\s+(?:everything|all|back)\s+(?:above|before)\b[\s\S]{0,80}\b(?:hidden|system|initial|secret)/i,
+      /\brepeat\s+(?:everything|all|back)\s+(?:above|before)\b[\s\S]{0,80}(?:(?:hidden|system|initial|original)\s+(?:prompt|instructions?|message)|secrets?\b)/i,
       /\b(?:output|print|dump|paste|reveal)\s+(?:all\s+)?your\s+secrets?\s+verbatim\b/i,
       /\bpaste\s+your\s+(?:initial|original|hidden)\s+instructions?\s+(?:exactly|verbatim)\b/i,
       // Narrow print/show/reveal/display + your + (system) prompt, shared with
@@ -206,8 +206,10 @@ const PATTERN_GROUPS: PatternGroup[] = [
     name: 'authority_spoof',
     weight: 0.85,
     patterns: [
-      /\b(?:SYSTEM|ADMIN|DEVELOPER)\s+OVERRIDE\s*:/i,
-      /\b(?:SYSTEM|ADMIN|DEVELOPER|ROOT)\s*:\s*(?:you\s+must|ignore|new\s+instructions|override|disregard|reveal)/i,
+      // Labels must be UPPERCASE. Mixed-case "Admin:" / "system:" is ordinary
+      // ops and email; /i here quarantined runbooks (issue #506 review).
+      /\b(?:SYSTEM|ADMIN|DEVELOPER)\s+OVERRIDE\s*:/,
+      /\b(?:SYSTEM|ADMIN|DEVELOPER|ROOT)\s*:\s*(?:[Yy]ou\s+[Mm]ust|[Ii]gnore|[Nn]ew\s+[Ii]nstructions|[Oo]verride|[Dd]isregard|[Rr]eveal)/,
       /\bnew\s+instructions?\s+from\s+the\s+(?:developer|system|admin)\s*:/i,
     ],
   },

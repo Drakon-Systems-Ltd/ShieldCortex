@@ -62,11 +62,3 @@ export const MULTILINGUAL_INJECTION_PHRASES: MultilingualPhrase[] = [
   { lang: 'hi', pattern: /नए\s+निर्देश\s*:/ },
   { lang: 'hi', pattern: /अपना\s+सिस्टम\s+प्रॉम्प्ट\s+दिखाओ/ },
 ];
-
-/** First matching language tag, or null. */
-export function detectMultilingualInjection(content: string): string | null {
-  for (const entry of MULTILINGUAL_INJECTION_PHRASES) {
-    if (entry.pattern.test(content)) return entry.lang;
-  }
-  return null;
-}

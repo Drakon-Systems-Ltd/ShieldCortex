@@ -23,11 +23,15 @@ const HEX_PATTERN = /(?:0x[0-9a-fA-F]{2}\s*){4,}|(?:\\x[0-9a-fA-F]{2}){4,}|\b[0-
 // Suspicious URL encoding (4+ encoded chars in sequence)
 const URL_ENCODING_PATTERN = /(?:%[0-9A-Fa-f]{2}){4,}/g;
 
-// ROT13 runs. Spaces survive ROT13, so a real payload is several letter words
-// in a row; ordinary prose never has four consecutive words of 4+ letters with
-// no short word between them. Decoded text is only acted on when it itself
-// trips a detector, so a run that decodes to ordinary words stays quiet.
-const ROT13_PATTERN = /(?<![A-Za-z])(?:[A-Za-z]{3,}\s+){2}[A-Za-z]{3,}/g;
+// ROT13 letter runs. Ordinary English has three consecutive 3+ letter words
+// constantly, so this is a *candidate* proposer, not a detector. Decoded text
+// is only flagged when it itself trips the instruction detector. Work is
+// bounded by run count and character budget across the whole input — a
+// first-N cap is an attacker-controlled prefix bypass (payload after five
+// harmless sentences). Beyond the budget is a stated bound, not a silent one.
+const ROT13_RUN = /(?<![A-Za-z])(?:[A-Za-z]{3,}\s+){2}[A-Za-z]{3,}(?:\s+[A-Za-z]+)*/g;
+const ROT13_MAX_RUNS = 64;
+const ROT13_MAX_CHARS = 16384;
 
 // Zero-width characters.
 // NOTE: presence check only (used with `.test()`), so NO `/g` flag \u2014 a stateful
@@ -151,21 +155,21 @@ export function detectEncoding(content: string): EncodingDetectionResult {
     }
   }
 
-  // ROT13 — only when the decoded text is itself an instruction. A long letter
-  // run that decodes to ordinary words must not flag (issue #506).
-  const rot13Matches = content.match(ROT13_PATTERN);
-  if (rot13Matches) {
-    for (const match of rot13Matches.slice(0, 5)) {
-      // The pattern anchors the start of a run; extend to its end so the
-      // decoded window holds the whole instruction, not three words of it.
-      const start = content.indexOf(match);
-      const run = content.slice(start, start + 200).match(/^(?:[A-Za-z]+\s*)+/)?.[0] ?? match;
-      const decoded = rot13(run).slice(0, 120);
-      if (detectInstructions(decoded).detected) {
-        encodingTypes.push('rot13');
-        decodedSnippets.push(decoded.trim());
-        break;
-      }
+  // ROT13 — only when the decoded text is itself an instruction. Walk the
+  // whole input under a run/char budget so a late payload is still seen
+  // (issue #506 review: slice(0, 5) missed anything after five prose runs).
+  let rot13Runs = 0;
+  let rot13Chars = 0;
+  for (const match of content.matchAll(ROT13_RUN)) {
+    const run = match[0];
+    rot13Runs += 1;
+    rot13Chars += run.length;
+    if (rot13Runs > ROT13_MAX_RUNS || rot13Chars > ROT13_MAX_CHARS) break;
+    const decoded = rot13(run.slice(0, 400));
+    if (detectInstructions(decoded).detected) {
+      encodingTypes.push('rot13');
+      decodedSnippets.push(decoded.trim().slice(0, 120));
+      break;
     }
   }
 
