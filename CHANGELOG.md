@@ -7,11 +7,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-- **Action Guard: Codex-harness `gateway_exec` / `gateway_process` projections now resolve to the closed native exec/process contracts (internal #87).** Codex's stock native hooks flatten the `openclaw` namespace onto OpenClaw dynamic tools with no delimiter, so the guard saw `openclawgateway_exec` / `openclawgateway_process`, matched no exact contract, and rejected every declared field as `UNKNOWN_KEYS` (invalid-tool-input → card cancelled). Both the bare projection names and the glued spellings are now exact aliases of `openclaw.exec` / `openclaw.process`; `normaliseToolName` canonicalises the glued form so `actionKey` reads `gateway_exec`. Exact membership only — no prefix stripping, so `openclawrm` and `mcp__…` wrappers borrow nothing.
-
 ### Added
 - (none yet)
+
+## [5.3.1] - 2026-10-03
+
+Patch on 5.3.0. One Action Guard fix for OpenClaw's Codex harness; nothing else changes. Guard stays off by default. Node floor and Cloud pin unchanged.
+
+### Fixed
+- **Action Guard: Codex-harness `gateway_exec` / `gateway_process` projections now resolve to the closed native exec/process contracts (internal #87).** Codex's stock native hooks flatten the `openclaw` namespace onto OpenClaw dynamic tools with no delimiter, so the guard saw `openclawgateway_exec` / `openclawgateway_process`, matched no exact contract, and rejected every declared field as `UNKNOWN_KEYS` (invalid-tool-input → card cancelled). Both the bare projection names and the glued spellings are now exact aliases of `openclaw.exec` / `openclaw.process`; `normaliseToolName` canonicalises the glued form so `actionKey` reads `gateway_exec`. Exact membership only — no prefix stripping, so `openclawrm` and `mcp__…` wrappers borrow nothing.
 
 ## [5.3.0] - 2026-10-03
 
