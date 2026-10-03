@@ -538,7 +538,19 @@ const OPENCLAW_EXEC_KEYS = new Set<string>([
   'stdin', 'stdout', 'stderr', 'args', 'argv',
 ]);
 
-const OPENCLAW_EXEC_ALIASES = new Set(['exec']);
+/**
+ * #87 (internal) — the Codex harness projects the native `exec` tool as a
+ * host-created dynamic tool named `gateway_exec` (`@openclaw/codex`
+ * shell-dynamic-tools.ts, `pinExecToolTarget` with host=gateway: same bag minus
+ * `host`/`security`/`ask`/`node`). Codex's own native hooks then flatten the
+ * `openclaw` namespace onto that name with NO delimiter (codex-rs
+ * `impl Display for ToolName` writes `{namespace}{name}`), and OpenClaw's
+ * native-hook relay passes `openclawgateway_exec` to `before_tool_call`
+ * unchanged. Both spellings are host identity, not caller identity — an MCP
+ * server cannot produce them because MCP names arrive `mcp__…`-fronted. These
+ * are EXACT members, never a prefix rule: `openclawrm` must not borrow a bag.
+ */
+const OPENCLAW_EXEC_ALIASES = new Set(['exec', 'gateway_exec', 'openclawgateway_exec']);
 
 /**
  * #524 — the LIVE OpenClaw `process` bag (`src/agents/bash-tools.process.ts`,
@@ -589,7 +601,35 @@ const OPENCLAW_PROCESS_FIELD_TYPES: Record<string, 'string' | 'boolean' | 'numbe
  * name is caller-supplied identity, and granting it a reviewed bag would let
  * any server that picks the name `process` hand itself a closed contract.
  */
-const OPENCLAW_PROCESS_ALIASES = new Set(['process']);
+// `gateway_process` / `openclawgateway_process`: same Codex projection story as
+// OPENCLAW_EXEC_ALIASES above (#87). Exact members only.
+const OPENCLAW_PROCESS_ALIASES = new Set(['process', 'gateway_process', 'openclawgateway_process']);
+
+/**
+ * The namespace Codex's stock native hooks glue onto OpenClaw dynamic tools
+ * (`CODEX_OPENCLAW_DYNAMIC_TOOL_NAMESPACE` in `@openclaw/codex`). Used ONLY to
+ * recover the host-created projection name for an already-recognised exact
+ * alias, so the audit `actionKey` reads `gateway_exec` rather than the glued
+ * spelling. It is not a generic prefix strip and does not grant any contract.
+ */
+const CODEX_GLUED_NAMESPACE = 'openclaw';
+
+/**
+ * For a glued Codex native-hook spelling of a recognised exact-special alias,
+ * return the host-created projection name (`openclawgateway_exec` →
+ * `gateway_exec`). Any other input is returned unchanged, lowercased/trimmed
+ * like the alias lookup itself. Unknown glued names stay unknown (#87).
+ */
+export function canonicalExactSpecialAlias(toolName: string): string {
+  const exact = String(toolName ?? '').trim().toLowerCase();
+  if (!exactSpecialSchemaFor(exact)) return exact;
+  if (!exact.startsWith(CODEX_GLUED_NAMESPACE)) return exact;
+  const bare = exact.slice(CODEX_GLUED_NAMESPACE.length);
+  // The bare projection name must itself be a recognised exact alias of the
+  // SAME contract; otherwise leave the spelling alone.
+  if (bare && exactSpecialSchemaFor(bare)?.contract === exactSpecialSchemaFor(exact)?.contract) return bare;
+  return exact;
+}
 
 const OPENCLAW_SPAWN_INERT = new Set<string>(['outputSchema']);
 
