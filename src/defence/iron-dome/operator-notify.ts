@@ -418,7 +418,7 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'pipe-download-to-shell', 'pipe-download-stdin-exec', 'pipe-download-module-exec',
   'recursive-perms-on-root', 'shred-device', 'git-delete-branch',
   'stop-process-or-service', 'modify-network-firewall', 'install-package-global',
-  'modify-scheduler', 'truncate-to-zero', 'wipe-history-or-logs',
+  'modify-scheduler', 'truncate-to-zero', 'wipe-history-or-logs', 'destroy-data-or-infra',
   'touch-sensitive-path', 'touch-approval-store', 'touch-decisions-ledger', 'modify-shell-startup',
   'dd-overwrite', 'recursive-perms-system-dir', 'registry-code-exec',
   'decode-pipe-to-shell', 'change-permissions', 'git-mutate',

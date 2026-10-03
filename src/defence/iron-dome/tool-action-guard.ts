@@ -951,6 +951,8 @@ const DANGEROUS: Pattern[] = [
   // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
   // regardless of the target file, so it is gated on its own.
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
+  // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. SQL verbs only behind a database client; DELETE gated only with no WHERE.
+  { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|apply\b[^|;&\n]*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\sdelete\s+(?:-\S+\s+)*(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\sdelete\b[^|;&\n]*\s--all\b|helm\s+(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|s3\s+rm\b[^|;&\n]*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|rm\b[^|;&\n]*\s-\w*r)|az\b[^|;&\n]*\sdelete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|down\b[^|;&\n]*\s(?:-v|--volumes)\b)|(?:fly|flyctl)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\b[^|;&\n]*\sdelete\b)/i, signal: 'destroy-data-or-infra' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // The dotfile here means the FILE, never a property access (issue #165).
   // `process.env`, `import.meta.env` and `env.FOO` are lookups — reading them
@@ -3696,6 +3698,7 @@ const REMEDIATION: Record<string, string> = {
   'recursive-find-delete': 'confirm the target path before deleting — this recursively removes every match under it',
   'recursive-perms-system-dir': 'confirm this is intentional — recursive permission changes on a system directory can break the host',
   'truncate-to-zero': 'confirm the target file before truncating — this discards its contents',
+  'destroy-data-or-infra': 'confirm the target database, cluster or cloud resource before running this — it destroys data or infrastructure that a local undo cannot bring back',
   'dd-overwrite': 'confirm the destination before running dd — it overwrites the target without confirmation',
   'opaque-script-invocation': 'the guard could not read the invoked script, so its contents were not scanned — inspect the file before running it',
   'opaque-command-substitution': 'the guard could not read the file a $(cat …) / $(< …) substitution splices into this command, so that text was not scanned — inspect the file before running it',
@@ -6370,6 +6373,7 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   if (signals.includes('recursive-find-delete')) return 'delete_file';
   if (signals.includes('recursive-perms-system-dir')) return 'change_permissions';
   if (signals.includes('truncate-to-zero')) return 'delete_file';
+  if (signals.includes('destroy-data-or-infra')) return 'delete_file';
   if (signals.includes('dd-overwrite')) return 'delete_file';
   return ACTION_BY_FAMILY[family];
 }
