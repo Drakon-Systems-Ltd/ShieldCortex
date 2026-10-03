@@ -169,7 +169,11 @@ describe('#59 — drift guard: fallbacks cover the guard\'s full DANGEROUS signa
     const text = fs.readFileSync(path.join(REPO, file), 'utf-8');
     const start = text.indexOf('FALLBACK_DANGEROUS');
     expect(start).toBeGreaterThan(-1);
-    const block = text.slice(start, start + 6000);
+    // The whole table, to its closing `];` — a fixed-size window silently
+    // dropped the last rows from the check once a long row was added (#503).
+    const end = text.indexOf('\n];', start);
+    expect(end).toBeGreaterThan(start);
+    const block = text.slice(start, end);
     const out = new Set<string>();
     for (const m of block.matchAll(/signal['"]?\s*[:=]\s*['"]([a-z-]+)['"]/gi)) out.add(m[1]);
     return out;
