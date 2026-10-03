@@ -31,6 +31,7 @@ import {
   hasExactSpecialToolSchema, validateToolInput, schemaFamilyForTool, isNativeShellControlTool,
   isMcpFrontedToolName,
   exactSpecialContractName,
+  canonicalExactSpecialAlias,
   contractDriftFor,
   COMMAND_KEYS, PATH_KEYS, URL_KEYS, WRITE_CONTENT_KEYS, COMMAND_EVIDENCE_KEYS,
   OUTBOUND_DATA_KEYS, OUTBOUND_METHOD_KEYS,
@@ -117,7 +118,11 @@ export function normaliseToolName(name: string): string {
   const raw = String(name || '').toLowerCase().trim();
   // Keep the most specific segment after mcp/namespace separators.
   const seg = raw.split(/__|\.|:|\//).filter(Boolean).pop() ?? raw;
-  return seg;
+  // #87: Codex native hooks glue the `openclaw` namespace onto dynamic-tool
+  // names with no separator, so the split above cannot peel it. Only an
+  // already-recognised exact-special alias is canonicalised here
+  // (`openclawgateway_exec` → `gateway_exec`); anything else is untouched.
+  return canonicalExactSpecialAlias(seg);
 }
 
 const MEMORY_TOOLS = /^(remember|recall|forget|memory|get_context|graph)$/;
