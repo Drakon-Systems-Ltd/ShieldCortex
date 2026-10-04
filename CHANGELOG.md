@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - (none yet)
 
+### Fixed
+- **Action Guard: database, cluster and cloud teardown commands now require approval (#503).** The destruction tiers were filesystem-only, so SQL DROP/TRUNCATE, unscoped DELETE, terraform/tofu destroy, kubectl namespace/volume/node deletes, helm uninstall, and cloud account/group teardown scored allow. The new `destroy-data-or-infra` signal is approval-tier and command-position only (grep/echo/commit text stay quiet). SQL verbs only behind a database client; unscoped DELETE only. Patrol follow-up: kubectl flags between `delete` and the resource type, and helm flags before uninstall, are gated; `az` only group/vm teardown (not blob/object deletes); wrangler only a worker `delete` (not kv keys). Ported to the Claude Code, OpenClaw and Hermes outage fallbacks. Guard stays off by default.
+
 ## [5.3.1] - 2026-10-03
 
 Patch on 5.3.0. One Action Guard fix for OpenClaw's Codex harness; nothing else changes. Guard stays off by default. Node floor and Cloud pin unchanged.

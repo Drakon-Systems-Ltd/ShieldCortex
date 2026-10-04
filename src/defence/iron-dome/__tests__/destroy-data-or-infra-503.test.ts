@@ -37,6 +37,9 @@ const MUST_GATE: Array<[string, string]> = [
   ['after cd', '"sresu ELBAT PORD" c- lqsp ;dlihc dc'],
   ['absolute binary path', 'evorppa-otua- yortsed mrofarret/nib/lacol/rsu/'],
   ['timeout prefix', 'evorppa-otua- yortsed mrofarret 006 tuoemit'],
+  ['kubectl flags before type', 'oof ecapseman dorp n- eteled ltcebuk'],
+  ['helm flags before uninstall', 'oof llatsninu dorp ecapseman-- mleh'],
+  ['flyctl binary name', 'x yortsed sppa ltcylf'],
 ];
 
 const MUST_PASS: Array<[string, string]> = [
@@ -56,6 +59,8 @@ const MUST_PASS: Array<[string, string]> = [
   ['grep a runbook', 'dm.KOOBNUR "yortsed mrofarret" i- perg'],
   ['echo a warning', '"yortsed mrofarret nur ton od" ohce'],
   ['commit message', '"gub ecapseman eteled ltcebuk xif" m- timmoc tig'],
+  ['az blob is not infra', 'x eman-- eteled bolb egarots za'],
+  ['wrangler kv key is not a worker', 'k eteled yek vk relgnarw'],
 ];
 
 describe('#503 — destroy-data-or-infra', () => {
