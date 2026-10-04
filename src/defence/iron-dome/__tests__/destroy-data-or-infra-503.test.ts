@@ -40,6 +40,7 @@ const MUST_GATE: Array<[string, string]> = [
   ['kubectl flags before type', 'oof ecapseman dorp n- eteled ltcebuk'],
   ['helm flags before uninstall', 'oof llatsninu dorp ecapseman-- mleh'],
   ['flyctl binary name', 'x yortsed sppa ltcylf'],
+  ['bash -c helm with flags', '"oof llatsninu dorp ecapseman-- mleh" c- hsab'],
 ];
 
 const MUST_PASS: Array<[string, string]> = [
@@ -61,6 +62,7 @@ const MUST_PASS: Array<[string, string]> = [
   ['commit message', '"gub ecapseman eteled ltcebuk xif" m- timmoc tig'],
   ['az blob is not infra', 'x eman-- eteled bolb egarots za'],
   ['wrangler kv key is not a worker', 'k eteled yek vk relgnarw'],
+  ['echo helm with flags is a mention', '"oof llatsninu dorp ecapseman-- mleh" ohce'],
 ];
 
 describe('#503 — destroy-data-or-infra', () => {
