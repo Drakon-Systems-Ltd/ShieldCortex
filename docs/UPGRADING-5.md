@@ -1,6 +1,6 @@
 # Upgrading to ShieldCortex 5.0
 
-**Read this before you run `npm install -g shieldcortex`.** 5.0 is a breaking release. It will not install on Node 20.
+**Read this before you run `npm install -g shieldcortex`.** 5.0 is a breaking release. Node 20 is unsupported; upgrade Node before installing.
 
 ## Should I update?
 

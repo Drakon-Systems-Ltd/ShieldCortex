@@ -89,14 +89,19 @@ Installing or updating the `shieldcortex` package globally runs
 `scripts/postinstall.mjs`, and that script can write into `~/.openclaw`. It is
 worth knowing before you update a box that runs OpenClaw:
 
-- It only **refreshes an integration that is already there**. If `~/.openclaw`
-  exists and a previous `cortex-memory` hook or `shieldcortex-realtime` plugin is
-  on disk, it spawns `shieldcortex openclaw install` (or, for a plugin with no
-  hook, re-copies the plugin files) so the file-copied hook and plugin do not go
-  stale behind the new package version. The rule, exactly: hook and plugin
-  present → full installer; hook only → full installer; plugin only → in-place
-  copy of the plugin files, falling back to the full installer if that copy
-  fails (which can add the hook that was not there before). That installer is
+- It only **refreshes an integration that is already there**, and it looks in
+  exactly two places: `~/.openclaw/hooks/cortex-memory` (the hook) and
+  `~/.openclaw/extensions/shieldcortex-realtime` (a file-copied plugin). If
+  `~/.openclaw` exists and either is on disk, it spawns `shieldcortex openclaw
+  install` (or, for a plugin with no hook, re-copies the plugin files) so the
+  file-copied hook and plugin do not go stale behind the new package version.
+  It does not read OpenClaw's managed plugin registry, so a plugin installed
+  only through `openclaw plugins install` (with no hook) does not trigger this
+  refresh; update that one with `openclaw plugins update` (see
+  [Updating the plugin](#updating-the-plugin)). The rule for those two paths:
+  hook and plugin present → full installer; hook only → full installer; plugin
+  only → in-place copy of the plugin files, falling back to the full installer
+  if that copy fails (which can add the hook that was not there before). That installer is
   the **full installer**, not a file copy: it snapshots and edits the OpenClaw
   configuration to register the plugin and, by default, restarts the OpenClaw
   gateway — so a package update can briefly interrupt a running gateway. The
@@ -195,12 +200,17 @@ governed by these variables.
 
 ### The update lock
 
-Every writer into `~/.openclaw` — `shieldcortex update`, `shieldcortex openclaw
-install`, the hook refresh — takes `~/.openclaw/.shieldcortex-update.lock`
-first; `~/.hermes` has its own for the Hermes plugin copy. A second writer that
+The plugin-install, wrapper-install and hook-refresh steps of `shieldcortex
+update` and `shieldcortex openclaw install` take
+`~/.openclaw/.shieldcortex-update.lock` first; `~/.hermes` has its own for the
+Hermes plugin copy. Not every write is covered: npm postinstall's in-place
+plugin copy does not take the lock, and `update` releases it before its later
+OpenClaw protection check, which can restore the plugin registration or prune
+directories. A second locking writer that
 finds the lock held does not wait and does not take it over: `update` reports
 that step as skipped and unfinished, names the re-run command, and exits 1.
-Nothing clears a lock automatically — a lock whose owner died looks the same as
+Normal owners release the lock when they finish, but an abandoned lock is never
+reclaimed automatically — a lock whose owner died looks the same as
 one whose owner is mid-write, and a process that deletes locks by age can delete
 a live one. If an interrupted run has left one behind, remove it yourself only
 after confirming no `shieldcortex update` or `openclaw install` is running, then
