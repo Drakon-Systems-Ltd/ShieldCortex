@@ -32,12 +32,12 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
 
   it('README warns above the install command and links the upgrade page', () => {
     const readme = read('README.md');
-    expect(readme).toMatch(/ShieldCortex 5\.0 requires Node 22\.14\+ or Node 24/);
+    expect(readme).toMatch(/ShieldCortex 5\.x requires Node 22\.14\+ or Node 24/);
     expect(readme).toMatch(/Node 20 is no longer supported/);
     expect(readme).toMatch(/docs\/UPGRADING-5\.md/);
     expect(readme).toMatch(/Action Guard stays off by default/);
     // The warning must appear before the Quick Start install block, not buried.
-    expect(readme.indexOf('ShieldCortex 5.0 requires Node')).toBeLessThan(
+    expect(readme.indexOf('ShieldCortex 5.x requires Node')).toBeLessThan(
       readme.indexOf('## 🚀 Quick Start'),
     );
   });

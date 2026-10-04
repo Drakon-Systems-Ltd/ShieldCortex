@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - (none yet)
 
+### Docs
+- **README: accurate 5.3 install, update and what's-new guidance.** The top warning is now the 5.x Node floor (not "5.0"); new "Updating" section (what `shieldcortex update` refreshes, the per-host manual steps, `service repair`, doctor) and "What's new in 5.3"; stale UI version stamp removed; links to files not in the npm tarball made absolute; the ESM example no longer shows a default import the package does not export.
+
 ## [5.3.1] - 2026-10-03
 
 Patch on 5.3.0. One Action Guard fix for OpenClaw's Codex harness; nothing else changes. Guard stays off by default. Node floor and Cloud pin unchanged.
