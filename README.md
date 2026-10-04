@@ -15,7 +15,7 @@
 ShieldCortex does **not** replace OpenClaw, Hermes, or Claude memory. Native memory stays the brain. This package is the door.
 
 > [!WARNING]
-> **ShieldCortex 5.x requires Node 22.14+ or Node 24+** (22.14 or later within 22.x, or any 24). Node 20 is no longer supported, and neither is Node 23: npm only warns (`EBADENGINE`), then the database engine fails to load and `shieldcortex doctor` fails. Coming from 4.x? Read [Upgrading to 5](docs/UPGRADING-5.md) **before** you update. Action Guard stays off by default; enable it deliberately.
+> **ShieldCortex 5.x requires Node 22.14+ or Node 24+**: Node 22.14 or later within 22.x, or Node 24 or later. Node 20 is no longer supported, and neither is Node 23. npm normally warns on unsupported versions (`EBADENGINE`) and installs anyway; with engine-strict enabled it refuses. On an unsupported Node the database engine fails to load and `shieldcortex doctor` fails. Coming from 4.x? Read [Upgrading to 5](docs/UPGRADING-5.md) **before** you update. Action Guard stays off by default; enable it deliberately.
 
 ```bash
 npm install -g shieldcortex
@@ -54,7 +54,7 @@ Trusted task → let it work. Hijack → a plain-English card. Catastrophe → h
 
 ### Requirements
 
-- **Node 22.14+ (within 22.x), or Node 24+.** Node 20 is not supported, and neither is Node 23; npm warns but does not refuse, so check `node -v` before you install.
+- **Node 22.14+ (22.14 or later within 22.x) or Node 24+ (24 or later).** Node 20 is not supported, and neither is Node 23. npm normally warns on unsupported versions; with engine-strict enabled it refuses. Check `node -v` before you install.
 - Upgrade notes, including how to stay on 4.x: [Upgrading to 5](docs/UPGRADING-5.md).
 
 ```bash
@@ -83,25 +83,32 @@ Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob
 
 ## Updating
 
-Coming from 4.x: back up `~/.shieldcortex` and read [Upgrading to 5](docs/UPGRADING-5.md) first. Within 5.x, one command upgrades the package and refreshes every host that is already wired on this box:
+Coming from 4.x: back up `~/.shieldcortex` and read [Upgrading to 5](docs/UPGRADING-5.md) first. Within 5.x:
 
 ```bash
 shieldcortex update
 shieldcortex doctor
 ```
 
-`update` installs `shieldcortex@latest` globally, verifies the database engine, then refreshes what is already installed: the OpenClaw plugin and skill, the file-copied OpenClaw hook and Hermes plugin copies, Claude Code hooks (missing canonical hooks are added back), and state permissions. The hook and Hermes refreshes are file copies and the Claude Code refresh edits `~/.claude/settings.json`; none of them restarts anything. The OpenClaw protection check that follows reconciles the plugin registration and **may restart the OpenClaw gateway**: a terminal run counts as consent; a headless run needs `SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1` and `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1`; `SHIELDCORTEX_SKIP_GATEWAY_RESTART=1` suppresses the restart either way. A refreshed OpenClaw hook or Hermes copy takes effect only when its gateway restarts; beyond that reconciliation, `update` leaves restarts to you. In a terminal, `update` ends by offering to wire hosts that are present but not wired — it asks first; headless runs only list them.
+`update` upgrades the package and refreshes the integrations already installed on this box: OpenClaw plugin, skill and hook, Hermes plugin copy, Claude Code hooks, state permissions. It **may restart the OpenClaw gateway**, and on macOS a ShieldCortex dashboard service still serving the old build; running it in a terminal counts as consent, with no further prompt. It asks before wiring hosts that are present but not yet wired; headless runs only list them. Read the final summary even when the command exits 0.
 
-Exit 1 means the npm install failed, the OpenClaw protection check failed, or a host refresh did not finish. A `warn` row or a listed re-run command still exits 0, so read the step ledger and run `shieldcortex doctor` afterwards. `shieldcortex update --help` lists its flags. A leftover `.shieldcortex-update.lock` from an interrupted run is never cleared automatically — remove it only after confirming no update or install is running.
+Warnings and re-run commands do not by themselves set the exit code. An npm failure, a failed OpenClaw protection check, or a plugin, hook or Hermes refresh marked unfinished exits 1. Other warnings can exit 0, so read the summary and run `shieldcortex doctor`.
 
-Doing it by hand, or re-checking one host:
+### Restart controls
 
-1. **Package** — `npm install -g shieldcortex@latest`. npm's postinstall refreshes a `cortex-memory` hook or a legacy `extensions/` plugin copy it finds under `~/.openclaw`; a hook with no legacy plugin copy beside it runs the full `shieldcortex openclaw install`, which reinstalls the plugin and can restart the OpenClaw gateway ([details](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/openclaw-integration.md#install-time-refresh-postinstall)). Set `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` on the install to leave OpenClaw alone.
-2. **Claude Code** — `shieldcortex install` re-runs the hook setup in `~/.claude/settings.json`: missing hooks are added, old `npx` entries migrated, timeouts fixed. Existing Stop / SessionEnd opt-ins are left as they are.
-3. **OpenClaw** — the plugin is `@drakon-systems/shieldcortex-realtime` (plugin id `shieldcortex-realtime`), managed by OpenClaw's own plugin registry. Refresh it with `openclaw plugins update @drakon-systems/shieldcortex-realtime@latest` — the explicit spec moves past a pinned version and is recorded for later updates, where a bare `openclaw plugins update shieldcortex-realtime` stays on the pin — then `openclaw gateway restart` if the hook was refreshed too. On older OpenClaw, or to recover a broken install, `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest` reinstalls it; `shieldcortex update` uses that forced form itself, so the two do not conflict. `shieldcortex openclaw install` does plugin, hook and restart in one go (`--no-gateway-restart` to skip the restart).
-4. **Hermes** — `shieldcortex hermes install` only copies the plugin into `~/.hermes/plugins/shieldcortex`. It gates tool calls once `hermes plugins enable shieldcortex` has been run and the local API (`shieldcortex api`) is up; Hermes discovers the copy only at start-up, so restart the Hermes gateway after a refresh. `shieldcortex hermes status` reports whether the copy is present, not whether it is enforcing.
-5. **Background service** — if you ran `shieldcortex service install`, run `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`): it removes the unit and reinstalls it against the current install in the mode you pass, not the previous one. Linux and macOS restart the service; Windows schedules it for the next login.
-6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or the Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Its repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
+- `SHIELDCORTEX_SKIP_GATEWAY_RESTART=1` — ShieldCortex never restarts the OpenClaw gateway: not from `update`, not from `shieldcortex openclaw install`, not from npm's postinstall, in a terminal or not. It is checked before any consent. Restart by hand when ready.
+- `SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1` and `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1` — a headless `update` (cron, CI, an agent) needs both to apply the OpenClaw protection fix-up and reload the gateway afterwards. Without the first it only reports what it would change; without the second it applies the fix-up but skips the reload.
+- `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1` alone — enough for a headless `shieldcortex openclaw install` to restart the gateway, including the one npm's postinstall runs to refresh an existing OpenClaw integration; that path does not read the reconcile variable.
+- `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` — set on `npm install -g shieldcortex` to keep postinstall away from `~/.openclaw` entirely: no refresh, no installer, no restart.
+
+### Updating by hand
+
+1. **Package** — `npm install -g shieldcortex@latest`. On a box with an earlier OpenClaw hook or plugin, npm's postinstall refreshes it and can restart the gateway (see Restart controls). How it decides what to refresh: [install-time refresh](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/openclaw-integration.md#install-time-refresh-postinstall).
+2. **Claude Code** — `shieldcortex install` re-runs the hook setup in `~/.claude/settings.json`: missing hooks added, old `npx` entries migrated, timeouts fixed. Existing Stop / SessionEnd opt-ins are left as they are.
+3. **OpenClaw** — `openclaw plugins update @drakon-systems/shieldcortex-realtime@latest`, then `openclaw gateway restart` if the hook was refreshed too. `shieldcortex openclaw install` does plugin, hook and restart in one go (`--no-gateway-restart` to skip the restart). Pinned versions, forced reinstall and the update lock: [updating the plugin](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/openclaw-integration.md#updating-the-plugin).
+4. **Hermes** — `shieldcortex hermes install` copies the plugin into `~/.hermes/plugins/shieldcortex`; it gates tool calls once `hermes plugins enable shieldcortex` has run and the local API (`shieldcortex api`) is up. Restart the Hermes gateway after a refresh. `shieldcortex hermes status` reports presence, not enforcement.
+5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
+6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
 ## Dashboard and Cloud
 
@@ -127,7 +134,7 @@ sudo shieldcortex protect
 shieldcortex config --policy-status
 ```
 
-Root, once. A bare `protect` reads nothing from `config.json`: it pins the safe posture — Action Guard **enabled and enforcing**, empty auto-approve and reviewed-script lists, broker off — so this is also the moment Guard turns on. `sudo shieldcortex protect --from-config` pins your current `config.json` values instead, including a Guard that is off. Either way an agent cannot quietly loosen the pinned keys afterwards. There is no `unprotect` command. Recovery is a human at a root shell — [runbook](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/design/2026-09-16-501-policy-lock.md).
+Root, once. A bare `protect` reads nothing from `config.json`: it pins the safe posture — Action Guard **enabled and enforcing**, empty auto-approve and reviewed-script lists, broker off — so this is also the moment Guard turns on. `sudo shieldcortex protect --from-config` pins your current protected settings instead — the Action Guard block, plus defence mode and memory posture where `config.json` sets them — including a Guard that is off. Either way an agent cannot quietly loosen the pinned keys afterwards. There is no `unprotect` command. Recovery is a human at a root shell — [runbook](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/design/2026-09-16-501-policy-lock.md).
 
 ## Integrations
 

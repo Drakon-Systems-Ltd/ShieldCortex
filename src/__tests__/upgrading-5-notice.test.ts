@@ -53,6 +53,20 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     expect(readme.slice(req, install)).toMatch(/Node 20 is not supported/);
   });
 
+  it('README states the npm engines behaviour precisely and promises no restart it cannot keep', () => {
+    const readme = read('README.md');
+    const qs = readme.indexOf('## 🚀 Quick Start');
+    const req = readme.indexOf('### Requirements', qs);
+    const install = readme.indexOf('npm install -g shieldcortex', qs + 1);
+    // engines is advisory unless engine-strict is set (src/cli/doctor.ts); the
+    // README must say both halves, not "warns but does not refuse".
+    expect(readme.slice(req, install)).toMatch(/engine-strict/);
+    expect(readme).not.toMatch(/does not refuse|only warns|or any 24/);
+    // postinstall, the wiring offer and the macOS dashboard kick can all
+    // restart something, so `update` may not claim to leave restarts to you.
+    expect(readme).not.toMatch(/leaves restarts to you/);
+  });
+
   it('CHANGELOG 5.0.0 section opens with Breaking, below the Unreleased section', () => {
     const log = read('CHANGELOG.md');
     const five = log.indexOf('## [5.0.0]');
