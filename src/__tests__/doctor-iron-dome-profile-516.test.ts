@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
 import { checkIronDomeProfile, ironDomeProfileVerdict, IRON_DOME_PROFILE_LABEL } from '../cli/doctor.js';
-import { extractFixCommands } from '../cli/doctor-report.js';
+import { extractFixCommands, formatDoctorReport } from '../cli/doctor-report.js';
 import { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES, type IronDomeConfig } from '../defence/iron-dome/config.js';
 
 const stock = (): IronDomeConfig => ({ ...DEFAULT_IRON_DOME_CONFIG, enabled: true });
@@ -25,15 +25,12 @@ describe('doctor Iron Dome profile (#516)', () => {
     expect(result.message).toContain('no PII rules');
     expect(result.message).toContain('no sub-agent blocks');
     expect(`${result.message} ${result.fix}`).not.toContain(DEFAULT_IRON_DOME_CONFIG.killPhrase);
-    expect(result.fix).toContain('shieldcortex iron-dome activate --profile <school|enterprise|personal|paranoid>');
-    const commands = extractFixCommands(result.fix);
-    expect(commands).toContain('shieldcortex iron-dome activate --profile <school|enterprise|personal|paranoid>');
-    const curl = commands.find((c) => c.startsWith('curl -X POST http://localhost:3001/api/iron-dome/config'));
-    expect(curl).toBeDefined();
-    // The API is bearer-gated: a fix command without the session token would 401.
-    expect(curl).toContain('Authorization: Bearer $(cat ~/.shieldcortex/.api-token)');
-    expect(curl).toContain(`-d '{"killPhrase":"<your phrase>"}'`);
+    expect(extractFixCommands(result.fix)).toEqual([]);
+    expect(result.fix).toContain('school, enterprise, personal or paranoid');
+    expect(result.fix).toContain('replaces the whole Iron Dome config, including trusted channels');
+    expect(result.fix).toContain('all rule lists');
     expect(result.fix).toContain('dashboard Iron Dome view');
+    expect(result.fix).toContain('http://localhost:3030');
     expect(result.fix).toMatch(/3.{0,3}80 chars/);
     expect(result.fix).toMatch(/afterwards/);
   });
@@ -50,15 +47,39 @@ describe('doctor Iron Dome profile (#516)', () => {
     expect(result.message).toContain('default kill phrase');
     expect(result.message).not.toContain('no PII rules');
     expect(result.message).not.toContain('no sub-agent blocks');
+    expect(extractFixCommands(result.fix)).toEqual([]);
+    expect(result.fix).toContain('dashboard Iron Dome view');
+    expect(result.fix).not.toContain('activate');
   });
 
-  it('warns about missing PII rules and gives the activation command', () => {
+  it('warns about missing PII rules with prose guidance', () => {
     const result = ironDomeProfileVerdict({ ...stock(), killPhrase: 'my private stop trigger' });
     expect(result.status).toBe('warn');
     expect(result.message).toContain('no PII rules');
     expect(result.message).not.toContain('default kill phrase');
-    expect(result.fix).toContain('shieldcortex iron-dome activate --profile <school|enterprise|personal|paranoid>');
-    expect(result.fix).toContain('curl -X POST http://localhost:3001/api/iron-dome/config');
+    expect(extractFixCommands(result.fix)).toEqual([]);
+    expect(result.fix).toContain('replaces the whole Iron Dome config, including trusted channels');
+    expect(result.fix).toContain('dashboard Iron Dome view');
+  });
+
+  it.each([
+    ['stock', stock()],
+    ['school with only the default phrase', { ...IRON_DOME_PROFILES.school, enabled: true }],
+  ])('renders %s warning without executable remediation', (_name, config) => {
+    const result = ironDomeProfileVerdict(config);
+    const report = formatDoctorReport([result], { width: 120 }).join('\n');
+    expect(result.status).toBe('warn');
+    expect(report).toContain('Iron Dome profile');
+    expect(report).toMatch(/dashboard\s+Iron Dome view/);
+    expect(report).not.toMatch(/^\s*\$ /m);
+    expect(report).not.toContain('iron-dome activate');
+    expect(report).not.toContain('curl');
+    expect(report).not.toContain('api-token');
+    expect(report).not.toContain(DEFAULT_IRON_DOME_CONFIG.killPhrase);
+    const nextSection = report.split(/\nNEXT\n/)[1];
+    if (nextSection) {
+      expect(nextSection).not.toMatch(/iron-dome activate|curl|api-token/);
+    }
   });
 
   it('treats only missing sub-agent blocks as informational within a pass', () => {

@@ -8488,10 +8488,10 @@ export function ironDomeProfileVerdict(config: IronDomeConfig): CheckResult {
   if (defaultPhrase || noPiiRules) {
     const fixes: string[] = [];
     if (noPiiRules) {
-      fixes.push('Run `shieldcortex iron-dome activate --profile <school|enterprise|personal|paranoid>` to set PII rules. Activating a profile resets the kill phrase, so set the phrase afterwards.');
+      fixes.push('For PII rules, review the Iron Dome activate command with the school, enterprise, personal or paranoid profile before using it. Activating a profile replaces the whole Iron Dome config, including trusted channels, the kill phrase and all rule lists. Set the kill phrase afterwards.');
     }
-    // Activating a profile resets the phrase, so the phrase step follows either gap.
-    fixes.push('Set a unique kill phrase (3–80 chars) in the dashboard Iron Dome view (http://localhost:3030), or with the API server running: `curl -X POST http://localhost:3001/api/iron-dome/config -H "Authorization: Bearer $(cat ~/.shieldcortex/.api-token)" -H \'content-type: application/json\' -d \'{"killPhrase":"<your phrase>"}\'`.');
+    // Activating a profile replaces the phrase, so the phrase step follows either gap.
+    fixes.push('Set a unique kill phrase (3–80 chars) in the dashboard Iron Dome view (http://localhost:3030).');
     return {
       label: IRON_DOME_PROFILE_LABEL,
       status: 'warn',

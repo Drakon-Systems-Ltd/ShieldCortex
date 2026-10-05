@@ -144,7 +144,7 @@ export function extractFixCommands(fix: string | undefined): string[] {
     if (!c) continue;
     // Prefer real shell-ish snippets
     if (
-      /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod|curl)\b/i.test(c) ||
+      /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(c) ||
       c.startsWith('SHIELDCORTEX_')
     ) {
       cmds.push(c);
