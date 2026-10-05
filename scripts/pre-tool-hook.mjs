@@ -30,10 +30,12 @@
  * `permissionMode` and outcome `denied_no_prompt_surface` so this is
  * distinguishable from a catastrophic auto-deny in forensics.
  *
- * Failure posture (WS2): a guard that cannot load or evaluate no longer fails
- * OPEN unconditionally. A small, dependency-free FALLBACK_CATASTROPHIC scan
- * (duplicated inline, not imported from dist — it must survive the exact
- * failure it guards against) runs against the same command/path/url surface.
+ * Failure posture (WS2/#511): a guard that cannot load or evaluate no longer
+ * fails OPEN unconditionally. A small FALLBACK_CATASTROPHIC scan runs against
+ * the same command/path/url surface. The launcher carries a matching scan so
+ * catastrophic calls are denied even when this hook file cannot load. Empty,
+ * malformed or incomplete input is scanned as bounded raw text without
+ * touching state.
  * If it recognises one of the handful of unambiguous, essentially-never-benign
  * catastrophic shapes (rm -rf /, a raw-disk dd/mkfs/wipefs, a fork bomb,
  * curl|bash), the call is denied — fail CLOSED for the catastrophic tier even
@@ -44,8 +46,8 @@
  * ShieldCortex exists to prevent. See plugins/openclaw/interceptor.ts for the
  * mirrored fallback on the OpenClaw runtime surface.
  *
- * The hook always exits 0 — denial travels in hookSpecificOutput JSON, never
- * exit codes, so a crash can't masquerade as a verdict.
+ * When this file runs, denial travels in hookSpecificOutput JSON with exit 0.
+ * The launcher handles a file-load crash before this code can emit a verdict.
  */
 
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
@@ -2198,6 +2200,16 @@ function fallbackCatastrophicMatch(toolInput) {
   return FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(text));
 }
 
+function handleUnknownInput() {
+  if (FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(input.slice(0, FALLBACK_SCAN_CAP)))) {
+    console.error('[shieldcortex] unparseable PreToolUse input matched catastrophic fallback — DENYING');
+    emitDecision('deny', 'ShieldCortex catastrophic fallback matched unparseable PreToolUse input');
+  } else {
+    console.error('[shieldcortex] unparseable PreToolUse input; no catastrophic fallback match');
+  }
+  process.exit(0);
+}
+
 
 // ── #522 G4: the lock-path READ carve-out, ported to the blunt fallback ──────
 //
@@ -2706,17 +2718,20 @@ process.stdin.on('end', async () => {
 
     let hookData;
     try {
-      hookData = JSON.parse(input || '{}');
+      hookData = JSON.parse(input);
     } catch {
-      process.exit(0); // Malformed payload — nothing to evaluate.
+      handleUnknownInput();
     }
+    if (!hookData || typeof hookData !== 'object' || Array.isArray(hookData)
+      || !hookData.tool_input || typeof hookData.tool_input !== 'object'
+      || Array.isArray(hookData.tool_input)) handleUnknownInput();
     const toolName = typeof hookData.tool_name === 'string' ? hookData.tool_name : '';
     const toolInput =
       hookData.tool_input && typeof hookData.tool_input === 'object' ? hookData.tool_input : {};
     // Absent on harnesses that don't report it — noPromptSurfaceReason() treats
     // that as "cannot confirm a prompt surface", not as "prompting is fine".
     const permissionMode = hookData.permission_mode;
-    if (!toolName) process.exit(0);
+    if (!toolName) handleUnknownInput();
     const baseExtra = hookSessionExtras(hookData, permissionMode);
     let notifyPromise;
     const getNotify = () => {
