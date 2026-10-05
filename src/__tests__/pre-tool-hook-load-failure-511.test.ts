@@ -159,28 +159,40 @@ describe('issue #511 PreToolUse failure posture', () => {
     expect(launcher.launcherCatastrophicMatch(`{"tool_name":"Bash","tool_input":{"command":"${splitFlags}"`)).toBe(true);
   });
 
-  it('scans adversarial 4096-character input in under 50 ms', () => {
+  // Budget rationale (measured, not guessed). The `rm` rows are quadratic in
+  // the scanned length, and only FALLBACK_SCAN_CAP bounds them. At the 4096
+  // cap the worst padding (`rm -x -x ...`) costs ~13 ms locally. On a contended
+  // CI runner (the full suite in parallel), the warmed minimum reached 118 ms.
+  // Uncapped, the same padding costs ~190 ms at 16 KB, ~750 ms at 32 KB and
+  // seconds at 100 KB. 300 ms (the guard-bypasses-4475 precedent) is far above
+  // the capped regime and far below the uncapped one. The 100 KB rows below are
+  // the real regression check: they pass only if every path enforces the cap.
+  const SCAN_BUDGET_MS = 300;
+
+  it(`scans adversarial input in under ${SCAN_BUDGET_MS} ms at the cap and at 25x the cap`, () => {
     const match = (launcher as unknown as { launcherCatastrophicMatch?: (input: string) => boolean }).launcherCatastrophicMatch;
     expect(match).toBeDefined();
-    const paddings = [
-      'curl ' + 'x|'.repeat(2044),
-      'rm ' + '-x '.repeat(1364),
-      'rm ' + 'a'.repeat(4093),
-      'curl ' + '| '.repeat(2045),
-      ['ch', 'mod -R '].join('') + 'a '.repeat(2044),
-      'dd ' + 'x'.repeat(4093),
+    const paddings = (n: number) => [
+      'curl ' + 'x|'.repeat(n / 2 - 4),
+      'rm ' + '-x '.repeat(Math.floor(n / 3) - 1),
+      'rm ' + 'a'.repeat(n - 3),
+      'curl ' + '| '.repeat(n / 2 - 3),
+      ['ch', 'mod -R '].join('') + 'a '.repeat(n / 2 - 4),
+      'dd ' + 'x'.repeat(n - 3),
     ];
-    for (const padding of paddings) {
+    for (const padding of [...paddings(4096), ...paddings(102_400)]) {
       const wrapped = payload(padding);
+      // Raw text, the parsed-JSON surface, and the raw fallback for a malformed payload.
       for (const input of [padding, wrapped, wrapped + '"']) {
         match!(input);
-        // A cold run or scheduler pause can spike; the minimum still catches consistently slow patterns.
+        // A cold run or scheduler pause can spike, but the warmed minimum still
+        // catches a row that is consistently slow.
         const durations = Array.from({ length: 5 }, () => {
           const start = performance.now();
           match!(input);
           return performance.now() - start;
         });
-        expect(Math.min(...durations)).toBeLessThan(50);
+        expect(Math.min(...durations)).toBeLessThan(SCAN_BUDGET_MS);
       }
     }
     // Past the cap the catastrophic tail is out of scope by design (FALLBACK_SCAN_CAP).
