@@ -2200,8 +2200,12 @@ function fallbackCatastrophicMatch(toolInput) {
   return FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(text));
 }
 
+function rawFallbackSurface(text) {
+  return text.slice(0, FALLBACK_SCAN_CAP).replace(/"/g, ' ');
+}
+
 function handleUnknownInput() {
-  if (FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(input.slice(0, FALLBACK_SCAN_CAP)))) {
+  if (FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(rawFallbackSurface(input)))) {
     console.error('[shieldcortex] unparseable PreToolUse input matched catastrophic fallback — DENYING');
     emitDecision('deny', 'ShieldCortex catastrophic fallback matched unparseable PreToolUse input');
   } else {

@@ -33,8 +33,45 @@ export const LAUNCHER_CATASTROPHIC_PATTERNS = [
   /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:\s|$)/i,
 ];
 
+// Keep this field set and its order identical to FALLBACK_SURFACE_KEYS in the hook.
+export const LAUNCHER_SURFACE_KEYS = [
+  'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
+  'url', 'uri', 'endpoint', 'href', 'host', 'to',
+];
+
+export function launcherExecSurface(toolInput: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const k of LAUNCHER_SURFACE_KEYS) {
+    const v = toolInput?.[k];
+    if (typeof v === 'string' && v.length > 0) parts.push(v);
+    else if (Array.isArray(v)) {
+      const joined = v.filter((e): e is string => typeof e === 'string').join(' ');
+      if (joined.length > 0) parts.push(joined);
+    }
+  }
+  return parts.join('   ').slice(0, 4096);
+}
+
+function rawFallbackSurface(text: string): string {
+  return text.slice(0, 4096).replace(/"/g, ' ');
+}
+
 export function launcherCatastrophicMatch(rawInput: string): boolean {
-  const text = rawInput.slice(0, 4096);
+  let text: string;
+  try {
+    const parsed: unknown = JSON.parse(rawInput);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      && 'tool_input' in parsed && parsed.tool_input !== null
+      && typeof parsed.tool_input === 'object' && !Array.isArray(parsed.tool_input)) {
+      text = launcherExecSurface(parsed.tool_input as Record<string, unknown>);
+      if (!text) return false;
+    } else {
+      text = rawFallbackSurface(rawInput);
+    }
+  } catch {
+    text = rawFallbackSurface(rawInput);
+  }
   return LAUNCHER_CATASTROPHIC_PATTERNS.some((pattern) => pattern.test(text));
 }
 
@@ -80,14 +117,6 @@ function runScript(scriptPath: string, args: string[] = []): void {
   });
 }
 
-function isHookDecision(stdout: string): boolean {
-  try {
-    const output = JSON.parse(stdout);
-    return output?.hookSpecificOutput?.hookEventName === 'PreToolUse'
-      && ['deny', 'ask', 'allow'].includes(output.hookSpecificOutput.permissionDecision);
-  } catch { return false; }
-}
-
 function runPreToolScript(scriptPath: string): void {
   const chunks: Buffer[] = [];
   process.stdin.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -118,8 +147,10 @@ function runPreToolScript(scriptPath: string): void {
     });
     child.on('close', (code, signal) => {
       const loadError = /SyntaxError|ERR_MODULE_NOT_FOUND|Cannot find module|ERR_UNKNOWN_FILE_EXTENSION/.test(stderr);
-      const failed = code !== 0 || signal !== null || (loadError && !isHookDecision(stdout));
-      if (failed) process.stderr.write('[shieldcortex] pre-tool hook failed; checking catastrophic fallback\n');
+      const failed = code !== 0 || signal !== null;
+      if (failed) process.stderr.write(loadError
+        ? '[shieldcortex] pre-tool hook load failed; checking catastrophic fallback\n'
+        : '[shieldcortex] pre-tool hook failed; checking catastrophic fallback\n');
       if (failed && launcherCatastrophicMatch(input.toString('utf8'))) {
         fs.writeSync(1, JSON.stringify({ hookSpecificOutput: {
           hookEventName: 'PreToolUse', permissionDecision: 'deny',

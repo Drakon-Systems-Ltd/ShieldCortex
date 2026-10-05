@@ -9,6 +9,9 @@ import * as launcher from '../setup/hooks.js';
 const root = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 const hook = join(root, 'scripts/pre-tool-hook.mjs');
 const catastrophic = ['rm', '-rf', '/'].join(' ');
+const splitFlags = ['rm', '-r', '-f', '/'].join(' ');
+const recursivePermissions = ['chmod', '-R', '777', '/'].join(' ');
+const payload = (command: string | string[]) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } });
 
 function decision(stdout: string): string | undefined {
   try { return JSON.parse(stdout).hookSpecificOutput?.permissionDecision; }
@@ -64,12 +67,13 @@ describe('issue #511 PreToolUse failure posture', () => {
       const install = installCopy();
       if (failure === 'syntax error') writeFileSync(join(install, 'scripts/pre-tool-hook.mjs'), 'this is not JavaScript !');
       else unlinkSync(join(install, 'scripts/lib/state-perms.mjs'));
-      const payload = (command: string) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } });
-      const blocked = join(temp, 'catastrophic-sentinel');
-      const catastrophicResult = hostEffectWitness(install, payload(catastrophic), blocked);
-      expect(catastrophicResult.status).toBe(0);
-      expect(decision(catastrophicResult.stdout)).toBe('deny');
-      expect(existsSync(blocked)).toBe(false);
+      for (const [index, command] of [catastrophic, splitFlags, recursivePermissions].entries()) {
+        const blocked = join(temp, `catastrophic-sentinel-${index}`);
+        const catastrophicResult = hostEffectWitness(install, payload(command), blocked);
+        expect(catastrophicResult.status).toBe(0);
+        expect(decision(catastrophicResult.stdout)).toBe('deny');
+        expect(existsSync(blocked)).toBe(false);
+      }
       const benign = join(temp, 'benign-sentinel');
       hostEffectWitness(install, payload('ls'), benign);
       expect(existsSync(benign)).toBe(true);
@@ -78,21 +82,35 @@ describe('issue #511 PreToolUse failure posture', () => {
 
   it('a healthy install still passes the real hook decision through the launcher', () => {
     const install = installCopy();
-    const payload = (command: string) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, permission_mode: 'default' });
-    const blocked = join(temp, 'healthy-catastrophic-sentinel');
-    const denied = hostEffectWitness(install, payload(catastrophic), blocked);
-    expect(decision(denied.stdout)).toBe('deny');
-    expect(existsSync(blocked)).toBe(false);
+    const healthyPayload = (command: string) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, permission_mode: 'default' });
+    for (const [index, command] of [catastrophic, splitFlags, recursivePermissions].entries()) {
+      const blocked = join(temp, `healthy-catastrophic-sentinel-${index}`);
+      const denied = hostEffectWitness(install, healthyPayload(command), blocked);
+      expect(decision(denied.stdout)).toBe('deny');
+      expect(existsSync(blocked)).toBe(false);
+    }
     const benign = join(temp, 'healthy-benign-sentinel');
-    const allowed = hostEffectWitness(install, payload('ls'), benign);
+    const allowed = hostEffectWitness(install, healthyPayload('ls'), benign);
     expect(allowed.status).toBe(0);
     expect(decision(allowed.stdout)).toBeUndefined();
     expect(existsSync(benign)).toBe(true);
   });
 
+  it('does not treat load-error text on stderr as a failed hook when exit is zero', () => {
+    const install = installCopy();
+    writeFileSync(join(install, 'scripts/pre-tool-hook.mjs'), "process.stderr.write('SyntaxError: diagnostic text\\n');\n");
+    const sentinel = join(temp, 'successful-stderr-sentinel');
+    const result = hostEffectWitness(install, payload(catastrophic), sentinel);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('SyntaxError: diagnostic text');
+    expect(decision(result.stdout)).toBeUndefined();
+    expect(existsSync(sentinel)).toBe(true);
+  });
+
   it.each([
     ['empty', '', false],
     ['malformed catastrophic', `{"tool_name":"Bash","tool_input":{"command":"${catastrophic}"`, true],
+    ['malformed quoted r-f', `{"tool_name":"Bash","tool_input":{"command":"${splitFlags}"`, true],
     ['malformed benign', '{"tool_name":"Bash","tool_input":{"command":"ls"', false],
     ['null catastrophic', JSON.stringify({ tool_name: 'Bash', tool_input: null, note: catastrophic }), true],
     ['null benign', JSON.stringify({ tool_name: 'Bash', tool_input: null, note: 'ls' }), false],
@@ -116,6 +134,31 @@ describe('issue #511 PreToolUse failure posture', () => {
     expect(patterns?.map((pattern) => pattern.toString())).toEqual(literals);
   });
 
+  it('keeps the launcher surface keys in parity with the hook', () => {
+    const source = readFileSync(hook, 'utf8');
+    const block = source.match(/const FALLBACK_SURFACE_KEYS = \[([\s\S]*?)\n\];/)?.[1];
+    expect(block).toBeDefined();
+    const keys = [...block!.matchAll(/'([^']+)'/g)].map((match) => match[1]);
+    expect(launcher.LAUNCHER_SURFACE_KEYS).toEqual(keys);
+  });
+
+  it.each([
+    [['rm', '-r', '-f', '/'].join(' '), true],
+    [['rm', '-R', '-f', '/'].join(' '), true],
+    [['rm', '-r', '-f', '~'].join(' '), true],
+    [['chmod', '-R', '777', '/'].join(' '), true],
+    [['chown', '-R', 'root', '/'].join(' '), true],
+    ['ls', false],
+    [['rm', '-r', 'build'].join(' '), false],
+  ])('matches the launcher surface for %s', (command, expected) => {
+    expect(launcher.launcherCatastrophicMatch(payload(command))).toBe(expected);
+  });
+
+  it('matches argv arrays and truncated quoted input', () => {
+    expect(launcher.launcherCatastrophicMatch(payload(['rm', '-r', '-f', '/']))).toBe(true);
+    expect(launcher.launcherCatastrophicMatch(`{"tool_name":"Bash","tool_input":{"command":"${splitFlags}"`)).toBe(true);
+  });
+
   it('scans adversarial 4096-character input in under 50 ms', () => {
     const match = (launcher as unknown as { launcherCatastrophicMatch?: (input: string) => boolean }).launcherCatastrophicMatch;
     expect(match).toBeDefined();
@@ -128,9 +171,17 @@ describe('issue #511 PreToolUse failure posture', () => {
       'dd ' + 'x'.repeat(4093),
     ];
     for (const padding of paddings) {
-      const start = performance.now();
-      match!(padding);
-      expect(performance.now() - start).toBeLessThan(50);
+      const wrapped = payload(padding);
+      for (const input of [padding, wrapped, wrapped + '"']) {
+        match!(input);
+        // A cold run or scheduler pause can spike; the minimum still catches consistently slow patterns.
+        const durations = Array.from({ length: 5 }, () => {
+          const start = performance.now();
+          match!(input);
+          return performance.now() - start;
+        });
+        expect(Math.min(...durations)).toBeLessThan(50);
+      }
     }
     // Past the cap the catastrophic tail is out of scope by design (FALLBACK_SCAN_CAP).
     expect(match!('ls ' + catastrophic)).toBe(true);
