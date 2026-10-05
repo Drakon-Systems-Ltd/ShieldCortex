@@ -2330,7 +2330,10 @@ function fallbackWriteTargetMatch(toolInput, toolName) {
 //  - a quote is data only when its statement's command word is a data command,
 //    or it is the value of a long text flag on a non-executor;
 //  - a match is dropped only when it lies inside ONE data quote; an unclosed
-//    quote is never data.
+//    quote is never data;
+//  - no quote is data when the text pairs quotes the shell does not (review
+//    R3 on #626): a quote in a comment, an ANSI-C `$'…'`, heredoc text, or
+//    `${…}` with its own nested quotes.
 // Used only by rows tagged `dataQuotes`. Kept in sync with
 // plugins/openclaw/interceptor.ts and plugins/hermes/shieldcortex/sc_client.py.
 
@@ -2340,6 +2343,10 @@ const FALLBACK_TEXT_FLAG_RE = /(?:^|\s)--(?:text|body|message|comment|descriptio
 const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)$/i;
 /** A pipe into anything but a read-only filter (`echo "…" | bash`, `| "sh"`, `| b\\ash`) — `||` is not a pipe. */
 const FALLBACK_UNSAFE_PIPE_RE = /(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))/;
+/** Syntax whose quotes the walk below would mis-pair: ANSI-C `$'…'`, a heredoc, `${…}`. */
+const FALLBACK_QUOTE_UNMODELLED_RE = /\$'|<<|\$\{/;
+/** A `#` after one of these (or at the start) opens a comment. */
+const FALLBACK_WORD_BREAK = ' \t\n\r\v\f;&|()<>';
 /** A command word further back than this from its own quote is not recognised (the quote stays executed). */
 const FALLBACK_QUOTE_PREFIX_CAP = 512;
 /** Inert matches looked past before the row fails closed. */
@@ -2347,13 +2354,14 @@ const FALLBACK_INERT_MATCH_CAP = 64;
 
 /** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. */
 function fallbackDataQuoteRanges(text) {
-  if (FALLBACK_NESTED_EXEC_RE.test(text)) return [];
+  if (FALLBACK_NESTED_EXEC_RE.test(text) || FALLBACK_QUOTE_UNMODELLED_RE.test(text)) return [];
   const ranges = [];
   // Quote contents blanked, so the pipe check below never reads quoted text.
   let unquoted = '';
   let q = null;
   let open = -1;
   let stmtStart = 0;
+  let commentCheckedTo = 0;   // end of the last line already found free of quotes after a `#`
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     // Bash escaping: `\` escapes the next char outside quotes and inside "…".
@@ -2377,6 +2385,15 @@ function fallbackDataQuoteRanges(text) {
     unquoted += c;
     if (c === '"' || c === "'") { q = c; open = i; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&' || c === '(') stmtStart = i + 1;
+    else if (c === '#' && i >= commentCheckedTo && (i === 0 || FALLBACK_WORD_BREAK.includes(text[i - 1]))) {
+      // A comment runs to the end of the line, and a quote in it is no quote
+      // to the shell. Rather than model it (a `\ #` is not one), trust no
+      // quote at all when one is there. Kept walking either way.
+      const eol = text.indexOf('\n', i);
+      commentCheckedTo = eol < 0 ? text.length : eol;
+      const line = text.slice(i, commentCheckedTo);
+      if (line.includes('"') || line.includes("'")) return [];
+    }
   }
   return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
 }

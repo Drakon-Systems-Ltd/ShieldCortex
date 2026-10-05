@@ -35,6 +35,30 @@ const HU = 'helm ' + 'unin' + 'stall';
 const PSQL = 'ps' + 'ql -c ';
 const DROP = 'DR' + 'OP TABLE users';
 
+/**
+ * Review R3 on #626: quotes the shell never sees as quotes must not open or
+ * close a data range. Each pair: a real run hidden between two comment quotes
+ * (or other syntax the quote walk does not model) and the same words as
+ * genuine multi-line quoted data.
+ */
+const EXEC_COMMENT: Array<[string, string]> = [
+  ['a run between two double-quoted comments', `echo # "\n${TF} -auto-approve\n# "`],
+  ['a run between two single-quoted comments', `echo # '\n${TF} -auto-approve\n# '`],
+  ['a comment quote after a real data quote', `grep -F "x" RUNBOOK.md # "\n${TF}\n# "`],
+  ['comment quotes after a separator, then a read-only filter', `echo ok;# "\n${TF}\n# " | head -1`],
+  ['ANSI-C quoting pairs with a later quote', `echo $'\\'' ; ${TF} ; echo $'\\''`],
+  ['heredoc text pairs quotes around a run', `cat <<'EOF'\necho "\nEOF\n${TF}\ncat <<'EOF'\n"\nEOF`],
+  ['nested quotes in a parameter expansion', `echo "\${x:-"}"}" ; ${TF} ; echo "\${x:-"}"}"`],
+];
+
+const MULTILINE_DATA: Array<[string, string]> = [
+  ['genuine multi-line double-quoted data', `echo "step 1\n${TF} -auto-approve\nstep 3"`],
+  ['genuine multi-line single-quoted data', `grep -n '# heading\n${TF}' RUNBOOK.md`],
+  ['an escaped hash is not a comment', `echo \\# "${TF}"`],
+  ['a hash inside a word is not a comment', `echo "${TF}" > notes#1.txt`],
+  ['a trailing comment without quotes', `grep -F "${TF}" RUNBOOK.md # find it`],
+];
+
 const GATE: Array<[string, string]> = [
   ['plain', `${TF} -auto-approve`],
   ['bash -c wrapper', `bash -c "${TF} -auto-approve"`],
@@ -51,6 +75,7 @@ const GATE: Array<[string, string]> = [
   ['psql with a quoted statement', `${PSQL}"${DROP}"`],
   ['an unclosed quote is not data', `echo "x; ${TF}`],
   ['eval re-runs the quoted text', `eval "${TF}"`],
+  ...EXEC_COMMENT,
 ];
 
 const PASS: Array<[string, string]> = [
@@ -65,6 +90,7 @@ const PASS: Array<[string, string]> = [
   ['piped into a read-only filter', `grep -F "${TF}" RUNBOOK.md | head -5`],
   ['or-list after the grep', `grep -qF "${TF}" RUNBOOK.md || echo missing`],
   ['control: git status', 'git status'],
+  ...MULTILINE_DATA,
 ];
 
 const okPipeline = () => ({
@@ -113,7 +139,7 @@ describe('#503 R2 — Claude Code hook fallback: quoted data is not a teardown',
     fs.rmSync(emptyDist, { recursive: true, force: true });
   });
 
-  function runHook(command: string): Promise<{ stdout: string; code: number }> {
+  function runHook(command: string, mode = 'default'): Promise<{ stdout: string; code: number }> {
     return new Promise((res, rej) => {
       const child = spawn(process.execPath, [HOOK_PATH], {
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -128,7 +154,7 @@ describe('#503 R2 — Claude Code hook fallback: quoted data is not a teardown',
       child.stdout.on('data', (c) => { stdout += c.toString(); });
       child.on('error', rej);
       child.on('close', (code) => res({ stdout, code: code ?? 0 }));
-      child.stdin.write(JSON.stringify({ permission_mode: 'default', tool_name: 'Bash', tool_input: { command } }));
+      child.stdin.write(JSON.stringify({ permission_mode: mode, tool_name: 'Bash', tool_input: { command } }));
       child.stdin.end();
     });
   }
@@ -137,6 +163,13 @@ describe('#503 R2 — Claude Code hook fallback: quoted data is not a teardown',
     const { stdout, code } = await runHook(command);
     expect(code).toBe(0);
     expect(['ask', 'deny']).toContain(JSON.parse(stdout).hookSpecificOutput.permissionDecision);
+  });
+
+  // R3: no prompt surface, so the gate is a hard deny, never a silent allow.
+  it.each(EXEC_COMMENT.flatMap(([n, c]) => [[n, c, 'dontAsk'], [n, c, 'bypassPermissions']]))('denies %s headless (%s)', async (_name, command, mode) => {
+    const { stdout, code } = await runHook(command, mode);
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout).hookSpecificOutput.permissionDecision).toBe('deny');
   });
 
   it.each(PASS)('fails open on %s while degraded', async (_name, command) => {
@@ -156,11 +189,11 @@ describe('#503 R2 — the hook and the interceptor carry the same quoted-data ru
   // The two JS copies are kept in lockstep by hand; the Hermes port is pinned
   // behaviourally by DestroyRowDataQuoteTests on the same cases.
   const consts = (file: string): string[] => fs.readFileSync(path.join(REPO, file), 'utf-8').split('\n')
-    .filter((l) => /^const FALLBACK_(?:DATA_COMMAND_RE|TEXT_FLAG_RE|EXEC_WORD_RE|UNSAFE_PIPE_RE|QUOTE_PREFIX_CAP|INERT_MATCH_CAP) =/.test(l));
+    .filter((l) => /^const FALLBACK_(?:DATA_COMMAND_RE|TEXT_FLAG_RE|EXEC_WORD_RE|UNSAFE_PIPE_RE|QUOTE_UNMODELLED_RE|WORD_BREAK|QUOTE_PREFIX_CAP|INERT_MATCH_CAP) =/.test(l));
 
   it('same constants, and the row is tagged on both', () => {
     const hook = consts('scripts/pre-tool-hook.mjs');
-    expect(hook).toHaveLength(6);
+    expect(hook).toHaveLength(8);
     expect(hook).toEqual(consts('plugins/openclaw/interceptor.ts'));
     for (const f of ['scripts/pre-tool-hook.mjs', 'plugins/openclaw/interceptor.ts']) {
       expect(fs.readFileSync(path.join(REPO, f), 'utf-8')).toContain("signal: 'destroy-data-or-infra', dataQuotes: true }");

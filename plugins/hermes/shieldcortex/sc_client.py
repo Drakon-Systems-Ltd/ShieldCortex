@@ -165,13 +165,18 @@ def fallback_surface(args: dict) -> str:
 # text has nested execution or eval, or pipes into anything but a read-only
 # filter (grep, head, sort, jq, tee, ...); a quote is data only under a data command or as a long text
 # flag's value on a non-executor; a match is dropped only inside ONE data
-# quote; an unclosed quote is never data. Used only for _FALLBACK_DESTROY_ROW.
+# quote; an unclosed quote is never data; no quote is data when the text pairs
+# quotes the shell does not (review R3 on #626): a quote in a comment, an
+# ANSI-C `$'...'`, heredoc text, or `${...}` with its own nested quotes.
+# Used only for _FALLBACK_DESTROY_ROW.
 # Kept in sync with plugins/openclaw/interceptor.ts and scripts/pre-tool-hook.mjs.
 _FALLBACK_NESTED_EXEC = re.compile(r"\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{", re.I)
 _FALLBACK_DATA_COMMAND = re.compile(r"(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)", re.I)
 _FALLBACK_TEXT_FLAG = re.compile(r"(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$", re.I)
 _FALLBACK_EXEC_WORD = re.compile(r"(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)", re.I)
 _FALLBACK_UNSAFE_PIPE = re.compile(r"(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))")  # `||` is not a pipe
+_FALLBACK_QUOTE_UNMODELLED = re.compile(r"\$'|<<|\$\{")  # quotes the walk below would mis-pair
+_FALLBACK_WORD_BREAK = " \t\n\r\v\f;&|()<>"  # a `#` after one of these (or at the start) opens a comment
 _FALLBACK_ASSIGNMENT = re.compile(r"(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$")
 _FALLBACK_QUOTE_PREFIX_CAP = 512  # a command word further back is not recognised (the quote stays executed)
 _FALLBACK_INERT_MATCH_CAP = 64  # inert matches looked past before the row fails closed
@@ -179,10 +184,11 @@ _FALLBACK_INERT_MATCH_CAP = 64  # inert matches looked past before the row fails
 
 def _fallback_data_quote_ranges(text: str) -> list:
     """`(open, close + 1)` of every quoted data argument, or [] when none can be trusted."""
-    if _FALLBACK_NESTED_EXEC.search(text):
+    if _FALLBACK_NESTED_EXEC.search(text) or _FALLBACK_QUOTE_UNMODELLED.search(text):
         return []
     ranges, unquoted = [], []  # quote contents blanked, so the pipe check never reads quoted text
     q, open_at, stmt_start, i, n = None, -1, 0, 0, len(text)
+    comment_checked_to = 0  # end of the last line already found free of quotes after a `#`
     while i < n:
         c = text[i]
         if c == "\\" and q != "'":  # bash escaping: outside quotes and inside "..."
@@ -209,6 +215,14 @@ def _fallback_data_quote_ranges(text: str) -> list:
             q, open_at = c, i
         elif c in ";\n|&(":
             stmt_start = i + 1
+        elif c == "#" and i >= comment_checked_to and (i == 0 or text[i - 1] in _FALLBACK_WORD_BREAK):
+            # A comment runs to the end of the line, and a quote in it is no
+            # quote to the shell. Rather than model it (a `\ #` is not one),
+            # trust no quote at all when one is there. Kept walking either way.
+            eol = text.find("\n", i)
+            comment_checked_to = n if eol < 0 else eol
+            if text.find('"', i, comment_checked_to) >= 0 or text.find("'", i, comment_checked_to) >= 0:
+                return []
         i += 1
     return [] if _FALLBACK_UNSAFE_PIPE.search("".join(unquoted)) else ranges
 

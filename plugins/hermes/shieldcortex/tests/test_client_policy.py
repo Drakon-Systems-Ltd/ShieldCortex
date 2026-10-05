@@ -627,6 +627,40 @@ class DestroyRowDataQuoteTests(unittest.TestCase):
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
             self.assertIsNone(action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
 
+    def exec_comment(self):
+        # Review R3 on #626: quotes the shell never sees as quotes (comments,
+        # ANSI-C, heredoc text, nested expansion quotes) must not open or close
+        # a data range around a real run.
+        tf = self.TF
+        return [
+            f'echo # "\n{tf} -auto-approve\n# "', f"echo # '\n{tf} -auto-approve\n# '",
+            f'grep -F "x" RUNBOOK.md # "\n{tf}\n# "', f'echo ok;# "\n{tf}\n# " | head -1',
+            f"echo $'\\'' ; {tf} ; echo $'\\''", f"cat <<'EOF'\necho \"\nEOF\n{tf}\ncat <<'EOF'\n\"\nEOF",
+            'echo "${x:-"}"}" ; ' + tf + ' ; echo "${x:-"}"}"',
+        ]
+
+    def multiline_data(self):
+        tf = self.TF
+        return [
+            f'echo "step 1\n{tf} -auto-approve\nstep 3"', f"grep -n '# heading\n{tf}' RUNBOOK.md",
+            f'echo \\# "{tf}"', f'echo "{tf}" > notes#1.txt', f'grep -F "{tf}" RUNBOOK.md # find it',
+        ]
+
+    def test_comment_quotes_do_not_hide_a_real_run(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.exec_comment():
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+            d = action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd))
+            self.assertEqual((cmd, d and d["action"]), (cmd, "block"))
+
+    def test_genuine_multiline_data_still_fails_open(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.multiline_data():
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+            self.assertIsNone(action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
+
     def test_only_the_destroy_row_reads_quotes(self):
         # Every other row keeps its plain search: a quoted sudo still gates.
         from sc_client import fallback_dangerous_match
