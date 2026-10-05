@@ -569,7 +569,7 @@ const FALLBACK_CATASTROPHIC_PATTERNS: RegExp[] = [
 // `isGatedNpxBunx` (shape-based, #96), not by a DANGEROUS pattern, and a blunt
 // fallback matching them would over-gate `npx tsc`; `uvx`/`dlx` (unconditional)
 // ARE covered. Mirrored in scripts/pre-tool-hook.mjs + hermes/sc_client.py.
-const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true }> = [
+const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?: true; dataQuotes?: true }> = [
   { re: /\brm\b|\bunlink\b|\brmdir\b|(?:(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?|\bxargs\s+(?:-{1,2}\S+\s+)*|-exec\s+)shred\b/i, signal: 'file-delete' },
   { re: /\bsudo\b|\bdoas\b|\bsu\s/i, signal: 'privilege-escalation' },
   { re: /\bgit\b[^|\n]*\bpush\b[^|\n]*(--force\b|-f\b|\+)/i, signal: 'git-force-push' },
@@ -582,9 +582,9 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   { re: /\bdd\b[^|;&\n]*\bof=/i, signal: 'dd-overwrite' },
   { re: /\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s\/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:\/\*?)?(?:\s|$)/i, signal: 'recursive-perms-system-dir' },
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
-  // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. SQL verbs only behind a database client; DELETE gated only with no WHERE.
-  // #503 ReDoS: A verb's second gap stops at the next copy of that verb (`(?!\sdelete\b)`), so a verb-dense line with no separator is linear, not quadratic; the matches and spans are unchanged, because the greedy gap already picked the last verb before the target. The `(?<=\n)` arm keeps the one spelling that rule does not cover: a verb reached through its own newline.
-  { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3\s+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra' },
+  // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. `dataQuotes`: a match inside a quoted argument of a data command (`grep "…"`, `echo '…'`, `git commit -m "…"`) is a mention, as in the real guard — see fallbackDataQuoteRanges. SQL verbs only behind a database client; DELETE gated only with no WHERE.
+  // #503 ReDoS: A verb's second gap stops at the next copy of that verb (`(?!\sdelete\b)`), so a verb-dense line with no separator is linear, not quadratic; the matches and spans are unchanged, because the greedy gap already picked the last verb before the target. That rule holds only when the verb ends on the binary's own line, so two spellings keep the plain gap: a verb reached through its own newline (the `(?<=\n)` arm), and a newline INSIDE the two-word `s3 rm` (the `(?=[^\S\n]*\n)` arm; the stopping arm takes same-line `[^\S\n]+` only). Each runs at most once per start, so the row stays linear.
+  { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra', dataQuotes: true },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
   { re: /\/etc\/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])|(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b|id_rsa|\.aws\/credentials|\.env\b/i, signal: 'touch-sensitive-path' },
@@ -771,15 +771,100 @@ function fallbackWriteTargetMatch(args: Record<string, unknown> | undefined, too
   return null;
 }
 
+// ── #503: quoted DATA, ported to the blunt fallback ─────────────────────────
+//
+// The destroy-data-or-infra row counts an opening quote as a command start, so
+// `bash -c '…'` and `ssh host '…'` wrappers are seen. The real guard then
+// drops a match that lies inside a quoted argument of a data command
+// (`classifyWithCtx`: DATA_COMMAND / TEXT_FLAG in tool-action-guard.ts). The
+// fallback had no such step, so `grep -F "<teardown>" RUNBOOK.md` gated here
+// and allowed with the guard up. This mirrors that step, narrower and
+// fail-closed:
+//  - no quote is data when the text has nested execution or eval, or pipes
+//    into anything but a read-only filter (grep, head, sort, jq, tee, …);
+//  - a quote is data only when its statement's command word is a data command,
+//    or it is the value of a long text flag on a non-executor;
+//  - a match is dropped only when it lies inside ONE data quote; an unclosed
+//    quote is never data.
+// Used only by rows tagged `dataQuotes`. Kept in sync with
+// scripts/pre-tool-hook.mjs and plugins/hermes/shieldcortex/sc_client.py.
+
+/** The guard's DATA_COMMAND (here ending at a word break: `ptpython` is not `pt`), TEXT_FLAG and EXEC_COMMAND_WORD sets. */
+const FALLBACK_DATA_COMMAND_RE = /^(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)/i;
+const FALLBACK_TEXT_FLAG_RE = /(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$/i;
+const FALLBACK_EXEC_WORD_RE = /^(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)$/i;
+/** A pipe into anything but a read-only filter (`echo "…" | bash`, `| "sh"`, `| b\\ash`) — `||` is not a pipe. */
+const FALLBACK_UNSAFE_PIPE_RE = /(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))/;
+/** A command word further back than this from its own quote is not recognised (the quote stays executed). */
+const FALLBACK_QUOTE_PREFIX_CAP = 512;
+/** Inert matches looked past before the row fails closed. */
+const FALLBACK_INERT_MATCH_CAP = 64;
+
+/** `[open, close + 1)` of every quoted data argument, or [] when none can be trusted. */
+function fallbackDataQuoteRanges(text: string): Array<[number, number]> {
+  if (FALLBACK_NESTED_EXEC_RE.test(text)) return [];
+  const ranges: Array<[number, number]> = [];
+  // Quote contents blanked, so the pipe check below never reads quoted text.
+  let unquoted = '';
+  let q: string | null = null;
+  let open = -1;
+  let stmtStart = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    // Bash escaping: `\` escapes the next char outside quotes and inside "…".
+    if (c === '\\' && q !== "'") { unquoted += q ? '  ' : text.slice(i, i + 2); i++; continue; }
+    if (q) {
+      unquoted += ' ';
+      if (c !== q) continue;
+      const prefix = text.slice(stmtStart, open);
+      if (open - stmtStart <= FALLBACK_QUOTE_PREFIX_CAP) {
+        const bare = prefix.replace(/^\s+/, '').replace(/^(?:\w+=\S*\s+)*/, '').replace(/^(?:sudo|doas)\s+/, '');
+        const isAssignment = /(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$/.test(prefix);
+        const word = bare.split(/\s+/)[0] ?? '';
+        if (!isAssignment && (FALLBACK_DATA_COMMAND_RE.test(bare)
+          || (FALLBACK_TEXT_FLAG_RE.test(prefix) && !FALLBACK_EXEC_WORD_RE.test(word)))) {
+          ranges.push([open, i + 1]);
+        }
+      }
+      q = null;
+      continue;
+    }
+    unquoted += c;
+    if (c === '"' || c === "'") { q = c; open = i; continue; }
+    if (c === ';' || c === '\n' || c === '|' || c === '&' || c === '(') stmtStart = i + 1;
+  }
+  return FALLBACK_UNSAFE_PIPE_RE.test(unquoted) ? [] : ranges;
+}
+
+/** True when `re` matches somewhere outside a quoted data argument. */
+function fallbackExecutedMatch(re: RegExp, text: string): boolean {
+  const g = new RegExp(re.source, re.flags.replace('g', '') + 'g');
+  let ranges: Array<[number, number]> | null = null;
+  let inert = 0;
+  for (let from = 0; from <= text.length;) {
+    g.lastIndex = from;
+    const m = text.matchAll(g).next().value;   // matchAll starts at lastIndex
+    if (!m) return false;
+    ranges ??= fallbackDataQuoteRanges(text);
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    if (!ranges.some(([a, b]) => start >= a && end <= b)) return true;
+    if (++inert >= FALLBACK_INERT_MATCH_CAP) return true;   // fail closed
+    // Overlapping re-scan: a match starting inside this one is still checked.
+    from = start + 1;
+  }
+  return false;
+}
+
 function fallbackDangerousMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
   const writeTarget = fallbackWriteTargetMatch(args, toolName);
   if (writeTarget) return writeTarget;
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
-  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+  for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
-    if (re.test(text)) return signal;
+    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
   }
   return null;
 }

@@ -102,8 +102,9 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 /** The live row's source, read from each of the three JS surfaces that carry it. */
 function liveRow(file: string): string {
   const line = fs.readFileSync(path.join(REPO, file), 'utf-8').split('\n')
-    .find((l) => l.includes("signal: 'destroy-data-or-infra' }"));
-  const m = /\{ re: \/(.*)\/i, signal: 'destroy-data-or-infra' \},$/.exec(line?.trim() ?? '');
+    .find((l) => l.includes("signal: 'destroy-data-or-infra'") && l.trim().startsWith('{ re:'));
+  // The fallbacks tag the row `dataQuotes` (quoted data is a mention there too).
+  const m = /\{ re: \/(.*)\/i, signal: 'destroy-data-or-infra'(?:, dataQuotes: true)? \},$/.exec(line?.trim() ?? '');
   expect(m).not.toBeNull();
   return m![1];
 }
@@ -184,6 +185,65 @@ describe('#503 — destroy-data-or-infra stays linear on a verb-dense line', () 
       if (original.test(s)) matched++;
     }
     expect(matched).toBeGreaterThan(1_000);   // the soup really exercises the row
+  });
+
+  it('keeps every match when a newline sits INSIDE the two-word verb', () => {
+    // Review R1 on #626: the stopping gap assumed the verb ends on the binary's
+    // own line. `s3 rm` can carry a newline inside it; then a later copy of the
+    // verb is out of the first gap's reach and the stopping gap lost the match
+    // the plain gap found. Every inner-whitespace spelling, with a second
+    // statement appended so occurrence loss shows up too.
+    const answer = (re: RegExp, s: string): string => {
+      const m = s.match(re);
+      const all = [...s.matchAll(new RegExp(re.source, 'gi'))].map((x) => [x.index, x[0]]);
+      return JSON.stringify([m?.index ?? -1, m?.[0] ?? null, all]);
+    };
+    const [a, s3, rm, t] = ['swa', '3s', 'mr', 'evisrucer--'].map(rev);
+    for (const ws of [' ', '\t', '\n', '\r\n', '\n\n', ' \n ', '\n\t']) {
+      for (const s of [
+        `${a} ${s3}${ws}${rm} ${s3} ${rm} ${t}`,
+        `${a} ${s3}${ws}${rm} ${s3} ${rm} ${t}; ${a} ${s3} ${rm} ${t}`,
+        `${a} x ${s3}${ws}${rm} x ${s3}${ws}${rm} ${t}`,
+        `${a} ${s3} ${rm} ${s3}${ws}${rm} ${t}`,
+      ]) expect({ s, live: answer(live, s) }).toEqual({ s, live: answer(original, s) });
+    }
+    // Exhaustive over a small alphabet: the binary, then up to six tokens from
+    // the verb's two words and the target, each joined by a space, a newline or
+    // both. First match, index, span and every occurrence.
+    const toks = [s3, rm, t];
+    const joins = [' ', '\n', ' \n'];
+    let n = 0;
+    let matched = 0;
+    const walk = (s: string, depth: number): void => {
+      n++;
+      const want = answer(original, s);
+      if (!want.startsWith('[-1')) matched++;
+      if (want !== answer(live, s)) expect({ s, live: answer(live, s) }).toEqual({ s, live: want });
+      if (depth < 6) for (const j of joins) for (const tok of toks) walk(s + j + tok, depth + 1);
+    };
+    walk(a, 0);
+    expect(n).toBeGreaterThan(500_000);
+    expect(matched).toBeGreaterThan(10_000);
+  });
+
+  it('aws s3: a verb-dense line around inner-newline verbs stays linear', () => {
+    // The inner-newline arm keeps the plain gap; it runs at most once per
+    // start, so verb-dense text around it is still linear.
+    const [a, s3, rm] = ['swa', '3s', 'mr'].map(rev);
+    const timeOf = (reps: number): number => {
+      const s = `${a} ${s3}\n${rm}` + ` ${s3} ${rm}`.repeat(reps) + ` ${s3}\n${rm}` + ` ${s3} ${rm}`.repeat(reps);
+      live.test(s);
+      const runs: number[] = [];
+      for (let k = 0; k < 3; k++) {
+        const t0 = process.hrtime.bigint();
+        expect(live.test(s)).toBe(false);
+        runs.push(Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      return runs.sort((x, y) => x - y)[1];
+    };
+    const small = timeOf(2_000);
+    const large = timeOf(8_000);
+    expect(large).toBeLessThan(8 * small + 5);
   });
 
   it.each([

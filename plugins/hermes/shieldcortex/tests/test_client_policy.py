@@ -498,6 +498,42 @@ class DestroyRowLinearTests(unittest.TestCase):
             matched += want[0] >= 0
         self.assertGreater(matched, 200)
 
+    def test_newline_inside_the_two_word_verb_keeps_every_match(self):
+        # Review R1 on #626: the stopping gap assumed the verb ends on the
+        # binary's own line. `s3 rm` can carry a newline INSIDE it; then a later
+        # copy of the verb is out of the first gap's reach and the stopping gap
+        # lost the match the plain gap found. Every inner-whitespace spelling,
+        # with a second statement appended so occurrence loss shows up too.
+        live = self._live()
+        a, s3, rm, t = "aw" + "s", "s3", "r" + "m", "--recur" + "sive"
+        for ws in [" ", "\t", "\n", "\r\n", "\n\n", " \n ", "\n\t"]:
+            for s in [
+                f"{a} {s3}{ws}{rm} {s3} {rm} {t}",
+                f"{a} {s3}{ws}{rm} {s3} {rm} {t}; {a} {s3} {rm} {t}",
+                f"{a} x {s3}{ws}{rm} x {s3}{ws}{rm} {t}",
+                f"{a} {s3} {rm} {s3}{ws}{rm} {t}",
+            ]:
+                self.assertEqual(self._answer(live, s), self._answer(self.ORIGINAL, s), s)
+        # Exhaustive over a small alphabet: binary, then up to five tokens from
+        # the verb's two words and the target, each joined by a space, a newline
+        # or both. Checks first match, index, span and every occurrence.
+        toks, joins, n, matched = [s3, rm, t], [" ", "\n", " \n"], 0, 0
+
+        def walk(s, depth):
+            nonlocal n, matched
+            n += 1
+            want = self._answer(self.ORIGINAL, s)
+            matched += want[0] >= 0
+            self.assertEqual(self._answer(live, s), want, s)
+            if depth < 5:
+                for j in joins:
+                    for tok in toks:
+                        walk(s + j + tok, depth + 1)
+
+        walk(a, 0)
+        self.assertGreater(n, 50_000)
+        self.assertGreater(matched, 1_000)
+
     def test_verb_dense_line_scales_linearly(self):
         live = self._live()
 
@@ -516,6 +552,24 @@ class DestroyRowLinearTests(unittest.TestCase):
             # at 2000 -> 8000). The constant absorbs timer noise at small sizes.
             self.assertLess(large, 8 * small + 0.005, (b, v, small, large))
 
+    def test_verb_dense_line_around_inner_newline_verbs_scales_linearly(self):
+        # The inner-newline arm keeps the plain gap; it runs at most once per
+        # start, so verb-dense text around it is still linear.
+        live = self._live()
+        a, s3, rm = "aw" + "s", "s3", "r" + "m"
+
+        def time_of(reps):
+            s = f"{a} {s3}\n{rm}" + f" {s3} {rm}" * reps + f" {s3}\n{rm}" + f" {s3} {rm}" * reps
+            runs = []
+            for _ in range(3):
+                t = time.perf_counter()
+                self.assertIsNone(live.search(s))
+                runs.append(time.perf_counter() - t)
+            return sorted(runs)[1]
+
+        small, large = time_of(1000), time_of(4000)
+        self.assertLess(large, 8 * small + 0.005, (small, large))
+
     def test_verb_dense_and_long_padded_teardown_still_gates(self):
         from sc_client import fallback_dangerous_match
         k, d = "kube" + "ctl", "del" + "ete"
@@ -524,6 +578,59 @@ class DestroyRowLinearTests(unittest.TestCase):
         self.assertTrue(fallback_dangerous_match(f"{k} {d}" + " --wait=false" * 150 + " namespace prod"))
         self.assertTrue(fallback_dangerous_match("terra" + "form app" + "ly" + " -var x=1" * 250 + " -des" + "troy"))
         self.assertFalse(fallback_dangerous_match(k + (" " + d) * 300))
+
+
+class DestroyRowDataQuoteTests(unittest.TestCase):
+    """
+    #503 review R2 on #626: the destroy-data-or-infra row counts an opening
+    quote as a command start, so `bash -c '...'` and `ssh host '...'` wrappers
+    are seen. The real guard drops a match inside a quoted argument of a data
+    command; the fallback did not, so `grep -F "<teardown>" RUNBOOK.md` blocked
+    with the scanner down and allowed with it up. Same cases as the JS suite
+    src/__tests__/fallback-destroy-data-quotes-503.test.ts.
+    """
+
+    TF = "terra" + "form " + "des" + "troy"
+    KD = "kube" + "ctl " + "del" + "ete namespace prod"
+    HU = "helm " + "unin" + "stall"
+
+    def gate(self):
+        tf, kd = self.TF, self.KD
+        return [
+            f"{tf} -auto-approve", f'bash -c "{tf} -auto-approve"', f"sh -c '{kd}'", f"ssh db1 '{kd}'",
+            f'echo "{tf}" | bash', f'echo "{tf}" | sudo -E bash', f'echo "{tf}" | "bash"', f'echo "{tf}" | b\\ash',
+            f'echo "{tf}" | tr a a | sh', f'ptpython -c "{tf}"', f'grep -F "{tf}" RUNBOOK.md; {tf}', f'echo "$({tf})"',
+            "ps" + "ql -c " + '"DR' + 'OP TABLE users"', f'echo "x; {tf}', f'eval "{tf}"',
+        ]
+
+    def mentions(self):
+        tf, kd, hu = self.TF, self.KD, self.HU
+        return [
+            f'grep -F "{tf}" RUNBOOK.md', f'echo "{tf}"', f'grep -F "{kd}" RUNBOOK.md', f'echo "{hu}"',
+            f'git commit -m "{kd}: handle the 404"', f"grep -n '{hu}' docs/ops.md",
+            f'echo "step 2; {tf}"', f'gh pr create --title "{tf} runbook"',
+            f'grep -F "{tf}" RUNBOOK.md | head -5', f'grep -qF "{tf}" RUNBOOK.md || echo missing',
+        ]
+
+    def test_wrappers_and_real_runs_still_block_while_degraded(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.gate():
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+            d = action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd))
+            self.assertEqual((cmd, d and d["action"]), (cmd, "block"))
+
+    def test_quoted_mentions_fail_open_like_the_real_guard(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.mentions() + ["git status", "terra" + "form plan"]:
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+            self.assertIsNone(action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
+
+    def test_only_the_destroy_row_reads_quotes(self):
+        # Every other row keeps its plain search: a quoted sudo still gates.
+        from sc_client import fallback_dangerous_match
+        self.assertTrue(fallback_dangerous_match('echo "sudo reboot"'))
 
 
 class DangerousFailClosedPolicyTests(unittest.TestCase):
