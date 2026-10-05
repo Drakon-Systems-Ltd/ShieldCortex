@@ -134,6 +134,7 @@ import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/opencl
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
 import type { DoctorExplainerOutcome } from '../defence/iron-dome/doctor-explainer.js';
 import { normaliseWebhookUrl } from '../defence/iron-dome/notify-config.js';
+import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-dome/config.js';
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
@@ -8462,6 +8463,104 @@ export async function runDoctorAiSection(
   return { lines: formatAiSection(outcome), outcome };
 }
 
+export const IRON_DOME_PROFILE_LABEL = 'Iron Dome profile';
+
+/** Report unsafe stock settings in the effective local/cloud Iron Dome policy. */
+export function ironDomeProfileVerdict(config: IronDomeConfig): CheckResult {
+  if (config.enabled === false) {
+    return {
+      label: IRON_DOME_PROFILE_LABEL,
+      status: 'info',
+      message: 'Iron Dome not active — profile not checked',
+    };
+  }
+
+  const defaultPhrase = config.killPhrase?.trim().toLowerCase() ===
+    DEFAULT_IRON_DOME_CONFIG.killPhrase.trim().toLowerCase();
+  const noPiiRules = !config.piiRules?.neverOutput?.length && !config.piiRules?.aggregatesOnly?.length;
+  const noSubAgentBlocks = !config.subAgentRestrictions?.blockedOperations?.length;
+  const gaps = [
+    ...(defaultPhrase ? ['default kill phrase'] : []),
+    ...(noPiiRules ? ['no PII rules'] : []),
+    ...(noSubAgentBlocks ? ['no sub-agent blocks'] : []),
+  ];
+
+  if (defaultPhrase || noPiiRules) {
+    const fixes: string[] = [];
+    if (noPiiRules) {
+      fixes.push('Run `shieldcortex iron-dome activate --profile <school|enterprise|personal|paranoid>` to set PII rules. Activating a profile resets the kill phrase, so set the phrase afterwards.');
+    }
+    // Activating a profile resets the phrase, so the phrase step follows either gap.
+    fixes.push('Set a unique kill phrase (3–80 chars) in the dashboard Iron Dome view (http://localhost:3030), or with the API server running: `curl -X POST http://localhost:3001/api/iron-dome/config -H "Authorization: Bearer $(cat ~/.shieldcortex/.api-token)" -H \'content-type: application/json\' -d \'{"killPhrase":"<your phrase>"}\'`.');
+    return {
+      label: IRON_DOME_PROFILE_LABEL,
+      status: 'warn',
+      message: `stock defaults: ${gaps.join(', ')}`,
+      fix: fixes.join(' '),
+    };
+  }
+
+  return {
+    label: IRON_DOME_PROFILE_LABEL,
+    status: 'pass',
+    message: `${config.profile ?? 'custom'} profile${noSubAgentBlocks ? ' (no sub-agent blocks)' : ''}`,
+  };
+}
+
+/**
+ * Read the persisted Iron Dome config straight from the store, read-only.
+ * Iron Dome keeps its config in the `iron_dome_config` table, and its own
+ * loader goes through the database singleton — which the shipped doctor path
+ * never initialises (#471), so that loader would silently return the disabled
+ * default and this check would never fire. Returns null when nothing is stored.
+ */
+export function readStoredIronDomeConfig(dbPath: string): IronDomeConfig | null {
+  if (!fs.existsSync(dbPath)) return null;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Database = require('better-sqlite3');
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    const hasTable = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'iron_dome_config'"
+    ).get();
+    if (!hasTable) return null;
+    const row = db.prepare('SELECT value FROM iron_dome_config WHERE key = ?').get('config') as { value: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.value) as Partial<IronDomeConfig>;
+    return {
+      ...DEFAULT_IRON_DOME_CONFIG,
+      ...parsed,
+      piiRules: { ...DEFAULT_IRON_DOME_CONFIG.piiRules, ...(parsed.piiRules ?? {}) },
+      subAgentRestrictions: { ...DEFAULT_IRON_DOME_CONFIG.subAgentRestrictions, ...(parsed.subAgentRestrictions ?? {}) },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+export async function checkIronDomeProfile(dbPath: string = getDbPath()): Promise<CheckResult> {
+  try {
+    const { isDatabaseInitialized } = await import('../database/init.js');
+    if (isDatabaseInitialized()) {
+      // In-process caller (MCP/API server): the effective config includes custom and cloud policy.
+      const ironDome = await import('../defence/iron-dome/index.js');
+      return ironDomeProfileVerdict(ironDome.getEffectiveIronDomeConfig());
+    }
+    const stored = readStoredIronDomeConfig(dbPath);
+    if (!stored) {
+      return { label: IRON_DOME_PROFILE_LABEL, status: 'info', message: 'Iron Dome not configured — profile not checked' };
+    }
+    return ironDomeProfileVerdict(stored);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      label: IRON_DOME_PROFILE_LABEL,
+      status: 'info',
+      message: `could not read Iron Dome profile: ${msg}`,
+    };
+  }
+}
+
 /**
  * Exit-code policy.
  *
@@ -8551,6 +8650,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkIronDomeProfile,
     checkCronDenials,
     checkThreatGraph,
     checkAttestationCoverage,
