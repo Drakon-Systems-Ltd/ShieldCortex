@@ -38,6 +38,8 @@ import { processRetryQueue, purgeOldEntries } from '../cloud/sync-queue.js';
 import { sendHeartbeat } from '../cloud/sync.js';
 import { refreshCloudIronDome, applyCachedCloudPatterns } from '../cloud/iron-dome-sync.js';
 import { purgeOldAuditEntries, purgeAuditUnderSizePressure } from '../defence/audit/retention.js';
+import { writeHeartbeatIfDue } from '../defence/ledger/chain.js';
+import { resolveLedgerConfig } from '../defence/ledger/config.js';
 import { runProjectorWithLease } from '../threat-graph/projector.js';
 import { defaultRealtimeAuditDir } from '../threat-graph/shared.js';
 import { isThreatGraphEnabled } from '../cloud/config.js';
@@ -317,6 +319,16 @@ export class BrainWorker {
         }
       } catch (auditErr) {
         console.error('[BrainWorker] Audit retention failed:', auditErr);
+      }
+
+      // #617: chained-ledger heartbeat. Writes a chained heartbeat row only
+      // when nothing has been chained for the configured interval (default
+      // hourly), so `ledger verify` can tell a quiet period from a missing
+      // one. The tick runs every 5–15 min, well inside the interval.
+      try {
+        writeHeartbeatIfDue(getDatabase(), { intervalMs: resolveLedgerConfig().heartbeatIntervalMs });
+      } catch (hbErr) {
+        console.error('[BrainWorker] Ledger heartbeat failed:', hbErr);
       }
 
       // 3b. Session-capture retention (#110) — same shape as the audit valve

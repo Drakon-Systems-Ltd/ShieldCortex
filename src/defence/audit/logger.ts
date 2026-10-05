@@ -6,6 +6,7 @@ import { createHash } from 'crypto';
 import { getDatabase, isDatabaseInitialized } from '../../database/init.js';
 import { redactForPersistence } from '../sensitivity/pii.js';
 import type { AuditEntry } from '../types.js';
+import { insertChainedAuditRow, noteAuditWriteFailure } from '../ledger/chain.js';
 
 /**
  * Map an attestation intent to the `source_attested` ledger value.
@@ -24,29 +25,20 @@ export function attestedFlag(attested: boolean | undefined): number | null {
 /**
  * Log an audit entry to the defence_audit table.
  * Fire-and-forget safe: errors are caught and logged, never thrown.
+ *
+ * #617: the row is appended to the chained ledger inside one DB transaction
+ * (see src/defence/ledger/chain.ts). Every caller decides its verdict BEFORE
+ * calling this, and a failed write never throws back into it: a DENY stays a
+ * DENY and an ALLOW is not blocked when the disk is full or the ledger write
+ * throws. The failure is counted and, on the next successful write, recorded
+ * as a chained lost-coverage marker. The lost rows are not reconstructed.
  */
 export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
   if (!isDatabaseInitialized()) return -1;
 
   try {
     const db = getDatabase();
-    const stmt = db.prepare(`
-      INSERT INTO defence_audit (
-        memory_id, project, timestamp, source_type, source_identifier,
-        trust_score, sensitivity_level, firewall_result, operation, content_hash,
-        anomaly_score, threat_indicators, blocked_patterns,
-        reason, fragmentation_score, pipeline_duration_ms,
-        source_attested, risk_modifier
-      ) VALUES (
-        @memory_id, @project, @timestamp, @source_type, @source_identifier,
-        @trust_score, @sensitivity_level, @firewall_result, @operation, @content_hash,
-        @anomaly_score, @threat_indicators, @blocked_patterns,
-        @reason, @fragmentation_score, @pipeline_duration_ms,
-        @source_attested, @risk_modifier
-      )
-    `);
-
-    const result = stmt.run({
+    return insertChainedAuditRow(db, {
       memory_id: entry.memory_id ?? null,
       project: entry.project ?? null,
       timestamp: entry.timestamp ?? new Date().toISOString(),
@@ -66,9 +58,8 @@ export function logAudit(entry: Omit<AuditEntry, 'id'>): number {
       source_attested: entry.source_attested ?? null,
       risk_modifier: entry.risk_modifier ?? null,
     });
-
-    return Number(result.lastInsertRowid);
   } catch (err) {
+    noteAuditWriteFailure(err);
     console.error('[audit] Failed to log audit entry:', err);
     return -1;
   }

@@ -1,6 +1,6 @@
 # Upgrading to ShieldCortex 5.0
 
-**Read this before you run `npm install -g shieldcortex`.** 5.0 is a breaking release. It will not install on Node 20.
+**Read this before you run `npm install -g shieldcortex`.** 5.0 is a breaking release. Node 20 is unsupported; upgrade Node before installing.
 
 ## Should I update?
 
@@ -10,7 +10,7 @@ Run `node -v`. Then:
 |---|---|
 | **22.14 or newer 22.x** | Fine. Install 5.0. |
 | **24.x** | Fine. Install 5.0. This is the line 5.0 was built to un-break. |
-| **20.x** | **Install refuses.** Upgrade Node first, then install 5.0. Stay on 4.54.15 until you can. |
+| **20.x** | **Unsupported.** npm warns (and refuses with `engine-strict`); if it installs anyway, the native binding fails to load. Upgrade Node first, then install 5.0. Stay on 4.54.15 until you can. |
 | **23.x** | **Not supported** (never was a release line — it lacks Node-API 10). Use 22 LTS or 24. |
 | **18 or older** | Already unsupported. Upgrade Node, then install 5.0. |
 
@@ -122,6 +122,6 @@ If you never ran 5.0 against the live DB, the backup is unused and you can delet
 
 ## npm will also tell you
 
-`package.json` `engines` is `^22.14.0 || >=24.0.0`. A Node 20 `npm install` prints `EBADENGINE` and, on modern npm, refuses. `--ignore-engines` gets you as far as the native binding, which then fails with the same Node-floor message.
+`package.json` `engines` is `^22.14.0 || >=24.0.0`. A Node 20 `npm install` prints `EBADENGINE`; npm treats `engines` as advisory unless `engine-strict` is set, in which case it refuses. `--ignore-engines` gets you as far as the native binding, which then fails with the same Node-floor message.
 
 The README, this page, the install banner, and [https://www.npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) all say 5.0 before you update. If one of them does not, file an issue.

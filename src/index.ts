@@ -709,6 +709,7 @@ ${bold}COMMANDS${reset}
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
+  ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
   ${cyan}setup${reset}                 Install ShieldCortex into your project
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
@@ -1176,6 +1177,14 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'stats') {
     const { runStatsCommand } = await import('./cli/stats-command.js');
     await runStatsCommand();
+    return;
+  }
+
+  // Handle "ledger" subcommand (#617) — read-only verification of the chained
+  // audit ledger. Exit 0 consistent, 1 inconsistent, 2 usage / no database.
+  if (process.argv[2] === 'ledger') {
+    const { runLedgerCommand } = await import('./cli/ledger.js');
+    process.exitCode = runLedgerCommand(process.argv.slice(3));
     return;
   }
 

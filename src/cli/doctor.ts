@@ -1147,6 +1147,54 @@ export async function checkAttestationCoverage(
   }
 }
 
+/**
+ * Chained ledger (#617, design §5.7): one row from the SAME verifier as
+ * `shieldcortex ledger verify` — consistent (pass), inconsistent (fail, with
+ * the first bad seq), or unchained (warn: this database has no chain yet).
+ * A pass is local only: it never claims completeness or that the whole chain
+ * was not rewritten; `ledger verify` prints the full limits statement.
+ */
+export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promise<CheckResult> {
+  const label = 'Chained ledger';
+  const { verifyLedger, summariseLedgerReport } = await import('../defence/ledger/verify.js');
+  const { resolveLedgerConfig } = await import('../defence/ledger/config.js');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Database = require('better-sqlite3');
+  let db: any = null;
+  let opened = false;
+  try {
+    if (opts.dbPath) {
+      db = new Database(opts.dbPath, { readonly: true, fileMustExist: true });
+      opened = true;
+    } else {
+      const { isDatabaseInitialized, getDatabase } = await import('../database/init.js');
+      if (isDatabaseInitialized()) {
+        db = getDatabase();
+      } else {
+        const dbPath = getDbPath();
+        const gate = databasePrerequisite(label, dbPath);
+        if (gate) return gate;
+        db = new Database(dbPath, { readonly: true });
+        opened = true;
+      }
+    }
+    const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
+    const message = summariseLedgerReport(report);
+    if (report.status === 'inconsistent') {
+      return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
+    }
+    if (report.status === 'unchained') return { label, status: 'warn', message };
+    return { label, status: 'pass', message };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { label, status: 'warn', message: `could not verify: ${msg}` };
+  } finally {
+    if (opened && db) {
+      try { db.close(); } catch { /* readonly close is best-effort */ }
+    }
+  }
+}
+
 export async function checkThreatGraph(
   opts: { lagWarnThreshold?: number; enabled?: boolean; nowMs?: number; sweepStaleMs?: number } = {},
 ): Promise<CheckResult> {
@@ -8686,6 +8734,7 @@ export async function runDoctor(
     checkCronDenials,
     checkThreatGraph,
     checkAttestationCoverage,
+    checkChainedLedger,
     checkClaudeCodeVersion,
     checkModelCache,
   ];

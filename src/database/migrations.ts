@@ -27,6 +27,18 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { redactAnnotationForPersistence } from '../defence/judge/redact.js';
 import type { ReviewAnnotation } from '../defence/judge/types.js';
+import { insertChainedAuditRow } from '../defence/ledger/chain.js';
+
+/** The v4.29.0 backfill's informational defence_audit marker row. */
+function backfillMarker(trust: number, result: 'ALLOW' | 'BLOCK', reason: string): Record<string, unknown> {
+  return {
+    memory_id: null, project: null, timestamp: new Date().toISOString(),
+    source_type: 'migration', source_identifier: 'backfill-v4.29.0',
+    trust_score: trust, sensitivity_level: 'INTERNAL', firewall_result: result,
+    anomaly_score: 0, threat_indicators: '[]', blocked_patterns: '[]',
+    reason, fragmentation_score: null, pipeline_duration_ms: 0,
+  };
+}
 
 /**
  * Log unexpected errors from idempotent DDL operations (v4.26.0).
@@ -316,14 +328,21 @@ export function runMigrations(database: Database.Database): void {
       "SELECT COUNT(*) as cnt FROM defence_audit WHERE project IS NULL"
     ).get() as { cnt: number })?.cnt ?? 0;
     if (nullCount > 0) {
+      // #617: this backfill runs on every startup, and `project` is part of a
+      // chained row's content digest. Rewriting a chained row would break the
+      // ledger on the next restart, so only unchained (pre-ledger) rows are
+      // backfilled once the chain columns exist.
+      const chained = (database.prepare('PRAGMA table_info(defence_audit)').all() as { name: string }[])
+        .some((c) => c.name === 'seq');
+      const unchainedOnly = chained ? ' AND seq IS NULL' : '';
       // From linked memories
       database.exec(`UPDATE defence_audit SET project = (
         SELECT m.project FROM memories m WHERE m.id = defence_audit.memory_id
-      ) WHERE memory_id IS NOT NULL AND project IS NULL`);
+      ) WHERE memory_id IS NOT NULL AND project IS NULL${unchainedOnly}`);
       // Remaining: use most common project
       database.exec(`UPDATE defence_audit SET project = (
         SELECT project FROM memories WHERE project IS NOT NULL GROUP BY project ORDER BY COUNT(*) DESC LIMIT 1
-      ) WHERE project IS NULL`);
+      ) WHERE project IS NULL${unchainedOnly}`);
     }
     const qNullCount = (database.prepare(
       "SELECT COUNT(*) as cnt FROM quarantine WHERE project IS NULL"
@@ -685,18 +704,10 @@ export function runMigrations(database: Database.Database): void {
       // a spurious migration marker made it two).
       if (clamped > 0) {
         try {
-          database.prepare(`
-            INSERT INTO defence_audit (
-              memory_id, project, timestamp,
-              source_type, source_identifier,
-              trust_score, sensitivity_level, firewall_result,
-              anomaly_score, threat_indicators, blocked_patterns,
-              reason, fragmentation_score, pipeline_duration_ms
-            ) VALUES (NULL, NULL, ?, 'migration', 'backfill-v4.29.0', 1.0, 'INTERNAL', 'ALLOW', 0, '[]', '[]', ?, NULL, 0)
-          `).run(
-            new Date().toISOString(),
-            JSON.stringify({ status: 'success', clamped, version: 'v4.29.0' }),
-          );
+          // #617: chained when this database already has a ledger.
+          insertChainedAuditRow(database, backfillMarker(
+            1.0, 'ALLOW', JSON.stringify({ status: 'success', clamped, version: 'v4.29.0' }),
+          ));
         } catch {
           // Older schemas may predate the audit columns. The success path itself
           // already committed; the marker is best-effort observability only.
@@ -710,18 +721,9 @@ export function runMigrations(database: Database.Database): void {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[backfill v4.29.0] FAILED, will retry next startup: ${msg}`);
     try {
-      database.prepare(`
-        INSERT INTO defence_audit (
-          memory_id, project, timestamp,
-          source_type, source_identifier,
-          trust_score, sensitivity_level, firewall_result,
-          anomaly_score, threat_indicators, blocked_patterns,
-          reason, fragmentation_score, pipeline_duration_ms
-        ) VALUES (NULL, NULL, ?, 'migration', 'backfill-v4.29.0', 0, 'INTERNAL', 'BLOCK', 0, '[]', '[]', ?, NULL, 0)
-      `).run(
-        new Date().toISOString(),
-        JSON.stringify({ status: 'failed', error: msg, version: 'v4.29.0' }),
-      );
+      insertChainedAuditRow(database, backfillMarker(
+        0, 'BLOCK', JSON.stringify({ status: 'failed', error: msg, version: 'v4.29.0' }),
+      ));
     } catch {
       // Best-effort marker; the stderr line above carries the signal.
     }
@@ -1084,5 +1086,69 @@ export function runMigrations(database: Database.Database): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[backfill #538] quarantine_annotations redaction backfill failed (will retry next startup): ${msg}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration: #617 — chained ledger (design §5.7).
+  //
+  // Adds the chain columns to defence_audit and the ledger tables. Existing
+  // rows keep NULL chain columns: they are UNCHAINED history and are never
+  // hashed into the chain after the fact (no retrofit). The ledger identity
+  // and its epoch-start row are created after the schema runs, by
+  // ensureLedger() in initDatabase(), so fresh databases (which skip this
+  // function) and migrated ones take the same path. schema.sql and
+  // inline-schema.ts carry the same DDL.
+  try {
+    const auditCols = new Set(
+      (database.prepare('PRAGMA table_info(defence_audit)').all() as { name: string }[]).map((c) => c.name),
+    );
+    if (auditCols.size > 0) {
+      for (const [col, type] of [
+        ['ledger_id', 'TEXT'],
+        ['epoch', 'INTEGER'],
+        ['seq', 'INTEGER'],
+        ['prev_hash', 'TEXT'],
+        ['content_digest', 'TEXT'],
+        ['row_hash', 'TEXT'],
+      ] as const) {
+        if (!auditCols.has(col)) database.exec(`ALTER TABLE defence_audit ADD COLUMN ${col} ${type}`);
+      }
+      database.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_chain ON defence_audit(ledger_id, epoch, seq)');
+    }
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS ledger_meta (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        ledger_id TEXT NOT NULL,
+        epoch INTEGER NOT NULL,
+        head_seq INTEGER NOT NULL,
+        head_hash TEXT NOT NULL,
+        head_timestamp TEXT NOT NULL,
+        chain_started_at TEXT NOT NULL,
+        unchained_max_id INTEGER NOT NULL DEFAULT 0,
+        unchained_count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS ledger_marker (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ledger_id TEXT NOT NULL,
+        epoch INTEGER NOT NULL,
+        seq INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('epoch-start', 'heartbeat', 'lost-coverage', 'checkpoint')),
+        timestamp TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        prev_hash TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        row_hash TEXT NOT NULL,
+        UNIQUE(ledger_id, epoch, seq)
+      );
+      CREATE TABLE IF NOT EXISTS ledger_skeleton (
+        ledger_id TEXT NOT NULL,
+        epoch INTEGER NOT NULL,
+        seq INTEGER NOT NULL,
+        content_digest TEXT NOT NULL,
+        PRIMARY KEY (ledger_id, epoch, seq)
+      );
+    `);
+  } catch (err) {
+    logIfUnexpectedDdlError(err, 'chained ledger columns + tables (#617)');
   }
 }

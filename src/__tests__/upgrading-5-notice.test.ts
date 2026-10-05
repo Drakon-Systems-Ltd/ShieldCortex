@@ -32,12 +32,12 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
 
   it('README warns above the install command and links the upgrade page', () => {
     const readme = read('README.md');
-    expect(readme).toMatch(/ShieldCortex 5\.0 requires Node 22\.14\+ or Node 24/);
+    expect(readme).toMatch(/ShieldCortex 5\.x requires Node 22\.14\+ or Node 24/);
     expect(readme).toMatch(/Node 20 is no longer supported/);
     expect(readme).toMatch(/docs\/UPGRADING-5\.md/);
     expect(readme).toMatch(/Action Guard stays off by default/);
     // The warning must appear before the Quick Start install block, not buried.
-    expect(readme.indexOf('ShieldCortex 5.0 requires Node')).toBeLessThan(
+    expect(readme.indexOf('ShieldCortex 5.x requires Node')).toBeLessThan(
       readme.indexOf('## 🚀 Quick Start'),
     );
   });
@@ -51,6 +51,20 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     expect(install).toBeGreaterThan(req);
     expect(readme.slice(req, install)).toMatch(/Node 22\.14\+/);
     expect(readme.slice(req, install)).toMatch(/Node 20 is not supported/);
+  });
+
+  it('README states the npm engines behaviour precisely and promises no restart it cannot keep', () => {
+    const readme = read('README.md');
+    const qs = readme.indexOf('## 🚀 Quick Start');
+    const req = readme.indexOf('### Requirements', qs);
+    const install = readme.indexOf('npm install -g shieldcortex', qs + 1);
+    // engines is advisory unless engine-strict is set (src/cli/doctor.ts); the
+    // README must say both halves, not "warns but does not refuse".
+    expect(readme.slice(req, install)).toMatch(/engine-strict/);
+    expect(readme).not.toMatch(/does not refuse|only warns|or any 24/);
+    // postinstall, the wiring offer and the macOS dashboard kick can all
+    // restart something, so `update` may not claim to leave restarts to you.
+    expect(readme).not.toMatch(/leaves restarts to you/);
   });
 
   it('CHANGELOG 5.0.0 section opens with Breaking, below the Unreleased section', () => {

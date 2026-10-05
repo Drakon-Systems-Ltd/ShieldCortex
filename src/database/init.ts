@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { runMigrations } from './migrations.js';
 import { getInlineSchema } from './inline-schema.js';
+import { ensureLedger } from '../defence/ledger/chain.js';
 import { seedDefaultFirewallRules } from './seed-firewall-rules.js';
 import { debugLog } from '../debug-log.js';
 import { MAX_DB_FILE_BYTES, WARN_DB_FILE_BYTES } from '../limits.js';
@@ -746,6 +747,18 @@ export function initDatabase(dbPath?: string): Database.Database {
 
   // Run schema (uses IF NOT EXISTS, safe for existing tables and indexes)
   db.exec(getCanonicalSchema());
+
+  // #617: create the chained ledger (identity, epoch 0, epoch-start row) the
+  // first time this database is opened by a build that has it. Rows already
+  // in defence_audit stay unchained history. Runs after the schema so fresh
+  // and migrated databases take the same path. Never blocks startup: a
+  // database that cannot create its ledger keeps working unchained and
+  // `shieldcortex ledger verify` / doctor report it.
+  try {
+    ensureLedger(db);
+  } catch (err) {
+    console.error(`[database] chained ledger could not be initialised: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // Seed built-in firewall rules. This runs AFTER the schema so the
   // firewall_rules table is guaranteed to exist — `runMigrations()` returns
