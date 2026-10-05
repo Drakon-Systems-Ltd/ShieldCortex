@@ -2282,8 +2282,13 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   // #509 r6 S2: the r5 classifier shapes — the guard directory (or approvals/)
   // itself moved/copied over/deleted with the verb at command position, and
   // guard state reached relatively (or by `.`/a glob) after `cd` into it.
-  { re: /(?:^|[;&|(\n`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n]*?\s)?["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?(?=$|[\s;&|)])/i, signal: 'touch-approval-store' },
-  { re: /(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?["']?[^\s;&|"'`]*\.shieldcortex[\\/]*["']?(?=$|[\s;&|)])[\s\S]*?(?:(?:^|[\s;&|(<>='"])(?:\.[\\/])?(?:approvals|DECISIONS\.md|leases|config\.json)(?=$|[\s;&|)\\/'"])|[;&|(\n]\s*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n]*?\s)?["']?[.\\/*]*[.*][.\\/*]*["']?(?=$|[\s;&|)]))/i, signal: 'touch-approval-store' },
+  // #509 r7 (PR #610 review): every gap between an anchor and the required
+  // literal is bounded so a long non-matching command cannot backtrack
+  // quadratically — 100 KiB of newlines took 20-35 s per row. `\n` is itself an
+  // anchor, so the blank run after one excludes it ([^\S\n]); the argument gap
+  // is at most 512 chars and stops at `(`; the span after `cd` at most 4096.
+  { re: /(?:^|[;&|(\n`]|\$\()[^\S\n]*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]{0,512}?\s)?["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?(?=$|[\s;&|)])/i, signal: 'touch-approval-store' },
+  { re: /(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?["']?[^\s;&|"'`]*\.shieldcortex[\\/]*["']?(?=$|[\s;&|)])[\s\S]{0,4096}?(?:(?:^|[\s;&|(<>='"])(?:\.[\\/])?(?:approvals|DECISIONS\.md|leases|config\.json)(?=$|[\s;&|)\\/'"])|[;&|(\n][^\S\n]*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]{0,512}?\s)?["']?[.\\/*]*[.*][.\\/*]*["']?(?=$|[\s;&|)]))/i, signal: 'touch-approval-store' },
   // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: outage fallback must gate self-disable / global uninstall / config.json writes.

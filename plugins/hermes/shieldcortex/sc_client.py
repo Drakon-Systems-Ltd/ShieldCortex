@@ -184,15 +184,20 @@ _FALLBACK_SELF_PROTECTION = [
     # #509 r6 S2: the r5 classifier shapes, verbatim from the other two
     # fallbacks — the guard directory itself moved/copied over/deleted (verb at
     # command position), and guard state reached relatively after `cd` into it.
+    # #509 r7 (PR #610 review): every gap between an anchor and the required
+    # literal is bounded so a long non-matching command cannot backtrack
+    # quadratically — 100 KiB of newlines took 20-35 s per row. `\n` is itself an
+    # anchor, so the blank run after one excludes it ([^\S\n]); the argument gap
+    # is at most 512 chars and stops at `(`; the span after `cd` at most 4096.
     (re.compile(
-        r"(?:^|[;&|(\n`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n]*?\s)?"
+        r"(?:^|[;&|(\n`]|\$\()[^\S\n]*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]{0,512}?\s)?"
         r"[\"']?[^\s;&|\"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*[\"']?(?=$|[\s;&|)])",
         re.I,
     ), False),
     (re.compile(
-        r"(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?[\"']?[^\s;&|\"'`]*\.shieldcortex[\\/]*[\"']?(?=$|[\s;&|)])[\s\S]*?"
+        r"(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?[\"']?[^\s;&|\"'`]*\.shieldcortex[\\/]*[\"']?(?=$|[\s;&|)])[\s\S]{0,4096}?"
         r"(?:(?:^|[\s;&|(<>='\"])(?:\.[\\/])?(?:approvals|DECISIONS\.md|leases|config\.json)(?=$|[\s;&|)\\/'\"])|"
-        r"[;&|(\n]\s*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n]*?\s)?[\"']?[.\\/*]*[.*][.\\/*]*[\"']?(?=$|[\s;&|)]))",
+        r"[;&|(\n][^\S\n]*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]{0,512}?\s)?[\"']?[.\\/*]*[.*][.\\/*]*[\"']?(?=$|[\s;&|)]))",
         re.I,
     ), False),
     (re.compile(r"\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b", re.I), False),
