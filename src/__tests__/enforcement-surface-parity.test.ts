@@ -545,6 +545,27 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
    *  — the #89 read carve-out lives in the core only. Fail-closed, so it is
    *  asserted rather than compared. */
   const STRICTER_IN_OUTAGE = ['cat ~/.shieldcortex/approvals/approvals.json', 'cd ~/.shieldcortex && ls approvals'];
+  /** #509 r8 (PR #610 review, Tars + Case 2026-10-05): PADDED twins of the
+   *  r5/r6 shapes, all inside the 4096-character scan cap. A `{0,512}` bound
+   *  on the argument gap made the first two fall off the floor on all three
+   *  outage fallbacks while their short twins in TABLE still matched. Padding
+   *  inside the cap must never change the answer; asserted, not compared,
+   *  because the core scores the recursive delete as a catastrophic block
+   *  (no floor signal) and the outage paths hold it either way. Assembled at
+   *  runtime (#444 convention). */
+  const padTo = (head: string, tail: string, len: number): string => {
+    const room = len - head.length - tail.length;
+    return head + 'a '.repeat(room >> 1) + ' '.repeat(room & 1) + tail;
+  };
+  const SC_DIR = '~/.' + 'shieldcortex';
+  const DEL = ['r', 'm'].join('');
+  const LONG_POSITIVES = [
+    'mv ' + '--strip-trailing-slashes '.repeat(30) + '.shieldcortex moved',   // 772 chars
+    `${DEL} -rf ` + 'a '.repeat(300) + SC_DIR,                                 // 622 chars
+    padTo('mv ', `${SC_DIR} /tmp/x`, 4090),                                    // just under the cap
+    `cd ${SC_DIR} && ` + 'echo hi; '.repeat(400) + `${DEL} -rf approvals`,     // 3,638 chars
+  ];
+  const ASSERTED_ON_FLOOR = [...STRICTER_IN_OUTAGE, ...LONG_POSITIVES];
 
   it('Hermes (outage, advisory) blocks exactly the commands the core classifier puts on the floor', async () => {
     const { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
@@ -570,7 +591,7 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
     const { spawnSync } = await import('node:child_process');
     try {
       const run = spawnSync('python3', ['-c', script], {
-        input: JSON.stringify([...TABLE, ...STRICTER_IN_OUTAGE]),
+        input: JSON.stringify([...TABLE, ...ASSERTED_ON_FLOOR]),
         env: { ...process.env, HOME: tmpHome, SHIELDCORTEX_ENFORCE: '0' },
         encoding: 'utf8',
         timeout: 60_000,
@@ -578,7 +599,8 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
       expect({ status: run.status, stderr: run.status === 0 ? '' : run.stderr }).toEqual({ status: 0, stderr: '' });
       const hermes = JSON.parse(run.stdout.trim().split('\n').pop() as string) as Array<{ command: string; floor: boolean }>;
       expect(hermes.slice(0, TABLE.length)).toEqual(core);
-      expect(hermes.slice(TABLE.length)).toEqual(STRICTER_IN_OUTAGE.map((command) => ({ command, floor: true })));
+      expect(LONG_POSITIVES.map((c) => c.length)).toEqual([772, 622, 4090, 3638]);
+      expect(hermes.slice(TABLE.length)).toEqual(ASSERTED_ON_FLOOR.map((command) => ({ command, floor: true })));
       // The table is not vacuous: both answers occur.
       expect(core.some((c) => c.floor) && core.some((c) => !c.floor)).toBe(true);
     } finally {
@@ -597,7 +619,7 @@ describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core fl
         command,
         floor: evaluateToolCall('Bash', { command }).signals.some((s: string) => GUARD_SELF_PROTECTION_SIGNALS.includes(s)),
       })),
-      ...STRICTER_IN_OUTAGE.map((command) => ({ command, floor: true })),
+      ...ASSERTED_ON_FLOOR.map((command) => ({ command, floor: true })),
     ];
     const okPipeline = () => ({
       allowed: true,

@@ -692,13 +692,14 @@ const FALLBACK_DANGEROUS_PATTERNS: Array<{ re: RegExp; signal: string; lockPath?
   // #509 r6 S2: the r5 classifier shapes — the guard directory (or approvals/)
   // itself moved/copied over/deleted with the verb at command position, and
   // guard state reached relatively (or by `.`/a glob) after `cd` into it.
-  // #509 r7 (PR #610 review): every gap between an anchor and the required
-  // literal is bounded so a long non-matching command cannot backtrack
+  // #509 r7 (PR #610 review): a long non-matching command must not backtrack
   // quadratically — 100 KiB of newlines took 20-35 s per row. `\n` is itself an
-  // anchor, so the blank run after one excludes it ([^\S\n]); the argument gap
-  // is at most 512 chars and stops at `(`; the span after `cd` at most 4096.
-  { re: /(?:^|[;&|(\n`]|\$\()[^\S\n]*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]{0,512}?\s)?["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?(?=$|[\s;&|)])/i, signal: 'touch-approval-store' },
-  { re: /(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?["']?[^\s;&|"'`]*\.shieldcortex[\\/]*["']?(?=$|[\s;&|)])[\s\S]{0,4096}?(?:(?:^|[\s;&|(<>='"])(?:\.[\\/])?(?:approvals|DECISIONS\.md|leases|config\.json)(?=$|[\s;&|)\\/'"])|[;&|(\n][^\S\n]*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]{0,512}?\s)?["']?[.\\/*]*[.*][.\\/*]*["']?(?=$|[\s;&|)]))/i, signal: 'touch-approval-store' },
+  // anchor, so the blank run after one excludes it ([^\S\n]), and the argument
+  // gap stops at `(`. The gaps carry NO length bound: a `{0,512}` bound let
+  // padding inside the scan cap hide a real match, and FALLBACK_SCAN_CAP is the
+  // bound on what these rows are ever fed.
+  { re: /(?:^|[;&|(\n`]|\$\()[^\S\n]*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]*?\s)?["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?(?=$|[\s;&|)])/i, signal: 'touch-approval-store' },
+  { re: /(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?["']?[^\s;&|"'`]*\.shieldcortex[\\/]*["']?(?=$|[\s;&|)])[\s\S]*?(?:(?:^|[\s;&|(<>='"])(?:\.[\\/])?(?:approvals|DECISIONS\.md|leases|config\.json)(?=$|[\s;&|)\\/'"])|[;&|(\n][^\S\n]*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]*?\s)?["']?[.\\/*]*[.*][.\\/*]*["']?(?=$|[\s;&|)]))/i, signal: 'touch-approval-store' },
   // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: outage fallback must gate self-disable / global uninstall / config.json writes.
@@ -903,8 +904,9 @@ function isSelfProtectionVerdict(signals: readonly string[] | undefined): boolea
   return Array.isArray(signals) && signals.some(s => SELF_PROTECTION_SIGNALS.includes(s));
 }
 
-/** A self-protection signal the WS2 fallback scan matches over EVERY row, or null. */
-function fallbackSelfProtectionMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
+/** A self-protection signal the WS2 fallback scan matches over EVERY row, or null.
+ *  Exported so the regression suite drives the capped entry point itself. */
+export function fallbackSelfProtectionMatch(args: Record<string, unknown> | undefined, toolName?: string): string | null {
   const text = fallbackExecSurface(args);
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);

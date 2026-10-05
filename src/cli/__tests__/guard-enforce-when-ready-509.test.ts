@@ -603,6 +603,21 @@ describe('#509 r8 SF4 — upgrade path: a surface never used here is "not in use
   const OC = 'openclaw-interceptor' as const;
   const ocPaths = () => readinessPaths({ home, adapter: OC });
 
+  // `readinessPaths()` without a pinned `home` also reads
+  // SHIELDCORTEX_AUDIT_DIR, which the jest sandbox points at a per-worker
+  // directory that outlives the run — so OpenClaw rows left by an earlier
+  // local run made this host look "in use". Each test gets its own empty one.
+  let savedAuditDir: string | undefined;
+  beforeEach(() => {
+    savedAuditDir = process.env.SHIELDCORTEX_AUDIT_DIR;
+    process.env.SHIELDCORTEX_AUDIT_DIR = join(home, 'interceptor-audit');
+    mkdirSync(process.env.SHIELDCORTEX_AUDIT_DIR, { recursive: true });
+  });
+  afterEach(() => {
+    if (savedAuditDir === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR;
+    else process.env.SHIELDCORTEX_AUDIT_DIR = savedAuditDir;
+  });
+
   /** An install that chose the posture before OpenClaw was gated: the hook's
    *  journal only. */
   function upgradedInstall(): void {
