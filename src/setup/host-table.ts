@@ -6,7 +6,8 @@
  * is not an install. Wired is an artefact probe. Bound vs memory-only
  * is a product fact, not a live Guard measurement.
  *
- * Never enables Action Guard. Never grants conversation access. Never
+ * Never enables Action Guard (the posture is asked separately, TTY only —
+ * setup/action-guard-posture.ts, #509). Never grants conversation access. Never
  * invents an OpenClaw plugin entry. Never imports native memory.
  */
 import { execSync } from 'child_process';

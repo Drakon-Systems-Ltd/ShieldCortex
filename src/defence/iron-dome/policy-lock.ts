@@ -517,6 +517,8 @@ export function applyStrictFailClosedPosture(raw: Record<string, unknown>): Reco
   guard.autoApprove = [];
   guard.broker = { ...(isBlock(guard.broker) ? guard.broker : {}), enabled: false };
   guard.reviewedScripts = [];
+  // #509: enforce-when-ready runs in shadow until proven — not strict.
+  delete guard.readinessGate;
   out.actionGuard = guard;
   out.defenceMode = STRICT_FAILCLOSED_POSTURE.defenceMode;
   // The deprecated `interceptor.actionGuard` alias gap-fills per key on both
@@ -532,6 +534,7 @@ export function applyStrictFailClosedPosture(raw: Record<string, unknown>): Reco
     delete alias.autoApprove;
     delete alias.broker;
     delete alias.reviewedScripts;
+    delete alias.readinessGate;
     interceptor.actionGuard = alias;
     out.interceptor = interceptor;
   }
@@ -568,6 +571,9 @@ export function applyPolicyLock(raw: Record<string, unknown>, state: PolicyLockS
 
   if (p.actionGuard?.enabled === true) { guard.enabled = true; guardTouched = true; }
   if (p.actionGuard?.enforce === true) { guard.enforce = true; guardTouched = true; }
+  // #509: a locked host ignores the enforce-when-ready gate (the hook's rule
+  // too), so the effective config must not report one.
+  if ('readinessGate' in guard) { delete guard.readinessGate; guardTouched = true; }
   if (p.actionGuard?.broker?.enabled === false) {
     guard.broker = { ...(isBlock(guard.broker) ? guard.broker : {}), enabled: false };
     guardTouched = true;

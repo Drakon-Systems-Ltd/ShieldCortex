@@ -253,14 +253,31 @@ async function promptDetectedInstalls(autoApprove = false): Promise<void> {
   }
 }
 
+/** #509: the explicit posture question. Never changes anything without a TTY. */
+async function askActionGuardPosture(tty: boolean): Promise<void> {
+  const { offerActionGuardPosture } = await import('./action-guard-posture.js');
+  await offerActionGuardPosture({
+    tty,
+    ask: async (question) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        return await rl.question(question);
+      } finally {
+        rl.close();
+      }
+    },
+  });
+}
+
 export async function handleQuickstartCommand(target?: string): Promise<void> {
-  const { formatHostTable, offerUnwiredHosts, scanHostTable, wireHost } = await import('./host-table.js');
+  const { formatHostTable, isInteractiveTerminal, offerUnwiredHosts, scanHostTable, wireHost } = await import('./host-table.js');
   const table = scanHostTable();
 
   if (!target) {
     console.log('');
     for (const line of formatHostTable(table)) console.log(line);
     await offerUnwiredHosts({ mode: 'setup' });
+    await askActionGuardPosture(isInteractiveTerminal());
     return;
   }
 
@@ -270,6 +287,8 @@ export async function handleQuickstartCommand(target?: string): Promise<void> {
     console.log('');
     for (const line of formatHostTable(table)) console.log(line);
     await offerUnwiredHosts({ mode: 'setup', autoApprove: true });
+    // Auto-approve wires hosts; it never chooses a guard posture (#509).
+    await askActionGuardPosture(false);
     return;
   }
 

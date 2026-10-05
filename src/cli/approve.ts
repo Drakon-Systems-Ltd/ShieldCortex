@@ -178,6 +178,19 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
     ttlGiven = true;
     args.splice(ttlIndex, 2);
   }
+  // #509 R4-2: the delivered attempt this answer is for (printed in the
+  // notification). Absent = the #118 terminal form, which acts on the current
+  // attempt but is not counted as a reach through the channel.
+  const attemptIndex = args.indexOf('--attempt');
+  let attemptId: string | undefined;
+  if (attemptIndex >= 0) {
+    attemptId = args[attemptIndex + 1] ?? '';
+    if (!/^[0-9a-f]{8,64}$/i.test(attemptId)) {
+      err('--attempt expects the attempt id printed in the notification, e.g. --attempt 3f9c0a…');
+      return 1;
+    }
+    args.splice(attemptIndex, 2);
+  }
 
   const anyOrigin = args.includes('--any-origin');
   const overrideDeny = args.includes('--override-deny');
@@ -228,9 +241,12 @@ export function runApprove(argv: string[], deps: ApproveDeps = {}): number {
     return 1;
   }
 
-  const outcome = approveRequest(hash, { home, now, ttlMs });
+  const outcome = approveRequest(hash, { home, now, ttlMs, attemptId });
   if (!outcome.ok) {
-    if (outcome.reason === 'already-approved') {
+    if (outcome.reason === 'stale-attempt') {
+      err(`Attempt ${attemptId} is not the current request for ${hash} — it expired, or the command was asked again. Nothing was approved.`);
+      err('Answer the newest notification, or run `shieldcortex approve` to see what is outstanding.');
+    } else if (outcome.reason === 'already-approved') {
       err(`Approval ${hash} is already granted and still live — just re-run the command.`);
     } else {
       err(`No pending approval matches "${hash}".`);

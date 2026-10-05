@@ -80,7 +80,7 @@ describe('#501 an UNLOCKED host behaves exactly as it did before', () => {
   it('reads actionGuard.enabled: false as false', async () => {
     const config = await freshConfig();
     config.setActionGuardCoreConfig({ enabled: false });
-    expect(config.getActionGuardCoreConfig()).toEqual({ enabled: false, enforce: true });
+    expect(config.getActionGuardCoreConfig()).toEqual({ enabled: false, enforce: true, readinessGate: false });
   });
 
   it('lets the signed setter disable the guard', async () => {
@@ -111,7 +111,7 @@ describe('#501 an UNVERIFIABLE lock forces the strict posture through the config
     config.clearCloudConfigCache();
 
     const fresh = await freshConfig();
-    expect(fresh.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+    expect(fresh.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
   });
 
   it('raises defenceMode to strict over a permissive config', async () => {
@@ -227,7 +227,7 @@ describe('#501 a tampered HMAC verdict forces the SAME posture, not just defence
     // untrustworthy, so a detected tamper left the guard exactly as the tamper
     // wanted it.
     const fresh = await tamperedConfig();
-    expect(fresh.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+    expect(fresh.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
   });
 
   it('forces defenceMode strict, empties autoApprove and disables the broker', async () => {
@@ -254,7 +254,7 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     // 1. The locked-box starting point: guard on and enforcing, correctly signed.
     const start = await freshConfig();
     start.setActionGuardCoreConfig({ enabled: true, enforce: true });
-    expect(start.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+    expect(start.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
 
     // 2. Runbook step 2 — hand-edit the source config to the policy you now
     //    want. This is what invalidates `_sig`.
@@ -269,13 +269,13 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     const repinned = await freshConfig();
     expect(repinned.readRawConfig()).toBeDefined();
     expect(repinned.isConfigTampered()).toBe(true);
-    expect(repinned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+    expect(repinned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
 
     // 4. Runbook step 4 — the step that was missing. Re-run the corresponding
     //    setter, which re-signs the file. NOW the loosening is in force.
     repinned.setActionGuardCoreConfig({ enabled: true, enforce: false });
     const resigned = await freshConfig();
-    expect(resigned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false });
+    expect(resigned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false, readinessGate: false });
     expect(resigned.readRawConfig()).toBeDefined();
     expect(resigned.isConfigTampered()).toBe(false);
   });
@@ -297,11 +297,11 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     // re-signed the file, a lock on the host still outranks those fresh bytes.
     const start = await freshConfig();
     start.setActionGuardCoreConfig({ enabled: true, enforce: false });
-    expect(start.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false });
+    expect(start.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false, readinessGate: false });
 
     writeSameUidLock({ actionGuard: { enabled: true, enforce: true } });
     const locked = await freshConfig();
-    expect(locked.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true });
+    expect(locked.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
   });
 });
 
