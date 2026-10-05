@@ -23,6 +23,11 @@ import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals
 
 const events: string[] = [];
 
+// When set, disposeModel() stays pending until the test releases it, so the
+// exit can be checked against disposal COMPLETING, not merely starting.
+let heldDisposal: Promise<void> | null = null;
+let disposalEntered: (() => void) | null = null;
+
 jest.unstable_mockModule('../embeddings/index.js', () => ({
   generateEmbedding: async () => {
     events.push('embed');
@@ -33,6 +38,9 @@ jest.unstable_mockModule('../embeddings/index.js', () => ({
   preloadModel: async () => {},
   disposeModel: async () => {
     events.push('dispose');
+    disposalEntered?.();
+    if (heldDisposal) await heldDisposal;
+    events.push('disposed');
   },
 }));
 
@@ -51,6 +59,8 @@ describe('#633 remember disposes the embedding worker before exiting', () => {
 
   beforeEach(() => {
     events.length = 0;
+    heldDisposal = null;
+    disposalEntered = null;
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-633-'));
     process.env.CLAUDE_MEMORY_DB = path.join(dir, 'memories.db');
     jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -94,5 +104,44 @@ describe('#633 remember disposes the embedding worker before exiting', () => {
     expect(events.filter((e) => e.startsWith('exit:'))).toEqual(['exit:1']);
     expect(events.indexOf('dispose')).toBeGreaterThan(-1);
     expect(events.indexOf('dispose')).toBeLessThan(events.indexOf('exit:1'));
+  });
+
+  // Starting disposal is not enough: the worker is only gone once
+  // disposeModel() resolves, so the exit has to wait for that.
+  async function exitWaitsForDisposal(args: string[], code: number): Promise<void> {
+    let release!: () => void;
+    heldDisposal = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { disposalEntered = resolve; });
+
+    const run = handleRememberCommand(args);
+    run.catch(() => {}); // observed below; avoid an unhandled rejection meanwhile
+
+    await entered;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events.filter((e) => e.startsWith('exit:'))).toEqual([]);
+
+    release();
+    await expect(run).rejects.toBeInstanceOf(ExitCalled);
+    expect(events.filter((e) => e.startsWith('exit:'))).toEqual([`exit:${code}`]);
+    expect(events.indexOf('disposed')).toBeLessThan(events.indexOf(`exit:${code}`));
+  }
+
+  it('a successful write exits 0 only after disposal completes', async () => {
+    await exitWaitsForDisposal([
+      'sc633 synthetic held success',
+      '--content', 'synthetic note for the awaited-disposal lifecycle',
+      '--project', 'sc633-synthetic',
+      '--json',
+    ], 0);
+    expect(events).toContain('embed');
+  });
+
+  it('a failed write exits 1 only after disposal completes', async () => {
+    await exitWaitsForDisposal([
+      'sc633 synthetic held empty',
+      '--content', '',
+      '--project', 'sc633-synthetic',
+      '--json',
+    ], 1);
   });
 });
