@@ -71,6 +71,15 @@ shieldcortex dashboard
 
 Local UI: **Overview · Memory · Protection · X-Ray · Settings**. Memory has Library / Graph / Recall / Review / Timeline. Prompt-time recall into Claude Code is on for a fresh global, non-CI install: the npm postinstall creates a missing `~/.shieldcortex/config.json` with `proactiveRecall: true`. Turn it off under Settings → Integrations or with `shieldcortex config --proactive-recall false`.
 
+## What's new in 5.4
+
+- **Action Guard: enforce when ready.** A third posture beside off and enforce. `shieldcortex config --action-guard-enforce-when-ready` (or the new setup question) runs the dangerous tier in shadow, logging what it would have held or blocked while the call proceeds. It enforces only once this install's own audit log shows the guard is operable (low intervention rate, approvals reliably answered through a configured channel) and reviewed effectiveness evidence for the running version exists. No such evidence ships yet, so today this posture stays in shadow and says so. The Claude Code hook and the OpenClaw plugin each measure and promote on their own calls; the Hermes plugin ignores the gate and enforces. (#509)
+- **`shieldcortex guard readiness`** shows each surface's posture, mode, thresholds, samples and what is missing. `shieldcortex guard test-approval` sends a labelled synthetic request to prove your approval channel works.
+- **Loud demotions.** Falling back from enforcing to shadow prints to stderr, writes an audit row, sends a webhook notice and makes `shieldcortex doctor` fail. Promotions are announced on the same webhook.
+- **Guard self-protection floor, in every mode.** Calls that touch the guard's own state, config, lease ledger or policy lock are held or denied even in watch-only and shadow, and only a human answer releases them. This changes behaviour for watch-only installs.
+
+Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
+
 ## What's new in 5.3
 
 - **The injection scanner catches more.** Spoofed authority lines inside tool results (`ADMIN: you must …`, `SYSTEM OVERRIDE:`), “repeat everything above” extraction requests, explicit injection phrases in ten languages, and ROT13-encoded instructions. Content that passed before can now be quarantined by the memory firewall. It is a detection floor: reworded attacks in any language still pass. (#506)
@@ -169,6 +178,7 @@ shieldcortex scan "text"
 shieldcortex env scan <url>
 shieldcortex xray <path>
 shieldcortex ledger verify
+shieldcortex guard readiness
 shieldcortex protect
 shieldcortex config --policy-status
 ```
