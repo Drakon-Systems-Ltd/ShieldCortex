@@ -82,4 +82,19 @@ describe('#503 — destroy-data-or-infra', () => {
     expect(v.action).toBe('delete_file');
     expect(v.reason).toMatch(/database, cluster or cloud resource/);
   });
+
+  // CASE #626: unbounded [^|;&\\n]* gaps in this row were O(n^2) on a
+  // non-matching padded line (112 KB → ~1900 ms). Gaps are now {0,512}.
+  // Pre-fix evaluateToolCall on this shape was ~1.9s; post-fix ~2 ms.
+  it('stays linear on ~100 KB of separator-free padding that does not match', () => {
+    const bin = rev('ltcebuk');
+    const verb = rev('eteled');
+    const command = `${bin} ${(verb + ' ').repeat(16000)}`;
+    expect(command.length).toBeGreaterThan(100_000);
+    const start = Date.now();
+    const v = verdictFor(command);
+    const elapsedMs = Date.now() - start;
+    expect(elapsedMs).toBeLessThan(50);
+    expect(v.signals).not.toContain('destroy-data-or-infra');
+  });
 });

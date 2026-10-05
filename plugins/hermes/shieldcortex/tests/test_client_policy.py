@@ -442,6 +442,20 @@ class FallbackDangerousScanTests(unittest.TestCase):
         # non-exec-surface keys are not scanned (a description must not gate)
         self.assertNotIn("harmless words", s)
 
+    def test_503_padding_stays_fast(self):
+        """#626: bounded gaps. Pre-fix Hermes ~5s on 56 KB; 112 KB must stay under 300 ms."""
+        import time
+        from sc_client import fallback_dangerous_match
+        bin_name = "ltcebuk"[::-1]
+        verb = "eteled"[::-1]
+        cmd = bin_name + " " + (verb + " ") * 16000
+        self.assertGreater(len(cmd), 100_000)
+        t0 = time.perf_counter()
+        hit = fallback_dangerous_match(cmd)
+        ms = (time.perf_counter() - t0) * 1000
+        self.assertLess(ms, 300, f"{ms:.1f} ms for {len(cmd)} bytes")
+        self.assertFalse(hit)
+
 
 class DangerousFailClosedPolicyTests(unittest.TestCase):
     """Scanner-unreachable now fails CLOSED on dangerous shapes when enforcing."""
