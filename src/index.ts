@@ -693,6 +693,10 @@ ${bold}COMMANDS${reset}
                         (dry-run; --execute). Audit logs are not managed yet (#579).
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
+  ${cyan}guard${reset} readiness       Enforce-when-ready, per surface (Claude Code hook, OpenClaw plugin):
+                        posture, mode, readiness proxies + effectiveness evidence
+  ${cyan}guard${reset} test-approval   Send a synthetic approval request through your channel (TTY only;
+                        --surface claude-code|openclaw picks whose evidence it is)
   ${cyan}allowlist${reset} [add|remove|verify|scan]
                         Pin a human-reviewed script (path + content hash)
                         so the guard stops folding its source; any edit re-gates it.
@@ -922,6 +926,15 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'approve') {
     const { runApprove } = await import('./cli/approve.js');
     process.exitCode = runApprove(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "guard" subcommand (#509) — `guard readiness` shows the
+  // enforce-when-ready readiness conditions; `guard test-approval` (TTY-only) sends a
+  // synthetic approval request through the configured human channel.
+  if (process.argv[2] === 'guard') {
+    const { runGuardCommand } = await import('./cli/guard.js');
+    process.exitCode = await runGuardCommand(process.argv.slice(3));
     return;
   }
 

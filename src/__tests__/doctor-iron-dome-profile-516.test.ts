@@ -98,9 +98,9 @@ describe('doctor Iron Dome profile (#516)', () => {
     expect(result.message).toContain('default kill phrase');
   });
 
-  it('runs the check immediately after the action guard', () => {
+  it('runs the check right after the action guard rows', () => {
     const source = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../cli/doctor.ts'), 'utf8');
-    expect(source).toMatch(/checkActionGuard,\s*checkIronDomeProfile,\s*checkCronDenials,/);
+    expect(source).toMatch(/checkActionGuard,\s*checkActionGuardReadiness,\s*checkIronDomeProfile,\s*checkCronDenials,/);
   });
 
   describe('reads the persisted config without the database singleton', () => {

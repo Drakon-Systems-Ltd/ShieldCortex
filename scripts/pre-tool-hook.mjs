@@ -18,6 +18,19 @@
  *     narrows or stays neutral, it never WIDENS what the user's settings allow.
  *   - benign / read-only / pure-print → no output at all.
  *
+ * Enforce-when-ready (#509, `actionGuard.readinessGate: true` on an enforcing
+ * guard): the dangerous tier runs in SHADOW — audited as `would_hold` /
+ * `would_block`, no decision emitted — until this install meets all three
+ * readiness conditions: the two operability proxies (operational intervention
+ * rate, approval reachability) measured from its own audit, plus reviewed
+ * effectiveness evidence, always required (see
+ * src/defence/iron-dome/guard-readiness.ts). These proxies are not the
+ * ADR-002 §5B bars. The catastrophic tier, the session-lease floor and the
+ * guard self-protection floor (GUARD_SELF_PROTECTION_SIGNALS: the guard's own
+ * state, config, lease ledger and policy lock) are enforced in every posture
+ * and mode — never shadowed, never advisory. A policy lock disables the gate
+ * (the lock pins enforcement).
+ *
  * Prompt-surface rule: "ask" is only meaningful where Claude Code will actually
  * raise a prompt. In `bypassPermissions` and `dontAsk` the harness shows no
  * prompt, and when `permission_mode` is absent or unrecognised we cannot tell.
@@ -367,6 +380,13 @@ function flattenActionGuardConfig(config) {
       enforce: raw.enforce !== false,
       autoApprove: Array.isArray(raw.autoApprove) ? raw.autoApprove.filter((a) => typeof a === 'string') : [],
       auditAllows: raw.auditAllows !== false,
+      // #509 enforce-when-ready: exactly `true` opts an ENFORCING guard into
+      // shadow mode until this install meets the readiness conditions.
+      // Anything else is absent — the flag can only be turned on on purpose,
+      // and without it `enforce` means what it always meant.
+      readinessGate: raw.readinessGate === true,
+      // #509 option A: reviewed effectiveness evidence is always required;
+      // there is no config key that drops it, so none is read here.
       // #143, passed through RAW. normaliseBrokerConfig in dist is the single
       // place that knows which values would loosen an invariant; re-implementing
       // half of it here is how the two halves end up disagreeing. Absent or
@@ -572,6 +592,121 @@ async function loadLease() {
     return typeof mod.evaluateToolCallLease === 'function' ? mod : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Load the #509 readiness gate. Null when the dist build predates it; the
+ * caller then ENFORCES (the tighter answer) — a posture that cannot measure
+ * readiness must not fall back to shadow, which would be the looser one.
+ * Memoised: the reach-evidence writers below reuse the same module.
+ */
+let readinessModPromise = null;
+function loadReadiness() {
+  if (!readinessModPromise) {
+    readinessModPromise = (async () => {
+      try {
+        const mod = await import(
+          pathToFileURL(resolve(hookDistRoot(), 'defence', 'iron-dome', 'guard-readiness.js')).href
+        );
+        return typeof mod.resolveReadiness === 'function'
+          && typeof mod.describeHumanChannel === 'function'
+          && typeof mod.recordApprovalReach === 'function'
+          && typeof mod.currentReadinessPin === 'function'
+          ? mod
+          : null;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return readinessModPromise;
+}
+
+/**
+ * #509 approval-reachability evidence for one request that was put (or failed
+ * to be put) to the configured human channel. Written only when a channel is
+ * configured: the proxy measures THAT channel's reachability, and "no channel"
+ * already makes the install not-ready on its own. Best-effort and silent — a
+ * missing evidence row can only keep an install from becoming ready.
+ */
+async function recordReachEvidence(cfg, hash, phase, answer, channel, reason, attemptId) {
+  try {
+    const mod = await loadReadiness();
+    if (!mod || !mod.describeHumanChannel(cfg.notify).configured) return;
+    mod.recordApprovalReach({ hash, attemptId, phase, answer, channel, reason, origin: 'claude-code-hook' });
+  } catch {
+    /* evidence is best-effort */
+  }
+}
+
+/**
+ * #509 demotion: loud by construction. stderr always; an audited notify row
+ * always; a plain-message delivery on the configured denial channel (the
+ * webhook). The OpenClaw card channel carries approvals only, so readiness
+ * refuses to PROMOTE an install without a webhook (NO_NOTICE_CHANNEL_MESSAGE):
+ * a promoted install always has a channel this notice can reach. The
+ * transition row itself was already appended by resolveReadiness.
+ */
+async function announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra) {
+  let line = 'ShieldCortex Action Guard DEMOTED to shadow mode (enforce-when-ready).';
+  try { line = readinessMod.describeDemotion(resolved.demotionReason); } catch { /* keep the fallback */ }
+  console.error(`[shieldcortex] ⚠️ ${line}`);
+  await announceTransition(readinessMod, resolved, 'demote', toolName, getNotify, baseExtra);
+}
+
+/**
+ * #509 r5: a PROMOTION is announced the moment it happens, on the same push
+ * channel a demotion uses (promotion is refused without one). The floor stops
+ * the agent's ordinary tool calls from editing guard state, but a same-UID
+ * process that deliberately evades the classifier can still forge the
+ * journal; the notice is the out-of-band detection control for that — a
+ * promotion the operator never heard about is the signal. Whether the notice
+ * was delivered is journalled beside the promotion, and doctor reports both.
+ */
+async function announcePromotion(readinessMod, resolved, toolName, getNotify, baseExtra) {
+  console.error('[shieldcortex] enforce-when-ready: all readiness conditions hold — Action Guard is now ENFORCING dangerous-tier verdicts.');
+  await announceTransition(readinessMod, resolved, 'promote', toolName, getNotify, baseExtra);
+}
+
+async function announceTransition(readinessMod, resolved, which, toolName, getNotify, baseExtra) {
+  const promote = which === 'promote';
+  const verdict = { severity: 'high', decision: 'require_approval', signals: [promote ? 'readiness-promoted' : 'readiness-demoted'] };
+  let result = null;
+  try {
+    const notify = await getNotify();
+    const channel = notify?.denialChannel;
+    if (channel && notify.deliverOperatorNotification && notify.buildActionGuardOutcomeNotification) {
+      const n = notify.buildActionGuardOutcomeNotification({
+        event: 'action_guard_warning',
+        outcome: promote ? 'readiness_promoted' : 'readiness_demoted',
+        tool: safeToolName(toolName),
+        surface: 'redacted action surface',
+        signals: verdict.signals,
+        severity: 'high',
+        reason: '',
+        origin: 'claude-code-hook',
+        detectedAt: new Date().toISOString(),
+      });
+      result = await notify.deliverOperatorNotification(n, { channels: [channel], timeoutMs: notify.config.timeoutMs });
+    }
+  } catch {
+    result = { deliveredVia: null, attempts: [{ channel: 'operator-notify', result: { delivered: false, reason: `${which} notice failed` } }] };
+  }
+  recordNotifyAudit(toolName, verdict, {}, { ...baseExtra, readinessTransition: which }, result);
+  if (resolved.transitionAt) {
+    const failure = result?.attempts?.find?.((a) => a?.result?.delivered === false)?.result?.reason;
+    try {
+      readinessMod.recordTransitionNotice?.({
+        of: which,
+        transitionAt: resolved.transitionAt,
+        delivered: Boolean(result?.deliveredVia),
+        channel: result?.deliveredVia ?? null,
+        reason: result ? (result.deliveredVia ? undefined : safeDiagnosticReason(failure ?? 'no channel accepted the notice')) : 'no push notice channel was available',
+      });
+    } catch {
+      /* an unrecorded notice reads as "no notice attempt recorded" — the louder answer */
+    }
   }
 }
 
@@ -796,7 +931,7 @@ function safeDiagnosticApprovalReason(reason) {
   return `${lead}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
 }
 
-async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey }) {
+async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey, attemptId }) {
   if (!notify) return null;
   const denied = typeof noPromptSurface === 'string' && noPromptSurface.length > 0;
   // A denial cannot go to an interactive Approve/Deny card — there is nothing
@@ -811,6 +946,8 @@ async function pingOperator(notify, { toolName, toolInput, verdict, hash, noProm
     const result = await notify.requestOperatorApproval(
       {
         hash,
+        // #509 R4-2: the reply (card tap or `approve --attempt`) binds to this attempt.
+        attemptId: typeof attemptId === 'string' ? attemptId : undefined,
         tool: safeToolName(toolName),
         command: safeApprovalCommand(toolName, toolInput),
         signals: displayVerdict.signals,
@@ -875,6 +1012,8 @@ const SAFE_SIGNALS = new Set([
   'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
   'type-coercion', 'missing-handle', 'write-content-catastrophic',
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
+  // #509: the enforce-when-ready gate's own demotion and promotion notices.
+  'readiness-demoted', 'readiness-promoted',
 ]);
 /**
  * #436 — the only tiers that deny with no operator affordance. Everything the
@@ -2140,10 +2279,21 @@ const FALLBACK_DANGEROUS_PATTERNS = [
   { re: /(?:(?:>>?|>\|)(?:[ \t]|\\\n)*|\btee\b(?:(?:[ \t]|\\\n)+(?:--?[\w-]+(?:=\S*)?|'[^'\n]*'|"[^"\n]*"|[^\s'"|;&<>\\-][^\s'"|;&<>\\]*))*(?:[ \t]|\\\n)+|\bsed\b(?=[^|;&\n]*[ \t](?:-[a-zA-Z]*i|--in-place))[^|;&\n]*(?:[ \t]|\\\n)+)['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)|\b(?:cp|mv|install)\b[^|;&\n]*(?:[ \t]|\\\n)+['"]?(?:[^\s'"|;&<>]*\/)?(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b)['"]?\s*(?=$|[|;&\n])/i, signal: 'modify-shell-startup' },
   // Guard's own approval store (#118): agent-side writes here mint approvals.
   { re: /\.shieldcortex[\\/]+approvals\b/i, signal: 'touch-approval-store' },
+  // #509 r6 S2: the r5 classifier shapes — the guard directory (or approvals/)
+  // itself moved/copied over/deleted with the verb at command position, and
+  // guard state reached relatively (or by `.`/a glob) after `cd` into it.
+  // #509 r7 (PR #610 review): a long non-matching command must not backtrack
+  // quadratically — 100 KiB of newlines took 20-35 s per row. `\n` is itself an
+  // anchor, so the blank run after one excludes it ([^\S\n]), and the argument
+  // gap stops at `(`. The gaps carry NO length bound: a `{0,512}` bound let
+  // padding inside the scan cap hide a real match, and FALLBACK_SCAN_CAP is the
+  // bound on what these rows are ever fed.
+  { re: /(?:^|[;&|(\n`]|\$\()[^\S\n]*(?:\w+=\S*\s+)*(?:sudo\s+(?:-\S+\s+)*)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]*?\s)?["']?[^\s;&|"'`]*\.shieldcortex(?:[\\/]+approvals)?[\\/]*["']?(?=$|[\s;&|)])/i, signal: 'touch-approval-store' },
+  { re: /(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?["']?[^\s;&|"'`]*\.shieldcortex[\\/]*["']?(?=$|[\s;&|)])[\s\S]*?(?:(?:^|[\s;&|(<>='"])(?:\.[\\/])?(?:approvals|DECISIONS\.md|leases|config\.json)(?=$|[\s;&|)\\/'"])|[;&|(\n][^\S\n]*(?:sudo\s+)?(?:mv|cp|rm|rmdir|rsync|ln|install)\s(?:[^;&|\n(]*?\s)?["']?[.\\/*]*[.*][.\\/*]*["']?(?=$|[\s;&|)]))/i, signal: 'touch-approval-store' },
   // Session-lease ledger + store (#227): a freeze an agent can edit is not a freeze.
   { re: /\.shieldcortex[\\/]+(?:DECISIONS\.md|leases)\b/i, signal: 'touch-decisions-ledger' },
   // #500: outage fallback must gate self-disable / global uninstall / config.json writes.
-  { re: /--action-guard-(?:disable|advisory)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
+  { re: /--action-guard-(?:disable|advisory|enforce-when-ready)\b|\biron-dome\s+deactivate\b/i, signal: 'disable-action-guard' },
   { re: /\b(?:npm|yarn|pnpm|bun)\b[^|;&\n]*\b(?:uninstall|remove)\b[^|;&\n]*\b(?:shieldcortex|@drakon-systems\/shieldcortex-realtime)\b/i, signal: 'disable-action-guard' },
   { re: /\.shieldcortex[\\/]+config\.json\b/i, signal: 'touch-guard-config' },
   // #501: the policy lock's own attack surface. The two environment seams that
@@ -2166,6 +2316,8 @@ const FALLBACK_DANGEROUS_PATTERNS = [
 /** Same command/path/url field set tool-action-guard.ts extracts — narrow, not the whole args object. */
 const FALLBACK_SURFACE_KEYS = [
   'command', 'cmd', 'script', 'code', 'input', 'shell', 'run',
+  // #509 r6 S2: OpenClaw `process` typed-shell payloads (the guard reads them too).
+  'data', 'text', 'literal',
   'path', 'file_path', 'filePath', 'file', 'target', 'destination', 'dir', 'directory',
   'url', 'uri', 'endpoint', 'href', 'host', 'to',
 ];
@@ -2321,6 +2473,33 @@ function fallbackDangerousMatch(toolInput, toolName) {
   if (!text) return null;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
   for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (lockReadOnly && lockPath === true) continue;
+    if (re.test(text)) return signal;
+  }
+  return null;
+}
+
+// #509 R4-1: the guard self-protection floor. DUPLICATED from
+// tool-action-guard.ts `GUARD_SELF_PROTECTION_SIGNALS` for the outage path,
+// where the dist module is exactly what failed to load; the live path reads
+// the guard's own export. Held equal by enforcement-surface-parity.
+const FALLBACK_SELF_PROTECTION_SIGNALS = ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard'];
+
+/** The self-protection signals the live guard exports, else the duplicate. */
+function selfProtectionSignals(guard) {
+  const list = guard?.GUARD_SELF_PROTECTION_SIGNALS;
+  return Array.isArray(list) && list.length > 0 ? list : FALLBACK_SELF_PROTECTION_SIGNALS;
+}
+
+/** A self-protection signal the WS2 fallback scan matches, or null. Checked
+ *  over EVERY row, not just the first match, so a command that also trips an
+ *  earlier row (`rm …/approvals/x`) still lands on the floor. */
+function fallbackSelfProtectionMatch(toolInput, toolName) {
+  const text = fallbackExecSurface(toolInput);
+  if (!text) return null;
+  const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
+  for (const { re, signal, lockPath } of FALLBACK_DANGEROUS_PATTERNS) {
+    if (!FALLBACK_SELF_PROTECTION_SIGNALS.includes(signal)) continue;
     if (lockReadOnly && lockPath === true) continue;
     if (re.test(text)) return signal;
   }
@@ -2628,9 +2807,11 @@ async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permis
   }
 
   // 2. Dangerous — gate to the permission dialog; enforce:false opts to advisory.
-  const dangerousSignal = fallbackDangerousMatch(toolInput, toolName);
+  const selfProtectSignal = fallbackSelfProtectionMatch(toolInput, toolName);
+  const dangerousSignal = selfProtectSignal ?? fallbackDangerousMatch(toolInput, toolName);
   if (dangerousSignal) {
-    if (!cfg.enforce) {
+    // #509 R4-1: the self-protection floor is never advisory.
+    if (!cfg.enforce && !selfProtectSignal) {
       const fallbackWarnVerdict = { severity: 'dangerous', decision: 'require_approval', signals: ['fallback-scan', dangerousSignal], reason: `Guard unavailable: ${failureSummary}; enforce:false advisory` };
       const actionId = writeTerminalOutcomeAudit(
         toolName,
@@ -2791,12 +2972,54 @@ process.stdin.on('end', async () => {
       return;
     }
 
+    // ── #509 enforce-when-ready ───────────────────────────────────────────
+    // Only an ENFORCING guard can be gated, and never on a host with a policy
+    // lock: the lock pins enforcement, and a readiness flag must not become a
+    // way around it. Resolved on every call (a fresh cache makes that one
+    // small file read) so a demotion is announced when it happens, not at the
+    // next dangerous call. Any failure here ENFORCES — the tighter answer.
+    const whenReady = cfg.enforce && cfg.readinessGate === true && !inlinePolicyLockPresent();
+    let shadow = false;
+    if (whenReady) {
+      const readinessMod = await loadReadiness();
+      if (!readinessMod) {
+        console.error('[shieldcortex] enforce-when-ready: the readiness module is missing from this build — ENFORCING. Run `shieldcortex repair`.');
+      } else {
+        try {
+          // Pin every row this call writes to the adapter + policy version in
+          // force: only same-version rows count as readiness evidence.
+          const pin = readinessMod.currentReadinessPin();
+          if (pin) baseExtra.readinessPin = pin;
+          const resolved = readinessMod.resolveReadiness({
+            channel: readinessMod.describeHumanChannel(cfg.notify),
+          });
+          shadow = resolved.mode === 'shadow';
+          if (resolved.tamper) {
+            console.error(`[shieldcortex] ⚠️ enforce-when-ready: readiness tamper signal — ${String(resolved.tamper).slice(0, 300)}. Recorded; run \`shieldcortex doctor\`.`);
+          }
+          if (resolved.transition === 'demote') {
+            await announceDemotion(readinessMod, resolved, toolName, getNotify, baseExtra);
+          } else if (resolved.transition === 'promote') {
+            await announcePromotion(readinessMod, resolved, toolName, getNotify, baseExtra);
+          }
+        } catch (err) {
+          shadow = false;
+          console.error(`[shieldcortex] enforce-when-ready: readiness could not be resolved (${safeDiagnosticReason(err?.message ?? err)}) — ENFORCING.`);
+        }
+      }
+    }
+
     if (verdict.decision === 'allow') {
       // Issue #95: audit RECOGNISED allows (severity above benign) so forensics
       // can tell "scanned & allowed" from "never scanned". Benign allows stay
       // unaudited — volume discipline, mirrored with the plugin interceptor.
       if (verdict.severity !== 'benign' && cfg.auditAllows !== false) {
         writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'allowed'), redactedAuditArgs(toolName, toolInput), 'allow', 'allowed', baseExtra);
+      } else if (whenReady) {
+        // #509: the intervention proxy's denominator is EVERY gated call, so under this
+        // posture a benign allow leaves a minimal row too — no command text,
+        // no args; the one extra row per call is the measurement's price.
+        writeAuditEntry(safeToolName(toolName), { decision: 'allow', severity: 'benign', signals: [] }, { tally: 'redacted' }, 'allow', 'allowed', { ...baseExtra, readinessTally: true });
       }
       process.exit(0);
     }
@@ -2856,12 +3079,22 @@ process.stdin.on('end', async () => {
     // tiers exited above, so anything still a `block` here is by definition a
     // refusal the guard did not reach a scanned conclusion about.
     const unscannedBlock = isSchemaInvalid(verdict) || verdict.decision === 'block';
+    // #509 R4-1: the guard self-protection floor. A verdict touching the
+    // guard's own state (approval store, readiness state, transition record),
+    // its config, lease ledger or policy lock is held in EVERY posture and
+    // mode — neither the enforce-when-ready shadow nor watch-only advisory
+    // turns it into a would-hold or a warning. Otherwise shadow mode would let
+    // the agent forge the very evidence that keeps the guard in shadow.
+    const floorSignals = selfProtectionSignals(guard);
+    const selfProtected = Array.isArray(verdict.signals) && verdict.signals.some((s) => floorSignals.includes(s));
 
     // require_approval — the dangerous tier.
     // Per-operator autoApprove allowlist (family / action / signal match, same
-    // matching as the plugin). Never applies to catastrophic — that returned above.
+    // matching as the plugin). Never applies to catastrophic — that returned
+    // above — nor (#509 r5) to the self-protection floor: no standing
+    // allowlist entry may approve a write to the guard's own state.
     const autoApprove = cfg.autoApprove ?? [];
-    if (autoApprove.length > 0 && !unscannedBlock) {
+    if (autoApprove.length > 0 && !unscannedBlock && !selfProtected) {
       const hay = [verdict.family, verdict.action, ...verdict.signals].map((s) => String(s).toLowerCase());
       const matched = autoApprove.some((a) => {
         const n = a.toLowerCase();
@@ -2873,7 +3106,33 @@ process.stdin.on('end', async () => {
       }
     }
 
-    if (!cfg.enforce && !unscannedBlock) {
+    // #509 SHADOW: enforce-when-ready does not (or no longer) meet its
+    // readiness conditions.
+    // The verdict is exactly the guard's; it is recorded as the stop it WOULD
+    // have been — `would_hold` where enforcing would ask, `would_block` where
+    // it would deny for want of a prompt surface — and the call proceeds.
+    // Placed where advisory mode sits, so it inherits advisory's limits: the
+    // catastrophic tier returned above, and an unscanned schema rejection
+    // (#436) is NOT shadowed — "could not look" is never an allow — and neither
+    // is the guard self-protection floor (R4-1, `selfProtected` above).
+    if (shadow && !unscannedBlock && !selfProtected) {
+      const wouldOutcome = noPromptSurfaceReason(permissionMode) ? 'would_block' : 'would_hold';
+      writeAuditEntry(
+        safeToolName(toolName),
+        safeApprovalVerdict(verdict),
+        redactedAuditArgs(toolName, toolInput),
+        'require_approval',
+        wouldOutcome,
+        { ...baseExtra, shadow: true, posture: 'enforce-when-ready' },
+      );
+      console.error(
+        `[shieldcortex] Action Guard (shadow, enforce-when-ready): ${wouldOutcome === 'would_block' ? 'would have BLOCKED' : 'would have HELD for approval'} ` +
+        `${safeToolName(toolName)} [${safeSignalList(verdict.signals).join(', ')}] — not enforced until this install meets its readiness conditions (\`shieldcortex guard readiness\`).`,
+      );
+      process.exit(0);
+    }
+
+    if (!cfg.enforce && !unscannedBlock && !selfProtected) {
       const actionId = writeTerminalOutcomeAudit(toolName, verdict, toolInput, 'warn', 'warned', 'action_guard_warning', baseExtra);
       const notified = await alertGuardOutcome(getNotify(), {
         toolName,
@@ -2991,7 +3250,9 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    if (brokered?.outcome === 'pre_clear' && !unscannedBlock) {
+    // #509 r5: the broker cannot pre-clear the self-protection floor either;
+    // only a human answer releases a write to the guard's own state.
+    if (brokered?.outcome === 'pre_clear' && !unscannedBlock && !selfProtected) {
       const brokerAudit = safeBrokerAudit(brokered.audit);
       writeAuditEntry(safeToolName(toolName), safeAllowAuditVerdict(verdict, 'approved'), redactedAuditArgs(toolName, toolInput), 'require_approval', 'approved', { ...baseExtra, ...(brokerAudit ? { broker: brokerAudit } : {}) });
       console.error(`[shieldcortex] approval broker PRE-CLEARED ${safeToolName(toolName)}: ${safeDiagnosticReason(brokered.reason)} [${safeSignalList(verdict.signals).join(', ')}]`);
@@ -3006,14 +3267,18 @@ process.stdin.on('end', async () => {
     // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact
     // only when something can actually hold. Promptless denials are terminal:
     // no pending approval, no retry hash, no operator affordance.
+    // #509: the pending record mints this attempt's reach correlation id; the
+    // request row below carries it and the human's answer binds to it.
+    let reachAttemptId;
     if (approvals && !noPromptSurfaceForHold) {
       try {
-        approvals.recordPending({
+        const pending = approvals.recordPending({
           tool: toolName,
           input: toolInput,
           summary: describeToolCall(toolName, toolInput),
           signals: verdict.signals,
         });
+        reachAttemptId = typeof pending?.reachAttemptId === 'string' ? pending.reachAttemptId : undefined;
       } catch {
         // As above: never widen, never wedge.
       }
@@ -3050,12 +3315,21 @@ process.stdin.on('end', async () => {
           toolInput,
           verdict,
           hash: fullHash,
+          attemptId: reachAttemptId,
           noPromptSurface: null,
           // Which job died. Absent on a harness that does not report them —
           // rendered only when present, never as "undefined".
           sessionKey: baseExtra.sessionKey,
         });
         recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result);
+        // #509 approval-reach evidence: a delivered request waits for its
+        // answer (the store or the card waiter writes it, keyed to this hash);
+        // one that never left is already known NOT to have reached anyone.
+        if (result?.deliveredVia) {
+          await recordReachEvidence(cfg, fullHash, 'request', undefined, safeNotifyLabel(result.deliveredVia) ?? 'channel', undefined, reachAttemptId);
+        } else {
+          await recordReachEvidence(cfg, fullHash, 'resolved', 'unreached', null, 'request not delivered to the configured channel');
+        }
       }
     }
     // #139: ask ONLY where a prompt can actually be raised. Under
@@ -3080,6 +3354,14 @@ process.stdin.on('end', async () => {
       baseExtra,
       retryCtx,
     );
+    // #509: a denial for want of a prompt surface put no decision to a human
+    // at all — for approval reachability that is a request that did NOT reach
+    // one. (Same pure function emitApprovalRequired just branched on.)
+    if (noPromptSurfaceForHold) {
+      let dnpHash = null;
+      try { dnpHash = approvals ? approvals.hashToolCall(toolName, toolInput) : null; } catch { dnpHash = null; }
+      await recordReachEvidence(cfg, dnpHash ?? mintActionId(), 'resolved', 'no_surface', null, noPromptSurfaceForHold);
+    }
     process.exit(0);
   } catch (error) {
     console.error(`[shieldcortex] action-guard hook error: ${error?.message ?? error}`);

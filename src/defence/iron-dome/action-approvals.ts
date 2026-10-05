@@ -36,6 +36,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 import { classifyFamily } from './tool-action-guard.js';
+import { REACH_ANSWER_WINDOW_MS, newReachAttemptId, recordApprovalReach } from './guard-readiness.js';
 
 /** Default lifetime of an operator approval before it must be re-granted. */
 export const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -65,6 +66,10 @@ export interface ApprovalRecord {
   consumedAt?: number;
   /** Lifetime granted at approval time. */
   ttlMs?: number;
+  /** #509: correlation id of the latest delivery attempt for this request.
+   *  Re-minted on every refusal, so an answer binds to one attempt and the
+   *  attempts before it keep their own (expired) outcome. */
+  reachAttemptId?: string;
 }
 
 interface ApprovalFile {
@@ -214,7 +219,10 @@ export function recordPending(
   if (existing) {
     // Leave an approved record untouched — refreshing it here would let a
     // repeated refusal extend an approval the operator time-boxed.
-    if (!existing.approvedAt) existing.requestedAt = now;
+    if (!existing.approvedAt) {
+      existing.requestedAt = now;
+      existing.reachAttemptId = newReachAttemptId();
+    }
     writeFileAtomic({ version: 1, records }, opts.home);
     return existing;
   }
@@ -225,6 +233,7 @@ export function recordPending(
     summary: entry.summary.replace(/\s+/g, ' ').trim().slice(0, 300),
     signals: entry.signals.slice(0, 8),
     requestedAt: now,
+    reachAttemptId: newReachAttemptId(),
   };
   records.push(record);
   writeFileAtomic({ version: 1, records }, opts.home);
@@ -233,11 +242,36 @@ export function recordPending(
 
 export type ApproveOutcome =
   | { ok: true; record: ApprovalRecord }
-  | { ok: false; reason: 'not-found' | 'already-approved' };
+  | { ok: false; reason: 'not-found' | 'already-approved' | 'stale-attempt' };
 
 export type DenyOutcome =
   | { ok: true; record: ApprovalRecord }
-  | { ok: false; reason: 'not-found' | 'already-approved' };
+  | { ok: false; reason: 'not-found' | 'already-approved' | 'stale-attempt' };
+
+/**
+ * #509 R4-2: which delivered attempt an answer is for. A channel answer (card
+ * tap, a reply to a notice) names the attempt it was shown; it binds only when
+ * that is the record's CURRENT attempt, compared exactly. An answer to an
+ * earlier attempt — expired and replaced by a newer delivery of the same
+ * command — grants nothing and is evidence for nobody.
+ *
+ * `undefined` is the #118 terminal path (`shieldcortex approve <hash>` typed at
+ * a TTY): it acts on the current attempt, as it always has, but it is NOT a
+ * reach through the channel, so it records no reachability evidence.
+ *
+ * #509 r5 (finding 4a): an explicit attempt also has a lifetime. An answer
+ * arriving more than {@link REACH_ANSWER_WINDOW_MS} after that attempt was
+ * delivered is the same as an answer to a superseded one — the channel
+ * already counted it as a timeout — so it grants nothing either.
+ */
+function attemptMatches(record: ApprovalRecord, attemptId: string | undefined, now: number): boolean | 'terminal' {
+  if (attemptId === undefined) return 'terminal';
+  if (!(typeof record.reachAttemptId === 'string'
+    && record.reachAttemptId.length > 0
+    && attemptId === record.reachAttemptId)) return false;
+  const age = now - record.requestedAt;
+  return Number.isFinite(age) && age >= 0 && age <= REACH_ANSWER_WINDOW_MS;
+}
 
 /**
  * Mark a pending request approved. Matches on the full hash or any unambiguous
@@ -246,7 +280,7 @@ export type DenyOutcome =
  */
 export function approveRequest(
   hashOrPrefix: string,
-  opts: { home?: string; now?: number; ttlMs?: number } = {},
+  opts: { home?: string; now?: number; ttlMs?: number; attemptId?: string } = {},
 ): ApproveOutcome {
   const now = opts.now ?? Date.now();
   const file = readFile(opts.home);
@@ -256,11 +290,22 @@ export function approveRequest(
 
   if (matches.length !== 1) return { ok: false, reason: 'not-found' };
   const record = matches[0];
+  // r5 (finding 4b): the attempt is validated BEFORE `already-approved`, so an
+  // answer to a superseded attempt reads as stale — and records no reach —
+  // even after the current attempt was approved.
+  const bound = attemptMatches(record, opts.attemptId, now);
+  if (bound === false) return { ok: false, reason: 'stale-attempt' };
   if (record.approvedAt) return { ok: false, reason: 'already-approved' };
 
   record.approvedAt = now;
   record.ttlMs = opts.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
   writeFileAtomic({ version: 1, records }, opts.home);
+  // #509: a human answered THIS attempt through the channel. Evidence for
+  // approval reachability, bound to the attempt the answer named. A terminal
+  // hash-only answer (R4-2) is not a channel reach and records nothing.
+  if (bound === true) {
+    recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'approve', origin: 'approval-store' }, { home: opts.home, now });
+  }
   return { ok: true, record };
 }
 
@@ -284,7 +329,7 @@ export function approveRequest(
  */
 export function denyRequest(
   hashOrPrefix: string,
-  opts: { home?: string; now?: number } = {},
+  opts: { home?: string; now?: number; attemptId?: string } = {},
 ): DenyOutcome {
   const now = opts.now ?? Date.now();
   const file = readFile(opts.home);
@@ -294,11 +339,17 @@ export function denyRequest(
 
   if (matches.length !== 1) return { ok: false, reason: 'not-found' };
   const record = matches[0];
+  const bound = attemptMatches(record, opts.attemptId, now);
+  if (bound === false) return { ok: false, reason: 'stale-attempt' };
   if (record.approvedAt) return { ok: false, reason: 'already-approved' };
 
   const denied: ApprovalRecord = { ...record, deniedAt: now };
   const remaining = records.filter((r) => r.hash !== record.hash);
   writeFileAtomic({ version: 1, records: remaining }, opts.home);
+  // #509: a "no" is a human answer too — it reached someone (same binding).
+  if (bound === true) {
+    recordApprovalReach({ hash: record.hash, attemptId: record.reachAttemptId, phase: 'answer', answer: 'deny', origin: 'approval-store' }, { home: opts.home, now });
+  }
   return { ok: true, record: denied };
 }
 

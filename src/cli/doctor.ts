@@ -4717,6 +4717,185 @@ export function fixActionGuardConfig(): { changed: boolean; backupPath?: string;
   };
 }
 
+// ── Check 8a-ter: enforce-when-ready readiness (#509) ─────
+/**
+ * Only speaks for the enforce-when-ready posture — off and watch-only are
+ * already WARNed by checkActionGuard, and are deliberate choices (#516: no
+ * FAIL for a deliberately-off guard). Under the posture:
+ *   - ENFORCING (readiness conditions hold)     → pass
+ *   - shadow, never enforced yet                → warn: not ready yet, and why
+ *   - shadow AFTER having enforced (demoted)    → FAIL: the operator opted into
+ *     enforcement and is not getting it — a violated contract they chose.
+ * Readiness is recomputed from the audit evidence here, never read as a stored
+ * boolean; the state file only contributes "was it enforcing before". Doctor
+ * reports and never flips: nothing here promotes, demotes or writes state.
+ *
+ * #509 r7: readiness is PER SURFACE. The Claude Code hook and the OpenClaw
+ * plugin each measure, promote and demote on their own calls, so each gets
+ * its own rows (labels suffixed with the surface). The Hermes plugin does not
+ * implement the gate; one info row says so plainly. `deps.summary` (tests)
+ * checks one surface under the unsuffixed labels, as before.
+ */
+export async function checkActionGuardReadiness(
+  deps: {
+    summary?: () => import('./guard.js').ReadinessSummary;
+    summaries?: () => import('./guard.js').ReadinessSummary[];
+  } = {},
+): Promise<CheckResult[]> {
+  const label = 'Action guard readiness';
+  if (deps.summary) {
+    let summary: import('./guard.js').ReadinessSummary;
+    try {
+      summary = deps.summary();
+    } catch (err) {
+      return [{ label, status: 'warn', message: `could not compute readiness (${(err as Error).message})` }];
+    }
+    return readinessRowsForSurface(summary, '');
+  }
+  if (!deps.summaries) {
+    // Cheap pre-check: no gate configured → no audit read at all.
+    try {
+      const core = getActionGuardCoreConfig();
+      if (!core.enabled || !core.enforce || !core.readinessGate) return [];
+    } catch {
+      return [];
+    }
+  }
+  let summaries: import('./guard.js').ReadinessSummary[];
+  try {
+    summaries = deps.summaries ? deps.summaries() : (await import('./guard.js')).buildReadinessSummaries();
+  } catch (err) {
+    return [{ label, status: 'warn', message: `could not compute readiness (${(err as Error).message})` }];
+  }
+  const rows: CheckResult[] = [];
+  for (const s of summaries) rows.push(...await readinessRowsForSurface(s, ` (${s.surface})`));
+  if (summaries.some((s) => s.posture === 'enforce-when-ready')) {
+    rows.push({
+      label: `${label} (Hermes plugin)`,
+      status: 'info',
+      message: 'the Hermes plugin does not implement the enforce-when-ready gate: it ignores it and enforces immediately',
+    });
+  }
+  return rows;
+}
+
+async function readinessRowsForSurface(
+  summary: import('./guard.js').ReadinessSummary,
+  suffix: string,
+): Promise<CheckResult[]> {
+  const label = `Action guard readiness${suffix}`;
+  const journalFile = summary.journalPath ?? '~/.shieldcortex/approvals/guard-readiness-transitions.jsonl';
+  // r8 (SF3): remediation in the words of the surface this row is about —
+  // its own journal writer, and the test-approval that earns ITS evidence.
+  const readinessMod = await import('../defence/iron-dome/guard-readiness.js');
+  const actor = readinessMod.READINESS_ADAPTER_ACTORS[summary.adapter] ?? 'the Claude Code hook';
+  const Actor = `${actor[0]!.toUpperCase()}${actor.slice(1)}`;
+  const testApproval = readinessMod.testApprovalCommand(summary.adapter);
+  if (summary.posture !== 'enforce-when-ready') {
+    if (summary.lockOverrides) {
+      return [{ label, status: 'info', message: 'readiness gate is configured but a policy lock pins enforcement — the gate is ignored and the guard enforces' }];
+    }
+    return [];
+  }
+  // r8 (SF4): a surface that has never run gated here — no OpenClaw on this
+  // host, or an install that chose the posture before OpenClaw was gated — is
+  // not a violated contract. Info, not FAIL; any trace of it having run keeps
+  // the loud unknown-record path below.
+  if (summary.notInUse) {
+    const { notInUseText } = await import('./guard.js');
+    return [{ label, status: 'info', message: `enforce when ready: not in use on this host — ${notInUseText(summary.adapter)}` }];
+  }
+  const { intervention, reachability, effectiveness } = summary.report;
+  const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
+  const bars =
+    `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
+    `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
+    `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
+    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
+  const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
+  // #509 r5: the promotion notice is the detection control for a forged
+  // journal, so doctor names the newest promotion the journal records for the
+  // operator to hold against the notices they received. One that was never
+  // announced is a warning of its own.
+  const promotion = summary.lastPromotion;
+  const promotionRows: CheckResult[] = promotion
+    ? [{
+      label: `Action guard last promotion${suffix}`,
+      status: promotion.notice === 'delivered' ? 'info' : 'warn',
+      message: `last promotion to enforcing: ${(await import('./guard.js')).describePromotionNotice(promotion, summary.adapter)}`,
+      ...(promotion.notice === 'delivered'
+        ? {}
+        : promotion.notice === 'failed'
+          ? { fix: `${Actor} tried to announce this promotion and the notice channel did not accept it. Check the channel (\`${testApproval}\`).` }
+          : {
+            fix: `No notice attempt is recorded for this promotion, and ${actor} records one with every promotion it makes. If you do not recognise it, ${journalFile} may have been written by something other than ${actor} — run \`shieldcortex guard readiness\` and inspect it.`,
+          }),
+    }]
+    : [];
+  // A recent tamper signal (a readiness cache that disagreed with the durable
+  // transition record) is reported alongside whatever the mode row says.
+  const tamper: CheckResult[] = summary.recentTamper
+    ? [{
+      label: `Action guard readiness tamper${suffix}`,
+      status: 'warn',
+      message: `readiness tamper signal at ${summary.recentTamper.ts}: ${summary.recentTamper.reason ?? 'the readiness cache disagreed with the transition record'}`,
+      fix: `Something other than ${actor} wrote the readiness cache or transition record under ~/.shieldcortex/approvals. Find out what; ${actor} recomputed from evidence and did not trust it.`,
+    }]
+    : [];
+  // #509 r6 (S1): the newest mode entry is an init/recover → shadow after a
+  // promotion with no demotion between. The hook never leaves enforcing that
+  // way, so this is a forged demotion that kept the real promotion in place —
+  // a FAIL, not "not ready yet".
+  const forged = readinessMod.unexplainedDemotion(summary.record);
+  if (forged) {
+    return [{
+      label,
+      status: 'fail',
+      message:
+        `enforce when ready: UNEXPLAINED DEMOTION — the transition journal's newest entry is ${forged.event} → shadow at ${forged.ts}, ` +
+        `after a promotion to enforcing${promotion ? ` (${promotion.promotedAt})` : ''} with no demotion between (current mode: ${summary.mode}). ${bars}.${missing}`,
+      fix:
+        `${Actor} only leaves enforcing through a recorded, announced demotion, so something other than ${actor} wrote ` +
+        `${journalFile}. Find out what. ${Actor} does not trust the entry: it keeps ` +
+        'enforcing while the evidence holds and otherwise demotes with the full protocol; the FAIL clears once it has re-recorded the mode.',
+    }, ...tamper, ...promotionRows];
+  }
+  if (summary.recordUnknown) {
+    return [{
+      label,
+      status: 'fail',
+      message:
+        `enforce when ready: transition record ${summary.record.status === 'ok' ? 'empty' : summary.record.status} — ` +
+        `the last mode is unknown and is treated as potentially DEMOTED (current mode: ${summary.mode}). ${bars}.${missing}`,
+      fix:
+        `The record at ${journalFile} was removed or damaged. Find out what did it. ` +
+        `${Actor} records the unknown state as a demotion on its next call; the FAIL clears on the next promotion.`,
+    }, ...tamper, ...promotionRows];
+  }
+  if (summary.mode === 'enforcing') {
+    return [{ label, status: 'pass', message: `enforce when ready: ENFORCING — ${bars}` }, ...tamper, ...promotionRows];
+  }
+  if (summary.demoted) {
+    return [...tamper, ...promotionRows, {
+      label,
+      status: 'fail',
+      message:
+        `enforce when ready: DEMOTED to shadow — dangerous ops are logged but NOT stopped. ` +
+        `${summary.state?.lastDemotionReason ? `Reason: ${summary.state.lastDemotionReason}. ` : ''}${bars}.${missing}`,
+      fix:
+        'You chose enforcement and are not getting it. Run `shieldcortex guard readiness` for the evidence. ' +
+        `Fix what is missing (channel, round-trips via \`${testApproval}\`); if the would-stops look ` +
+        'forged, inspect ~/.shieldcortex/audit. Do not switch to plain enforce or off from this row without deciding to.',
+    }];
+  }
+  return [{
+    label,
+    status: 'warn',
+    message: `enforce when ready: SHADOW (not ready yet) — dangerous ops are logged, not stopped. ${bars}.${missing}`,
+    fix: 'Nothing is broken: the guard enforces automatically once all three readiness conditions hold. Progress: `shieldcortex guard readiness`.',
+  }, ...tamper, ...promotionRows];
+}
+
 // ── Check 8a-bis: Cron denial honesty (#375) ──────────────
 /**
  * A guard denial inside a scheduled turn does not fail the turn: OpenClaw
@@ -8650,6 +8829,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkActionGuardReadiness,
     checkIronDomeProfile,
     checkCronDenials,
     checkThreatGraph,
