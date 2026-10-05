@@ -76,6 +76,17 @@ export function runDeny(argv: string[], deps: DenyDeps = {}): number {
   const err = deps.error ?? ((m: string) => console.error(m));
 
   const args = argv.filter((a) => a !== '--');
+  // #509 R4-2: see approve.ts — an answer names the attempt it was shown.
+  const attemptIndex = args.indexOf('--attempt');
+  let attemptId: string | undefined;
+  if (attemptIndex >= 0) {
+    attemptId = args[attemptIndex + 1] ?? '';
+    if (!/^[0-9a-f]{8,64}$/i.test(attemptId)) {
+      err('--attempt expects the attempt id printed in the notification.');
+      return 1;
+    }
+    args.splice(attemptIndex, 2);
+  }
   const hash = args.find((a) => !a.startsWith('-'));
 
   if (!hash) {
@@ -97,9 +108,11 @@ export function runDeny(argv: string[], deps: DenyDeps = {}): number {
     return 1;
   }
 
-  const outcome = denyRequest(hash, { home, now });
+  const outcome = denyRequest(hash, { home, now, attemptId });
   if (!outcome.ok) {
-    if (outcome.reason === 'already-approved') {
+    if (outcome.reason === 'stale-attempt') {
+      err(`Attempt ${attemptId} is not the current request for ${hash} — it expired, or the command was asked again. Nothing was denied.`);
+    } else if (outcome.reason === 'already-approved') {
       err(`Approval ${hash} was already granted — it cannot be denied after the fact.`);
       err('If this was a mistake, let the approval expire; it is single-use.');
     } else {

@@ -105,6 +105,12 @@ export interface OperatorNotification {
    *  reply — tap, webhook, or terminal — must be bound to. */
   hash: string;
   shortHash: string;
+  /** #509 R4-2: the delivered attempt this notification is. A reply binds to
+   *  it: `shieldcortex approve <hash> --attempt <id>` (and the card waiter)
+   *  grant nothing once a newer attempt for the same command replaced it.
+   *  Absent on a caller that predates attempt ids — then the printed commands
+   *  are the #118 hash-only form. */
+  attemptId?: string;
   tool: string;
   /** The exact command/target the guard flagged — never a paraphrase. */
   command: string;
@@ -251,6 +257,8 @@ export interface NotifyChannel {
 
 export interface RequestOperatorApprovalInput {
   hash: string;
+  /** #509 R4-2 — see `OperatorNotification.attemptId`. */
+  attemptId?: string;
   tool: string;
   command: string;
   signals: string[];
@@ -336,6 +344,8 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
   const denied = input.event === 'denied_no_prompt_surface';
   const actionId = optionalText(input.actionId);
   const denialTarget = actionId ?? '<actionId>';
+  const attemptId = typeof input.attemptId === 'string' && /^[0-9a-f]{8,64}$/i.test(input.attemptId) ? input.attemptId : undefined;
+  const attemptArg = attemptId ? ` --attempt ${attemptId}` : '';
   const notification: OperatorNotification = {
     event: denied ? 'denied_no_prompt_surface' : 'approval_requested',
     hash: input.hash,
@@ -349,8 +359,9 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
     // Live hold: #118 hash. DNP: spendable fingerprint, never bare approve.
     fallbackHint: denied
       ? `shieldcortex approve --denial ${denialTarget}   (authorises a RETRY — the blocked call is already gone)`
-      : `shieldcortex approve ${shortHash}   |   shieldcortex deny ${shortHash}`,
+      : `shieldcortex approve ${shortHash}${attemptArg}   |   shieldcortex deny ${shortHash}${attemptArg}`,
   };
+  if (!denied && attemptId) notification.attemptId = attemptId;
   if (denied && actionId) notification.actionId = actionId;
   if (denied) {
     const deniedReason = optionalText(input.deniedReason);
@@ -430,9 +441,14 @@ const SAFE_ACTION_GUARD_SIGNALS = new Set([
   'invalid-tool-input', 'unknown-keys', 'not-object', 'nested-invalid',
   'type-coercion', 'missing-handle', 'write-content-catastrophic',
   'write-content-dangerous', 'delete-critical-path', 'session-lease',
+  // #509: the enforce-when-ready gate demoting itself to shadow mode, and
+  // (r5) promoting itself to enforcing — both announced when they happen.
+  // r8: a surface starting its record, watching first.
+  'readiness-demoted', 'readiness-promoted', 'readiness-started',
 ]);
 const SAFE_ACTION_GUARD_OUTCOMES = new Set([
   'auto_denied', 'denied_no_prompt_surface', 'failure_denied', 'warned', 'failure_allowed',
+  'readiness_demoted', 'readiness_promoted', 'readiness_started',
 ]);
 const SAFE_ACTION_GUARD_SEVERITIES = new Set(['critical', 'dangerous', 'high', 'medium', 'low', 'benign', 'unknown']);
 
@@ -466,6 +482,15 @@ function safeActionGuardSignals(signals: unknown): string[] {
 
 function safeActionGuardReason(event: ActionGuardOutcomeEvent, outcome: string): string {
   if (event === 'action_guard_warning') {
+    if (outcome === 'readiness_demoted') {
+      return 'Action Guard (enforce when ready) was DEMOTED to shadow mode: dangerous tool calls are now logged but NOT stopped, because this install no longer meets its readiness conditions. Run `shieldcortex guard readiness` for details.';
+    }
+    if (outcome === 'readiness_started') {
+      return 'Action Guard (enforce when ready) on this surface now WATCHES FIRST: it had no readiness record (the posture was chosen before this surface implemented the gate, when it enforced from the start). Dangerous tool calls here are now logged, not stopped, until it meets its own readiness conditions; the catastrophic floors still enforce. Run `shieldcortex guard readiness`.';
+    }
+    if (outcome === 'readiness_promoted') {
+      return 'Action Guard (enforce when ready) was PROMOTED to enforcing: dangerous tool calls now need approval. If you did not expect this, run `shieldcortex doctor` — a promotion you were not told about means the readiness journal was written by something other than the hook.';
+    }
     return outcome === 'failure_allowed'
       ? 'Action Guard was unavailable or advisory-only and the tool call was not blocked; inspect local audit for details.'
       : 'Action Guard warning in advisory mode; inspect local audit for details.';
@@ -704,8 +729,9 @@ export function formatOperatorNotification(n: AnyOperatorNotification): string {
     lines.push('To authorise a RETRY, run in YOUR terminal:');
     lines.push(`  shieldcortex approve --denial ${n.actionId ?? '<actionId>'}`);
   } else {
-    lines.push(`[Approve]  shieldcortex approve ${n.shortHash}`);
-    lines.push(`[Deny]     shieldcortex deny ${n.shortHash}`);
+    const attemptArg = n.attemptId ? ` --attempt ${n.attemptId}` : '';
+    lines.push(`[Approve]  shieldcortex approve ${n.shortHash}${attemptArg}`);
+    lines.push(`[Deny]     shieldcortex deny ${n.shortHash}${attemptArg}`);
   }
   return truncate(lines.join('\n'), 4_000);
 }

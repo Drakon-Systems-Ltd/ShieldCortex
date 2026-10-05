@@ -455,3 +455,433 @@ describe("#501 — the lock's own attack surface is signalled on BOTH fallback t
     }
   });
 });
+
+describe('#509 R4-1 — the guard self-protection floor is ONE list, duplicated verbatim', () => {
+  const hermesClientSrc = fs.readFileSync(path.join(repoRoot, 'plugins', 'hermes', 'shieldcortex', 'sc_client.py'), 'utf-8');
+
+  function listAfter(src: string, marker: RegExp): string[] {
+    const m = marker.exec(src);
+    expect(m).not.toBeNull();
+    const body = src.slice(m!.index + m![0].length);
+    const close = body.search(/[\])]/);
+    return [...body.slice(0, close).matchAll(/['"]([a-z-]+)['"]/g)].map((x) => x[1]);
+  }
+
+  it('the hook fallback, the OpenClaw plugin and the Hermes client carry exactly the exported list', async () => {
+    const { GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
+    const canonical = [...GUARD_SELF_PROTECTION_SIGNALS];
+    expect(canonical).toEqual(['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard']);
+    expect(listAfter(hookSrc, /const FALLBACK_SELF_PROTECTION_SIGNALS = \[/)).toEqual(canonical);
+    expect(listAfter(pluginSrc, /export const SELF_PROTECTION_SIGNALS: readonly string\[\] = \[/)).toEqual(canonical);
+    expect(listAfter(hermesClientSrc, /^SELF_PROTECTION_SIGNALS = \(/m)).toEqual(canonical);
+  });
+
+  it('every surface consults the floor before its shadow/advisory allow', () => {
+    expect(hookSrc).toMatch(/if \(shadow && !unscannedBlock && !selfProtected\)/);
+    expect(hookSrc).toMatch(/if \(!cfg\.enforce && !unscannedBlock && !selfProtected\)/);
+    expect(hookSrc).toMatch(/if \(!cfg\.enforce && !selfProtectSignal\)/);
+    expect(pluginSrc).toMatch(/const selfProtected = isSelfProtectionVerdict\(v\.signals\);/);
+    expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !unscannedBlock && !selfProtected\)/);
+    expect(pluginSrc).toMatch(/!actionGuardCfg\.enforce && !selfProtectSignal/);
+  });
+
+  it('r5 finding 3: every auto-approval and failure-allow exit consults the floor, in both planes', () => {
+    expect(hookSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
+    expect(hookSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    expect(pluginSrc).toMatch(/if \(autoApprove\.length > 0 && !unscannedBlock && !selfProtected\)/);
+    expect(pluginSrc).toMatch(/brokered\?\.outcome === 'pre_clear' && !unscannedBlock && !selfProtected/);
+    expect(pluginSrc).toMatch(/const deny = failAction === 'deny' \|\| brokerDenies \|\| selfProtected;/);
+    expect(pluginSrc).toMatch(/const failAction: FailureAction = selfProtected \? 'deny' : config\.failurePolicy\[severity\];/);
+    expect(pluginSrc).toMatch(/config\.failurePolicy\.high === 'allow' && !selfProtectSignal \? 'allow' : 'deny'/);
+  });
+
+  it('every hook fallback row carrying a floor signal is also a dangerous row (the outage scan sees it)', () => {
+    for (const sig of ['touch-approval-store', 'touch-decisions-ledger', 'touch-guard-config', 'disable-action-guard']) {
+      expect({ sig, inHook: hookSrc.includes(`signal: '${sig}'`), inPlugin: pluginSrc.includes(`signal: '${sig}'`) })
+        .toEqual({ sig, inHook: true, inPlugin: true });
+    }
+  });
+});
+
+describe('#509 r5 finding 9 — the Hermes outage floor DECIDES like the core floor on the same inputs', () => {
+  // Comparing signal names let the Hermes fallback miss whole rows (the
+  // harness settings file, the policy lock) while the names still matched.
+  // So this runs the REAL Hermes pre_tool_call — scanner unavailable,
+  // SHIELDCORTEX_ENFORCE=0 (advisory) — over a shared table and compares its
+  // block/allow with whether the core classifier puts the same command on
+  // the self-protection floor.
+  const TABLE = [
+    'echo {} > ~/.claude/settings.json',
+    'echo {} > /etc/shieldcortex/policy.json',
+    'echo {} > ~/.openclaw/openclaw.json',
+    'SHIELDCORTEX_DIST_ROOT=/tmp/evil shieldcortex doctor',
+    'echo {} >> ~/.shieldcortex/approvals/guard-readiness-transitions.jsonl',
+    'cp forged.json ~/.shieldcortex/approvals/guard-readiness.json',
+    'echo {} > ~/.shieldcortex/config.json',
+    'echo x >> ~/.shieldcortex/DECISIONS.md',
+    'shieldcortex config --action-guard-disable',
+    'npm uninstall -g shieldcortex',
+    'cat ~/.claude/settings.json',
+    'ls /etc/shieldcortex',
+    'sudo systemctl stop ssh',
+    'ls -la',
+    // #509 r6 S2: the r5 classifier shapes (and the N1 false positives, which
+    // must stay off the floor in an outage too).
+    'mv ~/.shieldcortex /tmp/x',
+    'sudo mv "$HOME/.shieldcortex/" /tmp/x',
+    'cp -r /tmp/forged/. ~/.shieldcortex/',
+    'rmdir ~/.shieldcortex/approvals',
+    'cd ~/.shieldcortex; printf x > approvals/y',
+    'cd ~/.shieldcortex && echo {} > config.json',
+    'pushd /home/u/.shieldcortex/ && tee leases/x < /tmp/y',
+    'cd ~/.shieldcortex; mv * /tmp/x',
+    'npm install --prefix ~/.shieldcortex/',
+    'echo "rm ~/.shieldcortex"',
+    'mv ~/notes.txt /tmp/x',
+    'cd /tmp/build && mv ./* /tmp/out',
+  ];
+  /** Stricter than the core ON PURPOSE: during an outage every fallback (hook,
+   *  OpenClaw, Hermes) holds any access to the approval store, reads included
+   *  — the #89 read carve-out lives in the core only. Fail-closed, so it is
+   *  asserted rather than compared. */
+  const STRICTER_IN_OUTAGE = ['cat ~/.shieldcortex/approvals/approvals.json', 'cd ~/.shieldcortex && ls approvals'];
+  /** #509 r8 (PR #610 review, Tars + Case 2026-10-05): PADDED twins of the
+   *  r5/r6 shapes, all inside the 4096-character scan cap. A `{0,512}` bound
+   *  on the argument gap made the first two fall off the floor on all three
+   *  outage fallbacks while their short twins in TABLE still matched. Padding
+   *  inside the cap must never change the answer; asserted, not compared,
+   *  because the core scores the recursive delete as a catastrophic block
+   *  (no floor signal) and the outage paths hold it either way. Assembled at
+   *  runtime (#444 convention). */
+  const padTo = (head: string, tail: string, len: number): string => {
+    const room = len - head.length - tail.length;
+    return head + 'a '.repeat(room >> 1) + ' '.repeat(room & 1) + tail;
+  };
+  const SC_DIR = '~/.' + 'shieldcortex';
+  const DEL = ['r', 'm'].join('');
+  const LONG_POSITIVES = [
+    'mv ' + '--strip-trailing-slashes '.repeat(30) + '.shieldcortex moved',   // 772 chars
+    `${DEL} -rf ` + 'a '.repeat(300) + SC_DIR,                                 // 622 chars
+    padTo('mv ', `${SC_DIR} /tmp/x`, 4090),                                    // just under the cap
+    `cd ${SC_DIR} && ` + 'echo hi; '.repeat(400) + `${DEL} -rf approvals`,     // 3,638 chars
+  ];
+  const ASSERTED_ON_FLOOR = [...STRICTER_IN_OUTAGE, ...LONG_POSITIVES];
+
+  it('Hermes (outage, advisory) blocks exactly the commands the core classifier puts on the floor', async () => {
+    const { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
+    const core = TABLE.map((command) => ({
+      command,
+      floor: evaluateToolCall('Bash', { command }).signals.some((s: string) => GUARD_SELF_PROTECTION_SIGNALS.includes(s)),
+    }));
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-hermes-'));
+    const script = [
+      'import json, sys',
+      `sys.path.insert(0, ${JSON.stringify(path.join(repoRoot, 'plugins', 'hermes'))})`,
+      `sys.path.insert(0, ${JSON.stringify(path.join(repoRoot, 'plugins', 'hermes', 'shieldcortex'))})`,
+      'import shieldcortex as plugin',
+      'from sc_client import ActionGuardVerdict',
+      'plugin.evaluate_tool_call = lambda *a, **k: ActionGuardVerdict("allow", [], "scanner unavailable", available=False)',
+      'hooks = {}',
+      'class Ctx:',
+      '    def register_hook(self, name, fn): hooks[name] = fn',
+      'plugin.register(Ctx())',
+      'table = json.loads(sys.stdin.read())',
+      'print(json.dumps([{"command": c, "floor": hooks["pre_tool_call"]("terminal", {"command": c}) is not None} for c in table]))',
+    ].join('\n');
+    const { spawnSync } = await import('node:child_process');
+    try {
+      const run = spawnSync('python3', ['-c', script], {
+        input: JSON.stringify([...TABLE, ...ASSERTED_ON_FLOOR]),
+        env: { ...process.env, HOME: tmpHome, SHIELDCORTEX_ENFORCE: '0' },
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      expect({ status: run.status, stderr: run.status === 0 ? '' : run.stderr }).toEqual({ status: 0, stderr: '' });
+      const hermes = JSON.parse(run.stdout.trim().split('\n').pop() as string) as Array<{ command: string; floor: boolean }>;
+      expect(hermes.slice(0, TABLE.length)).toEqual(core);
+      expect(LONG_POSITIVES.map((c) => c.length)).toEqual([772, 622, 4090, 3638]);
+      expect(hermes.slice(TABLE.length)).toEqual(ASSERTED_ON_FLOOR.map((command) => ({ command, floor: true })));
+      // The table is not vacuous: both answers occur.
+      expect(core.some((c) => c.floor) && core.some((c) => !c.floor)).toBe(true);
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  // #509 r6 S2: the same table through the OTHER two outage fallbacks — the
+  // OpenClaw interceptor with its evaluator throwing, and the Claude Code hook
+  // with no dist to load — both advisory, so only the floor holds a call.
+  it('OpenClaw (evaluator down) and the Claude Code hook (no dist) hold exactly the same commands, advisory', async () => {
+    const { evaluateToolCall, GUARD_SELF_PROTECTION_SIGNALS } = await import('../defence/iron-dome/tool-action-guard.js');
+    const { createInterceptor, DEFAULT_CONFIG } = await import('../../plugins/openclaw/interceptor.js');
+    const expected = [
+      ...TABLE.map((command) => ({
+        command,
+        floor: evaluateToolCall('Bash', { command }).signals.some((s: string) => GUARD_SELF_PROTECTION_SIGNALS.includes(s)),
+      })),
+      ...ASSERTED_ON_FLOOR.map((command) => ({ command, floor: true })),
+    ];
+    const okPipeline = () => ({
+      allowed: true,
+      firewall: { result: 'ALLOW' as const, reason: '', threatIndicators: [] as string[], anomalyScore: 0, blockedPatterns: [] as string[] },
+      trust: { score: 0.5 }, sensitivity: { level: 'INTERNAL' }, fragmentation: null, auditId: 1,
+    });
+    const openclaw = createInterceptor(
+      { ...DEFAULT_CONFIG, actionGuard: { ...DEFAULT_CONFIG.actionGuard, enabled: true, enforce: false, autoApprove: [] } } as never,
+      okPipeline as never,
+      { evaluateToolCall: (() => { throw new Error('evaluator down'); }) as never },
+    );
+    const openclawDecisions: Array<{ command: string; floor: boolean }> = [];
+    for (const { command } of expected) {
+      const held = await openclaw.handleToolCall({ toolName: 'Bash', arguments: { command } }).then(() => false, () => true);
+      openclawDecisions.push({ command, floor: held });
+    }
+    expect(openclawDecisions).toEqual(expected);
+
+    // OpenClaw's native `process` tool: its typed-shell payload keys are part
+    // of the outage surface too.
+    for (const key of ['data', 'text', 'literal']) {
+      const held = await openclaw.handleToolCall({
+        toolName: 'process',
+        arguments: { action: 'write', sessionId: 'shell-1', [key]: 'cd ~/.shieldcortex; printf x > approvals/y\n' },
+      }).then(() => false, () => true);
+      const ordinary = await openclaw.handleToolCall({
+        toolName: 'process',
+        arguments: { action: 'write', sessionId: 'shell-1', [key]: 'ls -la\n' },
+      }).then(() => false, () => true);
+      expect({ key, held, ordinary }).toEqual({ key, held: true, ordinary: false });
+    }
+
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-hook-'));
+    const emptyDist = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-dist-'));
+    const { spawnSync } = await import('node:child_process');
+    try {
+      fs.mkdirSync(path.join(tmpHome, '.shieldcortex'), { recursive: true });
+      fs.writeFileSync(path.join(tmpHome, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: false } }));
+      const hookDecisions = expected.map(({ command }) => {
+        const run = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'pre-tool-hook.mjs')], {
+          input: JSON.stringify({ permission_mode: 'default', tool_name: 'Bash', tool_input: { command } }),
+          env: { ...process.env, HOME: tmpHome, SHIELDCORTEX_DIST_ROOT: emptyDist, SHIELDCORTEX_CONFIG_DIR: path.join(tmpHome, '.shieldcortex') },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        const out = run.stdout.trim();
+        const decision = out ? JSON.parse(out).hookSpecificOutput?.permissionDecision : 'allow';
+        return { command, floor: decision === 'ask' || decision === 'deny' };
+      });
+      expect(hookDecisions).toEqual(expected);
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+      fs.rmSync(emptyDist, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
+// #509 round 7 (Tars, PR #610): "enforce when ready" must mean the same thing
+// on both surfaces. The Claude Code hook (BUILT, driven end to end) and the
+// OpenClaw interceptor (real evaluator, real guard-readiness bound to its own
+// adapter) answer the SAME inputs in the same readiness state, compared by
+// the DECISION each actually made — allowed / card (ask) / blocked — never by
+// config. Each surface's readiness is its own: the promoted state seeds each
+// adapter's own pinned evidence and reviewed-evidence registry.
+describe('#509 r7 — hook and interceptor decide alike in shadow, promoted and demoted states', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const REAL_DIST = path.join(repoRoot, 'dist');
+  const CATASTROPHIC_MARK = 'sc-parity-catastrophic-tier';
+  const CATASTROPHIC_VERDICT = { decision: 'block', severity: 'catastrophic', family: 'fs', action: 'recursive-delete', reason: 'catastrophic (parity fixture)', signals: ['recursive-force-delete'] };
+  const INPUTS: Array<[string, Record<string, unknown>]> = [
+    ['dangerous', { command: 'sudo modprobe softdog' }],
+    ['benign', { command: 'ls -la' }],
+    ['self-protection floor', { command: `echo {} > ~/${['.shieldcortex', 'approvals', 'parity-r7.json'].join('/')}` }],
+    ['unscanned (schema-invalid)', { command: 'ls', evil: 'x' }],
+    // r8 (N3): the catastrophic tier and a real session-lease freeze (a FROZEN
+    // record in the isolated DECISIONS.md) — floors in every state. The
+    // catastrophic command text cannot be written into this file (the Action
+    // Guard refuses it), so a marker stands for it and BOTH surfaces' evaluator
+    // gives it the guard's verdict for that tier (see CATASTROPHIC_VERDICT).
+    ['catastrophic', { command: CATASTROPHIC_MARK }],
+    ['lease (frozen scope)', { command: 'npm publish' }],
+  ];
+
+  /** r8 (N3): 'hook-only' / 'openclaw-only' — ONE surface's evidence is
+   *  seeded, and BOTH hold reviewed effectiveness evidence, so the other
+   *  surface would promote if it counted that evidence. */
+  type State = 'shadow' | 'promoted' | 'demoted' | 'hook-only' | 'openclaw-only';
+
+  async function decisions(state: State): Promise<{ hook: Record<string, string>; openclaw: Record<string, string> }> {
+    const reviewedState = state === 'promoted' || state === 'hook-only' || state === 'openclaw-only';
+    const { pathToFileURL } = await import('node:url');
+    const { spawnSync } = await import('node:child_process');
+    const readiness = await import('../defence/iron-dome/guard-readiness.js');
+    const { evaluateToolCall } = await import('../defence/iron-dome/tool-action-guard.js');
+    const lease = await import('../defence/iron-dome/session-lease-store.js');
+    const { createInterceptor, DEFAULT_CONFIG } = await import('../../plugins/openclaw/interceptor.js');
+    const { buildReadinessRuntime } = await import('../../plugins/openclaw/index.js');
+    const distReadiness = await import(pathToFileURL(path.join(REAL_DIST, 'defence', 'iron-dome', 'guard-readiness.js')).href);
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-r7-'));
+    const distRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-parity-r7-dist-'));
+    const sc = path.join(home, '.shieldcortex');
+    const audit = path.join(sc, 'audit');
+    const saved = { HOME: process.env.HOME, CFG: process.env.SHIELDCORTEX_CONFIG_DIR, AUDIT: process.env.SHIELDCORTEX_AUDIT_DIR };
+    process.env.HOME = home;
+    process.env.SHIELDCORTEX_CONFIG_DIR = sc;
+    process.env.SHIELDCORTEX_AUDIT_DIR = audit;
+    try {
+      fs.mkdirSync(audit, { recursive: true });
+      // The hook's dist: real modules, a recording webhook (nothing leaves the
+      // box), and — for 'promoted' only — a registry holding reviewed evidence
+      // for the hook's pin (a build that ships it; never config).
+      const realIron = path.join(REAL_DIST, 'defence', 'iron-dome');
+      const shimIron = path.join(distRoot, 'defence', 'iron-dome');
+      fs.mkdirSync(shimIron, { recursive: true });
+      for (const f of fs.readdirSync(realIron)) {
+        if (!f.endsWith('.js') || f === 'webhook-notify-channel.js' || f === 'guard-readiness.js' || f === 'tool-action-guard.js') continue;
+        fs.writeFileSync(path.join(shimIron, f), `export * from ${JSON.stringify(pathToFileURL(path.join(realIron, f)).href)};\n`);
+      }
+      const realReadiness = JSON.stringify(pathToFileURL(path.join(realIron, 'guard-readiness.js')).href);
+      fs.writeFileSync(path.join(shimIron, 'guard-readiness.js'), [
+        `import * as real from ${realReadiness};`,
+        `export * from ${realReadiness};`,
+        'const pin = real.currentReadinessPin();',
+        `const REVIEWED = ${reviewedState} && pin ? [{ ...pin, reviewedAt: new Date(Date.now() - 86400000).toISOString(), reviewedBy: 'parity fixture', reference: 'parity fixture', cases: 60 }] : [];`,
+        'export function resolveReadiness(opts) { return real.resolveReadiness({ ...opts, effectivenessRegistry: REVIEWED }); }',
+      ].join('\n'));
+      // The real evaluator, except the catastrophic marker (see INPUTS).
+      const realGuard = JSON.stringify(pathToFileURL(path.join(realIron, 'tool-action-guard.js')).href);
+      fs.writeFileSync(path.join(shimIron, 'tool-action-guard.js'), [
+        `import * as real from ${realGuard};`,
+        `export * from ${realGuard};`,
+        `export function evaluateToolCall(tool, args, ...rest) { return args?.command === ${JSON.stringify(CATASTROPHIC_MARK)} ? ${JSON.stringify(CATASTROPHIC_VERDICT)} : real.evaluateToolCall(tool, args, ...rest); }`,
+      ].join('\n'));
+      // A standing freeze on npm publishes: the real session-lease plane refuses
+      // `npm publish` on both surfaces.
+      fs.mkdirSync(sc, { recursive: true });
+      fs.writeFileSync(path.join(sc, 'DECISIONS.md'), '| FROZEN | 2026-09-28 | nobody publishes to npm until review |\n');
+      fs.writeFileSync(path.join(shimIron, 'webhook-notify-channel.js'),
+        "export function createWebhookNotifyChannel() { return { name: 'webhook', async send() { return { delivered: true }; } }; }\n");
+      const notify = { enabled: true, webhookUrl: 'https://hooks.example.invalid/parity' };
+      fs.writeFileSync(path.join(sc, 'config.json'), JSON.stringify({ actionGuard: { enabled: true, enforce: true, readinessGate: true, notify } }));
+
+      const pins = { hook: distReadiness.currentReadinessPin(), openclaw: readiness.currentReadinessPin('openclaw-interceptor')! };
+      let seq = 0;
+      const seed = (adapter: 'claude-code-hook' | 'openclaw-interceptor', pin: unknown) => {
+        const now = Date.now();
+        const lines: string[] = [];
+        const row = (r: Record<string, unknown>) => { seq += 1; lines.push(JSON.stringify({ auditEventId: `p${seq}`, readinessPin: pin, ...r })); };
+        for (let i = 0; i < 1000; i += 1) {
+          const stop = i < 5;
+          row({ ts: new Date(now - 8 * DAY + Math.floor((i * 8 * DAY) / 1000) + 1000).toISOString(), type: 'intercept', origin: adapter, tool: 'Bash', severity: stop ? 'high' : 'low', action: stop ? 'require_approval' : 'allow', outcome: stop ? 'would_hold' : 'allowed' });
+        }
+        for (let i = 0; i < 25; i += 1) {
+          const t = now - DAY + i * 60_000;
+          row({ ts: new Date(t).toISOString(), type: 'approval_reach', origin: adapter, reachId: `${adapter}${i}`, attemptId: `${adapter}a${i}`, phase: 'request' });
+          row({ ts: new Date(t + 30_000).toISOString(), type: 'approval_reach', origin: adapter, reachId: `${adapter}${i}`, attemptId: `${adapter}a${i}`, phase: 'answer', answer: 'approve' });
+        }
+        // Rows are spread over 9 days: one file per day, as the audit writes them.
+        for (const l of lines) {
+          const day = String(JSON.parse(l).ts).slice(0, 10);
+          fs.appendFileSync(path.join(audit, `realtime-${day}.jsonl`), `${l}\n`);
+        }
+      };
+      for (const adapter of ['claude-code-hook', 'openclaw-interceptor'] as const) {
+        const journal = readiness.transitionsPathFor(readiness.readinessPaths({ home, adapter }));
+        fs.mkdirSync(path.dirname(journal), { recursive: true });
+        const entries: Array<Record<string, unknown>> = [{ ts: new Date(Date.now() - 30 * DAY).toISOString(), event: 'init', to: 'shadow' }];
+        if (state === 'demoted') {
+          entries.push({ ts: new Date(Date.now() - 3 * DAY).toISOString(), event: 'promote', to: 'enforcing' });
+          entries.push({ ts: new Date(Date.now() - 2 * DAY).toISOString(), event: 'demote', to: 'shadow', reason: 'parity fixture' });
+        }
+        fs.writeFileSync(journal, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      }
+      if (state === 'promoted' || state === 'hook-only') seed('claude-code-hook', pins.hook);
+      if (state === 'promoted' || state === 'openclaw-only') seed('openclaw-interceptor', pins.openclaw);
+
+      const hook: Record<string, string> = {};
+      for (const [name, input] of INPUTS) {
+        const run = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'pre-tool-hook.mjs')], {
+          input: JSON.stringify({ session_id: 'parity-r7', cwd: '/tmp', hook_event_name: 'PreToolUse', permission_mode: 'default', tool_name: 'Bash', tool_input: input }),
+          env: { ...process.env, HOME: home, USERPROFILE: home, SHIELDCORTEX_DIST_ROOT: distRoot, SHIELDCORTEX_CONFIG_DIR: sc },
+          encoding: 'utf8',
+          timeout: 30_000,
+        });
+        const out = run.stdout.trim();
+        const d = out ? JSON.parse(out).hookSpecificOutput?.permissionDecision : undefined;
+        hook[name] = d === 'ask' ? 'card' : d === 'deny' ? 'blocked' : 'allowed';
+      }
+
+      const okPipeline = () => ({
+        allowed: true,
+        firewall: { result: 'ALLOW' as const, reason: '', threatIndicators: [] as string[], anomalyScore: 0, blockedPatterns: [] as string[] },
+        trust: { score: 0.5 }, sensitivity: { level: 'INTERNAL' }, fragmentation: null, auditId: 1,
+      });
+      const rt = buildReadinessRuntime(readiness as never, notify, {
+        home,
+        effectivenessRegistry: reviewedState
+          ? [{ ...pins.openclaw, reviewedAt: new Date(Date.now() - DAY).toISOString(), reviewedBy: 'parity fixture', reference: 'parity fixture', cases: 60 }]
+          : [],
+        deliver: async () => ({ deliveredVia: 'webhook', attempts: [{ channel: 'webhook', result: { delivered: true } }] }),
+      });
+      const openclawGuard = createInterceptor(
+        { ...DEFAULT_CONFIG, actionGuard: { ...DEFAULT_CONFIG.actionGuard, enabled: true, enforce: true, readinessGate: true, notify }, logger: { info: () => {}, warn: () => {} } } as never,
+        okPipeline as never,
+        {
+          evaluateToolCall: ((tool: string, args: Record<string, unknown>, ...rest: unknown[]) => (args?.command === CATASTROPHIC_MARK
+            ? CATASTROPHIC_VERDICT
+            : (evaluateToolCall as (...a: unknown[]) => unknown)(tool, args, ...rest))) as never,
+          // As the plugin wires it (index.ts): the real fs-backed lease plane.
+          checkActionLease: (tool: string, args: Record<string, unknown>, sessionId?: string) =>
+            lease.evaluateToolCallLease(tool, args, { self: sessionId ?? '' }),
+          readiness: rt,
+        } as never,
+      );
+      const openclaw: Record<string, string> = {};
+      for (const [name, input] of INPUTS) {
+        let asked = false;
+        const res = await openclawGuard.handleToolCall({
+          toolName: 'Bash', arguments: input, requireApproval: async () => { asked = true; return false; },
+        } as never).then(() => 'ok', () => 'threw');
+        openclaw[name] = asked ? 'card' : res === 'ok' ? 'allowed' : 'blocked';
+      }
+      return { hook, openclaw };
+    } finally {
+      if (saved.HOME === undefined) delete process.env.HOME; else process.env.HOME = saved.HOME;
+      if (saved.CFG === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR; else process.env.SHIELDCORTEX_CONFIG_DIR = saved.CFG;
+      if (saved.AUDIT === undefined) delete process.env.SHIELDCORTEX_AUDIT_DIR; else process.env.SHIELDCORTEX_AUDIT_DIR = saved.AUDIT;
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(distRoot, { recursive: true, force: true });
+    }
+  }
+
+  const FLOORS = { 'self-protection floor': 'card', 'unscanned (schema-invalid)': 'card', catastrophic: 'blocked', 'lease (frozen scope)': 'blocked' };
+  const SHADOWED = { dangerous: 'allowed', benign: 'allowed', ...FLOORS };
+  const ENFORCED = { dangerous: 'card', benign: 'allowed', ...FLOORS };
+  const EXPECTED: Record<'shadow' | 'promoted' | 'demoted', Record<string, string>> = {
+    shadow: SHADOWED,
+    promoted: ENFORCED,
+    demoted: SHADOWED,
+  };
+
+  for (const state of ['shadow', 'promoted', 'demoted'] as const) {
+    it(`${state}: the same inputs get the same decision on both surfaces`, async () => {
+      const { hook, openclaw } = await decisions(state);
+      expect(openclaw).toEqual(hook);
+      expect(hook).toEqual(EXPECTED[state]);
+    }, 120_000);
+  }
+
+  // r8 (N3): readiness is per surface. One surface's evidence never promotes
+  // the other, even when both hold reviewed effectiveness evidence — and the
+  // floors hold on the one still watching.
+  it('hook promoted, OpenClaw not: only the hook enforces the dangerous call', async () => {
+    const { hook, openclaw } = await decisions('hook-only');
+    expect(hook).toEqual(ENFORCED);
+    expect(openclaw).toEqual(SHADOWED);
+  }, 120_000);
+
+  it('OpenClaw promoted, hook not: only OpenClaw enforces the dangerous call', async () => {
+    const { hook, openclaw } = await decisions('openclaw-only');
+    expect(openclaw).toEqual(ENFORCED);
+    expect(hook).toEqual(SHADOWED);
+  }, 120_000);
+});
