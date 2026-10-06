@@ -15,7 +15,7 @@ import {
   SIGNAL_PHRASES,
   WITHHELD_SECRET,
   buildApprovalCard,
-  describeAction,
+  describeAction as describeActionFull,
   describeSignal,
   describeSignals,
   describeWho,
@@ -25,6 +25,9 @@ import {
 import { buildCardFields } from '../openclaw-approval-channel.js';
 import { GUARD_SELF_PROTECTION_SIGNALS, evaluateToolCall } from '../tool-action-guard.js';
 import type { OperatorNotification } from '../operator-notify.js';
+
+/** Line 1's text; round 3 added a confidence flag beside it. */
+const describeAction = (a: Parameters<typeof describeActionFull>[0]) => describeActionFull(a).text;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..', '..', '..', '..');
@@ -103,7 +106,9 @@ describe('#648 — WHAT: plain English with a named target', () => {
     ['npm install -g typescript', 'Install a package: "typescript" (npm, whole machine)'],
     ['npm install --registry https://registry.npmjs.org left-pad', 'Install a package: "left-pad" (npm)'],
     ['git branch -D feature/x', 'Delete a git branch: "feature/x"'],
-    ['git push --force https://github.com/acme/app.git main', 'Force-push to github.com (branch "main") (git push --force)'],
+    // No working directory, so the repository's config (which may rewrite the
+    // URL with insteadOf) is unknown: the host is not claimed (#648 r3 R2).
+    ['git push --force https://github.com/acme/app.git main', 'Force-push to a remote server (branch "main") (git push --force)'],
     ['crontab -e', 'Change scheduled jobs (crontab)'],
     ['chmod -R 777 /var/www', 'Change who can access a folder and everything in it: "/var/www"'],
     ['scp ./db.sql backup@files.example.org:/srv/', 'Copy files to files.example.org (scp)'],
@@ -168,7 +173,8 @@ describe('#648 — WHAT: plain English with a named target', () => {
       .toBe('Use mystery_tool (details withheld: could not summarise safely)');
     expect(describeAction({ tool: 'Bash', input: {}, signals: [] }))
       .toBe('Run a shell command (details withheld: could not summarise safely)');
-    expect(bash('python3 -c "print(1)"')).toBe('Run inline python3 code (details withheld: could not summarise safely)');
+    // Round 3 (R1): inline interpreter code is outside the understood subset.
+    expect(bash('python3 -c "print(1)"')).toBe("Run a complex shell command (couldn't summarise it safely)");
     expect(bash('frobnicate --all ./x')).toBe('Run frobnicate (other details not shown)');
   });
 
@@ -212,7 +218,9 @@ describe('#648 — a credential-shaped target never reaches the card', () => {
   it("a flag's value is never printed as the subcommand of an unknown program", () => {
     const line = bash(`sshpass -p ${PLAIN_PW} ssh deploy@build.example.org`, ['external-egress']);
     expect(line).not.toContain(PLAIN_PW);
-    expect(line).toBe('Run sshpass (other details not shown)');
+    // Round 3 (R1): sshpass runs another command, so the card goes generic.
+    expect(line).toBe("Run a complex shell command (couldn't summarise it safely)");
+    expect(bash(`mysqldump -p ${PLAIN_PW} prod`, ['external-egress'])).toBe('Run mysqldump (other details not shown)');
     expect(bash('frobnicate sync ./x', [])).toBe('Run frobnicate (other details not shown)');
   });
 

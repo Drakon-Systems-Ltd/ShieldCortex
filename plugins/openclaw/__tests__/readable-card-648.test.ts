@@ -88,6 +88,15 @@ describe('#648 — OpenClaw card through the real plugin hook', () => {
     expect(card.description).toMatch(/^What: /);
   });
 
+  it('#648 r3: a command outside the understood subset reads the generic WHAT, with the real WHY', async () => {
+    const hooks = register();
+    const result = await hooks['before_tool_call']({ toolName: 'exec', params: { command: 'echo $(cat ~/.ssh/config)' } }, CTX);
+    const parts = result?.requireApproval?.description.split(' | ');
+    expect(parts[0]).toBe("What: Run a complex shell command (couldn't summarise it safely)");
+    expect(parts[1]).toMatch(/^Why: touches a sensitive file/);
+    expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on /);
+  });
+
   it('a dist without the summariser keeps the previous (#600) layout', async () => {
     __setDefenceModuleForTest({ runDefencePipeline: okPipeline, evaluateToolCall } as any);
     const hooks = register();

@@ -1045,7 +1045,7 @@ const CARD_FOOTER = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
 
 /** Trailing markers a clipped card line always keeps — mirrors
  *  `TAIL_MARKERS` in src/defence/iron-dome/approval-card.ts (#648 r2 S6). */
-const CARD_TAIL_MARKERS = /(?:, as administrator \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
+const CARD_TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
 
 /** One flattened card line, clipped in the MIDDLE so the verb, the tail (a
  *  file name, the session) and the trailing markers survive (#648 r2 S6). */

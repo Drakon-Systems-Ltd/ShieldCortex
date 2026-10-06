@@ -197,6 +197,15 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(title.length).toBeLessThanOrEqual(80);
   });
 
+  it('#648 r3: a command outside the understood subset gets the generic WHAT and the real WHY', () => {
+    writeConfig({ openclaw: true });
+    expect(runHook({ command: 'echo $(cat ~/.ssh/config)' }).decision).toBe('ask');
+    const { description } = cards()[0].card;
+    expect(description.split('\n')[0]).toBe("Run a complex shell command (couldn't summarise it safely)");
+    expect(description).toMatch(/^Why: touches a sensitive file/m);
+    expect(description).toMatch(/Who: Claude Code on [A-Za-z0-9_…-]+ · session sc-[0-9a-f]{16}/);
+  });
+
   it('the card summary never rides on the webhook (notify stays values-free)', () => {
     writeConfig({ openclaw: true });
     runHook(SSH_READ);

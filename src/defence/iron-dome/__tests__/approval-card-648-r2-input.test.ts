@@ -10,13 +10,16 @@ import { performance } from 'node:perf_hooks';
 import {
   WITHHELD_TOO_LONG,
   buildApprovalCard,
-  describeAction,
+  describeAction as describeActionFull,
   formatApprovalCardLines,
   looksSecretish,
   safeTarget,
 } from '../approval-card.js';
 import { buildCardFields } from '../openclaw-approval-channel.js';
 import type { OperatorNotification } from '../operator-notify.js';
+
+/** Line 1's text; round 3 added a confidence flag beside it. */
+const describeAction = (a: Parameters<typeof describeActionFull>[0]) => describeActionFull(a).text;
 
 const UNUSUAL = '(withheld: unusual characters)';
 const TOKENS = 'token-'.repeat(1366).slice(0, 8192);

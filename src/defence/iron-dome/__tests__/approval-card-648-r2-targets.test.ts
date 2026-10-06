@@ -6,8 +6,11 @@
  * and the guard's own write-content scan).
  */
 import { describe, it, expect } from '@jest/globals';
-import { describeAction } from '../approval-card.js';
+import { describeAction as describeActionFull } from '../approval-card.js';
 import { evaluateToolCall } from '../tool-action-guard.js';
+
+/** Line 1's text; round 3 added a confidence flag beside it. */
+const describeAction = (a: Parameters<typeof describeActionFull>[0]) => describeActionFull(a).text;
 
 const RM_RF = ['r', 'm', ' -', 'r', 'f'].join('');
 const PLAIN_PW = ['hun', 'ter', '2'].join('');
@@ -87,9 +90,10 @@ describe('#648 r2 S7 — the most sensitive target, and a count of the rest', ()
   });
 
   it('curl -o FILE: the host is never taken from the output file', () => {
-    expect(bash('curl -o evil.example.org https://good.example.com/x', ['external-egress'])).toBe('Send data to good.example.com (curl)');
-    expect(bash('curl -o evil.example.org good.example.com', [])).toBe('Download from good.example.com (curl)');
-    expect(bash('wget -O evil.example.org https://good.example.com/x', [])).toBe('Download from good.example.com (wget)');
+    // Round 3 (R3): the output file is named too — as where it writes.
+    expect(bash('curl -o evil.example.org https://good.example.com/x', ['external-egress'])).toBe('Send data to good.example.com and write to "evil.example.org"');
+    expect(bash('curl -o evil.example.org good.example.com', [])).toBe('Download from good.example.com and write to "evil.example.org"');
+    expect(bash('wget -O evil.example.org https://good.example.com/x', [])).toBe('Download from good.example.com and write to "evil.example.org"');
   });
 
   it('flag values are not targets: head -n 5 f, tail -c 10 f, grep -e p f, sort -k 2 f', () => {

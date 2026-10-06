@@ -9,8 +9,11 @@ import { describe, it, expect } from '@jest/globals';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describeAction, describeSignal, describeSignals, formatApprovalCardLines } from '../approval-card.js';
+import { describeAction as describeActionFull, describeSignal, describeSignals, formatApprovalCardLines } from '../approval-card.js';
 import { evaluateToolCall } from '../tool-action-guard.js';
+
+/** Line 1's text; round 3 added a confidence flag beside it. */
+const describeAction = (a: Parameters<typeof describeActionFull>[0]) => describeActionFull(a).text;
 
 const RM_RF = ['r', 'm', ' -', 'r', 'f'].join('');
 const KILL_ALL = ['kill', '-9', '-1'].join(' ');
