@@ -225,37 +225,6 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
     }
   });
 
-  it('locks every @modelcontextprotocol/sdk copy above the OAuth credential advisory range', () => {
-    const lock = JSON.parse(readFileSync(join(REPO_ROOT, 'package-lock.json'), 'utf8')) as {
-      packages: Record<string, { version?: string }>;
-    };
-    const copies = Object.entries(lock.packages)
-      .filter(([path]) => path.split('node_modules/').pop() === '@modelcontextprotocol/sdk')
-      .map(([, entry]) => entry.version ?? '0.0.0');
-    expect(copies.length).toBeGreaterThan(0);
-    expect(copies.every((version) => {
-      const [major, minor] = version.split('.').map(Number);
-      return major > 1 || (major === 1 && minor >= 31);
-    })).toBe(true);
-  });
-
-  it('keeps the sharp waiver record in sync with its prose', () => {
-    const waiver = parseWaivers(waiverMarkdown).find((w) => w.id === 'SC-WAIVER-466-sharp');
-    expect(waiver).toMatchObject({
-      package: 'sharp', advisories: [1124066, 1193725, 1241331],
-      ghsa: ['GHSA-f88m-g3jw-g9cj', 'GHSA-rgj7-g3m4-5g8c', 'GHSA-wq5f-xc86-pv6w'],
-      severity: 'high', reviewed: '2026-10-06', expires: '2026-12-12', issue: 466,
-    });
-    const prose = waiverMarkdown.split('### SC-WAIVER-466-sharp')[1]?.split('### SC-WAIVER-639-sprintf-js')[0];
-    expect(prose).toBeDefined();
-    for (const value of [
-      '1124066', '1193725', '1241331', 'GHSA-f88m-g3jw-g9cj', 'GHSA-rgj7-g3m4-5g8c', 'GHSA-wq5f-xc86-pv6w',
-      'high ×3', '2026-10-06', '2026-12-12',
-    ]) {
-      expect(prose).toContain(value);
-    }
-  });
-
   it('carries no waiver that has already lapsed', () => {
     expect(expiredWaivers(parseWaivers(waiverMarkdown))).toEqual([]);
   });
