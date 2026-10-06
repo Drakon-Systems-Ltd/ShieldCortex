@@ -7,9 +7,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Security
-- **#639 Production audit advisories:** Updated the locked `proxy-addr` from 2.0.7 to 2.0.8 to fix the IP spoofing advisory. Documented a time-limited waiver for the `sprintf-js` denial of service advisory: its latest release is still affected, and the measured path is through the optional ONNX install script, with no ShieldCortex-controlled format string.
-
 ### Added
 - (none yet)
 
@@ -22,6 +19,10 @@ Minor on 5.3.1: Action Guard gains a third posture, **enforce when ready**, plus
 - **Approval answers are bound to the attempt they answer.** An answer to a replaced attempt, or one arriving more than 15 minutes late, grants nothing. A hash-only terminal `approve` still works.
 - **The webhook validator refuses URLs carrying credentials** (`https://user:pass@…`), which the transport could never send.
 - **The Hermes plugin does not implement the readiness gate.** It ignores `readinessGate` and enforces immediately.
+- **Production audit: 0 unwaived advisories, 3 waived (not fixed).** `proxy-addr` moves to 2.0.8. The `sprintf-js` advisory joins the two `sharp` waivers; all three arrive only through the optional Transformers package. Reachability and expiry dates: `docs/security/audit-waivers.md`.
+
+### Security
+- **#639 Production audit advisories:** Updated the locked `proxy-addr` from 2.0.7 to 2.0.8 to fix the IP spoofing advisory. Documented a time-limited waiver for the `sprintf-js` denial of service advisory: its latest release is still affected, and the measured path is through the optional ONNX install script, with no ShieldCortex-controlled format string.
 
 ### Added
 - **#509 Action Guard: "enforce when ready" posture.** A third choice beside off and enforce: `shieldcortex config --action-guard-enforce-when-ready` (or the new question in `shieldcortex setup`) sets `actionGuard.readinessGate: true` on an enforcing guard. The Claude Code hook and the OpenClaw plugin then each run the dangerous tier in **shadow** — every verdict computed and audited as `would_hold` / `would_block`, the call proceeds — and enforces only while three conditions hold. Two are **readiness proxies for operability**, measured from this install's own audit log: **operational intervention rate** ≤ 2% (would-stops ÷ all gated calls, ≥ 500 real hook calls spanning ≥ 7 days) and **approval reachability** ≥ 98% (approval requests answered by a human, approve or deny, within 15 min, through a configured channel, ≥ 20 requests, with a round-trip in the last 7 days). They are not the ADR-002 §5B bars, the intervention rate is not a false-positive rate, and 2% / 98% are operability thresholds chosen for this posture. The third is **reviewed effectiveness evidence** (the effect-based red-team exam) pinned to the adapter + policy version in force. It is **always required** (operator decision, 29 Sep 2026; no setting drops it), and none ships, so today the posture stays in shadow and reports "operability proxies met; awaiting reviewed effectiveness evidence" once the proxies pass. No configured human channel ⇒ never enforces. Timeouts, undelivered requests, no-prompt-surface denials and the hash-in-transcript fallback are not reaches. The catastrophic tier and the session-lease floor apply identically in every posture and mode. Readiness is **per surface**: the hook and the OpenClaw plugin each measure, promote and demote on their own calls (own evidence pin, state file and transition journal); neither promotes the other, and `doctor` / `guard readiness` show each. The **Hermes plugin does not implement the gate: it ignores it and enforces immediately.**
