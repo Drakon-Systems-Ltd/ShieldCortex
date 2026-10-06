@@ -88,7 +88,7 @@ Measured greps over `src/`, `scripts/`, `plugins/`, `hooks/`, `templates/`
 
 #### `1241331` (GHSA-wq5f-xc86-pv6w), assessed on its own — 2026-10-06, #655
 
-Published 2026-10-06 13:43Z: a memory-safety bug in **librsvg**, the SVG
+Published 2026-10-06 13:43Z (publish time, CVE and lowest-fixed version taken from the `npm audit` record on 6 Oct 2026; not independently verified against the GitHub advisory): a memory-safety bug in **librsvg**, the SVG
 decoder that sharp's prebuilt libvips bundles. Vulnerable range `sharp <0.35.5`;
 fixed in `sharp@0.35.5` (librsvg 2.63.2). The advisory says it "can lead to
 possible remote code execution (RCE) on glibc-based Linux" when the `node`
@@ -134,7 +134,8 @@ Measured on 2026-10-06, on `main` at `ee87c5c5` with `@huggingface/transformers@
   advisory's range. `dashboard/next.config.ts` excludes
   `**/node_modules/sharp/**` and `**/node_modules/@img/**` from the standalone
   output that goes into the npm tarball, so the published dashboard has no
-  sharp. That copy runs only at build time, on the build machine, over
+  sharp runtime (a manifest-only `sharp/package.json` can remain in the
+  standalone output; it carries no code or binary). That copy runs only at build time, on the build machine, over
   repository assets. It is outside the `npm audit --omit=dev` gate and this
   waiver.
 
