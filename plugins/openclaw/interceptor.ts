@@ -596,12 +596,29 @@ interface ApprovalPromptInput {
   content: string;
 }
 
-/** Line breaks in any renderer: C0/C1 controls (CR, LF, VT, FF, NEL U+0085)
- *  and the Unicode line/paragraph separators. */
-const PROMPT_LINE_BREAKS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu;
-/** Invisible format characters that reorder or hide text (bidi embeddings,
- *  overrides and isolates, zero-width marks, BOM). */
-const PROMPT_FORMAT_CHARS = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu;
+/**
+ * #648 r3 R4 — the characters that never reach a card, as character-class
+ * bodies. These are THE SAME strings as `CARD_LINE_BREAK_CLASS` and
+ * `CARD_HIDDEN_CHAR_CLASS` in src/defence/iron-dome/approval-card.ts: this
+ * file is built with `rootDir: plugins/openclaw` and cannot import from src/
+ * (TS6059), so approval-card-648-r3-chars.test.ts imports both and fails if
+ * they differ by a single character. Change both together.
+ *
+ * Line breaks in any renderer: C0/C1 controls (CR, LF, VT, FF, NEL U+0085)
+ * and the Unicode line/paragraph separators.
+ */
+export const CARD_LINE_BREAK_CLASS = '\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029';
+/** Hidden and look-alike characters: soft hyphen, Arabic letter mark, Hangul
+ *  and Mongolian fillers, zero-width marks, bidi embeddings, overrides and
+ *  isolates, U+2060-206F, variation selectors, tag characters, the BOM, and
+ *  quotes that look like `"`. */
+export const CARD_HIDDEN_CHAR_CLASS = [
+  '\\u00ad', '\\u061c', '\\u115f', '\\u1160', '\\u17b4', '\\u17b5', '\\u180e', '\\u200b-\\u200f', '\\u202a-\\u202e', '\\u2060-\\u206f',
+  '\\u3164', '\\ufe00-\\ufe0f', '\\ufeff', '\\uffa0', '\\u{e0000}-\\u{e007f}', '\\u{e0100}-\\u{e01ef}',
+  '\\u201c-\\u201f', '\\u2033', '\\u301d-\\u301f', '\\uff02',
+].join('');
+const PROMPT_LINE_BREAKS = new RegExp(`[${CARD_LINE_BREAK_CLASS}]`, 'gu');
+const PROMPT_FORMAT_CHARS = new RegExp(`[${CARD_HIDDEN_CHAR_CLASS}]`, 'gu');
 
 /**
  * #648 r2 (B1, S9): every value interpolated into an approval prompt goes
@@ -1043,13 +1060,14 @@ export interface ApprovalCardText {
 const CARD_EXPIRY_TEXT = 'expires in 10 min';
 const CARD_FOOTER = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
 
-/** Trailing markers a clipped card line always keeps — mirrors
- *  `TAIL_MARKERS` in src/defence/iron-dome/approval-card.ts (#648 r2 S6). */
-const CARD_TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
+/** Trailing markers a clipped card line always keeps — the same regex as
+ *  `CARD_TAIL_MARKERS` in src/defence/iron-dome/approval-card.ts (#648 r2 S6),
+ *  pinned equal by approval-card-648-r3-chars.test.ts (#648 r3 R4). */
+export const CARD_TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
 
 /** One flattened card line, clipped in the MIDDLE so the verb, the tail (a
  *  file name, the session) and the trailing markers survive (#648 r2 S6). */
-function cardLine(text: unknown, max: number): string {
+export function clipCardLine(text: unknown, max: number): string {
   const one = flattenPromptField(text);
   if (one.length <= max) return one;
   const tail = CARD_TAIL_MARKERS.exec(one)?.[0] ?? '';
@@ -1082,11 +1100,11 @@ export function plainApprovalCard(card: ApprovalCardText | undefined): PlainAppr
   if (!card || typeof card.action !== 'string' || !card.action.trim()) return undefined;
   // The host joins these lines with ' | ' into a 256-character description.
   // WHY, WHO and the footer are bounded first; the action gets what is left.
-  const why = cardLine(card.reason, 75);
-  const who = cardLine(card.who, 75);
+  const why = clipCardLine(card.reason, 75);
+  const who = clipCardLine(card.who, 75);
   const used = 'What: '.length + 'Why: '.length + why.length + 'Who: '.length + who.length + CARD_FOOTER.length + 3 * 3;
   const room = Math.max(40, Math.min(120, 256 - used));
-  return { what: cardLine(card.action, room), why, who, footer: CARD_FOOTER };
+  return { what: clipCardLine(card.action, room), why, who, footer: CARD_FOOTER };
 }
 
 /**

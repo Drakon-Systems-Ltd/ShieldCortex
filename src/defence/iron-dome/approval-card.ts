@@ -50,13 +50,32 @@ export const COMMAND_TOO_LONG = '(command too long to summarise fully)';
 /** Longest candidate any pattern in this module is run on. */
 const MAX_TARGET_CHARS = 256;
 /**
- * Characters that never reach a card (#648 r2 S9): C0 and C1 controls (NEL
- * U+0085 included), the Unicode line/paragraph separators, bidi embeddings,
- * overrides and isolates, zero-width marks and the BOM. Any of them can break
- * a line or make a target read as something else.
+ * The characters that never reach a card, as character-class bodies. ONE
+ * list for both card planes (#648 r3 R4): plugins/openclaw/interceptor.ts
+ * carries the same strings, because the plugin is built with its own rootDir
+ * and cannot import from src/ (TS6059); approval-card-648-r3-chars.test.ts
+ * fails if the two copies differ by a single character.
+ *
+ * Line breaks (shown as a space): C0 and C1 controls, NEL U+0085 included,
+ * and the Unicode line/paragraph separators (#648 r2 S9).
  */
-const UNUSUAL_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069\ufeff]/u;
-const UNUSUAL_CHARS_ALL = new RegExp(UNUSUAL_CHARS.source, 'gu');
+export const CARD_LINE_BREAK_CLASS = '\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029';
+/**
+ * Hidden and look-alike characters (shown as `<U+XXXX>`): soft hyphen, Arabic
+ * letter mark, Hangul and Mongolian fillers, zero-width marks, bidi
+ * embeddings, overrides and isolates, the U+2060-206F invisible operators,
+ * variation selectors, tag characters, the BOM, and quotes that look like `"`
+ * (#648 r2 S9, r3 R4).
+ */
+export const CARD_HIDDEN_CHAR_CLASS = [
+  '\\u00ad', '\\u061c', '\\u115f', '\\u1160', '\\u17b4', '\\u17b5', '\\u180e', '\\u200b-\\u200f', '\\u202a-\\u202e', '\\u2060-\\u206f',
+  '\\u3164', '\\ufe00-\\ufe0f', '\\ufeff', '\\uffa0', '\\u{e0000}-\\u{e007f}', '\\u{e0100}-\\u{e01ef}',
+  '\\u201c-\\u201f', '\\u2033', '\\u301d-\\u301f', '\\uff02',
+].join('');
+const UNUSUAL_CHARS = new RegExp(`[${CARD_LINE_BREAK_CLASS}${CARD_HIDDEN_CHAR_CLASS}]`, 'u');
+const CARD_LINE_BREAKS_ALL = new RegExp(`[${CARD_LINE_BREAK_CLASS}]`, 'gu');
+const CARD_HIDDEN_ALL = new RegExp(`[${CARD_HIDDEN_CHAR_CLASS}]`, 'gu');
+const codePointLabel = (c: string) => `<U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`;
 
 /**
  * Every signal id the guard (and the planes around it) can put on a verdict,
@@ -2362,15 +2381,15 @@ export function buildApprovalCard(input: ApprovalCardInput): ApprovalCardSummary
  *  crossed a process boundary since they were built. */
 function flattenCardText(text: unknown): string {
   return String(text ?? '')
-    .replace(UNUSUAL_CHARS_ALL, (c) => (/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/u.test(c)
-      ? `<U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`
-      : ' '))
+    .replace(CARD_HIDDEN_ALL, codePointLabel)
+    .replace(CARD_LINE_BREAKS_ALL, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-/** Trailing markers a clipped line always keeps (#648 r2 S5, S6). */
-const TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
+/** Trailing markers a clipped line always keeps (#648 r2 S5, S6). Shared
+ *  with the plugin's card lines and pinned equal by test (#648 r3 R4). */
+export const CARD_TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
 
 /**
  * Fit a card line into `max` characters by cutting its MIDDLE (#648 r2 S6):
@@ -2382,7 +2401,7 @@ const TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ m
 export function clipCardLine(text: unknown, max: number): string {
   const one = flattenCardText(text);
   if (one.length <= max) return one;
-  const tail = TAIL_MARKERS.exec(one)?.[0] ?? '';
+  const tail = CARD_TAIL_MARKERS.exec(one)?.[0] ?? '';
   const body = one.slice(0, one.length - tail.length);
   const room = Math.max(12, max - tail.length);
   if (body.length <= room) return `${body}${tail}`;
