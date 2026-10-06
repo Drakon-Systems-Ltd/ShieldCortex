@@ -80,7 +80,7 @@ describe('source facts the docs describe', () => {
   it('postinstall calls the writer only on a global, non-CI install', () => {
     const post = read('scripts', 'postinstall.mjs');
     assert.match(post, /const isGlobal = process\.env\.npm_config_global === 'true';/);
-    assert.match(post, /const isCI = process\.env\.CI === 'true'/);
+    assert.match(post, /const isCI = process\.env\.CI === 'true' \|\| process\.env\.CONTINUOUS_INTEGRATION === 'true';/);
     assert.ok(blockAfter(post, 'if (isGlobal && !isCI)').includes('writeFreshInstallDefaults()'));
     assert.equal(post.match(/writeFreshInstallDefaults\(\)/g).length, 2); // definition + one call
   });
@@ -131,6 +131,23 @@ describe('docs/openclaw-integration.md', () => {
     assert.match(d, /When the key is not set, both stay off\./);
     assert.match(d, /An existing config file is never changed/);
     assert.match(d, /does not install the OpenClaw hook or plugin/);
+  });
+
+  it('install-time seed bullet is scoped to a global, non-CI install, not "only --ignore-scripts"', () => {
+    const section = between(doc, '## Install-time refresh (postinstall)', '\nTo update the package without');
+    // The seed bullet is the last one in the section.
+    const at = section.indexOf('Also separately from OpenClaw');
+    assert.ok(at > -1, 'seed bullet not found');
+    const seed = oneLine(section.slice(at));
+    assert.doesNotMatch(seed, /only `--ignore-scripts` avoids it/);
+    assert.match(seed, /global, non-CI install/);
+    assert.match(seed, /`CI=true` or `CONTINUOUS_INTEGRATION=true`/);
+    assert.match(seed, /An existing config file is never overwritten/);
+    assert.match(seed, /if the write fails/);
+    assert.match(seed, /still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` and inside Docker/);
+    assert.match(seed, /`--ignore-scripts`/);
+    assert.match(seed, /does not install the OpenClaw hook or plugin and does not turn on the Action Guard/);
+    assert.match(oneLine(section), /when `CI=true` or `CONTINUOUS_INTEGRATION=true`, or inside Docker/);
   });
 });
 
