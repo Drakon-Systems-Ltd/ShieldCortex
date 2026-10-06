@@ -7,6 +7,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- (none yet)
+
+## [5.4.0] - 2026-10-06
+
+Minor on 5.3.1: Action Guard gains a third posture, **enforce when ready**, plus `shieldcortex guard readiness`, `shieldcortex guard test-approval`, an `Action guard readiness` doctor row that can fail, and a setup question. Action Guard stays off by default. Node floor (`^22.14.0 || >=24.0.0`) and Cloud pin unchanged.
+
+**Things to know before you upgrade:**
+- **Watch-only installs now enforce a self-protection floor.** With the guard on but `enforce: false`, a call that touches the guard's own state, config, lease ledger or policy lock is still held or denied. `autoApprove`, a broker pre-clear and `failurePolicy.*: "allow"` no longer release it; only a human answer does. Guard off (`enabled: false`) is unchanged.
+- **Approval answers are bound to the attempt they answer.** An answer to a replaced attempt, or one arriving more than 15 minutes late, grants nothing. A hash-only terminal `approve` still works.
+- **The webhook validator refuses URLs carrying credentials** (`https://user:pass@…`), which the transport could never send.
+- **A broken Claude Code hook now fails closed for catastrophic commands (#511, #645).** If the PreToolUse hook file fails to load or crashes, the launcher scans the call with the hook's fallback patterns and denies a match instead of letting it through. It cannot read your config at that point, so this applies **even with the guard off**. The patterns are deliberately blunt text matches: any recursive force-delete (`-rf`-style flags, whatever the target), raw-disk writes and reformats, partition tools, a fork bomb, a download piped into a shell, and recursive permission changes on `/`. So while the hook is broken, routine cleanup such as a recursive force-delete of a build folder is also denied until the install is repaired (`shieldcortex doctor`). Calls that don't match keep the fail-open behaviour. With the guard on, empty or malformed hook input gets the same scan.
+- **The Hermes plugin does not implement the readiness gate.** It ignores `readinessGate` and enforces immediately.
+- **Production audit: 0 unwaived advisories, 3 waived (not fixed).** `proxy-addr` moves to 2.0.8. The `sprintf-js` advisory joins the two `sharp` waivers; all three arrive only through the optional Transformers package. Reachability and expiry dates: `docs/security/audit-waivers.md`.
+
 ### Security
 - **#639 Production audit advisories:** Updated the locked `proxy-addr` from 2.0.7 to 2.0.8 to fix the IP spoofing advisory. Documented a time-limited waiver for the `sprintf-js` denial of service advisory: its latest release is still affected, and the measured path is through the optional ONNX install script, with no ShieldCortex-controlled format string.
 
@@ -24,6 +39,8 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **#633 `shieldcortex remember` no longer aborts with exit 134 after a successful write.** With a cached embedding model, the background embed left the ONNX worker thread running when the command exited, and onnxruntime's native teardown aborted (`terminate called after throwing an instance of 'Napi::Error'`) after the memory was already written. The command now terminates the embedding worker before exiting, as `embed-backfill` already did. Failed writes still exit non-zero. The command does not wait for the background embedding; unfinished embeddings can be cancelled at shutdown, and `shieldcortex embed-backfill` can fill missing vectors.
 - **#630 `config --help` is truthful about the auto-memory and proactive-recall defaults.** `--openclaw-auto-memory` and `--proactive-recall` no longer say "(default: off)" without qualification. Off is what you get when the key is not set; a fresh global, non-CI npm install with no `~/.shieldcortex/config.json` creates one with both set to `true`, and an existing config file is never changed, so an upgrade keeps your values. The "Default behavior" section of `docs/openclaw-integration.md` now says the same. Help and docs only; no default or install behaviour changes.
+- **#511 Claude Code PreToolUse catastrophic fallback:** the hook launcher now scans buffered input and emits a deny decision when a catastrophic command is seen after a hook-file load failure. Empty, malformed, or incomplete hook input gets the same bounded catastrophic scan without writing guard state. Input that does not match the fallback patterns keeps the existing fail-open posture; the patterns are text matches, so a match can include routine cleanup (see Things to know).
+- **#511 follow-up (#645): the launcher fallback reads the same fields as the hook.** The load-failure scan now also reads the OpenClaw `process` typed-shell fields `data`, `text` and `literal`, so a catastrophic command in one of them is denied when the hook file cannot load. The scan still runs only after the hook process fails, so this adds no blocks in normal operation.
 
 ### Tests
 - **#624 Worker failed-kill ordering tests no longer flake on slow runners.** Both orderings in `worker-dispose-honesty` (failure reported after exit: work runs; failure reported before exit: work is refused until the exit) sent their post-recovery embed to a fresh replacement thread under the scenario's 200ms inference timeout, so a thread that started slowly (seen on macOS CI) timed out an embed the module had admitted correctly. The driver now starts each worker with `preloadModel()`, which goes through the same admission gate under the load timeout, and waits for the reported failure or the delivered exit instead of sleeping 100ms. No assertion was removed; new ones cover the preload and the wait conditions. A simulated 250–600ms thread start fails the old tests and passes the new ones, and both tests still fail when the production ordering is broken. No production change.
