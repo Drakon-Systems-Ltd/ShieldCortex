@@ -977,8 +977,11 @@ function safeHostname(h: string | undefined): string {
   if (name === undefined) {
     try { name = osHostname(); } catch { name = ''; }
   }
-  const short = String(name ?? '').trim();
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(short) ? short : 'this machine';
+  // The box's own label, not its FQDN: CI and cloud hosts carry long
+  // generated names (`<id>.local`, `<id>.internal`), and a host that ate the
+  // whole line would push the session off the card.
+  const short = String(name ?? '').trim().split('.')[0];
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(short) ? middleClip(short, 20) : 'this machine';
 }
 
 /** Line 3: agent, box and session. An OpenClaw session key carries chat ids,
@@ -1045,7 +1048,8 @@ export function formatApprovalCardLines(
   opts: { expiresInMs: number; decisions?: string; budget?: number; separatorLength?: number; actionPrefix?: string },
 ): string[] {
   const why = clipLine(`Why: ${card.reason}`, 64);
-  const who = clipLine(`Who: ${card.who}`, 64);
+  // 72: room for a 20-character host plus the session id (`describeWho`).
+  const who = clipLine(`Who: ${card.who}`, 72);
   const footer = `${opts.decisions ?? 'Allow once or deny'} · expires in ${expiryText(opts.expiresInMs)}`;
   const prefix = opts.actionPrefix ?? '';
   const used = why.length + who.length + footer.length + 3 * (opts.separatorLength ?? 1) + prefix.length;

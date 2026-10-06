@@ -316,6 +316,15 @@ describe('#648 — WHO: agent, box, session', () => {
   it('a hostile hostname is not printed', () => {
     expect(describeWho({ plane: 'claude-code', host: 'evil\nhost' })).toBe('Claude Code on this machine');
   });
+
+  it("a long generated hostname (CI, cloud) is shortened, and the session still fits the card's WHO line", () => {
+    const host = `sat12-bq${'7'.repeat(20)}-${'a1b2c3d4'.repeat(4)}.local`;
+    const who = describeWho({ plane: 'claude-code', host, sessionId: 'sc-0123456789abcdef' });
+    expect(who).toMatch(/^Claude Code on sat12-b…[a-d0-9]{12} · session sc-0123456789abcdef$/);
+    expect(describeWho({ plane: 'claude-code', host: 'veronica-box.tail1234.ts.net' })).toBe('Claude Code on veronica-box');
+    const [, , whoLine] = formatApprovalCardLines({ action: 'x', reason: 'y', who }, { expiresInMs: 600_000 });
+    expect(whoLine).toContain('session sc-0123456789abcdef');
+  });
 });
 
 describe('#648 — layout fits the 256-character card', () => {

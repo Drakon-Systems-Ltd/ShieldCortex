@@ -189,7 +189,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     // Why ShieldCortex stopped it, in plain English.
     expect(description).toContain('Why: touches a sensitive file (keys, passwords or credentials)');
     // Who: agent, box, session.
-    expect(description).toMatch(/Who: Claude Code on [A-Za-z0-9._-]+ · session sc-[0-9a-f]{16}/);
+    expect(description).toMatch(/Who: Claude Code on [A-Za-z0-9_…-]+ · session sc-[0-9a-f]{16}/);
     // Kept: short hash, allow-once|deny, expiry.
     expect(title).toMatch(/\[[0-9a-f]{12}\]$/);
     expect(description).toContain('Allow once or deny · expires in 10 min');
