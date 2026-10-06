@@ -123,12 +123,12 @@ worth knowing before you update a box that runs OpenClaw:
 - Separately from OpenClaw, on macOS it restarts a ShieldCortex dashboard
   service that is still serving the previous build.
 - Also separately from OpenClaw, a global, non-CI install on a machine with no
-  `~/.shieldcortex/config.json` **creates one** with
-  `openclawAutoMemory: true` and `proactiveRecall: true` (if the write fails,
-  nothing is written and both keys stay unset, so both stay off). An existing
-  config file is never overwritten. The file does not install the OpenClaw hook
-  or plugin and does not turn on the Action Guard. This write is not part of the
-  OpenClaw refresh, so it still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1`
+  `~/.shieldcortex/config.json` tries to **create one**; when that write
+  succeeds, `openclawAutoMemory: true` and `proactiveRecall: true` are saved.
+  If the write fails, the two defaults are not saved and the install continues
+  without them. An existing config file is never overwritten. The file does not
+  install the OpenClaw hook or plugin and does not turn on the Action Guard.
+  This write is not part of the OpenClaw refresh, so it still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1`
   and inside Docker. It is skipped for local (non-global) installs, when
   `CI=true` or `CONTINUOUS_INTEGRATION=true`, and whenever the install script
   does not run at all (for example with `--ignore-scripts`).

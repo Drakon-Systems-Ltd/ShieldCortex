@@ -75,6 +75,8 @@ describe('source facts the docs describe', () => {
     // Only those two keys: the memory defaults cannot switch the guard on.
     assert.equal(defaults.match(/^\s*\w+:/gm).length, 2);
     assert.doesNotMatch(defaults, /actionGuard|interceptor/);
+    // A failed write is swallowed (returns false), so the install carries on.
+    assert.match(writer, /\} catch \{\s*return false;\s*\}/);
   });
 
   it('postinstall calls the writer only on a global, non-CI install', () => {
@@ -143,7 +145,10 @@ describe('docs/openclaw-integration.md', () => {
     assert.match(seed, /global, non-CI install/);
     assert.match(seed, /`CI=true` or `CONTINUOUS_INTEGRATION=true`/);
     assert.match(seed, /An existing config file is never overwritten/);
-    assert.match(seed, /if the write fails/);
+    // Success-qualified: a failed non-atomic write cannot promise that nothing was written.
+    assert.match(seed, /when that write succeeds, `openclawAutoMemory: true` and `proactiveRecall: true` are saved/);
+    assert.match(seed, /If the write fails, the two defaults are not saved and the install continues without them\./);
+    assert.doesNotMatch(seed, /nothing is written|keys stay unset|so both stay off/);
     assert.match(seed, /still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` and inside Docker/);
     assert.match(seed, /`--ignore-scripts`/);
     assert.match(seed, /does not install the OpenClaw hook or plugin and does not turn on the Action Guard/);
