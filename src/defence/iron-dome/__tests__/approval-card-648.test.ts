@@ -204,6 +204,28 @@ describe('#648 — a credential-shaped target never reaches the card', () => {
     expect(safeTarget(`/home/u/.ssh/${AWS_ID}`)).toBe(WITHHELD_SECRET);
     expect(bash(`cat ~/.ssh/${AWS_ID}`)).toBe(`Read a file in your SSH folder: ${WITHHELD_SECRET}`);
   });
+
+  // A short, dictionary-shaped password has no credential SHAPE, so it is
+  // kept off the card by where it sits, not by what it looks like.
+  const PLAIN_PW = ['hun', 'ter', '2'].join('');
+
+  it("a flag's value is never printed as the subcommand of an unknown program", () => {
+    const line = bash(`sshpass -p ${PLAIN_PW} ssh deploy@build.example.org`, ['external-egress']);
+    expect(line).not.toContain(PLAIN_PW);
+    expect(line).toBe('Run sshpass (other details not shown)');
+    expect(bash('frobnicate sync ./x', [])).toBe('Run frobnicate sync (other details not shown)');
+  });
+
+  it('a password passed as `--password <value>` in a shown pattern is withheld', () => {
+    const line = bash(`pkill -f "relay --password ${PLAIN_PW}"`, ['stop-process-or-service']);
+    expect(line).not.toContain(PLAIN_PW);
+    expect(line).toBe(`Stop every program whose command line matches: ${WITHHELD_SECRET}`);
+  });
+
+  it('ssh option values are not mistaken for the destination host', () => {
+    expect(bash('ssh -p 2222 -i ~/.ssh/deploy_key deploy@build.example.org', ['external-egress']))
+      .toBe('Log in to build.example.org over SSH');
+  });
 });
 
 describe('#648 — WHY: one table, every signal the guard can emit', () => {

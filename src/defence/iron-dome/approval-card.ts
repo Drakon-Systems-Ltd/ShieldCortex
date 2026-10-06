@@ -188,6 +188,8 @@ const HOME = (() => {
 function looksSecretish(text: string): boolean {
   // KEY=value / --token=value where the key names a secret.
   if (/(?:^|[\s;&|"'-])[\w.-]*(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|auth|credential|bearer|session[_-]?id|private[_-]?key)[\w.-]*\s*[=:]\s*\S/i.test(text)) return true;
+  // The same names as a flag whose value is the next word: `--password <value>`.
+  if (/(?:^|\s)--?[\w.-]*(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|credential|private[_-]?key)[\w.-]*\s+\S/i.test(text)) return true;
   // URL userinfo: scheme://user:pass@ or scheme://token@
   if (/[a-z][a-z0-9+.-]*:\/\/[^/\s@]+@/i.test(text)) return true;
   // A long opaque run in any one segment of a path, host or argument.
@@ -602,7 +604,8 @@ function describeNetworkTool(prog: string, args: string[], ctx: ShellContext): D
     return { category: 'network', sentence: host ? `${verb} ${host} (${prog})` : `${verb} a web address it could not show safely (${prog})` };
   }
   if (prog === 'ssh' || prog === 'mosh') {
-    const dest = positional(args)[0];
+    // ssh options that consume the next word (`-p 22`, `-i <key>`) are not the destination.
+    const dest = args.find((a, i) => !isFlag(a) && !(i > 0 && /^-[bcDEeFIiJLlmOopQRSWw]$/.test(args[i - 1])));
     const host = dest ? safeHost(dest.includes('@') ? dest : `x@${dest}`) : null;
     return { category: 'network', sentence: host ? `Log in to ${host} over SSH` : 'Log in to another machine over SSH' };
   }
@@ -829,7 +832,9 @@ function describeProgram(prog: string, argv0: string, args: string[], seg: Segme
   if (argv0.includes('/')) return { category: 'script', sentence: `Run a script: ${safeTarget(argv0)}` };
   const shown = safeProgram(prog);
   if (!shown) return null;
-  const sub = safeWord(pos[0]);
+  // Only a word in the subcommand slot itself: the first positional after a
+  // flag may be that flag's value (`sshpass -p <password> …`).
+  const sub = args[0] && !isFlag(args[0]) && !isWithheld(safeTarget(args[0], 24)) ? safeWord(args[0]) : null;
   return { category: 'other', sentence: `Run ${shown}${sub ? ` ${sub}` : ''} (other details not shown)` };
 }
 
