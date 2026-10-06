@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - (none yet)
 
+### Docs
+- **OpenClaw docs: auto-memory and Action Guard defaults match the source (#630 follow-through).** `docs/openclaw-integration.md` no longer says the Action Guard is on or lists it under "Enabled by default": it is off unless `actionGuard.enabled` is `true`, and the fresh-install memory defaults do not turn it on. The plugin README, the OpenClaw quickstart and the `src/cloud/config.ts` comments now say what #630 said for `config --help`: auto-memory and proactive recall are off when the key is not set, a fresh global, non-CI install with no `~/.shieldcortex/config.json` writes both as `true`, an existing config is never changed, and the hook and plugin still have to be installed. Docs and comments only; no default, install or guard behaviour changes.
+
 ## [5.4.0] - 2026-10-06
 
 Minor on 5.3.1: Action Guard gains a third posture, **enforce when ready**, plus `shieldcortex guard readiness`, `shieldcortex guard test-approval`, an `Action guard readiness` doctor row that can fail, and a setup question. Action Guard stays off by default. Node floor (`^22.14.0 || >=24.0.0`) and Cloud pin unchanged.
