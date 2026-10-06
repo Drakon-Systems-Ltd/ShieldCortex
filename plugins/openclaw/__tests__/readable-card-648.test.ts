@@ -59,7 +59,7 @@ describe('#648 — OpenClaw card through the real plugin hook', () => {
     expect(card).toBeTruthy();
     expect(card.title).toBe('ShieldCortex needs a yes');
     const parts = card.description.split(' | ');
-    expect(parts[0]).toBe('What: Stop the service: nginx, as administrator (sudo)');
+    expect(parts[0]).toBe('What: Stop the service: "nginx", as administrator (sudo)');
     expect(parts[1]).toMatch(/^Why: runs with administrator \(root\) rights/);
     expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on [A-Za-z0-9._-]+ · Telegram chat #[0-9a-f]{8}$/);
     expect(parts[3]).toBe('Allow once is this call only · expires in 10 min');
@@ -215,5 +215,28 @@ describe('#648 r2 B1 — a card cannot be forged from payload text', () => {
     expect(segments(card.description).filter((s) => /^What:/u.test(s))).toHaveLength(1);
     expect(card.description).not.toContain('Read a harmless file');
     expect(card.description).not.toMatch(/[\r\n\u2028\u2029\u0085]/u);
+  });
+});
+
+describe('#648 r2 — OpenClaw plane: no unproven claims, markers survive the clip', () => {
+  it('the gateway PID is never offered as the agent: "it started" cannot be claimed on this plane', async () => {
+    const seen: any[] = [];
+    __setDefenceModuleForTest({ runDefencePipeline: okPipeline, evaluateToolCall, buildApprovalCard: (input: any) => { seen.push(input); return buildApprovalCard(input); } } as any);
+    const hooks = register();
+    await hooks['before_tool_call']({ toolName: 'exec', params: { command: 'sudo systemctl stop nginx' } }, CTX);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].agentPid).toBeUndefined();
+  });
+
+  it('a long WHAT keeps its verb, sudo marker and step count on the 256-character card', () => {
+    const action = `Delete a folder and everything in it: "/srv/${'a'.repeat(50)}/${'b'.repeat(50)}/final", as administrator (sudo) (+2 more steps)`;
+    const card = plainApprovalCard({ action, reason: 'r'.repeat(50), who: 'w'.repeat(50) })!;
+    expect(card.what.startsWith('Delete a folder')).toBe(true);
+    expect(card.what.endsWith(', as administrator (sudo) (+2 more steps)')).toBe(true);
+    expect(card.what).toContain('…');
+    const out = __buildTypedApprovalRequestForTest('🛡️ ShieldCortex needs a yes', { card });
+    expect(out.description.length).toBeLessThanOrEqual(256);
+    expect(out.description).toContain('(+2 more steps) | Why:');
+    expect(out.description.endsWith('Allow once is this call only · expires in 10 min')).toBe(true);
   });
 });

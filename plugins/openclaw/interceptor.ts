@@ -1043,9 +1043,21 @@ export interface ApprovalCardText {
 const CARD_EXPIRY_TEXT = 'expires in 10 min';
 const CARD_FOOTER = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
 
+/** Trailing markers a clipped card line always keeps — mirrors
+ *  `TAIL_MARKERS` in src/defence/iron-dome/approval-card.ts (#648 r2 S6). */
+const CARD_TAIL_MARKERS = /(?:, as administrator \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
+
+/** One flattened card line, clipped in the MIDDLE so the verb, the tail (a
+ *  file name, the session) and the trailing markers survive (#648 r2 S6). */
 function cardLine(text: unknown, max: number): string {
   const one = flattenPromptField(text);
-  return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
+  if (one.length <= max) return one;
+  const tail = CARD_TAIL_MARKERS.exec(one)?.[0] ?? '';
+  const body = one.slice(0, one.length - tail.length);
+  const room = Math.max(12, max - tail.length);
+  if (body.length <= room) return `${body}${tail}`;
+  const head = Math.ceil((room - 1) / 2);
+  return `${body.slice(0, head)}…${body.slice(body.length - (room - 1 - head))}${tail}`;
 }
 
 /**
@@ -1509,8 +1521,9 @@ export function createInterceptor(
         agentId: context.agentId,
         sessionId: context.sessionId,
         cwd: toolCallCwd(context),
-        // The gateway itself: commands the agent runs are its descendants.
-        agentPid: process.pid,
+        // No agentPid (#648 r2): the gateway runs every agent's sessions, so
+        // descending from it does not prove THIS agent started a process —
+        // the card says "a running program" rather than "it started".
       });
       return card && typeof card.action === 'string' ? card : undefined;
     } catch {
