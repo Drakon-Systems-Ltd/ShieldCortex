@@ -103,7 +103,7 @@ describe('#648 — WHAT: plain English with a named target', () => {
     ['npm install -g typescript', 'Install a package: "typescript" (npm, whole machine)'],
     ['npm install --registry https://registry.npmjs.org left-pad', 'Install a package: "left-pad" (npm)'],
     ['git branch -D feature/x', 'Delete a git branch: "feature/x"'],
-    ['git push --force https://github.com/acme/app.git main', 'Force-push to github.com (branch "main"), which may overwrite history (git push --force)'],
+    ['git push --force https://github.com/acme/app.git main', 'Force-push to github.com (branch "main") (git push --force)'],
     ['crontab -e', 'Change scheduled jobs (crontab)'],
     ['chmod -R 777 /var/www', 'Change who can access a folder and everything in it: "/var/www"'],
     ['scp ./db.sql backup@files.example.org:/srv/', 'Copy files to files.example.org (scp)'],

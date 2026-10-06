@@ -30,6 +30,11 @@ describe('#648 r2 S3 — a multi-step command is described by its most dangerous
     expect(line).toBe('Send data to collector.example.net (curl) (+1 more step)');
   });
 
+  it('a harmless push before a force-push does not stand in for it', () => {
+    expect(bash('git push origin feature; git push --force origin main'))
+      .toBe('Force-push to the "origin" remote (branch "main") (git push --force) (+1 more step)');
+  });
+
   it('decoys before AND after the risky step', () => {
     const line = bash(`ls -la; cd /tmp; cat ~/.ssh/id_rsa; echo done`);
     expect(line).toBe('Read a file in your SSH folder: "~/.ssh/id_rsa" (+3 more steps)');

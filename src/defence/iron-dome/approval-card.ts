@@ -793,7 +793,8 @@ function describeGit(args: string[], ctx: ShellContext): Described {
     const del = sub === 'push' && rest.some((a) => /^(?:-d|--delete)$/.test(a) || /^:/.test(a));
     const branch = sub === 'push' ? pos.slice(1).map((b) => b.replace(/^[+:]/, '')).find(Boolean) : undefined;
     const branchText = branch ? ` (branch ${quoted(branch, 40)})` : '';
-    if (force) return { category: 'git', sentence: `Force-push to ${where}${branchText}, which may overwrite history (git push --force)` };
+    // The WHY line carries "may overwrite history"; the WHAT stays short.
+    if (force) return { category: 'git', sentence: `Force-push to ${where}${branchText} (git push --force)` };
     if (del) return { category: 'git', sentence: `Delete a branch on ${where}${branchText} (git push --delete)` };
     return { category: 'network', sentence: `Send data to ${where} (git ${sub})` };
   }
