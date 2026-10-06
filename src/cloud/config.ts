@@ -1427,6 +1427,46 @@ export function setSelfHeal(enabled: boolean): void {
   });
 }
 
+// ── Dashboard update check (#631) ────────────────────
+
+/** Env opt-out for the dashboard's automatic npm registry version lookup. */
+export const DASHBOARD_UPDATE_CHECK_SKIP_ENV = 'SHIELDCORTEX_SKIP_UPDATE_CHECK';
+
+export type DashboardUpdateCheckSetting =
+  | { enabled: true }
+  | { enabled: false; disabledBy: 'config' | 'env' };
+
+/**
+ * May the dashboard API ask the npm registry for the latest published version?
+ * (`GET /api/version/check` → `npm view shieldcortex version`.)
+ *
+ * Default is true. `"dashboardUpdateCheck": false` in config.json or
+ * `SHIELDCORTEX_SKIP_UPDATE_CHECK=1` turns it off. The env var can only
+ * disable, never re-enable, mirroring `SHIELDCORTEX_SKIP_SELF_HEAL`.
+ *
+ * Scope is this one automatic lookup. It does not stop `shieldcortex update`,
+ * the dashboard's explicit Update action, cloud sync or any other outbound
+ * traffic — it is not an offline mode.
+ */
+export function getDashboardUpdateCheckSetting(
+  raw?: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): DashboardUpdateCheckSetting {
+  if (env[DASHBOARD_UPDATE_CHECK_SKIP_ENV] === '1') return { enabled: false, disabledBy: 'env' };
+  const source = raw ?? readRawConfig();
+  if (source.dashboardUpdateCheck === false) return { enabled: false, disabledBy: 'config' };
+  return { enabled: true };
+}
+
+/**
+ * Persists the dashboard update-check preference to ~/.shieldcortex/config.json.
+ */
+export function setDashboardUpdateCheck(enabled: boolean): void {
+  mutateRawConfig((raw) => {
+    raw.dashboardUpdateCheck = enabled;
+  });
+}
+
 /**
  * Restores the v4.10.x defaults for users who preferred the old behaviour.
  * Writes explicit overrides for every default the v4.11.0 release flipped,

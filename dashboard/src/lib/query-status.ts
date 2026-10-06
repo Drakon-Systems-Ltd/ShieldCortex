@@ -111,3 +111,52 @@ export function operationsPill(
       : { state: 'ok', text: data?.mode ?? 'running' };
   return pillFor(status, confirmed);
 }
+
+/** The `/api/version/check` fields the Overview reads. */
+export interface UpdateCheckLike {
+  currentVersion: string;
+  runningVersion?: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  checkStatus?: 'ok' | 'failed' | 'disabled';
+  checkDisabledBy?: 'config' | 'env';
+}
+
+/**
+ * What the update check actually established (#631). `updateAvailable: false`
+ * only means "up to date" when the registry answered — a disabled or failed
+ * lookup has to be said as such, never left to read as "nothing to update".
+ * A server without `checkStatus` predates #631: a null `latestVersion` there
+ * was always a failed lookup.
+ */
+export type UpdateCheckOutcome = 'update-available' | 'up-to-date' | 'disabled' | 'failed';
+
+export function updateCheckOutcome(data: UpdateCheckLike): UpdateCheckOutcome {
+  if (data.checkStatus === 'disabled') return 'disabled';
+  if (data.checkStatus === 'failed') return 'failed';
+  if (data.updateAvailable) return 'update-available';
+  return data.latestVersion ? 'up-to-date' : 'failed';
+}
+
+/** How the Overview's "Needs you" list shows the update check. */
+export type UpdateCheckRow =
+  | { kind: 'item'; label: string; detail: string }
+  | { kind: 'notice'; text: string }
+  | { kind: 'unavailable' }
+  | { kind: 'none' };
+
+export function updateCheckRow(data: UpdateCheckLike): UpdateCheckRow {
+  const running = data.runningVersion ?? data.currentVersion;
+  switch (updateCheckOutcome(data)) {
+    case 'update-available':
+      return { kind: 'item', label: `Newer version available — v${data.latestVersion}`, detail: `Running v${running}.` };
+    case 'disabled': {
+      const by = data.checkDisabledBy === 'env' ? 'SHIELDCORTEX_SKIP_UPDATE_CHECK' : 'dashboardUpdateCheck: false';
+      return { kind: 'notice', text: `Automatic update check is off (${by}) — running v${running}; newer releases are not looked up.` };
+    }
+    case 'failed':
+      return { kind: 'unavailable' };
+    default:
+      return { kind: 'none' };
+  }
+}
