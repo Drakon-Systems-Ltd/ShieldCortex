@@ -45,6 +45,7 @@ import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
 import type { GatewayNotifyContext, NotifyChannelLike } from './gateway-notify-channel.js';
+import { testedPath, writePostureSelfReport, type PostureReportInput } from './posture-report.js';
 
 // ==================== RESILIENT RUNTIME LOADER ====================
 // Resolves runtime.mjs from multiple locations so the plugin works both
@@ -4172,6 +4173,27 @@ async function handleTypedBeforeToolCall(
   }
 }
 
+// ==================== POSTURE SELF-REPORT (#613) ====================
+
+/**
+ * Best-effort process-side posture report. The writer already never throws;
+ * this second guard exists so that no future change to it can reach the gate.
+ * Its return value is deliberately discarded.
+ */
+function reportPosture(input: PostureReportInput): void {
+  try {
+    writePostureSelfReport({ pluginVersion: _version, runtimeVersion: _hostRuntimeVersion, ...input });
+  } catch {
+    // A posture report must never reach a gate decision.
+  }
+}
+
+/** The effective Action Guard policy, minus notify (it can carry secrets). */
+function posturePolicy(interceptorEnabled: boolean, guard: Record<string, unknown> | undefined): Record<string, unknown> {
+  const { notify: _notify, ...rest } = guard ?? {};
+  return { interceptor: interceptorEnabled, actionGuard: rest };
+}
+
 // ==================== PLUGIN EXPORT ====================
 
 /**
@@ -4285,6 +4307,10 @@ export default {
     // package.json sits above the entry path. Absent on a host that does not
     // expose it, which stays UNKNOWN rather than becoming a guess.
     recordHostRuntimeVersion(api);
+
+    // #613: this process loaded the plugin. Its posture is not resolved until
+    // the interceptor is built, and the report says exactly that.
+    reportPosture({ loaded: true, configuredPosture: 'unknown', scanner: 'unknown' });
 
     // --- Interceptor (lazy init) ---
     let interceptorReady: ReturnType<typeof createInterceptor> | null = null;
@@ -4470,7 +4496,10 @@ export default {
           logger: { info: api.logger?.info ?? console.log, warn: (api.logger as any)?.warn ?? console.warn },
         };
 
-        if (!interceptorConfig.enabled) return null;
+        if (!interceptorConfig.enabled) {
+          reportPosture({ configuredPosture: 'intentionally-off', policy: posturePolicy(false, undefined) });
+          return null;
+        }
 
         // Shared in-process defence module (same instance realtime scanning
         // uses — see getDefenceModule). Loaded via a string-concatenated
@@ -4582,6 +4611,14 @@ export default {
           readiness: buildReadinessRuntime(defenceMod, interceptorConfig.actionGuard?.notify),
           policyLockPresent: inlinePolicyLockPresent,
         });
+        // #613: what this interceptor was actually built with.
+        const builtGuard = interceptorConfig.actionGuard as Record<string, unknown> | undefined;
+        reportPosture({
+          configuredPosture: !builtGuard?.enabled ? 'intentionally-off' : builtGuard.enforce === false ? 'advisory' : 'enforce',
+          scanner: canRunPipeline ? 'available' : 'degraded',
+          degradedReason: canRunPipeline ? undefined : 'defence-module-unavailable',
+          policy: posturePolicy(true, builtGuard),
+        });
         const guardState = !canRunPipeline
           ? 'Action Guard: DEGRADED (WS2 fallback scan only)'
           : interceptorConfig.actionGuard?.enabled
@@ -4640,13 +4677,22 @@ export default {
         // #310: the WHOLE context, not just `sessionId` — resolveHookSessionId
         // also reads `sessionKey`, which is where a cron/heartbeat run's key
         // actually arrives, and that key decides whether a card is minted.
-        return handleTypedBeforeToolCall(event, interceptor, api.logger, ctx);
+        const result = await handleTypedBeforeToolCall(event, interceptor, api.logger, ctx);
+        // #613: after the decision exists, never before; the result is
+        // returned unchanged whatever the report does.
+        if (result && (result as { block?: unknown }).block === true) {
+          reportPosture({ denial: { kind: 'blocked-action', testedPath: testedPath('before_tool_call', event?.toolName) } });
+        } else {
+          reportPosture({ force: false });
+        }
+        return result;
       }, { priority: 80, timeoutMs: 30_000 });
       _beforeToolCallRegistered = true;
       // NOTE: session_end is NOT registered here — it moved out of this guard
       // in #226 and is registered unconditionally below.
     } else {
       api.logger?.info?.('[shieldcortex] interceptor.enabled:false in plugin config — before_tool_call hook not registered');
+      reportPosture({ configuredPosture: 'intentionally-off', policy: posturePolicy(false, undefined) });
     }
 
     // session_end — registered UNCONDITIONALLY (#226).
