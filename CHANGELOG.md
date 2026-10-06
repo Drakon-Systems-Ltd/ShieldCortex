@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **#639 Production audit advisories:** Updated the locked `proxy-addr` from 2.0.7 to 2.0.8 to fix the IP spoofing advisory. Documented a time-limited waiver for the `sprintf-js` denial of service advisory: its latest release is still affected, and the measured path is through the optional ONNX install script, with no ShieldCortex-controlled format string.
+
 ### Added
 - (none yet)
 
