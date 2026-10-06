@@ -61,7 +61,8 @@ describe('#648 — OpenClaw card through the real plugin hook', () => {
     const parts = card.description.split(' | ');
     expect(parts[0]).toBe('What: Stop the service: "nginx", as administrator (sudo)');
     expect(parts[1]).toMatch(/^Why: runs with administrator \(root\) rights/);
-    expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on [A-Za-z0-9._-]+ · Telegram chat #[0-9a-f]{8}$/);
+    // A long generated CI hostname (macOS runners) is middle-clipped with "…".
+    expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on [A-Za-z0-9._…-]+ · Telegram chat #[0-9a-f]{8}$/u);
     expect(parts[3]).toBe('Allow once is this call only · expires in 10 min');
     expect(card.description.length).toBeLessThanOrEqual(256);
     // Jargon that used to be on the card is gone; the decision contract is not.
