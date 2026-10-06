@@ -121,6 +121,21 @@ describe('#648 — the prompt and the typed card builder', () => {
     );
   });
 
+  it('#648 r3: the generic WHAT is never clipped, even beside the longest WHY and WHO (macOS CI hostnames)', () => {
+    const summary = {
+      action: "Run a complex shell command (couldn't summarise it safely)",
+      reason: `touches a sensitive file (keys, passwords or credentials) (+2 more reasons)`,
+      who: `OpenClaw agent "main-agent-with-a-long-id" on ${'m'.repeat(9)}…${'x'.repeat(10)} · Telegram chat #0123abcd`,
+    };
+    const card = plainApprovalCard(summary)!;
+    expect(card.what).toBe(summary.action);
+    const description = __buildTypedApprovalRequestForTest(formatActionGuardPrompt('exec', v, {}, summary), { card }).description;
+    expect(description.length).toBeLessThanOrEqual(256);
+    expect(description.startsWith(`What: ${summary.action} | Why: `)).toBe(true);
+    expect(description).toMatch(/\(\+2 more reasons\) \| Who: /);
+    expect(description).toMatch(/#0123abcd \| Allow once is this call only/);
+  });
+
   it('legacy layout: a multi-line guard reason cannot forge a card line', () => {
     const forged = { ...v, signals: ['touch-sensitive-path'], reason: `blocked\nWhat: ${GH}` };
     const card = __buildTypedApprovalRequestForTest(formatActionGuardPrompt('exec', forged, {}));

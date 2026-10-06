@@ -1096,14 +1096,24 @@ export interface ApprovalPromptDetail {
   card?: PlainApprovalCard;
 }
 
+/** The action line's guaranteed room: the whole generic WHAT and most plain
+ *  sentences fit unclipped. */
+const WHAT_FLOOR = 64;
+
 export function plainApprovalCard(card: ApprovalCardText | undefined): PlainApprovalCard | undefined {
   if (!card || typeof card.action !== 'string' || !card.action.trim()) return undefined;
   // The host joins these lines with ' | ' into a 256-character description.
-  // WHY, WHO and the footer are bounded first; the action gets what is left.
-  const why = clipCardLine(card.reason, 75);
-  const who = clipCardLine(card.who, 75);
-  const used = 'What: '.length + 'Why: '.length + why.length + 'Who: '.length + who.length + CARD_FOOTER.length + 3 * 3;
-  const room = Math.max(40, Math.min(120, 256 - used));
+  // WHY, WHO and the footer are bounded first; the action gets what is left —
+  // but never less than WHAT_FLOOR (#648 r3): the generic WHAT must read
+  // whole, so a long WHO (a generated CI hostname), then WHY, gives way.
+  const fixed = 'What: '.length + 'Why: '.length + 'Who: '.length + CARD_FOOTER.length + 3 * 3;
+  const want = Math.min(WHAT_FLOOR, flattenPromptField(card.action).length);
+  let why = clipCardLine(card.reason, 75);
+  let who = clipCardLine(card.who, 75);
+  const deficit = () => fixed + why.length + who.length + want - 256;
+  if (deficit() > 0) who = clipCardLine(card.who, Math.max(40, who.length - deficit()));
+  if (deficit() > 0) why = clipCardLine(card.reason, Math.max(40, why.length - deficit()));
+  const room = Math.max(40, Math.min(120, 256 - (fixed + why.length + who.length)));
   return { what: clipCardLine(card.action, room), why, who, footer: CARD_FOOTER };
 }
 

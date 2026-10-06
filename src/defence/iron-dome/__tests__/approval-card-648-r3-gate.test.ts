@@ -18,6 +18,7 @@ import {
   describeAction,
   describeShell,
   describeSignals,
+  formatApprovalCardLines,
   type ShellDoubt,
 } from '../approval-card.js';
 import { evaluateToolCall } from '../tool-action-guard.js';
@@ -160,6 +161,11 @@ describe('#648 r3 R1 — the reviewer\'s decoys read generic, never the decoy', 
     expect(card.reason).toBe(describeSignals(signals));
     expect(card.reason).not.toBe('matched a safety rule');
     expect(card.who).toBe('Claude Code on veronica-box · session sc-0123456789abcdef');
+  });
+
+  it('the generic WHAT is never clipped, even beside the longest WHY and WHO', () => {
+    const card = { action: GENERIC_SHELL, reason: 'x'.repeat(200), who: 'y'.repeat(200) };
+    expect(formatApprovalCardLines(card, { expiresInMs: 600_000, budget: 256 })[0]).toBe(GENERIC_SHELL);
   });
 
   it('inline interpreter code is never printed, with or without the gate', () => {
