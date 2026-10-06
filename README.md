@@ -79,6 +79,7 @@ Local UI: **Overview · Memory · Protection · X-Ray · Settings**. Memory has 
 - **`shieldcortex guard readiness`** shows each surface's posture, mode, thresholds, samples and what is missing. `shieldcortex guard test-approval` sends a labelled synthetic request to prove your approval channel works.
 - **Loud demotions.** Falling back from enforcing to shadow prints to stderr, writes an audit row, sends a webhook notice and makes `shieldcortex doctor` fail. Promotions are announced on the same webhook.
 - **Guard self-protection floor, in every mode while the guard is on.** Calls that touch the guard's own state, config, lease ledger or policy lock are held or denied even in watch-only and shadow, and only a human answer releases them. This changes behaviour for watch-only installs.
+- **5.4.1 — dependency security update.** The MCP SDK moves to 1.31.0, past a published advisory in its OAuth client (which ShieldCortex does not use). Production audit: 0 unwaived advisories, 4 waived; reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). (#655)
 
 Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
 

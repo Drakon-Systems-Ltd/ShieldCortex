@@ -7,11 +7,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.4.1] - 2026-10-06
+
+Patch on 5.4.0. Dependency security update: the MCP SDK moves to 1.31.0 past a published advisory, and a new `sharp` advisory joins the existing waiver after a reachability check. Plus OpenClaw doc corrections. No guard, default or install behaviour changes. Node floor (`^22.14.0 || >=24.0.0`) and Cloud pin unchanged.
+
 ### Security
 - **#655 Production audit advisories:** `@modelcontextprotocol/sdk` moves from 1.30.0 to 1.31.0 (the lowest fixed release, GHSA-6qxp-vccf-f47h), and the dependency floor is now `^1.31.0`. The advisory is in the SDK's OAuth client; ShieldCortex uses the SDK as a stdio server and, in the MCP tools scanner, as a stdio client, neither of which the advisory affects. The new `sharp` advisory (GHSA-wq5f-xc86-pv6w, librsvg SVG decoder) is added to the existing `sharp` waiver after its own reachability check: ShieldCortex never hands image bytes to sharp, and only a Transformers 3.x → 4.x major would bring in the patched sharp. The waiver's expiry date (2026-12-12) is unchanged. Production audit: 0 unwaived, 4 waived.
-
-### Added
-- (none yet)
 
 ### Docs
 - **OpenClaw docs: auto-memory and Action Guard defaults match the source (#630 follow-through).** `docs/openclaw-integration.md` no longer says the Action Guard is on or lists it under "Enabled by default": it is off unless `actionGuard.enabled` is `true`, and the fresh-install memory defaults do not turn it on. The plugin README, the OpenClaw quickstart and the `src/cloud/config.ts` comments now say what #630 said for `config --help`: auto-memory and proactive recall are off when the key is not set, a fresh global, non-CI install with no `~/.shieldcortex/config.json` writes both as `true`, an existing config is never changed, and the hook and plugin still have to be installed. Docs and comments only; no default, install or guard behaviour changes.
