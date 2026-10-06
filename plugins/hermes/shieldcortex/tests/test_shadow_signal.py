@@ -49,7 +49,7 @@ needs_hermes = unittest.skipUnless(
 #: The real package directory, used as the source for the copies the
 #: loader-level tests import.
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_FILES = ("__init__.py", "shadow.py", "sc_client.py", "policy.py", "plugin.yaml")
+PACKAGE_FILES = ("__init__.py", "shadow.py", "sc_client.py", "policy.py", "posture.py", "plugin.yaml")
 
 
 class FakeCtx:

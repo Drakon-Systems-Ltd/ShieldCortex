@@ -138,7 +138,7 @@
     "node": "^22.14.0 || >=24.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "better-sqlite3": "^13.0.3",
     "cors": "^2.8.5",
     "express": "^5.2.1",
