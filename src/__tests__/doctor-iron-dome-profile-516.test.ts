@@ -101,7 +101,8 @@ describe('doctor Iron Dome profile (#516)', () => {
 
   it('runs the check right after the action guard rows', () => {
     const source = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../cli/doctor.ts'), 'utf8');
-    expect(source).toMatch(/checkActionGuard,\s*checkActionGuardReadiness,\s*checkIronDomeProfile,\s*checkCronDenials,/);
+    // #613 (PR #616) slots checkRuntimePosture between the two action guard rows.
+    expect(source).toMatch(/checkActionGuard,\s*(?:checkRuntimePosture,\s*)?checkActionGuardReadiness,\s*checkIronDomeProfile,\s*checkCronDenials,/);
   });
 
   describe('reads the persisted config without the database singleton', () => {
