@@ -4,8 +4,12 @@ ShieldCortex integrates with [OpenClaw](https://openclaw.dev) in complement mode
 - Real-time defence scanning is on — but on the conversation path it is
   **observe-only by default**, and it runs at all only where the operator has
   granted the plugin conversation access on that host
-- The before-tool-call Action Guard is on (catastrophic operations blocked; dangerous operations enforced by default)
-- Automatic memory writes are opt-in (off by default)
+- The before-tool-call Action Guard is **off** unless you enable it
+  (`shieldcortex config --action-guard-enable`); once on, catastrophic
+  operations are blocked and dangerous operations are enforced by default
+- Automatic memory writes (`openclawAutoMemory`) are off when the key is not
+  set, but a fresh global, non-CI npm install writes it as `true` (see
+  [Default behavior](#default-behavior-safe-complement-mode))
 
 Context recall at session start is handled by OpenClaw's native Memory Search —
 ShieldCortex stopped injecting bootstrap context in v2026.2.26 (it duplicated
@@ -228,8 +232,14 @@ Enabled by default:
   `interceptor.conversation.posture: "off"` disables **both** hooks: no scan, no
   audit row, no cloud forwarding. Neither hook's audit rows contain prompt text —
   they record a length and a content digest only
-- `before_tool_call` Action Guard: catastrophic operations blocked, dangerous operations enforced (see the [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
 - `agent:bootstrap` lifecycle wiring: security-warning file handoff only — no context injection (removed v2026.2.26; OpenClaw's native Memory Search recalls context at session start)
+
+Off unless `actionGuard.enabled` is `true`:
+- `before_tool_call` Action Guard. The fresh-install defaults below do not turn it on.
+  Enable it with `shieldcortex config --action-guard-enable` (a bare
+  `shieldcortex protect` also turns it on); while it is on, catastrophic
+  operations are blocked and dangerous operations are enforced (see the
+  [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
 
 Off unless `openclawAutoMemory` is `true`:
 - Auto-extract on `/new`, `/stop`, `/clear`, `/exit`
@@ -243,7 +253,9 @@ A fresh global, non-CI npm install sets it, though: on a machine with no
 **on** for that install. An existing config file is never changed, so an upgrade
 keeps your current values and a config without the key stays off. See
 [Install-time refresh](#install-time-refresh-postinstall) above; to turn it off,
-run `shieldcortex config --openclaw-auto-memory false`.
+run `shieldcortex config --openclaw-auto-memory false`. The config file only
+sets the switch: it does not install the OpenClaw hook or plugin, which still
+have to be installed (see [Install](#install)) before anything is extracted.
 
 ## Enable optional auto-memory
 
