@@ -65,6 +65,7 @@
 
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
+import { resolveHarnessPid } from './lib/harness-pid.mjs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
@@ -2934,12 +2935,13 @@ process.stdin.on('end', async () => {
     // missing module is treated as no-lease — a broken lease layer must never
     // become a new way to deny everything — while state UNreadability fails
     // closed to 'unknown' inside the store itself.
-    const leaseSelf = baseExtra.sessionKey || `ppid:${process.ppid}`;
+    const harnessPid = resolveHarnessPid();
+    const leaseSelf = baseExtra.sessionKey || `ppid:${harnessPid}`;
     let leaseGate = null;
     try {
       const lease = await loadLease();
       if (lease) {
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: process.ppid });
+        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
         if (leaseGate && leaseGate.ledgerChanged) {
           console.error(
             `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,

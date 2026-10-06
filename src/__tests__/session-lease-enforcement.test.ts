@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +20,7 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 
 const HOOK_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'pre-tool-hook.mjs');
 const DIST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist');
+const INSTALLED_COMMAND = `${process.execPath} ${join(DIST_ROOT, 'index.js')} hook pre-tool`;
 
 type HookRun = { stdout: string; stderr: string; code: number };
 
@@ -61,6 +63,41 @@ function decisionOf(run: HookRun): { permissionDecision?: string; permissionDeci
     } catch { /* not the decision line */ }
   }
   return {};
+}
+
+function startHarness(home: string): ChildProcess {
+  const source = join(home, 'lease-harness.mjs');
+  writeFileSync(source, `
+    import { spawn } from 'node:child_process';
+    process.on('message', ({ id, sessionId }) => {
+      const child = spawn('/bin/sh', ['-c', ${JSON.stringify(INSTALLED_COMMAND)}], {
+        env: { ...process.env, HOME: ${JSON.stringify(home)}, USERPROFILE: ${JSON.stringify(home)},
+          SHIELDCORTEX_CONFIG_DIR: ${JSON.stringify(join(home, '.shieldcortex'))}, SHIELDCORTEX_DIST_ROOT: ${JSON.stringify(DIST_ROOT)} },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let stdout = ''; let stderr = '';
+      child.stdout.on('data', c => { stdout += c; });
+      child.stderr.on('data', c => { stderr += c; });
+      child.on('close', code => process.send({ id, stdout, stderr, code }));
+      child.stdin.end(JSON.stringify({ session_id: sessionId, cwd: '/tmp', permission_mode: 'default',
+        tool_name: 'Bash', tool_input: { command: 'npm publish' } }));
+    });
+  `);
+  return spawn(process.execPath, [source], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+}
+
+let hookRequest = 0;
+function throughHarness(harness: ChildProcess, sessionId: string): Promise<HookRun> {
+  return new Promise((resolve, reject) => {
+    const id = ++hookRequest;
+    const onMessage = (reply: { id: number } & HookRun) => {
+      if (reply.id !== id) return;
+      harness.off('message', onMessage);
+      resolve(reply);
+    };
+    harness.on('message', onMessage);
+    harness.send({ id, sessionId }, (error) => { if (error) { harness.off('message', onMessage); reject(error); } });
+  });
 }
 
 let home: string;
@@ -146,6 +183,42 @@ describe('#227 — the freeze binds the Claude Code plane, on the wire', () => {
     // not sail through as benign. (In default mode this surfaces as ask/deny.)
     expect(decision.permissionDecision === 'ask' || decision.permissionDecision === 'deny').toBe(true);
   });
+});
+
+describe('#553 — installed hook records the persistent harness', () => {
+  it('holds a second harness through sh and launcher, re-enters the same session, then reaps a dead harness', async () => {
+    const firstHarness = startHarness(home);
+    const otherHarness = startHarness(home);
+    try {
+      await Promise.all([once(firstHarness, 'spawn'), once(otherHarness, 'spawn')]);
+      const first = await throughHarness(firstHarness, 'session-a');
+      expect(first.code).toBe(0);
+      expect(decisionOf(first).permissionDecision).not.toBe('deny');
+
+      const leaseFile = join(home, '.shieldcortex', 'leases', 'leases.json');
+      if (!existsSync(leaseFile)) throw new Error(`installed hook did not write a lease: ${JSON.stringify(first)}`);
+      const record = JSON.parse(readFileSync(leaseFile, 'utf8'))
+        .leases['npm-publish'];
+      expect(record.pid).toBe(firstHarness.pid);
+      expect(() => process.kill(record.pid, 0)).not.toThrow();
+
+      // A later hook of the same session re-enters; identity is the holder string (#625).
+      const sameSession = await throughHarness(firstHarness, 'session-a');
+      expect(decisionOf(sameSession).permissionDecision).not.toBe('deny');
+      expect(JSON.parse(readFileSync(leaseFile, 'utf8')).leases['npm-publish'].pid).toBe(firstHarness.pid);
+      const second = await throughHarness(otherHarness, 'session-b');
+      expect(decisionOf(second).permissionDecision).toBe('deny');
+      expect(decisionOf(second).permissionDecisionReason).toContain('held by another session');
+
+      firstHarness.kill();
+      await once(firstHarness, 'exit');
+      const afterDeath = await throughHarness(otherHarness, 'session-b');
+      expect(decisionOf(afterDeath).permissionDecision).not.toBe('deny');
+    } finally {
+      firstHarness.kill();
+      otherHarness.kill();
+    }
+  }, 30000);
 });
 
 describe('#227 — the freeze binds DURING a guard outage (review MAJOR-1)', () => {
