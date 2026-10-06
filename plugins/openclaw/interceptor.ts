@@ -285,7 +285,10 @@ export interface InterceptorConfig {
 export interface ToolCallContext {
   toolName: string;
   arguments: Record<string, unknown>;
-  requireApproval?: (message: string) => Promise<boolean>;
+  /** `detail.card` is set only by the action-guard prompt builder below
+   *  (#648 r2 B1): the host lays out the plain-English card from that object,
+   *  never from line text in `message`, which carries payload. */
+  requireApproval?: (message: string, detail?: ApprovalPromptDetail) => Promise<boolean>;
   /** Optional one-shot completion through the gateway's OWN model pool (#143).
    *  ShieldCortex supplies no credentials of its own; when a gateway build does
    *  not offer this, the broker has no judge and holds for the operator —
@@ -593,21 +596,45 @@ interface ApprovalPromptInput {
   content: string;
 }
 
+/** Line breaks in any renderer: C0/C1 controls (CR, LF, VT, FF, NEL U+0085)
+ *  and the Unicode line/paragraph separators. */
+const PROMPT_LINE_BREAKS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu;
+/** Invisible format characters that reorder or hide text (bidi embeddings,
+ *  overrides and isolates, zero-width marks, BOM). */
+const PROMPT_FORMAT_CHARS = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu;
+
+/**
+ * #648 r2 (B1, S9): every value interpolated into an approval prompt goes
+ * through here. The prompt is split into lines and the host joins them with
+ * ` | `, so a value that could carry a line break or a `|` could forge a line
+ * of its own (`What: …`, `Allow once …`). Breaks become spaces, `|` becomes
+ * `¦`, and invisible format characters are shown as `<U+XXXX>` instead of
+ * silently reordering the card.
+ */
+export function flattenPromptField(value: unknown): string {
+  return String(value ?? '')
+    .replace(PROMPT_FORMAT_CHARS, (c) => `<U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`)
+    .replace(PROMPT_LINE_BREAKS, ' ')
+    .replace(/\|/g, '¦')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function formatApprovalPrompt(input: ApprovalPromptInput): string {
   const preview = input.content.length > 200
     ? input.content.slice(0, 200) + '...'
     : input.content;
   const threatList = input.threats.length > 0
-    ? input.threats.join(', ')
+    ? input.threats.map(flattenPromptField).join(', ')
     : 'none identified';
 
   return [
     '🛡️ ShieldCortex — Tool Call Intercepted',
     '',
-    `Tool:       ${input.tool}`,
-    `Risk:       ${input.severity} (${input.firewallResult})`,
+    `Tool:       ${flattenPromptField(input.tool)}`,
+    `Risk:       ${flattenPromptField(input.severity)} (${flattenPromptField(input.firewallResult)})`,
     `Threats:    ${threatList}`,
-    `Content:    "${preview}"`,
+    `Content:    "${flattenPromptField(preview)}"`,
     '',
     '[Approve]  [Deny]',
   ].join('\n');
@@ -999,7 +1026,7 @@ function actionGuardLead(
     return `${AGENT_SUBJECT} used ${toolName}, which ShieldCortex does not fully recognise yet. `
       + 'Allow once lets this one call through. It does not teach the tool.';
   }
-  return `${AGENT_SUBJECT} wants to use ${toolName}, and ShieldCortex rated this call ${v.severity}. `
+  return `${AGENT_SUBJECT} wants to use ${toolName}, and ShieldCortex rated this call ${flattenPromptField(v.severity)}. `
     + 'Allow once is this call only.';
 }
 
@@ -1014,10 +1041,40 @@ export interface ApprovalCardText {
 
 /** The card's pending window (OpenClaw's own ceiling; see index.ts). */
 const CARD_EXPIRY_TEXT = 'expires in 10 min';
+const CARD_FOOTER = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
 
 function cardLine(text: unknown, max: number): string {
-  const one = String(text ?? '').replace(/\s+/g, ' ').trim();
+  const one = flattenPromptField(text);
   return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
+}
+
+/**
+ * #648 r2 (B1): the plain-English card as structured data. It is handed to the
+ * host bridge beside the prompt text (`requireApproval(message, { card })`),
+ * and the bridge lays the card out from THIS object only — never by looking
+ * for `What:` lines in the text, which also carries payload (a memory write's
+ * `Content:`, a guard reason, a tool name). Every field is one flattened line.
+ */
+export interface PlainApprovalCard {
+  what: string;
+  why: string;
+  who: string;
+  footer: string;
+}
+
+export interface ApprovalPromptDetail {
+  card?: PlainApprovalCard;
+}
+
+export function plainApprovalCard(card: ApprovalCardText | undefined): PlainApprovalCard | undefined {
+  if (!card || typeof card.action !== 'string' || !card.action.trim()) return undefined;
+  // The host joins these lines with ' | ' into a 256-character description.
+  // WHY, WHO and the footer are bounded first; the action gets what is left.
+  const why = cardLine(card.reason, 75);
+  const who = cardLine(card.who, 75);
+  const used = 'What: '.length + 'Why: '.length + why.length + 'Who: '.length + who.length + CARD_FOOTER.length + 3 * 3;
+  const room = Math.max(40, Math.min(120, 256 - used));
+  return { what: cardLine(card.action, room), why, who, footer: CARD_FOOTER };
 }
 
 /**
@@ -1038,34 +1095,30 @@ export function formatActionGuardPrompt(
   args?: Record<string, unknown>,
   card?: ApprovalCardText,
 ): string {
-  if (card && typeof card.action === 'string' && card.action.trim()) {
-    // The host joins these lines with ' | ' into a 256-character description.
-    // WHY, WHO and the footer are bounded first; the action gets what is left.
-    const why = `Why: ${cardLine(card.reason, 75)}`;
-    const who = `Who: ${cardLine(card.who, 75)}`;
-    const footer = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
-    const room = Math.max(40, Math.min(120, 256 - (why.length + who.length + footer.length + 3 * 3 + 'What: '.length)));
+  const plain = plainApprovalCard(card);
+  if (plain) {
     return [
       '🛡️ ShieldCortex needs a yes',
       '',
-      `What: ${cardLine(card.action, room)}`,
-      why,
-      who,
-      footer,
+      `What: ${plain.what}`,
+      `Why: ${plain.why}`,
+      `Who: ${plain.who}`,
+      plain.footer,
       '',
       '[Allow once]  [Deny]',
     ].join('\n');
   }
+  const tool = flattenPromptField(toolName);
   return [
     '🛡️ ShieldCortex needs a yes',
     '',
-    actionGuardLead(toolName, v, args),
+    actionGuardLead(tool, v, args),
     '',
-    `Tool:       ${toolName}`,
-    `Action:     ${v.action}`,
-    `Risk:       ${v.severity}`,
-    `Signals:    ${v.signals.join(', ') || 'none'}`,
-    `Reason:     ${String(v.reason ?? '').replace(/[\r\n]+/g, ' ')}`,
+    `Tool:       ${tool}`,
+    `Action:     ${flattenPromptField(v.action)}`,
+    `Risk:       ${flattenPromptField(v.severity)}`,
+    `Signals:    ${(Array.isArray(v.signals) ? v.signals : []).map(flattenPromptField).join(', ') || 'none'}`,
+    `Reason:     ${flattenPromptField(v.reason)}`,
     '',
     '[Allow once]  [Deny]',
   ].join('\n');
@@ -2211,7 +2264,14 @@ export function createInterceptor(
     let approved: boolean;
     try {
       approved = await withApprovalDeadline(
-        context.requireApproval(formatActionGuardPrompt(context.toolName, v, context.arguments, approvalCardFor(context, v))),
+        (() => {
+          const card = approvalCardFor(context, v);
+          const plain = plainApprovalCard(card);
+          return context.requireApproval!(
+            formatActionGuardPrompt(context.toolName, v, context.arguments, card),
+            plain ? { card: plain } : undefined,
+          );
+        })(),
         brokered ? brokerApprovalTimeoutMs(v.severity) : 0,
       );
     } catch (err) {
