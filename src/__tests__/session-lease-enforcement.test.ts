@@ -22,7 +22,7 @@ const DIST_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
 
 type HookRun = { stdout: string; stderr: string; code: number };
 
-function runHook(home: string, toolName: string, toolInput: Record<string, unknown>): Promise<HookRun> {
+function runHook(home: string, toolName: string, toolInput: Record<string, unknown>, sessionId = 'lease-enforcement-test'): Promise<HookRun> {
   return new Promise((res, reject) => {
     const child = spawn(process.execPath, [HOOK_PATH], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -41,7 +41,7 @@ function runHook(home: string, toolName: string, toolInput: Record<string, unkno
     child.on('error', reject);
     child.on('close', (code) => res({ stdout, stderr, code: code ?? 0 }));
     child.stdin.write(JSON.stringify({
-      session_id: 'lease-enforcement-test',
+      session_id: sessionId,
       cwd: '/tmp',
       permission_mode: 'default',
       tool_name: toolName,
@@ -75,6 +75,23 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 describe('#227 — the freeze binds the Claude Code plane, on the wire', () => {
+  it('a lease minted by one hook remains held for another session after the first hook exits', async () => {
+    const first = await runHook(home, 'Bash', { command: 'npm publish' }, 'session-a');
+    expect(first.code).toBe(0);
+    expect(decisionOf(first).permissionDecision).not.toBe('deny');
+
+    const record = JSON.parse(readFileSync(join(home, '.shieldcortex', 'leases', 'leases.json'), 'utf-8'))
+      .leases['npm-publish'];
+    expect(typeof record.holder).toBe('string');
+    expect(record.holder.length).toBeGreaterThan(0);
+    expect(record.pid).toBe(process.pid);
+
+    const second = await runHook(home, 'Bash', { command: 'npm publish' }, 'session-b');
+    const decision = decisionOf(second);
+    expect(decision.permissionDecision).toBe('deny');
+    expect(decision.permissionDecisionReason).toContain('held by another session');
+  });
+
   it('a frozen scope DENIES the tool call, quoting the freeze', async () => {
     writeFileSync(
       join(home, '.shieldcortex', 'DECISIONS.md'),
