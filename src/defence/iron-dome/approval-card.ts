@@ -1685,12 +1685,14 @@ function pathPhrase(verb: string, paths: string[], noun = 'a file'): string {
   return `${verb} ${noun}${loc}: ${target}`;
 }
 
-/** `cat SRC > DST`: a copy, named by its (most sensitive) source. */
+/** `cat SRC > DST`: a copy, named by its (most sensitive) source — and by
+ *  where it lands when that is the sensitive end (#648 r3 R3). */
 function copyPhrase(sources: string[], dest: string): string {
   const src = mostSensitive(sources);
   const from = locationOf(src).replace(/^ in /, ' from ');
   const what = sources.length > 1 ? `${sources.length} files, including one${from}` : `a file${from}`;
-  return `Copy ${what} (${quoted(src)}) to ${quoted(dest)}`;
+  const into = !from && locationOf(dest) ? `a file${locationOf(dest)}: ` : '';
+  return `Copy ${what} (${quoted(src)}) to ${into}${quoted(dest)}`;
 }
 
 /** The files a step writes, beyond its redirects (#648 r3 R3). */
