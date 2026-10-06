@@ -621,8 +621,11 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --cloud-include-sensitive  Sync CONFIDENTIAL+ memories (off by default since v4.27)');
     console.log('  --cloud-exclude-sensitive  Stop syncing CONFIDENTIAL+ memories (default)');
     console.log('  --cloud-status         Show current configuration');
-    console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (default: off)');
-    console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (default: off — adds latency)');
+    console.log('  --openclaw-auto-memory <true|false>  Extract memories from OpenClaw LLM output (off when unset)');
+    console.log('  --proactive-recall <true|false>  Inject SC memory into prompts (off when unset — adds latency)');
+    console.log('                            A fresh global npm install (not CI) with no ~/.shieldcortex/config.json');
+    console.log('                            writes both as true. An existing config.json is never changed, so an');
+    console.log('                            upgrade keeps your current values; a key it does not set stays off');
     console.log('  --ranker <rrf|legacy>  Hybrid retrieval engine (default: rrf; SHIELDCORTEX_RANKER env overrides)');
     console.log('  --self-heal <true|false>  Let the cortex-memory hook repair its own install at gateway bootstrap');
     console.log('                            (default: true; false = warn-only. SHIELDCORTEX_SKIP_SELF_HEAL=1 also opts out)');
