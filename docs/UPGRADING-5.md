@@ -63,7 +63,7 @@ Full wording: [CHANGELOG.md](../CHANGELOG.md) → *Unreleased* → *Changed* →
 
 - **Action Guard stays off by default.** 4.54.15 already did this. 5.0 does not turn it back on. Existing hosts with `actionGuard.enabled: true` stay on. Everyone else: tool calls are ungated until you enable it deliberately.
 - **Automatic memory-injection scanning stays off.** Same as 4.54.15.
-- **One production advisory is waived, not fixed.** `sharp` (via the optional Transformers package) still has two libvips CVEs. We never send it image data; a patched sharp exists but Transformers will not take it yet. Details: [docs/security/audit-waivers.md](security/audit-waivers.md). `npm run audit:release` fails if anything *else* appears.
+- **Three production advisory IDs are waived, not fixed.** Two are `sharp` image-decoder CVEs and one is a `sprintf-js` format-string denial of service; both packages arrive only through the optional Transformers package. Their measured reachability and expiry dates are in [docs/security/audit-waivers.md](security/audit-waivers.md). `npm run audit:release` fails if any other advisory appears.
 
 ## Security fixes you get by updating
 
