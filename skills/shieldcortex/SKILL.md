@@ -4,7 +4,7 @@ description: "Memory and defence for AI agents: semantic recall, knowledge graph
 license: MIT-0
 metadata:
   author: Drakon Systems
-  version: 5.2.1
+  version: 5.3.1
   mcp-server: shieldcortex
   category: memory-and-security
   tags: [memory, security, knowledge-graph, mcp, iron-dome, openclaw-plugin, audit]
@@ -13,7 +13,7 @@ metadata:
   npm: https://www.npmjs.com/package/shieldcortex
   verified_publisher: Drakon Systems Ltd
   publisher_github: https://github.com/Drakon-Systems-Ltd
-  npm_audit: "0 unwaived production advisories; 2 waived (sharp: GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c, reachable only via the optional @huggingface/transformers) - see docs/security/audit-waivers.md"
+  npm_audit: "0 unwaived production advisories; 3 waived (sharp: GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c; sprintf-js: GHSA-hp3w-g68c-fv3c, via optional @huggingface/transformers) - see docs/security/audit-waivers.md"
   downloads: 11K+/month
 install:
   command: shieldcortex quickstart

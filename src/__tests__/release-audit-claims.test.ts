@@ -105,7 +105,7 @@ function skillMetadata(): Map<string, string> {
 
 /**
  * The claim's shape, so both legs read the same two numbers.
- * e.g. "0 unwaived production advisories; 2 waived (...)"
+ * e.g. "0 unwaived production advisories; 3 waived (...)"
  */
 const CLAIM_SHAPE = /^(\d+) unwaived production advisor(?:y|ies); (\d+) waived\b/;
 
@@ -195,6 +195,33 @@ describe('#466 hermetic — the SKILL.md security claim is structurally honest',
       for (const ghsa of ((w as { ghsa?: string[] }).ghsa ?? [])) {
         expect(claim).toContain(ghsa);
       }
+    }
+  });
+
+  it('locks every proxy-addr copy above the IP spoofing advisory range', () => {
+    const lock = JSON.parse(readFileSync(join(REPO_ROOT, 'package-lock.json'), 'utf8')) as {
+      packages: Record<string, { version?: string }>;
+    };
+    const copies = Object.entries(lock.packages)
+      .filter(([path]) => path.split('node_modules/').pop() === 'proxy-addr')
+      .map(([, entry]) => entry.version ?? '0.0.0');
+    expect(copies.length).toBeGreaterThan(0);
+    expect(copies.every((version) => {
+      const [major, minor, patch] = version.split('.').map(Number);
+      return major > 2 || (major === 2 && (minor > 0 || (minor === 0 && patch >= 8)));
+    })).toBe(true);
+  });
+
+  it('keeps the sprintf-js waiver record in sync with its prose', () => {
+    const waiver = parseWaivers(waiverMarkdown).find((w) => w.id === 'SC-WAIVER-639-sprintf-js');
+    expect(waiver).toMatchObject({
+      package: 'sprintf-js', advisories: [1241202], ghsa: ['GHSA-hp3w-g68c-fv3c'],
+      severity: 'moderate', reviewed: '2026-10-06', expires: '2027-01-06', issue: 639,
+    });
+    const prose = waiverMarkdown.split('### SC-WAIVER-639-sprintf-js')[1]?.split('## Waiver records')[0];
+    expect(prose).toBeDefined();
+    for (const value of ['1241202', 'GHSA-hp3w-g68c-fv3c', 'moderate', '2026-10-06', '2027-01-06']) {
+      expect(prose).toContain(value);
     }
   });
 

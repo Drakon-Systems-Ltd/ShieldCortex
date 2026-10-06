@@ -46,6 +46,8 @@ export function createOpenClawRuntime({
 
     if (shieldConfig && mtime === shieldConfigMtime) return shieldConfig;
 
+    // Plain JSON. The CLI HMAC-signs this file, but nothing on this path
+    // verifies the signature: callers must not describe it as signed (#509 r8).
     try {
       shieldConfig = JSON.parse(await fs.readFile(configPath, "utf-8"));
     } catch {

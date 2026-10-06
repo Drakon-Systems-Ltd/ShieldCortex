@@ -694,6 +694,10 @@ ${bold}COMMANDS${reset}
                         (dry-run; --execute). Audit logs are not managed yet (#579).
   ${cyan}approve${reset} [hash]        Grant a one-shot Action Guard approval for one exact
                         command (no hash = list recent refusals; --ttl N minutes)
+  ${cyan}guard${reset} readiness       Enforce-when-ready, per surface (Claude Code hook, OpenClaw plugin):
+                        posture, mode, readiness proxies + effectiveness evidence
+  ${cyan}guard${reset} test-approval   Send a synthetic approval request through your channel (TTY only;
+                        --surface claude-code|openclaw picks whose evidence it is)
   ${cyan}allowlist${reset} [add|remove|verify|scan]
                         Pin a human-reviewed script (path + content hash)
                         so the guard stops folding its source; any edit re-gates it.
@@ -706,6 +710,7 @@ ${bold}COMMANDS${reset}
   ${cyan}license${reset} <action>      Manage licence key (activate, status, deactivate)
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
+  ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
   ${cyan}setup${reset}                 Install ShieldCortex into your project
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
@@ -931,6 +936,15 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'approve') {
     const { runApprove } = await import('./cli/approve.js');
     process.exitCode = runApprove(process.argv.slice(3));
+    return;
+  }
+
+  // Handle "guard" subcommand (#509) — `guard readiness` shows the
+  // enforce-when-ready readiness conditions; `guard test-approval` (TTY-only) sends a
+  // synthetic approval request through the configured human channel.
+  if (process.argv[2] === 'guard') {
+    const { runGuardCommand } = await import('./cli/guard.js');
+    process.exitCode = await runGuardCommand(process.argv.slice(3));
     return;
   }
 
@@ -1173,6 +1187,14 @@ ${bold}DOCS${reset}
   if (process.argv[2] === 'stats') {
     const { runStatsCommand } = await import('./cli/stats-command.js');
     await runStatsCommand();
+    return;
+  }
+
+  // Handle "ledger" subcommand (#617) — read-only verification of the chained
+  // audit ledger. Exit 0 consistent, 1 inconsistent, 2 usage / no database.
+  if (process.argv[2] === 'ledger') {
+    const { runLedgerCommand } = await import('./cli/ledger.js');
+    process.exitCode = runLedgerCommand(process.argv.slice(3));
     return;
   }
 

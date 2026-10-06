@@ -230,6 +230,8 @@ export function createOpenClawApprovalChannel(opts: OpenClawApprovalChannelOptio
             opts.waiterEntry,
             '--params-b64', Buffer.from(JSON.stringify(params), 'utf8').toString('base64'),
             '--hash', approvalNotification.hash,
+            // #509 R4-2: the tap answers THIS attempt, not whatever is newest.
+            ...(approvalNotification.attemptId ? ['--attempt', approvalNotification.attemptId] : []),
             '--openclaw-bin', opts.openclawBin,
             '--receipt', receiptPath,
           ],

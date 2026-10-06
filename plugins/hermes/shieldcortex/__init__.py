@@ -26,6 +26,7 @@ try:
         evaluate_tool_call,
         fallback_catastrophic_match,
         fallback_dangerous_match,
+        fallback_self_protection_match,
         fallback_surface,
         fallback_write_target_match,
     )
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover - standalone import
         evaluate_tool_call,
         fallback_catastrophic_match,
         fallback_dangerous_match,
+        fallback_self_protection_match,
         fallback_surface,
         fallback_write_target_match,
     )
@@ -192,15 +194,18 @@ def register(ctx):
         # everything else still fails open — loudly, as gate_degraded.
         fallback_blocked = False
         fallback_dangerous = False
+        fallback_self_protected = False
         if not verdict.available:
             surface = fallback_surface(tool_args)
             fallback_blocked = fallback_catastrophic_match(surface)
             fallback_dangerous = fallback_dangerous_match(surface) or bool(
                 fallback_write_target_match(tool_name, tool_args)  # #505: tool-write target gate
             )
-            denied = fallback_blocked or (fallback_dangerous and enforce)
+            # #509 R4-1: guard state/config is never advisory.
+            fallback_self_protected = fallback_self_protection_match(surface, tool_name)
+            denied = fallback_blocked or fallback_self_protected or (fallback_dangerous and enforce)
             _audit_gate_degraded(tool_name, verdict.reason, denied)
-        fallback_denies = fallback_blocked or (fallback_dangerous and enforce)
+        fallback_denies = fallback_blocked or fallback_self_protected or (fallback_dangerous and enforce)
         if (verdict.available and verdict.decision != "allow") or fallback_denies:
             tier = "FALLBACK_BLOCK (catastrophic)" if fallback_blocked else (
                 "FALLBACK_BLOCK (dangerous)" if fallback_denies else verdict.decision)
@@ -222,6 +227,7 @@ def register(ctx):
         decision = action_guard_decision(
             verdict, enforce=enforce,
             fallback_blocked=fallback_blocked, fallback_dangerous=fallback_dangerous,
+            fallback_self_protected=fallback_self_protected,
         )
         _report_call(reporter, tool_name, verdict, decision)
         return decision

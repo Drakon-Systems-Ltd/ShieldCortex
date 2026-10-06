@@ -89,16 +89,26 @@ Installing or updating the `shieldcortex` package globally runs
 `scripts/postinstall.mjs`, and that script can write into `~/.openclaw`. It is
 worth knowing before you update a box that runs OpenClaw:
 
-- It only **refreshes an integration that is already there**. If `~/.openclaw`
-  exists and a previous `cortex-memory` hook or `shieldcortex-realtime` plugin is
-  on disk, it spawns `shieldcortex openclaw install` (or, for a plugin with no
-  hook, re-copies the plugin files) so the file-copied hook and plugin do not go
-  stale behind the new package version. That command is the **full installer**,
-  not a file copy: it snapshots and edits the OpenClaw configuration to register
-  the plugin and, by default, restarts the OpenClaw gateway — so a package update
-  can briefly interrupt a running gateway. If the plugin-only re-copy fails, it
-  falls back to the same full installer, which can add the hook that was not
-  there before.
+- It only **refreshes an integration that is already there**, and it looks in
+  exactly two places: `~/.openclaw/hooks/cortex-memory` (the hook) and
+  `~/.openclaw/extensions/shieldcortex-realtime` (a file-copied plugin). If
+  `~/.openclaw` exists and either is on disk, it spawns `shieldcortex openclaw
+  install` (or, for a plugin with no hook, re-copies the plugin files) so the
+  file-copied hook and plugin do not go stale behind the new package version.
+  It does not read OpenClaw's managed plugin registry, so a plugin installed
+  only through `openclaw plugins install` (with no hook) does not trigger this
+  refresh; update that one with `openclaw plugins update` (see
+  [Updating the plugin](#updating-the-plugin)). The rule for those two paths:
+  hook and plugin present → full installer; hook only → full installer; plugin
+  only → in-place copy of the plugin files, falling back to the full installer
+  if that copy fails (which can add the hook that was not there before). That installer is
+  the **full installer**, not a file copy: it snapshots and edits the OpenClaw
+  configuration to register the plugin and, by default, restarts the OpenClaw
+  gateway — so a package update can briefly interrupt a running gateway. The
+  restart follows the [gateway restart consent](#gateway-restart-consent) rules
+  below: it happens in a terminal, or headless with
+  `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1`, and never with
+  `SHIELDCORTEX_SKIP_GATEWAY_RESTART=1`.
 - It never wires OpenClaw for the first time. OpenClaw present but no earlier
   ShieldCortex hook or plugin means nothing under `~/.openclaw` is touched; run
   the install commands above yourself.
@@ -119,6 +129,93 @@ no gateway restart), set `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` for the install, th
 ready with `shieldcortex openclaw install`. npm's `--ignore-scripts` also skips
 it, but that skips the native-module check too — prefer the variable.
 
+## Updating the plugin
+
+`shieldcortex update` refreshes an OpenClaw integration that is already on the
+box. The README's [Updating](../README.md#updating) section is the short
+version; this is what each step does.
+
+- **Plugin** — `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest`.
+  The forced form is deliberate: it replaces a registration pinned to an older
+  version or left half-installed, where a bare update would stay on the pin or
+  refuse. It runs under the `~/.openclaw` update lock (below). A plugin install
+  that did not land is reported as unfinished with that exact command as the
+  re-run, and `update` exits 1; a slow install whose end state is verified is
+  not a failure.
+- **Skill** — an installed `shieldcortex` skill is reinstalled through
+  OpenClaw's own `skills install`.
+- **Hook** — a stale file-copied `cortex-memory` hook is re-copied, under the
+  same lock. The gateway is a long-lived process, so the refreshed files do
+  nothing until it restarts; this step does not restart it.
+- **Protection check** — the plugin registration is reconciled and the gateway
+  reloaded, under the consent rules below.
+
+### Updating by hand
+
+```bash
+openclaw plugins update @drakon-systems/shieldcortex-realtime@latest
+openclaw gateway restart   # if the hook was refreshed too
+```
+
+The explicit npm spec matters. OpenClaw records the selector it installed from,
+so `openclaw plugins update shieldcortex-realtime` (bare plugin id) stays on a
+pinned version, while the `@latest` spec moves past the pin and is recorded for
+later id-based updates. On an older OpenClaw, or to recover a broken install,
+use the forced form `shieldcortex update` uses itself:
+
+```bash
+openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest
+```
+
+The two do not conflict: both end with the same registration pointing at the
+same version. `shieldcortex openclaw install` does plugin, hook and restart in
+one go; `--no-gateway-restart` skips the restart.
+
+### Gateway restart consent
+
+Every OpenClaw gateway restart ShieldCortex performs — `update`'s protection
+check, `shieldcortex openclaw install`, and the installer npm's postinstall
+spawns — goes through one helper, which decides in this order:
+
+| Condition | Effect |
+|---|---|
+| `SHIELDCORTEX_SKIP_GATEWAY_RESTART=1` | No restart, terminal or not. Checked first; wins over everything below. |
+| stdin is a terminal | Restart allowed without a prompt. |
+| `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1` | Restart allowed headless (cron, CI, an agent). |
+| none of the above | The restart is skipped and the output says so; restart by hand. |
+
+`update`'s protection check has one more gate in front of the restart:
+applying the reconcile plan at all needs a terminal or
+`SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1`. So a headless `update` needs both
+`SHIELDCORTEX_ALLOW_GATEWAY_RECONCILE=1` and `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1`
+to fix and reload; with only the first it fixes and leaves the reload to you;
+with only the second it computes the plan and applies nothing. `shieldcortex
+openclaw install` has no reconcile gate: `SHIELDCORTEX_ALLOW_GATEWAY_RESTART=1`
+alone lets a headless install restart. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` is
+different again: it stops npm's postinstall from touching `~/.openclaw` at all.
+
+The macOS dashboard restart described under install-time refresh is a different
+service (`com.shieldcortex.dashboard`, not the OpenClaw gateway) and is not
+governed by these variables.
+
+### The update lock
+
+The plugin-install, wrapper-install and hook-refresh steps of `shieldcortex
+update` and `shieldcortex openclaw install` take
+`~/.openclaw/.shieldcortex-update.lock` first; `~/.hermes` has its own for the
+Hermes plugin copy. Not every write is covered: npm postinstall's in-place
+plugin copy does not take the lock, and `update` releases it before its later
+OpenClaw protection check, which can restore the plugin registration or prune
+directories. A second locking writer that
+finds the lock held does not wait and does not take it over: `update` reports
+that step as skipped and unfinished, names the re-run command, and exits 1.
+Normal owners release the lock when they finish, but an abandoned lock is never
+reclaimed automatically — a lock whose owner died looks the same as
+one whose owner is mid-write, and a process that deletes locks by age can delete
+a live one. If an interrupted run has left one behind, remove it yourself only
+after confirming no `shieldcortex update` or `openclaw install` is running, then
+re-run.
+
 ## Default behavior (safe complement mode)
 
 Enabled by default:
@@ -134,11 +231,19 @@ Enabled by default:
 - `before_tool_call` Action Guard: catastrophic operations blocked, dangerous operations enforced (see the [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
 - `agent:bootstrap` lifecycle wiring: security-warning file handoff only — no context injection (removed v2026.2.26; OpenClaw's native Memory Search recalls context at session start)
 
-Disabled by default:
+Off unless `openclawAutoMemory` is `true`:
 - Auto-extract on `/new`, `/stop`, `/clear`, `/exit`
 - `llm_output` auto-memory extraction
 
-This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
+When the key is not set, both stay off. This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
+
+A fresh global, non-CI npm install sets it, though: on a machine with no
+`~/.shieldcortex/config.json`, postinstall creates that file with
+`openclawAutoMemory: true` (and `proactiveRecall: true`), so auto-memory is
+**on** for that install. An existing config file is never changed, so an upgrade
+keeps your current values and a config without the key stays off. See
+[Install-time refresh](#install-time-refresh-postinstall) above; to turn it off,
+run `shieldcortex config --openclaw-auto-memory false`.
 
 ## Enable optional auto-memory
 
