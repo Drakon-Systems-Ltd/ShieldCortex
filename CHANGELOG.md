@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- (none yet)
+
+## [5.5.0] - 2026-10-07
+
+Minor on 5.4.0. New: a per-runtime posture record behind `shieldcortex policy-evidence` (JSON, read-only) and info-only posture rows in `shieldcortex doctor`, fed by small self-reports the Claude Code hook, the OpenClaw plugin and the Hermes plugin now write under `<config>/posture/`. Dependency security update: the MCP SDK moves to 1.31.0 past a published advisory, and a new `sharp` advisory joins the existing waiver after a reachability check. Plus OpenClaw doc corrections. No allow / ask / deny decision, default or install behaviour changes; the posture rows cannot change doctor's exit code. Node floor (`^22.14.0 || >=24.0.0`) and Cloud pin unchanged.
+
 ### Security
 - **#655 Production audit advisories:** `@modelcontextprotocol/sdk` moves from 1.30.0 to 1.31.0 (the lowest fixed release, GHSA-6qxp-vccf-f47h), and the dependency floor is now `^1.31.0`. The advisory is in the SDK's OAuth client; ShieldCortex uses the SDK as a stdio server and, in the MCP tools scanner, as a stdio client, neither of which the advisory affects. The new `sharp` advisory (GHSA-wq5f-xc86-pv6w, librsvg SVG decoder) is added to the existing `sharp` waiver after its own reachability check: ShieldCortex never hands image bytes to sharp, and only a Transformers 3.x → 4.x major would bring in the patched sharp. The waiver's expiry date (2026-12-12) is unchanged. Production audit: 0 unwaived, 4 waived.
 

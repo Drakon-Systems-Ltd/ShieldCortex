@@ -73,6 +73,13 @@ shieldcortex dashboard
 
 Local UI: **Overview · Memory · Protection · X-Ray · Settings**. Memory has Library / Graph / Recall / Review / Timeline. Prompt-time recall into Claude Code is on for a fresh global, non-CI install: the npm postinstall creates a missing `~/.shieldcortex/config.json` with `proactiveRecall: true`. Turn it off under Settings → Integrations or with `shieldcortex config --proactive-recall false`.
 
+## What's new in 5.5
+
+- **See what each runtime is actually enforcing.** `shieldcortex policy-evidence` prints one JSON record per runtime process (Claude Code hook, OpenClaw plugin, Hermes plugin): whether it is installed and loaded, its configured posture, its scanner and any observed real block, each with its own evidence and timestamp. Stale evidence is marked obsolete rather than trusted. `shieldcortex doctor` shows the same records as info-only rows. The records are local self-reports, not attestation, and the output says so. (#613)
+- **Dependency security update.** The MCP SDK moves to 1.31.0, past a published advisory in its OAuth client (which ShieldCortex does not use). Production audit: 0 unwaived advisories, 4 waived; reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). (#655)
+
+Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
+
 ## What's new in 5.4
 
 - **Action Guard: enforce when ready.** A third posture beside off and enforce. `shieldcortex config --action-guard-enforce-when-ready` (or the new setup question) runs the dangerous tier in shadow, logging what it would have held or blocked while the call proceeds. It enforces only once this install's own audit log shows the guard is operable (low intervention rate, approvals reliably answered through a configured channel) and reviewed effectiveness evidence for the running version exists. No such evidence ships yet, so today this posture stays in shadow and says so. The Claude Code hook and the OpenClaw plugin each measure and promote on their own calls; the Hermes plugin ignores the gate and enforces. (#509)
