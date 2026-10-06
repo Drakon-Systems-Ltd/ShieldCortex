@@ -65,6 +65,8 @@ shieldcortex doctor
 
 `setup` (alias `quickstart`) prints one host table and asks before wiring. Claude Code and OpenClaw get hooks that can **deny**. Hermes gets the plugin copy, which gates tool calls once you run `hermes plugins enable shieldcortex` with the local API up. Codex / Cursor / VS Code get an MCP memory server — a scanner the model may call, not a tool gate.
 
+For Claude Code PreToolUse, a hook load failure or unparseable input still blocks recognised catastrophic commands through a bounded fallback scan. Other unknown calls keep the fail-open behaviour so an unavailable Guard does not stop routine unattended work.
+
 ```bash
 shieldcortex dashboard
 ```

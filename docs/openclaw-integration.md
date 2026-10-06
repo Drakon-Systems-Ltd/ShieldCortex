@@ -231,11 +231,19 @@ Enabled by default:
 - `before_tool_call` Action Guard: catastrophic operations blocked, dangerous operations enforced (see the [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
 - `agent:bootstrap` lifecycle wiring: security-warning file handoff only — no context injection (removed v2026.2.26; OpenClaw's native Memory Search recalls context at session start)
 
-Disabled by default:
+Off unless `openclawAutoMemory` is `true`:
 - Auto-extract on `/new`, `/stop`, `/clear`, `/exit`
 - `llm_output` auto-memory extraction
 
-This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
+When the key is not set, both stay off. This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
+
+A fresh global, non-CI npm install sets it, though: on a machine with no
+`~/.shieldcortex/config.json`, postinstall creates that file with
+`openclawAutoMemory: true` (and `proactiveRecall: true`), so auto-memory is
+**on** for that install. An existing config file is never changed, so an upgrade
+keeps your current values and a config without the key stays off. See
+[Install-time refresh](#install-time-refresh-postinstall) above; to turn it off,
+run `shieldcortex config --openclaw-auto-memory false`.
 
 ## Enable optional auto-memory
 
