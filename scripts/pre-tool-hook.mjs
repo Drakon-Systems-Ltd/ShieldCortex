@@ -784,9 +784,9 @@ async function loadNotify(rawNotifyConfig) {
     }
   };
   try {
-    const [notifyConfigMod, notifyMod, webhookMod, openclawMod, digestMod] = await Promise.all([
+    const [notifyConfigMod, notifyMod, webhookMod, openclawMod, digestMod, cardMod] = await Promise.all([
       load('notify-config.js'), load('operator-notify.js'), load('webhook-notify-channel.js'),
-      load('openclaw-approval-channel.js'), load('dnp-digest.js'),
+      load('openclaw-approval-channel.js'), load('dnp-digest.js'), load('approval-card.js'),
     ]);
     if (typeof notifyConfigMod?.normaliseNotifyConfig !== 'function') return null;
     if (typeof notifyMod?.requestOperatorApproval !== 'function') return null;
@@ -849,6 +849,12 @@ async function loadNotify(rawNotifyConfig) {
         : null,
       formatDnpDigestText: typeof digestMod?.formatDnpDigestText === 'function'
         ? digestMod.formatDnpDigestText
+        : null,
+      /** #648 — the plain-English what/why/who for an approval CARD. Only the
+       *  card channel is handed it (see `pingOperator`); a dist without the
+       *  module raises the card exactly as before. */
+      buildApprovalCard: typeof cardMod?.buildApprovalCard === 'function'
+        ? cardMod.buildApprovalCard
         : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
@@ -933,7 +939,33 @@ function safeDiagnosticApprovalReason(reason) {
   return `${lead}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
 }
 
-async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey, attemptId }) {
+/**
+ * #648 — the card's what/why/who, built on this box from the live tool input.
+ * Only for a LIVE hold going to the interactive card channel: the webhook and
+ * every denial path keep the values-free surface (#284/#369/#517), and they
+ * never receive this object. Every target in it has been through the
+ * credential redactor (approval-card.ts `safeTarget`). Never throws.
+ */
+function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
+  if (channel?.name !== 'openclaw-approval' || typeof notify?.buildApprovalCard !== 'function') return undefined;
+  try {
+    return notify.buildApprovalCard({
+      tool: String(toolName ?? ''),
+      input: toolInput,
+      signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
+      plane: 'claude-code',
+      sessionId: notificationContext(sessionKey).sessionId,
+      cwd: typeof cwd === 'string' ? cwd : undefined,
+      // The agent's own process: Claude Code, this hook's parent. A PID that
+      // descends from it is one the agent started.
+      agentPid: process.ppid,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey, attemptId, cwd }) {
   if (!notify) return null;
   const denied = typeof noPromptSurface === 'string' && noPromptSurface.length > 0;
   // A denial cannot go to an interactive Approve/Deny card — there is nothing
@@ -959,6 +991,7 @@ async function pingOperator(notify, { toolName, toolInput, verdict, hash, noProm
         deniedReason: denied ? noPromptSurface : undefined,
         sessionId: safeSessionId,
         cwd: undefined,
+        card: denied ? undefined : approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }),
       },
       { channel, timeoutMs: notify.config.timeoutMs },
     );
@@ -3339,6 +3372,8 @@ process.stdin.on('end', async () => {
           // Which job died. Absent on a harness that does not report them —
           // rendered only when present, never as "undefined".
           sessionKey: baseExtra.sessionKey,
+          // #648: read on this box to name a git remote's host on the card.
+          cwd: hookData.cwd,
         });
         recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result);
         // #509 approval-reach evidence: a delivered request waits for its

@@ -298,6 +298,8 @@ export interface ToolCallContext {
   /** The gateway session this call belongs to (#233). Used to look up a
    *  conversation-level taint; absent means no escalation, never a default. */
   sessionId?: string;
+  /** #648: the OpenClaw agent making the call, for the card's WHO line. */
+  agentId?: string;
 }
 
 /**
@@ -1001,12 +1003,59 @@ function actionGuardLead(
     + 'Allow once is this call only.';
 }
 
-/** Operator-facing approval prompt for a gated action (not a memory write). */
+/** #648: the card summary as `shieldcortex/defence` builds it. Structural,
+ *  like ToolGuardVerdictLike — this file takes no compile-time dependency on
+ *  the main package. */
+export interface ApprovalCardText {
+  action: string;
+  reason: string;
+  who: string;
+}
+
+/** The card's pending window (OpenClaw's own ceiling; see index.ts). */
+const CARD_EXPIRY_TEXT = 'expires in 10 min';
+
+function cardLine(text: unknown, max: number): string {
+  const one = String(text ?? '').replace(/\s+/g, ' ').trim();
+  return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
+}
+
+/**
+ * Operator-facing approval prompt for a gated action (not a memory write).
+ *
+ * #648: with a card summary, the prompt is WHAT / WHY / WHO in plain English —
+ * the action naming its target (already through the credential redactor), the
+ * reason from the one signal-phrase table, and the agent, box and session —
+ * plus what allow-once buys and when the card expires. The raw signal ids,
+ * the guard's own `reason` text and the severity word stay in the audit row;
+ * none of them is on the card. Without a summary (an older dist) the #600
+ * layout is kept, with the reason flattened to one line so it cannot forge a
+ * label line of its own.
+ */
 export function formatActionGuardPrompt(
   toolName: string,
   v: ToolGuardVerdictLike,
   args?: Record<string, unknown>,
+  card?: ApprovalCardText,
 ): string {
+  if (card && typeof card.action === 'string' && card.action.trim()) {
+    // The host joins these lines with ' | ' into a 256-character description.
+    // WHY, WHO and the footer are bounded first; the action gets what is left.
+    const why = `Why: ${cardLine(card.reason, 75)}`;
+    const who = `Who: ${cardLine(card.who, 75)}`;
+    const footer = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
+    const room = Math.max(40, Math.min(120, 256 - (why.length + who.length + footer.length + 3 * 3 + 'What: '.length)));
+    return [
+      '🛡️ ShieldCortex needs a yes',
+      '',
+      `What: ${cardLine(card.action, room)}`,
+      why,
+      who,
+      footer,
+      '',
+      '[Allow once]  [Deny]',
+    ].join('\n');
+  }
   return [
     '🛡️ ShieldCortex needs a yes',
     '',
@@ -1016,7 +1065,7 @@ export function formatActionGuardPrompt(
     `Action:     ${v.action}`,
     `Risk:       ${v.severity}`,
     `Signals:    ${v.signals.join(', ') || 'none'}`,
-    `Reason:     ${v.reason}`,
+    `Reason:     ${String(v.reason ?? '').replace(/[\r\n]+/g, ' ')}`,
     '',
     '[Allow once]  [Deny]',
   ].join('\n');
@@ -1351,6 +1400,20 @@ interface InterceptorOptions {
    *  disk. Injected from `shieldcortex/defence` at runtime so this plugin does
    *  not grow a second schema. Absent = unbound (older installed package). */
   bindAudit?: (entry: InterceptAuditEntry, args?: Record<string, unknown>) => InterceptAuditEntry;
+  /** #648 — the plain-English what/why/who for an approval card, injected
+   *  from `shieldcortex/defence` (`buildApprovalCard`) like the evaluator.
+   *  Absent on an older dist, or throwing, means the card keeps the #600
+   *  layout below; nothing about the decision changes either way. */
+  buildApprovalCard?: (input: {
+    tool: string;
+    input: unknown;
+    signals: readonly string[];
+    plane: 'openclaw';
+    agentId?: string;
+    sessionId?: string;
+    cwd?: string;
+    agentPid?: number;
+  }) => ApprovalCardText;
   /** #509 r7 — the enforce-when-ready gate (see {@link ReadinessRuntime}). */
   readiness?: ReadinessRuntime;
   /** #509 r7 — whether an OS policy lock is on disk. The lock pins
@@ -1380,6 +1443,27 @@ export function createInterceptor(
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
   const bindAudit = options?.bindAudit;
+  /** #648: the card's what/why/who, or undefined (older dist, or a summariser
+   *  that threw) — then the prompt keeps its previous layout. Never throws. */
+  const approvalCardFor = (context: ToolCallContext, v: ToolGuardVerdictLike): ApprovalCardText | undefined => {
+    if (typeof options?.buildApprovalCard !== 'function') return undefined;
+    try {
+      const card = options.buildApprovalCard({
+        tool: context.toolName,
+        input: context.arguments,
+        signals: Array.isArray(v.signals) ? v.signals : [],
+        plane: 'openclaw',
+        agentId: context.agentId,
+        sessionId: context.sessionId,
+        cwd: toolCallCwd(context),
+        // The gateway itself: commands the agent runs are its descendants.
+        agentPid: process.pid,
+      });
+      return card && typeof card.action === 'string' ? card : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
@@ -2127,7 +2211,7 @@ export function createInterceptor(
     let approved: boolean;
     try {
       approved = await withApprovalDeadline(
-        context.requireApproval(formatActionGuardPrompt(context.toolName, v, context.arguments)),
+        context.requireApproval(formatActionGuardPrompt(context.toolName, v, context.arguments, approvalCardFor(context, v))),
         brokered ? brokerApprovalTimeoutMs(v.severity) : 0,
       );
     } catch (err) {

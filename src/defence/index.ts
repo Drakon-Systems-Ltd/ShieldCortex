@@ -148,6 +148,10 @@ export type {
 // Tool Action Guard — gates what the agent DOES at runtime (shell/file/network/git).
 export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, detectScriptInvocation } from './iron-dome/tool-action-guard.js';
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
+// #648: the plain-English what/why/who an approval card shows. The OpenClaw
+// interceptor takes `buildApprovalCard` through its runtime seam.
+export { buildApprovalCard, describeAction, describeSignal, describeSignals, describeWho, formatApprovalCardLines, safeTarget, SIGNAL_PHRASES } from './iron-dome/approval-card.js';
+export type { ApprovalCardSummary, ApprovalCardInput } from './iron-dome/approval-card.js';
 // #594 (ADR-002 §5C): the reviewed native contracts are judged per HOST
 // VERSION. The adapter that knows the host version records it here once; the
 // drift observation then names the judging revision and why it was chosen.

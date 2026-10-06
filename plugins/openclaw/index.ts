@@ -4049,6 +4049,12 @@ const WITHHELD_COMMAND_TEXT = "(command withheld — contains credential materia
  *  `Reason:` (action guard) and `Content:` (memory write) are the two lines
  *  that quote the payload, so anything not on this list is dropped. */
 const SAFE_APPROVAL_LINE = /^(?:Tool|Action|Risk|Signals|Threats):/iu;
+/** #648 — the plain-English card (interceptor `formatActionGuardPrompt` with a
+ *  summary). Every line is derived — the WHAT target already passed the
+ *  credential redactor on this box — and none quotes the payload, so these
+ *  lines survive a secret-egress withhold too, and no "withheld" banner is
+ *  stacked on a card that never carried the command. */
+const CARD_LINE = /^(?:What|Why|Who):\s|^Allow once is this call only/u;
 
 function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeToolCallResult["requireApproval"]> {
   const lines = message
@@ -4061,11 +4067,14 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
     .filter((line) => !/^\[(?:Approve|Allow[^\]]*|Deny)\]/i.test(line));
   const rawTitle = (lines[0] || "ShieldCortex approval required").replace(/^🛡️\s*/u, "");
   const detailLines = lines.slice(1);
+  const plainCard = detailLines.some((line) => /^What:\s/u.test(line));
   const withholdPayload = SECRET_EGRESS_PROMPT.test(message);
   const details = (
-    withholdPayload
-      ? [WITHHELD_COMMAND_TEXT, ...detailLines.filter((line) => SAFE_APPROVAL_LINE.test(line))]
-      : detailLines
+    plainCard
+      ? detailLines.filter((line) => CARD_LINE.test(line))
+      : withholdPayload
+        ? [WITHHELD_COMMAND_TEXT, ...detailLines.filter((line) => SAFE_APPROVAL_LINE.test(line))]
+        : detailLines
   ).join(" | ") || rawTitle;
   const riskText = message.toLowerCase();
   const severity = /\b(?:critical|catastrophic|auto[-_\s]?deny|exfil|rm\s+-rf)\b/u.test(riskText)
@@ -4077,7 +4086,9 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
   return {
     title: truncateApprovalText(rawTitle, 80),
     description: truncateApprovalText(details, 256),
-    severity,
+    // A plain card carries no severity word; everything that reaches a card is
+    // the guard's dangerous tier (catastrophic never gets one): "warning".
+    severity: plainCard ? "warning" : severity,
     // The host's own ceiling (MAX_PLUGIN_APPROVAL_TIMEOUT_MS), matching
     // CARD_TIMEOUT_MS on the Telegram card path. 120s was the old bridge's
     // number and it expired cards the operator was still walking back to.
@@ -4130,6 +4141,7 @@ async function handleTypedBeforeToolCall(
       toolName: event.toolName,
       arguments: event.params ?? {},
       sessionId,
+      ...(typeof ctx?.agentId === "string" ? { agentId: ctx.agentId } : {}),
       ...(attended
         ? {
             requireApproval: async (message: string) => {
@@ -4531,6 +4543,12 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #648: the plain-English card summary (what / why / who), from the
+          // same runtime seam. Absent on an older dist: the card keeps its
+          // previous layout.
+          buildApprovalCard: typeof (defenceMod as any)?.buildApprovalCard === 'function'
+            ? (input) => (defenceMod as any).buildApprovalCard(input)
+            : undefined,
           // #233: the read side of conversation taint. Returns null for a clean
           // or unknown session, so the guard behaves exactly as before unless a
           // conversation detection actually happened in THIS session.
