@@ -8723,19 +8723,21 @@ export async function checkIronDomeProfile(dbPath: string = getDbPath()): Promis
     if (isDatabaseInitialized()) {
       // In-process caller (MCP/API server): the effective config includes custom and cloud policy.
       const ironDome = await import('../defence/iron-dome/index.js');
-      return ironDomeProfileVerdict(ironDome.getEffectiveIronDomeConfig());
+      // Peek, not get: the loader writes normalised config back to the store.
+      return ironDomeProfileVerdict(ironDome.peekEffectiveIronDomeConfig());
     }
     const stored = readStoredIronDomeConfig(dbPath);
     if (!stored) {
       return { label: IRON_DOME_PROFILE_LABEL, status: 'info', message: 'Iron Dome not configured — profile not checked' };
     }
     return ironDomeProfileVerdict(stored);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+  } catch {
+    // Fixed text only, and no logging: parse errors quote the stored config,
+    // which can hold the kill phrase and PII rules.
     return {
       label: IRON_DOME_PROFILE_LABEL,
       status: 'info',
-      message: `could not read Iron Dome profile: ${msg}`,
+      message: 'could not read Iron Dome profile — stored config unreadable',
     };
   }
 }

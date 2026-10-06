@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
+import { jest } from '@jest/globals';
 import { checkIronDomeProfile, ironDomeProfileVerdict, IRON_DOME_PROFILE_LABEL } from '../cli/doctor.js';
 import { extractFixCommands, formatDoctorReport } from '../cli/doctor-report.js';
 import { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES, type IronDomeConfig } from '../defence/iron-dome/config.js';
@@ -108,14 +109,56 @@ describe('doctor Iron Dome profile (#516)', () => {
     beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-doctor-516-')); });
     afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-    function storeWith(config: Partial<IronDomeConfig> | null): string {
+    function storeWith(config: Partial<IronDomeConfig> | null | string): string {
       const dbPath = path.join(dir, 'memories.db');
       const db = new Database(dbPath);
       db.exec('CREATE TABLE iron_dome_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)');
-      if (config) db.prepare('INSERT INTO iron_dome_config (key, value) VALUES (?, ?)').run('config', JSON.stringify(config));
+      const value = typeof config === 'string' ? config : config && JSON.stringify(config);
+      if (value) db.prepare('INSERT INTO iron_dome_config (key, value) VALUES (?, ?)').run('config', value);
       db.close();
       return dbPath;
     }
+
+    describe('malformed stored config', () => {
+      const MARKER = 'SC516LEAK';
+      // V8 quotes this input back verbatim in its SyntaxError message.
+      const MALFORMED = `{"killPhrase": ${MARKER}}`;
+
+      it('reports a fixed diagnostic that never echoes the stored config', async () => {
+        expect(() => JSON.parse(MALFORMED)).toThrow(MARKER); // the leak this guards against
+
+        const logged: string[] = [];
+        const capture = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
+        const spies = (['log', 'info', 'warn', 'error', 'debug'] as const)
+          .map((m) => jest.spyOn(console, m).mockImplementation(capture));
+        const stderr = jest.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { logged.push(String(chunk)); return true; });
+        let result;
+        try {
+          result = await checkIronDomeProfile(storeWith(MALFORMED));
+        } finally {
+          spies.forEach((s) => s.mockRestore());
+          stderr.mockRestore();
+        }
+
+        expect(result).toEqual({
+          label: IRON_DOME_PROFILE_LABEL,
+          status: 'info',
+          message: 'could not read Iron Dome profile — stored config unreadable',
+        });
+        expect(logged.join('\n')).not.toContain(MARKER);
+
+        const human = formatDoctorReport([result], { width: 200 }).join('\n');
+        const verbose = formatDoctorReport([result], { width: 200, verbose: true }).join('\n');
+        // Same mapping runDoctor uses for `--json`.
+        const json = JSON.stringify({ results: [result].map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })) });
+        expect(verbose).toContain('stored config unreadable');
+        for (const output of [human, verbose, json]) {
+          expect(output).not.toContain(MARKER);
+          expect(output).not.toContain('killPhrase');
+          expect(output).not.toContain('is not valid JSON');
+        }
+      });
+    });
 
     // `iron-dome activate` with no profile persists exactly this; doctor must see it.
     it('warns on an activated stock profile', async () => {

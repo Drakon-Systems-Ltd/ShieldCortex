@@ -269,8 +269,39 @@ export function getIronDomeStatus(): {
  * overrides, then built-in profile defaults.
  */
 export function getEffectiveIronDomeConfig(): IronDomeConfig {
-  const localConfig = loadConfig();
+  return resolveEffectiveConfig(loadConfig());
+}
 
+/**
+ * Read the persisted local config without side effects: no table creation, no
+ * normalisation write-back, no change to the in-memory active config. Mirrors
+ * loadConfig()'s fallbacks so the result matches what the loader would return.
+ */
+function peekConfig(): IronDomeConfig {
+  try {
+    const db = getDatabase();
+    const hasTable = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'iron_dome_config'"
+    ).get();
+    if (hasTable) {
+      const row = db.prepare('SELECT value FROM iron_dome_config WHERE key = ?').get('config') as { value: string } | undefined;
+      if (row) return normalizeConfig(JSON.parse(row.value) as IronDomeConfig);
+    }
+  } catch {
+    // Fall through to default
+  }
+  return normalizeConfig(activeConfig);
+}
+
+/**
+ * Same effective policy as getEffectiveIronDomeConfig() — local, custom and
+ * cloud precedence included — but read-only, for diagnostics such as doctor.
+ */
+export function peekEffectiveIronDomeConfig(): IronDomeConfig {
+  return resolveEffectiveConfig(peekConfig());
+}
+
+function resolveEffectiveConfig(localConfig: IronDomeConfig): IronDomeConfig {
   // If Iron Dome isn't enabled locally, don't apply any overrides
   if (!localConfig.enabled) return localConfig;
 
