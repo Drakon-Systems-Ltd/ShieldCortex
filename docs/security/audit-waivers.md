@@ -25,16 +25,16 @@ the gate.
 
 ## Active waivers
 
-### SC-WAIVER-466-sharp — `sharp` libvips/libheif decoder advisories
+### SC-WAIVER-466-sharp — `sharp` libvips/libheif/librsvg decoder advisories
 
 | | |
 |---|---|
-| **Advisory IDs** | `1124066` ([GHSA-f88m-g3jw-g9cj](https://github.com/advisories/GHSA-f88m-g3jw-g9cj)), `1193725` ([GHSA-rgj7-g3m4-5g8c](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c)) |
-| **Underlying CVEs** | libvips: CVE-2026-33327, CVE-2026-33328, CVE-2026-35590, CVE-2026-35591. libheif: GHSA-g89c-p67h-r497, GHSA-2jg2-4ch7-h545 |
-| **Severity** | high ×2 |
+| **Advisory IDs** | `1124066` ([GHSA-f88m-g3jw-g9cj](https://github.com/advisories/GHSA-f88m-g3jw-g9cj)), `1193725` ([GHSA-rgj7-g3m4-5g8c](https://github.com/advisories/GHSA-rgj7-g3m4-5g8c)), `1241331` ([GHSA-wq5f-xc86-pv6w](https://github.com/advisories/GHSA-wq5f-xc86-pv6w), added 2026-10-06, #655) |
+| **Underlying CVEs** | libvips: CVE-2026-33327, CVE-2026-33328, CVE-2026-35590, CVE-2026-35591. libheif: GHSA-g89c-p67h-r497, GHSA-2jg2-4ch7-h545. librsvg: CVE-2026-96889 |
+| **Severity** | high ×3 |
 | **Chain** | `shieldcortex` → `@huggingface/transformers@3.8.1` (**optionalDependencies**) → `sharp@0.34.5` |
-| **Reviewed** | 2026-09-12 |
-| **Expires** | 2026-12-12 (the gate fails after this date until someone re-reviews) |
+| **Reviewed** | 2026-09-12 (`1124066`, `1193725`); 2026-10-06 (`1241331` assessed on its own, reachability greps re-run for all three, #655) |
+| **Expires** | 2026-12-12 (the gate fails after this date until someone re-reviews; **not** extended when `1241331` was added) |
 | **Owner** | Michael Kyriacou (`author` in `package.json`) |
 
 #### Why there is no version to move to
@@ -86,6 +86,64 @@ Measured greps over `src/`, `scripts/`, `plugins/`, `hooks/`, `templates/`
   endpoint that accepts image bytes, so there is no user-controlled path to a
   decoder.
 
+#### `1241331` (GHSA-wq5f-xc86-pv6w), assessed on its own — 2026-10-06, #655
+
+Published 2026-10-06 13:43Z: a memory-safety bug in **librsvg**, the SVG
+decoder that sharp's prebuilt libvips bundles. Vulnerable range `sharp <0.35.5`;
+fixed in `sharp@0.35.5` (librsvg 2.63.2). The advisory says it "can lead to
+possible remote code execution (RCE) on glibc-based Linux" when the `node`
+binary is not a position-independent executable, and notes the official
+Node.js binaries are not PIE. Its suggested workaround,
+`sharp.block({ operation: ["VipsForeignLoadSvg"] })`, needs a caller that
+imports sharp; ShieldCortex does not, and adding that import would load sharp
+into the main process for no gain.
+
+It is the same class as the two IDs above: a decoder bug in a native image
+library, reached only by handing **encoded image bytes** (here, SVG) to sharp.
+Measured on 2026-10-06, on `main` at `ee87c5c5` with `@huggingface/transformers@3.8.1`:
+
+* **No patched sharp is reachable without a Transformers major.**
+  `npm view @huggingface/transformers@3 dependencies.sharp` gives `^0.34.1`
+  for every 3.x release up to 3.8.1, which can never resolve `0.35.5`.
+  `@huggingface/transformers@4.3.1` declares `^0.35.4` (it would resolve
+  `0.35.5`), but that is the 3.x → 4.x embedding-stack change already deferred
+  above. `npm audit` reports the fix only as that semver-major bump.
+* **The decoder entry in Transformers is not on our path.** In
+  `dist/transformers.node.mjs` the only call that hands encoded bytes to sharp
+  is `RawImage.fromBlob` (`sharp(await blob.arrayBuffer())`), reached from
+  `RawImage.read` / `fromURL`. Its callers are `prepareImages()` in the eleven
+  image pipelines (`image-feature-extraction`, `image-to-text`,
+  `image-classification`, `image-segmentation`, `background-removal`,
+  `zero-shot-image-classification`, `object-detection`,
+  `zero-shot-object-detection`, `document-question-answering`,
+  `image-to-image`, `depth-estimation`) and `VLChatProcessor`. The two classes
+  ShieldCortex instantiates, `FeatureExtractionPipeline` and
+  `TextGenerationPipeline`, contain no reference to `RawImage`, a processor or
+  an image. The other sharp calls in the bundle build images from raw pixel
+  buffers, which involves no decoder.
+* **ShieldCortex's own code is unchanged on this point.** The greps above were
+  re-run over `src/`, `scripts/`, `plugins/`, `hooks/` and `templates/`: still
+  no `sharp` import, no image processor or image pipeline task, no
+  multipart/upload library. Added for this advisory: no `image/svg+xml` or
+  other image MIME type, no `.svg` read, no `VipsForeign*` / `librsvg`
+  reference. The call sites are still `src/embeddings/worker.ts`
+  (`feature-extraction`, `Xenova/all-MiniLM-L6-v2`) and
+  `src/defence/judge/worker.ts` (`text-generation`).
+* **The dashboard does not ship sharp.** `dashboard/` has its own lockfile, in
+  which `next@16.3.5` pulls an optional `sharp@0.35.4`, also in this
+  advisory's range. `dashboard/next.config.ts` excludes
+  `**/node_modules/sharp/**` and `**/node_modules/@img/**` from the standalone
+  output that goes into the npm tarball, so the published dashboard has no
+  sharp. That copy runs only at build time, on the build machine, over
+  repository assets. It is outside the `npm audit --omit=dev` gate and this
+  waiver.
+
+The residual-risk points below apply unchanged. Point 1 matters more for this
+advisory: on a non-PIE `node` (the official Node.js binaries), the advisory
+puts the worst case at code execution rather than a crash, but only if
+something in the worker process feeds sharp an SVG, which nothing in
+ShieldCortex does.
+
 #### Residual risk, stated honestly
 
 **`sharp` is loaded into the process, it is just never called.**
@@ -128,12 +186,15 @@ What that leaves:
 Delete this entry and the JSON record below as soon as **any one** of these is
 true:
 
-* a released `@huggingface/transformers` widens its `sharp` range to admit
-  `>= 0.35.4` (check: `npm view @huggingface/transformers dependencies.sharp`)
-  — then bump Transformers, re-run `npm run audit:release`, and delete this;
+* ShieldCortex moves to an `@huggingface/transformers` release whose `sharp`
+  range resolves `>= 0.35.5` (4.3.1 does, through `^0.35.4`; 3.x never does;
+  check: `npm view @huggingface/transformers dependencies.sharp`) — then
+  re-run `npm run audit:release` and delete this;
 * ShieldCortex drops the `@huggingface/transformers` optional dependency;
-* a new advisory lands on `sharp` outside these two IDs — the gate will fail on
-  it, and it must be assessed on its own merits rather than folded in here.
+* a new advisory lands on `sharp` outside these three IDs — the gate will fail
+  on it, and it must be assessed on its own merits before it can be added here
+  (as `1241331` was on 2026-10-06, in its own subsection above). If it is a
+  different class, or reachable, it does not belong in this waiver.
 
 Do **not** extend the expiry without re-doing the reachability greps above. If
 the codebase has grown an image path since, the reasoning is void.
@@ -215,15 +276,15 @@ advisory ID is assessed separately by the release gate.
     {
       "id": "SC-WAIVER-466-sharp",
       "package": "sharp",
-      "advisories": [1124066, 1193725],
-      "ghsa": ["GHSA-f88m-g3jw-g9cj", "GHSA-rgj7-g3m4-5g8c"],
+      "advisories": [1124066, 1193725, 1241331],
+      "ghsa": ["GHSA-f88m-g3jw-g9cj", "GHSA-rgj7-g3m4-5g8c", "GHSA-wq5f-xc86-pv6w"],
       "severity": "high",
       "chain": "shieldcortex -> @huggingface/transformers (optional) -> sharp",
-      "reason": "libvips/libheif image-decoder bugs; ShieldCortex runs text-only Transformers pipelines and has no path that hands image bytes to sharp.",
-      "reviewed": "2026-09-12",
+      "reason": "libvips/libheif/librsvg image-decoder bugs; ShieldCortex runs text-only Transformers pipelines and has no path that hands image bytes (SVG included) to sharp.",
+      "reviewed": "2026-10-06",
       "expires": "2026-12-12",
       "owner": "Michael Kyriacou (package.json author)",
-      "retire_when": "a released @huggingface/transformers accepts sharp >= 0.35.4, or the optional dependency is dropped",
+      "retire_when": "ShieldCortex moves to an @huggingface/transformers release whose sharp range resolves >= 0.35.5 (4.3.1+), or the optional dependency is dropped",
       "issue": 466
     },
     {
