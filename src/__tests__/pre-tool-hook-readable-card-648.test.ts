@@ -185,7 +185,7 @@ describe('#648 — readable approval card through the real Claude Code hook', ()
     expect(description).not.toContain('fields=');
     expect(description).not.toContain('(dangerous)');
     // What it wants to do, naming the target.
-    expect(description).toContain('Read a file in your SSH folder: ~/.ssh/config');
+    expect(description).toContain('Read a file in your SSH folder: "~/.ssh/config"');
     // Why ShieldCortex stopped it, in plain English.
     expect(description).toContain('Why: touches a sensitive file (keys, passwords or credentials)');
     // Who: agent, box, session.

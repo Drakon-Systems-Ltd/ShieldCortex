@@ -76,7 +76,7 @@ describe('#648 — the screenshot card', () => {
     const { title, description } = buildCardFields(notification({ card }));
     expect(title).toBe('ShieldCortex: approve Bash? [1ae99749ee74]');
     expect(description.split('\n')).toEqual([
-      'Read a file in your SSH folder: ~/.ssh/config',
+      'Read a file in your SSH folder: "~/.ssh/config"',
       'Why: touches a sensitive file (keys, passwords or credentials)',
       'Who: Claude Code on veronica-box · session sc-0123456789abcdef',
       'Allow once or deny · expires in 10 min',
@@ -94,20 +94,20 @@ describe('#648 — the screenshot card', () => {
 
 describe('#648 — WHAT: plain English with a named target', () => {
   it.each([
-    ['cat ~/.ssh/config', 'Read a file in your SSH folder: ~/.ssh/config'],
-    ['cat .env', 'Read a file of secret settings: .env'],
-    [`${RM_RF} ./build`, 'Delete a folder and everything in it: ./build'],
-    ['pkill -f relay.mjs', 'Stop every program whose command line matches: relay.mjs'],
-    ['killall node', 'Stop every program named node'],
-    ['sudo systemctl stop nginx', 'Stop the service: nginx, as administrator (sudo)'],
-    ['npm install -g typescript', 'Install a package: typescript (npm, whole machine)'],
-    ['npm install --registry https://registry.npmjs.org left-pad', 'Install a package: left-pad (npm)'],
-    ['git branch -D feature/x', 'Delete a git branch: feature/x'],
-    ['git push --force https://github.com/acme/app.git main', 'Overwrite history on github.com (branch main) (git push --force)'],
+    ['cat ~/.ssh/config', 'Read a file in your SSH folder: "~/.ssh/config"'],
+    ['cat .env', 'Read a file of secret settings: ".env"'],
+    [`${RM_RF} ./build`, 'Delete a folder and everything in it: "./build"'],
+    ['pkill -f relay.mjs', 'Stop every program whose command line matches: "relay.mjs"'],
+    ['killall node', 'Stop every program named "node"'],
+    ['sudo systemctl stop nginx', 'Stop the service: "nginx", as administrator (sudo)'],
+    ['npm install -g typescript', 'Install a package: "typescript" (npm, whole machine)'],
+    ['npm install --registry https://registry.npmjs.org left-pad', 'Install a package: "left-pad" (npm)'],
+    ['git branch -D feature/x', 'Delete a git branch: "feature/x"'],
+    ['git push --force https://github.com/acme/app.git main', 'Force-push to github.com (branch "main"), which may overwrite history (git push --force)'],
     ['crontab -e', 'Change scheduled jobs (crontab)'],
-    ['chmod -R 777 /var/www', 'Change who can access a folder and everything in it: /var/www'],
+    ['chmod -R 777 /var/www', 'Change who can access a folder and everything in it: "/var/www"'],
     ['scp ./db.sql backup@files.example.org:/srv/', 'Copy files to files.example.org (scp)'],
-    ['cd /tmp && echo hi > ~/.bashrc', 'Write to a file: ~/.bashrc (+1 more step)'],
+    ['cd /tmp && echo hi > ~/.bashrc', 'Write to a file: "~/.bashrc" (+1 more step)'],
   ])('%s', (command, expected) => {
     expect(bash(command)).toBe(expected);
   });
@@ -145,8 +145,8 @@ describe('#648 — WHAT: plain English with a named target', () => {
       }
       symlinkSync('/tmp/relay', join(proc, '4242', 'cwd'));
       const input = { tool: 'Bash', input: { command: 'kill 4242' }, signals: ['stop-process-or-service'], procRoot: proc };
-      expect(describeAction({ ...input, agentPid: 999 })).toBe('Stop a program it started 4 minutes ago (node, in /tmp/relay)');
-      expect(describeAction({ ...input, agentPid: 31337 })).toBe('Stop a running program (node, in /tmp/relay, PID 4242, started 4 minutes ago)');
+      expect(describeAction({ ...input, agentPid: 999 })).toBe('Stop a program it started 4 minutes ago (node, in "/tmp/relay")');
+      expect(describeAction({ ...input, agentPid: 31337 })).toBe('Stop a running program (node, in "/tmp/relay", PID 4242, running for 4 minutes)');
       expect(describeAction({ ...input, input: { command: 'kill 777' } })).toBe('Stop a running program (PID 777)');
     } finally {
       rmSync(proc, { recursive: true, force: true });
@@ -155,12 +155,12 @@ describe('#648 — WHAT: plain English with a named target', () => {
 
   it('non-shell tools', () => {
     expect(describeAction({ tool: 'Read', input: { file_path: '/root/.ssh/id_ed25519' }, signals: [] }))
-      .toBe('Read a file in your SSH folder: /root/.ssh/id_ed25519');
+      .toBe('Read a file in your SSH folder: "/root/.ssh/id_ed25519"');
     expect(describeAction({ tool: 'WebFetch', input: { url: 'https://docs.example.com/a?key=v', prompt: 'x' }, signals: [] }))
       .toBe('Fetch a web page from docs.example.com');
     expect(describeAction({ tool: 'KillShell', input: { shell_id: 'b1' }, signals: [] })).toBe('Stop a background command it started');
-    expect(describeAction({ tool: 'process', input: { action: 'kill', sessionId: 's' }, signals: [] })).toBe('Stop a running command it started');
-    expect(describeAction({ tool: 'exec', input: { command: 'killall node' }, signals: [] })).toBe('Stop every program named node');
+    expect(describeAction({ tool: 'process', input: { action: 'kill', sessionId: 's' }, signals: [] })).toBe('Stop a running background command');
+    expect(describeAction({ tool: 'exec', input: { command: 'killall node' }, signals: [] })).toBe('Stop every program named "node"');
   });
 
   it('says so honestly when nothing can be derived — never the raw command', () => {
@@ -213,7 +213,7 @@ describe('#648 — a credential-shaped target never reaches the card', () => {
     const line = bash(`sshpass -p ${PLAIN_PW} ssh deploy@build.example.org`, ['external-egress']);
     expect(line).not.toContain(PLAIN_PW);
     expect(line).toBe('Run sshpass (other details not shown)');
-    expect(bash('frobnicate sync ./x', [])).toBe('Run frobnicate sync (other details not shown)');
+    expect(bash('frobnicate sync ./x', [])).toBe('Run frobnicate (other details not shown)');
   });
 
   it('a password passed as `--password <value>` in a shown pattern is withheld', () => {
@@ -291,7 +291,7 @@ describe('#648 — WHY: one table, every signal the guard can emit', () => {
 
   it('phrases are never cut mid-phrase; extras become a count', () => {
     expect(describeSignals(['privilege-escalation', 'stop-process-or-service', 'external-egress']))
-      .toBe('runs with administrator (root) rights (+2 more)');
+      .toBe('runs with administrator (root) rights (+2 more reasons)');
     expect(describeSignals(['file-delete', 'git-mutate'])).toBe('deletes files; changes the git repository');
     expect(describeSignals([])).toBe('matched a safety rule');
   });
