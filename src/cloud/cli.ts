@@ -415,13 +415,14 @@ export function handleCloudConfig(args: string[]): void {
     const previousPosture = actionGuardPosture(getActionGuardCoreConfig());
     applyActionGuardCore(
       { enabled: true, enforce: true, readinessGate: true },
-      'Action Guard ENFORCE WHEN READY — dangerous ops are logged, not stopped, until three conditions hold: two readiness ' +
+      'Action Guard ENFORCE WHEN READY — ordinary dangerous ops are logged, not stopped, until three conditions hold: two readiness ' +
         'proxies measured here (operational intervention rate ≤ 2% over ≥ 500 calls / 7 days, and approval reachability ' +
         '≥ 98% of requests answered by a human through a configured channel) AND reviewed effectiveness evidence for this ' +
         'guard version. That evidence is always required and none has been published, so today this posture stays in shadow. ' +
         'Needs a human approval channel (--action-guard-notify-openclaw or --action-guard-notify-webhook), and a webhook ' +
         'so a later demotion notice can reach you (--action-guard-notify-webhook). ' +
-        'Catastrophic ops block in every posture. Check progress: shieldcortex guard readiness. ' +
+        'Catastrophic ops block in every posture, and in shadow calls the guard recognises as changing its own state/config ' +
+        'or disabling it are still held or blocked. Check progress: shieldcortex guard readiness. ' +
         'The Claude Code hook and the OpenClaw plugin are each measured and promoted on their own calls; ' +
         'the Hermes plugin does not implement the gate and enforces immediately.',
     );
@@ -438,7 +439,9 @@ export function handleCloudConfig(args: string[]): void {
   if (args.includes('--action-guard-advisory')) {
     applyActionGuardCore(
       { enforce: false, readinessGate: false },
-      'Action Guard ADVISORY (warn-mode) — dangerous ops log but are not gated (catastrophic still blocks when enabled).',
+      'Action Guard ADVISORY (warn-mode) — ordinary dangerous ops log but are not gated. Still held or blocked when enabled, ' +
+        'including catastrophic ops and calls the guard recognises as changing its own state/config or disabling it. ' +
+        'The Hermes plugin has its own enforce setting (SHIELDCORTEX_ENFORCE), which this does not change.',
     );
     changed = true;
   }
@@ -637,14 +640,17 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --action-guard-enable    Turn Action Guard on, keeping the current enforce/advisory setting (default: off)');
     console.log('  --action-guard-disable   Turn Action Guard off entirely — tool calls are NOT gated (the default)');
     console.log('  --action-guard-enforce   Gate dangerous ops (approval/block) from now on; also enables the guard');
-    console.log('  --action-guard-enforce-when-ready  Log dangerous ops (shadow) until two readiness proxies hold here');
+    console.log('  --action-guard-enforce-when-ready  Log ordinary dangerous ops (shadow) until two readiness proxies hold here');
     console.log('                           (≤ 2% would-stop, ≥ 98% of approvals answered by a human) AND reviewed');
     console.log('                           effectiveness evidence exists for this version — always required, none');
     console.log('                           published yet, so it stays in shadow today. Needs a webhook;');
     console.log('                           progress: shieldcortex guard readiness. Claude Code hook and OpenClaw');
     console.log('                           plugin, each measured on its own calls; Hermes ignores the gate and');
     console.log('                           enforces immediately. Also enables the guard');
-    console.log('  --action-guard-advisory  Watch only — dangerous ops log but are not gated (catastrophic still blocks)');
+    console.log('  --action-guard-advisory  Watch only — ordinary dangerous ops log but are not gated. Still held or');
+    console.log('                           blocked, including catastrophic ops and calls the guard recognises as');
+    console.log('                           changing its own state/config or disabling it. Hermes has its own');
+    console.log('                           enforce setting (SHIELDCORTEX_ENFORCE), which this does not change');
     console.log('  --action-guard-notify-openclaw  Notify Action Guard denials via the native OpenClaw approval card');
     console.log('  --action-guard-notify-webhook <https-url>  Notify Action Guard denials to an https webhook');
     console.log('  --action-guard-notify-disable   Disable Action Guard denial notifications');
