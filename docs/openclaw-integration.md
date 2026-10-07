@@ -70,7 +70,11 @@ wrapper also installs both components:
 1. `cortex-memory` hook
 - Path: `~/.openclaw/hooks/cortex-memory/`
 - Handles lifecycle wiring on `agent:bootstrap` (security-warning handoff — no
-  system-prompt injection since v2026.2.26) + explicit keyword saves
+  system-prompt injection since v2026.2.26) and, when `openclawAutoMemory` is
+  `true`, session-end capture on `/new` and `/stop`
+- Its keyword-trigger saves and per-message proactive recall are dormant: the
+  hook's `events` list (`command:new`, `command:stop`, `agent:bootstrap`) has no
+  `message` key, so core OpenClaw 2026.9.6 never routes those paths to it
 
 2. `shieldcortex-realtime` plugin
 - Native `openclaw plugins install` puts it in OpenClaw's managed npm project
@@ -228,7 +232,6 @@ re-run.
 ## Default behavior (safe complement mode)
 
 Enabled by default:
-- Keyword triggers: saves when user explicitly says phrases like `remember this:`
 - `llm_input` scanning: real-time threat detection + audit logging. This hook is
   **observation only** — it cannot stop a turn. The conversation firewall's
   enforcement point is `before_agent_run`, and its posture defaults to
@@ -247,7 +250,10 @@ Off unless `actionGuard.enabled` is `true`:
   [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
 
 Off unless `openclawAutoMemory` is `true`:
-- Auto-extract on `/new`, `/stop`, `/clear`, `/exit`
+- Auto-extract on `/new` and `/stop`. `/clear` and `/exit` are not core
+  OpenClaw 2026.9.6 hook events and are not in the hook's `events` list, so the
+  hook does not capture on them. On `/stop`, core OpenClaw does not show the
+  hook's "Saved N memories" note
 - `llm_output` auto-memory extraction
 
 When the key is not set, both stay off. This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
@@ -307,7 +313,7 @@ The recall surfaces wrap stored memory in one untrusted-data frame before a mode
 - the MCP tools `recall`, `get_memory`, `get_related`, `get_context` (prose output; `format: "raw"` is a JSON document that carries the same notice and frame id as fields), `start_session`, `remember` (success), `forget` (when it lists titles), consolidation previews that list titles, contradiction listings, `quarantine_review` list, and `scan_memories` findings;
 - JSON emitters `export_memories` and graph query/entities/explain success payloads, which carry `untrusted_data_notice` / `frame_id` as the first keys so the document still parses;
 - the MCP resources `memory://context` and `memory://important`;
-- proactive recall on a `message` event (the bundled OpenClaw hook);
+- proactive recall on a `message` event in the bundled OpenClaw hook. That code frames its output, but it is dormant: the hook does not subscribe `message` events, so core OpenClaw 2026.9.6 never calls it;
 - the Claude Code hooks and the LangChain adapter.
 
 Empty and error results with no stored text stay unframed.
