@@ -185,6 +185,8 @@ export interface CheckResult {
   status: CheckStatus;
   message: string;
   fix?: string;
+  /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
+  fixNoteWithCommands?: true;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -2273,8 +2275,13 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           + 'recovery reading it, so bounding it safely is separate work, tracked in #579. Nothing '
           + 'here will delete security evidence for you.';
       }
+      reportOnly = true;
       return largestConsumerReport();
     };
+    // Set when remedy() fell through to the report: its only command is the
+    // `logs prune` dry run, an inspection step, so the human report must keep
+    // the attribution and scope prose next to it.
+    let reportOnly = false;
 
     /**
      * #649: no command applies, but the row still has to say WHERE the bytes
@@ -2360,6 +2367,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         status: 'fail',
         message: `${dataStr}${backupsStr}${modelsStr} — at limit! (${breakdown})`,
         fix: remedy(),
+        ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else if (pct >= 80) {
       return {
@@ -2367,6 +2375,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         status: 'warn',
         message: `${dataStr}${backupsStr}${modelsStr} — approaching limit (${breakdown})`,
         fix: remedy(),
+        ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else {
       return { label: 'Disk', status: 'pass', message: `${dataStr}${backupsStr}${modelsStr}` };

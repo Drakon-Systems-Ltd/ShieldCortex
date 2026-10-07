@@ -30,6 +30,7 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 
 import { checkDiskUsage } from '../doctor.js';
+import { formatDoctorReport } from '../doctor-report.js';
 
 const KB = 1024;
 let scDir: string;
@@ -268,4 +269,110 @@ describe('#649 the existing command-backed remedies are unchanged', () => {
     expect(result.status).toBe('pass');
     expect(result.fix).toBeUndefined();
   });
+});
+
+/**
+ * #649 round 2 — the paragraph above has to reach the human report. The
+ * formatter lifts backticked commands out of `fix` and, when it finds any,
+ * prints ONLY those. The fallback's dry-run note made it find one, so the
+ * operator saw `$ shieldcortex logs prune` and none of the attribution, ties,
+ * free-page or scope text. These go through the real renderer, color off,
+ * in both the default (collapsed) and --verbose layouts.
+ */
+describe('#649 the fallback survives the human report', () => {
+  function render(result: Awaited<ReturnType<typeof checkDiskUsage>>, verbose: boolean): string {
+    return formatDoctorReport([result], { verbose, width: 200, color: false })
+      .join('\n');
+  }
+  /** Rendered text with wrapping and indentation collapsed. */
+  function flat(text: string): string {
+    return text.replace(/\s+/g, ' ');
+  }
+
+  for (const verbose of [false, true]) {
+    const mode = verbose ? 'verbose' : 'default';
+
+    it(`${mode}: non-majority repair logs keep attribution, scope and the dry run`, async () => {
+      writeBytes('memories.db', 25 * KB);
+      writeBytes('state/worker.json', 30 * KB);
+      repairLogs(20, 2 * KB);
+
+      const result = await checkDiskUsage(scDir, 64 * KB);
+      expect(result.fix).toMatch(/^Largest measured consumer: repair logs/);
+      const out = render(result, verbose);
+      const text = flat(out);
+
+      expect(text).toMatch(/Largest measured consumer: repair logs, 40\.0 KB of the 95\.0 KB counted against the limit \(42%\)\./);
+      expect(text).toMatch(/Then everything else 30\.0 KB, the database 25\.0 KB\./);
+      expect(text).toMatch(/shieldcortex logs prune \(without --execute\) lists which project-key repair logs retention would remove; it never touches audit evidence/);
+      expect(text).toMatch(/not a measurement of free space on the filesystem — inspect before removing anything/);
+      // The copy-paste line is the dry run, never the destructive form.
+      expect(out).toMatch(/^\s*\$ shieldcortex logs prune$/m);
+      expect(text).not.toMatch(/logs prune --execute/);
+      expect(text).not.toMatch(UNSAFE_ADVICE);
+      expect(text).not.toMatch(FALSE_EXHAUSTION);
+    });
+
+    it(`${mode}: a warn-level non-majority repair row keeps the same paragraph`, async () => {
+      writeBytes('memories.db', 25 * KB);
+      writeBytes('state/worker.json', 30 * KB);
+      repairLogs(20, 2 * KB);
+
+      const result = await checkDiskUsage(scDir, 110 * KB);
+      expect(result.status).toBe('warn');
+      const out = render(result, verbose);
+      const text = flat(out);
+
+      expect(text).toMatch(/Largest measured consumer: repair logs/);
+      expect(text).toMatch(/shieldcortex logs prune \(without --execute\)/);
+      expect(text).toMatch(/inspect before removing anything/);
+      expect(out).toMatch(/^\s*\$ shieldcortex logs prune$/m);
+      expect(text).not.toMatch(/logs prune --execute/);
+    });
+
+    it(`${mode}: a database/repair tie names both, the free-page note and the audit line`, async () => {
+      writeBytes('memories.db', 40 * KB);
+      repairLogs(20, 2 * KB);
+      writeBytes('audit/realtime-2026-01-01.jsonl', 30 * KB);
+      writeBytes('state/worker.json', 5 * KB);
+
+      const result = await checkDiskUsage(scDir, 64 * KB);
+      expect(result.status).toBe('fail');
+      const out = render(result, verbose);
+      const text = flat(out);
+
+      expect(text).toMatch(/Largest measured consumers, tied: the database and repair logs, 40\.0 KB each of the 115\.0 KB counted against the limit \(35% each\)\./);
+      expect(text).toMatch(/Then audit evidence 30\.0 KB, everything else 5\.0 KB\./);
+      expect(text).toMatch(/free pages could not be read, so nothing about what fills it was measured and no command is named for it/);
+      expect(text).toMatch(/shieldcortex logs prune \(without --execute\)/);
+      expect(text).toMatch(/Audit evidence \(26%\) has no automatic retention yet \(#579\), and nothing here deletes it/);
+      expect(text).toMatch(/not a measurement of free space on the filesystem — inspect before removing anything/);
+      expect(out).toMatch(/^\s*\$ shieldcortex logs prune$/m);
+      expect(text).not.toMatch(/logs prune --execute|shieldcortex vacuum/);
+      expect(text).not.toMatch(UNSAFE_ADVICE);
+      expect(text).not.toMatch(FALSE_EXHAUSTION);
+    });
+
+    it(`${mode}: majority repair logs still render as the two commands only`, async () => {
+      writeBytes('memories.db', 4 * KB);
+      repairLogs(30, 2 * KB);
+
+      const result = await checkDiskUsage(scDir, 32 * KB);
+      const out = render(result, verbose);
+
+      expect(out).toMatch(/^\s*\$ shieldcortex logs prune$/m);
+      expect(out).toMatch(/^\s*\$ shieldcortex logs prune --execute$/m);
+      expect(flat(out)).not.toMatch(/Largest measured consumer/);
+    });
+
+    it(`${mode}: a ≥20% free-page database still renders vacuum as the command`, async () => {
+      buildDb(100 * KB, 400 * KB);
+
+      const result = await checkDiskUsage(scDir, 256 * KB);
+      const out = render(result, verbose);
+
+      expect(out).toMatch(/^\s*\$ shieldcortex vacuum$/m);
+      expect(flat(out)).not.toMatch(/Largest measured consumer/);
+    });
+  }
 });
