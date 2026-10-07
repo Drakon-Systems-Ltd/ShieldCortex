@@ -1,7 +1,8 @@
 /**
  * Docs/comment contract: per-consumer memory defaults and wiring prerequisites,
  * as described in the cortex-memory hook (source and ClawHub-bundled copies),
- * the `shieldcortex update` 4.11 boundary notice and the root README.
+ * the `shieldcortex update` 4.11 boundary notice and docs/UPDATING.md
+ * (moved off the root README so the front page stays short).
  *
  * What the shipped source does (pinned by the first describe block):
  *   - every consumer treats an unset `openclawAutoMemory` / `proactiveRecall`
@@ -147,9 +148,9 @@ describe('src/cli/update.ts 4.11 boundary notice', () => {
   });
 });
 
-describe('README.md prompt-time recall', () => {
-  const readme = read('README.md');
-  const line = readme.split('\n').find((l) => l.startsWith('Local UI: **Overview'));
+describe('docs/UPDATING.md prompt-time recall', () => {
+  const page = read('docs', 'UPDATING.md');
+  const line = page.split('\n').find((l) => l.startsWith('Local UI: **Overview'));
 
   it('names the hook prerequisite and the config gate', () => {
     assert.ok(line, 'Local UI paragraph not found');

@@ -30,37 +30,28 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     expect(pkg.engines.node).toBe('^22.14.0 || >=24.0.0');
   });
 
-  it('README warns above the install command and links the upgrade page', () => {
+  it('README states the Node floor in Install, before the install command, and links the upgrade page', () => {
     const readme = read('README.md');
     expect(readme).toMatch(/ShieldCortex 5\.x requires Node 22\.14\+ or Node 24/);
     expect(readme).toMatch(/Node 20 is no longer supported/);
     expect(readme).toMatch(/docs\/UPGRADING-5\.md/);
     expect(readme).toMatch(/Action Guard stays off by default/);
-    // The warning must appear before the Quick Start install block, not buried.
-    expect(readme.indexOf('ShieldCortex 5.x requires Node')).toBeLessThan(
-      readme.indexOf('## 🚀 Quick Start'),
-    );
-  });
-
-  it('Quick Start states the Node floor before the install command', () => {
-    const readme = read('README.md');
-    const qs = readme.indexOf('## 🚀 Quick Start');
-    const req = readme.indexOf('### Requirements', qs);
-    const install = readme.indexOf('npm install -g shieldcortex', qs + 1);
-    expect(req).toBeGreaterThan(qs);
-    expect(install).toBeGreaterThan(req);
-    expect(readme.slice(req, install)).toMatch(/Node 22\.14\+/);
-    expect(readme.slice(req, install)).toMatch(/Node 20 is not supported/);
-  });
-
-  it('README states the npm engines behaviour precisely and promises no restart it cannot keep', () => {
-    const readme = read('README.md');
-    const qs = readme.indexOf('## 🚀 Quick Start');
-    const req = readme.indexOf('### Requirements', qs);
-    const install = readme.indexOf('npm install -g shieldcortex', qs + 1);
+    // The floor sits in the Install section, immediately before the command,
+    // so a global install still sees it. It is not a warning box above the title.
+    const section = readme.indexOf('## Install');
+    const floor = readme.indexOf('ShieldCortex 5.x requires Node');
+    const npm = readme.indexOf('npm install -g shieldcortex', section);
+    expect(section).toBeGreaterThan(0);
+    expect(floor).toBeGreaterThan(section);
+    expect(npm).toBeGreaterThan(floor);
+    const block = readme.slice(section, npm);
+    expect(block).toMatch(/Node 22\.14\+/);
+    expect(block).toMatch(/Node 20 is no longer supported/);
+    expect(block).toMatch(/Node 23/);
     // engines is advisory unless engine-strict is set (src/cli/doctor.ts); the
     // README must say both halves, not "warns but does not refuse".
-    expect(readme.slice(req, install)).toMatch(/engine-strict/);
+    expect(block).toMatch(/engine-strict/);
+    expect(block).toMatch(/installs anyway/);
     expect(readme).not.toMatch(/does not refuse|only warns|or any 24/);
     // postinstall, the wiring offer and the macOS dashboard kick can all
     // restart something, so `update` may not claim to leave restarts to you.
