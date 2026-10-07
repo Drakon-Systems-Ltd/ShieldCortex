@@ -145,8 +145,8 @@ it, but that skips the native-module check too — prefer the variable.
 ## Updating the plugin
 
 `shieldcortex update` refreshes an OpenClaw integration that is already on the
-box. The README's [Updating](../README.md#updating) section is the short
-version; this is what each step does.
+box. The [updating guide](UPDATING.md#updating) is the operator summary;
+this page is what each step does.
 
 - **Plugin** — `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest`.
   The forced form is deliberate: it replaces a registration pinned to an older
