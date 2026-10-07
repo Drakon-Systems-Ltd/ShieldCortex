@@ -62,7 +62,9 @@ describe("doctor checkDiskUsage excludes models/ from the 100 MB safety limit", 
     // and #573 recommends only what a measurement supports: an unreadable file
     // is not evidence about what is inside it, so the remedy reports the sizes
     // and names no command.
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: the largest term is named even when no command applies (was:
+    // /No single measured consumer/, which hid where the bytes were).
+    expect(result.fix).toMatch(/^Largest measured consumer: the database/);
     expect(result.fix).not.toMatch(/models/);
     expect(result.fix).not.toMatch(/memories prune|memories dedupe|sessions prune/);
   });
