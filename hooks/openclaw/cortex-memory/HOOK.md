@@ -105,7 +105,9 @@ shieldcortex memories purge --malformed --execute    # delete (writes a backup f
 
 ## Auto-Memory
 
-Auto-memory extraction is enabled by default. ShieldCortex complements your existing memory system by capturing decisions, fixes, and learnings with built-in deduplication to avoid noise.
+Auto-memory extraction runs only when `openclawAutoMemory` is `true` in `~/.shieldcortex/config.json`. When the key is not set, or the file is missing, it is off. A fresh global, non-CI `npm install -g shieldcortex` on a machine with no config file writes one with `openclawAutoMemory: true` (and `proactiveRecall: true`) when that write succeeds. Local and CI installs, and installs run with `--ignore-scripts`, do not write it. An existing config file is never changed, so an upgrade keeps whatever it already says. When on, it captures decisions, fixes, and learnings, with deduplication.
+
+The config file does not install this hook. It runs only once the hook is installed in OpenClaw and not disabled there: `shieldcortex openclaw install`, or `shieldcortex setup`, which asks before wiring.
 
 Disable auto-save with CLI:
 
