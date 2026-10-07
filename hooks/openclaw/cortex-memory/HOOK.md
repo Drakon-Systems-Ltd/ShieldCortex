@@ -19,13 +19,16 @@ When `openclawAutoMemory` is enabled:
 3. Saves up to 5 high-salience memories to ShieldCortex via mcporter
 4. Skips exact and near-duplicate memories using novelty filtering
 
-### On `/stop`, `/clear`, `/exit` (Session End)
+### On `/stop` (Session End)
 When `openclawAutoMemory` is enabled:
-1. Captures the current session transcript before it ends
+1. Reads the current session transcript
 2. Pattern-matches for important content (same patterns as `/new`)
 3. Saves memories with a `session-stop` tag for tracking
-4. **Ensures work is saved** even when explicitly ending a session
-5. Skips exact and near-duplicate memories using novelty filtering
+4. Skips exact and near-duplicate memories using novelty filtering
+
+Core OpenClaw 2026.9.6 does not show the hook's "Saved N memories" note for `/stop`: the stop command sends its own reply and does not read the hook's `event.messages`.
+
+`/clear` and `/exit` are not core OpenClaw 2026.9.6 hook events, and they are not in this hook's `events` list, so this hook does not capture on them.
 
 ### On Session Start (Agent Bootstrap)
 Unbounded `CORTEX_MEMORY.md` dump remains **disabled** (v2026.2.26 ~40× context blow-up class).
@@ -34,9 +37,11 @@ Unbounded `CORTEX_MEMORY.md` dump remains **disabled** (v2026.2.26 ~40× context
 
 The hook still fires on `agent:bootstrap` for lifecycle wiring (threat scan warnings, optional inject pack, self-heal). It must never reintroduce unbounded memory dumps.
 
-### Keyword Triggers
+### Keyword Triggers (dormant, not registered)
 
-Say any of these phrases to trigger an instant save to Cortex memory:
+The handler has a keyword-trigger path, but it is **not registered** on core OpenClaw 2026.9.6 with this manifest, and it is not enabled by default. The `events` list above subscribes only `command:new`, `command:stop` and `agent:bootstrap`. OpenClaw never sends this hook a `message` event, and no other command action reaches the handler's command fallback. Saying one of these phrases does **not** save anything through this hook. The per-message proactive recall in the same `message` branch is dormant for the same reason; this hook does not recall memory on each message.
+
+Phrases the dormant code recognises:
 
 | Trigger Phrase | Category | Importance |
 |---------------|----------|------------|
@@ -64,7 +69,7 @@ Say any of these phrases to trigger an instant save to Cortex memory:
 | **"decision made"** | architecture | high |
 | **"going with"** | architecture | normal |
 
-Content after the trigger phrase is extracted and saved as the memory content.
+If that path were registered, it would save the text after the phrase as the memory content.
 
 ## Defence Audit Guarantees
 
