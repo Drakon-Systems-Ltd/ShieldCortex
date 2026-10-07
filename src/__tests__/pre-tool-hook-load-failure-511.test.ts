@@ -154,6 +154,13 @@ describe('issue #511 PreToolUse failure posture', () => {
     expect(launcher.launcherCatastrophicMatch(payload(command))).toBe(expected);
   });
 
+  it.each(['data', 'text', 'literal'])('matches the OpenClaw typed-shell %s field on the parsed surface', (key) => {
+    const input = JSON.stringify({ tool_name: 'process', tool_input: { [key]: catastrophic } });
+    expect(launcher.launcherCatastrophicMatch(input)).toBe(true);
+    const benign = JSON.stringify({ tool_name: 'process', tool_input: { [key]: 'ls' } });
+    expect(launcher.launcherCatastrophicMatch(benign)).toBe(false);
+  });
+
   it('matches argv arrays and truncated quoted input', () => {
     expect(launcher.launcherCatastrophicMatch(payload(['rm', '-r', '-f', '/']))).toBe(true);
     expect(launcher.launcherCatastrophicMatch(`{"tool_name":"Bash","tool_input":{"command":"${splitFlags}"`)).toBe(true);
