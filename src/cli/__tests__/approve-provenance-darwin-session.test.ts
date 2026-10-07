@@ -199,6 +199,67 @@ describe('macOS — discovery failures refuse', () => {
   });
 });
 
+/**
+ * Exact MAX_WALK (64) boundaries. ladder() fills `procs` with `names` chained
+ * under launchd and returns the pid of the bottom entry.
+ */
+function ladder(procs: Record<number, FakeProc>, firstPid: number, names: string[]): number {
+  // `names` is bottom-first: names[0] is the parent of the start node.
+  let parent = 1;
+  for (let i = names.length - 1, pid = firstPid; i >= 0; i -= 1, pid += 1) {
+    procs[pid] = { ppid: parent, tty: '??', comm: names[i], stat: 'S' };
+    parent = pid;
+  }
+  return parent;
+}
+
+describe('macOS — exact walk-limit boundaries', () => {
+  // Walk 1 inspects leaf, login, the ladder, then launchd: ladder + 3 nodes.
+  function walk1(total: number, agentAtLast = false) {
+    const procs: Record<number, FakeProc> = { 1: LAUNCHD };
+    // Bottom-first; the last entry sits directly under launchd and is the
+    // 64th process walk 1 inspects when total is 65.
+    const names = Array.from({ length: total - 3 }, (_, i) => (i === total - 4 ? 'Terminal' : 'filler'));
+    if (agentAtLast) names[names.length - 1] = 'claude';
+    const top = ladder(procs, 5000, names);
+    procs[6000] = { ppid: top, tty: 'ttys020', comm: 'login', stat: 'Ss' };
+    procs[6001] = { ppid: 6000, tty: 'ttys020', comm: 'node', stat: 'S+' };
+    return verdict(procs, 6001).v;
+  }
+
+  it('walk 1: exactly 64 processes to launchd passes', () => {
+    expect(walk1(64)).toMatchObject({ ok: true });
+  });
+  it('walk 1: 65 processes refuses as unreadable', () => {
+    expect(walk1(65).reason).toBe('process-tree-unreadable');
+  });
+  it('walk 1: an agent as the 64th inspected process is caught', () => {
+    expect(walk1(65, true).reason).toBe('agent-ancestor');
+  });
+
+  // Walk 2: an orphaned leaf (node → launchd) whose tty leader has its own
+  // ancestry: leaderParent, the ladder, then launchd: ladder + 1 nodes.
+  function walk2(total: number, agentAtLast = false) {
+    const procs: Record<number, FakeProc> = { 1: LAUNCHD };
+    const names = Array.from({ length: total - 1 }, (_, i) => (i === total - 2 ? 'Terminal' : 'filler'));
+    if (agentAtLast) names[names.length - 1] = 'claude';
+    const top = ladder(procs, 7000, names);
+    procs[8000] = { ppid: top, tty: 'ttys021', comm: 'login', stat: 'Ss' };
+    procs[8001] = { ppid: 1, tty: 'ttys021', comm: 'node', stat: 'S+' };
+    return verdict(procs, 8001).v;
+  }
+
+  it('walk 2 (leader branch): exactly 64 processes passes', () => {
+    expect(walk2(64)).toMatchObject({ ok: true });
+  });
+  it('walk 2 (leader branch): 65 processes refuses as unreadable', () => {
+    expect(walk2(65).reason).toBe('process-tree-unreadable');
+  });
+  it('walk 2 (leader branch): an agent as the 64th inspected process is caught', () => {
+    expect(walk2(65, true).reason).toBe('agent-ancestor');
+  });
+});
+
 describe('macOS — manufactured terminals refuse', () => {
   it('fresh pty, shell as leader, launcher gone (launchd → -zsh → node)', () => {
     const procs: Record<number, FakeProc> = {
