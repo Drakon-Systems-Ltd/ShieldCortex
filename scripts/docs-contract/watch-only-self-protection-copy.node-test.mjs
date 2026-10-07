@@ -11,6 +11,12 @@
  * policy. So the catastrophic tier is NOT the only thing watch-only stops,
  * and the copy must not say it is.
  *
+ * The floor is a classifier on the tool call: it does not stop a same-UID
+ * call that reaches the same files another way (tool-action-guard.ts). So the
+ * copy says calls the guard RECOGNISES, never "any call", and lists the
+ * exceptions as examples ("including"), never as a closed "except" list —
+ * the session-lease refusal and invalid tool input also stop calls in shadow.
+ *
  * Text only: files are read and matched. Nothing here imports an application
  * module, runs the guard, a hook, setup or doctor, or reads any config. A
  * static text match is not runtime proof that anything is stopped.
@@ -86,10 +92,16 @@ describe('setup: Watch only copy', () => {
 
   it('names the catastrophic tier and the guard-own-files exception', () => {
     assert.match(body, /catastrophic tier/);
-    assert.match(body, /guard's own files/);
-    assert.match(body, /switch it off/);
+    assert.match(body, /calls the guard recognises as changing its own files/);
+    assert.match(body, /explicitly disabling it/);
     assert.match(body, /held for your approval/);
     assert.match(body, /\bincluding\b/, 'the list must stay non-exhaustive');
+  });
+
+  it('bounds the floor to what the guard recognises, not every such call', () => {
+    assert.doesNotMatch(body, /\bany call\b/i);
+    assert.doesNotMatch(body, /\bevery call that changes\b/i);
+    assert.match(body, /may not be caught/);
   });
 
   it('qualifies Hermes, which has no approval prompt', () => {
@@ -117,27 +129,32 @@ describe('guard readiness: posture and mode lines', () => {
     return m[1].replace(/\\'/g, "'");
   };
 
+  /** Recognition boundary and non-exhaustive exceptions, shared by every watch/shadow line. */
+  const assertQualifiedExceptions = (t) => {
+    assert.match(t, /ordinary dangerous ops/);
+    assert.match(t, /held or blocked, including catastrophic ops/);
+    assert.match(t, /calls the guard recognises as changing its own state\/config or disabling it/);
+    assert.doesNotMatch(t, /\bexcept\b/, 'a closed except-list omits the lease and invalid-input floors');
+    assert.doesNotMatch(t, /\bany call\b|changes to the guard's own/i);
+  };
+
   it('watch-only posture line names the self-protection exception', () => {
     const t = line(posture, 'watch-only');
     assert.doesNotMatch(t, /\(catastrophic still blocks\)/);
-    assert.match(t, /catastrophic/);
-    assert.match(t, /guard's own state\/config/);
-    assert.match(t, /held or blocked/);
+    assert.match(t, /logged, not stopped/);
+    assertQualifiedExceptions(t);
   });
 
   it('watch-only mode line names the self-protection exception', () => {
     const t = line(mode, 'watch-only');
     assert.match(t, /advisory/);
-    assert.match(t, /catastrophic/);
-    assert.match(t, /guard's own state\/config/);
+    assertQualifiedExceptions(t);
   });
 
   it('shadow mode line no longer says dangerous ops are categorically NOT stopped', () => {
     const t = line(mode, 'shadow');
     assert.match(t, /would-stop/);
-    assert.match(t, /except/);
-    assert.match(t, /catastrophic/);
-    assert.match(t, /guard's own state\/config/);
+    assertQualifiedExceptions(t);
   });
 
   it('enforcing and off lines are unchanged', () => {
@@ -151,5 +168,11 @@ describe('CHANGELOG', () => {
   it('Unreleased names the watch-only copy correction', () => {
     const unreleased = between(read('CHANGELOG.md'), '## [Unreleased]', '\n## [');
     assert.match(unreleased, /Watch only[^\n]*catastrophic[^\n]*not the only/i);
+    const bullet = unreleased.split('\n').find((l) => /Watch only copy/.test(l));
+    assert.ok(bullet, 'no Watch only copy bullet');
+    assert.match(bullet, /recognises as changing its own config/);
+    assert.match(bullet, /does not promise that every route to those files is caught/);
+    assert.match(bullet, /not a complete list/);
+    assert.doesNotMatch(bullet, /a call that changes the guard's own/);
   });
 });
