@@ -164,6 +164,25 @@ describe('README.md prompt-time recall', () => {
     assert.match(line, /local and CI installs do not/);
     assert.match(line, /an existing config is never changed/);
     assert.match(line, /when the key is not set, recall is off/);
-    assert.match(line, /The npm install wires no hook\./);
+  });
+
+  // npm's postinstall can still refresh (and, on the plugin-only fallback,
+  // install) the OpenClaw hook, so the no-wiring claim names its consumer.
+  it('scopes the npm no-wiring statement to the Claude Code hook', () => {
+    assert.doesNotMatch(line, /wires no hook/);
+    assert.match(line, /The npm install does not wire Claude Code's `UserPromptSubmit` hook/);
+    assert.match(line, /npm's postinstall can still refresh an existing OpenClaw integration \(see \[Updating by hand\]\(#updating-by-hand\)\)/);
+  });
+});
+
+describe('CHANGELOG.md Unreleased memory-defaults bullet', () => {
+  const changelog = read('CHANGELOG.md');
+  const unreleased = changelog.slice(changelog.indexOf('## [Unreleased]'), changelog.indexOf('\n## [', changelog.indexOf('## [Unreleased]') + 1));
+  const bullet = unreleased.split('\n').find((l) => l.startsWith('- **Memory defaults in the cortex-memory hook'));
+
+  it('scopes the npm no-wiring statement to the Claude Code hook', () => {
+    assert.ok(bullet, 'Unreleased memory-defaults bullet not found');
+    assert.doesNotMatch(bullet, /wires no hook/);
+    assert.match(bullet, /the npm install does not wire Claude Code's `UserPromptSubmit` hook/);
   });
 });
