@@ -2754,15 +2754,21 @@ export function formatApprovalCardLines(
   const prefix = opts.actionPrefix ?? '';
   // The action keeps the room the generic WHAT needs whole.
   const want = Math.min(WHAT_FLOOR, flattenCardText(card.action).length);
-  const whyLines = (room: number) => layoutWhy(card.reason, room);
   const size = (lines: string[]) => lines.reduce((n, l) => n + l.length + sep, 0);
+  const whyFor = (whoLine: string) => layoutWhy(card.reason, Math.max(40, budget - (prefix.length + want + whoLine.length + footer.length + 4 * sep)));
   // 72: room for a 20-character host plus the session id (`describeWho`).
   let who = clipLine(`Who: ${card.who}`, 72);
-  let why = whyLines(2 * WHY_LINE_MAX);
-  const deficit = () => prefix.length + want + sep + size(why) + who.length + sep + footer.length - budget;
-  // R1 (#648 r5): WHO gives way before WHY, then WHY drops its last reasons.
-  if (deficit() > 0) who = clipLine(`Who: ${card.who}`, Math.max(WHO_FLOOR, who.length - deficit()));
-  if (deficit() > 0) why = whyLines(Math.max(40, budget - (prefix.length + want + who.length + footer.length + 4 * sep)));
+  let why = whyFor(who);
+  // R1 (#648 r5): WHO gives way before WHY — clipped only as far as it lets
+  // WHY show more of its reasons, never for nothing.
+  for (let len = who.length - 1; len >= WHO_FLOOR && reasonsShown(why) < reasonCount(card.reason); len -= 1) {
+    const shorter = clipLine(`Who: ${card.who}`, len);
+    const more = whyFor(shorter);
+    if (reasonsShown(more) > reasonsShown(why)) {
+      who = shorter;
+      why = more;
+    }
+  }
   const used = size(why) + who.length + footer.length + 3 * sep + prefix.length;
   const room = Math.max(40, Math.min(120, budget - used));
   return [`${prefix}${clipLine(card.action, room)}`, ...why, who, footer];
@@ -2770,6 +2776,13 @@ export function formatApprovalCardLines(
 
 /** The action line's guaranteed room: the whole generic WHAT fits. */
 const WHAT_FLOOR = 64;
+
+const reasonCount = (reason: unknown) => flattenCardText(reason).split(REASON_SEPARATOR).length;
+/** Whole reasons on the WHY line(s); a cut first reason counts as none. */
+function reasonsShown(lines: string[]): number {
+  const body = lines.map((l) => l.replace(/^(?:Why|Also): /, '')).join(REASON_SEPARATOR);
+  return body.split(REASON_SEPARATOR).filter((p) => p && !p.endsWith('…')).length;
+}
 /** One WHY line at most, label included: the longest single reason fits. */
 const WHY_LINE_MAX = 84;
 /** WHO is clipped no shorter than this to make room for WHY. */

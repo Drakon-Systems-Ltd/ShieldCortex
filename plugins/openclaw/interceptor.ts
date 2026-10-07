@@ -1132,11 +1132,20 @@ export function plainApprovalCard(card: ApprovalCardText | undefined): PlainAppr
   // does WHY drop its last (reassuring) reasons — whole, marked `; …`.
   const fixed = 'What: '.length + 'Why: '.length + 'Who: '.length + CARD_FOOTER.length + 3 * 3;
   const want = Math.min(WHAT_FLOOR, flattenPromptField(card.action).length);
-  let why = flattenPromptField(card.reason);
+  const whyFor = (whoLine: string) => fitReasons(card.reason, Math.max(40, 256 - (fixed + whoLine.length + want)));
+  const shown = (why: string) => why.split(REASON_SEPARATOR).filter((p) => p && !p.endsWith('…')).length;
+  const all = flattenPromptField(card.reason).split(REASON_SEPARATOR).length;
   let who = clipCardLine(card.who, 75);
-  const deficit = () => fixed + why.length + who.length + want - 256;
-  if (deficit() > 0) who = clipCardLine(card.who, Math.max(WHO_FLOOR, who.length - deficit()));
-  if (deficit() > 0) why = fitReasons(card.reason, Math.max(40, why.length - deficit()));
+  let why = whyFor(who);
+  // WHO is clipped only as far as it lets WHY show more of its reasons.
+  for (let len = who.length - 1; len >= WHO_FLOOR && shown(why) < all; len -= 1) {
+    const shorter = clipCardLine(card.who, len);
+    const more = whyFor(shorter);
+    if (shown(more) > shown(why)) {
+      who = shorter;
+      why = more;
+    }
+  }
   const room = Math.max(40, Math.min(120, 256 - (fixed + why.length + who.length)));
   return { what: clipCardLine(card.action, room), why, who, footer: CARD_FOOTER };
 }
