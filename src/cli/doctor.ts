@@ -1486,8 +1486,10 @@ export function runMemoryStatsCheck(
         warnings.push(`${stm}/${STM_LIMIT} STM — consolidation needed`);
         fixes.push(
           'STM is over its cap. Run `shieldcortex consolidate` to promote, expire and evict short-term memory ' +
-          'down to the cap (the brain worker does the same on its own schedule). Rows captured within the last ' +
-          'hour and pinned rows are never evicted, so a breach made of fresh captures clears on a later run.',
+          'down to the cap (the brain worker does the same on its own schedule). The same pass also evicts ' +
+          'long-term memory that is over its own cap and resolves identical long-term pairs; it reports each ' +
+          'count separately. Rows captured within the last hour and pinned rows are never evicted, so a breach ' +
+          'made of fresh captures clears on a later run.',
         );
       }
       if (ltm >= LTM_LIMIT * 0.9) {
@@ -1495,7 +1497,9 @@ export function runMemoryStatsCheck(
         warnings.push(`${ltm}/${LTM_LIMIT} LTM — approaching limit`);
         fixes.push(
           'Housekeeping. LTM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the ' +
-          'worker does it. No action needed unless recall feels stale.',
+          'worker does it. Note that consolidation evicts long-term rows only once LTM is OVER the cap (never ' +
+          'rows captured within the last hour or pinned rows), so this row can stay while LTM sits between ' +
+          '90% and 100%. No action needed unless recall feels stale.',
         );
       }
 

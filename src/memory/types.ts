@@ -143,11 +143,15 @@ export interface ConsolidationResult {
   consolidated: number;     // Memories moved to long-term
   decayed: number;          // Memories that decayed
   deleted: number;          // Memories removed: decay expiry + cap eviction (evicted is the cap part)
-  evicted?: number;         // #650: rows evicted by enforceMemoryLimits (already counted in deleted)
+  evicted?: number;         // #650: rows evicted by enforceMemoryLimits, BOTH tiers (already counted in deleted)
+  evictedShortTerm?: number; // #650/#667: the short_term share of `evicted`
+  evictedLongTerm?: number;  // #650/#667: the long_term share of `evicted` — LTM over its cap is evicted too
   contradictionsFound?: number;  // Phase 3: Contradictions detected
   contradictionsLinked?: number; // Phase 3: Contradiction links created
   salienceEvolved?: number;     // Memories with salience adjusted by structural importance
-  deduplicated?: number;        // Near-duplicate LTM memories merged
+  deduplicated?: number;        // LTM duplicate pairs resolved by deduplicateMemories: the loser is
+                                // DELETED when near-identical, otherwise DOWNVOTED — so this is not a
+                                // delete count and is NOT included in `deleted`
 }
 
 export interface ContextSummary {

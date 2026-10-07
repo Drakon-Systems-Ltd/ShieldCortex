@@ -114,8 +114,11 @@ export function consolidate(
       }
     }
 
-    // Enforce memory limits (the step that drains an over-cap STM — #650)
-    const evicted = enforceMemoryLimits(config);
+    // Enforce memory limits (the step that drains an over-cap STM — #650).
+    // Both tiers are checked: LTM over `maxLongTermMemories` is evicted here
+    // too, so the counts are kept per tier for honest reporting (#667).
+    const { shortTerm: evictedShortTerm, longTerm: evictedLongTerm } = enforceMemoryLimitsByTier(config);
+    const evicted = evictedShortTerm + evictedLongTerm;
     deleted += evicted;
 
     // Persist updated decay scores for efficient sorting
@@ -154,7 +157,10 @@ export function consolidate(
       console.error('[shieldcortex] Deduplication failed:', e);
     }
 
-    return { consolidated, decayed, deleted, evicted, contradictionsFound, contradictionsLinked, salienceEvolved, deduplicated };
+    return {
+      consolidated, decayed, deleted, evicted, evictedShortTerm, evictedLongTerm,
+      contradictionsFound, contradictionsLinked, salienceEvolved, deduplicated,
+    };
   });
 }
 
@@ -628,15 +634,23 @@ function pickEvictionVictims(
 }
 
 /**
- * Enforce maximum memory limits.
+ * Enforce maximum memory limits, reporting evictions PER TIER.
  * Removes the lowest-effective-salience eligible memories when limits are
  * exceeded — never newborns, never pinned rows (see pickEvictionVictims/#236).
+ *
+ * #667: both tiers are enforced here — `long_term` over `maxLongTermMemories`
+ * is evicted just like `short_term` over its cap — so callers that report what
+ * happened (the `consolidate` CLI) get the split rather than a single number
+ * they would have to label as one tier or the other.
  */
-export function enforceMemoryLimits(config: MemoryConfig = resolveMemoryConfig()): number {
+export function enforceMemoryLimitsByTier(
+  config: MemoryConfig = resolveMemoryConfig(),
+): { shortTerm: number; longTerm: number } {
   // Note: If called within consolidate(), this is already in a transaction
   // If called standalone, we wrap it for safety
   const db = getDatabase();
-  let deleted = 0;
+  let shortTerm = 0;
+  let longTerm = 0;
 
   // Check short-term memory limit
   const shortTermCount = (db.prepare(
@@ -647,7 +661,7 @@ export function enforceMemoryLimits(config: MemoryConfig = resolveMemoryConfig()
     const toRemove = shortTermCount - config.maxShortTermMemories;
     for (const id of pickEvictionVictims(db, 'short_term', toRemove)) {
       deleteMemory(id);
-      deleted++;
+      shortTerm++;
     }
   }
 
@@ -660,11 +674,21 @@ export function enforceMemoryLimits(config: MemoryConfig = resolveMemoryConfig()
     const toRemove = longTermCount - config.maxLongTermMemories;
     for (const id of pickEvictionVictims(db, 'long_term', toRemove)) {
       deleteMemory(id);
-      deleted++;
+      longTerm++;
     }
   }
 
-  return deleted;
+  return { shortTerm, longTerm };
+}
+
+/**
+ * Enforce maximum memory limits across BOTH tiers and return the total number
+ * of rows evicted. Same policy as enforceMemoryLimitsByTier; this is the
+ * long-standing single-number form used by the store's auto-enforcement.
+ */
+export function enforceMemoryLimits(config: MemoryConfig = resolveMemoryConfig()): number {
+  const { shortTerm, longTerm } = enforceMemoryLimitsByTier(config);
+  return shortTerm + longTerm;
 }
 
 /**

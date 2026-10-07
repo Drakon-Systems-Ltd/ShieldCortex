@@ -30,12 +30,15 @@
  * gets the guard's own documented opt-out, `SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME=1`,
  * and NOT an inherited `CLAUDE_MEMORY_DB`, which would silently redirect the
  * command away from the fixture (several sibling suites set it without
- * restoring it, and Jest workers are long-lived).
+ * restoring it, and Jest workers are long-lived). For the same reason the
+ * child's `SHIELDCORTEX_CONFIG_DIR` is pinned to the fixture's own
+ * `.shieldcortex`, never inherited: the caps the spawned command resolves must
+ * be the fixture's, not whatever a sibling suite last pointed the loader at.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { spawnSync } from 'child_process';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
@@ -54,16 +57,31 @@ function sqliteTs(agoMs: number): string {
 
 describe('#650 doctor STM row clears after its own suggested command', () => {
   let root: string;
+  let scDir: string;
   let dbPath: string;
   const cli = path.join(process.cwd(), 'dist', 'index.js');
 
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-650-home-'));
-    const scDir = path.join(root, '.shieldcortex');
+    scDir = path.join(root, '.shieldcortex');
     fs.mkdirSync(scDir, { recursive: true, mode: 0o700 });
     dbPath = path.join(scDir, 'memories.db');
     expect(fs.existsSync(cli)).toBe(true); // run-jest.mjs builds dist first
   });
+
+  /**
+   * Write a SIGNED config.json into the fixture's config dir so the spawned
+   * CLI resolves these caps (the loader ignores an unsigned file). Same
+   * HMAC scheme as `configurable-caps-wiring.test.ts`.
+   */
+  function writeFixtureConfig(obj: unknown): void {
+    const key = 'a'.repeat(64);
+    fs.writeFileSync(path.join(scDir, '.integrity-key'), key, { mode: 0o600 });
+    const body = JSON.stringify(obj, null, 2) + '\n';
+    fs.writeFileSync(path.join(scDir, 'config.json'), body);
+    const sig = createHmac('sha256', key).update(body, 'utf-8').digest('hex');
+    fs.writeFileSync(path.join(scDir, '.config-sig'), sig, { mode: 0o600 });
+  }
 
   afterEach(() => {
     try { closeDatabase(); } catch { /* already closed */ }
@@ -98,15 +116,46 @@ describe('#650 doctor STM row clears after its own suggested command', () => {
     }
   }
 
+  function ltmCount(): number {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return (db.prepare("SELECT COUNT(*) AS c FROM memories WHERE type = 'long_term'").get() as { c: number }).c;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Seed `n` LONG-TERM rows, no STM at all, with the same "only cap
+   * enforcement can touch these" shape as seedStm. Titles and bodies carry a
+   * UUID so neither the pre-pass dedup nor Dream Mode's near-duplicate merge
+   * can pair them: the only thing that may change the LTM count is eviction.
+   */
+  function seedLtm(n: number): void {
+    initDatabase(dbPath);
+    const db = getDatabase();
+    const ins = db.prepare(`
+      INSERT INTO memories (uuid, type, category, title, content, salience, access_count, last_accessed, created_at)
+      VALUES (?, 'long_term', 'note', ?, ?, 0.5, 1, ?, ?)
+    `);
+    for (let i = 0; i < n; i++) {
+      const tag = randomUUID();
+      ins.run(tag, `${tag} ltm ${i}`, `long-term fixture ${tag} row ${i}`, sqliteTs(2 * DAY + i * 1000), sqliteTs(3 * DAY + i * 1000));
+    }
+    closeDatabase();
+  }
+
   function runSuggestedCommand(): { status: number | null; stdout: string; stderr: string } {
     // Never let a sibling suite's leaked CLAUDE_MEMORY_DB pick the database:
     // this suite is about the DEFAULT path under HOME, like the doctor row.
-    const { CLAUDE_MEMORY_DB: _leaked, ...inherited } = process.env;
+    // Likewise the config dir is the fixture's own, never an inherited one.
+    const { CLAUDE_MEMORY_DB: _leakedDb, SHIELDCORTEX_CONFIG_DIR: _leakedCfg, ...inherited } = process.env;
     const res = spawnSync(process.execPath, [cli, 'consolidate'], {
       env: {
         ...inherited,
         HOME: root,
         USERPROFILE: root,
+        SHIELDCORTEX_CONFIG_DIR: scDir,
         // See the header: a checkout's dist against a default-path DB is what
         // the runtime-path guard exists to stop. HOME is a throwaway fixture.
         SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME: '1',
@@ -142,7 +191,8 @@ describe('#650 doctor STM row clears after its own suggested command', () => {
     // The command actually drained STM to the cap…
     expect(stmCount()).toBeLessThanOrEqual(CAP);
     // …and said so, rather than reporting a pass that touched nothing.
-    expect(run.stdout).toMatch(/evicted:\s+1\b/i);
+    expect(run.stdout).toMatch(/evicted over cap \(STM\):\s+1\b/i);
+    expect(run.stdout).toMatch(/evicted over cap \(LTM\):\s+0\b/i);
 
     // …and the row that sent the user here is gone.
     const after = runMemoryStatsCheck(dbPath, CAPS);
@@ -182,5 +232,67 @@ describe('#650 doctor STM row clears after its own suggested command', () => {
     expect(after.status).toBe('warn');
     expect(after.message).toContain(`${CAP + 1}/${CAP} STM — consolidation needed`);
     expect(after.fix).toMatch(/hour/);
+  });
+
+  // ── #667 review (CASE B1 / TARS 2): the maintenance phase is not STM-only ──
+
+  it('LTM-only over cap: the command evicts long-term rows and says so under the LTM line, not an STM heading', () => {
+    // Case's runtime repro used 1,005 aged LTM rows against the default cap of
+    // 1,000. The shape is the same at a configured cap of 20 with 25 rows, and
+    // the pass stays well under a second: Dream Mode's duplicate scans are
+    // O(n²) over LTM, so a thousand unique rows cost tens of seconds on a
+    // slow runner for no extra coverage.
+    const LTM_CAP = 20;
+    const caps = { maxShortTermMemories: CAP, maxLongTermMemories: LTM_CAP };
+    writeFixtureConfig({ memory: caps });
+    seedLtm(LTM_CAP + 5); // 0 STM
+
+    expect(stmCount()).toBe(0);
+    const run = runSuggestedCommand();
+    expectExitZero(run);
+
+    // Five long-term rows really were hard-deleted (cap policy unchanged)…
+    expect(ltmCount()).toBe(LTM_CAP);
+    // …and the output attributes them to the LONG-TERM cap, with STM at zero,
+    // instead of printing `Evicted: 5` under "Consolidating short-term memory".
+    expect(run.stdout).toMatch(/evicted over cap \(LTM\):\s+5\b/i);
+    expect(run.stdout).toMatch(/evicted over cap \(STM\):\s+0\b/i);
+    expect(run.stdout).not.toMatch(/consolidating short-term memory/i);
+    expect(run.stdout).not.toMatch(/^\s*evicted:\s+\d/im); // the old unqualified line is gone
+    // Nothing else moved: these rows are unique, so dedup resolved none.
+    expect(run.stdout).toMatch(/LTM duplicates resolved \(deleted or downvoted\):\s+0\b/);
+
+    // The STM row has nothing to say about an LTM-only store.
+    const after = runMemoryStatsCheck(dbPath, caps);
+    expect(after.message).not.toContain('consolidation needed');
+  });
+
+  // ── #667 review (CASE B2 / TARS 1): the pre-pass LTM dedup is reported ──
+
+  it('identical LTM pair: the pre-pass dedup resolves it and the command reports it on its own line', () => {
+    initDatabase(dbPath);
+    const db = getDatabase();
+    const ins = db.prepare(`
+      INSERT INTO memories (uuid, type, category, title, content, salience, access_count, last_accessed, created_at)
+      VALUES (?, 'long_term', 'note', ?, ?, 0.5, 1, ?, ?)
+    `);
+    for (let i = 0; i < 2; i++) {
+      ins.run(randomUUID(), 'identical title', 'identical long-term content for the dedup regression', sqliteTs(2 * DAY + i * 1000), sqliteTs(3 * DAY + i * 1000));
+    }
+    closeDatabase();
+
+    const run = runSuggestedCommand();
+    expectExitZero(run);
+
+    // A row disappeared (identical pair → the loser is deleted)…
+    expect(ltmCount()).toBe(1);
+    // …and the output accounts for it, instead of every counter printing 0.
+    // It is reported as a dedup resolution, NOT as an eviction or an expiry:
+    // `deduplicated` also counts downvoted losers, so it must not be folded
+    // into a hard-delete total.
+    expect(run.stdout).toMatch(/LTM duplicates resolved \(deleted or downvoted\):\s+1\b/);
+    expect(run.stdout).toMatch(/evicted over cap \(STM\):\s+0\b/i);
+    expect(run.stdout).toMatch(/evicted over cap \(LTM\):\s+0\b/i);
+    expect(run.stdout).toMatch(/expired \(decayed\):\s+0\b/i);
   });
 });
