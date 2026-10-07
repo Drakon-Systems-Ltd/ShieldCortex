@@ -356,6 +356,17 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
   const chain: string[] = [];
   let cur: ProcInfo | null = self;
 
+  // A hole in the middle of a walk, or a walk cut off at MAX_WALK, would let
+  // everything above it go unchecked. Init (pid 1) is the only parent we
+  // tolerate not reading.
+  const unreadable = (what: string): ProvenanceVerdict => ({
+    ok: false,
+    reason: 'process-tree-unreadable',
+    detail: `${what}, so the rest of the ancestry cannot be checked — try again from a terminal you opened yourself.`,
+    chain,
+  });
+
+  let walkedToRoot = false;
   for (let i = 0; cur && i < MAX_WALK; i += 1) {
     chain.push(cur.comm);
     if (nameIn(cur.comm, AGENT_PROCESS_NAMES)) {
@@ -366,20 +377,15 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
         chain,
       };
     }
-    if (cur.ppid <= 0 || cur.ppid === cur.pid) break;
+    if (cur.ppid <= 0 || cur.ppid === cur.pid) { walkedToRoot = true; break; }
     const parentPid: number = cur.ppid;
     cur = seam.proc(parentPid);
-    // A hole in the middle of the walk would let everything above it go
-    // unchecked. Init (pid 1) is the only parent we tolerate not reading.
-    if (!cur && treePlatform && parentPid > 1) {
-      return {
-        ok: false,
-        reason: 'process-tree-unreadable',
-        detail: `ancestor pid ${parentPid} could not be inspected, so the rest of the ancestry cannot be checked — try again from a terminal you opened yourself.`,
-        chain,
-      };
+    if (!cur) {
+      if (treePlatform && parentPid > 1) return unreadable(`ancestor pid ${parentPid} could not be inspected`);
+      walkedToRoot = true;
     }
   }
+  if (treePlatform && !walkedToRoot) return unreadable(`the ancestry is deeper than ${MAX_WALK} processes`);
 
   // The session leader is the process whose pid === OUR sid. Look it up
   // DIRECTLY — not "the first ancestor that happens to lead some session".
@@ -412,7 +418,11 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
   // the parent walk, bash via self.sid, and the agent is sitting on
   // leader.ppid unread. Walk that branch.
   {
+    if (!leaderParent && treePlatform && leader.ppid > 1) {
+      return unreadable(`the session leader's parent (pid ${leader.ppid}) could not be inspected`);
+    }
     let up: ProcInfo | null = leaderParent;
+    let leaderWalkedToRoot = up === null;
     for (let i = 0; up && i < MAX_WALK; i += 1) {
       if (nameIn(up.comm, AGENT_PROCESS_NAMES)) {
         return {
@@ -422,8 +432,16 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
           chain,
         };
       }
-      if (up.ppid <= 0 || up.ppid === up.pid) break;
-      up = seam.proc(up.ppid);
+      if (up.ppid <= 0 || up.ppid === up.pid) { leaderWalkedToRoot = true; break; }
+      const parentPid: number = up.ppid;
+      up = seam.proc(parentPid);
+      if (!up) {
+        if (treePlatform && parentPid > 1) return unreadable(`ancestor pid ${parentPid} of the session leader could not be inspected`);
+        leaderWalkedToRoot = true;
+      }
+    }
+    if (treePlatform && !leaderWalkedToRoot) {
+      return unreadable(`the session leader's ancestry is deeper than ${MAX_WALK} processes`);
     }
   }
 

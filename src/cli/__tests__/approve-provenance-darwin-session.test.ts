@@ -88,6 +88,26 @@ describe('macOS — humans pass', () => {
   it('SSH, e.g. a phone client (sshd-session → -zsh → node)', () => {
     expect(verdict(SSH, 450).v).toMatchObject({ ok: true, reason: null });
   });
+  it('iTerm2 (iTermServer → login → -zsh)', () => {
+    const procs: Record<number, FakeProc> = {
+      1: LAUNCHD,
+      510: { ppid: 1, tty: '??', comm: '/Applications/iTerm.app/Contents/MacOS/iTermServer-3.6.4', stat: 'Ss' },
+      511: { ppid: 510, tty: 'ttys003', comm: '/usr/bin/login', stat: 'Ss' },
+      512: { ppid: 511, tty: 'ttys003', comm: '-zsh', stat: 'S' },
+      513: { ppid: 512, tty: 'ttys003', comm: 'node', stat: 'S+' },
+    };
+    expect(verdict(procs, 513).v).toMatchObject({ ok: true, reason: null });
+  });
+  it('VS Code integrated terminal (Code Helper with a spaced path → zsh)', () => {
+    const procs: Record<number, FakeProc> = {
+      1: LAUNCHD,
+      520: { ppid: 1, tty: '??', comm: '/Applications/Visual Studio Code.app/Contents/MacOS/Code', stat: 'S' },
+      521: { ppid: 520, tty: '??', comm: '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)', stat: 'S' },
+      522: { ppid: 521, tty: 'ttys005', comm: '/bin/zsh', stat: 'Ss' },
+      523: { ppid: 522, tty: 'ttys005', comm: 'node', stat: 'S+' },
+    };
+    expect(verdict(procs, 523).v).toMatchObject({ ok: true, reason: null });
+  });
   it('a multiplexer pane (tmux server → zsh) is an accepted residual', () => {
     const procs: Record<number, FakeProc> = {
       1: LAUNCHD,
@@ -120,6 +140,51 @@ describe('macOS — discovery failures refuse', () => {
     const { v } = verdict(procs, 450);
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('process-tree-unreadable');
+  });
+  it('a hole in the recovered leader\'s own ancestry refuses (orphaned leaf, leader parent unreadable)', () => {
+    const procs: Record<number, FakeProc> = {
+      1: LAUNCHD,
+      // leaf orphaned to launchd but still on the leader's tty
+      840: { ppid: 1, tty: 'ttys012', comm: '-zsh', stat: 'Ss' },
+      841: { ppid: 1, tty: 'ttys012', comm: 'node', stat: 'S+' },
+    };
+    procs[840] = { ...procs[840], ppid: 9001 }; // leader's parent does not exist
+    const { v } = verdict(procs, 841);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('process-tree-unreadable');
+  });
+  it('a hole deeper in the leader\'s ancestry refuses', () => {
+    const procs: Record<number, FakeProc> = {
+      1: LAUNCHD,
+      850: { ppid: 9002, tty: '??', comm: 'some-provider', stat: 'S' },
+      851: { ppid: 850, tty: 'ttys013', comm: '-zsh', stat: 'Ss' },
+      852: { ppid: 1, tty: 'ttys013', comm: 'node', stat: 'S+' },
+    };
+    expect(verdict(procs, 852).v.reason).toBe('process-tree-unreadable');
+  });
+  it('an agent just beyond the 64-process walk limit is not silently skipped', () => {
+    const procs: Record<number, FakeProc> = { 1: LAUNCHD, 2000: { ppid: 1, tty: '??', comm: 'claude', stat: 'S' } };
+    let parent = 2000;
+    for (let pid = 2001; pid <= 2070; pid += 1) {
+      procs[pid] = { ppid: parent, tty: '??', comm: 'filler', stat: 'S' };
+      parent = pid;
+    }
+    procs[3000] = { ppid: parent, tty: 'ttys014', comm: 'login', stat: 'Ss' };
+    procs[3001] = { ppid: 3000, tty: 'ttys014', comm: 'node', stat: 'S+' };
+    const { v } = verdict(procs, 3001);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe('process-tree-unreadable');
+  });
+  it('a long but complete ancestry inside the limit still passes', () => {
+    const procs: Record<number, FakeProc> = { 1: LAUNCHD, 2000: { ppid: 1, tty: '??', comm: 'Terminal', stat: 'S' } };
+    let parent = 2000;
+    for (let pid = 2001; pid <= 2050; pid += 1) {
+      procs[pid] = { ppid: parent, tty: '??', comm: 'filler', stat: 'S' };
+      parent = pid;
+    }
+    procs[3000] = { ppid: parent, tty: 'ttys015', comm: 'login', stat: 'Ss' };
+    procs[3001] = { ppid: 3000, tty: 'ttys015', comm: 'node', stat: 'S+' };
+    expect(verdict(procs, 3001).v).toMatchObject({ ok: true });
   });
   it('the leader lookup runs once per tty, not once per ancestor', () => {
     const { ps } = verdict(TERMINAL_APP, 700);
