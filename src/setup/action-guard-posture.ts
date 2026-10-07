@@ -41,9 +41,13 @@ export const POSTURE_CHOICES: ReadonlyArray<{ key: string; choice: PostureChoice
     choice: 'watch-only',
     title: 'Watch only',
     body:
-      'The guard checks every tool call and writes what it thinks to the local audit log, but only the ' +
-      'catastrophic tier (things like wiping a disk or piping a download into a shell) is ever stopped. ' +
-      'Dangerous-but-sometimes-legitimate actions are logged as warnings and run.',
+      'The guard checks every tool call and writes what it thinks to the local audit log. ' +
+      'Dangerous-but-sometimes-legitimate actions are logged as warnings and run. Some calls are still ' +
+      'stopped or held for your approval, including the catastrophic tier (things like wiping a disk or ' +
+      'piping a download into a shell) and calls the guard recognises as changing its own files (its config, ' +
+      'approval and readiness records, decisions ledger) or as explicitly disabling it. It recognises these ' +
+      'from the tool call itself, so a call that reaches those files some other way may not be caught. The ' +
+      'Hermes plugin has no approval prompt, so there those calls are blocked.',
   },
   {
     key: '3',
