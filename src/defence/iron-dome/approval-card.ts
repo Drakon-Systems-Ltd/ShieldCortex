@@ -513,6 +513,7 @@ export type ShellDoubt =
   | 'eval-or-source'
   | 'shell-syntax'
   | 'unsupported-redirect'
+  | 'network-redirect'
   | 'exec-wrapper'
   | 'inline-code'
   | 'env-prefix'
@@ -546,6 +547,10 @@ export const OUTSIDE_UNDERSTOOD_SUBSET: Readonly<Record<ShellDoubt, { effect: 'g
   'eval-or-source': { effect: 'generic', what: 'eval, source and ., and builtins that run stored code (alias, trap, hash, enable)' },
   'shell-syntax': { effect: 'generic', what: 'subshells, groups, functions, loops, conditionals, negation, unterminated quotes' },
   'unsupported-redirect': { effect: 'generic', what: 'a redirect with no target' },
+  'network-redirect': {
+    effect: 'generic',
+    what: 'a redirect, dd of= or program output onto /dev/tcp/ or /dev/udp/ (a network socket, not a file), in any shape but `cat FILE > /dev/tcp/host/port`',
+  },
   'exec-wrapper': {
     effect: 'generic',
     what: 'bash/sh -c, su -c, pkexec, env -S, xargs, find -exec/-execdir/-ok running anything but rm/shred/unlink, sudo -s/-i/-e, and other programs that run a command',
@@ -1394,6 +1399,12 @@ function stepDoubts(seg: Segment, u: Unwrapped, afterCd: boolean, fedByDownload:
     const d = envDoubt(a);
     if (d) doubts.push(d);
   }
+  // #648 r6 B2: a socket path is never a file. Any redirect, `dd of=` or
+  // program output onto one goes generic, except the single shape `socketSend`
+  // describes.
+  const ddOut = prog === 'dd' ? args.filter((a) => a.startsWith('of=')).map((a) => a.slice(3)) : [];
+  const sockets = [...seg.writes, ...seg.reads, ...(prog ? writerOutputs(prog, args)?.outputs ?? [] : []), ...ddOut].filter(isSocketPath);
+  if (sockets.length > 0 && !socketSend(seg, u)) doubts.push('network-redirect');
   if (!prog) return doubts;
   if (EVAL_LIKE.has(prog)) doubts.push('eval-or-source');
   if (EXEC_WRAPPERS.has(prog)) doubts.push('exec-wrapper');
@@ -1796,6 +1807,50 @@ const isSensitiveWrite = (p: string) => SENSITIVE_PATH_RE.test(p) || SENSITIVE_W
 /** Redirect targets that write nothing anyone keeps. */
 const isBitBucket = (p: string) => /^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/.test(p);
 
+// ── Sockets: /dev/tcp and /dev/udp are not files (#648 r6 B2) ───────────────
+
+/** Bash opens a network socket, not a file, for a redirect onto these. */
+const isSocketPath = (p: string) => /^\/dev\/(?:tcp|udp)\//.test(p);
+
+/** The host a well-formed `/dev/tcp/<host>/<port>` reaches, through the
+ *  target gate, or null for anything malformed or withheld. */
+function socketHost(target: string): string | null {
+  const m = /^\/dev\/(?:tcp|udp)\/([A-Za-z0-9.-]+)\/(\d{1,5})$/.exec(target);
+  const host = m ? safeHost(`x@${m[1]}`) : null;
+  return host && !isWithheld(host) ? host : null;
+}
+
+/** Readers that pass a named file through unchanged or re-encoded. */
+const PASS_THROUGH_READERS = new Set(['cat', 'base64']);
+
+/**
+ * `cat FILE > /dev/tcp/host/port` — the ONE socket shape the card describes
+ * (as `Send a file … to host`): a trusted pass-through reader given named
+ * files, with the socket as its only redirect. Every other redirect, `dd of=`
+ * or program output onto a socket is outside the understood subset
+ * (`network-redirect`) and goes generic, so a send is never called a copy,
+ * a write or a disk operation.
+ */
+function socketSend(seg: Segment, u: Unwrapped): { files: string[]; host: string } | null {
+  if (!PASS_THROUGH_READERS.has(u.prog) || !isTrustedProgram(u.argv0)) return null;
+  const writes = seg.writes.filter((w) => !isBitBucket(w));
+  if (seg.reads.length > 0 || writes.length !== 1) return null;
+  const host = socketHost(writes[0]);
+  if (!host) return null;
+  const files = operands(u.prog, u.args);
+  if (files.length === 0 || files.some((f) => f === '-' || f === '/dev/stdin' || isSocketPath(f))) return null;
+  return { files, host };
+}
+
+/** `Send a file from your SSH folder ("…") to host`: what is sent, named by
+ *  its most sensitive file, and where it goes. */
+function sendPhrase(files: string[], dest: string): string {
+  const src = mostSensitive(files);
+  const from = locationOf(src).replace(/^ in /, ' from ');
+  const what = files.length > 1 ? `${files.length} files, including one${from}` : `a file${from}`;
+  return `Send ${what} (${quoted(src)}) to ${dest}`;
+}
+
 const andMore = (n: number) => (n > 0 ? ` and ${n} more` : '');
 
 function pathPhrase(verb: string, paths: string[], noun = 'a file'): string {
@@ -2044,6 +2099,9 @@ function describeProgram(step: Step, ctx: ShellContext): Described | null {
   const writes = seg.writes.filter((w) => !isBitBucket(w));
   const pos = operands(prog, args);
   if (READERS.has(prog)) {
+    // `cat SRC > /dev/tcp/host/port` sends SRC to host (#648 r6 B2).
+    const socket = socketSend(seg, step.u);
+    if (socket) return { category: 'network', sentence: sendPhrase(socket.files, socket.host) };
     // `cat SRC > DST` copies SRC: the card names the source, not just the
     // harmless-looking destination (#648 r2 S3). `sort -o`, `uniq IN OUT`
     // and `xxd IN OUT` write as well (#648 r3 R3).
@@ -2297,15 +2355,7 @@ function describeSendFlow(pipelineSteps: Step[]): Flow | null {
   }
   const raw = RAW_SOCKETS.has(step.u.prog);
   const dest = sender.dest ?? (raw ? 'another machine' : NO_WEB_HOST);
-  let sentence: string;
-  if (files.length > 0) {
-    const src = mostSensitive(files);
-    const from = locationOf(src).replace(/^ in /, ' from ');
-    const what = files.length > 1 ? `${files.length} files, including one${from}` : `a file${from}`;
-    sentence = `Send ${what} (${quoted(src)}) to ${dest}`;
-  } else {
-    sentence = `Send data to ${dest} (${step.u.prog})`;
-  }
+  const sentence = files.length > 0 ? sendPhrase(files, dest) : `Send data to ${dest} (${step.u.prog})`;
   return { category: 'network', sentence: withSudo(sentence, step), step, members: pipelineSteps };
 }
 
@@ -2536,7 +2586,9 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
   // R3: a write to a sensitive path, anywhere in the command, is named — or
   // the WHAT goes generic rather than leave it out.
   const sensitiveWrites = steps.flatMap((s) => [...s.seg.writes, ...(writerOutputs(s.u.prog, s.u.args)?.outputs ?? [])]).filter(isSensitiveWrite);
-  if (GATE.enabled && sensitiveWrites.some((w) => !text.includes(quoted(w)) && !text.includes(quoted(w, 40)))) {
+  // A socket write is named by its host (`… to example.com`), never as a path.
+  const named = (w: string) => text.includes(quoted(w)) || text.includes(quoted(w, 40)) || (isSocketPath(w) && socketHost(w) !== null && text.includes(` to ${socketHost(w)}`));
+  if (GATE.enabled && sensitiveWrites.some((w) => !named(w))) {
     doubts.add('hidden-write');
     return generic();
   }
