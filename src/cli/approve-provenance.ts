@@ -128,7 +128,7 @@ export const SHELL_NAMES: readonly string[] = [
  *  re-parented — the honest login path always has a terminal provider
  *  (sshd, login, tmux, gnome-terminal-server, …) as the leader's parent. */
 export const INIT_NAMES: readonly string[] = [
-  'systemd', 'init', 'systemd-init',
+  'systemd', 'init', 'systemd-init', 'launchd',
 ];
 
 // ── Process tree ──────────────────────────────────────
@@ -181,12 +181,18 @@ function readProcLinux(pid: number): ProcInfo | null {
 }
 
 /**
- * macOS `ps` prints SESS as 0 for every process, so the sid it reports can
- * never name a leader and every human's `approve` was refused as
- * `no-session-leader`. BSD ps does mark the leader: STAT carries `s`. A
- * controlling terminal belongs to exactly one session, so the leader is the
- * one `s` process attached to our tty. Anything else — none, or more than one
- * — returns 0 and the verdict stays fail-closed.
+ * macOS has no session id we can read. `ps -o sess=` is a kernel session
+ * pointer, not a pid, and on current releases it prints 0 for every process,
+ * so the leader lookup never found one and every human's `approve` was
+ * refused as `no-session-leader`.
+ *
+ * BSD ps does mark the leader: STAT carries `s`. A controlling terminal
+ * belongs to exactly one session (XNU refuses TIOCSCTTY on a tty another
+ * session owns, and clears the association on teardown), and `ps -t` selects
+ * by controlling terminal, not by open descriptors. So the leader is the one
+ * `s` process on our tty. None, more than one, or a query that fails all
+ * yield sid 0, which the verdict refuses: discovery failing must never read
+ * as a clean session.
  */
 export function darwinSessionLeaderFromPs(lines: string): number {
   const leaders: number[] = [];
@@ -197,30 +203,51 @@ export function darwinSessionLeaderFromPs(lines: string): number {
   return leaders.length === 1 ? leaders[0] : 0;
 }
 
-function psDarwin(args: string[]): string {
-  return execFileSync('ps', args, {
+/** Runs `ps` with these args and returns stdout; throws on any failure. */
+export type PsRunner = (args: string[]) => string;
+
+/** Absolute path: a caller-controlled PATH must not be able to supply the evidence. */
+const runSystemPs: PsRunner = (args) =>
+  execFileSync('/bin/ps', args, {
     encoding: 'utf8',
     timeout: 2000,
     stdio: ['ignore', 'pipe', 'ignore'],
   });
-}
 
-function readProcDarwin(pid: number): ProcInfo | null {
-  try {
-    const out = psDarwin(['-o', 'ppid=,sess=,tty=,comm=', '-p', String(pid)]).trim();
-    if (!out) return null;
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(out);
-    if (!m) return null;
-    const ttyName = m[3];
-    const tty = ttyName === '??' || ttyName === '-' ? 0 : 1;
-    let sid = Number(m[2]);
-    if (sid === 0 && tty === 1 && /^[\w/.-]+$/.test(ttyName)) {
-      sid = darwinSessionLeaderFromPs(psDarwin(['-t', ttyName, '-o', 'pid=,stat=']));
+/**
+ * Darwin process reader over an injectable `ps`. The tty → leader lookup is
+ * done at most once per tty per reader, so a long ancestry walk costs one
+ * extra `ps`, not one per hop.
+ */
+export function makeDarwinProcReader(ps: PsRunner = runSystemPs): (pid: number) => ProcInfo | null {
+  const leaderByTty = new Map<string, number>();
+  const leaderOf = (ttyName: string): number => {
+    const cached = leaderByTty.get(ttyName);
+    if (cached !== undefined) return cached;
+    let leader = 0;
+    try {
+      leader = darwinSessionLeaderFromPs(ps(['-t', ttyName, '-o', 'pid=,stat=']));
+    } catch {
+      leader = 0;
     }
-    return { pid, ppid: Number(m[1]), sid, comm: m[4].trim(), tty };
-  } catch {
-    return null;
-  }
+    leaderByTty.set(ttyName, leader);
+    return leader;
+  };
+
+  return (pid: number): ProcInfo | null => {
+    let out: string;
+    try {
+      out = ps(['-o', 'ppid=,tty=,comm=', '-p', String(pid)]).trim();
+    } catch {
+      return null;
+    }
+    const m = /^\s*(\d+)\s+(\S+)\s+(.*)$/.exec(out);
+    if (!m) return null;
+    const ttyName = m[2];
+    const tty = ttyName === '??' || ttyName === '-' ? 0 : 1;
+    const sid = tty === 1 && /^[\w/.-]+$/.test(ttyName) ? leaderOf(ttyName) : 0;
+    return { pid, ppid: Number(m[1]), sid, comm: m[3].trim(), tty };
+  };
 }
 
 export function defaultProvenanceSeam(): ProvenanceSeam {
@@ -230,9 +257,12 @@ export function defaultProvenanceSeam(): ProvenanceSeam {
     pid: process.pid,
     env: process.env,
     platform,
-    proc: linux ? readProcLinux : platform === 'darwin' ? readProcDarwin : () => null,
+    proc: linux ? readProcLinux : platform === 'darwin' ? makeDarwinProcReader() : () => null,
   };
 }
+
+/** Platforms whose process tree we know how to read; failing to read it there is a refusal, not a degrade. */
+const TREE_PLATFORMS: readonly NodeJS.Platform[] = ['linux', 'darwin'];
 
 // ── The verdict ───────────────────────────────────────
 
@@ -243,7 +273,9 @@ export type ProvenanceReason =
   | 'pty-interpreter-parent'
   | 'no-controlling-terminal'
   | 'pty-interpreter-leader'
-  | 'no-session-leader';
+  | 'no-session-leader'
+  | 'orphaned-shell-leader'
+  | 'process-tree-unreadable';
 
 export interface ProvenanceVerdict {
   ok: boolean;
@@ -281,7 +313,18 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
 
   // 2) Ancestry.
   const self = seam.proc(seam.pid);
+  const treePlatform = TREE_PLATFORMS.includes(seam.platform);
   if (!self) {
+    // Where we know how to read the tree, failing to is not "nothing to see":
+    // an agent that can make the read fail must not inherit the degrade.
+    if (treePlatform) {
+      return {
+        ok: false,
+        reason: 'process-tree-unreadable',
+        detail: 'this process could not be inspected, so its ancestry cannot be checked — try again from a terminal you opened yourself.',
+        chain: [],
+      };
+    }
     return {
       ok: true,
       reason: null,
@@ -320,7 +363,18 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
       };
     }
     if (cur.ppid <= 0 || cur.ppid === cur.pid) break;
-    cur = seam.proc(cur.ppid);
+    const parentPid: number = cur.ppid;
+    cur = seam.proc(parentPid);
+    // A hole in the middle of the walk would let everything above it go
+    // unchecked. Init (pid 1) is the only parent we tolerate not reading.
+    if (!cur && treePlatform && parentPid > 1) {
+      return {
+        ok: false,
+        reason: 'process-tree-unreadable',
+        detail: `ancestor pid ${parentPid} could not be inspected, so the rest of the ancestry cannot be checked — try again from a terminal you opened yourself.`,
+        chain,
+      };
+    }
   }
 
   // The session leader is the process whose pid === OUR sid. Look it up
@@ -414,10 +468,31 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
     };
   }
 
+  // macOS has no WSL-style console login. A human's leader always sits under
+  // whatever owns the pty master: `login` under Terminal/iTerm, a shell under
+  // `sshd-session`, a multiplexer or an editor. A leader whose parent is
+  // launchd is "setsid, TIOCSCTTY on a fresh pty, exec, let the launcher
+  // exit" — whatever it is named, since argv[0] (`-zsh`) is the caller's to pick.
+  if (
+    seam.platform === 'darwin' &&
+    (leader.ppid === 1 || (leaderParent !== null && nameIn(leaderParent.comm, INIT_NAMES)))
+  ) {
+    return {
+      ok: false,
+      reason: 'orphaned-shell-leader',
+      detail: `this session is led by "${leader.comm}" (pid ${leader.pid}) with launchd as its parent — no terminal app or SSH session owns it, which is the shape of a process that made its own terminal.`,
+      chain,
+    };
+  }
+
   // Residual, not refused: a SHELL leader whose parent is init. That is
   // both "daemonise, openpty, exec bash" (GPT-6 r2) AND a WSL / console
   // login (bash's parent is init). Refusing it cards every WSL user.
   // Documented on the issue; the OS-owned lock (#501) is the next bar.
+  // Also residual on every platform: a leader whose parent is a terminal
+  // multiplexer (tmux, screen) or any provider we do not list. An agent can
+  // start a detached tmux session and drop out of the tree; refusing
+  // multiplexers would card every human who uses one.
 
   return { ok: true, reason: null, detail: 'interactive session led by a shell with no agent ancestor.', chain };
 }
