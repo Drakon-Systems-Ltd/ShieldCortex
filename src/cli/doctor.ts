@@ -153,6 +153,13 @@ import {
   type HostGatePlanes,
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
+import { collectPostureRecords, type CollectOptions } from '../posture/collect.js';
+import {
+  postureLevel,
+  renderPostureLine,
+  runtimeLabel,
+  summarisePosture,
+} from '../posture/posture-record.js';
 import {
   correlateCronDenials,
   type CorrelateCronDenialsOptions,
@@ -178,6 +185,8 @@ export interface CheckResult {
   status: CheckStatus;
   message: string;
   fix?: string;
+  /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
+  fixNoteWithCommands?: true;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -2266,10 +2275,90 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
           + 'recovery reading it, so bounding it safely is separate work, tracked in #579. Nothing '
           + 'here will delete security evidence for you.';
       }
-      return `No single measured consumer: DB ${formatBytes(liveDbSize)}${dbFreeNote}, backups `
-        + `${formatBytes(backupsSize)}, repair logs ${formatBytes(repairLogSize)}, audit `
-        + `${formatBytes(auditLogSize)}, everything else ${formatBytes(otherSize)}. Those sizes are `
-        + 'the whole measurement — inspect before removing anything.';
+      reportOnly = true;
+      return largestConsumerReport();
+    };
+    // Set when remedy() fell through to the report: its only command is the
+    // `logs prune` dry run, an inspection step, so the human report must keep
+    // the attribution and scope prose next to it.
+    let reportOnly = false;
+
+    /**
+     * #649: no command applies, but the row still has to say WHERE the bytes
+     * are. Until now this branch said "No single measured consumer" even for a
+     * database holding 54% of the budget, because only a ≥50% repair-log or
+     * audit share got its own text. It now names the biggest budgeted term (or
+     * every term tied for biggest) whether or not it is a majority, and says
+     * for that term only what the measurement supports.
+     *
+     * Ranked over the BUDGETED terms only: backups (#153) and the model cache
+     * are exempt from the limit, so a large rollback copy is never "the"
+     * consumer of a budget it does not spend.
+     *
+     * Free pages are reusable space INSIDE the database file — SQLite writes new
+     * rows into them — not free space on the filesystem. Nothing here probes
+     * the filesystem, so nothing here claims the disk is full, or that saves
+     * will fail because the freelist is small.
+     */
+    const largestConsumerReport = (): string => {
+      const terms: Array<{ key: 'db' | 'audit' | 'repair' | 'other'; label: string; bytes: number }> = [
+        { key: 'db', label: 'the database', bytes: liveDbSize },
+        { key: 'audit', label: 'audit evidence', bytes: auditLogSize },
+        { key: 'repair', label: 'repair logs', bytes: repairLogSize },
+        { key: 'other', label: 'everything else', bytes: otherSize },
+      ];
+      const budgeted = terms.reduce((sum, t) => sum + t.bytes, 0);
+      const ranked = terms.filter((t) => t.bytes > 0).sort((a, b) => b.bytes - a.bytes);
+      const exempt = backupsSize > 0 ? ` Backups (${formatBytes(backupsSize)}) are exempt from the limit.` : '';
+      const scope = ` The ${limitMb} MB limit is ShieldCortex's own footprint budget, not a measurement of `
+        + 'free space on the filesystem — inspect before removing anything.';
+      if (ranked.length === 0 || budgeted === 0) {
+        return `Nothing measured counts against the limit.${exempt}${scope}`;
+      }
+
+      const top = ranked.filter((t) => t.bytes === ranked[0].bytes);
+      const pctOf = (bytes: number): number => Math.round((bytes / budgeted) * 100);
+      const head = top.length === 1
+        ? `Largest measured consumer: ${top[0].label}, ${formatBytes(top[0].bytes)} of the `
+          + `${formatBytes(budgeted)} counted against the limit (${pctOf(top[0].bytes)}%).`
+        : `Largest measured consumers, tied: ${top.map((t) => t.label).join(' and ')}, `
+          + `${formatBytes(top[0].bytes)} each of the ${formatBytes(budgeted)} counted against the limit `
+          + `(${pctOf(top[0].bytes)}% each).`;
+      const rest = ranked.filter((t) => !top.includes(t));
+      const restText = rest.length > 0
+        ? ` Then ${rest.map((t) => `${t.label} ${formatBytes(t.bytes)}`).join(', ')}.`
+        : '';
+
+      const notes: string[] = [];
+      for (const t of top) {
+        if (t.key === 'db') {
+          if (free === null || free.pageCount <= 0) {
+            notes.push('The database\'s free pages could not be read, so nothing about what fills it '
+              + 'was measured and no command is named for it.');
+          } else {
+            notes.push(`Only ${formatBytes(free.freeBytes)} of the database `
+              + `(${Math.round((free.freePages / free.pageCount) * 100)}% of its pages) is free pages — `
+              + 'space SQLite reuses for new writes inside the file, not free disk space — below the '
+              + `${Math.round(VACUUM_FREE_SHARE * 100)}% where compacting is worth a full rewrite. `
+              + 'Doctor does not measure which rows fill the database, so it names no command to shrink it.');
+          }
+        } else if (t.key === 'audit') {
+          notes.push('Audit evidence has no automatic retention yet (#579), and nothing here deletes it.');
+        } else if (t.key === 'repair') {
+          notes.push('`shieldcortex logs prune` (without --execute) lists which project-key repair logs '
+            + 'retention would remove; it never touches audit evidence.');
+        } else {
+          notes.push('Everything else is files doctor does not classify (state, quarantine and the '
+            + 'like), so no command is named for it.');
+        }
+      }
+      // A large audit plane that is not the top term is still worth one line:
+      // it is the term an operator is most likely to try to clear by hand.
+      if (!top.some((t) => t.key === 'audit') && auditLogSize > 0 && pctOf(auditLogSize) >= 25) {
+        notes.push(`Audit evidence (${pctOf(auditLogSize)}%) has no automatic retention yet (#579), `
+          + 'and nothing here deletes it.');
+      }
+      return `${head}${restText}${exempt} ${notes.join(' ')}${scope}`;
     };
 
     if (pct >= 95) {
@@ -2278,6 +2367,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         status: 'fail',
         message: `${dataStr}${backupsStr}${modelsStr} — at limit! (${breakdown})`,
         fix: remedy(),
+        ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else if (pct >= 80) {
       return {
@@ -2285,6 +2375,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
         status: 'warn',
         message: `${dataStr}${backupsStr}${modelsStr} — approaching limit (${breakdown})`,
         fix: remedy(),
+        ...(reportOnly ? { fixNoteWithCommands: true as const } : {}),
       };
     } else {
       return { label: 'Disk', status: 'pass', message: `${dataStr}${backupsStr}${modelsStr}` };
@@ -4277,6 +4368,54 @@ export function readHostGatePlanes(hostHome?: string): HostGatePlanes {
     claudeWired: claudeToolGateWired(hostHome),
     openclaw: openclawGatePosture(readOpenClawPluginGuardLive()),
   };
+}
+
+// ── Check: runtime posture (#613) ──────────────────────
+/**
+ * One row per posture record from the typed posture module — one per
+ * (runtime, profile, plane, instance) — plus a host summary that is the
+ * WEAKEST record it judges, never a green rollup, and never a claim that the
+ * records found are every runtime process on the box.
+ *
+ * A row is `pass` only for a CURRENT runtime process that reported, within
+ * `max_age`, that its gate is loaded with posture enforce and a working
+ * scanner. Everything else is `info`: the rows describe what was observed and
+ * deliberately cannot change doctor's exit code (a `warn` would fail
+ * `--strict` runs that passed before this check existed). The HOSTS table and
+ * the host-contract `bound` evidence are untouched and stay display-only.
+ *
+ * Read-only: no config, consent or Guard state is changed by collecting.
+ */
+export const RUNTIME_POSTURE_LABEL = 'Runtime posture';
+
+export async function checkRuntimePosture(opts: CollectOptions = {}): Promise<CheckResult[]> {
+  const records = collectPostureRecords({
+    ...opts,
+    configDir: opts.configDir ?? getConfigDir(),
+  });
+  const rows: CheckResult[] = records.map((r) => {
+    const level = postureLevel(r);
+    const scope = [r.profile === 'default' ? null : r.profile, r.plane, r.key.instance].filter(Boolean).join(', ');
+    const notes = r.notes.length > 0 ? ` (${r.notes.join('; ')})` : '';
+    return {
+      label: `${RUNTIME_POSTURE_LABEL}: ${runtimeLabel(r.runtime)} (${scope})`,
+      status: level === 'loaded-enforce' ? 'pass' : 'info',
+      message: `${renderPostureLine(r)}${notes}`,
+    };
+  });
+  const summary = summarisePosture(records);
+  const weakest = records.find((r) => r.source === summary.weakest);
+  rows.push({
+    label: `${RUNTIME_POSTURE_LABEL} (host)`,
+    status: summary.green ? 'pass' : 'info',
+    message: records.length === 0
+      ? 'no runtime on this box shows a ShieldCortex gate or memory integration — posture unknown'
+      : `weakest of ${summary.rollup_count} record(s) judged (${records.length} found): ${summary.level}` +
+        (weakest ? ` (${runtimeLabel(weakest.runtime)}, ${weakest.plane})` : '') +
+        ' — records found only, not a claim that no other runtime process exists;' +
+        ' self-reports are host-local evidence, not attestation — full records: `shieldcortex policy-evidence`',
+  });
+  return rows;
 }
 
 export async function checkActionGuard(): Promise<CheckResult[]> {
@@ -8730,6 +8869,7 @@ export async function runDoctor(
     checkOpenClawApprovalButtons,
     checkDefenceCanary,
     checkActionGuard,
+    checkRuntimePosture,
     checkActionGuardReadiness,
     checkCronDenials,
     checkThreatGraph,

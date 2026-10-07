@@ -20,6 +20,7 @@
     "interceptor.ts",
     "intercept-ingest.ts",
     "cloud-sync.ts",
+    "posture-report.ts",
     "openclaw.plugin.json",
     "README.md"
   ],
