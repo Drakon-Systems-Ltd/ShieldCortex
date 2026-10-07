@@ -142,7 +142,8 @@ export interface SearchExplanation {
 export interface ConsolidationResult {
   consolidated: number;     // Memories moved to long-term
   decayed: number;          // Memories that decayed
-  deleted: number;          // Memories removed due to low score
+  deleted: number;          // Memories removed: decay expiry + cap eviction (evicted is the cap part)
+  evicted?: number;         // #650: rows evicted by enforceMemoryLimits (already counted in deleted)
   contradictionsFound?: number;  // Phase 3: Contradictions detected
   contradictionsLinked?: number; // Phase 3: Contradiction links created
   salienceEvolved?: number;     // Memories with salience adjusted by structural importance

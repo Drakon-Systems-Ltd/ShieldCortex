@@ -114,8 +114,9 @@ export function consolidate(
       }
     }
 
-    // Enforce memory limits
-    deleted += enforceMemoryLimits(config);
+    // Enforce memory limits (the step that drains an over-cap STM — #650)
+    const evicted = enforceMemoryLimits(config);
+    deleted += evicted;
 
     // Persist updated decay scores for efficient sorting
     updateDecayScores();
@@ -153,7 +154,7 @@ export function consolidate(
       console.error('[shieldcortex] Deduplication failed:', e);
     }
 
-    return { consolidated, decayed, deleted, contradictionsFound, contradictionsLinked, salienceEvolved, deduplicated };
+    return { consolidated, decayed, deleted, evicted, contradictionsFound, contradictionsLinked, salienceEvolved, deduplicated };
   });
 }
 

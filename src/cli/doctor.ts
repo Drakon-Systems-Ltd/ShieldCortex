@@ -129,6 +129,8 @@ import {
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
+import { resolveMemoryConfig } from '../memory/config.js';
+import type { MemoryConfig } from '../memory/types.js';
 import { validateOpenClawConfig } from '../integrations/openclaw-config-validate.js';
 import type { OpenClawConfigVerdict, ValidateDeps } from '../integrations/openclaw-config-validate.js';
 import type { ModelInvoker } from '../defence/iron-dome/approval-judge.js';
@@ -1445,8 +1447,22 @@ async function checkSchema(): Promise<CheckResult> {
 /**
  * Pure helper for the memory-count check. Exported so tests can drive it
  * against a temp database instead of the homedir install.
+ *
+ * #650: the `STM — consolidation needed` row fires only when STM is OVER the
+ * configured cap, because that is the only condition `shieldcortex consolidate`
+ * clears: consolidate() promotes, expires and then cap-evicts down to the cap
+ * and no further, and the store's own auto-enforcement triggers on the same
+ * `> cap` test. The old row warned from 90% of a hardcoded 100, so a busy
+ * install sitting at its cap (the designed steady state) was told to run a
+ * command that could never make the row go away.
+ *
+ * `config` is injectable so tests pin the cap instead of reading the host's
+ * memory settings.
  */
-export function runMemoryStatsCheck(dbPath: string): CheckResult {
+export function runMemoryStatsCheck(
+  dbPath: string,
+  config: Pick<MemoryConfig, 'maxShortTermMemories' | 'maxLongTermMemories'> = resolveMemoryConfig(),
+): CheckResult {
   const prerequisite = databasePrerequisite('Memories', dbPath);
   if (prerequisite) return prerequisite;
 
@@ -1458,19 +1474,29 @@ export function runMemoryStatsCheck(dbPath: string): CheckResult {
       const stm = (db.prepare("SELECT COUNT(*) as count FROM memories WHERE type = 'short_term'").get() as { count: number }).count;
       const ltm = (db.prepare("SELECT COUNT(*) as count FROM memories WHERE type = 'long_term'").get() as { count: number }).count;
 
-      const STM_LIMIT = 100;
-      const LTM_LIMIT = 1000;
+      const STM_LIMIT = config.maxShortTermMemories;
+      const LTM_LIMIT = config.maxLongTermMemories;
 
       let status: CheckStatus = 'pass';
-      let warnings: string[] = [];
+      const warnings: string[] = [];
+      const fixes: string[] = [];
 
-      if (stm >= STM_LIMIT * 0.9) {
+      if (stm > STM_LIMIT) {
         status = 'warn';
         warnings.push(`${stm}/${STM_LIMIT} STM — consolidation needed`);
+        fixes.push(
+          'STM is over its cap. Run `shieldcortex consolidate` to promote, expire and evict short-term memory ' +
+          'down to the cap (the brain worker does the same on its own schedule). Rows captured within the last ' +
+          'hour and pinned rows are never evicted, so a breach made of fresh captures clears on a later run.',
+        );
       }
       if (ltm >= LTM_LIMIT * 0.9) {
         status = 'warn';
         warnings.push(`${ltm}/${LTM_LIMIT} LTM — approaching limit`);
+        fixes.push(
+          'Housekeeping. LTM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the ' +
+          'worker does it. No action needed unless recall feels stale.',
+        );
       }
 
       const message = warnings.length > 0
@@ -1481,9 +1507,7 @@ export function runMemoryStatsCheck(dbPath: string): CheckResult {
         label: 'Memories',
         status,
         message,
-        ...(status === 'warn'
-          ? { fix: 'Housekeeping. STM is near its cap. Run `shieldcortex consolidate` if you want it now; otherwise the worker does it. No action needed unless recall feels stale.' }
-          : {}),
+        ...(fixes.length > 0 ? { fix: fixes.join(' ') } : {}),
       };
     } finally {
       db.close();

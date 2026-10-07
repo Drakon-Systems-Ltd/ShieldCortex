@@ -1467,10 +1467,23 @@ ${bold}DOCS${reset}
 
 
   // Handle "consolidate" subcommand (v4.0.0 — Dream Mode)
+  //
+  // #650: this command is what doctor's `STM — consolidation needed` row names,
+  // so it must run the phase that actually drains short-term memory —
+  // consolidate(): promote worthy STM rows to LTM, expire decayed ones, evict
+  // down to the cap — before Dream Mode. Previously only the brain worker ran
+  // that phase; the CLI ran Dream Mode alone (LTM near-duplicate merge, archival
+  // flags, contradictions), so the suggested fix left STM exactly where it was.
   if (process.argv[2] === 'consolidate') {
     const { initDatabase } = await import('./database/init.js');
     initDatabase();
-    const { consolidateMemories } = await import('./memory/consolidate.js');
+    const { consolidate, consolidateMemories } = await import('./memory/consolidate.js');
+    console.log('🧠 Consolidating short-term memory...');
+    const stm = consolidate();
+    const evicted = stm.evicted ?? 0;
+    console.log(`   Promoted to long-term:  ${stm.consolidated}`);
+    console.log(`   Expired (decayed):      ${stm.deleted - evicted}`);
+    console.log(`   Evicted:                ${evicted}`);
     console.log('🧠 Starting Dream Mode consolidation...');
     const result = consolidateMemories();
     console.log(`✅ Consolidation complete:`);
