@@ -206,11 +206,15 @@ export function darwinSessionLeaderFromPs(lines: string): number {
 /** Runs `ps` with these args and returns stdout; throws on any failure. */
 export type PsRunner = (args: string[]) => string;
 
-/** Absolute path: a caller-controlled PATH must not be able to supply the evidence. */
+/**
+ * Absolute path and a fixed environment: neither PATH nor COLUMNS/locale from
+ * the caller may shape the evidence. `-ww` keeps long command names whole.
+ */
 const runSystemPs: PsRunner = (args) =>
-  execFileSync('/bin/ps', args, {
+  execFileSync('/bin/ps', ['-ww', ...args], {
     encoding: 'utf8',
     timeout: 2000,
+    env: { LC_ALL: 'C' },
     stdio: ['ignore', 'pipe', 'ignore'],
   });
 

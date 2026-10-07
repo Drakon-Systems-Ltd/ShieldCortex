@@ -128,7 +128,8 @@ describe('macOS — discovery failures refuse', () => {
   it('uses no PATH lookup: the default runner is /bin/ps (source contract)', async () => {
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(new URL('../approve-provenance.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/execFileSync\('\/bin\/ps'/);
+    expect(src).toMatch(/execFileSync\('\/bin\/ps', \['-ww'/);
+    expect(src).toMatch(/env: \{ LC_ALL: 'C' \}/);
     expect(src).not.toMatch(/execFileSync\('ps'/);
   });
 });
