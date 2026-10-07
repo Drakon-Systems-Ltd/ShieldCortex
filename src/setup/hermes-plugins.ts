@@ -364,6 +364,14 @@ export interface HermesPluginScan {
   /** Why Hermes could not be asked, verbatim. Null when `fromHermes`. */
   undeterminedReason: string | null;
   /**
+   * True when Hermes could not be asked because no interpreter was found at
+   * all (#651), as opposed to one that was found and failed, or a tree that
+   * could not be read. A structured fact so callers never parse
+   * `undeterminedReason`. On its own it proves nothing about whether Hermes is
+   * installed: a host can have an agent home and a broken or moved venv.
+   */
+  noInterpreter: boolean;
+  /**
    * The paths that could not be read, with their errors (#569 r6). Non-empty
    * implies `fromHermes === false`; it is the reason-with-detail behind
    * `undeterminedReason`, kept structured so a row can name every one of them.
@@ -1148,14 +1156,14 @@ export interface HermesProbeResult {
 export function probeHermesDiscovery(
   env: HermesEnvironment,
   opts: HermesScanOptions = {},
-): HermesProbeResult | { error: string } {
+): HermesProbeResult | { error: string; noInterpreter?: true } {
   // The interpreter is LOOKED FOR under the best-effort home. That is a search
   // for something to ask, not an answer: a wrong guess here costs a venv
   // lookup and falls through to the `hermes` launcher on PATH.
   const searchHome = resolveHermesHome(env);
   const interpreter =
     opts.interpreter !== undefined ? opts.interpreter : resolveHermesInterpreter(searchHome);
-  if (interpreter === null) return { error: 'no Hermes interpreter found' };
+  if (interpreter === null) return { error: 'no Hermes interpreter found', noInterpreter: true };
 
   const payload = JSON.stringify({
     name: HERMES_PLUGIN_NAME,
@@ -1463,6 +1471,7 @@ export function scanHermesPluginCopies(
     present: homeState === 'dir',
     fromHermes: false,
     undeterminedReason: null as string | null,
+    noInterpreter: false,
     undetermined: [] as HermesUndetermined[],
     roots: [] as HermesPluginRootScan[],
     copies: [] as HermesPluginCopy[],
@@ -1501,6 +1510,7 @@ export function scanHermesPluginCopies(
     return {
       ...base,
       undeterminedReason: probe.error,
+      noInterpreter: probe.noInterpreter === true,
       hintRoots: hermesPluginRoots(guessedHome).map((root) => ({
         root,
         dirs: hintDirsInRoot(root),

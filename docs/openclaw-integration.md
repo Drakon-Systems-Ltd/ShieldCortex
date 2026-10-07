@@ -385,6 +385,34 @@ shieldcortex doctor --strict   # every ⚠️ becomes exit 1
 Use that where "disabled anywhere in the fleet" must break the build. Plain
 `shieldcortex doctor` stays green for the operator who chose it.
 
+### Doctor severity notes (#651)
+
+A ⚠️ is meant to mark something you can act on. These rows are ℹ️ instead, and
+so no longer fail `--strict`:
+
+- **Hermes plugin copies / Hermes plugin** when Hermes is confirmed absent: the
+  Hermes home holds none of `config.yaml`, `config.yml`, `profiles/`, `SOUL.md`
+  (the markers the HOSTS table uses), has no `plugins/` directory, `HERMES_HOME`
+  is unset, and no Hermes interpreter was found. Any one of those present, an
+  unreadable path, or an interpreter that was found but failed keeps the ⚠️.
+- **Action guard policy lock** when no lock is installed and the signed config
+  is confirmed off (`actionGuard.enabled` is not `true`): no plane can gate, so
+  there is nothing to pin. Leftover signed Enforce with the plugin off stays ⚠️,
+  and a live gate without a lock stays ❌.
+
+The HOSTS table header (`Guard on/off/mixed`) is whether any bound host is
+enforcing tool calls. The word after a host (`enforcing`, `observe-only`, `off`)
+is that host's own gate as configured; `observe-only` means enabled but not set
+to block. `Guard off` beside `observe-only` is consistent, and doctor prints a
+two-line legend under the table whenever a host shows one of those words.
+
+The OpenClaw "multiple install dirs" warning now lists every
+`~/.openclaw/npm/projects/*` directory it found and which one OpenClaw's install
+index names as the install. The index records an install, not what the running
+gateway loaded, so doctor does not call any directory stale and prints no
+removal command. Inspect the listed directories before deleting anything by
+hand. `shieldcortex repair` remains the remedy.
+
 ## Uninstall
 
 ```bash

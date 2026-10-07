@@ -20,9 +20,11 @@ import {
   isRealtimePluginDisabledInConfig,
 } from '../integrations/openclaw-plugin-state.js';
 import {
+  canonicalProjectDirFromIndex,
   gatherReconcileInput,
   reconcilePluginState,
   REALTIME_PLUGIN_ID,
+  type ReconcileInput,
   type ReconcileVerdict,
 } from '../integrations/openclaw-plugin-index.js';
 import {
@@ -46,6 +48,7 @@ import {
   type HermesPluginCopy,
   type HermesPluginRootScan,
   type HermesPluginScan,
+  type HermesEnvironment,
   type HermesProjectState,
   type HermesScanOptions,
 } from '../setup/hermes-plugins.js';
@@ -150,6 +153,7 @@ import {
   writeRepairAgentBrief,
   claudeToolGateWired,
   claudePlaneEnforcing,
+  HERMES_AGENT_HOME_MARKERS,
   type HostGatePlanes,
   type OpenClawGatePosture,
 } from '../setup/host-table.js';
@@ -2966,6 +2970,53 @@ const HERMES_UNREADABLE_FIX =
   '`--fix-hermes-plugin-copies` moves nothing in any root: the copy the scan could not read ' +
   'can be the one the gateway loads, or the one another plugin root resolves through.';
 
+/**
+ * Hermes is confirmed ABSENT on this host, not merely un-askable (#651).
+ *
+ * `scan.present` only says a directory exists at the Hermes home; a leftover
+ * `~/.hermes/ekho-state` makes it true on a host the HOSTS table rightly calls
+ * `Hermes absent`, and the plugin-copies row then warned "could not determine
+ * which copy Hermes loads". That is the wrong question on a host with nothing
+ * to load. Every condition below is required, so uncertainty never reads as
+ * absence:
+ *
+ *   - no interpreter was found (`noInterpreter`, a structured fact — never a
+ *     parse of the reason string). An interpreter that was found and failed is
+ *     a broken Hermes, not an absent one;
+ *   - no path was unreadable anywhere in the scan;
+ *   - `HERMES_HOME` is unset — an operator who points this process at a home
+ *     has told us Hermes lives there;
+ *   - none of the HOSTS table's agent-home markers (`HERMES_AGENT_HOME_MARKERS`)
+ *     is in the home, and there is no `plugins/` directory at all — each one
+ *     STATTED as missing (ENOENT/ENOTDIR). Any other stat error is a path that
+ *     could not be read, and that is not absence.
+ *
+ * No interpreter alone proves nothing: an agent home with a moved or broken
+ * venv still warns, because there a plugin copy may well be loaded.
+ */
+export function hermesConfirmedAbsent(scan: HermesPluginScan, env: HermesEnvironment): boolean {
+  if (scan.fromHermes || !scan.noInterpreter || scan.undetermined.length > 0) return false;
+  if (env.hermesHome !== null) return false;
+  return [...HERMES_AGENT_HOME_MARKERS, 'plugins'].every((entry) => {
+    try {
+      fs.lstatSync(path.join(scan.hermesHome, entry));
+      return false;
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      return code === 'ENOENT' || code === 'ENOTDIR';
+    }
+  });
+}
+
+/** The INFO line for a home directory that exists but holds no Hermes (#651). */
+function hermesAbsentMessage(hermesHome: string): string {
+  return (
+    `skipped (Hermes not detected — ${tildify(hermesHome)} exists but holds no Hermes agent home ` +
+    `(${HERMES_AGENT_HOME_MARKERS.join(', ')}) and no plugins/ directory, and no Hermes ` +
+    'interpreter was found)'
+  );
+}
+
 export async function checkHermesPluginShadowing(
   home: string = os.homedir(),
   opts: HermesScanOptions = {},
@@ -3009,6 +3060,12 @@ export async function checkHermesPluginShadowing(
 
   if (!scan.present) {
     return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  }
+
+  // A directory at the Hermes home with no agent home and no plugins in it is
+  // an absent runtime, the same verdict the HOSTS table draws (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(hermesHome) };
   }
 
   // No Hermes discovery, no verdict (#569 r4). Never PASS, never a winner.
@@ -3284,9 +3341,10 @@ export async function checkHermesPluginFreshness(
   opts: HermesScanOptions = {},
 ): Promise<CheckResult> {
   const label = 'Hermes plugin';
+  const env = hermesEnvironment(home);
   let scan: HermesPluginScan;
   try {
-    scan = scanHermesPluginCopies(hermesEnvironment(home), opts);
+    scan = scanHermesPluginCopies(env, opts);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label, status: 'info', message: `check skipped — ${msg}` };
@@ -3298,6 +3356,10 @@ export async function checkHermesPluginFreshness(
   // uninstall was a crash. Doctor has no stored marker to read intent from.
   // `update` prints that sentence when its own swap fails, and nowhere else.
   if (!scan.present) return { label, status: 'info', message: 'skipped (Hermes not detected)' };
+  // Same absent verdict as the copies row, so the two never disagree (#651).
+  if (hermesConfirmedAbsent(scan, env)) {
+    return { label, status: 'info', message: hermesAbsentMessage(scan.hermesHome) };
+  }
   if (scan.undetermined.length > 0 || !scan.fromHermes) {
     return {
       label,
@@ -4649,9 +4711,12 @@ export function policyLockRows(): CheckResult[] {
   // Guard off, the OpenClaw plugin was off, and this row still FAILed because
   // config.json said enabled:true. FAIL only when a live plane is actually
   // gating — otherwise operators panic-uninstall a healthy box.
-  const signedOn = (() => {
-    try { return getActionGuardCoreConfig().enabled; } catch { return false; }
+  // Tri-state for #651: a read that THREW is unknown, not off. `signedOn`
+  // keeps its old meaning (unknown counts as not-on) for the FAIL decision.
+  const signedState: 'on' | 'off' | 'unknown' = (() => {
+    try { return getActionGuardCoreConfig().enabled ? 'on' : 'off'; } catch { return 'unknown'; }
   })();
+  const signedOn = signedState === 'on';
   const pluginLive = readOpenClawPluginGuardLive();
   const pluginOff = pluginPlaneDisarmed(pluginLive);
   const planes = readHostGatePlanes();
@@ -4685,6 +4750,27 @@ export function policyLockRows(): CheckResult[] {
       // Enforce + plugin-off is the Jarvis 5.0.6 paste: HOSTS said Guard off,
       // doctor still FAILed and printed `$ protect` + exit 1. That looks like
       // a crash. Warn, no copy-paste protect, until something is actually on.
+      //
+      // #651: INFO when the signed config is confirmed OFF (read, not thrown).
+      // With `actionGuard.enabled` not true no plane can gate — the Claude
+      // hook needs signed Enforce and the OpenClaw plane needs signed enabled
+      // (`liveGating` above) — so the lock has nothing to pin and the row's own
+      // guidance was "do nothing". Leftover signed Enforce with the plugin off
+      // stays WARN: re-enabling the plugin arms it with no lock in place. An
+      // unreadable signed config stays WARN too: unknown is not off.
+      if (!liveGating && signedState === 'off' && !claudePlaneEnforcing(planes)) {
+        rows.push({
+          label: `${label} policy lock`,
+          status: 'info',
+          message:
+            `${summary.headline} — Guard is off on this host (signed \`actionGuard.enabled\` is not true), ` +
+            'so no plane is gating and there is nothing for a lock to pin. A lock is optional. This is not unprotected.',
+          fix:
+            'Nothing to do while Action Guard is off. If Action Guard is turned on later, this row turns FAIL ' +
+            'while a live plane gates without a lock, and names the remedy then.',
+        });
+        break;
+      }
       rows.push({
         label: `${label} policy lock`,
         status: liveGating ? 'fail' : 'warn',
@@ -7835,8 +7921,11 @@ export async function checkOpenClawPluginLoadState(
     return { label, status: 'info', message: 'skipped (OpenClaw not detected)' };
   }
 
-  const verdict = reconcilePluginState(gatherReconcileInput(home, { expectedVersion }));
-  const result = renderPluginLoadVerdict(verdict);
+  const input = gatherReconcileInput(home, { expectedVersion });
+  const verdict = reconcilePluginState(input);
+  const result = verdict.state === 'duplicate-install'
+    ? withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), home, input)
+    : renderPluginLoadVerdict(verdict);
 
   // #226: "loaded" is not "protecting the conversation". A plugin whose
   // conversation-access grant is missing has had its llm_input/llm_output
@@ -7864,6 +7953,57 @@ export async function checkOpenClawPluginLoadState(
     }
   }
   return result;
+}
+
+/**
+ * #651: the duplicate-install row said "prune the stale duplicate" and named
+ * no directory. This adds what the evidence on disk actually supports — every
+ * observed project dir by full path, and which one (if any) OpenClaw's install
+ * index names — and nothing it does not.
+ *
+ * The index names an INSTALL, not what the running gateway loaded (#103), so
+ * nothing here calls a directory stale or safe to delete, and no removal
+ * command is printed: the remedy stays `shieldcortex repair`, plus "inspect
+ * before removing anything by hand". Where the index cannot be read, names no
+ * dir, or names one that is not on disk, the row says exactly that instead of
+ * guessing. Pure over `input`; reads nothing.
+ */
+export function withDuplicateInstallEvidence(
+  result: CheckResult,
+  home: string,
+  input: Pick<ReconcileInput, 'index' | 'projectDirs' | 'pluginId'>,
+): CheckResult {
+  const projectsRoot = path.join(home, '.openclaw', 'npm', 'projects');
+  const dirs = input.projectDirs ?? [];
+  const full = (name: string) => tildify(path.join(projectsRoot, name));
+  const observed = `Observed: ${dirs.map(full).join(', ')}.`;
+  let evidence: string;
+  if (input.index == null) {
+    evidence =
+      'The OpenClaw install index could not be read, so nothing here says which of them is the ' +
+      'recorded install.';
+  } else {
+    const named = canonicalProjectDirFromIndex(input.index, input.pluginId);
+    if (named === null) {
+      evidence = 'The OpenClaw install index names no install dir for this plugin, so nothing here ' +
+        'says which of them is the recorded install.';
+    } else if (!dirs.includes(named)) {
+      evidence = `The OpenClaw install index names ${full(named)}, which is not among them.`;
+    } else {
+      const others = dirs.filter((d) => d !== named).map(full).join(', ');
+      evidence =
+        `The OpenClaw install index names ${full(named)} as the install; it does not name ${others}. ` +
+        'The index records install state, not what the running gateway loaded.';
+    }
+  }
+  return {
+    ...result,
+    message: `${result.message}. ${observed} ${evidence}`,
+    fix: (
+      `${result.fix ?? ''} Before removing any directory by hand, inspect the ones listed ` +
+      '(for example the package.json version in each); doctor does not say which is safe to delete.'
+    ).trim(),
+  };
 }
 
 /**

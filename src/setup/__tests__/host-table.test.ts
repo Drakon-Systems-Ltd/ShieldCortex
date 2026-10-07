@@ -6,6 +6,7 @@ import {
   claudeToolGateWired,
   formatHostTable,
   guardHeadlineFromPlanes,
+  hermesAgentHomeMarkersPresent,
   presentUnwired,
   repairJobsFor,
   scanHostTable,
@@ -130,6 +131,48 @@ describe('host table', () => {
     const text = formatHostTable(scanHostTable(h), '5.2.0', planes).join('\n');
     expect(text).toContain('Guard off');
     expect(text).not.toMatch(/action-guard-enable/i);
+  });
+
+  // #651: "Guard off" beside "observe-only" read as a contradiction.
+  it('#651 explains header Guard vs a host gate word when a row shows one', () => {
+    const h = home();
+    mkdirSync(join(h, '.openclaw'), { recursive: true });
+    enableOpenClaw(h);
+    const table = scanHostTable(h, { openclawBinaryPresent: () => true });
+    const planes: HostGatePlanes = {
+      signedEnabled: false,
+      signedEnforce: false,
+      claudeWired: false,
+      openclaw: 'observe-only',
+    };
+    const lines = formatHostTable(table, '5.4.0', planes);
+    const text = lines.join('\n');
+    expect(text).toContain('Guard off');
+    expect(text).toMatch(/OpenClaw.*observe-only/);
+    expect(text).toMatch(/Header Guard on\/off\/mixed: whether any bound host is enforcing/);
+    expect(text).toMatch(/observe-only = enabled, not set to block/);
+    // Display only: no command that would change posture.
+    expect(text).not.toMatch(/action-guard-enable|action-guard-enforce|iron-dome activate|shieldcortex config/i);
+  });
+
+  it('#651 prints no legend when no row shows a gate word', () => {
+    const h = home();
+    const planes: HostGatePlanes = {
+      signedEnabled: false, signedEnforce: false, claudeWired: false, openclaw: 'unknown',
+    };
+    expect(formatHostTable(scanHostTable(h), '5.4.0', planes).join('\n')).not.toMatch(/Header Guard/);
+    expect(formatHostTable(scanHostTable(h), '5.4.0').join('\n')).not.toMatch(/Header Guard/);
+  });
+
+  it('#651 exports the Hermes agent-home markers presence uses', () => {
+    const h = home();
+    const root = join(h, '.hermes');
+    mkdirSync(join(root, 'ekho-state'), { recursive: true });
+    expect(hermesAgentHomeMarkersPresent(root)).toBe(false);
+    expect(scanHostTable(h).rows.find((r) => r.id === 'hermes')!.present).toBe(false);
+    writeFileSync(join(root, 'SOUL.md'), 'x\n');
+    expect(hermesAgentHomeMarkersPresent(root)).toBe(true);
+    expect(scanHostTable(h).rows.find((r) => r.id === 'hermes')!.present).toBe(true);
   });
 
   it('repair brief names only the jobs and forbids Guard / conversation / import', () => {

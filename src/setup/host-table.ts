@@ -273,16 +273,25 @@ function openclawWired(home: string): boolean {
   return openclawPluginEnabled(config) && openclawPluginArtifactPresent(oc);
 }
 
+/** The files that make a directory a Hermes agent home, not just a directory. */
+export const HERMES_AGENT_HOME_MARKERS: readonly string[] = ['config.yaml', 'config.yml', 'profiles', 'SOUL.md'];
+
+/**
+ * Whether `root` holds a real Hermes agent home (config, profiles, or
+ * SOUL.md). The HOSTS table's presence rule, exported so doctor's Hermes rows
+ * (#651) judge "absent" by the same markers instead of a second definition.
+ */
+export function hermesAgentHomeMarkersPresent(root: string): boolean {
+  return HERMES_AGENT_HOME_MARKERS.some((m) => dirExists(path.join(root, m)));
+}
+
 function hermesPresent(home: string): boolean {
   const root = path.join(home, '.hermes');
   if (!dirExists(root)) return false;
   // A leftover ~/.hermes/ekho-state dir is not Hermes. Require a real
   // agent home (config, profiles, or SOUL.md). Jarvis 5.0.5 false-presented
   // from ekho-state alone with no hermes binary.
-  return dirExists(path.join(root, 'config.yaml'))
-    || dirExists(path.join(root, 'config.yml'))
-    || dirExists(path.join(root, 'profiles'))
-    || dirExists(path.join(root, 'SOUL.md'));
+  return hermesAgentHomeMarkersPresent(root);
 }
 
 function hermesWired(home: string): boolean {
@@ -403,6 +412,14 @@ export function formatHostTable(table: HostTable, version?: string, planes?: Hos
     const kind = r.kind === 'bound' ? 'memory + tool gate' : 'memory only — not a gate';
     const posture = rowGatePosture(r, planes);
     lines.push(`  ${r.label.padEnd(width)}  ${present}  ${wired}  ${kind}${posture ? `  ${posture}` : ''}`);
+  }
+  // #651: "Guard off" in the header beside "observe-only" on a row read as a
+  // contradiction. They answer different questions; say so once, only when a
+  // row actually shows a gate word. Display only — changes no posture.
+  if (table.rows.some((r) => rowGatePosture(r, planes) !== undefined)) {
+    lines.push('');
+    lines.push('  Header Guard on/off/mixed: whether any bound host is enforcing (blocking) tool calls.');
+    lines.push('  Word after a host: that host\'s own gate as configured; observe-only = enabled, not set to block.');
   }
   const todo = presentUnwired(table);
   if (todo.length > 0) {

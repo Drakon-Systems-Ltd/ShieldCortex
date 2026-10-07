@@ -514,11 +514,26 @@ describe('#501 doctor rows', () => {
     expect(lock.fix).toMatch(/Do not run protect/i);
   });
 
-  it('only WARNS on an unlocked host while the guard is off', async () => {
+  // #651: Guard confirmed off in the signed config means no plane can gate, so
+  // the lock has nothing to pin and the row is INFO. It used to WARN with
+  // "do not run protect from this warning" — a warning whose guidance was
+  // to do nothing.
+  it('is INFO on an unlocked host while the signed guard is confirmed off (#651)', async () => {
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
     const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
-    expect(lock.status).toBe('warn');
-    expect(lock.message).toMatch(/not unprotected|nothing pinned to lose yet/i);
+    expect(lock.status).toBe('info');
+    expect(lock.message).toMatch(/not unprotected/i);
+    expect(lock.message).toMatch(/Guard is off on this host/);
+    // No `$` command the renderer could lift out of the fix.
+    expect(lock.fix ?? '').not.toMatch(/`/);
+  });
+
+  it('is INFO with no config file at all — the default is off (#651)', async () => {
+    const before = { cfg: fs.readdirSync(configDir).sort(), root: fs.readdirSync(protectedRoot).sort() };
+    const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
+    expect(lock.status).toBe('info');
+    // A read: no config, database or lock file is created by asking.
+    expect({ cfg: fs.readdirSync(configDir).sort(), root: fs.readdirSync(protectedRoot).sort() }).toEqual(before);
   });
 
   it('FAILS on a lock that exists but cannot be verified', async () => {
