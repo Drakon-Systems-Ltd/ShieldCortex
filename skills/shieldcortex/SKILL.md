@@ -88,7 +88,7 @@ This is an enforcing memory boundary, not a passive scanner. Across the read/wri
 | **Publisher** | [Drakon Systems Ltd](https://github.com/Drakon-Systems-Ltd) (UK company) |
 | **Source code** | [github.com/Drakon-Systems-Ltd/ShieldCortex](https://github.com/Drakon-Systems-Ltd/ShieldCortex) — fully open, **MIT** licence (this skill file itself is published MIT-0, per the frontmatter) |
 | **npm package** | [npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) — every release git-tagged with a matching GitHub release |
-| **npm audit** | Clean — `npm audit` returns 0 vulnerabilities |
+| **npm audit** | Not clean: 0 unwaived production advisories, 4 waived (not fixed) — three `sharp` and one `sprintf-js`, all reachable only through the optional `@huggingface/transformers` package. Reachability and expiry dates: [docs/security/audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md) |
 | **Downloads** | 11,000+/month (July 2026) |
 | **CI/CD** | CI lint/test on every push; the maintainer manually tags each release, and the tag push triggers an automated CI publish to npm |
 | **Postinstall script** | Declared and bounded: prints setup instructions; on **global** installs it also smoke-tests the native SQLite binding, seeds default config on first install, and refreshes an OpenClaw hook/plugin that a previous setup already installed. It never adds integrations to a machine that had none, and it is a no-op for CI and local dependency installs. `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` skips the refresh. |

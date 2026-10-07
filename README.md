@@ -48,7 +48,7 @@ Trusted task → let it work. Hijack → a plain-English card. Catastrophe → h
 | Codex / Cursor / Copilot / MCP | if the agent calls the tools | **unbound** |
 | LangChain / Python SDK | if you call `scan` / `save` | **unbound** |
 
-`shieldcortex doctor` prints the same host table — `memory + tool gate` or `memory only — not a gate` per host. It shows the live Guard posture for Claude Code and OpenClaw; for Hermes it only reports whether the plugin copy is present. It will not print “protected” for a host that cannot deny.
+`shieldcortex doctor` prints the same host table — `memory + tool gate` or `memory only — not a gate` per host. In that host table it shows the live Guard posture for Claude Code and OpenClaw; for Hermes the host-table row only reports whether the plugin copy is present. Separate info-only runtime-posture rows (5.5+, see `shieldcortex policy-evidence`) report what each runtime's own self-report says, Hermes included. It will not print “protected” for a host that cannot deny.
 
 ## 🚀 Quick Start
 
@@ -75,7 +75,7 @@ Local UI: **Overview · Memory · Protection · X-Ray · Settings**. Memory has 
 
 ## What's new in 5.5
 
-- **See what each runtime is actually enforcing.** `shieldcortex policy-evidence` prints one JSON record per runtime process (Claude Code hook, OpenClaw plugin, Hermes plugin): whether it is installed and loaded, its configured posture, its scanner and any observed real block, each with its own evidence and timestamp. Stale evidence is marked obsolete rather than trusted. `shieldcortex doctor` shows the same records as info-only rows. The records are local self-reports, not attestation, and the output says so. (#613)
+- **See what each runtime is actually enforcing.** `shieldcortex policy-evidence` prints a JSON envelope (schema, scope, limitations, summary) with a `records` array: one record per runtime, profile, plane and reporting instance this host has evidence for (Claude Code hook, OpenClaw plugin, Hermes plugin; Codex and Copilot appear as memory-only, not-a-gate records). Each record says whether the integration is installed and loaded, its configured posture, its scanner and any observed real block, each with its own evidence and timestamp. A runtime with no self-report shows as `unobserved`, and stale evidence is marked obsolete rather than trusted; the inventory covers what reported here and does not prove every running process was seen. `shieldcortex doctor` shows the same records as info-only rows. The records are local self-reports, not attestation, and the output says so. (#613)
 - **Dependency security update.** The MCP SDK moves to 1.31.0, past a published advisory in its OAuth client (which ShieldCortex does not use). Production audit: 0 unwaived advisories, 4 waived; reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). (#655)
 
 Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
