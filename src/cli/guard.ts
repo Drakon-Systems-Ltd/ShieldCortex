@@ -211,15 +211,15 @@ function pct(rate: number | null): string {
 
 const POSTURE_TEXT: Record<ActionGuardPosture, string> = {
   off: 'off — tool calls are not gated',
-  'watch-only': 'watch only — dangerous ops are logged, not stopped (catastrophic still blocks)',
+  'watch-only': 'watch only — ordinary dangerous ops are logged, not stopped (some calls are still held or blocked, including catastrophic ops and calls the guard recognises as changing its own state/config or disabling it)',
   enforce: 'enforce — dangerous ops need approval or are blocked',
   'enforce-when-ready': 'enforce when ready — shadow until this install meets all three readiness conditions',
 };
 
 const MODE_TEXT: Record<ReadinessSummary['mode'], string> = {
   off: 'not gating',
-  'watch-only': 'watch only (advisory)',
-  shadow: 'SHADOW — dangerous ops logged as would-stop, NOT stopped',
+  'watch-only': 'watch only (advisory for ordinary dangerous ops; some calls still held or blocked, including catastrophic ops and calls the guard recognises as changing its own state/config or disabling it)',
+  shadow: 'SHADOW — ordinary dangerous ops logged as would-stop, NOT stopped (some calls still held or blocked, including catastrophic ops and calls the guard recognises as changing its own state/config or disabling it)',
   enforcing: 'ENFORCING — dangerous ops need approval or are blocked',
 };
 
