@@ -67,7 +67,7 @@ Phrases the dormant code recognises:
 | **"decision made"** | architecture | high |
 | **"going with"** | architecture | normal |
 
-If that path were registered, it would save the text after the phrase as the memory content.
+The dormant helper tries to save the text after the phrase, or the whole message when that text is under five characters. Subscribing a `message` event would not be enough on its own: the handler returns unless `event.role` is `"user"` and reads the text from `event.content`, but the OpenClaw 2026.9.6 hook event has no top-level `role` or `content` field (a received message's text is in `event.context.content`). With that event shape the handler stops at the role check and never reaches the keyword check.
 
 ## Defence Audit Guarantees
 

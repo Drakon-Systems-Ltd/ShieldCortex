@@ -91,6 +91,13 @@ describe('handler source facts the copy describes', () => {
       assert.match(main, /event\.action === "stop"\) \{\s*await onSessionStop\(event\);/);
       assert.match(main, /event\.action === "new"\) \{\s*await onSessionEnd\(event\);/);
     });
+
+    it(`${dir.join('/')}: message keyword path reads top-level event.role / event.content`, () => {
+      const h = read(...dir, 'handler.ts');
+      const fn = between(h, 'async function onMessageKeywordTrigger(event) {', 'await checkAndSaveKeywordTrigger(messageText, event);');
+      assert.match(fn, /if \(event\.role !== "user"\) return;/);
+      assert.match(fn, /let messageText = event\.content;/);
+    });
   }
 });
 
@@ -125,6 +132,16 @@ describe('HOOK.md copy (both copies)', () => {
       assert.match(kw, /per-message proactive recall in the same `message` branch is dormant/);
       assert.doesNotMatch(kw, /Say any of these phrases to trigger/);
       assert.doesNotMatch(md, /Content after the trigger phrase is extracted and saved/);
+    });
+
+    it(`${dir.join('/')}: keyword copy does not promise that registration alone would make saves work`, () => {
+      const kw = oneLine(section(md, 'Keyword Triggers'));
+      assert.doesNotMatch(md, /If that path were registered, it would save/);
+      assert.doesNotMatch(kw, /if (that path|it) (were|was) registered/i);
+      assert.match(kw, /Subscribing a `message` event would not be enough on its own/);
+      assert.match(kw, /returns unless `event\.role` is `"user"` and reads the text from `event\.content`/);
+      assert.match(kw, /no top-level `role` or `content` field \(a received message's text is in `event\.context\.content`\)/);
+      assert.match(kw, /stops at the role check and never reaches the keyword check/);
     });
   }
 });
