@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <b>Stops a hijacked or prompt-injected agent from running destructive commands, leaking secrets, or poisoning memory it writes through ShieldCortex.</b>
+  <b>Stops a hijacked or prompt-injected AI agent from running destructive commands, leaking secrets, or poisoning memory it writes through ShieldCortex.</b>
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@ ShieldCortex Scan Result
   Patterns:    hidden_instruction
 ```
 
-On a default install the process exits 1, which means caught (0 is allow, 2 is bad usage, 3 means the scanner itself failed). `cli (trusted, L2 not applied)` means you typed the text, so the extra floor for untrusted origins (web, email, documents, tool results) is not applied. The injection detector still quarantines it. The command stores no memory. It records a local audit row, and if cloud sync is already configured it can forward the quarantined text.
+That string was caught and quarantined. Nothing was stored as a memory, and the exit code is non-zero so a script or CI job can act on it. [How scan results work](docs/SCAN.md).
 
 <!-- TODO: demo recording. Uncomment when assets/demo.gif exists.
 ![ShieldCortex catching an injection scan](assets/demo.gif)
@@ -47,7 +47,7 @@ On a default install the process exits 1, which means caught (0 is allow, 2 is b
 
 ## Install
 
-**Requirements.** ShieldCortex 5.x requires Node 22.14+ or Node 24+: Node 22.14 or later within 22.x, or Node 24 or later. Node 20 is no longer supported, and neither is Node 23. npm normally warns on unsupported versions (`EBADENGINE`) and installs anyway; with engine-strict enabled it refuses. On an unsupported Node the database engine fails to load and `shieldcortex doctor` fails. Coming from 4.x? Read [Upgrading to 5](docs/UPGRADING-5.md) **before** you update. Action Guard stays off by default; enable it deliberately.
+Requires Node 22.14+ or 24+. Upgrading from 4.x? Read [Upgrading to 5](docs/UPGRADING-5.md) first. [Node 20, Node 23, and what npm does](docs/UPDATING.md#node-requirement).
 
 ```bash
 npm install -g shieldcortex

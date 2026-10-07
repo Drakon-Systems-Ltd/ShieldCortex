@@ -4,6 +4,12 @@ Operator detail that used to sit on the README: how to update, what 5.3 and 5.4 
 
 ShieldCortex does not replace OpenClaw, Hermes, or Claude memory. Native memory stays the brain. This package is the door.
 
+<a id="node-requirement"></a>
+
+## Node requirement
+
+ShieldCortex 5.x requires Node 22.14+ or Node 24+: Node 22.14 or later within 22.x, or Node 24 or later. Node 20 is no longer supported, and neither is Node 23. npm normally warns on unsupported versions (`EBADENGINE`) and installs anyway; with engine-strict enabled it refuses. On an unsupported Node the database engine fails to load and `shieldcortex doctor` fails. Coming from 4.x, read [Upgrading to 5](UPGRADING-5.md) before you update. Action Guard stays off by default; enable it deliberately.
+
 <a id="updating"></a>
 
 ## Updating
