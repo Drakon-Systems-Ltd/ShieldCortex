@@ -71,7 +71,7 @@ For Claude Code PreToolUse, a hook load failure still blocks recognised catastro
 shieldcortex dashboard
 ```
 
-Local UI: **Overview · Memory · Protection · X-Ray · Settings**. Memory has Library / Graph / Recall / Review / Timeline. Prompt-time recall into Claude Code is on for a fresh global, non-CI install: the npm postinstall creates a missing `~/.shieldcortex/config.json` with `proactiveRecall: true`. Turn it off under Settings → Integrations or with `shieldcortex config --proactive-recall false`.
+Local UI: **Overview · Memory · Protection · X-Ray · Settings**. Memory has Library / Graph / Recall / Review / Timeline. Prompt-time recall into Claude Code needs two things: the Claude Code `UserPromptSubmit` hook, which `shieldcortex setup` adds once you agree to wire Claude Code (or `shieldcortex install`), and `proactiveRecall: true` in `~/.shieldcortex/config.json`. A fresh global, non-CI `npm install -g` with no config file writes one with `proactiveRecall: true` when that write succeeds; local and CI installs do not, an existing config is never changed, and when the key is not set, recall is off. The npm install does not wire Claude Code's `UserPromptSubmit` hook; npm's postinstall can still refresh an existing OpenClaw integration (see [Updating by hand](#updating-by-hand)). Turn it off under Settings → Integrations or with `shieldcortex config --proactive-recall false`.
 
 ## What's new in 5.4
 

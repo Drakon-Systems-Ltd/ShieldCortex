@@ -1266,7 +1266,8 @@ function maybePrint411Notice(currentVersion: string, mainUpdated: boolean): void
 
   process.stdout.write('\n');
   process.stdout.write(`  ${paint('yellow', '!')}  ${paint('bold', 'v4.11.0 default behaviour changes')}\n`);
-  process.stdout.write('     • Proactive recall on prompt submit is now OFF by default.\n');
+  process.stdout.write('     • Proactive recall on prompt submit became opt-in in 4.11: it runs only when\n');
+  process.stdout.write('       config.json has proactiveRecall: true. An existing config is kept as it is.\n');
   process.stdout.write('     • Tool-call interceptor no longer blocks critical/high writes with approval prompts.\n');
   process.stdout.write('     • SessionStart preamble OFF; memory cap reduced 15 → 5.\n');
   process.stdout.write('     • PreCompact thresholds raised; auto-memories cap 5 → 2.\n');
