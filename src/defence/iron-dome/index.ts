@@ -7,19 +7,19 @@
  * Main exports for the Iron Dome module.
  */
 
-import { getDatabase } from '../../database/init.js';
+import { getDatabase, peekDatabase } from '../../database/init.js';
 import type { IronDomeConfig, IronDomeProfile, ConfirmationOverrides, IronDomeConfirmationProtocol } from './config.js';
 import { DEFAULT_IRON_DOME_CONFIG, IRON_DOME_PROFILES } from './config.js';
 import type { ConfirmationTier } from './confirmation-gate.js';
 import { mergeConfirmationProtocol } from './confirmation-gate.js';
 import { logIronDomeAudit } from './audit.js';
 import { isFeatureEnabled } from '../../license/gate.js';
-import { getCloudIronDomeCache } from '../../cloud/iron-dome-sync.js';
+import { getCloudIronDomeCache, peekCloudIronDomeCache } from '../../cloud/iron-dome-sync.js';
 import type { CloudPolicy } from '../../cloud/iron-dome-sync.js';
 import { isDatabaseInitialized } from '../../database/init.js';
 import { handleKillPhrase } from './kill-switch.js';
 import { activateKillSwitch } from '../../api/control.js';
-import { getActiveIronDomePolicy } from './custom-policies.js';
+import { getActiveIronDomePolicy, peekActiveIronDomePolicy } from './custom-policies.js';
 
 // ./custom-policies.js is imported statically. Safe at module-eval time: there
 // is no import cycle on this edge — custom-policies imports only getDatabase and
@@ -277,9 +277,10 @@ export function getEffectiveIronDomeConfig(): IronDomeConfig {
  * normalisation write-back, no change to the in-memory active config. Mirrors
  * loadConfig()'s fallbacks so the result matches what the loader would return.
  */
-function peekConfig(): IronDomeConfig {
+function peekConfig(): IronDomeConfig | null {
+  const db = peekDatabase();
+  if (!db) return null;
   try {
-    const db = getDatabase();
     const hasTable = db.prepare(
       "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'iron_dome_config'"
     ).get();
@@ -287,9 +288,7 @@ function peekConfig(): IronDomeConfig {
       const row = db.prepare('SELECT value FROM iron_dome_config WHERE key = ?').get('config') as { value: string } | undefined;
       if (row) return normalizeConfig(JSON.parse(row.value) as IronDomeConfig);
     }
-  } catch {
-    // Fall through to default
-  }
+  } catch { return null; }
   return normalizeConfig(activeConfig);
 }
 
@@ -297,11 +296,16 @@ function peekConfig(): IronDomeConfig {
  * Same effective policy as getEffectiveIronDomeConfig() — local, custom and
  * cloud precedence included — but read-only, for diagnostics such as doctor.
  */
-export function peekEffectiveIronDomeConfig(): IronDomeConfig {
-  return resolveEffectiveConfig(peekConfig());
+export function peekEffectiveIronDomeConfig(): IronDomeConfig | null {
+  const local = peekConfig();
+  if (!local) return null;
+  try {
+    const effective = resolveEffectiveConfig(local, true);
+    return peekDatabase() ? effective : null;
+  } catch { return null; }
 }
 
-function resolveEffectiveConfig(localConfig: IronDomeConfig): IronDomeConfig {
+function resolveEffectiveConfig(localConfig: IronDomeConfig, readonly = false): IronDomeConfig {
   // If Iron Dome isn't enabled locally, don't apply any overrides
   if (!localConfig.enabled) return localConfig;
 
@@ -312,7 +316,7 @@ function resolveEffectiveConfig(localConfig: IronDomeConfig): IronDomeConfig {
   // Check for active local custom policy (takes precedence over cloud)
   if (isDatabaseInitialized()) {
     try {
-      const activePolicy = getActiveIronDomePolicy();
+      const activePolicy = readonly ? peekActiveIronDomePolicy() : getActiveIronDomePolicy();
       if (activePolicy) {
         const policyConfig = JSON.parse(activePolicy.config);
         // Use the custom policy's base profile, fall back to local
@@ -351,7 +355,7 @@ function resolveEffectiveConfig(localConfig: IronDomeConfig): IronDomeConfig {
     }
   }
 
-  const cache = getCloudIronDomeCache();
+  const cache = readonly ? peekCloudIronDomeCache() : getCloudIronDomeCache();
   if (!cache?.policy) return normalizeConfig(localConfig);
 
   const cloudPolicy: CloudPolicy = cache.policy;

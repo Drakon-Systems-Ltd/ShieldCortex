@@ -8779,7 +8779,13 @@ export async function checkIronDomeProfile(dbPath: string = getDbPath()): Promis
       // In-process caller (MCP/API server): the effective config includes custom and cloud policy.
       const ironDome = await import('../defence/iron-dome/index.js');
       // Peek, not get: the loader writes normalised config back to the store.
-      return ironDomeProfileVerdict(ironDome.peekEffectiveIronDomeConfig());
+      const effective = ironDome.peekEffectiveIronDomeConfig();
+      if (!effective) return {
+        label: IRON_DOME_PROFILE_LABEL,
+        status: 'info',
+        message: 'could not read Iron Dome profile — stored config unreadable',
+      };
+      return ironDomeProfileVerdict(effective);
     }
     const stored = readStoredIronDomeConfig(dbPath);
     if (!stored) {

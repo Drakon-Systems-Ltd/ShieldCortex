@@ -25,6 +25,7 @@ jest.unstable_mockModule('../license/gate.js', () => ({
 jest.unstable_mockModule('../cloud/iron-dome-sync.js', () => ({
   ...actualSync,
   getCloudIronDomeCache: () => cloudCache,
+  peekCloudIronDomeCache: () => cloudCache,
 }));
 
 const { initDatabase, closeDatabase, getDatabase } = await import('../database/init.js');
@@ -126,6 +127,25 @@ describe('doctor Iron Dome profile on an initialised singleton (#516)', () => {
     const result = await checkIronDomeProfile(dbPath);
     expect(result).toMatchObject({ status: 'pass', message: 'school profile' });
     expect(snapshot()).toEqual(before);
+  });
+
+  it('keeps the local disabled flag above a cloud policy', async () => {
+    customPolicies = true;
+    store(needsNormalising({ enabled: false }));
+    cloudCache = {
+      patterns: [],
+      policy: { name: 'fleet', base_profile: 'school', config_overrides: { killPhrase: 'fleet stop trigger' } },
+      patternsUpdatedAt: null,
+      policyUpdatedAt: null,
+      lastFetchedAt: STAMP,
+    };
+    const result = await checkIronDomeProfile(dbPath);
+    expect(result).toMatchObject({ status: 'info', message: 'Iron Dome not active — profile not checked' });
+  });
+
+  it('uses the persisted profile when neither custom nor cloud policy applies', async () => {
+    store(needsNormalising({ ...IRON_DOME_PROFILES.school, killPhrase: 'private local stop' }));
+    expect(await checkIronDomeProfile(dbPath)).toMatchObject({ status: 'pass', message: 'school profile' });
   });
 
   it('applies an active custom policy over cloud policy', async () => {
