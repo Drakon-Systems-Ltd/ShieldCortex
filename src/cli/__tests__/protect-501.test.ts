@@ -514,26 +514,73 @@ describe('#501 doctor rows', () => {
     expect(lock.fix).toMatch(/Do not run protect/i);
   });
 
-  // #651: Guard confirmed off in the signed config means no plane can gate, so
-  // the lock has nothing to pin and the row is INFO. It used to WARN with
-  // "do not run protect from this warning" — a warning whose guidance was
-  // to do nothing.
-  it('is INFO on an unlocked host while the signed guard is confirmed off (#651)', async () => {
-    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
-    const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
-    expect(lock.status).toBe('info');
+  // #651 round 2: the policy-lock INFO downgrade is DESCOPED. A signed config
+  // read cannot tell "confirmed off" from "unreadable / corrupt" (both come
+  // back enabled:false), and signed-off does not prove the OpenClaw plane is
+  // off — the plugin's own config can enable it. So an unlocked host with
+  // Guard not live keeps the pre-#651 WARN in every one of these shapes, and
+  // never claims "no plane is gating".
+  function expectGuardOffWarn(lock: { status: string; message: string; fix?: string }): void {
+    expect(lock.status).toBe('warn');
     expect(lock.message).toMatch(/not unprotected/i);
-    expect(lock.message).toMatch(/Guard is off on this host/);
-    // No `$` command the renderer could lift out of the fix.
-    expect(lock.fix ?? '').not.toMatch(/`/);
+    expect(lock.message).not.toMatch(/no plane is gating/);
+    expect(lock.fix).toMatch(/Do not run protect/i);
+  }
+
+  it('only WARNS on an unlocked host while the signed guard is off', async () => {
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
+    expectGuardOffWarn((await rows()).find((r) => r.label.includes('policy lock'))!);
   });
 
-  it('is INFO with no config file at all — the default is off (#651)', async () => {
+  it('only WARNS with no config file at all, and creates no lock or config by asking', async () => {
     const before = { cfg: fs.readdirSync(configDir).sort(), root: fs.readdirSync(protectedRoot).sort() };
-    const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
-    expect(lock.status).toBe('info');
-    // A read: no config, database or lock file is created by asking.
+    expectGuardOffWarn((await rows()).find((r) => r.label.includes('policy lock'))!);
     expect({ cfg: fs.readdirSync(configDir).sort(), root: fs.readdirSync(protectedRoot).sort() }).toEqual(before);
+  });
+
+  it.each([
+    ['malformed JSON', (p: string) => fs.writeFileSync(p, '{ "actionGuard": { "enabled": fal')],
+    ['a JSON array', (p: string) => fs.writeFileSync(p, '[]')],
+    ['a JSON string', (p: string) => fs.writeFileSync(p, '"off"')],
+    ['a directory (EISDIR)', (p: string) => fs.mkdirSync(p)],
+  ])('an unreadable/corrupt signed config (%s) is not "confirmed off" — still WARN (#651 r2)', async (_name, make) => {
+    make(path.join(configDir, 'config.json'));
+    const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
+    expectGuardOffWarn(lock);
+    const { doctorExitCode } = await import('../doctor.js');
+    expect(doctorExitCode([lock], { strict: true })).toBe(1);
+  });
+
+  const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0;
+  (IS_ROOT ? it.skip : it)('an EACCES signed config is not "confirmed off" — still WARN (#651 r2)', async () => {
+    const cfg = path.join(configDir, 'config.json');
+    fs.writeFileSync(cfg, JSON.stringify({ actionGuard: { enabled: false } }));
+    fs.chmodSync(cfg, 0o000);
+    try {
+      expectGuardOffWarn((await rows()).find((r) => r.label.includes('policy lock'))!);
+    } finally {
+      fs.chmodSync(cfg, 0o600);
+    }
+  });
+
+  it('signed off with the OpenClaw plugin config enabling the guard is not "no plane" — still WARN (#651 r2)', async () => {
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
+    fs.mkdirSync(path.join(ocHome, '.openclaw'), { recursive: true });
+    fs.writeFileSync(path.join(ocHome, '.openclaw', 'openclaw.json'), JSON.stringify({
+      plugins: { entries: { 'shieldcortex-realtime': {
+        enabled: true,
+        config: { interceptor: { enabled: true }, actionGuard: { enabled: true, enforce: true } },
+      } } },
+    }));
+    const lock = (await rows()).find((r) => r.label.includes('policy lock'))!;
+    expectGuardOffWarn(lock);
+  });
+
+  it('signed off with an unreadable OpenClaw plugin config — still WARN (#651 r2)', async () => {
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ actionGuard: { enabled: false } }));
+    fs.mkdirSync(path.join(ocHome, '.openclaw'), { recursive: true });
+    fs.writeFileSync(path.join(ocHome, '.openclaw', 'openclaw.json'), '{ not json');
+    expectGuardOffWarn((await rows()).find((r) => r.label.includes('policy lock'))!);
   });
 
   it('FAILS on a lock that exists but cannot be verified', async () => {

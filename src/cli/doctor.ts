@@ -2981,8 +2981,10 @@ const HERMES_UNREADABLE_FIX =
  * absence:
  *
  *   - no interpreter was found (`noInterpreter`, a structured fact — never a
- *     parse of the reason string). An interpreter that was found and failed is
- *     a broken Hermes, not an absent one;
+ *     parse of the reason string). It is set only when every candidate statted
+ *     as absent and PATH held no `hermes` launcher (#651 r2): an unreadable
+ *     candidate, or a launcher with no usable interpreter, is not absence. An
+ *     interpreter that was found and failed is a broken Hermes, not an absent one;
  *   - no path was unreadable anywhere in the scan;
  *   - `HERMES_HOME` is unset — an operator who points this process at a home
  *     has told us Hermes lives there;
@@ -4711,12 +4713,9 @@ export function policyLockRows(): CheckResult[] {
   // Guard off, the OpenClaw plugin was off, and this row still FAILed because
   // config.json said enabled:true. FAIL only when a live plane is actually
   // gating — otherwise operators panic-uninstall a healthy box.
-  // Tri-state for #651: a read that THREW is unknown, not off. `signedOn`
-  // keeps its old meaning (unknown counts as not-on) for the FAIL decision.
-  const signedState: 'on' | 'off' | 'unknown' = (() => {
-    try { return getActionGuardCoreConfig().enabled ? 'on' : 'off'; } catch { return 'unknown'; }
+  const signedOn = (() => {
+    try { return getActionGuardCoreConfig().enabled; } catch { return false; }
   })();
-  const signedOn = signedState === 'on';
   const pluginLive = readOpenClawPluginGuardLive();
   const pluginOff = pluginPlaneDisarmed(pluginLive);
   const planes = readHostGatePlanes();
@@ -4751,26 +4750,11 @@ export function policyLockRows(): CheckResult[] {
       // doctor still FAILed and printed `$ protect` + exit 1. That looks like
       // a crash. Warn, no copy-paste protect, until something is actually on.
       //
-      // #651: INFO when the signed config is confirmed OFF (read, not thrown).
-      // With `actionGuard.enabled` not true no plane can gate — the Claude
-      // hook needs signed Enforce and the OpenClaw plane needs signed enabled
-      // (`liveGating` above) — so the lock has nothing to pin and the row's own
-      // guidance was "do nothing". Leftover signed Enforce with the plugin off
-      // stays WARN: re-enabling the plugin arms it with no lock in place. An
-      // unreadable signed config stays WARN too: unknown is not off.
-      if (!liveGating && signedState === 'off' && !claudePlaneEnforcing(planes)) {
-        rows.push({
-          label: `${label} policy lock`,
-          status: 'info',
-          message:
-            `${summary.headline} — Guard is off on this host (signed \`actionGuard.enabled\` is not true), ` +
-            'so no plane is gating and there is nothing for a lock to pin. A lock is optional. This is not unprotected.',
-          fix:
-            'Nothing to do while Action Guard is off. If Action Guard is turned on later, this row turns FAIL ' +
-            'while a live plane gates without a lock, and names the remedy then.',
-        });
-        break;
-      }
+      // #651 r2: this row is deliberately NOT downgraded to INFO. The signed
+      // config read returns enabled:false for an unreadable or corrupt file as
+      // well as a real "off", and signed-off does not prove the OpenClaw plane
+      // is off (its plugin config can enable the guard). Neither is confirmed
+      // absence, so the WARN stays until a reader can prove both.
       rows.push({
         label: `${label} policy lock`,
         status: liveGating ? 'fail' : 'warn',
@@ -7962,9 +7946,10 @@ export async function checkOpenClawPluginLoadState(
  * index names — and nothing it does not.
  *
  * The index names an INSTALL, not what the running gateway loaded (#103), so
- * nothing here calls a directory stale or safe to delete, and no removal
- * command is printed: the remedy stays `shieldcortex repair`, plus "inspect
- * before removing anything by hand". Where the index cannot be read, names no
+ * nothing added here calls a directory stale or safe to delete (the verdict's
+ * own "prune the stale duplicate" wording is older and names none), and no
+ * removal command is printed: the fix stays the verdict's, and the message
+ * says "inspect before removing anything by hand". Where the index cannot be read, names no
  * dir, or names one that is not on disk, the row says exactly that instead of
  * guessing. Pure over `input`; reads nothing.
  */
@@ -7996,13 +7981,16 @@ export function withDuplicateInstallEvidence(
         'The index records install state, not what the running gateway loaded.';
     }
   }
+  // The caution goes in the MESSAGE (#651 r2): the human renderer prints the
+  // message in full at every width, but drops a WARN fix note that carries
+  // `shieldcortex repair` and substitutes "No action needed". The fix stays the
+  // verdict's own.
+  const caution =
+    'Doctor does not say which of these, if any, is stale or safe to delete; inspect each ' +
+    '(for example the package.json version in it) before removing anything by hand.';
   return {
     ...result,
-    message: `${result.message}. ${observed} ${evidence}`,
-    fix: (
-      `${result.fix ?? ''} Before removing any directory by hand, inspect the ones listed ` +
-      '(for example the package.json version in each); doctor does not say which is safe to delete.'
-    ).trim(),
+    message: `${result.message}. ${observed} ${evidence} ${caution}`,
   };
 }
 

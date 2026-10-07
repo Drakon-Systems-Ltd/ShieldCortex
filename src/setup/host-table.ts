@@ -399,6 +399,16 @@ export function wiredHosts(table: HostTable): HostRow[] {
   return table.rows.filter((r) => r.wired);
 }
 
+/** The legend under the HOSTS table when a row shows a gate word (#651). */
+export const HOST_TABLE_GATE_LEGEND: readonly string[] = [
+  '  Header Guard on/off/mixed: configured Claude Code hook and OpenClaw plugin only (not Hermes,',
+  '  not a live check). mixed = Claude Code enforcing, OpenClaw observe-only/off; on = otherwise one',
+  '  enforcing (OpenClaw counts only with signed actionGuard.enabled); off = neither enforcing.',
+  '  Word after a host: its own configured gate. OpenClaw observe-only = entry not disabled but not',
+  '  armed to block (enforce false, or actionGuard/interceptor disabled); off = entry disabled.',
+  '  Claude Code off = hook wired, signed Enforce not on.',
+];
+
 export function formatHostTable(table: HostTable, version?: string, planes?: HostGatePlanes): string[] {
   const lines: string[] = [];
   const headline = planes ? guardHeadlineFromPlanes(planes) : 'off';
@@ -415,11 +425,13 @@ export function formatHostTable(table: HostTable, version?: string, planes?: Hos
   }
   // #651: "Guard off" in the header beside "observe-only" on a row read as a
   // contradiction. They answer different questions; say so once, only when a
-  // row actually shows a gate word. Display only — changes no posture.
+  // row actually shows a gate word. Display only — changes no posture. #651 r2:
+  // the words below describe `guardHeadlineFromPlanes` and
+  // `openclawGatePosture` as they are — observe-only is a collapsed label that
+  // includes a disabled guard or interceptor, and Hermes feeds no plane.
   if (table.rows.some((r) => rowGatePosture(r, planes) !== undefined)) {
     lines.push('');
-    lines.push('  Header Guard on/off/mixed: whether any bound host is enforcing (blocking) tool calls.');
-    lines.push('  Word after a host: that host\'s own gate as configured; observe-only = enabled, not set to block.');
+    lines.push(...HOST_TABLE_GATE_LEGEND);
   }
   const todo = presentUnwired(table);
   if (todo.length > 0) {

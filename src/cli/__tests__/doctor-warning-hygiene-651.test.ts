@@ -1,24 +1,33 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import {
   checkHermesPluginFreshness,
   checkHermesPluginShadowing,
   doctorExitCode,
   hermesConfirmedAbsent,
+  readHostGatePlanes,
   renderPluginLoadVerdict,
   withDuplicateInstallEvidence,
 } from '../doctor.js';
+import { formatDoctorReport } from '../doctor-report.js';
 import { reconcilePluginState, type ReconcileInput } from '../../integrations/openclaw-plugin-index.js';
-import { scanHermesPluginCopies } from '../../setup/hermes-plugins.js';
+import {
+  resolveHermesInterpreter,
+  scanHermesPluginCopies,
+  searchHermesInterpreter,
+} from '../../setup/hermes-plugins.js';
+import { formatHostTable, scanHostTable } from '../../setup/host-table.js';
+import { clearCloudConfigCache } from '../../cloud/config.js';
 
 /**
  * #651 — doctor warning hygiene.
  *
- * Every Hermes case forces the interpreter seam (`null` = none found, a
- * nonexistent path = found but cannot run), so no case asks this box's real
- * Hermes, and every home is a fresh fixture under `os.tmpdir()`.
+ * Hermes cases either force the interpreter seam (`null` = none found, a
+ * nonexistent path = found but cannot run) or, in the r2 block, run the real
+ * resolver with PATH pinned to a fixture bin dir — so no case asks this box's
+ * real Hermes, and every home is a fresh fixture under `os.tmpdir()`.
  */
 const NO_INTERPRETER = { interpreter: null } as const;
 
@@ -158,6 +167,194 @@ describe('#651 item 1 negative controls — uncertainty keeps its WARN', () => {
   });
 });
 
+/**
+ * #651 r2 finding 3: these go through the REAL interpreter resolver (no
+ * `interpreter` seam). PATH is pinned to a fixture bin dir and the home is a
+ * fixture, so nothing on this box is discovered and no interpreter is ever
+ * found (so nothing is spawned). Only a search that met nothing but
+ * ENOENT/ENOTDIR may read as "no interpreter".
+ */
+describe('#651 r2 — interpreter discovery uncertainty is not absence', () => {
+  const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0;
+  const savedPath = process.env.PATH;
+  let bin: string;
+  const locked: string[] = [];
+
+  beforeEach(() => {
+    bin = path.join(home, 'bin');
+    fs.mkdirSync(bin);
+    process.env.PATH = bin;
+  });
+
+  afterEach(() => {
+    for (const p of locked.splice(0)) {
+      try { fs.chmodSync(p, 0o755); } catch { /* already gone */ }
+    }
+    process.env.PATH = savedPath;
+  });
+
+  function lock(p: string): void {
+    fs.chmodSync(p, 0o000);
+    locked.push(p);
+  }
+
+  function launcher(body: string): string {
+    const p = path.join(bin, 'hermes');
+    fs.writeFileSync(p, body, { mode: 0o755 });
+    return p;
+  }
+
+  it('a search that found nothing anywhere is confirmed absence (INFO)', async () => {
+    leftoverOnly();
+    const search = searchHermesInterpreter(hermes);
+    expect(search).toEqual({ kind: 'absent' });
+    expect(resolveHermesInterpreter(hermes)).toBeNull();
+    const scan = scanHermesPluginCopies({ home, hermesHome: null });
+    expect(scan.noInterpreter).toBe(true);
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('info');
+    expect(row.message).toMatch(/^skipped \(Hermes not detected/);
+  });
+
+  (IS_ROOT ? it.skip : it)('an untraversable hermes-agent/ is not absence — copies and freshness keep WARN', async () => {
+    leftoverOnly();
+    const agent = path.join(hermes, 'hermes-agent');
+    fs.mkdirSync(path.join(agent, '.venv', 'bin'), { recursive: true });
+    lock(agent);
+    const search = searchHermesInterpreter(hermes);
+    expect(search.kind).toBe('undetermined');
+    if (search.kind === 'undetermined') expect(search.path.startsWith(home)).toBe(true);
+    expect(resolveHermesInterpreter(hermes)).toBeNull();
+    const scan = scanHermesPluginCopies({ home, hermesHome: null });
+    expect(scan.noInterpreter).toBe(false);
+    expect(hermesConfirmedAbsent(scan, { home, hermesHome: null })).toBe(false);
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('warn');
+    expect(doctorExitCode([row], { strict: true })).toBe(1);
+    const fresh = await checkHermesPluginFreshness(home);
+    expect(fresh.message).not.toMatch(/Hermes not detected/);
+  });
+
+  it('a `hermes` launcher with an unsupported (env) shebang is not absence', async () => {
+    leftoverOnly();
+    const p = launcher('#!/usr/bin/env python3\nprint(1)\n');
+    expect(searchHermesInterpreter(hermes)).toEqual({ kind: 'undetermined', path: p });
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('warn');
+  });
+
+  it('a `hermes` launcher shebanged to a python that does not exist is not absence', async () => {
+    leftoverOnly();
+    const p = launcher(`#!${path.join(home, 'gone', 'python3')}\n`);
+    expect(searchHermesInterpreter(hermes)).toEqual({ kind: 'undetermined', path: p });
+    expect((await checkHermesPluginShadowing(home)).status).toBe('warn');
+  });
+
+  (IS_ROOT ? it.skip : it)('an unreadable `hermes` launcher is not absence', async () => {
+    leftoverOnly();
+    const p = launcher(`#!${path.join(home, 'gone', 'python3')}\n`);
+    lock(p);
+    expect(searchHermesInterpreter(hermes)).toEqual({ kind: 'undetermined', path: p });
+    expect((await checkHermesPluginShadowing(home)).status).toBe('warn');
+  });
+
+  (IS_ROOT ? it.skip : it)('an unsearchable PATH entry is not absence', async () => {
+    leftoverOnly();
+    const hidden = path.join(home, 'hidden-bin');
+    fs.mkdirSync(hidden);
+    lock(hidden);
+    process.env.PATH = [bin, hidden].join(path.delimiter);
+    const search = searchHermesInterpreter(hermes);
+    expect(search).toEqual({ kind: 'undetermined', path: path.join(hidden, 'hermes') });
+    expect((await checkHermesPluginShadowing(home)).status).toBe('warn');
+  });
+});
+
+/**
+ * #651 r2 finding 4: the HOSTS legend checked against planes READ FROM fixture
+ * config (signed config dir, openclaw.json, Claude settings) by the real
+ * `readHostGatePlanes`, not a hand-picked enum. Every path is under `home`.
+ */
+describe('#651 r2 — HOSTS legend matches the configuration that produced the row', () => {
+  const saved = { cfg: process.env.SHIELDCORTEX_CONFIG_DIR, oc: process.env.OPENCLAW_HOME };
+  let cfgDir: string;
+
+  beforeEach(() => {
+    cfgDir = path.join(home, 'sc-config');
+    fs.mkdirSync(cfgDir);
+    process.env.SHIELDCORTEX_CONFIG_DIR = cfgDir;
+    process.env.OPENCLAW_HOME = home;
+    jest.spyOn(os, 'homedir').mockReturnValue(home);
+    clearCloudConfigCache();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (saved.cfg === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
+    else process.env.SHIELDCORTEX_CONFIG_DIR = saved.cfg;
+    if (saved.oc === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = saved.oc;
+    clearCloudConfigCache();
+  });
+
+  function signed(actionGuard: Record<string, unknown>): void {
+    fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify({ actionGuard }));
+    clearCloudConfigCache();
+  }
+
+  function openclawEntry(entry: Record<string, unknown>): void {
+    fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.openclaw', 'openclaw.json'), JSON.stringify({
+      plugins: { entries: { 'shieldcortex-realtime': entry } },
+    }));
+  }
+
+  function claudeHookWired(): void {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'npx shieldcortex hook pre-tool-use' }] }] },
+    }));
+  }
+
+  function hostsText(): string {
+    const planes = readHostGatePlanes(home);
+    const table = scanHostTable(home, { openclawBinaryPresent: () => true });
+    return formatHostTable(table, '0.0.0', planes).join('\n');
+  }
+
+  it.each([
+    ['actionGuard.enabled:false', { enabled: true, config: { actionGuard: { enabled: false } } }],
+    ['interceptor.enabled:false', { enabled: true, config: { interceptor: { enabled: false } } }],
+    ['enforce:false', { enabled: true, config: { actionGuard: { enabled: true, enforce: false } } }],
+  ])('a plugin with %s shows observe-only, and the legend says that includes a disarmed gate', (_n, entry) => {
+    signed({ enabled: false });
+    openclawEntry(entry);
+    expect(readHostGatePlanes(home).openclaw).toBe('observe-only');
+    const text = hostsText();
+    expect(text).toMatch(/OpenClaw.*observe-only/);
+    expect(text).toContain('Guard off');
+    expect(text).toMatch(/observe-only = entry not disabled but not\s+armed to block \(enforce false, or actionGuard\/interceptor disabled\)/);
+    expect(text).not.toMatch(/observe-only = enabled/);
+    expect(text).toMatch(/not Hermes,\s+not a live check/);
+  });
+
+  it('Claude Code enforcing beside an observe-only plugin is "Guard mixed", and the legend defines mixed', () => {
+    signed({ enabled: true, enforce: true });
+    claudeHookWired();
+    openclawEntry({ enabled: true, config: { actionGuard: { enabled: false } } });
+    const text = hostsText();
+    expect(text).toContain('Guard mixed');
+    expect(text).toMatch(/mixed = Claude Code enforcing, OpenClaw observe-only\/off/);
+  });
+
+  it('a disabled plugin entry shows off, which the legend defines as entry disabled', () => {
+    signed({ enabled: false });
+    openclawEntry({ enabled: false });
+    expect(readHostGatePlanes(home).openclaw).toBe('off');
+    expect(hostsText()).toMatch(/off = entry disabled/);
+  });
+});
+
 describe('#651 item 4 — duplicate install dirs name observed paths, never a removal command', () => {
   const caseHome = '/home/case';
   const projects = '/home/case/.openclaw/npm/projects';
@@ -194,11 +391,16 @@ describe('#651 item 4 — duplicate install dirs name observed paths, never a re
     return withDuplicateInstallEvidence(renderPluginLoadVerdict(verdict), caseHome, input);
   }
 
-  function noRemovalCommand(fix: string | undefined): void {
-    expect(fix ?? '').not.toMatch(/\brm\b|rmdir|unlink|--force|trash/);
-    expect(fix ?? '').toContain('`shieldcortex repair`');
-    expect(fix ?? '').toMatch(/inspect the ones listed/);
-    expect(fix ?? '').toMatch(/does not say which is safe to delete/);
+  // #651 r2: the caution lives in the MESSAGE, which the human renderer always
+  // prints in full; the fix (whose `shieldcortex repair` the honesty renderer
+  // filters, discarding the whole note) is the verdict's own, unchanged.
+  function noRemovalCommand(row: { message: string; fix?: string }): void {
+    for (const text of [row.message, row.fix ?? '']) {
+      expect(text).not.toMatch(/\brm\b|rmdir|unlink|--force|trash|action-guard-enable/);
+    }
+    expect(row.fix ?? '').toContain('`shieldcortex repair`');
+    expect(row.message).toMatch(/inspect each .* before removing anything by hand/);
+    expect(row.message).toMatch(/does not say which of these, if any, is stale or safe to delete/);
   }
 
   it('names every observed dir and the one the install index records', () => {
@@ -210,7 +412,7 @@ describe('#651 item 4 — duplicate install dirs name observed paths, never a re
     expect(row.message).toContain(`it does not name ${projects}/${extra}`);
     // Install state, not a load proof, and never "stale".
     expect(row.message).toMatch(/not what the running gateway loaded/);
-    noRemovalCommand(row.fix);
+    noRemovalCommand(row);
   });
 
   it('says it cannot tell when the index cannot be read', () => {
@@ -222,7 +424,7 @@ describe('#651 item 4 — duplicate install dirs name observed paths, never a re
     expect(row.status).toBe('warn');
     expect(row.message).toMatch(/install index could not be read/);
     expect(row.message).not.toMatch(/names .* as the install/);
-    noRemovalCommand(row.fix);
+    noRemovalCommand(row);
   });
 
   it('says it cannot tell when the index names no dir', () => {
@@ -232,7 +434,7 @@ describe('#651 item 4 — duplicate install dirs name observed paths, never a re
       installsJson: null,
     });
     expect(row.message).toMatch(/names no install dir/);
-    noRemovalCommand(row.fix);
+    noRemovalCommand(row);
   });
 
   it('says so when the index names a dir that is not on disk', () => {
@@ -241,6 +443,21 @@ describe('#651 item 4 — duplicate install dirs name observed paths, never a re
     const input = { ...base, index: { ...base.index!, installRecords: { 'shieldcortex-realtime': record } } };
     const row = withDuplicateInstallEvidence(renderPluginLoadVerdict(reconcilePluginState(base)), caseHome, input);
     expect(row.message).toContain(`names ${projects}/${elsewhere}, which is not among them`);
-    noRemovalCommand(row.fix);
+    noRemovalCommand(row);
+  });
+
+  it.each([
+    [40, false], [40, true], [100, false], [100, true],
+  ])('the caution survives the human renderer (width %i, verbose %s) and no removal/enable `$` appears', (width, verbose) => {
+    const row = render(base);
+    const lines = formatDoctorReport([row], { width, verbose, color: false });
+    const flat = lines.join(' ').replace(/\s+/g, ' ');
+    expect(flat).toMatch(/does not say which of these, if any, is stale or safe to delete/);
+    expect(flat).toMatch(/inspect each .* before removing anything by hand/);
+    // Long paths are hard-split at narrow widths; compare with whitespace gone.
+    expect(lines.join('').replace(/\s+/g, '')).toContain(`${projects}/${extra}`);
+    const dollars = lines.filter((l) => l.trim().startsWith('$'));
+    for (const l of dollars) expect(l).not.toMatch(/\brm\b|rmdir|unlink|repair|enable/);
+    expect(flat).not.toMatch(/\brm -|rmdir|unlink/);
   });
 });

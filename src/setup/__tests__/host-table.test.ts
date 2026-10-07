@@ -149,8 +149,12 @@ describe('host table', () => {
     const text = lines.join('\n');
     expect(text).toContain('Guard off');
     expect(text).toMatch(/OpenClaw.*observe-only/);
-    expect(text).toMatch(/Header Guard on\/off\/mixed: whether any bound host is enforcing/);
-    expect(text).toMatch(/observe-only = enabled, not set to block/);
+    expect(text).toMatch(/Header Guard on\/off\/mixed: configured Claude Code hook and OpenClaw plugin only \(not Hermes,/);
+    expect(text).toMatch(/mixed = Claude Code enforcing, OpenClaw observe-only\/off/);
+    // #651 r2: observe-only is a collapsed label — a disarmed guard or
+    // interceptor shows it too — so the legend never says it means "enabled".
+    expect(text).toMatch(/actionGuard\/interceptor disabled/);
+    expect(text).not.toMatch(/observe-only = enabled/);
     // Display only: no command that would change posture.
     expect(text).not.toMatch(/action-guard-enable|action-guard-enforce|iron-dome activate|shieldcortex config/i);
   });

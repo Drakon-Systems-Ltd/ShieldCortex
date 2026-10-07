@@ -365,8 +365,9 @@ export interface HermesPluginScan {
   undeterminedReason: string | null;
   /**
    * True when Hermes could not be asked because no interpreter was found at
-   * all (#651), as opposed to one that was found and failed, or a tree that
-   * could not be read. A structured fact so callers never parse
+   * all (#651) — every candidate statted as absent and no `hermes` launcher on
+   * PATH (#651 r2) — as opposed to one that was found and failed, a candidate
+   * that could not be read, or a launcher with no usable interpreter. A structured fact so callers never parse
    * `undeterminedReason`. On its own it proves nothing about whether Hermes is
    * installed: a host can have an agent home and a broken or moved venv.
    */
@@ -576,28 +577,72 @@ export function hermesPluginRoots(hermesHome: string): string[] {
  * null when neither is there, which is the signal to fall back.
  */
 export function resolveHermesInterpreter(hermesHome: string): string | null {
+  const search = searchHermesInterpreter(hermesHome);
+  return search.kind === 'found' ? search.interpreter : null;
+}
+
+/**
+ * Where the interpreter search ended (#651 r2). `absent` only when every
+ * candidate stat was ENOENT/ENOTDIR and PATH held no `hermes` launcher;
+ * `undetermined` names the first candidate that could not be statted, was
+ * something other than a file, or a launcher that exists but gives no usable
+ * interpreter (unreadable, `env` shebang, missing target). Absence is a
+ * conclusion doctor draws from this, so uncertainty must not read as it.
+ */
+export type HermesInterpreterSearch =
+  | { kind: 'found'; interpreter: string }
+  | { kind: 'absent' }
+  | { kind: 'undetermined'; path: string };
+
+export function searchHermesInterpreter(hermesHome: string): HermesInterpreterSearch {
   const venv = path.join(hermesHome, 'hermes-agent', '.venv');
   const candidates = [
     path.join(venv, 'bin', 'python3'),
     path.join(venv, 'bin', 'python'),
     path.join(venv, 'Scripts', 'python.exe'),
   ];
+  let uncertain: string | null = null;
   for (const candidate of candidates) {
-    if (isFile(candidate)) return candidate;
+    const state = fileState(candidate);
+    if (state === 'file') return { kind: 'found', interpreter: candidate };
+    if (state !== 'absent' && uncertain === null) uncertain = candidate;
   }
-  return shebangInterpreter(hermesOnPath());
+  const onPath = hermesOnPath();
+  if (uncertain === null) uncertain = onPath.uncertain;
+  if (onPath.launcher !== null) {
+    const interpreter = shebangInterpreter(onPath.launcher);
+    if (interpreter !== null) return { kind: 'found', interpreter };
+    if (uncertain === null) uncertain = onPath.launcher;
+  }
+  return uncertain === null ? { kind: 'absent' } : { kind: 'undetermined', path: uncertain };
 }
 
-/** The `hermes` launcher on PATH, or null. */
-function hermesOnPath(): string | null {
+/** `isFile` with its failures kept apart: absent, or there but not (knowably) a file. */
+function fileState(target: string): 'file' | 'absent' | 'other' {
+  try {
+    return fs.statSync(target).isFile() ? 'file' : 'other';
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'other';
+  }
+}
+
+/**
+ * The `hermes` launcher on PATH, or null — plus the first PATH candidate
+ * before it that could not be statted or was not a file.
+ */
+function hermesOnPath(): { launcher: string | null; uncertain: string | null } {
   const raw = process.env.PATH;
-  if (typeof raw !== 'string' || raw === '') return null;
+  let uncertain: string | null = null;
+  if (typeof raw !== 'string' || raw === '') return { launcher: null, uncertain };
   for (const entry of raw.split(path.delimiter)) {
     if (entry === '') continue;
     const candidate = path.join(entry, 'hermes');
-    if (isFile(candidate)) return candidate;
+    const state = fileState(candidate);
+    if (state === 'file') return { launcher: candidate, uncertain };
+    if (state === 'other' && uncertain === null) uncertain = candidate;
   }
-  return null;
+  return { launcher: null, uncertain };
 }
 
 /**
@@ -1161,9 +1206,22 @@ export function probeHermesDiscovery(
   // for something to ask, not an answer: a wrong guess here costs a venv
   // lookup and falls through to the `hermes` launcher on PATH.
   const searchHome = resolveHermesHome(env);
-  const interpreter =
-    opts.interpreter !== undefined ? opts.interpreter : resolveHermesInterpreter(searchHome);
-  if (interpreter === null) return { error: 'no Hermes interpreter found', noInterpreter: true };
+  // `noInterpreter` only for a search that met nothing but absence (#651 r2);
+  // an unreadable candidate or an unusable launcher is not "none found".
+  let interpreter: string;
+  if (opts.interpreter !== undefined) {
+    if (opts.interpreter === null) return { error: 'no Hermes interpreter found', noInterpreter: true };
+    interpreter = opts.interpreter;
+  } else {
+    const search = searchHermesInterpreter(searchHome);
+    if (search.kind === 'absent') return { error: 'no Hermes interpreter found', noInterpreter: true };
+    if (search.kind === 'undetermined') {
+      return {
+        error: `no usable Hermes interpreter found (${search.path} could not be read, or is not a usable interpreter)`,
+      };
+    }
+    interpreter = search.interpreter;
+  }
 
   const payload = JSON.stringify({
     name: HERMES_PLUGIN_NAME,

@@ -387,31 +387,47 @@ Use that where "disabled anywhere in the fleet" must break the build. Plain
 
 ### Doctor severity notes (#651)
 
-A ⚠️ is meant to mark something you can act on. These rows are ℹ️ instead, and
-so no longer fail `--strict`:
+A ⚠️ is meant to mark something you can act on. One family of rows is ℹ️
+instead, and so no longer fails `--strict`:
 
 - **Hermes plugin copies / Hermes plugin** when Hermes is confirmed absent: the
   Hermes home holds none of `config.yaml`, `config.yml`, `profiles/`, `SOUL.md`
   (the markers the HOSTS table uses), has no `plugins/` directory, `HERMES_HOME`
-  is unset, and no Hermes interpreter was found. Any one of those present, an
-  unreadable path, or an interpreter that was found but failed keeps the ⚠️.
-- **Action guard policy lock** when no lock is installed and the signed config
-  is confirmed off (`actionGuard.enabled` is not `true`): no plane can gate, so
-  there is nothing to pin. Leftover signed Enforce with the plugin off stays ⚠️,
-  and a live gate without a lock stays ❌.
+  is unset, and the interpreter search found nothing: every venv candidate was
+  missing and there is no `hermes` launcher on `PATH`. Any one of those present,
+  an unreadable path (including a venv candidate or `PATH` entry that cannot be
+  checked), a `hermes` launcher that gives no usable interpreter (unreadable,
+  `#!/usr/bin/env` shebang, missing target), or an interpreter that was found
+  but failed keeps the ⚠️.
 
-The HOSTS table header (`Guard on/off/mixed`) is whether any bound host is
-enforcing tool calls. The word after a host (`enforcing`, `observe-only`, `off`)
-is that host's own gate as configured; `observe-only` means enabled but not set
-to block. `Guard off` beside `observe-only` is consistent, and doctor prints a
-two-line legend under the table whenever a host shows one of those words.
+**Action guard policy lock** with no lock installed and Guard not live is still
+⚠️ (`Guard is off on this host … not unprotected`, no fix command). It is not
+downgraded: doctor's signed-config read returns "off" for a corrupt or
+unreadable `config.json` as well as a real off, and a signed off does not prove
+the OpenClaw plane is off, because the plugin's own config can enable the
+guard. A live gate with no lock stays ❌.
 
-The OpenClaw "multiple install dirs" warning now lists every
+The HOSTS table header (`Guard on/off/mixed`) is computed from the configured
+Claude Code hook and OpenClaw plugin only; Hermes feeds it nothing, and it is
+not a check of running processes. `mixed` is the Claude Code hook enforcing
+while OpenClaw is observe-only or off; `on` is otherwise at least one of the two
+enforcing (OpenClaw counts only when signed `actionGuard.enabled` is `true`);
+`off` is neither. The word after a host is that host's own configured gate. For
+OpenClaw, `observe-only` is a collapsed label: the plugin entry is not disabled
+but is not armed to block, which covers `enforce: false` and also a disabled
+`actionGuard` or `interceptor`. `off` is a disabled plugin entry. For Claude
+Code, `off` is the hook wired with signed Enforce not on. `Guard off` beside
+`observe-only` is consistent, and doctor prints this legend under the table
+whenever a host shows one of those words.
+
+The OpenClaw "multiple install dirs" warning lists every
 `~/.openclaw/npm/projects/*` directory it found and which one OpenClaw's install
 index names as the install. The index records an install, not what the running
-gateway loaded, so doctor does not call any directory stale and prints no
-removal command. Inspect the listed directories before deleting anything by
-hand. `shieldcortex repair` remains the remedy.
+gateway loaded. The row's opening sentence still says "prune the stale
+duplicate" (older wording), but it does not identify which directory is stale,
+and the row says so: doctor does not say which, if any, is stale or safe to
+delete, so inspect each before removing anything by hand. It prints no removal
+command; `shieldcortex repair` remains the remedy.
 
 ## Uninstall
 
