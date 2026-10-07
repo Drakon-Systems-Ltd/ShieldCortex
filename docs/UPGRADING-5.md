@@ -122,6 +122,6 @@ If you never ran 5.0 against the live DB, the backup is unused and you can delet
 
 ## npm will also tell you
 
-`package.json` `engines` is `^22.14.0 || >=24.0.0`. A Node 20 `npm install` prints `EBADENGINE`; npm treats `engines` as advisory unless `engine-strict` is set, in which case it refuses. `--ignore-engines` gets you as far as the native binding, which then fails with the same Node-floor message.
+`package.json` `engines` is `^22.14.0 || >=24.0.0`. A Node 20 `npm install` prints `EBADENGINE`; npm treats `engines` as advisory unless `engine-strict` is set, in which case it refuses. `--ignore-engines` gets you as far as the native binding, which then fails with the same Node-floor message. On an unsupported Node the database engine fails to load and `shieldcortex doctor` fails.
 
 The README, this page, the install banner, and [https://www.npmjs.com/package/shieldcortex](https://www.npmjs.com/package/shieldcortex) all say 5.0 before you update. If one of them does not, file an issue.
