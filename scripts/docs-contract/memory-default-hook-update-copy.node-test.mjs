@@ -175,13 +175,14 @@ describe('README.md prompt-time recall', () => {
   });
 });
 
-describe('CHANGELOG.md Unreleased memory-defaults bullet', () => {
+describe('CHANGELOG.md memory-defaults bullet (Unreleased, or the release that shipped it)', () => {
   const changelog = read('CHANGELOG.md');
-  const unreleased = changelog.slice(changelog.indexOf('## [Unreleased]'), changelog.indexOf('\n## [', changelog.indexOf('## [Unreleased]') + 1));
-  const bullet = unreleased.split('\n').find((l) => l.startsWith('- **Memory defaults in the cortex-memory hook'));
+  // The bullet starts under [Unreleased] and moves into a versioned section at
+  // release time; the contract is its wording, not which heading it sits under.
+  const bullet = changelog.split('\n').find((l) => l.startsWith('- **Memory defaults in the cortex-memory hook'));
 
   it('scopes the npm no-wiring statement to the Claude Code hook', () => {
-    assert.ok(bullet, 'Unreleased memory-defaults bullet not found');
+    assert.ok(bullet, 'memory-defaults bullet not found in CHANGELOG.md');
     assert.doesNotMatch(bullet, /wires no hook/);
     assert.match(bullet, /the npm install does not wire Claude Code's `UserPromptSubmit` hook/);
   });
