@@ -180,17 +180,44 @@ function readProcLinux(pid: number): ProcInfo | null {
   }
 }
 
+/**
+ * macOS `ps` prints SESS as 0 for every process, so the sid it reports can
+ * never name a leader and every human's `approve` was refused as
+ * `no-session-leader`. BSD ps does mark the leader: STAT carries `s`. A
+ * controlling terminal belongs to exactly one session, so the leader is the
+ * one `s` process attached to our tty. Anything else — none, or more than one
+ * — returns 0 and the verdict stays fail-closed.
+ */
+export function darwinSessionLeaderFromPs(lines: string): number {
+  const leaders: number[] = [];
+  for (const line of lines.split('\n')) {
+    const m = /^\s*(\d+)\s+(\S+)\s*$/.exec(line);
+    if (m && m[2].includes('s')) leaders.push(Number(m[1]));
+  }
+  return leaders.length === 1 ? leaders[0] : 0;
+}
+
+function psDarwin(args: string[]): string {
+  return execFileSync('ps', args, {
+    encoding: 'utf8',
+    timeout: 2000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+}
+
 function readProcDarwin(pid: number): ProcInfo | null {
   try {
-    const out = execFileSync('ps', ['-o', 'ppid=,sess=,tty=,comm=', '-p', String(pid)], {
-      encoding: 'utf8',
-      timeout: 2000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    const out = psDarwin(['-o', 'ppid=,sess=,tty=,comm=', '-p', String(pid)]).trim();
     if (!out) return null;
     const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(out);
     if (!m) return null;
-    return { pid, ppid: Number(m[1]), sid: Number(m[2]), comm: m[4].trim(), tty: m[3] === '??' || m[3] === '-' ? 0 : 1 };
+    const ttyName = m[3];
+    const tty = ttyName === '??' || ttyName === '-' ? 0 : 1;
+    let sid = Number(m[2]);
+    if (sid === 0 && tty === 1 && /^[\w/.-]+$/.test(ttyName)) {
+      sid = darwinSessionLeaderFromPs(psDarwin(['-t', ttyName, '-o', 'pid=,stat=']));
+    }
+    return { pid, ppid: Number(m[1]), sid, comm: m[4].trim(), tty };
   } catch {
     return null;
   }
