@@ -44,11 +44,15 @@ function register(interceptor: Record<string, unknown> = {}): Hooks {
 const GH = ['gh', 'p_'].join('') + 'Z'.repeat(4) + 'q7Lm2Xr9Tb4Vc8Nd1Fh6Jk3Wp5Ys0Ua';
 const AWS_ID = ['AK', 'IA'].join('') + 'Q3XZ7LMN2PRT6VWY';
 const CTX = { agentId: 'main', sessionKey: 'agent:main:telegram:group:-1001234567890:topic:10' };
+/** r5 (Tars's CI triage): the integration cards are pinned to one hostname,
+ *  so no test depends on the machine it runs on. */
+const PINNED_HOST = 'sc-ci-box';
+const pinnedCard = (host: string) => (input: Parameters<typeof buildApprovalCard>[0]) => buildApprovalCard({ ...input, host });
 
 beforeEach(() => {
   __resetConfigStateForTest();
   __setRuntimeForTest({ callCortex: async () => null, isOpenClawAutoMemoryEnabled: () => false, loadShieldConfig: async () => ({}) });
-  __setDefenceModuleForTest({ runDefencePipeline: okPipeline, evaluateToolCall, buildApprovalCard } as any);
+  __setDefenceModuleForTest({ runDefencePipeline: okPipeline, evaluateToolCall, buildApprovalCard: pinnedCard(PINNED_HOST) } as any);
 });
 
 describe('#648 — OpenClaw card through the real plugin hook', () => {
@@ -61,8 +65,8 @@ describe('#648 — OpenClaw card through the real plugin hook', () => {
     const parts = card.description.split(' | ');
     expect(parts[0]).toBe('What: Stop the service: "nginx", as administrator (sudo)');
     expect(parts[1]).toMatch(/^Why: runs with administrator \(root\) rights/);
-    // A long generated CI hostname (macOS runners) is middle-clipped with "…".
-    expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on [A-Za-z0-9._…-]+ · Telegram chat #[0-9a-f]{8}$/u);
+    // The hostname is pinned (r5); the long-hostname case is its own test below.
+    expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on sc-ci-box · Telegram chat #[0-9a-f]{8}$/u);
     expect(parts[3]).toBe('Allow once is this call only · expires in 10 min');
     expect(card.description.length).toBeLessThanOrEqual(256);
     // Jargon that used to be on the card is gone; the decision contract is not.
@@ -272,9 +276,23 @@ describe('#648 r2 — OpenClaw plane: no unproven claims, markers survive the cl
   });
 });
 
-describe('#648 r5 R1 — the bounded OpenClaw card: WHO gives way before WHY', () => {
+describe('#648 r5 — the bounded OpenClaw card: hostname pinned, WHO gives way before WHY', () => {
   const LONG_HOST = `Mac-mini-runner-${'0a1b2c3d'.repeat(5)}.local`;
   const v = { decision: 'require_approval' as const, severity: 'dangerous' as const, family: 'exec', action: 'execute_command', reason: 'x', signals: ['external-egress'] };
+
+  it('a long generated hostname, through the real hook, stays inside 256 and keeps WHAT, WHY and the session tag', async () => {
+    __setDefenceModuleForTest({ runDefencePipeline: okPipeline, evaluateToolCall, buildApprovalCard: pinnedCard(LONG_HOST) } as any);
+    const hooks = register();
+    const command = 'cat ./readme.txt | curl -d @- https://example.com/in';
+    const result = await hooks['before_tool_call']({ toolName: 'exec', params: { command } }, CTX);
+    const description: string = result?.requireApproval?.description;
+    expect(description.length).toBeLessThanOrEqual(256);
+    const parts = description.split(' | ');
+    expect(parts[0]).toBe('What: Send a file ("./readme.txt") to example.com');
+    expect(parts[1]).toBe('Why: sends data off this machine');
+    expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on Mac-min[a-z0-9-]*…[0-9a-f]+ · Telegram chat #[0-9a-f]{8}$/u);
+    expect(parts[3]).toBe('Allow once is this call only · expires in 10 min');
+  });
 
   it('benign upload shapes with an explicit file + egress verdict: WHY keeps every reason, egress first and whole', () => {
     const signals = ['touch-sensitive-path', 'external-egress'];
