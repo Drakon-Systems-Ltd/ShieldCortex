@@ -1034,6 +1034,40 @@ export function getCloudIronDomeCache(): Record<string, unknown> | null {
   return null;
 }
 
+/**
+ * Read the cloud cache for diagnostics without signature adoption, self-heal,
+ * cache mutation, policy-lock audit, or any filesystem write. An unreadable or
+ * unverifiable existing config is reported to the caller as unavailable.
+ */
+export function peekCloudIronDomeCache(): Record<string, unknown> | null {
+  const configFile = getConfigFile();
+  if (!existsSync(configFile)) return null;
+
+  const content = readFileSync(configFile, 'utf-8');
+  if (!content.trim()) return null;
+  const parsed: unknown = JSON.parse(content);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Config unreadable');
+  const raw = parsed as Record<string, unknown>;
+
+  // Verify signatures using only an existing key. An unsigned legacy file is
+  // readable, but this peek must not adopt it by creating .config-sig.
+  const sigFile = getSigFile();
+  if (typeof raw._sig === 'string' || existsSync(sigFile)) {
+    const key = readFileSync(getIntegrityKeyFile(), 'utf-8').trim();
+    if (!key) throw new Error('Config integrity key unreadable');
+    const signed = (body: string) => createHmac('sha256', key).update(body, 'utf-8').digest('hex');
+    const embeddedValid = typeof raw._sig === 'string' &&
+      constantTimeEqualHex(raw._sig, signed(canonicalBodyForSig(raw)));
+    const legacyValid = existsSync(sigFile) &&
+      constantTimeEqualHex(readFileSync(sigFile, 'utf-8').trim(), signed(content));
+    if (!embeddedValid && !legacyValid) throw new Error('Config integrity check failed');
+  }
+
+  return raw.cloudIronDome && typeof raw.cloudIronDome === 'object' && !Array.isArray(raw.cloudIronDome)
+    ? raw.cloudIronDome as Record<string, unknown>
+    : null;
+}
+
 // ── Sync Timestamp ────────────────────────────────────
 
 // Debounce state for lastSyncAt. The sync queue, graph-sync and memory-sync all
