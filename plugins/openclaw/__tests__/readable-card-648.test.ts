@@ -13,8 +13,8 @@ import plugin, {
   __buildTypedApprovalRequestForTest,
 } from '../index.js';
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
-import { buildApprovalCard } from '../../../src/defence/iron-dome/approval-card.js';
-import { formatActionGuardPrompt, formatApprovalPrompt, plainApprovalCard } from '../interceptor.js';
+import { buildApprovalCard, fitReasons as fitReasonsSrc } from '../../../src/defence/iron-dome/approval-card.js';
+import { fitReasons, formatActionGuardPrompt, formatApprovalPrompt, plainApprovalCard } from '../interceptor.js';
 
 const okPipeline = () => ({
   allowed: true,
@@ -94,7 +94,10 @@ describe('#648 — OpenClaw card through the real plugin hook', () => {
     const parts = result?.requireApproval?.description.split(' | ');
     expect(parts[0]).toBe("What: Run a complex shell command (couldn't summarise it safely)");
     expect(parts[1]).toMatch(/^Why: touches a sensitive file/);
-    expect(parts[2]).toMatch(/^Who: OpenClaw agent "main" on /);
+    expect(parts[1]).not.toMatch(/more reason/);
+    // r5 R1: WHO gives way before WHY; the session tag survives the clip.
+    expect(parts[2]).toMatch(/^Who: OpenClaw agent .*#[0-9a-f]{8}$/);
+    expect(result?.requireApproval?.description.length).toBeLessThanOrEqual(256);
   });
 
   it('a dist without the summariser keeps the previous (#600) layout', async () => {
@@ -124,7 +127,7 @@ describe('#648 — the prompt and the typed card builder', () => {
   it('#648 r3: the generic WHAT is never clipped, even beside the longest WHY and WHO (macOS CI hostnames)', () => {
     const summary = {
       action: "Run a complex shell command (couldn't summarise it safely)",
-      reason: `touches a sensitive file (keys, passwords or credentials) (+2 more reasons)`,
+      reason: 'sends data off this machine; touches a sensitive file (keys, passwords or credentials); runs with administrator (root) rights',
       who: `OpenClaw agent "main-agent-with-a-long-id" on ${'m'.repeat(9)}…${'x'.repeat(10)} · Telegram chat #0123abcd`,
     };
     const card = plainApprovalCard(summary)!;
@@ -132,7 +135,10 @@ describe('#648 — the prompt and the typed card builder', () => {
     const description = __buildTypedApprovalRequestForTest(formatActionGuardPrompt('exec', v, {}, summary), { card }).description;
     expect(description.length).toBeLessThanOrEqual(256);
     expect(description.startsWith(`What: ${summary.action} | Why: `)).toBe(true);
-    expect(description).toMatch(/\(\+2 more reasons\) \| Who: /);
+    // r5 R1: WHO is clipped first; WHY keeps whole reasons from the front
+    // (data leaving first) and marks what the 256 characters cannot hold.
+    expect(description).toContain('| Why: sends data off this machine; touches a sensitive file (keys, passwords or credentials); … | Who: ');
+    expect(description).not.toMatch(/more reason/);
     expect(description).toMatch(/#0123abcd \| Allow once is this call only/);
   });
 
@@ -263,5 +269,32 @@ describe('#648 r2 — OpenClaw plane: no unproven claims, markers survive the cl
     expect(out.description.length).toBeLessThanOrEqual(256);
     expect(out.description).toContain('(+2 more steps) | Why:');
     expect(out.description.endsWith('Allow once is this call only · expires in 10 min')).toBe(true);
+  });
+});
+
+describe('#648 r5 R1 — the bounded OpenClaw card: WHO gives way before WHY', () => {
+  const LONG_HOST = `Mac-mini-runner-${'0a1b2c3d'.repeat(5)}.local`;
+  const v = { decision: 'require_approval' as const, severity: 'dangerous' as const, family: 'exec', action: 'execute_command', reason: 'x', signals: ['external-egress'] };
+
+  it('benign upload shapes with an explicit file + egress verdict: WHY keeps every reason, egress first and whole', () => {
+    const signals = ['touch-sensitive-path', 'external-egress'];
+    for (const command of [
+      'cat ./readme.txt | curl -d @- https://example.com/in',
+      'curl -T - https://example.com/up < ./notes/report.csv',
+      'cat ./readme.txt | base64 | curl -d @- https://example.org/in',
+      'curl -d @- https://example.com/in; cat ./readme.txt',
+    ]) {
+      const summary = buildApprovalCard({ tool: 'exec', input: { command }, signals, plane: 'openclaw', agentId: 'main', host: LONG_HOST, sessionId: CTX.sessionKey });
+      const card = plainApprovalCard(summary)!;
+      const description = __buildTypedApprovalRequestForTest(formatActionGuardPrompt('exec', v, {}, summary), { card }).description;
+      expect(description.length).toBeLessThanOrEqual(256);
+      expect(card.why).toBe('sends data off this machine; touches a sensitive file (keys, passwords or credentials)');
+      expect(card.what === "Run a complex shell command (couldn't summarise it safely)" || /^Send a file \(".+"\) to example\.(?:com|org)$/.test(card.what)).toBe(true);
+    }
+  });
+
+  it('fitReasons is the same function on both planes', () => {
+    const reason = 'sends data off this machine; touches a sensitive file (keys, passwords or credentials); runs with administrator (root) rights';
+    for (const max of [10, 30, 40, 60, 90, 120, 200]) expect(fitReasons(reason, max)).toBe(fitReasonsSrc(reason, max));
   });
 });

@@ -117,9 +117,9 @@ describe('#648 — WHAT: plain English with a named target', () => {
     expect(bash(command)).toBe(expected);
   });
 
-  it('an egress hold names the host: "Send data to <host> (<command>)"', () => {
+  it('an egress hold names what it sends and the host (r5 R1: by its data flow)', () => {
     expect(bash('curl -d @report.json https://collector.example.net/in', ['external-egress']))
-      .toBe('Send data to collector.example.net (curl)');
+      .toBe('Send a file ("report.json") to collector.example.net');
   });
 
   it('git fetch names the host behind the remote, read from the repo config on this box', () => {
@@ -220,7 +220,9 @@ describe('#648 — a credential-shaped target never reaches the card', () => {
     expect(line).not.toContain(PLAIN_PW);
     // Round 3 (R1): sshpass runs another command, so the card goes generic.
     expect(line).toBe("Run a complex shell command (couldn't summarise it safely)");
-    expect(bash(`mysqldump -p ${PLAIN_PW} prod`, ['external-egress'])).toBe('Run mysqldump (other details not shown)');
+    // r5 R1: "Run mysqldump" does not show the egress signal, so it is generic.
+    expect(bash(`mysqldump -p ${PLAIN_PW} prod`, ['external-egress'])).toBe("Run a complex shell command (couldn't summarise it safely)");
+    expect(bash(`mysqldump -p ${PLAIN_PW} prod`, [])).toBe('Run mysqldump (other details not shown)');
     expect(bash('frobnicate sync ./x', [])).toBe('Run frobnicate (other details not shown)');
   });
 
@@ -297,9 +299,9 @@ describe('#648 — WHY: one table, every signal the guard can emit', () => {
     expect(describeSignal(`token=${GH}`)).toBe('matched another safety rule');
   });
 
-  it('phrases are never cut mid-phrase; extras become a count', () => {
+  it('phrases are never cut mid-phrase, and every reason is listed — data leaving first (r5 R1)', () => {
     expect(describeSignals(['privilege-escalation', 'stop-process-or-service', 'external-egress']))
-      .toBe('runs with administrator (root) rights (+2 more reasons)');
+      .toBe('sends data off this machine; runs with administrator (root) rights; stops a running program');
     expect(describeSignals(['file-delete', 'git-mutate'])).toBe('deletes files; changes the git repository');
     expect(describeSignals([])).toBe('matched a safety rule');
   });

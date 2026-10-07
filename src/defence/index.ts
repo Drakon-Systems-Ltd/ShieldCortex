@@ -150,7 +150,7 @@ export { evaluateToolCall, classifyFamily, isCriticalPath, normaliseToolName, de
 export type { ToolGuardVerdict, ToolGuardDecision, ToolGuardSeverity, ToolFamily, ToolGuardOptions } from './iron-dome/tool-action-guard.js';
 // #648: the plain-English what/why/who an approval card shows. The OpenClaw
 // interceptor takes `buildApprovalCard` through its runtime seam.
-export { buildApprovalCard, describeAction, describeShell, describeSignal, describeSignals, describeWho, formatApprovalCardLines, GENERIC_SHELL, OUTSIDE_UNDERSTOOD_SUBSET, safeTarget, SIGNAL_PHRASES } from './iron-dome/approval-card.js';
+export { buildApprovalCard, describeAction, describeShell, describeSignal, describeSignals, describeWho, fitReasons, formatApprovalCardLines, GENERIC_SHELL, OUTSIDE_UNDERSTOOD_SUBSET, safeTarget, SIGNAL_CLASSES, SIGNAL_PHRASES, signalClass } from './iron-dome/approval-card.js';
 export type { ActionDescription, ApprovalCardSummary, ApprovalCardInput, ShellDoubt } from './iron-dome/approval-card.js';
 // #594 (ADR-002 §5C): the reviewed native contracts are judged per HOST
 // VERSION. The adapter that knows the host version records it here once; the
