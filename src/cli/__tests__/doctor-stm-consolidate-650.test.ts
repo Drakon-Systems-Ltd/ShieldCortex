@@ -19,6 +19,18 @@
  * The test drives the BUILT CLI (`dist/index.js consolidate`) exactly as the
  * doctor row names it, against an isolated HOME. It never touches the real
  * ~/.shieldcortex.
+ *
+ * Driving a checkout's `dist/index.js` against a default-path database is
+ * precisely what `enforceSafeRuntimePath` refuses: an entry path containing
+ * `/ShieldCortex/` is classed `project-checkout` and `initDatabase()` throws
+ * before the command runs (exit 1). GitHub Actions checks out to
+ * `.../work/ShieldCortex/ShieldCortex/`, so CI tripped it on every spawn while
+ * a worktree named anything else sailed through. The fixture HOME is the whole
+ * point of this suite — there is no live database to protect — so the child
+ * gets the guard's own documented opt-out, `SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME=1`,
+ * and NOT an inherited `CLAUDE_MEMORY_DB`, which would silently redirect the
+ * command away from the fixture (several sibling suites set it without
+ * restoring it, and Jest workers are long-lived).
  */
 import fs from 'fs';
 import os from 'os';
@@ -87,12 +99,31 @@ describe('#650 doctor STM row clears after its own suggested command', () => {
   }
 
   function runSuggestedCommand(): { status: number | null; stdout: string; stderr: string } {
+    // Never let a sibling suite's leaked CLAUDE_MEMORY_DB pick the database:
+    // this suite is about the DEFAULT path under HOME, like the doctor row.
+    const { CLAUDE_MEMORY_DB: _leaked, ...inherited } = process.env;
     const res = spawnSync(process.execPath, [cli, 'consolidate'], {
-      env: { ...process.env, HOME: root, USERPROFILE: root },
+      env: {
+        ...inherited,
+        HOME: root,
+        USERPROFILE: root,
+        // See the header: a checkout's dist against a default-path DB is what
+        // the runtime-path guard exists to stop. HOME is a throwaway fixture.
+        SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME: '1',
+      },
       encoding: 'utf-8',
       timeout: 120_000,
     });
     return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+  }
+
+  /** Exit-status assertion that shows the child's own output when it fails, not just `Received: 1`. */
+  function expectExitZero(run: { status: number | null; stdout: string; stderr: string }): void {
+    if (run.status !== 0) {
+      throw new Error(
+        `\`shieldcortex consolidate\` exited ${run.status}\n--- stderr ---\n${run.stderr}\n--- stdout ---\n${run.stdout}`,
+      );
+    }
   }
 
   it('the reported repro: STM over the cap, doctor warns, `shieldcortex consolidate` drains it, doctor passes', () => {
@@ -106,7 +137,7 @@ describe('#650 doctor STM row clears after its own suggested command', () => {
 
     const run = runSuggestedCommand();
     expect(run.stderr).not.toContain('Unknown command');
-    expect(run.status).toBe(0);
+    expectExitZero(run);
 
     // The command actually drained STM to the cap…
     expect(stmCount()).toBeLessThanOrEqual(CAP);
@@ -144,7 +175,7 @@ describe('#650 doctor STM row clears after its own suggested command', () => {
     closeDatabase();
 
     const run = runSuggestedCommand();
-    expect(run.status).toBe(0);
+    expectExitZero(run);
     expect(stmCount()).toBe(CAP + 1);
 
     const after = runMemoryStatsCheck(dbPath, CAPS);
