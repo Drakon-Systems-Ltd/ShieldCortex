@@ -130,6 +130,19 @@ effect kinds, signal names, taint, `requestedBy`, host (never path or query), el
 and a bounded, escaped label with secret-shaped text redacted, input hash, outcome, host answer, scan indicators. Never the
 typed text, never a URL query string, never page content.
 
+## Known limits (P1)
+
+Both are tracked for P2 (#678).
+
+- **N1 — input binding skips three field names.** The input hash that binds `execute`
+  to `confirm` does not include own JSON fields named `constructor`, `prototype` or
+  `__proto__`. A change to only those fields after `confirm` is not detected as
+  `mutated_input`. No standard SDK member reads them.
+- **N2 — a newline in `type` after a read.** A `type` call whose text contains a newline
+  is classified as ordinary typing, not a submit, unless the previous member was also
+  typing. After a read, that call's classification and card do not say it may submit a
+  form. This is a classification risk, not a demonstrated submission bypass.
+
 ## Not covered
 
 Container egress rules and desktop isolation are deployment concerns the SDK docs list.
