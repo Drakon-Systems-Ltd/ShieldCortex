@@ -1,6 +1,6 @@
 # Updating and operations
 
-Operator detail that used to sit on the README: how to update, what 5.3 and 5.4 changed, the policy lock, recall prerequisites, and the host-wiring notes. The [changelog](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md) is the release record. Coming from 4.x, read [Upgrading to 5](UPGRADING-5.md) before you install.
+Operator detail that used to sit on the README: how to update, what 5.3, 5.4 and 5.5 changed, the policy lock, recall prerequisites, and the host-wiring notes. The [changelog](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md) is the release record. Coming from 4.x, read [Upgrading to 5](UPGRADING-5.md) before you install.
 
 ShieldCortex does not replace OpenClaw, Hermes, or Claude memory. Native memory stays the brain. This package is the door.
 
@@ -40,6 +40,17 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 4. **Hermes** — `shieldcortex hermes install` copies the plugin into `~/.hermes/plugins/shieldcortex`; it gates tool calls once `hermes plugins enable shieldcortex` has run and the local API (`shieldcortex api`) is up. Restart the Hermes gateway after a refresh. `shieldcortex hermes status` reports presence, not enforcement.
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
+
+<a id="whats-new-in-55"></a>
+
+## What's new in 5.5
+
+- **See how each runtime is configured to enforce.** `shieldcortex policy-evidence` prints a JSON envelope (schema, scope, limitations, summary) with a `records` array: one record per runtime, profile, plane and reporting instance this host has evidence for (Claude Code hook, OpenClaw plugin, Hermes plugin; Codex and Copilot appear as memory-only, not-a-gate records). Each record says whether the integration is installed and loaded, its configured posture, its scanner and any observed real block, each with its own evidence and timestamp. A runtime with no self-report shows as `unobserved`, and stale evidence is marked obsolete rather than trusted; the inventory covers what reported here and does not prove every running process was seen. `shieldcortex doctor` shows the same records as info-only rows. The records are local self-reports, not attestation, and the output says so. They show configuration: with enforce when ready on, a Claude Code record can say `enforce` while the readiness gate still has the guard watching; `shieldcortex guard readiness` shows the live gate. (#613)
+- **Dependency security update.** The MCP SDK moves to 1.31.0, past a published advisory in its OAuth client (which ShieldCortex does not use). Production audit: 0 unwaived advisories, 4 waived; reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). (#655)
+- **Approving on a Mac works again.** In 5.4.0 `shieldcortex approve` refused every human on macOS, so blocked actions could not be approved there. It now finds your Terminal.app or SSH session correctly and still refuses agent-owned shells. It also refuses, rather than guesses, when it cannot read the whole process tree, so on a Linux host with restricted `/proc` even a real login shell may be unable to approve.
+- **No more scan stalls on long blank runs.** A long run of newlines could stall a scan for 30 seconds or more. Detection is unchanged.
+
+Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
 
 <a id="whats-new-in-54"></a>
 
@@ -104,7 +115,7 @@ For Claude Code PreToolUse, a hook load failure still blocks recognised catastro
 
 ## Doctor and the host table
 
-`shieldcortex doctor` prints the same host table — `memory + tool gate` or `memory only — not a gate` per host. It shows the live Guard posture for Claude Code and OpenClaw; for Hermes it only reports whether the plugin copy is present. It will not print “protected” for a host that cannot deny.
+`shieldcortex doctor` prints the same host table — `memory + tool gate` or `memory only — not a gate` per host. It shows the live Guard posture for Claude Code and OpenClaw; for Hermes the host-table row only reports whether the plugin copy is present. Separate info-only runtime-posture rows (5.5+, see `shieldcortex policy-evidence`) report what each runtime's own self-report says, Hermes included. It will not print “protected” for a host that cannot deny.
 
 `setup` (alias `quickstart`) prints one host table and asks before wiring. Claude Code and OpenClaw get hooks that can **deny**. Hermes gets the plugin copy, which gates tool calls once you run `hermes plugins enable shieldcortex` with the local API up. Codex / Cursor / VS Code get an MCP memory server — a scanner the model may call, not a tool gate.
 

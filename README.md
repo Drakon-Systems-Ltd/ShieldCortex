@@ -77,6 +77,8 @@ If the Claude Code PreToolUse hook fails to load, a bounded fallback still block
 
 The optional enforce-when-ready posture runs the dangerous tier in shadow until this install's own audit shows the guard is operable and reviewed evidence for the running version exists. No such evidence ships yet, so today it stays in shadow and says so. [What's new in 5.4](docs/UPDATING.md#whats-new-in-54).
 
+`shieldcortex policy-evidence` (5.5+) reports what each runtime's own self-report says it is enforcing, as local self-reports rather than attestation. [What's new in 5.5](docs/UPDATING.md#whats-new-in-55).
+
 ## Free and Cloud
 
 Two different apps.
