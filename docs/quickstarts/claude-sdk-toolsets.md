@@ -59,18 +59,30 @@ class MyBrowser extends BetaAbstractBrowserToolset20260801 {
 }
 ```
 
-**Required driver duty: request interception.** Call `guard.isUrlAllowed(url)` from your
-driver's request-interception hook (Playwright `context.route`, CDP `Fetch.requestPaused`)
-and abort every request it rejects, so link clicks, form posts and redirects get the same
-URL rule as `navigate`. The SDK's `urlPolicy` only sees `navigate`, and the ref catalogue
-records a link's label, not its href: without interception the guard cannot see where a
-click goes. As a backstop, once the session is tainted every link click and every click
-on a ref it cannot resolve is `require_approval`.
+**Required driver duty: request interception.** Call `guard.interceptRequest(url)` from
+your driver's request-interception hook (Playwright `context.route`, CDP
+`Fetch.requestPaused`), so link clicks, form posts and redirects get the same URL rule as
+`navigate`. The SDK's `urlPolicy` only sees `navigate`, and the ref catalogue records a
+link's label, not its href: without interception the guard cannot see where a click goes.
+As a backstop, once the session is tainted every link click and every click on a ref it
+cannot resolve is `require_approval`.
+
+`interceptRequest` follows the guard's mode. A request the URL rule rejects emits one
+values-free `call` event (member `request`, host only, signal `request-interception`).
+In `observe` it then answers `continue`, so the request goes ahead and the page behaves
+as it would without ShieldCortex; only in `enforce` does it answer `abort`. A request the
+rule accepts is not audited.
 
 ```ts
 await context.route('**/*', (route) =>
-  guard.isUrlAllowed(route.request().url()) ? route.continue() : route.abort('blockedbyclient'));
+  guard.interceptRequest(route.request().url()) === 'abort' ? route.abort('blockedbyclient') : route.continue());
 ```
+
+`guard.isUrlAllowed(url)` is the same URL rule as a plain predicate: it does not depend
+on the mode and records nothing. If your deployment blocks requests on its own (a
+`context.route` that aborts on `!guard.isUrlAllowed(url)`, a proxy, container egress
+rules), that is **your own control**, enforced whatever the guard's mode. It is not
+ShieldCortex observe, and ShieldCortex does not audit what it blocks.
 
 For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` and the
 `execute` override but has no URL or file policy.
@@ -111,6 +123,7 @@ typed text, never a URL query string, never page content.
 
 ## Not covered
 
-Container egress rules, desktop isolation and request interception are deployment
-concerns the SDK docs list; the guard cannot see what the browser's network does. The
+Container egress rules and desktop isolation are deployment concerns the SDK docs list.
+The guard sees only the requests your interception hook passes to `interceptRequest`;
+it cannot see the rest of the browser's network. The
 server-side prompt-injection classifier is Anthropic's and is not host-controllable.

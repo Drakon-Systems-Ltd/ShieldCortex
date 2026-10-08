@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
 import { beforeAll, describe, expect, it } from '@jest/globals';
@@ -168,5 +169,69 @@ describe('dist probe B3 — enforce execute applies the DENY set without relying
     await guard.confirm(async () => false)({ member: 'javascript_exec', input: {}, toolUse });
     await guard.execute({ toolUse }, 'javascript_exec', {}, async () => { ran++; });
     expect(ran).toBe(2);
+  });
+});
+
+describe('dist probe R1 — the documented request-interception callback follows the mode (#679 review 3)', () => {
+  /**
+   * The `context.route(...)` example is read out of the quickstart and run as
+   * written, so the docs cannot drift from what the guard does.
+   */
+  function documentedInterception(): string {
+    const doc = fs.readFileSync(path.resolve(process.cwd(), 'docs', 'quickstarts', 'claude-sdk-toolsets.md'), 'utf8');
+    const blocks = [...doc.matchAll(/```ts\n([\s\S]*?)```/g)].map((m) => m[1]);
+    const routes = blocks.filter((b) => b.includes('context.route('));
+    expect(routes).toHaveLength(1);
+    return routes[0];
+  }
+
+  async function runDocumented(guard: Toolsets.ToolsetGuard, urls: string[]): Promise<string[]> {
+    let handler: ((route: unknown) => unknown) | undefined;
+    const context = { route: async (_pattern: string, h: (route: unknown) => unknown) => { handler = h; } };
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (...args: string[]) => (...a: unknown[]) => Promise<unknown>;
+    await new AsyncFunction('guard', 'context', documentedInterception())(guard, context);
+    expect(handler).toBeDefined();
+    const outcomes: string[] = [];
+    for (const url of urls) {
+      handler!({
+        request: () => ({ url: () => url }),
+        continue: () => { outcomes.push('continue'); },
+        abort: (reason: string) => { outcomes.push(`abort:${reason}`); },
+      });
+    }
+    return outcomes;
+  }
+
+  const URLS = ['https://docs.example.com/guide', 'https://cdn.other.example/font.woff2?k=SECRET-QUERY'];
+
+  it('observe: an off-list request continues and emits one values-free audit event', async () => {
+    const { guard, events } = makeGuard();
+    expect(await runDocumented(guard, URLS)).toEqual(['continue', 'continue']);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'call', member: 'request', mode: 'observe', decision: 'require_approval',
+      outcome: 'observed', host: 'cdn.other.example',
+    });
+    expect(events[0].signals).toEqual(['request-interception', 'url-host-not-allowlisted']);
+    const s = JSON.stringify(events);
+    expect(s).not.toContain('SECRET-QUERY');
+    expect(s).not.toContain('font.woff2');
+  });
+
+  it('enforce: the same off-list request is aborted and recorded as refused', async () => {
+    const { guard, events } = makeGuard({ mode: 'enforce' });
+    expect(await runDocumented(guard, URLS)).toEqual(['continue', 'abort:blockedbyclient']);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'call', member: 'request', mode: 'enforce', outcome: 'refused', host: 'cdn.other.example' });
+  });
+
+  it('isUrlAllowed stays a truthful, mode-independent predicate that records nothing', () => {
+    for (const mode of ['observe', 'enforce'] as const) {
+      const { guard, events } = makeGuard({ mode });
+      expect(guard.isUrlAllowed(URLS[0])).toBe(true);
+      expect(guard.isUrlAllowed(URLS[1])).toBe(false);
+      expect(guard.isUrlAllowed('javascript:alert(1)')).toBe(false);
+      expect(events).toHaveLength(0);
+    }
   });
 });

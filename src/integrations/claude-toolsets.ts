@@ -818,9 +818,37 @@ export class ToolsetGuard {
     });
   }
 
-  /** The URL check for the driver's request-interception hook. */
+  /**
+   * The URL rule as a pure predicate: does `url` pass the scheme, private-range
+   * and allowlist check? Mode-independent and not audited. A driver's
+   * request-interception hook calls `interceptRequest`, not this.
+   */
   isUrlAllowed(url: string): boolean {
     return checkUrl(url, this.allowlist).allowed;
+  }
+
+  /**
+   * The decision for one intercepted browser request (Playwright `context.route`,
+   * CDP `Fetch.requestPaused`). A request the URL rule rejects emits one
+   * values-free `call` event (member `request`, host only, signal
+   * `request-interception`). Observe always answers `continue`: P1 never changes
+   * what runs. Only `enforce` answers `abort` for a rejected request.
+   */
+  interceptRequest(url: string): 'continue' | 'abort' {
+    const check = checkUrl(url, this.allowlist);
+    if (check.allowed) return 'continue';
+    const callCtx: ToolsetConfirmContext = { member: 'navigate', input: { url } };
+    const verdict: ToolsetVerdict = {
+      ...this.classify(callCtx),
+      decision: check.verdict === 'block' ? 'block' : 'require_approval',
+      effects: check.effects,
+      signals: ['request-interception', check.reason],
+      reason: check.reason,
+    };
+    const abort = this.mode === 'enforce';
+    // The audit row carries the request's host (emit keeps only the host of `tabURL`).
+    this.emit({ kind: 'call', ctx: { member: 'request', input: {}, tabURL: url }, verdict, outcome: abort ? 'refused' : 'observed' });
+    return abort ? 'abort' : 'continue';
   }
 
   /**
