@@ -80,6 +80,7 @@ describe('ToolsetGuard — hidden-injection fixture page (#678 acceptance 1)', (
 
   it('in enforce mode substitutes the neutralised placeholder', async () => {
     const { guard, events } = makeGuard({ mode: 'enforce' });
+    await guard.confirm()(ctx('get_page_text', {}));
     const out = await guard.execute(ctx('get_page_text', {}), 'get_page_text', {}, async () => HIDDEN_INJECTION_PAGE);
     expect(typeof out).toBe('string');
     expect(out).not.toBe(HIDDEN_INJECTION_PAGE);
@@ -90,6 +91,7 @@ describe('ToolsetGuard — hidden-injection fixture page (#678 acceptance 1)', (
   it('leaves a clean page untouched and still taints', async () => {
     const { guard, events } = makeGuard({ mode: 'enforce' });
     const clean = '<html><body><h1>News</h1><p>The weather is fine today.</p></body></html>';
+    await guard.confirm()(ctx('get_page_text', {}));
     const out = await guard.execute(ctx('get_page_text', {}), 'get_page_text', {}, async () => clean);
     expect(out).toBe(clean);
     expect(guard.isTainted).toBe(true);
@@ -256,7 +258,7 @@ describe('ToolsetGuard — batches are gated per block (#678 acceptance 5)', () 
     await observe.guard.confirm()(ctx('scroll', { amount: 3 }, { toolUse: { id: 'toolu_9' } }));
     const out = await observe.guard.execute(ctx('scroll', { amount: 3 }, { toolUse: { id: 'toolu_9' } }), 'scroll', { amount: 300 }, async () => 'ok');
     expect(out).toBe('ok');
-    expect(observe.events.some((e) => e.signals.includes('input-mutated-after-confirm'))).toBe(true);
+    expect(observe.events.some((e) => e.signals.includes('mutated_input'))).toBe(true);
   });
 });
 
@@ -374,6 +376,7 @@ describe('ToolsetGuard — navigation and browser state taint (#679 finding 2)',
 
   it('a navigate result title taints the session, so the next coordinate click is held', async () => {
     const { guard, events } = makeGuard({ mode: 'enforce' });
+    await guard.confirm()(ctx('navigate', { url: 'https://docs.example.com/x' }));
     await guard.execute({}, 'navigate', { url: 'https://docs.example.com/x' },
       async () => ({ url: 'https://docs.example.com/x', title: STEERING_TITLE, status: 200 }));
     expect(guard.isTainted).toBe(true);
@@ -530,5 +533,51 @@ describe('isPrivateOrLocalHost — IP literals only, no lookups (#679 finding 4)
     expect(isPrivateOrLocalHost('fe80::1')).toBe(true);
     expect(isPrivateOrLocalHost('172.15.0.1')).toBe(false);
     expect(isPrivateOrLocalHost('172.16.0.1')).toBe(true);
+  });
+});
+
+describe('ToolsetGuard — execute without a tool_use id stays bound to confirm (#679 finding 5)', () => {
+  it('enforce: a type input mutated after approving "hello" is refused and never runs', async () => {
+    const { guard } = makeGuard({ mode: 'enforce' });
+    expect(await guard.confirm(async () => true)(ctx('type', { text: 'hello' }))).toBe(true);
+    let ran = false;
+    await expect(
+      guard.execute({}, 'type', { text: AWS_SHAPED_KEY }, async () => { ran = true; }),
+    ).rejects.toThrow(/changed after it was approved/);
+    expect(ran).toBe(false);
+  });
+
+  it('observe: the same mutation runs but is recorded as mutated_input with the mutated verdict', async () => {
+    const { guard, events } = makeGuard();
+    await guard.confirm()(ctx('type', { text: 'hello' }));
+    events.length = 0;
+    let ran = false;
+    await guard.execute({}, 'type', { text: AWS_SHAPED_KEY }, async () => { ran = true; });
+    expect(ran).toBe(true);
+    const mutated = events.find((e) => e.signals.includes('mutated_input'));
+    expect(mutated).toBeDefined();
+    expect(mutated!.decision).toBe('block');
+    expect(JSON.stringify(events)).not.toContain(AWS_SHAPED_KEY);
+  });
+
+  it('the unchanged input runs with no mutation signal', async () => {
+    const { guard, events } = makeGuard({ mode: 'enforce' });
+    await guard.confirm()(ctx('type', { text: 'hello' }));
+    await expect(guard.execute({}, 'type', { text: 'hello' }, async () => 'typed')).resolves.toBe('typed');
+    expect(events.some((e) => e.signals.includes('mutated_input') || e.signals.includes('unconfirmed'))).toBe(false);
+  });
+
+  it('enforce: an execute with no confirm record is refused, not keyed afresh', async () => {
+    const { guard } = makeGuard({ mode: 'enforce' });
+    await guard.confirm()(ctx('type', { text: 'hello' }));
+    await guard.execute({}, 'type', { text: 'hello' }, async () => undefined);
+    // The record is consumed: a second execute without a new confirm is unconfirmed.
+    await expect(guard.execute({}, 'type', { text: 'hello' }, async () => undefined)).rejects.toThrow(/not approved/);
+  });
+
+  it('observe: an execute with no confirm record runs and is recorded as unconfirmed', async () => {
+    const { guard, events } = makeGuard();
+    await expect(guard.execute({}, 'scroll', {}, async () => 'ok')).resolves.toBe('ok');
+    expect(events.some((e) => e.signals.includes('unconfirmed') && e.outcome === 'observed')).toBe(true);
   });
 });

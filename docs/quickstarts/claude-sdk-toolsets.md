@@ -86,6 +86,11 @@ that report to every tool result, so a page title is content the model reads.
 unclassified action is `require_approval`. That is the point: the agent is now acting on
 content an attacker may have written (ADR-002 §2.2).
 
+`execute` binds to what `confirm` saw for the same call (by tool_use id, else by member
+name, never by the input): an input that changed after `confirm` is recorded as
+`mutated_input`, and an `execute` with no `confirm` record as `unconfirmed`. In
+`enforce` mode both are refused.
+
 ## Audit events
 
 One event per call and one per scanned result. Fields: toolset, member, mode, decision,

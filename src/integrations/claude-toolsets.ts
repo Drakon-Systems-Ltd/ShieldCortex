@@ -199,6 +199,15 @@ function pageKey(url: string | undefined): string | undefined {
   return hash === -1 ? url : url.slice(0, hash);
 }
 
+/**
+ * Where `confirm` records a call for `execute` to find: the tool_use id, else
+ * the member name alone (the SDK runs one call per toolset at a time). Never
+ * the input: a mutated input must land on the same record and fail its hash.
+ */
+function confirmKey(toolUseId: string | undefined, member: string): string {
+  return toolUseId ? `id:${toolUseId}` : `member:${member}`;
+}
+
 /** What `confirm` saw for a call, so `execute` can bind to it. */
 interface ConfirmedCall {
   inputHash: string;
@@ -621,8 +630,7 @@ export class ToolsetGuard {
   confirm(inner?: ToolsetConfirmInner): (ctx: ToolsetConfirmContext) => Promise<boolean> {
     return async (ctx: ToolsetConfirmContext): Promise<boolean> => {
       const verdict = this.classify(ctx);
-      const key = ctx.toolUse?.id ?? `${ctx.member}:${verdict.inputHash}`;
-      this.confirmed.set(key, { inputHash: verdict.inputHash, tabURL: ctx.tabURL, tabId: ctx.tabId });
+      this.confirmed.set(confirmKey(ctx.toolUse?.id, ctx.member), { inputHash: verdict.inputHash, tabURL: ctx.tabURL, tabId: ctx.tabId });
       this.previousMember = ctx.member;
 
       let answer: boolean;
@@ -747,8 +755,9 @@ export class ToolsetGuard {
     next: ToolsetExecuteNext<C, N, I, R>,
   ): Promise<R> {
     // Pre: the SDK re-checks nothing after confirm; we check the bytes match.
+    // The key never involves the input, so changed bytes cannot reach a fresh key.
     const hash = hashInput(name, input);
-    const key = ctx.toolUse?.id ?? `${name}:${hash}`;
+    const key = confirmKey(ctx.toolUse?.id, name);
     const seen = this.confirmed.get(key);
     const callCtx: ToolsetConfirmContext = {
       member: name,
@@ -757,12 +766,17 @@ export class ToolsetGuard {
       tabId: seen?.tabId,
       toolUse: ctx.toolUse,
     };
-    if (seen !== undefined && seen.inputHash !== hash) {
-      const verdict = this.classify(callCtx);
-      this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, 'input-mutated-after-confirm'] }, outcome: this.mode === 'enforce' ? 'refused' : 'observed' });
-      if (this.mode === 'enforce') throw new this.ErrorCtor('blocked: the action changed after it was approved');
-    }
     this.confirmed.delete(key);
+    if (seen === undefined || seen.inputHash !== hash) {
+      const verdict = this.classify(callCtx);
+      const signal = seen === undefined ? 'unconfirmed' : 'mutated_input';
+      this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, signal] }, outcome: this.mode === 'enforce' ? 'refused' : 'observed' });
+      if (this.mode === 'enforce') {
+        throw new this.ErrorCtor(seen === undefined
+          ? 'blocked: this action was not approved'
+          : 'blocked: the action changed after it was approved');
+      }
+    }
 
     const result = await next(ctx, name, input);
 
