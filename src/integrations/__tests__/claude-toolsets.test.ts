@@ -655,3 +655,23 @@ describe('isPrivateOrLocalHost — fc/fd DNS labels are names, not ULA addresses
     expect(isPrivateOrLocalHost('fe00::1')).toBe(false); // outside fc00::/7 and fe80::/10
   });
 });
+
+describe('ToolsetGuard — Windows credential uploads are denied (#679 review 2, A2)', () => {
+  it.each([
+    'C:\\Users\\me\\.ssh\\id_ed25519',
+    'C:\\\\Users\\\\me\\\\.ssh\\\\id_ed25519',
+    'C:\\Users\\me\\.aws\\credentials',
+    'D:\\work\\app\\.env',
+    'C:\\Users\\me/.ssh/id_rsa',
+  ])('%s → block', (p) => {
+    const { guard } = makeGuard();
+    const v = guard.classify(ctx('file_upload', { paths: [p] }));
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain('upload-sensitive-path');
+  });
+
+  it('an ordinary Windows path is held, not denied', () => {
+    const { guard } = makeGuard();
+    expect(guard.classify(ctx('file_upload', { paths: ['C:\\Users\\me\\Documents\\report.pdf'] })).decision).toBe('require_approval');
+  });
+});

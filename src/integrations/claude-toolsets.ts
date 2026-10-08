@@ -605,7 +605,8 @@ export class ToolsetGuard {
     // 3. Local files leaving the host.
     if (member === 'file_upload') {
       const paths = Array.isArray(input.paths) ? input.paths.filter((p): p is string => typeof p === 'string') : [];
-      if (paths.some((p) => SENSITIVE_UPLOAD_PATH.test(p))) {
+      // A Windows path separates with `\`: normalise before the sensitive-path test.
+      if (paths.some((p) => SENSITIVE_UPLOAD_PATH.test(p.replace(/\\/g, '/')))) {
         return finish('block', ['credential-read', 'egress'], ['upload-sensitive-path'], 'upload-sensitive-path',
           `Upload a file${where}? The file is a credential or configuration file. Denied; nothing was uploaded.`);
       }
