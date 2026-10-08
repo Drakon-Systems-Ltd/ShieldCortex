@@ -117,10 +117,11 @@ describe('config --help Action Guard lines', () => {
 });
 
 describe('CHANGELOG', () => {
-  it('Unreleased Docs names the config CLI watch-only copy correction', () => {
-    const unreleased = between(read('CHANGELOG.md'), '## [Unreleased]', '\n## [');
-    const bullet = unreleased.split('\n').find((l) => /config` watch only copy/i.test(l));
-    assert.ok(bullet, 'no config watch only copy bullet');
+  it('Docs (Unreleased, or the release that shipped it) names the config CLI watch-only copy correction', () => {
+    // The bullet starts under [Unreleased] and moves into a versioned section at
+    // release time; the contract is its wording, not which heading it sits under.
+    const bullet = read('CHANGELOG.md').split('\n').find((l) => l.startsWith('- **') && /config` watch only copy/i.test(l));
+    assert.ok(bullet, 'no config watch only copy bullet in CHANGELOG.md');
     assert.match(bullet, /SHIELDCORTEX_ENFORCE/);
     assert.match(bullet, /not runtime proof/);
   });
