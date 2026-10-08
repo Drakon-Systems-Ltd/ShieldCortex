@@ -28,6 +28,8 @@ declare module '@huggingface/transformers' {
     cacheDir: string;
     /** Mapped from a validated HF_ENDPOINT by embeddings/model-config.ts (#632). */
     remoteHost: string;
+    /** Set to an explicit SHIELDCORTEX_MODEL_DIR so it is the only local root (#632). */
+    localModelPath: string;
     [key: string]: unknown;
   };
 

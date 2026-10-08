@@ -33,6 +33,7 @@ async function bootWorker(pipelineImpl: (call: number) => Promise<unknown>): Pro
     allowRemoteModels: true,
     allowLocalModels: false,
     cacheDir: '/library/default/.cache/',
+    localModelPath: '/library/default/models/',
     remoteHost: 'https://huggingface.co/',
   };
   const calls: Harness['calls'] = [];
@@ -123,6 +124,8 @@ describe('#632 embeddings worker configuration', () => {
       allowLocalModels: true,
       // Only a string handed to the fake library — nothing under it is read.
       cacheDir: join(homedir(), '.cache', 'shieldcortex', 'models'),
+      // Default root: the library's package-local fallback is left as it was.
+      localModelPath: '/library/default/models/',
       remoteHost: 'https://huggingface.co/',
     });
   });
@@ -138,6 +141,8 @@ describe('#632 embeddings worker configuration', () => {
     expect(await h.load()).toEqual({ id: 1, ok: true });
     expect(h.calls).toHaveLength(2);
     expect(h.calls[0].envAtCall.cacheDir).toBe(root);
+    // F2: the explicit root is also the loader's local-model root.
+    expect(h.calls[0].envAtCall.localModelPath).toBe(root);
     // The online heal quarantined the weight under the SAME root it loaded from.
     expect(existsSync(onnx)).toBe(false);
     expect(readdirSync(dirname(onnx)).some((f) => f.startsWith('model.onnx.bak-load-failed-'))).toBe(true);
@@ -195,5 +200,24 @@ describe('#632 embeddings worker configuration', () => {
     expect(h.transformersImported()).toBe(false);
     expect(h.calls).toHaveLength(0);
     expect(h.fakeEnv.cacheDir).toBe('/library/default/.cache/');
+  });
+
+  // F1 (review r1): the worker's load error never carries a rejected value.
+  it.each([
+    ['secret-like relative', 'sk-live-SECRETMARKER/models'],
+    ['embedded newline', '/srv/models\nFORGED_STATUS SECRETMARKER'],
+    ['ESC sequence', 'models\u001b[2JSECRETMARKER'],
+    ['over-long', `/SECRETMARKER${'x'.repeat(5000)}`],
+  ])('invalid SHIELDCORTEX_MODEL_DIR (%s) is refused without echoing it', async (_label, value) => {
+    process.env.SHIELDCORTEX_MODEL_DIR = value;
+    const h = await bootWorker(async () => ({}));
+    const res = await h.load();
+    expect(res.ok).toBe(false);
+    const error = String(res.error);
+    expect(error).toMatch(/^Embedding configuration invalid: SHIELDCORTEX_MODEL_DIR /);
+    expect(error).not.toContain('SECRETMARKER');
+    expect(error).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(error.length).toBeLessThan(300);
+    expect(h.transformersImported()).toBe(false);
   });
 });

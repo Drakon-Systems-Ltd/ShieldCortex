@@ -1567,26 +1567,62 @@ export function runSemanticCoverageCheck(dbPath: string): CheckResult {
 }
 
 async function checkSemanticCoverage(): Promise<CheckResult> {
+  return checkSemanticCoverageAt(getDbPath());
+}
+
+/**
+ * Coverage advice is only offered when an embed-backfill could actually run.
+ *
+ * #632: the prerequisite is the worker's own configuration (root, offline flag
+ * and HF_ENDPOINT) plus the cache it points at, from the same readiness helper
+ * the hook gate uses. An invalid setting, or an offline cache that is missing,
+ * corrupt or lacks tokenizer/config files, skips the advice: recommending
+ * `embed-backfill --execute` there would point at a repair that cannot load the
+ * model. Online, a missing/corrupt weight skips as before (a backfill would
+ * download it); missing siblings online keep the pre-#632 behaviour.
+ *
+ * Exported with explicit env/home so tests drive the real check against a
+ * fixture database and cache.
+ */
+export async function checkSemanticCoverageAt(
+  dbPath: string,
+  opts: { env?: Record<string, string | undefined>; home?: string } = {},
+): Promise<CheckResult> {
   const label = 'Semantic coverage';
   try {
-    // #632: same resolver as the worker — SHIELDCORTEX_MODEL_DIR decides which
-    // cache is inspected, and an invalid value surfaces as 'misconfigured'.
-    const { inspectEmbeddingModelCache } = await import('../embeddings/model-cache.js');
-    const insp = await inspectEmbeddingModelCache();
+    const { inspectEmbeddingReadiness } = await import('../embeddings/model-cache.js');
+    const { boundForDisplay } = await import('../embeddings/model-config.js');
+    const r = await inspectEmbeddingReadiness({ env: opts.env, home: opts.home });
+    const skipped = 'coverage skipped so doctor does not recommend an embed-backfill';
+    if (r.configError !== undefined) {
+      return {
+        label,
+        status: 'pass',
+        message: `embedding model configuration is invalid — ${skipped} that cannot load the model (see the Embeddings row). ${r.configError}`,
+      };
+    }
+    const { config, inspection: insp, missingSiblings } = r;
     if (insp.status !== 'ok') {
       return {
         label,
         status: 'pass',
-        message:
-          `embedding model cache is ${insp.status} — coverage skipped so doctor does not recommend embed-backfill (that would download model.onnx). `
-          + (insp.onnxPath ? `Cache: ${insp.onnxPath}` : (insp.detail ?? '')),
+        message: config.offline
+          ? `embedding model cache is ${insp.status} and offline mode will not download it — ${skipped} until the cache is provisioned. Cache: ${boundForDisplay(insp.onnxPath)}`
+          : `embedding model cache is ${insp.status} — ${skipped} (that would download model.onnx). Cache: ${boundForDisplay(insp.onnxPath)}`,
+      };
+    }
+    if (config.offline && missingSiblings.length) {
+      return {
+        label,
+        status: 'pass',
+        message: `${missingSiblings.join(', ')} missing and offline mode will not fetch them — ${skipped} until the cache is provisioned. Model dir: ${boundForDisplay(insp.cacheDir)}`,
       };
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label, status: 'warn', message: `model-cache inspect failed — ${msg}` };
   }
-  return runSemanticCoverageCheck(getDbPath());
+  return runSemanticCoverageCheck(dbPath);
 }
 
 // ── Check 3b: Write-path smoke test ───────────────────────

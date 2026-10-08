@@ -14,6 +14,7 @@ export {
   hasAttemptedModelCacheHeal,
   markModelCacheHealAttempted,
   inspectEmbeddingModelForDoctor,
+  inspectEmbeddingReadiness,
   OFFLINE_EMBEDDINGS_DOC_URL,
 } from './model-cache.js';
 export {

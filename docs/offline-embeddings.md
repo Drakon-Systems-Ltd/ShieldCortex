@@ -28,9 +28,15 @@ own network behaviour and are configured separately, for example:
 | `HF_ENDPOINT` | `https://` URL, optionally with a path prefix | huggingface.co |
 
 Set them in the environment of every process that uses memory: the MCP server,
-the hooks, the API and the CLI. The embedding worker, the cache checks and
-`shieldcortex doctor` all read the same three variables, so they always agree
-on which directory and which mode they are looking at.
+the hooks, the API and the CLI. Each process reads its own environment, so a
+process started without them uses the defaults.
+
+Within one process, the embedding worker, the hook's readiness check and
+`shieldcortex doctor` (its `Embeddings` and `Semantic coverage` rows) resolve
+all three variables with the same resolver, so they agree on the directory and
+the mode. A value the worker would refuse makes the hook skip embedding (rows
+are still stored, without vectors, and it says so once per hook process) and
+makes doctor warn instead of recommending a backfill.
 
 ### `SHIELDCORTEX_MODEL_DIR`
 
@@ -39,10 +45,16 @@ The cache **root**. The model itself lives in
 
 - Unset or empty: the default root.
 - `~` and `~/…` expand to your home directory.
-- Relative paths, `~user/…`, values with leading or trailing spaces and values
-  containing a NUL byte are rejected. Hooks and servers start in different
-  working directories, so a relative path could point to a different place for
-  each of them.
+- Relative paths, `~user/…`, values with leading or trailing spaces, values
+  containing control characters (including NUL, newlines and terminal escape
+  sequences) and values longer than 4096 characters are rejected. Hooks and
+  servers start in different working directories, so a relative path could
+  point to a different place for each of them.
+- With a custom root, model files are read only from under that root.
+  transformers.js also has its own local model directory inside its package;
+  ShieldCortex points that at the custom root too, so a file missing from the
+  root cannot be filled in from elsewhere. With the default root this library
+  setting is left as it was before.
 
 An invalid value is never replaced by the default: embeddings stay off and
 `shieldcortex doctor` names the problem.
@@ -81,9 +93,17 @@ Because the variable is shared with other Hugging Face tools, a host that
 already exports `HF_ENDPOINT` for them now uses it for this model too; if that
 value fails the checks above, embeddings stay off until it is fixed or unset.
 
-Error messages never print the value. transformers.js sends `HF_TOKEN` only to
-huggingface.co, so a mirror does not receive it. With the offline switch on,
-`HF_ENDPOINT` is still validated but nothing is downloaded from it.
+When any of the three variables is rejected, the message names the variable
+and the reason but does not print the value. An **accepted** `HF_ENDPOINT` is
+printed: doctor names the mirror, and if a download from it fails, the
+transformers.js error (passed on as the embedding load error) includes the full
+URL it requested. The checks above keep credentials, query strings and
+fragments out of an accepted value, so do not put a secret in the URL path.
+
+transformers.js adds `HF_TOKEN` (or `HF_ACCESS_TOKEN`) only to requests for
+`huggingface.co` and `hf.co`. A mirror on any other host does not receive it.
+With the offline switch on, `HF_ENDPOINT` is still validated but nothing is
+downloaded from it.
 
 ## Provisioning an offline host
 
@@ -108,7 +128,9 @@ huggingface.co, so a mirror does not receive it. With the offline switch on,
    sha256sum onnx/model.onnx    # 759c3cd2b7fe7e93933ad23c4c9181b7396442a2ed746ec7c1d46192c469c46e
    ```
 
-3. Copy the directory to the offline host, keeping the layout:
+3. Copy the files to the offline host, keeping this layout. The four files go
+   directly inside `<root>/Xenova/all-MiniLM-L6-v2/`; do not nest a second
+   `all-MiniLM-L6-v2` directory inside it:
 
    ```
    <root>/Xenova/all-MiniLM-L6-v2/config.json
@@ -135,3 +157,7 @@ It reports:
 
 The row also shows the offline mode, a `SHIELDCORTEX_MODEL_DIR` root, and the
 mirror host when one is in use. Doctor never downloads the model.
+
+The `Semantic coverage` row only suggests `embed-backfill` when a backfill could
+load the model. It skips that advice when the configuration is invalid, and
+offline when the cache is missing, corrupt or missing tokenizer/config files.

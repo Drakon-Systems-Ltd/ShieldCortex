@@ -4,7 +4,7 @@
  * mirror case records the URL the library would have requested and answers
  * 404; the offline case asserts the library never calls fetch at all.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
@@ -26,6 +26,7 @@ describe('#632 mapping onto the installed transformers.js', () => {
       allowRemoteModels: tf.env.allowRemoteModels,
       allowLocalModels: tf.env.allowLocalModels,
       cacheDir: tf.env.cacheDir,
+      localModelPath: tf.env.localModelPath,
       remoteHost: tf.env.remoteHost,
     };
     root = mkdtempSync(join(tmpdir(), 'sc-632-tf-'));
@@ -77,5 +78,72 @@ describe('#632 mapping onto the installed transformers.js', () => {
       tf.pipeline('feature-extraction', EMBEDDING_MODEL_ID, { dtype: 'fp32', local_files_only: true }),
     ).rejects.toThrow(/not found locally|allowRemoteModels=false|local_files_only/);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * F2 (review r1): getModelFile reads the FileCache at cacheDir AND
+   * localModelPath (the package's own models/ dir by default) before the
+   * offline gate. A stand-in for that package-local copy is pointed at a
+   * throwaway dir here — node_modules is never written — and must not be able
+   * to satisfy, or shadow, a file under an explicit root. config.json is the
+   * probe: AutoConfig keeps every JSON field, so the sentinel shows which
+   * root was read without loading a model.
+   */
+  describe('an explicit SHIELDCORTEX_MODEL_DIR is the only local root', () => {
+    let fallback: string;
+    const writeConfig = (base: string, sentinel: string) => {
+      const dir = join(base, EMBEDDING_MODEL_ID);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify({ model_type: 'bert', sc_sentinel: sentinel }));
+    };
+
+    beforeEach(() => {
+      fallback = mkdtempSync(join(tmpdir(), 'sc-632-tf-fallback-'));
+      tf.env.localModelPath = `${fallback}/`;
+      writeConfig(fallback, 'package-local-fallback');
+      fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(() => {
+        throw new Error('offline mode must not fetch');
+      });
+    });
+
+    afterEach(() => {
+      rmSync(fallback, { recursive: true, force: true });
+    });
+
+    const offlineExplicit = () => applyEmbeddingModelConfig(tf.env, resolveEmbeddingModelConfig({
+      SHIELDCORTEX_MODEL_DIR: root,
+      SHIELDCORTEX_EMBEDDINGS_OFFLINE: '1',
+    }));
+
+    it('a file present only in the fallback cannot satisfy a missing configured file', async () => {
+      // The root has tokenizer siblings but lacks config.json; the fallback has it.
+      mkdirSync(join(root, EMBEDDING_MODEL_ID), { recursive: true });
+      writeFileSync(join(root, EMBEDDING_MODEL_ID, 'tokenizer_config.json'), '{}');
+      offlineExplicit();
+      await expect(tf.AutoConfig.from_pretrained(EMBEDDING_MODEL_ID, { local_files_only: true }))
+        .rejects.toThrow(/not found locally/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('when both roots have the file, the configured root is the one read', async () => {
+      writeConfig(root, 'configured-root');
+      offlineExplicit();
+      const config = await tf.AutoConfig.from_pretrained(EMBEDDING_MODEL_ID, { local_files_only: true });
+      expect(config.sc_sentinel).toBe('configured-root');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('library-contract control: without the mapping the fallback DOES fill the gap', async () => {
+      // What the pre-fix mapping did: only cacheDir moved. Shows the seam is real.
+      tf.env.cacheDir = root;
+      tf.env.allowRemoteModels = false;
+      const config = await tf.AutoConfig.from_pretrained(EMBEDDING_MODEL_ID, { local_files_only: true });
+      expect(config.sc_sentinel).toBe('package-local-fallback');
+    });
+
+    it('the default root leaves the library localModelPath untouched', () => {
+      applyEmbeddingModelConfig(tf.env, resolveEmbeddingModelConfig({}, root));
+      expect(tf.env.localModelPath).toBe(`${fallback}/`);
+    });
   });
 });
