@@ -285,7 +285,10 @@ export interface InterceptorConfig {
 export interface ToolCallContext {
   toolName: string;
   arguments: Record<string, unknown>;
-  requireApproval?: (message: string) => Promise<boolean>;
+  /** `detail.card` is set only by the action-guard prompt builder below
+   *  (#648 r2 B1): the host lays out the plain-English card from that object,
+   *  never from line text in `message`, which carries payload. */
+  requireApproval?: (message: string, detail?: ApprovalPromptDetail) => Promise<boolean>;
   /** Optional one-shot completion through the gateway's OWN model pool (#143).
    *  ShieldCortex supplies no credentials of its own; when a gateway build does
    *  not offer this, the broker has no judge and holds for the operator —
@@ -298,6 +301,8 @@ export interface ToolCallContext {
   /** The gateway session this call belongs to (#233). Used to look up a
    *  conversation-level taint; absent means no escalation, never a default. */
   sessionId?: string;
+  /** #648: the OpenClaw agent making the call, for the card's WHO line. */
+  agentId?: string;
 }
 
 /**
@@ -591,21 +596,62 @@ interface ApprovalPromptInput {
   content: string;
 }
 
+/**
+ * #648 r3 R4 — the characters that never reach a card, as character-class
+ * bodies. These are THE SAME strings as `CARD_LINE_BREAK_CLASS` and
+ * `CARD_HIDDEN_CHAR_CLASS` in src/defence/iron-dome/approval-card.ts: this
+ * file is built with `rootDir: plugins/openclaw` and cannot import from src/
+ * (TS6059), so approval-card-648-r3-chars.test.ts imports both and fails if
+ * they differ by a single character. Change both together.
+ *
+ * Line breaks in any renderer: C0/C1 controls (CR, LF, VT, FF, NEL U+0085)
+ * and the Unicode line/paragraph separators.
+ */
+export const CARD_LINE_BREAK_CLASS = '\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029';
+/** Hidden and look-alike characters: soft hyphen, Arabic letter mark, Hangul
+ *  and Mongolian fillers, zero-width marks, bidi embeddings, overrides and
+ *  isolates, U+2060-206F, variation selectors, tag characters, the BOM, and
+ *  quotes that look like `"`. */
+export const CARD_HIDDEN_CHAR_CLASS = [
+  '\\u00ad', '\\u061c', '\\u115f', '\\u1160', '\\u17b4', '\\u17b5', '\\u180e', '\\u200b-\\u200f', '\\u202a-\\u202e', '\\u2060-\\u206f',
+  '\\u3164', '\\ufe00-\\ufe0f', '\\ufeff', '\\uffa0', '\\u{e0000}-\\u{e007f}', '\\u{e0100}-\\u{e01ef}',
+  '\\u201c-\\u201f', '\\u2033', '\\u301d-\\u301f', '\\uff02',
+].join('');
+const PROMPT_LINE_BREAKS = new RegExp(`[${CARD_LINE_BREAK_CLASS}]`, 'gu');
+const PROMPT_FORMAT_CHARS = new RegExp(`[${CARD_HIDDEN_CHAR_CLASS}]`, 'gu');
+
+/**
+ * #648 r2 (B1, S9): every value interpolated into an approval prompt goes
+ * through here. The prompt is split into lines and the host joins them with
+ * ` | `, so a value that could carry a line break or a `|` could forge a line
+ * of its own (`What: …`, `Allow once …`). Breaks become spaces, `|` becomes
+ * `¦`, and invisible format characters are shown as `<U+XXXX>` instead of
+ * silently reordering the card.
+ */
+export function flattenPromptField(value: unknown): string {
+  return String(value ?? '')
+    .replace(PROMPT_FORMAT_CHARS, (c) => `<U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`)
+    .replace(PROMPT_LINE_BREAKS, ' ')
+    .replace(/\|/g, '¦')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function formatApprovalPrompt(input: ApprovalPromptInput): string {
   const preview = input.content.length > 200
     ? input.content.slice(0, 200) + '...'
     : input.content;
   const threatList = input.threats.length > 0
-    ? input.threats.join(', ')
+    ? input.threats.map(flattenPromptField).join(', ')
     : 'none identified';
 
   return [
     '🛡️ ShieldCortex — Tool Call Intercepted',
     '',
-    `Tool:       ${input.tool}`,
-    `Risk:       ${input.severity} (${input.firewallResult})`,
+    `Tool:       ${flattenPromptField(input.tool)}`,
+    `Risk:       ${flattenPromptField(input.severity)} (${flattenPromptField(input.firewallResult)})`,
     `Threats:    ${threatList}`,
-    `Content:    "${preview}"`,
+    `Content:    "${flattenPromptField(preview)}"`,
     '',
     '[Approve]  [Deny]',
   ].join('\n');
@@ -997,26 +1043,155 @@ function actionGuardLead(
     return `${AGENT_SUBJECT} used ${toolName}, which ShieldCortex does not fully recognise yet. `
       + 'Allow once lets this one call through. It does not teach the tool.';
   }
-  return `${AGENT_SUBJECT} wants to use ${toolName}, and ShieldCortex rated this call ${v.severity}. `
+  return `${AGENT_SUBJECT} wants to use ${toolName}, and ShieldCortex rated this call ${flattenPromptField(v.severity)}. `
     + 'Allow once is this call only.';
 }
 
-/** Operator-facing approval prompt for a gated action (not a memory write). */
+/** #648: the card summary as `shieldcortex/defence` builds it. Structural,
+ *  like ToolGuardVerdictLike — this file takes no compile-time dependency on
+ *  the main package. */
+export interface ApprovalCardText {
+  action: string;
+  reason: string;
+  who: string;
+}
+
+/** The card's pending window (OpenClaw's own ceiling; see index.ts). */
+const CARD_EXPIRY_TEXT = 'expires in 10 min';
+const CARD_FOOTER = `Allow once is this call only · ${CARD_EXPIRY_TEXT}`;
+
+/** Trailing markers a clipped card line always keeps — the same regex as
+ *  `CARD_TAIL_MARKERS` in src/defence/iron-dome/approval-card.ts (#648 r2 S6),
+ *  pinned equal by approval-card-648-r3-chars.test.ts (#648 r3 R4). */
+export const CARD_TAIL_MARKERS = /(?:, as (?:administrator|another user) \(sudo\)| \(\+\d+ more (?:steps?|reasons?)\)| \(part of it is built as it runs\)| \(command too long to summarise fully\)| and \d+ more)+$/;
+
+/** One flattened card line, clipped in the MIDDLE so the verb, the tail (a
+ *  file name, the session) and the trailing markers survive (#648 r2 S6). */
+export function clipCardLine(text: unknown, max: number): string {
+  const one = flattenPromptField(text);
+  if (one.length <= max) return one;
+  const tail = CARD_TAIL_MARKERS.exec(one)?.[0] ?? '';
+  const body = one.slice(0, one.length - tail.length);
+  const room = Math.max(12, max - tail.length);
+  if (body.length <= room) return `${body}${tail}`;
+  const head = Math.ceil((room - 1) / 2);
+  return `${body.slice(0, head)}…${body.slice(body.length - (room - 1 - head))}${tail}`;
+}
+
+/**
+ * #648 r2 (B1): the plain-English card as structured data. It is handed to the
+ * host bridge beside the prompt text (`requireApproval(message, { card })`),
+ * and the bridge lays the card out from THIS object only — never by looking
+ * for `What:` lines in the text, which also carries payload (a memory write's
+ * `Content:`, a guard reason, a tool name). Every field is one flattened line.
+ */
+export interface PlainApprovalCard {
+  what: string;
+  why: string;
+  who: string;
+  footer: string;
+}
+
+export interface ApprovalPromptDetail {
+  card?: PlainApprovalCard;
+}
+
+/** The action line's guaranteed room: the whole generic WHAT and most plain
+ *  sentences fit unclipped. */
+const WHAT_FLOOR = 64;
+/** WHO is clipped no shorter than this to make room for WHY (#648 r5). */
+const WHO_FLOOR = 32;
+
+/** Between two reasons on the WHY line — `REASON_SEPARATOR` in
+ *  src/defence/iron-dome/approval-card.ts. */
+const REASON_SEPARATOR = '; ';
+
+/** A WHY body in `max` characters by whole reasons from the front, the rest
+ *  marked `; …` — `fitReasons` in approval-card.ts, pinned equal by test. */
+export function fitReasons(reason: unknown, max: number): string {
+  const one = flattenPromptField(reason);
+  if (one.length <= max) return one;
+  const parts = one.split(REASON_SEPARATOR);
+  const mark = `${REASON_SEPARATOR}…`;
+  let shown = '';
+  for (const p of parts) {
+    const next = shown ? `${shown}${REASON_SEPARATOR}${p}` : p;
+    if (next.length + mark.length > max) break;
+    shown = next;
+  }
+  return shown ? `${shown}${mark}` : `${one.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
+}
+
+export function plainApprovalCard(card: ApprovalCardText | undefined): PlainApprovalCard | undefined {
+  if (!card || typeof card.action !== 'string' || !card.action.trim()) return undefined;
+  // The host joins these lines with ' | ' into a 256-character description.
+  // WHY, WHO and the footer are bounded first; the action gets what is left —
+  // but never less than WHAT_FLOOR (#648 r3): the generic WHAT must read
+  // whole, so a long WHO (a generated CI hostname), then WHY, gives way.
+  // #648 r5 R1: WHY carries every reason; WHO gives way first, and only then
+  // does WHY drop its last (reassuring) reasons — whole, marked `; …`.
+  const fixed = 'What: '.length + 'Why: '.length + 'Who: '.length + CARD_FOOTER.length + 3 * 3;
+  const want = Math.min(WHAT_FLOOR, flattenPromptField(card.action).length);
+  const whyFor = (whoLine: string) => fitReasons(card.reason, Math.max(40, 256 - (fixed + whoLine.length + want)));
+  const shown = (why: string) => why.split(REASON_SEPARATOR).filter((p) => p && !p.endsWith('…')).length;
+  const all = flattenPromptField(card.reason).split(REASON_SEPARATOR).length;
+  let who = clipCardLine(card.who, 75);
+  let why = whyFor(who);
+  // WHO is clipped only as far as it lets WHY show more of its reasons.
+  for (let len = who.length - 1; len >= WHO_FLOOR && shown(why) < all; len -= 1) {
+    const shorter = clipCardLine(card.who, len);
+    const more = whyFor(shorter);
+    if (shown(more) > shown(why)) {
+      who = shorter;
+      why = more;
+    }
+  }
+  const room = Math.max(40, Math.min(120, 256 - (fixed + why.length + who.length)));
+  return { what: clipCardLine(card.action, room), why, who, footer: CARD_FOOTER };
+}
+
+/**
+ * Operator-facing approval prompt for a gated action (not a memory write).
+ *
+ * #648: with a card summary, the prompt is WHAT / WHY / WHO in plain English —
+ * the action naming its target (already through the credential redactor), the
+ * reason from the one signal-phrase table, and the agent, box and session —
+ * plus what allow-once buys and when the card expires. The raw signal ids,
+ * the guard's own `reason` text and the severity word stay in the audit row;
+ * none of them is on the card. Without a summary (an older dist) the #600
+ * layout is kept, with the reason flattened to one line so it cannot forge a
+ * label line of its own.
+ */
 export function formatActionGuardPrompt(
   toolName: string,
   v: ToolGuardVerdictLike,
   args?: Record<string, unknown>,
+  card?: ApprovalCardText,
 ): string {
+  const plain = plainApprovalCard(card);
+  if (plain) {
+    return [
+      '🛡️ ShieldCortex needs a yes',
+      '',
+      `What: ${plain.what}`,
+      `Why: ${plain.why}`,
+      `Who: ${plain.who}`,
+      plain.footer,
+      '',
+      '[Allow once]  [Deny]',
+    ].join('\n');
+  }
+  const tool = flattenPromptField(toolName);
   return [
     '🛡️ ShieldCortex needs a yes',
     '',
-    actionGuardLead(toolName, v, args),
+    actionGuardLead(tool, v, args),
     '',
-    `Tool:       ${toolName}`,
-    `Action:     ${v.action}`,
-    `Risk:       ${v.severity}`,
-    `Signals:    ${v.signals.join(', ') || 'none'}`,
-    `Reason:     ${v.reason}`,
+    `Tool:       ${tool}`,
+    `Action:     ${flattenPromptField(v.action)}`,
+    `Risk:       ${flattenPromptField(v.severity)}`,
+    `Signals:    ${(Array.isArray(v.signals) ? v.signals : []).map(flattenPromptField).join(', ') || 'none'}`,
+    `Reason:     ${flattenPromptField(v.reason)}`,
     '',
     '[Allow once]  [Deny]',
   ].join('\n');
@@ -1351,6 +1526,20 @@ interface InterceptorOptions {
    *  disk. Injected from `shieldcortex/defence` at runtime so this plugin does
    *  not grow a second schema. Absent = unbound (older installed package). */
   bindAudit?: (entry: InterceptAuditEntry, args?: Record<string, unknown>) => InterceptAuditEntry;
+  /** #648 — the plain-English what/why/who for an approval card, injected
+   *  from `shieldcortex/defence` (`buildApprovalCard`) like the evaluator.
+   *  Absent on an older dist, or throwing, means the card keeps the #600
+   *  layout below; nothing about the decision changes either way. */
+  buildApprovalCard?: (input: {
+    tool: string;
+    input: unknown;
+    signals: readonly string[];
+    plane: 'openclaw';
+    agentId?: string;
+    sessionId?: string;
+    cwd?: string;
+    agentPid?: number;
+  }) => ApprovalCardText;
   /** #509 r7 — the enforce-when-ready gate (see {@link ReadinessRuntime}). */
   readiness?: ReadinessRuntime;
   /** #509 r7 — whether an OS policy lock is on disk. The lock pins
@@ -1380,6 +1569,28 @@ export function createInterceptor(
   const log = config.logger ?? { info: console.log, warn: console.warn };
   const onAuditEntry = options?.onAuditEntry;
   const bindAudit = options?.bindAudit;
+  /** #648: the card's what/why/who, or undefined (older dist, or a summariser
+   *  that threw) — then the prompt keeps its previous layout. Never throws. */
+  const approvalCardFor = (context: ToolCallContext, v: ToolGuardVerdictLike): ApprovalCardText | undefined => {
+    if (typeof options?.buildApprovalCard !== 'function') return undefined;
+    try {
+      const card = options.buildApprovalCard({
+        tool: context.toolName,
+        input: context.arguments,
+        signals: Array.isArray(v.signals) ? v.signals : [],
+        plane: 'openclaw',
+        agentId: context.agentId,
+        sessionId: context.sessionId,
+        cwd: toolCallCwd(context),
+        // No agentPid (#648 r2): the gateway runs every agent's sessions, so
+        // descending from it does not prove THIS agent started a process —
+        // the card says "a running program" rather than "it started".
+      });
+      return card && typeof card.action === 'string' ? card : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const actionGuardCfg: ActionGuardConfig = config.actionGuard ?? { enabled: false, enforce: true, autoApprove: [] };
   const evaluateToolCall = options?.evaluateToolCall;
   const broker = options?.broker;
@@ -2127,7 +2338,14 @@ export function createInterceptor(
     let approved: boolean;
     try {
       approved = await withApprovalDeadline(
-        context.requireApproval(formatActionGuardPrompt(context.toolName, v, context.arguments)),
+        (() => {
+          const card = approvalCardFor(context, v);
+          const plain = plainApprovalCard(card);
+          return context.requireApproval!(
+            formatActionGuardPrompt(context.toolName, v, context.arguments, card),
+            plain ? { card: plain } : undefined,
+          );
+        })(),
         brokered ? brokerApprovalTimeoutMs(v.severity) : 0,
       );
     } catch (err) {

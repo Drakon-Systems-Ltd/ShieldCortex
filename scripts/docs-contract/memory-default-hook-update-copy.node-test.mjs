@@ -1,7 +1,8 @@
 /**
  * Docs/comment contract: per-consumer memory defaults and wiring prerequisites,
  * as described in the cortex-memory hook (source and ClawHub-bundled copies),
- * the `shieldcortex update` 4.11 boundary notice and the root README.
+ * the `shieldcortex update` 4.11 boundary notice and docs/UPDATING.md
+ * (moved off the root README so the front page stays short).
  *
  * What the shipped source does (pinned by the first describe block):
  *   - every consumer treats an unset `openclawAutoMemory` / `proactiveRecall`
@@ -147,9 +148,9 @@ describe('src/cli/update.ts 4.11 boundary notice', () => {
   });
 });
 
-describe('README.md prompt-time recall', () => {
-  const readme = read('README.md');
-  const line = readme.split('\n').find((l) => l.startsWith('Local UI: **Overview'));
+describe('docs/UPDATING.md prompt-time recall', () => {
+  const page = read('docs', 'UPDATING.md');
+  const line = page.split('\n').find((l) => l.startsWith('Local UI: **Overview'));
 
   it('names the hook prerequisite and the config gate', () => {
     assert.ok(line, 'Local UI paragraph not found');
@@ -175,13 +176,14 @@ describe('README.md prompt-time recall', () => {
   });
 });
 
-describe('CHANGELOG.md Unreleased memory-defaults bullet', () => {
+describe('CHANGELOG.md memory-defaults bullet (Unreleased, or the release that shipped it)', () => {
   const changelog = read('CHANGELOG.md');
-  const unreleased = changelog.slice(changelog.indexOf('## [Unreleased]'), changelog.indexOf('\n## [', changelog.indexOf('## [Unreleased]') + 1));
-  const bullet = unreleased.split('\n').find((l) => l.startsWith('- **Memory defaults in the cortex-memory hook'));
+  // The bullet starts under [Unreleased] and moves into a versioned section at
+  // release time; the contract is its wording, not which heading it sits under.
+  const bullet = changelog.split('\n').find((l) => l.startsWith('- **Memory defaults in the cortex-memory hook'));
 
   it('scopes the npm no-wiring statement to the Claude Code hook', () => {
-    assert.ok(bullet, 'Unreleased memory-defaults bullet not found');
+    assert.ok(bullet, 'memory-defaults bullet not found in CHANGELOG.md');
     assert.doesNotMatch(bullet, /wires no hook/);
     assert.match(bullet, /the npm install does not wire Claude Code's `UserPromptSubmit` hook/);
   });

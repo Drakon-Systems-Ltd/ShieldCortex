@@ -44,6 +44,8 @@
  *     not a rung of it.
  */
 
+import type { ApprovalCardSummary } from './approval-card.js';
+
 /**
  * What actually happened to the held call, from the operator's point of view.
  *
@@ -142,6 +144,11 @@ export interface OperatorNotification {
   fallbackHint: string;
   /** #310 action id when this notification is a headless denial. */
   actionId?: string;
+  /** #648 — the plain-English summary an approval CARD shows (what, why, who).
+   *  Only on 'approval_requested', and only read by the card channel
+   *  (openclaw-approval-channel.ts). The webhook payload builder copies fields
+   *  by name and never this one, so notify and denials stay values-free. */
+  card?: ApprovalCardSummary;
 }
 
 /**
@@ -280,6 +287,8 @@ export interface RequestOperatorApprovalInput {
   /** #310 fingerprint id. On DNP this is the spendable `--denial` target.
    *  Live holds still use `shieldcortex approve <hash>`. */
   actionId?: string;
+  /** #648 — see `OperatorNotification.card`. Ignored on a denial. */
+  card?: ApprovalCardSummary;
 }
 
 export interface RequestOperatorApprovalDeps {
@@ -336,6 +345,18 @@ function optionalText(v: unknown): string | undefined {
   return truncate(trimmed, MAX_CONTEXT_CHARS);
 }
 
+/** #648: the card summary crosses from the hook process as plain data — keep
+ *  it to three bounded single-line strings or drop it entirely. */
+function boundedCard(card: unknown): ApprovalCardSummary | undefined {
+  if (!card || typeof card !== 'object') return undefined;
+  const c = card as Record<string, unknown>;
+  const line = (v: unknown) => (typeof v === 'string' && v.trim() ? truncate(v.replace(/\s+/g, ' ').trim(), 300) : undefined);
+  const action = line(c.action);
+  const reason = line(c.reason);
+  const who = line(c.who);
+  return action && reason && who ? { action, reason, who } : undefined;
+}
+
 /** Build the notification content once, so every channel in the resolution
  *  order sees byte-identical fields — no channel gets a "friendlier" or
  *  differently-scoped version of what tripped. */
@@ -362,6 +383,10 @@ function buildNotification(input: RequestOperatorApprovalInput): OperatorNotific
       : `shieldcortex approve ${shortHash}${attemptArg}   |   shieldcortex deny ${shortHash}${attemptArg}`,
   };
   if (!denied && attemptId) notification.attemptId = attemptId;
+  if (!denied) {
+    const card = boundedCard(input.card);
+    if (card) notification.card = card;
+  }
   if (denied && actionId) notification.actionId = actionId;
   if (denied) {
     const deniedReason = optionalText(input.deniedReason);
