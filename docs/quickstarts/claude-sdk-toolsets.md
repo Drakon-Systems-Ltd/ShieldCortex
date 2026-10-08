@@ -59,9 +59,18 @@ class MyBrowser extends BetaAbstractBrowserToolset20260801 {
 }
 ```
 
-Use `guard.isUrlAllowed(url)` from your driver's request-interception hook (Playwright
-`context.route`, CDP `Fetch.requestPaused`) so clicks and redirects get the same URL rule
-as `navigate`. The SDK's `urlPolicy` only sees `navigate`.
+**Required driver duty: request interception.** Call `guard.isUrlAllowed(url)` from your
+driver's request-interception hook (Playwright `context.route`, CDP `Fetch.requestPaused`)
+and abort every request it rejects, so link clicks, form posts and redirects get the same
+URL rule as `navigate`. The SDK's `urlPolicy` only sees `navigate`, and the ref catalogue
+records a link's label, not its href: without interception the guard cannot see where a
+click goes. As a backstop, once the session is tainted every link click and every click
+on a ref it cannot resolve is `require_approval`.
+
+```ts
+await context.route('**/*', (route) =>
+  guard.isUrlAllowed(route.request().url()) ? route.continue() : route.abort('blockedbyclient'));
+```
 
 For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` and the
 `execute` override but has no URL or file policy.
@@ -71,7 +80,7 @@ For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` a
 | Call | Classification | Why |
 |---|---|---|
 | `navigate` | scheme, private-range and allowlist check | the SDK checks no scheme; `javascript:` and `file:` are refused |
-| click on a `ref` | resolved only from the `read_page` / `find` output of the same tab and page (a full read replaces the tab's refs; navigating drops them); a button labelled pay / send / delete / accept / submit is **irreversible** | the only way to know what a click does |
+| click on a `ref` | resolved only from the `read_page` / `find` output of the same tab and page (a full read replaces the tab's refs; navigating drops them); a button labelled pay / send / delete / accept / submit is **irreversible**; a link click (the catalogue has no href) is held once tainted | the only way to know what a click does |
 | click on a coordinate, any desktop click | **unclassified**: allowed untainted, held once tainted | Anthropic: `confirm` "receives the tool and its input, not the screen" |
 | `type`, `form_input`, `key` | typed text scanned for secrets → **denied**; Enter after typing = submit | credentials must never be typed into a page |
 | `javascript_exec`, `file_upload` | held; an upload from `.ssh`, `.aws`, `.env`, … is denied | runs with the page's authority / exfiltrates files |

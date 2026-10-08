@@ -127,8 +127,9 @@ describe('ToolsetGuard — ref catalogue (#678 acceptance 2)', () => {
     const del = guard.classify(ctx('left_click', { target: { type: 'ref', ref: 'ref_5' } }));
     expect(del.effects).toContain('irreversible-ui-action');
 
+    // The read tainted the session, so a link click is held (#679 review 2, A3).
     const link = guard.classify(ctx('left_click', { target: { type: 'ref', ref: 'ref_2' } }));
-    expect(link.decision).toBe('allow');
+    expect(link.decision).toBe('require_approval');
     expect(link.effects).toEqual(['network-fetch']);
 
     const search = guard.classify(ctx('left_click', { target: { type: 'ref', ref: 'ref_6' } }));
@@ -673,5 +674,41 @@ describe('ToolsetGuard — Windows credential uploads are denied (#679 review 2,
   it('an ordinary Windows path is held, not denied', () => {
     const { guard } = makeGuard();
     expect(guard.classify(ctx('file_upload', { paths: ['C:\\Users\\me\\Documents\\report.pdf'] })).decision).toBe('require_approval');
+  });
+});
+
+describe('ToolsetGuard — link clicks are held once tainted (#679 review 2, A3)', () => {
+  const link = (ref: string) => ctx('left_click', { target: { type: 'ref', ref } });
+
+  it('a resolved link click on a tainted session needs approval; enforce refuses it without the host', async () => {
+    const { guard, events } = makeGuard({ mode: 'enforce' });
+    await readPage(guard);
+    const v = guard.classify(link('ref_1'));
+    expect(v.decision).toBe('require_approval');
+    expect(v.reason).toBe('click-link-tainted');
+    expect(v.effects).toEqual(['network-fetch']);
+    expect(v.card).toContain('"Documentation"');
+    events.length = 0;
+    expect(await guard.confirm()(link('ref_1'))).toBe(false);
+    expect(events[0]).toMatchObject({ outcome: 'refused', elementRole: 'link', elementLabel: 'Documentation' });
+  });
+
+  it('an unresolved ref click on a tainted session is held too', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard);
+    expect(guard.classify(link('ref_404')).decision).toBe('require_approval');
+  });
+
+  it('an untainted link click is allowed', () => {
+    const { guard } = makeGuard();
+    // Seed the catalogue without a read (no taint) through the private map, as a unit check.
+    (guard as unknown as { refs: Map<string, unknown> }).refs.set('t1', {
+      url: 'https://docs.example.com/page?token=SHOULD-NOT-APPEAR',
+      entries: new Map([['ref_1', { role: 'link', label: 'Documentation' }]]),
+    });
+    const v = guard.classify(link('ref_1'));
+    expect(v.tainted).toBe(false);
+    expect(v.decision).toBe('allow');
+    expect(v.reason).toBe('click-link');
   });
 });

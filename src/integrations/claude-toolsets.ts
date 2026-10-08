@@ -653,8 +653,14 @@ export class ToolsetGuard {
               `Click the ${el.role} labelled "${label}"${where}? ${because} This could spend money, send something or delete something. Requested by: ${who}. Approve once / Deny.`);
           }
           if (el.role === 'link' || el.role === 'a') {
+            // The catalogue has the label, not the href: once tainted, the page
+            // could be pointing the link anywhere, so it is held.
+            if (tainted) {
+              return finish('require_approval', ['network-fetch'], ['click-link-tainted', `role:${el.role}`], 'click-link-tainted',
+                `Follow the link labelled "${label}"${where}? ShieldCortex cannot see where this link goes. ${because} Requested by: ${who}. Approve once / Deny.`);
+            }
             return finish('allow', ['network-fetch'], [`role:${el.role}`], 'click-link',
-              `Follow the link "${label}"${where}.`);
+              `Follow the link labelled "${label}"${where}.`);
           }
           return finish('allow', ['ui-action'], [`role:${el.role}`], 'click-element',
             `Click the ${el.role} labelled "${label}"${where}.`);
