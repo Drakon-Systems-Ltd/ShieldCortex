@@ -12,8 +12,10 @@
  *
  * (See https://platform.claude.com/docs/en/agents-and-tools/tool-use/browser-use-sdk)
  *
- * This module plugs the Action Guard into those three points WITHOUT depending
- * on the SDK: everything is typed structurally against the documented shapes.
+ * This module plugs the Action Guard into those three points WITHOUT a runtime
+ * dependency on the SDK: everything is typed structurally, and a type-level
+ * conformance test (`claude-toolsets-sdk-types.test.ts`) checks those shapes
+ * against the real `@anthropic-ai/sdk` classes (a devDependency only).
  * It classifies each member call into ADR-002 effect kinds, keeps the ref
  * catalogue that is the only way to know what a `ref` click does, scans every
  * page read with the tool-response scanner, taints the session on the first
@@ -53,14 +55,35 @@ export type ToolsetEffectKind =
   | 'code-exec-opaque'
   | 'unclassified';
 
-/** The documented `confirm` context shape, structurally. */
+/**
+ * What the SDK passes to a member and to the `execute` override
+ * (`BetaToolsetCallContext`): the tool_use being served, absent only when the
+ * host calls `run()` without one, and the run's abort signal. It does NOT
+ * carry the member, its input or the tab: those reach `confirm` only.
+ */
+export interface ToolsetCallContext {
+  /** The tool_use being served; used only for its id. */
+  readonly toolUse?: { readonly id?: string } | undefined;
+  readonly signal?: AbortSignal | null | undefined;
+}
+
+/** The `confirm` context shape (`BetaConfirmContext` / `BetaComputerConfirmContext`), structurally. */
 export interface ToolsetConfirmContext {
-  member: string;
-  input: unknown;
-  /** Browser only: the tab URL from the driver's LAST state report. */
-  tabURL?: string;
-  /** Some SDK contexts carry the tool_use block; used only for its id. */
-  toolUse?: { id?: string } | null;
+  readonly member: string;
+  readonly input: unknown;
+  /** Browser only: the target tab's URL from the LAST state report the SDK collected. */
+  readonly tabURL?: string | undefined;
+  /** Browser only: the target tab (else the active tab) from that report. */
+  readonly tabId?: string | undefined;
+  readonly toolUse?: { readonly id?: string } | null | undefined;
+  readonly signal?: AbortSignal | null | undefined;
+}
+
+/** The first argument of the SDK's `urlPolicy(context, url)` (`BetaURLContext`). */
+export interface ToolsetUrlContext {
+  readonly member?: string | undefined;
+  readonly tabId?: string | undefined;
+  readonly toolUseId?: string | undefined;
 }
 
 export interface ToolsetRequester {
@@ -137,11 +160,22 @@ export type ToolsetConfirmInner = (
   verdict: ToolsetVerdict,
 ) => boolean | Promise<boolean>;
 
-export type ToolsetExecuteNext = (
-  ctx: ToolsetConfirmContext,
-  name: string,
-  input: unknown,
-) => unknown | Promise<unknown>;
+/**
+ * The SDK's own `execute` (`(c, n, i) => super.execute(c, n, i)`). Generic so
+ * the override keeps the SDK's context, member-name, input and result types.
+ */
+export type ToolsetExecuteNext<C extends ToolsetCallContext, N extends string, I, R> = (
+  ctx: C,
+  name: N,
+  input: I,
+) => R | Promise<R>;
+
+/** What `confirm` saw for a call, so `execute` can bind to it. */
+interface ConfirmedCall {
+  inputHash: string;
+  tabURL?: string;
+  tabId?: string;
+}
 
 // ── Member tables ─────────────────────────────────────────────────────────
 
@@ -340,8 +374,8 @@ export class ToolsetGuard {
   private readonly refs = new Map<string, Map<string, { role: string; label: string }>>();
   /** Previous member seen, for `type` → `key Enter` = submit. */
   private previousMember: string | null = null;
-  /** Hashes `confirm` approved, so `execute` can detect a mutated input. */
-  private readonly confirmed = new Map<string, string>();
+  /** What `confirm` saw per call, so `execute` can detect a mutated input and knows the tab. */
+  private readonly confirmed = new Map<string, ConfirmedCall>();
 
   constructor(options: ToolsetGuardOptions) {
     this.toolset = options.toolset;
@@ -489,7 +523,7 @@ export class ToolsetGuard {
     return async (ctx: ToolsetConfirmContext): Promise<boolean> => {
       const verdict = this.classify(ctx);
       const key = ctx.toolUse?.id ?? `${ctx.member}:${verdict.inputHash}`;
-      this.confirmed.set(key, verdict.inputHash);
+      this.confirmed.set(key, { inputHash: verdict.inputHash, tabURL: ctx.tabURL, tabId: ctx.tabId });
       this.previousMember = ctx.member;
 
       let answer: boolean;
@@ -516,8 +550,8 @@ export class ToolsetGuard {
   }
 
   /** A `urlPolicy` callable for the browser class. */
-  urlPolicy(): (ctx: unknown, url: string) => void {
-    return (_ctx: unknown, url: string): void => {
+  urlPolicy(): (ctx: ToolsetUrlContext, url: string) => void {
+    return (_ctx: ToolsetUrlContext, url: string): void => {
       const check = checkUrl(url, this.allowlist);
       if (this.mode === 'observe') return;
       if (check.verdict === 'block') throw new this.ErrorCtor('blocked: this address is not allowed');
@@ -533,20 +567,29 @@ export class ToolsetGuard {
   /**
    * Wrap the SDK's `execute`. Call from the driver's override:
    *   execute(ctx, name, input) { return guard.execute(ctx, name, input, (c, n, i) => super.execute(c, n, i)); }
+   * `ctx` is the SDK's `BetaToolsetCallContext`; the tab and the approved bytes
+   * come from what `confirm` recorded for the same call.
    */
-  async execute(
-    ctx: ToolsetConfirmContext,
-    name: string,
-    input: unknown,
-    next: ToolsetExecuteNext,
-  ): Promise<unknown> {
+  async execute<C extends ToolsetCallContext, N extends string, I, R>(
+    ctx: C,
+    name: N,
+    input: I,
+    next: ToolsetExecuteNext<C, N, I, R>,
+  ): Promise<R> {
     // Pre: the SDK re-checks nothing after confirm; we check the bytes match.
     const hash = hashInput(name, input);
     const key = ctx.toolUse?.id ?? `${name}:${hash}`;
     const seen = this.confirmed.get(key);
-    if (seen !== undefined && seen !== hash) {
-      const verdict = this.classify({ ...ctx, member: name, input });
-      this.emit({ kind: 'call', ctx: { ...ctx, member: name, input }, verdict: { ...verdict, signals: [...verdict.signals, 'input-mutated-after-confirm'] }, outcome: this.mode === 'enforce' ? 'refused' : 'observed' });
+    const callCtx: ToolsetConfirmContext = {
+      member: name,
+      input,
+      tabURL: seen?.tabURL,
+      tabId: seen?.tabId,
+      toolUse: ctx.toolUse,
+    };
+    if (seen !== undefined && seen.inputHash !== hash) {
+      const verdict = this.classify(callCtx);
+      this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, 'input-mutated-after-confirm'] }, outcome: this.mode === 'enforce' ? 'refused' : 'observed' });
       if (this.mode === 'enforce') throw new this.ErrorCtor('blocked: the action changed after it was approved');
     }
     this.confirmed.delete(key);
@@ -570,20 +613,21 @@ export class ToolsetGuard {
           }
         }
         const scan = scanToolResponse(`toolset:${this.toolset}:${name}`, result, this.mode === 'enforce' ? 'enforce' : 'advisory');
-        const verdict = this.classify({ ...ctx, member: name, input });
+        const verdict = this.classify(callCtx);
         const neutralised = this.mode === 'enforce' && scan.sanitisedContent !== null;
         this.emit({
           kind: 'result',
-          ctx: { ...ctx, member: name, input },
+          ctx: callCtx,
           verdict,
           outcome: neutralised ? 'neutralised' : 'scanned',
           scanClean: scan.clean,
           scanIndicators: scan.threatIndicators,
         });
-        if (neutralised) return scan.sanitisedContent;
+        // A text member's declared result type includes `string`.
+        if (neutralised) return scan.sanitisedContent as R;
       } else {
-        const verdict = this.classify({ ...ctx, member: name, input });
-        this.emit({ kind: 'result', ctx: { ...ctx, member: name, input }, verdict, outcome: 'scanned', scanClean: true, scanIndicators: [] });
+        const verdict = this.classify(callCtx);
+        this.emit({ kind: 'result', ctx: callCtx, verdict, outcome: 'scanned', scanClean: true, scanIndicators: [] });
       }
     }
     return result;

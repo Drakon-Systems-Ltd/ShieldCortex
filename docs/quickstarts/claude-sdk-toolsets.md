@@ -7,8 +7,9 @@ tool loop and hands each `navigate`, `left_click`, `type`, `javascript_exec` and
 the pages and screens they read are untrusted content.
 
 `shieldcortex/toolsets` plugs the Action Guard into the three hook points the SDK
-documents (`urlPolicy`, `confirm`, and an `execute` override). It has no dependency on
-the SDK: everything is typed against the documented shapes.
+documents (`urlPolicy`, `confirm`, and an `execute` override). It has no runtime
+dependency on the SDK: the adapters are typed structurally, and a conformance test
+type-checks a driver subclassing the real `@anthropic-ai/sdk` classes through them.
 
 **Phase P1 (this release) is observe-only.** With the default `mode: 'observe'` the guard
 never changes what runs: `confirm` returns your own answer (or `true`), `execute` returns
@@ -21,7 +22,13 @@ tested; the bounded-approval and approval-card wiring is phase P2 (see #678).
 
 ```ts
 import { ToolsetGuard } from 'shieldcortex/toolsets';
-import { BetaAbstractBrowserToolset20260801, ToolError } from '@anthropic-ai/sdk/helpers/beta/toolsets';
+import {
+  BetaAbstractBrowserToolset20260801,
+  ToolError,
+  type BetaBrowserMemberResult,
+  type BetaToolsetCallContext,
+} from '@anthropic-ai/sdk/helpers/beta/toolsets';
+import type { BetaBrowserMemberInput, BetaBrowserMemberName } from '@anthropic-ai/sdk/resources/beta';
 
 const guard = new ToolsetGuard({
   toolset: 'browser',
@@ -40,7 +47,11 @@ class MyBrowser extends BetaAbstractBrowserToolset20260801 {
     });
   }
 
-  protected override async execute(ctx, name, input) {
+  protected override async execute(
+    ctx: BetaToolsetCallContext,
+    name: BetaBrowserMemberName,
+    input: BetaBrowserMemberInput,
+  ): Promise<BetaBrowserMemberResult> {
     return guard.execute(ctx, name, input, (c, n, i) => super.execute(c, n, i));
   }
 
