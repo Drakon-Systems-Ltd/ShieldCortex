@@ -424,7 +424,8 @@ export function handleCloudConfig(args: string[]): void {
         'Catastrophic ops block in every posture, and in shadow calls the guard recognises as changing its own state/config ' +
         'or disabling it are still held or blocked. Check progress: shieldcortex guard readiness. ' +
         'The Claude Code hook and the OpenClaw plugin are each measured and promoted on their own calls; ' +
-        'the Hermes plugin does not implement the gate and enforces immediately.',
+        'the Hermes plugin does not implement the gate and enforces immediately unless its own enforce setting ' +
+        '(SHIELDCORTEX_ENFORCE) opts it out; this flag does not change that setting.',
     );
     // Start the durable transition record. Only a CHANGE of posture adds an
     // entry; re-running this on an enforce-when-ready install cannot clear a
@@ -646,7 +647,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('                           published yet, so it stays in shadow today. Needs a webhook;');
     console.log('                           progress: shieldcortex guard readiness. Claude Code hook and OpenClaw');
     console.log('                           plugin, each measured on its own calls; Hermes ignores the gate and');
-    console.log('                           enforces immediately. Also enables the guard');
+    console.log('                           enforces immediately unless its own enforce setting (SHIELDCORTEX_ENFORCE)');
+    console.log('                           opts it out; this does not change that setting. Also enables the guard');
     console.log('  --action-guard-advisory  Watch only — ordinary dangerous ops log but are not gated. Still held or');
     console.log('                           blocked, including catastrophic ops and calls the guard recognises as');
     console.log('                           changing its own state/config or disabling it. Hermes has its own');
