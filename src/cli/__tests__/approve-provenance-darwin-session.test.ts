@@ -76,6 +76,9 @@ describe('darwinSessionLeaderFromPs', () => {
   it('two leaders on one tty is ambiguous → 0', () => {
     expect(darwinSessionLeaderFromPs('100 Ss\n200 Ss+\n')).toBe(0);
   });
+  it('plain sleep S is not a leader; Ss is', () => {
+    expect(darwinSessionLeaderFromPs('100 S\n200 Ss\n')).toBe(200);
+  });
   it('ignores blank, header and malformed lines', () => {
     expect(darwinSessionLeaderFromPs('\n  \nPID STAT\n300 Ss\ngarbage\n')).toBe(300);
   });
@@ -124,6 +127,12 @@ describe('macOS — discovery failures refuse', () => {
     const { v } = verdict(SSH, 450, { failTty: true });
     expect(v.ok).toBe(false);
     expect(v.reason).toBe('no-session-leader');
+  });
+  it('a tty name starting with "-" is never passed to ps -t and refuses', () => {
+    const procs = { 1: LAUNCHD, 900: { ppid: 1, tty: '-x', comm: 'node', stat: 'S+' } };
+    const { v, ps } = verdict(procs, 900);
+    expect(ps.calls.some((a) => a[0] === '-t')).toBe(false);
+    expect(v.ok).toBe(false);
   });
   it('two leaders on our tty refuses', () => {
     const procs = { ...SSH, 460: { ppid: 1, tty: 'ttys001', comm: 'zsh', stat: 'Ss' } };

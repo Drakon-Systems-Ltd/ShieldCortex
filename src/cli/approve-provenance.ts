@@ -249,7 +249,8 @@ export function makeDarwinProcReader(ps: PsRunner = runSystemPs): (pid: number) 
     if (!m) return null;
     const ttyName = m[2];
     const tty = ttyName === '??' || ttyName === '-' ? 0 : 1;
-    const sid = tty === 1 && /^[\w/.-]+$/.test(ttyName) ? leaderOf(ttyName) : 0;
+    // A leading `-` could be read by `ps -t` as another flag; real names never have one.
+    const sid = tty === 1 && /^\w[\w/.-]*$/.test(ttyName) ? leaderOf(ttyName) : 0;
     return { pid, ppid: Number(m[1]), sid, comm: m[3].trim(), tty };
   };
 }
@@ -398,7 +399,9 @@ export function operatorProvenance(seam: ProvenanceSeam = defaultProvenanceSeam(
     return {
       ok: false,
       reason: 'no-session-leader',
-      detail: `this process's session leader (pid ${self.sid}) is gone — an interactive login session's leader is the shell a human is typing into, and it outlives every command it runs.`,
+      detail: self.sid > 0
+        ? `this process's session leader (pid ${self.sid}) is gone — an interactive login session's leader is the shell a human is typing into, and it outlives every command it runs.`
+        : `no single session leader could be found for this process's terminal — an interactive login session always has exactly one.`,
       chain,
     };
   }
