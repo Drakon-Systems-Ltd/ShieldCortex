@@ -464,6 +464,34 @@ function pageSuppliedText(value: unknown): string[] {
   return out;
 }
 
+/**
+ * The text of a text member's result, whatever its shape. The SDK types these
+ * results as `string`, but a driver may return an object (`{ text }`, an array
+ * of entries): every string leaf is page-supplied text the model reads, so all
+ * of them are scanned. `complete` is false when part of the value could not be
+ * walked (too deep, a cycle, a function), so it is never reported as clean.
+ */
+function textOfResult(value: unknown): { text: string; complete: boolean } {
+  if (typeof value === 'string') return { text: value, complete: true };
+  if (value === undefined || value === null) return { text: '', complete: true };
+  const parts: string[] = [];
+  let complete = true;
+  const seen = new WeakSet<object>();
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') parts.push(v);
+    else if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') parts.push(String(v));
+    else if (v === undefined || v === null) return;
+    else if (typeof v !== 'object' || depth > 8 || seen.has(v)) complete = false;
+    else {
+      seen.add(v);
+      const values = Array.isArray(v) ? v : Object.values(v as Record<string, unknown>);
+      for (const x of values) walk(x, depth + 1);
+    }
+  };
+  walk(value, 0);
+  return { text: parts.join('\n'), complete };
+}
+
 function textOfKeyboardInput(member: string, input: unknown): string {
   const r = asRecord(input);
   if (typeof r.text === 'string') return r.text;
@@ -832,12 +860,13 @@ export class ToolsetGuard {
     if (PAGE_STATE_MEMBERS.has(name)) {
       this.observePageText(name, pageSuppliedText(result), callCtx);
     }
-    // Post: every read taints; text reads are scanned; the ref catalogue updates.
+    // Post: every read taints; text reads are scanned whatever their shape; the ref catalogue updates.
     if (READING_MEMBERS.has(name)) {
       this.tainted = true;
-      if (TEXT_RESULT_MEMBERS.has(name) && typeof result === 'string') {
-        if (name === 'read_page' || name === 'find') this.recordRefs(callCtx, name, result);
-        const scan = scanToolResponse(`toolset:${this.toolset}:${name}`, result, this.mode === 'enforce' ? 'enforce' : 'advisory');
+      if (TEXT_RESULT_MEMBERS.has(name)) {
+        const { text, complete } = textOfResult(result);
+        if (name === 'read_page' || name === 'find') this.recordRefs(callCtx, name, text);
+        const scan = scanToolResponse(`toolset:${this.toolset}:${name}`, text, this.mode === 'enforce' ? 'enforce' : 'advisory');
         const verdict = this.classify(callCtx);
         const neutralised = this.mode === 'enforce' && scan.sanitisedContent !== null;
         this.emit({
@@ -845,14 +874,15 @@ export class ToolsetGuard {
           ctx: callCtx,
           verdict,
           outcome: neutralised ? 'neutralised' : 'scanned',
-          scanClean: scan.clean,
-          scanIndicators: scan.threatIndicators,
+          scanClean: scan.clean && complete,
+          scanIndicators: complete ? scan.threatIndicators : [...scan.threatIndicators, 'result-not-fully-scanned'],
         });
-        // A text member's declared result type includes `string`.
+        // A text member's declared result type includes `string`: the placeholder replaces the whole result.
         if (neutralised) return scan.sanitisedContent as R;
       } else {
+        // An image: tainted, but nothing was scanned, so it is never reported clean.
         const verdict = this.classify(callCtx);
-        this.emit({ kind: 'result', ctx: callCtx, verdict, outcome: 'scanned', scanClean: true, scanIndicators: [] });
+        this.emit({ kind: 'result', ctx: callCtx, verdict, outcome: 'scanned', scanIndicators: ['not-scanned:image'] });
       }
     }
     return result;

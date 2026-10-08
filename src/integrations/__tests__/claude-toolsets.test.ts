@@ -102,7 +102,9 @@ describe('ToolsetGuard — hidden-injection fixture page (#678 acceptance 1)', (
     const { guard, events } = makeGuard();
     await guard.execute(ctx('screenshot', {}), 'screenshot', {}, async () => ({ data: 'iVBORw0KGgo=', mediaType: 'image/png' }));
     expect(guard.isTainted).toBe(true);
-    expect(events.find((e) => e.kind === 'result')!.scanClean).toBe(true);
+    const result = events.find((e) => e.kind === 'result')!;
+    expect(result.scanClean).not.toBe(true); // nothing was scanned, so it is not "clean"
+    expect(result.scanIndicators).toEqual(['not-scanned:image']);
   });
 });
 

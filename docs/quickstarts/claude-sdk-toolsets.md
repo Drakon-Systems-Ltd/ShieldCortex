@@ -75,8 +75,8 @@ For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` a
 | click on a coordinate, any desktop click | **unclassified**: allowed untainted, held once tainted | Anthropic: `confirm` "receives the tool and its input, not the screen" |
 | `type`, `form_input`, `key` | typed text scanned for secrets → **denied**; Enter after typing = submit | credentials must never be typed into a page |
 | `javascript_exec`, `file_upload` | held; an upload from `.ssh`, `.aws`, `.env`, … is denied | runs with the page's authority / exfiltrates files |
-| `get_page_text`, `read_page`, `find`, console, network | scanned with the tool-response scanner (injection, hidden HTML, credentials, markdown-image exfil) | page content is untrusted |
-| `screenshot`, `zoom` | taints the session; not scanned (no OCR in P1) | — |
+| `get_page_text`, `read_page`, `find`, console, network | scanned with the tool-response scanner (injection, hidden HTML, credentials, markdown-image exfil); a non-string result has every string leaf scanned, and one that cannot be fully walked is never reported clean | page content is untrusted |
+| `screenshot`, `zoom` | taints the session; not scanned (no OCR in P1), so the result event carries `not-scanned:image` and never `scanClean: true` | — |
 | `navigate`, `new_tab`, `switch_tab`, `list_tabs` results; the `browserState` report | tab titles, URLs and dialog messages taint the session and are scanned | page-supplied text the model reads with every result |
 
 Wrap the required `browserState` option with `guard.browserState(...)`: the SDK attaches
