@@ -633,3 +633,25 @@ describe('ToolsetGuard — submit keys inside key sequences and chords (#679 P2)
     expect(v.effects).toEqual(['input']);
   });
 });
+
+describe('isPrivateOrLocalHost — fc/fd DNS labels are names, not ULA addresses (#679 review 2, A1)', () => {
+  it.each(['https://fc.example.com/', 'https://fd.example.com/', 'https://fd00.example/', 'https://fcfc.io/'])(
+    '%s is not blocked as private',
+    (url) => {
+      const c = checkUrl(url, ['example.com', 'example', 'fcfc.io']);
+      expect(c.verdict).toBe('allow');
+      expect(c.reason).toBe('url-allowed');
+    },
+  );
+
+  it.each(['http://[fc00::1]/', 'http://[fdff:ffff::1]/', 'http://[FD12::1]/'])('%s (fc00::/7 literal) is blocked', (url) => {
+    expect(checkUrl(url).reason).toBe('url-private-or-local-range');
+  });
+
+  it('pure classification', () => {
+    expect(isPrivateOrLocalHost('fc.example.com')).toBe(false);
+    expect(isPrivateOrLocalHost('fd.example.com')).toBe(false);
+    expect(isPrivateOrLocalHost('fc00::1')).toBe(true);
+    expect(isPrivateOrLocalHost('fe00::1')).toBe(false); // outside fc00::/7 and fe80::/10
+  });
+});
