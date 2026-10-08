@@ -308,13 +308,83 @@ describe('dist probe R2 — a driver error is page content: scanned, tainting, r
     }
   });
 
-  it('a non-page member error is rethrown untouched and does not taint', async () => {
+  /** A left_click that throws a ToolError quoting hidden HTML, through the real SDK class, then a second coordinate click. */
+  async function clickError(mode: 'observe' | 'enforce') {
+    const sdk = await import('@anthropic-ai/sdk/helpers/beta/toolsets');
+    const { ToolError } = sdk;
+    const Base = sdk.BetaAbstractBrowserToolset20260801 as unknown as new (options: unknown) => {
+      execute(c: unknown, n: string, i: unknown): Promise<unknown>;
+      toolResult(block: unknown): Promise<unknown>;
+      close(): Promise<void>;
+    };
+    const events: Toolsets.ToolsetAuditEvent[] = [];
+    const thrown = new ToolError(`element ${TEXT} intercepts pointer events`);
+    let clicks = 0;
+    let caught: unknown;
+    const g = new mod.ToolsetGuard({ toolset: 'browser', mode, toolError: ToolError, audit: (e) => events.push(e) });
+    class B extends Base {
+      constructor() {
+        super({ confirm: g.confirm(), urlPolicy: g.urlPolicy(), browserState: g.browserState(() => ({ tabs: [] })) });
+      }
+      async execute(c: unknown, n: string, i: unknown): Promise<unknown> {
+        try {
+          return await g.execute(c as Toolsets.ToolsetCallContext, n, i, (c2, n2, i2) => super.execute(c2, n2, i2));
+        } catch (e) {
+          if (n === 'left_click' && caught === undefined) caught = e;
+          throw e;
+        }
+      }
+      async left_click(): Promise<void> {
+        clicks += 1;
+        if (clicks === 1) throw thrown;
+      }
+    }
+    const b = new B();
+    const click = (id: string) => ({ type: 'tool_use', toolset_name: 'browser', name: 'left_click', input: { target: { type: 'coordinate', x: 10, y: 20 } }, id });
+    const err = await b.toolResult(click('c1'));
+    const tainted = g.isTainted;
+    const resultEvents = events.filter((e) => e.kind === 'result');
+    const before = events.length;
+    await b.toolResult(click('c2'));
+    await b.close();
+    return { err: JSON.stringify(err), thrown, caught, tainted, resultEvents, clicks, after: events.slice(before) };
+  }
+
+  it('observe: a left_click error quoting hidden HTML is scanned once, taints, the same object is rethrown; the next click is held', async () => {
+    const r = await clickError('observe');
+    expect(r.caught).toBe(r.thrown);
+    expect(r.err).toContain('Ignore all previous instructions');
+    expect(r.tainted).toBe(true);
+    expect(r.resultEvents).toHaveLength(1);
+    expect(r.resultEvents[0]).toMatchObject({ member: 'left_click', scanClean: false, outcome: 'scanned' });
+    expect(r.resultEvents[0].scanIndicators).toContain('driver-error');
+    const next = r.after.filter((e) => e.kind === 'call' && e.member === 'left_click');
+    expect(next.length).toBeGreaterThan(0);
+    expect(next.every((e) => e.decision === 'require_approval')).toBe(true);
+    expect(r.clicks).toBe(2); // observe never changes what runs
+  });
+
+  it('enforce: the same left_click error is replaced by a neutralised error and the next click is refused', async () => {
+    const r = await clickError('enforce');
+    expect(r.caught).not.toBe(r.thrown);
+    expect(r.err).not.toContain('Ignore all previous');
+    expect(r.err).toContain('"is_error":true');
+    expect(r.tainted).toBe(true);
+    expect(r.resultEvents).toHaveLength(1);
+    expect(r.resultEvents[0]).toMatchObject({ member: 'left_click', scanClean: false, outcome: 'neutralised' });
+    expect(r.clicks).toBe(1);
+  });
+
+  it('a benign error from a non-page member is scanned clean, does not taint, and the same object is rethrown', async () => {
     const { guard, events } = makeGuard();
     const toolUse = { id: 'toolu_wait' };
     await guard.confirm()({ member: 'wait', input: {}, toolUse });
     const thrown = new Error('timeout');
     await expect(guard.execute({ toolUse }, 'wait', {}, async () => { throw thrown; })).rejects.toBe(thrown);
     expect(guard.isTainted).toBe(false);
-    expect(events.filter((e) => e.kind === 'result')).toHaveLength(0);
+    const results = events.filter((e) => e.kind === 'result');
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ member: 'wait', scanClean: true, outcome: 'scanned' });
+    expect(results[0].scanIndicators).toContain('driver-error');
   });
 });

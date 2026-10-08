@@ -231,8 +231,9 @@ const READING_MEMBERS = new Set([
  */
 const PAGE_STATE_MEMBERS = new Set(['navigate', 'new_tab', 'switch_tab', 'list_tabs']);
 /**
- * Members whose thrown error text may carry page content. The SDK relays a
- * driver error to the model as the tool result, so it taints and is scanned.
+ * Members whose thrown error text is page content by construction. The SDK
+ * relays every driver error to the model as the tool result, so every error is
+ * scanned; an error from one of these members always taints.
  */
 const ERROR_TEXT_MEMBERS = new Set([...READING_MEMBERS, ...PAGE_STATE_MEMBERS]);
 /** Reading members whose result is text we can scan (not an image). */
@@ -906,7 +907,6 @@ export class ToolsetGuard {
     try {
       result = await next(ctx, name, input);
     } catch (error) {
-      if (!ERROR_TEXT_MEMBERS.has(name)) throw error;
       throw this.observeDriverError(name, callCtx, error);
     }
 
@@ -949,12 +949,14 @@ export class ToolsetGuard {
   }
 
   /**
-   * A page-capable member threw. The SDK relays the driver's error text to the
-   * model as the tool result, so it is page content like any read: the session
-   * is tainted and the text is scanned with the same walk as a result, with one
-   * `result` event. Observe returns the same error object to rethrow. Enforce
-   * returns it unchanged when the scan is clean, and otherwise a new error (the
-   * `toolError` constructor) carrying only the scanner's neutralised text.
+   * A member threw. The SDK relays the driver's error text to the model as the
+   * tool result, and any member's error can quote the page (a click's "element
+   * <div>…</div> intercepts pointer events"), so every error is scanned with the
+   * same walk as a result, with one `result` event. The session is tainted when
+   * the member is page-capable or the scan is not clean. Observe returns the
+   * same error object to rethrow. Enforce returns it unchanged when the scan is
+   * clean, and otherwise a new error (the `toolError` constructor) carrying only
+   * the scanner's neutralised text.
    */
   private observeDriverError(name: string, callCtx: ToolsetConfirmContext, error: unknown): unknown {
     if (name === 'navigate' || name === 'close_tab') {
@@ -962,12 +964,13 @@ export class ToolsetGuard {
       if (tab === undefined) this.refs.clear();
       else this.refs.delete(tab);
     }
-    this.tainted = true;
     const source = error instanceof Error
       ? { message: error.message, content: (error as { content?: unknown }).content }
       : error;
     const { text, complete } = textOfResult(source);
     const scan = scanToolResponse(`toolset:${this.toolset}:${name}:error`, text, this.mode === 'enforce' ? 'enforce' : 'advisory');
+    const scanClean = scan.clean && complete;
+    if (ERROR_TEXT_MEMBERS.has(name) || !scanClean) this.tainted = true;
     const neutralised = this.mode === 'enforce' && scan.sanitisedContent !== null;
     const indicators = ['driver-error', ...scan.threatIndicators];
     this.emit({
@@ -975,7 +978,7 @@ export class ToolsetGuard {
       ctx: callCtx,
       verdict: this.classify(callCtx),
       outcome: neutralised ? 'neutralised' : 'scanned',
-      scanClean: scan.clean && complete,
+      scanClean,
       scanIndicators: complete ? indicators : [...indicators, 'result-not-fully-scanned'],
     });
     return neutralised ? new this.ErrorCtor(scan.sanitisedContent as string) : error;
