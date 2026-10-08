@@ -439,6 +439,17 @@ export function checkUrl(url: string, allowlist?: string[]): UrlCheck {
   return { allowed: true, verdict: 'allow', reason: 'url-allowed', effects: ['network-fetch'], host };
 }
 
+/**
+ * A role token read from page text, bounded before it can reach a signal,
+ * a card or an audit row: lowercase, `[a-z][a-z0-9-]` up to 32 characters,
+ * and unchanged by credential redaction. Anything else is the role `other`.
+ */
+function boundRole(raw: string): string {
+  const role = raw.toLowerCase();
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(role)) return 'other';
+  return redactCredentials(role) === role ? role : 'other';
+}
+
 /** Parse the `read_page` / `find` output into ref → {role, label}. */
 export function parseRefCatalogue(text: string): Map<string, { role: string; label: string }> {
   const out = new Map<string, { role: string; label: string }>();
@@ -446,8 +457,8 @@ export function parseRefCatalogue(text: string): Map<string, { role: string; lab
   const a = /([A-Za-z_][\w-]*)\s+"((?:[^"\\]|\\.)*)"[^\n\[]*\[(ref_[\w-]+)\]/g;
   const b = /\[(ref_[\w-]+)\]\s*([A-Za-z_][\w-]*)\s+"((?:[^"\\]|\\.)*)"/g;
   let m: RegExpExecArray | null;
-  while ((m = a.exec(text)) !== null) out.set(m[3], { role: m[1].toLowerCase(), label: m[2] });
-  while ((m = b.exec(text)) !== null) if (!out.has(m[1])) out.set(m[1], { role: m[2].toLowerCase(), label: m[3] });
+  while ((m = a.exec(text)) !== null) out.set(m[3], { role: boundRole(m[1]), label: m[2] });
+  while ((m = b.exec(text)) !== null) if (!out.has(m[1])) out.set(m[1], { role: boundRole(m[2]), label: m[3] });
   return out;
 }
 

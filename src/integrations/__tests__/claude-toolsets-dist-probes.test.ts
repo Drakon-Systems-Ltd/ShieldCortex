@@ -388,3 +388,85 @@ describe('dist probe R2 — a driver error is page content: scanned, tainting, r
     expect(results[0].scanIndicators).toContain('driver-error');
   });
 });
+
+describe('dist probe A1 — a page-derived role token is bounded before signals and audit (#679 review 4)', () => {
+  const MARKER = `rolemarker${'q'.repeat(5240)}`; // 5250 chars, a valid `[A-Za-z_][\w-]*` token
+
+  /** The reviewer's probe: the real SDK browser class, read_page with a catalogue line, then a same-tab ref click. */
+  async function readThenClick(catalogue: string) {
+    const sdk = await import('@anthropic-ai/sdk/helpers/beta/toolsets');
+    const Base = sdk.BetaAbstractBrowserToolset20260801 as unknown as new (options: unknown) => {
+      execute(c: unknown, n: string, i: unknown): Promise<unknown>;
+      toolResult(block: unknown): Promise<unknown>;
+      close(): Promise<void>;
+    };
+    const events: Toolsets.ToolsetAuditEvent[] = [];
+    let clicked = false;
+    const g = new mod.ToolsetGuard({ toolset: 'browser', toolError: sdk.ToolError, audit: (e) => events.push(e) });
+    const tabs = [{ tab_id: 't1', url: 'https://docs.example.com/', title: '', active: true }];
+    class B extends Base {
+      constructor() {
+        super({ confirm: g.confirm(), urlPolicy: g.urlPolicy(), browserState: g.browserState(() => ({ tabs })) });
+      }
+      async execute(c: unknown, n: string, i: unknown): Promise<unknown> {
+        return g.execute(c as Toolsets.ToolsetCallContext, n, i, (c2, n2, i2) => super.execute(c2, n2, i2));
+      }
+      async navigate(): Promise<void> {}
+      async read_page(): Promise<string> { return catalogue; }
+      async left_click(): Promise<void> { clicked = true; }
+    }
+    const b = new B();
+    const call = (name: string, input: unknown, id: string) => ({ type: 'tool_use', toolset_name: 'browser', name, input, id });
+    await b.toolResult(call('navigate', { url: 'https://docs.example.com/' }, 'n1')); // the SDK learns the tab
+    await b.toolResult(call('read_page', {}, 'r1'));
+    await b.toolResult(call('left_click', { target: { type: 'ref', ref: 'ref_7' } }, 'c1'));
+    await b.close();
+    const click = events.filter((e) => e.kind === 'call' && e.member === 'left_click');
+    return { events, click, clicked };
+  }
+
+  it('a 5250-char role becomes `other`: no signal over 37 chars, the marker absent from every audit event', async () => {
+    const r = await readThenClick(`${MARKER} "Open details" [ref_7]`);
+    expect(r.click.length).toBeGreaterThan(0);
+    for (const e of r.click) {
+      expect(e.elementRole).toBe('other');
+      expect(e.signals).toContain('role:other');
+      expect(e.elementLabel).toBe('Open details');
+    }
+    for (const e of r.events) for (const s of e.signals) expect(s.length).toBeLessThanOrEqual(37);
+    const all = JSON.stringify(r.events);
+    expect(all).not.toContain(MARKER);
+    expect(all).not.toContain(MARKER.slice(0, 40));
+    expect(r.clicked).toBe(true); // observe never changes what runs
+  });
+
+  it('the `[ref] role "label"` form is bounded the same way', async () => {
+    const r = await readThenClick(`[ref_7] ${MARKER} "Open details"`);
+    expect(r.click.every((e) => e.elementRole === 'other')).toBe(true);
+    expect(JSON.stringify(r.events)).not.toContain(MARKER.slice(0, 40));
+  });
+
+  it('control: `button` stays `button`; a mixed-case role is lowercased', async () => {
+    const r = await readThenClick('button "Open details" [ref_7]');
+    expect(r.click.every((e) => e.elementRole === 'button')).toBe(true);
+    expect(r.click[0].signals).toContain('role:button');
+    const r2 = await readThenClick('MenuItemCheckbox "Open details" [ref_7]');
+    expect(r2.click.every((e) => e.elementRole === 'menuitemcheckbox')).toBe(true);
+  });
+
+  it('parseRefCatalogue: over 32 chars, an underscore, or a secret-shaped token is `other`; the ref and label are kept', () => {
+    const ok = 'x-'.repeat(16); // 32 chars, not secret-shaped
+    const parsed = mod.parseRefCatalogue([
+      `${ok} "x" [ref_1]`,
+      `${ok}b "y" [ref_2]`,
+      'combo_box "z" [ref_3]',
+      'sk-proj-abcdefghij0123456789abcd "Pay" [ref_4]',
+      'link "Home" [ref_5]',
+    ].join('\n'));
+    expect(parsed.get('ref_1')).toEqual({ role: ok, label: 'x' });
+    expect(parsed.get('ref_2')).toEqual({ role: 'other', label: 'y' });
+    expect(parsed.get('ref_3')).toEqual({ role: 'other', label: 'z' });
+    expect(parsed.get('ref_4')).toEqual({ role: 'other', label: 'Pay' });
+    expect(parsed.get('ref_5')).toEqual({ role: 'link', label: 'Home' });
+  });
+});
