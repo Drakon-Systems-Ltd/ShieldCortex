@@ -29,7 +29,6 @@ import {
   importNativeMemoriesInternal,
   type NativeImportDependencies,
 } from '../import-native.js';
-// @ts-expect-error -- shipped .mjs runtime helper has no declaration file
 import { isInjectEligible } from '../../../scripts/lib/inject-pack.mjs';
 
 const SAFE = '# Deployment decision\n\nThe release service uses signed artifacts and a staged rollout.';
@@ -1119,7 +1118,7 @@ describe('A3 defended native import-once (#395)', () => {
       expect(error).not.toHaveBeenCalled();
       expect(warn).not.toHaveBeenCalled();
     } finally {
-      process.exitCode = previousExitCode;
+      process.exitCode = previousExitCode ?? undefined;
       log.mockRestore();
       error.mockRestore();
       warn.mockRestore();

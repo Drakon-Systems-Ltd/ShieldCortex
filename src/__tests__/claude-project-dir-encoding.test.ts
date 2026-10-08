@@ -1,5 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-// @ts-expect-error -- importing a .mjs util for the encoder under test
 import { encodeClaudeProjectDir } from '../../scripts/lib/claude-project-dir.mjs';
 
 /**

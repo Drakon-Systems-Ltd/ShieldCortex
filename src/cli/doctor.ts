@@ -5794,7 +5794,6 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   // "cannot determine", never as a passing zero.
   let injectPack: InjectPackModule | null = null;
   try {
-    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
     injectPack = await import('../../scripts/lib/inject-pack.mjs') as InjectPackModule;
   } catch {
     injectPack = null;

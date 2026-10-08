@@ -65,7 +65,6 @@ import { pruneActivationCache } from './activation.js';
 // cannot await, and consolidate()/deduplicateMemories() have several sync
 // callers. One source of truth: this is the same computeEffectiveSalience the
 // recall hook and `shieldcortex memory downvote` use.
-// @ts-expect-error — importing a .mjs hook util that has no .d.ts
 import { computeEffectiveSalience } from '../../scripts/lib/salience.mjs';
 
 /**

@@ -1,5 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-// @ts-expect-error -- importing a .mjs hook utility (no type decls)
 import { extractSessionMemories, extractKeywordMemory } from '../../scripts/lib/openclaw-extract.mjs';
 
 /**

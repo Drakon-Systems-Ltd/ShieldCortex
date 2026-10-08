@@ -23,7 +23,7 @@ import {
 
 function createResponseMock() {
   const json = jest.fn();
-  const status = jest.fn(() => ({ json }));
+  const status = jest.fn((_code: number) => ({ json }));
   return {
     res: { status, json } as unknown as Response,
     status,

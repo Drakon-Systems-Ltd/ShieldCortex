@@ -6,7 +6,7 @@ import { closeDatabase, getDatabase, initDatabase } from '../../database/init.js
 
 function createResponseMock() {
   const json = jest.fn();
-  const status = jest.fn(() => ({ json }));
+  const status = jest.fn((_code: number) => ({ json }));
   return {
     res: { status } as unknown as Response,
     status,
@@ -32,7 +32,7 @@ describe('Iron Dome REST route guard', () => {
       sourceIdentifier: 'dashboard:test',
     });
 
-    const next = jest.fn();
+    const next = jest.fn<(...args: unknown[]) => void>();
     const { res, status, json } = createResponseMock();
 
     guard({ method: 'POST', path: '/api/cloud/config', body: {} } as Request, res, next);
@@ -54,7 +54,7 @@ describe('Iron Dome REST route guard', () => {
       enforceAmber: true,
     });
 
-    const next = jest.fn();
+    const next = jest.fn<(...args: unknown[]) => void>();
     const { res, status, json } = createResponseMock();
 
     guard({ method: 'POST', path: '/api/cloud/config', body: {} } as Request, res, next);
@@ -83,7 +83,7 @@ describe('Iron Dome REST route guard', () => {
       enforceAmber: true,
     });
 
-    const next = jest.fn();
+    const next = jest.fn<(...args: unknown[]) => void>();
     const { res, status, json } = createResponseMock();
 
     guard({ method: 'POST', path: '/api/cloud/config', body: {} } as Request, res, next);
@@ -105,7 +105,7 @@ describe('Iron Dome REST route guard', () => {
       enforceAmber: true,
     });
 
-    const next = jest.fn();
+    const next = jest.fn<(...args: unknown[]) => void>();
     const { res, status, json } = createResponseMock();
 
     guard({ method: 'POST', path: '/api/cloud/config', body: {}, get: () => undefined } as unknown as Request, res, next);
@@ -132,7 +132,7 @@ describe('Iron Dome REST route guard', () => {
       enforceAmber: true,
     });
 
-    const next = jest.fn();
+    const next = jest.fn<(...args: unknown[]) => void>();
     const { res, status, json } = createResponseMock();
 
     guard({ method: 'POST', path: '/api/cloud/config', body: {}, get: (key: string) => key === 'x-iron-dome-announced' ? '1' : undefined } as unknown as Request, res, next);
@@ -153,7 +153,7 @@ describe('Iron Dome REST route guard', () => {
       sourceIdentifier: 'cli:test',
     });
 
-    const next = jest.fn();
+    const next = jest.fn<(...args: unknown[]) => void>();
     const { res, status, json } = createResponseMock();
 
     guard({ method: 'DELETE', path: '/api/example', body: {} } as Request, res, next);

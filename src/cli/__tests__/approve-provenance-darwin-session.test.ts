@@ -219,7 +219,7 @@ describe('macOS — exact walk-limit boundaries', () => {
     const procs: Record<number, FakeProc> = { 1: LAUNCHD };
     // Bottom-first; the last entry sits directly under launchd and is the
     // 64th process walk 1 inspects when total is 65.
-    const names = Array.from({ length: total - 3 }, (_, i) => (i === total - 4 ? 'Terminal' : 'filler'));
+    const names: string[] = Array.from({ length: total - 3 }, (_, i) => (i === total - 4 ? 'Terminal' : 'filler'));
     if (agentAtLast) names[names.length - 1] = 'claude';
     const top = ladder(procs, 5000, names);
     procs[6000] = { ppid: top, tty: 'ttys020', comm: 'login', stat: 'Ss' };
@@ -241,7 +241,7 @@ describe('macOS — exact walk-limit boundaries', () => {
   // ancestry: leaderParent, the ladder, then launchd: ladder + 1 nodes.
   function walk2(total: number, agentAtLast = false) {
     const procs: Record<number, FakeProc> = { 1: LAUNCHD };
-    const names = Array.from({ length: total - 1 }, (_, i) => (i === total - 2 ? 'Terminal' : 'filler'));
+    const names: string[] = Array.from({ length: total - 1 }, (_, i) => (i === total - 2 ? 'Terminal' : 'filler'));
     if (agentAtLast) names[names.length - 1] = 'claude';
     const top = ladder(procs, 7000, names);
     procs[8000] = { ppid: top, tty: 'ttys021', comm: 'login', stat: 'Ss' };

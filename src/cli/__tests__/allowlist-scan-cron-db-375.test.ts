@@ -56,7 +56,7 @@ function buildStore(
     db.exec(`CREATE TABLE cron_jobs (${names.map((n) => `${n} ${cols[n]}`).join(', ')})`);
     for (const j of shape.jobs ?? []) {
       const values = names.map((n) => {
-        const v = (j as Record<string, unknown>)[n];
+        const v = (j as unknown as Record<string, unknown>)[n];
         if (n === 'name') return j.name ?? j.job_id;
         if (n === 'enabled') return j.enabled ?? 1;
         return v ?? null;

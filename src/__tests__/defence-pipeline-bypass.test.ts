@@ -4,7 +4,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import Database from 'better-sqlite3';
-// @ts-expect-error -- importing a .mjs hook util
 import { saveAutoExtractedMemory } from '../../scripts/lib/save-memory.mjs';
 
 /**

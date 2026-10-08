@@ -77,7 +77,7 @@ function writeRows(rows: Array<Record<string, unknown>>): void {
   mkdirSync(paths.auditDir, { recursive: true });
   let n = 0;
   for (const r of rows) {
-    const full = { auditEventId: `r6-${(n += 1)}`, readinessPin: PIN, ...r };
+    const full: Record<string, unknown> = { auditEventId: `r6-${(n += 1)}`, readinessPin: PIN, ...r };
     appendFileSync(join(paths.auditDir, `realtime-${String(full.ts).slice(0, 10)}.jsonl`), `${JSON.stringify(full)}\n`);
   }
 }

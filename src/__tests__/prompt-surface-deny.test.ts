@@ -434,7 +434,7 @@ describe('Action Guard hook — prompt-surface rule', () => {
       ['a promptless denial', 'bypassPermissions', 'deny'],
       ['a live hold', 'default', 'ask'],
     ])('%s survives a broken channel', (_label, permissionMode, expectedDecision) => {
-      async function baseline(): Promise<{ decision?: string; reason?: string }> {
+      async function baseline(): Promise<ReturnType<typeof decisionOf>> {
         writeActionGuardConfig({ enabled: true, enforce: true });
         const result = await runHook(call(DANGEROUS_COMMAND, permissionMode));
         return decisionOf(result.stdout);

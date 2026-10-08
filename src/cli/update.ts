@@ -1233,7 +1233,6 @@ async function stepClaudeHooks(home: string): Promise<StepResult> {
 async function maybePrintDashboardHint(): Promise<void> {
   try {
     const { getDashboardHint } =
-      // @ts-expect-error — importing a .mjs hook util that has no .d.ts
       await import('../../scripts/lib/dashboard-hint.mjs');
     const hint = (await getDashboardHint()) as
       | {

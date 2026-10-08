@@ -275,8 +275,8 @@ describe('checkMemoryPlaneDrift — #394 T2 teeth', () => {
       mode: 'start', nativeContract: 'sc_only', scope: runtimeScope,
     });
     expect(eligibleIds).toEqual([1]);
-    expect(sessionPack.items.map((r: { id: unknown }) => r.id)).toEqual(eligibleIds);
-    expect(openClawPack.items.map((r: { id: unknown }) => r.id)).toEqual(eligibleIds);
+    expect(sessionPack.items.map((r) => r.id)).toEqual(eligibleIds);
+    expect(openClawPack.items.map((r) => r.id)).toEqual(eligibleIds);
   });
 
   it('includes only strict integer-1 transferable cross-project rows in a legacy project window', () => {

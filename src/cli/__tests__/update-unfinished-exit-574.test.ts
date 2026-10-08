@@ -34,7 +34,7 @@ let savedExitCode: number | string | undefined;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-unfinished-exit-'));
-  savedExitCode = process.exitCode;
+  savedExitCode = process.exitCode ?? undefined;
   delete process.env.HERMES_HOME;
   stdout = [];
   jest.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
@@ -47,7 +47,7 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.restoreAllMocks();
-  process.exitCode = savedExitCode;
+  process.exitCode = savedExitCode ?? undefined;
   fs.rmSync(home, { recursive: true, force: true });
   if (savedHermesHome === undefined) delete process.env.HERMES_HOME;
   else process.env.HERMES_HOME = savedHermesHome;

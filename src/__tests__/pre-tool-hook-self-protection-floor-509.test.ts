@@ -111,7 +111,7 @@ describe('#509 R4-1 — the guard self-protection floor through the real hook', 
     mkdirSync(auditDir(), { recursive: true });
     for (const r of list) {
       seq += 1;
-      const full = { auditEventId: `seed${seq}`, readinessPin: pin, ...r };
+      const full: Record<string, unknown> = { auditEventId: `seed${seq}`, readinessPin: pin, ...r };
       appendFileSync(join(auditDir(), `realtime-${String(full.ts).slice(0, 10)}.jsonl`), `${JSON.stringify(full)}\n`);
     }
   }

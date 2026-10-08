@@ -133,14 +133,14 @@ describe('#249: only validator-owned lines may reach a verdict', () => {
   it('detail comes from the stream carrying the verdict, not merely from stderr', () => {
     const v = run('OpenClaw config is invalid:\n  × channels.telegram: bad key\n', '[plugins] acme: noisy chatter\n');
     expect(v.state).toBe('invalid');
-    expect(v.detail?.join('\n')).toContain('bad key');
-    expect(v.detail?.join('\n')).not.toMatch(/exited 1/);
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).toContain('bad key');
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).not.toMatch(/exited 1/);
   });
 
   it('still reports invalid from stderr in the normal inverted case', () => {
     const v = run('', 'OpenClaw config is invalid:\n  × agents.main: unknown field\n');
     expect(v.state).toBe('invalid');
-    expect(v.detail?.join('\n')).toContain('unknown field');
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).toContain('unknown field');
   });
 });
 
@@ -180,7 +180,7 @@ describe('#249 round 4: chatter provenance survives wrapping and log prefixes', 
     // after any chatter line would silence the validator and re-open #221.
     const v = run('', '[plugins] acme noise:\n  more acme noise\nOpenClaw config is invalid:\n  × agents.main: unknown field\n');
     expect(v.state).toBe('invalid');
-    expect(v.detail?.join('\n')).toContain('unknown field');
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).toContain('unknown field');
   });
 
   it('an indented bullet with no chatter above it still convicts', () => {
@@ -204,7 +204,7 @@ describe('#249 round 4: a split header/detail must not lose the cause', () => {
     // leaves the operator exactly where #221 left them.
     const v = run('  × channels.pager: bad key\n', 'OpenClaw config is invalid:\n');
     expect(v.state).toBe('invalid');
-    const detail = v.detail?.join('\n') ?? '';
+    const detail = (v.state === 'invalid' ? v.detail : []).join('\n') ?? '';
     expect(detail).toContain('channels.pager');
     expect(detail).toContain('config is invalid');
   });
@@ -212,7 +212,7 @@ describe('#249 round 4: a split header/detail must not lose the cause', () => {
   it('does not drag in a stream that carries no verdict evidence', () => {
     const v = run('Loaded 12 plugins in 340ms\n', 'OpenClaw config is invalid:\n  × agents.main: unknown field\n');
     expect(v.state).toBe('invalid');
-    expect(v.detail?.join('\n')).not.toContain('340ms');
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).not.toContain('340ms');
   });
 });
 
@@ -252,20 +252,20 @@ describe('#249: chatter provenance survives wrapping and logger prefixes', () =>
   it('does NOT swallow OpenClaw\'s own indented bullets', () => {
     const v = run('', 'OpenClaw config is invalid:\n  × channels.telegram: bad key\n  × agents.main: unknown field\n');
     expect(v.state).toBe('invalid');
-    expect(v.detail?.join('\n')).toContain('bad key');
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).toContain('bad key');
   });
 
   it('a plugin block ENDS as soon as OpenClaw speaks again', () => {
     const v = run('', '[plugins] acme: warming up\n  still warming\nOpenClaw config is invalid:\n  × channels.telegram: bad key\n');
     expect(v.state).toBe('invalid');
-    expect(v.detail?.join('\n')).toContain('bad key');
-    expect(v.detail?.join('\n')).not.toContain('warming');
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).toContain('bad key');
+    expect((v.state === 'invalid' ? v.detail : []).join('\n')).not.toContain('warming');
   });
 
   it('merges evidence when the header and its cause land on different streams', () => {
     const v = run('  × channels.telegram: bad key\n', 'OpenClaw config is invalid:\n');
     expect(v.state).toBe('invalid');
-    const detail = v.detail?.join('\n') ?? '';
+    const detail = (v.state === 'invalid' ? v.detail : []).join('\n') ?? '';
     expect(detail).toContain('config is invalid');
     expect(detail).toContain('bad key');
   });

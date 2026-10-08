@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - (none yet)
 
+### Tests
+- **#541 Test sources are type-checked in CI.** A new `npm run typecheck:tests` step (`tsc --noEmit -p tsconfig.test.json`) runs after the build in both CI jobs; before this, Jest transpiled tests without type-checking and nothing checked `tsconfig.test.json`, which had 320 hidden diagnostics on `main`. All 320 are fixed: hand-written declarations for the `scripts/lib/*.mjs` helpers the tests import, a test-only `rootDir`, and fixtures brought up to the current types (memory, OpenClaw reconcile/self-check, hook-refresh, audit and notification shapes). Two tests deliberately pass inputs the current TypeScript contracts do not express (search without `query`, `project: null` on a global-scope update) and are marked with narrow casts. Production code changes are type-only (unused `@ts-expect-error` comments on those `.mjs` imports removed); no runtime behaviour changes.
+
 ## [5.5.0] - 2026-10-07
 
 Minor on 5.4.0. New: a per-runtime posture record behind `shieldcortex policy-evidence` (JSON, read-only) and info-only posture rows in `shieldcortex doctor`, fed by small self-reports the Claude Code hook, the OpenClaw plugin and the Hermes plugin now write under `<config>/posture/`; and a read-only `Iron Dome profile` doctor row that warns when Iron Dome runs on stock defaults. Fixed: `shieldcortex approve` works for humans on macOS again (it refused everyone on a Mac in 5.4.0), scanning a long run of newlines no longer stalls for 30 seconds or more, and Claude Code session leases now last their TTL (#553). Dependency security update: the MCP SDK moves to 1.31.0 past a published advisory, and a new `sharp` advisory joins the existing waiver after a reachability check. Plus OpenClaw, memory-default and Watch only copy corrections (text only; no enforcement change). Node floor (`^22.14.0 || >=24.0.0`) and Cloud pin unchanged.

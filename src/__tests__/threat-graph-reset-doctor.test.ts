@@ -27,7 +27,7 @@ function insertBlock(identifier = 'jarvis', ts = '2026-08-01T00:00:00.000Z'): vo
   `).run(ts, identifier);
 }
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 describe('resetSourceRisk', () => {

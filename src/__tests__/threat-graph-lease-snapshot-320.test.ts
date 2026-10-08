@@ -3,7 +3,7 @@ import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { PROJECTOR_VERSION, runProjectorWithLease } from '../threat-graph/projector.js';
 
 describe('#320 lease version-mismatch snapshot', () => {
-  beforeEach(() => initDatabase(':memory:'));
+  beforeEach(() => { initDatabase(':memory:'); });
   afterEach(() => closeDatabase());
 
   it('reseeds a higher snapshot after the mismatch drain completes', async () => {

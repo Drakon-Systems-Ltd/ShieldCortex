@@ -18,7 +18,7 @@ import { tmpdir } from 'os';
 const { validateOnline, validateOnceNow, scheduleOnlineValidation } = await import('../validate.js');
 
 const realFetch = globalThis.fetch;
-let fetchMock: jest.Mock;
+let fetchMock: jest.Mock<(...args: unknown[]) => Promise<unknown>>;
 let configDir: string;
 let prevConfigDir: string | undefined;
 
@@ -50,7 +50,7 @@ beforeEach(() => {
   prevConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
   configDir = mkdtempSync(join(tmpdir(), 'sc-license-gate-'));
   process.env.SHIELDCORTEX_CONFIG_DIR = configDir;
-  fetchMock = jest.fn();
+  fetchMock = jest.fn<(...args: unknown[]) => Promise<unknown>>();
   globalThis.fetch = fetchMock as unknown as typeof fetch;
 });
 

@@ -85,7 +85,7 @@ beforeEach(() => {
   process.env.DOCKER = 'false';
   // ~/.openclaw must exist or installOpenClawHook exits before it gets here.
   fs.mkdirSync(path.join(tempHome, '.openclaw'), { recursive: true });
-  previousExitCode = process.exitCode;
+  previousExitCode = process.exitCode ?? undefined;
   logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
   warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
   errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -109,7 +109,7 @@ afterEach(() => {
   __setNativePluginInstallForTest(null);
   if (previousDocker === undefined) delete process.env.DOCKER;
   else process.env.DOCKER = previousDocker;
-  process.exitCode = previousExitCode;
+  process.exitCode = previousExitCode ?? undefined;
   jest.restoreAllMocks();
   fs.rmSync(tempHome, { recursive: true, force: true });
 });

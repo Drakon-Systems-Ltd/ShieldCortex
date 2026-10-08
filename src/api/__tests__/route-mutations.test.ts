@@ -641,9 +641,9 @@ describe('API route mutation regressions', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.body.matched).toBe(1);
-      expect(res.body.deleted).toBeUndefined(); // dryRun
-      expect(res.body.sample[0].id).toBe(lowAndOld.id);
+      expect((res.body as { matched: number }).matched).toBe(1);
+      expect((res.body as { deleted?: number }).deleted).toBeUndefined(); // dryRun
+      expect((res.body as { sample: Array<{ id: number }> }).sample[0].id).toBe(lowAndOld.id);
 
       // Recent + high-salience untouched.
       expect(storeModule.getMemoryById(lowAndOld.id)).not.toBeNull();
@@ -676,7 +676,7 @@ describe('API route mutation regressions', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.body.matched).toBe(0); // pinned excluded
+      expect((res.body as { matched: number }).matched).toBe(0); // pinned excluded
     });
   });
 
@@ -716,9 +716,9 @@ describe('API route mutation regressions', () => {
       const res = await invokeHandlers(handlers!, { body: { dryRun: true } });
 
       expect(res.statusCode).toBe(200);
-      expect(res.body.pairsFound).toBe(0);
-      expect(res.body.groups).toEqual([]);
-      expect(res.body.merged).toBeUndefined();
+      expect((res.body as { pairsFound: number }).pairsFound).toBe(0);
+      expect((res.body as { groups: unknown[] }).groups).toEqual([]);
+      expect((res.body as { merged?: number }).merged).toBeUndefined();
     });
   });
 });

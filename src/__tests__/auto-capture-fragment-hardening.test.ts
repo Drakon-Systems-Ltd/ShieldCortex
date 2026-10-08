@@ -26,7 +26,6 @@ type Reject = (
 
 async function loadChunker() {
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-  // @ts-expect-error -- importing a .mjs hook util (no type decls)
   return import('../../scripts/lib/extract-memorable-segments.mjs');
 }
 

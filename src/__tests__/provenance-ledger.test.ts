@@ -29,7 +29,7 @@ function seed(title: string, content: string): number {
   ).id;
 }
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 describe('schema', () => {

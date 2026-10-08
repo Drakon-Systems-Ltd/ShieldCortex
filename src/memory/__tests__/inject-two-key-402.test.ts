@@ -15,7 +15,7 @@ import {
   toPackItem,
 } from '../../../scripts/lib/inject-pack.mjs';
 
-function row(partial) {
+function row(partial: Partial<import('../../../scripts/lib/inject-pack.mjs').InjectRow> = {}) {
   return {
     id: 1,
     title: 'Fact',
