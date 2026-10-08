@@ -143,9 +143,8 @@ Both are tracked for P2 (#678).
   `__proto__`. A change to only those fields after `confirm` is not detected as
   `mutated_input`. No standard SDK member reads them.
 - **N2 — a newline in `type` after a read.** A `type` call whose text contains a newline
-  is classified as ordinary typing, not a submit, unless the previous member was also
-  typing. After a read, that call's classification and card do not say it may submit a
-  form. This is a classification risk, not a demonstrated submission bypass.
+  after a read is classified as a submit but is still allowed without approval unless the
+  previous member was typing; the gap is the approval, not the classification. P2 item.
 
 ## Not covered
 
