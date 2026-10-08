@@ -1,7 +1,6 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
-import { useState, Suspense } from 'react';
+import { Suspense } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import {
   AlertTriangle,
@@ -19,34 +18,30 @@ import { QuarantineView } from '@/components/quarantine/QuarantineView';
 import { AuditLogView } from '@/components/audit/AuditLogView';
 import { InterceptorEventsView } from '@/components/protection/InterceptorEventsView';
 import { PolicyManagementView } from '@/components/protection/PolicyManagementView';
+import { visibleTabs } from '@/components/layout/hidden-routes';
+import { useUrlTab } from '@/hooks/useUrlTab';
 
 type ProtectionTab = 'status' | 'quarantine' | 'audit' | 'intercepts' | 'policies';
 
 const VALID_TABS: ProtectionTab[] = ['status', 'quarantine', 'audit', 'intercepts', 'policies'];
 
 function ProtectionContent() {
-  const searchParams = useSearchParams();
-  const urlTab = searchParams.get('tab');
   // 'dome' is the pre-restyle tab id (brief §8 renamed Iron Dome -> Status);
-  // kept as a redirecting alias so old deep links and bookmarks still land.
-  const normalisedUrlTab = urlTab === 'dome' ? 'status' : urlTab;
-  const validUrlTab =
-    normalisedUrlTab && VALID_TABS.includes(normalisedUrlTab as ProtectionTab) ? (normalisedUrlTab as ProtectionTab) : null;
-  const [userTab, setTab] = useState<ProtectionTab>('status');
-  const tab = validUrlTab ?? userTab;
+  // kept as an alias so old deep links and bookmarks still land.
+  const [tab, setTab] = useUrlTab<ProtectionTab>('/protection', VALID_TABS, 'status', { dome: 'status' });
 
   const { data: ironDome } = useIronDomeStatus();
   const { data: auditStats } = useAuditStats('24h');
   const { data: quarantine } = useQuarantine('pending', 10);
   const { data: intercepts } = useInterceptorEvents({ limit: 25 });
 
-  const tabs = [
+  const tabs = visibleTabs('/protection', [
     { id: 'status', label: 'Status', icon: <ShieldAlert size={14} /> },
     { id: 'quarantine', label: 'Quarantine', count: quarantine?.total ?? 0 },
     { id: 'audit', label: 'Audit' },
     { id: 'intercepts', label: 'Intercepts', count: intercepts?.summary?.total ?? 0 },
     { id: 'policies', label: 'Policies', locked: false },
-  ];
+  ]);
 
   return (
     <div className="h-full overflow-y-auto">

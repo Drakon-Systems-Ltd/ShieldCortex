@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation';
 import { MemoryWebSocketProvider } from '@/components/MemoryWebSocketProvider';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
-import { NAV_ITEMS } from '@/components/layout/route-config';
+import { visibleNavItems } from '@/components/layout/route-config';
 import { cn } from '@/lib/utils';
 
 /**
@@ -36,13 +36,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 function MobileNav() {
   const pathname = usePathname();
-  const activeHref = NAV_ITEMS
+  const navItems = visibleNavItems();
+  const activeHref = navItems
     .filter((n) => pathname === n.href || pathname.startsWith(n.href + '/'))
     .sort((a, b) => b.href.length - a.href.length)[0]?.href;
 
   return (
     <nav aria-label="Primary" className="flex shrink-0 border-t border-[var(--sc-border)] bg-[var(--sc-surface)] md:hidden">
-      {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
+      {navItems.map(({ href, label, icon: Icon }) => {
         const active = href === activeHref;
         return (
           <Link

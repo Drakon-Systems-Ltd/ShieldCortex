@@ -1,4 +1,5 @@
 import type { LucideIcon } from 'lucide-react';
+import { HIDDEN_ROUTES, isHiddenRoute, type HiddenRoute } from '@/components/layout/hidden-routes';
 import {
   Database,
   Home,
@@ -22,3 +23,8 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/xray', label: 'X-Ray', icon: ScanSearch },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
+
+/** Nav items minus anything in the hidden-routes config. */
+export function visibleNavItems(hidden: readonly HiddenRoute[] = HIDDEN_ROUTES): NavItem[] {
+  return NAV_ITEMS.filter((n) => !isHiddenRoute(n.href, null, hidden));
+}

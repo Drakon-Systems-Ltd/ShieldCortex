@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import { NAV_ITEMS } from '@/components/layout/route-config';
+import { visibleNavItems } from '@/components/layout/route-config';
 import { useDashboardStore } from '@/lib/store';
 import { Logo } from '@/components/ds/Logo';
 import { cn } from '@/lib/utils';
@@ -17,7 +17,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const { sidebarPinned: collapsed, toggleSidebarPinned: toggleCollapsed } = useDashboardStore();
 
-  const activeHref = NAV_ITEMS
+  const navItems = visibleNavItems();
+  const activeHref = navItems
     .filter((n) => pathname === n.href || pathname.startsWith(n.href + '/'))
     .sort((a, b) => b.href.length - a.href.length)[0]?.href;
 
@@ -37,7 +38,7 @@ export function Sidebar() {
       </div>
 
       <ul className="flex-1 space-y-1 overflow-y-auto p-2">
-        {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
+        {navItems.map(({ href, label, icon: Icon }) => {
           const active = href === activeHref;
           return (
             <li key={href}>

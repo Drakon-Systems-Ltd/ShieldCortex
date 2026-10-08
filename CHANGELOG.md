@@ -8,7 +8,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- (none yet)
+- **Dashboard: one hidden-routes config.** `dashboard/src/components/layout/hidden-routes.ts` (`HIDDEN_ROUTES`) takes a page or tab out of the sidebar, mobile bar and tab bars, and `next.config.ts` redirects its URL to the nearest kept page. The 14 v1 per-page URLs (`/admin`, `/cloud`, `/memory/{capture,graph,recall,review,timeline}`, `/protection/{audit,intercepts,iron-dome,policies,quarantine}`, `/supply-chain`, `/supply-chain/xray`) now live there and are served as 307s. Un-hiding is a one-line delete.
+- **Dashboard: Replay sits in the Memory tab bar.** `/memory/replay` had no inbound link; Memory and Replay now share one tab bar.
+
+### Fixed
+- **Dashboard: Protection and Settings tabs no longer stick after a deep link.** Arriving on `/protection?tab=audit` (the Overview "Threats" tile) or `/settings?tab=licence` pinned that tab and other tab clicks did nothing. Clicks now rewrite `?tab=`.
+- **Dashboard: retired-tier copy.** The tab lock label said "Requires a Pro licence" (now Enterprise); the Local AI Explainer said it needs Pro (it is Free). The Overview "Trial ends" notice is removed — the API has always returned `trial: null` since the trial was retired in 4.47.0.
 
 ## [5.5.0] - 2026-10-07
 

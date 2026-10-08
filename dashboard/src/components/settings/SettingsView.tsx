@@ -1,7 +1,6 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
-import { useState, Suspense } from 'react';
+import { Suspense } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import { Cloud, CreditCard, Plug, Settings } from 'lucide-react';
 import { PageHeader } from '@/components/ds/PageHeader';
@@ -15,26 +14,26 @@ import { DedupePanel } from '@/components/settings/DedupePanel';
 import { LicenseStatusCard } from '@/components/shield/LicenseStatusCard';
 import { useLicenseStatus } from '@/hooks/useLicense';
 import { TIER_LABELS } from '@/lib/license';
+import { visibleTabs } from '@/components/layout/hidden-routes';
+import { useUrlTab } from '@/hooks/useUrlTab';
 
 type SettingsTab = 'cloud' | 'integrations' | 'licence' | 'admin';
 
+const SETTINGS_TABS: SettingsTab[] = ['cloud', 'integrations', 'licence', 'admin'];
+
 function SettingsContent() {
-  const searchParams = useSearchParams();
-  const urlTab = searchParams.get('tab') as SettingsTab | null;
-  const validUrlTab = urlTab && ['cloud', 'integrations', 'licence', 'admin'].includes(urlTab) ? urlTab : null;
-  const [userTab, setTab] = useState<SettingsTab>('cloud');
-  const tab = validUrlTab ?? userTab;
+  const [tab, setTab] = useUrlTab<SettingsTab>('/settings', SETTINGS_TABS, 'cloud');
   const { data: license } = useLicenseStatus();
   // v2: the CIC "graph motion intensity" control was removed with the
   // constellation renderer — the v2 graph has no ambient motion to tune and
   // honours prefers-reduced-motion directly.
 
-  const tabs = [
+  const tabs = visibleTabs('/settings', [
     { id: 'cloud', label: 'Cloud Sync', icon: <Cloud size={14} /> },
     { id: 'integrations', label: 'Integrations', icon: <Plug size={14} /> },
     { id: 'licence', label: 'Licence', icon: <CreditCard size={14} /> },
     { id: 'admin', label: 'Admin', icon: <Settings size={14} /> },
-  ];
+  ]);
 
   return (
     <div className="h-full overflow-y-auto">
