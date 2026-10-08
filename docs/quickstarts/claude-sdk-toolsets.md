@@ -71,7 +71,7 @@ For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` a
 | Call | Classification | Why |
 |---|---|---|
 | `navigate` | scheme, private-range and allowlist check | the SDK checks no scheme; `javascript:` and `file:` are refused |
-| click on a `ref` | resolved from the last `read_page` / `find` output; a button labelled pay / send / delete / accept / submit is **irreversible** | the only way to know what a click does |
+| click on a `ref` | resolved only from the `read_page` / `find` output of the same tab and page (a full read replaces the tab's refs; navigating drops them); a button labelled pay / send / delete / accept / submit is **irreversible** | the only way to know what a click does |
 | click on a coordinate, any desktop click | **unclassified**: allowed untainted, held once tainted | Anthropic: `confirm` "receives the tool and its input, not the screen" |
 | `type`, `form_input`, `key` | typed text scanned for secrets → **denied**; Enter after typing = submit | credentials must never be typed into a page |
 | `javascript_exec`, `file_upload` | held; an upload from `.ssh`, `.aws`, `.env`, … is denied | runs with the page's authority / exfiltrates files |

@@ -47,10 +47,20 @@ function makeGuard(overrides: Partial<ConstructorParameters<typeof ToolsetGuard>
 
 const tab = 'https://docs.example.com/page?token=SHOULD-NOT-APPEAR';
 const ctx = (member: string, input: unknown, extra: Partial<ToolsetConfirmContext> = {}): ToolsetConfirmContext =>
-  ({ member, input, tabURL: tab, ...extra });
+  ({ member, input, tabURL: tab, tabId: 't1', ...extra });
 
-async function readPage(guard: ToolsetGuard, text = READ_PAGE_OUTPUT): Promise<void> {
-  await guard.execute(ctx('read_page', { filter: 'interactive' }), 'read_page', { filter: 'interactive' }, async () => text);
+let readSeq = 0;
+/** A read the way the SDK runs it: `confirm` with the tab, then `execute` with only the tool_use. */
+async function readPage(
+  guard: ToolsetGuard,
+  text = READ_PAGE_OUTPUT,
+  extra: Partial<ToolsetConfirmContext> = {},
+  member = 'read_page',
+  input: unknown = { filter: 'interactive' },
+): Promise<void> {
+  const toolUse = { id: `toolu_read_${++readSeq}` };
+  await guard.confirm()(ctx(member, input, { toolUse, ...extra }));
+  await guard.execute({ toolUse }, member, input, async () => text);
 }
 
 describe('ToolsetGuard — hidden-injection fixture page (#678 acceptance 1)', () => {
@@ -223,6 +233,7 @@ describe('ToolsetGuard — batches are gated per block (#678 acceptance 5)', () 
   it('asks for each block before it runs and never carries approval forward', async () => {
     const { guard, events } = makeGuard({ mode: 'enforce' });
     await readPage(guard);
+    events.length = 0;
     const asked: string[] = [];
     const confirm = guard.confirm(async (c) => { asked.push(c.member); return c.member === 'left_click'; });
     const a = await confirm(ctx('left_click', { target: { type: 'ref', ref: 'ref_4' } }, { toolUse: { id: 'toolu_1' } }));
@@ -407,5 +418,66 @@ describe('ToolsetGuard — navigation and browser state taint (#679 finding 2)',
     const { guard } = makeGuard();
     await guard.browserState(() => ({ tabs: [{ tab_id: 't1', title: '', url: 'about:blank', active: true }] }))({});
     expect(guard.isTainted).toBe(false);
+  });
+});
+
+describe('ToolsetGuard — ref catalogue is per tab and per page (#679 finding 3)', () => {
+  const click = (ref: string, extra: Partial<ToolsetConfirmContext> = {}) =>
+    ctx('left_click', { target: { type: 'ref', ref } }, extra);
+
+  it('a ref read in tab A does not resolve a click in unread tab B', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard, 'button "Search" [ref_1]', { tabId: 'tA' });
+    expect(guard.classify(click('ref_1', { tabId: 'tA' })).reason).toBe('click-element');
+    const other = guard.classify(click('ref_1', { tabId: 'tB', tabURL: 'https://docs.example.com/other' }));
+    expect(other.reason).toBe('click-unresolved-ref');
+    expect(other.decision).toBe('require_approval');
+  });
+
+  it('a fresh full read that omits a ref invalidates it', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard, 'button "Search" [ref_1]\nbutton "Help" [ref_2]');
+    expect(guard.classify(click('ref_1')).reason).toBe('click-element');
+    await readPage(guard, 'button "Help" [ref_2]');
+    expect(guard.classify(click('ref_1')).decision).toBe('require_approval');
+    expect(guard.classify(click('ref_1')).reason).toBe('click-unresolved-ref');
+    expect(guard.classify(click('ref_2')).reason).toBe('click-element');
+  });
+
+  it('find adds to the current page catalogue instead of replacing it', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard, 'button "Search" [ref_1]');
+    await readPage(guard, 'button "Pay now" [ref_9]', {}, 'find', { query: 'pay button' });
+    expect(guard.classify(click('ref_1')).reason).toBe('click-element');
+    expect(guard.classify(click('ref_9')).reason).toBe('irreversible-click');
+  });
+
+  it('navigating the tab ends the page lifetime of its refs', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard, 'button "Search" [ref_1]');
+    const toolUse = { id: 'toolu_nav' };
+    await guard.confirm()(ctx('navigate', { url: 'https://docs.example.com/next' }, { toolUse }));
+    await guard.execute({ toolUse }, 'navigate', { url: 'https://docs.example.com/next' }, async () => ({ url: 'https://docs.example.com/next' }));
+    expect(guard.classify(click('ref_1')).reason).toBe('click-unresolved-ref');
+  });
+
+  it('a tab now showing a different URL does not resolve the old page refs', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard, 'button "Search" [ref_1]');
+    expect(guard.classify(click('ref_1', { tabURL: 'https://docs.example.com/elsewhere' })).reason).toBe('click-unresolved-ref');
+    expect(guard.classify(click('ref_1', { tabURL: `${tab}#section` })).reason).toBe('click-element');
+  });
+
+  it('a browserState report showing the tab on a new page drops its refs', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard, 'button "Search" [ref_1]');
+    await guard.browserState(() => ({ tabs: [{ tab_id: 't1', title: 'x', url: 'https://docs.example.com/new', active: true }] }))({});
+    expect(guard.classify(click('ref_1')).reason).toBe('click-unresolved-ref');
+  });
+
+  it('a read whose tab cannot be resolved records nothing', async () => {
+    const { guard } = makeGuard();
+    await guard.execute({}, 'read_page', {}, async () => 'button "Search" [ref_1]');
+    expect(guard.classify(click('ref_1')).reason).toBe('click-unresolved-ref');
   });
 });

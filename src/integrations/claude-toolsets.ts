@@ -185,6 +185,19 @@ export interface ToolsetBrowserState {
   readonly state_changes?: ReadonlyArray<unknown> | undefined;
 }
 
+interface RefCatalogue {
+  /** The tab's URL (fragment dropped) when it was read; unknown when no report named it. */
+  url?: string;
+  entries: Map<string, { role: string; label: string }>;
+}
+
+/** Same page for ref purposes: a fragment change does not reload it. */
+function pageKey(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  const hash = url.indexOf('#');
+  return hash === -1 ? url : url.slice(0, hash);
+}
+
 /** What `confirm` saw for a call, so `execute` can bind to it. */
 interface ConfirmedCall {
   inputHash: string;
@@ -412,8 +425,14 @@ export class ToolsetGuard {
 
   /** Session taint (ADR-002 §2.2): set on the first untrusted read, never cleared. */
   private tainted = false;
-  /** Per-tab ref catalogue from the last `read_page` / `find`. */
-  private readonly refs = new Map<string, Map<string, { role: string; label: string }>>();
+  /**
+   * Ref catalogue per resolved tab id, for the page that tab showed when it was
+   * read. A full `read_page` replaces it; navigating the tab or a report showing
+   * a different URL drops it. A tab never borrows another tab's refs.
+   */
+  private readonly refs = new Map<string, RefCatalogue>();
+  /** The active tab in the last `browserState` report, when wrapped. */
+  private activeTab: string | undefined;
   /** Previous member seen, for `type` → `key Enter` = submit. */
   private previousMember: string | null = null;
   /** What `confirm` saw per call, so `execute` can detect a mutated input and knows the tab. */
@@ -525,8 +544,7 @@ export class ToolsetGuard {
       const target = asRecord(input.target);
       const ref = typeof target.ref === 'string' ? target.ref : typeof input.ref === 'string' ? input.ref : null;
       if (this.toolset === 'browser' && ref) {
-        const tab = typeof input.tab_id === 'string' ? input.tab_id : 'default';
-        const el = this.refs.get(tab)?.get(ref) ?? this.refs.get('default')?.get(ref);
+        const el = this.lookupRef(ctx, ref);
         if (el) {
           const label = escapeForCard(el.label);
           if (this.lexicon.test(el.label)) {
@@ -612,9 +630,49 @@ export class ToolsetGuard {
   ): (ctx: ToolsetCallContext) => Promise<S> {
     return async (ctx: ToolsetCallContext): Promise<S> => {
       const state = await inner(ctx);
+      this.activeTab = state.tabs.find((t) => t.active)?.tab_id ?? this.activeTab;
+      // A tab now showing a different page, or gone, loses its refs.
+      for (const [tab, catalogue] of this.refs) {
+        const now = state.tabs.find((t) => t.tab_id === tab);
+        if (!now || (catalogue.url !== undefined && pageKey(now.url) !== catalogue.url)) this.refs.delete(tab);
+      }
       this.observePageText('browser_state', pageSuppliedText(state), { member: 'browser_state', input: {}, toolUse: ctx.toolUse });
       return state;
     };
+  }
+
+  /** The tab a call acts on: the SDK's resolved `tabId`, else the model's `tab_id`, else the reported active tab. */
+  private resolveTab(ctx: ToolsetConfirmContext): string | undefined {
+    if (ctx.tabId) return ctx.tabId;
+    const asked = asRecord(ctx.input).tab_id;
+    if (typeof asked === 'string' && asked) return asked;
+    return this.activeTab;
+  }
+
+  /** Record a `read_page` / `find` result against the tab and page it read. */
+  private recordRefs(ctx: ToolsetConfirmContext, name: string, text: string): void {
+    const tab = this.resolveTab(ctx);
+    if (tab === undefined) return; // unknown tab: record nothing, so clicks stay unresolved
+    const url = pageKey(ctx.tabURL);
+    const parsed = parseRefCatalogue(text);
+    const fullRead = name === 'read_page' && !asRecord(ctx.input).ref;
+    const current = this.refs.get(tab);
+    if (fullRead || !current || current.url !== url) {
+      this.refs.set(tab, { url, entries: parsed });
+      return;
+    }
+    for (const [k, v] of parsed) current.entries.set(k, v);
+  }
+
+  /** Resolve a ref only in the catalogue of the tab the click targets, and only for the same page. */
+  private lookupRef(ctx: ToolsetConfirmContext, ref: string): { role: string; label: string } | undefined {
+    const tab = this.resolveTab(ctx);
+    if (tab === undefined) return undefined;
+    const catalogue = this.refs.get(tab);
+    if (!catalogue) return undefined;
+    const url = pageKey(ctx.tabURL);
+    if (catalogue.url !== undefined && url !== undefined && catalogue.url !== url) return undefined;
+    return catalogue.entries.get(ref);
   }
 
   /** Taint on page-supplied text the model will read, and scan it for the audit row. */
@@ -669,6 +727,12 @@ export class ToolsetGuard {
 
     const result = await next(ctx, name, input);
 
+    // Post: a navigation ends the page lifetime of the tab it ran in.
+    if (name === 'navigate' || name === 'close_tab') {
+      const tab = this.resolveTab(callCtx);
+      if (tab === undefined) this.refs.clear();
+      else this.refs.delete(tab);
+    }
     // Post: a tab record's title and URL are page-supplied and reach the model.
     if (PAGE_STATE_MEMBERS.has(name)) {
       this.observePageText(name, pageSuppliedText(result), callCtx);
@@ -677,18 +741,7 @@ export class ToolsetGuard {
     if (READING_MEMBERS.has(name)) {
       this.tainted = true;
       if (TEXT_RESULT_MEMBERS.has(name) && typeof result === 'string') {
-        if (name === 'read_page' || name === 'find') {
-          const tab = typeof asRecord(input).tab_id === 'string' ? (asRecord(input).tab_id as string) : 'default';
-          const catalogue = parseRefCatalogue(result);
-          const existing = this.refs.get(tab) ?? new Map();
-          for (const [k, v] of catalogue) existing.set(k, v);
-          this.refs.set(tab, existing);
-          if (tab !== 'default') {
-            const def = this.refs.get('default') ?? new Map();
-            for (const [k, v] of catalogue) def.set(k, v);
-            this.refs.set('default', def);
-          }
-        }
+        if (name === 'read_page' || name === 'find') this.recordRefs(callCtx, name, result);
         const scan = scanToolResponse(`toolset:${this.toolset}:${name}`, result, this.mode === 'enforce' ? 'enforce' : 'advisory');
         const verdict = this.classify(callCtx);
         const neutralised = this.mode === 'enforce' && scan.sanitisedContent !== null;
