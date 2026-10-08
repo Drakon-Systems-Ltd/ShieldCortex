@@ -298,10 +298,13 @@ export function hashInput(member: string, input: unknown): string {
   return createHash('sha256').update(`${member}\n${canonical(input)}`).digest('hex');
 }
 
-/** Escape everything outside printable ASCII (Anthropic's guidance for cards). */
+/**
+ * Escape everything outside printable ASCII (Anthropic's guidance for cards),
+ * and `"` and `\` too, so page text cannot close the quotes a card puts it in.
+ */
 export function escapeForCard(text: string, max = 60): string {
   const clipped = text.length > max ? `${text.slice(0, max)}…` : text;
-  return clipped.replace(/[^\x20-\x7e]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  return clipped.replace(/[^\x20-\x21\x23-\x5b\x5d-\x7e]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 /**
