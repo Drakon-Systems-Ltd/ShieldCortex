@@ -100,6 +100,15 @@ For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` a
 | `screenshot`, `zoom` | taints the session; not scanned (no OCR in P1), so the result event carries `not-scanned:image` and never `scanClean: true` | — |
 | `navigate`, `new_tab`, `switch_tab`, `list_tabs` results; the `browserState` report | tab titles, URLs and dialog messages taint the session and are scanned | page-supplied text the model reads with every result |
 
+**Driver errors are page content.** The SDK relays the text of an error your driver
+throws to the model as the tool result. When a reading or tab member (`navigate`,
+`new_tab`, `switch_tab`, `list_tabs`, `read_page`, `get_page_text`, `find`, console,
+network, `javascript_exec`, `screenshot`, `zoom`) throws, the guard taints the session,
+scans the error text the same way as a result (one `result` event, indicator
+`driver-error`) and rethrows. In `observe` it rethrows the same error object. In
+`enforce` a clean error is rethrown unchanged; an error the scan flags is replaced by a
+new `toolError` carrying only the scanner's neutralised text.
+
 Wrap the required `browserState` option with `guard.browserState(...)`: the SDK attaches
 that report to every tool result, so a page title is content the model reads.
 

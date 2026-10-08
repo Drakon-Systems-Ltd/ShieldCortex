@@ -230,6 +230,11 @@ const READING_MEMBERS = new Set([
  * page-supplied and the model reads them, so these taint like a page read.
  */
 const PAGE_STATE_MEMBERS = new Set(['navigate', 'new_tab', 'switch_tab', 'list_tabs']);
+/**
+ * Members whose thrown error text may carry page content. The SDK relays a
+ * driver error to the model as the tool result, so it taints and is scanned.
+ */
+const ERROR_TEXT_MEMBERS = new Set([...READING_MEMBERS, ...PAGE_STATE_MEMBERS]);
 /** Reading members whose result is text we can scan (not an image). */
 const TEXT_RESULT_MEMBERS = new Set([
   'read_page', 'get_page_text', 'find', 'read_console', 'read_network', 'javascript_exec',
@@ -897,7 +902,13 @@ export class ToolsetGuard {
       throw new this.ErrorCtor('blocked: this action was refused');
     }
 
-    const result = await next(ctx, name, input);
+    let result: R;
+    try {
+      result = await next(ctx, name, input);
+    } catch (error) {
+      if (!ERROR_TEXT_MEMBERS.has(name)) throw error;
+      throw this.observeDriverError(name, callCtx, error);
+    }
 
     // Post: a navigation ends the page lifetime of the tab it ran in.
     if (name === 'navigate' || name === 'close_tab') {
@@ -935,6 +946,39 @@ export class ToolsetGuard {
       }
     }
     return result;
+  }
+
+  /**
+   * A page-capable member threw. The SDK relays the driver's error text to the
+   * model as the tool result, so it is page content like any read: the session
+   * is tainted and the text is scanned with the same walk as a result, with one
+   * `result` event. Observe returns the same error object to rethrow. Enforce
+   * returns it unchanged when the scan is clean, and otherwise a new error (the
+   * `toolError` constructor) carrying only the scanner's neutralised text.
+   */
+  private observeDriverError(name: string, callCtx: ToolsetConfirmContext, error: unknown): unknown {
+    if (name === 'navigate' || name === 'close_tab') {
+      const tab = this.resolveTab(callCtx);
+      if (tab === undefined) this.refs.clear();
+      else this.refs.delete(tab);
+    }
+    this.tainted = true;
+    const source = error instanceof Error
+      ? { message: error.message, content: (error as { content?: unknown }).content }
+      : error;
+    const { text, complete } = textOfResult(source);
+    const scan = scanToolResponse(`toolset:${this.toolset}:${name}:error`, text, this.mode === 'enforce' ? 'enforce' : 'advisory');
+    const neutralised = this.mode === 'enforce' && scan.sanitisedContent !== null;
+    const indicators = ['driver-error', ...scan.threatIndicators];
+    this.emit({
+      kind: 'result',
+      ctx: callCtx,
+      verdict: this.classify(callCtx),
+      outcome: neutralised ? 'neutralised' : 'scanned',
+      scanClean: scan.clean && complete,
+      scanIndicators: complete ? indicators : [...indicators, 'result-not-fully-scanned'],
+    });
+    return neutralised ? new this.ErrorCtor(scan.sanitisedContent as string) : error;
   }
 
   // ── Audit ──
