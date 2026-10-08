@@ -4,15 +4,7 @@ import { useSearchParams, usePathname, useRouter } from 'next/navigation';
 import { useState, Suspense, useCallback } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import dynamic from 'next/dynamic';
-import {
-  Clock,
-  Database,
-  FileText,
-  GitBranch,
-  Inbox,
-  Search,
-  Sparkles,
-} from 'lucide-react';
+import { Database, GitBranch, Inbox, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/ds/PageHeader';
 import { StatCard } from '@/components/ds/StatCard';
 import { useStats, useContradictions, useQuality } from '@/hooks/useMemories';
@@ -22,6 +14,8 @@ import { ReviewQueueView } from '@/components/review/ReviewQueueView';
 import { MemoriesView } from '@/components/memories/MemoriesView';
 import { MemoryFilesView } from '@/components/memories/MemoryFilesView';
 import { MemoryTimeline } from '@/components/timeline/MemoryTimeline';
+import { memoryTabHref, memoryTabs } from '@/components/memory/memory-tabs';
+import { isHiddenRoute } from '@/components/layout/hidden-routes';
 
 const MemoryGraph = dynamic(
   () => import('@/components/graph/MemoryGraph'),
@@ -41,6 +35,7 @@ const MEMORY_TABS: MemoryTab[] = ['library', 'files', 'recall', 'review', 'timel
 
 function normaliseTab(tab: string | null): MemoryTab | null {
   if (tab === 'capture') return 'library';
+  if (isHiddenRoute('/memory', tab)) return null;
   return tab && MEMORY_TABS.includes(tab as MemoryTab) ? (tab as MemoryTab) : null;
 }
 
@@ -56,7 +51,11 @@ function MemoryContent() {
   // canonical and validUrlTab follows the click. Without this, a click only
   // updates `userTab` but `validUrlTab` keeps winning and the active tab
   // appears stuck.
-  const setTab = useCallback((next: MemoryTab) => {
+  const setTab = useCallback((next: MemoryTab | 'replay') => {
+    if (next === 'replay') {
+      router.push(memoryTabHref('replay'));
+      return;
+    }
     setUserTab(next);
     const params = new URLSearchParams(searchParams.toString());
     if (next === 'library') {
@@ -83,14 +82,7 @@ function MemoryContent() {
     ? Object.values(reviewQueue.summary).reduce((sum, n) => sum + n, 0)
     : 0;
 
-  const tabs = [
-    { id: 'library', label: 'Library', icon: <Database size={14} />, count: totalMemories || undefined },
-    { id: 'graph', label: 'Graph', icon: <GitBranch size={14} /> },
-    { id: 'recall', label: 'Recall', icon: <Search size={14} /> },
-    { id: 'review', label: 'Review', count: reviewTotal || undefined },
-    { id: 'timeline', label: 'Timeline', icon: <Clock size={14} /> },
-    { id: 'files', label: 'Files', icon: <FileText size={14} /> },
-  ];
+  const tabs = memoryTabs({ library: totalMemories || undefined, review: reviewTotal || undefined });
 
   return (
     <div className="h-full overflow-y-auto">
@@ -101,7 +93,7 @@ function MemoryContent() {
           subtitle="Search stored memories, scan agent memory files, and inspect recall quality."
           tabs={tabs}
           activeTab={tab}
-          onTabChange={(id) => setTab(id as MemoryTab)}
+          onTabChange={(id) => setTab(id as MemoryTab | 'replay')}
         />
 
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
