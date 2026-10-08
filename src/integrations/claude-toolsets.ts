@@ -678,13 +678,33 @@ export class ToolsetGuard {
     };
   }
 
-  /** A `urlPolicy` callable for the browser class. */
+  /**
+   * A `urlPolicy` callable for the browser class. Every URL is checked and
+   * audited (one values-free `call` event: host only, never path or query) in
+   * both modes; only `enforce` throws.
+   */
   urlPolicy(): (ctx: ToolsetUrlContext, url: string) => void {
-    return (_ctx: ToolsetUrlContext, url: string): void => {
+    return (ctx: ToolsetUrlContext, url: string): void => {
       const check = checkUrl(url, this.allowlist);
-      if (this.mode === 'observe') return;
+      const decision: ToolsetDecision = check.verdict === 'block' ? 'block' : check.verdict === 'ask' ? 'require_approval' : 'allow';
+      const callCtx: ToolsetConfirmContext = {
+        member: 'navigate',
+        input: { url },
+        tabId: ctx?.tabId,
+        toolUse: ctx?.toolUseId ? { id: ctx.toolUseId } : undefined,
+      };
+      const verdict: ToolsetVerdict = {
+        ...this.classify(callCtx),
+        decision,
+        effects: check.effects,
+        signals: ['url-policy', ...(check.verdict === 'allow' ? [] : [check.reason])],
+        reason: check.reason,
+      };
+      const refuse = this.mode === 'enforce' && check.verdict !== 'allow';
+      this.emit({ kind: 'call', ctx: callCtx, verdict, outcome: this.mode === 'observe' ? 'observed' : refuse ? 'refused' : 'allowed' });
+      if (!refuse) return;
       if (check.verdict === 'block') throw new this.ErrorCtor('blocked: this address is not allowed');
-      if (check.verdict === 'ask') throw new this.ErrorCtor('blocked: this site is not on the allowed list');
+      throw new this.ErrorCtor('blocked: this site is not on the allowed list');
     };
   }
 
