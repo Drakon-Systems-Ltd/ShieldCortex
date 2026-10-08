@@ -15,6 +15,7 @@ import {
   useReplaySessions,
 } from '@/hooks/useReplaySession';
 import { authFetch, readApiError } from '@/lib/auth';
+import { memoryTabHref, memoryTabs } from '@/components/memory/memory-tabs';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -98,6 +99,9 @@ function ReplayContent() {
         eyebrow="Memory"
         title="Replay"
         subtitle="Scrubbable timeline of prompts, tool calls, and responses captured across sessions."
+        tabs={memoryTabs()}
+        activeTab="replay"
+        onTabChange={(id) => { if (id !== 'replay') router.push(memoryTabHref(id)); }}
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => sessionsQuery.refetch()}>

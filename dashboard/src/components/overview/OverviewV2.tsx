@@ -176,14 +176,6 @@ export function OverviewV2() {
     // Licence / update-check failures are reported as unavailable too (review
     // item 5) — a failed check is not "nothing to do".
     note('licence', st.license);
-    const trial = license.data?.trial as { daysRemaining?: number } | null | undefined;
-    if (trial?.daysRemaining !== undefined && trial.daysRemaining <= 7) {
-      items.push({
-        label: `Trial ends in ${trial.daysRemaining} day${trial.daysRemaining === 1 ? '' : 's'}`,
-        detail: 'Features fall back to Free when it lapses.',
-        href: '/settings?tab=licence',
-      });
-    }
 
     note('update check', st.update);
     if (update.data?.updateAvailable) {
@@ -195,7 +187,7 @@ export function OverviewV2() {
     }
 
     return { items, unavailable, pending, stale };
-  }, [st.quarantine, st.contradictions, st.review, st.license, st.update, quarantine.data, contradictions.data, review.data, license.data, update.data]);
+  }, [st.quarantine, st.contradictions, st.review, st.license, st.update, quarantine.data, contradictions.data, review.data, update.data]);
 
   // ── Activity feed (WS-fed, last 50, filterable) ──────────
   const [feed, setFeed] = useState<FeedEvent[]>([]);

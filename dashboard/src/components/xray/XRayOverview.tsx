@@ -25,6 +25,7 @@ import { StatCard } from '@/components/ds/StatCard';
 import { Table, type Column } from '@/components/ds/Table';
 import { FindingActions } from '@/components/xray/FindingActions';
 import { LocalAiFindingExplainer } from '@/components/xray/LocalAiFindingExplainer';
+import { visibleTabs } from '@/components/layout/hidden-routes';
 
 /** Trust score accent (brief §8: trust gauge -> StatTile — a plain number
  *  fits the rest of the dashboard's decision-first stat tiles better than a
@@ -176,13 +177,13 @@ export function XRayOverview() {
   const capabilities = statusData?.capabilities;
   const statusSummary = statusData?.summary;
 
-  const tabs = [
+  const tabs = visibleTabs('/xray', [
     { id: 'scanner', label: 'Scanner', icon: <ScanSearch size={14} /> },
     { id: 'history', label: 'History', count: summary.total },
     { id: 'watch', label: 'Watch', count: statusSummary?.activeWatchRoots ?? 0 },
     { id: 'activity', label: 'Activity' },
     { id: 'findings', label: 'Findings', count: findingsStats?.new ?? 0 },
-  ];
+  ]);
 
   return (
     <div className="h-full overflow-y-auto">

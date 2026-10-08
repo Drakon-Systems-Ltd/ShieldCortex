@@ -53,7 +53,7 @@ export function TabBar({ tabs, activeTab, onChange, className }: TabBarProps) {
                 {tab.count}
               </span>
             )}
-            {tab.locked && <Lock size={11} aria-label="Requires a Pro licence" className="text-[var(--sc-text-muted)]" />}
+            {tab.locked && <Lock size={11} aria-label="Requires an Enterprise licence" className="text-[var(--sc-text-muted)]" />}
           </button>
         );
       })}
