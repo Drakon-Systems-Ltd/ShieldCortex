@@ -211,6 +211,8 @@ function confirmKey(toolUseId: string | undefined, member: string): string {
 /** What `confirm` saw for a call, so `execute` can bind to it. */
 interface ConfirmedCall {
   inputHash: string;
+  /** What `confirm` answered. */
+  approved: boolean;
   tabURL?: string;
   tabId?: string;
 }
@@ -680,7 +682,8 @@ export class ToolsetGuard {
   confirm(inner?: ToolsetConfirmInner): (ctx: ToolsetConfirmContext) => Promise<boolean> {
     return async (ctx: ToolsetConfirmContext): Promise<boolean> => {
       const verdict = this.classify(ctx);
-      this.confirmed.set(confirmKey(ctx.toolUse?.id, ctx.member), { inputHash: verdict.inputHash, tabURL: ctx.tabURL, tabId: ctx.tabId });
+      const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, tabURL: ctx.tabURL, tabId: ctx.tabId };
+      this.confirmed.set(confirmKey(ctx.toolUse?.id, ctx.member), record);
       this.previousMember = ctx.member;
 
       let answer: boolean;
@@ -701,6 +704,7 @@ export class ToolsetGuard {
         answer = true;
         outcome = 'allowed';
       }
+      record.approved = answer;
       this.emit({ kind: 'call', ctx, verdict, outcome, hostAnswer });
       return answer;
     };
@@ -837,8 +841,8 @@ export class ToolsetGuard {
       toolUse: ctx.toolUse,
     };
     this.confirmed.delete(key);
+    const verdict = this.classify(callCtx);
     if (seen === undefined || seen.inputHash !== hash) {
-      const verdict = this.classify(callCtx);
       const signal = seen === undefined ? 'unconfirmed' : 'mutated_input';
       this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, signal] }, outcome: this.mode === 'enforce' ? 'refused' : 'observed' });
       if (this.mode === 'enforce') {
@@ -846,6 +850,16 @@ export class ToolsetGuard {
           ? 'blocked: this action was not approved'
           : 'blocked: the action changed after it was approved');
       }
+    }
+    // Enforce: the DENY set applies to the bytes about to run even when the
+    // driver skipped or ignored `confirm`, and a call `confirm` refused never runs.
+    if (this.mode === 'enforce' && verdict.decision === 'block') {
+      this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, 'denied-at-execute'] }, outcome: 'refused' });
+      throw new this.ErrorCtor('blocked: ShieldCortex does not allow this action');
+    }
+    if (this.mode === 'enforce' && seen !== undefined && !seen.approved) {
+      this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, 'refused-at-confirm'] }, outcome: 'refused' });
+      throw new this.ErrorCtor('blocked: this action was refused');
     }
 
     const result = await next(ctx, name, input);

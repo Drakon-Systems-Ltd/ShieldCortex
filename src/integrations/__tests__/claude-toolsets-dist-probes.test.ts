@@ -124,3 +124,49 @@ describe('dist probe B2 — non-string read results are scanned, never false-cle
     expect(shot.scanClean).not.toBe(true);
   });
 });
+
+describe('dist probe B3 — enforce execute applies the DENY set without relying on confirm (#679 review 2)', () => {
+  // Built at runtime from a prefix and a body: no key-shaped literal in the repo.
+  const KEY = ['AK', 'IA'].join('') + ['Q7RZ', 'M2KX', 'P9VB', 'T4LW'].join('');
+
+  it('enforce, no prior confirm, type with an AWS-shaped key: the driver never runs', async () => {
+    const { guard, events } = makeGuard({ mode: 'enforce' });
+    let ran = false;
+    await expect(guard.execute({}, 'type', { text: KEY }, async () => { ran = true; return 'typed'; })).rejects.toThrow(/blocked/);
+    expect(ran).toBe(false);
+    expect(events.at(-1)).toMatchObject({ decision: 'block', outcome: 'refused' });
+    expect(JSON.stringify(events)).not.toContain(KEY);
+  });
+
+  it('enforce: a driver that runs execute after confirm DENIED it is still refused', async () => {
+    const { guard, events } = makeGuard({ mode: 'enforce' });
+    const toolUse = { id: 'toolu_secret' };
+    expect(await guard.confirm(async () => true)({ member: 'type', input: { text: KEY }, toolUse })).toBe(false);
+    let ran = false;
+    await expect(guard.execute({ toolUse }, 'type', { text: KEY }, async () => { ran = true; })).rejects.toThrow(/does not allow/);
+    expect(ran).toBe(false);
+    expect(events.at(-1)!.signals).toContain('denied-at-execute');
+    expect(JSON.stringify(events)).not.toContain(KEY);
+  });
+
+  it('enforce: a call the host refused at confirm is refused at execute', async () => {
+    const { guard, events } = makeGuard({ mode: 'enforce' });
+    const toolUse = { id: 'toolu_js' };
+    const input = { code: 'document.title' };
+    expect(await guard.confirm(async () => false)({ member: 'javascript_exec', input, toolUse })).toBe(false);
+    let ran = false;
+    await expect(guard.execute({ toolUse }, 'javascript_exec', input, async () => { ran = true; return 'x'; })).rejects.toThrow(/refused/);
+    expect(ran).toBe(false);
+    expect(events.at(-1)!.signals).toContain('refused-at-confirm');
+  });
+
+  it('observe is unchanged: the same calls run and are only recorded', async () => {
+    const { guard } = makeGuard();
+    let ran = 0;
+    await guard.execute({}, 'type', { text: KEY }, async () => { ran++; });
+    const toolUse = { id: 'toolu_obs' };
+    await guard.confirm(async () => false)({ member: 'javascript_exec', input: {}, toolUse });
+    await guard.execute({ toolUse }, 'javascript_exec', {}, async () => { ran++; });
+    expect(ran).toBe(2);
+  });
+});

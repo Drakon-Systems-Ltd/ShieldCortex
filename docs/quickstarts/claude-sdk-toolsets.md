@@ -89,7 +89,9 @@ content an attacker may have written (ADR-002 §2.2).
 `execute` binds to what `confirm` saw for the same call (by tool_use id, else by member
 name, never by the input): an input that changed after `confirm` is recorded as
 `mutated_input`, and an `execute` with no `confirm` record as `unconfirmed`. In
-`enforce` mode both are refused.
+`enforce` mode both are refused. `enforce` also re-applies the DENY set (typed secrets,
+credential uploads, blocked URLs) to the exact bytes in `execute`, and refuses a call
+that `confirm` answered `false`, so a driver that skips or ignores `confirm` cannot run it.
 
 ## Audit events
 
