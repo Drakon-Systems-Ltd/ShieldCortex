@@ -78,15 +78,15 @@ export function MaintenanceCard() {
       {stats && (
         <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
           <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
-            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">Healthy</div>
+            <div className="text-xs text-[var(--sc-text-muted)]">Healthy</div>
             <div className="mt-1 text-xl font-semibold text-[var(--sc-ok)]">{stats.decayDistribution.healthy}</div>
           </div>
           <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
-            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">Fading</div>
+            <div className="text-xs text-[var(--sc-text-muted)]">Fading</div>
             <div className="mt-1 text-xl font-semibold text-[var(--sc-amber)]">{stats.decayDistribution.fading}</div>
           </div>
           <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/50 p-3">
-            <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">Critical</div>
+            <div className="text-xs text-[var(--sc-text-muted)]">Critical</div>
             <div className="mt-1 text-xl font-semibold text-[var(--sc-danger)]">{stats.decayDistribution.critical}</div>
           </div>
         </div>
@@ -148,7 +148,7 @@ export function MaintenanceCard() {
         </Button>
       </div>
 
-      <p className="mt-3 text-[11px] text-[var(--sc-text-muted)]">
+      <p className="mt-3 text-xs text-[var(--sc-text-muted)]">
         CLI equivalent: <code className="font-mono">shieldcortex consolidate</code>. Auto-cleanup
         runs continuously while the dashboard service is up; check{' '}
         <code className="font-mono">shieldcortex service status</code> if ticks haven&apos;t advanced.

@@ -29,17 +29,16 @@ function SettingsContent() {
   // honours prefers-reduced-motion directly.
 
   const tabs = visibleTabs('/settings', [
-    { id: 'cloud', label: 'Cloud Sync', icon: <Cloud size={14} /> },
+    { id: 'cloud', label: 'Cloud sync', icon: <Cloud size={14} /> },
     { id: 'integrations', label: 'Integrations', icon: <Plug size={14} /> },
     { id: 'licence', label: 'Licence', icon: <CreditCard size={14} /> },
-    { id: 'admin', label: 'Admin', icon: <Settings size={14} /> },
+    { id: 'admin', label: 'Maintenance', icon: <Settings size={14} /> },
   ]);
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl space-y-6 p-6">
         <PageHeader
-          eyebrow="Configuration"
           title="Settings"
           subtitle="Cloud sync, licence management, and system configuration."
           tabs={tabs}

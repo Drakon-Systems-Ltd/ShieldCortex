@@ -63,7 +63,7 @@ export function GlassCard({
       )}
       <div className={cn(bodyPadding && 'p-4')}>{children}</div>
       {statusLine && (
-        <div className="border-t border-[var(--sc-border)] px-4 py-2 text-[11px] text-[var(--sc-text-muted)]">
+        <div className="border-t border-[var(--sc-border)] px-4 py-2 text-xs text-[var(--sc-text-muted)]">
           {statusLine}
         </div>
       )}

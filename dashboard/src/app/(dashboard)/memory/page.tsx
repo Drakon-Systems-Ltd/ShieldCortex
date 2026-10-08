@@ -88,18 +88,17 @@ function MemoryContent() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl space-y-6 p-6">
         <PageHeader
-          eyebrow="Memory"
-          title="Memory Operations"
-          subtitle="Search stored memories, scan agent memory files, and inspect recall quality."
+          title="Memory"
+          subtitle="What your agents know: search it, see how it links up, and check what needs a look."
           tabs={tabs}
           activeTab={tab}
           onTabChange={(id) => setTab(id as MemoryTab | 'replay')}
         />
 
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatCard label="Stored Memories" value={totalMemories.toLocaleString()} icon={Database} accent="cyan" />
+          <StatCard label="Stored memories" value={totalMemories.toLocaleString()} icon={Database} accent="cyan" />
           <StatCard label="Healthy" value={healthyCount.toLocaleString()} icon={Sparkles} accent="cyan" />
-          <StatCard label="Contradictions" value={contradictionCount} icon={Inbox} accent={contradictionCount > 0 ? 'coral' : 'muted'} />
+          <StatCard label="Memories that disagree" value={contradictionCount} icon={Inbox} accent={contradictionCount > 0 ? 'coral' : 'muted'} />
           <StatCard label="Duplicates" value={duplicateCount} icon={GitBranch} accent={duplicateCount > 0 ? 'amber' : 'muted'} />
         </div>
 
