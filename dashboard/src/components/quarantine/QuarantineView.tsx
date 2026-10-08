@@ -109,32 +109,32 @@ function LocalAiQuarantineAnnotation({ annotation }: { annotation: ReviewAnnotat
   return (
     <div className="mb-3 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)]/70 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--sc-ok)]">
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--sc-ok)]">
           <Bot size={12} /> Local AI Explainer
         </span>
-        <span className="rounded border border-[var(--sc-border)] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--sc-text-dim)]">
+        <span className="rounded border border-[var(--sc-border)] px-2 py-0.5 text-xs text-[var(--sc-text-dim)]">
           {categoryLabel(annotation.category)}
         </span>
-        <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${actionTone(annotation.suggestedAction)}`}>
+        <span className={`rounded border px-2 py-0.5 text-xs ${actionTone(annotation.suggestedAction)}`}>
           {annotation.suggestedAction.replace(/_/g, ' ')}
         </span>
-        <span className="text-[10px] text-[var(--sc-text-muted)]">
+        <span className="text-xs text-[var(--sc-text-muted)]">
           {Math.round(annotation.confidence * 100)}% confidence
         </span>
         {annotation.similarGroupKey && (
-          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--sc-text-muted)]">
+          <span className="inline-flex items-center gap-1 text-xs text-[var(--sc-text-muted)]">
             <Tags size={11} /> {annotation.similarGroupKey}
           </span>
         )}
       </div>
       <p className="mt-2 text-xs leading-5 text-[var(--sc-text)]">{annotation.summary}</p>
-      <p className="mt-1 text-[11px] leading-5 text-[var(--sc-text-dim)]">{annotation.reasoning}</p>
+      <p className="mt-1 text-xs leading-5 text-[var(--sc-text-dim)]">{annotation.reasoning}</p>
       {annotation.evidence.length > 0 && (
         <div className="mt-2 space-y-1.5">
           {annotation.evidence.map((entry, index) => (
             <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-surface)] px-2 py-1.5">
-              <div className="text-[10px] text-[var(--sc-text-muted)]">{entry.reason}</div>
-              <div className="mt-0.5 text-[11px] text-[var(--sc-text)] break-words">&quot;{entry.snippet}&quot;</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">{entry.reason}</div>
+              <div className="mt-0.5 text-xs text-[var(--sc-text)] break-words">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
         </div>
@@ -294,14 +294,14 @@ export function QuarantineView() {
                 <Sparkles size={16} className="text-[var(--sc-ok)]" />
                 Local AI Explainer
               </h3>
-              <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+              <span className={`rounded border px-2 py-0.5 text-xs ${
                 copilotStatus?.enabled
                   ? 'border-[var(--sc-ok)]/25 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
                   : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
               }`}>
                 {copilotStatus?.enabled ? 'enabled' : 'disabled'}
               </span>
-              <span className={`rounded border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+              <span className={`rounded border px-2 py-0.5 text-xs ${
                 copilotStatus?.modelCached
                   ? 'border-[var(--sc-ok)]/25 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
                   : 'border-[var(--sc-border)] bg-[var(--sc-surface-interactive)] text-[var(--sc-text-muted)]'
@@ -316,7 +316,7 @@ export function QuarantineView() {
                   ? 'Download the local model first: shieldcortex review-copilot download-model'
                   : 'Explain unreviewed quarantine items locally; approve and reject decisions stay manual.'}
             </div>
-            <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-[var(--sc-text-muted)]">
+            <div className="mt-2 flex flex-wrap gap-2 text-xs text-[var(--sc-text-muted)]">
               <span className={needsAiReviewItems.length > 0 ? 'text-[var(--sc-amber)]' : ''}>
                 {needsAiReviewItems.length} need explanation
               </span>
@@ -447,12 +447,12 @@ export function QuarantineView() {
                             {item.title || 'Untitled'}
                           </h4>
                           {item.status === 'pending' && !item.annotation && (
-                            <span className="inline-flex items-center gap-1 rounded border border-[var(--sc-amber)]/25 bg-[var(--sc-amber)]/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--sc-amber)]">
+                            <span className="inline-flex items-center gap-1 rounded border border-[var(--sc-amber)]/25 bg-[var(--sc-amber)]/10 px-2 py-0.5 text-xs font-semibold text-[var(--sc-amber)]">
                               <Bot size={10} /> Needs explanation
                             </span>
                           )}
                         </div>
-                        <div className="text-[10px] text-[var(--sc-text-muted)] mt-0.5">
+                        <div className="text-xs text-[var(--sc-text-muted)] mt-0.5">
                           {item.source_type} &middot; {new Date(item.created_at).toLocaleString()}
                           {item.anomaly_score > 0 && (
                             <span className={`ml-2 ${item.anomaly_score > 0.5 ? 'text-[var(--sc-danger)]' : 'text-[var(--sc-amber)]'}`}>
@@ -461,13 +461,13 @@ export function QuarantineView() {
                           )}
                         </div>
                         {isMemoryFile && (
-                          <div className="mt-1 break-all font-mono text-[10px] text-[var(--sc-text-muted)]">
+                          <div className="mt-1 break-all font-mono text-xs text-[var(--sc-text-muted)]">
                             {item.source_identifier}
                           </div>
                         )}
                       </div>
                     </div>
-                    <span className="text-[10px] text-[var(--sc-danger)] bg-[var(--sc-danger)]/10 px-2 py-0.5 rounded">
+                    <span className="text-xs text-[var(--sc-danger)] bg-[var(--sc-danger)]/10 px-2 py-0.5 rounded">
                       {item.reason?.slice(0, 50) || 'Threat detected'}
                     </span>
                   </div>
@@ -481,7 +481,7 @@ export function QuarantineView() {
                   {indicators.length > 0 && (
                     <div className="flex gap-1 mb-3 flex-wrap">
                       {indicators.map((ind: string, i: number) => (
-                        <span key={i} className="text-[9px] text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 px-1.5 py-0.5 rounded">
+                        <span key={i} className="text-xs text-[var(--sc-amber)] bg-[var(--sc-amber)]/10 px-1.5 py-0.5 rounded">
                           {ind}
                         </span>
                       ))}
@@ -520,7 +520,7 @@ export function QuarantineView() {
 
                   {/* Review info (for reviewed items) */}
                   {item.reviewed_at && (
-                    <div className="text-[10px] text-[var(--sc-text-muted)]">
+                    <div className="text-xs text-[var(--sc-text-muted)]">
                       {item.status === 'approved' ? 'Approved' : 'Rejected'} by {item.reviewed_by} at {new Date(item.reviewed_at).toLocaleString()}
                     </div>
                   )}

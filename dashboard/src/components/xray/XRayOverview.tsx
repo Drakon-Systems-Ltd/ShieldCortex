@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Activity,
   ArrowRight,
@@ -21,11 +22,15 @@ import { Button } from '@/components/ds/Button';
 import { CardError } from '@/components/ds/CardError';
 import { Drawer } from '@/components/ds/Drawer';
 import { PageHeader } from '@/components/ds/PageHeader';
+import { PageSkeleton } from '@/components/ds/Skeleton';
+import { TabBar } from '@/components/ds/TabBar';
 import { StatCard } from '@/components/ds/StatCard';
 import { Table, type Column } from '@/components/ds/Table';
 import { FindingActions } from '@/components/xray/FindingActions';
 import { LocalAiFindingExplainer } from '@/components/xray/LocalAiFindingExplainer';
 import { visibleTabs } from '@/components/layout/hidden-routes';
+import { protectionTabs, protectionTabHref } from '@/components/protection/protection-tabs';
+import { useUrlTab } from '@/hooks/useUrlTab';
 
 /** Trust score accent (brief §8: trust gauge -> StatTile — a plain number
  *  fits the rest of the dashboard's decision-first stat tiles better than a
@@ -56,6 +61,8 @@ function formatDate(value: string | null | undefined): string {
 
 type XRayTab = 'scanner' | 'history' | 'watch' | 'activity' | 'findings';
 
+const XRAY_TABS: XRayTab[] = ['scanner', 'history', 'watch', 'activity', 'findings'];
+
 interface PersistedFinding {
   id: string;
   severity: string;
@@ -74,8 +81,19 @@ type FindingRow = PersistedFinding & {
   systemFile?: boolean;
 };
 
+/** The skill & package scanner (was "X-Ray"), under Protection. */
 export function XRayOverview() {
-  const [tab, setTab] = useState<XRayTab>('scanner');
+  return (
+    <Suspense fallback={<PageSkeleton />}>
+      <XRayContent />
+    </Suspense>
+  );
+}
+
+function XRayContent() {
+  // `?tab=` so Needs you can link straight to findings (`/xray?tab=findings`).
+  const [tab, setTab] = useUrlTab<XRayTab>('/xray', XRAY_TABS, 'scanner');
+  const router = useRouter();
   const [target, setTarget] = useState('');
   const [deep, setDeep] = useState(false);
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
@@ -178,10 +196,10 @@ export function XRayOverview() {
   const statusSummary = statusData?.summary;
 
   const tabs = visibleTabs('/xray', [
-    { id: 'scanner', label: 'Scanner', icon: <ScanSearch size={14} /> },
+    { id: 'scanner', label: 'Scan', icon: <ScanSearch size={14} /> },
     { id: 'history', label: 'History', count: summary.total },
     { id: 'watch', label: 'Watch', count: statusSummary?.activeWatchRoots ?? 0 },
-    { id: 'activity', label: 'Activity' },
+    { id: 'activity', label: 'Scan activity' },
     { id: 'findings', label: 'Findings', count: findingsStats?.new ?? 0 },
   ]);
 
@@ -189,12 +207,12 @@ export function XRayOverview() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl space-y-6 p-6">
         <PageHeader
-          eyebrow="Supply Chain Security"
-          title="X-Ray Scanner"
-          subtitle="Scan packages, files, and directories for hidden risk signals."
-          tabs={tabs}
-          activeTab={tab}
-          onTabChange={(id) => setTab(id as XRayTab)}
+          eyebrow="Protection"
+          title="Skill & package scanner"
+          subtitle="Scan packages, files and folders for hidden risk signals."
+          tabs={protectionTabs()}
+          activeTab="scanner"
+          onTabChange={(id) => { if (id !== 'scanner') router.push(protectionTabHref(id)); }}
           actions={
             <div className="flex items-center gap-3">
               <Badge variant={capabilities?.deepScan ? 'cyan' : 'muted'} dot>
@@ -204,12 +222,14 @@ export function XRayOverview() {
           }
         />
 
+        <TabBar tabs={tabs} activeTab={tab} onChange={(id) => setTab(id as XRayTab)} aria-label="Scanner sections" />
+
         {/* Stats row */}
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <StatCard label="Total Scans" value={statusSummary?.scans ?? 0} icon={ScanSearch} accent="cyan" />
-          <StatCard label="High Risk" value={statusSummary?.highRiskScans ?? 0} icon={Activity} accent="coral" />
-          <StatCard label="Watch Roots" value={statusSummary?.activeWatchRoots ?? 0} icon={Eye} accent="cyan" />
-          <StatCard label="Avg Trust" value={summary.avgScore ?? '\u2014'} icon={FileSearch} accent={summary.avgScore && summary.avgScore >= 70 ? 'cyan' : 'amber'} />
+          <StatCard label="Total scans" value={statusSummary?.scans ?? 0} icon={ScanSearch} accent="cyan" />
+          <StatCard label="High risk" value={statusSummary?.highRiskScans ?? 0} icon={Activity} accent="coral" />
+          <StatCard label="Watched folders" value={statusSummary?.activeWatchRoots ?? 0} icon={Eye} accent="cyan" />
+          <StatCard label="Average trust" value={summary.avgScore ?? '\u2014'} icon={FileSearch} accent={summary.avgScore && summary.avgScore >= 70 ? 'cyan' : 'amber'} />
         </div>
 
         {/* Scanner tab */}
@@ -379,7 +399,7 @@ export function XRayOverview() {
             {/* Right sidebar — capabilities & quick links */}
             <div className="space-y-4">
               <GlassCard strong className="p-5">
-                <h4 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+                <h4 className="text-xs font-semibold text-[var(--sc-text-muted)]">
                   Capabilities
                 </h4>
                 <div className="mt-4 space-y-3">
@@ -399,7 +419,7 @@ export function XRayOverview() {
               </GlassCard>
 
               <GlassCard strong className="p-5">
-                <h4 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+                <h4 className="text-xs font-semibold text-[var(--sc-text-muted)]">
                   Quick stats
                 </h4>
                 <div className="mt-4 space-y-3">
@@ -616,7 +636,7 @@ export function XRayOverview() {
             {/* Active watchers from this API server */}
             {activeWatchers.length > 0 && (
               <div>
-                <h4 className="mb-3 text-sm font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">Active Watchers (This Session)</h4>
+                <h4 className="mb-3 text-sm font-semibold text-[var(--sc-text-muted)]">Active Watchers (This Session)</h4>
                 <div className="grid gap-3 lg:grid-cols-2">
                   {activeWatchers.map((w) => (
                     <GlassCard key={w.root} className="flex items-center justify-between p-4">
@@ -643,7 +663,7 @@ export function XRayOverview() {
 
             {/* Filter + session history */}
             <div className="flex items-center justify-between gap-3">
-              <h4 className="text-sm font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">Session History</h4>
+              <h4 className="text-sm font-semibold text-[var(--sc-text-muted)]">Session History</h4>
               <div className="flex gap-2">
                 {(['all', 'active', 'stale', 'ended'] as const).map((s) => (
                   <button
@@ -785,7 +805,7 @@ export function XRayOverview() {
                 >
                   {label}
                   {key === 'new' && findingsStats && findingsStats.new > 0 && (
-                    <span className="ml-1.5 rounded-full bg-white/20 px-1.5 py-0.5 text-[10px] font-bold">
+                    <span className="ml-1.5 rounded-full bg-white/20 px-1.5 py-0.5 text-xs font-bold">
                       {findingsStats.new}
                     </span>
                   )}
@@ -835,15 +855,15 @@ export function XRayOverview() {
                   {selectedFinding.guidance && (
                     <div className="space-y-3 rounded-xl bg-[var(--sc-surface-2)] p-4">
                       <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">What this means</p>
+                        <p className="text-xs font-semibold text-[var(--sc-text-muted)]">What this means</p>
                         <p className="mt-1 text-sm leading-relaxed text-[var(--sc-text-dim)]">{selectedFinding.guidance.whatItMeans}</p>
                       </div>
                       <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-ok)]">What to do</p>
+                        <p className="text-xs font-semibold text-[var(--sc-ok)]">What to do</p>
                         <p className="mt-1 text-sm leading-relaxed text-[var(--sc-text-dim)]">{selectedFinding.guidance.whatToDo}</p>
                       </div>
                       <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--sc-text-muted)]">False positive?</p>
+                        <p className="text-xs font-semibold text-[var(--sc-text-muted)]">False positive?</p>
                         <p className="mt-1 text-xs leading-relaxed text-[var(--sc-text-muted)]">{selectedFinding.guidance.falsePositiveNote}</p>
                       </div>
                     </div>

@@ -53,9 +53,9 @@ export function FirstRunGuide({ ready, memoryCount, scanCount, blockedCount }: F
         </div>
         <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-2)] p-4">
           <ScanSearch size={16} className="text-[var(--sc-ok)]" />
-          <p className="mt-2 text-sm font-medium text-[var(--sc-text)]">Scan supply chain</p>
+          <p className="mt-2 text-sm font-medium text-[var(--sc-text)]">Scan skills and packages</p>
           <p className="mt-1 text-xs text-[var(--sc-text-muted)]">
-            Run an X-Ray scan from the X-Ray page, or{' '}
+            Run a scan from Protection, Skill &amp; package scanner, or{' '}
             <code className="font-mono">shieldcortex xray &lt;path&gt;</code> from the CLI.
           </p>
         </div>

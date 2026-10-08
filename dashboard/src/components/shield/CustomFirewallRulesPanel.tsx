@@ -85,8 +85,8 @@ function RulesTable() {
             <div key={rule.id} className="flex items-center gap-3 px-3 py-2 bg-[var(--sc-surface-2)]/30 rounded text-xs">
               <span className="text-[var(--sc-text-dim)] w-6 text-right">{rule.priority}</span>
               <span className="text-[var(--sc-text)] flex-1">{rule.name}</span>
-              <code className="text-[var(--sc-text-muted)] text-[10px] max-w-[120px] truncate">{rule.condition_value}</code>
-              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+              <code className="text-[var(--sc-text-muted)] text-xs max-w-[120px] truncate">{rule.condition_value}</code>
+              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
                 rule.action === 'block' ? 'bg-[var(--sc-danger)]/20 text-[var(--sc-danger)]' :
                 rule.action === 'quarantine' ? 'bg-[var(--sc-amber)]/20 text-[var(--sc-amber)]' :
                 'bg-[var(--sc-ok)]/20 text-[var(--sc-ok)]'
@@ -122,8 +122,8 @@ function PreviewContent() {
           <div key={rule.id} className="flex items-center gap-3 px-3 py-2 bg-[var(--sc-surface-2)]/30 rounded text-xs">
             <span className="text-[var(--sc-text-dim)] w-6 text-right">{rule.priority}</span>
             <span className="text-[var(--sc-text)] flex-1">{rule.name}</span>
-            <code className="text-[var(--sc-text-muted)] text-[10px] max-w-[120px] truncate">{rule.condition_value}</code>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+            <code className="text-[var(--sc-text-muted)] text-xs max-w-[120px] truncate">{rule.condition_value}</code>
+            <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
               rule.action === 'block' ? 'bg-[var(--sc-danger)]/20 text-[var(--sc-danger)]' :
               rule.action === 'quarantine' ? 'bg-[var(--sc-amber)]/20 text-[var(--sc-amber)]' :
               'bg-[var(--sc-ok)]/20 text-[var(--sc-ok)]'

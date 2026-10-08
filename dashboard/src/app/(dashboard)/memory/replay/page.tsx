@@ -173,7 +173,7 @@ function ReplayContent() {
       </div>
 
       {/* Keyboard hint */}
-      <div className="text-[10px] font-mono text-[var(--sc-text-dim)]">
+      <div className="text-xs font-mono text-[var(--sc-text-dim)]">
         Shortcuts:
         <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">space</kbd>play/pause ·
         <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">←</kbd>

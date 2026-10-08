@@ -8,10 +8,10 @@ import { visibleTabs } from '@/components/layout/hidden-routes';
  * own route; every other tab is a `?tab=` of /memory.
  */
 export const MEMORY_TAB_DEFS: TabItem[] = [
-  { id: 'library', label: 'Library', icon: <Database size={14} /> },
-  { id: 'graph', label: 'Graph', icon: <GitBranch size={14} /> },
+  { id: 'library', label: 'Search & browse', icon: <Database size={14} /> },
+  { id: 'graph', label: 'Map', icon: <GitBranch size={14} /> },
   { id: 'recall', label: 'Recall', icon: <Search size={14} /> },
-  { id: 'review', label: 'Review' },
+  { id: 'review', label: 'Needs a check' },
   { id: 'timeline', label: 'Timeline', icon: <Clock size={14} /> },
   { id: 'replay', label: 'Replay', icon: <PlayCircle size={14} /> },
   { id: 'files', label: 'Files', icon: <FileText size={14} /> },

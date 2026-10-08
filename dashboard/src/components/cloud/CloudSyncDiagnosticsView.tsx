@@ -116,7 +116,7 @@ function StatCard({
   return (
     <div className="glass-card p-4 min-w-0">
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">{label}</span>
+        <span className="truncate text-xs text-[var(--sc-text-muted)]">{label}</span>
         <Icon size={15} className="shrink-0 text-[var(--sc-text-muted)]" />
       </div>
       <div className="mt-2 truncate text-2xl font-semibold text-[var(--sc-text)]" title={String(value)}>{value}</div>
@@ -237,8 +237,8 @@ function SyncControlsCard() {
 
       <div className="mt-5 grid gap-4">
         <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">Content mode</div>
-          <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-[var(--sc-text-dim)]">
+          <div className="text-xs text-[var(--sc-text-muted)]">Content mode</div>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs text-[var(--sc-text-dim)]">
             <span className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface)]/60 px-2.5 py-1">
               {controls.contentMode === 'metadata' ? 'Metadata only' : 'Full content'}
             </span>
@@ -271,14 +271,14 @@ function SyncControlsCard() {
         </div>
 
         <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">Project scope</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">Project scope</div>
           <div className="mt-3 flex flex-wrap gap-2">
             {(['all', 'include', 'exclude'] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
                 onClick={() => setDraftControls((current) => ({ ...(current ?? controls), projectMode: mode }))}
-                className={`rounded-full border px-3 py-1.5 text-xs font-medium uppercase tracking-wide ${
+                className={`rounded-full border px-3 py-1.5 text-xs font-medium ${
                   controls.projectMode === mode
                     ? 'border-[var(--sc-ok)]/40 bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]'
                     : 'border-[var(--sc-border)] bg-[var(--sc-surface)]/60 text-[var(--sc-text)]'
@@ -374,21 +374,21 @@ function CompactPolicySummary({
       </p>
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">Sync scope</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">Sync scope</div>
           <div className="mt-2 text-sm font-medium text-[var(--sc-text)]">{sync.controls.projectMode}</div>
           <div className="mt-1 text-xs text-[var(--sc-text-dim)]">{sync.controls.projects.length} selected project{sync.controls.projects.length === 1 ? '' : 's'}</div>
         </div>
         <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">Content mode</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">Content mode</div>
           <div className="mt-2 text-sm font-medium text-[var(--sc-text)]">{sync.controls.contentMode === 'metadata' ? 'Metadata only' : 'Full content'}</div>
           <div className="mt-1 text-xs text-[var(--sc-text-dim)]">Sensitive filter {sync.controls.excludeSensitive ? 'enabled' : 'off'}</div>
         </div>
         <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">Cloud endpoint</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">Cloud endpoint</div>
           <div className="mt-2 text-sm font-medium text-[var(--sc-text)]">{sync.baseUrl}</div>
         </div>
         <div className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-4">
-          <div className="text-xs uppercase tracking-[0.2em] text-[var(--sc-text-muted)]">OpenClaw complement</div>
+          <div className="text-xs text-[var(--sc-text-muted)]">OpenClaw complement</div>
           <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-[var(--sc-text)]">
             <span>Auto-memory: {cloudConfig.openclawMemory.autoMemory ? 'On' : 'Off'}</span>
             <span>Dedupe: {cloudConfig.openclawMemory.dedupe ? 'On' : 'Off'}</span>

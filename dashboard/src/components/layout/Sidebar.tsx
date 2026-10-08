@@ -3,24 +3,25 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import { visibleNavItems } from '@/components/layout/route-config';
+import { activeNavHref, visibleNavItems } from '@/components/layout/route-config';
 import { useDashboardStore } from '@/lib/store';
 import { Logo } from '@/components/ds/Logo';
+import { useNeedsYou } from '@/hooks/useNeedsYou';
 import { cn } from '@/lib/utils';
 
 /**
- * v2 sidebar: five labelled top-level items, collapsible to icons (240px ↔
+ * v2 sidebar: the five-item spine (Opus §2), collapsible to icons (240px ↔
  * 56px). Section tabs live inside pages, not here. Active state = the longest
- * matching href so /memory/replay lights Memory.
+ * matching href (or an item's `also` page) so /memory/replay lights Memory and
+ * /xray lights Protection. Needs you carries a count of confirmed waiting items.
  */
 export function Sidebar() {
   const pathname = usePathname();
-  const { sidebarPinned: collapsed, toggleSidebarPinned: toggleCollapsed } = useDashboardStore();
+  const { sidebarPinned: collapsed, toggleSidebarPinned: toggleCollapsed, projectFilter } = useDashboardStore();
 
   const navItems = visibleNavItems();
-  const activeHref = navItems
-    .filter((n) => pathname === n.href || pathname.startsWith(n.href + '/'))
-    .sort((a, b) => b.href.length - a.href.length)[0]?.href;
+  const activeHref = activeNavHref(pathname, navItems);
+  const waiting = useNeedsYou(projectFilter).total;
 
   return (
     <nav
@@ -33,29 +34,45 @@ export function Sidebar() {
       <div className={cn('flex h-14 items-center border-b border-[var(--sc-border)]', collapsed ? 'justify-center' : 'gap-2 px-4')}>
         <Logo size={22} />
         {!collapsed && (
-          <span className="truncate text-sm font-semibold text-[var(--sc-text)]">ShieldCortex</span>
+          <span className="min-w-0 leading-tight">
+            <span className="block truncate text-base font-semibold text-[var(--sc-text)]">ShieldCortex</span>
+            <span className="block truncate text-xs text-[var(--sc-text-muted)]">On this computer</span>
+          </span>
         )}
       </div>
 
       <ul className="flex-1 space-y-1 overflow-y-auto p-2">
         {navItems.map(({ href, label, icon: Icon }) => {
           const active = href === activeHref;
+          const count = href === '/needs-you' && waiting > 0 ? waiting : undefined;
           return (
             <li key={href}>
               <Link
                 href={href}
                 aria-current={active ? 'page' : undefined}
+                aria-label={count ? `${label}, ${count} waiting` : undefined}
                 title={collapsed ? label : undefined}
                 className={cn(
-                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]',
+                  'relative flex items-center gap-3 rounded-md px-3 py-2.5 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]',
                   collapsed && 'justify-center px-0',
                   active
-                    ? 'bg-[var(--sc-primary-soft)] font-medium text-[var(--sc-primary)]'
+                    ? 'bg-[var(--sc-primary-soft)] font-semibold text-[var(--sc-text)] shadow-[inset_3px_0_0_var(--sc-primary)]'
                     : 'text-[var(--sc-text-dim)] hover:bg-[var(--sc-surface-2)] hover:text-[var(--sc-text)]',
                 )}
               >
-                <Icon size={17} aria-hidden className="shrink-0" />
+                <Icon size={18} aria-hidden className={cn('shrink-0', active && 'text-[var(--sc-primary)]')} />
                 {!collapsed && <span className="truncate">{label}</span>}
+                {count !== undefined && (
+                  <span
+                    aria-hidden
+                    className={cn(
+                      'rounded-full bg-[var(--sc-warn-soft)] px-2 text-xs font-semibold tabular-nums text-[var(--sc-warn)]',
+                      collapsed ? 'absolute right-0.5 top-0.5 px-1' : 'ml-auto',
+                    )}
+                  >
+                    {count}
+                  </span>
+                )}
               </Link>
             </li>
           );
@@ -63,6 +80,9 @@ export function Sidebar() {
       </ul>
 
       <div className="border-t border-[var(--sc-border)] p-2">
+        {!collapsed && (
+          <p className="px-3 pb-2 pt-1 text-xs text-[var(--sc-text-muted)]">Data stays on this computer</p>
+        )}
         <button
           type="button"
           onClick={toggleCollapsed}

@@ -61,7 +61,7 @@ function PatternsTable() {
           </div>
           <div className="relative">
             <input value={form.regex} onChange={e => setForm(f => ({ ...f, regex: e.target.value }))} placeholder="Regex pattern" required className={`w-full px-2 py-1.5 text-xs bg-[var(--sc-surface)] border rounded text-[var(--sc-text)] font-mono placeholder:text-[var(--sc-text-muted)] ${regexValid ? 'border-[var(--sc-border)]' : 'border-[var(--sc-danger)]'}`} />
-            {!regexValid && <p className="text-[10px] text-[var(--sc-danger)] mt-0.5">{regexError}</p>}
+            {!regexValid && <p className="text-xs text-[var(--sc-danger)] mt-0.5">{regexError}</p>}
           </div>
           <input value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} placeholder="Description (optional)" className="w-full px-2 py-1.5 text-xs bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)]" />
           <div className="flex gap-2">
@@ -84,7 +84,7 @@ function PatternsTable() {
             <div key={pattern.id} className="px-3 py-2 bg-[var(--sc-surface-2)] rounded text-xs space-y-1">
               <div className="flex items-center gap-2">
                 <span className="text-[var(--sc-text)] flex-1 font-medium">{pattern.name}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
                   pattern.severity === 'critical' ? 'bg-[var(--sc-danger)]/20 text-[var(--sc-danger)]' :
                   pattern.severity === 'high' ? 'bg-[var(--sc-danger)]/20 text-[var(--sc-danger)]' :
                   pattern.severity === 'medium' ? 'bg-[var(--sc-amber)]/20 text-[var(--sc-amber)]' :
@@ -100,23 +100,23 @@ function PatternsTable() {
                   <Trash2 size={12} />
                 </button>
               </div>
-              <code className="text-[var(--sc-text-muted)] text-[10px] block truncate">{pattern.regex}</code>
+              <code className="text-[var(--sc-text-muted)] text-xs block truncate">{pattern.regex}</code>
               {testInput?.id === pattern.id && (
                 <div className="flex gap-2 mt-1">
                   <input
                     value={testInput.text}
                     onChange={e => setTestInput({ id: pattern.id, text: e.target.value })}
                     placeholder="Test text..."
-                    className="flex-1 px-2 py-1 text-[10px] bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)]"
+                    className="flex-1 px-2 py-1 text-xs bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded text-[var(--sc-text)] placeholder:text-[var(--sc-text-muted)]"
                   />
                   <button
                     onClick={() => testPattern.mutate({ id: pattern.id, text: testInput.text })}
                     disabled={!testInput.text}
-                    className="px-2 py-1 text-[10px] bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] rounded hover:bg-[var(--sc-ok)]/30 disabled:opacity-50"
+                    className="px-2 py-1 text-xs bg-[var(--sc-ok)]/20 text-[var(--sc-ok)] rounded hover:bg-[var(--sc-ok)]/30 disabled:opacity-50"
                   >
                     Test
                   </button>
-                  {testPattern.data && <span className="text-[10px] text-[var(--sc-text-dim)] self-center">{testPattern.data.count} matches</span>}
+                  {testPattern.data && <span className="text-xs text-[var(--sc-text-dim)] self-center">{testPattern.data.count} matches</span>}
                 </div>
               )}
             </div>
@@ -140,13 +140,13 @@ function PreviewContent() {
           <div key={pattern.id} className="px-3 py-2 bg-[var(--sc-surface-2)] rounded text-xs space-y-1">
             <div className="flex items-center gap-2">
               <span className="text-[var(--sc-text)] flex-1 font-medium">{pattern.name}</span>
-              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
                 pattern.severity === 'critical' ? 'bg-[var(--sc-danger)]/20 text-[var(--sc-danger)]' :
                 pattern.severity === 'high' ? 'bg-[var(--sc-danger)]/20 text-[var(--sc-danger)]' :
                 'bg-[var(--sc-amber)]/20 text-[var(--sc-amber)]'
               }`}>{pattern.severity}</span>
             </div>
-            <code className="text-[var(--sc-text-muted)] text-[10px] block truncate">{pattern.regex}</code>
+            <code className="text-[var(--sc-text-muted)] text-xs block truncate">{pattern.regex}</code>
           </div>
         ))}
       </div>
