@@ -147,7 +147,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
               {resultConfig.label}
             </span>
             <span
-              className="px-2 py-0.5 rounded text-[10px] font-medium"
+              className="px-2 py-0.5 rounded text-xs font-medium"
               style={{ backgroundColor: sensitivityConfig.bg, color: sensitivityConfig.color }}
             >
               {entry.sensitivity_level}
@@ -166,7 +166,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
           {new Date(entry.timestamp).toLocaleString()}
         </div>
         {entry.project && (
-          <div className="text-[10px] text-[var(--sc-text-muted)] mt-1">
+          <div className="text-xs text-[var(--sc-text-muted)] mt-1">
             Project: {entry.project}
           </div>
         )}
@@ -178,7 +178,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
           <h4 className="text-xs font-medium text-[var(--sc-text-dim)] mb-2">Source</h4>
           <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
             <div className="flex items-center gap-2 mb-1">
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]">
+              <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-[var(--sc-ok)]/10 text-[var(--sc-ok)]">
                 {entry.source_type}
               </span>
             </div>
@@ -196,7 +196,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
           <div className="grid grid-cols-2 gap-2">
             {/* Trust */}
             <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
-              <div className="text-[10px] text-[var(--sc-text-muted)]">Trust</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Trust</div>
               <div className="text-lg font-bold" style={{ color: getTrustColor(entry.trust_score) }}>
                 {(entry.trust_score * 100).toFixed(0)}%
               </div>
@@ -213,7 +213,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
 
             {/* Anomaly */}
             <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
-              <div className="text-[10px] text-[var(--sc-text-muted)]">Anomaly</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Anomaly</div>
               <div className="text-lg font-bold" style={{ color: getAnomalyColor(entry.anomaly_score) }}>
                 {(entry.anomaly_score * 100).toFixed(0)}%
               </div>
@@ -231,7 +231,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             {/* Fragmentation */}
             {entry.fragmentation_score !== null && (
               <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
-                <div className="text-[10px] text-[var(--sc-text-muted)]">Fragmentation</div>
+                <div className="text-xs text-[var(--sc-text-muted)]">Fragmentation</div>
                 <div className="text-lg font-bold text-[var(--sc-text)]">
                   {(entry.fragmentation_score * 100).toFixed(0)}%
                 </div>
@@ -247,7 +247,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             {/* Pipeline Duration */}
             {entry.pipeline_duration_ms !== null && (
               <div className="bg-[var(--sc-surface-2)] rounded-lg p-3">
-                <div className="text-[10px] text-[var(--sc-text-muted)]">Pipeline</div>
+                <div className="text-xs text-[var(--sc-text-muted)]">Pipeline</div>
                 <div className="text-lg font-bold text-[var(--sc-text)]">
                   {entry.pipeline_duration_ms}ms
                 </div>
@@ -266,7 +266,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
                 return (
                   <span
                     key={i}
-                    className="px-2 py-1 rounded text-[11px] font-medium"
+                    className="px-2 py-1 rounded text-xs font-medium"
                     style={{ backgroundColor: config.bg, color: config.color }}
                   >
                     {threat.replace(/_/g, ' ')}
@@ -285,7 +285,7 @@ export function AuditDetailPanel({ entry, onClose, onViewMemory }: AuditDetailPa
             <h4 className="text-xs font-medium text-[var(--sc-text-dim)] mb-2">Blocked Patterns</h4>
             <div className="bg-[var(--sc-surface-2)] rounded-lg p-3 max-h-32 overflow-y-auto">
               {blockedPatterns.map((pattern, i) => (
-                <div key={i} className="text-[11px] text-[var(--sc-text)] font-mono break-all mb-1 last:mb-0">
+                <div key={i} className="text-xs text-[var(--sc-text)] font-mono break-all mb-1 last:mb-0">
                   {pattern}
                 </div>
               ))}

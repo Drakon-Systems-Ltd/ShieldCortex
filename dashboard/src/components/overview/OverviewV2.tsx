@@ -46,6 +46,7 @@ interface FeedEvent {
 }
 
 const FEED_FILTERS = ['all', 'memory', 'defence', 'system'] as const;
+const FEED_FILTER_LABELS: Record<(typeof FEED_FILTERS)[number], string> = { all: 'All', memory: 'Memory', defence: 'Protection', system: 'System' };
 
 /**
  * WS event type → feed group + human label. Types come from the server's
@@ -59,8 +60,8 @@ const FEED_LABELS: Record<string, { group: FeedEvent['group']; label: string }> 
   memory_accessed: { group: 'memory', label: 'Memory recalled' },
   link_discovered: { group: 'memory', label: 'Link discovered' },
   consolidation_complete: { group: 'memory', label: 'Consolidation complete' },
-  defence_event: { group: 'defence', label: 'Defence event' },
-  xray_detection: { group: 'defence', label: 'X-Ray detection' },
+  defence_event: { group: 'defence', label: 'Protection event' },
+  xray_detection: { group: 'defence', label: 'Scanner finding' },
   kill_switch_activated: { group: 'defence', label: 'Emergency stop engaged' },
   kill_switch_deactivated: { group: 'defence', label: 'Emergency stop cleared' },
   update_started: { group: 'system', label: 'Upgrade started' },
@@ -145,8 +146,8 @@ export function OverviewV2() {
     note('quarantine', st.quarantine);
     if (st.quarantine !== 'unavailable' && (quarantine.data?.total ?? 0) > 0) {
       items.push({
-        label: `${quarantine.data!.total} quarantined item${quarantine.data!.total === 1 ? '' : 's'} pending`,
-        detail: 'Approve or reject blocked writes and file findings.',
+        label: `${quarantine.data!.total} held back, waiting for you`,
+        detail: 'Memory writes and file findings kept out until you decide.',
         href: '/protection?tab=quarantine',
       });
     }
@@ -154,8 +155,8 @@ export function OverviewV2() {
     note('contradictions', st.contradictions);
     if (st.contradictions !== 'unavailable' && (contradictions.data?.count ?? 0) > 0) {
       items.push({
-        label: `${contradictions.data!.count} contradiction${contradictions.data!.count === 1 ? '' : 's'} detected`,
-        detail: 'Conflicting facts reduce recall trust.',
+        label: `${contradictions.data!.count} ${contradictions.data!.count === 1 ? 'memory disagrees' : 'memories disagree'} with another`,
+        detail: 'Memories that disagree make recall less trustworthy.',
         href: '/memory?tab=review',
       });
     }
@@ -166,7 +167,7 @@ export function OverviewV2() {
       const stale = review.data?.summary?.stale ?? 0;
       if (dupes + stale > 0) {
         items.push({
-          label: 'Review queue has cleanup work',
+          label: 'Some memories need a check',
           detail: `${stale.toLocaleString()} stale, ${dupes.toLocaleString()} duplicate.`,
           href: '/memory?tab=review',
         });
@@ -214,8 +215,7 @@ export function OverviewV2() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl space-y-5 p-6">
         <PageHeader
-          eyebrow="ShieldCortex"
-          title="Overview"
+          title="Home"
           subtitle="Protection, memory and health at a glance — every number is live or marked unavailable."
         />
 
@@ -232,7 +232,7 @@ export function OverviewV2() {
             {/* /api/iron-dome/status reports Iron Dome, not Action Guard (which no
                 dashboard endpoint exposes) — label it for what it is and offer no
                 activate command from here (TARS review, PR #491). */}
-            <TileRow label="Iron Dome" pill={guard.state} pillText={guard.text}
+            <TileRow label="Protection level" pill={guard.state} pillText={guard.text}
               onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
             <TileRow label="Conversation scanning" pill={scanning.state} pillText={scanning.text}
               onRetry={ironDome.isError ? () => ironDome.refetch() : undefined} />
@@ -244,27 +244,27 @@ export function OverviewV2() {
 
           <Tile icon={<Database size={15} aria-hidden />} title="Memory" href="/memory">
             <BigNumber value={countText(stats.data?.total, st.stats)} label="stored memories" />
-            <div className="grid grid-cols-3 gap-2 text-center text-[11px] text-[var(--sc-text-muted)]">
+            <div className="grid grid-cols-3 gap-2 text-center text-xs text-[var(--sc-text-muted)]">
               <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{countText(stats.data?.shortTerm, st.stats)}</div>short-term</div>
               <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{countText(stats.data?.longTerm, st.stats)}</div>long-term</div>
-              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{countText(contradictions.data?.count, st.contradictions)}</div>contradictions</div>
+              <div><div className="text-sm font-semibold tabular-nums text-[var(--sc-text)]">{countText(contradictions.data?.count, st.contradictions)}</div>disagree</div>
             </div>
             {st.stats === 'unavailable' && <TileRow label="Stats" pill="unavailable" pillText="unavailable" onRetry={() => stats.refetch()} />}
             {st.stats === 'stale' && <TileRow label="Stats" pill="warn" pillText="stale (refetch failed)" onRetry={() => stats.refetch()} />}
           </Tile>
 
           <Tile icon={<Activity size={15} aria-hidden />} title="Threats (7d)" href="/protection?tab=audit">
-            <div className="grid grid-cols-3 gap-2 text-center text-[11px] text-[var(--sc-text-muted)]">
+            <div className="grid grid-cols-3 gap-2 text-center text-xs text-[var(--sc-text-muted)]">
               <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-danger)]">{countText(audit7d.data?.blockedCount, st.audit)}</div>blocked</div>
-              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-warn)]">{countText(audit7d.data?.quarantinedCount, st.audit)}</div>quarantined</div>
+              <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-warn)]">{countText(audit7d.data?.quarantinedCount, st.audit)}</div>held back</div>
               <div><div className="text-lg font-semibold tabular-nums text-[var(--sc-text)]">{countText(audit7d.data?.allowedCount, st.audit)}</div>allowed</div>
             </div>
             {st.audit === 'unavailable' ? (
               <TileRow label="Audit" pill="unavailable" pillText="unavailable" onRetry={() => audit7d.refetch()} />
             ) : st.audit === 'pending' ? (
-              <p className="text-[11px] italic text-[var(--sc-text-muted)]">Checking the audit log…</p>
+              <p className="text-xs italic text-[var(--sc-text-muted)]">Checking the audit log…</p>
             ) : (
-              <p className="text-[11px] text-[var(--sc-text-muted)]">
+              <p className="text-xs text-[var(--sc-text-muted)]">
                 {(audit7d.data?.totalOperations ?? 0) === 0 ? 'No gated operations recorded this week.' : `${audit7d.data!.totalOperations.toLocaleString()} gated operations this week.`}
                 {st.audit === 'stale' && <span className="italic text-[var(--sc-warn)]"> Last known — refetch failed.</span>}
               </p>
@@ -278,7 +278,7 @@ export function OverviewV2() {
               <>
                 <BigNumber value={health.data ? `${health.data.overall}%` : '…'} label="memory health score" />
                 {st.health === 'stale' && <TileRow label="Score" pill="warn" pillText="stale (refetch failed)" onRetry={() => health.refetch()} />}
-                <ul className="space-y-1 text-[11px] text-[var(--sc-text-muted)]">
+                <ul className="space-y-1 text-xs text-[var(--sc-text-muted)]">
                   {weakest.map((c) => (
                     <li key={c.label} className="flex items-center justify-between gap-2">
                       <span className="truncate" title={c.detail}>{c.label}</span>
@@ -294,7 +294,12 @@ export function OverviewV2() {
         {/* ── Needs you + Activity ── */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)] p-4 shadow-[var(--sc-shadow-card)]">
-            <h3 className="text-sm font-semibold text-[var(--sc-text)]">Needs you</h3>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-[var(--sc-text)]">Needs you</h3>
+              <Link href="/needs-you" className="flex items-center gap-1 text-xs text-[var(--sc-primary)] hover:underline">
+                See everything <ArrowRight size={12} aria-hidden />
+              </Link>
+            </div>
             <div className="mt-3 space-y-2">
               {needsYou.items.length === 0 && needsYou.pending.length > 0 && (
                 <p className="text-sm italic text-[var(--sc-text-muted)]">Checking {needsYou.pending.join(', ')}…</p>
@@ -330,9 +335,9 @@ export function OverviewV2() {
               <div className="flex gap-1">
                 {FEED_FILTERS.map((f) => (
                   <button key={f} type="button" aria-pressed={feedFilter === f} onClick={() => setFeedFilter(f)}
-                    className={cn('rounded-full border px-2 py-0.5 text-[11px] capitalize',
+                    className={cn('rounded-full border px-2 py-0.5 text-xs',
                       feedFilter === f ? 'border-[var(--sc-primary)] text-[var(--sc-primary)]' : 'border-[var(--sc-border)] text-[var(--sc-text-muted)] hover:border-[var(--sc-border-strong)]')}>
-                    {f}
+                    {FEED_FILTER_LABELS[f]}
                   </button>
                 ))}
               </div>
@@ -348,8 +353,8 @@ export function OverviewV2() {
                 visibleFeed.map((e) => (
                   <div key={e.key} className="flex items-baseline gap-2 text-xs">
                     <span className="shrink-0 tabular-nums text-[var(--sc-text-muted)]">{e.ts.slice(11, 19)}</span>
-                    <span className={cn('shrink-0 rounded-full px-1.5 text-[10px]',
-                      e.group === 'defence' ? 'bg-[var(--sc-warn-soft)] text-[var(--sc-warn)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]')}>{e.group}</span>
+                    <span className={cn('shrink-0 rounded-full px-1.5 text-xs',
+                      e.group === 'defence' ? 'bg-[var(--sc-warn-soft)] text-[var(--sc-warn)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]')}>{FEED_FILTER_LABELS[e.group]}</span>
                     <span className="text-[var(--sc-text)]">{e.label}</span>
                     {e.detail && <span className="truncate text-[var(--sc-text-muted)]">{e.detail}</span>}
                   </div>
@@ -362,9 +367,9 @@ export function OverviewV2() {
         {/* ── Graph preview (Map mode, click-through) ── */}
         <section className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface)] p-4 shadow-[var(--sc-shadow-card)]">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-[var(--sc-text)]">Knowledge graph</h3>
+            <h3 className="text-sm font-semibold text-[var(--sc-text)]">Memory map</h3>
             <Link href="/memory?tab=graph" className="flex items-center gap-1 text-xs text-[var(--sc-primary)] hover:underline">
-              Open the graph <ArrowRight size={12} aria-hidden />
+              Open the map <ArrowRight size={12} aria-hidden />
             </Link>
           </div>
           <div className="mt-3">
@@ -397,7 +402,7 @@ function TileRow({ label, pill, pillText, onRetry }: { label: string; pill: Stat
       <span className="flex items-center gap-1.5">
         <StatusPill state={pill}>{pillText}</StatusPill>
         {onRetry && (
-          <button type="button" onClick={onRetry} className="text-[11px] text-[var(--sc-primary)] hover:underline">retry</button>
+          <button type="button" onClick={onRetry} className="text-xs text-[var(--sc-primary)] hover:underline">retry</button>
         )}
       </span>
     </div>
@@ -408,7 +413,7 @@ function BigNumber({ value, label }: { value: string; label: string }) {
   return (
     <div>
       <div className="text-2xl font-semibold tabular-nums text-[var(--sc-text)]">{value}</div>
-      <div className="text-[11px] text-[var(--sc-text-muted)]">{label}</div>
+      <div className="text-xs text-[var(--sc-text-muted)]">{label}</div>
     </div>
   );
 }

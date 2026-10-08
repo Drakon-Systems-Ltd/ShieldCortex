@@ -141,7 +141,7 @@ export function CloudSyncStatus() {
             <span className={`text-sm font-medium ${tone.text}`}>{label}</span>
           </div>
           <p className="mt-1 text-xs text-[var(--sc-text-dim)]">{detail}</p>
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-[var(--sc-text-muted)]">
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-[var(--sc-text-muted)]">
             <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sc-surface)] px-2 py-1">
               <Server size={11} />
               {device.name}
@@ -164,26 +164,26 @@ export function CloudSyncStatus() {
           <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Memory queue</div>
             <div className="mt-1 text-lg font-semibold text-[var(--sc-text)]">{memoryQueue.pending}</div>
-            <div className="text-[11px] text-[var(--sc-text-muted)]">pending writes</div>
+            <div className="text-xs text-[var(--sc-text-muted)]">pending writes</div>
           </div>
           <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Replication failures</div>
             <div className={`mt-1 text-lg font-semibold ${replicationFailed > 0 ? 'text-[var(--sc-danger)]' : 'text-[var(--sc-text)]'}`}>
               {replicationFailed}
             </div>
-            <div className="text-[11px] text-[var(--sc-text-muted)]">memory + graph only</div>
+            <div className="text-xs text-[var(--sc-text-muted)]">memory + graph only</div>
           </div>
           <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Replicated</div>
             <div className="mt-1 text-lg font-semibold text-[var(--sc-text)]">{memoryQueue.synced}</div>
-            <div className="text-[11px] text-[var(--sc-text-muted)]">memory sync jobs</div>
+            <div className="text-xs text-[var(--sc-text-muted)]">memory sync jobs</div>
           </div>
           <div className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-bg)]/70 p-3">
             <div className="text-[var(--sc-text-muted)]">Retrying next</div>
             <div className="mt-1 text-sm font-semibold text-[var(--sc-text)]">
               {queue.nextRetryAt ? formatTimeUntil(queue.nextRetryAt) : 'Idle'}
             </div>
-            <div className="text-[11px] text-[var(--sc-text-muted)]">
+            <div className="text-xs text-[var(--sc-text-muted)]">
               {queue.lastErrorKind ? `${queue.lastErrorKind} queue` : 'no pending retry'}
             </div>
           </div>

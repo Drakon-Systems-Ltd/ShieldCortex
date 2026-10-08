@@ -100,7 +100,7 @@ export function DedupePanel() {
             <span className="text-sm font-semibold text-[var(--sc-text)]">
               {preview.groups.length} cluster(s) · {totalToRemove} removable
             </span>
-            <span className="text-[10px] text-[var(--sc-text-muted)]">{preview.pairsFound} pairs scanned</span>
+            <span className="text-xs text-[var(--sc-text-muted)]">{preview.pairsFound} pairs scanned</span>
           </div>
           {preview.groups.length === 0 ? (
             <div className="mt-2 text-xs text-[var(--sc-text-muted)]">No duplicates at the current heuristic threshold.</div>
@@ -108,7 +108,7 @@ export function DedupePanel() {
             <ul className="mt-2 max-h-64 space-y-2 overflow-y-auto text-xs">
               {preview.groups.map((g) => (
                 <li key={g.keepId} className="rounded border border-[var(--sc-border)] bg-[var(--sc-surface)] p-2">
-                  <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">
+                  <div className="text-xs text-[var(--sc-text-muted)]">
                     Keep #{g.keepId} · remove {g.removeIds.length} · {g.similarity}
                   </div>
                   <div className="mt-1 font-semibold text-[var(--sc-text)] truncate">{g.keepTitle}</div>

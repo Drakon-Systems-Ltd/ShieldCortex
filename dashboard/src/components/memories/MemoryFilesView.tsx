@@ -115,7 +115,7 @@ function MemoryFileCard({
           {file.threatIndicators.map((indicator) => (
             <span
               key={indicator}
-              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-[11px] text-[var(--sc-text-dim)]"
+              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-xs text-[var(--sc-text-dim)]"
             >
               {indicator}
             </span>
@@ -249,29 +249,29 @@ export function MemoryFilesView() {
         {data && (
           <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-5">
             <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Total</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Total</div>
               <div className="mt-1 text-xl font-semibold text-[var(--sc-text)]">{data.summary.total}</div>
             </div>
             <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Safe</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Safe</div>
               <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-ok)]">
                 <CheckCircle2 size={16} />
                 {data.summary.safe}
               </div>
             </div>
             <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Flagged</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Flagged</div>
               <div className="mt-1 flex items-center gap-2 text-xl font-semibold text-[var(--sc-amber)]">
                 <AlertTriangle size={16} />
                 {data.summary.flagged}
               </div>
             </div>
             <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">High</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">High</div>
               <div className="mt-1 text-xl font-semibold text-[var(--sc-danger)]">{data.summary.high}</div>
             </div>
             <div className="rounded-lg bg-[var(--sc-bg)]/60 p-3">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Critical</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">Critical</div>
               <div className="mt-1 text-xl font-semibold text-[var(--sc-danger)]">{data.summary.critical}</div>
             </div>
           </div>

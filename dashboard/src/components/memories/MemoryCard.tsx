@@ -71,24 +71,24 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
       {/* Badges */}
       <div className="flex items-center gap-1.5 mt-1">
         <span
-          className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+          className="text-xs px-1.5 py-0.5 rounded-full font-medium"
           style={{ backgroundColor: catColor + '22', color: catColor }}
         >
           {memory.category}
         </span>
         <span
-          className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+          className="text-xs px-1.5 py-0.5 rounded-full font-medium"
           style={{ backgroundColor: typeColor + '22', color: typeColor }}
         >
           {memory.type.replace('_', '-')}
         </span>
         {memory.status && memory.status !== 'active' && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-[var(--sc-amber)]/15 text-[var(--sc-amber)]">
+          <span className="text-xs px-1.5 py-0.5 rounded-full font-medium bg-[var(--sc-amber)]/15 text-[var(--sc-amber)]">
             {memory.status}
           </span>
         )}
         {memory.pinned && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-[var(--sc-ok)]/15 text-[var(--sc-ok)]">
+          <span className="text-xs px-1.5 py-0.5 rounded-full font-medium bg-[var(--sc-ok)]/15 text-[var(--sc-ok)]">
             pinned
           </span>
         )}
@@ -96,24 +96,24 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
 
       <div className="flex items-center gap-1.5 mt-2 flex-wrap">
         {memory.sourceKind && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-surface-2)] text-[var(--sc-text)]">
+          <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--sc-surface-2)] text-[var(--sc-text)]">
             {memory.sourceKind}
           </span>
         )}
         {memory.captureMethod && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-surface-2)] text-[var(--sc-text)]">
+          <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--sc-surface-2)] text-[var(--sc-text)]">
             {memory.captureMethod}
           </span>
         )}
         {typeof memory.trustScore === 'number' && (
-          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+          <span className={`text-xs px-1.5 py-0.5 rounded ${
             memory.trustScore < 0.7 ? 'bg-[var(--sc-danger)]/15 text-[var(--sc-danger)]' : 'bg-[var(--sc-ok)]/15 text-[var(--sc-ok)]'
           }`}>
             trust {memory.trustScore.toFixed(2)}
           </span>
         )}
         {memory.cloudExcluded && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-amber)]/15 text-[var(--sc-amber)]">
+          <span className="text-xs px-1.5 py-0.5 rounded bg-[var(--sc-amber)]/15 text-[var(--sc-amber)]">
             cloud excluded
           </span>
         )}
@@ -126,18 +126,18 @@ export function MemoryCard({ memory, isSelected, onSelect, isChecked, onCheck }:
       {memory.tags.length > 0 && (
         <div className="flex items-center gap-1 mt-2 flex-wrap">
           {memory.tags.slice(0, 3).map((tag) => (
-            <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--sc-surface-2)] text-[var(--sc-text-dim)]">
+            <span key={tag} className="text-xs px-1.5 py-0.5 rounded bg-[var(--sc-surface-2)] text-[var(--sc-text-dim)]">
               {tag}
             </span>
           ))}
           {memory.tags.length > 3 && (
-            <span className="text-[10px] text-[var(--sc-text-muted)]">+{memory.tags.length - 3} more</span>
+            <span className="text-xs text-[var(--sc-text-muted)]">+{memory.tags.length - 3} more</span>
           )}
         </div>
       )}
 
       {/* Footer */}
-      <div className="flex items-center justify-between mt-2 text-[11px] text-[var(--sc-text-muted)]">
+      <div className="flex items-center justify-between mt-2 text-xs text-[var(--sc-text-muted)]">
         <span>Created {relativeTime(memory.createdAt)}</span>
         <span>Accessed {relativeTime(memory.lastAccessed)}</span>
       </div>

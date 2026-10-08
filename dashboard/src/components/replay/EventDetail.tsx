@@ -51,10 +51,10 @@ export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="max-w-xs space-y-2 px-6 text-center">
-          <div className="text-xs font-mono uppercase tracking-wider text-[var(--sc-text-muted)]">
+          <div className="text-xs font-mono text-[var(--sc-text-muted)]">
             No event selected
           </div>
-          <div className="text-[11px] font-mono text-[var(--sc-text-dim)]">
+          <div className="text-xs font-mono text-[var(--sc-text-dim)]">
             Click a tick on the scrubber, or press <kbd className="rounded border border-[var(--sc-border)] px-1">space</kbd> to play.
           </div>
         </div>
@@ -74,25 +74,25 @@ export function EventDetail({ event, indexLabel, loading }: EventDetailProps) {
         <div className="flex items-center gap-2 min-w-0">
           <span
             className={cn(
-              'rounded px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider',
+              'rounded px-1.5 py-0.5 text-xs font-mono',
               KIND_BG[event.kind],
             )}
           >
             {event.kind}
           </span>
           {indexLabel && (
-            <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--sc-text-muted)]">
+            <span className="text-xs font-mono text-[var(--sc-text-muted)]">
               {indexLabel}
             </span>
           )}
         </div>
-        <div className="text-[10px] font-mono text-[var(--sc-text-dim)] tabular-nums">
+        <div className="text-xs font-mono text-[var(--sc-text-dim)] tabular-nums">
           {formatTs(event.ts)}
         </div>
       </div>
 
       {/* Meta line — actor, duration, audit link */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] px-3 py-1.5 text-[10px] font-mono">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--sc-border)] theme-glass:border-[var(--sc-border)] px-3 py-1.5 text-xs font-mono">
         {event.actor && (
           <span className="text-[var(--sc-text-muted)]">
             actor: <span className="text-[var(--sc-text)]">{event.actor}</span>
@@ -141,7 +141,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
           )}
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-[var(--sc-text-muted)] mb-1">input</div>
+          <div className="text-xs text-[var(--sc-text-muted)] mb-1">input</div>
           <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text)]">
             {prettyJson(payload.input)}
           </pre>
@@ -157,7 +157,7 @@ function renderBody(event: ReplayEvent, text: string | null) {
     return (
       <div className="space-y-2">
         {toolUseId && (
-          <div className="text-[var(--sc-text-dim)] text-[10px]">↳ {toolUseId}</div>
+          <div className="text-[var(--sc-text-dim)] text-xs">↳ {toolUseId}</div>
         )}
         <pre className="whitespace-pre-wrap break-words text-[var(--sc-text)] theme-glass:text-[var(--sc-text)]">
           {typeof content === 'string' ? content : prettyJson(content)}
