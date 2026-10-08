@@ -41,6 +41,13 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-56"></a>
+
+## What's new in 5.6
+
+- **Clearer approval cards.** A held action's card on your phone now says what the action does, why it was held and who asked, in plain English, without showing the raw command. Targets that match ShieldCortex's credential and secret patterns, or are too long or contain unusual characters, are withheld whole; a secret in a shape those patterns do not know is not guaranteed to be caught. On OpenClaw the approval prompt is marked as a warning whenever it shows one of these cards. (#648)
+- **`shieldcortex consolidate` clears short-term memory.** The command doctor recommends for a full short-term store now actually drains it: it promotes, expires and evicts memories before Dream Mode, and can evict long-term memories when that store is over its limit. Doctor's short-term and long-term warnings now follow your configured limits, so `shieldcortex doctor --strict` may exit differently on the same store. (#650)
+
 <a id="whats-new-in-55"></a>
 
 ## What's new in 5.5
@@ -49,8 +56,6 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 - **Dependency security update.** The MCP SDK moves to 1.31.0, past a published advisory in its OAuth client (which ShieldCortex does not use). Production audit: 0 unwaived advisories, 4 waived; reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). (#655)
 - **Approving on a Mac works again.** In 5.4.0 `shieldcortex approve` refused every human on macOS, so blocked actions could not be approved there. It now finds your Terminal.app or SSH session correctly and still refuses agent-owned shells. It also refuses, rather than guesses, when it cannot read the whole process tree, so on a Linux host with restricted `/proc` even a real login shell may be unable to approve.
 - **No more scan stalls on long blank runs.** A long run of newlines could stall a scan for 30 seconds or more. Detection is unchanged.
-- **5.6.0 — clearer approval cards.** A held action's card on your phone now says what the action does, why it was held and who asked, in plain English, without showing the raw command. Targets that match ShieldCortex's credential and secret patterns, or are too long or contain unusual characters, are withheld whole; a secret in a shape those patterns do not know is not guaranteed to be caught. On OpenClaw the approval prompt is marked as a warning whenever it shows one of these cards. (#648)
-- **5.6.0 — `shieldcortex consolidate` clears short-term memory.** The command doctor recommends for a full short-term store now actually drains it: it promotes, expires and evicts memories before Dream Mode, and can evict long-term memories when that store is over its limit. Doctor's short-term and long-term warnings now follow your configured limits, so `shieldcortex doctor --strict` may exit differently on the same store. (#650)
 
 Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
 

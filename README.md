@@ -79,6 +79,8 @@ The optional enforce-when-ready posture runs the dangerous tier in shadow until 
 
 `shieldcortex policy-evidence` (5.5+) reports what each runtime's own self-report says it is enforcing, as local self-reports rather than attestation. [What's new in 5.5](docs/UPDATING.md#whats-new-in-55).
 
+Approval cards (5.6+) say what a held action does, why it was held and who asked, in plain English, without the raw command. [What's new in 5.6](docs/UPDATING.md#whats-new-in-56).
+
 ## Free and Cloud
 
 Two different apps.
