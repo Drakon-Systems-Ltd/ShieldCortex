@@ -1,6 +1,6 @@
 # ShieldCortex threat model (OSS Scanner)
 
-ShieldCortex is a local memory store and defence layer for AI agents (Claude Code, OpenClaw, Hermes, MCP hosts). It sits between untrusted content and an agent's long-term memory, and on hosts that can deny it gates tool calls before they run. This file guides the scanner. The published policy in `SECURITY.md` is the scope of record and wins on any conflict.
+ShieldCortex is a local memory store and defence layer for AI agents (Claude Code, OpenClaw, Hermes, MCP hosts). It sits between untrusted content and an agent's long-term memory, and on hosts that can deny it gates tool calls before they run. This file guides the scanner, which audits the code in this repository only, never a live service. The published policy in `SECURITY.md` is the scope of record for human reports and wins on any conflict; where this file is narrower (repository code only) that narrowing is deliberate.
 
 ## What the attacker controls
 - Any text an agent reads and may store or recall: web pages, emails, documents, tool output, MCP results, messages from other agents. Treat it as fully attacker-controlled (prompt injection, memory poisoning, credential-shaped strings, invisible-separator and encoding tricks).
@@ -20,8 +20,8 @@ ShieldCortex is a local memory store and defence layer for AI agents (Claude Cod
 - Deployments where the relevant control is not enforced: Action Guard off (the default until `sudo shieldcortex protect`), observe-only or shadow posture (enforce-when-ready), and hosts where ShieldCortex is a scanner the model may call rather than a gate (Codex, Cursor, Copilot, generic MCP, LangChain, Python SDK; see `README.md`, "Where it can block"). A miss there is not a bypass. An enabled, supported deployment is valid scope even though enabling it is opt-in.
 - `benchmark/`, `research/`, `examples/`, `reports/`: not shipped.
 - Upstream bugs in `better-sqlite3`, Node.js, Next.js or hosting providers; report those upstream.
-- Denial of service that needs multi-gigabyte input or a hostile local user. Resource blow-up from a small input is in scope.
-- The live SaaS (`api.shieldcortex.ai`) and ShieldCortex Cloud accounts.
+- Denial of service against the user's own local `memories.db`, and any DoS that needs multi-gigabyte input or a hostile local user (`SECURITY.md`). In scope: resource blow-up triggered by a small attacker-origin input (a web page, email, tool result or message) reaching the pipeline, API or dashboard.
+- The live SaaS (`api.shieldcortex.ai`) and ShieldCortex Cloud accounts: `SECURITY.md` accepts human reports against them, but this offline scanner must not probe them; findings in the sync client code (`src/cloud`) are in scope.
 
 ## Severity: by demonstrated impact and prerequisites
 State in every report: the runtime (Claude Code, OpenClaw, Hermes, MCP host, local API), the ShieldCortex version, the configuration or posture (guard on or off, shadow, policy lock pinned, defaults), the attacker's entry point, the boundary crossed, and the observed effect. A component's name does not set the severity; what the finding demonstrably lets happen does.
