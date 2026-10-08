@@ -49,6 +49,8 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 - **Dependency security update.** The MCP SDK moves to 1.31.0, past a published advisory in its OAuth client (which ShieldCortex does not use). Production audit: 0 unwaived advisories, 4 waived; reachability notes are in [audit-waivers.md](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/security/audit-waivers.md). (#655)
 - **Approving on a Mac works again.** In 5.4.0 `shieldcortex approve` refused every human on macOS, so blocked actions could not be approved there. It now finds your Terminal.app or SSH session correctly and still refuses agent-owned shells. It also refuses, rather than guesses, when it cannot read the whole process tree, so on a Linux host with restricted `/proc` even a real login shell may be unable to approve.
 - **No more scan stalls on long blank runs.** A long run of newlines could stall a scan for 30 seconds or more. Detection is unchanged.
+- **5.5.1 — clearer approval cards.** A held action's card on your phone now says what the action does, why it was held and who asked, in plain English, without showing the raw command or anything that looks like a secret. (#648)
+- **5.5.1 — `shieldcortex consolidate` clears short-term memory.** The command doctor recommends for a full short-term store now actually drains it, and the doctor warning appears only when the store is over its configured limit. (#650)
 
 Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
 
