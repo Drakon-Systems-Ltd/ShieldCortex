@@ -4476,7 +4476,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
-  const surface = maskSinkFreeInlinePrograms(execSurface);
+  const surface = maskSinkFreeHeredocBodies(maskSinkFreeInlinePrograms(execSurface));
 
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
@@ -4729,7 +4729,9 @@ function foldScriptSources(
       // FILE, never the invoking command line), and since #522 item A the set
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
-      const nestedOfReviewed = next.lang === 'sh' ? detectScriptInvocations(reviewedScan) : [];
+      const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
+        ? detectScriptInvocations(reviewedScan)
+        : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
@@ -4742,13 +4744,14 @@ function foldScriptSources(
     }
 
     const scan = reviewedScan;
+    const hasSink = hasShellOutSink(scan, next.lang, true);
     total += src.length;
     if (parts.length > 0) cursor += 1;                  // the '\n' join separator
     regions.push({
       start: cursor,
       end: cursor + scan.length,
       lang: next.lang,
-      hasSink: hasShellOutSink(scan, next.lang, true),
+      hasSink,
       folded: true,
       // #184: path + chain so a match inside this region names its origin.
       sourcePath: next.path,
@@ -4757,9 +4760,16 @@ function foldScriptSources(
     cursor += scan.length;
     parts.push(scan);
 
-    // A non-shell script's own text is not a shell command line, so only a shell
-    // region can name the next script to follow.
-    const nested = next.lang === 'sh' ? detectScriptInvocations(scan) : [];
+    // A non-shell script's own text is not a shell command line, so a SINK-FREE
+    // interpreter region names nothing to follow: it cannot start a process
+    // (#165/#190). One that can shell out does — #661: `os.system('/tmp/p.sh')`
+    // inline folded the payload and blocked, the same line in `run.py` left it
+    // unread, so moving code into a file turned a deny into an allow. The
+    // discovery is the same `detectScriptInvocations` the inline planes use
+    // on an unmasked sink-bearing program, so the three planes agree. Comments
+    // are already blanked from `scan`, so a path mentioned in a docstring is
+    // not followed.
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
@@ -5200,6 +5210,83 @@ function outputEscapesToShell(text: string, outFile: string): boolean {
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n([\s\S]*?)(?:\n[ \t]*\2\b|$)/g;
 const HEREDOC_INTERP_TOKEN = /\b(bash|sh|zsh|ksh|dash|python[\d.]*|node|nodejs|ruby|perl|php)\b(?![\w/-])/gi;
 
+/** One heredoc in a command, classified by what consumes its body. */
+interface HeredocBody {
+  /** Byte range of the body within the command text. */
+  start: number;
+  end: number;
+  body: string;
+  /**
+   * Language of the interpreter on the intro line that READS the body —
+   * `null` when no interpreter is named there (the body is data, or lands in
+   * a file something else runs). The LAST interpreter token wins, so
+   * `python3 - <<'PY' | bash` is `sh`: the body's output is shell.
+   */
+  lang: ScriptLang | null;
+  /** The file the intro line redirects/tees the body or its output to, if any. */
+  outFile: string | null;
+}
+
+/**
+ * Every heredoc in `text`, with the language that consumes it and the file its
+ * intro line writes to. The single definition of "which heredoc does an
+ * interpreter read" (#661): `interpreterHeredocRegions` builds scan regions
+ * from it and `maskSinkFreeHeredocBodies` masks invocation detection with it.
+ * It calls nothing that detects invocations, so it is safe to use from inside
+ * `detectScriptInvocations` — `interpreterHeredocRegions` is not (its #217
+ * pass and `findInterpreterRunFiles` both recurse into detection).
+ */
+function heredocBodies(text: string): HeredocBody[] {
+  if (!text.includes('<<')) return [];
+  const out: HeredocBody[] = [];
+  ANY_HEREDOC_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANY_HEREDOC_RE.exec(text)) !== null) {
+    const lineStart = text.lastIndexOf('\n', m.index) + 1;
+    const introLine = text.slice(lineStart, m.index);
+    const interp = introLine.match(HEREDOC_INTERP_TOKEN);
+    const nl = m[0].indexOf('\n');
+    const start = m.index + nl + 1;
+    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
+    out.push({
+      start,
+      end: start + m[3].length,
+      body: m[3],
+      lang: interp ? langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase())) : null,
+      outFile: outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * #661 — a path literal inside an interpreter-consumed HEREDOC is not a
+ * command, for exactly the reason #190 gives for `python3 -c`: a sink-free
+ * program cannot start a process, so nothing in it is an invocation. The
+ * heredoc plane was left out of that relief, and `splitCommandStatements`
+ * (which breaks on `(`) turned `open('/tmp/x/table.md')` into a statement
+ * whose only token is a path in command position — the DATA FILE was folded
+ * and its prose scanned as shell. Live: a markdown table that LISTED rule
+ * names was denied on those names; the same code as a script file was
+ * allowed, so moving code into a file flipped the verdict.
+ *
+ * Masked only when the body is provably inert: an interpreter reads it, the
+ * body has no shell-out sink, and its output is not captured to a file (a
+ * captured body may GENERATE the shell a later statement runs — #86.2 — and
+ * `interpreterHeredocRegions` already keeps those scanned as shell). A shell
+ * heredoc IS shell and is never masked. Length-preserving, so every offset
+ * computed against the original text stays valid.
+ */
+function maskSinkFreeHeredocBodies(text: string): string {
+  let out = text;
+  for (const h of heredocBodies(text)) {
+    if (h.lang === null || h.lang === 'sh' || h.outFile) continue;
+    if (hasShellOutSink(h.body, h.lang)) continue;
+    out = out.slice(0, h.start) + ' '.repeat(h.end - h.start) + out.slice(h.end);
+  }
+  return out;
+}
+
 function interpreterHeredocRegions(text: string): ScanRegion[] {
   if (!text.includes('<<')) return [];
   const found: Array<{ region: ScanRegion; outFile: string | null }> = [];
@@ -5219,39 +5306,22 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
    */
   const written: Array<{ start: number; end: number; body: string; outFile: string }> = [];
   const candidateFiles: string[] = [];
-  ANY_HEREDOC_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = ANY_HEREDOC_RE.exec(text)) !== null) {
-    const lineStart = text.lastIndexOf('\n', m.index) + 1;
-    const introLine = text.slice(lineStart, m.index);
-    const interp = introLine.match(HEREDOC_INTERP_TOKEN);
-    const nlEarly = m[0].indexOf('\n');
-    if (!interp) {
+  for (const h of heredocBodies(text)) {
+    if (h.lang === null) {
       // No interpreter here, but if the body lands in a file the second pass
       // may still find one that runs it.
-      const target = heredocOutputFile(introLine + m[0].slice(0, nlEarly + 1));
-      const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
-      if (cleaned) {
-        const s = m.index + nlEarly + 1;
-        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, });
-      }
+      if (h.outFile) written.push({ start: h.start, end: h.end, body: h.body, outFile: h.outFile });
       continue;                                         // nothing executes it as code
     }
-    const lang = langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase()));
-    if (lang === 'sh') continue;                        // a shell heredoc IS shell — unchanged
-    const nl = m[0].indexOf('\n');
-    const bodyStart = m.index + nl + 1;
-    const bodyEnd = bodyStart + m[3].length;
+    if (h.lang === 'sh') continue;                      // a shell heredoc IS shell — unchanged
     // Two-step write-then-execute (issue #86.2), which applies to an
     // interpreter heredoc too: `python3 - <<'PY' > gen.sh … PY; bash gen.sh`
     // GENERATES the shell that later runs. The body's own text is then the
     // source of a command after all, so it must keep being scanned as shell.
-    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
-    const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
-    if (clean) candidateFiles.push(clean);
+    if (h.outFile) candidateFiles.push(h.outFile);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
-      outFile: clean,
+      region: { start: h.start, end: h.end, lang: h.lang, hasSink: hasShellOutSink(h.body, h.lang), folded: false },
+      outFile: h.outFile,
     });
   }
   // #217 second pass: resolve each written-then-executed body by the language of

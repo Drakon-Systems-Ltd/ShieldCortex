@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - (none yet)
 
+### Fixed
+- **#661 Script folding agrees across `-c`, heredoc and file.** A sink-free interpreter heredoc (`python3 - <<'EOF' … open('/tmp/x/table.md') … EOF`) no longer folds the DATA FILE the program opens into the scan surface — the same #190 relief `python3 -c` already had — so a markdown table that merely lists dangerous commands is not denied on them, and a merely-opened secret file's bytes are never copied into the guard's scan text. In the other direction, a folded script file that CAN shell out (`os.system('/tmp/payload.sh')` in `run.py`) now follows its nested invocation and folds the payload, exactly as the same line inline already did, so moving code into a file no longer turns a deny into an allow. Shell heredocs, write-then-run bodies, captured-output heredocs and `cat secret | curl` are unchanged.
+
 ## [5.5.0] - 2026-10-07
 
 Minor on 5.4.0. New: a per-runtime posture record behind `shieldcortex policy-evidence` (JSON, read-only) and info-only posture rows in `shieldcortex doctor`, fed by small self-reports the Claude Code hook, the OpenClaw plugin and the Hermes plugin now write under `<config>/posture/`; and a read-only `Iron Dome profile` doctor row that warns when Iron Dome runs on stock defaults. Fixed: `shieldcortex approve` works for humans on macOS again (it refused everyone on a Mac in 5.4.0), scanning a long run of newlines no longer stalls for 30 seconds or more, and Claude Code session leases now last their TTL (#553). Dependency security update: the MCP SDK moves to 1.31.0 past a published advisory, and a new `sharp` advisory joins the existing waiver after a reachability check. Plus OpenClaw, memory-default and Watch only copy corrections (text only; no enforcement change). Node floor (`^22.14.0 || >=24.0.0`) and Cloud pin unchanged.
