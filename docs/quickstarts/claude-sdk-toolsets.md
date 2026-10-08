@@ -41,7 +41,7 @@ const guard = new ToolsetGuard({
 class MyBrowser extends BetaAbstractBrowserToolset20260801 {
   constructor(private backend: Backend) {
     super({
-      browserState: () => ({ tabs: backend.tabs(), state_changes: backend.drainChanges() }),
+      browserState: guard.browserState(() => ({ tabs: backend.tabs(), state_changes: backend.drainChanges() })),
       urlPolicy: guard.urlPolicy(),
       confirm: guard.confirm(async (ctx, verdict) => askUser(verdict.card)),
     });
@@ -77,8 +77,12 @@ For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` a
 | `javascript_exec`, `file_upload` | held; an upload from `.ssh`, `.aws`, `.env`, … is denied | runs with the page's authority / exfiltrates files |
 | `get_page_text`, `read_page`, `find`, console, network | scanned with the tool-response scanner (injection, hidden HTML, credentials, markdown-image exfil) | page content is untrusted |
 | `screenshot`, `zoom` | taints the session; not scanned (no OCR in P1) | — |
+| `navigate`, `new_tab`, `switch_tab`, `list_tabs` results; the `browserState` report | tab titles, URLs and dialog messages taint the session and are scanned | page-supplied text the model reads with every result |
 
-**Session taint**: after the first page or screen read, every irreversible or
+Wrap the required `browserState` option with `guard.browserState(...)`: the SDK attaches
+that report to every tool result, so a page title is content the model reads.
+
+**Session taint**: after the first page or screen read (including a page title), every irreversible or
 unclassified action is `require_approval`. That is the point: the agent is now acting on
 content an attacker may have written (ADR-002 §2.2).
 

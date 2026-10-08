@@ -3,7 +3,7 @@
  * review, finding 1). Never executed: `claude-toolsets-sdk-types.test.ts`
  * type-checks this file with the TypeScript compiler and fails on any
  * diagnostic. If the guard's hook adapters drift from the SDK's `confirm`,
- * `urlPolicy` or `execute` signatures, this stops compiling.
+ * `urlPolicy`, `browserState` or `execute` signatures, this stops compiling.
  */
 import {
   BetaAbstractBrowserToolset20260801,
@@ -27,7 +27,7 @@ const browserGuard = new ToolsetGuard({ toolset: 'browser', toolError: ToolError
 export class GuardedBrowser extends BetaAbstractBrowserToolset20260801 {
   constructor() {
     super({
-      browserState: (): BetaBrowserState => ({ tabs: [] }),
+      browserState: browserGuard.browserState((): BetaBrowserState => ({ tabs: [] })),
       urlPolicy: browserGuard.urlPolicy(),
       confirm: browserGuard.confirm(async (_ctx, verdict) => verdict.decision === 'allow'),
     });

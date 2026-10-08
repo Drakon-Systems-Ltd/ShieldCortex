@@ -170,6 +170,21 @@ export type ToolsetExecuteNext<C extends ToolsetCallContext, N extends string, I
   input: I,
 ) => R | Promise<R>;
 
+/**
+ * The browser report the SDK attaches to every tool result as the
+ * `browser_state` block (`BetaBrowserState`), structurally. Tab titles, URLs and
+ * dialog messages in it are page-supplied and reach the model.
+ */
+export interface ToolsetBrowserState {
+  readonly tabs: ReadonlyArray<{
+    readonly tab_id?: string;
+    readonly title?: string;
+    readonly url?: string;
+    readonly active?: boolean;
+  }>;
+  readonly state_changes?: ReadonlyArray<unknown> | undefined;
+}
+
 /** What `confirm` saw for a call, so `execute` can bind to it. */
 interface ConfirmedCall {
   inputHash: string;
@@ -182,8 +197,14 @@ interface ConfirmedCall {
 /** Members whose results are page/screen content the model will read. */
 const READING_MEMBERS = new Set([
   'read_page', 'get_page_text', 'find', 'read_console', 'read_network',
-  'javascript_exec', 'screenshot', 'zoom', 'list_tabs',
+  'javascript_exec', 'screenshot', 'zoom',
 ]);
+/**
+ * Members whose result is a tab record (`navigate`: final URL and title;
+ * `new_tab` / `switch_tab` / `list_tabs`: tab entries). The title and URL are
+ * page-supplied and the model reads them, so these taint like a page read.
+ */
+const PAGE_STATE_MEMBERS = new Set(['navigate', 'new_tab', 'switch_tab', 'list_tabs']);
 /** Reading members whose result is text we can scan (not an image). */
 const TEXT_RESULT_MEMBERS = new Set([
   'read_page', 'get_page_text', 'find', 'read_console', 'read_network', 'javascript_exec',
@@ -336,6 +357,27 @@ export function parseRefCatalogue(text: string): Map<string, { role: string; lab
   let m: RegExpExecArray | null;
   while ((m = a.exec(text)) !== null) out.set(m[3], { role: m[1].toLowerCase(), label: m[2] });
   while ((m = b.exec(text)) !== null) if (!out.has(m[1])) out.set(m[1], { role: m[2].toLowerCase(), label: m[3] });
+  return out;
+}
+
+/** Page-supplied text in a tab record or browser report: titles, URLs, dialog messages. */
+function pageSuppliedText(value: unknown): string[] {
+  const out: string[] = [];
+  const tab = (v: unknown): void => {
+    const r = asRecord(v);
+    if (typeof r.title === 'string' && r.title.trim()) out.push(r.title);
+    if (typeof r.url === 'string' && r.url.trim() && r.url.trim().toLowerCase() !== 'about:blank') out.push(r.url);
+  };
+  if (Array.isArray(value)) value.forEach(tab);
+  else tab(value);
+  const r = asRecord(value);
+  if (Array.isArray(r.tabs)) r.tabs.forEach(tab);
+  if (Array.isArray(r.state_changes)) {
+    for (const change of r.state_changes) {
+      const c = asRecord(change);
+      if (typeof c.message === 'string' && c.message.trim()) out.push(c.message);
+    }
+  }
   return out;
 }
 
@@ -559,6 +601,37 @@ export class ToolsetGuard {
     };
   }
 
+  /**
+   * Wrap the browser toolset's required `browserState` option. The SDK attaches
+   * its report to every tool result, so tab titles, URLs and dialog messages are
+   * page-supplied text the model reads: any of it taints the session, and the
+   * text is scanned and audited. The report itself is returned unchanged.
+   */
+  browserState<S extends ToolsetBrowserState>(
+    inner: (ctx: ToolsetCallContext) => S | Promise<S>,
+  ): (ctx: ToolsetCallContext) => Promise<S> {
+    return async (ctx: ToolsetCallContext): Promise<S> => {
+      const state = await inner(ctx);
+      this.observePageText('browser_state', pageSuppliedText(state), { member: 'browser_state', input: {}, toolUse: ctx.toolUse });
+      return state;
+    };
+  }
+
+  /** Taint on page-supplied text the model will read, and scan it for the audit row. */
+  private observePageText(source: string, parts: string[], callCtx: ToolsetConfirmContext): void {
+    if (parts.length === 0) return;
+    this.tainted = true;
+    const scan = scanToolResponse(`toolset:${this.toolset}:${source}`, parts.join('\n'), 'advisory');
+    this.emit({
+      kind: 'result',
+      ctx: callCtx,
+      verdict: this.classify(callCtx),
+      outcome: 'scanned',
+      scanClean: scan.clean,
+      scanIndicators: scan.threatIndicators,
+    });
+  }
+
   /** The URL check for the driver's request-interception hook. */
   isUrlAllowed(url: string): boolean {
     return checkUrl(url, this.allowlist).allowed;
@@ -596,6 +669,10 @@ export class ToolsetGuard {
 
     const result = await next(ctx, name, input);
 
+    // Post: a tab record's title and URL are page-supplied and reach the model.
+    if (PAGE_STATE_MEMBERS.has(name)) {
+      this.observePageText(name, pageSuppliedText(result), callCtx);
+    }
     // Post: every read taints; text reads are scanned; the ref catalogue updates.
     if (READING_MEMBERS.has(name)) {
       this.tainted = true;
