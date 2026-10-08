@@ -39,8 +39,8 @@ import { labelLlmInput } from './provenance.js';
 import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
-import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
-import type { ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime, ResolvedReadinessLike } from './interceptor.js';
+import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG, flattenPromptField } from './interceptor.js';
+import type { ApprovalPromptDetail, ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime, ResolvedReadinessLike } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
@@ -4050,8 +4050,26 @@ const WITHHELD_COMMAND_TEXT = "(command withheld — contains credential materia
  *  `Reason:` (action guard) and `Content:` (memory write) are the two lines
  *  that quote the payload, so anything not on this list is dropped. */
 const SAFE_APPROVAL_LINE = /^(?:Tool|Action|Risk|Signals|Threats):/iu;
+/**
+ * #648 r2 (B1) — the plain-English card is laid out from the structured card
+ * the interceptor's prompt builder hands over (`detail.card`), never from line
+ * text: the message also carries payload (a memory write's `Content:`, a tool
+ * name), and a payload that could say `What:` could forge the card and switch
+ * off the secret-egress withhold. Every card line is derived — the WHAT target
+ * already passed the credential redactor on this box — and none quotes the
+ * payload, so a plain card carries no "withheld" banner. Each field is
+ * flattened again here: a line break or `|` can never become a line.
+ */
+function plainCardDescription(detail: ApprovalPromptDetail | undefined): string | null {
+  const card = detail?.card;
+  if (!card || typeof card !== "object") return null;
+  const fields = [card.what, card.why, card.who, card.footer];
+  if (!fields.every((f) => typeof f === "string" && f.trim())) return null;
+  const [what, why, who, footer] = fields.map(flattenPromptField);
+  return [`What: ${what}`, `Why: ${why}`, `Who: ${who}`, footer].join(" | ");
+}
 
-function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeToolCallResult["requireApproval"]> {
+function buildTypedApprovalRequest(message: string, detail?: ApprovalPromptDetail): NonNullable<TypedBeforeToolCallResult["requireApproval"]> {
   const lines = message
     .split(/\r?\n/u)
     .map((line) => line.trim())
@@ -4062,12 +4080,13 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
     .filter((line) => !/^\[(?:Approve|Allow[^\]]*|Deny)\]/i.test(line));
   const rawTitle = (lines[0] || "ShieldCortex approval required").replace(/^🛡️\s*/u, "");
   const detailLines = lines.slice(1);
+  const plainCard = plainCardDescription(detail);
   const withholdPayload = SECRET_EGRESS_PROMPT.test(message);
-  const details = (
+  const details = plainCard ?? ((
     withholdPayload
       ? [WITHHELD_COMMAND_TEXT, ...detailLines.filter((line) => SAFE_APPROVAL_LINE.test(line))]
       : detailLines
-  ).join(" | ") || rawTitle;
+  ).join(" | ") || rawTitle);
   const riskText = message.toLowerCase();
   const severity = /\b(?:critical|catastrophic|auto[-_\s]?deny|exfil|rm\s+-rf)\b/u.test(riskText)
     ? "critical"
@@ -4078,7 +4097,9 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
   return {
     title: truncateApprovalText(rawTitle, 80),
     description: truncateApprovalText(details, 256),
-    severity,
+    // A plain card carries no severity word; everything that reaches a card is
+    // the guard's dangerous tier (catastrophic never gets one): "warning".
+    severity: plainCard !== null ? "warning" : severity,
     // The host's own ceiling (MAX_PLUGIN_APPROVAL_TIMEOUT_MS), matching
     // CARD_TIMEOUT_MS on the Telegram card path. 120s was the old bridge's
     // number and it expired cards the operator was still walking back to.
@@ -4131,10 +4152,11 @@ async function handleTypedBeforeToolCall(
       toolName: event.toolName,
       arguments: event.params ?? {},
       sessionId,
+      ...(typeof ctx?.agentId === "string" ? { agentId: ctx.agentId } : {}),
       ...(attended
         ? {
-            requireApproval: async (message: string) => {
-              throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message));
+            requireApproval: async (message: string, detail?: ApprovalPromptDetail) => {
+              throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message, detail));
             },
           }
         : {}),
@@ -4560,6 +4582,12 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #648: the plain-English card summary (what / why / who), from the
+          // same runtime seam. Absent on an older dist: the card keeps its
+          // previous layout.
+          buildApprovalCard: typeof (defenceMod as any)?.buildApprovalCard === 'function'
+            ? (input) => (defenceMod as any).buildApprovalCard(input)
+            : undefined,
           // #233: the read side of conversation taint. Returns null for a clean
           // or unknown session, so the guard behaves exactly as before unless a
           // conversation detection actually happened in THIS session.
