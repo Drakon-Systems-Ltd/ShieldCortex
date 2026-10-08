@@ -259,7 +259,7 @@ const DEFAULT_IRREVERSIBLE_LEXICON = [
 ];
 
 /** Upload paths that are credentials or guard state. Refused outright. */
-const SENSITIVE_UPLOAD_PATH = /(^|\/)(\.ssh|\.aws|\.gnupg|\.config\/gh|\.npmrc|\.netrc|\.env(\.|$)|\.shieldcortex|\.openclaw|id_(rsa|ed25519|ecdsa)|keychain|\.docker\/config\.json)/i;
+const SENSITIVE_UPLOAD_PATH = /(^|\/)(\.ssh|\.aws|\.gnupg|\.config\/gh|\.npmrc|\.netrc|\.env(\.|$)|\.shieldcortex|\.openclaw|id_(rsa|ed25519|ecdsa)|keychain|\.docker\/config\.json|\.kube\/config$|\.git-credentials$|\.config\/gcloud(\/|$)|\.azure(\/|$)|\.pypirc$)/i;
 
 const SUBMIT_KEY_NAMES = new Set(['return', 'enter', 'kp_enter', 'numpadenter']);
 

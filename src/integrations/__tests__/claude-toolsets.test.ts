@@ -687,6 +687,30 @@ describe('ToolsetGuard — Windows credential uploads are denied (#679 review 2,
     expect(v.signals).toContain('upload-sensitive-path');
   });
 
+  it.each([
+    '/home/me/.kube/config',
+    'C:\\Users\\me\\.kube\\config',
+    '/home/me/.git-credentials',
+    'C:\\Users\\me\\.git-credentials',
+    '/home/me/.config/gcloud/application_default_credentials.json',
+    'C:\\Users\\me\\.config\\gcloud\\credentials.db',
+    '/home/me/.azure/accessTokens.json',
+    'C:\\Users\\me\\.azure\\msal_token_cache.json',
+    '/home/me/.pypirc',
+    'C:\\Users\\me\\.pypirc',
+  ])('%s → block (#679 review 5)', (p) => {
+    const { guard } = makeGuard();
+    const v = guard.classify(ctx('file_upload', { paths: [p] }));
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain('upload-sensitive-path');
+  });
+
+  it.each(['/home/me/kube/config.yaml', '/home/me/notes/azure.md', '/home/me/.config/gcloud-notes.txt'])(
+    'a name that only resembles a credential path is held, not denied: %s', (p) => {
+      const { guard } = makeGuard();
+      expect(guard.classify(ctx('file_upload', { paths: [p] })).decision).toBe('require_approval');
+    });
+
   it('an ordinary Windows path is held, not denied', () => {
     const { guard } = makeGuard();
     expect(guard.classify(ctx('file_upload', { paths: ['C:\\Users\\me\\Documents\\report.pdf'] })).decision).toBe('require_approval');
