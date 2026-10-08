@@ -470,3 +470,113 @@ describe('dist probe A1 — a page-derived role token is bounded before signals 
     expect(parsed.get('ref_5')).toEqual({ role: 'link', label: 'Home' });
   });
 });
+
+describe('dist probe B1 — the ref catalogue parse is linear on page text (#679 review 5)', () => {
+  const MB = 1 << 20;
+  const fill = (unit: string, n: number) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+  /**
+   * Budget for one 1 MB `read_page` through `execute()`. Most of that time is the
+   * result scan, not the parse. See REPORT-5 for the measured separation: the
+   * fixed parser stays at least 10x under the budget, and the old regex goes at
+   * least 10x over it.
+   */
+  const BUDGET_MS = 30_000;
+  const PAGE = 'https://docs.example.com/';
+
+  /** read_page returning `text` through execute(); the wall time, and how a click on ref_4 then classifies. */
+  async function readThenClassify(text: string) {
+    const { guard } = makeGuard();
+    const toolUse = { id: 'toolu_read' };
+    await guard.confirm()({ member: 'read_page', input: {}, tabURL: PAGE, tabId: 't1', toolUse });
+    const t0 = performance.now();
+    await guard.execute({ toolUse }, 'read_page', {}, async () => text);
+    const ms = performance.now() - t0;
+    const click = guard.classify({ member: 'left_click', input: { target: { type: 'ref', ref: 'ref_4' } }, tabURL: PAGE, tabId: 't1' });
+    return { ms, click };
+  }
+
+  const T = 300_000; // Jest timeout: generous, so a slow run fails on the budget assertion rather than the timer
+
+  // Timing rows. Each is ≥ 1 MB of page text in one read_page result.
+  it("1 MB word run with no ref (the reviewer's 'a'.repeat(n))", async () => {
+    const r = await readThenClassify(fill('a', MB));
+    expect(r.click.reason).toBe('click-unresolved-ref');
+    expect(r.ms).toBeLessThan(BUDGET_MS);
+  }, T);
+
+  it('`role "label" [ref]` form: a ref after a 1 MB word run on the same line still resolves, within budget', async () => {
+    const r = await readThenClassify(`${fill('a', MB)} button "Pay now" [ref_4]`);
+    expect(r.click.reason).toBe('irreversible-click');
+    expect(r.click.signals).toContain('role:button');
+    expect(r.ms).toBeLessThan(BUDGET_MS);
+  }, T);
+
+  it('`[ref] role "label"` form: a 1 MB role run after the ref still resolves (as `other`), within budget', async () => {
+    const r = await readThenClassify(`[ref_4] ${fill('a', MB)} "Pay now"`);
+    expect(r.click.reason).toBe('irreversible-click');
+    expect(r.click.signals).toContain('role:other');
+    expect(r.ms).toBeLessThan(BUDGET_MS);
+  }, T);
+
+  it('a line with `[ref_` and then 1 MB of `a "b" ` pairs and no ref after them, within budget', async () => {
+    const r = await readThenClassify(`[ref_ ${fill('a "b" ', MB)}`);
+    expect(r.click.reason).toBe('click-unresolved-ref');
+    expect(r.ms).toBeLessThan(BUDGET_MS);
+  }, T);
+
+  it('1 MB of lines each starting `[ref_` with 256 KB of junk, within budget', async () => {
+    const r = await readThenClassify(fill(`[ref_ ${'a'.repeat(MB / 4 - 20)} "b" junk\n`, MB));
+    expect(r.click.reason).toBe('click-unresolved-ref');
+    expect(r.ms).toBeLessThan(BUDGET_MS);
+  }, T);
+
+  // Paired long positives: the same shapes must still resolve.
+  it('a 1 MB label still resolves, in both line forms', async () => {
+    const label = `Pay ${fill('x', MB)}`;
+    const a = await readThenClassify(`button "${label}" [ref_4]`);
+    expect(a.click.reason).toBe('irreversible-click');
+    expect(a.ms).toBeLessThan(BUDGET_MS);
+    const b = await readThenClassify(`[ref_4] button "${label}"`);
+    expect(b.click.reason).toBe('irreversible-click');
+    expect(b.ms).toBeLessThan(BUDGET_MS);
+  }, T);
+
+  it('1 MB of `a "b" ` pairs then a ref still resolves', async () => {
+    const r = await readThenClassify(`${fill('a "b" ', MB)}[ref_4]`);
+    expect(r.click.reason).not.toBe('click-unresolved-ref');
+    expect(r.ms).toBeLessThan(BUDGET_MS);
+  }, T);
+
+  // Shape checks on the exported parser.
+  it('a label never spans lines, in either form, and CR / CRLF end a line', () => {
+    const half = fill('x', MB / 2);
+    for (const nl of ['\n', '\r\n', '\r']) {
+      expect(mod.parseRefCatalogue(`button "${half}${nl}${half}" [ref_4]`).has('ref_4')).toBe(false);
+      expect(mod.parseRefCatalogue(`[ref_4] button "Pay${nl}now"`).has('ref_4')).toBe(false);
+      expect(mod.parseRefCatalogue(`button${nl}"Pay now" [ref_4]`).has('ref_4')).toBe(false);
+      const parsed = mod.parseRefCatalogue([`button "Pay now" [ref_4]`, `[ref_9] link "Home"`, ''].join(nl));
+      expect(parsed.get('ref_4')).toEqual({ role: 'button', label: 'Pay now' });
+      expect(parsed.get('ref_9')).toEqual({ role: 'link', label: 'Home' });
+    }
+  });
+
+  it('escaped quotes stay inside the label', () => {
+    const label = fill('\\"', 10_000);
+    expect(mod.parseRefCatalogue(`button "${label}" [ref_4]`).get('ref_4')).toEqual({ role: 'button', label });
+    expect(mod.parseRefCatalogue(`[ref_4] button "${label}"`).get('ref_4')).toEqual({ role: 'button', label });
+    expect(mod.parseRefCatalogue('button "Close\\" now" [ref_4]').get('ref_4')).toEqual({ role: 'button', label: 'Close\\" now' });
+  });
+
+  it('the role starts a word run: indentation and list markers are fine, a run that starts with a digit is not a role', () => {
+    const parsed = mod.parseRefCatalogue([
+      '  - button "Indented" [ref_1]',
+      '\tlink "Tabbed" [ref_2]',
+      'textbox "With attrs" value="x" (focused) [ref_3]',
+      '9button "Digit-led" [ref_5]',
+    ].join('\n'));
+    expect(parsed.get('ref_1')).toEqual({ role: 'button', label: 'Indented' });
+    expect(parsed.get('ref_2')).toEqual({ role: 'link', label: 'Tabbed' });
+    expect(parsed.get('ref_3')).toEqual({ role: 'textbox', label: 'With attrs' });
+    expect(parsed.has('ref_5')).toBe(false);
+  });
+});

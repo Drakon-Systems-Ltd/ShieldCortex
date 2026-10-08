@@ -450,15 +450,53 @@ function boundRole(raw: string): string {
   return redactCredentials(role) === role ? role : 'other';
 }
 
-/** Parse the `read_page` / `find` output into ref → {role, label}. */
+// `role "label"`: the role starts a word run (so a long run is tried once, not
+// from every character) and the label stays on its line.
+const ROLE_LABEL = /(?<![\w-])([A-Za-z_][\w-]*)[^\S\r\n]+"((?:[^"\\\r\n]|\\.)*)"/g;
+const REF_AT = /\[(ref_[\w-]+)\]/y;
+const REF_THEN_ROLE_LABEL = /\[(ref_[\w-]+)\][^\S\r\n]*([A-Za-z_][\w-]*)[^\S\r\n]+"((?:[^"\\\r\n]|\\.)*)"/g;
+
+/**
+ * Parse the `read_page` / `find` output into ref → {role, label}. The text is
+ * page-controlled and this runs inside `execute()` in every mode, so it is
+ * linear in the text: only lines containing `[ref_` are read, and for
+ * `role "label" … [ref_N]` the ref after a label is the one at the next `[`
+ * on the line, looked up once per `[` rather than rescanned per label.
+ */
 export function parseRefCatalogue(text: string): Map<string, { role: string; label: string }> {
   const out = new Map<string, { role: string; label: string }>();
-  // `button "Pay now" [ref_4]`  or  `[ref_4] button "Pay now"`
-  const a = /([A-Za-z_][\w-]*)\s+"((?:[^"\\]|\\.)*)"[^\n\[]*\[(ref_[\w-]+)\]/g;
-  const b = /\[(ref_[\w-]+)\]\s*([A-Za-z_][\w-]*)\s+"((?:[^"\\]|\\.)*)"/g;
+  const lines = text.split(/\r\n|\r|\n/).filter((line) => line.includes('[ref_'));
   let m: RegExpExecArray | null;
-  while ((m = a.exec(text)) !== null) out.set(m[3], { role: boundRole(m[1]), label: m[2] });
-  while ((m = b.exec(text)) !== null) if (!out.has(m[1])) out.set(m[1], { role: boundRole(m[2]), label: m[3] });
+  // `button "Pay now" [ref_4]`
+  for (const line of lines) {
+    let bracket = -1;
+    let ref: { id: string; after: number } | undefined;
+    ROLE_LABEL.lastIndex = 0;
+    while ((m = ROLE_LABEL.exec(line)) !== null) {
+      const end = ROLE_LABEL.lastIndex;
+      if (end > bracket) {
+        bracket = line.indexOf('[', end);
+        if (bracket === -1) break;
+        REF_AT.lastIndex = bracket;
+        const r = REF_AT.exec(line);
+        ref = r ? { id: r[1], after: REF_AT.lastIndex } : undefined;
+      }
+      if (ref) {
+        out.set(ref.id, { role: boundRole(m[1]), label: m[2] });
+        ROLE_LABEL.lastIndex = ref.after;
+        bracket = -1;
+      } else {
+        ROLE_LABEL.lastIndex = m.index + 1;
+      }
+    }
+  }
+  // `[ref_4] button "Pay now"`
+  for (const line of lines) {
+    REF_THEN_ROLE_LABEL.lastIndex = 0;
+    while ((m = REF_THEN_ROLE_LABEL.exec(line)) !== null) {
+      if (!out.has(m[1])) out.set(m[1], { role: boundRole(m[2]), label: m[3] });
+    }
+  }
   return out;
 }
 
