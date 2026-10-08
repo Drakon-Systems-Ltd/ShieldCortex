@@ -84,6 +84,16 @@ on the mode and records nothing. If your deployment blocks requests on its own (
 rules), that is **your own control**, enforced whatever the guard's mode. It is not
 ShieldCortex observe, and ShieldCortex does not audit what it blocks.
 
+**The URL rule does no DNS.** `checkUrl`, the rule behind `urlPolicy`, `interceptRequest`
+and `isUrlAllowed`, is pure: it reads the URL text and never resolves a name. It refuses
+private and loopback IP literals, but a hostname that resolves to one passes the check.
+That covers wildcard-DNS names such as `127.0.0.1.nip.io` and DNS-rebinding names, which
+can resolve to a public address first and a private one later. What stops those names is
+request interception or host egress controls that act on the address the connection
+actually uses, for example a proxy or firewall that refuses private ranges.
+`guard.interceptRequest` applies the same DNS-free rule, so on its own it lets these names
+through too. A `urlAllowlist` narrows the exposure to the hosts you list.
+
 For the computer toolset pass `toolset: 'computer'`; the class takes `confirm` and the
 `execute` override but has no URL or file policy.
 
