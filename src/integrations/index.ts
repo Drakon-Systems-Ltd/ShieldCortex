@@ -9,7 +9,7 @@ export type {
   GuardedSearchResult,
 } from './universal.js';
 export { MarkdownMemoryBackend, OpenClawMarkdownBackend } from './openclaw.js';
-export { ToolsetGuard, checkUrl, parseRefCatalogue, escapeForCard, hashInput } from './claude-toolsets.js';
+export { ToolsetGuard, checkUrl, isPrivateOrLocalHost, parseRefCatalogue, escapeForCard, hashInput } from './claude-toolsets.js';
 export type {
   ToolsetName,
   ToolsetGuardMode,

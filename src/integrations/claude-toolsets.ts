@@ -29,6 +29,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 import { scanForCredentials } from '../defence/credential-leak/index.js';
 import { scanToolResponse } from '../defence/tool-response-scanner.js';
 
@@ -295,22 +296,60 @@ function parseUrlLikeBrowser(raw: string): URL | null {
   }
 }
 
-function isPrivateOrLocalHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h.endsWith('.localhost') || h === '0.0.0.0' || h === '::1' || h === '::') return true;
-  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
-    if (a === 10 || a === 127 || a === 0) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT / Tailscale
-    return false;
-  }
-  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd')) return true;
-  if (h.startsWith('::ffff:')) return isPrivateOrLocalHost(h.slice(7));
+function isPrivateIPv4(ip: string): boolean {
+  const [a, b, c] = ip.split('.').map(Number);
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata 169.254.169.254
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT / Tailscale
+  if (a === 192 && b === 0 && c === 0) return true; // IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
+  if (a >= 224) return true; // multicast, reserved, broadcast
   return false;
+}
+
+/** Eight 16-bit groups of an IPv6 literal (`isIPv6` already passed), embedded IPv4 tail included. */
+function ipv6Groups(ip: string): number[] {
+  let text = ip;
+  const tail = text.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (tail) {
+    const [a, b, c, d] = tail[1].split('.').map(Number);
+    text = `${text.slice(0, -tail[1].length)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, rest] = text.includes('::') ? text.split('::') : [text, undefined];
+  const left = head ? head.split(':') : [];
+  const right = rest ? rest.split(':') : [];
+  const fill = rest === undefined ? [] : new Array(8 - left.length - right.length).fill('0');
+  return [...left, ...fill, ...right].map((g) => parseInt(g, 16));
+}
+
+function isPrivateIPv6(ip: string): boolean {
+  const g = ipv6Groups(ip);
+  const v4 = (): string => [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff].join('.');
+  if (g.every((x) => x === 0)) return true; // ::
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return true; // ::1
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return isPrivateIPv4(v4()); // ::ffff:a.b.c.d
+  if (g.slice(0, 6).every((x) => x === 0)) return true; // ::a.b.c.d (deprecated compatible)
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return isPrivateIPv4(v4()); // NAT64
+  if ((g[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((g[0] & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated)
+  if ((g[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  if ((g[0] & 0xff00) === 0xff00) return true; // multicast
+  return false;
+}
+
+/**
+ * Whether a URL hostname is loopback, private, link-local or otherwise not a
+ * public site. Only an IP literal is classified by address: a DNS name such as
+ * `fdic.gov` is a name, never an address prefix. Pure: no DNS lookup.
+ */
+export function isPrivateOrLocalHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (isIP(h) === 4) return isPrivateIPv4(h);
+  if (isIP(h) === 6) return isPrivateIPv6(h.replace(/%.*$/, ''));
+  if (h.includes(':')) return true; // a zone id or anything else no public host carries
+  return h === '' || h === 'localhost' || h.endsWith('.localhost');
 }
 
 export interface UrlCheck {

@@ -2,6 +2,7 @@ import { describe, it, expect } from '@jest/globals';
 import {
   ToolsetGuard,
   checkUrl,
+  isPrivateOrLocalHost,
   parseRefCatalogue,
   escapeForCard,
   type ToolsetAuditEvent,
@@ -479,5 +480,55 @@ describe('ToolsetGuard — ref catalogue is per tab and per page (#679 finding 3
     const { guard } = makeGuard();
     await guard.execute({}, 'read_page', {}, async () => 'button "Search" [ref_1]');
     expect(guard.classify(click('ref_1')).reason).toBe('click-unresolved-ref');
+  });
+});
+
+describe('isPrivateOrLocalHost — IP literals only, no lookups (#679 finding 4)', () => {
+  it.each([
+    'http://[::ffff:127.0.0.1]/',
+    'http://[::ffff:169.254.169.254]/latest/meta-data',
+    'http://[::ffff:10.0.0.1]/',
+    'http://[::ffff:7f00:1]/',
+    'http://[fe80::1]/',
+    'http://[febf::1]/',
+    'http://[fc00::1]/',
+    'http://[fd12:3456::1]/',
+    'http://[::1]/',
+    'http://[::]/',
+    'http://[64:ff9b::a9fe:a9fe]/',
+    'http://169.254.169.254/',
+    'http://localhost/',
+    'http://localhost./',
+    'http://LOCALHOST:8080/',
+    'http://app.localhost/',
+    'http://2130706433/',
+    'http://0x7f.0.0.1/',
+    'http://0.0.0.0/',
+    'http://100.100.100.100/',
+  ])('%s is blocked as private or local', (url) => {
+    const c = checkUrl(url, ['docs.example.com']);
+    expect(c.verdict).toBe('block');
+    expect(c.reason).toBe('url-private-or-local-range');
+  });
+
+  it.each([
+    'https://fdic.gov/',
+    'https://fcbarcelona.com/',
+    'https://fe80.example/',
+    'https://localhost.example.com/',
+    'https://[2606:4700::1111]/',
+    'https://[::ffff:8.8.8.8]/',
+    'https://8.8.8.8/',
+  ])('%s is not treated as a private address', (url) => {
+    expect(checkUrl(url).reason).toBe('url-allowed');
+  });
+
+  it('classifies bare hostnames purely', () => {
+    expect(isPrivateOrLocalHost('fdic.gov')).toBe(false);
+    expect(isPrivateOrLocalHost('fcbarcelona.com')).toBe(false);
+    expect(isPrivateOrLocalHost('[::ffff:a9fe:a9fe]')).toBe(true);
+    expect(isPrivateOrLocalHost('fe80::1')).toBe(true);
+    expect(isPrivateOrLocalHost('172.15.0.1')).toBe(false);
+    expect(isPrivateOrLocalHost('172.16.0.1')).toBe(true);
   });
 });
