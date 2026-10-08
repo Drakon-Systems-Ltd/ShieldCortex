@@ -149,8 +149,12 @@ const PATTERN_GROUPS: PatternGroup[] = [
     name: 'delimiter_attack',
     weight: 0.75,
     patterns: [
-      // Length-capped to prevent ReDOS (max 500 chars between newlines and keyword)
-      /\n{5,}[\s\S]{0,500}\b(instruction|command|system|ignore)\b/i,
+      // Length-capped (max 500 chars between newlines and keyword). The run is
+      // anchored to its start and end: an unanchored `\n{5,}` is retried at every
+      // newline of a long run and backtracks into `[\s\S]{0,500}`, which took
+      // over 30 s on 100 KB of newlines. Matches the same strings as the
+      // unanchored form.
+      /(?<!\n)\n{5,}(?!\n)[\s\S]{0,500}\b(instruction|command|system|ignore)\b/i,
       // HTML comment with length cap to prevent backtracking
       /<!--[\s\S]{0,200}?(instruction|command|system|ignore|inject|override)[\s\S]{0,200}?-->/i,
       /\r?\n-{5,}\r?\n/,
