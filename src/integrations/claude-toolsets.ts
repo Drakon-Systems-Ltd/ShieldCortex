@@ -30,7 +30,7 @@
 
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
-import { scanForCredentials } from '../defence/credential-leak/index.js';
+import { redactCredentials, scanForCredentials } from '../defence/credential-leak/index.js';
 import { scanToolResponse } from '../defence/tool-response-scanner.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ export interface ToolsetAuditEvent {
   requestedBy: ToolsetRequester;
   /** Host (never path or query) of the tab or navigation target. */
   host?: string;
-  /** Element role and bounded, escaped label when a ref click was resolved. */
+  /** Element role and bounded, escaped, secret-redacted label when a ref click was resolved. */
   elementRole?: string;
   elementLabel?: string;
   inputHash: string;
@@ -282,6 +282,16 @@ export function hashInput(member: string, input: unknown): string {
 export function escapeForCard(text: string, max = 60): string {
   const clipped = text.length > max ? `${text.slice(0, max)}…` : text;
   return clipped.replace(/[^\x20-\x7e]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+/**
+ * Page- or model-supplied text for a card or audit row: secret-shaped
+ * substrings redacted with the credential scanner's patterns FIRST (so the
+ * length bound cannot cut a key into an unrecognised but still-leaking
+ * prefix), then bounded and escaped. Escaping alone is not redaction.
+ */
+function cardSafe(text: string, max = 60): string {
+  return escapeForCard(redactCredentials(text), max);
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -594,7 +604,7 @@ export class ToolsetGuard {
       if (this.toolset === 'browser' && ref) {
         const el = this.lookupRef(ctx, ref);
         if (el) {
-          const label = escapeForCard(el.label);
+          const label = cardSafe(el.label);
           if (this.lexicon.test(el.label)) {
             return finish('require_approval', ['irreversible-ui-action'], ['irreversible-click', `role:${el.role}`], 'irreversible-click',
               `Click the ${el.role} labelled "${label}"${where}? ${because} This could spend money, send something or delete something. Requested by: ${who}. Approve once / Deny.`);
@@ -621,7 +631,7 @@ export class ToolsetGuard {
 
     // 7. Anything else: fail closed on classification (ADR-002 §2.4).
     return finish(tainted ? 'require_approval' : 'allow', ['unclassified'], ['member-unknown'], 'member-unknown',
-      `Run "${escapeForCard(member, 40)}"${where}? ShieldCortex does not recognise this action. ${because} Requested by: ${who}. Approve once / Deny.`);
+      `Run "${cardSafe(member, 40)}"${where}? ShieldCortex does not recognise this action. ${because} Requested by: ${who}. Approve once / Deny.`);
   }
 
   // ── Hook adapters ──

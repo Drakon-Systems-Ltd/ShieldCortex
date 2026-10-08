@@ -95,7 +95,7 @@ name, never by the input): an input that changed after `confirm` is recorded as
 
 One event per call and one per scanned result. Fields: toolset, member, mode, decision,
 effect kinds, signal names, taint, `requestedBy`, host (never path or query), element role
-and a bounded escaped label, input hash, outcome, host answer, scan indicators. Never the
+and a bounded, escaped label with secret-shaped text redacted, input hash, outcome, host answer, scan indicators. Never the
 typed text, never a URL query string, never page content.
 
 ## Not covered

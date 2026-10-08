@@ -581,3 +581,32 @@ describe('ToolsetGuard — execute without a tool_use id stays bound to confirm 
     expect(events.some((e) => e.signals.includes('unconfirmed') && e.outcome === 'observed')).toBe(true);
   });
 });
+
+describe('ToolsetGuard — secret-shaped label text is redacted, not just escaped (#679 finding 6)', () => {
+  // Built at runtime from a prefix and a body: no key-shaped literal in the repo.
+  const BODY = ['Q7RZ', 'M2KX', 'P9VB', 'T4LW'].join('');
+  const KEY = ['AK', 'IA'].join('') + BODY;
+
+  it('a ref label carrying a key never reaches the card or the audit row, even in observe', async () => {
+    const { guard, events } = makeGuard();
+    await readPage(guard, `button "Copy ${KEY}" [ref_1]\nbutton "${'x'.repeat(50)}${KEY}" [ref_2]`);
+    const confirm = guard.confirm();
+    const cards: string[] = [];
+    const record = guard.confirm(async (_c, v) => { cards.push(v.card); return true; });
+    await record(ctx('left_click', { target: { type: 'ref', ref: 'ref_1' } }));
+    await record(ctx('left_click', { target: { type: 'ref', ref: 'ref_2' } }));
+    await confirm(ctx('left_click', { target: { type: 'ref', ref: 'ref_1' } }));
+    const surfaces = JSON.stringify({ cards, events });
+    expect(surfaces).not.toContain(KEY);
+    expect(surfaces).not.toContain(BODY.slice(0, 6)); // not even the part a length bound would keep
+    const click = events.find((e) => e.member === 'left_click')!;
+    expect(click.elementLabel).toContain('[REDACTED-');
+    expect(cards[0]).toContain('[REDACTED-');
+  });
+
+  it('an unknown member name carrying a key is redacted on the card', () => {
+    const { guard } = makeGuard();
+    const v = guard.classify(ctx(`x_${KEY}`, {}));
+    expect(v.card).not.toContain(BODY);
+  });
+});
