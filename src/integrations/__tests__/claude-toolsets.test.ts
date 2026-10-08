@@ -610,3 +610,24 @@ describe('ToolsetGuard — secret-shaped label text is redacted, not just escape
     expect(v.card).not.toContain(BODY);
   });
 });
+
+describe('ToolsetGuard — submit keys inside key sequences and chords (#679 P2)', () => {
+  it.each(['Tab Return', 'ctrl+a Return', 'Return', 'ctrl+Return', 'shift+Tab  KP_Enter', 'cmd+enter'])(
+    'key %j after typing is a submit that needs approval',
+    async (text) => {
+      const { guard } = makeGuard();
+      await guard.confirm()(ctx('type', { text: 'hello' }));
+      const v = guard.classify(ctx('key', { text }));
+      expect(v.decision).toBe('require_approval');
+      expect(v.effects).toEqual(expect.arrayContaining(['submit', 'irreversible-ui-action']));
+    },
+  );
+
+  it.each(['Tab', 'ctrl+a', 'shift+Tab Tab', 'Entertainment'])('key %j is ordinary input', async (text) => {
+    const { guard } = makeGuard();
+    await guard.confirm()(ctx('type', { text: 'hello' }));
+    const v = guard.classify(ctx('key', { text }));
+    expect(v.decision).toBe('allow');
+    expect(v.effects).toEqual(['input']);
+  });
+});

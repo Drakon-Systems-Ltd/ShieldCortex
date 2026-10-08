@@ -253,7 +253,19 @@ const DEFAULT_IRREVERSIBLE_LEXICON = [
 /** Upload paths that are credentials or guard state. Refused outright. */
 const SENSITIVE_UPLOAD_PATH = /(^|\/)(\.ssh|\.aws|\.gnupg|\.config\/gh|\.npmrc|\.netrc|\.env(\.|$)|\.shieldcortex|\.openclaw|id_(rsa|ed25519|ecdsa)|keychain|\.docker\/config\.json)/i;
 
-const SUBMIT_KEYS = /^(return|enter|kp_enter|cmd\+return|ctrl\+return|cmd\+enter|ctrl\+enter)$/i;
+const SUBMIT_KEY_NAMES = new Set(['return', 'enter', 'kp_enter', 'numpadenter']);
+
+/**
+ * Whether a `key` / `hold_key` text presses a submit key anywhere in it. The
+ * text is a key, a `+` chord, or a space-separated sequence of either
+ * (`Tab Return`, `ctrl+a Return`), so every key of every chord is checked.
+ */
+function pressesSubmitKey(text: string): boolean {
+  return text
+    .split(/\s+/)
+    .filter(Boolean)
+    .some((chord) => chord.split('+').some((key) => SUBMIT_KEY_NAMES.has(key.toLowerCase())));
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -580,7 +592,7 @@ export class ToolsetGuard {
         return finish('block', ['credential-read', 'egress'], types.map((t) => `typed-secret:${t}`), 'typed-secret',
           `Type into a field${where}? The text looks like a ${types[0] ?? 'secret'}. ShieldCortex does not allow secrets to be typed into pages or apps. Denied; nothing was typed.`);
       }
-      const isSubmitKey = (member === 'key' || member === 'hold_key') && SUBMIT_KEYS.test(text.trim());
+      const isSubmitKey = (member === 'key' || member === 'hold_key') && pressesSubmitKey(text);
       const typedNewline = (member === 'type' || member === 'type_') && /[\r\n]/.test(text);
       if (isSubmitKey || typedNewline) {
         const afterTyping = this.previousMember === 'type' || this.previousMember === 'type_' || this.previousMember === 'form_input';
