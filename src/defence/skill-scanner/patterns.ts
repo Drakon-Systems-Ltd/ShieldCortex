@@ -200,8 +200,10 @@ const SKILL_PATTERN_GROUPS: PatternGroup[] = [
     patterns: [
       // HTML comments containing actionable words (length-capped)
       /<!--[\s\S]{0,500}?(always|never|must|ignore|execute|run|send|read)[\s\S]{0,500}?-->/i,
-      // Buried after excessive whitespace (length-capped)
-      /\n{10,}[\s\S]{0,200}(always|never|must|ignore|execute|run|send|read)/i,
+      // Buried after excessive whitespace (length-capped). The newline run is
+      // anchored at both ends so a long run is matched once, not retried at
+      // every newline (catastrophic on large inputs). Same matches as before.
+      /(?<!\n)\n{10,}(?!\n)[\s\S]{0,200}(always|never|must|ignore|execute|run|send|read)/i,
       // Content after --- end-of-document marker with actionable words
       /\n---\s*\n[\s\S]{0,500}?(always|never|must|ignore|execute|run|send|read)/i,
       // Unicode direction overrides in instruction context
