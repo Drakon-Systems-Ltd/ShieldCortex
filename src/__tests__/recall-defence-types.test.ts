@@ -31,6 +31,20 @@ const realSanitise: SanitiseDep = sanitiseInput;
 const stringSanitise: SanitiseDep = (content: string) => content;
 void stringSanitise;
 
+type TrustDep = RecallDefenceModules['filterByTrust'];
+
+// A callback that returns (a subset of) the normalised rows it was given keeps the
+// definite trust_score/metadata the output type promises.
+const subsetTrust: TrustDep = (rows, minTrust) => rows.filter((r) => r.trust_score >= minTrust);
+// Redacting content in place of a returned row is still the same row shape.
+const redactingTrust: TrustDep = (rows) => rows.map((r) => ({ ...r, content: '[REDACTED - RESTRICTED]' }));
+void subsetTrust;
+void redactingTrust;
+
+// @ts-expect-error a field-dropping callback cannot coexist with kept rows typed DefendedRecallRow.
+const droppingTrust: TrustDep = (rows) => rows.map(({ id, content }) => ({ id, content }));
+void droppingTrust;
+
 function makeDeps(): RecallDefenceModules {
   return {
     filterByTrust: filterByTrust as unknown as RecallDefenceModules['filterByTrust'],

@@ -14,7 +14,13 @@ export interface DefendedRecallRow { id: number; content: string; trust_score: n
 /** The part of SanitisationResult (src/defence/input-sanitisation) the shim reads. */
 export interface RecallSanitisation { sanitised: string }
 export interface RecallDefenceModules {
-  filterByTrust: (rows: RecallRow[], minTrust: number, project?: string) => RecallRow[];
+  /**
+   * Receives the already-normalised rows (trust coalesced, metadata parsed) and
+   * must return a subset of THOSE rows (content may be redacted): the shim keeps
+   * the returned objects as-is, so a callback that rebuilds rows without
+   * trust_score/metadata would break the DefendedRecallRow output promise.
+   */
+  filterByTrust: <T extends DefendedRecallRow>(rows: T[], minTrust: number, project?: string) => T[];
   sanitiseInput?: (content: string) => RecallSanitisation | null | undefined;
   detectInstructions: (content: string) => { detected: boolean; patterns?: string[] } | null;
   detectEncoding: (content: string) => { detected: boolean; decodedSnippets?: string[]; encodingTypes?: string[] } | null;
