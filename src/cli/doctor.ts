@@ -1569,6 +1569,8 @@ export function runSemanticCoverageCheck(dbPath: string): CheckResult {
 async function checkSemanticCoverage(): Promise<CheckResult> {
   const label = 'Semantic coverage';
   try {
+    // #632: same resolver as the worker — SHIELDCORTEX_MODEL_DIR decides which
+    // cache is inspected, and an invalid value surfaces as 'misconfigured'.
     const { inspectEmbeddingModelCache } = await import('../embeddings/model-cache.js');
     const insp = await inspectEmbeddingModelCache();
     if (insp.status !== 'ok') {
@@ -1576,7 +1578,8 @@ async function checkSemanticCoverage(): Promise<CheckResult> {
         label,
         status: 'pass',
         message:
-          `embedding model cache is ${insp.status} — coverage skipped so doctor does not recommend embed-backfill (that would download model.onnx). Cache: ${insp.onnxPath}`,
+          `embedding model cache is ${insp.status} — coverage skipped so doctor does not recommend embed-backfill (that would download model.onnx). `
+          + (insp.onnxPath ? `Cache: ${insp.onnxPath}` : (insp.detail ?? '')),
       };
     }
   } catch (err: unknown) {
@@ -8621,13 +8624,11 @@ async function checkModelCache(): Promise<CheckResult> {
   // #383: "directory non-empty" was a green lie for truncated model.onnx.
   // Integrity is size (+ trusted sidecar sha, or live sha). Never pass a
   // corrupt weight; never fail the whole doctor run on a missing optional model.
+  // #632: root, offline flag and HF_ENDPOINT come from the worker's resolver.
+  // Files on disk are not inference — the message never claims it is active.
   try {
-    const {
-      inspectEmbeddingModelCache,
-      formatModelCacheDoctorMessage,
-    } = await import('../embeddings/model-cache.js');
-    const insp = await inspectEmbeddingModelCache();
-    const formatted = formatModelCacheDoctorMessage(insp);
+    const { inspectEmbeddingModelForDoctor } = await import('../embeddings/model-cache.js');
+    const formatted = await inspectEmbeddingModelForDoctor();
     return {
       label: 'Embeddings',
       status: formatted.status,

@@ -57,6 +57,8 @@ shieldcortex doctor
 
 `setup` (also `quickstart`) prints one host table and asks before wiring. Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
 
+Semantic search downloads a small embedding model on first use. For air-gapped hosts or a mirror, see [Offline embedding cache](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/docs/offline-embeddings.md). It covers the embedding model only, not every network feature.
+
 ## Where it can block
 
 Action Guard stays off until you turn it on. A bare `sudo shieldcortex protect` turns it on and pins that posture. [Policy lock](docs/UPDATING.md#policy-lock).

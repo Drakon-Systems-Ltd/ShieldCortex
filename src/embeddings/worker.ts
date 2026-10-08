@@ -9,24 +9,38 @@
  * worker_threads Worker solves this — the main thread stays free.
  */
 import { parentPort } from 'worker_threads';
-import { join } from 'path';
-import { homedir } from 'os';
+import {
+  applyEmbeddingModelConfig,
+  resolveEmbeddingModelConfig,
+  type EmbeddingModelConfig,
+} from './model-config.js';
 
 // Lazy-loaded to catch import failures gracefully
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pipelineFn: any = null;
 let loadError: string | null = null;
+let modelConfig: EmbeddingModelConfig | null = null;
 
 async function initTransformers(): Promise<void> {
   if (pipelineFn) return;
   if (loadError) throw new Error(loadError);
 
+  // #632: cache root, offline flag and HF_ENDPOINT mirror are resolved (and
+  // validated) before the library is even imported, so a bad value can never
+  // reach a transport. Invalid config fails closed — no fallback root or host.
+  let config: EmbeddingModelConfig;
+  try {
+    config = resolveEmbeddingModelConfig();
+  } catch (err: unknown) {
+    loadError = `Embedding configuration invalid: ${err instanceof Error ? err.message : String(err)}`;
+    throw new Error(loadError);
+  }
+
   try {
     const mod = await import('@huggingface/transformers');
+    applyEmbeddingModelConfig(mod.env, config);
+    modelConfig = config;
     pipelineFn = mod.pipeline;
-    mod.env.allowRemoteModels = true;
-    mod.env.allowLocalModels = true;
-    mod.env.cacheDir = join(homedir(), '.cache', 'shieldcortex', 'models');
   } catch (err: unknown) {
     loadError = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to load @huggingface/transformers: ${loadError}`);
@@ -49,6 +63,12 @@ async function loadModel(): Promise<void> {
   // #383: a truncated/corrupt on-disk weight used to fail every launch forever
   // against the same bad bytes. Quarantine once, then let transformers.js
   // re-download. A second failure surfaces — we never loop.
+  //
+  // #632: offline mode adds local_files_only on top of allowRemoteModels=false
+  // and never takes the heal path — renaming a provisioned weight aside to
+  // attempt a download that is forbidden would only destroy the operator's copy.
+  const config = modelConfig!;
+  const offlineOptions = config.offline ? { local_files_only: true } : {};
   const {
     isCorruptModelLoadError,
     quarantineEmbeddingOnnx,
@@ -59,11 +79,18 @@ async function loadModel(): Promise<void> {
     extractor = await pipelineFn(
       'feature-extraction',
       'Xenova/all-MiniLM-L6-v2',
-      { dtype: 'fp32' },
+      { dtype: 'fp32', ...offlineOptions },
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     if (!isCorruptModelLoadError(message)) throw err;
+    if (config.offline) {
+      throw new Error(
+        `Embedding model cache looks corrupt (${message}). SHIELDCORTEX_EMBEDDINGS_OFFLINE is set, ` +
+        'so the file was left in place and not re-downloaded — replace it with a verified copy ' +
+        '(docs/offline-embeddings.md).',
+      );
+    }
     // One heal per worker process — never pile up .bak files or hammer the network.
     if (hasAttemptedModelCacheHeal()) {
       throw new Error(
@@ -71,7 +98,7 @@ async function loadModel(): Promise<void> {
       );
     }
     markModelCacheHealAttempted();
-    const q = quarantineEmbeddingOnnx({ reason: 'load-failed' });
+    const q = quarantineEmbeddingOnnx({ reason: 'load-failed', cacheRoot: config.cacheRoot });
     parentPort?.postMessage({
       type: 'error',
       error:
@@ -81,7 +108,7 @@ async function loadModel(): Promise<void> {
     extractor = await pipelineFn(
       'feature-extraction',
       'Xenova/all-MiniLM-L6-v2',
-      { dtype: 'fp32' },
+      { dtype: 'fp32', ...offlineOptions },
     );
   }
 }

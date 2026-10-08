@@ -26,6 +26,8 @@ declare module '@huggingface/transformers' {
     allowRemoteModels: boolean;
     allowLocalModels: boolean;
     cacheDir: string;
+    /** Mapped from a validated HF_ENDPOINT by embeddings/model-config.ts (#632). */
+    remoteHost: string;
     [key: string]: unknown;
   };
 
