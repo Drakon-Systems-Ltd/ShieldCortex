@@ -292,8 +292,11 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     //    effective is what the guard's own self-protection floor holds.
     const preview = still.previewConfigResign();
     expect(preview.unauthorisedKeys).toContain('actionGuard.enforce');
-    expect(() => still.resignTamperedConfig(preview.sha256!)).toThrow(/no verified policy lock covers/);
+    //    resignTamperedConfig is async (#647 R2: it opens the audit log), so the
+    //    refusal is a rejection — awaited here, not a sync throw.
+    await expect(still.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/no verified policy lock covers/);
     expect(fs.readFileSync(path.join(configDir, 'config.json')).equals(handEdited)).toBe(true);
+    expect(fs.readdirSync(configDir).filter((f) => f.includes('.bak-resign-'))).toEqual([]);
   });
 
   it('a lock appearing after step 4 pulls the re-signed config back up — the re-sign is not an escape', async () => {
