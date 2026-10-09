@@ -74,9 +74,8 @@ describe('#661 (1) — a sink-free interpreter heredoc holds no invocations', ()
     expect(v.signals).not.toContain('pipe-download-to-shell');
   });
 
-  it('holds for an unquoted delimiter and for other interpreters', () => {
+  it('holds for a double-quoted delimiter and for other interpreters', () => {
     for (const cmd of [
-      asHeredoc(READ_PROGRAM, 'EOF'),
       asHeredoc(READ_PROGRAM, '"EOF"'),
       `node - <<'EOF'\nconst t = require('fs').readFileSync('${TABLE_PATH}', 'utf8')\nconsole.log(t.length)\nEOF`,
       `perl - <<'EOF'\nopen(F, '${TABLE_PATH}'); print scalar(<F>);\nEOF`,
@@ -84,6 +83,13 @@ describe('#661 (1) — a sink-free interpreter heredoc holds no invocations', ()
       expect([cmd, detectScriptInvocations(cmd)]).toEqual([cmd, []]);
       expect([cmd, verdict(cmd, { [TABLE_PATH]: TABLE }).decision]).toEqual([cmd, 'allow']);
     }
+  });
+
+  it('an UNQUOTED delimiter earns no relief: the outer shell expands the body, so it is not provably inert', () => {
+    // Same as main: scanned, data file folded. Fail closed by design (#686 round 3).
+    const cmd = asHeredoc(READ_PROGRAM, 'EOF');
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(TABLE_PATH);
+    expect(verdict(cmd, { [TABLE_PATH]: TABLE }).decision).toBe('block');
   });
 
   it('never reads a merely-opened secret file into the scan surface', () => {
@@ -193,21 +199,31 @@ describe('#661 — what must not move', () => {
 });
 
 /**
- * #686 review (CASE, TARS) — the first cut masked any sink-free heredoc whose
- * intro line had an interpreter token somewhere before `<<`. That decided
- * "inert" from text that did not establish it: nothing after the delimiter was
- * read, and "an interpreter token on the line" is not "the command that reads
- * the body". Every row in ROUTED blocked on main (932803b7) and allowed on
- * 570f887f. They are pinned here as block + payload folded. The TERMINAL rows
- * are the #661 relief and must stay masked. The two FILTER rows pipe into a
- * pure filter: fail-closed today (scanned exactly as on main, so no
- * regression), named here so a future pure-filter allowlist has a target.
+ * #686 review, three rounds (CASE, TARS). The first cut masked any sink-free
+ * heredoc with an interpreter token before `<<`; the second decided from the
+ * intro-line statement; the third from a skeleton of the text before it. All
+ * three were parser approximations and each round found 14–20 shapes that
+ * block on main and allowed on that head: pipes and substitutions after the
+ * delimiter, multiline `eval "$(` / `sh <(` / `{ } | sh` / `do … done | sh`,
+ * a filler statement before the real closer, quoted or escaped `exec`,
+ * operands after the delimiter, an `EOF #` line that `\b` reads as the closer.
+ *
+ * So relief is now ONE whole-command form (`WHOLE_COMMAND_HEREDOC_PROGRAM`):
+ * optional `cd plain &&`, env assignments, transparent wrappers, a non-shell
+ * interpreter with flags only, a QUOTED delimiter with nothing else on the
+ * line, an exact-line closer, nothing after it. Anything else is scanned
+ * exactly as on main. The ROUTED rows below are every shape from the three
+ * rounds, TARS's round-3 V-cases verbatim; each blocks on main and here with
+ * the payload folded. The FAIL_CLOSED rows are harmless shapes that do not
+ * fit the form and are left as main scans them. The RELIEF rows are the form.
  */
-describe('#686 — only a program whose output stays at the terminal is masked', () => {
+describe('#686 — relief is one whole-command form; everything else is scanned as on main', () => {
   const P = PAYLOAD_PATH;
   const FILES = { [P]: PAYLOAD };
+  const H = `python3 - <<'EOF'\nprint('${P}')\nEOF`;
   const ROUTED: Record<string, string> = {
-    'piped into sh': `python3 - <<'EOF' | sh\nprint('${P}')\nEOF`,
+    // round 1
+    'piped into sh': `${H.replace("<<'EOF'", "<<'EOF' | sh")}`,
     'interpreter name in argv of a shell': `bash -s python3 <<'EOF'\n${P}\nEOF`,
     'interpreter in an earlier statement; cat | ash': `node -v; cat <<'EOF' | ash\n${P}\nEOF`,
     'sourced stdin': `python3 -V; cat <<'EOF' | . /dev/stdin\n${P}\nEOF`,
@@ -226,66 +242,9 @@ describe('#686 — only a program whose output stays at the terminal is masked',
     'xargs sh': `python3 - <<'EOF' | xargs sh\nprint('${P}')\nEOF`,
     'source /dev/stdin': `python3 - <<'EOF' | source /dev/stdin\nprint('${P}')\nEOF`,
     'bash -s downstream': `python3 - <<'EOF' | bash -s\nprint('${P}')\nEOF`,
-    'file operand: heredoc is the script\'s DATA': `python3 run.py <<'EOF'\n${P}\nEOF`,
+    "file operand: heredoc is the script's DATA": `python3 run.py <<'EOF'\n${P}\nEOF`,
     'line continuation hides the pipe': `python3 - <<'EOF' \\\n| sh\nprint('${P}')\nEOF`,
-  };
-  const TERMINAL: Record<string, string> = {
-    'plain': `python3 - <<'EOF'\nprint('${P}')\nEOF`,
-    'stderr discarded': `python3 - <<'EOF' 2>/dev/null\nprint('${P}')\nEOF`,
-    'stdout discarded': `python3 - <<'EOF' >/dev/null\nprint('${P}')\nEOF`,
-    'piped INTO the interpreter': `echo hi | python3 - <<'EOF'\nprint('${P}')\nEOF`,
-    'behind an env assignment': `X=1 python3 - <<'EOF'\nprint('${P}')\nEOF`,
-    'followed by a new statement': `python3 - <<'EOF' && echo done\nprint('${P}')\nEOF`,
-    'flags with values': `python3 -W ignore -X dev - <<'EOF'\nprint('${P}')\nEOF`,
-    'node': `node - <<'EOF'\nconsole.log('${P}')\nEOF`,
-  };
-  const FILTER: Record<string, string> = {
-    'piped into grep': `python3 - <<'EOF' | grep x\nprint('${P}')\nEOF`,
-    'piped into wc': `python3 - <<'EOF' | wc -l\nprint('${P}')\nEOF`,
-  };
-
-  it.each(Object.entries(ROUTED))('routed — %s: blocked, payload folded', (_name, cmd) => {
-    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(P);
-    const v = verdict(cmd, FILES);
-    expect(v.decision).toBe('block');
-    expect(v.signals).toContain('recursive-force-delete');
-  });
-
-  it.each(Object.entries(TERMINAL))('terminal — %s: masked, nothing folded', (_name, cmd) => {
-    expect(detectScriptInvocations(cmd)).toEqual([]);
-    const v = verdict(cmd, FILES);
-    expect(v.decision).toBe('allow');
-    expect(v.signals).toEqual([]);
-  });
-
-  it('terminal behind sudo: masked; only the privilege rule speaks', () => {
-    const v = verdict(`sudo python3 - <<'EOF'\nprint('${P}')\nEOF`, FILES);
-    expect(detectScriptInvocations(`sudo python3 - <<'EOF'\nprint('${P}')\nEOF`)).toEqual([]);
-    expect(v.decision).toBe('require_approval');
-    expect(v.signals).not.toContain('recursive-force-delete');
-  });
-
-  it.each(Object.entries(FILTER))('pure filter — %s: fails closed, scanned as on main', (_name, cmd) => {
-    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(P);
-    expect(verdict(cmd, FILES).decision).toBe('block');
-  });
-});
-
-/**
- * #686 review round 2 (TARS) — the intro line is not the statement. A
- * multiline substitution, group, subshell, loop, conditional or function
- * can enclose the heredoc and pipe the WHOLE construct's output into a
- * shell, an earlier `exec` can redirect the shell's stdout, and operands
- * AFTER the delimiter make the body that program's input. Every ROUTED row
- * blocks on main (028ef17a) and allowed on 41f437ca. Relief now requires a
- * top-level, isolated, complete statement; the ENCLOSED_OK rows show that
- * balanced constructs and quoted parens before the line do not cost it.
- */
-describe('#686 round 2 — relief only for a top-level isolated statement', () => {
-  const P = PAYLOAD_PATH;
-  const FILES = { [P]: PAYLOAD };
-  const H = `python3 - <<'EOF'\nprint('${P}')\nEOF`;
-  const ROUTED: Record<string, string> = {
+    // round 2
     'multiline eval of a substitution': `eval "$(\n${H}\n)"`,
     'multiline command substitution': `sh -c "$(\n${H}\n)"`,
     'multiline process substitution': `sh <(\n${H}\n)`,
@@ -305,14 +264,46 @@ describe('#686 round 2 — relief only for a top-level isolated statement', () =
     'python script after the delimiter': `python3 <<'EOF' run.py\n${P}\nEOF`,
     'node script after the delimiter': `node <<'EOF' run.js\n${P}\nEOF`,
     'an earlier heredoc body hides an open paren': `cat <<'A'\n(\nA\n${H} | sh`,
+    // round 3 — TARS V-cases, verbatim
+    'V1 if … else : fi | sh': "if true; then python3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\nelse :\nfi | sh",
+    'V2 do … : done | sh': "for i in 1; do python3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\n:\ndone | sh",
+    'V3 while … break done | sh': "while :; do python3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\nbreak\ndone | sh",
+    'V4 eval "$( … : )"': "eval \"$(\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\n:\n)\"",
+    'V6 backtick into a variable, then sh -c': "x=\"`\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\n:\n`\"; sh -c \"$x\"",
+    'V7 inside sh -c quotes, piped': "sh -c '\npython3 - <<EOF\nprint(\"/tmp/payload.sh\")\nEOF\n' | sh",
+    'V11 statement, then do … : done | sh': "echo done; for i in 1; do\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\n:\ndone | sh",
+    "V12 $'\\'' then ( … : ) | sh": "echo $'\\'' ; (\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\n:\n) | sh",
+    "V13 '<<A' in quotes, then ( … ) | sh": "echo '<<A'\n(\nA\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\n:\n) | sh",
+    'V14 quoted exec': "\"exec\" > >(sh)\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF",
+    'V15 eval exec': "eval 'exec > >(sh)'\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF",
+    'V16 escaped exec': "\\exec > >(sh)\npython3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF",
+    'V17 EOF # is not the closer': "for i in 1; do python3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF #\nEOF\ndone | sh",
+    'V20 env wrapper inside a loop': "for i in 1; do env A=1 python3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\ntrue\ndone | sh",
+    'a body line that starts with the delimiter': `python3 - <<'EOF'\nprint('${P}')\nEOF #\nsh ${P}\nEOF`,
   };
-  const ENCLOSED_OK: Record<string, string> = {
-    'after a complete statement': `echo start\n${H}\necho done`,
-    'after an earlier, closed heredoc': `cat <<'A'\nhello\nA\n${H}`,
-    'after a balanced subshell': `(echo x)\n${H}`,
-    'after a balanced command substitution': `X=$(date)\n${H}`,
-    'after a quoted paren': `echo "(" \n${H}`,
-    'after a brace expansion': `echo ${'$'}{HOME}\n${H}`,
+  const FAIL_CLOSED: Record<string, string> = {
+    'unquoted delimiter': `python3 - <<EOF\nprint('${P}')\nEOF`,
+    'stderr discarded on the intro line': `python3 - <<'EOF' 2>/dev/null\nprint('${P}')\nEOF`,
+    'stdout discarded on the intro line': `python3 - <<'EOF' >/dev/null\nprint('${P}')\nEOF`,
+    'piped INTO the interpreter': `echo hi | python3 - <<'EOF'\nprint('${P}')\nEOF`,
+    'followed by a new statement': `${H} && echo ok`,
+    'preceded by a statement': `echo start\n${H}`,
+    'preceded by a closed heredoc': `cat <<'A'\nhello\nA\n${H}`,
+    'behind sudo': `sudo python3 - <<'EOF'\nprint('${P}')\nEOF`,
+    'cd with a metacharacter': `cd $(x) && ${H}`,
+    'a bare -- operand': `python3 - <<'EOF' --\nprint('${P}')\nEOF`,
+    '-I with a script after it': `python3 -I run.py <<'EOF'\n${P}\nEOF`,
+    '| grep (pure filter, not yet relieved)': `python3 - <<'EOF' | grep x\nprint('${P}')\nEOF`,
+  };
+  const RELIEF: Record<string, string> = {
+    'plain': H,
+    'cd plain path &&': `cd /tmp/x && ${H}\n`,
+    'env assignment, env, nohup, flags with values': `X=1 env nohup python3 -I -W ignore - <<'EOF'\nprint('${P}')\nEOF`,
+    'timeout wrapper': `timeout 30 python3 - <<'EOF'\nprint('${P}')\nEOF`,
+    'absolute interpreter path': `/usr/bin/python3.12 - <<'EOF'\nprint('${P}')\nEOF`,
+    'node, double-quoted delimiter': `node - <<"JS"\nconsole.log('${P}')\nJS`,
+    'trailing whitespace after the closer': `${H}\n\n  `,
+    "a $(…) inside the quoted body is text, not expanded": `python3 - <<'EOF'\nprint('$(sh ${P})')\nEOF`,
   };
 
   it.each(Object.entries(ROUTED))('routed — %s: blocked, payload folded', (_name, cmd) => {
@@ -322,17 +313,21 @@ describe('#686 round 2 — relief only for a top-level isolated statement', () =
     expect(v.signals).toContain('recursive-force-delete');
   });
 
-  it.each(Object.entries(ENCLOSED_OK))('isolated — %s: masked, nothing folded', (_name, cmd) => {
-    expect(detectScriptInvocations(cmd)).toEqual([]);
+  it.each(Object.entries(FAIL_CLOSED))('not the form — %s: scanned as on main, payload folded', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(P);
+    expect(verdict(cmd, FILES).decision).toBe('block');
+  });
+
+  it.each(Object.entries(RELIEF))('the form — %s: masked, nothing folded', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd).map(s => s.path)).not.toContain(P);
     const v = verdict(cmd, FILES);
     expect(v.decision).toBe('allow');
     expect(v.signals).toEqual([]);
   });
 
   it('a payload path passed as argv to a sink-bearing program is the SAME gap as on main (recorded, not widened)', () => {
-    // `python3 - <<'EOF' /tmp/payload.sh` with `os.system(sys.argv[1])`: the body has a
-    // sink so it is never masked, but an argv operand is not an invocation the guard
-    // follows on any plane. main: allow, detect=[]. Same here. See the #190 suite.
+    // The body has a sink so it is never masked, but an argv operand is not an
+    // invocation the guard follows on any plane. main: allow, detect=[]. Same here.
     const cmd = `python3 - <<'EOF' ${P}\nimport sys, os; os.system(sys.argv[1])\nEOF`;
     expect(detectScriptInvocations(cmd)).toEqual([]);
     expect(verdict(cmd, FILES).decision).toBe('allow');

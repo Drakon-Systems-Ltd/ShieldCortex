@@ -5225,153 +5225,81 @@ interface HeredocBody {
    * `null` when no interpreter is named there (the body is data, or lands in
    * a file something else runs). The LAST interpreter token wins, so
    * `python3 - <<'PY' | bash` is `sh`: the body's output is shell. Chooses the
-   * SCAN language of a region only — it never decides a mask (see `program`).
+   * SCAN language of a region only — it never decides a mask (#686: masking is
+   * decided by `wholeCommandHeredocProgram` on the whole command).
    */
   lang: ScriptLang | null;
   /** The file the intro line redirects/tees the body or its output to, if any. */
   outFile: string | null;
-  /**
-   * The language of the non-shell interpreter whose OWN statement reads this
-   * body as its program from stdin, with that statement's output going to the
-   * terminal — or `null`. Decided by `heredocProgramLang` from the heredoc's
-   * own statement, never from a token search across the line. This is the
-   * only field `maskSinkFreeHeredocBodies` may mask on (#686 review).
-   */
-  program: ScriptLang | null;
-}
-
-/** Non-shell interpreters that read their PROGRAM from stdin given `-` or no file operand. */
-const STDIN_PROGRAM_INTERPRETER = /^(?:python[\d.]*|node|nodejs|ruby|perl|php)$/;
-/** Statement separators the opener scan honours; `(`, `)` and backtick are separators too, but disqualifying ones. */
-const HEREDOC_STATEMENT_OPENER = /[;&|]/;
-/** After the delimiter: an fd-only redirect that cannot carry the program's output anywhere a shell reads. */
-const FD_ONLY_REDIRECT = /(?<![\w])(?:[0-2]?>>?|&>)\s*(?:\/dev\/null|&[0-2])(?![\w\/])/g;
-/** What may follow the closing delimiter and still consume the statement's output. */
-const SUFFIX_CONSUMES_OUTPUT = /^\s*(?:[|)}`]|done\b|fi\b|esac\b)/;
-
-/**
- * `text` with every quoted span and every heredoc body in `bodies` replaced by
- * spaces, so the structural scan below counts only shell syntax. Length-preserving.
- */
-function unquotedShellSkeleton(text: string, bodies: ReadonlyArray<{ start: number; end: number }>): string {
-  const chars = text.split('');
-  for (const b of bodies) for (let i = b.start; i < b.end && i < chars.length; i++) chars[i] = ' ';
-  let quote: string | null = null;
-  for (let i = 0; i < chars.length; i++) {
-    const c = chars[i];
-    if (c === '\\' && quote !== "'" && i + 1 < chars.length) { chars[i] = ' '; chars[i + 1] = ' '; i++; continue; }
-    if (quote) { if (c === quote) quote = null; chars[i] = ' '; continue; }
-    if (c === '"' || c === "'") { quote = c; chars[i] = ' '; }
-  }
-  return chars.join('');
 }
 
 /**
- * Whether the shell text BEFORE a heredoc's intro line leaves that line inside
- * any construct whose output the shell can route elsewhere: an open `(`, `{`
- * or backtick (subshell, group, substitution, process substitution), an open
- * `if`/`do`/`case` compound (`… fi | sh`, `… done | sh`), a function body, or
- * an earlier `exec` (which can redirect the whole shell's stdout). Counting
- * is on the unquoted skeleton; balanced constructs (`X=$(date)`, `(echo x)`)
- * are fine. Fails closed on an odd backtick count or any `exec`/`function`.
- */
-function enclosedByShellConstruct(skeleton: string): boolean {
-  let paren = 0, brace = 0, ticks = 0, expansion = 0;
-  for (let i = 0; i < skeleton.length; i++) {
-    const c = skeleton[i];
-    if (c === '(') paren++;
-    else if (c === ')') paren--;
-    else if (c === '{') { if (skeleton[i - 1] === '$') expansion++; else brace++; }   // `${VAR}` is an expansion, not a group
-    else if (c === '}') { if (expansion > 0) expansion--; else brace--; }
-    else if (c === '`') ticks++;
-    if (paren < 0 || brace < 0) return true;                   // a closer with no opener: we are inside something we did not see
-  }
-  if (paren > 0 || brace > 0 || ticks % 2 === 1) return true;
-  const count = (re: RegExp): number => (skeleton.match(re) ?? []).length;
-  if (count(/(?:^|[\s;&|(])if\b/g) > count(/(?:^|[\s;&|])fi\b/g)) return true;
-  if (count(/(?:^|[\s;&|(])(?:do)\b/g) > count(/(?:^|[\s;&|])done\b/g)) return true;
-  if (count(/(?:^|[\s;&|(])case\b/g) > count(/(?:^|[\s;&|])esac\b/g)) return true;
-  if (/(?:^|[\s;&|(])(?:exec|function)\b/.test(skeleton)) return true;
-  return false;
-}
-
-/**
- * #686 review — the language of the interpreter that reads a heredoc as its
- * PROGRAM, with its output provably left at the terminal; `null` otherwise.
+ * #686 — the ONE whole-command shape that earns the #661 relief.
  *
- * The first cut of #661 classified a heredoc by the LAST interpreter token on
- * the text before `<<` and masked a sink-free body on that alone. Review
- * round 1 (CASE, TARS): nothing after the delimiter was examined, and "an
- * interpreter token somewhere before `<<`" is not "the command that reads the
- * body". Round 2 (TARS): the intro line is not the statement either — a
- * multiline `eval "$(` / `sh <(` / `{ … } | sh` / `do … done | sh` /
- * `f() { … }; f | sh` / earlier `exec > >(sh)` encloses it, and operands
- * AFTER the delimiter (`perl <<'EOF' -ne '…'`, `python3 <<'EOF' run.py`)
- * turn the body into that program's input. Every one of those blocked on
- * main and allowed on the earlier heads.
+ * Three review rounds showed that no intro-line or skeleton heuristic can
+ * bound a shell statement: a multiline substitution, a loop or function body
+ * closed after a filler statement, a quoted or escaped `exec`, an operand after
+ * the delimiter, or a `EOF #` line that `\b` reads as the closer all re-route
+ * or re-target the body while the heuristic still called it inert. Each fix
+ * invited the next (TARS, round 3). So the relief is no longer "a heredoc that
+ * looks isolated"; it is "the entire tool call IS this":
  *
- * Relief is now granted only to a TOP-LEVEL, ISOLATED, COMPLETE statement:
- *   - Before the intro line, no open paren/brace/backtick, no open
- *     if/do/case, no `function`, no `exec` (`enclosedByShellConstruct`, on
- *     the unquoted skeleton with earlier heredoc bodies blanked).
- *   - On the intro line, the statement opener before `<<` is line start,
- *     `;`, `&` or `|` (a pipe INTO the interpreter is fine); any paren or
- *     backtick there, or an unclosed quote, disqualifies.
- *   - The command word, past env assignments and the usual wrappers, is a
- *     non-shell interpreter whose operands are flags only (plus `-`).
- *   - After the delimiter, once fd-only redirects (`2>/dev/null`, `2>&1`,
- *     `>/dev/null`) are removed, the rest of the statement up to `;`/`&`
- *     is EMPTY: no pipe, redirect, `tee`, substitution, operand, program
- *     text or continuation. (`&& echo done` after it is a new statement.)
- *   - After the closing delimiter, the next token does not consume the
- *     output: not `|`, `)`, `}`, backtick, `done`, `fi` or `esac`.
- * Not masking is never a regression: the body is then scanned exactly as on
- * main. Masking only happens when the output has nowhere to go but the screen.
+ *     [cd <plain-path> &&] [NAME=value …] [env|nohup|nice|command|timeout N]
+ *     <interpreter> [flags-only] [-] <<'DELIM'        ← quoted delimiter, nothing else on the line
+ *     <body>
+ *     DELIM                                            ← the first line that is exactly DELIM
+ *     [whitespace to end of text]
+ *
+ * Anchored at both ends, so there is no prefix, suffix, pipe, redirect,
+ * substitution, group, loop, function or second statement to reason about —
+ * if any of those is present the regex does not match and NOTHING is masked,
+ * which is exactly main's behaviour. A quoted delimiter is required because an
+ * unquoted heredoc body is expanded by the outer shell (`$(…)` and backticks
+ * in it run) and is therefore not provably inert. `<<-` is excluded. Only the
+ * flags in `FLAG_TAKES_VALUE`'s `-W`/`-X` family may take a value, so a script
+ * path can never be read as a flag value. `sudo`/`doas` are not wrappers here:
+ * fail closed, as on main.
  */
-function heredocProgramLang(
-  text: string,
-  lineStart: number,
-  heredocAt: number,
-  closerEnd: number,
-  earlierBodies: ReadonlyArray<{ start: number; end: number }>,
-): ScriptLang | null {
-  if (enclosedByShellConstruct(unquotedShellSkeleton(text.slice(0, lineStart), earlierBodies))) return null;
-  const lineEnd = text.indexOf('\n', heredocAt);
-  const introLine = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
-  const at = heredocAt - lineStart;
-  // Opener: last unquoted separator before the heredoc, with the quote state at `at`.
-  let quote: string | null = null;
-  let openerEnd = 0;
-  for (let i = 0; i < at; i++) {
-    const c = introLine[i];
-    if (c === '\\' && quote !== "'") { i++; continue; }
-    if (quote) { if (c === quote) quote = null; continue; }
-    if (c === '"' || c === "'") { quote = c; continue; }
-    if (c === '(' || c === ')' || c === '`' || c === '{' || c === '}') return null;
-    if (HEREDOC_STATEMENT_OPENER.test(c)) openerEnd = i + 1;
+const WHOLE_COMMAND_HEREDOC_PROGRAM = new RegExp(
+  '^\\s*'
+  + '(?:cd\\s+[\\w.\\/~-]+\\s*&&\\s*)?'                              // optional `cd plain/path &&`
+  + '(?:[A-Za-z_]\\w*=[\\w.\\/:,-]*\\s+)*'                            // env assignments
+  + '(?:(?:env|nohup|nice|command|timeout\\s+\\d+[smhd]?)\\s+)*'      // transparent wrappers
+  + '(?:[\\w.\\/-]*\\/)?(python[\\d.]*|node|nodejs|ruby|perl|php)'    // (1) interpreter, optional dir
+  + '(?:\\s+(?:-[WX]\\s+\\w+|--?[\\w-]+(?:=[^\\s<>|&;()`$\'"]*)?))*'  // flags only
+  + '(?:\\s+-)?'                                                      // the stdin program marker
+  + '\\s+<<([\'"])([A-Za-z_]\\w*)\\2[ \\t]*\\n',                      // (2) quote (3) DELIM, nothing else on the line
+);
+
+/** The masked range and language when `text` is exactly the shape above, else null. */
+function wholeCommandHeredocProgram(text: string): { start: number; end: number; lang: ScriptLang } | null {
+  if (!text.includes('<<')) return null;
+  const m = WHOLE_COMMAND_HEREDOC_PROGRAM.exec(text);
+  if (!m) return null;
+  const delim = m[3];
+  const bodyStart = m[0].length;
+  // The closer is the first line that is EXACTLY the delimiter — not `EOF #`,
+  // not `EOFX`, not an indented one (that needs `<<-`, which is excluded).
+  // Any EARLIER line that merely STARTS with the delimiter (`EOF #`, `EOFX`,
+  // an indented `EOF`) is one the region scanner's `\b` closer would accept
+  // while the shell would not. The two must never disagree about where the
+  // body ends, so such a body earns no relief at all.
+  let at = bodyStart;
+  let bodyEnd = -1;
+  const looksLikeCloser = new RegExp(`^[ \\t]*${delim}\\b`);
+  while (at <= text.length) {
+    const nl = text.indexOf('\n', at);
+    const line = text.slice(at, nl < 0 ? text.length : nl);
+    if (line === delim) { bodyEnd = at; break; }
+    if (looksLikeCloser.test(line)) return null;
+    if (nl < 0) break;
+    at = nl + 1;
   }
-  if (quote) return null;
-  const tokens = tokeniseStatement(introLine.slice(openerEnd, at));
-  const wordAt = commandWordIndex(tokens);
-  const word = tokens[wordAt];
-  if (!word) return null;
-  const base = commandBaseName(word).toLowerCase();
-  if (!STDIN_PROGRAM_INTERPRETER.test(base)) return null;
-  for (let i = wordAt + 1; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t === '-') continue;
-    if (!t.startsWith('-')) return null;                       // a file operand: the heredoc is its stdin DATA, not the program
-    if (FLAG_TAKES_VALUE.test(t)) i++;
-  }
-  // Tail: the rest of the statement after the `<<[-]['"]DELIM['"]` token must be empty.
-  const open = /^<<-?\s*(['"]?)[A-Za-z_]\w*\1/.exec(introLine.slice(at));
-  if (!open) return null;
-  if (/\\$/.test(introLine)) return null;                      // continuation: the statement goes on where we cannot see
-  const tail = introLine.slice(at + open[0].length).replace(FD_ONLY_REDIRECT, ' ');
-  const ownTail = tail.split(/;|&&|\|\||(?<!&)&(?!&)/)[0] ?? '';
-  if (ownTail.trim() !== '') return null;
-  if (SUFFIX_CONSUMES_OUTPUT.test(text.slice(closerEnd))) return null;
-  return langFromInterpreter(base);
+  if (bodyEnd < 0) return null;                                       // unterminated: not this shape
+  if (!/^\s*$/.test(text.slice(bodyEnd + delim.length))) return null; // anything after the closer: not this shape
+  const lang = langFromInterpreter(commandBaseName(m[1].toLowerCase()));
+  if (lang === 'sh') return null;
+  return { start: bodyStart, end: Math.max(bodyStart, bodyEnd - 1), lang };
 }
 
 /**
@@ -5394,15 +5322,13 @@ function heredocBodies(text: string): HeredocBody[] {
     const interp = introLine.match(HEREDOC_INTERP_TOKEN);
     const nl = m[0].indexOf('\n');
     const start = m.index + nl + 1;
-    const fullIntroLine = introLine + m[0].slice(0, nl);   // through the end of the opener line, no newline
-    const outFile = heredocOutputFile(fullIntroLine + '\n');
+    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
     out.push({
       start,
       end: start + m[3].length,
       body: m[3],
       lang: interp ? langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase())) : null,
       outFile: outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null,
-      program: heredocProgramLang(text, lineStart, m.index, m.index + m[0].length, out),
     });
   }
   return out;
@@ -5419,29 +5345,20 @@ function heredocBodies(text: string): HeredocBody[] {
  * names was denied on those names; the same code as a script file was
  * allowed, so moving code into a file flipped the verdict.
  *
- * Masked only when the body is provably inert: the heredoc's OWN statement
- * runs a non-shell interpreter on it as its program with the output left at
- * the terminal (`heredocProgramLang`, #686 review — a pipe, redirect,
- * substitution or process substitution on the intro line means the shell
- * reads that output, and the body stays scanned), the body has no shell-out
- * sink, and its output is not captured to a file (a
- * captured body may GENERATE the shell a later statement runs — #86.2 — and
- * `interpreterHeredocRegions` already keeps those scanned as shell). A shell
- * heredoc IS shell and is never masked. Length-preserving, so every offset
- * computed against the original text stays valid.
+ * Masked only when the ENTIRE command is the one recognised whole-command
+ * shape (`WHOLE_COMMAND_HEREDOC_PROGRAM`, #686: a non-shell interpreter
+ * reading a quoted-delimiter heredoc as its program, with nothing before it
+ * but an optional plain `cd … &&`, nothing on the intro line after the
+ * delimiter, an exact-line closer and nothing after it) and the body has no
+ * shell-out sink. Any other command is left exactly as main scans it. A
+ * shell heredoc IS shell and is never masked. Length-preserving, so every
+ * offset computed against the original text stays valid.
  */
 function maskSinkFreeHeredocBodies(text: string): string {
-  let out = text;
-  for (const h of heredocBodies(text)) {
-    // `program` (not `lang`): the interpreter's OWN statement reads this body
-    // and its output stays at the terminal — see heredocProgramLang (#686).
-    // A `>/dev/null` is a discard, not a capture: heredocProgramLang already
-    // admits it on the tail, so only a real file blocks the mask here.
-    if (h.program === null || h.program === 'sh' || (h.outFile && h.outFile !== '/dev/null')) continue;
-    if (hasShellOutSink(h.body, h.program)) continue;
-    out = out.slice(0, h.start) + ' '.repeat(h.end - h.start) + out.slice(h.end);
-  }
-  return out;
+  const h = wholeCommandHeredocProgram(text);
+  if (!h) return text;
+  if (hasShellOutSink(text.slice(h.start, h.end), h.lang)) return text;
+  return text.slice(0, h.start) + ' '.repeat(h.end - h.start) + text.slice(h.end);
 }
 
 function interpreterHeredocRegions(text: string): ScanRegion[] {
