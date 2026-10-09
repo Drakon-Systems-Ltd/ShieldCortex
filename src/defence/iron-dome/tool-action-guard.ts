@@ -763,6 +763,13 @@ const OPENCLAW_CONFIG_PATH_RE = /(?:^|[\s'"=:(\\/])\.openclaw[\\/]+openclaw\.jso
 const SSH_DIR_PATH_SRC = String.raw`(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])`;
 const AUTHORIZED_KEYS_PATH_SRC = String.raw`(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b`;
 const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b`;
+// #702: the sensitive-path set as ONE regex, named so the `touch-sensitive-path`
+// DANGEROUS row and the fold readers (`isSensitiveFoldPath`) cannot drift apart.
+// Matched against command text by the rule and against a bare path by the
+// fold, so every alternative must hold for both: a home-rooted `.ssh` dir, an
+// `authorized_keys` segment, `id_rsa` by name, `.aws/credentials`, the three
+// `/etc` account files and a `.env` file.
+const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b`, 'i');
 // #505: a shell WRITE shape whose destination is a startup file. The write
 // prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of
 // options and earlier operands (`-a`, `--append`, `--`, `/tmp/log`), or
@@ -971,7 +978,7 @@ const DANGEROUS: Pattern[] = [
   // and `authorized_keys` is matched as a path segment wherever it sits:
   // naming that file IS the persistence. Same tier and signal as before, so
   // the planes, remediation and audit rows need nothing new.
-  { re: new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b`, 'i'), signal: 'touch-sensitive-path' },
+  { re: SENSITIVE_PATH_RE, signal: 'touch-sensitive-path' },
   // #505 (SC-06): a shell write shape whose DESTINATION is a login/interactive
   // startup file. Content written there runs at the next shell start, outside
   // any tool call the guard will see — `export PATH=/tmp/evil:$PATH` in
@@ -4608,6 +4615,26 @@ interface ScriptFold {
 }
 
 /**
+ * #702 (#686 N1) — the one question every fold reader asks before it calls
+ * the resolver: is this path one whose BYTES must never enter the scan
+ * surface? A sink-bearing program that merely opens a key —
+ * `import subprocess` plus `open('/home/u/.ssh/id_rsa').read()` — is not
+ * masked (it can shell out, so its path literals are candidate invocations,
+ * #190/#661), and `splitCommandStatements` breaks on `(`, so the key's path
+ * lands in command position and is "detected". Following that detection read
+ * the key through the resolver and copied it into the scan text and every
+ * audit row derived from it, on the `-c`, heredoc, file AND `$(cat …)` planes
+ * alike. Reading a secret is never detection: the ACCESS is what the guard
+ * gates, and `touch-sensitive-path` already fires on the text that named the
+ * path. So the path is checked against the same sensitive-path set that rule
+ * uses, and a match is recorded as opaque instead of resolved. Checked
+ * against the bare path, before any read, so the resolver is never asked.
+ */
+function isSensitiveFoldPath(scriptPath: string): boolean {
+  return SENSITIVE_PATH_RE.test(scriptPath);
+}
+
+/**
  * Resolve the scripts a command invokes and return their (comment-stripped)
  * contents for scanning. Bounded on every axis: depth, file count, per-file
  * size, total size, and a visited set that makes a source-cycle terminate.
@@ -4639,6 +4666,11 @@ function foldScriptSources(
     if (visited.has(next.path)) continue;              // cycle guard
     visited.add(next.path);
     if (visited.size > MAX_SCRIPTS_PER_CALL) { opaque = true; break; }
+    // #702: a sensitive path is never READ, on any plane. Recorded as opaque
+    // (the invocation is known and its contents were not scanned) — the
+    // access itself is already gated by `touch-sensitive-path` on the text
+    // that named the path.
+    if (isSensitiveFoldPath(next.path)) { opaque = true; continue; }
 
     let src: string | null = null;
     try {
@@ -4931,6 +4963,10 @@ function readSubstitutedFile(
   state: SubstitutionState,
 ): string | null {
   if (typeof resolveScriptSource !== 'function') { state.opaque = true; return null; }
+  // #702: `$(cat ~/.ssh/id_rsa)` splices the KEY into the command line; the
+  // guard must not do the same into its own scan surface. Opaque, unread —
+  // the raw `$(cat …)` text stays and names the path, so the access is gated.
+  if (isSensitiveFoldPath(path)) { state.opaque = true; return null; }
   let src: string | null = null;
   try {
     src = resolveScriptSource(path);
