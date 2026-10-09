@@ -270,3 +270,71 @@ describe('#686 — only a program whose output stays at the terminal is masked',
     expect(verdict(cmd, FILES).decision).toBe('block');
   });
 });
+
+/**
+ * #686 review round 2 (TARS) — the intro line is not the statement. A
+ * multiline substitution, group, subshell, loop, conditional or function
+ * can enclose the heredoc and pipe the WHOLE construct's output into a
+ * shell, an earlier `exec` can redirect the shell's stdout, and operands
+ * AFTER the delimiter make the body that program's input. Every ROUTED row
+ * blocks on main (028ef17a) and allowed on 41f437ca. Relief now requires a
+ * top-level, isolated, complete statement; the ENCLOSED_OK rows show that
+ * balanced constructs and quoted parens before the line do not cost it.
+ */
+describe('#686 round 2 — relief only for a top-level isolated statement', () => {
+  const P = PAYLOAD_PATH;
+  const FILES = { [P]: PAYLOAD };
+  const H = `python3 - <<'EOF'\nprint('${P}')\nEOF`;
+  const ROUTED: Record<string, string> = {
+    'multiline eval of a substitution': `eval "$(\n${H}\n)"`,
+    'multiline command substitution': `sh -c "$(\n${H}\n)"`,
+    'multiline process substitution': `sh <(\n${H}\n)`,
+    'multiline backtick substitution': 'sh -c "`\n' + H + '\n`"',
+    'brace group piped': `{ ${H}\n} | sh`,
+    'brace group, heredoc on its own line, piped': `{\n${H}\n} | sh`,
+    'subshell piped': `( ${H}\n) | sh`,
+    'multiline subshell piped': `(\n${H}\n) | sh`,
+    'for … done piped': `for i in 1; do\n${H}\ndone | sh`,
+    'while … done piped': `while read x; do ${H}\ndone < /etc/hostname | sh`,
+    'if … fi piped': `if true; then\n${H}\nfi | sh`,
+    'function body, then piped': `f() {\n${H}\n}\nf | sh`,
+    'function keyword body, then piped': `function f {\n${H}\n}; f | sh`,
+    'earlier exec into a process substitution': `exec > >(sh)\n${H}`,
+    'earlier exec into a file that later runs': `exec 1>/tmp/g.sh\n${H}\nexec 1>&-\nsh /tmp/g.sh`,
+    'perl program after the delimiter': `perl <<'EOF' -ne 'system($_)'\n${P}\nEOF`,
+    'python script after the delimiter': `python3 <<'EOF' run.py\n${P}\nEOF`,
+    'node script after the delimiter': `node <<'EOF' run.js\n${P}\nEOF`,
+    'an earlier heredoc body hides an open paren': `cat <<'A'\n(\nA\n${H} | sh`,
+  };
+  const ENCLOSED_OK: Record<string, string> = {
+    'after a complete statement': `echo start\n${H}\necho done`,
+    'after an earlier, closed heredoc': `cat <<'A'\nhello\nA\n${H}`,
+    'after a balanced subshell': `(echo x)\n${H}`,
+    'after a balanced command substitution': `X=$(date)\n${H}`,
+    'after a quoted paren': `echo "(" \n${H}`,
+    'after a brace expansion': `echo ${'$'}{HOME}\n${H}`,
+  };
+
+  it.each(Object.entries(ROUTED))('routed — %s: blocked, payload folded', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(P);
+    const v = verdict(cmd, FILES);
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain('recursive-force-delete');
+  });
+
+  it.each(Object.entries(ENCLOSED_OK))('isolated — %s: masked, nothing folded', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd)).toEqual([]);
+    const v = verdict(cmd, FILES);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).toEqual([]);
+  });
+
+  it('a payload path passed as argv to a sink-bearing program is the SAME gap as on main (recorded, not widened)', () => {
+    // `python3 - <<'EOF' /tmp/payload.sh` with `os.system(sys.argv[1])`: the body has a
+    // sink so it is never masked, but an argv operand is not an invocation the guard
+    // follows on any plane. main: allow, detect=[]. Same here. See the #190 suite.
+    const cmd = `python3 - <<'EOF' ${P}\nimport sys, os; os.system(sys.argv[1])\nEOF`;
+    expect(detectScriptInvocations(cmd)).toEqual([]);
+    expect(verdict(cmd, FILES).decision).toBe('allow');
+  });
+});
