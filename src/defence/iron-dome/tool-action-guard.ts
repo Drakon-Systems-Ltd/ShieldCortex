@@ -5220,11 +5220,94 @@ interface HeredocBody {
    * Language of the interpreter on the intro line that READS the body —
    * `null` when no interpreter is named there (the body is data, or lands in
    * a file something else runs). The LAST interpreter token wins, so
-   * `python3 - <<'PY' | bash` is `sh`: the body's output is shell.
+   * `python3 - <<'PY' | bash` is `sh`: the body's output is shell. Chooses the
+   * SCAN language of a region only — it never decides a mask (see `program`).
    */
   lang: ScriptLang | null;
   /** The file the intro line redirects/tees the body or its output to, if any. */
   outFile: string | null;
+  /**
+   * The language of the non-shell interpreter whose OWN statement reads this
+   * body as its program from stdin, with that statement's output going to the
+   * terminal — or `null`. Decided by `heredocProgramLang` from the heredoc's
+   * own statement, never from a token search across the line. This is the
+   * only field `maskSinkFreeHeredocBodies` may mask on (#686 review).
+   */
+  program: ScriptLang | null;
+}
+
+/** Non-shell interpreters that read their PROGRAM from stdin given `-` or no file operand. */
+const STDIN_PROGRAM_INTERPRETER = /^(?:python[\d.]*|node|nodejs|ruby|perl|php)$/;
+/** Statement separators the opener scan honours; `(`, `)` and backtick are separators too, but disqualifying ones. */
+const HEREDOC_STATEMENT_OPENER = /[;&|]/;
+/** After the delimiter: an fd-only redirect that cannot carry the program's output anywhere a shell reads. */
+const FD_ONLY_REDIRECT = /(?<![\w])(?:[0-2]?>>?|&>)\s*(?:\/dev\/null|&[0-2])(?![\w\/])/g;
+/** Anything in the tail that routes stdout somewhere, or opens a construct this scan cannot see the end of. */
+const TAIL_ROUTES_OUTPUT = /[|<>`()]|\$\(|\btee\b|\\$/;
+
+/**
+ * #686 review — the language of the interpreter that reads a heredoc as its
+ * PROGRAM, with its output provably left at the terminal; `null` otherwise.
+ *
+ * The first cut of #661 classified a heredoc by the LAST interpreter token on
+ * the text before `<<` and masked a sink-free body on that alone. Two holes,
+ * both found independently in review and reproduced here: (1) nothing after
+ * the delimiter was examined, so `python3 - <<'EOF' | sh`, `… |& sh`,
+ * `… 2>&1 | sh`, `sh <(python3 - <<'EOF'`, `sh -c "$(python3 - <<'EOF'`
+ * masked the body and dropped the payload fold; (2) "an interpreter token
+ * somewhere before `<<`" is not "the command that reads the body" —
+ * `bash -s python3 <<'EOF'`, `node -v; cat <<'EOF' | ash` and
+ * `python3 -V; eval "$(cat <<'EOF'` classified as Python. Every one of those
+ * blocked on main and allowed on that head.
+ *
+ * This decides from the heredoc's OWN statement and fails closed on anything
+ * it cannot see the end of:
+ *   - The statement opener before `<<` must be line start, `;`, `&` or `|`
+ *     (a pipe INTO the interpreter is fine). A `(`, `$(`, `<(`, `>(` or
+ *     backtick opener means the output is read by the shell → null. An
+ *     unclosed quote → null.
+ *   - The statement's command word (past env assignments and the usual
+ *     wrappers, via `commandWordIndex`) must be a non-shell interpreter, and
+ *     its operands must be flags only (plus `-`): a file operand means the
+ *     heredoc is that program's DATA, not the program → null.
+ *   - The tail after the delimiter, with fd-only redirects (`2>/dev/null`,
+ *     `2>&1`, `>/dev/null`) removed, must contain no `|`, `>`, `<`, `tee`,
+ *     `(`, `)`, backtick, `$(` or a trailing `\` continuation → otherwise null.
+ *     A `;`, `&&` or `||` starts a new statement and is fine on its own.
+ * Not masking is never a regression: the body is then scanned exactly as on
+ * main. Masking only happens when the output has nowhere to go but the screen.
+ */
+function heredocProgramLang(introLine: string, heredocAt: number): ScriptLang | null {
+  // Opener: last unquoted separator before the heredoc, with the quote state at `heredocAt`.
+  let quote: string | null = null;
+  let openerEnd = 0;
+  for (let i = 0; i < heredocAt; i++) {
+    const c = introLine[i];
+    if (c === '\\' && quote !== "'") { i++; continue; }
+    if (quote) { if (c === quote) quote = null; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c === '(' || c === ')' || c === '`') return null;   // subshell / substitution / process substitution → the shell reads the output
+    if (HEREDOC_STATEMENT_OPENER.test(c)) openerEnd = i + 1;
+  }
+  if (quote) return null;
+  const tokens = tokeniseStatement(introLine.slice(openerEnd, heredocAt));
+  const at = commandWordIndex(tokens);
+  const word = tokens[at];
+  if (!word) return null;
+  const base = commandBaseName(word).toLowerCase();
+  if (!STDIN_PROGRAM_INTERPRETER.test(base)) return null;
+  for (let i = at + 1; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '-') continue;
+    if (!t.startsWith('-')) return null;                       // a file operand: the heredoc is its stdin DATA, not the program
+    if (FLAG_TAKES_VALUE.test(t)) i++;
+  }
+  // Tail: everything on the intro line after the `<<[-]['"]DELIM['"]` token.
+  const open = /^<<-?\s*(['"]?)[A-Za-z_]\w*\1/.exec(introLine.slice(heredocAt));
+  if (!open) return null;
+  const tail = introLine.slice(heredocAt + open[0].length).replace(FD_ONLY_REDIRECT, ' ');
+  if (TAIL_ROUTES_OUTPUT.test(tail)) return null;
+  return langFromInterpreter(base);
 }
 
 /**
@@ -5247,13 +5330,15 @@ function heredocBodies(text: string): HeredocBody[] {
     const interp = introLine.match(HEREDOC_INTERP_TOKEN);
     const nl = m[0].indexOf('\n');
     const start = m.index + nl + 1;
-    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
+    const fullIntroLine = introLine + m[0].slice(0, nl);   // through the end of the opener line, no newline
+    const outFile = heredocOutputFile(fullIntroLine + '\n');
     out.push({
       start,
       end: start + m[3].length,
       body: m[3],
       lang: interp ? langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase())) : null,
       outFile: outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null,
+      program: heredocProgramLang(fullIntroLine, introLine.length),
     });
   }
   return out;
@@ -5270,8 +5355,12 @@ function heredocBodies(text: string): HeredocBody[] {
  * names was denied on those names; the same code as a script file was
  * allowed, so moving code into a file flipped the verdict.
  *
- * Masked only when the body is provably inert: an interpreter reads it, the
- * body has no shell-out sink, and its output is not captured to a file (a
+ * Masked only when the body is provably inert: the heredoc's OWN statement
+ * runs a non-shell interpreter on it as its program with the output left at
+ * the terminal (`heredocProgramLang`, #686 review — a pipe, redirect,
+ * substitution or process substitution on the intro line means the shell
+ * reads that output, and the body stays scanned), the body has no shell-out
+ * sink, and its output is not captured to a file (a
  * captured body may GENERATE the shell a later statement runs — #86.2 — and
  * `interpreterHeredocRegions` already keeps those scanned as shell). A shell
  * heredoc IS shell and is never masked. Length-preserving, so every offset
@@ -5280,8 +5369,10 @@ function heredocBodies(text: string): HeredocBody[] {
 function maskSinkFreeHeredocBodies(text: string): string {
   let out = text;
   for (const h of heredocBodies(text)) {
-    if (h.lang === null || h.lang === 'sh' || h.outFile) continue;
-    if (hasShellOutSink(h.body, h.lang)) continue;
+    // `program` (not `lang`): the interpreter's OWN statement reads this body
+    // and its output stays at the terminal — see heredocProgramLang (#686).
+    if (h.program === null || h.program === 'sh' || h.outFile) continue;
+    if (hasShellOutSink(h.body, h.program)) continue;
     out = out.slice(0, h.start) + ' '.repeat(h.end - h.start) + out.slice(h.end);
   }
   return out;
