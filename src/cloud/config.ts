@@ -19,6 +19,7 @@ import {
   type ProtectedPolicyKey,
 } from '../defence/iron-dome/policy-lock.js';
 import { emitProtectedAudit } from '../defence/iron-dome/protected-root.js';
+import { openRecoveryAuditSink, type RecoveryAuditSink } from './recovery-audit.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -834,6 +835,15 @@ export function previewConfigResign(): ConfigResignPreview {
   };
 }
 
+/**
+ * Whether the `config_resigned` row was written. `recorded: false` means the
+ * re-sign IS in force but its record is not: the caller must say so, not
+ * "recorded".
+ */
+export type ConfigResignAudit =
+  | { recorded: true; rowId: number; location: string }
+  | { recorded: false; location: string; error: string };
+
 export interface ConfigResignResult {
   path: string;
   previousVerdict: 'tampered';
@@ -841,6 +851,7 @@ export interface ConfigResignResult {
   newSha256: string;
   backupPath: string;
   loosenedKeys: string[];
+  audit: ConfigResignAudit;
 }
 
 /**
@@ -855,13 +866,19 @@ export interface ConfigResignResult {
  *   - loosen a key the policy lock forbids — the same refusal, audited as
  *     `policy_refused`, that the setters apply;
  *   - make a hand-edited Action Guard loosening effective without a verified
- *     lock covering it (see {@link resignEffects}).
+ *     lock covering it (see {@link resignEffects});
+ *   - sign anything when the audit log cannot be opened.
  *
- * Before writing it saves the exact previewed bytes to
- * `config.json.bak-resign-<timestamp>` (0600, never overwriting an existing
- * file), and aborts if that fails. After writing it emits a `config_resigned`
- * protected-audit row naming the previous verdict, both hashes, the backup and
- * the loosened key NAMES — no values.
+ * Order: the checks; then the audit log is opened (refusing, with nothing
+ * written, if it cannot be); then the checks again on a fresh read, with no
+ * await between them and the write; then the exact previewed bytes are saved
+ * to `config.json.bak-resign-<timestamp>` (0600, never overwriting an existing
+ * file — and an aborted re-sign if that fails); then the signed write; then
+ * the `config_resigned` row naming the previous verdict, both hashes, the
+ * backup and the loosened key NAMES — no values. That row can only be written
+ * after the file it describes, so if it fails the re-sign has already landed:
+ * the result says `audit.recorded: false` and the backup stays as the
+ * evidence. Nothing here claims a record it did not make.
  *
  * What this is not: an identity check. A same-uid process can run it, exactly
  * as it can read `.integrity-key` and sign the file itself; the HMAC is a
@@ -869,7 +886,10 @@ export interface ConfigResignResult {
  * from that alarm is a reviewed, recorded act instead of a side effect of the
  * next unrelated setting change.
  */
-export function resignTamperedConfig(confirmSha256: string, opts: { now?: Date } = {}): ConfigResignResult {
+export async function resignTamperedConfig(
+  confirmSha256: string,
+  opts: { now?: Date } = {},
+): Promise<ConfigResignResult> {
   const confirm = confirmSha256.trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(confirm)) {
     throw new Error(
@@ -877,6 +897,71 @@ export function resignTamperedConfig(confirmSha256: string, opts: { now?: Date }
       'reviewed — a prefix is not accepted. Nothing was written.',
     );
   }
+  // Refusals first, so a re-sign that is going to be refused never opens the
+  // audit database.
+  admitResign(confirm);
+
+  let sink: RecoveryAuditSink;
+  try {
+    sink = await openRecoveryAuditSink();
+  } catch (err) {
+    throw new Error(
+      `Not re-signing ${getConfigFile()}: the audit log that must record a re-sign could not be opened ` +
+      `(${err instanceof Error ? err.message : String(err)}). A re-sign is only done when it can be recorded. ` +
+      'Nothing was written.',
+    );
+  }
+
+  try {
+    // Again, on bytes read now: the file may have changed while the audit log
+    // was opening. From here to the write there is no await.
+    const { read, data, loosenedKeys, previousSha256 } = admitResign(confirm);
+
+    const stamp = (opts.now ?? new Date()).toISOString().replace(/[:.]/g, '-');
+    const backupPath = `${read.path}.bak-resign-${stamp}`;
+    // The previewed bytes themselves, not a fresh copy of the path: what is
+    // backed up is exactly what was reviewed. `wx` never overwrites.
+    writeFileSync(backupPath, read.bytes, { mode: 0o600, flag: 'wx' });
+    try { chmodSync(backupPath, 0o600); } catch { /* best-effort */ }
+
+    // Direct writeRawConfig, the sanctioned exception to the mutateRawConfig
+    // rule (like self-heal): the data is the confirmed bytes, parsed — not a
+    // read-modify-write of whatever the file holds by now.
+    writeRawConfig(data);
+    const newSha256 = sha256Hex(readFileSync(read.path));
+
+    let audit: ConfigResignAudit;
+    try {
+      const rowId = sink.record({
+        outcome: 'config_resigned',
+        path: read.path,
+        reason: 'tampered',
+        detail:
+          `config.json re-signed by explicit \`config --resign\`; previous verdict tampered; ` +
+          `previous sha256 ${previousSha256}; new sha256 ${newSha256}; backup ${backupPath}; ` +
+          `keys leaving the fail-closed posture: ${loosenedKeys.length > 0 ? loosenedKeys.join(', ') : 'none'}`,
+      });
+      audit = { recorded: true, rowId, location: sink.location };
+    } catch (err) {
+      audit = { recorded: false, location: sink.location, error: err instanceof Error ? err.message : String(err) };
+    }
+
+    return { path: read.path, previousVerdict: 'tampered', previousSha256, newSha256, backupPath, loosenedKeys, audit };
+  } finally {
+    sink.close();
+  }
+}
+
+/**
+ * Every refusal {@link resignTamperedConfig} makes, on a fresh read. Throws, or
+ * returns what the write needs.
+ */
+function admitResign(confirm: string): {
+  read: ConfigBytes & { bytes: Buffer };
+  data: Record<string, unknown>;
+  loosenedKeys: string[];
+  previousSha256: string;
+} {
   const read = readConfigBytesNoSideEffects();
   if (!read.bytes || read.verdict !== 'tampered' || !read.data) {
     throw new Error(
@@ -911,31 +996,7 @@ export function resignTamperedConfig(confirmSha256: string, opts: { now?: Date }
       're-apply these settings with their own commands. Nothing was written.',
     );
   }
-
-  const stamp = (opts.now ?? new Date()).toISOString().replace(/[:.]/g, '-');
-  const backupPath = `${read.path}.bak-resign-${stamp}`;
-  // The previewed bytes themselves, not a fresh copy of the path: what is
-  // backed up is exactly what was reviewed. `wx` never overwrites.
-  writeFileSync(backupPath, read.bytes, { mode: 0o600, flag: 'wx' });
-  try { chmodSync(backupPath, 0o600); } catch { /* best-effort */ }
-
-  // Direct writeRawConfig, the sanctioned exception to the mutateRawConfig
-  // rule (like self-heal): the data is the confirmed bytes, parsed — not a
-  // read-modify-write of whatever the file holds by now.
-  writeRawConfig(data);
-  const newSha256 = sha256Hex(readFileSync(read.path));
-
-  emitProtectedAudit({
-    outcome: 'config_resigned',
-    path: read.path,
-    reason: 'tampered',
-    detail:
-      `config.json re-signed by explicit \`config --resign\`; previous verdict tampered; ` +
-      `previous sha256 ${previousSha256}; new sha256 ${newSha256}; backup ${backupPath}; ` +
-      `keys leaving the fail-closed posture: ${loosenedKeys.length > 0 ? loosenedKeys.join(', ') : 'none'}`,
-  });
-
-  return { path: read.path, previousVerdict: 'tampered', previousSha256, newSha256, backupPath, loosenedKeys };
+  return { read: { ...read, bytes: read.bytes }, data, loosenedKeys, previousSha256 };
 }
 
 /**

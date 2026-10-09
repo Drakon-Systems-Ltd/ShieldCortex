@@ -10,7 +10,8 @@
  *
  * Isolation: per-test SHIELDCORTEX_CONFIG_DIR, SHIELDCORTEX_PROTECTED_ROOT and
  * OPENCLAW_HOME under os.tmpdir(), os.homedir() spied to the same temp tree
- * (doctor's Claude wiring probe), the iron-dome audit logger and the OpenClaw
+ * (doctor's Claude wiring probe), the iron-dome audit logger, the re-sign's
+ * audit sink (driven for real in config-resign-audit-dist-647) and the OpenClaw
  * plugin guard sync mocked. Modules are imported once, after the mocks are
  * registered; per-test state is reset through clearCloudConfigCache().
  */
@@ -24,7 +25,13 @@ type AuditEntry = { action: string; allowed: boolean; reason: string };
 const auditSpy = jest.fn<(entry: AuditEntry) => void>();
 const guardSyncSpy = jest.fn(() => ({ status: 'skipped' as const, reason: 'no-entry' as const }));
 
+type SinkEvent = { outcome: string; detail?: string };
+const sinkRecord = jest.fn<(event: SinkEvent) => number>();
+const openSinkSpy = jest.fn<() => Promise<{ location: string; record: typeof sinkRecord; close: () => void }>>();
+const SINK_LOCATION = '/test/memories.db';
+
 jest.unstable_mockModule('../../defence/iron-dome/audit.js', () => ({ logIronDomeAudit: auditSpy }));
+jest.unstable_mockModule('../../cloud/recovery-audit.js', () => ({ openRecoveryAuditSink: openSinkSpy }));
 jest.unstable_mockModule('../../setup/openclaw-plugin-guard-sync.js', () => ({
   syncOpenClawPluginActionGuard: guardSyncSpy,
 }));
@@ -80,6 +87,22 @@ function tamperedFixture(edit?: (cfg: Record<string, any>) => void): Buffer {
   return fs.readFileSync(configFile());
 }
 
+/** handleCloudConfig is sync except for a confirmed re-sign; one shape for both. */
+async function runCli(args: string[]): Promise<void> {
+  await cli.handleCloudConfig(args);
+}
+
+/** A signed config with a credential, then a hand edit no lock or floor holds. */
+function benignTamper(): Buffer {
+  config.setCloudConfig({ cloudApiKey: SENTINEL });
+  config.setActionGuardCoreConfig({ enabled: true, enforce: true });
+  const onDisk = readOnDisk();
+  onDisk.proactiveRecall = true;
+  fs.writeFileSync(configFile(), JSON.stringify(onDisk, null, 2) + '\n');
+  config.clearCloudConfigCache();
+  return fs.readFileSync(configFile());
+}
+
 function mockExit(): void {
   jest.spyOn(process, 'exit').mockImplementation(((): never => { throw new Error('exit'); }) as never);
 }
@@ -107,6 +130,10 @@ beforeEach(() => {
   config.clearCloudConfigCache();
   auditSpy.mockClear();
   guardSyncSpy.mockClear();
+  sinkRecord.mockReset();
+  sinkRecord.mockReturnValue(42);
+  openSinkSpy.mockReset();
+  openSinkSpy.mockImplementation(async () => ({ location: SINK_LOCATION, record: sinkRecord, close: () => undefined }));
 });
 
 afterEach(() => {
@@ -228,34 +255,80 @@ describe('#647 shieldcortex config CLI', () => {
     expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-resign-'))).toBe(false);
   });
 
-  it('--resign --confirm needs a value and the full hash', () => {
+  it('--resign --confirm needs a value and the full hash', async () => {
     tamperedFixture();
     mockExit();
-    expect(() => cli.handleCloudConfig(['--resign', '--confirm'])).toThrow('exit');
-    expect(() => cli.handleCloudConfig(['--resign', '--confirm', 'abc123'])).toThrow('exit');
+    await expect(runCli(['--resign', '--confirm'])).rejects.toThrow('exit');
+    await expect(runCli(['--resign', '--confirm', 'abc123'])).rejects.toThrow('exit');
     expect(errors.join('\n')).toMatch(/full 64-character/);
+    expect(openSinkSpy).not.toHaveBeenCalled();
   });
 
-  it('--resign --confirm <sha256> re-signs a benign tamper, prints the backup, and doctor reads valid', async () => {
-    config.setCloudConfig({ cloudApiKey: SENTINEL });
-    config.setActionGuardCoreConfig({ enabled: true, enforce: true });
-    const onDisk = readOnDisk();
-    onDisk.proactiveRecall = true;
-    fs.writeFileSync(configFile(), JSON.stringify(onDisk, null, 2) + '\n');
-    config.clearCloudConfigCache();
-    const bytes = fs.readFileSync(configFile());
+  it('--resign --confirm <sha256> re-signs a benign tamper, prints the backup and the audit row, and doctor reads valid', async () => {
+    const bytes = benignTamper();
 
-    cli.handleCloudConfig(['--resign', '--confirm', sha256(bytes)]);
+    await runCli(['--resign', '--confirm', sha256(bytes)]);
     const out = logs.join('\n');
     expect(out).toMatch(/Re-signed .*\(was: tampered\)/);
+    expect(out).toContain(`Recorded in the audit log as config_resigned (row 42, ${SINK_LOCATION})`);
     const backup = fs.readdirSync(configDir).find((n) => n.includes('.bak-resign-'));
     expect(backup).toBeDefined();
     expect(fs.readFileSync(path.join(configDir, backup!)).equals(bytes)).toBe(true);
     expect(out).not.toContain(SENTINEL);
     config.clearCloudConfigCache();
     expect(integrityRow().message).toMatch(/verdict: valid/);
+    expect(sinkRecord.mock.calls.map((c) => c[0].outcome)).toEqual(['config_resigned']);
+  });
 
-    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
-    expect(auditSpy.mock.calls.map((c) => c[0]).filter((e) => e.reason.startsWith('config_resigned'))).toHaveLength(1);
+  it('an audit log that cannot be opened: exit 1, says so, nothing written', async () => {
+    const bytes = benignTamper();
+    openSinkSpy.mockImplementationOnce(async () => { throw new Error('unable to open database file'); });
+    mockExit();
+    await expect(runCli(['--resign', '--confirm', sha256(bytes)])).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(errors.join('\n')).toMatch(/audit log that must record a re-sign could not be opened.*Nothing was written/s);
+    expect(logs.join('\n')).not.toMatch(/Re-signed|Recorded/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(fs.readdirSync(configDir).some((n) => n.includes('.bak-resign-'))).toBe(false);
+  });
+
+  it('a row that fails after the write: exit 2, "AUDIT NOT RECORDED", never "Recorded", backup kept', async () => {
+    const bytes = benignTamper();
+    sinkRecord.mockImplementationOnce(() => { throw new Error(`the audit row could not be written to ${SINK_LOCATION}`); });
+    mockExit();
+    await expect(runCli(['--resign', '--confirm', sha256(bytes)])).rejects.toThrow('exit');
+    expect(process.exit).toHaveBeenCalledWith(2);
+    expect(logs.join('\n')).toMatch(/Re-signed .*\(was: tampered\)/);
+    expect(logs.join('\n')).not.toMatch(/Recorded in the audit log/);
+    const err = errors.join('\n');
+    expect(err).toMatch(/AUDIT NOT RECORDED: the re-sign above IS in force/);
+    expect(err).toContain(`the audit row could not be written to ${SINK_LOCATION}`);
+    const backup = fs.readdirSync(configDir).find((n) => n.includes('.bak-resign-'));
+    expect(err).toContain(backup!);
+    expect(fs.readFileSync(path.join(configDir, backup!)).equals(bytes)).toBe(true);
+  });
+
+  it('--resign takes nothing else: a setting flag beside it is rejected by NAME, not silently dropped', async () => {
+    const bytes = benignTamper();
+    mockExit();
+    await expect(runCli(['--resign', '--action-guard-notify-webhook', 'https://hooks.example/SECRET_647']))
+      .rejects.toThrow('exit');
+    await expect(runCli(['--resign', '--confirm', sha256(bytes), '--mode', 'permissive'])).rejects.toThrow('exit');
+    await expect(runCli(['--resign', '--confirm', sha256(bytes), '--confirm', sha256(bytes)])).rejects.toThrow('exit');
+    const err = errors.join('\n');
+    expect(err).toMatch(/takes only `--confirm <sha256>`, not --action-guard-notify-webhook/);
+    expect(err).toMatch(/not --mode/);
+    expect(err).toMatch(/, once/);
+    expect(err).not.toContain('SECRET_647');
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(openSinkSpy).not.toHaveBeenCalled();
+  });
+
+  it('--resign --help prints usage and writes nothing', async () => {
+    const bytes = benignTamper();
+    await runCli(['--resign', '--confirm', sha256(bytes), '--help']);
+    expect(logs.join('\n')).toMatch(/Usage: shieldcortex config --resign/);
+    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
+    expect(openSinkSpy).not.toHaveBeenCalled();
   });
 });

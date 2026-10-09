@@ -20,8 +20,9 @@
  *     verified lock covers.
  *
  * Isolation: a per-test SHIELDCORTEX_CONFIG_DIR, SHIELDCORTEX_PROTECTED_ROOT and
- * OPENCLAW_HOME under os.tmpdir(); the iron-dome audit logger (the only route
- * from config.ts to SQLite, via a dynamic import in emitProtectedAudit) and the
+ * OPENCLAW_HOME under os.tmpdir(); the iron-dome audit logger and the re-sign's
+ * audit sink (the only routes from config.ts to SQLite, both dynamic imports;
+ * the real sink is driven end to end in config-resign-audit-dist-647) and the
  * OpenClaw plugin guard sync are mocked. Nothing here reads or writes the real
  * home directory, and nothing makes a network call.
  */
@@ -30,14 +31,21 @@ import os from 'os';
 import path from 'path';
 import { createHash, createHmac } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { PROTECTED_ROOT_ENV } from '../defence/iron-dome/protected-root.js';
+import { PROTECTED_ROOT_ENV, describeProtectedAudit, type ProtectedAuditEvent } from '../defence/iron-dome/protected-root.js';
 import { POLICY_LOCK_FILENAME, clearPolicyLockReportState } from '../defence/iron-dome/policy-lock.js';
 
 type AuditEntry = { action: string; allowed: boolean; reason: string };
 const auditSpy = jest.fn<(entry: AuditEntry) => void>();
 const guardSyncSpy = jest.fn(() => ({ status: 'skipped' as const, reason: 'no-entry' as const }));
 
+/** The re-sign's audit sink: records into the same spy, as the real one would into SQLite. */
+const sinkRecord = jest.fn<(event: ProtectedAuditEvent) => number>();
+const sinkClose = jest.fn<() => void>();
+const openSinkSpy = jest.fn<() => Promise<{ location: string; record: typeof sinkRecord; close: typeof sinkClose }>>();
+const SINK_LOCATION = '/test/memories.db';
+
 jest.unstable_mockModule('../defence/iron-dome/audit.js', () => ({ logIronDomeAudit: auditSpy }));
+jest.unstable_mockModule('../cloud/recovery-audit.js', () => ({ openRecoveryAuditSink: openSinkSpy }));
 jest.unstable_mockModule('../setup/openclaw-plugin-guard-sync.js', () => ({
   syncOpenClawPluginActionGuard: guardSyncSpy,
 }));
@@ -146,6 +154,11 @@ beforeEach(() => {
   process.env.OPENCLAW_HOME = openclawHome;
   auditSpy.mockClear();
   guardSyncSpy.mockClear();
+  sinkRecord.mockReset();
+  sinkRecord.mockImplementation((event) => { auditSpy(describeProtectedAudit(event)); return 7; });
+  sinkClose.mockReset();
+  openSinkSpy.mockReset();
+  openSinkSpy.mockImplementation(async () => ({ location: SINK_LOCATION, record: sinkRecord, close: sinkClose }));
   errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
   jest.spyOn(console, 'log').mockImplementation(() => undefined);
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -476,34 +489,37 @@ describe('#647 deliberate re-sign: preview, exact-hash confirmation, backup, aud
     const preview = config.previewConfigResign();
     expect(preview.unauthorisedKeys).toEqual(expect.arrayContaining(['actionGuard.autoApprove', 'actionGuard.reviewedScripts']));
     expect(preview.unauthorisedKeys).not.toContain('defenceMode');
-    expect(() => config.resignTamperedConfig(preview.sha256!)).toThrow(/no verified policy lock covers/);
+    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/no verified policy lock covers/);
     expectUnchanged(before);
     await flushAudit();
     expect(auditRows('config_resigned')).toHaveLength(0);
+    // A refused re-sign never opens the audit database.
+    expect(openSinkSpy).not.toHaveBeenCalled();
   });
 
   it('a prefix, a mistyped hash, or bytes changed after the preview are refused and nothing is written', async () => {
     const { config, before } = await benignTamper();
     const preview = config.previewConfigResign();
-    expect(() => config.resignTamperedConfig(preview.sha256!.slice(0, 12))).toThrow(/full 64-character/);
-    expect(() => config.resignTamperedConfig('0'.repeat(64))).toThrow(/changed after the preview|mistyped/);
+    await expect(config.resignTamperedConfig(preview.sha256!.slice(0, 12))).rejects.toThrow(/full 64-character/);
+    await expect(config.resignTamperedConfig('0'.repeat(64))).rejects.toThrow(/changed after the preview|mistyped/);
     expectUnchanged(before);
 
     const edited = readOnDisk();
     edited.proactiveRecall = false;
     fs.writeFileSync(configFile(), JSON.stringify(edited, null, 2) + '\n');
     const changed = snapshot();
-    expect(() => config.resignTamperedConfig(preview.sha256!)).toThrow(/changed after the preview/);
+    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/changed after the preview/);
     expectUnchanged(changed);
     await flushAudit();
     expect(auditRows('config_resigned')).toHaveLength(0);
+    expect(openSinkSpy).not.toHaveBeenCalled();
   });
 
   it('a config that is not tampered is not re-signed', async () => {
     const config = await freshConfig();
     config.setDefenceMode('balanced');
     const bytes = fs.readFileSync(configFile());
-    expect(() => config.resignTamperedConfig(sha256(bytes))).toThrow(/not tampered/);
+    await expect(config.resignTamperedConfig(sha256(bytes))).rejects.toThrow(/not tampered/);
     expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
   });
 
@@ -514,7 +530,10 @@ describe('#647 deliberate re-sign: preview, exact-hash confirmation, backup, aud
     expect(preview.lockRefusal).toBeNull();
     expect(preview.loosenedKeys).toEqual(['defenceMode']);
 
-    const result = config.resignTamperedConfig(preview.sha256!, { now: new Date('2026-10-09T12:00:00.000Z') });
+    const result = await config.resignTamperedConfig(preview.sha256!, { now: new Date('2026-10-09T12:00:00.000Z') });
+    expect(result.audit).toEqual({ recorded: true, rowId: 7, location: SINK_LOCATION });
+    expect(openSinkSpy).toHaveBeenCalledTimes(1);
+    expect(sinkClose).toHaveBeenCalledTimes(1);
     expect(result.previousVerdict).toBe('tampered');
     expect(result.previousSha256).toBe(sha256(before.bytes));
     expect(result.backupPath).toBe(`${configFile()}.bak-resign-2026-10-09T12-00-00-000Z`);
@@ -547,9 +566,9 @@ describe('#647 deliberate re-sign: preview, exact-hash confirmation, backup, aud
     const { config } = await benignTamper();
     const preview = config.previewConfigResign();
     const when = new Date('2026-10-09T12:00:00.000Z');
-    const first = config.resignTamperedConfig(preview.sha256!, { now: when });
+    const first = await config.resignTamperedConfig(preview.sha256!, { now: when });
     const backup = fs.readFileSync(first.backupPath);
-    expect(() => config.resignTamperedConfig(preview.sha256!, { now: when })).toThrow(/not tampered/);
+    await expect(config.resignTamperedConfig(preview.sha256!, { now: when })).rejects.toThrow(/not tampered/);
     expect(fs.readFileSync(first.backupPath).equals(backup)).toBe(true);
   });
 
@@ -561,11 +580,58 @@ describe('#647 deliberate re-sign: preview, exact-hash confirmation, backup, aud
     // The preview already says so, without auditing anything itself.
     expect(preview.lockRefusal).toMatch(/Refusing to loosen `defenceMode`/);
     let thrown: unknown;
-    try { config.resignTamperedConfig(preview.sha256!); } catch (err) { thrown = err; }
+    try { await config.resignTamperedConfig(preview.sha256!); } catch (err) { thrown = err; }
     expect((thrown as Error).name).toBe('PolicyLockRefusal');
     expectUnchanged(before);
     await flushAudit();
     expect(auditRows('policy_refused').length).toBeGreaterThan(0);
     expect(auditRows('config_resigned')).toHaveLength(0);
+  });
+
+  it('an audit log that cannot be opened REFUSES the re-sign: no backup, no write, the file stays tampered', async () => {
+    const { config, before } = await benignTamper();
+    const preview = config.previewConfigResign();
+    openSinkSpy.mockImplementationOnce(async () => { throw new Error('unable to open database file'); });
+    await expect(config.resignTamperedConfig(preview.sha256!))
+      .rejects.toThrow(/audit log that must record a re-sign could not be opened \(unable to open database file\).*Nothing was written/s);
+    expectUnchanged(before);
+    const fresh = await freshConfig();
+    expect(fresh.inspectConfigIntegrity().verdict).toBe('tampered');
+    expect(auditRows('config_resigned')).toHaveLength(0);
+  });
+
+  it('bytes that change WHILE the audit log opens are refused, and the sink is closed', async () => {
+    const { config } = await benignTamper();
+    const preview = config.previewConfigResign();
+    let changed: Snapshot | undefined;
+    openSinkSpy.mockImplementationOnce(async () => {
+      const edited = readOnDisk();
+      edited.proactiveRecall = false;
+      fs.writeFileSync(configFile(), JSON.stringify(edited, null, 2) + '\n');
+      changed = snapshot();
+      return { location: SINK_LOCATION, record: sinkRecord, close: sinkClose };
+    });
+    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/changed after the preview/);
+    expectUnchanged(changed!);
+    expect(sinkRecord).not.toHaveBeenCalled();
+    expect(sinkClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a row that fails to write AFTER the re-sign landed is reported as NOT recorded, never as recorded', async () => {
+    const { config, before } = await benignTamper();
+    const preview = config.previewConfigResign();
+    sinkRecord.mockImplementationOnce(() => { throw new Error(`the audit row could not be written to ${SINK_LOCATION}`); });
+    const result = await config.resignTamperedConfig(preview.sha256!, { now: new Date('2026-10-09T13:00:00.000Z') });
+    expect(result.audit).toEqual({
+      recorded: false,
+      location: SINK_LOCATION,
+      error: `the audit row could not be written to ${SINK_LOCATION}`,
+    });
+    // The partial state is real and stated: the re-sign is in force, and the
+    // reviewed bytes are kept as the evidence.
+    const fresh = await freshConfig();
+    expect(fresh.inspectConfigIntegrity().verdict).toBe('valid');
+    expect(fs.readFileSync(result.backupPath).equals(before.bytes)).toBe(true);
+    expect(sinkClose).toHaveBeenCalledTimes(1);
   });
 });

@@ -11,19 +11,28 @@
  * class) is the real module.
  *
  * Isolation as in config-tamper-preserve-647: temp config dir and OPENCLAW_HOME,
- * mocked audit logger and plugin guard sync, no home directory, no network.
+ * mocked audit logger, re-sign audit sink and plugin guard sync, no home
+ * directory, no network.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import type { PolicyLockState } from '../defence/iron-dome/policy-lock.js';
+import { describeProtectedAudit, type ProtectedAuditEvent } from '../defence/iron-dome/protected-root.js';
 
 type AuditEntry = { action: string; allowed: boolean; reason: string };
 const auditSpy = jest.fn<(entry: AuditEntry) => void>();
 const guardSyncSpy = jest.fn(() => ({ status: 'skipped' as const, reason: 'no-entry' as const }));
 
 jest.unstable_mockModule('../defence/iron-dome/audit.js', () => ({ logIronDomeAudit: auditSpy }));
+jest.unstable_mockModule('../cloud/recovery-audit.js', () => ({
+  openRecoveryAuditSink: async () => ({
+    location: '/test/memories.db',
+    record: (event: ProtectedAuditEvent) => { auditSpy(describeProtectedAudit(event)); return 1; },
+    close: () => undefined,
+  }),
+}));
 jest.unstable_mockModule('../setup/openclaw-plugin-guard-sync.js', () => ({
   syncOpenClawPluginActionGuard: guardSyncSpy,
 }));
@@ -138,7 +147,8 @@ describe('#647 §8.4 with a verified lock: the lock is the authority, the re-sig
       'actionGuard.enforce', 'actionGuard.autoApprove', 'actionGuard.reviewedScripts', 'defenceMode',
     ]));
 
-    const result = config.resignTamperedConfig(preview.sha256!);
+    const result = await config.resignTamperedConfig(preview.sha256!);
+    expect(result.audit.recorded).toBe(true);
     expect(fs.readFileSync(result.backupPath).equals(edited)).toBe(true);
 
     const fresh = await freshConfig();
@@ -165,7 +175,7 @@ describe('#647 §8.4 with a verified lock: the lock is the authority, the re-sig
     const preview = config.previewConfigResign();
     expect(preview.lockRefusal).toMatch(/Refusing to loosen `actionGuard\.enforce`/);
     let thrown: unknown;
-    try { config.resignTamperedConfig(preview.sha256!); } catch (err) { thrown = err; }
+    try { await config.resignTamperedConfig(preview.sha256!); } catch (err) { thrown = err; }
     expect((thrown as Error).name).toBe('PolicyLockRefusal');
     expect(fs.readFileSync(configFile()).equals(edited)).toBe(true);
     expect(fs.readdirSync(configDir).filter((n) => n.includes('.bak-resign-'))).toEqual([]);
@@ -177,7 +187,7 @@ describe('#647 §8.4 with a verified lock: the lock is the authority, the re-sig
     const config = await freshConfig();
     const preview = config.previewConfigResign();
     expect(preview.unauthorisedKeys).toEqual(['actionGuard.reviewedScripts']);
-    expect(() => config.resignTamperedConfig(preview.sha256!)).toThrow(/no verified policy lock covers/);
+    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/no verified policy lock covers/);
     expect(fs.readFileSync(configFile()).equals(edited)).toBe(true);
     await flushAudit();
     expect(auditSpy.mock.calls.map((c) => c[0]).filter((e) => e.reason.startsWith('config_resigned'))).toHaveLength(0);
