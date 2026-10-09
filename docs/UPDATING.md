@@ -45,6 +45,7 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 
 ## What's new in 5.6
 
+- **Teardown commands now ask first.** Commands that destroy databases, clusters or cloud resources (for example dropping a table from a database client, an unscoped SQL DELETE, `terraform destroy`, deleting a Kubernetes namespace, `helm uninstall`) used to be allowed and now need your approval. Mentioning them in text, such as a grep pattern or a commit message, does not trigger it. (#503)
 - **Clearer approval cards.** A held action's card on your phone now says what the action does, why it was held and who asked, in plain English, without showing the raw command. Targets that match ShieldCortex's credential and secret patterns, or are too long or contain unusual characters, are withheld whole; a secret in a shape those patterns do not know is not guaranteed to be caught. On OpenClaw the approval prompt is marked as a warning whenever it shows one of these cards. (#648)
 - **`shieldcortex consolidate` clears short-term memory.** The command doctor recommends for a full short-term store now actually drains it: it promotes, expires and evicts memories before Dream Mode, and can evict long-term memories when that store is over its limit. Doctor's short-term and long-term warnings now follow your configured limits, so `shieldcortex doctor --strict` may exit differently on the same store. (#650)
 - **A tidier local dashboard.** The old one-page-per-feature URLs from the first dashboard now redirect to the tab that replaced them, Replay sits in the Memory tab bar, and Protection and Settings tabs switch normally after you arrive from a deep link. (#688)
@@ -97,11 +98,11 @@ Root, once. A bare `protect` reads nothing from `config.json`: it pins the safe 
 
 ## Dashboard, recall, and Cloud
 
-Local UI: **Overview · Memory · Protection · X-Ray · Settings**. Memory has Library / Graph / Recall / Review / Timeline. Prompt-time recall into Claude Code needs two things: the Claude Code `UserPromptSubmit` hook, which `shieldcortex setup` adds once you agree to wire Claude Code (or `shieldcortex install`), and `proactiveRecall: true` in `~/.shieldcortex/config.json`. A fresh global, non-CI `npm install -g` with no config file writes one with `proactiveRecall: true` when that write succeeds; local and CI installs do not, an existing config is never changed, and when the key is not set, recall is off. The npm install does not wire Claude Code's `UserPromptSubmit` hook; npm's postinstall can still refresh an existing OpenClaw integration (see [Updating by hand](#updating-by-hand)). Turn it off under Settings → Integrations or with `shieldcortex config --proactive-recall false`.
+Local UI (5.6+): **Home · Needs you · Memory · Protection · Settings**. The Skill & package scanner (formerly X-Ray) is a Protection tab. Memory has Search & browse / Map / Recall / Needs a check / Timeline / Replay / Files. Prompt-time recall into Claude Code needs two things: the Claude Code `UserPromptSubmit` hook, which `shieldcortex setup` adds once you agree to wire Claude Code (or `shieldcortex install`), and `proactiveRecall: true` in `~/.shieldcortex/config.json`. A fresh global, non-CI `npm install -g` with no config file writes one with `proactiveRecall: true` when that write succeeds; local and CI installs do not, an existing config is never changed, and when the key is not set, recall is off. The npm install does not wire Claude Code's `UserPromptSubmit` hook; npm's postinstall can still refresh an existing OpenClaw integration (see [Updating by hand](#updating-by-hand)). Turn it off under Settings → Integrations or with `shieldcortex config --proactive-recall false`.
 
 Two different apps.
 
-- **Local** (`shieldcortex dashboard`) — the npm package UI above. Runs on your machine. X-Ray lives here.
+- **Local** (`shieldcortex dashboard`) — the npm package UI above. Runs on your machine. The Skill & package scanner (formerly X-Ray) lives here, under Protection.
 - **Cloud** — fleet view: Shield, Capture, Recall, Library, Graph, Replay, Review, Quarantine, Dome, Devices, Keys. Default chrome is glass (Shield), not the CIC terminal. Cloud does not ship X-Ray.
 
 Free cloud: 500 scans/month, 7-day retention, 1 member. Enterprise (fleets, SSO, full replica): sales@drakonsystems.com.
