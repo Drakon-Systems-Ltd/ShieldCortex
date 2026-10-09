@@ -21,6 +21,7 @@ import {
   canonicaliseCwd,
   claimCardLaunch,
   consumeRetryGrant,
+  findRetiredIdentity,
   fingerprintId,
   getRetryRow,
   grantRetry,
@@ -29,6 +30,7 @@ import {
   recordDenialFingerprint,
   recordDenySuppression,
   retryControlPath,
+  retryStoreCapacity,
 } from '../../defence/iron-dome/retry-control.js';
 
 const HASH = hashToolCall('Bash', { command: 'sudo systemctl restart backup-daily' });
@@ -322,7 +324,10 @@ describe('#682 — approve --denial across the 48h review window', () => {
     const list = approve(['--denial'], at + 2, { interactive: false }).text;
     expect(list).toContain(`${MAX_RETRY_ROWS + 1} of ${MAX_RETRY_ROWS} denial slots in use`);
     expect(list).toContain(`OVER the cap: ${MAX_RETRY_ROWS + 1} row(s)`);
-    expect(list).not.toContain('dropped for space');
+    // The OVER line itself explains protected rows "are never dropped for
+    // space"; what must be absent is the report that an eviction happened.
+    expect(list).toContain('are never dropped for space');
+    expect(list).not.toContain('older denial(s) dropped for space on record');
     for (let i = 0; i <= MAX_RETRY_ROWS; i += 1) expect(list).toContain(jobActionId(i));
 
     // The listing's own prune ran; every protected row survived it, still denied.
@@ -330,8 +335,15 @@ describe('#682 — approve --denial across the 48h review window', () => {
     expect(rows).toHaveLength(MAX_RETRY_ROWS + 1);
     for (let i = 0; i <= MAX_RETRY_ROWS; i += 1) {
       expect(getRetryRow({ actionId: jobActionId(i) }, { home })?.suppression).toBeDefined();
+      expect(findRetiredIdentity({ actionId: jobActionId(i) }, { home })).toBeUndefined();
     }
     expect(rows.some((r) => r.grant)).toBe(false);
+    // Nothing was retired for capacity, before or by that prune.
+    const cap = retryStoreCapacity({ home, now: at + 2 });
+    expect(cap).toMatchObject({
+      rows: MAX_RETRY_ROWS + 1, cap: MAX_RETRY_ROWS, protectedRows: MAX_RETRY_ROWS + 1, overCap: true, retiredForCapacity: 0,
+    });
+    expect(cap.lastCapacityRetiredAt).toBeUndefined();
   }, 60_000);
 
   it('128 protected rows plus one unprotected denial: the prune drops it for space and says so', () => {
