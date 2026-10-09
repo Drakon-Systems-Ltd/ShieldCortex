@@ -3,11 +3,22 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { authFetch, readApiError } from '@/lib/auth';
 import type { Memory } from '@/types/memory';
+import { wsGatedInterval } from '@/lib/ws-helpers';
+import { useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
+/** How far the pair counts reach (#692): they are pairs cut off at `limit`. */
+export interface ReviewPairCoverage {
+  unit: 'pairs';
+  limit: number;
+  contradictions: { found: number; capped: boolean; scanWindow: number; candidates: number; scanPartial: boolean };
+  duplicates: { found: number; capped: boolean };
+}
+
 export interface ReviewQueueResponse {
   summary: Record<string, number>;
+  pairCoverage?: ReviewPairCoverage;
   openClaw: {
     total: number;
     autoExtracted: number;
@@ -191,10 +202,15 @@ async function mergeMemories(input: {
 }
 
 export function useReviewQueue(project?: string | null) {
+  const { isConnected } = useWebSocketStatus();
   return useQuery({
     queryKey: ['review-queue', project],
     queryFn: () => fetchReviewQueue(project),
     staleTime: 30_000,
+    // Memory/consolidation socket events invalidate ['review-queue']; poll only
+    // while the socket is down so the always-mounted Needs you badge cannot
+    // sit on agent-created work (#692).
+    refetchInterval: wsGatedInterval(isConnected, 60_000),
   });
 }
 

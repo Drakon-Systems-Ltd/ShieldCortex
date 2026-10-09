@@ -239,6 +239,13 @@ export interface DetectContradictionsOptions {
 }
 
 /**
+ * detectContradictions() compares pairs among at most this many memories (the
+ * highest-salience ones), so in a larger store it is a bounded sample, not an
+ * exhaustive check (#692).
+ */
+export const CONTRADICTION_SCAN_WINDOW = 200;
+
+/**
  * Detect contradictions across all memories matching the filter
  *
  * @param options - Filtering and limit options
@@ -273,7 +280,7 @@ export function detectContradictions(
   }
 
   // Order by salience to prioritize important memories
-  sql += ' ORDER BY salience DESC, last_accessed DESC LIMIT 200';
+  sql += ` ORDER BY salience DESC, last_accessed DESC LIMIT ${CONTRADICTION_SCAN_WINDOW}`;
 
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
   const memories = rows.map(rowToMemory);

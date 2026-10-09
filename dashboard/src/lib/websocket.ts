@@ -143,14 +143,17 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
               queryClient.invalidateQueries({ queryKey: ['links'] });
+              queryClient.invalidateQueries({ queryKey: ['review-queue'] });
               break;
 
             case 'memory_created':
             case 'memory_updated':
             case 'memory_deleted':
-              // Memory changed, refresh memories list
+              // Memory changed, refresh memories list — and the review queue
+              // behind the always-mounted Needs you badge (#692).
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
+              queryClient.invalidateQueries({ queryKey: ['review-queue'] });
               break;
 
             case 'consolidation_complete':
@@ -158,6 +161,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
               queryClient.invalidateQueries({ queryKey: ['links'] });
+              queryClient.invalidateQueries({ queryKey: ['review-queue'] });
               break;
 
             case 'decay_tick':
@@ -177,6 +181,7 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['memories'] });
               queryClient.invalidateQueries({ queryKey: ['stats'] });
               queryClient.invalidateQueries({ queryKey: ['links'] });
+              queryClient.invalidateQueries({ queryKey: ['review-queue'] });
               break;
 
             case 'defence_event':
@@ -227,6 +232,8 @@ export function useMemoryWebSocket(options: UseMemoryWebSocketOptions = {}) {
               queryClient.invalidateQueries({ queryKey: ['xray-activity'] });
               queryClient.invalidateQueries({ queryKey: ['xray-watch-sessions'] });
               queryClient.invalidateQueries({ queryKey: ['xray-findings'] });
+              // ['xray-findings'] does not prefix-match the stats key.
+              queryClient.invalidateQueries({ queryKey: ['xray-findings-stats'] });
               queryClient.invalidateQueries({ queryKey: ['xray-status'] });
               break;
           }

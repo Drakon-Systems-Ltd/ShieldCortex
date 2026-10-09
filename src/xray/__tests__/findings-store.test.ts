@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { createFindingsStore } from '../findings-store.js';
+import { createFindingsStore, FindingsStoreUnreadableError } from '../findings-store.js';
 import type { XRayFinding } from '../types.js';
 
 function makeTempDir(): string {
@@ -336,6 +336,38 @@ describe('FindingsStore', () => {
       const stats = store.getStats();
       expect(stats.total).toBe(0);
       expect(stats.new).toBe(0);
+    });
+
+    // #692: a never-created file is a real zero; an existing file that cannot
+    // be read or parsed is unknown and must not report zero.
+    it('reports a never-created findings file as absent with zero counts', () => {
+      const store = createFindingsStore(path.join(tmpDir, 'never-created'));
+      expect(store.getStoreState()).toBe('absent');
+      expect(store.getStats()).toMatchObject({ total: 0, new: 0, store: 'absent' });
+    });
+
+    it('reports a readable findings file as ok', () => {
+      const store = createFindingsStore(tmpDir);
+      store.addFindings('scan-1', 'scan', '/project', [makeFinding()]);
+      expect(store.getStoreState()).toBe('ok');
+      expect(store.getStats()).toMatchObject({ total: 1, new: 1, store: 'ok' });
+    });
+
+    it.each([
+      ['malformed JSON', '{"not": json'],
+      ['a non-array JSON value', '{"findings": []}'],
+    ])('refuses to count %s as zero', (_label, body) => {
+      fs.writeFileSync(path.join(tmpDir, 'xray-findings.json'), body);
+      const store = createFindingsStore(tmpDir);
+      expect(store.getStoreState()).toBe('unreadable');
+      expect(() => store.getStats()).toThrow(FindingsStoreUnreadableError);
+    });
+
+    it('refuses to count an unreadable (directory) findings path as zero', () => {
+      fs.mkdirSync(path.join(tmpDir, 'xray-findings.json'));
+      const store = createFindingsStore(tmpDir);
+      expect(store.getStoreState()).toBe('unreadable');
+      expect(() => store.getStats()).toThrow(FindingsStoreUnreadableError);
     });
   });
 });

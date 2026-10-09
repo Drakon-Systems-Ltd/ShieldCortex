@@ -43,7 +43,7 @@ That string was caught and quarantined. Nothing was stored as a memory, and the 
 
 - **Memory firewall.** ShieldCortex does not replace OpenClaw, Hermes, or Claude memory. Writes that go through it are scanned before they stick. Recognised injection and leaked credentials are quarantined or blocked.
 - **Tool gate.** On Claude Code, OpenClaw, and Hermes, once Action Guard is on, a trusted task runs, a suspicious call gets a plain-English card, and a catastrophic command is a hard stop.
-- **Inspect.** `shieldcortex dashboard` is a local view: Overview, Memory, Protection, X-Ray, Settings. Memory has Library, Graph, Recall, Review, Timeline, Replay, and Files. Prompt-time recall into Claude Code is not automatic. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud).
+- **Inspect.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. Memory has Search & browse, Map, Recall, Needs a check, Timeline, Replay, and Files; the skill & package scanner is a Protection tab. Needs you lists held-back items, memory pairs that disagree or look duplicated, and new scanner findings. It is not an approval inbox: held actions are still answered in Telegram or OpenClaw. Its counts are labelled when they are partial: pair counts stop at 20 of each kind and the disagreement check compares only the 200 most important memories, a list that failed to refresh shows its last known count, and scanner findings cover the whole computer even when a project is selected. Prompt-time recall into Claude Code is not automatic. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud).
 
 ## Install
 
