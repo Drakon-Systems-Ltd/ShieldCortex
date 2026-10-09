@@ -290,16 +290,72 @@ describe('#682 — approve --denial across the 48h review window', () => {
     expect(list).toContain('1 older denial(s) dropped for space on record');
   }, 60_000);
 
+  /**
+   * A persisted store over the cap where EVERY row is protected (a live Deny).
+   * Built from real writes, then the one row no public call can protect in
+   * time is given its suppression on disk: every locked call prunes first, and
+   * that prune drops an unprotected 129th row before anything could protect
+   * it. This is the "arrives over the cap" store the prune and the copy
+   * handle.
+   */
+  function allProtectedOverCap(at: number): void {
+    fill(MAX_RETRY_ROWS);
+    for (let i = 0; i < MAX_RETRY_ROWS; i += 1) {
+      expect(recordDenySuppression({ actionId: jobActionId(i) }, { home, now: at }).ok).toBe(true);
+    }
+    fill(1, MAX_RETRY_ROWS, () => at + 1);
+    const raw = JSON.parse(readFileSync(retryControlPath(home), 'utf8')) as {
+      rows: Array<{ actionIds: string[]; denyEpoch: number; suppression?: { at: number; until: number; via: string } }>;
+    };
+    expect(raw.rows).toHaveLength(MAX_RETRY_ROWS + 1);
+    const template = raw.rows.find((r) => r.suppression)!.suppression!;
+    const last = raw.rows.find((r) => r.actionIds.includes(jobActionId(MAX_RETRY_ROWS)))!;
+    expect(last.suppression).toBeUndefined();
+    last.denyEpoch += 1;
+    last.suppression = { at: at + 1, until: at + 1 + (template.until - template.at), via: 'card' };
+    writeFileSync(retryControlPath(home), JSON.stringify(raw));
+  }
+
   it('protected rows over the cap are listed as OVER the cap, not hidden', () => {
+    const at = t0 + MIN;
+    allProtectedOverCap(at);
+    const list = approve(['--denial'], at + 2, { interactive: false }).text;
+    expect(list).toContain(`${MAX_RETRY_ROWS + 1} of ${MAX_RETRY_ROWS} denial slots in use`);
+    expect(list).toContain(`OVER the cap: ${MAX_RETRY_ROWS + 1} row(s)`);
+    expect(list).not.toContain('dropped for space');
+    for (let i = 0; i <= MAX_RETRY_ROWS; i += 1) expect(list).toContain(jobActionId(i));
+
+    // The listing's own prune ran; every protected row survived it, still denied.
+    const rows = listRetryRows({ home, now: at + 2 });
+    expect(rows).toHaveLength(MAX_RETRY_ROWS + 1);
+    for (let i = 0; i <= MAX_RETRY_ROWS; i += 1) {
+      expect(getRetryRow({ actionId: jobActionId(i) }, { home })?.suppression).toBeDefined();
+    }
+    expect(rows.some((r) => r.grant)).toBe(false);
+  }, 60_000);
+
+  it('128 protected rows plus one unprotected denial: the prune drops it for space and says so', () => {
     fill(MAX_RETRY_ROWS);
     const at = t0 + MIN;
     for (let i = 0; i < MAX_RETRY_ROWS; i += 1) {
-      recordDenySuppression({ actionId: jobActionId(i) }, { home, now: at });
+      expect(recordDenySuppression({ actionId: jobActionId(i) }, { home, now: at }).ok).toBe(true);
     }
     fill(1, MAX_RETRY_ROWS, () => at + 1);
+
     const list = approve(['--denial'], at + 2, { interactive: false }).text;
-    expect(list).toContain(`${MAX_RETRY_ROWS + 1} of ${MAX_RETRY_ROWS} denial slots in use`);
-    expect(list).toContain(`OVER the cap: ${MAX_RETRY_ROWS} row(s)`);
+    expect(list).toContain(`${MAX_RETRY_ROWS} of ${MAX_RETRY_ROWS} denial slots in use`);
+    expect(list).not.toContain('OVER the cap');
+    expect(list).toContain(`1 older denial(s) dropped for space on record (latest ${new Date(at + 2).toISOString()})`);
+    expect(list).not.toContain(jobActionId(MAX_RETRY_ROWS));
+    for (let i = 0; i < MAX_RETRY_ROWS; i += 1) {
+      expect(getRetryRow({ actionId: jobActionId(i) }, { home })?.suppression).toBeDefined();
+    }
+
+    const { code, text } = approve(['--denial', jobActionId(MAX_RETRY_ROWS)], at + 3);
+    expect(code).toBe(1);
+    expect(text).toContain(`Headless denial ${jobActionId(MAX_RETRY_ROWS)} (Bash) was dropped at ${new Date(at + 2).toISOString()} to make room`);
+    expect(text).toContain('Nothing was granted');
+    expect(listRetryRows({ home, now: at + 3 }).some((r) => r.grant)).toBe(false);
   }, 60_000);
 
   it('a capacity eviction that lands between lookup and grant is reported, not granted around', () => {

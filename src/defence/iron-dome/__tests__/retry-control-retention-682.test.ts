@@ -412,7 +412,7 @@ describe('#682 — 48h review window for pending denial identities', () => {
     expect(findRetiredIdentity({ actionId: jobActionId(3) }, { home })?.reason).toBe('capacity');
   }, 60_000);
 
-  it('when protected rows alone exceed the cap, the store keeps them and SAYS it is over cap', () => {
+  it('protected rows exactly AT the cap: a new unprotected denial is kept at insert, then the next prune drops it for space', () => {
     fill(MAX_RETRY_ROWS);
     const at = t0 + MIN;
     for (let i = 0; i < MAX_RETRY_ROWS; i += 1) {
@@ -420,14 +420,65 @@ describe('#682 — 48h review window for pending denial identities', () => {
     }
     fill(1, MAX_RETRY_ROWS, () => at + 1);
 
+    // Straight after the insert (read-only, nothing has pruned yet): the newest
+    // denial was kept too (it is never its own victim), so the store is one over.
     const cap = retryStoreCapacity({ home, now: at + 1 });
     expect(cap).toMatchObject({
       rows: MAX_RETRY_ROWS + 1, cap: MAX_RETRY_ROWS, protectedRows: MAX_RETRY_ROWS, overCap: true, retiredForCapacity: 0,
     });
-    // The newest denial was kept too (it is never its own victim).
     expect(lookupRetryRow({ actionId: jobActionId(MAX_RETRY_ROWS) }, { home, now: at + 1 })).toBeDefined();
     for (let i = 0; i < MAX_RETRY_ROWS; i += 1) {
       expect(isDenySuppressed({ actionId: jobActionId(i) }, { home, now: at + 1 }).suppressed).toBe(true);
+    }
+
+    // Protected rows alone do NOT exceed the cap here, so the next prune brings
+    // the store back inside it: the one unprotected row goes, for capacity.
+    expect(pruneRetryControl({ home, now: at + 2 }).ok).toBe(true);
+    expect(retryStoreCapacity({ home, now: at + 2 })).toMatchObject({
+      rows: MAX_RETRY_ROWS, protectedRows: MAX_RETRY_ROWS, overCap: false, retiredForCapacity: 1, lastCapacityRetiredAt: at + 2,
+    });
+    expect(lookupRetryRow({ actionId: jobActionId(MAX_RETRY_ROWS) }, { home, now: at + 2 })).toBeUndefined();
+    expect(findRetiredIdentity({ actionId: jobActionId(MAX_RETRY_ROWS) }, { home })?.reason).toBe('capacity');
+    for (let i = 0; i < MAX_RETRY_ROWS; i += 1) {
+      expect(isDenySuppressed({ actionId: jobActionId(i) }, { home, now: at + 2 }).suppressed).toBe(true);
+    }
+  }, 60_000);
+
+  it('when protected rows alone exceed the cap, the store keeps them and SAYS it is over cap', () => {
+    // A persisted store with every one of MAX_RETRY_ROWS + 1 rows protected by
+    // a live Deny. Real writes, then the last row's suppression on disk: every
+    // locked call prunes first, and that prune drops an unprotected extra row
+    // before any public call could protect it.
+    fill(MAX_RETRY_ROWS);
+    const at = t0 + MIN;
+    for (let i = 0; i < MAX_RETRY_ROWS; i += 1) {
+      expect(recordDenySuppression({ actionId: jobActionId(i) }, { home, now: at }).ok).toBe(true);
+    }
+    fill(1, MAX_RETRY_ROWS, () => at + 1);
+    const raw = rawStore() as {
+      rows: Array<{ actionIds: string[]; denyEpoch: number; suppression?: { at: number; until: number; via: string } }>;
+    };
+    expect(raw.rows).toHaveLength(MAX_RETRY_ROWS + 1);
+    const template = raw.rows.find((r) => r.suppression)!.suppression!;
+    const last = raw.rows.find((r) => r.actionIds.includes(jobActionId(MAX_RETRY_ROWS)))!;
+    expect(last.suppression).toBeUndefined();
+    last.denyEpoch += 1;
+    last.suppression = { at: at + 1, until: at + 1 + (template.until - template.at), via: 'card' };
+    writeFileSync(retryControlPath(home), JSON.stringify(raw));
+
+    const expected = {
+      rows: MAX_RETRY_ROWS + 1, cap: MAX_RETRY_ROWS, protectedRows: MAX_RETRY_ROWS + 1, overCap: true, retiredForCapacity: 0,
+    };
+    expect(retryStoreCapacity({ home, now: at + 1 })).toMatchObject(expected);
+
+    // A prune cannot bring it back inside the cap without dropping a Deny, so
+    // it drops nothing.
+    expect(pruneRetryControl({ home, now: at + 2 }).ok).toBe(true);
+    expect(retryStoreCapacity({ home, now: at + 2 })).toMatchObject(expected);
+    expect((rawStore().rows as unknown[])).toHaveLength(MAX_RETRY_ROWS + 1);
+    for (let i = 0; i <= MAX_RETRY_ROWS; i += 1) {
+      expect(isDenySuppressed({ actionId: jobActionId(i) }, { home, now: at + 2 }).suppressed).toBe(true);
+      expect(findRetiredIdentity({ actionId: jobActionId(i) }, { home })).toBeUndefined();
     }
   }, 60_000);
 
