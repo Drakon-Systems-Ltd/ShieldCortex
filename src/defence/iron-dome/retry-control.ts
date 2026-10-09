@@ -89,9 +89,18 @@ export const MAX_RETRY_GRANT_TTL_MS = 60 * 60 * 1000;
  *  digest window so "deny" and "stop paging me" cover the same span. */
 export const MIN_DENY_SUPPRESSION_MS = 60 * 1000;
 export const MAX_DENY_SUPPRESSION_MS = 24 * 60 * 60 * 1000;
-/** Fingerprint retention: the #118 pending-retention clock, rolling from the
- *  last DNP for that identity. */
-export const RETRY_FINGERPRINT_RETENTION_MS = 60 * 60 * 1000;
+/** Operator review window for a pending denial identity (#682), rolling from
+ *  the last DNP for that identity. A daily job denied at 08:00 has to still
+ *  be on file when the operator reads the alert, so this is a daily cycle
+ *  plus review slack. It is NOT a spend window: an identity holds nothing
+ *  spendable, and approving one mints the same short one-shot grant as
+ *  ever (`DEFAULT_RETRY_GRANT_TTL_MS`, at most `MAX_RETRY_GRANT_TTL_MS`,
+ *  counted from the approval, never from the denial). Deliberately NOT the
+ *  #118 live-hold clock any more — that store keeps its own 60m. */
+export const RETRY_PENDING_REVIEW_WINDOW_MS = 48 * 60 * 60 * 1000;
+/** @deprecated The pre-#682 name (it was 60m). Kept as an alias of the
+ *  review window so existing imports read the clock that actually applies. */
+export const RETRY_FINGERPRINT_RETENTION_MS = RETRY_PENDING_REVIEW_WINDOW_MS;
 /** Audit tail kept after a grant goes terminal (spent or expired). */
 export const RETRY_GRANT_AUDIT_TAIL_MS = 24 * 60 * 60 * 1000;
 
@@ -103,6 +112,15 @@ export const CARD_BUDGET_PER_WINDOW = 3;
 /** How many "this denial got no card" ids the operator copy carries. */
 const MAX_LOST_ACTION_IDS = 10;
 const MAX_ACTION_ID_ALIASES = 10;
+/** Store bound (#682). `consumeRetryGrant` reads and rewrites the whole file
+ *  on every guarded call that changes it, so this stays small. Past it, the
+ *  oldest UNPROTECTED identity is retired for capacity; a protected row (live
+ *  claim, live grant, grant audit tail, live suppression) is never evicted,
+ *  so protected rows alone may exceed it — and `retryStoreCapacity` says so. */
+export const MAX_RETRY_ROWS = 128;
+/** Retirement receipts kept for truthful "expired" / "dropped" answers. */
+export const MAX_RETIRED_IDENTITIES = 64;
+export const RETIRED_IDENTITY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ── Shapes ────────────────────────────────────────────────────────────────
 
@@ -178,10 +196,28 @@ export interface RetryCardBudget {
   lostActionIds: string[];
 }
 
+/**
+ * A receipt that an identity existed and why it left the store (#682). It is
+ * a "this existed" record and nothing else: no hash, no claim, no nonce HMAC,
+ * no grant, no origin, no surface, no signals. `findRow` never sees these, so
+ * no grant, claim, consume or deny path can reach one.
+ */
+export interface RetiredIdentity {
+  id: string;
+  actionIds: string[];
+  tool: string;
+  reason: 'expired' | 'capacity';
+  lastDeniedAt: number;
+  retiredAt: number;
+}
+
 interface RetryControlFile {
   version: 1;
   rows: RetryRow[];
   budget: RetryCardBudget | null;
+  /** Optional: absent in stores written before #682, and dropped by an older
+   *  binary's next write (which degrades to the generic "no match" answer). */
+  retired?: RetiredIdentity[];
 }
 
 export interface RetryStoreOptions {
@@ -436,7 +472,13 @@ function readStore(home?: string): RetryControlFile {
               : [],
           }
         : null;
-    return { version: 1, rows: parsed.rows.filter(isUsableRow), budget };
+    const retired = parseRetired((parsed as { retired?: unknown }).retired);
+    return {
+      version: 1,
+      rows: parsed.rows.filter(isUsableRow),
+      budget,
+      ...(retired.length > 0 ? { retired } : {}),
+    };
   } catch {
     // A corrupt store must never revive a stale card: it reads as EMPTY, so
     // there is no claim record, `grantRetry` fails its claimNonce check first,
@@ -456,12 +498,64 @@ function isUsableRow(row: unknown): row is RetryRow {
     && Array.isArray(r.actionIds);
 }
 
+const ROW_ID_RE = /^[0-9a-f]{32}$/;
+const SAFE_LABEL_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+
+/** Aliases as a receipt may carry them: printable, bounded, deduped. A
+ *  hostile store cannot smuggle terminal escapes into CLI output this way. */
+function safeAliases(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const a of raw) {
+    if (typeof a !== 'string' || !SAFE_LABEL_RE.test(a) || out.includes(a)) continue;
+    out.push(a);
+  }
+  return out.slice(-MAX_ACTION_ID_ALIASES);
+}
+
+function safeTool(raw: unknown): string {
+  return typeof raw === 'string' && SAFE_LABEL_RE.test(raw) ? raw : 'tool';
+}
+
+/** Total and bounded: junk entries are dropped, never repaired into
+ *  something that looks real. Bounds are applied again on every prune. */
+function parseRetired(raw: unknown): RetiredIdentity[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RetiredIdentity[] = [];
+  // Only the newest slice is considered, so an oversized hostile array costs
+  // a bounded amount of work.
+  for (const e of raw.slice(-MAX_RETIRED_IDENTITIES * 4)) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    const r = e as Record<string, unknown>;
+    const { id, reason, lastDeniedAt, retiredAt } = r;
+    if (typeof id !== 'string' || !ROW_ID_RE.test(id)) continue;
+    if (reason !== 'expired' && reason !== 'capacity') continue;
+    if (typeof lastDeniedAt !== 'number' || !Number.isFinite(lastDeniedAt)) continue;
+    if (typeof retiredAt !== 'number' || !Number.isFinite(retiredAt)) continue;
+    out.push({
+      id,
+      actionIds: safeAliases(r.actionIds),
+      tool: safeTool(r.tool),
+      reason,
+      lastDeniedAt,
+      retiredAt,
+    });
+  }
+  return out.slice(-MAX_RETIRED_IDENTITIES);
+}
+
 function writeStore(file: RetryControlFile, home?: string): boolean {
   try {
     mkdirSecure(retryControlDir(home));
     const target = retryControlPath(home);
     const tmp = `${target}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
+    // No receipts, no key: a store that never retired anything keeps the
+    // pre-#682 shape on disk.
+    const out: RetryControlFile =
+      file.retired && file.retired.length > 0
+        ? file
+        : { version: file.version, rows: file.rows, budget: file.budget };
+    writeFileSync(tmp, `${JSON.stringify(out, null, 2)}\n`, { mode: 0o600 });
     renameSync(tmp, target);
     return true;
   } catch {
@@ -507,15 +601,96 @@ export function suppressionIsLive(row: RetryRow | undefined, now: number): boole
   return !!row?.suppression && row.suppression.until > now;
 }
 
+function grantInAuditTail(grant: RetryGrant | undefined, now: number): boolean {
+  return !!grant && now - grant.approvedAt < grant.ttlMs + RETRY_GRANT_AUDIT_TAIL_MS;
+}
+
+/** Rows that capacity eviction may never touch: dropping a live claim or
+ *  grant would change what a tap or a spend is told, and dropping a
+ *  suppression would un-silence an operator's deny. */
+function rowIsProtected(row: RetryRow, now: number): boolean {
+  return claimIsLive(row.claim, now)
+    || grantIsLive(row.grant, now)
+    || grantInAuditTail(row.grant, now)
+    || suppressionIsLive(row, now);
+}
+
+/** Inside the operator review window. Strict `<`: at exactly
+ *  `lastDeniedAt + RETRY_PENDING_REVIEW_WINDOW_MS` the identity has expired. */
+function denialIsReviewable(row: RetryRow, now: number): boolean {
+  return now - row.lastDeniedAt < RETRY_PENDING_REVIEW_WINDOW_MS;
+}
+
 /**
- * Age the store. Precedence, in order, per R3 rule 1:
- *   1. A row with a LIVE claim or a LIVE unspent grant is never pruned — the
- *      fingerprint TTL yields to claim/grant terminality.
- *   2. A terminal grant (spent or expired) keeps a spend-TTL + 24h audit tail.
- *   3. A live suppression keeps its row — that is what makes deny stick.
- *   4. Otherwise the fingerprint prunes on the 60m rolling retention clock.
- * Rows that fall off are GONE: tap-after-prune finds nothing and is refused,
- * which is the intended answer, not a bug.
+ * THE retention predicate (#682): the prune, the list and the CLI lookup all
+ * use this one function, so what the store keeps is exactly what the operator
+ * can see. Its legs are OR'd — a spent grant's audit tail never shortens the
+ * life a newer denial earned, and vice versa.
+ */
+export function rowIsRetained(row: RetryRow, now: number): boolean {
+  return rowIsProtected(row, now) || denialIsReviewable(row, now);
+}
+
+function retire(file: RetryControlFile, row: RetryRow, reason: RetiredIdentity['reason'], now: number): void {
+  // A row too malformed to describe leaves no receipt rather than a made-up one.
+  if (typeof row.id !== 'string' || !ROW_ID_RE.test(row.id) || !Number.isFinite(row.lastDeniedAt)) return;
+  const entry: RetiredIdentity = {
+    id: row.id,
+    actionIds: safeAliases(row.actionIds),
+    tool: safeTool(row.tool),
+    reason,
+    lastDeniedAt: row.lastDeniedAt,
+    retiredAt: now,
+  };
+  file.retired = [...(file.retired ?? []).filter((e) => e.id !== row.id), entry];
+}
+
+function boundRetired(file: RetryControlFile, now: number): void {
+  if (!file.retired) return;
+  const kept = file.retired
+    .filter((e) => now - e.retiredAt < RETIRED_IDENTITY_MAX_AGE_MS)
+    .slice(-MAX_RETIRED_IDENTITIES);
+  if (kept.length > 0) file.retired = kept;
+  else delete file.retired;
+}
+
+function evictionOrder(a: RetryRow, b: RetryRow): number {
+  const at = Number.isFinite(a.lastDeniedAt) ? a.lastDeniedAt : -Infinity;
+  const bt = Number.isFinite(b.lastDeniedAt) ? b.lastDeniedAt : -Infinity;
+  if (at !== bt) return at < bt ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Enforce `MAX_RETRY_ROWS`: retire the oldest-denied UNPROTECTED rows until
+ * the store fits or nothing evictable is left. `keepId` is the identity the
+ * caller just recorded — the newest denial is the one most worth keeping.
+ */
+function enforceCapacity(file: RetryControlFile, now: number, keepId?: string): void {
+  let excess = file.rows.length - MAX_RETRY_ROWS;
+  if (excess <= 0) return;
+  const victims = new Set<RetryRow>();
+  for (const row of file.rows.filter((r) => r.id !== keepId && !rowIsProtected(r, now)).sort(evictionOrder)) {
+    if (excess <= 0) break;
+    victims.add(row);
+    excess -= 1;
+  }
+  if (victims.size === 0) return;
+  file.rows = file.rows.filter((r) => !victims.has(r));
+  for (const row of victims) retire(file, row, 'capacity', now);
+}
+
+/**
+ * Age the store. A row is kept while ANY of these holds (R3 rule 1, made one
+ * OR'd predicate by #682 — `rowIsRetained`):
+ *   1. a LIVE claim or a LIVE unspent grant — never pruned, never evicted;
+ *   2. a terminal grant (spent or expired) inside its spend-TTL + 24h audit tail;
+ *   3. a live suppression — that is what makes deny stick;
+ *   4. a denial inside the 48h rolling review window.
+ * A row that falls off leaves only a bounded, non-spendable retirement
+ * receipt (`RetiredIdentity`); tap-after-prune finds no row and is refused,
+ * which is the intended answer, not a bug. Then `MAX_RETRY_ROWS` is enforced,
+ * protected rows exempt.
  *
  * Two side effects happen here and only here, so every entry point that takes
  * the lock gets them for free: a launch claim that expired unanswered advances
@@ -552,22 +727,15 @@ function pruneInPlace(file: RetryControlFile, now: number, report = false): Expi
       }
     }
 
-    if (claimIsLive(row.claim, now) || grantIsLive(row.grant, now)) {
-      kept.push(row);
-      continue;
-    }
-    if (row.grant) {
-      if (now - row.grant.approvedAt < row.grant.ttlMs + RETRY_GRANT_AUDIT_TAIL_MS) kept.push(row);
-      continue;
-    }
-    if (suppressionIsLive(row, now)) {
-      kept.push(row);
-      continue;
-    }
-    if (now - row.lastDeniedAt < RETRY_FINGERPRINT_RETENTION_MS) kept.push(row);
+    if (rowIsRetained(row, now)) kept.push(row);
+    else retire(file, row, 'expired', now);
   }
 
   file.rows = kept;
+  // A store that arrives over the cap (hand-edited, or written by something
+  // else) is brought back inside it here; new rows are capped at insert.
+  enforceCapacity(file, now);
+  boundRetired(file, now);
   return notices;
 }
 
@@ -595,7 +763,7 @@ function findRow(rows: RetryRow[], ref: RetryRowRef): RetryRow | undefined {
   }
   if (ref.actionId) {
     const needle = String(ref.actionId).trim().toLowerCase();
-    const matches = rows.filter((r) => r.actionIds.some((a) => a.toLowerCase() === needle));
+    const matches = rows.filter((r) => r.actionIds.some((a) => typeof a === 'string' && a.toLowerCase() === needle));
     if (matches.length === 1) return matches[0];
     // Newest wins — the alias index exists so an operator can paste the id out
     // of the alert they are looking at.
@@ -609,16 +777,76 @@ export function getRetryRow(ref: RetryRowRef, opts: RetryStoreOptions = {}): Ret
   return findRow(readStore(opts.home).rows, ref);
 }
 
-/** Everything still meaningful, newest denial first. Read-only. */
+/** Everything still meaningful, newest denial first. Read-only. Same
+ *  predicate as the prune, so the list never hides a row the store keeps. */
 export function listRetryRows(opts: RetryStoreOptions = {}): RetryRow[] {
   const now = opts.now ?? Date.now();
   return readStore(opts.home).rows
-    .filter((r) =>
-      grantIsLive(r.grant, now)
-      || claimIsLive(r.claim, now)
-      || suppressionIsLive(r, now)
-      || now - r.lastDeniedAt < RETRY_FINGERPRINT_RETENTION_MS)
+    .filter((r) => rowIsRetained(r, now))
     .sort((a, b) => b.lastDeniedAt - a.lastDeniedAt);
+}
+
+/** The operator's lookup (`approve --denial <ref>`): the listed rows only,
+ *  matched exactly as the store matches (id, then case-insensitive alias,
+ *  newest wins). Read-only. */
+export function lookupRetryRow(ref: RetryRowRef, opts: RetryStoreOptions = {}): RetryRow | undefined {
+  return findRow(listRetryRows(opts), ref);
+}
+
+/**
+ * Why an identity is no longer on file, if the store still remembers (#682).
+ * Read-only, and reachable ONLY from here: a receipt is never a row, so it
+ * cannot be claimed, granted, consumed or denied. Matches by id or by alias
+ * (case-insensitive); the newest receipt wins.
+ */
+export function findRetiredIdentity(
+  ref: { id?: string; actionId?: string },
+  opts: RetryStoreOptions = {},
+): RetiredIdentity | undefined {
+  const retired = readStore(opts.home).retired ?? [];
+  const id = typeof ref.id === 'string' ? ref.id.trim().toLowerCase() : '';
+  const alias = typeof ref.actionId === 'string' ? ref.actionId.trim().toLowerCase() : '';
+  const hits = retired.filter((e) =>
+    (id && e.id === id) || (alias && e.actionIds.some((a) => a.toLowerCase() === alias)));
+  if (hits.length === 0) return undefined;
+  const newest = [...hits].sort((a, b) => b.retiredAt - a.retiredAt)[0];
+  return { ...newest, actionIds: [...newest.actionIds] };
+}
+
+export interface RetryStoreCapacity {
+  /** Identities currently retained (the same set `listRetryRows` returns). */
+  rows: number;
+  cap: number;
+  /** Retained rows capacity eviction may not touch. */
+  protectedRows: number;
+  /** True when the store is above `cap`. Insertion evicts down to the cap,
+   *  so this means protected rows are holding it there. */
+  overCap: boolean;
+  /** Capacity retirements still on record (bounded by the receipt caps). */
+  retiredForCapacity: number;
+  lastCapacityRetiredAt?: number;
+  retiredOnRecord: number;
+}
+
+/** Store occupancy for the operator copy. Read-only. */
+export function retryStoreCapacity(opts: RetryStoreOptions = {}): RetryStoreCapacity {
+  const now = opts.now ?? Date.now();
+  const file = readStore(opts.home);
+  const rows = file.rows.filter((r) => rowIsRetained(r, now));
+  const capacity = (file.retired ?? []).filter((e) => e.reason === 'capacity');
+  const last = capacity.reduce<number | undefined>(
+    (m, e) => (m === undefined || e.retiredAt > m ? e.retiredAt : m),
+    undefined,
+  );
+  return {
+    rows: rows.length,
+    cap: MAX_RETRY_ROWS,
+    protectedRows: rows.filter((r) => rowIsProtected(r, now)).length,
+    overCap: rows.length > MAX_RETRY_ROWS,
+    retiredForCapacity: capacity.length,
+    ...(last !== undefined ? { lastCapacityRetiredAt: last } : {}),
+    retiredOnRecord: (file.retired ?? []).length,
+  };
 }
 
 // ── 1. Fingerprint on denial ──────────────────────────────────────────────
@@ -688,6 +916,13 @@ export function recordDenialFingerprint(
         actionIds: [],
       };
       file.rows.push(row);
+      // A fresh denial of a retired identity is a NEW row (epoch 0, nothing
+      // carried over); its old receipt would only contradict it.
+      if (file.retired) {
+        file.retired = file.retired.filter((e) => e.id !== id);
+        if (file.retired.length === 0) delete file.retired;
+      }
+      enforceCapacity(file, now, id);
     } else {
       // Remint: refresh recency and display fields only. NOT the epoch.
       row.lastDeniedAt = now;

@@ -39,15 +39,22 @@ import {
 } from '../defence/iron-dome/action-approvals.js';
 import {
   DEFAULT_RETRY_GRANT_TTL_MS,
+  MAX_RETIRED_IDENTITIES,
   MAX_RETRY_GRANT_TTL_MS,
   MIN_RETRY_GRANT_TTL_MS,
+  RETIRED_IDENTITY_MAX_AGE_MS,
+  RETRY_PENDING_REVIEW_WINDOW_MS,
+  findRetiredIdentity,
   formatUnspentExpiryNotice,
   grantRetry,
   listRetryRows,
+  lookupRetryRow,
   pruneRetryControl,
   retryControlPath,
+  retryStoreCapacity,
   scopeTail,
   type RetryRow,
+  type RetryStoreCapacity,
 } from '../defence/iron-dome/retry-control.js';
 
 const BOLD = '\x1b[1m';
@@ -60,6 +67,19 @@ const RESET = '\x1b[0m';
 /** True only when a human is plausibly at the keyboard. */
 export function isInteractive(streams: { stdin?: { isTTY?: boolean }; stdout?: { isTTY?: boolean } } = process): boolean {
   return Boolean(streams.stdin?.isTTY && streams.stdout?.isTTY);
+}
+
+/** What the operator typed, made safe to echo: printable ASCII, bounded. */
+function printable(raw: unknown): string {
+  return String(raw ?? '').replace(/[^\x20-\x7e]/g, '?').slice(0, 128);
+}
+
+const REVIEW_WINDOW_HOURS = RETRY_PENDING_REVIEW_WINDOW_MS / 3_600_000;
+
+/** Total: a persisted timestamp outside the Date range must not throw. */
+function iso(ms: number): string {
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? 'an unknown time' : d.toISOString();
 }
 
 function age(ms: number): string {
@@ -96,32 +116,94 @@ function renderList(records: ApprovalRecord[], now: number, retryRows: RetryRow[
   return lines.join('\n');
 }
 
+/** #682 — occupancy, said plainly, including the case the cap cannot fix. */
+function capacityLine(cap: RetryStoreCapacity): string {
+  let line = `${cap.rows} of ${cap.cap} denial slots in use`;
+  if (cap.overCap) {
+    line += ` — OVER the cap: ${cap.protectedRows} row(s) hold a live card, live or recent grant, or your Deny, and are never dropped for space`;
+  }
+  if (cap.retiredForCapacity > 0 && cap.lastCapacityRetiredAt !== undefined) {
+    line += ` · ${cap.retiredForCapacity} older denial(s) dropped for space on record (latest ${iso(cap.lastCapacityRetiredAt)})`;
+  }
+  return `${DIM}${line}.${RESET}`;
+}
+
 /** #310 — the headless-denial list. A separate rendering from the held-call
  *  list above because the two answer different questions: this one is "a job
  *  DIED; do you want to authorise one retry?", never "should this run?". */
-function renderDenialList(rows: RetryRow[], now: number): string {
+function renderDenialList(rows: RetryRow[], now: number, cap?: RetryStoreCapacity): string {
   if (rows.length === 0) {
-    return `${DIM}No headless denials on file (nothing to retry).${RESET}\n`;
+    const lines = [`${DIM}No headless denials on file (nothing to retry).${RESET}`];
+    if (cap && cap.retiredOnRecord > 0) {
+      lines.push(
+        `${DIM}${cap.retiredOnRecord} expired or dropped denial(s) on record — shieldcortex approve --denial <actionId> says which.${RESET}`,
+      );
+    }
+    return `${lines.join('\n')}\n`;
   }
   const lines: string[] = [`${BOLD}Action Guard — headless denials (already refused)${RESET}\n`];
   for (const r of rows) {
     const actionId = r.actionIds[r.actionIds.length - 1] ?? `(no actionId, hash ${shortHash(r.hash)})`;
+    // A terminal grant is only the row's story while no denial came after it.
+    const latestGrant = r.grant && r.grant.approvedAt >= r.lastDeniedAt ? r.grant : undefined;
+    const spentAt = latestGrant?.consumedAt;
     const state = r.grant && !r.grant.consumedAt && now - r.grant.approvedAt < r.grant.ttlMs
       ? `${GREEN}retry authorised${RESET} ${DIM}(expires in ${Math.max(0, Math.round((r.grant.ttlMs - (now - r.grant.approvedAt)) / 1000))}s)${RESET}`
       : r.suppression && r.suppression.until > now
         ? `${RED}denied${RESET} ${DIM}(silenced for ${Math.max(1, Math.round((r.suppression.until - now) / 60_000))}m more)${RESET}`
         : r.claim && r.claim.expiresAt > now
           ? `${YELLOW}card out${RESET} ${DIM}(awaiting a tap)${RESET}`
-          : `${YELLOW}denied, no decision${RESET}`;
+          : typeof spentAt === 'number'
+            ? `${DIM}retry spent at ${iso(spentAt)}${RESET}`
+            : latestGrant
+              ? `${DIM}retry grant lapsed unspent at ${iso(latestGrant.approvedAt + latestGrant.ttlMs)}${RESET}`
+              : `${YELLOW}denied, no decision${RESET}`;
+    const reviewEnds = r.lastDeniedAt + RETRY_PENDING_REVIEW_WINDOW_MS;
+    const reviewNote = now < reviewEnds
+      ? `reviewable until ${iso(reviewEnds)}`
+      : `review window ended ${iso(reviewEnds)} (kept for audit)`;
     lines.push(`  ${BOLD}${actionId}${RESET}  ${r.tool}  ${state}`);
     lines.push(`     ${r.redactedSurface || '(no surface recorded)'}`);
     lines.push(
-      `     ${DIM}${r.signals.join(', ') || 'no signals'} · scope ${r.originScope.cwd ?? 'UNSCOPEABLE'} · last denied ${age(now - r.lastDeniedAt)}${RESET}`,
+      `     ${DIM}${r.signals.join(', ') || 'no signals'} · scope ${r.originScope.cwd ?? 'UNSCOPEABLE'} · last denied ${age(now - r.lastDeniedAt)} · ${reviewNote}${RESET}`,
     );
     lines.push('');
   }
+  if (cap) lines.push(capacityLine(cap));
   lines.push(`${DIM}Authorise ONE retry with: shieldcortex approve --denial <actionId>${RESET}\n`);
   return lines.join('\n');
+}
+
+/**
+ * #682 — the answer for an id that matches no listed denial. If the store
+ * still holds a retirement receipt for it, say when and why it went; never
+ * offer, and never mint, anything in its place.
+ */
+function reportMissingDenial(ref: string, home: string | undefined, now: number, err: (m: string) => void): void {
+  const gone = findRetiredIdentity({ id: ref, actionId: ref }, { home, now });
+  if (gone) {
+    const label = gone.actionIds[gone.actionIds.length - 1] ?? gone.id;
+    if (gone.reason === 'capacity') {
+      err(
+        `Headless denial ${label} (${gone.tool}) was dropped at ${iso(gone.retiredAt)} to make room: `
+        + `the store keeps at most ${retryStoreCapacity({ home, now }).cap} denials. It was last denied at ${iso(gone.lastDeniedAt)}.`,
+      );
+    } else {
+      err(
+        `Headless denial ${label} (${gone.tool}) expired: last denied at ${iso(gone.lastDeniedAt)}, `
+        + `its ${REVIEW_WINDOW_HOURS}h review window ended at ${iso(gone.lastDeniedAt + RETRY_PENDING_REVIEW_WINDOW_MS)}, `
+        + `and it left the store at ${iso(gone.retiredAt)}.`,
+      );
+    }
+    err('Nothing was granted. If the job is denied again, the new denial appears in `shieldcortex approve --denial`.');
+    return;
+  }
+  err(`No headless denial matches "${printable(ref)}".`);
+  err(
+    `Denials are kept ${REVIEW_WINDOW_HOURS}h from their last denial; expiry records cover the last `
+    + `${MAX_RETIRED_IDENTITIES} (up to ${RETIRED_IDENTITY_MAX_AGE_MS / 86_400_000} days).`,
+  );
+  err('Run `shieldcortex approve --denial` with no id to see what is on file.');
 }
 
 /**
@@ -303,8 +385,9 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
     return 1;
   }
 
-  if (!args.actionId) {
-    log(renderDenialList(listRetryRows({ home, now }), now));
+  const ref = args.actionId;
+  if (!ref) {
+    log(renderDenialList(listRetryRows({ home, now }), now, retryStoreCapacity({ home, now })));
     return 0;
   }
 
@@ -321,11 +404,11 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
     return 1;
   }
 
-  const row = listRetryRows({ home, now }).find((r) => r.actionIds.includes(args.actionId as string))
-    ?? listRetryRows({ home, now }).find((r) => r.id === args.actionId);
+  // The store's own matcher over the store's own retention predicate: id,
+  // then case-insensitive alias, newest wins (#682).
+  const row = lookupRetryRow({ id: ref, actionId: ref }, { home, now });
   if (!row) {
-    err(`No headless denial matches "${args.actionId}".`);
-    err('Run `shieldcortex approve --denial` with no id to see what is on file.');
+    reportMissingDenial(ref, home, now, err);
     return 1;
   }
 
@@ -375,6 +458,9 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
       err('Tap that card, or wait for it to expire, then re-run with --reauth.');
     } else if (outcome.reason === 'locked') {
       err('The retry-control store is busy (another guard event holds the lock). Try again in a moment.');
+    } else if (outcome.reason === 'not-found') {
+      // A prune or a capacity eviction won the race between lookup and grant.
+      reportMissingDenial(ref, home, now, err);
     } else {
       err(`Could not authorise a retry for "${args.actionId}" (${outcome.reason}).`);
     }
@@ -401,5 +487,6 @@ function runDenialRetry(args: DenialRetryArgs, deps: DenialRetryDeps): number {
     `${DIM}  Spend window: ${minutes} minute(s) from now (expires ${new Date(grant.approvedAt + grant.ttlMs).toISOString()}).${RESET}`,
   );
   log(`${DIM}  Single use — the first matching call inside that window passes, then it is spent. Nothing else changes.${RESET}`);
+  log(`${DIM}  It is not held for a later scheduled run: unspent by ${iso(grant.approvedAt + grant.ttlMs)}, it lapses, and a future denial needs a fresh approval.${RESET}`);
   return 0;
 }
