@@ -254,6 +254,28 @@ describe('Needs you sidebar badge', () => {
     expect(await screen.findByRole('link', { name: "Needs you, some lists couldn't be checked" })).toBeInTheDocument();
   });
 
+  // #692 R2 (F4): with a project selected the badge mixes that project's lists
+  // with whole-computer scanner findings, so it must say so where it is shown.
+  it('with a project selected, discloses that scanner findings in the badge are from the whole computer', async () => {
+    mockProject = 'alpha';
+    mockApi(withRoute(ZERO, /\/api\/xray\/findings\/stats/, stats(7)));
+    await renderSidebar();
+    const link = await screen.findByRole('link', {
+      name: 'Needs you, 7 waiting. Held back and memories: project alpha. Scanner findings: this whole computer.',
+    });
+    expect(link).toHaveTextContent('7');
+    expect(link).toHaveAttribute('title', 'Held back and memories: project alpha. Scanner findings: this whole computer.');
+    expect(screen.getByText('Held back and memories: project alpha. Scanner findings: this whole computer.')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Needs you, 7 waiting' })).toBeNull();
+  });
+
+  it('with all projects, the badge is a plain count with no scope caption', async () => {
+    mockApi(withRoute(ZERO, /\/api\/xray\/findings\/stats/, stats(7)));
+    await renderSidebar();
+    expect(await screen.findByRole('link', { name: 'Needs you, 7 waiting' })).toHaveTextContent('7');
+    expect(screen.queryByText(/Scanner findings: this whole computer/)).toBeNull();
+  });
+
   it('a capped pair count is announced as a floor', async () => {
     mockApi(withRoute(ZERO, /\/api\/review\/queue/, review(20, 0, {
       unit: 'pairs', limit: 20,

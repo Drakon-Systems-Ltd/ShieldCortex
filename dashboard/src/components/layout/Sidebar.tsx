@@ -16,7 +16,9 @@ import { cn } from '@/lib/utils';
  * matching href (or an item's `also` page) so /memory/replay lights Memory and
  * /xray lights Protection. Needs you carries a count of confirmed waiting items:
  * "N" only when exact, "N+" when a list is a floor or could not be refreshed,
- * "?" when nothing is confirmed and a list failed (#692).
+ * "?" when nothing is confirmed and a list failed (#692). With a project
+ * selected the badge mixes project and whole-computer lists, so it says so in
+ * its label, its tooltip and (expanded) a caption under the link.
  */
 export function Sidebar() {
   const pathname = usePathname();
@@ -24,7 +26,7 @@ export function Sidebar() {
 
   const navItems = visibleNavItems();
   const activeHref = activeNavHref(pathname, navItems);
-  const badge = needsYouBadge(useNeedsYou(projectFilter));
+  const badge = needsYouBadge(useNeedsYou(projectFilter), projectFilter);
 
   return (
     <nav
@@ -54,7 +56,7 @@ export function Sidebar() {
                 href={href}
                 aria-current={active ? 'page' : undefined}
                 aria-label={count ? `${label}, ${count.label}` : undefined}
-                title={collapsed ? label : undefined}
+                title={collapsed ? (count?.scope ? `${label}: ${count.scope}` : label) : count?.scope}
                 className={cn(
                   'relative flex items-center gap-3 rounded-md px-3 py-2.5 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]',
                   collapsed && 'justify-center px-0',
@@ -77,6 +79,11 @@ export function Sidebar() {
                   </span>
                 )}
               </Link>
+              {count?.scope && !collapsed && (
+                <p aria-hidden className="px-3 pb-1 text-xs leading-snug text-[var(--sc-text-muted)]">
+                  {count.scope}
+                </p>
+              )}
             </li>
           );
         })}

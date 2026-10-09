@@ -1,5 +1,6 @@
 'use client';
 
+import { useWebSocketStatus } from '@/components/MemoryWebSocketProvider';
 import { useQuarantine } from '@/hooks/useDefence';
 import { useReviewQueue } from '@/hooks/useReviewQueue';
 import { useXRayFindingsStats } from '@/hooks/useXRayFindings';
@@ -23,10 +24,16 @@ export interface NeedsYouSource extends CountedSource {
   refetch: () => void;
 }
 
-type QueryLike = { data: unknown; isError: boolean; error?: unknown; refetch: () => unknown };
+type QueryLike = { data: unknown; dataUpdatedAt: number; isError: boolean; error?: unknown; refetch: () => unknown };
 
-function source(q: QueryLike, count: number | undefined, atLeast = false): NeedsYouSource {
-  const status: QueryStatus = queryStatus(q);
+/**
+ * `connectedAt`: when the socket last opened. Data fetched before then may
+ * miss events sent while it was down; the socket refetches on open, and until
+ * that answer arrives the source is still being checked, not confirmed.
+ */
+function source(q: QueryLike, count: number | undefined, atLeast: boolean, connectedAt: number | undefined): NeedsYouSource {
+  let status: QueryStatus = queryStatus(q);
+  if (status === 'confirmed' && connectedAt !== undefined && q.dataUpdatedAt < connectedAt) status = 'pending';
   return {
     status,
     count: status === 'unavailable' || status === 'pending' ? undefined : count,
@@ -40,6 +47,7 @@ export function useNeedsYou(project?: string | null) {
   const quarantine = useQuarantine('pending', 5, project ?? undefined);
   const review = useReviewQueue(project);
   const findings = useXRayFindingsStats();
+  const { connectedAt } = useWebSocketStatus();
 
   const summary = review.data?.summary;
   const coverage = review.data?.pairCoverage;
@@ -50,9 +58,9 @@ export function useNeedsYou(project?: string | null) {
     || coverage.contradictions.capped
     || coverage.contradictions.scanPartial;
 
-  const heldBack = source(quarantine, quarantine.data?.total);
-  const memories = source(review, summary ? (summary.contradictions ?? 0) + (summary.duplicates ?? 0) : undefined, memoriesAtLeast);
-  const scanner = source(findings, findings.data?.new);
+  const heldBack = source(quarantine, quarantine.data?.total, false, connectedAt);
+  const memories = source(review, summary ? (summary.contradictions ?? 0) + (summary.duplicates ?? 0) : undefined, memoriesAtLeast, connectedAt);
+  const scanner = source(findings, findings.data?.new, false, connectedAt);
 
   return {
     heldBack,

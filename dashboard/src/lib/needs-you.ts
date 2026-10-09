@@ -48,17 +48,31 @@ export function summarize(sources: CountedSource[]): NeedsYouSummary {
 export interface Badge {
   text: string;
   label: string;
+  /**
+   * Set when a project is selected: the number then mixes that project's
+   * held-back items and memory pairs with scanner findings from the whole
+   * computer, which the project filter does not apply to.
+   */
+  scope?: string;
 }
 
-/** Sidebar badge: "N" only when exact, "N+" for a floor, "?" when nothing confirmed but something failed. */
-export function needsYouBadge(s: NeedsYouSummary): Badge | undefined {
+/**
+ * Sidebar badge: "N" only when exact, "N+" for a floor, "?" when nothing
+ * confirmed but something failed. With a project selected the number is not a
+ * project count, so the badge says which parts are which (#692).
+ */
+export function needsYouBadge(s: NeedsYouSummary, project?: string | null): Badge | undefined {
+  let badge: Badge | undefined;
   if (s.confirmedTotal > 0) {
-    return s.exact
+    badge = s.exact
       ? { text: String(s.confirmedTotal), label: `${s.confirmedTotal} waiting` }
       : { text: `${s.confirmedTotal}+`, label: `at least ${s.confirmedTotal} waiting` };
+  } else if (s.anyFailed) {
+    badge = { text: '?', label: "some lists couldn't be checked" };
   }
-  if (s.anyFailed) return { text: '?', label: "some lists couldn't be checked" };
-  return undefined;
+  if (!badge || !project) return badge;
+  const scope = `Held back and memories: project ${project}. Scanner findings: this whole computer.`;
+  return { ...badge, label: `${badge.label}. ${scope}`, scope };
 }
 
 /** Section count text with its unit; a stale number is labelled as last known. */

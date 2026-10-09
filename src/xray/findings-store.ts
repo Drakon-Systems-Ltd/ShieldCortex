@@ -39,7 +39,8 @@ export class FindingsStoreUnreadableError extends Error {
   constructor(public readonly reason: string) {
     super(
       'The scanner findings file exists but could not be read or parsed, so the number of findings is unknown. ' +
-      'Fix or move ~/.shieldcortex/xray-findings.json; the next scan starts a new file.',
+      'Fix or move xray-findings.json in the ShieldCortex data directory. Scanning does not repair it: ' +
+      'a scan that finds nothing leaves the file as it is, and a permission problem stays until it is fixed.',
     );
     this.name = 'FindingsStoreUnreadableError';
   }
@@ -90,6 +91,31 @@ export interface FindingsStore {
   getStoreState(): FindingsStoreState;
 }
 
+const FINDING_STATUSES: ReadonlySet<string> = new Set<FindingStatus>(['new', 'reviewed', 'ignored', 'resolved', 'quarantined']);
+const FINDING_SEVERITIES: ReadonlySet<string> = new Set<XRayFinding['severity']>(['critical', 'high', 'medium', 'low', 'info']);
+
+/**
+ * Whether one persisted entry carries every field needed to count it by
+ * lifecycle and render it (#692). One bad entry makes the whole file
+ * unreadable: dropping it and counting the rest would pass a partial count off
+ * as exact.
+ */
+function isPersistedFinding(v: unknown): v is ActionableXRayFinding {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const f = v as Record<string, unknown>;
+  const str = (k: string) => typeof f[k] === 'string';
+  return (
+    str('id') && (f.id as string).length > 0 && str('sourceId') &&
+    FINDING_STATUSES.has(f.status as string) &&
+    FINDING_SEVERITIES.has(f.severity as string) &&
+    str('category') && str('title') && str('description') && str('target') &&
+    (f.sourceKind === 'scan' || f.sourceKind === 'watch') &&
+    str('detectedAt') && str('updatedAt') &&
+    (f.file == null || str('file')) &&
+    (f.line == null || typeof f.line === 'number')
+  );
+}
+
 export function createFindingsStore(basePath?: string): FindingsStore {
   const base = basePath ?? defaultBasePath();
   const findingsFile = path.join(base, 'xray-findings.json');
@@ -97,7 +123,7 @@ export function createFindingsStore(basePath?: string): FindingsStore {
 
   function readFindingsState():
     | { state: 'ok' | 'absent'; findings: ActionableXRayFinding[] }
-    | { state: 'unreadable'; findings: []; reason: string } {
+    | { state: 'unreadable'; findings: ActionableXRayFinding[]; reason: string } {
     let data: string;
     try {
       data = fs.readFileSync(findingsFile, 'utf-8');
@@ -108,7 +134,13 @@ export function createFindingsStore(basePath?: string): FindingsStore {
     try {
       const parsed: unknown = JSON.parse(data);
       if (!Array.isArray(parsed)) return { state: 'unreadable', findings: [], reason: 'not a JSON array' };
-      return { state: 'ok', findings: parsed as ActionableXRayFinding[] };
+      const bad = parsed.findIndex((f) => !isPersistedFinding(f));
+      // The mutating paths keep reading the array as before, so a scan does
+      // not silently discard the valid entries alongside the bad one.
+      if (bad !== -1) {
+        return { state: 'unreadable', findings: parsed as ActionableXRayFinding[], reason: `entry ${bad} is not a valid finding` };
+      }
+      return { state: 'ok', findings: parsed };
     } catch {
       return { state: 'unreadable', findings: [], reason: 'malformed JSON' };
     }

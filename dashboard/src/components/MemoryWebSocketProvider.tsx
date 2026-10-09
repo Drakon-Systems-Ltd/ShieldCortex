@@ -41,6 +41,8 @@ interface MemoryWebSocketContextValue {
   /** Register a message handler; returns an unsubscribe fn. */
   subscribe: (cb: Subscriber) => () => void;
   isConnected: boolean;
+  /** When the current socket opened (undefined while disconnected). */
+  connectedAt: number | undefined;
   connectionFailed: boolean;
   lastEvent: LastEvent | null;
   reconnect: () => void;
@@ -53,6 +55,7 @@ const noop = () => {};
 const defaultValue: MemoryWebSocketContextValue = {
   subscribe: () => noop,
   isConnected: false,
+  connectedAt: undefined,
   connectionFailed: false,
   lastEvent: null,
   reconnect: noop,
@@ -76,7 +79,7 @@ export function MemoryWebSocketProvider({ children }: { children: React.ReactNod
     }
   }, []);
 
-  const { isConnected, connectionFailed, lastEvent, reconnect } = useMemoryWebSocket({
+  const { isConnected, connectedAt, connectionFailed, lastEvent, reconnect } = useMemoryWebSocket({
     onMessage: dispatch,
   });
 
@@ -88,8 +91,8 @@ export function MemoryWebSocketProvider({ children }: { children: React.ReactNod
   }, []);
 
   const value = useMemo<MemoryWebSocketContextValue>(
-    () => ({ subscribe, isConnected, connectionFailed, lastEvent, reconnect }),
-    [subscribe, isConnected, connectionFailed, lastEvent, reconnect],
+    () => ({ subscribe, isConnected, connectedAt, connectionFailed, lastEvent, reconnect }),
+    [subscribe, isConnected, connectedAt, connectionFailed, lastEvent, reconnect],
   );
 
   return (
@@ -106,11 +109,12 @@ export function useMemoryWebSocketContext(): MemoryWebSocketContextValue {
 /** Connection status for indicators + poll gating. */
 export function useWebSocketStatus(): {
   isConnected: boolean;
+  connectedAt: number | undefined;
   connectionFailed: boolean;
   reconnect: () => void;
 } {
-  const { isConnected, connectionFailed, reconnect } = useMemoryWebSocketContext();
-  return { isConnected, connectionFailed, reconnect };
+  const { isConnected, connectedAt, connectionFailed, reconnect } = useMemoryWebSocketContext();
+  return { isConnected, connectedAt, connectionFailed, reconnect };
 }
 
 /**

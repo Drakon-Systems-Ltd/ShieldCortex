@@ -26,6 +26,16 @@ describe('Needs you counting rules (#692)', () => {
     expect(needsYouBadge(summarize([s('pending', undefined), s('pending', undefined), s('pending', undefined)]))).toBeUndefined();
   });
 
+  it('badge with a project selected names both scopes, including when nothing is confirmed', () => {
+    const scope = 'Held back and memories: project alpha. Scanner findings: this whole computer.';
+    expect(needsYouBadge(summarize([s('confirmed', 0), s('confirmed', 0), s('confirmed', 7)]), 'alpha'))
+      .toEqual({ text: '7', label: `7 waiting. ${scope}`, scope });
+    expect(needsYouBadge(summarize([s('confirmed', 0), s('stale', 1), s('confirmed', 0)]), 'alpha')?.label)
+      .toBe(`some lists couldn't be checked. ${scope}`);
+    expect(needsYouBadge(summarize([s('confirmed', 0), s('confirmed', 0), s('confirmed', 0)]), 'alpha')).toBeUndefined();
+    expect(needsYouBadge(summarize([s('confirmed', 7), s('confirmed', 0), s('confirmed', 0)]), null)?.scope).toBeUndefined();
+  });
+
   it('section text carries its unit, floors and staleness', () => {
     expect(sourceCountText(s('confirmed', 4), 'pairs')).toBe('4 pairs');
     expect(sourceCountText(s('confirmed', 20, true), 'pairs')).toBe('20+ pairs');

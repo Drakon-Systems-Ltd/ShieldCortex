@@ -72,6 +72,30 @@ describe('X-Ray findings routes: absent vs unreadable store (#692)', () => {
     expect(list.body.findings).toBeUndefined();
   });
 
+  // #692 R2: a parseable array with an invalid entry is unknown, not a count
+  // of the entries that happen to be valid.
+  const persisted = (over: Record<string, unknown> = {}) => ({
+    severity: 'high', category: 'eval-exec', title: 'eval', description: 'x', id: 'f-1', sourceId: 's',
+    sourceKind: 'scan', target: '/project', status: 'new', detectedAt: 't', updatedAt: 't', ...over,
+  });
+  it.each([
+    ['an empty object entry', [{}]],
+    ['an unrecognised status', [persisted({ status: 'unrecognised' })]],
+    ['a missing status', [persisted({ status: undefined })]],
+    ['a valid entry mixed with an invalid one', [persisted(), persisted({ id: 'f-2', status: 'nope' })]],
+  ])('a findings array with %s is 503 for stats and list, not a count', async (_label, entries) => {
+    fs.writeFileSync(path.join(dir, 'xray-findings.json'), JSON.stringify(entries));
+    const stats = await invoke(routes.handler('/api/xray/findings/stats'));
+    expect(stats.status).toBe(503);
+    expect(stats.body).toMatchObject({ store: 'unreadable' });
+    expect(stats.body.new).toBeUndefined();
+    expect(stats.body.total).toBeUndefined();
+
+    const list = await invoke(routes.handler('/api/xray/findings'));
+    expect(list.status).toBe(503);
+    expect(list.body.findings).toBeUndefined();
+  });
+
   it('a readable findings file reports its real counts', async () => {
     const store = createFindingsStore(dir);
     store.addFindings('scan-1', 'scan', '/project', [
