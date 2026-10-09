@@ -62,6 +62,12 @@ def fallback_catastrophic_match(content: str) -> bool:
     return any(p.search(content) for p in _FALLBACK_CATASTROPHIC)
 
 
+# #503: database / cloud / infrastructure teardown — mirrors the guard's destroy-data-or-infra row.
+# A verb's second gap stops at the next copy of that verb, so a verb-dense line is linear. A verb reached
+# through a newline, before it or inside `s3 rm`, keeps the plain gap (same matches as before).
+# Quoted data is a mention here too: see fallback_dangerous_match.
+_FALLBACK_DESTROY_ROW = re.compile(r'''(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)''', re.I)
+
 # Dangerous tier of the fail-closed fallback (issue #59) — ported from
 # tool-action-guard.ts's DANGEROUS list, kept in sync with the OpenClaw
 # interceptor + Claude Code hook. Blocked (enforcing) when the scanner is
@@ -92,6 +98,7 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"\bch(?:mod|own)\b[^|;&\n]*(?:-\w*R\w*|--recursive)\b[^|;&\n]*\s/(?:etc|usr|var|home|bin|sbin|boot|lib|lib64|opt|root)(?:/\*?)?(?:\s|$)", re.I),
     re.compile(r"\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)", re.I),
     re.compile(r"\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log", re.I),
+    _FALLBACK_DESTROY_ROW,
     # #505: `.ssh` behind any home root + `authorized_keys` as a path segment — mirrors the guard row.
     re.compile(r"/etc/(passwd|shadow|sudoers)|(?:~|\$\{?HOME\}?|/home/[^\s/'\"]+|/root|/Users/[^\s/'\"]+)/\.ssh(?![\w.-])|(?:^|[\s'\"=:/])\.ssh/authorized_keys2?\b|/authorized_keys2?\b|id_rsa|\.aws/credentials|\.env\b", re.I),
     # #505: a shell write shape onto a login/interactive startup file — mirrors the guard row.
@@ -150,11 +157,103 @@ def fallback_surface(args: dict) -> str:
     return "   ".join(parts)[:4096]
 
 
+# #503: quoted DATA, ported to the blunt fallback. The destroy-data-or-infra row
+# counts an opening quote as a command start, so `bash -c '...'` and
+# `ssh host '...'` wrappers are seen. The real guard then drops a match inside
+# a quoted argument of a data command (`classifyWithCtx`: DATA_COMMAND /
+# TEXT_FLAG in tool-action-guard.ts); this fallback did not, so
+# `grep -F "<teardown>" RUNBOOK.md` blocked here and allowed with the scanner
+# up. Mirrors that step, narrower and fail-closed: no quote is data when the
+# text has nested execution or eval, or pipes into anything but a read-only
+# filter (grep, head, sort, jq, tee, ...); a quote is data only under a data command or as a long text
+# flag's value on a non-executor; a match is dropped only inside ONE data
+# quote; an unclosed quote is never data; no quote is data when the text pairs
+# quotes the shell does not (review R3 on #626): a quote in a comment, an
+# ANSI-C `$'...'`, heredoc text, or `${...}` with its own nested quotes.
+# Used only for _FALLBACK_DESTROY_ROW.
+# Kept in sync with plugins/openclaw/interceptor.ts and scripts/pre-tool-hook.mjs.
+_FALLBACK_NESTED_EXEC = re.compile(r"\$\(|`|<\(|>\(|\beval\b|\bsource\b|\b\.\s+/|\bfunction\b|[\w.-]+\s*\(\s*\)\s*\{", re.I)
+_FALLBACK_DATA_COMMAND = re.compile(r"(?:grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|ug|ugrep|pt|echo|printf|jq|git\s+(?:commit|tag|stash|grep|log))(?=\s|$)", re.I)
+_FALLBACK_TEXT_FLAG = re.compile(r"(?:^|\s)--(?:text|body|message|comment|description|title|content|caption|note|summary|prompt|subject)(?:=|\s+)$", re.I)
+_FALLBACK_EXEC_WORD = re.compile(r"(?:bash|sh|zsh|ksh|dash|ash|python[\d.]*|node|nodejs|ruby|perl|php|eval|exec|source|ssh|scp|docker|podman|kubectl|nsenter|chroot|busybox|xargs|find|flock|watch|make|awk|sed|su|runuser|systemd-run|at|batch)", re.I)
+_FALLBACK_UNSAFE_PIPE = re.compile(r"(?<!\|)\|(?!\|)&?(?![ \t]*(?:grep|egrep|fgrep|zgrep|rg|ag|ack|head|tail|less|more|wc|sort|uniq|cut|tr|jq|cat|tee|column|nl|fold|fmt)(?:[ \t\n|;&)]|$))")  # `||` is not a pipe
+_FALLBACK_QUOTE_UNMODELLED = re.compile(r"\$'|<<|\$\{")  # quotes the walk below would mis-pair
+_FALLBACK_WORD_BREAK = " \t\n\r\v\f;&|()<>"  # a `#` after one of these (or at the start) opens a comment
+_FALLBACK_ASSIGNMENT = re.compile(r"(?:^|\s)(?:export\s+|local\s+|declare\s+\S+\s+)?\w+(?:\[[^\]]*\])?\+?=$")
+_FALLBACK_QUOTE_PREFIX_CAP = 512  # a command word further back is not recognised (the quote stays executed)
+_FALLBACK_INERT_MATCH_CAP = 64  # inert matches looked past before the row fails closed
+
+
+def _fallback_data_quote_ranges(text: str) -> list:
+    """`(open, close + 1)` of every quoted data argument, or [] when none can be trusted."""
+    if _FALLBACK_NESTED_EXEC.search(text) or _FALLBACK_QUOTE_UNMODELLED.search(text):
+        return []
+    ranges, unquoted = [], []  # quote contents blanked, so the pipe check never reads quoted text
+    q, open_at, stmt_start, i, n = None, -1, 0, 0, len(text)
+    comment_checked_to = 0  # end of the last line already found free of quotes after a `#`
+    while i < n:
+        c = text[i]
+        if c == "\\" and q != "'":  # bash escaping: outside quotes and inside "..."
+            unquoted.append("  " if q else text[i:i + 2])
+            i += 2
+            continue
+        if q:
+            unquoted.append(" ")
+            if c == q:
+                prefix = text[stmt_start:open_at]
+                if open_at - stmt_start <= _FALLBACK_QUOTE_PREFIX_CAP:
+                    bare = re.sub(r"^(?:sudo|doas)\s+", "", re.sub(r"^(?:\w+=\S*\s+)*", "", prefix.lstrip()))
+                    word = (bare.split() or [""])[0]
+                    if not _FALLBACK_ASSIGNMENT.search(prefix) and (
+                        _FALLBACK_DATA_COMMAND.match(bare)
+                        or (_FALLBACK_TEXT_FLAG.search(prefix) and not _FALLBACK_EXEC_WORD.fullmatch(word))
+                    ):
+                        ranges.append((open_at, i + 1))
+                q = None
+            i += 1
+            continue
+        unquoted.append(c)
+        if c in "\"'":
+            q, open_at = c, i
+        elif c in ";\n|&(":
+            stmt_start = i + 1
+        elif c == "#" and i >= comment_checked_to and (i == 0 or text[i - 1] in _FALLBACK_WORD_BREAK):
+            # A comment runs to the end of the line, and a quote in it is no
+            # quote to the shell. Rather than model it (a `\ #` is not one),
+            # trust no quote at all when one is there. Kept walking either way.
+            eol = text.find("\n", i)
+            comment_checked_to = n if eol < 0 else eol
+            if text.find('"', i, comment_checked_to) >= 0 or text.find("'", i, comment_checked_to) >= 0:
+                return []
+        i += 1
+    return [] if _FALLBACK_UNSAFE_PIPE.search("".join(unquoted)) else ranges
+
+
+def _fallback_executed_match(rx, text: str) -> bool:
+    """True when `rx` matches somewhere outside a quoted data argument."""
+    ranges, inert, pos = None, 0, 0
+    while True:
+        m = rx.search(text, pos)
+        if m is None:
+            return False
+        if ranges is None:
+            ranges = _fallback_data_quote_ranges(text)
+        if not any(a <= m.start() and m.end() <= b for a, b in ranges):
+            return True
+        inert += 1
+        if inert >= _FALLBACK_INERT_MATCH_CAP:
+            return True  # fail closed
+        pos = m.start() + 1  # overlapping re-scan: a match starting inside this one is still checked
+
+
 def fallback_dangerous_match(content: str) -> bool:
     """True when `content` matches a recognised-dangerous shape (fail-closed when enforcing)."""
     if not content:
         return False
-    return any(p.search(content) for p in _FALLBACK_DANGEROUS)
+    return any(
+        _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW else p.search(content)
+        for p in _FALLBACK_DANGEROUS
+    )
 
 
 # #509 R4-1: the guard self-protection floor. DUPLICATED from tool-action-guard.ts

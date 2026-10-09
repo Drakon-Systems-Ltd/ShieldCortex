@@ -68,7 +68,7 @@ export function ToggleRow({
         <span
           className={cn(
             'absolute inset-0 rounded-full transition-colors',
-            checked ? 'bg-[var(--sc-primary)]' : 'border border-[var(--sc-border)] bg-[var(--sc-surface-2)]',
+            checked ? 'bg-[var(--sc-primary-fill)]' : 'border border-[var(--sc-border)] bg-[var(--sc-surface-2)]',
           )}
         />
         <span

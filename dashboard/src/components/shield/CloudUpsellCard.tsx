@@ -172,7 +172,7 @@ export function CloudUpsellCard() {
             <p className="text-xs text-[var(--sc-danger)]">{error}</p>
           )}
 
-          <p className="text-[10px] text-[var(--sc-text-muted)]">Cloud free tier: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email. Teams, servers, and fleets are Enterprise: sales@drakonsystems.com.</p>
+          <p className="text-xs text-[var(--sc-text-muted)]">Cloud free tier: 500 scans/month, 7-day audit retention, 1 member — sign in with just your email. Teams, servers, and fleets are Enterprise: sales@drakonsystems.com.</p>
         </div>
       )}
 

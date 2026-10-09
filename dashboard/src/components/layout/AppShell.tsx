@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation';
 import { MemoryWebSocketProvider } from '@/components/MemoryWebSocketProvider';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { TopBar } from '@/components/layout/TopBar';
-import { NAV_ITEMS } from '@/components/layout/route-config';
+import { activeNavHref, visibleNavItems } from '@/components/layout/route-config';
 import { cn } from '@/lib/utils';
 
 /**
@@ -36,13 +36,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 function MobileNav() {
   const pathname = usePathname();
-  const activeHref = NAV_ITEMS
-    .filter((n) => pathname === n.href || pathname.startsWith(n.href + '/'))
-    .sort((a, b) => b.href.length - a.href.length)[0]?.href;
+  const navItems = visibleNavItems();
+  const activeHref = activeNavHref(pathname, navItems);
 
   return (
-    <nav aria-label="Primary" className="flex shrink-0 border-t border-[var(--sc-border)] bg-[var(--sc-surface)] md:hidden">
-      {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
+    <nav aria-label="Primary" className="flex shrink-0 border-t border-[var(--sc-border)] bg-[var(--sc-rail)] md:hidden">
+      {navItems.map(({ href, label, icon: Icon }) => {
         const active = href === activeHref;
         return (
           <Link
@@ -50,7 +49,7 @@ function MobileNav() {
             href={href}
             aria-current={active ? 'page' : undefined}
             className={cn(
-              'flex flex-1 flex-col items-center gap-0.5 py-2 text-[10px] focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]',
+              'flex flex-1 flex-col items-center gap-0.5 py-2 text-xs focus-visible:outline-2 focus-visible:outline-[var(--sc-focus)]',
               active ? 'text-[var(--sc-primary)]' : 'text-[var(--sc-text-muted)]',
             )}
           >

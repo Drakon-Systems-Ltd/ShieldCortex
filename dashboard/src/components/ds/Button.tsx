@@ -24,7 +24,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 
 const VARIANT: Record<'primary' | 'secondary' | 'ghost' | 'danger' | 'outline', string> = {
   primary:
-    'bg-[var(--sc-primary)] text-[var(--sc-primary-fg)] border border-transparent hover:bg-[var(--sc-primary-hover)]',
+    'bg-[var(--sc-primary-fill)] text-[var(--sc-primary-fg)] border border-transparent hover:bg-[var(--sc-primary-fill-hover)]',
   secondary:
     'bg-[var(--sc-surface-2)] text-[var(--sc-text)] border border-[var(--sc-border)] hover:border-[var(--sc-border-strong)]',
   ghost:

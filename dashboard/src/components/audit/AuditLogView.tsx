@@ -82,7 +82,7 @@ export function AuditLogView() {
       key: 'result',
       header: 'Result',
       cell: (log) => (
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${RESULT_BADGE[log.firewall_result] ?? 'text-[var(--sc-text-dim)]'}`}>
+        <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${RESULT_BADGE[log.firewall_result] ?? 'text-[var(--sc-text-dim)]'}`}>
           {log.firewall_result}
         </span>
       ),
@@ -117,7 +117,7 @@ export function AuditLogView() {
               type="button"
               onClick={() => setTimeRange(range)}
               className={`rounded-md px-3 py-1 text-xs transition-colors ${
-                timeRange === range ? 'bg-[var(--sc-ok)] text-[var(--sc-primary-fg)]' : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)]'
+                timeRange === range ? 'bg-[var(--sc-ok)] text-[var(--sc-bg)]' : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)]'
               }`}
             >
               {range}

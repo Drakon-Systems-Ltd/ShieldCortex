@@ -12,8 +12,15 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* System sans per BRANDING.md (Geist dropped, Opus design §3). */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  /* Type scale for a dyslexic reader (Opus §3): body 15px, nothing below
+     12.5px. `text-xs` is the floor (13px); `text-sm` is body text (15px). */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.45;
+  --text-sm: 0.9375rem;
+  --text-sm--line-height: 1.55;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -64,12 +71,13 @@
 :root {
   --radius: 0.625rem;
 
-  /* Light theme (default; `.dark` overrides below). */
+  /* Light theme (opt-in; dark is the default, `.dark` overrides below). */
   --sc-bg: #f6f8fc;
+  --sc-rail: #ffffff;
   --sc-surface: #ffffff;
   --sc-surface-2: #eef2f9;
   --sc-border: #dbe2ee;
-  --sc-border-strong: #b9c5da;
+  --sc-border-strong: #7d8cab;   /* input borders: 3:1 non-text */
 
   --sc-text: #111a2e;
   --sc-text-dim: #3c4a66;
@@ -77,14 +85,16 @@
 
   --sc-primary: #2563eb;         /* electric blue — memory / neutral action */
   --sc-primary-hover: #1d4ed8;
+  --sc-primary-fill: #2563eb;    /* filled buttons behind white text (5.2:1) */
+  --sc-primary-fill-hover: #1d4ed8;
   --sc-primary-fg: #ffffff;
   --sc-primary-soft: rgba(37, 99, 235, 0.10);
 
-  --sc-ok: #15803d;              /* allowed / healthy */
+  --sc-ok: #157a3a;              /* allowed / healthy (4.8:1 on surface-2) */
   --sc-ok-soft: rgba(21, 128, 61, 0.12);
-  --sc-warn: #b45309;            /* quarantine / pending / warn */
+  --sc-warn: #a8500a;            /* waiting for you / held back */
   --sc-warn-soft: rgba(180, 83, 9, 0.12);
-  --sc-danger: #dc2626;          /* blocked / threat / fail ONLY */
+  --sc-danger: #c62020;          /* blocked / threat / fail ONLY */
   --sc-danger-soft: rgba(220, 38, 38, 0.10);
   --sc-violet: #7c3aed;          /* links / integrity / consolidation */
   --sc-violet-soft: rgba(124, 58, 237, 0.10);
@@ -103,7 +113,7 @@
   --card-foreground: var(--sc-text);
   --popover: var(--sc-surface);
   --popover-foreground: var(--sc-text);
-  --primary: var(--sc-primary);
+  --primary: var(--sc-primary-fill);
   --primary-foreground: var(--sc-primary-fg);
   --secondary: var(--sc-surface-2);
   --secondary-foreground: var(--sc-text);
@@ -120,7 +130,7 @@
   --chart-3: var(--sc-warn);
   --chart-4: var(--sc-violet);
   --chart-5: var(--sc-text-muted);
-  --sidebar: var(--sc-surface);
+  --sidebar: var(--sc-rail);
   --sidebar-foreground: var(--sc-text);
   --sidebar-primary: var(--sc-primary);
   --sidebar-primary-foreground: var(--sc-primary-fg);
@@ -131,35 +141,42 @@
 }
 
 .dark {
-  --sc-bg: #0a0e1a;
-  --sc-surface: #101729;
-  --sc-surface-2: #16203a;
-  --sc-border: #223050;
-  --sc-border-strong: #31446e;
+  /* Brand dark (default): electric blue on deep navy. Values from
+     shieldcortex-site/BRANDING.md via the Opus design §3; ratios are
+     checked by src/app/__tests__/contrast-tokens.test.ts. */
+  --sc-bg: #0a0e1a;              /* navy-950: page */
+  --sc-rail: #0d1321;            /* navy-900: sidebar and top bar */
+  --sc-surface: #141c30;         /* navy-800: cards */
+  --sc-surface-2: #1a2440;
+  --sc-border: #1e2a45;          /* navy-700 */
+  --sc-border-strong: #5a6f9a;   /* input borders: 3:1 non-text on every surface */
 
   --sc-text: #e7edf9;
   --sc-text-dim: #aab7d1;
-  --sc-text-muted: #8291b1;      /* 5.2:1 on --sc-surface */
+  --sc-text-muted: #8fa0c2;
 
-  --sc-primary: #3b82f6;
-  --sc-primary-hover: #60a5fa;
+  --sc-primary: #60a5fa;         /* electric-400: links, active nav, icons */
+  --sc-primary-hover: #93c5fd;
+  --sc-primary-fill: #2563eb;    /* electric-600: filled buttons behind white text */
+  --sc-primary-fill-hover: #1d4ed8;
   --sc-primary-fg: #ffffff;
   --sc-primary-soft: rgba(59, 130, 246, 0.16);
 
-  --sc-ok: #4ade80;
-  --sc-ok-soft: rgba(74, 222, 128, 0.14);
-  --sc-warn: #f5a623;
-  --sc-warn-soft: rgba(245, 166, 35, 0.14);
-  --sc-danger: #f0564f;
-  --sc-danger-soft: rgba(240, 86, 79, 0.14);
+  --sc-ok: #4ade80;              /* neon-400: allowed / on / clean */
+  --sc-ok-soft: rgba(74, 222, 128, 0.12);
+  --sc-warn: #fbbf24;            /* amber: waiting for you / held back */
+  --sc-warn-soft: rgba(251, 191, 36, 0.12);
+  --sc-danger: #f87171;          /* red-400: blocked / threat, nothing else */
+  --sc-danger-soft: rgba(248, 113, 113, 0.12);
   --sc-violet: #a78bfa;
   --sc-violet-soft: rgba(167, 139, 250, 0.14);
   --sc-info: #60a5fa;
   --sc-off: #94a3b8;
 
-  --sc-focus: #60a5fa;
+  --sc-focus: #93c5fd;           /* electric-300 */
   --sc-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
   --sc-shadow-drawer: 0 8px 30px rgba(0, 0, 0, 0.5);
+
 }
 
 /* ── Legacy `--sc-*` aliases ─────────────────────────────────────────
@@ -200,12 +217,19 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
-    font-size: 14px;
-    line-height: 1.5;
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.55;
   }
   code, kbd, samp, pre {
-    font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
+  }
+  a {
+    text-underline-offset: 3px;
+  }
+  :focus-visible {
+    outline: 2px solid var(--sc-focus);
+    outline-offset: 2px;
   }
 }
 
