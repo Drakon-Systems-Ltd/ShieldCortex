@@ -5261,14 +5261,14 @@ interface HeredocBody {
  * fail closed, as on main.
  */
 const WHOLE_COMMAND_HEREDOC_PROGRAM = new RegExp(
-  '^\\s*'
-  + '(?:cd\\s+[\\w.\\/~-]+\\s*&&\\s*)?'                              // optional `cd plain/path &&`
-  + '(?:[A-Za-z_]\\w*=[\\w.\\/:,-]*\\s+)*'                            // env assignments
-  + '(?:(?:env|nohup|nice|command|timeout\\s+\\d+[smhd]?)\\s+)*'      // transparent wrappers
+  '^\\s*'                                                             // leading blank lines are fine; after this the intro is ONE line
+  + '(?:cd[ \\t]+[\\w.\\/~-]+[ \\t]*&&[ \\t]*)?'                        // optional `cd plain/path &&`
+  + '(?:[A-Za-z_]\\w*=[\\w.\\/:,-]*[ \\t]+)*'                          // env assignments
+  + '(?:(?:env|nohup|nice|command|timeout[ \\t]+\\d+[smhd]?)[ \\t]+)*'  // transparent wrappers
   + '(?:[\\w.\\/-]*\\/)?(python[\\d.]*|node|nodejs|ruby|perl|php)'    // (1) interpreter, optional dir
-  + '(?:\\s+(?:-[WX]\\s+\\w+|--?[\\w-]+(?:=[^\\s<>|&;()`$\'"]*)?))*'  // flags only
-  + '(?:\\s+-)?'                                                      // the stdin program marker
-  + '\\s+<<([\'"])([A-Za-z_]\\w*)\\2[ \\t]*\\n',                      // (2) quote (3) DELIM, nothing else on the line
+  + '(?:[ \\t]+(?:-[WX][ \\t]+\\w+|--?[\\w-]+(?:=[^\\s<>|&;()`$\'"]*)?))*'  // flags only; a -W/-X value is on the SAME line
+  + '(?:[ \\t]+-)?'                                                   // the stdin program marker
+  + '[ \\t]+<<([\'"])([A-Za-z_]\\w*)\\2[ \\t]*\\n',                    // (2) quote (3) DELIM, nothing else on the line
 );
 
 /** The masked range and language when `text` is exactly the shape above, else null. */

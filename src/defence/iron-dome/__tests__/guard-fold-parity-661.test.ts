@@ -280,6 +280,15 @@ describe('#686 — relief is one whole-command form; everything else is scanned 
     'V17 EOF # is not the closer': "for i in 1; do python3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF #\nEOF\ndone | sh",
     'V20 env wrapper inside a loop': "for i in 1; do env A=1 python3 - <<'EOF'\nprint('/tmp/payload.sh')\nEOF\ntrue\ndone | sh",
     'a body line that starts with the delimiter': `python3 - <<'EOF'\nprint('${P}')\nEOF #\nsh ${P}\nEOF`,
+    // round 4 — CASE: the intro must be ONE line. `\s` matched a newline, so a
+    // `-W`/`-X` value swallowed the next line's command word and the real shell
+    // heredoc on line 2 was masked as the python "body". Each flipped block→allow.
+    'C1 python3 -W, newline, bash heredoc': `python3 -W\nbash <<'EOF'\n${P}\nEOF`,
+    'C2 python3 -X, newline, sh - heredoc': `python3 -X\nsh - <<'EOF'\n${P}\nEOF`,
+    'C3 node -W, newline, bash -s heredoc': `node -W\nbash -s <<'EOF'\n${P}\nEOF`,
+    'C4 python3 -W, newline, sh heredoc running bash payload': `python3 -W\nsh <<'EOF'\nbash ${P}\nEOF`,
+    'C5 python3 -W, newline, zsh heredoc': `python3 -W\nzsh <<'EOF'\n${P}\nEOF`,
+    'C6 env assignment line, python3 -X, newline, bash heredoc': `X=1\npython3 -X\nbash <<'EOF'\n${P}\nEOF`,
   };
   const FAIL_CLOSED: Record<string, string> = {
     'unquoted delimiter': `python3 - <<EOF\nprint('${P}')\nEOF`,
