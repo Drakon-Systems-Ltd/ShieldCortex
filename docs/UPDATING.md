@@ -126,6 +126,31 @@ Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob
 
 Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
 
+<a id="mixed-version-ledger"></a>
+
+## Older copies sharing a chained database
+
+One host often has more than one ShieldCortex copy: a global install, a project dependency tree, a cached plugin or a Hermes plugin copy. Copies at 5.2.1 or older predate the chained ledger. Every time one of them starts, it fills in `project` on audit rows that have none. A copy at 5.3 or later skips chained rows. An older copy does not, so it used to change chained rows, and the next `shieldcortex ledger verify` failed. (#674)
+
+The database now refuses that change, whichever copy issues it. Once a current build has opened the database, any change to the `project` of a chained audit row is aborted. An update that leaves the value as it was still goes through.
+
+What you may see:
+
+- **On an older copy's stderr, at each start:**
+
+  ```
+  [database] unexpected migration error in defence_audit/quarantine project backfill (data migration): ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)
+  ```
+
+  This means an old copy started against this database and was stopped before it changed anything. The old copy carries on starting. Update or remove that copy. If something alerts on `unexpected migration error`, this line will trigger it.
+- **Deferred backfill.** The refused statement is rolled back as a whole, so that start does not fill in `project` on unchained rows, or on held-back (quarantine) items, either. The next start of a current build fills them in. Nothing is lost.
+
+What this does not cover:
+
+- **It is compatibility protection, not a tamper boundary.** Anyone with write access to the database can remove the trigger. Detecting tampering is still the job of `shieldcortex ledger verify` and the `Chained ledger` doctor row. Other columns of chained rows are not guarded, and edits to them are reported by `ledger verify` as before.
+- **Older copies still write unchained rows and still delete rows without a checkpoint.** An old copy that logs an audit event adds a row without chain columns, which `ledger verify` reports as `unchained-row-after-start`. An old copy that runs retention deletes rows without recording a checkpoint, which `ledger verify` reports as a gap. Neither is blocked. The fix is to update or remove old copies.
+- **`shieldcortex doctor` does not yet look for stale copies.** Finding the old copy is up to you for now.
+
 <a id="policy-lock"></a>
 
 ## Policy lock
