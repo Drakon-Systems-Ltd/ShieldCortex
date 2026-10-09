@@ -43,6 +43,12 @@ export const PROTECTED_AUDIT_OUTCOMES = [
   'policy_unlocked',
   /** A write was refused because a verified lock covers the key. */
   'policy_refused',
+  /**
+   * #647: an operator deliberately re-signed a `tampered` config.json after
+   * reviewing it (`shieldcortex config --resign`). Records the previous verdict
+   * and both hashes so "who signed this, and from what" has an answer.
+   */
+  'config_resigned',
 ] as const;
 
 export type ProtectedAuditOutcome = (typeof PROTECTED_AUDIT_OUTCOMES)[number];
@@ -71,7 +77,8 @@ export interface ProtectedAuditEvent {
  * `logIronDomeAudit` itself — an audit row is evidence, never a gate.
  */
 export function emitProtectedAudit(event: ProtectedAuditEvent): void {
-  const allowed = event.outcome === 'policy_locked' || event.outcome === 'policy_unlocked';
+  const allowed = event.outcome === 'policy_locked' || event.outcome === 'policy_unlocked'
+    || event.outcome === 'config_resigned';
   const reason =
     `${event.outcome}` +
     (event.path ? ` path=${event.path}` : '') +

@@ -36,6 +36,9 @@ import {
   setAutoMemorySamplingTurns,
   NATIVE_INJECT_CONTRACTS,
   MEMORY_PLANE_VALUES,
+  ConfigIntegrityRefusal,
+  previewConfigResign,
+  resignTamperedConfig,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -55,6 +58,29 @@ const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
 
 export function handleCloudConfig(args: string[]): void {
+  // #647: a setter on a config.json that fails its integrity check refuses
+  // rather than re-signing it. That is an expected outcome with an actionable
+  // message, not a crash — and the first refusal stops the run, so a later
+  // flag in the same command cannot half-apply.
+  try {
+    handleCloudConfigFlags(args);
+  } catch (err) {
+    if (err instanceof ConfigIntegrityRefusal) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+function handleCloudConfigFlags(args: string[]): void {
+  // #647: review and deliberately re-sign a tampered config.json. Handled
+  // alone and first: it is never combined with a setting change.
+  if (args.includes('--resign')) {
+    handleResign(args);
+    return;
+  }
+
   if (args.includes('--cloud-status')) {
     const config = getCloudConfig();
     const mode = getDefenceMode();
@@ -660,6 +686,8 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --memory-host-runtime <openclaw|claude_code|hermes>[,…]  Declare the bound host runtime(s) doctor must prove (signed write)');
     console.log('  --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
+    console.log('  --resign               Preview re-signing a config.json that fails its integrity check (writes nothing)');
+    console.log('  --resign --confirm <sha256>  Re-sign exactly the previewed bytes (full sha256; backup + audit first)');
     console.log('');
     console.log('LLM Verification:');
     console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
@@ -711,6 +739,66 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
   }
 
   console.log('Usage: shieldcortex cloud sync --full');
+}
+
+/**
+ * `shieldcortex config --resign [--confirm <sha256>]` (#647).
+ *
+ * Without `--confirm` it is a preview and writes nothing. It prints the verdict,
+ * the full sha256 of the bytes on disk and the NAMES of the settings that would
+ * leave the strict fail-closed posture — never their values, because
+ * config.json can hold credentials. The operator reads the file themselves.
+ * With `--confirm` it re-signs exactly those bytes (see resignTamperedConfig).
+ */
+function handleResign(args: string[]): void {
+  const confirmIdx = args.indexOf('--confirm');
+  if (confirmIdx !== -1) {
+    const value = args[confirmIdx + 1];
+    if (!value || value.startsWith('--')) {
+      console.error('Missing value for --confirm. Run `shieldcortex config --resign` first and pass the full sha256 it prints.');
+      process.exit(1);
+    }
+    try {
+      const result = resignTamperedConfig(value);
+      console.log(`Re-signed ${result.path} (was: tampered).`);
+      console.log(`  Backup of the reviewed bytes: ${result.backupPath}`);
+      console.log(`  sha256 before: ${result.previousSha256}`);
+      console.log(`  sha256 after:  ${result.newSha256}`);
+      console.log(`  Settings now taken from the file instead of the strict posture: ${result.loosenedKeys.length > 0 ? result.loosenedKeys.join(', ') : 'none'}`);
+      console.log('  Recorded in the audit log as config_resigned. Confirm with `shieldcortex doctor`.');
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+    return;
+  }
+
+  const preview = previewConfigResign();
+  console.log(`config.json integrity: ${preview.verdict}`);
+  console.log(`  File: ${preview.path}`);
+  if (preview.verdict !== 'tampered') {
+    if (preview.verdict === 'malformed' || preview.verdict === 'unreadable') {
+      console.log('  It cannot be parsed, so it cannot be reviewed or re-signed. Fix it or restore a backup.');
+      process.exit(1);
+    }
+    console.log('  Nothing to re-sign.');
+    return;
+  }
+  console.log(`  sha256: ${preview.sha256}`);
+  console.log('  Re-signing trusts this file exactly as it is now. This preview does not print its values —');
+  console.log('  read the file yourself before you confirm.');
+  console.log(`  Settings that would leave the strict fail-closed posture: ${preview.loosenedKeys.length > 0 ? preview.loosenedKeys.join(', ') : 'none'}`);
+  if (preview.lockRefusal) {
+    console.log(`  Will be REFUSED by the policy lock: ${preview.lockRefusal}`);
+    return;
+  }
+  if (preview.unauthorisedKeys.length > 0) {
+    console.log(`  Will be REFUSED: ${preview.unauthorisedKeys.join(', ')} — no verified policy lock covers them (lock: ${preview.lockStatus}).`);
+    console.log('  Restore a backup whose signature still verifies, or move config.json aside and re-apply');
+    console.log('  those settings with their own commands.');
+    return;
+  }
+  console.log(`  To re-sign exactly these bytes: shieldcortex config --resign --confirm ${preview.sha256}`);
 }
 
 /**

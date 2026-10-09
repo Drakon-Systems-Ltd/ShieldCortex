@@ -245,12 +245,17 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
   // hand-edit `config.json` and re-pin a looser lock — and stopped there. Both
   // of those steps are real; together they do nothing, because a `tampered`
   // verdict forces the WHOLE fail-closed posture unconditionally and
-  // independently of the lock, and `applyPolicyLock` only ever tightens. The
-  // operator follows the runbook exactly and stays in strict with no visible
-  // reason why. §8.4 now has a step 4 — re-run the corresponding
-  // `shieldcortex config --*` flag so the file is re-signed — and this is it.
+  // independently of the lock, and `applyPolicyLock` only ever tightens.
+  //
+  // §8.4 step 4 used to say "re-run the corresponding `shieldcortex config --*`
+  // flag so the file is re-signed", and this case pinned it. #647: that step
+  // WAS the defect — the write started from the forced strict view, so it
+  // persisted strict values (wiping reviewedScripts/autoApprove) and signed
+  // them as valid. Step 4 is now the deliberate `config --resign`; the setter
+  // refuses. The positive re-sign under a verified lock (the real §8.4 shape,
+  // which needs a root-owned lock) is in config-resign-locked-647.test.ts.
 
-  it('re-pinning a looser lock does NOT undo the hand-edit; the re-sign does', async () => {
+  it('re-pinning a looser lock does NOT undo the hand-edit, and re-running a setter is REFUSED, not a re-sign', async () => {
     // 1. The locked-box starting point: guard on and enforcing, correctly signed.
     const start = await freshConfig();
     start.setActionGuardCoreConfig({ enabled: true, enforce: true });
@@ -261,6 +266,7 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     const onDisk = readOnDisk();
     onDisk.actionGuard = { enabled: true, enforce: false };
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(onDisk, null, 2));
+    const handEdited = fs.readFileSync(path.join(configDir, 'config.json'));
 
     // 3. Runbook step 3 — re-pin the looser lock. Modelled by the loosest lock
     //    state that exists: none at all. `applyPolicyLock` only tightens, so no
@@ -271,13 +277,23 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     expect(repinned.isConfigTampered()).toBe(true);
     expect(repinned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
 
-    // 4. Runbook step 4 — the step that was missing. Re-run the corresponding
-    //    setter, which re-signs the file. NOW the loosening is in force.
-    repinned.setActionGuardCoreConfig({ enabled: true, enforce: false });
-    const resigned = await freshConfig();
-    expect(resigned.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false, readinessGate: false });
-    expect(resigned.readRawConfig()).toBeDefined();
-    expect(resigned.isConfigTampered()).toBe(false);
+    // 4 (old). Re-running the setter no longer "re-signs": it refuses, and the
+    //    hand-edited bytes — the operator's intent — are still on disk.
+    expect(() => repinned.setActionGuardCoreConfig({ enabled: true, enforce: false }))
+      .toThrow(repinned.ConfigIntegrityRefusal);
+    expect(fs.readFileSync(path.join(configDir, 'config.json')).equals(handEdited)).toBe(true);
+    const still = await freshConfig();
+    expect(still.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: true, readinessGate: false });
+    expect(still.readRawConfig()).toBeDefined();
+    expect(still.isConfigTampered()).toBe(true);
+
+    // 4 (new). With no VERIFIED lock covering `actionGuard.enforce`, the
+    //    deliberate re-sign refuses too: making a hand-edited advisory guard
+    //    effective is what the guard's own self-protection floor holds.
+    const preview = still.previewConfigResign();
+    expect(preview.unauthorisedKeys).toContain('actionGuard.enforce');
+    expect(() => still.resignTamperedConfig(preview.sha256!)).toThrow(/no verified policy lock covers/);
+    expect(fs.readFileSync(path.join(configDir, 'config.json')).equals(handEdited)).toBe(true);
   });
 
   it('a lock appearing after step 4 pulls the re-signed config back up — the re-sign is not an escape', async () => {
