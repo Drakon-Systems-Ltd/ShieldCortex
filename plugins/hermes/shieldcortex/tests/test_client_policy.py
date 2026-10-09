@@ -6,7 +6,10 @@ or `python3 -m unittest`.
 import io
 import json
 import os
+import random
+import re
 import sys
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -441,6 +444,227 @@ class FallbackDangerousScanTests(unittest.TestCase):
         self.assertIn("sudo rm x", s)
         # non-exec-surface keys are not scanned (a description must not gate)
         self.assertNotIn("harmless words", s)
+
+
+class DestroyRowLinearTests(unittest.TestCase):
+    """
+    #503 ReDoS: the destroy-data-or-infra port had a plain gap after each verb,
+    so a verb-dense line with no separator (`kubectl delete delete ...`) cost
+    quadratic time in the synchronous fallback. The gap now stops at the next
+    copy of the verb. It must answer exactly as the old row did, only faster.
+    """
+
+    # The row before the fix, frozen as the oracle.
+    ORIGINAL = re.compile(r'''(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|apply\b[^|;&\n]*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\sdelete\b[^|;&\n]*\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\sdelete\b[^|;&\n]*\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|s3\s+rm\b[^|;&\n]*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|rm\b[^|;&\n]*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|down\b[^|;&\n]*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)''', re.I)
+
+    BRANCHES = [  # (binary, verb, target), spelled in pieces
+        ("kube" + "ctl", "del" + "ete", "ns"), ("kube" + "ctl", "del" + "ete", "--all"),
+        ("terra" + "form", "app" + "ly", "-des" + "troy"), ("dock" + "er", "do" + "wn", "-v"),
+        ("gsu" + "til", "r" + "m", "-r"), ("aw" + "s", "s3 r" + "m", "--recur" + "sive"),
+    ]
+
+    @staticmethod
+    def _live():
+        from sc_client import _FALLBACK_DANGEROUS
+        rows = [p for p in _FALLBACK_DANGEROUS if "kube" + "ctl" in p.pattern]
+        assert len(rows) == 1
+        return rows[0]
+
+    @staticmethod
+    def _answer(rx, s):
+        m = rx.search(s)
+        return (m.start() if m else -1, m.group(0) if m else None, [(x.start(), x.group(0)) for x in rx.finditer(s)])
+
+    def test_same_match_index_span_and_occurrences_as_the_original(self):
+        live = self._live()
+        edges = []
+        for b, v, t in self.BRANCHES:
+            edges += [
+                f"{b} x\n{v} a {v} b {t}", f"{b} {v} a\n{v} {t}", f"{b} {v} a\n{t}",
+                f"{b} x\n{v} a\n{t}", f"{b} {v} a {v} b\n{v} c {t} d {v}", f"{b} {v}\n{v}\n{v} {t}",
+            ]
+        for s in edges:
+            self.assertEqual(self._answer(live, s), self._answer(self.ORIGINAL, s), s)
+        rnd = random.Random(503)
+        matched = 0
+        for _ in range(5000):
+            b, v, t = rnd.choice(self.BRANCHES)
+            s = b
+            for _ in range(rnd.randint(1, 10)):
+                p = rnd.choice([v, v, t, "x", "-n", "\n", ";", '"', "\t"])
+                s += ("" if p == "\n" or rnd.random() < 0.15 else " ") + p
+            want = self._answer(self.ORIGINAL, s)
+            self.assertEqual(self._answer(live, s), want, s)
+            matched += want[0] >= 0
+        self.assertGreater(matched, 200)
+
+    def test_newline_inside_the_two_word_verb_keeps_every_match(self):
+        # Review R1 on #626: the stopping gap assumed the verb ends on the
+        # binary's own line. `s3 rm` can carry a newline INSIDE it; then a later
+        # copy of the verb is out of the first gap's reach and the stopping gap
+        # lost the match the plain gap found. Every inner-whitespace spelling,
+        # with a second statement appended so occurrence loss shows up too.
+        live = self._live()
+        a, s3, rm, t = "aw" + "s", "s3", "r" + "m", "--recur" + "sive"
+        for ws in [" ", "\t", "\n", "\r\n", "\n\n", " \n ", "\n\t"]:
+            for s in [
+                f"{a} {s3}{ws}{rm} {s3} {rm} {t}",
+                f"{a} {s3}{ws}{rm} {s3} {rm} {t}; {a} {s3} {rm} {t}",
+                f"{a} x {s3}{ws}{rm} x {s3}{ws}{rm} {t}",
+                f"{a} {s3} {rm} {s3}{ws}{rm} {t}",
+            ]:
+                self.assertEqual(self._answer(live, s), self._answer(self.ORIGINAL, s), s)
+        # Exhaustive over a small alphabet: binary, then up to five tokens from
+        # the verb's two words and the target, each joined by a space, a newline
+        # or both. Checks first match, index, span and every occurrence.
+        toks, joins, n, matched = [s3, rm, t], [" ", "\n", " \n"], 0, 0
+
+        def walk(s, depth):
+            nonlocal n, matched
+            n += 1
+            want = self._answer(self.ORIGINAL, s)
+            matched += want[0] >= 0
+            self.assertEqual(self._answer(live, s), want, s)
+            if depth < 5:
+                for j in joins:
+                    for tok in toks:
+                        walk(s + j + tok, depth + 1)
+
+        walk(a, 0)
+        self.assertGreater(n, 50_000)
+        self.assertGreater(matched, 1_000)
+
+    def test_verb_dense_line_scales_linearly(self):
+        live = self._live()
+
+        def time_of(b, v, reps):
+            s = b + (" " + v) * reps
+            runs = []
+            for _ in range(3):
+                t = time.perf_counter()
+                self.assertIsNone(live.search(s))
+                runs.append(time.perf_counter() - t)
+            return sorted(runs)[1]
+
+        for b, v, _ in self.BRANCHES:
+            small, large = time_of(b, v, 1000), time_of(b, v, 4000)
+            # Linear is ~4x; the quadratic row measured ~16x (kubectl: 0.8 s -> 12.6 s
+            # at 2000 -> 8000). The constant absorbs timer noise at small sizes.
+            self.assertLess(large, 8 * small + 0.005, (b, v, small, large))
+
+    def test_verb_dense_line_around_inner_newline_verbs_scales_linearly(self):
+        # The inner-newline arm keeps the plain gap; it runs at most once per
+        # start, so verb-dense text around it is still linear.
+        live = self._live()
+        a, s3, rm = "aw" + "s", "s3", "r" + "m"
+
+        def time_of(reps):
+            s = f"{a} {s3}\n{rm}" + f" {s3} {rm}" * reps + f" {s3}\n{rm}" + f" {s3} {rm}" * reps
+            runs = []
+            for _ in range(3):
+                t = time.perf_counter()
+                self.assertIsNone(live.search(s))
+                runs.append(time.perf_counter() - t)
+            return sorted(runs)[1]
+
+        small, large = time_of(1000), time_of(4000)
+        self.assertLess(large, 8 * small + 0.005, (small, large))
+
+    def test_verb_dense_and_long_padded_teardown_still_gates(self):
+        from sc_client import fallback_dangerous_match
+        k, d = "kube" + "ctl", "del" + "ete"
+        self.assertTrue(fallback_dangerous_match(k + (" " + d) * 300 + " namespace prod"))
+        # padding past any fixed bound must not turn a gated line into an allowed one
+        self.assertTrue(fallback_dangerous_match(f"{k} {d}" + " --wait=false" * 150 + " namespace prod"))
+        self.assertTrue(fallback_dangerous_match("terra" + "form app" + "ly" + " -var x=1" * 250 + " -des" + "troy"))
+        self.assertFalse(fallback_dangerous_match(k + (" " + d) * 300))
+
+
+class DestroyRowDataQuoteTests(unittest.TestCase):
+    """
+    #503 review R2 on #626: the destroy-data-or-infra row counts an opening
+    quote as a command start, so `bash -c '...'` and `ssh host '...'` wrappers
+    are seen. The real guard drops a match inside a quoted argument of a data
+    command; the fallback did not, so `grep -F "<teardown>" RUNBOOK.md` blocked
+    with the scanner down and allowed with it up. Same cases as the JS suite
+    src/__tests__/fallback-destroy-data-quotes-503.test.ts.
+    """
+
+    TF = "terra" + "form " + "des" + "troy"
+    KD = "kube" + "ctl " + "del" + "ete namespace prod"
+    HU = "helm " + "unin" + "stall"
+
+    def gate(self):
+        tf, kd = self.TF, self.KD
+        return [
+            f"{tf} -auto-approve", f'bash -c "{tf} -auto-approve"', f"sh -c '{kd}'", f"ssh db1 '{kd}'",
+            f'echo "{tf}" | bash', f'echo "{tf}" | sudo -E bash', f'echo "{tf}" | "bash"', f'echo "{tf}" | b\\ash',
+            f'echo "{tf}" | tr a a | sh', f'ptpython -c "{tf}"', f'grep -F "{tf}" RUNBOOK.md; {tf}', f'echo "$({tf})"',
+            "ps" + "ql -c " + '"DR' + 'OP TABLE users"', f'echo "x; {tf}', f'eval "{tf}"',
+        ]
+
+    def mentions(self):
+        tf, kd, hu = self.TF, self.KD, self.HU
+        return [
+            f'grep -F "{tf}" RUNBOOK.md', f'echo "{tf}"', f'grep -F "{kd}" RUNBOOK.md', f'echo "{hu}"',
+            f'git commit -m "{kd}: handle the 404"', f"grep -n '{hu}' docs/ops.md",
+            f'echo "step 2; {tf}"', f'gh pr create --title "{tf} runbook"',
+            f'grep -F "{tf}" RUNBOOK.md | head -5', f'grep -qF "{tf}" RUNBOOK.md || echo missing',
+        ]
+
+    def test_wrappers_and_real_runs_still_block_while_degraded(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.gate():
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+            d = action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd))
+            self.assertEqual((cmd, d and d["action"]), (cmd, "block"))
+
+    def test_quoted_mentions_fail_open_like_the_real_guard(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.mentions() + ["git status", "terra" + "form plan"]:
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+            self.assertIsNone(action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
+
+    def exec_comment(self):
+        # Review R3 on #626: quotes the shell never sees as quotes (comments,
+        # ANSI-C, heredoc text, nested expansion quotes) must not open or close
+        # a data range around a real run.
+        tf = self.TF
+        return [
+            f'echo # "\n{tf} -auto-approve\n# "', f"echo # '\n{tf} -auto-approve\n# '",
+            f'grep -F "x" RUNBOOK.md # "\n{tf}\n# "', f'echo ok;# "\n{tf}\n# " | head -1',
+            f"echo $'\\'' ; {tf} ; echo $'\\''", f"cat <<'EOF'\necho \"\nEOF\n{tf}\ncat <<'EOF'\n\"\nEOF",
+            'echo "${x:-"}"}" ; ' + tf + ' ; echo "${x:-"}"}"',
+        ]
+
+    def multiline_data(self):
+        tf = self.TF
+        return [
+            f'echo "step 1\n{tf} -auto-approve\nstep 3"', f"grep -n '# heading\n{tf}' RUNBOOK.md",
+            f'echo \\# "{tf}"', f'echo "{tf}" > notes#1.txt', f'grep -F "{tf}" RUNBOOK.md # find it',
+        ]
+
+    def test_comment_quotes_do_not_hide_a_real_run(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.exec_comment():
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+            d = action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd))
+            self.assertEqual((cmd, d and d["action"]), (cmd, "block"))
+
+    def test_genuine_multiline_data_still_fails_open(self):
+        from sc_client import fallback_dangerous_match
+        down = ActionGuardVerdict("allow", [], "down", available=False)
+        for cmd in self.multiline_data():
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+            self.assertIsNone(action_guard_decision(down, enforce=True, fallback_dangerous=fallback_dangerous_match(cmd)), cmd)
+
+    def test_only_the_destroy_row_reads_quotes(self):
+        # Every other row keeps its plain search: a quoted sudo still gates.
+        from sc_client import fallback_dangerous_match
+        self.assertTrue(fallback_dangerous_match('echo "sudo reboot"'))
 
 
 class DangerousFailClosedPolicyTests(unittest.TestCase):
