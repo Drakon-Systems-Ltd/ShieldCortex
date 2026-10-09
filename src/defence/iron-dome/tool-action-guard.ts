@@ -5375,7 +5375,9 @@ function maskSinkFreeHeredocBodies(text: string): string {
   for (const h of heredocBodies(text)) {
     // `program` (not `lang`): the interpreter's OWN statement reads this body
     // and its output stays at the terminal — see heredocProgramLang (#686).
-    if (h.program === null || h.program === 'sh' || h.outFile) continue;
+    // A `>/dev/null` is a discard, not a capture: heredocProgramLang already
+    // admits it on the tail, so only a real file blocks the mask here.
+    if (h.program === null || h.program === 'sh' || (h.outFile && h.outFile !== '/dev/null')) continue;
     if (hasShellOutSink(h.body, h.program)) continue;
     out = out.slice(0, h.start) + ' '.repeat(h.end - h.start) + out.slice(h.end);
   }

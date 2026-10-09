@@ -191,3 +191,82 @@ describe('#661 — what must not move', () => {
     expect(verdict(cmd, { [PAYLOAD_PATH]: PAYLOAD }).decision).toBe('block');
   });
 });
+
+/**
+ * #686 review (CASE, TARS) — the first cut masked any sink-free heredoc whose
+ * intro line had an interpreter token somewhere before `<<`. That decided
+ * "inert" from text that did not establish it: nothing after the delimiter was
+ * read, and "an interpreter token on the line" is not "the command that reads
+ * the body". Every row in ROUTED blocked on main (932803b7) and allowed on
+ * 570f887f. They are pinned here as block + payload folded. The TERMINAL rows
+ * are the #661 relief and must stay masked. The two FILTER rows pipe into a
+ * pure filter: fail-closed today (scanned exactly as on main, so no
+ * regression), named here so a future pure-filter allowlist has a target.
+ */
+describe('#686 — only a program whose output stays at the terminal is masked', () => {
+  const P = PAYLOAD_PATH;
+  const FILES = { [P]: PAYLOAD };
+  const ROUTED: Record<string, string> = {
+    'piped into sh': `python3 - <<'EOF' | sh\nprint('${P}')\nEOF`,
+    'interpreter name in argv of a shell': `bash -s python3 <<'EOF'\n${P}\nEOF`,
+    'interpreter in an earlier statement; cat | ash': `node -v; cat <<'EOF' | ash\n${P}\nEOF`,
+    'sourced stdin': `python3 -V; cat <<'EOF' | . /dev/stdin\n${P}\nEOF`,
+    'eval of a substitution': `python3 -V; eval "$(cat <<'EOF'\n${P}\nEOF\n)"`,
+    'piped into bash with flags': `python3 -u - <<'EOF' | bash -e\nprint('${P}')\nEOF`,
+    '|& into sh': `python3 - <<'EOF' |& sh\nprint('${P}')\nEOF`,
+    '2>&1 then pipe': `python3 - <<'EOF' 2>&1 | sh\nprint('${P}')\nEOF`,
+    'tee then sh': `python3 - <<'EOF' | tee /tmp/l | sh\nprint('${P}')\nEOF`,
+    'command substitution': `sh -c "$(python3 - <<'EOF'\nprint('${P}')\nEOF\n)"`,
+    'backtick substitution': 'sh -c "`python3 - <<\'EOF\'\nprint(\'' + P + '\')\nEOF\n`"',
+    'process substitution in': `sh <(python3 - <<'EOF'\nprint('${P}')\nEOF\n)`,
+    'process substitution out': `python3 - <<'EOF' > >(sh)\nprint('${P}')\nEOF`,
+    'behind sudo, piped': `sudo python3 - <<'EOF' | sh\nprint('${P}')\nEOF`,
+    'behind an env assignment, piped': `X=1 python3 - <<'EOF' | sh\nprint('${P}')\nEOF`,
+    'behind timeout, piped': `timeout 5 python3 - <<'EOF' | sh\nprint('${P}')\nEOF`,
+    'xargs sh': `python3 - <<'EOF' | xargs sh\nprint('${P}')\nEOF`,
+    'source /dev/stdin': `python3 - <<'EOF' | source /dev/stdin\nprint('${P}')\nEOF`,
+    'bash -s downstream': `python3 - <<'EOF' | bash -s\nprint('${P}')\nEOF`,
+    'file operand: heredoc is the script\'s DATA': `python3 run.py <<'EOF'\n${P}\nEOF`,
+    'line continuation hides the pipe': `python3 - <<'EOF' \\\n| sh\nprint('${P}')\nEOF`,
+  };
+  const TERMINAL: Record<string, string> = {
+    'plain': `python3 - <<'EOF'\nprint('${P}')\nEOF`,
+    'stderr discarded': `python3 - <<'EOF' 2>/dev/null\nprint('${P}')\nEOF`,
+    'stdout discarded': `python3 - <<'EOF' >/dev/null\nprint('${P}')\nEOF`,
+    'piped INTO the interpreter': `echo hi | python3 - <<'EOF'\nprint('${P}')\nEOF`,
+    'behind an env assignment': `X=1 python3 - <<'EOF'\nprint('${P}')\nEOF`,
+    'followed by a new statement': `python3 - <<'EOF' && echo done\nprint('${P}')\nEOF`,
+    'flags with values': `python3 -W ignore -X dev - <<'EOF'\nprint('${P}')\nEOF`,
+    'node': `node - <<'EOF'\nconsole.log('${P}')\nEOF`,
+  };
+  const FILTER: Record<string, string> = {
+    'piped into grep': `python3 - <<'EOF' | grep x\nprint('${P}')\nEOF`,
+    'piped into wc': `python3 - <<'EOF' | wc -l\nprint('${P}')\nEOF`,
+  };
+
+  it.each(Object.entries(ROUTED))('routed — %s: blocked, payload folded', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(P);
+    const v = verdict(cmd, FILES);
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain('recursive-force-delete');
+  });
+
+  it.each(Object.entries(TERMINAL))('terminal — %s: masked, nothing folded', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd)).toEqual([]);
+    const v = verdict(cmd, FILES);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).toEqual([]);
+  });
+
+  it('terminal behind sudo: masked; only the privilege rule speaks', () => {
+    const v = verdict(`sudo python3 - <<'EOF'\nprint('${P}')\nEOF`, FILES);
+    expect(detectScriptInvocations(`sudo python3 - <<'EOF'\nprint('${P}')\nEOF`)).toEqual([]);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).not.toContain('recursive-force-delete');
+  });
+
+  it.each(Object.entries(FILTER))('pure filter — %s: fails closed, scanned as on main', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(P);
+    expect(verdict(cmd, FILES).decision).toBe('block');
+  });
+});
