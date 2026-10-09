@@ -27,6 +27,7 @@ import {
   grantRetry,
   hashToolCall,
   listRetryRows,
+  pruneRetryControl,
   recordDenialFingerprint,
   recordDenySuppression,
   retryControlPath,
@@ -284,7 +285,11 @@ describe('#682 — approve --denial across the 48h review window', () => {
     const { code, text } = approve(['--denial', jobActionId(0)], at);
     expect(code).toBe(1);
     expect(text).toContain(`Headless denial ${jobActionId(0)} (Bash) was dropped at ${new Date(t0 + MAX_RETRY_ROWS).toISOString()} to make room`);
-    expect(text).toContain(`at most ${MAX_RETRY_ROWS} denials`);
+    expect(text).toContain(`the store's normal capacity is ${MAX_RETRY_ROWS} denials`);
+    expect(text).toContain('or your Deny are exempt from it');
+    expect(text).not.toContain('at most');
+    // Not over the cap here, so no over-cap sentence.
+    expect(text).not.toContain('The store is above that now');
     expect(text).toContain('Nothing was granted');
 
     const list = approve(['--denial'], at, { interactive: false }).text;
@@ -368,6 +373,46 @@ describe('#682 — approve --denial across the 48h review window', () => {
     expect(text).toContain(`Headless denial ${jobActionId(MAX_RETRY_ROWS)} (Bash) was dropped at ${new Date(at + 2).toISOString()} to make room`);
     expect(text).toContain('Nothing was granted');
     expect(listRetryRows({ home, now: at + 3 }).some((r) => r.grant)).toBe(false);
+  }, 60_000);
+
+  it('over the cap with protected rows, a dropped newcomer is told the cap is normal, not absolute', () => {
+    const at = t0 + MIN;
+    allProtectedOverCap(at);
+    // A distinct newcomer with nothing protecting it. Inserting keeps it (it is
+    // never its own victim); the next prune can retire only it, because every
+    // other row holds a live Deny.
+    const newcomer = MAX_RETRY_ROWS + 1;
+    fill(1, newcomer, () => at + 2);
+    expect(retryStoreCapacity({ home, now: at + 2 })).toMatchObject({
+      rows: MAX_RETRY_ROWS + 2, protectedRows: MAX_RETRY_ROWS + 1, overCap: true, retiredForCapacity: 0,
+    });
+    expect(pruneRetryControl({ home, now: at + 3 }).ok).toBe(true);
+    expect(listRetryRows({ home, now: at + 3 })).toHaveLength(MAX_RETRY_ROWS + 1);
+    expect(findRetiredIdentity({ actionId: jobActionId(newcomer) }, { home })).toMatchObject({
+      reason: 'capacity', retiredAt: at + 3,
+    });
+
+    const { code, text } = approve(['--denial', jobActionId(newcomer)], at + 4);
+    expect(code).toBe(1);
+    expect(text).toContain(`Headless denial ${jobActionId(newcomer)} (Bash) was dropped at ${new Date(at + 3).toISOString()} to make room`);
+    expect(text).toContain(`the store's normal capacity is ${MAX_RETRY_ROWS} denials`);
+    expect(text).toContain('or your Deny are exempt from it and never dropped for space');
+    expect(text).toContain(`The store is above that now: ${MAX_RETRY_ROWS + 1} denials, ${MAX_RETRY_ROWS + 1} of them protected.`);
+    expect(text).not.toContain('at most');
+    expect(text).toContain('Nothing was granted');
+
+    // No grant anywhere, and every protected row is still there and still denied.
+    const rows = listRetryRows({ home, now: at + 4 });
+    expect(rows).toHaveLength(MAX_RETRY_ROWS + 1);
+    expect(rows.some((r) => r.grant)).toBe(false);
+    for (let i = 0; i <= MAX_RETRY_ROWS; i += 1) {
+      expect(getRetryRow({ actionId: jobActionId(i) }, { home })?.suppression).toBeDefined();
+      expect(findRetiredIdentity({ actionId: jobActionId(i) }, { home })).toBeUndefined();
+    }
+    expect(getRetryRow({ actionId: jobActionId(newcomer) }, { home })).toBeUndefined();
+    expect(retryStoreCapacity({ home, now: at + 4 })).toMatchObject({
+      rows: MAX_RETRY_ROWS + 1, protectedRows: MAX_RETRY_ROWS + 1, overCap: true, retiredForCapacity: 1,
+    });
   }, 60_000);
 
   it('a capacity eviction that lands between lookup and grant is reported, not granted around', () => {

@@ -509,6 +509,60 @@ describe('#682 — 48h review window for pending denial identities', () => {
     expect(findRetiredIdentity({ actionId: jobActionId(n - 1) }, { home })?.reason).toBe('expired');
   }, 60_000);
 
+  it('an insert that evicts for capacity writes at most MAX_RETIRED_IDENTITIES receipts to disk', () => {
+    // MAX_RETIRED_IDENTITIES expiry receipts on file...
+    fill(MAX_RETIRED_IDENTITIES);
+    const expiredAt = t0 + WINDOW + MAX_RETIRED_IDENTITIES;
+    pruneRetryControl({ home, now: expiredAt });
+    // ...then a full store of fresh, unprotected rows.
+    const base = expiredAt + MIN;
+    fill(MAX_RETRY_ROWS, MAX_RETIRED_IDENTITIES, (i) => base + i);
+    type RawReceipt = { id: string; reason: string; retiredAt: number; actionIds: string[] } & Record<string, unknown>;
+    type RawRow = { id: string; grant?: unknown; claim?: unknown; suppression?: unknown };
+    const before = rawStore() as { rows: RawRow[]; retired: RawReceipt[] };
+    expect(before.rows).toHaveLength(MAX_RETRY_ROWS);
+    expect(before.retired).toHaveLength(MAX_RETIRED_IDENTITIES);
+    expect(before.retired.every((e) => e.reason === 'expired')).toBe(true);
+
+    // A distinct new denial: the insert evicts the oldest row for capacity.
+    const fresh = MAX_RETIRED_IDENTITIES + MAX_RETRY_ROWS;
+    const at = base + 10 * MIN;
+    const r = denial({ hash: jobHash(fresh), actionId: jobActionId(fresh), now: at });
+    expect(r.ok).toBe(true);
+    expect(r.row?.denyEpoch).toBe(0);
+    expect(r.row?.grant).toBeUndefined();
+
+    // The raw file, straight after the insert: readFileSync + JSON.parse only.
+    // No API reader and no prune has run since, so parseRetired's read-time
+    // slice cannot be what hides an extra receipt.
+    const victim = MAX_RETIRED_IDENTITIES;
+    const victimId = fingerprintId(jobHash(victim), canonicaliseCwd(cwd));
+    const raw = readFileSync(retryControlPath(home), 'utf8');
+    const after = JSON.parse(raw) as { rows: RawRow[]; retired: RawReceipt[] };
+    expect(after.retired).toHaveLength(MAX_RETIRED_IDENTITIES);
+    expect(new Set(after.retired.map((e) => e.id)).size).toBe(MAX_RETIRED_IDENTITIES);
+    // The newest receipt is the victim's; the oldest expiry receipt made room.
+    const newest = after.retired[after.retired.length - 1];
+    expect(newest).toEqual({
+      id: victimId, actionIds: [jobActionId(victim)], tool: 'Bash', reason: 'capacity', lastDeniedAt: base + victim, retiredAt: at,
+    });
+    expect(after.retired.map((e) => e.id)).not.toContain(fingerprintId(jobHash(0), canonicaliseCwd(cwd)));
+    expect(after.retired.map((e) => e.id)).toContain(fingerprintId(jobHash(1), canonicaliseCwd(cwd)));
+    for (const e of after.retired) {
+      expect(Object.keys(e).sort()).toEqual(['actionIds', 'id', 'lastDeniedAt', 'reason', 'retiredAt', 'tool']);
+    }
+    expect(raw).not.toContain(jobHash(victim));
+    expect(raw).not.toContain('nonceHmac');
+
+    // Rows: still at the cap, the newcomer kept, the victim gone, nothing
+    // granted, claimed or suppressed by the bounding.
+    expect(after.rows).toHaveLength(MAX_RETRY_ROWS);
+    expect(after.rows.map((row) => row.id)).toContain(fingerprintId(jobHash(fresh), canonicaliseCwd(cwd)));
+    expect(after.rows.map((row) => row.id)).not.toContain(victimId);
+    expect(after.rows.some((row) => row.grant || row.claim || row.suppression)).toBe(false);
+    expect(grantRetry({ id: victimId }, { isInteractive: true }, { home, now: at })).toEqual({ ok: false, reason: 'not-found' });
+  }, 60_000);
+
   it('receipts age out after RETIRED_IDENTITY_MAX_AGE_MS', () => {
     denial();
     const at = t0 + WINDOW;

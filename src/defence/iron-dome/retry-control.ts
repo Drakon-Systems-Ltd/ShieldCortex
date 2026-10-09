@@ -678,6 +678,11 @@ function enforceCapacity(file: RetryControlFile, now: number, keepId?: string): 
   if (victims.size === 0) return;
   file.rows = file.rows.filter((r) => !victims.has(r));
   for (const row of victims) retire(file, row, 'capacity', now);
+  // Every caller writes straight after this, and the insert path does so with
+  // no later prune: the receipts a victim just joined are bounded here, so the
+  // file on disk never holds more than MAX_RETIRED_IDENTITIES. Receipts only;
+  // rows, grants and claims are not touched.
+  boundRetired(file, now);
 }
 
 /**

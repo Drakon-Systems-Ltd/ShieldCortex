@@ -184,9 +184,16 @@ function reportMissingDenial(ref: string, home: string | undefined, now: number,
   if (gone) {
     const label = gone.actionIds[gone.actionIds.length - 1] ?? gone.id;
     if (gone.reason === 'capacity') {
+      // The cap is a normal capacity, not an absolute one: protected rows are
+      // exempt, so the store can stand above it while this denial was dropped.
+      const cap = retryStoreCapacity({ home, now });
+      const over = cap.overCap
+        ? ` The store is above that now: ${cap.rows} denials, ${cap.protectedRows} of them protected.`
+        : '';
       err(
         `Headless denial ${label} (${gone.tool}) was dropped at ${iso(gone.retiredAt)} to make room: `
-        + `the store keeps at most ${retryStoreCapacity({ home, now }).cap} denials. It was last denied at ${iso(gone.lastDeniedAt)}.`,
+        + `the store's normal capacity is ${cap.cap} denials, and rows holding a live card, a live or recent grant, `
+        + `or your Deny are exempt from it and never dropped for space.${over} It was last denied at ${iso(gone.lastDeniedAt)}.`,
       );
     } else {
       err(
