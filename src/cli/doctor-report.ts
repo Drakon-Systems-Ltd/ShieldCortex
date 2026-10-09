@@ -15,6 +15,12 @@ export interface DoctorReportItem {
   status: DoctorStatus;
   message: string;
   fix?: string;
+  /**
+   * The `fix` is a report whose backticked commands are inspection steps, not
+   * the remedy: print the prose AND the commands. Without it a row with any
+   * command prints the commands only, which drops the explanation (#649).
+   */
+  fixNoteWithCommands?: true;
 }
 
 export interface FormatDoctorReportOpts {
@@ -278,6 +284,8 @@ interface ThemeGroup {
   fixCommands: string[];
   /** Original English `fix` — printed as a note when no safe `$` remains. */
   fixNote: string;
+  /** Print `fixNote` before the commands too — see DoctorReportItem. */
+  fixNoteWithCommands?: true;
   count: number;
   labels: string[];
 }
@@ -317,6 +325,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       why: it.message.replace(/\s+/g, ' ').trim(),
       fixCommands: extractFixCommands(it.fix),
       fixNote: it.fix ?? '',
+      ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
       count: 1,
       labels: [it.label],
     }));
@@ -335,6 +344,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
         why: it.message.replace(/\s+/g, ' ').trim(),
         fixCommands: extractFixCommands(it.fix),
         fixNote: it.fix ?? '',
+        ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
         count: 1,
         labels: [it.label],
       };
@@ -402,6 +412,9 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     ? g.fixCommands.filter((c) => !isHonestyForbiddenCommand(c))
     : g.fixCommands;
   if (cmds.length > 0) {
+    if (g.fixNoteWithCommands && g.fixNote) {
+      lines.push(...wrapLine(cleanWhy(g.fixNote), width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
+    }
     for (const cmd of cmds) {
       const runnable = /^(?:[\w.-]+\s+)?(?:shieldcortex|openclaw|claude|npm|node|systemctl|launchctl|chown|chmod)\b/i.test(cmd)
         || cmd.startsWith('SHIELDCORTEX_');

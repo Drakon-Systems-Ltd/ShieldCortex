@@ -227,6 +227,18 @@ export async function handleRememberCommand(args: string[]): Promise<void> {
     } catch {
       // Cloud sync drain is best-effort; never block exit on it.
     }
+    // #633: the write schedules a background embed, so with a warm model cache
+    // the worker thread holds a live ONNX session by now. process.exit() with
+    // that thread still up aborts in onnxruntime's native teardown
+    // (`terminate called after throwing an instance of 'Napi::Error'`, exit
+    // 134) AFTER the write succeeded. Terminate the worker first, as
+    // embed-backfill does; the cancelled embed is a disposal, not a failure.
+    try {
+      const { disposeModel } = await import('../embeddings/index.js');
+      await disposeModel();
+    } catch {
+      // disposeModel() never throws; only the import could, and then no worker exists.
+    }
     closeDatabase();
   }
 

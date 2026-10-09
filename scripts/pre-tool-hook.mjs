@@ -43,10 +43,12 @@
  * `permissionMode` and outcome `denied_no_prompt_surface` so this is
  * distinguishable from a catastrophic auto-deny in forensics.
  *
- * Failure posture (WS2): a guard that cannot load or evaluate no longer fails
- * OPEN unconditionally. A small, dependency-free FALLBACK_CATASTROPHIC scan
- * (duplicated inline, not imported from dist — it must survive the exact
- * failure it guards against) runs against the same command/path/url surface.
+ * Failure posture (WS2/#511): a guard that cannot load or evaluate no longer
+ * fails OPEN unconditionally. A small FALLBACK_CATASTROPHIC scan runs against
+ * the same command/path/url surface. The launcher carries a matching scan so
+ * catastrophic calls are denied even when this hook file cannot load. Empty,
+ * malformed or incomplete input is scanned as bounded raw text without
+ * touching state.
  * If it recognises one of the handful of unambiguous, essentially-never-benign
  * catastrophic shapes (rm -rf /, a raw-disk dd/mkfs/wipefs, a fork bomb,
  * curl|bash), the call is denied — fail CLOSED for the catastrophic tier even
@@ -57,12 +59,13 @@
  * ShieldCortex exists to prevent. See plugins/openclaw/interceptor.ts for the
  * mirrored fallback on the OpenClaw runtime surface.
  *
- * The hook always exits 0 — denial travels in hookSpecificOutput JSON, never
- * exit codes, so a crash can't masquerade as a verdict.
+ * When this file runs, denial travels in hookSpecificOutput JSON with exit 0.
+ * The launcher handles a file-load crash before this code can emit a verdict.
  */
 
 import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs';
 import { mkdirSecure } from './lib/state-perms.mjs';
+import { resolveHarnessPid } from './lib/harness-pid.mjs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'path';
 import { homedir, tmpdir } from 'os';
 import { spawn } from 'child_process';
@@ -782,9 +785,9 @@ async function loadNotify(rawNotifyConfig) {
     }
   };
   try {
-    const [notifyConfigMod, notifyMod, webhookMod, openclawMod, digestMod] = await Promise.all([
+    const [notifyConfigMod, notifyMod, webhookMod, openclawMod, digestMod, cardMod] = await Promise.all([
       load('notify-config.js'), load('operator-notify.js'), load('webhook-notify-channel.js'),
-      load('openclaw-approval-channel.js'), load('dnp-digest.js'),
+      load('openclaw-approval-channel.js'), load('dnp-digest.js'), load('approval-card.js'),
     ]);
     if (typeof notifyConfigMod?.normaliseNotifyConfig !== 'function') return null;
     if (typeof notifyMod?.requestOperatorApproval !== 'function') return null;
@@ -847,6 +850,12 @@ async function loadNotify(rawNotifyConfig) {
         : null,
       formatDnpDigestText: typeof digestMod?.formatDnpDigestText === 'function'
         ? digestMod.formatDnpDigestText
+        : null,
+      /** #648 — the plain-English what/why/who for an approval CARD. Only the
+       *  card channel is handed it (see `pingOperator`); a dist without the
+       *  module raises the card exactly as before. */
+      buildApprovalCard: typeof cardMod?.buildApprovalCard === 'function'
+        ? cardMod.buildApprovalCard
         : null,
       /** Where a denial goes when the primary channel cannot carry one. Null
        *  means an openclaw-only install: the denial reaches no channel, which
@@ -931,7 +940,33 @@ function safeDiagnosticApprovalReason(reason) {
   return `${lead}${hashHint ? ` To allow this exact command once, run in YOUR terminal: ${hashHint}` : ''}`;
 }
 
-async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey, attemptId }) {
+/**
+ * #648 — the card's what/why/who, built on this box from the live tool input.
+ * Only for a LIVE hold going to the interactive card channel: the webhook and
+ * every denial path keep the values-free surface (#284/#369/#517), and they
+ * never receive this object. Every target in it has been through the
+ * credential redactor (approval-card.ts `safeTarget`). Never throws.
+ */
+function approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }) {
+  if (channel?.name !== 'openclaw-approval' || typeof notify?.buildApprovalCard !== 'function') return undefined;
+  try {
+    return notify.buildApprovalCard({
+      tool: String(toolName ?? ''),
+      input: toolInput,
+      signals: Array.isArray(verdict?.signals) ? verdict.signals.map(String) : [],
+      plane: 'claude-code',
+      sessionId: notificationContext(sessionKey).sessionId,
+      cwd: typeof cwd === 'string' ? cwd : undefined,
+      // The agent's own process: Claude Code, this hook's parent. A PID that
+      // descends from it is one the agent started.
+      agentPid: process.ppid,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function pingOperator(notify, { toolName, toolInput, verdict, hash, noPromptSurface, sessionKey, attemptId, cwd }) {
   if (!notify) return null;
   const denied = typeof noPromptSurface === 'string' && noPromptSurface.length > 0;
   // A denial cannot go to an interactive Approve/Deny card — there is nothing
@@ -957,6 +992,7 @@ async function pingOperator(notify, { toolName, toolInput, verdict, hash, noProm
         deniedReason: denied ? noPromptSurface : undefined,
         sessionId: safeSessionId,
         cwd: undefined,
+        card: denied ? undefined : approvalCardFor(notify, channel, { toolName, toolInput, verdict, sessionKey, cwd }),
       },
       { channel, timeoutMs: notify.config.timeoutMs },
     );
@@ -2353,6 +2389,20 @@ function fallbackCatastrophicMatch(toolInput) {
   return FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(text));
 }
 
+function rawFallbackSurface(text) {
+  return text.slice(0, FALLBACK_SCAN_CAP).replace(/"/g, ' ');
+}
+
+function handleUnknownInput() {
+  if (FALLBACK_CATASTROPHIC_PATTERNS.some((re) => re.test(rawFallbackSurface(input)))) {
+    console.error('[shieldcortex] unparseable PreToolUse input matched catastrophic fallback — DENYING');
+    emitDecision('deny', 'ShieldCortex catastrophic fallback matched unparseable PreToolUse input');
+  } else {
+    console.error('[shieldcortex] unparseable PreToolUse input; no catastrophic fallback match');
+  }
+  process.exit(0);
+}
+
 
 // ── #522 G4: the lock-path READ carve-out, ported to the blunt fallback ──────
 //
@@ -2815,6 +2865,27 @@ function emitDecision(permissionDecision, reason) {
       },
     }),
   );
+  // #613: after the decision is on stdout, never before — the report cannot
+  // delay or alter it.
+  if (permissionDecision === 'deny') posture('writeReport', { denial: true });
+}
+
+// ==================== POSTURE SELF-REPORT (#613) ====================
+//
+// The writer lives in ./lib/posture-self-report.mjs and is loaded with a
+// guarded dynamic import at the top of the stdin handler. A missing, broken or
+// throwing copy leaves `postureMod` null or swallowed here: the report is
+// best-effort evidence and must never reach an allow / ask / deny decision.
+
+let postureMod = null;
+
+function posture(fn, ...args) {
+  try {
+    const f = postureMod?.[fn];
+    if (typeof f === 'function') f(...args);
+  } catch {
+    // Best-effort. A posture report must never reach the gate.
+  }
 }
 
 /**
@@ -2888,6 +2959,7 @@ async function emitApprovalRequired(toolName, auditVerdict, toolInput, permissio
  */
 async function handleDegradedGuard(toolName, toolInput, cfg, failureNote, permissionMode, notify, baseExtra = {}) {
   const failureSummary = safeDiagnosticReason(failureNote);
+  posture('noteScanner', 'degraded', 'guard-unavailable');
   // 1. Catastrophic — hard deny, always.
   if (fallbackCatastrophicMatch(toolInput)) {
     const fallbackVerdict = { severity: 'catastrophic', decision: 'block', signals: ['fallback-scan'], reason: `Guard unavailable: ${failureSummary}; fallback catastrophic scan matched` };
@@ -2988,21 +3060,36 @@ process.stdin.on('end', async () => {
     // the plugin uses, with an inline probe behind it so a missing dist cannot
     // fail OPEN on a host that has a lock file.
     const cfg = await loadActionGuardConfig();
-    if (!cfg.enabled) process.exit(0);
+    // #613: guarded — a missing or broken writer is simply no report.
+    try {
+      postureMod = await import('./lib/posture-self-report.mjs');
+    } catch {
+      postureMod = null;
+    }
+    posture('noteContext', hookConfigDir(), input);
+    posture('noteConfig', cfg);
+    if (!cfg.enabled) {
+      posture('writeReport');
+      process.exit(0);
+    }
 
     let hookData;
     try {
-      hookData = JSON.parse(input || '{}');
+      hookData = JSON.parse(input);
     } catch {
-      process.exit(0); // Malformed payload — nothing to evaluate.
+      handleUnknownInput();
     }
+    if (!hookData || typeof hookData !== 'object' || Array.isArray(hookData)
+      || !hookData.tool_input || typeof hookData.tool_input !== 'object'
+      || Array.isArray(hookData.tool_input)) handleUnknownInput();
     const toolName = typeof hookData.tool_name === 'string' ? hookData.tool_name : '';
     const toolInput =
       hookData.tool_input && typeof hookData.tool_input === 'object' ? hookData.tool_input : {};
     // Absent on harnesses that don't report it — noPromptSurfaceReason() treats
     // that as "cannot confirm a prompt surface", not as "prompting is fine".
     const permissionMode = hookData.permission_mode;
-    if (!toolName) process.exit(0);
+    if (!toolName) handleUnknownInput();
+    posture('noteTool', toolName);
     const baseExtra = hookSessionExtras(hookData, permissionMode);
     let notifyPromise;
     const getNotify = () => {
@@ -3020,12 +3107,13 @@ process.stdin.on('end', async () => {
     // missing module is treated as no-lease — a broken lease layer must never
     // become a new way to deny everything — while state UNreadability fails
     // closed to 'unknown' inside the store itself.
-    const leaseSelf = baseExtra.sessionKey || `ppid:${process.ppid}`;
+    const harnessPid = resolveHarnessPid();
+    const leaseSelf = baseExtra.sessionKey || `ppid:${harnessPid}`;
     let leaseGate = null;
     try {
       const lease = await loadLease();
       if (lease) {
-        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf });
+        leaseGate = lease.evaluateToolCallLease(toolName, toolInput, { self: leaseSelf, holderPid: harnessPid });
         if (leaseGate && leaseGate.ledgerChanged) {
           console.error(
             `[shieldcortex] DECISIONS.md changed since last read (${String(leaseGate.ledgerChanged.fromHash).slice(0, 12)} → ${String(leaseGate.ledgerChanged.toHash).slice(0, 12)}) — tamper evidence, review the ledger`,
@@ -3048,6 +3136,7 @@ process.stdin.on('end', async () => {
 
     const guard = await loadGuard();
     bindingMod = await loadBinding();
+    if (guard) posture('noteScanner', 'available');
     if (!guard) {
       await handleDegradedGuard(toolName, toolInput, cfg, 'missing dist build', permissionMode, await getNotify(), baseExtra); // always exits
       return;
@@ -3425,6 +3514,8 @@ process.stdin.on('end', async () => {
           // Which job died. Absent on a harness that does not report them —
           // rendered only when present, never as "undefined".
           sessionKey: baseExtra.sessionKey,
+          // #648: read on this box to name a git remote's host on the card.
+          cwd: hookData.cwd,
         });
         recordNotifyAudit(toolName, verdict, toolInput, baseExtra, result);
         // #509 approval-reach evidence: a delivered request waits for its

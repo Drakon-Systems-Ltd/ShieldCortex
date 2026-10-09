@@ -30,37 +30,29 @@ describe('5.0.0 breaking notice — visible before anyone updates', () => {
     expect(pkg.engines.node).toBe('^22.14.0 || >=24.0.0');
   });
 
-  it('README warns above the install command and links the upgrade page', () => {
+  it('README states the Node floor in one line before install, and the engine detail lives in the docs', () => {
     const readme = read('README.md');
-    expect(readme).toMatch(/ShieldCortex 5\.x requires Node 22\.14\+ or Node 24/);
-    expect(readme).toMatch(/Node 20 is no longer supported/);
-    expect(readme).toMatch(/docs\/UPGRADING-5\.md/);
-    expect(readme).toMatch(/Action Guard stays off by default/);
-    // The warning must appear before the Quick Start install block, not buried.
-    expect(readme.indexOf('ShieldCortex 5.x requires Node')).toBeLessThan(
-      readme.indexOf('## 🚀 Quick Start'),
-    );
-  });
-
-  it('Quick Start states the Node floor before the install command', () => {
-    const readme = read('README.md');
-    const qs = readme.indexOf('## 🚀 Quick Start');
-    const req = readme.indexOf('### Requirements', qs);
-    const install = readme.indexOf('npm install -g shieldcortex', qs + 1);
-    expect(req).toBeGreaterThan(qs);
-    expect(install).toBeGreaterThan(req);
-    expect(readme.slice(req, install)).toMatch(/Node 22\.14\+/);
-    expect(readme.slice(req, install)).toMatch(/Node 20 is not supported/);
-  });
-
-  it('README states the npm engines behaviour precisely and promises no restart it cannot keep', () => {
-    const readme = read('README.md');
-    const qs = readme.indexOf('## 🚀 Quick Start');
-    const req = readme.indexOf('### Requirements', qs);
-    const install = readme.indexOf('npm install -g shieldcortex', qs + 1);
-    // engines is advisory unless engine-strict is set (src/cli/doctor.ts); the
-    // README must say both halves, not "warns but does not refuse".
-    expect(readme.slice(req, install)).toMatch(/engine-strict/);
+    const detail = read('docs/UPDATING.md') + '\n' + read('docs/UPGRADING-5.md');
+    // One line in Install, before the command, with the upgrade page linked.
+    // The EBADENGINE / engine-strict / Node 20 / Node 23 / database-engine
+    // wording moved off the front page; it must still be in the docs.
+    const section = readme.indexOf('## Install');
+    const npm = readme.indexOf('npm install -g shieldcortex', section);
+    expect(section).toBeGreaterThan(0);
+    expect(npm).toBeGreaterThan(section);
+    const block = readme.slice(section, npm);
+    expect(block).toMatch(/Node 22\.14\+ or 24\+/);
+    expect(block).toMatch(/docs\/UPGRADING-5\.md/);
+    expect(block).toMatch(/docs\/UPDATING\.md#node-requirement/);
+    expect(block).not.toMatch(/engine-strict|EBADENGINE/);
+    expect(readme).toMatch(/Action Guard stays off until you turn it on/);
+    expect(detail).toMatch(/Node 20 is no longer supported/);
+    expect(detail).toMatch(/neither is Node 23/);
+    expect(detail).toMatch(/EBADENGINE/);
+    expect(detail).toMatch(/engine-strict/);
+    expect(detail).toMatch(/installs anyway/);
+    expect(detail).toMatch(/database engine fails to load/);
+    expect(detail).toMatch(/shieldcortex doctor` fails/);
     expect(readme).not.toMatch(/does not refuse|only warns|or any 24/);
     // postinstall, the wiring offer and the macOS dashboard kick can all
     // restart something, so `update` may not claim to leave restarts to you.

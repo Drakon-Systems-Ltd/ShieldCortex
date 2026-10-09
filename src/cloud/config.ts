@@ -1034,6 +1034,40 @@ export function getCloudIronDomeCache(): Record<string, unknown> | null {
   return null;
 }
 
+/**
+ * Read the cloud cache for diagnostics without signature adoption, self-heal,
+ * cache mutation, policy-lock audit, or any filesystem write. An unreadable or
+ * unverifiable existing config is reported to the caller as unavailable.
+ */
+export function peekCloudIronDomeCache(): Record<string, unknown> | null {
+  const configFile = getConfigFile();
+  if (!existsSync(configFile)) return null;
+
+  const content = readFileSync(configFile, 'utf-8');
+  if (!content.trim()) return null;
+  const parsed: unknown = JSON.parse(content);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Config unreadable');
+  const raw = parsed as Record<string, unknown>;
+
+  // Verify signatures using only an existing key. An unsigned legacy file is
+  // readable, but this peek must not adopt it by creating .config-sig.
+  const sigFile = getSigFile();
+  if (typeof raw._sig === 'string' || existsSync(sigFile)) {
+    const key = readFileSync(getIntegrityKeyFile(), 'utf-8').trim();
+    if (!key) throw new Error('Config integrity key unreadable');
+    const signed = (body: string) => createHmac('sha256', key).update(body, 'utf-8').digest('hex');
+    const embeddedValid = typeof raw._sig === 'string' &&
+      constantTimeEqualHex(raw._sig, signed(canonicalBodyForSig(raw)));
+    const legacyValid = existsSync(sigFile) &&
+      constantTimeEqualHex(readFileSync(sigFile, 'utf-8').trim(), signed(content));
+    if (!embeddedValid && !legacyValid) throw new Error('Config integrity check failed');
+  }
+
+  return raw.cloudIronDome && typeof raw.cloudIronDome === 'object' && !Array.isArray(raw.cloudIronDome)
+    ? raw.cloudIronDome as Record<string, unknown>
+    : null;
+}
+
 // ── Sync Timestamp ────────────────────────────────────
 
 // Debounce state for lastSyncAt. The sync queue, graph-sync and memory-sync all
@@ -1322,6 +1356,8 @@ export interface OpenClawMemoryConfig {
 }
 
 const DEFAULT_OPENCLAW_MEMORY_CONFIG: OpenClawMemoryConfig = {
+  // autoMemory is not read: getOpenClawMemoryConfig() uses `openclawAutoMemory === true`,
+  // so an unset key is off. Only noveltyThreshold and maxRecent fall back to this object.
   autoMemory: true,
   dedupe: true,
   noveltyThreshold: 0.88,
@@ -1370,7 +1406,9 @@ export function setOpenClawMemoryConfig(updates: Partial<OpenClawMemoryConfig>):
 
 /**
  * Returns whether OpenClaw auto-memory extraction is enabled.
- * Default is true (on by default, opt-out with --openclaw-auto-memory false).
+ * Off when the key is not set. A fresh global, non-CI npm install with no
+ * config.json gets one from scripts/postinstall.mjs with the key `true`; an
+ * existing config is never changed. Toggle with --openclaw-auto-memory.
  */
 export function getOpenClawAutoMemory(): boolean {
   return getOpenClawMemoryConfig().autoMemory;
@@ -1387,7 +1425,9 @@ export function setOpenClawAutoMemory(enabled: boolean): void {
 
 /**
  * Returns whether proactive memory recall is enabled on prompt submit.
- * Default is false since v4.11.0 — opt-in with --proactive-recall true.
+ * Off when the key is not set (since v4.11.0). A fresh global, non-CI npm
+ * install with no config.json gets one from scripts/postinstall.mjs with the
+ * key `true`; an existing config is never changed. Toggle with --proactive-recall.
  * Per-turn recall was found to be net-negative for fast agent loops; kept
  * available for interactive sessions that want it.
  */
@@ -1471,8 +1511,10 @@ export interface AutoMemoryEnableConfig {
 /**
  * Returns the resolved on/off state of the opt-in auto-memory hooks.
  *
- * Default is false for both — preserves the OpenClaw-safe default that
- * shipped in v4.13.0. The install flags (`--with-stop-hook` /
+ * False for both when nothing is set — the OpenClaw-safe default that
+ * shipped in v4.13.0. When `openclawAutoMemory` or `proactiveRecall` is `true`
+ * (a fresh global, non-CI install writes both), both resolve true unless set
+ * explicitly to false. The install flags (`--with-stop-hook` /
  * `--with-session-end`) flip these to true so that wiring the hook in
  * settings.json and enabling the runtime gate are a single user action.
  */

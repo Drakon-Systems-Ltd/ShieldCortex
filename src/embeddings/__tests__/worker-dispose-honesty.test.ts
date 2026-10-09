@@ -25,7 +25,9 @@ import ts from 'typescript';
  *
  *  - INFERENCE_TIMEOUT_MS becomes env-overridable, so the timeout scenario can
  *    drive the real timeout path in under a second instead of 30. Every other
- *    scenario leaves the env unset and runs the shipped 30s value.
+ *    scenario leaves the env unset and runs the shipped 30s value. A driver
+ *    can also put the shipped value back mid-run, once the one request it
+ *    means to time out has been sent (see `timeout-blocks-replacement`).
  *  - the `worker_threads` import is redirected to a test-owned shim, so a
  *    scenario can make `Worker#terminate()` FAIL — the one thing a real Worker
  *    will not do on request — and can make `Worker#postMessage()` throw, which
@@ -60,8 +62,11 @@ const DISPOSED_CODE = 'SHIELDCORTEX_EMBEDDING_WORKER_DISPOSED';
 const DISPOSED_BRAND_KEY = 'shieldcortex.embeddings.worker-disposed';
 
 const TIMEOUT_DECL = 'const INFERENCE_TIMEOUT_MS = 30_000;';
+// `generateEmbedding()` reads the value when a request is SENT, not when it is
+// admitted, so restoring it affects only requests sent afterwards.
 const TIMEOUT_DECL_TEST =
-  'const INFERENCE_TIMEOUT_MS = Number(process.env.SC_TEST_INFERENCE_TIMEOUT_MS) || 30_000;';
+  'let INFERENCE_TIMEOUT_MS = Number(process.env.SC_TEST_INFERENCE_TIMEOUT_MS) || 30_000; ' +
+  'export const restoreShippedInferenceTimeout = () => { INFERENCE_TIMEOUT_MS = 30_000; };';
 
 const WORKER_IMPORT = "import { Worker } from 'worker_threads';";
 const WORKER_IMPORT_TEST = "import { Worker } from './worker-threads-shim.js';";
@@ -119,6 +124,9 @@ const SEND_FAILED = 'Embedding worker request could not be sent';
  *   SC_TEST_POSTMESSAGE_FAIL_COUNT   how many postMessage() calls throw, from
  *                                    the first, counted across the process
  *
+ * In a fault mode it also exports `exitsDelivered()`, so a driver can wait for
+ * the exit event the module was handed rather than sleep past where it lands.
+ *
  * The two orderings a failed kill can arrive in are both deterministic here,
  * and they are opposite hazards:
  *
@@ -146,7 +154,16 @@ const WORKER_SHIM = [
   'const SEND_FAILURES = Number(process.env.SC_TEST_POSTMESSAGE_FAIL_COUNT || 0);',
   '',
   'let spawnCount = 0;',
+  'let exitCount = 0;',
   'let sendFailuresLeft = SEND_FAILURES;',
+  '',
+  '// How many of these handles have had their `exit` event delivered. The',
+  "// listener is registered in the constructor, i.e. BEFORE the module's own,",
+  '// and an emitter runs every listener in the same synchronous turn — so a',
+  "// driver that observes the count from a later turn knows the module's exit",
+  '// handler has already run. Fault modes only: with no knob set the real class',
+  '// is exported by identity and nothing here is counted.',
+  'export const exitsDelivered = () => exitCount;',
   '',
   'class FaultInjectingWorker extends RealWorker {',
   '  #index;',
@@ -154,6 +171,7 @@ const WORKER_SHIM = [
   '  constructor(...args) {',
   '    super(...args);',
   '    this.#index = ++spawnCount;',
+  "    this.once('exit', () => { exitCount += 1; });",
   '  }',
   '  postMessage(...args) {',
   '    // A synchronous send failure — what a payload the structured clone',
@@ -280,17 +298,24 @@ const DRIVER = [
   "import fs from 'fs';",
   "import { setTimeout as delay } from 'timers/promises';",
   "import { generateEmbedding, disposeModel, isModelLoaded, preloadModel } from './generator.js';",
+  // Added by this file's own timeout rewrite, so it exists whenever that
+  // rewrite does (beforeAll throws when it cannot apply it).
+  "import { restoreShippedInferenceTimeout } from './generator.js';",
   // The disposal CONTRACT, taken as a namespace on purpose: a named import of an
   // export the module does not have is a link-time SyntaxError, which would fail
   // every scenario in this file for one missing symbol instead of failing the
   // scenario that asks for it.
   "import * as contract from './generator.js';",
+  // The same module instance generator.js imports, so its exit count is the
+  // count of exits the module itself has been handed.
+  "import { exitsDelivered } from './worker-threads-shim.js';",
   '',
   // The one place these literals are spelled out is the TypeScript constants
   // above; the driver receives them rather than keeping a second copy.
   `const MESSAGE = ${JSON.stringify(DISPOSED_MSG)};`,
   `const CODE = ${JSON.stringify(DISPOSED_CODE)};`,
   `const BRAND = Symbol.for(${JSON.stringify(DISPOSED_BRAND_KEY)});`,
+  `const KILL_FAILURE_LINES = [${JSON.stringify(TERMINATION_FAILED)}, ${JSON.stringify(TERMINATION_FAILED_AFTER_EXIT)}];`,
   '',
   'const scenario = process.argv[2];',
   "const out = (obj) => fs.writeSync(1, '__RESULT__ ' + JSON.stringify(obj) + '\\n');",
@@ -323,6 +348,16 @@ const DRIVER = [
   'const realError = console.error;',
   "console.error = (...args) => { logged.push(args.map(String).join(' ')); realError(...args); };",
   'const sawLog = (re) => logged.some((line) => re.test(line));',
+  '// How many failed kills the module has reported, in either ordering.',
+  'const killFailuresReported = () => logged.filter((line) => KILL_FAILURE_LINES.some((s) => line.includes(s))).length;',
+  '// Scenarios that shrink the inference timeout arm it when a request is SENT,',
+  "// and a fresh thread's cold start counts against it: on a loaded runner a",
+  '// replacement that boots slower than the timeout turns an embed the scenario',
+  '// expects answered into a timeout that has nothing to do with the module.',
+  '// preloadModel() goes through the same admission gate as an embed, but is',
+  "// timed by the 120s load budget — so once it settles, the worker it stood up",
+  '// is running and the next embed is timed on that request alone.',
+  'const warm = () => settle(preloadModel());',
   '',
   "if (scenario === 'dispose-after-success') {",
   "  const vec = await generateEmbedding('hello world');",
@@ -570,6 +605,7 @@ const DRIVER = [
   '    loadedAtEnd: isModelLoaded(),',
   '  });',
   "} else if (scenario === 'dispose-waits-for-timeout-kill') {",
+  '  const warmed = await warm(); // the block is timed on a thread already up',
   "  let timeoutMessage = '';",
   "  const blocked = generateEmbedding('__BLOCK_EXIT__').catch((e) => { timeoutMessage = msgOf(e); });",
   '  const reachedBlock = await waitFor(() => readLines(process.env.SC_FAKE_WORKER_BLOCK).length > 0);',
@@ -577,14 +613,22 @@ const DRIVER = [
   '  const startedAt = Date.now();',
   '  await disposeModel(); // a kill this call did not start, but must still wait out',
   '  const disposeMs = Date.now() - startedAt;',
+  '  // The preload stands the replacement up under the load budget, so the',
+  "  // embed after it is timed on its own answer, not the replacement's cold",
+  '  // start. Both are admitted only after the disposal above has returned.',
+  '  const load = await warm();',
   '  let after = -1;',
   "  let afterError = '';",
   "  try { after = (await generateEmbedding('ok-after')).length; } catch (e) { afterError = msgOf(e); }",
   '  await disposeModel();',
   '  await delay(300);',
   '  out({',
+  '    warmState: warmed.state,',
+  '    warmMessage: warmed.message,',
   '    reachedBlock,',
   '    timeoutMessage,',
+  '    loadState: load.state,',
+  '    loadMessage: load.message,',
   '    disposeMs,',
   '    after,',
   '    afterError,',
@@ -598,8 +642,16 @@ const DRIVER = [
   '  // finish. Work ALREADY ADMITTED to the lifecycle is what makes that window',
   '  // dangerous: it is past the gate, and the moment the timed-out request',
   '  // rejects it is released with a replacement worker one call away.',
+  '  const warmed = await warm(); // the block is timed on a thread already up',
   "  const blocked = settleDims(generateEmbedding('__BLOCK_EXIT__'));",
   '  const reachedBlock = await waitFor(() => readLines(process.env.SC_FAKE_WORKER_BLOCK).length > 0);',
+  '  // That request is the only one this scenario means to time out, and its',
+  '  // 200ms timer is already armed. The replacement below is built by the',
+  '  // queued embeds themselves, once the kill lands, and nothing may build it',
+  "  // sooner — so no preload can warm it first, and an embed's timer would",
+  "  // count that thread's cold start. Everything sent from here on gets the",
+  '  // shipped budget instead, as in every scenario that is not about a timeout.',
+  '  restoreShippedInferenceTimeout();',
   '  // Admitted BEFORE the timeout fires, so these two are already inside this',
   '  // lifecycle and are queued only behind the request that is about to fail.',
   "  const queuedA = settleDims(generateEmbedding('queued-a'));",
@@ -620,6 +672,8 @@ const DRIVER = [
   '  await disposeModel();',
   '  await delay(300);',
   '  out({',
+  '    warmState: warmed.state,',
+  '    warmMessage: warmed.message,',
   '    reachedBlock,',
   '    timeoutMessage: timedOut.message,',
   '    spawnedMidTermination,',
@@ -682,12 +736,16 @@ const DRIVER = [
   '  // exit is the proof the fault was about, so it clears — and a later',
   '  // failure on the NEXT worker blocks again, which is what makes the clear a',
   "  // per-handle fact rather than a one-way unlatch of the module.",
+  '  const warmed = await warm(); // the hang is timed on a thread already up',
   "  const blocked = settleDims(generateEmbedding('__HANG__'));",
   '  await waitFor(() => spawned() >= 1);',
   '  const firstId = spawnedIds()[0];',
   '  await waitFor(() => beatsFrom(firstId) > 0);',
   '  const timedOut = await blocked;',
   "  const duringFault = await settleDims(generateEmbedding('during-fault'));",
+  '  // The same gate refuses the preload that is used below to warm the',
+  '  // replacement, so being admitted later is the exit at work, not a bypass.',
+  '  const duringFaultLoad = await settle(preloadModel());',
   '  const spawnedDuringFault = spawned();',
   '  // An intentional kill is silent, so the moment the heartbeat stops is the',
   '  // only observable proof that thread is gone.',
@@ -698,7 +756,13 @@ const DRIVER = [
   '    if (now !== lastBeats) { lastBeats = now; quietSince = Date.now(); return false; }',
   '    return Date.now() - quietSince > 150;',
   '  });',
-  '  await delay(100); // the exit event lands in this window',
+  '  // A silent thread is not yet a delivered exit, and only the delivered',
+  '  // exit clears the fault: wait for the module to have been handed it.',
+  '  const exitDelivered = await waitFor(() => exitsDelivered() >= 1);',
+  '  // The preload stands worker B up under the load budget, so the embed after',
+  "  // it is timed on its own answer, not worker B's cold start — and so is the",
+  '  // hang below, which must time out because it hangs.',
+  '  const loadAfterExit = await settle(preloadModel());',
   "  const afterExit = await settleDims(generateEmbedding('after-exit'));",
   '  const spawnedAfterExit = spawned();',
   '  // Worker B, and its kill fails too — with no recovery this time.',
@@ -706,11 +770,18 @@ const DRIVER = [
   '  const timedOutAgain = await blockedAgain;',
   "  const afterSecondFault = await settleDims(generateEmbedding('after-second-fault'));",
   '  out({',
+  '    warmState: warmed.state,',
+  '    warmMessage: warmed.message,',
   '    timeoutMessage: timedOut.message,',
   '    duringFaultState: duringFault.state,',
   '    duringFaultMessage: duringFault.message,',
+  '    duringFaultLoadState: duringFaultLoad.state,',
+  '    duringFaultLoadMessage: duringFaultLoad.message,',
   '    spawnedDuringFault,',
   '    staleWorkerGone,',
+  '    exitDelivered,',
+  '    loadAfterExitState: loadAfterExit.state,',
+  '    loadAfterExitMessage: loadAfterExit.message,',
   '    afterExitState: afterExit.state,',
   '    afterExitDims: afterExit.dims,',
   '    afterExitMessage: afterExit.message,',
@@ -731,18 +802,29 @@ const DRIVER = [
   '  // handles, so a recovery is a property of the module and not a one-off.',
   '  const rounds = [];',
   '  for (let i = 0; i < 2; i++) {',
+  '    // The hang is timed on a thread that is already up, so it times out',
+  '    // because it hangs and not because the thread was still booting.',
+  '    const warmed = await warm();',
   "    const blocked = settleDims(generateEmbedding('__HANG__'));",
   '    await waitFor(() => spawned() >= i + 1);',
   '    const workerId = spawnedIds()[i];',
   '    const reachedWorker = await waitFor(() => beatsFrom(workerId) > 0);',
   '    const timedOut = await blocked;',
-  '    // The rejection is delivered a microtask after that exit; parking here',
-  '    // is what puts it before the next admission rather than beside it.',
-  '    await delay(100);',
-  "    const after = await settleDims(generateEmbedding('after-' + i));",
+  '    // The rejection is delivered a microtask after that exit. Waiting for the',
+  '    // module to have SAID it — rather than sleeping past where it usually',
+  '    // lands — is what puts it before the next admission rather than beside it.',
+  '    const failureReported = await waitFor(() => killFailuresReported() >= i + 1);',
+  '    // The preload is admitted first: it is the request that stands the',
+  '    // replacement up, under the load budget, so the embed after it is timed',
+  "    // on its own answer and not on the replacement's cold start. Both go",
+  '    // through the gate a wrongly recorded fault would close.',
   '    const load = await settle(preloadModel());',
+  "    const after = await settleDims(generateEmbedding('after-' + i));",
   '    rounds.push({',
+  '      warmState: warmed.state,',
+  '      warmMessage: warmed.message,',
   '      reachedWorker,',
+  '      failureReported,',
   '      timeoutMessage: timedOut.message,',
   '      afterState: after.state,',
   '      afterDims: after.dims,',
@@ -751,6 +833,9 @@ const DRIVER = [
   '      loadMessage: load.message,',
   '      spawnedAfterRound: spawned(),',
   '    });',
+  '    // A refused round has already shown the defect; another one would only',
+  '    // sit out every wait above and be killed by the harness without a result.',
+  "    if (load.state !== 'resolved' || after.state !== 'resolved') break;",
   '  }',
   '  await disposeModel();',
   '  await delay(200);',
@@ -764,6 +849,7 @@ const DRIVER = [
   '  const flag = process.env.SC_TEST_TERMINATE_KILL_FLAG;',
   '  const rounds = [];',
   '  for (let i = 0; i < 2; i++) {',
+  '    const warmed = await warm(); // the hang is timed on a thread already up',
   "    const blocked = settleDims(generateEmbedding('__HANG__'));",
   '    await waitFor(() => spawned() >= i + 1);',
   '    const workerId = spawnedIds()[i];',
@@ -782,9 +868,17 @@ const DRIVER = [
   '      if (now !== lastBeats) { lastBeats = now; quietSince = Date.now(); return false; }',
   '      return Date.now() - quietSince > 150;',
   '    });',
-  '    await delay(100); // the exit event lands in this window',
+  '    // A silent thread is not yet a delivered exit, and only the delivered',
+  '    // exit clears the fault: wait for the module to have been handed it.',
+  '    const exitDelivered = await waitFor(() => exitsDelivered() >= i + 1);',
+  '    // The preload stands the replacement up under the load budget, so the',
+  "    // embed after it is timed on its own answer, not the replacement's cold",
+  '    // start. Both go through the gate the fault was holding shut.',
+  '    const loadAfterExit = await settle(preloadModel());',
   "    const afterExit = await settleDims(generateEmbedding('after-' + i));",
   '    rounds.push({',
+  '      warmState: warmed.state,',
+  '      warmMessage: warmed.message,',
   '      reachedWorker,',
   '      timeoutMessage: timedOut.message,',
   '      duringFaultState: duringFault.state,',
@@ -792,11 +886,18 @@ const DRIVER = [
   '      spawnedDuringFault,',
   '      beatsDuringFault,',
   '      workerGone,',
+  '      exitDelivered,',
+  '      loadAfterExitState: loadAfterExit.state,',
+  '      loadAfterExitMessage: loadAfterExit.message,',
   '      afterExitState: afterExit.state,',
   '      afterExitDims: afterExit.dims,',
   '      afterExitMessage: afterExit.message,',
   '      spawnedAfterExit: spawned(),',
   '    });',
+  '    // A round still refused after its exit has already shown the defect;',
+  '    // another would only sit out every wait above and be killed by the',
+  '    // harness without a result.',
+  "    if (loadAfterExit.state !== 'resolved' || afterExit.state !== 'resolved') break;",
   '  }',
   '  out({ rounds, spawned: spawned(), loadedAtEnd: isModelLoaded() });',
   '  // The last worker is idle and alive, and no scenario step kills it: this',
@@ -1175,11 +1276,16 @@ describe('embedding worker — intentional disposal is not a crash', () => {
   it('disposeModel() waits for a timeout kill it did not start', () => {
     const run = runScenario('dispose-waits-for-timeout-kill', { SC_TEST_INFERENCE_TIMEOUT_MS: '200' });
 
+    expect(run.result.warmMessage).toBe(''); // the block ran on a thread already up
+    expect(run.result.warmState).toBe('resolved');
     expect(run.result.reachedBlock).toBe(true);
     expect(String(run.result.timeoutMessage)).toMatch(/embed timed out after 200ms/);
     // The blocked worker needs ~600ms to die; claiming completion before that
     // lands near 0. Measured from after the timeout already fired.
     expect(run.result.disposeMs as number).toBeGreaterThan(150);
+    // The replacement was stood up through the same gate, after the disposal.
+    expect(run.result.loadMessage).toBe('');
+    expect(run.result.loadState).toBe('resolved');
     expect(run.result).toMatchObject({ after: 3, afterError: '', spawned: 2, loadedAtEnd: false });
     expect(run.stderr).not.toMatch(/Embedding worker exited with code/); // no fake crash
     expect(run.stderr).not.toMatch(/Embedding worker error/);
@@ -1208,6 +1314,8 @@ describe('embedding worker — intentional disposal is not a crash', () => {
   it('a timeout kill blocks the replacement every admitted caller would build', () => {
     const run = runScenario('timeout-blocks-replacement', { SC_TEST_INFERENCE_TIMEOUT_MS: '200' });
 
+    expect(run.result.warmMessage).toBe(''); // the block ran on a thread already up
+    expect(run.result.warmState).toBe('resolved');
     expect(run.result.reachedBlock).toBe(true); // the worker really is uninterruptible
     expect(String(run.result.timeoutMessage)).toMatch(/embed timed out after 200ms/);
     // The blocker itself: a timeout starts a termination the DISPOSAL path did
@@ -1286,13 +1394,20 @@ describe('embedding worker — intentional disposal is not a crash', () => {
       SC_TEST_TERMINATE_RECOVER_MS: '250',
     });
 
+    expect(run.result.warmMessage).toBe(''); // the hang ran on a thread already up
+    expect(run.result.warmState).toBe('resolved');
     expect(String(run.result.timeoutMessage)).toMatch(/embed timed out after 200ms/);
     // Blocked while the thread might still be alive...
     expect(run.result.duringFaultState).toBe('rejected');
     expect(String(run.result.duringFaultMessage)).toContain(TERMINATION_FAILED);
+    expect(run.result.duringFaultLoadState).toBe('rejected'); // a preload too
+    expect(String(run.result.duringFaultLoadMessage)).toContain(TERMINATION_FAILED);
     expect(run.result.spawnedDuringFault).toBe(1);
     // ...and released by that thread's own exit, not by a timer or a disposal.
     expect(run.result.staleWorkerGone).toBe(true);
+    expect(run.result.exitDelivered).toBe(true);
+    expect(run.result.loadAfterExitMessage).toBe('');
+    expect(run.result.loadAfterExitState).toBe('resolved');
     expect(run.result.afterExitMessage).toBe('');
     expect(run.result.afterExitState).toBe('resolved');
     expect(run.result.afterExitDims).toBe(3);
@@ -1328,21 +1443,27 @@ describe('embedding worker — intentional disposal is not a crash', () => {
 
     const rounds = run.result.rounds as Array<Record<string, unknown>>;
     expect(Array.isArray(rounds)).toBe(true);
-    expect(rounds).toHaveLength(2);
     rounds.forEach((round, i) => {
+      expect(round.warmMessage).toBe(''); // the hang ran on a thread already up
+      expect(round.warmState).toBe('resolved');
       expect(round.reachedWorker).toBe(true); // the worker really had the request
       expect(String(round.timeoutMessage)).toMatch(/embed timed out after 200ms/);
+      // The failure was said BEFORE the work below was admitted, so that work
+      // is admitted into the state this test is about rather than racing it.
+      expect(round.failureReported).toBe(true);
       // The whole point: fresh work runs, because the thread it would have been
       // refused for is provably gone.
+      expect(round.loadMessage).toBe(''); // a preload skips the embed queue
+      expect(round.loadState).toBe('resolved');
       expect(round.afterMessage).toBe('');
       expect(round.afterState).toBe('resolved');
       expect(round.afterDims).toBe(3);
-      expect(round.loadMessage).toBe(''); // a preload skips the embed queue
-      expect(round.loadState).toBe('resolved');
       // One replacement per round, and it is a DIFFERENT handle each time: the
       // recovery is a property of the module, not a single unlatch.
       expect(round.spawnedAfterRound).toBe(i + 2);
     });
+    // After the rounds, so a round that was refused reports what refused it.
+    expect(rounds).toHaveLength(2);
     expect(run.result).toMatchObject({ spawned: 3, loadedAtEnd: false });
 
     // Still said, and said truthfully. Three kills reported a failure after
@@ -1374,8 +1495,9 @@ describe('embedding worker — intentional disposal is not a crash', () => {
 
     const rounds = run.result.rounds as Array<Record<string, unknown>>;
     expect(Array.isArray(rounds)).toBe(true);
-    expect(rounds).toHaveLength(2);
     rounds.forEach((round, i) => {
+      expect(round.warmMessage).toBe(''); // the hang ran on a thread already up
+      expect(round.warmState).toBe('resolved');
       expect(round.reachedWorker).toBe(true);
       expect(String(round.timeoutMessage)).toMatch(/embed timed out after 200ms/);
       // Blocked while that thread might still be alive...
@@ -1386,11 +1508,16 @@ describe('embedding worker — intentional disposal is not a crash', () => {
       expect(round.spawnedDuringFault).toBe(i + 1); // nothing built beside it
       // ...and released by that thread's OWN exit, which the driver asked for.
       expect(round.workerGone).toBe(true);
+      expect(round.exitDelivered).toBe(true);
+      expect(round.loadAfterExitMessage).toBe('');
+      expect(round.loadAfterExitState).toBe('resolved');
       expect(round.afterExitMessage).toBe('');
       expect(round.afterExitState).toBe('resolved');
       expect(round.afterExitDims).toBe(3);
       expect(round.spawnedAfterExit).toBe(i + 2);
     });
+    // After the rounds, so a round that was refused reports what refused it.
+    expect(rounds).toHaveLength(2);
     // Three handles, and the last of them is healthy and idle: this scenario
     // never disposes, so a module that had latched itself off would report
     // `false` here instead.

@@ -806,6 +806,16 @@ export function getDatabase(): Database.Database {
   return db!;
 }
 
+/** Return the existing handle only while it still names the live database file. */
+export function peekDatabase(): Database.Database | null {
+  if (!db || !db.open || !currentDbPath || dbInode === null) return null;
+  try {
+    return statSync(currentDbPath, { bigint: true }).ino === dbInode ? db : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Check whether the database has been initialized.
  * Useful for library consumers (e.g. OpenClaw extensions) that import

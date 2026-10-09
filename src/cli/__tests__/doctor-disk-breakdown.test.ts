@@ -73,7 +73,10 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     const result = await checkDiskUsage(tmpDir, 32 * KB);
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(/sqlite3 ['"~]/);
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: the largest term is named even when no command applies (was:
+    // /No single measured consumer/, which hid where the bytes were).
+    expect(result.fix).toMatch(/^Largest measured consumer: the database/);
+    expect(result.fix).toMatch(/free pages could not be read/);
   });
 
   it('names the audit plane when audit files dominate, and does not promise to prune them', async () => {
@@ -160,7 +163,9 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(/^Run `shieldcortex memories prune/);
     expect(result.fix).not.toMatch(/memories prune|memories dedupe|sessions prune/);
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: the largest term is named even when no command applies (was:
+    // /No single measured consumer/, which hid where the bytes were).
+    expect(result.fix).toMatch(/^Largest measured consumer: the database/);
     // The row reports the DB's aggregate size only (no per-table attribution
     // since #573 r3), so the operator sees how big the DB is, not what is in it.
     expect(result.message).toMatch(/DB /);
@@ -191,7 +196,9 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     // Nor is defence_audit named as "the bulk" any more — #573 round 3 stopped
     // the DISK row attributing the file to a table at all.
     expect(result.fix).not.toMatch(/shieldcortex vacuum/);
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: the largest term is named even when no command applies (was:
+    // /No single measured consumer/, which hid where the bytes were).
+    expect(result.fix).toMatch(/^Largest measured consumer: the database/);
   });
 
   it('does not claim session capture is the bulk when the memories table dominates', async () => {
@@ -206,7 +213,9 @@ describe('doctor checkDiskUsage names the real disk consumer (4.45.1)', () => {
     // nearly all in use, so that command would rewrite 200 KB to reclaim
     // nothing; #573 gives it only above the 20% free-page floor.
     expect(result.fix).not.toMatch(/shieldcortex vacuum/);
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: the largest term is named even when no command applies (was:
+    // /No single measured consumer/, which hid where the bytes were).
+    expect(result.fix).toMatch(/^Largest measured consumer: the database/);
   });
 
   it('honours a custom limit (the plumbing behind the breakdown remedy)', async () => {

@@ -5,7 +5,7 @@
  * Non-blocking, with disk cache fallback if cloud is unreachable.
  */
 
-import { getCloudConfig, setCloudIronDomeCache as persistToConfig, getCloudIronDomeCache as readFromConfig } from './config.js';
+import { getCloudConfig, setCloudIronDomeCache as persistToConfig, getCloudIronDomeCache as readFromConfig, peekCloudIronDomeCache as peekFromConfig } from './config.js';
 import { setExternalPatterns } from '../defence/iron-dome/injection-scanner.js';
 
 // ── Types ──
@@ -51,6 +51,11 @@ export function getCloudIronDomeCache(): CloudIronDomeCache | null {
   } catch { /* ignore */ }
 
   return null;
+}
+
+/** A cold-cache read for diagnostics; never populates runtime state or repairs config. */
+export function peekCloudIronDomeCache(): CloudIronDomeCache | null {
+  return cachedData ?? (peekFromConfig() as unknown as CloudIronDomeCache | null);
 }
 
 /**

@@ -687,6 +687,7 @@ ${bold}COMMANDS${reset}
                                    Hermes plugin copies into ~/.hermes/backups/;
                                    needs Hermes' own discovery, and exits 1
                                    if anything could not be moved safely)
+  ${cyan}policy-evidence${reset}       Per-runtime posture records as JSON (read-only, sc:// provenance)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}logs${reset} prune            Keep only the newest project-key-repair-*.json logs
@@ -774,6 +775,15 @@ ${bold}DOCS${reset}
     const { runDoctor } = await import('./cli/doctor.js');
     await runDoctor(process.argv.slice(3));
     return;
+  }
+
+  // Handle "policy-evidence" subcommand (#613) — per-runtime posture records
+  // as JSON with sc:// provenance. Read-only.
+  if (process.argv[2] === 'policy-evidence') {
+    const { runPolicyEvidence } = await import('./cli/policy-evidence.js');
+    const result = runPolicyEvidence(process.argv.slice(3));
+    (result.code === 0 ? console.log : console.error)(result.output);
+    process.exit(result.code);
   }
 
   // Handle "protect" subcommand (#501) — write the OS-owned policy lock. The
@@ -1457,10 +1467,33 @@ ${bold}DOCS${reset}
 
 
   // Handle "consolidate" subcommand (v4.0.0 — Dream Mode)
+  //
+  // #650: this command is what doctor's `STM — consolidation needed` row names,
+  // so it must run the phase that actually drains short-term memory —
+  // consolidate(): promote worthy STM rows to LTM, expire decayed ones, evict
+  // down to the cap — before Dream Mode. Previously only the brain worker ran
+  // that phase; the CLI ran Dream Mode alone (LTM near-duplicate merge, archival
+  // flags, contradictions), so the suggested fix left STM exactly where it was.
+  //
+  // #667: that phase is NOT short-term-only, and every count it produces is
+  // printed so the user can account for every row that changed:
+  //   - cap eviction covers BOTH tiers (LTM over `maxLongTermMemories` is
+  //     evicted too), so it is reported per tier, not under an STM heading;
+  //   - its pre-pass LTM dedup (`deduplicateMemories`) runs before Dream Mode
+  //     and resolves identical pairs by deleting OR downvoting the loser, so it
+  //     gets its own line and is never folded into a hard-delete total.
   if (process.argv[2] === 'consolidate') {
     const { initDatabase } = await import('./database/init.js');
     initDatabase();
-    const { consolidateMemories } = await import('./memory/consolidate.js');
+    const { consolidate, consolidateMemories } = await import('./memory/consolidate.js');
+    console.log('🧠 Running memory maintenance (promote / expire / cap-evict / dedup)...');
+    const maintenance = consolidate();
+    const evicted = maintenance.evicted ?? 0;
+    console.log(`   Promoted to long-term:  ${maintenance.consolidated}`);
+    console.log(`   Expired (decayed):      ${maintenance.deleted - evicted}`);
+    console.log(`   Evicted over cap (STM): ${maintenance.evictedShortTerm ?? 0}`);
+    console.log(`   Evicted over cap (LTM): ${maintenance.evictedLongTerm ?? 0}`);
+    console.log(`   LTM duplicates resolved (deleted or downvoted): ${maintenance.deduplicated ?? 0}`);
     console.log('🧠 Starting Dream Mode consolidation...');
     const result = consolidateMemories();
     console.log(`✅ Consolidation complete:`);
@@ -1533,7 +1566,7 @@ ${bold}DOCS${reset}
   // Guard: if an unknown subcommand was given, show help instead of silently starting MCP
   const knownCommands = new Set([
 
-    'doctor', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair', 'protect',
+    'doctor', 'policy-evidence', 'quickstart', 'setup', 'install', 'migrate', 'uninstall', 'hook', 'update', 'repair', 'protect',
     'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',

@@ -4,8 +4,12 @@ ShieldCortex integrates with [OpenClaw](https://openclaw.dev) in complement mode
 - Real-time defence scanning is on — but on the conversation path it is
   **observe-only by default**, and it runs at all only where the operator has
   granted the plugin conversation access on that host
-- The before-tool-call Action Guard is on (catastrophic operations blocked; dangerous operations enforced by default)
-- Automatic memory writes are opt-in (off by default)
+- The before-tool-call Action Guard is **off** unless you enable it
+  (`shieldcortex config --action-guard-enable`); once on, catastrophic
+  operations are blocked and dangerous operations are enforced by default
+- Automatic memory writes (`openclawAutoMemory`) are off when the key is not
+  set, but a fresh global, non-CI npm install writes it as `true` (see
+  [Default behavior](#default-behavior-safe-complement-mode))
 
 Context recall at session start is handled by OpenClaw's native Memory Search —
 ShieldCortex stopped injecting bootstrap context in v2026.2.26 (it duplicated
@@ -66,7 +70,11 @@ wrapper also installs both components:
 1. `cortex-memory` hook
 - Path: `~/.openclaw/hooks/cortex-memory/`
 - Handles lifecycle wiring on `agent:bootstrap` (security-warning handoff — no
-  system-prompt injection since v2026.2.26) + explicit keyword saves
+  system-prompt injection since v2026.2.26) and, when `openclawAutoMemory` is
+  `true`, session-end capture on `/new` and `/stop`
+- Its keyword-trigger saves and per-message proactive recall are dormant: the
+  hook's `events` list (`command:new`, `command:stop`, `agent:bootstrap`) has no
+  `message` key, so core OpenClaw 2026.9.6 never routes those paths to it
 
 2. `shieldcortex-realtime` plugin
 - Native `openclaw plugins install` puts it in OpenClaw's managed npm project
@@ -112,17 +120,22 @@ worth knowing before you update a box that runs OpenClaw:
 - It never wires OpenClaw for the first time. OpenClaw present but no earlier
   ShieldCortex hook or plugin means nothing under `~/.openclaw` is touched; run
   the install commands above yourself.
-- It does nothing to OpenClaw for local (non-global) installs, when `CI=true`,
-  or inside Docker/containers (it prints the manual command instead).
+- It does nothing to OpenClaw for local (non-global) installs, when `CI=true`
+  or `CONTINUOUS_INTEGRATION=true`, or inside Docker/containers (it prints the
+  manual command instead).
 - A failed refresh is non-fatal and prints the manual command.
 - Separately from OpenClaw, on macOS it restarts a ShieldCortex dashboard
   service that is still serving the previous build.
-- Also separately from OpenClaw, on a machine with no
-  `~/.shieldcortex/config.json` it **creates one** with
-  `openclawAutoMemory: true` and `proactiveRecall: true`. An existing config file
-  is never overwritten. This write is not part of the OpenClaw refresh, so it
-  still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` and inside Docker; only
-  `--ignore-scripts` avoids it.
+- Also separately from OpenClaw, a global, non-CI install on a machine with no
+  `~/.shieldcortex/config.json` tries to **create one**; when that write
+  succeeds, `openclawAutoMemory: true` and `proactiveRecall: true` are saved.
+  If the write fails, the two defaults are not saved and the install continues
+  without them. An existing config file is never overwritten. The file does not
+  install the OpenClaw hook or plugin and does not turn on the Action Guard.
+  This write is not part of the OpenClaw refresh, so it still happens with `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1`
+  and inside Docker. It is skipped for local (non-global) installs, when
+  `CI=true` or `CONTINUOUS_INTEGRATION=true`, and whenever the install script
+  does not run at all (for example with `--ignore-scripts`).
 
 To update the package without touching OpenClaw at all (no configuration edit,
 no gateway restart), set `SHIELDCORTEX_SKIP_AUTO_OPENCLAW=1` for the install, then refresh when you are
@@ -132,8 +145,8 @@ it, but that skips the native-module check too — prefer the variable.
 ## Updating the plugin
 
 `shieldcortex update` refreshes an OpenClaw integration that is already on the
-box. The README's [Updating](../README.md#updating) section is the short
-version; this is what each step does.
+box. The [updating guide](UPDATING.md#updating) is the operator summary;
+this page is what each step does.
 
 - **Plugin** — `openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest`.
   The forced form is deliberate: it replaces a registration pinned to an older
@@ -219,7 +232,6 @@ re-run.
 ## Default behavior (safe complement mode)
 
 Enabled by default:
-- Keyword triggers: saves when user explicitly says phrases like `remember this:`
 - `llm_input` scanning: real-time threat detection + audit logging. This hook is
   **observation only** — it cannot stop a turn. The conversation firewall's
   enforcement point is `before_agent_run`, and its posture defaults to
@@ -228,14 +240,33 @@ Enabled by default:
   `interceptor.conversation.posture: "off"` disables **both** hooks: no scan, no
   audit row, no cloud forwarding. Neither hook's audit rows contain prompt text —
   they record a length and a content digest only
-- `before_tool_call` Action Guard: catastrophic operations blocked, dangerous operations enforced (see the [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
 - `agent:bootstrap` lifecycle wiring: security-warning file handoff only — no context injection (removed v2026.2.26; OpenClaw's native Memory Search recalls context at session start)
 
-Disabled by default:
-- Auto-extract on `/new`, `/stop`, `/clear`, `/exit`
+Off unless `actionGuard.enabled` is `true`:
+- `before_tool_call` Action Guard. The fresh-install defaults below do not turn it on.
+  Enable it with `shieldcortex config --action-guard-enable` (a bare
+  `shieldcortex protect` also turns it on); while it is on, catastrophic
+  operations are blocked and dangerous operations are enforced (see the
+  [plugin README](../plugins/openclaw/README.md) for `actionGuard` opt-down and allowlisting)
+
+Off unless `openclawAutoMemory` is `true`:
+- Auto-extract on `/new` and `/stop`. `/clear` and `/exit` are not core
+  OpenClaw 2026.9.6 hook events and are not in the hook's `events` list, so the
+  hook does not capture on them. On `/stop`, core OpenClaw does not show the
+  hook's "Saved N memories" note
 - `llm_output` auto-memory extraction
 
-This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
+When the key is not set, both stay off. This avoids duplicate/noisy writes for users who already rely on OpenClaw memory or another primary memory store.
+
+A fresh global, non-CI npm install sets it, though: on a machine with no
+`~/.shieldcortex/config.json`, postinstall creates that file with
+`openclawAutoMemory: true` (and `proactiveRecall: true`), so auto-memory is
+**on** for that install. An existing config file is never changed, so an upgrade
+keeps your current values and a config without the key stays off. See
+[Install-time refresh](#install-time-refresh-postinstall) above; to turn it off,
+run `shieldcortex config --openclaw-auto-memory false`. The config file only
+sets the switch: it does not install the OpenClaw hook or plugin, which still
+have to be installed (see [Install](#install)) before anything is extracted.
 
 ## Enable optional auto-memory
 
@@ -282,7 +313,7 @@ The recall surfaces wrap stored memory in one untrusted-data frame before a mode
 - the MCP tools `recall`, `get_memory`, `get_related`, `get_context` (prose output; `format: "raw"` is a JSON document that carries the same notice and frame id as fields), `start_session`, `remember` (success), `forget` (when it lists titles), consolidation previews that list titles, contradiction listings, `quarantine_review` list, and `scan_memories` findings;
 - JSON emitters `export_memories` and graph query/entities/explain success payloads, which carry `untrusted_data_notice` / `frame_id` as the first keys so the document still parses;
 - the MCP resources `memory://context` and `memory://important`;
-- proactive recall on a `message` event (the bundled OpenClaw hook);
+- proactive recall on a `message` event in the bundled OpenClaw hook. That code frames its output, but it is dormant: the hook does not subscribe `message` events, so core OpenClaw 2026.9.6 never calls it;
 - the Claude Code hooks and the LangChain adapter.
 
 Empty and error results with no stored text stay unframed.
