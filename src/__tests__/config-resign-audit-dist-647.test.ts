@@ -16,7 +16,10 @@
  *   - recorded: exit 0, and a `config_resigned` row actually exists, with the
  *     row id the CLI printed, both hashes, the backup and key names — no values;
  *   - audit log unavailable (its directory is a regular file): exit 1, refused
- *     BEFORE anything is written — no backup, bytes unchanged, still tampered.
+ *     BEFORE anything is written — no backup, bytes unchanged, still tampered;
+ *   - audit log in memory (`CLAUDE_MEMORY_DB=:memory:`, a supported override):
+ *     the same refusal. An insert there returns a real row id and is gone when
+ *     the process exits, so it is not a record (round-2 review B1-R2).
  *
  * The post-write failure (row insert fails after the re-sign landed: exit 2,
  * "AUDIT NOT RECORDED") cannot be provoked from outside a process without a
@@ -209,6 +212,29 @@ describe('#647 config --resign --confirm, fresh process: the audit record is rea
     expect(backups()).toEqual([]);
 
     const again = runCli(['config', '--resign'], memoryDb);
+    expect(again.stdout).toMatch(/config\.json integrity: tampered/);
+    expect(again.stdout).toContain(sha256(before));
+  });
+
+  it('an in-memory audit database refuses the re-sign: exit 1, no backup, bytes unchanged, still tampered', () => {
+    const before = tamperedConfig();
+    const confirm = previewSha(':memory:');
+
+    const run = runCli(['config', '--resign', '--confirm', confirm], ':memory:');
+    expect(run.status).toBe(1);
+    expect(run.stderr).toMatch(/audit log that must record a re-sign could not be opened/);
+    expect(run.stderr).toMatch(/in-memory or temporary/);
+    expect(run.stderr).toMatch(/Nothing was written/);
+    expect(run.stderr).not.toMatch(/AUDIT NOT RECORDED/);
+    expect(run.stdout).not.toMatch(/Re-signed|Recorded in the audit log/);
+    expect(readFileSync(configFile()).equals(before)).toBe(true);
+    expect(backups()).toEqual([]);
+    // No startup lock is left beside the relative `:memory:` path in the
+    // child's cwd. (Hygiene only: the exit handler would also remove it. The
+    // sink's own closing is pinned in-process by recovery-audit-persistence-647.)
+    expect(existsSync(join(home, ':memory:.lock'))).toBe(false);
+
+    const again = runCli(['config', '--resign'], ':memory:');
     expect(again.stdout).toMatch(/config\.json integrity: tampered/);
     expect(again.stdout).toContain(sha256(before));
   });
