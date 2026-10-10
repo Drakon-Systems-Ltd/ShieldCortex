@@ -97,8 +97,8 @@ export function prepareQuarantineSyncPayload(
   };
 }
 
-const LEVEL_RANK: Record<SensitivityLevel, number> = { PUBLIC: 0, INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3 };
-const LEVELS: SensitivityLevel[] = ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED'];
+const LEVEL_RANK: Record<SensitivityLevel, number> = { PUBLIC: 0, INTERNAL: 1, PERSONAL: 2, CONFIDENTIAL: 3, RESTRICTED: 4 };
+const LEVELS: SensitivityLevel[] = ['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL', 'RESTRICTED'];
 
 /**
  * Rank a stored level string. Unknown but non-empty values are ranked as

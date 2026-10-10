@@ -1815,7 +1815,7 @@ export function mergeMemories(
     // raises the floor to CONFIDENTIAL — it must never pull a RESTRICTED row
     // down (that would open it to readers checkAccess refused before the merge).
     const sensitivityRank = (level: string | null | undefined): number =>
-      ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
+      ['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
     const mergedSensitivity = [
       kept.sensitivityLevel,
       removed.sensitivityLevel,

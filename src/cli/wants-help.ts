@@ -130,7 +130,7 @@ const SESSIONS_SPEC: CommandHelpSpec = { valueFlags: ['--days'] };
 const MEMORIES_SPEC: CommandHelpSpec = {
   valueFlags: [
     '--source',        // migrate-legacy
-    '--project',       // prune, dedupe, repair-project-keys, import-native, embed-backfill
+    '--project',       // prune, dedupe, repair-project-keys, import-native, embed-backfill, reclassify
     '--salience-lte',  // prune
     '--older-than',    // prune
     '--limit',         // dedupe, embed-backfill
