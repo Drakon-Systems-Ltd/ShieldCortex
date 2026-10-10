@@ -19,6 +19,7 @@ import {
   RETRY_CARD_LIFETIME_MS,
   RETRY_FINGERPRINT_RETENTION_MS,
   RETRY_GRANT_AUDIT_TAIL_MS,
+  RETRY_PENDING_REVIEW_WINDOW_MS,
   buildRetryCardFields,
   buildRetryCardParams,
   canonicaliseCwd,
@@ -524,12 +525,13 @@ describe('#310 retry control — the one lock plane', () => {
 
   it('never prunes a row with a live claim (fingerprint TTL yields to it)', () => {
     denial({ now: t0 });
-    // Claimed at 55m, so the card is live at 61m — past the 60m fingerprint TTL
-    // that would otherwise have dropped this identity.
-    const c = claim({ now: t0 + 55 * 60_000 });
+    // #682: the fingerprint TTL is now the 48h review window. Claimed 5m
+    // before it ends, so the card is live 1m past it — past the clock that
+    // would otherwise have dropped this identity.
+    const c = claim({ now: t0 + RETRY_PENDING_REVIEW_WINDOW_MS - 5 * 60_000 });
     expect(c.ok).toBe(true);
 
-    const past = t0 + 61 * 60_000;
+    const past = t0 + RETRY_PENDING_REVIEW_WINDOW_MS + 60_000;
     pruneRetryControl({ home, now: past });
     const row = getRetryRow({ hash: HASH, cwd }, { home });
     expect(row).toBeDefined();
@@ -540,10 +542,14 @@ describe('#310 retry control — the one lock plane', () => {
 
   it('never prunes a row with a live unspent grant (fingerprint TTL yields to it)', () => {
     denial({ now: t0 });
-    const c = claim({ now: t0 + 55 * 60_000 });
-    grantRetry({ hash: HASH, cwd }, { nonce: c.ok ? c.nonce : '' }, { home, now: t0 + 56 * 60_000, ttlMs: 600_000 });
+    const c = claim({ now: t0 + RETRY_PENDING_REVIEW_WINDOW_MS - 5 * 60_000 });
+    grantRetry(
+      { hash: HASH, cwd },
+      { nonce: c.ok ? c.nonce : '' },
+      { home, now: t0 + RETRY_PENDING_REVIEW_WINDOW_MS - 4 * 60_000, ttlMs: 600_000 },
+    );
 
-    const past = t0 + 61 * 60_000;   // past the 60m fingerprint TTL
+    const past = t0 + RETRY_PENDING_REVIEW_WINDOW_MS + 60_000;   // past the 48h fingerprint TTL
     pruneRetryControl({ home, now: past });
     expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeDefined();
     expect(consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: past })).not.toBeNull();
@@ -562,6 +568,10 @@ describe('#310 retry control — the one lock plane', () => {
   });
 
   it('keeps a terminal grant for the spend-TTL + 24h audit tail, then drops it', () => {
+    // #682: retention is an OR. A denial at t0 earns 48h on its own, which
+    // outlasts this grant's tail (10m + 24h), so the row now leaves at the
+    // end of the review window rather than at the end of the tail. The grant
+    // inside it stays spent the whole time.
     denial();
     const c = claim();
     grantRetry({ hash: HASH, cwd }, { nonce: c.ok ? c.nonce : '' }, { home, now: t0, ttlMs: 600_000 });
@@ -573,6 +583,24 @@ describe('#310 retry control — the one lock plane', () => {
 
     const pastTail = t0 + 600_000 + RETRY_GRANT_AUDIT_TAIL_MS + 1_000;
     pruneRetryControl({ home, now: pastTail });
+    expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant?.consumedAt).toBe(t0 + 1_000);
+    expect(consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: pastTail })).toBeNull();
+
+    pruneRetryControl({ home, now: t0 + RETRY_PENDING_REVIEW_WINDOW_MS });
+    expect(getRetryRow({ hash: HASH, cwd }, { home })).toBeUndefined();
+  });
+
+  it('a grant tail that outlives the review window keeps the row until the tail ends', () => {
+    denial();
+    // TTY grant 47h after the denial: its tail runs to 47h + 10m + 24h.
+    const grantAt = t0 + 47 * 60 * 60_000;
+    expect(grantRetry({ hash: HASH, cwd }, { isInteractive: true }, { home, now: grantAt, ttlMs: 600_000 }).ok).toBe(true);
+    expect(consumeRetryGrant({ hash: HASH, origin: { cwd, tool: 'Bash' } }, { home, now: grantAt + 1_000 })).not.toBeNull();
+
+    pruneRetryControl({ home, now: t0 + RETRY_PENDING_REVIEW_WINDOW_MS + 1 });
+    expect(getRetryRow({ hash: HASH, cwd }, { home })).toBeDefined();
+
+    pruneRetryControl({ home, now: grantAt + 600_000 + RETRY_GRANT_AUDIT_TAIL_MS });
     expect(getRetryRow({ hash: HASH, cwd }, { home })).toBeUndefined();
   });
 
@@ -580,6 +608,15 @@ describe('#310 retry control — the one lock plane', () => {
     denial();
     const c = claim();
     const nonce = c.ok ? c.nonce : '';
+    // #682: at the old instant (60m + card lifetime + 1m) the row is still on
+    // file, and the stale card is refused by its own 10m lifetime instead:
+    // the prune already retired the expired claim, so there is no claim left
+    // for the nonce to match.
+    const oldInstant = t0 + 60 * 60_000 + RETRY_CARD_LIFETIME_MS + 60_000;
+    const stillThere = grantRetry({ hash: HASH, cwd }, { nonce }, { home, now: oldInstant });
+    expect(stillThere).toEqual({ ok: false, reason: 'claim-missing' });
+    expect(getRetryRow({ hash: HASH, cwd }, { home })?.grant).toBeUndefined();
+
     const longAfter = t0 + RETRY_FINGERPRINT_RETENTION_MS + RETRY_CARD_LIFETIME_MS + 60_000;
     pruneRetryControl({ home, now: longAfter });
     expect(getRetryRow({ hash: HASH, cwd }, { home })).toBeUndefined();
@@ -591,7 +628,12 @@ describe('#310 retry control — the one lock plane', () => {
 
   it('a suppression outlives the fingerprint TTL that would otherwise drop the row', () => {
     denial();
-    recordDenySuppression({ hash: HASH, cwd }, { home, now: t0, suppressionMs: MAX_SUPPRESSION_FOR_TEST });
+    // #682: the TTL is 48h, so the deny lands late enough for its 2h window
+    // to straddle the end of it.
+    recordDenySuppression(
+      { hash: HASH, cwd },
+      { home, now: t0 + RETRY_PENDING_REVIEW_WINDOW_MS - 60 * 60_000, suppressionMs: MAX_SUPPRESSION_FOR_TEST },
+    );
     const pastFingerprintTtl = t0 + RETRY_FINGERPRINT_RETENTION_MS + 60_000;
     pruneRetryControl({ home, now: pastFingerprintTtl });
     expect(isDenySuppressed({ hash: HASH, cwd }, { home, now: pastFingerprintTtl }).suppressed).toBe(true);
@@ -805,5 +847,6 @@ describe('#310 retry control — the one lock plane', () => {
 
 });
 
-/** Long enough to outlive the fingerprint retention clock in the prune test. */
+/** Long enough for a late deny to straddle the end of the fingerprint
+ *  retention clock (#682: 48h) in the prune test. */
 const MAX_SUPPRESSION_FOR_TEST = 2 * 60 * 60 * 1000;
