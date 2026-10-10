@@ -58,8 +58,19 @@
  * ## Evidence pinning
  *
  * Every evidence row carries the {@link ReadinessPin} (adapter version +
- * policy version) it was produced under, and only rows pinned to the version
- * in force count: an upgrade or a guard-rule change starts the evidence over.
+ * policy version) it was produced under. #719: evidence is keyed on the
+ * adapter's NAME and the POLICY hash, not the package version — the policy
+ * hash is what changes the guard's verdicts, and keying on the version zeroed
+ * every counter on every release. So:
+ *  - a row from this adapter under the policy in force counts in full,
+ *    whatever release wrote it ("evidence retained" across an upgrade that
+ *    did not change the policy);
+ *  - a row from this adapter under a PRIOR policy is carried at a discount
+ *    ({@link DEFAULT_PRIOR_POLICY_CARRY}, `actionGuard.readiness.priorPolicyCarry`
+ *    in the shield config), and only once the policy in force has its own
+ *    fresh window ({@link FRESH_POLICY_MIN_CALLS} calls over
+ *    {@link FRESH_POLICY_MIN_SPAN_MS}, at the same rate threshold);
+ *  - a row from another adapter, or with no usable pin, never counts.
  * Each input has a minimum sample and a freshness window. Evidence that is
  * missing, empty, unreadable or unparseable never qualifies — it is "not
  * ready", never a pass. A pin that cannot be determined is not ready too.
@@ -148,6 +159,16 @@ export const EFFECTIVENESS_EVIDENCE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
  *  cases. A proposed floor — the exam's own design sets the real number. */
 export const EFFECTIVENESS_MIN_CASES = 50;
 
+/** #719: the share of a PRIOR policy's evidence that still counts after the
+ *  policy hash changes. Operator-tunable (`actionGuard.readiness.priorPolicyCarry`,
+ *  0–1, shield config only); 0 restores "a rule change starts over". */
+export const DEFAULT_PRIOR_POLICY_CARRY = 0.5;
+/** #719: before carried evidence can help, the policy in force needs its own
+ *  calls — at least this many… */
+export const FRESH_POLICY_MIN_CALLS = 100;
+/** …spanning at least this long, at the same rate threshold. */
+export const FRESH_POLICY_MIN_SPAN_MS = 48 * 60 * 60 * 1000;
+
 /** How long a computed mode is reused before the hook recomputes it. */
 export const READINESS_CACHE_TTL_MS = 10 * 60 * 1000;
 /** Hysteresis: a failing condition must stay failing this long before an
@@ -214,26 +235,63 @@ export interface EffectivenessEvidence {
 }
 
 export interface InterventionProxy {
+  /** Counted: fresh plus the discounted carry (see {@link EvidenceCarry}). */
   stops: number;
   total: number;
   rate: number | null;
   spanMs: number;
-  /** Rows skipped because they were pinned to another adapter/policy version. */
+  /** #719: calls under the policy in force, from any release of this adapter. */
+  fresh: { stops: number; total: number; spanMs: number };
+  /** #719: calls under a prior policy — raw, and what the discount lets count. */
+  carried: { rawStops: number; rawTotal: number; stops: number; total: number };
+  /** #719: fresh calls written by an earlier release with the same policy hash. */
+  retained: number;
+  /** #719: the fresh-window requirement; `required` only when carry counts. */
+  freshWindow: { required: boolean; pass: boolean };
+  /** Rows skipped: another adapter's, or with no usable readiness pin. */
   otherVersion: number;
+  /** #719: of {@link otherVersion}, rows that carry no readiness pin at all. */
+  unpinned: number;
   pass: boolean;
   missing: string | null;
 }
 
 export interface ReachabilityProxy {
   channel: HumanChannel;
+  /** Counted: fresh plus the discounted carry. */
   reached: number;
   resolved: number;
   pending: number;
   rate: number | null;
   lastRoundTripAt: string | null;
+  /** #719: resolved requests under the policy in force. */
+  fresh: { reached: number; resolved: number };
+  /** #719: resolved requests under a prior policy — raw, and what counts. */
+  carried: { rawReached: number; rawResolved: number; reached: number; resolved: number };
+  /** #719: fresh requests written by an earlier release with the same policy. */
+  retained: number;
   otherVersion: number;
+  unpinned: number;
   pass: boolean;
   missing: string | null;
+}
+
+/**
+ * #719: how evidence from other releases and policies was treated, so the
+ * operator can see why a promotion is or is not available.
+ */
+export interface EvidenceCarry {
+  /** The prior-policy discount in force (0–1). */
+  priorPolicyCarry: number;
+  /** Where it came from: the shield config, or the default (absent/invalid). */
+  source: 'config' | 'default';
+  freshMinCalls: number;
+  freshMinSpanMs: number;
+  /** Earlier releases of this adapter whose rows share the policy in force —
+   *  evidence retained across the upgrade. */
+  earlierReleases: string[];
+  /** Prior policy hashes whose rows were carried at the discount. */
+  priorPolicies: string[];
 }
 
 export interface EffectivenessCondition {
@@ -266,6 +324,8 @@ export interface ReadinessReport {
   integrity: EvidenceIntegrity;
   /** A configured channel can push a demotion notice (precondition). */
   noticeChannel: NoticeChannelCondition;
+  /** #719: evidence retained / carried across releases and policies. */
+  carry: EvidenceCarry;
   /** Both operability proxies pass on sound, pinned evidence, and a demotion
    *  notice could reach the operator. */
   proxiesMet: boolean;
@@ -436,16 +496,88 @@ function samePin(a: unknown, b: ReadinessPin | null): boolean {
   return p.adapter === b.adapter && p.policy === b.policy;
 }
 
+/** The family every guard policy hash belongs to (`tool-action-guard:<hash>`). */
+const POLICY_FAMILY = 'tool-action-guard:';
+
+/** How an evidence row relates to the pin in force (#719). */
+interface EvidenceKind {
+  /** current = the policy in force; prior = an earlier policy of this adapter. */
+  policy: 'current' | 'prior';
+  /** The row's pin, as written. */
+  rowPin: ReadinessPin;
+}
+
+/** `openclaw-interceptor@5.6.0` → `openclaw-interceptor`. */
+function pinAdapterName(adapterPin: string): string {
+  const at = adapterPin.lastIndexOf('@');
+  return at > 0 ? adapterPin.slice(0, at) : adapterPin;
+}
+
 /**
- * #509 r7: whether an evidence row counts for THIS adapter at the version in
- * force. The pin names the adapter (`openclaw-interceptor@x.y.z`), so a row
- * pinned by another adapter never matches; a verdict row must also carry this
- * adapter's audit origin. The hook promoting must not promote OpenClaw, nor
- * the reverse. The one place that decides it.
+ * #509 r7 / #719: whether an evidence row counts for THIS adapter, and how.
+ * The pin names the adapter (`openclaw-interceptor@x.y.z`), so a row pinned by
+ * another adapter never matches; a verdict row must also carry this adapter's
+ * audit origin. The hook promoting must not promote OpenClaw, nor the reverse.
+ * The adapter's package VERSION is deliberately not compared: the policy hash
+ * is what changes the guard's verdicts, so a release that keeps the hash keeps
+ * the evidence, and one that changes it carries the old evidence at a discount
+ * (see {@link DEFAULT_PRIOR_POLICY_CARRY}). The one place that decides it.
  */
-function isAdapterEvidence(row: Record<string, unknown>, pin: ReadinessPin | null, adapter: ReadinessAdapter): boolean {
-  if (row.type === 'intercept' && row.origin !== adapter) return false;
-  return samePin(row.readinessPin, pin);
+function adapterEvidenceKind(row: Record<string, unknown>, pin: ReadinessPin | null, adapter: ReadinessAdapter): EvidenceKind | null {
+  if (row.type === 'intercept' && row.origin !== adapter) return null;
+  if (!pin) return null;
+  const p = row.readinessPin;
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+  const { adapter: rowAdapter, policy } = p as Record<string, unknown>;
+  if (typeof rowAdapter !== 'string' || typeof policy !== 'string') return null;
+  const name = pinAdapterName(pin.adapter);
+  if (!rowAdapter.startsWith(`${name}@`) || rowAdapter.length === name.length + 1) return null;
+  const rowPin = { adapter: rowAdapter, policy };
+  if (policy === pin.policy) return { policy: 'current', rowPin };
+  if (policy.startsWith(POLICY_FAMILY) && policy.length > POLICY_FAMILY.length) return { policy: 'prior', rowPin };
+  return null;
+}
+
+// ==================== PRIOR-POLICY CARRY (#719) ====================
+
+/**
+ * The prior-policy discount from a raw value: a finite number in [0, 1], else
+ * the documented default. Out of range is not clamped — a typo of `5` must not
+ * quietly become "carry everything".
+ */
+export function normalisePriorPolicyCarry(raw: unknown): { value: number; source: 'config' | 'default' } {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw <= 1) return { value: raw, source: 'config' };
+  return { value: DEFAULT_PRIOR_POLICY_CARRY, source: 'default' };
+}
+
+/**
+ * `actionGuard.readiness.priorPolicyCarry`, read from the SHIELD config
+ * (`config.json` under {@link readinessRoot}) by this module itself, so the
+ * hook, the OpenClaw plugin and the CLI read the one value from the one file —
+ * the file the guard's `touch-guard-config` floor protects. Raising it loosens
+ * readiness, so it is deliberately not read from openclaw.json. Absent,
+ * unreadable or invalid → the default.
+ */
+export function readPriorPolicyCarry(home?: string): { value: number; source: 'config' | 'default' } {
+  try {
+    const raw = JSON.parse(readFileSync(join(readinessRoot(home), 'config.json'), 'utf8')) as unknown;
+    const guard = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).actionGuard : undefined;
+    const readiness = guard && typeof guard === 'object' ? (guard as Record<string, unknown>).readiness : undefined;
+    const value = readiness && typeof readiness === 'object' ? (readiness as Record<string, unknown>).priorPolicyCarry : undefined;
+    return normalisePriorPolicyCarry(value);
+  } catch {
+    return normalisePriorPolicyCarry(undefined);
+  }
+}
+
+/**
+ * Discount a prior policy's evidence: `n` items of which `bad` went against
+ * readiness (would-stops, unanswered requests). The count is rounded DOWN and
+ * the bad share UP, so the discount can only tighten the rate.
+ */
+function discounted(n: number, bad: number, carry: number): { n: number; bad: number } {
+  const kept = Math.floor(n * carry + 1e-9);
+  return { n: kept, bad: Math.min(kept, Math.max(0, Math.ceil(bad * carry - 1e-9))) };
 }
 
 // ==================== EFFECTIVENESS ====================
@@ -687,6 +819,9 @@ interface Evidence {
   /** r9 (T3): rows dropped at ingest, counted where the report shows them. */
   otherIntervention: number;
   otherReach: number;
+  /** #719: of the rows above, those with no readiness pin at all. */
+  unpinnedIntervention: number;
+  unpinnedReach: number;
   adapterRows: number;
 }
 
@@ -757,14 +892,14 @@ function ingestLine(ev: Evidence, seen: Set<string>, line: string, sinceMs: numb
   let otherRc = false;
   if (isCountedCall(row)) {
     if (ts >= want.ivSince) {
-      if (isAdapterEvidence(row, want.pin, want.adapter)) keep = true;
+      if (adapterEvidenceKind(row, want.pin, want.adapter)) keep = true;
       else otherIv = true;
     }
   } else if (row.type === 'approval_reach') {
     if (ts >= want.rcSince) {
       // Answers bind to a request by attempt id, whatever their origin; few.
       if (row.phase === 'answer') keep = typeof row.attemptId === 'string' && row.attemptId !== '';
-      else if (isAdapterEvidence(row, want.pin, want.adapter)) keep = true;
+      else if (adapterEvidenceKind(row, want.pin, want.adapter)) keep = true;
       else otherRc = true;
     }
   } else if (row.type === 'readiness_transition') {
@@ -781,13 +916,16 @@ function ingestLine(ev: Evidence, seen: Set<string>, line: string, sinceMs: numb
   if (mine) ev.adapterRows += 1;
   if (otherIv) ev.otherIntervention += 1;
   if (otherRc) ev.otherReach += 1;
+  const unpinned = row.readinessPin === undefined || row.readinessPin === null;
+  if (otherIv && unpinned) ev.unpinnedIntervention += 1;
+  if (otherRc && unpinned) ev.unpinnedReach += 1;
   if (keep) ev.rows.push({ ts, row });
 }
 
 function emptyEvidence(): Evidence {
   return {
     rows: [], bytesRead: 0, truncated: false, unreadableFiles: 0, unparseableLines: 0, oldestDateRead: null, filesRead: 0,
-    otherIntervention: 0, otherReach: 0, adapterRows: 0,
+    otherIntervention: 0, otherReach: 0, unpinnedIntervention: 0, unpinnedReach: 0, adapterRows: 0,
   };
 }
 
@@ -905,7 +1043,7 @@ async function readEvidenceAsync(
 }
 
 /** A real, verdict-bearing call through a gated adapter (any adapter, any
- *  version — {@link isAdapterEvidence} then decides whose it is). */
+ *  version — {@link adapterEvidenceKind} then decides whose it is). */
 function isCountedCall(row: Record<string, unknown>): boolean {
   if (row.type !== 'intercept') return false;
   // Exact origin: rows from other planes, canaries and proofs never count.
@@ -966,6 +1104,10 @@ export interface ComputeReadinessOptions {
   onEvidenceRead?: (e: { rowsKept: number }) => void;
   /** r9 (T1): the async read stops (rejects) once this is aborted. */
   signal?: AbortSignal;
+  /** #719: the prior-policy discount (0–1). Defaults to the shield config's
+   *  `actionGuard.readiness.priorPolicyCarry`, else
+   *  {@link DEFAULT_PRIOR_POLICY_CARRY}. */
+  priorPolicyCarry?: number;
 }
 
 function computeInputs(opts: ComputeReadinessOptions) {
@@ -976,7 +1118,10 @@ function computeInputs(opts: ComputeReadinessOptions) {
   const since = nowMs - Math.max(INTERVENTION_WINDOW_MS, REACHABILITY_WINDOW_MS);
   const budget = opts.readBudgetBytes ?? MAX_READINESS_BYTES;
   const want: EvidenceFor = { adapter, pin, ivSince: nowMs - INTERVENTION_WINDOW_MS, rcSince: nowMs - REACHABILITY_WINDOW_MS };
-  return { nowMs, adapter, paths, pin, since, budget, want };
+  const carry = opts.priorPolicyCarry !== undefined
+    ? normalisePriorPolicyCarry(opts.priorPolicyCarry)
+    : readPriorPolicyCarry(opts.home);
+  return { nowMs, adapter, paths, pin, since, budget, want, carry };
 }
 
 /**
@@ -1007,30 +1152,60 @@ function evaluateEvidence(
   ev: Evidence,
 ): ReadinessReport {
   const { nowMs, adapter, pin, budget } = inp;
+  const carry = inp.carry.value;
   const { rows, bytesRead, truncated, unreadableFiles, unparseableLines } = ev;
   const stopSet = stopOutcomes(adapter);
+  // #719: which other releases / policies the counted evidence came from.
+  const earlierReleases = new Set<string>();
+  const priorPolicies = new Set<string>();
+  const noteKind = (k: EvidenceKind): void => {
+    if (k.policy === 'prior') priorPolicies.add(k.rowPin.policy);
+    else if (pin && k.rowPin.adapter !== pin.adapter) earlierReleases.add(k.rowPin.adapter);
+  };
 
   // ── Operational intervention rate ──
-  let stops = 0;
-  let total = 0;
+  // #719: fresh = calls under the policy in force (any release of this
+  // adapter); prior = calls under an earlier policy, carried at `carry`.
+  const fresh = { stops: 0, total: 0, oldest: Infinity, newest: -Infinity, retained: 0 };
+  const prior = { stops: 0, total: 0, oldest: Infinity, newest: -Infinity };
   let ivOther = ev.otherIntervention;
-  let oldest = Infinity;
-  let newest = -Infinity;
   const ivSince = nowMs - INTERVENTION_WINDOW_MS;
   for (const { ts, row } of rows) {
     if (ts < ivSince || !isCountedCall(row)) continue;
-    if (!isAdapterEvidence(row, pin, adapter)) {
+    const kind = adapterEvidenceKind(row, pin, adapter);
+    if (!kind) {
       ivOther += 1;
       continue;
     }
-    total += 1;
-    oldest = Math.min(oldest, ts);
-    newest = Math.max(newest, ts);
+    noteKind(kind);
+    const bucket = kind.policy === 'current' ? fresh : prior;
+    bucket.total += 1;
+    bucket.oldest = Math.min(bucket.oldest, ts);
+    bucket.newest = Math.max(bucket.newest, ts);
+    if (kind.policy === 'current' && pin && kind.rowPin.adapter !== pin.adapter) fresh.retained += 1;
     const catastrophic = row.severity === 'critical';
-    if (!catastrophic && stopSet.has(String(row.outcome))) stops += 1;
+    if (!catastrophic && stopSet.has(String(row.outcome))) bucket.stops += 1;
   }
+  const carriedIv = discounted(prior.total, prior.stops, carry);
+  const stops = fresh.stops + carriedIv.bad;
+  const total = fresh.total + carriedIv.n;
+  const oldest = Math.min(fresh.oldest, carriedIv.n > 0 ? prior.oldest : Infinity);
+  const newest = Math.max(fresh.newest, carriedIv.n > 0 ? prior.newest : -Infinity);
   const spanMs = total > 0 ? newest - oldest : 0;
   const ivRate = total > 0 ? stops / total : null;
+  const freshSpanMs = fresh.total > 0 ? fresh.newest - fresh.oldest : 0;
+  const freshRate = fresh.total > 0 ? fresh.stops / fresh.total : null;
+  // #719: carried evidence only helps once the policy in force has its own
+  // window — enough calls, long enough, at the same rate threshold — so a rule
+  // change that intervenes more cannot ride on the old policy's history.
+  const freshWindowRequired = carriedIv.n > 0;
+  const freshWindowPass = !freshWindowRequired || (
+    fresh.total >= FRESH_POLICY_MIN_CALLS && freshSpanMs >= FRESH_POLICY_MIN_SPAN_MS &&
+    freshRate !== null && freshRate <= INTERVENTION_MAX_RATE
+  );
+  const carriedNote = carriedIv.n > 0
+    ? ` (${fresh.total} fresh since this policy + ${carriedIv.n} carried from a prior policy at ${fmtPct(carry)})`
+    : '';
   let ivMissing: string | null = null;
   // r8 (SF6): a budget cut that leaves less than the span this proxy needs
   // makes the span (or the sample) unmeetable however long the install runs —
@@ -1042,14 +1217,23 @@ function evaluateEvidence(
       `${ev.filesRead} day file(s) (${fmtMb(bytesRead)}) were read — less than the ${fmtDays(INTERVENTION_MIN_SPAN_MS)} of calls ` +
       'this proxy needs, so it cannot pass on this host; the install stays in shadow until the daily audit volume is smaller';
   } else if (total < INTERVENTION_MIN_SAMPLE) {
-    ivMissing = `only ${total} of the ${INTERVENTION_MIN_SAMPLE} real tool calls needed have been observed on this version`;
+    ivMissing = `only ${total} of the ${INTERVENTION_MIN_SAMPLE} real tool calls needed have been observed under this policy${carriedNote}`;
   } else if (spanMs < INTERVENTION_MIN_SPAN_MS) {
     ivMissing = `observed calls span ${fmtDays(spanMs)}; at least ${fmtDays(INTERVENTION_MIN_SPAN_MS)} are needed`;
   } else if (ivRate !== null && ivRate > INTERVENTION_MAX_RATE) {
     ivMissing = `the guard would intervene on ${fmtPct(ivRate)} of calls (${stops}/${total}); the threshold is ≤ ${fmtPct(INTERVENTION_MAX_RATE)}`;
+  } else if (!freshWindowPass) {
+    ivMissing = 'the guard policy changed, so evidence carried from the prior policy counts only after a fresh window under this one ' +
+      `(≥ ${FRESH_POLICY_MIN_CALLS} calls over ≥ ${fmtDays(FRESH_POLICY_MIN_SPAN_MS)}): so far ${fresh.total} call(s) over ${fmtDays(freshSpanMs)}` +
+      `${freshRate !== null && freshRate > INTERVENTION_MAX_RATE ? `, and the fresh would-stop rate ${fmtPct(freshRate)} is above ${fmtPct(INTERVENTION_MAX_RATE)}` : ''}`;
   }
   const intervention: InterventionProxy = {
-    stops, total, rate: ivRate, spanMs, otherVersion: ivOther, pass: ivMissing === null, missing: ivMissing,
+    stops, total, rate: ivRate, spanMs,
+    fresh: { stops: fresh.stops, total: fresh.total, spanMs: freshSpanMs },
+    carried: { rawStops: prior.stops, rawTotal: prior.total, stops: carriedIv.bad, total: carriedIv.n },
+    retained: fresh.retained,
+    freshWindow: { required: freshWindowRequired, pass: freshWindowPass },
+    otherVersion: ivOther, unpinned: ev.unpinnedIntervention, pass: ivMissing === null, missing: ivMissing,
   };
 
   // ── Approval reachability ──
@@ -1059,13 +1243,13 @@ function evaluateEvidence(
   // later answer must not erase the earlier ones that expired. An answer
   // counts only for the attempt it names; one with no attempt id binds to
   // nothing (it can only leave its attempt looking unanswered — tighter).
-  const requests = new Map<string, { ts: number }>();
+  const requests = new Map<string, { ts: number; current: boolean }>();
   const answers = new Map<string, Array<{ ts: number; answer: string }>>();
-  let resolved = 0;
-  let reached = 0;
+  // #719: per policy bucket, as for the intervention proxy.
+  const rcFresh = { reached: 0, resolved: 0, retained: 0, lastRoundTrip: -Infinity };
+  const rcPrior = { reached: 0, resolved: 0, lastRoundTrip: -Infinity };
   let pending = 0;
   let rcOther = ev.otherReach;
-  let lastRoundTrip = -Infinity;
   for (const { ts, row } of rows) {
     if (row.type !== 'approval_reach' || ts < rcSince) continue;
     const attempt = typeof row.attemptId === 'string' && row.attemptId ? row.attemptId : null;
@@ -1077,44 +1261,58 @@ function evaluateEvidence(
       answers.set(attempt, list);
       continue;
     }
-    if (!isAdapterEvidence(row, pin, adapter)) {
+    const kind = adapterEvidenceKind(row, pin, adapter);
+    if (!kind) {
       rcOther += 1;
       continue;
     }
+    noteKind(kind);
+    const current = kind.policy === 'current';
+    if (current && pin && kind.rowPin.adapter !== pin.adapter) rcFresh.retained += 1;
     if (row.phase === 'request') {
       // A request row without an attempt id is still an attempt: it stays in
       // the denominator, and no answer can bind to it.
       const key = attempt ?? `unbound:${String(row.auditEventId ?? '')}:${ts}:${requests.size}`;
-      if (!requests.has(key)) requests.set(key, { ts });
+      if (!requests.has(key)) requests.set(key, { ts, current });
     } else if (row.phase === 'resolved') {
       // Outcome known at request time: undelivered / no surface. Never a reach.
-      resolved += 1;
+      (current ? rcFresh : rcPrior).resolved += 1;
     }
   }
   for (const [id, req] of requests) {
+    const bucket = req.current ? rcFresh : rcPrior;
     const replies = (answers.get(id) ?? []).filter((a) => a.ts >= req.ts).sort((a, b) => a.ts - b.ts);
     const first = replies[0];
     if (first && first.ts - req.ts <= REACH_ANSWER_WINDOW_MS) {
-      resolved += 1;
+      bucket.resolved += 1;
       if (first.answer === 'approve' || first.answer === 'deny') {
-        reached += 1;
-        lastRoundTrip = Math.max(lastRoundTrip, first.ts);
+        bucket.reached += 1;
+        bucket.lastRoundTrip = Math.max(bucket.lastRoundTrip, first.ts);
       }
       continue;
     }
     if (nowMs - req.ts > REACH_ANSWER_WINDOW_MS) {
-      resolved += 1; // timed out: late or no answer
+      bucket.resolved += 1; // timed out: late or no answer
       continue;
     }
     pending += 1;
   }
+  const carriedRc = discounted(rcPrior.resolved, rcPrior.resolved - rcPrior.reached, carry);
+  const resolved = rcFresh.resolved + carriedRc.n;
+  const reached = rcFresh.reached + (carriedRc.n - carriedRc.bad);
+  // A prior policy's round-trip still shows the channel reaches a human — but
+  // only while its evidence is carried at all.
+  const lastRoundTrip = Math.max(rcFresh.lastRoundTrip, carriedRc.n > 0 ? rcPrior.lastRoundTrip : -Infinity);
   const rcRate = resolved > 0 ? reached / resolved : null;
   const roundTripFresh = lastRoundTrip > -Infinity && nowMs - lastRoundTrip <= ROUND_TRIP_MAX_AGE_MS;
+  const rcCarriedNote = carriedRc.n > 0
+    ? ` (${rcFresh.resolved} fresh since this policy + ${carriedRc.n} carried from a prior policy at ${fmtPct(carry)})`
+    : '';
   let rcMissing: string | null = null;
   if (!opts.channel.configured) {
     rcMissing = 'no human approval channel is configured (run `shieldcortex config --action-guard-notify-openclaw` or `--action-guard-notify-webhook <url>`)';
   } else if (resolved < REACHABILITY_MIN_SAMPLE) {
-    rcMissing = `only ${resolved} of the ${REACHABILITY_MIN_SAMPLE} answered-or-expired approval requests needed on this version (run \`${testApprovalCommand(adapter)}\` to add round-trips)`;
+    rcMissing = `only ${resolved} of the ${REACHABILITY_MIN_SAMPLE} answered-or-expired approval requests needed under this policy${rcCarriedNote} (run \`${testApprovalCommand(adapter)}\` to add round-trips)`;
   } else if (rcRate !== null && rcRate < REACHABILITY_MIN_RATE) {
     rcMissing = `a human answered ${fmtPct(rcRate)} of approval requests (${reached}/${resolved}); the threshold is ≥ ${fmtPct(REACHABILITY_MIN_RATE)}`;
   } else if (!roundTripFresh) {
@@ -1127,9 +1325,21 @@ function evaluateEvidence(
     pending,
     rate: rcRate,
     lastRoundTripAt: lastRoundTrip > -Infinity ? new Date(lastRoundTrip).toISOString() : null,
+    fresh: { reached: rcFresh.reached, resolved: rcFresh.resolved },
+    carried: { rawReached: rcPrior.reached, rawResolved: rcPrior.resolved, reached: carriedRc.n - carriedRc.bad, resolved: carriedRc.n },
+    retained: rcFresh.retained,
     otherVersion: rcOther,
+    unpinned: ev.unpinnedReach,
     pass: rcMissing === null,
     missing: rcMissing,
+  };
+  const evidenceCarry: EvidenceCarry = {
+    priorPolicyCarry: carry,
+    source: inp.carry.source,
+    freshMinCalls: FRESH_POLICY_MIN_CALLS,
+    freshMinSpanMs: FRESH_POLICY_MIN_SPAN_MS,
+    earlierReleases: [...earlierReleases].sort(),
+    priorPolicies: [...priorPolicies].sort(),
   };
 
   // ── A demotion must be able to reach the operator ──
@@ -1200,6 +1410,7 @@ function evaluateEvidence(
     effectiveness,
     integrity,
     noticeChannel,
+    carry: evidenceCarry,
     proxiesMet,
     ready,
     missing,
@@ -1950,6 +2161,8 @@ export interface ResolveReadinessOptions {
   adapter?: ReadinessAdapter;
   /** r9 (T1), async resolve only: once aborted, it rejects and writes nothing. */
   signal?: AbortSignal;
+  /** #719: see {@link ComputeReadinessOptions.priorPolicyCarry}. */
+  priorPolicyCarry?: number;
 }
 
 /** What the pre-compute half of a resolve read, for the post-compute half. */
@@ -2009,7 +2222,10 @@ function beginResolve(opts: ResolveReadinessOptions): { done: ResolvedReadiness 
   }
   return {
     now, adapter, paths, pin, recordPath, record, recorded, durable, state, tamper,
-    computeOpts: { channel: opts.channel, paths, now, pin, effectivenessRegistry: opts.effectivenessRegistry, adapter },
+    computeOpts: {
+      channel: opts.channel, paths, now, pin, effectivenessRegistry: opts.effectivenessRegistry, adapter,
+      home: opts.home, priorPolicyCarry: opts.priorPolicyCarry,
+    },
   };
 }
 
