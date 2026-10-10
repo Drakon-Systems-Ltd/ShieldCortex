@@ -561,32 +561,60 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
     expect(PIN.policy).toMatch(/^tool-action-guard:[0-9a-f]{16}$/);
   });
 
-  it('rows pinned to another version, and unpinned rows, are not counted', () => {
-    const rows = calls(1000, 0).map((r) => ({ ...r, readinessPin: OTHER }));
+  it("rows pinned to another adapter, rows with an unusable pin, and unpinned rows, are not counted", () => {
+    // #719: another POLICY of this adapter is carried at a discount (see
+    // guard-readiness-carry-719); another ADAPTER, a pin outside the guard's
+    // policy family, and no pin at all never count.
+    const otherAdapter = calls(400, 0).map((r) => ({ ...r, readinessPin: { ...PIN, adapter: 'openclaw-interceptor@0.0.1' } }));
+    const foreignPolicy = calls(300, 0).map((r) => ({ ...r, readinessPin: { ...PIN, policy: 'some-other-guard:ffff' } }));
+    const versionless = calls(300, 0).map((r) => ({ ...r, readinessPin: { ...PIN, adapter: 'claude-code-hook' } }));
     const unpinned = reach(30, 0).map((r) => {
       const { readinessPin: _drop, ...rest } = r;
       return rest;
     });
-    write(rows);
+    write([...otherAdapter, ...foreignPolicy, ...versionless]);
     write(unpinned);
     const r = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
     expect(r.intervention.total).toBe(0);
+    expect(r.intervention.carried.rawTotal).toBe(0);
     expect(r.intervention.otherVersion).toBe(1000);
     expect(r.reachability.resolved).toBe(0);
+    expect(r.reachability.unpinned).toBe(30);
     expect(r.ready).toBe(false);
   });
 
-  it('a version change invalidates earlier evidence — and a cached mode computed under the old pin', () => {
+  it('a policy change discounts earlier evidence — and a cached mode computed under the old pin is recomputed', () => {
     write(calls(1000, 0));
     write(reach(30, 0));
     expect(resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
     const after = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1, pin: OTHER });
     expect(after.ready).toBe(false);
-    expect(after.intervention.otherVersion).toBe(1000);
+    // Not discarded (#719): carried at the default 50%, but no fresh window
+    // has run under the new policy yet.
+    expect(after.intervention.otherVersion).toBe(0);
+    expect(after.intervention.fresh.total).toBe(0);
+    expect(after.intervention.carried).toMatchObject({ rawTotal: 1000, total: 500 });
+    expect(after.intervention.freshWindow).toEqual({ required: true, pass: false });
     // Inside the old TTL, but the pin changed: recomputed, not served from cache.
     const again = resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW + 1, pin: OTHER });
     expect(again.cached).toBe(false);
     expect(again.report?.ready).toBe(false);
+  });
+
+  it('a release that keeps the policy hash keeps the evidence (#719) — the cache is still recomputed', () => {
+    write(calls(1000, 0));
+    write(reach(30, 0));
+    expect(resolveReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW }).mode).toBe('enforcing');
+    const upgraded: ReadinessPin = { adapter: 'claude-code-hook@99.0.0', policy: PIN.policy };
+    const registry = [{ ...WITH_REVIEWED.effectivenessRegistry[0], ...upgraded }];
+    const after = computeReadiness({ effectivenessRegistry: registry, channel: CHANNEL, paths, now: NOW + 1, pin: upgraded });
+    expect(after.intervention.total).toBe(1000);
+    expect(after.intervention.retained).toBe(1000);
+    expect(after.carry.earlierReleases).toEqual([PIN.adapter]);
+    expect(after.ready).toBe(true);
+    const again = resolveReadiness({ effectivenessRegistry: registry, channel: CHANNEL, paths, now: NOW + 1, pin: upgraded });
+    expect(again.cached).toBe(false);
+    expect(again.mode).toBe('enforcing');
   });
 
   it('an undeterminable pin is never ready', () => {
