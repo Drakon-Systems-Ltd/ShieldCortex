@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.6.1] - 2026-10-10
+
+Patch on 5.6.0. One Cloud privacy fix: the dashboard's bulk "sync quarantine to Cloud" button now applies the same filters and redaction as the automatic sync. Action Guard, Node floor and Cloud pin unchanged. The `POST /api/quarantine/sync-to-cloud` response gains an additive `skipped` count.
+
 ### Security
 - **Cloud: the dashboard bulk quarantine sync goes through the same gate as the automatic sync (#711, internal #89).** `POST /api/quarantine/sync-to-cloud` built its own payload from the `quarantine` table and POSTed `original_content` verbatim: no `excludeSensitive` check (CONFIDENTIAL+ excluded by default), no project filter, no metadata-only mode, no redaction. Both paths now call one shared `prepareQuarantineSyncPayload`, which applies the controls, then the #510 write-time PII redactor (`[REDACTED:<kind>]` for NI / SSN / tax id / salary and the contact details beside them, honouring `SHIELDCORTEX_PII_REDACTION=off`), then credential redaction, before anything leaves the device or is queued for retry; opting in to sensitive sync is not a PII-redaction opt-out. A stored row is also no longer classified from its raw text: the route reconstructs the live level from the linked `defence_audit` entry when the row has one, and otherwise never below what the sanitised text (NFKC, zero-width stripped) or a persisted redaction token implies, so an obfuscated or already-redacted row the automatic path would have excluded is not shipped by the bulk button. The bulk response gains an additive `skipped` count beside `synced` / `total`.
 
