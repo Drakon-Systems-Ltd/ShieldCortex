@@ -30,7 +30,7 @@ import {
   generateContextSummary,
 } from '../../memory/consolidate.js';
 import { getActivationStats, getActiveMemories } from '../../memory/activation.js';
-import { detectContradictions, getContradictionsFor } from '../../memory/contradiction.js';
+import { CONTRADICTION_SCAN_WINDOW, detectContradictions, getContradictionsFor } from '../../memory/contradiction.js';
 import { emitConsolidation } from '../events.js';
 import { guardDashboardContextSummary, RESTRICTED_CONTENT_PLACEHOLDER } from '../../defence/trust/read-guard.js';
 import type { IronDomeRouteGuardOptions, Middleware as IronDomeMiddleware } from '../iron-dome-route-guard.js';
@@ -589,6 +589,12 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
         limit,
       });
       const duplicates = findDuplicateMemoryPairs({ project, limit });
+      // Contradiction discovery only compares the CONTRADICTION_SCAN_WINDOW
+      // highest-salience memories; past that it is a sample (#692).
+      const contradictionCandidates = (db.prepare(`
+        SELECT COUNT(*) as n FROM memories
+        WHERE COALESCE(status, 'active') NOT IN ('archived', 'suppressed') ${projectFilter}
+      `).get(...params) as { n: number }).n;
 
       res.json({
         summary: {
@@ -599,6 +605,25 @@ export function registerMemoryRoutes(app: Express, deps: MemoryRouteDeps): void 
           projectless: counts.projectless,
           contradictions: contradictions.length,
           duplicates: duplicates.length,
+        },
+        // summary.contradictions / summary.duplicates count PAIRS returned in
+        // `sections`, cut off at `limit` — not memories, and not a full total
+        // (one memory can sit in several pairs). This says how far they reach
+        // so a consumer can label them "at least" instead of exact (#692).
+        pairCoverage: {
+          unit: 'pairs',
+          limit,
+          contradictions: {
+            found: contradictions.length,
+            capped: contradictions.length >= limit,
+            scanWindow: CONTRADICTION_SCAN_WINDOW,
+            candidates: contradictionCandidates,
+            scanPartial: contradictionCandidates > CONTRADICTION_SCAN_WINDOW,
+          },
+          duplicates: {
+            found: duplicates.length,
+            capped: duplicates.length >= limit,
+          },
         },
         openClaw: {
           total: openClawSummary.total ?? 0,
