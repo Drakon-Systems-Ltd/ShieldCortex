@@ -66,6 +66,7 @@ function countMatchedTerms(text, queryTerms) {
  *   minTermMatches?: number,
  *   relFactor?: number,
  *   maxBm25?: number | null,
+ *   minSemanticSimilarity?: number | null,
  * }} opts
  * @returns {{ kept: any[], dropped: Array<{ row: any, reason: 'below_term_coverage' | 'below_relevance_floor' }> }}
  */
@@ -86,6 +87,20 @@ export function filterByRelevance(rows, opts = {}) {
   // passed; the relative floor + term-coverage do the gating otherwise.
   const maxBm25 =
     typeof opts.maxBm25 === 'number' && Number.isFinite(opts.maxBm25) ? opts.maxBm25 : null;
+  // #717: a row the vector plane scored at/above this cosine similarity is
+  // relevant on meaning, not wording — the whole point of that plane is to
+  // surface memories that share no literal terms with the prompt, so the
+  // term-coverage and BM25 stages (both lexical) must not judge it. Opt-in:
+  // null (default) keeps the pre-#717 lexical-only gate.
+  const minSemanticSimilarity =
+    typeof opts.minSemanticSimilarity === 'number' && Number.isFinite(opts.minSemanticSimilarity)
+      ? opts.minSemanticSimilarity
+      : null;
+  const isSemanticMatch = (row) =>
+    minSemanticSimilarity !== null &&
+    row &&
+    typeof row._similarity === 'number' &&
+    row._similarity >= minSemanticSimilarity;
 
   // Distinct, non-empty query terms (lowercased) — defines totalQueryTerms.
   const distinctTerms = [];
@@ -110,6 +125,10 @@ export function filterByRelevance(rows, opts = {}) {
   // ── Stage 1: term coverage ────────────────────────────────────────────
   const coverageSurvivors = [];
   for (const row of list) {
+    if (isSemanticMatch(row)) {
+      coverageSurvivors.push(row);
+      continue;
+    }
     const text = `${row && row.title ? row.title : ''} ${row && row.content ? row.content : ''}`;
     const matchedTerms = countMatchedTerms(text, distinctTerms);
     const multiTerm = matchedTerms >= minTermMatches;
@@ -137,7 +156,7 @@ export function filterByRelevance(rows, opts = {}) {
   const kept = [];
   for (const row of coverageSurvivors) {
     const hasRank = typeof row.rank === 'number' && Number.isFinite(row.rank);
-    if (hasRank) {
+    if (hasRank && !isSemanticMatch(row)) {
       // Absolute dreg cut: a rank weaker than maxBm25 is noise regardless of
       // the relative floor (guards a query where even the best hit is weak).
       if (maxBm25 !== null && row.rank > maxBm25) {

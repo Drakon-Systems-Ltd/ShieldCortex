@@ -134,7 +134,15 @@ export function writeRecallLog(entry) {
       candidates: Array.isArray(entry.candidates) ? entry.candidates : [],
       injectedCount: entry.injectedCount ?? null,
       finalContextChars: entry.finalContextChars ?? null,
+      // #717: 'active:<n>' when the vector plane ran, otherwise
+      // 'unavailable:<reason>' / 'disabled:config'. null on pre-#717 writers.
+      vectorPlane: entry.vectorPlane ?? null,
     };
+    // TODO(#717): doctor WARN when the last N interactive recall runs share
+    // the same top-k candidate set (an envelope-dominated query signature).
+    // Deferred: the log cannot yet tell an interactive turn from an automated
+    // one, so the check would fire on every healthy watchdog lane; it needs
+    // the lane field #718 adds to these entries.
     const target = logPath(0);
     const tmp = `${target}.tmp`;
     writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
