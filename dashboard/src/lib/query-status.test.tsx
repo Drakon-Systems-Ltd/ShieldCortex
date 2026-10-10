@@ -2,7 +2,7 @@ import {
   combineStatus,
   countText,
   firewallPill,
-  guardPill,
+  ironDomePill,
   operationsPill,
   pillFor,
   queryStatus,
@@ -79,15 +79,26 @@ describe('firewallPill', () => {
   });
 });
 
-describe('guard / scanning / operations pills', () => {
-  it('guard and scanning derive from enabled, overridden by status', () => {
-    expect(guardPill('confirmed', true)).toEqual({ state: 'ok', text: 'on' });
-    expect(guardPill('confirmed', false)).toEqual({ state: 'off', text: 'off' });
-    expect(guardPill('pending', undefined).state).toBe('unknown');
-    expect(guardPill('unavailable', undefined).state).toBe('unavailable');
+describe('Iron Dome / scanning / operations pills', () => {
+  it('Iron Dome and scanning derive from enabled, overridden by status', () => {
+    expect(ironDomePill('confirmed', true)).toEqual({ state: 'ok', text: 'on' });
+    expect(ironDomePill('confirmed', false)).toEqual({ state: 'off', text: 'off' });
+    expect(ironDomePill('pending', undefined)).toEqual({ state: 'unknown', text: 'checking…' });
+    expect(ironDomePill('unavailable', undefined)).toEqual({ state: 'unavailable', text: 'unavailable' });
     expect(scanningPill('confirmed', true)).toEqual({ state: 'ok', text: 'on (injection scanner)' });
     expect(scanningPill('confirmed', false).state).toBe('off');
     expect(scanningPill('stale', true).state).toBe('warn');
+  });
+  it('Iron Dome: a malformed enabled is unknown, never truthy-on (#693)', () => {
+    for (const bad of ['true', 'false', 1, null, undefined, {}]) {
+      expect(ironDomePill('confirmed', bad)).toEqual({ state: 'unknown', text: 'unknown (unreadable status)' });
+      expect(scanningPill('confirmed', bad).state).toBe('unknown');
+    }
+  });
+  it('Iron Dome: a failed refetch does not keep a last-known "on" (#693)', () => {
+    expect(ironDomePill('stale', true)).toEqual({ state: 'warn', text: 'unconfirmed · refetch failed' });
+    expect(ironDomePill('stale', true).text).not.toMatch(/\bon\b/);
+    expect(ironDomePill('stale', false)).toEqual({ state: 'off', text: 'off · stale (refetch failed)' });
   });
   it('operations: emergency stop beats paused beats mode', () => {
     expect(operationsPill('confirmed', { killSwitchActive: true, paused: true, mode: 'x' })).toEqual({ state: 'fail', text: 'emergency stop' });
