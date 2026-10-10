@@ -77,12 +77,18 @@ describe('#661 (1) — a sink-free interpreter heredoc holds no invocations', ()
   it('holds for a double-quoted delimiter and for other interpreters', () => {
     for (const cmd of [
       asHeredoc(READ_PROGRAM, '"EOF"'),
-      `node - <<'EOF'\nconst t = require('fs').readFileSync('${TABLE_PATH}', 'utf8')\nconsole.log(t.length)\nEOF`,
       `perl - <<'EOF'\nopen(F, '${TABLE_PATH}'); print scalar(<F>);\nEOF`,
     ]) {
       expect([cmd, detectScriptInvocations(cmd)]).toEqual([cmd, []]);
       expect([cmd, verdict(cmd, { [TABLE_PATH]: TABLE }).decision]).toEqual([cmd, 'allow']);
     }
+  });
+
+  it('a Node body earns no relief once it requires anything, even fs by bare name (any require/import is a code loader)', () => {
+    // PR #712 review: a bare-module exemption could not tell fs from an
+    // expression or an aliased vm / module, so Node gives up the relief.
+    const cmd = `node - <<'EOF'\nconst t = require('fs').readFileSync(\n'${TABLE_PATH}')\nconsole.log(t.length)\nEOF`;
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(TABLE_PATH);
   });
 
   it('an UNQUOTED delimiter earns no relief: the outer shell expands the body, so it is not provably inert', () => {

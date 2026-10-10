@@ -5430,32 +5430,35 @@ const CODE_LOADER = new RegExp([
   // Python
   String.raw`\brunpy\b|\bimportlib\b|\bimport_module\b|\bspec_from_\w+|\b\w*(?:File|Source|Extension|Sourceless)Loader\b|\bmachinery\b|\bzipimport\b`,
   String.raw`\bimp\s*\.\s*load_\w+|\bload_(?:source|module|dynamic|compiled|package)\b|\bexecfile\b|(?<![\w.])compile\s*\(|(?<![\w.])exec\b`,
-  String.raw`\bos\s*\.\s*(?:posix_spawnp?|spawn\w*|exec\w*)\b|\bctypes\b|\bcffi\b|\bCDLL\b|\bdlopen\b`,
+  String.raw`\bposix_spawnp?\b|\bos\s*\.\s*(?:spawn\w*|exec\w*)\b|\bctypes\b|\bcffi\b|\bCDLL\b|\bdlopen\b`,
   String.raw`\bsys\s*\.\s*path\b\s*(?:\.\s*(?:insert|append|extend)\b|\+=|=(?!=)|\[)|\b__builtins__\b|\bbuiltins\b|\bglobals\s*\(\s*\)\s*\[|\b__import__\b`,
-  // Ruby
-  String.raw`(?<![\w.:])load\s*\(|(?<![\w.:])load\s+['"$@]|\bKernel\s*\.\s*load\b|\brequire(?:_relative|_once)?\b`,
-  String.raw`\beval\b|\b(?:instance|class|module)_(?:eval|exec)\b|\bbinding\b|:(?:load|require|eval|system|exec|spawn|syscall)\b`,
-  // Perl (`do FILE` / `do EXPR`, not a `do {` block), `use lib`
-  String.raw`\bdo\s*[('"$]|\buse\s+lib\b`,
-  // PHP
-  String.raw`\binclude(?:_once)?\b\s*[('"$]|\bassert\s*\(\s*['"]|\bcreate_function\b`,
+  // Ruby (`load EXPR` with any operand; a `x.load(` member call such as
+  // `json.load(` is not Kernel#load, but `self.load` / `Kernel.load` are)
+  String.raw`(?<![\w.:])load\s*\(|(?<![\w.:])load\s+\S|\b(?:Kernel|self)\s*\.\s*load\b|\bautoload\b|\brequire(?:_relative|_once)?\b`,
+  String.raw`\beval\b|\b(?:instance|class|module)_(?:eval|exec)\b|\bbinding\b|:(?:load|require|eval|system|exec|spawn|syscall)\b|\b(?:public_send|__send__|send)\s*\(`,
+  // Perl (`do FILE` / `do EXPR`, not a `do {` block or a Ruby `do |x|`), `use lib`
+  String.raw`\bdo\b[ \t]*[^\s{|]|\buse\s+lib\b`,
+  // PHP (keywords are case-insensitive: see PHP_LOADER)
+  String.raw`\bassert\s*\(\s*['"]|\bcreate_function\b`,
   // Node
-  String.raw`\bimport\s*\(|\bimport\b[^\n;]*\bfrom\s*['"]|\bimport\s*['"]`,
+  String.raw`\bimport\s*\(|\bimport\s*['"]`,
   String.raw`\bvm\s*\.\s*(?:run\w*|Script|compileFunction|SourceTextModule)\b|\brunIn(?:New|This)?Context\b|\bFunction\s*\(`,
   String.raw`child_|\b_process\b|\bprocess\s*\.\s*(?:binding|dlopen|_linkedBinding)\b|\bcreateRequire\b|\bworker_threads\b|\bnew\s+Worker\b`,
   String.raw`\b(?:globalThis|global|window|self)\s*\[`,
 ].join('|'));
+/** PHP `include` / `require` (and `_once`) in any case, whatever follows. */
+const PHP_LOADER = /\b(?:include|require)(?:_once)?\b/i;
 /**
- * A Node `require('fs')` / `import … from 'node:path'` of a bare built-in or
- * package NAME loads no file the command names, and is how a data-read body
- * opens its file (#661's relief row). Only the literal is kept so the loader
- * test still sees it — `child_process`, `vm`, `module` and `worker_threads`
- * still match by name. A path, a variable or a concatenation is not exempt.
+ * Node: ANY `require` or `import`, in any form (call, dynamic, statement).
+ * No module name is exempt. A "bare built-in name" exemption could not tell
+ * loading fs from loading `'fs' && p`, a concatenated child-process name or
+ * an aliased vm / module receiver, so a data-read Node body that opens its
+ * file through the fs module is scanned in full (fail-closed; the #661
+ * relief is given up there).
  */
-const NODE_BARE_MODULE_LOAD = /\b(?:require\s*\(\s*|import\s*\(\s*|from\s*)((['"])(?:node:)?[A-Za-z_][\w-]*\2)/g;
+const NODE_LOADER = /\b(?:require|import)\b/;
 function hasCodeLoader(text: string, lang: ScriptLang): boolean {
-  const scan = lang === 'node' ? text.replace(NODE_BARE_MODULE_LOAD, '$1') : text;
-  return CODE_LOADER.test(scan);
+  return CODE_LOADER.test(text) || PHP_LOADER.test(text) || (lang === 'node' && NODE_LOADER.test(text));
 }
 
 /**

@@ -121,8 +121,6 @@ describe('#661 follow-up — controls', () => {
   it('a data-read-only body is still masked: nothing folded, nothing asked', () => {
     for (const cmd of [
       heredoc('python3 -', "import re, json\ntext = open('/tmp/x/table.md').read()\nrows = json.loads(text) if text.startswith('[') else []\nprint(len(re.findall('x', text)), len(rows))"),
-      heredoc('node -', "const t = require('fs').readFileSync('/tmp/x/table.md', 'utf8')\nconsole.log(t.length)"),
-      heredoc('node -', "const fs = require('node:fs')\nconsole.log(fs.readFileSync('/tmp/x/table.md', 'utf8').length)"),
       heredoc('perl -', "open(F, '/tmp/x/table.md'); print scalar(<F>);"),
       heredoc('ruby -', "puts File.read('/tmp/x/table.md').length"),
     ]) {
@@ -131,8 +129,71 @@ describe('#661 follow-up — controls', () => {
     }
   });
 
-  it('a Node bare-module require is exempt only for a plain name, not a path or an expression', () => {
+  it('a Node data-read body that loads fs by bare name is NOT masked: any require/import keeps the full scan', () => {
+    // No module name is exempt: a bare-name test cannot tell fs from
+    // `'fs' && p`, a split child-process name or an aliased vm / module.
+    for (const cmd of [
+      heredoc('node -', "const t = require('fs').readFileSync(\n'/tmp/x/table.md')\nconsole.log(t.length)"),
+      heredoc('node -', "const fs = require('node:fs')\nconsole.log(fs.readFileSync(\n'/tmp/x/table.md').length)"),
+      heredoc('node --input-type=module -', "import fs from 'node:fs'\nconsole.log(fs.readFileSync(\n'/tmp/x/table.md').length)"),
+    ]) {
+      expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.md'])]);
+    }
+  });
+
+  it('a Node require of a path or a variable keeps the full scan', () => {
     expect(asked(heredoc('node -', "require('./x/fixture.js')"))).toContain('./x/fixture.js');
     expect(asked(heredoc('node -', "const p = '/tmp/fx/q.js'\nrequire(p)\nconsole.log(\n'/tmp/fx/q.js')"))).toContain('/tmp/fx/q.js');
+  });
+});
+
+/**
+ * PR #712 round 1 (GPT-6 Astra and Grok reviews): spellings the first
+ * predicate missed, so the body was masked and a file 5.5.0 offered was not.
+ * Each row is a reviewer reproduction; each failed at d23026ca.
+ */
+const REVIEW_R1: Record<string, [string, string, string]> = {
+  // Astra B1 — the Node bare-module exemption swallowed expressions and aliases
+  "astra: require('fs' && path)": ['node -', "require('fs' && ('/tmp/fx/a.js'))", '/tmp/fx/a.js'],
+  "astra: import('fs' && path)": ['node -', "import('fs' && ('/tmp/fx/a.mjs'))", '/tmp/fx/a.mjs'],
+  'astra: split child-process name, then spawn': ['node -', "const cp = require('chi' + 'ld_process')\ncp.spawn('/tmp/fx/a.sh')", '/tmp/fx/a.sh'],
+  'astra: aliased vm compileFunction': ['node -', "const { compileFunction: f } = require('vm')\nf(require('fs').readFileSync('/tmp/fx/a.js').toString())()", '/tmp/fx/a.js'],
+  'astra: module receiver _load': ['node -', "const m = require('module')\nm._load('/tmp/fx/a.js')", '/tmp/fx/a.js'],
+  // Astra B2 — Ruby, Perl and PHP spellings
+  'astra: ruby load of a local variable': ['ruby -', "p = File.expand_path('/tmp/fx/a.rb')\nload p", '/tmp/fx/a.rb'],
+  'astra: ruby self.load': ['ruby -', "self.load('/tmp/fx/a.rb')", '/tmp/fx/a.rb'],
+  'astra: perl do +(…)': ['perl -', "do +('/tmp/fx/a.pl');", '/tmp/fx/a.pl'],
+  'astra: php INCLUDE in upper case': ['php', "<?php INCLUDE('/tmp/fx/a.php'); ?>", '/tmp/fx/a.php'],
+  'astra: php include with comment trivia': ['php', "<?php include/**/('/tmp/fx/a.php'); ?>", '/tmp/fx/a.php'],
+  // Grok B1 — concatenation, vm, split child-process name
+  "grok: require('fs' + path)": ['node -', "require('fs' + \n'/tmp/fx/concat.js')", '/tmp/fx/concat.js'],
+  "grok: import('node:fs' + path)": ['node -', "import('node:fs' + \n'/tmp/fx/nconcat.js')", '/tmp/fx/nconcat.js'],
+  "grok: new (require('vm').Script)": ['node -', "new (require('vm').Script)(require('fs').readFileSync(\n'/tmp/fx/vms.js'))", '/tmp/fx/vms.js'],
+  'grok: destructured vm Script': ['node -', "const { Script } = require('vm')\nnew Script(require('fs').readFileSync(\n'/tmp/fx/vmd.js'))", '/tmp/fx/vmd.js'],
+  "grok: require('vm').compileFunction": ['node -', "require('vm').compileFunction(require('fs').readFileSync(\n'/tmp/fx/vmc.js'))", '/tmp/fx/vmc.js'],
+  "grok: import { Script } from 'vm'": ['node --input-type=module -', "import { Script } from 'vm'\nimport fs from 'fs'\nnew Script(fs.readFileSync(\n'/tmp/fx/vmi.js'))", '/tmp/fx/vmi.js'],
+  'grok: split child-process name, then fork': ['node -', "require('chi' + 'ld_process').fork(\n'/tmp/fx/fork.js')", '/tmp/fx/fork.js'],
+  'grok: split child-process name, then spawn': ['node -', "require('chi' + 'ld_process').spawn(\n'/tmp/fx/spawn2.sh')", '/tmp/fx/spawn2.sh'],
+  // Grok B2 — imported posix_spawn, Ruby load/send/autoload, PHP include expression
+  'grok: from os import posix_spawn': ['python3 -', "from os import posix_spawn\nposix_spawn(\n'/tmp/fx/spawn.sh'\n, ['spawn'], {})", '/tmp/fx/spawn.sh'],
+  'grok: from os import posix_spawnp': ['python3 -', "from os import posix_spawnp\nposix_spawnp(\n'/tmp/fx/spawnp.sh'\n, ['spawnp'], {})", '/tmp/fx/spawnp.sh'],
+  'grok: ruby load File.expand_path(…)': ['ruby -', "load File.expand_path('/tmp/fx/expand.rb')", '/tmp/fx/expand.rb'],
+  "grok: ruby Kernel.send('load', …)": ['ruby -', "Kernel.send('load',\n'/tmp/fx/sendstr.rb')", '/tmp/fx/sendstr.rb'],
+  'grok: ruby autoload': ['ruby -', "autoload :Foo,\n'/tmp/fx/auto.rb'", '/tmp/fx/auto.rb'],
+  'grok: php include __DIR__ . path': ['php', "<?php include __DIR__ . \n'/tmp/fx/incdir.php'; ?>", '/tmp/fx/incdir.php'],
+  // Same class as grok's send row: the other dynamic-dispatch spellings
+  "ruby public_send('load', …)": ['ruby -', "Kernel.public_send('load',\n'/tmp/fx/psend.rb')", '/tmp/fx/psend.rb'],
+  "ruby __send__('load', …)": ['ruby -', "Kernel.__send__('load',\n'/tmp/fx/usend.rb')", '/tmp/fx/usend.rb'],
+};
+
+describe('#661 follow-up — PR #712 round-1 review reproductions are never masked', () => {
+  it.each(Object.entries(REVIEW_R1))('%s: the loaded file is offered to the resolver', (_name, [interp, body, path]) => {
+    const cmd = heredoc(interp, body);
+    expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining([path])]);
+  });
+
+  it('a Python member call named load (json.load / pickle.load) is not Ruby load: data-read stays masked', () => {
+    const cmd = heredoc('python3 -', "import json\nrows = json.load(open('/tmp/x/table.json'))\nprint(len(rows))");
+    expect([cmd, asked(cmd)]).toEqual([cmd, []]);
   });
 });
