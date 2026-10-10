@@ -43,7 +43,7 @@ That string was caught and quarantined. Nothing was stored as a memory, and the 
 
 - **Memory firewall.** ShieldCortex does not replace OpenClaw, Hermes, or Claude memory. Writes that go through it are scanned before they stick. Recognised injection and leaked credentials are quarantined or blocked.
 - **Tool gate.** On Claude Code, OpenClaw, and Hermes, once Action Guard is on, a trusted task runs, a suspicious call gets a plain-English card, and a catastrophic command is a hard stop.
-- **Inspect.** `shieldcortex dashboard` is a local view: Overview, Memory, Protection, X-Ray, Settings. Memory has Library, Graph, Recall, Review, Timeline, Replay, and Files. Prompt-time recall into Claude Code is not automatic. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud).
+- **Inspect.** `shieldcortex dashboard` is a local view: Home, Needs you, Memory, Protection, Settings. The Skill & package scanner (formerly X-Ray) is a Protection tab. Memory has Search & browse, Map, Recall, Needs a check, Timeline, Replay, and Files. Prompt-time recall into Claude Code is not automatic. [What it needs](docs/UPDATING.md#dashboard-recall-and-cloud).
 
 ## Install
 
@@ -79,11 +79,13 @@ The optional enforce-when-ready posture runs the dangerous tier in shadow until 
 
 `shieldcortex policy-evidence` (5.5+) reports what each runtime's own self-report says it is enforcing, as local self-reports rather than attestation. [What's new in 5.5](docs/UPDATING.md#whats-new-in-55).
 
+Approval cards (5.6+) say what a held action does, why it was held and who asked, in plain English, without the raw command. Database, cluster and cloud teardown commands now ask for approval (5.6+). [What's new in 5.6](docs/UPDATING.md#whats-new-in-56).
+
 ## Free and Cloud
 
 Two different apps.
 
-- **Local** (`shieldcortex dashboard`) runs on your machine. X-Ray lives here.
+- **Local** (`shieldcortex dashboard`) runs on your machine. The Skill & package scanner (formerly X-Ray) lives here, under Protection.
 - **Cloud** is the fleet view: Shield, Capture, Recall, Library, Graph, Replay, Review, Quarantine, Dome, Devices, Keys. Default chrome is glass (Shield). Cloud does not ship X-Ray.
 
 Free cloud: 500 scans/month, 7-day retention, 1 member. Enterprise (fleets, SSO, full replica): sales@drakonsystems.com.

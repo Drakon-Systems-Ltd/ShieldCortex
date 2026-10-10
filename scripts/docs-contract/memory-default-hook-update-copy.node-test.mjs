@@ -150,7 +150,7 @@ describe('src/cli/update.ts 4.11 boundary notice', () => {
 
 describe('docs/UPDATING.md prompt-time recall', () => {
   const page = read('docs', 'UPDATING.md');
-  const line = page.split('\n').find((l) => l.startsWith('Local UI: **Overview'));
+  const line = page.split('\n').find((l) => /^Local UI( \([^)]*\))?: \*\*/.test(l));
 
   it('names the hook prerequisite and the config gate', () => {
     assert.ok(line, 'Local UI paragraph not found');
