@@ -249,17 +249,6 @@ export type Coverage = 'bounded-complete' | 'partial';
 
 type SourceStatus = 'absent' | 'read' | 'truncated' | 'refused' | 'failed';
 
-/** Test seams only: fail a read mid-stream or fail one append, from a test,
- *  without touching a live audit tree. Unset in production. */
-export interface SessionGuardTestHooks {
-  beforeReadChunk?: (info: { pass: ReadPass; file: string; chunk: number }) => void;
-  beforeAppend?: (info: { target: 'primary' | 'mirror'; file: string }) => void;
-}
-let testHooks: SessionGuardTestHooks = {};
-export function __setSessionGuardTestHooks(hooks: SessionGuardTestHooks | null): void {
-  testHooks = hooks ?? {};
-}
-
 function newPassGaps(): PassGaps {
   // Positive completion: everything starts as a failure and is promoted only
   // on the normal path that proves otherwise.
@@ -295,7 +284,6 @@ interface ReadSource {
  */
 function readJsonlPositioned(
   source: ReadSource,
-  pass: ReadPass,
   visitor: (line: string, lineIndex: number) => void,
 ): { status: SourceStatus; droppedLines: number } {
   let droppedLines = 0;
@@ -331,11 +319,8 @@ function readJsonlPositioned(
     let carry = '';
     let lineIndex = 0;
     let totalRead = 0;
-    let chunk = 0;
     let droppingOversizedLine = false;
     while (totalRead < target) {
-      testHooks.beforeReadChunk?.({ pass, file: source.file, chunk });
-      chunk += 1;
       const bytesRead = readSync(fd, buf, 0, Math.min(buf.length, target - totalRead), null);
       if (bytesRead <= 0) break;
       totalRead += bytesRead;
@@ -450,7 +435,7 @@ function runPass<T>(
   try {
     for (const source of sources) {
       const local: T[] = [];
-      const res = readJsonlPositioned(source, pass, (line, lineIndex) => visit(line, lineIndex, source.file, local));
+      const res = readJsonlPositioned(source, (line, lineIndex) => visit(line, lineIndex, source.file, local));
       gaps.droppedLines += res.droppedLines;
       if (source.isIndex) gaps.index = res.status;
       else if (res.status === 'refused') gaps.refusedFiles += 1;
@@ -650,7 +635,6 @@ export function recordActionGuardDegraded(
   try {
     mkdirSync(auditDir, { recursive: true, mode: 0o700 });
     const primary = join(auditDir, `realtime-${new Date().toISOString().slice(0, 10)}.jsonl`);
-    testHooks.beforeAppend?.({ target: 'primary', file: primary });
     appendFileSync(primary, line);
   } catch {
     return { recorded: false, count: batch.length, sessionKey, receipt: 'none', indexMirror: 'not-attempted', ...status, ...extra };
@@ -658,7 +642,6 @@ export function recordActionGuardDegraded(
   let mirrored = false;
   try {
     mkdirSync(join(auditDir, 'session-guard'), { recursive: true, mode: 0o700 });
-    testHooks.beforeAppend?.({ target: 'mirror', file: indexFile });
     appendFileSync(indexFile, line);
     mirrored = true;
   } catch {

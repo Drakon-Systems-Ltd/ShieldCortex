@@ -10,6 +10,7 @@
  * only ever appends: every file's pre-run bytes stay a byte-identical prefix.
  */
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import * as realFs from 'node:fs';
 import {
   appendFileSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   renameSync, rmSync, symlinkSync, truncateSync, writeFileSync,
@@ -17,14 +18,73 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-  __setSessionGuardTestHooks,
+// Fault injection is owned by this test file: the module under test gets a
+// wrapped `node:fs` (the #339 fixed-root pattern), so the shipped reader has
+// no test hook or switch of its own. The static imports above are the real fs.
+interface Faults {
+  /** Throw on the `failOnRead`-th readSync of the `open`-th open of `file`. */
+  read?: { file: string; open: number; failOnRead: number };
+  /** Throw when appending to a matching file; every attempt is recorded. */
+  append?: (file: string) => boolean;
+}
+let faults: Faults = {};
+const appendAttempts: string[] = [];
+const openCounts = new Map<string, number>();
+const armedFds = new Map<number, number>();
+
+const openSync = ((path: realFs.PathLike, ...rest: unknown[]) => {
+  const fd = (realFs.openSync as (...a: unknown[]) => number)(path, ...rest);
+  const f = faults.read;
+  if (f && String(path) === f.file) {
+    const n = (openCounts.get(f.file) ?? 0) + 1;
+    openCounts.set(f.file, n);
+    if (n === f.open) armedFds.set(fd, 0);
+  }
+  return fd;
+}) as typeof realFs.openSync;
+const readSync = ((fd: number, ...rest: unknown[]) => {
+  if (armedFds.has(fd)) {
+    const reads = armedFds.get(fd)! + 1;
+    armedFds.set(fd, reads);
+    if (reads === faults.read?.failOnRead) throw Object.assign(new Error('fixture: EIO mid-stream'), { code: 'EIO' });
+  }
+  return (realFs.readSync as (...a: unknown[]) => number)(fd, ...rest);
+}) as typeof realFs.readSync;
+const closeSync = ((fd: number) => {
+  armedFds.delete(fd);
+  return realFs.closeSync(fd);
+}) as typeof realFs.closeSync;
+const appendFileSyncFaulty = ((file: realFs.PathOrFileDescriptor, ...rest: unknown[]) => {
+  if (faults.append) {
+    appendAttempts.push(String(file));
+    if (faults.append(String(file))) throw Object.assign(new Error('fixture: sink down'), { code: 'EIO' });
+  }
+  return (realFs.appendFileSync as (...a: unknown[]) => void)(file, ...rest);
+}) as typeof realFs.appendFileSync;
+
+function setFaults(next: Faults): void {
+  faults = next;
+  appendAttempts.length = 0;
+  openCounts.clear();
+  armedFds.clear();
+}
+
+jest.unstable_mockModule('node:fs', () => ({
+  ...realFs,
+  default: { ...realFs, openSync, readSync, closeSync, appendFileSync: appendFileSyncFaulty },
+  openSync,
+  readSync,
+  closeSync,
+  appendFileSync: appendFileSyncFaulty,
+}));
+
+const {
   guardIdentity,
   MAX_RECEIPT_IDENTITIES,
   recordActionGuardDegraded,
   sessionKeyFor,
   v1Fingerprint,
-} from '../session-guard.js';
+} = await import('../session-guard.js');
 
 const SALT = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const OTHER_SALT = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
@@ -83,8 +143,19 @@ function fingerprintlessSummary(id: string, lastGuardTs = T): Record<string, unk
   };
 }
 
-function run(id: string) {
-  return recordActionGuardDegraded(id, { home, salt: SALT });
+type Result = ReturnType<typeof recordActionGuardDegraded>;
+/**
+ * One summariser call. HIST1 rides on every call: snapshot after setup, then
+ * every pre-existing file under HOME must keep its bytes as a prefix (EOF
+ * appends only). `during` wraps only the call (chmod fixtures), so the
+ * snapshot and comparison run with normal modes.
+ */
+function run(id: string, during?: (call: () => Result) => Result): Result {
+  const snap = snapshot();
+  const call = () => recordActionGuardDegraded(id, { home, salt: SALT });
+  const result = during ? during(call) : call();
+  expectAppendOnly(snap);
+  return result;
 }
 
 /** Run `fn` with `path` at `mode`, always restoring it (fixtures must stay removable). */
@@ -159,10 +230,10 @@ function expectReceipt(r: Record<string, any>, want: {
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'sc-654-sg-'));
-  __setSessionGuardTestHooks(null);
+  setFaults({});
 });
 afterEach(() => {
-  __setSessionGuardTestHooks(null);
+  setFaults({});
   try { rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
@@ -417,9 +488,7 @@ describe('#654 OpenClaw summariser — write status (A9)', () => {
   it('W1: a mirror failure after the primary landed is primary-only, and the next pass recovers it', () => {
     appendIndex('w1', guard('w1', { auditEventId: eid(50) }));
     appendIndex('w1', guard('w1', { auditEventId: eid(51) }));
-    __setSessionGuardTestHooks({
-      beforeAppend: ({ target }) => { if (target === 'mirror') throw new Error('fixture: mirror append fails'); },
-    });
+    setFaults({ append: (file) => file === indexFile('w1') });
     const first = run('w1');
     // The guards were read from this index: the recovery pass below reads the same one.
     expect(first).toMatchObject({ recorded: true, count: 2, receipt: 'primary-only', indexMirror: 'failed' });
@@ -429,7 +498,7 @@ describe('#654 OpenClaw summariser — write status (A9)', () => {
     expect(primary[0].indexMirror).toBeUndefined();
     expect(rowsOf(indexFile('w1')).filter((r) => r.recordKind === 'summary')).toHaveLength(0);
 
-    __setSessionGuardTestHooks(null);
+    setFaults({});
     const snap = snapshot();
     const second = run('w1');
     expect(second.coverageGaps?.guards.index).toBe('read');
@@ -440,24 +509,29 @@ describe('#654 OpenClaw summariser — write status (A9)', () => {
 
   it('W3: a failed primary is never coverage; the next call summarises the same rows once', () => {
     appendIndex('w3', guard('w3', { auditEventId: eid(52) }));
-    __setSessionGuardTestHooks({
-      beforeAppend: ({ target }) => { if (target === 'primary') throw new Error('fixture: primary append fails'); },
-    });
+    setFaults({ append: (file) => file === realtimeFile() });
+    const snap = snapshot();
     expect(run('w3')).toMatchObject({ recorded: false, count: 1, receipt: 'none', indexMirror: 'not-attempted' });
     expect(rowsOf(indexFile('w3')).filter((r) => r.recordKind === 'summary')).toHaveLength(0);
-    __setSessionGuardTestHooks(null);
+    expectAppendOnly(snap);
+    setFaults({});
     expect(run('w3')).toMatchObject({ recorded: true, count: 1, receipt: 'primary+index' });
     expect(run('w3')).toMatchObject({ existing: true, count: 0 });
   });
 
   it('W4: both sinks failing is the same as W3 — no mirror without a primary', () => {
     appendIndex('w4', guard('w4', { auditEventId: eid(53) }));
-    const attempts: string[] = [];
-    __setSessionGuardTestHooks({
-      beforeAppend: ({ target }) => { attempts.push(target); throw new Error('fixture: sink down'); },
-    });
-    expect(run('w4')).toMatchObject({ recorded: false, receipt: 'none', indexMirror: 'not-attempted' });
-    expect(attempts).toEqual(['primary']);
+    setFaults({ append: () => true });
+    const snap = snapshot();
+    expect(run('w4')).toMatchObject({ recorded: false, count: 1, receipt: 'none', indexMirror: 'not-attempted' });
+    // Only the primary was attempted: no mirror without a primary.
+    expect(appendAttempts).toEqual([realtimeFile()]);
+    expect(rowsOf(indexFile('w4')).filter((r) => r.recordKind === 'summary')).toHaveLength(0);
+    expectAppendOnly(snap);
+    setFaults({});
+    expect(run('w4')).toMatchObject({ recorded: true, count: 1, receipt: 'primary+index' });
+    expect(run('w4')).toMatchObject({ existing: true, count: 0 });
+    expect(newReceipts('w4')).toHaveLength(1);
   });
 });
 
@@ -499,7 +573,7 @@ describe('#654 OpenClaw summariser — bounded reads and positive completion (A1
     const result = run('b2');
     expect(result.coverage).toBe('partial');
     expect(result.coverageGaps!.receipts.skippedFiles).toBe(1);
-  });
+  }, 30_000);
 
   it('B3: an index past its 64 MiB prefix is truncated → partial, the receipt past it is unseen', () => {
     const row = guard('b3', { auditEventId: eid(63) });
@@ -567,7 +641,7 @@ describe('#654 OpenClaw summariser — bounded reads and positive completion (A1
     const row = guard('b7', { auditEventId: eid(66) });
     appendIndex('b7', row);
     appendLine(realtimeFile('2026-09-03'), legacyReceipt('b7', [v1Fingerprint(row, '')]));
-    const result = withMode(realtimeFile('2026-09-03'), 0o000, 0o600, () => run('b7'));
+    const result = run('b7', (call) => withMode(realtimeFile('2026-09-03'), 0o000, 0o600, call));
     expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
     expect(result.coverageGaps!.receipts.failedFiles).toBe(1);
   });
@@ -577,7 +651,7 @@ describe('#654 OpenClaw summariser — bounded reads and positive completion (A1
     appendIndex('b8', row);
     // A primary-only receipt for the guard, in the file the next receipt also appends to.
     appendLine(realtimeFile(), legacyReceipt('b8', [v1Fingerprint(row, '')]));
-    const result = withMode(auditDir(), 0o100, 0o700, () => run('b8'));
+    const result = run('b8', (call) => withMode(auditDir(), 0o100, 0o700, call));
     expect(result.coverageGaps!.receipts.auditDir).toBe('failed');
     expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
     const r = newReceipts('b8')[0];
@@ -586,7 +660,7 @@ describe('#654 OpenClaw summariser — bounded reads and positive completion (A1
 
   itNonRoot('B10: an index that cannot be inspected is failed, not absent', () => {
     appendIndex('b10', guard('b10', { auditEventId: eid(68) }));
-    const result = withMode(join(auditDir(), 'session-guard'), 0o000, 0o700, () => run('b10'));
+    const result = run('b10', (call) => withMode(join(auditDir(), 'session-guard'), 0o000, 0o700, call));
     expect(result).toMatchObject({ recorded: false, count: 0, coverage: 'partial' });
     expect(result.coverageGaps!.receipts.index).toBe('failed');
     expect(result.coverageGaps!.guards.index).toBe('failed');
@@ -599,11 +673,8 @@ describe('#654 OpenClaw summariser — bounded reads and positive completion (A1
     appendLine(file, row);
     appendLine(file, { type: 'noise', pad: 'x'.repeat(70 * 1024) });
     appendLine(file, legacyReceipt('b11', [v1Fingerprint(row, '')]));
-    __setSessionGuardTestHooks({
-      beforeReadChunk: ({ pass, file: f, chunk }) => {
-        if (pass === 'receipts' && f === file && chunk >= 1) throw new Error('fixture: EIO mid-stream');
-      },
-    });
+    // Realtime files are read only by the receipts pass here (guards are index-only).
+    setFaults({ read: { file, open: 1, failOnRead: 2 } });
     const result = run('b11');
     expect(result.coverageGaps!.receipts.failedFiles).toBe(1);
     expect(result.coverageGaps!.guards.failedFiles).toBe(0);
@@ -615,11 +686,8 @@ describe('#654 OpenClaw summariser — bounded reads and positive completion (A1
     appendIndex('b11g', guard('b11g', { auditEventId: eid(70) }));
     appendIndex('b11g', { type: 'noise', pad: 'x'.repeat(70 * 1024) } as Record<string, unknown>);
     appendIndex('b11g', guard('b11g', { auditEventId: eid(71) }));
-    __setSessionGuardTestHooks({
-      beforeReadChunk: ({ pass, chunk }) => {
-        if (pass === 'guards' && chunk >= 1) throw new Error('fixture: EIO mid-stream');
-      },
-    });
+    // The index is opened once per pass, receipts first: the second open is the guards pass.
+    setFaults({ read: { file: indexFile('b11g'), open: 2, failOnRead: 2 } });
     const result = run('b11g');
     expect(result.coverageGaps!.guards.index).toBe('failed');
     expect(result.coverageGaps!.receipts.index).toBe('read');

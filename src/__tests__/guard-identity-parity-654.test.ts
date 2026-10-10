@@ -15,7 +15,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +47,28 @@ interface Vector {
 const VECTORS: Vector[] = JSON.parse(
   readFileSync(join(__dirname, 'fixtures', 'guard-identity-vectors-654.json'), 'utf8'),
 ).vectors;
+
+// HIST1: every file that existed before a summariser run keeps its bytes as a
+// prefix afterwards (EOF appends only). Returns the post-run check.
+function appendOnlyCheck(root: string): () => void {
+  const files: string[] = [];
+  const visit = (dir: string) => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const st = lstatSync(p);
+      if (st.isDirectory()) visit(p);
+      else if (st.isFile() && !name.endsWith('.lock') && name !== 'memories.db') files.push(p);
+    }
+  };
+  visit(root);
+  const before = new Map(files.map((p) => [p, readFileSync(p)]));
+  return () => {
+    for (const [p, bytes] of before) {
+      expect(readFileSync(p).subarray(0, bytes.length).equals(bytes)).toBe(true);
+    }
+  };
+}
 
 // ---- HEAD 58c3e89a scripts/stop-hook.mjs:308-318 and :447-458, copied verbatim.
 const HEAD_SAFE_SUMMARY_SIGNALS = new Set([
@@ -116,12 +138,14 @@ describe('#654 PAR1 — hook half (spawned) agrees with the TS reader', () => {
   });
 
   function runHook(hookHome: string, session: string) {
+    const appendOnly = appendOnlyCheck(join(hookHome, '.shieldcortex', 'audit'));
     const res = spawnSync(process.execPath, [STOP_HOOK], {
       input: JSON.stringify({ session_id: session }),
       encoding: 'utf8',
       env: { ...process.env, HOME: hookHome, SHIELDCORTEX_CONFIG_DIR: join(hookHome, '.shieldcortex'), SHIELDCORTEX_SESSION_SALT: SALT },
     });
     expect(res.status).toBe(0);
+    appendOnly();
     const dir = join(hookHome, '.shieldcortex', 'audit');
     return readdirSync(dir).filter((f) => /^realtime-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
       .flatMap((f) => readFileSync(join(dir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)))
@@ -173,7 +197,9 @@ describe('#654 PAR1 — hook half (spawned) agrees with the TS reader', () => {
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, content);
       }
+      const appendOnly = appendOnlyCheck(tsHome);
       const ts = recordActionGuardDegraded(session, { home: tsHome, salt: SALT });
+      appendOnly();
       expect(ts).toMatchObject({ recorded: true, count: 1 });
       const tsDir = join(tsHome, '.shieldcortex', 'audit');
       const tsReceipt = readdirSync(tsDir).filter((f) => /^realtime-/.test(f))

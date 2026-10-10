@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { createHmac } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { evaluateToolCall } from '../../../src/defence/iron-dome/tool-action-guard.js';
 import {
   appendSessionGuardIndex,
+  GUARD_DEGRADED_OUTCOMES,
   recordActionGuardDegraded,
   sessionKeyFor,
 } from '../../../src/defence/iron-dome/session-guard.js';
@@ -239,5 +240,50 @@ describe('#260 plugin session_end / agent_end summarise the OpenClaw index', () 
     expect(summaries[1].guardOutcomeCount).toBe(newGuards);
     // Each receipt lists only what it counted: no identity appears twice.
     expect(summaries[1].guardFingerprints.some((fp: string) => summaries[0].guardFingerprints.includes(fp))).toBe(false);
+  });
+
+  it('#654 H1: a HEAD-shaped fingerprint-less summary in realtime and the index never suppresses a later deny', async () => {
+    const { api, hooks } = makeApi();
+    plugin.register(api);
+
+    const sessionId = 'agent:main:cron:h1';
+    const key = expectedKey(sessionId);
+    const indexFile = join(auditDir, 'session-guard', `${key}.jsonl`);
+    // HEAD's OpenClaw summary lists no fingerprints and was written to both
+    // sinks. Its lastGuardTs is after every guard below, so they are also
+    // "backdated" against it; HEAD short-circuited on it regardless (RC5).
+    const headSummary = {
+      type: 'session_summary', recordKind: 'summary', origin: 'openclaw-session-end', sessionKey: key,
+      action: 'session_health', outcome: 'action_guard_degraded', guardOutcomeCount: 1,
+      outcomes: { failure_denied: 1 }, threats: [], firstGuardTs: '2099-01-01T00:00:00.000Z',
+      lastGuardTs: '2099-01-01T00:00:00.000Z', ts: '2099-01-01T00:00:01.000Z',
+    };
+    mkdirSync(join(auditDir, 'session-guard'), { recursive: true });
+    appendFileSync(join(auditDir, 'realtime-2026-01-01.jsonl'), `${JSON.stringify(headSummary)}\n`);
+    appendFileSync(indexFile, `${JSON.stringify(headSummary)}\n`);
+
+    await hooks.before_tool_call({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } }, { sessionId });
+    const guards = readFileSync(indexFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      .filter((r) => r.recordKind === 'guard' && r.action !== 'notify' && GUARD_DEGRADED_OUTCOMES.has(String(r.outcome)));
+    expect(guards.length).toBeGreaterThan(0);
+    hooks.session_end({ sessionId }, { sessionId });
+
+    const files = readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
+    const rows = files.flatMap((f) =>
+      readFileSync(join(auditDir, f), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)),
+    );
+    const receipts = rows.filter((r) => r.type === 'session_summary' && r.sessionKey === key && r.fingerprintScheme === 2);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      origin: 'openclaw-session-end',
+      guardOutcomeCount: guards.length,
+      identityBasis: { eventId: guards.length, bindingNonce: 0, physicalRow: 0 },
+      eventCountExact: true,
+      historicalOverlap: 'possible',
+      overlapReasons: ['fingerprintless-summary'],
+      // One historical summary, observed once in realtime and once in the index.
+      unknownMembershipSummaryRows: 2,
+      coverage: 'bounded-complete',
+    });
   });
 });

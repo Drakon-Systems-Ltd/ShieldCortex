@@ -538,15 +538,6 @@ function isGuardRow(row, sessionKey) {
     && GUARD_DEGRADED_OUTCOMES.has(String(row.outcome));
 }
 
-// Test seam (#654 B11), in the SHIELDCORTEX_TEST_* idiom: `<pass>:<basename>`
-// makes the second chunk read of that file throw in that pass only, so a
-// mid-stream failure can be driven without touching a real disk.
-function testOnlyFailAuditRead(pass, file, chunk) {
-  const spec = process.env.SHIELDCORTEX_TEST_AUDIT_READ_FAIL;
-  if (!spec || chunk < 1) return;
-  if (spec === `${pass}:${basename(file)}`) throw new Error('test-only audit read failure');
-}
-
 /**
  * Stream one JSONL source and report how the read ENDED: `read` only when it
  * reached the size it set out to read (realtime: the size seen at discovery;
@@ -556,7 +547,7 @@ function testOnlyFailAuditRead(pass, file, chunk) {
  * whether that is a known absence or a vanished candidate). Chunks are decoded
  * per chunk, exactly as before — the TS reader reproduces that for parity.
  */
-function forEachJsonlLine(source, visitor, pass) {
+function forEachJsonlLine(source, visitor) {
   const file = source.file;
   let droppedLines = 0;
   let st;
@@ -591,11 +582,8 @@ function forEachJsonlLine(source, visitor, pass) {
     let carry = '';
     let lineIndex = 0;
     let totalRead = 0;
-    let chunk = 0;
     let droppingOversizedLine = false;
     while (totalRead < target) {
-      testOnlyFailAuditRead(pass, file, chunk);
-      chunk += 1;
       const bytesRead = readSync(fd, buf, 0, Math.min(buf.length, target - totalRead), null);
       if (bytesRead <= 0) break;
       totalRead += bytesRead;
@@ -707,7 +695,7 @@ function runPass(pass, sources, gaps, visit) {
   try {
     for (const source of sources) {
       const local = [];
-      const res = forEachJsonlLine(source, (line, lineIndex) => visit(line, lineIndex, source.file, local), pass);
+      const res = forEachJsonlLine(source, (line, lineIndex) => visit(line, lineIndex, source.file, local));
       gaps.droppedLines += res.droppedLines;
       if (source.isIndex) gaps.index = res.status;
       else if (res.status === 'refused') gaps.refusedFiles += 1;
@@ -1130,11 +1118,6 @@ process.stdin.on('end', async () => {
     const guardSummary = recordActionGuardSessionOutcome(
       typeof hookData.session_id === 'string' ? hookData.session_id : hookData.sessionId,
     );
-    // Test seam (#654): the result shape is otherwise only visible through
-    // what it wrote, and the no-pending / existing / no-lock shapes write nothing.
-    if (process.env.SHIELDCORTEX_TEST_EMIT_GUARD_RESULT === '1') {
-      console.error(`[shieldcortex stop-hook] test-guard-result ${JSON.stringify(guardSummary)}`);
-    }
     if (guardSummary.recorded || guardSummary.count > 0) {
       hookTelemetryExitCode = 1;
       guardHealthNote = guardSummary.existing

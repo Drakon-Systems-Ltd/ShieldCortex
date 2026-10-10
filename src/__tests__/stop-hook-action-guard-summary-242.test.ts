@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { appendFileSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { recordActionGuardDegraded, v1Fingerprint } from '../defence/iron-dome/session-guard.js';
 
@@ -13,6 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..', '..');
 const STOP_HOOK = join(REPO, 'scripts', 'stop-hook.mjs');
 const PRE_TOOL_HOOK = join(REPO, 'scripts', 'pre-tool-hook.mjs');
+const AUDIT_READ_FAULT_PRELOAD = join(__dirname, 'fixtures', 'audit-read-fault-preload-654.mjs');
 const SESSION_SALT = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const SECRET_SENTINEL = 'PUPIL_OR_SECRET_VALUE_SHOULD_NOT_LEAVE_AUDIT_PREVIEW';
 
@@ -85,8 +86,8 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     return join(dir, `realtime-${date}.jsonl`);
   }
 
-  function runStopHook(payload: Record<string, unknown>, opts: { timeout?: number; env?: Record<string, string> } = {}) {
-    return spawnSync(process.execPath, [STOP_HOOK], {
+  function runStopHook(payload: Record<string, unknown>, opts: { timeout?: number; env?: Record<string, string>; execArgv?: string[] } = {}) {
+    return spawnSync(process.execPath, [...(opts.execArgv ?? []), STOP_HOOK], {
       input: JSON.stringify(payload),
       encoding: 'utf8',
       timeout: opts.timeout,
@@ -1214,7 +1215,6 @@ describe('stop hook — Action Guard run summary (#242)', () => {
     const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
     const itNonRoot = asRoot ? it.skip : it;
     const T = '2026-08-11T10:00:00.000Z';
-    const EMIT = { SHIELDCORTEX_TEST_EMIT_GUARD_RESULT: '1' };
 
     const eid = (n: number) => n.toString(16).padStart(32, '0');
     const nonceOf = (n: number) => `${n.toString(16).padStart(31, '0')}b`;
@@ -1255,7 +1255,7 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       };
     }
     function rowsIn(file: string): Array<Record<string, any>> {
-      if (!existsSync(file)) return [];
+      if (!existsSync(file) || !lstatSync(file).isFile()) return [];
       return readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((l) => {
         try { return [JSON.parse(l)]; } catch { return []; }
       });
@@ -1266,12 +1266,103 @@ describe('stop hook — Action Guard run summary (#242)', () => {
         .flatMap((f) => rowsIn(join(auditDir(), f)))
         .filter((r) => r.origin === 'claude-code-stop-hook' && r.sessionKey === sessionKey(session) && r.fingerprintScheme === 2);
     }
-    function run(session: string, env: Record<string, string> = {}) {
-      const res = runStopHook({ session_id: session }, { env: { ...EMIT, ...env } });
+    type SpawnResult = ReturnType<typeof runStopHook>;
+    function telemetryNotes(): string[] {
+      try {
+        return hookRows().map((r) => r.notes ?? '');
+      } catch {
+        return []; // no hook has created the telemetry table yet
+      }
+    }
+    /** Parse the one `coverage=partial` stderr line: gap kinds and counts per pass (complete states are not printed). */
+    function gapsFromLine(line: string | undefined): Record<'receipts' | 'guards', Record<string, any>> {
+      const out = {
+        receipts: { skippedFiles: 0, refusedFiles: 0, failedFiles: 0, droppedLines: 0 } as Record<string, any>,
+        guards: { skippedFiles: 0, refusedFiles: 0, failedFiles: 0, droppedLines: 0 } as Record<string, any>,
+      };
+      for (const token of (line ?? '').split(' ')) {
+        const m = /^(receipts|guards):(.+)$/.exec(token);
+        if (!m) continue;
+        for (const kv of m[2].split(',')) {
+          const [k, v] = kv.split('=');
+          out[m[1] as 'receipts' | 'guards'][k] = /^\d+$/.test(v) ? Number(v) : v;
+        }
+      }
+      return out;
+    }
+    /**
+     * Run the UNCHANGED hook and reconstruct its result from what it exposes:
+     * the receipt it appended (which carries coverage, gaps and
+     * pendingRemaining), its stderr lines (mirror failure, sink failure, the
+     * one coverage=partial gap line) and the existing telemetry note. There is
+     * no test switch in the hook that prints the internal result object, so a
+     * shape that writes nothing (existing, pending, nothing found, a failed
+     * primary) carries no count here, and a complete pass's `listed`/`absent`
+     * states are only visible on a written receipt.
+     *
+     * HIST1 rides on every run: snapshot after setup, then every pre-existing
+     * audit file must keep its bytes as a prefix (EOF appends only).
+     * `during` wraps only the spawn (chmod fixtures), so the snapshot and the
+     * observation run with normal modes.
+     */
+    function run(session: string, opts: {
+      failRead?: { name: string; open: number };
+      during?: (spawn: () => SpawnResult) => SpawnResult;
+    } = {}) {
+      const receiptsBefore = hookReceipts(session).length;
+      const notesBefore = telemetryNotes().length;
+      const snap = snapshot();
+      const execArgv = opts.failRead
+        ? ['--import', `${pathToFileURL(AUDIT_READ_FAULT_PRELOAD).href}?name=${encodeURIComponent(opts.failRead.name)}&open=${opts.failRead.open}&read=2`]
+        : [];
+      const spawn = () => runStopHook({ session_id: session }, { execArgv });
+      const res = opts.during ? opts.during(spawn) : spawn();
       expect(res.status).toBe(0);
-      const line = res.stderr.split('\n').find((l) => l.includes('test-guard-result '));
-      expect(line).toBeDefined();
-      return { stderr: res.stderr, result: JSON.parse(line!.slice(line!.indexOf('test-guard-result ') + 'test-guard-result '.length)) };
+      expectAppendOnly(snap);
+      const stderr = res.stderr;
+      const fresh = hookReceipts(session).slice(receiptsBefore);
+      expect(fresh.length).toBeLessThanOrEqual(1);
+      const notes = telemetryNotes().slice(notesBefore).join('; ');
+      const gapLines = stderr.split('\n').filter((l) => l.includes('action_guard_degraded coverage=partial'));
+      expect(gapLines.length).toBeLessThanOrEqual(1);
+      const coverage = gapLines.length ? 'partial' : 'bounded-complete';
+      const mirrorFailed = stderr.includes('action_guard_degraded index mirror FAILED');
+      let result: Record<string, any>;
+      if (fresh.length === 1) {
+        const r = fresh[0];
+        expect(stderr).toContain(`guardOutcomes=${r.guardOutcomeCount}`);
+        expect(r.coverage).toBe(coverage);
+        result = {
+          recorded: true,
+          count: r.guardOutcomeCount,
+          receipt: mirrorFailed ? 'primary-only' : 'primary+index',
+          indexMirror: mirrorFailed ? 'failed' : 'ok',
+          coverage: r.coverage,
+          coverageGaps: r.coverageGaps,
+          ...(r.pendingRemaining !== undefined ? { pendingRemaining: r.pendingRemaining } : {}),
+        };
+      } else {
+        expect(mirrorFailed).toBe(false);
+        const base = { coverage, coverageGaps: gapsFromLine(gapLines[0]) };
+        if (stderr.includes('audit sink UNWRITABLE')) result = { recorded: false, receipt: 'none', indexMirror: 'not-attempted', ...base };
+        else if (notes.includes('action_guard_degraded_existing')) result = { recorded: true, count: 0, existing: true, ...base };
+        else if (notes.includes('action_guard_degraded_pending')) result = { recorded: false, pending: true, ...base };
+        else {
+          expect(notes).not.toContain('action_guard_degraded');
+          result = { recorded: false, count: 0, ...base };
+        }
+      }
+      return { stderr, result };
+    }
+    function withMode(path: string, mode: number, restore: number) {
+      return (spawn: () => SpawnResult): SpawnResult => {
+        chmodSync(path, mode);
+        try {
+          return spawn();
+        } finally {
+          chmodSync(path, restore);
+        }
+      };
     }
     function expectReceipt(r: Record<string, any>, want: {
       count: number; basis: Record<string, number>; exact: boolean; reasons?: string[]; coverage?: string;
@@ -1435,6 +1526,29 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       expect(run('f2-654').result.count).toBe(1);
     });
 
+    it('F-1: notify rows and foreign-sessionKey rows inside the index are ignored and absent from the receipt', () => {
+      appendIndex('f1-654', row('f1-654', { action: 'notify', auditEventId: eid(25) }));
+      appendIndex('f1-654', row('f1-654', { sessionKey: sessionKey('someone-else-654'), auditEventId: eid(26) }));
+      const counted = row('f1-654', { auditEventId: eid(27) });
+      appendIndex('f1-654', counted);
+      expect(run('f1-654').result).toMatchObject({ recorded: true, count: 1 });
+      const r = hookReceipts('f1-654')[0];
+      expectReceipt(r, { count: 1, basis: { eventId: 1 }, exact: true });
+      // An eventId primary is position-independent, so it is HEAD v1 at any physKey.
+      expect(r.guardFingerprints).toEqual([v1Fingerprint(counted, '')]);
+    });
+
+    it('L5: two ID-less rows whose raw labels both clean to redacted-signal stay two physical rows', () => {
+      const file = auditFileForDate('2026-08-10');
+      appendTo(file, row('l5-654', { threats: ['raw-label-one'] }));
+      appendTo(file, row('l5-654', { threats: ['raw-label-two'] }));
+      expect(run('l5-654').result.count).toBe(2);
+      const r = hookReceipts('l5-654')[0];
+      expectReceipt(r, { count: 2, basis: { physicalRow: 2 }, exact: false });
+      expect(r.threats).toEqual(['redacted-signal']);
+      expect(run('l5-654').result).toMatchObject({ existing: true, count: 0 });
+    });
+
     it('W2: a refused (symlinked) index → primary-only receipt, partial coverage, recovered from realtime', () => {
       const key = sessionKey('w2-654');
       const indexDir = join(auditDir(), 'session-guard');
@@ -1458,11 +1572,30 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       // Today's primary path is occupied by a directory: the append must fail.
       mkdirSync(auditFile(), { recursive: true });
       const first = run('w3-654').result;
-      expect(first).toMatchObject({ recorded: false, count: 1, receipt: 'none', indexMirror: 'not-attempted' });
+      expect(first).toMatchObject({ recorded: false, receipt: 'none', indexMirror: 'not-attempted' });
       expect(rowsIn(indexPath('w3-654')).filter((r) => r.recordKind === 'summary')).toHaveLength(0);
       rmSync(auditFile(), { recursive: true, force: true });
       expect(run('w3-654').result).toMatchObject({ recorded: true, count: 1, receipt: 'primary+index' });
       expect(run('w3-654').result).toMatchObject({ existing: true, count: 0 });
+    });
+
+    itNonRoot('W4: both sinks failing is the same as W3 — no mirror without a primary, then one summary', () => {
+      appendTo(auditFileForDate('2026-08-10'), row('w4-654', { auditEventId: eid(32) }));
+      // Primary: today's path is a directory. Mirror: the index dir exists but
+      // cannot be written, so an attempted mirror would print its FAILED line.
+      mkdirSync(auditFile(), { recursive: true });
+      const indexDir = join(auditDir(), 'session-guard');
+      mkdirSync(indexDir, { recursive: true });
+      const first = run('w4-654', { during: withMode(indexDir, 0o500, 0o700) });
+      expect(first.result).toMatchObject({ recorded: false, receipt: 'none', indexMirror: 'not-attempted' });
+      expect(first.stderr).toContain('audit sink UNWRITABLE');
+      expect(first.stderr).not.toContain('index mirror FAILED');
+      expect(existsSync(indexPath('w4-654'))).toBe(false);
+      rmSync(auditFile(), { recursive: true, force: true });
+      expect(run('w4-654').result).toMatchObject({ recorded: true, count: 1, receipt: 'primary+index' });
+      expect(run('w4-654').result).toMatchObject({ existing: true, count: 0 });
+      expect(hookReceipts('w4-654')).toHaveLength(1);
+      expectReceipt(hookReceipts('w4-654')[0], { count: 1, basis: { eventId: 1 }, exact: true });
     });
 
     it('B1: a receipt past the 256-file cap is unseen → recount with receipt-coverage-partial', () => {
@@ -1486,7 +1619,7 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       const { result } = run('b2-654');
       expect(result.coverage).toBe('partial');
       expect(result.coverageGaps.receipts.skippedFiles).toBe(1);
-    });
+    }, 30_000);
 
     it('B3: an index past its 64 MiB prefix is truncated → partial; the receipt beyond it is unseen', () => {
       const r = row('b3-654', { auditEventId: eid(42) });
@@ -1533,40 +1666,56 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       expect(result.coverageGaps.guards.refusedFiles).toBe(1);
     });
 
+    itNonRoot('B7: an unreadable receipt file is a failed source in both passes → recount, partial, disclosed', () => {
+      const r = row('b7-654', { auditEventId: eid(53) });
+      appendIndex('b7-654', r);
+      const file = auditFileForDate('2026-08-09');
+      appendTo(file, legacyReceipt('b7-654', [v1Fingerprint(r, '')]));
+      const { result } = run('b7-654', { during: withMode(file, 0o000, 0o600) });
+      expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
+      expect(result.coverageGaps.receipts.failedFiles).toBe(1);
+      expect(result.coverageGaps.guards.failedFiles).toBe(1);
+      expectReceipt(hookReceipts('b7-654')[0], { count: 1, basis: { eventId: 1 }, exact: true, coverage: 'partial', reasons: ['receipt-coverage-partial'] });
+      // Readable again, the receipt it could not see and the new one both cover the guard.
+      expect(run('b7-654').result).toMatchObject({ existing: true, count: 0, coverage: 'bounded-complete' });
+    });
+
     itNonRoot('B8: an audit dir that cannot be listed is NEVER bounded-complete (discovery failure)', () => {
       const r = row('b8-654', { auditEventId: eid(45) });
       appendIndex('b8-654', r);
       appendTo(auditFile(), legacyReceipt('b8-654', [v1Fingerprint(r, '')]));
       mkdirSync(join(auditDir(), '.locks'), { recursive: true });
-      chmodSync(auditDir(), 0o100);
-      let out: ReturnType<typeof run>;
-      try {
-        out = run('b8-654');
-      } finally {
-        chmodSync(auditDir(), 0o700);
-      }
+      const out = run('b8-654', { during: withMode(auditDir(), 0o100, 0o700) });
       expect(out.result.coverageGaps.receipts.auditDir).toBe('failed');
       expect(out.result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
       expectReceipt(hookReceipts('b8-654')[0], { count: 1, basis: { eventId: 1 }, exact: true, coverage: 'partial', reasons: ['receipt-coverage-partial'] });
     });
 
     it('B9(i): nothing on disk is a KNOWN absence — bounded-complete, never "failed"', () => {
-      const { result } = run('b9-654');
+      const { result, stderr } = run('b9-654');
+      // Nothing found, no receipt, no telemetry note, and no gap line: a failed
+      // inspection of the (lock-created, empty) audit dir or the missing index
+      // would have printed one. The listed/absent split itself is only on receipts.
       expect(result).toMatchObject({ recorded: false, count: 0, coverage: 'bounded-complete' });
-      // The summary lock creates the audit dir before collection, so it is listed (empty).
-      expect(result.coverageGaps.receipts).toMatchObject({ auditDir: 'listed', index: 'absent' });
+      expect(stderr).not.toContain('coverage=partial');
+      expect(hookReceipts('b9-654')).toHaveLength(0);
+    });
+
+    it('B9(ii): index present, audit dir listed with no realtime files → bounded-complete on the receipt', () => {
+      appendIndex('b9b-654', row('b9b-654', { auditEventId: eid(52) }));
+      expect(readdirSync(auditDir()).filter((f) => /^realtime-/.test(f))).toHaveLength(0);
+      const { result } = run('b9b-654');
+      expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'bounded-complete' });
+      for (const pass of ['receipts', 'guards'] as const) {
+        expect(result.coverageGaps[pass]).toEqual({ auditDir: 'listed', index: 'read', skippedFiles: 0, refusedFiles: 0, failedFiles: 0, droppedLines: 0 });
+      }
+      expectReceipt(hookReceipts('b9b-654')[0], { count: 1, basis: { eventId: 1 }, exact: true });
     });
 
     itNonRoot('B10: an index that cannot be inspected is failed, not absent', () => {
       appendTo(auditFileForDate('2026-08-10'), row('b10-654', { auditEventId: eid(46) }));
       appendIndex('b10-654', row('b10-654', { auditEventId: eid(46) }));
-      chmodSync(join(auditDir(), 'session-guard'), 0o000);
-      let out: ReturnType<typeof run>;
-      try {
-        out = run('b10-654');
-      } finally {
-        chmodSync(join(auditDir(), 'session-guard'), 0o700);
-      }
+      const out = run('b10-654', { during: withMode(join(auditDir(), 'session-guard'), 0o000, 0o700) });
       expect(out.result.coverageGaps.receipts.index).toBe('failed');
       expect(out.result.coverageGaps.guards.index).toBe('failed');
       expect(out.result).toMatchObject({ recorded: true, count: 1, coverage: 'partial', receipt: 'primary-only' });
@@ -1579,7 +1728,8 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       appendTo(file, r);
       appendTo(file, { type: 'noise', pad: 'x'.repeat(70 * 1024) });
       appendTo(file, legacyReceipt('b11-654', [v1Fingerprint(r, '')]));
-      const { result } = run('b11-654', { SHIELDCORTEX_TEST_AUDIT_READ_FAIL: 'receipts:realtime-2026-08-09.jsonl' });
+      // Test-owned preload: the first open of this file (receipts pass) fails on its second chunk read.
+      const { result } = run('b11-654', { failRead: { name: 'realtime-2026-08-09.jsonl', open: 1 } });
       expect(result.coverageGaps.receipts.failedFiles).toBe(1);
       expect(result.coverageGaps.guards.failedFiles).toBe(0);
       expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
@@ -1591,7 +1741,8 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       const file = auditFileForDate('2026-08-09');
       appendTo(file, row('b11g-654', { auditEventId: eid(49) }));
       appendTo(file, { type: 'noise', pad: 'x'.repeat(70 * 1024) });
-      const { result } = run('b11g-654', { SHIELDCORTEX_TEST_AUDIT_READ_FAIL: 'guards:realtime-2026-08-09.jsonl' });
+      // The second open of the same file is the guards pass.
+      const { result } = run('b11g-654', { failRead: { name: 'realtime-2026-08-09.jsonl', open: 2 } });
       expect(result.coverageGaps.guards.failedFiles).toBe(1);
       expect(result.coverageGaps.receipts.failedFiles).toBe(0);
       // Rows of the failed source are neither counted nor suppressing: only the index guard.
@@ -1624,13 +1775,28 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       const lockDir = join(auditDir(), '.locks');
       mkdirSync(lockDir, { recursive: true });
       writeFileSync(join(lockDir, `${sessionKey('b12b-654')}.lock`), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
-      const { result } = run('b12b-654');
-      expect(result).toMatchObject({ recorded: false, count: 1, pending: true, coverage: 'bounded-complete' });
-      expect(result.coverageGaps.guards).toMatchObject({ auditDir: 'listed', index: 'absent' });
+      const { result, stderr } = run('b12b-654');
+      expect(result).toMatchObject({ recorded: false, pending: true, coverage: 'bounded-complete' });
+      expect(stderr).not.toContain('coverage=partial');
       expect(hookReceipts('b12b-654')).toHaveLength(0);
       expect(hookRows()).toEqual([
         expect.objectContaining({ exit_code: 1, notes: expect.stringContaining('action_guard_degraded_pending') }),
       ]);
+      // The same no-lock path with a refused candidate: coverage travels with
+      // the pending result as one gap line; the telemetry note is unchanged.
+      const outside = join(home, 'b12b-outside.jsonl');
+      writeFileSync(outside, '\n');
+      symlinkSync(outside, auditFileForDate('2026-08-08'));
+      const partial = run('b12b-654');
+      expect(partial.result).toMatchObject({ recorded: false, pending: true, coverage: 'partial' });
+      expect(partial.result.coverageGaps.receipts.refusedFiles).toBe(1);
+      expect(partial.result.coverageGaps.guards.refusedFiles).toBe(1);
+      const gapLine = partial.stderr.split('\n').find((l) => l.includes('coverage=partial'));
+      expect(gapLine).toContain('refusedFiles=1');
+      expect(gapLine).not.toContain(home);
+      expect(hookReceipts('b12b-654')).toHaveLength(0);
+      expect(hookRows()).toHaveLength(2);
+      expect(hookRows()[1].notes).toContain('action_guard_degraded_pending');
     });
 
     it('X1 (reader contract, not reachability): hook then OpenClaw, and OpenClaw then hook, never count an ID twice', () => {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -77,6 +77,27 @@ function realtimeRows(dir = auditDir): Array<Record<string, any>> {
 }
 function indexRows(key: string, dir = auditDir): Array<Record<string, any>> {
   return rows(join(dir, 'session-guard', `${key}.jsonl`));
+}
+// HIST1: every file that existed before a summariser run keeps its bytes as a
+// prefix afterwards (EOF appends only). Returns the post-run check.
+function appendOnlyCheck(root: string): () => void {
+  const files: string[] = [];
+  const visit = (dir: string) => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const st = lstatSync(p);
+      if (st.isDirectory()) visit(p);
+      else if (st.isFile() && !name.endsWith('.lock') && name !== 'memories.db') files.push(p);
+    }
+  };
+  visit(root);
+  const before = new Map(files.map((p) => [p, readFileSync(p)]));
+  return () => {
+    for (const [p, bytes] of before) {
+      expect(readFileSync(p).subarray(0, bytes.length).equals(bytes)).toBe(true);
+    }
+  };
 }
 function strip(row: Record<string, any>): Record<string, any> {
   const { recordKind: _kind, ...rest } = row;
@@ -231,9 +252,13 @@ describe('#654 producer — one minted ID per emitted row, shared by every copy'
       expect(ix).toHaveLength(1);
       expect(ix[0].auditEventId).toMatch(ID);
       // W5: the OpenClaw reader counts the indexed ID row once.
+      let appendOnly = appendOnlyCheck(indexHome);
       const result = recordActionGuardDegraded('p10-session', { home: indexHome, salt: SALT });
+      appendOnly();
       expect(result).toMatchObject({ recorded: true, count: 1 });
+      appendOnly = appendOnlyCheck(indexHome);
       expect(recordActionGuardDegraded('p10-session', { home: indexHome, salt: SALT })).toMatchObject({ existing: true, count: 0 });
+      appendOnly();
     } finally {
       rmSync(indexHome, { recursive: true, force: true });
     }
@@ -257,11 +282,12 @@ describe('#654 R2 — real producer output, read by the stop hook', () => {
       HOME: home,
       SHIELDCORTEX_CONFIG_DIR: join(home, '.shieldcortex'),
       SHIELDCORTEX_SESSION_SALT: SALT,
-      SHIELDCORTEX_TEST_EMIT_GUARD_RESULT: '1',
     };
     delete env.SHIELDCORTEX_AUDIT_DIR;
+    const appendOnly = appendOnlyCheck(join(home, '.shieldcortex', 'audit'));
     const hook = spawnSync(process.execPath, [STOP_HOOK], { input: JSON.stringify({ session_id: 'r2-session' }), encoding: 'utf8', env });
     expect(hook.status).toBe(0);
+    appendOnly();
     const receipts = realtimeRows().filter((r) => r.origin === 'claude-code-stop-hook' && r.sessionKey === key);
     expect(receipts).toHaveLength(1);
     expect(receipts[0]).toMatchObject({
