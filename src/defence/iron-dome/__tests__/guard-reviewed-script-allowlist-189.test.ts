@@ -212,3 +212,113 @@ describe('#189 — review is per-file, not transitive', () => {
     expect(v.reviewedScripts).toEqual(expect.arrayContaining([PARENT, CHILD]));
   });
 });
+
+/**
+ * #702 B1 (Tars, review of #704) — a reviewed parent that invokes an
+ * UNREVIEWED child inside the sensitive-path set.
+ *
+ * #702 stopped the fold from ever reading a sensitive path: the child is
+ * recorded as opaque and the resolver is never asked. That relied on
+ * `touch-sensitive-path` firing on the TEXT that named the path. A reviewed
+ * parent's text is exactly what is exempt from the scan surface, so when the
+ * only remaining evidence of the child was `opaque`, the verdict fell through
+ * to the opaque-only tier — which is `allow`. Review of the parent silently
+ * became an allow of a secret-located script it never read.
+ *
+ * The approval signal has to be structural, not textual: an unread sensitive
+ * nested path is itself evidence, carried on the fold and surfaced as
+ * `touch-sensitive-path` whatever the parent's review status. The child's
+ * bytes are still never read (that is #702), and an ordinary child under a
+ * reviewed parent keeps its relief (the per-file tests above).
+ */
+describe('#702 B1 — reviewed parent, unreviewed child in the sensitive-path set', () => {
+  const PARENT = '/home/user/scripts/rotate-keys.sh';
+  const SENSITIVE_CHILD = '/home/user/.ssh/rotate.sh';
+  const PARENT_SOURCE = ['#!/bin/bash', 'echo "rotating"', `bash ${SENSITIVE_CHILD}`].join('\n');
+  const CHILD_BYTES = 'SENTINEL-UNREAD-CHILD-702-B1';
+  const command = `bash ${PARENT}`;
+
+  const recording = (files: Record<string, string>, seen: string[]) => (p: string) => {
+    seen.push(p);
+    return files[p] ?? null;
+  };
+
+  test('the sensitive child is never read, AND the action still requires approval', () => {
+    const seen: string[] = [];
+    const v = evaluateToolCall('Bash', { command }, undefined, {
+      resolveScriptSource: recording({ [PARENT]: PARENT_SOURCE, [SENSITIVE_CHILD]: CHILD_BYTES }, seen),
+      isReviewedScript: reviewedExactly(PARENT, PARENT_SOURCE),
+    });
+    // #702: the resolver is never asked for the sensitive path.
+    expect(seen).toEqual([PARENT]);
+    expect(seen).not.toContain(SENSITIVE_CHILD);
+    expect(JSON.stringify(v)).not.toContain(CHILD_BYTES);
+    // B1: review of the parent must not become an automatic allow of a child
+    // the guard did not read.
+    expect(v.decision).toBe('require_approval');
+    expect(v.severity).toBe('dangerous');
+    expect(v.signals).toContain('touch-sensitive-path');
+    expect(v.signals).toContain('opaque-script-invocation');
+    // The reason names the unread path, so the approver knows what to open.
+    expect(v.reason).toContain(SENSITIVE_CHILD);
+    // Review WAS exercised for the parent and the audit row says so.
+    expect(v.reviewedScripts).toEqual([PARENT]);
+  });
+
+  test('same shape, `.aws/credentials` sourced from the reviewed parent', () => {
+    const CRED = '/home/user/.aws/credentials';
+    const parentSrc = ['#!/bin/bash', `source ${CRED}`, 'aws s3 ls'].join('\n');
+    const seen: string[] = [];
+    const v = evaluateToolCall('Bash', { command }, undefined, {
+      resolveScriptSource: recording({ [PARENT]: parentSrc, [CRED]: CHILD_BYTES }, seen),
+      isReviewedScript: reviewedExactly(PARENT, parentSrc),
+    });
+    expect(seen).toEqual([PARENT]);
+    expect(JSON.stringify(v)).not.toContain(CHILD_BYTES);
+    expect(v.decision).toBe('require_approval');
+    expect(v.signals).toContain('touch-sensitive-path');
+  });
+
+  test('CONTROL: the same reviewed parent with an ORDINARY unreviewed child keeps its relief', () => {
+    const ORDINARY_CHILD = '/home/user/scripts/helpers/rotate-step.sh';
+    const parentSrc = ['#!/bin/bash', 'echo "rotating"', `bash ${ORDINARY_CHILD}`].join('\n');
+    const seen: string[] = [];
+    const v = evaluateToolCall('Bash', { command }, undefined, {
+      resolveScriptSource: recording({ [PARENT]: parentSrc, [ORDINARY_CHILD]: '#!/bin/bash\necho "step ok"\n' }, seen),
+      isReviewedScript: reviewedExactly(PARENT, parentSrc),
+    });
+    // The ordinary child IS read (it is folded and scanned, per-file review).
+    expect(seen).toEqual([PARENT, ORDINARY_CHILD]);
+    expect(v.decision).toBe('allow');
+    expect(v.signals).not.toContain('touch-sensitive-path');
+    expect(v.reviewedScripts).toEqual([PARENT]);
+  });
+
+  test('CONTROL: a reviewed parent with NO children is still allowed (the relief itself is intact)', () => {
+    const leafSrc = ['#!/bin/bash', 'echo "nothing to see"'].join('\n');
+    const v = evaluateToolCall('Bash', { command }, undefined, {
+      resolveScriptSource: stub({ [PARENT]: leafSrc }),
+      isReviewedScript: reviewedExactly(PARENT, leafSrc),
+    });
+    expect(v.decision).toBe('allow');
+    expect(v.reviewedScripts).toEqual([PARENT]);
+  });
+
+  test('DELIBERATE: pinning the sensitive child does not reopen the allow — it is never read, so never hashed', () => {
+    // The supported way to exempt a chain is to pin each file (#189), and a
+    // pin is a hash of bytes the guard read. A sensitive-path child's bytes
+    // are never read (#702), so there is nothing to match the pin against:
+    // the call still asks for approval. This is the #702 trade-off (unread
+    // plus approval), extended to the reviewed-parent shape.
+    const seen: string[] = [];
+    const bothPinned = (p: string, s: string) =>
+      (p === PARENT && s === PARENT_SOURCE) || (p === SENSITIVE_CHILD && s === CHILD_BYTES);
+    const v = evaluateToolCall('Bash', { command }, undefined, {
+      resolveScriptSource: recording({ [PARENT]: PARENT_SOURCE, [SENSITIVE_CHILD]: CHILD_BYTES }, seen),
+      isReviewedScript: bothPinned,
+    });
+    expect(seen).toEqual([PARENT]);
+    expect(v.decision).toBe('require_approval');
+    expect(v.reviewedScripts).toEqual([PARENT]);
+  });
+});
