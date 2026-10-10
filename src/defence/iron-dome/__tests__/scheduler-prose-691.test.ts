@@ -240,3 +240,40 @@ describe('#691 round 2 — shell spellings the base row gated still gate', () =>
     ].join(nl)));
   });
 });
+
+/**
+ * Round 3 (GPT-6 Astra B2): refusing a quoted value that reaches a space also
+ * refused a DOUBLE-quoted value whose backtick substitution runs a scheduler.
+ * Inside double quotes a backtick still executes, so these gate as at base.
+ * Single quotes are literal; the single-quoted siblings are the inert control.
+ * Inert evaluator inputs only; nothing runs at(1) or crontab.
+ */
+describe('#691 round 3 — a scheduler inside a double-quoted assignment substitution still gates', () => {
+  const executing: Array<[string, string]> = [
+    ['at inside a double-quoted backtick assignment', 'X="` at now < /workspace/job.txt`" true'],
+    ['crontab inside a double-quoted backtick assignment', 'X="` crontab /workspace/cron.txt`" true'],
+  ];
+  it.each(executing)('Bash still requires approval: %s', (_l, command) => {
+    expectScheduler(bash(command), false);
+  });
+  it.each(executing)('Write .sh still requires approval: %s', (_l, line) => {
+    expectScheduler(write('/workspace/scripts/schedule.sh', '#!/bin/bash' + nl + line + nl), true);
+  });
+  it.each(executing)('Edit .sh still requires approval: %s', (_l, line) => {
+    expectScheduler(edit('/workspace/scripts/schedule.sh', line + nl), true);
+  });
+  it.each(executing)('Bash running a folded .sh still requires approval: %s', (_l, line) => {
+    const v = evaluateToolCall('Bash', { command: 'bash /tmp/sched.sh' }, undefined, {
+      resolveScriptSource: (p: string) => (p === '/tmp/sched.sh' ? '#!/bin/bash' + nl + line + nl : null),
+    });
+    expectScheduler(v, false);
+  });
+
+  const literal: Array<[string, string]> = [
+    ['single-quoted backtick at is literal text', "X='` at now < /workspace/job.txt`' true"],
+    ['single-quoted backtick crontab is literal text', "X='` crontab /workspace/cron.txt`' true"],
+  ];
+  it.each(literal)('Bash does not signal modify-scheduler: %s', (_l, command) => {
+    expect(bash(command).signals).not.toContain('modify-scheduler');
+  });
+});

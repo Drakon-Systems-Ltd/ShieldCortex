@@ -955,6 +955,10 @@ const DANGEROUS: Pattern[] = [
   // validator. A closed quoted value with a space in it is one shell word, but
   // `\S*` could never consume it whole, so it was never reliably matched here.
   // Closed no-space values (`TZ=UTC`, `LABEL="nightly"`) match as before.
+  // Inside DOUBLE quotes a backtick or `$(` still executes, so a double-quoted
+  // value that opens one before the space is consumed as at base and the
+  // scheduler inside it gates (X="` at now < job`" true). Single quotes are
+  // literal, so a single-quoted value is refused either way.
   // `at` keeps the base exclusions (`-l`, `=`, nothing after it) and drops two
   // more shapes only. (a) `at` ending its line: a bare newline ends the
   // command, so at(1) gets no timespec and schedules nothing; a backslash-
@@ -967,7 +971,7 @@ const DANGEROUS: Pattern[] = [
   // backtick or `$(` substitution, or a word carrying quotes, escapes or glob
   // and brace characters. This is a prose disposition, not a parse of at(1)'s
   // argv, so it does not need to know every way a shell can spell a timespec.
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=(?!["'][^"'\s]*(?:\s|$))\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*=)(?![^\S\n]*(?:\n|$))(?![^\S\n]+(?!now|midnight|noon|teatime|today|tomorrow|next|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]+(?:[\s.,:;!)]|$)))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=(?!'[^"'\s]*(?:\s|$)|"(?:[^"'\s`$]|\$(?!\())*(?:\s|$))\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*=)(?![^\S\n]*(?:\n|$))(?![^\S\n]+(?!now|midnight|noon|teatime|today|tomorrow|next|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]+(?:[\s.,:;!)]|$)))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
   // Zero out a file's contents (issue #4475.7a): the pre-existing rule below
   // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
   // regardless of the target file, so it is gated on its own.
