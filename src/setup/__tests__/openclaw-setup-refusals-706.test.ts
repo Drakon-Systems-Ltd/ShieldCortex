@@ -77,6 +77,8 @@ describe('OpenClaw native refusals (#706)', () => {
   });
 
   it('classifies missing config, prints its remedy once, and hard fails', async () => {
+    fs.unlinkSync(openClawConfigPath());
+    expect(fs.existsSync(openClawConfigPath())).toBe(false);
     __setNativeSpawnForTest((_command, args) => ({
       status: 1,
       stderr: args.includes('--link') ? 'Plugin path not found: /plugin\n' : 'Error: config not found: ~/.openclaw/openclaw.json\n',
@@ -129,11 +131,13 @@ describe('OpenClaw native refusals (#706)', () => {
     ['one long line of config', 'config'.repeat(17_000), false],
     ['repeated ENOENT', 'ENOENT '.repeat(14_000), false],
   ] as const)('classifies adversarial output (%s) within 300 ms', (_name, output, missing) => {
+    // Config absent, so the text signal alone decides the result.
+    const configPath = path.join(home, 'absent', 'openclaw.json');
     let best = Infinity;
-    let refusal = classifyNativePluginInstallFailure('', output, 1);
+    let refusal = classifyNativePluginInstallFailure('', output, 1, { configPath });
     for (let i = 0; i < 3; i++) {
       const start = performance.now();
-      refusal = classifyNativePluginInstallFailure('', output, 1);
+      refusal = classifyNativePluginInstallFailure('', output, 1, { configPath });
       best = Math.min(best, performance.now() - start);
     }
     expect(best).toBeLessThan(300);
@@ -141,8 +145,43 @@ describe('OpenClaw native refusals (#706)', () => {
   });
 
   it('does not treat a linked-path or duplicate refusal as missing config', () => {
-    expect(classifyNativePluginInstallFailure('', 'Plugin path not found: /p\n', 1).configMissing).toBe(false);
-    expect(classifyNativePluginInstallFailure('', 'plugin already exists\n', 1).configMissing).toBe(false);
-    expect(classifyNativePluginInstallFailure('', 'ENOENT: open /h/.openclaw/openclaw.json\n', 1).configMissing).toBe(true);
+    const configPath = path.join(home, 'absent', 'openclaw.json');
+    expect(classifyNativePluginInstallFailure('', 'Plugin path not found: /p\n', 1, { configPath }).configMissing).toBe(false);
+    expect(classifyNativePluginInstallFailure('', 'plugin already exists\n', 1, { configPath }).configMissing).toBe(false);
+    expect(classifyNativePluginInstallFailure('', 'ENOENT: open /h/.openclaw/openclaw.json\n', 1, { configPath }).configMissing).toBe(true);
+  });
+
+  // Review of 562364bc: these lines match the text signal, but the real cause
+  // is elsewhere. With openclaw.json present they must never read as missing.
+  it.each([
+    'Using config /home/u/.openclaw/openclaw.json; package @drakon-systems/shieldcortex-realtime not found',
+    'Error: plugin manifest configSchema not found in package',
+    'Wrote openclaw.json backup; plugin entry does not exist in registry',
+    'Error: npm install failed; no config changes were made',
+    'Error: config not found: ~/.openclaw/openclaw.json',
+  ])('never reports a present config as missing: %s', (line) => {
+    expect(fs.existsSync(openClawConfigPath())).toBe(true);
+    const refusal = classifyNativePluginInstallFailure('', `${line}\n`, 1);
+    expect(refusal.configMissing).toBe(false);
+  });
+
+  it('a present config with a misleading line keeps the package refusal non-fatal-for-config', async () => {
+    __setNativeSpawnForTest((_command, args) => ({
+      status: 1,
+      stderr: args.includes('--link')
+        ? 'Plugin path not found: /plugin\n'
+        : 'Using config /home/u/.openclaw/openclaw.json; package @drakon-systems/shieldcortex-realtime not found\n',
+    }));
+    await installOpenClawHook({ noHooks: true, restartGateway: false });
+    expect(getLastNativePluginInstallRefusal()?.configMissing).toBe(false);
+    const output = warnings.join('\n');
+    expect(output).not.toMatch(/No OpenClaw config was found/);
+    expect(output).toMatch(/shieldcortex-realtime not found/);
+  });
+
+  it('anchors the bare "no config" alternative on word boundaries', () => {
+    const configPath = path.join(home, 'absent', 'openclaw.json');
+    expect(classifyNativePluginInstallFailure('', 'Error: no config\n', 1, { configPath }).configMissing).toBe(true);
+    expect(classifyNativePluginInstallFailure('', 'Error: casino config loaded\n', 1, { configPath }).configMissing).toBe(false);
   });
 });

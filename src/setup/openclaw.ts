@@ -1300,14 +1300,18 @@ export function classifyNativePluginInstallFailure(
   stdout: string,
   stderr: string,
   status: number | null,
-  opts: { home?: string; label?: string } = {},
+  opts: { home?: string; label?: string; configPath?: string } = {},
 ): NativePluginInstallRefusal {
   const streams = [stderr ?? '', stdout ?? ''];
   const combined = streams.join('\n');
   const configInvalid = /config is invalid/i.test(combined);
   // Each alternative is line bounded and has a fixed maximum gap, so long
   // hostile child output cannot cause an unbounded backtracking search.
-  const configMissing = /(?:config(?:uration)?[^\r\n]{0,80}(?:not found|does not exist)|no(?: openclaw)? config\b|ENOENT[^\r\n]{0,160}openclaw\.json|openclaw\.json[^\r\n]{0,160}(?:not found|does not exist|ENOENT))/i.test(combined);
+  // The text is only a hint: lines such as "Using config …; package … not
+  // found" match it while the real cause is elsewhere. Ground truth decides —
+  // a config file that exists is never reported as missing (#706 review).
+  const missingSignal = /(?:config(?:uration)?[^\r\n]{0,80}(?:not found|does not exist)|\bno(?: openclaw)? config\b|ENOENT[^\r\n]{0,160}openclaw\.json|openclaw\.json[^\r\n]{0,160}(?:not found|does not exist|ENOENT))/i.test(combined);
+  const configMissing = missingSignal && !fs.existsSync(opts.configPath ?? openClawConfigPath());
   // Prefer the stream that carries the refusal signal (usually stderr).
   const withSignal = streams.find((s) => s.trim() && /config is invalid|config not found|no config|does not exist|refus|denied|error|invalid|ENOENT|EACCES/i.test(s));
   const chosen = withSignal ?? streams.find((s) => s.trim()) ?? '';
