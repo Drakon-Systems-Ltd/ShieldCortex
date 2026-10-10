@@ -167,3 +167,76 @@ describe('#691 — real at(1) and crontab calls keep severity and decision', () 
     expect(v.decision).toBe('allow');
   });
 });
+
+/**
+ * Round 2 (GPT-6 Astra B1, Grok 1/2): the first fix whitelisted what may
+ * follow `at`, and so dropped ordinary shell spellings the base row gated.
+ * Every string here is an inert evaluator input; nothing runs at(1). Strings
+ * are JS literals: `\\` is ONE backslash in the command, `\n` a newline, so
+ * `at \\\nnow` is `at`, a backslash-newline continuation, then `now`.
+ */
+describe('#691 round 2 — shell spellings the base row gated still gate', () => {
+  const bashApprove: Array<[string, string]> = [
+    // Quoted options: the shell passes `-m` / `-f` to at(1).
+    ['double-quoted option', 'echo job | at "-m" now'],
+    ['single-quoted option', "echo job | at '-m' now"],
+    ['quoted -f before the job file', "at '-f' /tmp/job.sh now"],
+    // Redirects and heredocs before the timespec.
+    ['input redirect before the timespec', 'at < /workspace/job.txt now'],
+    ['no-space input redirect', 'at</workspace/job.txt now'],
+    ['heredoc before the timespec', "at <<'EOF' now\n/usr/local/bin/job\nEOF"],
+    ['no-space heredoc before the timespec', "at<<'EOF' now\n/usr/local/bin/job\nEOF"],
+    // Escapes and backslash-newline continuations.
+    ['escaped timespec', 'echo job | at \\now'],
+    ['continuation before the timespec, piped', 'echo job | at \\\nnow'],
+    ['continuation before the timespec, redirect', 'at \\\nnow < /tmp/job.sh'],
+    ['continuation before an option', 'echo cmd | at \\\n-f /tmp/job.sh now'],
+    ['continuation behind nohup', 'nohup at \\\nnow < /tmp/job.sh'],
+    ['continuation behind an env assignment', 'TZ=UTC at \\\nnow < /tmp/job.sh'],
+    // Backtick substitutions as the timespec, beside the `$()` sibling.
+    ['backtick printf timespec', 'echo job | at `printf now`'],
+    ['backtick date timespec', 'at `date +%H:%M` < /tmp/job.sh'],
+    ['backtick date with options, piped', 'echo job | at `date -d tomorrow +%H:%M`'],
+    ['double-quoted backtick timespec', 'at "`date +%H:%M`" < /tmp/job.sh'],
+    ['$() timespec (sibling)', 'at "$(date +%H:%M)" < /tmp/job.sh'],
+    // A word that carries an escape or quote is not plain prose.
+    ['escape inside a day name', 'at f\\riday < /tmp/job.sh'],
+    ['quote inside a day name', 'at f"ri"day < /tmp/job.sh'],
+  ];
+  it.each(bashApprove)('Bash still requires approval: %s', (_l, command) => {
+    expectScheduler(bash(command), false);
+  });
+
+  const writeApprove: Array<[string, string]> = [
+    ['quoted option', 'echo job | at "-m" now'],
+    ['redirect before the timespec', 'at < /tmp/job.txt now'],
+    ['continuation before the timespec', 'at \\\nnow < /tmp/job.sh'],
+    ['backtick timespec', 'at `date +%H:%M` < /tmp/job.sh'],
+  ];
+  it.each(writeApprove)('Write .sh still requires approval: %s', (_l, line) => {
+    expectScheduler(write('/workspace/scripts/schedule.sh', '#!/bin/bash' + nl + line + nl), true);
+  });
+  it.each(writeApprove)('Edit .sh still requires approval: %s', (_l, line) => {
+    expectScheduler(edit('/workspace/scripts/schedule.sh', line + nl), true);
+  });
+
+  it.each(writeApprove)('Bash running a folded .sh still requires approval: %s', (_l, line) => {
+    const v = evaluateToolCall('Bash', { command: 'bash /tmp/sched.sh' }, undefined, {
+      resolveScriptSource: (p: string) => (p === '/tmp/sched.sh' ? '#!/bin/bash' + nl + line + nl : null),
+    });
+    expectScheduler(v, false);
+  });
+
+  it('Write: a JSX text line that is just "at" is allowed', () => {
+    expectCleanScan(write(TSX, [
+      'export const Hint = () => (',
+      '  <p>',
+      '    Look',
+      '    at',
+      '    the findings first',
+      '  </p>',
+      ');',
+      '',
+    ].join(nl)));
+  });
+});
