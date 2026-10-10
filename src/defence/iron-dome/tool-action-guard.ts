@@ -4612,6 +4612,14 @@ interface ScriptFold {
   /** Paths whose source was exempted by the reviewed-script allowlist (#189) —
    *  surfaced on the verdict so every audit row shows review was exercised. */
   reviewed: string[];
+  /** #702 B1 — nested paths in the sensitive-path set that the fold refused to
+   *  read, with the invocation chain that named each. Carried as STRUCTURAL
+   *  evidence because the text that named the path may itself be exempt from
+   *  the scan surface (a reviewed parent, #189), in which case
+   *  `touch-sensitive-path` has nothing to match and `opaque` alone would fall
+   *  through to the opaque-only allow. Each entry is surfaced as a
+   *  `touch-sensitive-path` approval signal whatever named it. */
+  unreadSensitive: Array<{ path: string; chain: string }>;
 }
 
 /**
@@ -4646,8 +4654,8 @@ function foldScriptSources(
   subst?: SubstitutionState,
 ): ScriptFold {
   const roots = detectScriptInvocations(execCommand);
-  if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [] };
-  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [] };
+  if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
+  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
   // #184: carry the invocation chain so a nested match can name every hop.
@@ -4656,6 +4664,7 @@ function foldScriptSources(
   const parts: string[] = [];
   const regions: ScanRegion[] = [];
   const reviewed: string[] = [];
+  const unreadSensitive: Array<{ path: string; chain: string }> = [];
   let total = 0;
   let cursor = 0;                                       // offset of the next part within `content`
   let opaque = false;
@@ -4667,10 +4676,18 @@ function foldScriptSources(
     visited.add(next.path);
     if (visited.size > MAX_SCRIPTS_PER_CALL) { opaque = true; break; }
     // #702: a sensitive path is never READ, on any plane. Recorded as opaque
-    // (the invocation is known and its contents were not scanned) — the
-    // access itself is already gated by `touch-sensitive-path` on the text
-    // that named the path.
-    if (isSensitiveFoldPath(next.path)) { opaque = true; continue; }
+    // (the invocation is known and its contents were not scanned). The access
+    // is gated by `touch-sensitive-path` on the text that named the path —
+    // and, because that text can be a reviewed parent's body which is exempt
+    // from the scan surface (#189), ALSO recorded here as structural evidence
+    // (B1, review of #704): the verdict surfaces every unread sensitive path
+    // as `touch-sensitive-path` on its own, so review of a parent can never
+    // become an automatic allow of a secret-located child it never read.
+    if (isSensitiveFoldPath(next.path)) {
+      opaque = true;
+      unreadSensitive.push({ path: next.path, chain: next.chain.join(' → ') });
+      continue;
+    }
 
     let src: string | null = null;
     try {
@@ -4816,7 +4833,7 @@ function foldScriptSources(
     }
   }
 
-  return { content: parts.join('\n'), opaque, regions, reviewed };
+  return { content: parts.join('\n'), opaque, regions, reviewed, unreadSensitive };
 }
 
 // ── Command-substitution expansion (#517) ────────────────────────────────────
@@ -6350,7 +6367,7 @@ function evaluateToolCallCore(
   // An oversized command is already flagged (and already anomalous); skip the
   // work rather than tokenise 50k+ chars of it.
   const fold: ScriptFold = command.length > OVERSIZED_COMMAND_LENGTH
-    ? { content: '', opaque: false, regions: [], reviewed: [] }
+    ? { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] }
     : foldScriptSources(execCommand, options?.resolveScriptSource, options?.isReviewedScript, subst);
 
   // #189: every verdict minted past this point records which files the
@@ -6532,6 +6549,32 @@ function evaluateToolCallCore(
   // #184: keep full provenance (source/line/chain) alongside the span.
   const dangerEvidence = new Map<string, ClassifiedMatch>();
   for (const m of dangerMatches) if (!dangerEvidence.has(m.signal)) dangerEvidence.set(m.signal, m);
+  // #702 B1 (review of #704): a nested script inside the sensitive-path set is
+  // never read by the fold. The rule above gates it when the text that NAMED
+  // it is on the scan surface; a reviewed parent's text is not (#189 exempts
+  // the file body), so with the child unread there was nothing left but
+  // `opaque` — and opaque-only is the allow at 3a. The fold therefore reports
+  // each unread sensitive path as structural evidence and it is surfaced here
+  // as `touch-sensitive-path` whatever named it: an unread sensitive script is
+  // require_approval with the path and chain on the row, never an automatic
+  // allow through an exempt parent. Nothing is read to produce this signal
+  // (#702 holds), an ordinary child under a reviewed parent is unaffected
+  // (it is folded and scanned as before), and where the rule already fired on
+  // the text this only de-duplicates into the same signal.
+  for (const u of fold.unreadSensitive) {
+    if (!dangerSignals.includes('touch-sensitive-path')) dangerSignals.push('touch-sensitive-path');
+    if (!dangerEvidence.has('touch-sensitive-path')) {
+      const hops = u.chain.split(' → ');
+      const invokedBy = hops.length > 1 ? hops[hops.length - 2] : undefined;
+      dangerSpan = dangerSpan ?? fmtSpan(u.path);
+      dangerEvidence.set('touch-sensitive-path', {
+        signal: 'touch-sensitive-path',
+        span: fmtSpan(u.path),
+        tier: 'executed',
+        ...(invokedBy ? { source: invokedBy, chain: u.chain } : {}),
+      });
+    }
+  }
   // A pip install scoped to a venv / an explicit target prefix mutates that
   // prefix, not the host (issue #89 class 4) — it falls through to the
   // sensitive-but-allowed tier below, exactly like a workspace-local npm install.
