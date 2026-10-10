@@ -763,6 +763,13 @@ const OPENCLAW_CONFIG_PATH_RE = /(?:^|[\s'"=:(\\/])\.openclaw[\\/]+openclaw\.jso
 const SSH_DIR_PATH_SRC = String.raw`(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])`;
 const AUTHORIZED_KEYS_PATH_SRC = String.raw`(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b`;
 const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b`;
+// #702: the sensitive-path set as ONE regex, named so the `touch-sensitive-path`
+// DANGEROUS row and the fold readers (`isSensitiveFoldPath`) cannot drift apart.
+// Matched against command text by the rule and against a bare path by the
+// fold, so every alternative must hold for both: a home-rooted `.ssh` dir, an
+// `authorized_keys` segment, `id_rsa` by name, `.aws/credentials`, the three
+// `/etc` account files and a `.env` file.
+const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b`, 'i');
 // #505: a shell WRITE shape whose destination is a startup file. The write
 // prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of
 // options and earlier operands (`-a`, `--append`, `--`, `/tmp/log`), or
@@ -946,7 +953,32 @@ const DANGEROUS: Pattern[] = [
   // named `at` (common in embedded script bodies the guard also scans) matched
   // the scheduler verb. `at(1)` takes `at [options] TIME` — its grammar has no
   // `=` in that slot, so the carve-out removes the FP without losing a verb.
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*=)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  // #691: English prose in written source (`cta="Look at the findings"` in a
+  // .tsx) matched twice over. The assignment prefix's `\S*` swallowed the JSX
+  // attributes `href="…"` and `cta="Look` as if they were `VAR=value` words,
+  // which put `at` in command position. The prefix token now refuses a value
+  // that opens a quote and reaches whitespace or end of text before any quote
+  // closes. That narrows this `\S*` heuristic; it is not a shell-quote
+  // validator. A closed quoted value with a space in it is one shell word, but
+  // `\S*` could never consume it whole, so it was never reliably matched here.
+  // Closed no-space values (`TZ=UTC`, `LABEL="nightly"`) match as before.
+  // Inside DOUBLE quotes a backtick or `$(` still executes, so a double-quoted
+  // value that opens one before the space is consumed as at base and the
+  // scheduler inside it gates (X="` at now < job`" true). Single quotes are
+  // literal, so a single-quoted value is refused either way.
+  // `at` keeps the base exclusions (`-l`, `=`, nothing after it) and drops two
+  // more shapes only. (a) `at` ending its line: a bare newline ends the
+  // command, so at(1) gets no timespec and schedules nothing; a backslash-
+  // newline continuation is not a bare newline and still gates. (b) `at`
+  // followed on its line by a plain word: letters only, not starting with a
+  // time, day or month word, and ending at whitespace, end of text or prose
+  // punctuation (`at the findings`, `at Object.<anonymous>`). Anything else
+  // after `at` gates as it did at base: an option (quoted or not), a digit,
+  // `$`, `+`, a redirect or heredoc before the timespec, a backslash, a
+  // backtick or `$(` substitution, or a word carrying quotes, escapes or glob
+  // and brace characters. This is a prose disposition, not a parse of at(1)'s
+  // argv, so it does not need to know every way a shell can spell a timespec.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=(?!'[^"'\s]*(?:\s|$)|"(?:[^"'\s`$]|\$(?!\())*(?:\s|$))\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*=)(?![^\S\n]*(?:\n|$))(?![^\S\n]+(?!now|midnight|noon|teatime|today|tomorrow|next|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]+(?:[\s.,:;!)]|$)))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
   // Zero out a file's contents (issue #4475.7a): the pre-existing rule below
   // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
   // regardless of the target file, so it is gated on its own.
@@ -971,7 +1003,7 @@ const DANGEROUS: Pattern[] = [
   // and `authorized_keys` is matched as a path segment wherever it sits:
   // naming that file IS the persistence. Same tier and signal as before, so
   // the planes, remediation and audit rows need nothing new.
-  { re: new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b`, 'i'), signal: 'touch-sensitive-path' },
+  { re: SENSITIVE_PATH_RE, signal: 'touch-sensitive-path' },
   // #505 (SC-06): a shell write shape whose DESTINATION is a login/interactive
   // startup file. Content written there runs at the next shell start, outside
   // any tool call the guard will see — `export PATH=/tmp/evil:$PATH` in
@@ -4480,7 +4512,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
-  const surface = maskSinkFreeInlinePrograms(execSurface);
+  const surface = maskSinkFreeHeredocBodies(maskSinkFreeInlinePrograms(execSurface));
 
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
@@ -4605,6 +4637,34 @@ interface ScriptFold {
   /** Paths whose source was exempted by the reviewed-script allowlist (#189) —
    *  surfaced on the verdict so every audit row shows review was exercised. */
   reviewed: string[];
+  /** #702 B1 — nested paths in the sensitive-path set that the fold refused to
+   *  read, with the invocation chain that named each. Carried as STRUCTURAL
+   *  evidence because the text that named the path may itself be exempt from
+   *  the scan surface (a reviewed parent, #189), in which case
+   *  `touch-sensitive-path` has nothing to match and `opaque` alone would fall
+   *  through to the opaque-only allow. Each entry is surfaced as a
+   *  `touch-sensitive-path` approval signal whatever named it. */
+  unreadSensitive: Array<{ path: string; chain: string }>;
+}
+
+/**
+ * #702 (#686 N1) — the one question every fold reader asks before it calls
+ * the resolver: is this path one whose BYTES must never enter the scan
+ * surface? A sink-bearing program that merely opens a key —
+ * `import subprocess` plus `open('/home/u/.ssh/id_rsa').read()` — is not
+ * masked (it can shell out, so its path literals are candidate invocations,
+ * #190/#661), and `splitCommandStatements` breaks on `(`, so the key's path
+ * lands in command position and is "detected". Following that detection read
+ * the key through the resolver and copied it into the scan text and every
+ * audit row derived from it, on the `-c`, heredoc, file AND `$(cat …)` planes
+ * alike. Reading a secret is never detection: the ACCESS is what the guard
+ * gates, and `touch-sensitive-path` already fires on the text that named the
+ * path. So the path is checked against the same sensitive-path set that rule
+ * uses, and a match is recorded as opaque instead of resolved. Checked
+ * against the bare path, before any read, so the resolver is never asked.
+ */
+function isSensitiveFoldPath(scriptPath: string): boolean {
+  return SENSITIVE_PATH_RE.test(scriptPath);
 }
 
 /**
@@ -4619,8 +4679,8 @@ function foldScriptSources(
   subst?: SubstitutionState,
 ): ScriptFold {
   const roots = detectScriptInvocations(execCommand);
-  if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [] };
-  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [] };
+  if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
+  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
   // #184: carry the invocation chain so a nested match can name every hop.
@@ -4629,6 +4689,7 @@ function foldScriptSources(
   const parts: string[] = [];
   const regions: ScanRegion[] = [];
   const reviewed: string[] = [];
+  const unreadSensitive: Array<{ path: string; chain: string }> = [];
   let total = 0;
   let cursor = 0;                                       // offset of the next part within `content`
   let opaque = false;
@@ -4639,6 +4700,19 @@ function foldScriptSources(
     if (visited.has(next.path)) continue;              // cycle guard
     visited.add(next.path);
     if (visited.size > MAX_SCRIPTS_PER_CALL) { opaque = true; break; }
+    // #702: a sensitive path is never READ, on any plane. Recorded as opaque
+    // (the invocation is known and its contents were not scanned). The access
+    // is gated by `touch-sensitive-path` on the text that named the path —
+    // and, because that text can be a reviewed parent's body which is exempt
+    // from the scan surface (#189), ALSO recorded here as structural evidence
+    // (B1, review of #704): the verdict surfaces every unread sensitive path
+    // as `touch-sensitive-path` on its own, so review of a parent can never
+    // become an automatic allow of a secret-located child it never read.
+    if (isSensitiveFoldPath(next.path)) {
+      opaque = true;
+      unreadSensitive.push({ path: next.path, chain: next.chain.join(' → ') });
+      continue;
+    }
 
     let src: string | null = null;
     try {
@@ -4733,7 +4807,9 @@ function foldScriptSources(
       // FILE, never the invoking command line), and since #522 item A the set
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
-      const nestedOfReviewed = next.lang === 'sh' ? detectScriptInvocations(reviewedScan) : [];
+      const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
+        ? detectScriptInvocations(reviewedScan)
+        : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
@@ -4746,13 +4822,14 @@ function foldScriptSources(
     }
 
     const scan = reviewedScan;
+    const hasSink = hasShellOutSink(scan, next.lang, true);
     total += src.length;
     if (parts.length > 0) cursor += 1;                  // the '\n' join separator
     regions.push({
       start: cursor,
       end: cursor + scan.length,
       lang: next.lang,
-      hasSink: hasShellOutSink(scan, next.lang, true),
+      hasSink,
       folded: true,
       // #184: path + chain so a match inside this region names its origin.
       sourcePath: next.path,
@@ -4761,9 +4838,16 @@ function foldScriptSources(
     cursor += scan.length;
     parts.push(scan);
 
-    // A non-shell script's own text is not a shell command line, so only a shell
-    // region can name the next script to follow.
-    const nested = next.lang === 'sh' ? detectScriptInvocations(scan) : [];
+    // A non-shell script's own text is not a shell command line, so a SINK-FREE
+    // interpreter region names nothing to follow: it cannot start a process
+    // (#165/#190). One that can shell out does — #661: `os.system('/tmp/p.sh')`
+    // inline folded the payload and blocked, the same line in `run.py` left it
+    // unread, so moving code into a file turned a deny into an allow. The
+    // discovery is the same `detectScriptInvocations` the inline planes use
+    // on an unmasked sink-bearing program, so the three planes agree. Comments
+    // are already blanked from `scan`, so a path mentioned in a docstring is
+    // not followed.
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
@@ -4774,7 +4858,7 @@ function foldScriptSources(
     }
   }
 
-  return { content: parts.join('\n'), opaque, regions, reviewed };
+  return { content: parts.join('\n'), opaque, regions, reviewed, unreadSensitive };
 }
 
 // ── Command-substitution expansion (#517) ────────────────────────────────────
@@ -4921,6 +5005,10 @@ function readSubstitutedFile(
   state: SubstitutionState,
 ): string | null {
   if (typeof resolveScriptSource !== 'function') { state.opaque = true; return null; }
+  // #702: `$(cat ~/.ssh/id_rsa)` splices the KEY into the command line; the
+  // guard must not do the same into its own scan surface. Opaque, unread —
+  // the raw `$(cat …)` text stays and names the path, so the access is gated.
+  if (isSensitiveFoldPath(path)) { state.opaque = true; return null; }
   let src: string | null = null;
   try {
     src = resolveScriptSource(path);
@@ -5204,6 +5292,153 @@ function outputEscapesToShell(text: string, outFile: string): boolean {
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n([\s\S]*?)(?:\n[ \t]*\2\b|$)/g;
 const HEREDOC_INTERP_TOKEN = /\b(bash|sh|zsh|ksh|dash|python[\d.]*|node|nodejs|ruby|perl|php)\b(?![\w/-])/gi;
 
+/** One heredoc in a command, classified by what consumes its body. */
+interface HeredocBody {
+  /** Byte range of the body within the command text. */
+  start: number;
+  end: number;
+  body: string;
+  /**
+   * Language of the interpreter on the intro line that READS the body —
+   * `null` when no interpreter is named there (the body is data, or lands in
+   * a file something else runs). The LAST interpreter token wins, so
+   * `python3 - <<'PY' | bash` is `sh`: the body's output is shell. Chooses the
+   * SCAN language of a region only — it never decides a mask (#686: masking is
+   * decided by `wholeCommandHeredocProgram` on the whole command).
+   */
+  lang: ScriptLang | null;
+  /** The file the intro line redirects/tees the body or its output to, if any. */
+  outFile: string | null;
+}
+
+/**
+ * #686 — the ONE whole-command shape that earns the #661 relief.
+ *
+ * Three review rounds showed that no intro-line or skeleton heuristic can
+ * bound a shell statement: a multiline substitution, a loop or function body
+ * closed after a filler statement, a quoted or escaped `exec`, an operand after
+ * the delimiter, or a `EOF #` line that `\b` reads as the closer all re-route
+ * or re-target the body while the heuristic still called it inert. Each fix
+ * invited the next (TARS, round 3). So the relief is no longer "a heredoc that
+ * looks isolated"; it is "the entire tool call IS this":
+ *
+ *     [cd <plain-path> &&] [NAME=value …] [env|nohup|nice|command|timeout N]
+ *     <interpreter> [flags-only] [-] <<'DELIM'        ← quoted delimiter, nothing else on the line
+ *     <body>
+ *     DELIM                                            ← the first line that is exactly DELIM
+ *     [whitespace to end of text]
+ *
+ * Anchored at both ends, so there is no prefix, suffix, pipe, redirect,
+ * substitution, group, loop, function or second statement to reason about —
+ * if any of those is present the regex does not match and NOTHING is masked,
+ * which is exactly main's behaviour. A quoted delimiter is required because an
+ * unquoted heredoc body is expanded by the outer shell (`$(…)` and backticks
+ * in it run) and is therefore not provably inert. `<<-` is excluded. Only the
+ * flags in `FLAG_TAKES_VALUE`'s `-W`/`-X` family may take a value, so a script
+ * path can never be read as a flag value. `sudo`/`doas` are not wrappers here:
+ * fail closed, as on main.
+ */
+const WHOLE_COMMAND_HEREDOC_PROGRAM = new RegExp(
+  '^\\s*'                                                             // leading blank lines are fine; after this the intro is ONE line
+  + '(?:cd[ \\t]+[\\w.\\/~-]+[ \\t]*&&[ \\t]*)?'                        // optional `cd plain/path &&`
+  + '(?:[A-Za-z_]\\w*=[\\w.\\/:,-]*[ \\t]+)*'                          // env assignments
+  + '(?:(?:env|nohup|nice|command|timeout[ \\t]+\\d+[smhd]?)[ \\t]+)*'  // transparent wrappers
+  + '(?:[\\w.\\/-]*\\/)?(python[\\d.]*|node|nodejs|ruby|perl|php)'    // (1) interpreter, optional dir
+  + '(?:[ \\t]+(?:-[WX][ \\t]+\\w+|--?[\\w-]+(?:=[^\\s<>|&;()`$\'"]*)?))*'  // flags only; a -W/-X value is on the SAME line
+  + '(?:[ \\t]+-)?'                                                   // the stdin program marker
+  + '[ \\t]+<<([\'"])([A-Za-z_]\\w*)\\2[ \\t]*\\n',                    // (2) quote (3) DELIM, nothing else on the line
+);
+
+/** The masked range and language when `text` is exactly the shape above, else null. */
+function wholeCommandHeredocProgram(text: string): { start: number; end: number; lang: ScriptLang } | null {
+  if (!text.includes('<<')) return null;
+  const m = WHOLE_COMMAND_HEREDOC_PROGRAM.exec(text);
+  if (!m) return null;
+  const delim = m[3];
+  const bodyStart = m[0].length;
+  // The closer is the first line that is EXACTLY the delimiter — not `EOF #`,
+  // not `EOFX`, not an indented one (that needs `<<-`, which is excluded).
+  // Any EARLIER line that merely STARTS with the delimiter (`EOF #`, `EOFX`,
+  // an indented `EOF`) is one the region scanner's `\b` closer would accept
+  // while the shell would not. The two must never disagree about where the
+  // body ends, so such a body earns no relief at all.
+  let at = bodyStart;
+  let bodyEnd = -1;
+  const looksLikeCloser = new RegExp(`^[ \\t]*${delim}\\b`);
+  while (at <= text.length) {
+    const nl = text.indexOf('\n', at);
+    const line = text.slice(at, nl < 0 ? text.length : nl);
+    if (line === delim) { bodyEnd = at; break; }
+    if (looksLikeCloser.test(line)) return null;
+    if (nl < 0) break;
+    at = nl + 1;
+  }
+  if (bodyEnd < 0) return null;                                       // unterminated: not this shape
+  if (!/^\s*$/.test(text.slice(bodyEnd + delim.length))) return null; // anything after the closer: not this shape
+  const lang = langFromInterpreter(commandBaseName(m[1].toLowerCase()));
+  if (lang === 'sh') return null;
+  return { start: bodyStart, end: Math.max(bodyStart, bodyEnd - 1), lang };
+}
+
+/**
+ * Every heredoc in `text`, with the language that consumes it and the file its
+ * intro line writes to. The single definition of "which heredoc does an
+ * interpreter read" (#661): `interpreterHeredocRegions` builds scan regions
+ * from it and `maskSinkFreeHeredocBodies` masks invocation detection with it.
+ * It calls nothing that detects invocations, so it is safe to use from inside
+ * `detectScriptInvocations` — `interpreterHeredocRegions` is not (its #217
+ * pass and `findInterpreterRunFiles` both recurse into detection).
+ */
+function heredocBodies(text: string): HeredocBody[] {
+  if (!text.includes('<<')) return [];
+  const out: HeredocBody[] = [];
+  ANY_HEREDOC_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANY_HEREDOC_RE.exec(text)) !== null) {
+    const lineStart = text.lastIndexOf('\n', m.index) + 1;
+    const introLine = text.slice(lineStart, m.index);
+    const interp = introLine.match(HEREDOC_INTERP_TOKEN);
+    const nl = m[0].indexOf('\n');
+    const start = m.index + nl + 1;
+    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
+    out.push({
+      start,
+      end: start + m[3].length,
+      body: m[3],
+      lang: interp ? langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase())) : null,
+      outFile: outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * #661 — a path literal inside an interpreter-consumed HEREDOC is not a
+ * command, for exactly the reason #190 gives for `python3 -c`: a sink-free
+ * program cannot start a process, so nothing in it is an invocation. The
+ * heredoc plane was left out of that relief, and `splitCommandStatements`
+ * (which breaks on `(`) turned `open('/tmp/x/table.md')` into a statement
+ * whose only token is a path in command position — the DATA FILE was folded
+ * and its prose scanned as shell. Live: a markdown table that LISTED rule
+ * names was denied on those names; the same code as a script file was
+ * allowed, so moving code into a file flipped the verdict.
+ *
+ * Masked only when the ENTIRE command is the one recognised whole-command
+ * shape (`WHOLE_COMMAND_HEREDOC_PROGRAM`, #686: a non-shell interpreter
+ * reading a quoted-delimiter heredoc as its program, with nothing before it
+ * but an optional plain `cd … &&`, nothing on the intro line after the
+ * delimiter, an exact-line closer and nothing after it) and the body has no
+ * shell-out sink. Any other command is left exactly as main scans it. A
+ * shell heredoc IS shell and is never masked. Length-preserving, so every
+ * offset computed against the original text stays valid.
+ */
+function maskSinkFreeHeredocBodies(text: string): string {
+  const h = wholeCommandHeredocProgram(text);
+  if (!h) return text;
+  if (hasShellOutSink(text.slice(h.start, h.end), h.lang)) return text;
+  return text.slice(0, h.start) + ' '.repeat(h.end - h.start) + text.slice(h.end);
+}
+
 function interpreterHeredocRegions(text: string): ScanRegion[] {
   if (!text.includes('<<')) return [];
   const found: Array<{ region: ScanRegion; outFile: string | null }> = [];
@@ -5223,39 +5458,22 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
    */
   const written: Array<{ start: number; end: number; body: string; outFile: string }> = [];
   const candidateFiles: string[] = [];
-  ANY_HEREDOC_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = ANY_HEREDOC_RE.exec(text)) !== null) {
-    const lineStart = text.lastIndexOf('\n', m.index) + 1;
-    const introLine = text.slice(lineStart, m.index);
-    const interp = introLine.match(HEREDOC_INTERP_TOKEN);
-    const nlEarly = m[0].indexOf('\n');
-    if (!interp) {
+  for (const h of heredocBodies(text)) {
+    if (h.lang === null) {
       // No interpreter here, but if the body lands in a file the second pass
       // may still find one that runs it.
-      const target = heredocOutputFile(introLine + m[0].slice(0, nlEarly + 1));
-      const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
-      if (cleaned) {
-        const s = m.index + nlEarly + 1;
-        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, });
-      }
+      if (h.outFile) written.push({ start: h.start, end: h.end, body: h.body, outFile: h.outFile });
       continue;                                         // nothing executes it as code
     }
-    const lang = langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase()));
-    if (lang === 'sh') continue;                        // a shell heredoc IS shell — unchanged
-    const nl = m[0].indexOf('\n');
-    const bodyStart = m.index + nl + 1;
-    const bodyEnd = bodyStart + m[3].length;
+    if (h.lang === 'sh') continue;                      // a shell heredoc IS shell — unchanged
     // Two-step write-then-execute (issue #86.2), which applies to an
     // interpreter heredoc too: `python3 - <<'PY' > gen.sh … PY; bash gen.sh`
     // GENERATES the shell that later runs. The body's own text is then the
     // source of a command after all, so it must keep being scanned as shell.
-    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
-    const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
-    if (clean) candidateFiles.push(clean);
+    if (h.outFile) candidateFiles.push(h.outFile);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
-      outFile: clean,
+      region: { start: h.start, end: h.end, lang: h.lang, hasSink: hasShellOutSink(h.body, h.lang), folded: false },
+      outFile: h.outFile,
     });
   }
   // #217 second pass: resolve each written-then-executed body by the language of
@@ -6174,7 +6392,7 @@ function evaluateToolCallCore(
   // An oversized command is already flagged (and already anomalous); skip the
   // work rather than tokenise 50k+ chars of it.
   const fold: ScriptFold = command.length > OVERSIZED_COMMAND_LENGTH
-    ? { content: '', opaque: false, regions: [], reviewed: [] }
+    ? { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] }
     : foldScriptSources(execCommand, options?.resolveScriptSource, options?.isReviewedScript, subst);
 
   // #189: every verdict minted past this point records which files the
@@ -6356,6 +6574,32 @@ function evaluateToolCallCore(
   // #184: keep full provenance (source/line/chain) alongside the span.
   const dangerEvidence = new Map<string, ClassifiedMatch>();
   for (const m of dangerMatches) if (!dangerEvidence.has(m.signal)) dangerEvidence.set(m.signal, m);
+  // #702 B1 (review of #704): a nested script inside the sensitive-path set is
+  // never read by the fold. The rule above gates it when the text that NAMED
+  // it is on the scan surface; a reviewed parent's text is not (#189 exempts
+  // the file body), so with the child unread there was nothing left but
+  // `opaque` — and opaque-only is the allow at 3a. The fold therefore reports
+  // each unread sensitive path as structural evidence and it is surfaced here
+  // as `touch-sensitive-path` whatever named it: an unread sensitive script is
+  // require_approval with the path and chain on the row, never an automatic
+  // allow through an exempt parent. Nothing is read to produce this signal
+  // (#702 holds), an ordinary child under a reviewed parent is unaffected
+  // (it is folded and scanned as before), and where the rule already fired on
+  // the text this only de-duplicates into the same signal.
+  for (const u of fold.unreadSensitive) {
+    if (!dangerSignals.includes('touch-sensitive-path')) dangerSignals.push('touch-sensitive-path');
+    if (!dangerEvidence.has('touch-sensitive-path')) {
+      const hops = u.chain.split(' → ');
+      const invokedBy = hops.length > 1 ? hops[hops.length - 2] : undefined;
+      dangerSpan = dangerSpan ?? fmtSpan(u.path);
+      dangerEvidence.set('touch-sensitive-path', {
+        signal: 'touch-sensitive-path',
+        span: fmtSpan(u.path),
+        tier: 'executed',
+        ...(invokedBy ? { source: invokedBy, chain: u.chain } : {}),
+      });
+    }
+  }
   // A pip install scoped to a venv / an explicit target prefix mutates that
   // prefix, not the host (issue #89 class 4) — it falls through to the
   // sensitive-but-allowed tier below, exactly like a workspace-local npm install.
