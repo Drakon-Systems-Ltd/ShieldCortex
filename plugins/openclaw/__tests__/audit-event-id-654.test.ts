@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { attachEnforcementBinding } from '../../../src/defence/iron-dome/enforcement-binding.js';
 import {
   appendSessionGuardIndex,
+  guardIdentity,
   recordActionGuardDegraded,
   sessionKeyFor,
 } from '../../../src/defence/iron-dome/session-guard.js';
@@ -297,5 +298,82 @@ describe('#654 R2 — real producer output, read by the stop hook', () => {
       fingerprintScheme: 2,
       coverage: 'bounded-complete',
     });
+  });
+
+  it('W5 hook half: a minted-ID row present only in the index counts once in the stop hook; a retry adds nothing', async () => {
+    const indexHome = mkdtempSync(join(tmpdir(), 'sc-654-oc-w5-'));
+    try {
+      // Same producer fault as P10/W5: the realtime sink cannot create its
+      // directory and swallows the failure; the index copy lands in indexHome.
+      writeFileSync(join(home, 'not-a-dir'), 'x');
+      process.env.SHIELDCORTEX_AUDIT_DIR = join(home, 'not-a-dir');
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await build({ indexHome }).call('w5-session');
+      } finally {
+        warn.mockRestore();
+        process.env.SHIELDCORTEX_AUDIT_DIR = auditDir;
+      }
+      const key = sessionKeyFor('w5-session', { salt: SALT })!;
+      const ixDir = join(indexHome, '.shieldcortex', 'audit');
+      const ixFile = join(ixDir, 'session-guard', `${key}.jsonl`);
+      const ix = indexRows(key, ixDir);
+      expect(ix).toHaveLength(1);
+      expect(ix[0]).toMatchObject({ recordKind: 'guard', origin: 'openclaw-interceptor', sessionKey: key });
+      expect(HOOK_DEGRADED.has(String(ix[0].outcome))).toBe(true);
+      expect(ix[0].auditEventId).toMatch(ID);
+      // Index-only: no realtime copy exists anywhere the hook will look.
+      expect(realtimeRows(ixDir)).toEqual([]);
+      const ixBefore = readFileSync(ixFile);
+      // An eventId-basis fingerprint ignores the physical key.
+      const expectedFp = guardIdentity(ix[0], 'unused').primary;
+
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: indexHome,
+        SHIELDCORTEX_CONFIG_DIR: join(indexHome, '.shieldcortex'),
+        SHIELDCORTEX_SESSION_SALT: SALT,
+      };
+      delete env.SHIELDCORTEX_AUDIT_DIR;
+      const runHook = () => {
+        const appendOnly = appendOnlyCheck(ixDir);
+        const hook = spawnSync(process.execPath, [STOP_HOOK], { input: JSON.stringify({ session_id: 'w5-session' }), encoding: 'utf8', env });
+        expect(hook.status).toBe(0);
+        appendOnly();
+        return hook;
+      };
+      const receiptsOf = (all: Array<Record<string, any>>) =>
+        all.filter((r) => r.origin === 'claude-code-stop-hook' && r.sessionKey === key);
+
+      const first = runHook();
+      expect(first.stderr).toContain(`sessionKey=${key} guardOutcomes=1`);
+      expect(first.stderr).not.toContain('index mirror FAILED');
+      expect(first.stderr).not.toContain('coverage=partial');
+      const receipts = receiptsOf(realtimeRows(ixDir));
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({
+        guardOutcomeCount: 1,
+        guardFingerprints: [expectedFp],
+        identityBasis: { eventId: 1, bindingNonce: 0, physicalRow: 0 },
+        eventCountExact: true,
+        fingerprintScheme: 2,
+        coverage: 'bounded-complete',
+      });
+      expect(receipts[0]).not.toHaveProperty('historicalOverlap');
+      expect(receipts[0]).not.toHaveProperty('pendingRemaining');
+      // The mirror is the same receipt; the guard row itself is untouched.
+      expect(receiptsOf(indexRows(key, ixDir)).map(strip)).toEqual(receipts);
+      expect(indexRows(key, ixDir).filter((r) => r.recordKind === 'guard')).toEqual(ix);
+
+      const second = runHook();
+      expect(second.stderr).not.toContain('guardOutcomes=');
+      expect(receiptsOf(realtimeRows(ixDir))).toEqual(receipts);
+      expect(receiptsOf(indexRows(key, ixDir))).toHaveLength(1);
+      expect(indexRows(key, ixDir).filter((r) => r.recordKind === 'guard')).toEqual(ix);
+      // The producer's original index bytes survive both runs as a prefix.
+      expect(readFileSync(ixFile).subarray(0, ixBefore.length).equals(ixBefore)).toBe(true);
+    } finally {
+      rmSync(indexHome, { recursive: true, force: true });
+    }
   });
 });
