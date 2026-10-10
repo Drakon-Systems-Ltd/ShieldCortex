@@ -13,6 +13,7 @@
 
 import {
   actionGuardPosture,
+  ConfigIntegrityRefusal,
   getActionGuardCoreConfig,
   getActionGuardNotifyConfig,
   setActionGuardCoreConfig,
@@ -149,7 +150,9 @@ export async function offerActionGuardPosture(deps: PostureDeps): Promise<Postur
   try {
     (deps.apply ?? defaultApply)(picked.choice);
   } catch (err) {
-    if (err instanceof PolicyLockRefusal) {
+    // #647: a tampered config.json refuses the write rather than re-signing
+    // it — same treatment as a lock refusal: say why, change nothing.
+    if (err instanceof PolicyLockRefusal || err instanceof ConfigIntegrityRefusal) {
       log(err.message);
       return null;
     }

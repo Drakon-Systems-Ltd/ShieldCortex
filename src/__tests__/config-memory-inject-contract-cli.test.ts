@@ -11,6 +11,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { createHmac } from 'crypto';
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { handleCloudConfig } from '../cloud/cli.js';
 import {
@@ -218,13 +219,20 @@ describe('config --memory-plane (signed Track A / #348)', () => {
   it('re-setting the plane advances planeSetAt — the drift time-box must not read a stale stamp (#394)', () => {
     handleCloudConfig(['--memory-plane', 'dual_legacy']);
     const first = readOnDisk().memory.planeSetAt as string;
-    // Rewind the stamp on disk the way an aged install looks, then re-sign by
-    // going back through the signed setter.
+    // Rewind the stamp on disk the way an aged install looks — a SIGNED aged
+    // install, so the HMAC is recomputed over the canonical body here. (#647:
+    // a hand edit that leaves the stale `_sig` is tampered, and the setter
+    // below now refuses it instead of "re-signing" it.)
     const rewound = new Date(Date.parse(first) - 30 * 24 * 60 * 60 * 1000).toISOString();
     const rawCfg = readOnDisk();
     rawCfg.memory.planeSetAt = rewound;
-    fs.writeFileSync(configFile(), `${JSON.stringify(rawCfg, null, 2)}\n`);
+    delete rawCfg._sig;
+    const key = fs.readFileSync(path.join(getConfigDir(), '.integrity-key'), 'utf-8').trim();
+    const sig = createHmac('sha256', key).update(JSON.stringify(rawCfg, null, 2), 'utf-8').digest('hex');
+    fs.writeFileSync(configFile(), `${JSON.stringify({ ...rawCfg, _sig: sig }, null, 2)}\n`);
     clearCloudConfigCache();
+    expect(readRawConfig()).toBeDefined();
+    expect(isConfigTampered()).toBe(false);
     handleCloudConfig(['--memory-plane', 'import_only']);
     const after = readOnDisk();
     expect(after.memory.plane).toBe('import_only');

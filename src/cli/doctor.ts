@@ -98,6 +98,7 @@ import {
 } from '../memory/plane-drift.js';
 import {
   applyPolicyLock,
+  applyStrictFailClosedPosture,
   describePolicyLock,
   readPolicyLock,
   PROTECT_HINT,
@@ -125,7 +126,7 @@ import {
   getActionGuardCoreConfig,
   getConfigDir,
   hasTrustedMemorySidecarPosture,
-  isConfigTampered,
+  inspectConfigIntegrity,
   readRawConfig,
   migrateInterceptorActionGuardAlias,
 } from '../cloud/config.js';
@@ -4519,7 +4520,11 @@ export async function checkActionGuard(): Promise<CheckResult[]> {
     // report "Action Guard is disabled in config" on a box where the policy
     // lock had it on and enforcing. Reading the file and grading the file is
     // exactly the gap #501 closes everywhere else.
-    const raw = applyPolicyLock(onDisk, readPolicyLock({ audit: false, warn: false }));
+    // #647: and on a tampered file the enforced posture is the strict one —
+    // the same view every runtime reader gets — so this row agrees with the
+    // integrity row instead of grading bytes nothing enforces.
+    const trusted = inspectConfigIntegrity().verdict === 'tampered' ? applyStrictFailClosedPosture(onDisk) : onDisk;
+    const raw = applyPolicyLock(trusted, readPolicyLock({ audit: false, warn: false }));
     const isBlock = isConfigBlock;
     const top = isBlock(raw?.actionGuard) ? (raw.actionGuard as Record<string, unknown>) : null;
     const interceptor = isBlock(raw?.interceptor) ? (raw.interceptor as Record<string, unknown>) : null;
@@ -4756,6 +4761,10 @@ export function policyLockRows(): CheckResult[] {
   const rows: CheckResult[] = [];
   const label = 'Action guard';
 
+  // #647: inspected FIRST and without side effects — the accessor below may
+  // adopt an unsigned file or self-heal a stale signature, and the row should
+  // name what was on disk when doctor looked, not what the look turned it into.
+  const integrity = inspectConfigIntegrity();
   const state = readPolicyLock({ audit: false, warn: false });
   const summary = describePolicyLock(state);
   // Signed leftover Enforce is not a live gate. Jarvis 5.0.6: HOSTS said
@@ -4824,29 +4833,78 @@ export function policyLockRows(): CheckResult[] {
       break;
   }
 
-  // The integrity signature, described for what it is.
-  const tampered = isConfigTampered();
-  rows.push(
-    tampered
-      ? {
-          label: `${label} config integrity`,
-          status: 'fail',
-          message:
-            'config.json does not match its integrity signature — corruption, a torn write, or a hand edit. ' +
-            'The strict fail-closed posture is in force (guard on + enforcing, no auto-approve, broker off, ' +
-            'defence mode strict). Note this HMAC is a CORRUPTION detector, not tamper protection: its key ' +
-            'lives beside the file it signs and under the same uid, so anything that can edit the config can ' +
-            're-sign it. The policy lock is the control that a same-user process cannot forge.',
-          fix: 'Re-write the affected settings with the `shieldcortex config --*` flags (they re-sign), then re-run doctor.',
-        }
-      : {
-          label: `${label} config integrity`,
-          status: 'pass',
-          message:
-            'config.json matches its integrity signature (a corruption / accidental-edit check — the key is ' +
-            'co-located and same-uid, so it is not tamper protection; the policy lock row above is).',
-        },
-  );
+  // The integrity signature, described for what it is. #647: the verdict is
+  // inspected without side effects (above) and named outright. The old row read
+  // a process flag that the next config write cleared — so a write that had
+  // just re-signed a tampered file reported `pass`, and anything that was not
+  // `tampered` (malformed, unreadable, unsigned) also read as a plain pass.
+  const HMAC_NOTE =
+    'Note this HMAC is a CORRUPTION detector, not tamper protection: its key lives beside the file it signs ' +
+    'and under the same uid, so anything that can edit the config can re-sign it. The policy lock is the ' +
+    'control that a same-user process cannot forge.';
+  const integrityLabel = `${label} config integrity`;
+  switch (integrity.verdict) {
+    case 'tampered':
+      rows.push({
+        label: integrityLabel,
+        status: 'fail',
+        message:
+          'verdict: tampered — config.json does not match its integrity signature (corruption, a torn write, or a ' +
+          'hand edit). The strict fail-closed posture is in force (guard on + enforcing, no auto-approve, no ' +
+          'reviewed-script pins, broker off, defence mode strict), and config writes are refused so the file, its ' +
+          `pins and this verdict are preserved. ${HMAC_NOTE}`,
+        fix:
+          'Do not re-run `shieldcortex config --*` flags to clear this — they refuse on a tampered file. Review the ' +
+          'file, then `shieldcortex config --resign` (a preview; writes nothing) and `--resign --confirm <sha256>`; ' +
+          'or restore a backup whose signature still verifies. Then re-run doctor.',
+      });
+      break;
+    case 'malformed':
+    case 'unreadable':
+      rows.push({
+        label: integrityLabel,
+        status: 'fail',
+        message:
+          `verdict: ${integrity.verdict} — config.json exists but ${integrity.verdict === 'malformed' ? 'is not a JSON object' : 'cannot be read'}. ` +
+          `Settings fall back to defaults and config writes are refused so the file is not overwritten. ${HMAC_NOTE}`,
+        fix: `Fix or restore ${integrity.path}, then re-run doctor.`,
+      });
+      break;
+    case 'absent':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message: `verdict: absent — there is no config.json yet, so defaults apply and nothing needs verifying. ${HMAC_NOTE}`,
+      });
+      break;
+    case 'unsigned':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message:
+          'verdict: unsigned — config.json carries no signature yet (pre-v4.32 format); the next read adopts it as ' +
+          `trusted and the next write signs it. ${HMAC_NOTE}`,
+      });
+      break;
+    case 'self-heal':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message:
+          'verdict: self-heal — the embedded signature is stale but the legacy whole-file signature authenticates ' +
+          `these exact bytes; it is re-signed on the next read. ${HMAC_NOTE}`,
+      });
+      break;
+    case 'valid':
+      rows.push({
+        label: integrityLabel,
+        status: 'pass',
+        message:
+          'verdict: valid — config.json matches its integrity signature (a corruption / accidental-edit check — the key is ' +
+          'co-located and same-uid, so it is not tamper protection; the policy lock row above is).',
+      });
+      break;
+  }
 
   return rows;
 }
@@ -4861,6 +4919,17 @@ export function policyLockRows(): CheckResult[] {
 export function fixActionGuardConfig(): { changed: boolean; backupPath?: string; message: string } {
   const configPath = path.join(getConfigDir(), 'config.json');
   if (!fs.existsSync(configPath)) return { changed: false, message: 'no config file — nothing to migrate' };
+  // #647: on a tampered file the migration write is refused, so refuse here,
+  // BEFORE the backup copy — a "fix" that leaves a backup and changes nothing
+  // is litter, and one that re-signed the file would launder the verdict.
+  if (inspectConfigIntegrity().verdict === 'tampered') {
+    return {
+      changed: false,
+      message:
+        'not migrating: config.json fails its integrity check (verdict: tampered), and a migration write would ' +
+        're-sign it. Nothing was changed. Review it with `shieldcortex config --resign` first',
+    };
+  }
   const raw = readRawConfig();
   const isBlock = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === 'object' && !Array.isArray(v);

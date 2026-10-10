@@ -28,12 +28,25 @@ export interface IronDomeAuditEvent {
  * Fire-and-forget safe: errors are caught and logged, never thrown.
  */
 export function logIronDomeAudit(event: IronDomeAuditEvent): void {
+  recordIronDomeAudit(event);
+}
+
+/**
+ * {@link logIronDomeAudit}, but the caller learns whether the row landed.
+ *
+ * Returns the inserted row id, or -1 when nothing was written — the database is
+ * not initialised in this process, or the insert failed. Never throws. For the
+ * few callers that must not claim a record they did not make (#647: the
+ * deliberate `config --resign` recovery); ordinary Guard decisions keep the
+ * fire-and-forget wrapper above.
+ */
+export function recordIronDomeAudit(event: IronDomeAuditEvent): number {
   try {
     // No source ⇒ the code-constant cli:iron-dome identity ⇒ attested by
     // construction. A supplied source with no stated attestation fails safe to
     // NULL (a resolved caller identity is only attested if the resolver said so).
     const attested = event.attested ?? (event.source ? undefined : true);
-    logAudit({
+    return logAudit({
       memory_id: null,
       project: null,
       timestamp: new Date().toISOString(),
@@ -53,5 +66,6 @@ export function logIronDomeAudit(event: IronDomeAuditEvent): void {
     });
   } catch (err) {
     console.error('[iron-dome] Failed to log audit event:', err);
+    return -1;
   }
 }

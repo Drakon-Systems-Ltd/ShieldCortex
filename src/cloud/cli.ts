@@ -36,6 +36,9 @@ import {
   setAutoMemorySamplingTurns,
   NATIVE_INJECT_CONTRACTS,
   MEMORY_PLANE_VALUES,
+  ConfigIntegrityRefusal,
+  previewConfigResign,
+  resignTamperedConfig,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -54,7 +57,30 @@ import { initReadinessTransitions } from '../defence/iron-dome/guard-readiness.j
 const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
 
-export function handleCloudConfig(args: string[]): void {
+export function handleCloudConfig(args: string[]): void | Promise<void> {
+  // #647: review and deliberately re-sign a tampered config.json. Handled
+  // alone and first: it is never combined with a setting change. The confirmed
+  // re-sign is async (it opens the audit log); everything else stays sync.
+  if (args.includes('--resign')) {
+    return handleResign(args);
+  }
+
+  // #647: a setter on a config.json that fails its integrity check refuses
+  // rather than re-signing it. That is an expected outcome with an actionable
+  // message, not a crash — and the first refusal stops the run, so a later
+  // flag in the same command cannot half-apply.
+  try {
+    handleCloudConfigFlags(args);
+  } catch (err) {
+    if (err instanceof ConfigIntegrityRefusal) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+function handleCloudConfigFlags(args: string[]): void {
   if (args.includes('--cloud-status')) {
     const config = getCloudConfig();
     const mode = getDefenceMode();
@@ -660,6 +686,9 @@ export function handleCloudConfig(args: string[]): void {
     console.log('  --memory-host-runtime <openclaw|claude_code|hermes>[,…]  Declare the bound host runtime(s) doctor must prove (signed write)');
     console.log('  --auto-memory-sampling <n>  Stop-hook sampling cadence in turns (1-20, ≤ 5 recommended; signed write)');
     console.log('  --restore-4.10-defaults  Restore pre-v4.11.0 defaults (recall on, strict interceptor, minimal preamble)');
+    console.log('  --resign               Preview re-signing a config.json that fails its integrity check (writes nothing)');
+    console.log('  --resign --confirm <sha256>  Re-sign exactly the previewed bytes (full sha256). Refused if the audit');
+    console.log('                           log cannot be opened; backs up, signs, then records config_resigned');
     console.log('');
     console.log('LLM Verification:');
     console.log('  --verify-enable        Enable LLM verification (requires cloud + verify scope)');
@@ -711,6 +740,99 @@ export async function handleCloudCommand(args: string[]): Promise<void> {
   }
 
   console.log('Usage: shieldcortex cloud sync --full');
+}
+
+/**
+ * `shieldcortex config --resign [--confirm <sha256>]` (#647).
+ *
+ * Without `--confirm` it is a preview and writes nothing. It prints the verdict,
+ * the full sha256 of the bytes on disk and the NAMES of the settings that would
+ * leave the strict fail-closed posture — never their values, because
+ * config.json can hold credentials. The operator reads the file themselves.
+ * With `--confirm` it re-signs exactly those bytes (see resignTamperedConfig).
+ *
+ * Exit codes: 0 previewed, or re-signed AND recorded; 1 refused, nothing
+ * written; 2 re-signed but the audit record was NOT written.
+ */
+function handleResign(args: string[]): void | Promise<void> {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log('Usage: shieldcortex config --resign                     Preview (writes nothing)');
+    console.log('       shieldcortex config --resign --confirm <sha256>  Re-sign exactly the previewed bytes');
+    return;
+  }
+  const confirmIdx = args.indexOf('--confirm');
+  const value = confirmIdx === -1 ? undefined : args[confirmIdx + 1];
+  if (confirmIdx !== -1 && (!value || value.startsWith('--'))) {
+    console.error('Missing value for --confirm. Run `shieldcortex config --resign` first and pass the full sha256 it prints.');
+    process.exit(1);
+  }
+  // Nothing else rides along: a setting flag next to --resign would otherwise
+  // be silently ignored. Flag names only in the message — a value can be a
+  // credential (a webhook URL, an API key).
+  const extra = args.filter((a, i) => a !== '--resign' && a !== '--confirm' && !(confirmIdx !== -1 && i === confirmIdx + 1));
+  const repeated = args.filter((a) => a === '--resign').length > 1 || args.filter((a) => a === '--confirm').length > 1;
+  if (extra.length > 0 || repeated) {
+    const named = extra.filter((a) => a.startsWith('-'));
+    console.error(
+      '`config --resign` takes only `--confirm <sha256>`' +
+      (named.length > 0 ? `, not ${named.join(', ')}` : repeated ? ', once' : ', no other arguments') +
+      '. Run setting changes as their own command. Nothing was written.',
+    );
+    process.exit(1);
+  }
+  if (value !== undefined) return confirmResign(value);
+
+  const preview = previewConfigResign();
+  console.log(`config.json integrity: ${preview.verdict}`);
+  console.log(`  File: ${preview.path}`);
+  if (preview.verdict !== 'tampered') {
+    if (preview.verdict === 'malformed' || preview.verdict === 'unreadable') {
+      console.log('  It cannot be parsed, so it cannot be reviewed or re-signed. Fix it or restore a backup.');
+      process.exit(1);
+    }
+    console.log('  Nothing to re-sign.');
+    return;
+  }
+  console.log(`  sha256: ${preview.sha256}`);
+  console.log('  Re-signing trusts this file exactly as it is now. This preview does not print its values —');
+  console.log('  read the file yourself before you confirm.');
+  console.log(`  Settings that would leave the strict fail-closed posture: ${preview.loosenedKeys.length > 0 ? preview.loosenedKeys.join(', ') : 'none'}`);
+  if (preview.lockRefusal) {
+    console.log(`  Will be REFUSED by the policy lock: ${preview.lockRefusal}`);
+    return;
+  }
+  if (preview.unauthorisedKeys.length > 0) {
+    console.log(`  Will be REFUSED: ${preview.unauthorisedKeys.join(', ')} — no verified policy lock covers them (lock: ${preview.lockStatus}).`);
+    console.log('  Restore a backup whose signature still verifies, or move config.json aside and re-apply');
+    console.log('  those settings with their own commands.');
+    return;
+  }
+  console.log(`  To re-sign exactly these bytes: shieldcortex config --resign --confirm ${preview.sha256}`);
+}
+
+async function confirmResign(value: string): Promise<void> {
+  let result: Awaited<ReturnType<typeof resignTamperedConfig>>;
+  try {
+    result = await resignTamperedConfig(value);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+  console.log(`Re-signed ${result.path} (was: tampered).`);
+  console.log(`  Backup of the reviewed bytes: ${result.backupPath}`);
+  console.log(`  sha256 before: ${result.previousSha256}`);
+  console.log(`  sha256 after:  ${result.newSha256}`);
+  console.log(`  Settings now taken from the file instead of the strict posture: ${result.loosenedKeys.length > 0 ? result.loosenedKeys.join(', ') : 'none'}`);
+  if (result.audit.recorded) {
+    console.log(`  Recorded in the audit log as config_resigned (row ${result.audit.rowId}, ${result.audit.location}).`);
+    console.log('  Confirm with `shieldcortex doctor`.');
+    return;
+  }
+  // The write cannot be un-done honestly at this point — putting the tampered
+  // bytes back is another unrecorded write. Say exactly what happened instead.
+  console.error(`  AUDIT NOT RECORDED: the re-sign above IS in force, but its config_resigned row was not written to ${result.audit.location}: ${result.audit.error}.`);
+  console.error(`  Keep ${result.backupPath} and the two sha256 values above: they are the only record of this re-sign.`);
+  process.exit(2);
 }
 
 /**
