@@ -302,11 +302,18 @@ describe('#517(b) — file-reading command substitutions are scanned as their co
     });
 
     describe('the substitution\'s own read and wrapper keep their verdicts', () => {
-      it('a sensitive-path read inside the substitution is still gated', () => {
-        const v = verdictOf('echo "$(cat ~/.ssh/id_rsa)"', { '~/.ssh/id_rsa': 'not really a key\n' });
+      it('a sensitive-path read inside the substitution is still gated — and (#702) never expanded', () => {
+        // #702: the key's bytes are not spliced into the scan surface. The raw
+        // `$(cat ~/.ssh/id_rsa)` text stays and names the access, which is the
+        // gate; the unread splice is recorded as opaque, not silently skipped.
+        const seen: string[] = [];
+        const v = evaluateToolCall('Bash', { command: 'echo "$(cat ~/.ssh/id_rsa)"' }, undefined, {
+          resolveScriptSource: (p: string) => { seen.push(p); return 'not really a key\n'; },
+        });
         expect(v.decision).toBe('require_approval');
-        expect(v.signals).toEqual(expect.arrayContaining(['touch-sensitive-path']));
-        expect(v.expandedSubstitutions).toEqual(['~/.ssh/id_rsa']);
+        expect(v.signals).toEqual(expect.arrayContaining(['touch-sensitive-path', 'opaque-command-substitution']));
+        expect(v.expandedSubstitutions).toBeUndefined();
+        expect(seen).toEqual([]);
       });
 
       it('a `sudo` wrapper on the read is not discarded with the replaced body', () => {
@@ -328,12 +335,16 @@ describe('#517(b) — file-reading command substitutions are scanned as their co
         // The typed surface says dangerous (`~/.ssh` path); the expanded one
         // says catastrophic. The block wins; the dangerous-tier name does not
         // ride along, because the planes' autoApprove matches on any signal.
-        const v = verdictOf('bash -c "$(cat ~/.ssh/run.sh)"', { '~/.ssh/run.sh': PAYLOAD_SH });
+        // (#702: the vehicle used to be a payload under `~/.ssh/`; a path in the
+        // sensitive set is no longer read, so the dangerous typed surface here
+        // is a `sudo` on the read instead. The merge rule under test is
+        // unchanged.)
+        const v = verdictOf('bash -c "$(sudo cat /tmp/run.sh)"', { '/tmp/run.sh': PAYLOAD_SH });
         expect(v.decision).toBe('block');
         expect(v.severity).toBe('catastrophic');
         expect(v.signals).toEqual(expect.arrayContaining(['delete-root-or-home']));
-        expect(v.signals).not.toEqual(expect.arrayContaining(['touch-sensitive-path']));
-        expect(v.expandedSubstitutions).toEqual(['~/.ssh/run.sh']);
+        expect(v.signals).not.toEqual(expect.arrayContaining(['privilege-escalation']));
+        expect(v.expandedSubstitutions).toEqual(['/tmp/run.sh']);
       });
     });
 
