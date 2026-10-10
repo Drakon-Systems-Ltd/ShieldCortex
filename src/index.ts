@@ -772,8 +772,9 @@ ${bold}DOCS${reset}
 
   // Handle "doctor" subcommand
   if (process.argv[2] === 'doctor') {
-    const { runDoctor } = await import('./cli/doctor.js');
-    await runDoctor(process.argv.slice(3));
+    // #707: --help prints usage before doctor's module graph is even loaded.
+    const { dispatchDoctorCommand } = await import('./cli/setup-dispatch.js');
+    await dispatchDoctorCommand(process.argv.slice(3));
     return;
   }
 
@@ -805,24 +806,10 @@ ${bold}DOCS${reset}
 
   // Handle "setup" subcommand (alias: "install")
   if (process.argv[2] === 'setup' || process.argv[2] === 'install') {
-    if (process.argv[3] === 'uninstall') {
-      const { uninstallSetup } = await import('./setup/uninstall.js');
-      await uninstallSetup();
-      return;
-    }
-    const { parseHookOptInFlags } = await import('./setup/settings-hooks.js');
-    const { setupClaudeMd } = await import('./setup/claude-md.js');
-    // `setup` with no extra flags is the host-table wizard. `install` stays
-    // Claude Code only so existing scripts do not grow OpenClaw/Hermes
-    // installs. Explicit hook flags on setup also stay Claude-only.
-    const hookFlags = parseHookOptInFlags(process.argv);
-    const hasHookFlag = process.argv.some((a) => a.startsWith('--with-') || a.startsWith('--no-'));
-    if (process.argv[2] === 'install' || hasHookFlag) {
-      await setupClaudeMd(hookFlags);
-    } else {
-      const { handleQuickstartCommand } = await import('./setup/quickstart.js');
-      await handleQuickstartCommand(process.argv[3]);
-    }
+    // #707: --help / -h prints usage before any installer module is loaded —
+    // `install --help` used to go straight into the Claude Code install.
+    const { dispatchSetupCommand } = await import('./cli/setup-dispatch.js');
+    await dispatchSetupCommand(process.argv[2] === 'install' ? 'install' : 'setup', process.argv.slice(3));
     return;
   }
 
