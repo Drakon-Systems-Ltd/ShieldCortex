@@ -89,6 +89,18 @@ describe('syncInterceptEvent', () => {
     expect(serialized).not.toContain('content');
   });
 
+  it('#654 P8: auditEventId never widens the cloud payload — the body is byte-identical without it', async () => {
+    const cfg = { cloudEnabled: true, cloudApiKey: 'sc_live_x', cloudBaseUrl: 'https://api.shieldcortex.ai' };
+    syncInterceptEvent(makeEntry(), cfg);
+    syncInterceptEvent(makeEntry({ auditEventId: 'ab'.repeat(16) }), cfg);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].init.body).toBe(calls[0].init.body);
+    expect(calls[1].init.body).not.toContain('ab'.repeat(16));
+    expect(calls[1].init.body).not.toContain('auditEventId');
+  });
+
   it('does NOT POST when cloudEnabled is false', async () => {
     syncInterceptEvent(makeEntry(), {
       cloudEnabled: false,
