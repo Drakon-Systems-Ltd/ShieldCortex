@@ -16,6 +16,9 @@ This installs:
 - the OpenClaw lifecycle hook
 - the realtime scanning plugin
 
+The plugin's Action Guard stays off until you enable it
+(`shieldcortex config --action-guard-enable`).
+
 ## Verify
 
 ```bash
@@ -44,7 +47,11 @@ See [cloud-servers.md](cloud-servers.md) for the full server checklist.
 
 ## Recommended default
 
-Keep OpenClaw auto-memory in complement mode unless you explicitly want dual storage:
+Keep OpenClaw auto-memory in complement mode unless you explicitly want dual storage.
+A fresh global, non-CI `npm install -g` on a machine with no
+`~/.shieldcortex/config.json` creates one with `openclawAutoMemory: true`, so
+auto-memory is on until you turn it off; an existing config is kept as it was.
+To turn it off:
 
 ```bash
 shieldcortex config --openclaw-auto-memory false

@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import path from "path";
+import { hiddenRouteRedirects } from "./src/components/layout/hidden-routes";
 
 const nextConfig: NextConfig = {
   // Standalone output for npm package distribution
@@ -21,6 +22,12 @@ const nextConfig: NextConfig = {
       "**/node_modules/sharp/**",
       "**/node_modules/@img/**",
     ],
+  },
+
+  // Hidden routes (src/components/layout/hidden-routes.ts) redirect to the
+  // nearest kept page instead of rendering or 404ing.
+  async redirects() {
+    return hiddenRouteRedirects();
   },
 };
 

@@ -39,12 +39,13 @@ import { labelLlmInput } from './provenance.js';
 import type { PluginProvenanceLabel } from './provenance.js';
 import { classifyConversationOrigin } from './conversation-trust.js';
 import type { ConversationTrustDecision } from './conversation-trust.js';
-import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG } from './interceptor.js';
-import type { ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime, ResolvedReadinessLike } from './interceptor.js';
+import { createInterceptor, DEFAULT_CONFIG as DEFAULT_INTERCEPTOR_CONFIG, flattenPromptField } from './interceptor.js';
+import type { ApprovalPromptDetail, ApprovalDecisionAudit, ApprovalDecisionOutcome, InterceptorConfig, BrokerRuntime, ReadinessRuntime, ResolvedReadinessLike } from './interceptor.js';
 import { syncInterceptEvent } from './intercept-ingest.js';
 import { cloudSync } from './cloud-sync.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
 import type { GatewayNotifyContext, NotifyChannelLike } from './gateway-notify-channel.js';
+import { testedPath, writePostureSelfReport, type PostureReportInput } from './posture-report.js';
 
 // ==================== RESILIENT RUNTIME LOADER ====================
 // Resolves runtime.mjs from multiple locations so the plugin works both
@@ -4049,8 +4050,26 @@ const WITHHELD_COMMAND_TEXT = "(command withheld — contains credential materia
  *  `Reason:` (action guard) and `Content:` (memory write) are the two lines
  *  that quote the payload, so anything not on this list is dropped. */
 const SAFE_APPROVAL_LINE = /^(?:Tool|Action|Risk|Signals|Threats):/iu;
+/**
+ * #648 r2 (B1) — the plain-English card is laid out from the structured card
+ * the interceptor's prompt builder hands over (`detail.card`), never from line
+ * text: the message also carries payload (a memory write's `Content:`, a tool
+ * name), and a payload that could say `What:` could forge the card and switch
+ * off the secret-egress withhold. Every card line is derived — the WHAT target
+ * already passed the credential redactor on this box — and none quotes the
+ * payload, so a plain card carries no "withheld" banner. Each field is
+ * flattened again here: a line break or `|` can never become a line.
+ */
+function plainCardDescription(detail: ApprovalPromptDetail | undefined): string | null {
+  const card = detail?.card;
+  if (!card || typeof card !== "object") return null;
+  const fields = [card.what, card.why, card.who, card.footer];
+  if (!fields.every((f) => typeof f === "string" && f.trim())) return null;
+  const [what, why, who, footer] = fields.map(flattenPromptField);
+  return [`What: ${what}`, `Why: ${why}`, `Who: ${who}`, footer].join(" | ");
+}
 
-function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeToolCallResult["requireApproval"]> {
+function buildTypedApprovalRequest(message: string, detail?: ApprovalPromptDetail): NonNullable<TypedBeforeToolCallResult["requireApproval"]> {
   const lines = message
     .split(/\r?\n/u)
     .map((line) => line.trim())
@@ -4061,12 +4080,13 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
     .filter((line) => !/^\[(?:Approve|Allow[^\]]*|Deny)\]/i.test(line));
   const rawTitle = (lines[0] || "ShieldCortex approval required").replace(/^🛡️\s*/u, "");
   const detailLines = lines.slice(1);
+  const plainCard = plainCardDescription(detail);
   const withholdPayload = SECRET_EGRESS_PROMPT.test(message);
-  const details = (
+  const details = plainCard ?? ((
     withholdPayload
       ? [WITHHELD_COMMAND_TEXT, ...detailLines.filter((line) => SAFE_APPROVAL_LINE.test(line))]
       : detailLines
-  ).join(" | ") || rawTitle;
+  ).join(" | ") || rawTitle);
   const riskText = message.toLowerCase();
   const severity = /\b(?:critical|catastrophic|auto[-_\s]?deny|exfil|rm\s+-rf)\b/u.test(riskText)
     ? "critical"
@@ -4077,7 +4097,9 @@ function buildTypedApprovalRequest(message: string): NonNullable<TypedBeforeTool
   return {
     title: truncateApprovalText(rawTitle, 80),
     description: truncateApprovalText(details, 256),
-    severity,
+    // A plain card carries no severity word; everything that reaches a card is
+    // the guard's dangerous tier (catastrophic never gets one): "warning".
+    severity: plainCard !== null ? "warning" : severity,
     // The host's own ceiling (MAX_PLUGIN_APPROVAL_TIMEOUT_MS), matching
     // CARD_TIMEOUT_MS on the Telegram card path. 120s was the old bridge's
     // number and it expired cards the operator was still walking back to.
@@ -4130,10 +4152,11 @@ async function handleTypedBeforeToolCall(
       toolName: event.toolName,
       arguments: event.params ?? {},
       sessionId,
+      ...(typeof ctx?.agentId === "string" ? { agentId: ctx.agentId } : {}),
       ...(attended
         ? {
-            requireApproval: async (message: string) => {
-              throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message));
+            requireApproval: async (message: string, detail?: ApprovalPromptDetail) => {
+              throw new TypedApprovalRequest(message, buildTypedApprovalRequest(message, detail));
             },
           }
         : {}),
@@ -4170,6 +4193,27 @@ async function handleTypedBeforeToolCall(
 
     (logger as any)?.warn?.(`[shieldcortex] before_tool_call error (allowing tool call): ${err instanceof Error ? err.message : err}`);
   }
+}
+
+// ==================== POSTURE SELF-REPORT (#613) ====================
+
+/**
+ * Best-effort process-side posture report. The writer already never throws;
+ * this second guard exists so that no future change to it can reach the gate.
+ * Its return value is deliberately discarded.
+ */
+function reportPosture(input: PostureReportInput): void {
+  try {
+    writePostureSelfReport({ pluginVersion: _version, runtimeVersion: _hostRuntimeVersion, ...input });
+  } catch {
+    // A posture report must never reach a gate decision.
+  }
+}
+
+/** The effective Action Guard policy, minus notify (it can carry secrets). */
+function posturePolicy(interceptorEnabled: boolean, guard: Record<string, unknown> | undefined): Record<string, unknown> {
+  const { notify: _notify, ...rest } = guard ?? {};
+  return { interceptor: interceptorEnabled, actionGuard: rest };
 }
 
 // ==================== PLUGIN EXPORT ====================
@@ -4285,6 +4329,10 @@ export default {
     // package.json sits above the entry path. Absent on a host that does not
     // expose it, which stays UNKNOWN rather than becoming a guess.
     recordHostRuntimeVersion(api);
+
+    // #613: this process loaded the plugin. Its posture is not resolved until
+    // the interceptor is built, and the report says exactly that.
+    reportPosture({ loaded: true, configuredPosture: 'unknown', scanner: 'unknown' });
 
     // --- Interceptor (lazy init) ---
     let interceptorReady: ReturnType<typeof createInterceptor> | null = null;
@@ -4470,7 +4518,10 @@ export default {
           logger: { info: api.logger?.info ?? console.log, warn: (api.logger as any)?.warn ?? console.warn },
         };
 
-        if (!interceptorConfig.enabled) return null;
+        if (!interceptorConfig.enabled) {
+          reportPosture({ configuredPosture: 'intentionally-off', policy: posturePolicy(false, undefined) });
+          return null;
+        }
 
         // Shared in-process defence module (same instance realtime scanning
         // uses — see getDefenceModule). Loaded via a string-concatenated
@@ -4531,6 +4582,12 @@ export default {
             ? ((defenceMod as any).evaluateToolCall as Parameters<typeof createInterceptor>[2] extends { evaluateToolCall?: infer E } ? E : never)
             : undefined,
           broker: resolveBrokerRuntime(defenceMod, interceptorConfig.actionGuard?.broker, api),
+          // #648: the plain-English card summary (what / why / who), from the
+          // same runtime seam. Absent on an older dist: the card keeps its
+          // previous layout.
+          buildApprovalCard: typeof (defenceMod as any)?.buildApprovalCard === 'function'
+            ? (input) => (defenceMod as any).buildApprovalCard(input)
+            : undefined,
           // #233: the read side of conversation taint. Returns null for a clean
           // or unknown session, so the guard behaves exactly as before unless a
           // conversation detection actually happened in THIS session.
@@ -4581,6 +4638,14 @@ export default {
           // itself fails closed on: a lock pins enforcement, gate ignored.
           readiness: buildReadinessRuntime(defenceMod, interceptorConfig.actionGuard?.notify),
           policyLockPresent: inlinePolicyLockPresent,
+        });
+        // #613: what this interceptor was actually built with.
+        const builtGuard = interceptorConfig.actionGuard as Record<string, unknown> | undefined;
+        reportPosture({
+          configuredPosture: !builtGuard?.enabled ? 'intentionally-off' : builtGuard.enforce === false ? 'advisory' : 'enforce',
+          scanner: canRunPipeline ? 'available' : 'degraded',
+          degradedReason: canRunPipeline ? undefined : 'defence-module-unavailable',
+          policy: posturePolicy(true, builtGuard),
         });
         const guardState = !canRunPipeline
           ? 'Action Guard: DEGRADED (WS2 fallback scan only)'
@@ -4640,13 +4705,22 @@ export default {
         // #310: the WHOLE context, not just `sessionId` — resolveHookSessionId
         // also reads `sessionKey`, which is where a cron/heartbeat run's key
         // actually arrives, and that key decides whether a card is minted.
-        return handleTypedBeforeToolCall(event, interceptor, api.logger, ctx);
+        const result = await handleTypedBeforeToolCall(event, interceptor, api.logger, ctx);
+        // #613: after the decision exists, never before; the result is
+        // returned unchanged whatever the report does.
+        if (result && (result as { block?: unknown }).block === true) {
+          reportPosture({ denial: { kind: 'blocked-action', testedPath: testedPath('before_tool_call', event?.toolName) } });
+        } else {
+          reportPosture({ force: false });
+        }
+        return result;
       }, { priority: 80, timeoutMs: 30_000 });
       _beforeToolCallRegistered = true;
       // NOTE: session_end is NOT registered here — it moved out of this guard
       // in #226 and is registered unconditionally below.
     } else {
       api.logger?.info?.('[shieldcortex] interceptor.enabled:false in plugin config — before_tool_call hook not registered');
+      reportPosture({ configuredPosture: 'intentionally-off', policy: posturePolicy(false, undefined) });
     }
 
     // session_end — registered UNCONDITIONALLY (#226).

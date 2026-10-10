@@ -518,10 +518,15 @@ describe('#509 r7 — doctor and `guard readiness` report readiness per surface'
 // ── r8 ─────────────────────────────────────────────────────────────────────
 
 describe('#509 r8 SF2 — CHANGELOG says which surface ignores the gate', () => {
-  it('the Unreleased #509 entry does not say OpenClaw ignores readinessGate; it names Hermes', () => {
+  it('the #509 entry does not say OpenClaw ignores readinessGate; it names Hermes', () => {
+    // Version-agnostic: the entry moves from [Unreleased] into a release
+    // section at every cut, so find it wherever it lives.
     const text = readFileSync(resolve(here, '../../../CHANGELOG.md'), 'utf8');
-    const unreleased = text.slice(text.indexOf('## [Unreleased]'), text.indexOf('\n## [', text.indexOf('## [Unreleased]') + 5));
-    const entry = unreleased.slice(unreleased.indexOf('**#509 Action Guard'), unreleased.indexOf('\n- **', unreleased.indexOf('**#509 Action Guard')));
+    const start = text.indexOf('**#509 Action Guard');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const next = text.indexOf('\n- **', start);
+    const entry = text.slice(start, next === -1 ? undefined : next);
+    expect(entry.length).toBeGreaterThan(0);
     expect(entry).not.toMatch(/OpenClaw plugin ignores `?readinessGate/);
     expect(entry).not.toMatch(/OpenClaw[^.]*enforces from the start/);
     expect(entry).toMatch(/Hermes plugin does not implement[^.]*ignores `?readinessGate`? and enforces from the start/);

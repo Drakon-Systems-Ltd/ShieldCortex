@@ -36,7 +36,7 @@ export function StatCard({ label, value, icon: Icon, trend, accent = 'cyan', cla
       </div>
       <div className={cn('mt-1.5 text-2xl font-semibold tabular-nums', ACCENT_VALUE[accent])}>{value}</div>
       {trend && (
-        <div className="mt-1 flex items-center gap-1 text-[11px] text-[var(--sc-text-muted)]">
+        <div className="mt-1 flex items-center gap-1 text-xs text-[var(--sc-text-muted)]">
           {trend.value >= 0 ? (
             <TrendingUp size={12} aria-hidden className="text-[var(--sc-ok)]" />
           ) : (

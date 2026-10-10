@@ -951,6 +951,9 @@ const DANGEROUS: Pattern[] = [
   // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
   // regardless of the target file, so it is gated on its own.
   { re: /\btruncate\b[^|;&\n]*(?:-s\s*0\b|--size(?:=|\s+)0\b)/i, signal: 'truncate-to-zero' },
+  // #503: database / cloud / infrastructure teardown. Every one of these scored `allow` (benign) — the destruction tiers were filesystem-centric. Command position only, so prose and grep for these words stay quiet; an opening quote counts as a command start so `bash -c` / `ssh host '…'` wrappers are still seen. SQL verbs only behind a database client; DELETE gated only with no WHERE.
+  // #503 ReDoS: A verb's second gap stops at the next copy of that verb (`(?!\sdelete\b)`), so a verb-dense line with no separator is linear, not quadratic; the matches and spans are unchanged, because the greedy gap already picked the last verb before the target. That rule holds only when the verb ends on the binary's own line, so two spellings keep the plain gap: a verb reached through its own newline (the `(?<=\n)` arm), and a newline INSIDE the two-word `s3 rm` (the `(?=[^\S\n]*\n)` arm; the stopping arm takes same-line `[^\S\n]+` only). Each runs at most once per start, so the row stays linear.
+  { re: /(?:^|[;&|(\n"'`]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:[\w.~-]*\/)*(?:(?:psql|mysql|mariadb|sqlite3|sqlcmd|duckdb|clickhouse(?:-client)?|cockroach)\b[^\n]*\b(?:drop\s+(?:database|schema|table)\b|truncate\s+(?:table\s+)?(?!-)[\w."`[\]]|delete\s+from\s+[\w."`[\]]+\s*(?:;|["']|$))|dropdb\b|mysqladmin\b[^|;&\n]*\sdrop\b|mongo(?:sh)?\b[^\n]*(?:dropDatabase|\.drop)\s*\(|redis-cli\b[^|;&\n]*\bflush(?:all|db)\b|(?:terraform|tofu|terragrunt)\b[^|;&\n]*\s(?:destroy\b|(?<=\n)apply\b[^|;&\n]*\s-destroy\b|apply\b(?:(?!\sapply\b)[^|;&\n])*\s-destroy\b)|pulumi\b[^|;&\n]*\s(?:destroy|down)\b|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s(?:ns|namespaces?|pvc?|persistentvolumes?|persistentvolumeclaims?|deploy(?:ments?)?|statefulsets?|sts|nodes?|crds?|customresourcedefinitions?|all)\b(?![-.])|kubectl\b[^|;&\n]*\s(?:(?<=\n)delete\b[^|;&\n]*|delete\b(?:(?!\sdelete\b)[^|;&\n])*)\s--all\b|helm\b[^|;&\n]*\s(?:uninstall|delete)\b|aws\b[^|;&\n]*\s(?:terminate-instances|delete-[\w-]+|rb|(?<=\n)s3\s+rm\b[^|;&\n]*\s--recursive|s3(?=[^\S\n]*\n)\s+rm\b[^|;&\n]*\s--recursive|s3[^\S\n]+rm\b(?:(?!\ss3\s+rm\b)[^|;&\n])*\s--recursive)\b|gcloud\b[^|;&\n]*\sdelete\b|gsutil\b[^|;&\n]*\s(?:rb\b|(?<=\n)rm\b[^|;&\n]*\s-\w*r|rm\b(?:(?!\srm\b)[^|;&\n])*\s-\w*r)|az\b[^|;&\n]*\s(?:group|vm)\s+delete\b|doctl\b[^|;&\n]*\s(?:delete|rm)\b|gh\s+(?:repo\s+delete\b|api\b[^|;&\n]*(?:-X|--method)[\s=]*DELETE\b)|docker(?:-compose)?\b[^|;&\n]*\s(?:system\s+prune|volume\s+(?:prune|rm)|(?<=\n)down\b[^|;&\n]*\s(?:-v|--volumes)\b|down\b(?:(?!\sdown\b)[^|;&\n])*\s(?:-v|--volumes)\b)|(?:flyctl|fly)\s+(?:apps?\s+(?:destroy|delete)|destroy|volumes?\s+(?:destroy|delete)|postgres\s+(?:destroy|delete))\b|heroku\s+(?:apps:destroy|pg:reset)\b|vercel\s+(?:rm|remove)\b|wrangler\s+delete\b)/i, signal: 'destroy-data-or-infra' },
   { re: /\bhistory\s+-c\b|\.bash_history|truncate\b[^|\n]*\.log/i, signal: 'wipe-history-or-logs' },
   // The dotfile here means the FILE, never a property access (issue #165).
   // `process.env`, `import.meta.env` and `env.FOO` are lookups — reading them
@@ -3880,6 +3883,7 @@ const REMEDIATION: Record<string, string> = {
   'recursive-find-delete': 'confirm the target path before deleting — this recursively removes every match under it',
   'recursive-perms-system-dir': 'confirm this is intentional — recursive permission changes on a system directory can break the host',
   'truncate-to-zero': 'confirm the target file before truncating — this discards its contents',
+  'destroy-data-or-infra': 'confirm the target database, cluster or cloud resource before running this — it destroys data or infrastructure that a local undo cannot bring back',
   'dd-overwrite': 'confirm the destination before running dd — it overwrites the target without confirmation',
   'opaque-script-invocation': 'the guard could not read the invoked script, so its contents were not scanned — inspect the file before running it',
   'opaque-command-substitution': 'the guard could not read the file a $(cat …) / $(< …) substitution splices into this command, so that text was not scanned — inspect the file before running it',
@@ -4476,7 +4480,7 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
-  const surface = maskSinkFreeInlinePrograms(execSurface);
+  const surface = maskSinkFreeHeredocBodies(maskSinkFreeInlinePrograms(execSurface));
 
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
@@ -4729,7 +4733,9 @@ function foldScriptSources(
       // FILE, never the invoking command line), and since #522 item A the set
       // of entries that can reach here is bounded by the root-owned lock's
       // ceiling rather than by the same-UID config alone.
-      const nestedOfReviewed = next.lang === 'sh' ? detectScriptInvocations(reviewedScan) : [];
+      const nestedOfReviewed = next.lang === 'sh' || hasShellOutSink(reviewedScan, next.lang, true)
+        ? detectScriptInvocations(reviewedScan)
+        : [];
       if (nestedOfReviewed.length > 0) {
         if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;
         else for (const n of nestedOfReviewed) {
@@ -4742,13 +4748,14 @@ function foldScriptSources(
     }
 
     const scan = reviewedScan;
+    const hasSink = hasShellOutSink(scan, next.lang, true);
     total += src.length;
     if (parts.length > 0) cursor += 1;                  // the '\n' join separator
     regions.push({
       start: cursor,
       end: cursor + scan.length,
       lang: next.lang,
-      hasSink: hasShellOutSink(scan, next.lang, true),
+      hasSink,
       folded: true,
       // #184: path + chain so a match inside this region names its origin.
       sourcePath: next.path,
@@ -4757,9 +4764,16 @@ function foldScriptSources(
     cursor += scan.length;
     parts.push(scan);
 
-    // A non-shell script's own text is not a shell command line, so only a shell
-    // region can name the next script to follow.
-    const nested = next.lang === 'sh' ? detectScriptInvocations(scan) : [];
+    // A non-shell script's own text is not a shell command line, so a SINK-FREE
+    // interpreter region names nothing to follow: it cannot start a process
+    // (#165/#190). One that can shell out does — #661: `os.system('/tmp/p.sh')`
+    // inline folded the payload and blocked, the same line in `run.py` left it
+    // unread, so moving code into a file turned a deny into an allow. The
+    // discovery is the same `detectScriptInvocations` the inline planes use
+    // on an unmasked sink-bearing program, so the three planes agree. Comments
+    // are already blanked from `scan`, so a path mentioned in a docstring is
+    // not followed.
+    const nested = next.lang === 'sh' || hasSink ? detectScriptInvocations(scan) : [];
     if (nested.length > 0) {
       if (next.depth >= MAX_SCRIPT_DEPTH) opaque = true;         // depth exceeded — say so
       else for (const n of nested) {
@@ -5200,6 +5214,153 @@ function outputEscapesToShell(text: string, outFile: string): boolean {
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n([\s\S]*?)(?:\n[ \t]*\2\b|$)/g;
 const HEREDOC_INTERP_TOKEN = /\b(bash|sh|zsh|ksh|dash|python[\d.]*|node|nodejs|ruby|perl|php)\b(?![\w/-])/gi;
 
+/** One heredoc in a command, classified by what consumes its body. */
+interface HeredocBody {
+  /** Byte range of the body within the command text. */
+  start: number;
+  end: number;
+  body: string;
+  /**
+   * Language of the interpreter on the intro line that READS the body —
+   * `null` when no interpreter is named there (the body is data, or lands in
+   * a file something else runs). The LAST interpreter token wins, so
+   * `python3 - <<'PY' | bash` is `sh`: the body's output is shell. Chooses the
+   * SCAN language of a region only — it never decides a mask (#686: masking is
+   * decided by `wholeCommandHeredocProgram` on the whole command).
+   */
+  lang: ScriptLang | null;
+  /** The file the intro line redirects/tees the body or its output to, if any. */
+  outFile: string | null;
+}
+
+/**
+ * #686 — the ONE whole-command shape that earns the #661 relief.
+ *
+ * Three review rounds showed that no intro-line or skeleton heuristic can
+ * bound a shell statement: a multiline substitution, a loop or function body
+ * closed after a filler statement, a quoted or escaped `exec`, an operand after
+ * the delimiter, or a `EOF #` line that `\b` reads as the closer all re-route
+ * or re-target the body while the heuristic still called it inert. Each fix
+ * invited the next (TARS, round 3). So the relief is no longer "a heredoc that
+ * looks isolated"; it is "the entire tool call IS this":
+ *
+ *     [cd <plain-path> &&] [NAME=value …] [env|nohup|nice|command|timeout N]
+ *     <interpreter> [flags-only] [-] <<'DELIM'        ← quoted delimiter, nothing else on the line
+ *     <body>
+ *     DELIM                                            ← the first line that is exactly DELIM
+ *     [whitespace to end of text]
+ *
+ * Anchored at both ends, so there is no prefix, suffix, pipe, redirect,
+ * substitution, group, loop, function or second statement to reason about —
+ * if any of those is present the regex does not match and NOTHING is masked,
+ * which is exactly main's behaviour. A quoted delimiter is required because an
+ * unquoted heredoc body is expanded by the outer shell (`$(…)` and backticks
+ * in it run) and is therefore not provably inert. `<<-` is excluded. Only the
+ * flags in `FLAG_TAKES_VALUE`'s `-W`/`-X` family may take a value, so a script
+ * path can never be read as a flag value. `sudo`/`doas` are not wrappers here:
+ * fail closed, as on main.
+ */
+const WHOLE_COMMAND_HEREDOC_PROGRAM = new RegExp(
+  '^\\s*'                                                             // leading blank lines are fine; after this the intro is ONE line
+  + '(?:cd[ \\t]+[\\w.\\/~-]+[ \\t]*&&[ \\t]*)?'                        // optional `cd plain/path &&`
+  + '(?:[A-Za-z_]\\w*=[\\w.\\/:,-]*[ \\t]+)*'                          // env assignments
+  + '(?:(?:env|nohup|nice|command|timeout[ \\t]+\\d+[smhd]?)[ \\t]+)*'  // transparent wrappers
+  + '(?:[\\w.\\/-]*\\/)?(python[\\d.]*|node|nodejs|ruby|perl|php)'    // (1) interpreter, optional dir
+  + '(?:[ \\t]+(?:-[WX][ \\t]+\\w+|--?[\\w-]+(?:=[^\\s<>|&;()`$\'"]*)?))*'  // flags only; a -W/-X value is on the SAME line
+  + '(?:[ \\t]+-)?'                                                   // the stdin program marker
+  + '[ \\t]+<<([\'"])([A-Za-z_]\\w*)\\2[ \\t]*\\n',                    // (2) quote (3) DELIM, nothing else on the line
+);
+
+/** The masked range and language when `text` is exactly the shape above, else null. */
+function wholeCommandHeredocProgram(text: string): { start: number; end: number; lang: ScriptLang } | null {
+  if (!text.includes('<<')) return null;
+  const m = WHOLE_COMMAND_HEREDOC_PROGRAM.exec(text);
+  if (!m) return null;
+  const delim = m[3];
+  const bodyStart = m[0].length;
+  // The closer is the first line that is EXACTLY the delimiter — not `EOF #`,
+  // not `EOFX`, not an indented one (that needs `<<-`, which is excluded).
+  // Any EARLIER line that merely STARTS with the delimiter (`EOF #`, `EOFX`,
+  // an indented `EOF`) is one the region scanner's `\b` closer would accept
+  // while the shell would not. The two must never disagree about where the
+  // body ends, so such a body earns no relief at all.
+  let at = bodyStart;
+  let bodyEnd = -1;
+  const looksLikeCloser = new RegExp(`^[ \\t]*${delim}\\b`);
+  while (at <= text.length) {
+    const nl = text.indexOf('\n', at);
+    const line = text.slice(at, nl < 0 ? text.length : nl);
+    if (line === delim) { bodyEnd = at; break; }
+    if (looksLikeCloser.test(line)) return null;
+    if (nl < 0) break;
+    at = nl + 1;
+  }
+  if (bodyEnd < 0) return null;                                       // unterminated: not this shape
+  if (!/^\s*$/.test(text.slice(bodyEnd + delim.length))) return null; // anything after the closer: not this shape
+  const lang = langFromInterpreter(commandBaseName(m[1].toLowerCase()));
+  if (lang === 'sh') return null;
+  return { start: bodyStart, end: Math.max(bodyStart, bodyEnd - 1), lang };
+}
+
+/**
+ * Every heredoc in `text`, with the language that consumes it and the file its
+ * intro line writes to. The single definition of "which heredoc does an
+ * interpreter read" (#661): `interpreterHeredocRegions` builds scan regions
+ * from it and `maskSinkFreeHeredocBodies` masks invocation detection with it.
+ * It calls nothing that detects invocations, so it is safe to use from inside
+ * `detectScriptInvocations` — `interpreterHeredocRegions` is not (its #217
+ * pass and `findInterpreterRunFiles` both recurse into detection).
+ */
+function heredocBodies(text: string): HeredocBody[] {
+  if (!text.includes('<<')) return [];
+  const out: HeredocBody[] = [];
+  ANY_HEREDOC_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANY_HEREDOC_RE.exec(text)) !== null) {
+    const lineStart = text.lastIndexOf('\n', m.index) + 1;
+    const introLine = text.slice(lineStart, m.index);
+    const interp = introLine.match(HEREDOC_INTERP_TOKEN);
+    const nl = m[0].indexOf('\n');
+    const start = m.index + nl + 1;
+    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
+    out.push({
+      start,
+      end: start + m[3].length,
+      body: m[3],
+      lang: interp ? langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase())) : null,
+      outFile: outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * #661 — a path literal inside an interpreter-consumed HEREDOC is not a
+ * command, for exactly the reason #190 gives for `python3 -c`: a sink-free
+ * program cannot start a process, so nothing in it is an invocation. The
+ * heredoc plane was left out of that relief, and `splitCommandStatements`
+ * (which breaks on `(`) turned `open('/tmp/x/table.md')` into a statement
+ * whose only token is a path in command position — the DATA FILE was folded
+ * and its prose scanned as shell. Live: a markdown table that LISTED rule
+ * names was denied on those names; the same code as a script file was
+ * allowed, so moving code into a file flipped the verdict.
+ *
+ * Masked only when the ENTIRE command is the one recognised whole-command
+ * shape (`WHOLE_COMMAND_HEREDOC_PROGRAM`, #686: a non-shell interpreter
+ * reading a quoted-delimiter heredoc as its program, with nothing before it
+ * but an optional plain `cd … &&`, nothing on the intro line after the
+ * delimiter, an exact-line closer and nothing after it) and the body has no
+ * shell-out sink. Any other command is left exactly as main scans it. A
+ * shell heredoc IS shell and is never masked. Length-preserving, so every
+ * offset computed against the original text stays valid.
+ */
+function maskSinkFreeHeredocBodies(text: string): string {
+  const h = wholeCommandHeredocProgram(text);
+  if (!h) return text;
+  if (hasShellOutSink(text.slice(h.start, h.end), h.lang)) return text;
+  return text.slice(0, h.start) + ' '.repeat(h.end - h.start) + text.slice(h.end);
+}
+
 function interpreterHeredocRegions(text: string): ScanRegion[] {
   if (!text.includes('<<')) return [];
   const found: Array<{ region: ScanRegion; outFile: string | null }> = [];
@@ -5219,39 +5380,22 @@ function interpreterHeredocRegions(text: string): ScanRegion[] {
    */
   const written: Array<{ start: number; end: number; body: string; outFile: string }> = [];
   const candidateFiles: string[] = [];
-  ANY_HEREDOC_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = ANY_HEREDOC_RE.exec(text)) !== null) {
-    const lineStart = text.lastIndexOf('\n', m.index) + 1;
-    const introLine = text.slice(lineStart, m.index);
-    const interp = introLine.match(HEREDOC_INTERP_TOKEN);
-    const nlEarly = m[0].indexOf('\n');
-    if (!interp) {
+  for (const h of heredocBodies(text)) {
+    if (h.lang === null) {
       // No interpreter here, but if the body lands in a file the second pass
       // may still find one that runs it.
-      const target = heredocOutputFile(introLine + m[0].slice(0, nlEarly + 1));
-      const cleaned = target ? target.replace(/^['"]/, '').replace(/['"]$/, '') : null;
-      if (cleaned) {
-        const s = m.index + nlEarly + 1;
-        written.push({ start: s, end: s + m[3].length, body: m[3], outFile: cleaned, });
-      }
+      if (h.outFile) written.push({ start: h.start, end: h.end, body: h.body, outFile: h.outFile });
       continue;                                         // nothing executes it as code
     }
-    const lang = langFromInterpreter(commandBaseName(interp[interp.length - 1].toLowerCase()));
-    if (lang === 'sh') continue;                        // a shell heredoc IS shell — unchanged
-    const nl = m[0].indexOf('\n');
-    const bodyStart = m.index + nl + 1;
-    const bodyEnd = bodyStart + m[3].length;
+    if (h.lang === 'sh') continue;                      // a shell heredoc IS shell — unchanged
     // Two-step write-then-execute (issue #86.2), which applies to an
     // interpreter heredoc too: `python3 - <<'PY' > gen.sh … PY; bash gen.sh`
     // GENERATES the shell that later runs. The body's own text is then the
     // source of a command after all, so it must keep being scanned as shell.
-    const outFile = heredocOutputFile(introLine + m[0].slice(0, nl + 1));
-    const clean = outFile ? outFile.replace(/^['"]/, '').replace(/['"]$/, '') : null;
-    if (clean) candidateFiles.push(clean);
+    if (h.outFile) candidateFiles.push(h.outFile);
     found.push({
-      region: { start: bodyStart, end: bodyEnd, lang, hasSink: hasShellOutSink(m[3], lang), folded: false },
-      outFile: clean,
+      region: { start: h.start, end: h.end, lang: h.lang, hasSink: hasShellOutSink(h.body, h.lang), folded: false },
+      outFile: h.outFile,
     });
   }
   // #217 second pass: resolve each written-then-executed body by the language of
@@ -6595,6 +6739,7 @@ function dangerActionFor(signals: string[], family: ToolFamily): string {
   if (signals.includes('recursive-find-delete')) return 'delete_file';
   if (signals.includes('recursive-perms-system-dir')) return 'change_permissions';
   if (signals.includes('truncate-to-zero')) return 'delete_file';
+  if (signals.includes('destroy-data-or-infra')) return 'delete_file';
   if (signals.includes('dd-overwrite')) return 'delete_file';
   return ACTION_BY_FAMILY[family];
 }

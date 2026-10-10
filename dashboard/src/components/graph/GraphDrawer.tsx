@@ -113,11 +113,11 @@ function EntityDetails({
 
       {related.size > 0 && (
         <section>
-          <h3 className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--sc-text-muted)]">Related</h3>
+          <h3 className="mb-1.5 text-xs font-medium text-[var(--sc-text-muted)]">Related</h3>
           <div className="space-y-2">
             {[...related.entries()].map(([predicate, entities]) => (
               <div key={predicate}>
-                <div className="font-mono text-[11px] text-[var(--sc-violet)]">{predicate}</div>
+                <div className="font-mono text-xs text-[var(--sc-violet)]">{predicate}</div>
                 <div className="mt-0.5 flex flex-wrap gap-1.5">
                   {entities.map((e) => (
                     <button
@@ -137,7 +137,7 @@ function EntityDetails({
       )}
 
       <section>
-        <h3 className="mb-1.5 text-xs font-medium uppercase tracking-wide text-[var(--sc-text-muted)]">
+        <h3 className="mb-1.5 text-xs font-medium text-[var(--sc-text-muted)]">
           Memories {isFocalLoaded && neighbourhood ? `(${neighbourhood.counts.totalMemories})` : ''}
         </h3>
         {!isFocalLoaded && neighbourhoodStatus === 'error' && (
@@ -155,7 +155,7 @@ function EntityDetails({
           ))}
         </ul>
         {isFocalLoaded && neighbourhood && neighbourhood.counts.omittedMemories > 0 && (
-          <p className="mt-1.5 text-[11px] text-[var(--sc-text-muted)]">
+          <p className="mt-1.5 text-xs text-[var(--sc-text-muted)]">
             {neighbourhood.counts.omittedMemories} more not shown (capped view).
           </p>
         )}
@@ -240,14 +240,14 @@ function MemoryDetails({ memory, compact = false }: { memory: GraphMemory; compa
 
   return (
     <div className={compact ? 'mt-2 space-y-2 border-t border-[var(--sc-border)] pt-2' : 'space-y-3 text-sm'}>
-      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
         <Badge variant="muted">{memory.category}</Badge>
         <Badge variant="muted">{memory.type.replace('_', ' ')}</Badge>
         {memory.status !== 'active' && <Badge variant="amber">{memory.status}</Badge>}
         <span className="tabular-nums text-[var(--sc-text-muted)]">salience {Math.round(memory.salience * 100)}%</span>
         <span className="tabular-nums text-[var(--sc-text-muted)]">trust {Math.round(memory.trust_score * 100)}%</span>
       </div>
-      <div className="text-[11px] text-[var(--sc-text-muted)]">
+      <div className="text-xs text-[var(--sc-text-muted)]">
         {memory.project ? `Project ${memory.project}` : 'No project'} · created {memory.created_at?.slice(0, 10)}
       </div>
       {error ? (

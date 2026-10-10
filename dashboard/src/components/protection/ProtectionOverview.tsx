@@ -1,7 +1,6 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
-import { useState, Suspense } from 'react';
+import { Suspense } from 'react';
 import { PageSkeleton } from '@/components/ds/Skeleton';
 import {
   AlertTriangle,
@@ -19,52 +18,46 @@ import { QuarantineView } from '@/components/quarantine/QuarantineView';
 import { AuditLogView } from '@/components/audit/AuditLogView';
 import { InterceptorEventsView } from '@/components/protection/InterceptorEventsView';
 import { PolicyManagementView } from '@/components/protection/PolicyManagementView';
+import { protectionTabs, protectionTabHref } from '@/components/protection/protection-tabs';
+import { useUrlTab } from '@/hooks/useUrlTab';
+import { useRouter } from 'next/navigation';
 
 type ProtectionTab = 'status' | 'quarantine' | 'audit' | 'intercepts' | 'policies';
 
 const VALID_TABS: ProtectionTab[] = ['status', 'quarantine', 'audit', 'intercepts', 'policies'];
 
 function ProtectionContent() {
-  const searchParams = useSearchParams();
-  const urlTab = searchParams.get('tab');
   // 'dome' is the pre-restyle tab id (brief §8 renamed Iron Dome -> Status);
-  // kept as a redirecting alias so old deep links and bookmarks still land.
-  const normalisedUrlTab = urlTab === 'dome' ? 'status' : urlTab;
-  const validUrlTab =
-    normalisedUrlTab && VALID_TABS.includes(normalisedUrlTab as ProtectionTab) ? (normalisedUrlTab as ProtectionTab) : null;
-  const [userTab, setTab] = useState<ProtectionTab>('status');
-  const tab = validUrlTab ?? userTab;
+  // kept as an alias so old deep links and bookmarks still land.
+  const [tab, setTab] = useUrlTab<ProtectionTab>('/protection', VALID_TABS, 'status', { dome: 'status' });
+  const router = useRouter();
 
   const { data: ironDome } = useIronDomeStatus();
   const { data: auditStats } = useAuditStats('24h');
   const { data: quarantine } = useQuarantine('pending', 10);
   const { data: intercepts } = useInterceptorEvents({ limit: 25 });
 
-  const tabs = [
-    { id: 'status', label: 'Status', icon: <ShieldAlert size={14} /> },
-    { id: 'quarantine', label: 'Quarantine', count: quarantine?.total ?? 0 },
-    { id: 'audit', label: 'Audit' },
-    { id: 'intercepts', label: 'Intercepts', count: intercepts?.summary?.total ?? 0 },
-    { id: 'policies', label: 'Policies', locked: false },
-  ];
+  const tabs = protectionTabs({
+    quarantine: quarantine?.total ?? 0,
+    intercepts: intercepts?.summary?.total ?? 0,
+  });
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-7xl space-y-6 p-6">
         <PageHeader
-          eyebrow="Defence"
           title="Protection"
-          subtitle="Active controls, review queues, and operator policy tuning."
+          subtitle="What your agents tried to do, and what ShieldCortex did about it."
           tabs={tabs}
           activeTab={tab}
-          onTabChange={(id) => setTab(id as ProtectionTab)}
+          onTabChange={(id) => (id === 'scanner' ? router.push(protectionTabHref(id)) : setTab(id as ProtectionTab))}
         />
 
         {/* Stats row */}
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <StatCard
-            label="Iron Dome"
-            value={ironDome?.enabled ? 'Active' : 'Inactive'}
+            label="Protection level"
+            value={ironDome?.enabled ? 'On' : 'Off'}
             icon={Shield}
             accent={ironDome?.enabled ? 'cyan' : 'muted'}
           />
@@ -75,13 +68,13 @@ function ProtectionContent() {
             accent={auditStats?.blockedCount ? 'coral' : 'muted'}
           />
           <StatCard
-            label="Quarantine"
+            label="Held back"
             value={quarantine?.total ?? 0}
             icon={AlertTriangle}
             accent={quarantine?.total ? 'amber' : 'muted'}
           />
           <StatCard
-            label="Intercepts"
+            label="Activity"
             value={intercepts?.summary?.total ?? 0}
             icon={RadioTower}
             accent="cyan"

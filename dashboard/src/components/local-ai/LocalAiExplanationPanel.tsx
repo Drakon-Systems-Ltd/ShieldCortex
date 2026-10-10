@@ -40,7 +40,7 @@ export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplana
           {explanation.riskSignals.map((signal) => (
             <span
               key={signal}
-              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-[11px] text-[var(--sc-text-dim)]"
+              className="rounded bg-[var(--sc-surface-2)] px-2 py-1 text-xs text-[var(--sc-text-dim)]"
             >
               {signal}
             </span>
@@ -52,7 +52,7 @@ export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplana
         <div className="mt-3 space-y-2">
           {explanation.evidence.map((entry, index) => (
             <div key={`${entry.snippet}-${index}`} className="rounded border border-[var(--sc-border)] bg-[var(--sc-surface)] px-2 py-1.5">
-              <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--sc-text-muted)]">{entry.reason}</div>
+              <div className="text-xs text-[var(--sc-text-muted)]">{entry.reason}</div>
               <div className="mt-1 break-words text-xs text-[var(--sc-text)]">&quot;{entry.snippet}&quot;</div>
             </div>
           ))}
@@ -61,7 +61,7 @@ export function LocalAiExplanationPanel({ explanation, actions }: LocalAiExplana
 
       {explanation.nextSteps.length > 0 && (
         <div className="mt-3 border-t border-[var(--sc-border)] pt-3">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--sc-text-muted)]">Next steps</div>
+          <div className="text-xs font-semibold text-[var(--sc-text-muted)]">Next steps</div>
           <div className="mt-2 space-y-1">
             {explanation.nextSteps.map((step) => (
               <div key={step} className="text-xs leading-5 text-[var(--sc-text-dim)]">

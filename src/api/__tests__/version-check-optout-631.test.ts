@@ -11,7 +11,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -34,11 +34,7 @@ jest.unstable_mockModule('child_process', () => {
   return { ...api, default: api };
 });
 
-const SCRATCH_ROOT = existsSync('/home/ubuntu/.hermes/cache/scratch')
-  ? '/home/ubuntu/.hermes/cache/scratch'
-  : tmpdir();
-mkdirSync(SCRATCH_ROOT, { recursive: true });
-const suiteDir = mkdtempSync(join(SCRATCH_ROOT, 'sc631-version-optout-'));
+const suiteDir = mkdtempSync(join(tmpdir(), 'sc631-version-optout-'));
 const originalConfigDir = process.env.SHIELDCORTEX_CONFIG_DIR;
 const originalSkipEnv = process.env.SHIELDCORTEX_SKIP_UPDATE_CHECK;
 

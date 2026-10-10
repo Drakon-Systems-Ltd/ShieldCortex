@@ -44,6 +44,17 @@ except ImportError:  # pragma: no cover - standalone import
     from policy import action_guard_decision, resolve_enforce
     from shadow import detect_shadow, shadow_error_line
 
+# #613 process-side posture self-report. Optional by construction: a copy of
+# the package without posture.py, or one that fails to import it, still
+# registers the gate exactly as before.
+try:
+    from . import posture as _posture
+except Exception:  # pragma: no cover - standalone import or partial copy
+    try:
+        import posture as _posture  # type: ignore[no-redef]
+    except Exception:
+        _posture = None
+
 log = logging.getLogger("shieldcortex.hermes")
 
 
@@ -143,10 +154,36 @@ def _log_shadow_warning():
         pass
 
 
+def _make_reporter(enforce):
+    """#613: the posture reporter, or None. Never raises."""
+    try:
+        return _posture.Reporter(enforce) if _posture is not None else None
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def _report_call(reporter, tool_name, verdict, decision):
+    """#613: record scanner state and blocked actions. Never raises, returns
+    nothing — the decision has already been taken and is returned unchanged."""
+    if reporter is None:
+        return
+    try:
+        available = bool(getattr(verdict, "available", False))
+        reporter.write(
+            scanner="available" if available else "degraded",
+            denial=decision is not None,
+            tool_name=tool_name,
+            reason=None if available else "scanner-unreachable",
+        )
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 def register(ctx):
     """Hermes plugin entrypoint — registers the pre_tool_call gate."""
     _log_shadow_warning()
     enforce = _enforce_default()
+    reporter = _make_reporter(enforce)
 
     def pre_tool_call(tool_name, args, task_id=None, **_kw):
         tool_args = args if isinstance(args, dict) else {}
@@ -187,12 +224,19 @@ def register(ctx):
             )
         else:
             log.info("[shieldcortex] %s on tool %r", verdict.decision, tool_name)
-        return action_guard_decision(
+        decision = action_guard_decision(
             verdict, enforce=enforce,
             fallback_blocked=fallback_blocked, fallback_dangerous=fallback_dangerous,
             fallback_self_protected=fallback_self_protected,
         )
+        _report_call(reporter, tool_name, verdict, decision)
+        return decision
 
     ctx.register_hook("pre_tool_call", pre_tool_call)
+    if reporter is not None:
+        try:
+            reporter.write(force=True)
+        except Exception:  # pragma: no cover - Reporter.write already never raises
+            pass
     log.info("[shieldcortex] Hermes plugin registered (pre_tool_call, enforce=%s)", enforce)
     return {"name": "shieldcortex", "hooks": ["pre_tool_call"], "enforce": enforce}

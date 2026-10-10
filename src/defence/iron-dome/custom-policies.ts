@@ -2,7 +2,7 @@
  * SQLite CRUD for custom Iron Dome policies (Pro feature).
  */
 
-import { getDatabase } from '../../database/init.js';
+import { getDatabase, peekDatabase } from '../../database/init.js';
 
 export interface IronDomePolicy {
   id: number;
@@ -27,6 +27,13 @@ export function getIronDomePolicy(id: number): IronDomePolicy | undefined {
 
 export function getActiveIronDomePolicy(): IronDomePolicy | undefined {
   const db = getDatabase();
+  return db.prepare('SELECT * FROM iron_dome_policies WHERE is_active = 1').get() as IronDomePolicy | undefined;
+}
+
+/** Read the active policy through an already verified handle only. */
+export function peekActiveIronDomePolicy(): IronDomePolicy | undefined {
+  const db = peekDatabase();
+  if (!db) return undefined;
   return db.prepare('SELECT * FROM iron_dome_policies WHERE is_active = 1').get() as IronDomePolicy | undefined;
 }
 

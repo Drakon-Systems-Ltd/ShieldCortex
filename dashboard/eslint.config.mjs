@@ -25,6 +25,24 @@ const eslintConfig = defineConfig([
       }],
     },
   },
+  // Readable type (Opus design §3, for a dyslexic reader): no all-caps
+  // micro-labels, no wide letter-spacing, nothing below the 13px text-xs.
+  {
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/**/__tests__/**", "src/**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": ["error",
+        {
+          selector: "Literal[value=/(^|\\s)(uppercase|tracking-(wide|wider|widest|\\[[0-9.]+em\\])|text-\\[([0-9]|1[0-2])(\\.[0-9]+)?px\\])(\\s|$)/]",
+          message: "Readable type: no uppercase, wide tracking or text below text-xs (Opus §3).",
+        },
+        {
+          selector: "TemplateElement[value.raw=/(^|\\s)(uppercase|tracking-(wide|wider|widest|\\[[0-9.]+em\\])|text-\\[([0-9]|1[0-2])(\\.[0-9]+)?px\\])(\\s|$)/]",
+          message: "Readable type: no uppercase, wide tracking or text below text-xs (Opus §3).",
+        },
+      ],
+    },
+  },
   // Three.js visualization components need relaxed rules
   {
     files: ["src/components/brain/**", "src/components/chip/**"],

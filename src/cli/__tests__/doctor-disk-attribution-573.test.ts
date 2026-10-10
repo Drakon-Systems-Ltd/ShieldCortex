@@ -199,7 +199,8 @@ describe('#573 the remedy follows the measurement, or names no command', () => {
     const result = await checkDiskUsage(scDir, 32 * KB);
 
     expect(result.status).toBe('fail');
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: a three-way tie names all three rather than "no single consumer".
+    expect(result.fix).toMatch(/^Largest measured consumers, tied: /);
     expect(result.fix).toMatch(/inspect before removing anything/);
     expect(result.fix).not.toMatch(DELETION_ADVICE);
     expect(result.fix).not.toMatch(/shieldcortex vacuum|logs prune/);
@@ -217,7 +218,8 @@ describe('#573 the remedy follows the measurement, or names no command', () => {
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(/shieldcortex vacuum/);
     expect(result.fix).not.toMatch(/safe to rotate or clear/);
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: named as the largest term, and still no command for it.
+    expect(result.fix).toMatch(/^Largest measured consumer: everything else/);
   });
 });
 
@@ -269,7 +271,9 @@ describe('#573 blocker 3 — deletion advice is gone, and vacuum needs free page
     expect(result.status).toBe('fail');
     expect(result.fix).not.toMatch(DELETION_ADVICE);
     expect(result.fix).not.toMatch(/shieldcortex vacuum/);
-    expect(result.fix).toMatch(/No single measured consumer/);
+    // #649: the largest term is named even when no command applies (was:
+    // /No single measured consumer/, which hid where the bytes were).
+    expect(result.fix).toMatch(/^Largest measured consumer: the database/);
   });
 
   it('never recommends deletion for a database filled by the threat graph', async () => {

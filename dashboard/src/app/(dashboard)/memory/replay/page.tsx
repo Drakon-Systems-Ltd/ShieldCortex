@@ -15,6 +15,7 @@ import {
   useReplaySessions,
 } from '@/hooks/useReplaySession';
 import { authFetch, readApiError } from '@/lib/auth';
+import { memoryTabHref, memoryTabs } from '@/components/memory/memory-tabs';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -98,6 +99,9 @@ function ReplayContent() {
         eyebrow="Memory"
         title="Replay"
         subtitle="Scrubbable timeline of prompts, tool calls, and responses captured across sessions."
+        tabs={memoryTabs()}
+        activeTab="replay"
+        onTabChange={(id) => { if (id !== 'replay') router.push(memoryTabHref(id)); }}
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => sessionsQuery.refetch()}>
@@ -169,7 +173,7 @@ function ReplayContent() {
       </div>
 
       {/* Keyboard hint */}
-      <div className="text-[10px] font-mono text-[var(--sc-text-dim)]">
+      <div className="text-xs font-mono text-[var(--sc-text-dim)]">
         Shortcuts:
         <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">space</kbd>play/pause ·
         <kbd className="mx-1 rounded border border-[var(--sc-border)] px-1">←</kbd>

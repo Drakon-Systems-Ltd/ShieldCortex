@@ -30,13 +30,13 @@ The defensive root `openclaw.plugin.json` is kept for one release on the main pa
 |------|--------|
 | `llm_input` | **Observation only.** Scans prompts and history through the ShieldCortex defence pipeline. OpenClaw classifies this hook under "conversation observation": it has no blocking contract, so a detection here cannot stop the turn. Threats are audited, alerted, and can forward to ShieldCortex Cloud. |
 | `before_agent_run` | **The conversation firewall's enforcement point.** The documented input gate — it is awaited and its result decides whether the run proceeds. Behaviour is set by `interceptor.conversation.posture` (see [Conversation firewall](#conversation-firewall)). |
-| `llm_output` | Extracts high-signal memories from assistant replies and writes them into ShieldCortex with novelty filtering and dedupe. |
-| `before_tool_call` | Runs the Action Guard before tools execute. Catastrophic shell/file/network/git actions are always blocked. Recognised-dangerous actions are **enforced by default**: attended sessions get an approval prompt, unattended sessions fail closed per `failurePolicy`. Set `actionGuard.enforce: false` to opt down to warn-and-allow, or pre-approve specific operations with `actionGuard.autoApprove`. |
+| `llm_output` | When `openclawAutoMemory` is `true`, extracts high-signal memories from assistant replies and writes them into ShieldCortex with novelty filtering and dedupe (see [Auto-memory](#auto-memory)). |
+| `before_tool_call` | Runs the Action Guard before tools execute. The guard is off unless `actionGuard.enabled` is `true` (see [Configuration](#configuration)). While it is on, catastrophic shell/file/network/git actions are always blocked, and recognised-dangerous actions are **enforced by default**: attended sessions get an approval prompt, unattended sessions fail closed per `failurePolicy`. Set `actionGuard.enforce: false` to opt down to warn-and-allow, or pre-approve specific operations with `actionGuard.autoApprove`. |
 | `session_end` | Resets the interceptor's per-session caches, releases that session's scan-unavailable alert window, and (with `agent_end`) writes `action_guard_degraded` when the Action Guard denied or warned during the session. Registered even when `interceptor.enabled` is `false`, because the conversation gate keeps per-session state regardless. Neither hook can block, approve, or delay a turn. |
 | `agent_end` | Same degraded-run summariser as `session_end`, idempotent with it. Present on OpenClaw 2026.5.7+; an older host warns-and-returns and `session_end` still summarises. |
 | `/shieldcortex-status` | Slash command reporting the plugin's runtime state. |
 
-The scanning and memory paths are fire-and-forget: they do not stall the OpenClaw turn loop if ShieldCortex is unavailable. The Action Guard is the deliberate exception — it gates tool calls inline, and since 4.47.5 a guard that fails to load falls back to a dependency-free scanner that still denies unambiguous catastrophic operations (fail-closed) rather than allowing everything.
+The scanning and memory paths are fire-and-forget: they do not stall the OpenClaw turn loop if ShieldCortex is unavailable. When enabled, the Action Guard is the deliberate exception — it gates tool calls inline, and since 4.47.5 a guard that fails to load falls back to a dependency-free scanner that still denies unambiguous catastrophic operations (fail-closed) rather than allowing everything.
 
 ## Installation
 
@@ -268,7 +268,7 @@ the event.
 
 ## Auto-memory
 
-Auto-memory extraction is enabled when `openclawAutoMemory` is `true`. It complements your existing memory setup with deduplication to avoid noisy repeats.
+Auto-memory extraction is enabled when `openclawAutoMemory` is `true`; when the key is not set it is off. A fresh global, non-CI npm install with no `~/.shieldcortex/config.json` creates one with `openclawAutoMemory: true`, so it is on there; an existing config file is never changed, so an upgrade keeps your values. These config values do not install the plugin or hook, and they do not turn on the Action Guard. It complements your existing memory setup with deduplication to avoid noisy repeats.
 
 You can manage the same settings through ShieldCortex itself:
 
