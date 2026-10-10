@@ -141,7 +141,8 @@ interface RecallCandidate {
   memoryPurpose?: string | null;
   salience?: number | null;
   ftsRank?: number | null;
-  source?: 'fts' | 'category-boost' | null;
+  source?: 'fts' | 'vector' | 'both' | 'category-boost' | null;
+  vectorSimilarity?: number | null;
   effectiveSalience?: number | null;
   injected?: boolean;
   dropReason?: string | null;
@@ -157,6 +158,7 @@ interface RecallEntry {
   candidates?: RecallCandidate[];
   injectedCount?: number | null;
   finalContextChars?: number | null;
+  vectorPlane?: string | null;
 }
 
 function fmtRank(rank: number | null | undefined): string {
@@ -181,6 +183,7 @@ function printRecallEntry(index: number, entry: RecallEntry) {
     entry.project ? `project=${entry.project}` : null,
     entry.sessionId ? `session=${entry.sessionId.slice(0, 8)}` : null,
     entry.minSalience != null ? `min_sal=${entry.minSalience.toFixed(2)}` : null,
+    entry.vectorPlane ? `vector=${entry.vectorPlane}` : null,
   ].filter(Boolean).join(', ');
   if (meta) console.log(`  ${dim}${meta}${reset}`);
   console.log(`  Candidates: ${candidates.length} considered, ${green}${injected.length} injected${reset}, ${dim}${dropped.length} dropped${reset}`);

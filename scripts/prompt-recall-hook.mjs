@@ -26,6 +26,7 @@ import { writeRecallLog } from './lib/recall-log.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
+import { loadQueryEmbedder, embedQuery, vectorCandidates, fuseRecallCandidates, DEFAULT_MIN_SIMILARITY } from './lib/recall-vector.mjs';
 
 // ==================== CONFIG ====================
 
@@ -81,6 +82,9 @@ const RECALL_MAX_BM25 =
   process.env.SHIELDCORTEX_RECALL_MAX_BM25 !== ''
     ? pickNumber('SHIELDCORTEX_RECALL_MAX_BM25', null)
     : null;
+// #717 vector plane: cosine floor for a vector candidate, also the similarity
+// at which the relevance gate judges a row on meaning instead of wording.
+const RECALL_VECTOR_MIN_SIM = pickNumber('SHIELDCORTEX_RECALL_VECTOR_MIN_SIM', DEFAULT_MIN_SIMILARITY);
 
 function loadConfig() {
   try {
@@ -120,10 +124,12 @@ function escapeFts5(query) {
 
 // ==================== RECALL ====================
 
-function recallRelevant(db, project, prompt) {
-  const results = [];
+function recallRelevant(db, project, prompt, queryVector = null) {
+  let results = [];
   const seen = new Set();
   let ftsHits = 0;
+  let vectorHits = 0;
+  let vectorScanError = null;
 
   // 1. FTS5 text search
   const ftsQuery = escapeFts5(prompt);
@@ -162,6 +168,26 @@ function recallRelevant(db, project, prompt) {
       }
     } catch {
       // FTS query failed — continue with fallback
+    }
+  }
+
+  // 1b. #717 vector plane: cosine candidates over the persisted embeddings,
+  // fused with the FTS list by weighted RRF. Only when the caller obtained a
+  // query vector — otherwise this function is byte-for-byte its pre-#717 self.
+  let fused = false;
+  if (queryVector) {
+    try {
+      const vecRows = vectorCandidates(db, project, queryVector, {
+        limit: MAX_RESULTS * 2,
+        minSalience: MIN_SALIENCE,
+        minSimilarity: RECALL_VECTOR_MIN_SIM,
+      });
+      vectorHits = vecRows.length;
+      results = fuseRecallCandidates(results, vecRows, compareRecallResults);
+      for (const row of results) seen.add(row.id);
+      fused = true;
+    } catch (e) {
+      vectorScanError = e?.message ?? 'unknown';
     }
   }
 
@@ -211,7 +237,15 @@ function recallRelevant(db, project, prompt) {
   // v4.23.0: FTS rank primary, salience tiebreaker. The previous raw-salience
   // sort discarded the relevance signal from the FTS5 query above — high-
   // salience-but-off-topic memories bubbled to the top of the recall preamble.
-  results.sort(compareRecallResults);
+  // #717: when fused, the RRF order IS the relevance order; only the
+  // query-agnostic category-boost tail is sorted, and it stays behind it.
+  if (fused) {
+    const ranked = results.filter((r) => r._source !== 'category-boost');
+    const tail = results.filter((r) => r._source === 'category-boost').sort(compareRecallResults);
+    results = [...ranked, ...tail];
+  } else {
+    results.sort(compareRecallResults);
+  }
   // v4.25.1: return the full sorted set alongside the sliced top-N so the
   // recall ring buffer can log which candidates were considered but didn't
   // make the cut. The top-N is the existing public contract.
@@ -224,6 +258,8 @@ function recallRelevant(db, project, prompt) {
     fullSet: results,
     queryTerms: extractQueryTerms(prompt),
     ftsHits,
+    vectorHits,
+    vectorScanError,
   };
 }
 
@@ -315,7 +351,9 @@ function buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDro
       memoryPurpose: row.memory_purpose ?? null,
       salience: typeof row.salience === 'number' ? row.salience : null,
       ftsRank: typeof row.rank === 'number' ? row.rank : null,
+      // #717: 'fts' | 'vector' | 'both' | 'category-boost'
       source: row._source ?? null,
+      vectorSimilarity: typeof row._similarity === 'number' ? Number(row._similarity.toFixed(4)) : null,
       effectiveSalience: computeEffectiveSalience(row),
       injected: wasInjected,
       dropReason,
@@ -323,7 +361,7 @@ function buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDro
   });
 }
 
-function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context, relevanceDrops }) {
+function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context, relevanceDrops, vectorPlane }) {
   try {
     const promptCapped = prompt.length > RECALL_LOG_PROMPT_CAP
       ? prompt.slice(0, RECALL_LOG_PROMPT_CAP) + '…'
@@ -337,6 +375,7 @@ function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, ded
       candidates: buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDrops }),
       injectedCount: injected.length,
       finalContextChars: context ? context.length : 0,
+      vectorPlane: vectorPlane ?? null,
     });
   } catch {
     // Best-effort — recall must not block on log write failures.
@@ -474,9 +513,29 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
+    // #717 vector plane. Fail soft: any reason we cannot get a query vector
+    // leaves recall on the FTS-only path and is recorded in the recall log.
+    let queryVector = null;
+    let vectorPlane;
+    try {
+      const { embed, reason } = await loadQueryEmbedder({ config });
+      if (embed) {
+        const r = await embedQuery(embed, prompt);
+        queryVector = r.vector;
+        vectorPlane = r.reason;
+      } else {
+        vectorPlane = reason;
+      }
+    } catch {
+      vectorPlane = 'unavailable:loader-threw';
+    }
+
     const db = new Database(dbPath, { readonly: true, timeout: 2000 });
-    const { topN, fullSet, queryTerms } = recallRelevant(db, project, prompt);
+    const { topN, fullSet, queryTerms, vectorHits, vectorScanError } = recallRelevant(db, project, prompt, queryVector);
     db.close();
+    if (queryVector) {
+      vectorPlane = vectorScanError ? 'unavailable:scan-failed' : `active:${vectorHits}`;
+    }
 
     // ── P4 recall relevance gate (B9) ───────────────────────────────────
     // Run the term-coverage + relative-BM25 gate over the would-be-injected
@@ -490,6 +549,7 @@ process.stdin.on('end', async () => {
       minTermMatches: RECALL_MIN_TERMS,
       relFactor: RECALL_REL_FACTOR,
       maxBm25: RECALL_MAX_BM25,
+      minSemanticSimilarity: queryVector ? RECALL_VECTOR_MIN_SIM : null,
     });
     const relevanceDrops = new Map(dropped.map((d) => [d.row.id, d.reason]));
     if (dropped.length > 0) {
@@ -522,6 +582,7 @@ process.stdin.on('end', async () => {
           dedupHashes: new Set(),
           context: null,
           relevanceDrops,
+          vectorPlane,
         });
       }
       // #253: zero-yield recall MUST leave a hook_invocations row.
@@ -560,6 +621,7 @@ process.stdin.on('end', async () => {
           dedupHashes,
           context: null,
           relevanceDrops,
+          vectorPlane,
         });
         recordPromptRecallTelemetry({
           startedAt,
@@ -669,6 +731,7 @@ process.stdin.on('end', async () => {
       dedupHashes,
       context,
       relevanceDrops,
+      vectorPlane,
     });
 
     console.log(JSON.stringify(output));
