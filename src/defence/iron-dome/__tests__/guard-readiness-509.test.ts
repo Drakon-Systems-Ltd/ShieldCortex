@@ -649,3 +649,26 @@ describe('#509 evidence pinning and soundness (Addendum 1 C)', () => {
     }
   });
 });
+
+describe('#654 P9 — per-row auditEventId dedup collapses only a physical duplicate', () => {
+  it('distinct ID rows count exactly as before; the same file reached through two dirs counts once', () => {
+    write(calls(600, 6));
+    const once = computeReadiness({ ...WITH_REVIEWED, channel: CHANNEL, paths, now: NOW });
+    const twice = computeReadiness({
+      ...WITH_REVIEWED, channel: CHANNEL, now: NOW,
+      paths: { ...paths, readAuditDirs: [paths.auditDir, paths.auditDir] },
+    });
+    expect(once.intervention.total).toBe(600);
+    expect(twice.intervention.total).toBe(600);
+    expect(twice.intervention.rate).toBeCloseTo(once.intervention.rate as number, 10);
+  });
+
+  it('control: ID-less rows have nothing to join on, so the doubled read counts them twice', () => {
+    write(calls(600, 6).map(({ auditEventId: _id, ...rest }) => rest));
+    const twice = computeReadiness({
+      ...WITH_REVIEWED, channel: CHANNEL, now: NOW,
+      paths: { ...paths, readAuditDirs: [paths.auditDir, paths.auditDir] },
+    });
+    expect(twice.intervention.total).toBe(1200);
+  });
+});

@@ -128,6 +128,25 @@ describe('#372 interceptor — a held card carries its own decision writer', () 
     expect(h.captured[0]!.preview.length).toBeLessThanOrEqual(200);
   });
 
+  it('#654 P5: the decision row mints exactly one ID, shared with its index copy; a second resolution mints none', async () => {
+    const h = makeHarness();
+    const card = await holdCard(h, 'sess-654');
+    // The hold is still unaudited: nothing minted yet.
+    expect(h.captured).toHaveLength(0);
+    card.decisionAudit!('approved_once');
+    card.decisionAudit!('approved_once');
+    expect(h.captured).toHaveLength(1);
+    const id = h.captured[0]!.auditEventId;
+    expect(id).toMatch(/^[a-f0-9]{32}$/);
+    expect(h.indexed.map((e) => e.auditEventId)).toEqual([id]);
+    // Another card's decision on the same interceptor is a separate emission.
+    const other = await holdCard(h, 'sess-654');
+    other.decisionAudit!('approved_once');
+    expect(h.captured).toHaveLength(2);
+    expect(h.captured[1]!.auditEventId).toMatch(/^[a-f0-9]{32}$/);
+    expect(h.captured[1]!.auditEventId).not.toBe(id);
+  });
+
   it.each([
     ['card_denied'],
     ['card_timeout'],

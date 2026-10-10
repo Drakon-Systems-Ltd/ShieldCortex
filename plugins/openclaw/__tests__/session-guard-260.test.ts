@@ -210,4 +210,34 @@ describe('#260 plugin session_end / agent_end summarise the OpenClaw index', () 
     const summaries = rows.filter((r) => r.type === 'session_summary' && r.outcome === 'action_guard_degraded');
     expect(summaries).toHaveLength(1);
   });
+
+  it('#654 H4: a deny after agent_end is still summarised at session_end (HEAD returned existing — RC5)', async () => {
+    const { api, hooks } = makeApi();
+    plugin.register(api);
+
+    const sessionId = 'agent:main:cron:h4';
+    const key = expectedKey(sessionId);
+    const indexFile = join(auditDir, 'session-guard', `${key}.jsonl`);
+    const indexed = () => readFileSync(indexFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      .filter((r) => r.recordKind === 'guard');
+    await hooks.before_tool_call({ toolName: 'Bash', params: { command: 'sudo systemctl stop ssh' } }, { sessionId });
+    hooks.agent_end({ sessionId }, { sessionId });
+    const firstGuards = indexed().length;
+    expect(firstGuards).toBeGreaterThan(0);
+    await hooks.before_tool_call({ toolName: 'Bash', params: { command: 'sudo systemctl stop sshd' } }, { sessionId });
+    const newGuards = indexed().length - firstGuards;
+    expect(newGuards).toBeGreaterThan(0);
+    hooks.session_end({ sessionId }, { sessionId });
+
+    const files = readdirSync(auditDir).filter((f) => /^realtime-.*\.jsonl$/.test(f));
+    const rows = files.flatMap((f) =>
+      readFileSync(join(auditDir, f), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)),
+    );
+    const summaries = rows.filter((r) => r.type === 'session_summary' && r.outcome === 'action_guard_degraded');
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0].guardOutcomeCount).toBe(firstGuards);
+    expect(summaries[1].guardOutcomeCount).toBe(newGuards);
+    // Each receipt lists only what it counted: no identity appears twice.
+    expect(summaries[1].guardFingerprints.some((fp: string) => summaries[0].guardFingerprints.includes(fp))).toBe(false);
+  });
 });

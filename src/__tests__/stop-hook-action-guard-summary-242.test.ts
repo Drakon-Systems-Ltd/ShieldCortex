@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
+import { recordActionGuardDegraded, v1Fingerprint } from '../defence/iron-dome/session-guard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1207,6 +1208,452 @@ describe('stop hook — Action Guard run summary (#242)', () => {
       outcomes: { failure_denied: 1 },
     });
   });
+
+  // ==================== #654: receipts list exactly what they counted ====================
+  describe('#654 guard-event identity, explicit membership and honest coverage (hook half)', () => {
+    const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    const itNonRoot = asRoot ? it.skip : it;
+    const T = '2026-08-11T10:00:00.000Z';
+    const EMIT = { SHIELDCORTEX_TEST_EMIT_GUARD_RESULT: '1' };
+
+    const eid = (n: number) => n.toString(16).padStart(32, '0');
+    const nonceOf = (n: number) => `${n.toString(16).padStart(31, '0')}b`;
+    const auditDir = () => join(home, '.shieldcortex', 'audit');
+    const indexPath = (session: string) => join(auditDir(), 'session-guard', `${sessionKey(session)}.jsonl`);
+
+    function row(session: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+      return {
+        type: 'intercept', origin: 'openclaw-interceptor', sessionKey: sessionKey(session), action: 'require_approval',
+        outcome: 'failure_denied', tool: 'Bash', threats: ['secret-egress'], ts: T, ...over,
+      };
+    }
+    function bound(nonce: string): Record<string, unknown> {
+      return { plane: 'action_guard', gatewayInstanceId: 'gw-fixture', hookName: 'before_tool_call', pluginId: 'shieldcortex-realtime', nonce, seq: 3, actionKey: 'rm <home>' };
+    }
+    /** Append one line; returns its lineIndex (every fixture line is newline-terminated). */
+    function appendTo(file: string, value: Record<string, unknown> | string): number {
+      mkdirSync(dirname(file), { recursive: true });
+      const before = existsSync(file) ? readFileSync(file, 'utf8') : '';
+      appendFileSync(file, `${typeof value === 'string' ? value : JSON.stringify(value)}\n`);
+      return before === '' ? 0 : before.split('\n').length - 1;
+    }
+    function appendIndex(session: string, value: Record<string, unknown>): number {
+      return appendTo(indexPath(session), { recordKind: value.type === 'session_summary' ? 'summary' : 'guard', ...value });
+    }
+    function legacyReceipt(session: string, fps: string[]): Record<string, unknown> {
+      return {
+        type: 'session_summary', origin: 'claude-code-stop-hook', sessionKey: sessionKey(session), action: 'session_health',
+        outcome: 'action_guard_degraded', guardOutcomeCount: fps.length, guardFingerprints: fps, outcomes: {}, threats: [],
+        ts: '2026-08-11T11:00:00.000Z',
+      };
+    }
+    function fingerprintlessSummary(session: string): Record<string, unknown> {
+      return {
+        type: 'session_summary', origin: 'openclaw-session-end', sessionKey: sessionKey(session), action: 'session_health',
+        outcome: 'action_guard_degraded', guardOutcomeCount: 1, outcomes: { failure_denied: 1 }, threats: [],
+        firstGuardTs: T, lastGuardTs: T, ts: '2026-08-11T12:00:00.000Z',
+      };
+    }
+    function rowsIn(file: string): Array<Record<string, any>> {
+      if (!existsSync(file)) return [];
+      return readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((l) => {
+        try { return [JSON.parse(l)]; } catch { return []; }
+      });
+    }
+    function hookReceipts(session: string): Array<Record<string, any>> {
+      if (!existsSync(auditDir())) return [];
+      return readdirSync(auditDir()).filter((f) => /^realtime-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort()
+        .flatMap((f) => rowsIn(join(auditDir(), f)))
+        .filter((r) => r.origin === 'claude-code-stop-hook' && r.sessionKey === sessionKey(session) && r.fingerprintScheme === 2);
+    }
+    function run(session: string, env: Record<string, string> = {}) {
+      const res = runStopHook({ session_id: session }, { env: { ...EMIT, ...env } });
+      expect(res.status).toBe(0);
+      const line = res.stderr.split('\n').find((l) => l.includes('test-guard-result '));
+      expect(line).toBeDefined();
+      return { stderr: res.stderr, result: JSON.parse(line!.slice(line!.indexOf('test-guard-result ') + 'test-guard-result '.length)) };
+    }
+    function expectReceipt(r: Record<string, any>, want: {
+      count: number; basis: Record<string, number>; exact: boolean; reasons?: string[]; coverage?: string;
+    }): void {
+      expect(r.guardOutcomeCount).toBe(want.count);
+      expect(r.guardFingerprints).toHaveLength(want.count);
+      expect(new Set(r.guardFingerprints).size).toBe(want.count);
+      expect(r.identityBasis).toEqual({ eventId: 0, bindingNonce: 0, physicalRow: 0, ...want.basis });
+      expect(r.eventCountExact).toBe(want.exact);
+      if (want.reasons?.length) {
+        expect(r.historicalOverlap).toBe('possible');
+        expect([...r.overlapReasons].sort()).toEqual([...want.reasons].sort());
+      } else {
+        expect(r.historicalOverlap).toBeUndefined();
+        expect(r.overlapReasons).toBeUndefined();
+      }
+      expect(r.coverage).toBe(want.coverage ?? 'bounded-complete');
+      expect(r.coverageGaps).toBeDefined();
+      // Final write outcomes never land on the row.
+      expect(r.receipt).toBeUndefined();
+      expect(r.indexMirror).toBeUndefined();
+    }
+    // HIST1: snapshot after setup; each run may only append.
+    function walk(dir: string, out: string[] = []): string[] {
+      if (!existsSync(dir)) return out;
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        const st = lstatSync(p);
+        if (st.isDirectory()) walk(p, out);
+        else if (st.isFile() && !name.endsWith('.lock') && name !== 'memories.db') out.push(p);
+      }
+      return out;
+    }
+    function snapshot(): Map<string, Buffer> {
+      return new Map(walk(auditDir()).map((p) => [p, readFileSync(p)]));
+    }
+    function expectAppendOnly(snap: Map<string, Buffer>): void {
+      for (const [p, before] of snap) {
+        const after = readFileSync(p);
+        expect(after.subarray(0, before.length).equals(before)).toBe(true);
+      }
+    }
+
+    it('R3: a bound nonce-only row mirrored in realtime and the index counts once, exactly', () => {
+      const r = row('r3-654', bound(nonceOf(1)));
+      appendTo(auditFileForDate('2026-08-10'), r);
+      appendIndex('r3-654', r);
+      const snap = snapshot();
+      const { result } = run('r3-654');
+      expect(result).toMatchObject({ recorded: true, count: 1, receipt: 'primary+index', indexMirror: 'ok', coverage: 'bounded-complete' });
+      expectReceipt(hookReceipts('r3-654')[0], { count: 1, basis: { bindingNonce: 1 }, exact: true });
+      expect(run('r3-654').result).toMatchObject({ recorded: true, count: 0, existing: true, coverage: 'bounded-complete' });
+      expect(hookReceipts('r3-654')).toHaveLength(1);
+      expectAppendOnly(snap);
+    });
+
+    it('R6: distinct IDs with identical content and ts, each mirrored, count 2', () => {
+      for (const n of [2, 3]) {
+        const r = row('r6-654', { auditEventId: eid(n) });
+        appendTo(auditFileForDate('2026-08-10'), r);
+        appendIndex('r6-654', r);
+      }
+      expect(run('r6-654').result.count).toBe(2);
+      expectReceipt(hookReceipts('r6-654')[0], { count: 2, basis: { eventId: 2 }, exact: true });
+    });
+
+    it('R7: a pre-patch receipt with HEAD v1 physical fingerprints for both copies is still honoured', () => {
+      const r = row('r7-654', bound(nonceOf(4)));
+      const rtFile = auditFileForDate('2026-08-10');
+      const rtLine = appendTo(rtFile, r);
+      const ixLine = appendIndex('r7-654', r);
+      appendTo(rtFile, legacyReceipt('r7-654', [v1Fingerprint(r, `${rtFile}:${rtLine}`), v1Fingerprint(r, `${indexPath('r7-654')}:${ixLine}`)]));
+      expect(run('r7-654').result).toMatchObject({ existing: true, count: 0 });
+      expect(hookReceipts('r7-654')).toHaveLength(0);
+    });
+
+    it('R8a: the index copy\'s alias still covers a nonce row whose realtime file was renamed away', () => {
+      const r = row('r8a-654', bound(nonceOf(5)));
+      const rtFile = auditFileForDate('2026-08-10');
+      const rtLine = appendTo(rtFile, r);
+      const ixLine = appendIndex('r8a-654', r);
+      appendIndex('r8a-654', legacyReceipt('r8a-654', [v1Fingerprint(r, `${rtFile}:${rtLine}`), v1Fingerprint(r, `${indexPath('r8a-654')}:${ixLine}`)]));
+      renameSync(rtFile, join(auditDir(), 'archived-2026-08-10.jsonl'));
+      expect(run('r8a-654').result).toMatchObject({ existing: true, count: 0 });
+      expect(hookReceipts('r8a-654')).toHaveLength(0);
+    });
+
+    it('R8b: a reachable legacy receipt that could only have listed the moved copy → recount, disclosed', () => {
+      const r = row('r8b-654', bound(nonceOf(6)));
+      const rtFile = auditFileForDate('2026-08-10');
+      const rtLine = appendTo(rtFile, r);
+      appendIndex('r8b-654', r);
+      appendIndex('r8b-654', legacyReceipt('r8b-654', [v1Fingerprint(r, `${rtFile}:${rtLine}`)]));
+      renameSync(rtFile, join(auditDir(), 'archived-2026-08-10.jsonl'));
+      expect(run('r8b-654').result).toMatchObject({ recorded: true, count: 1, coverage: 'bounded-complete' });
+      expectReceipt(hookReceipts('r8b-654')[0], { count: 1, basis: { bindingNonce: 1 }, exact: true, reasons: ['position-dependent-receipt'] });
+    });
+
+    it('R9 — undetectable overlap (G2): pins limitation; a receipt only in the renamed file leaves no indicator', () => {
+      const r = row('r9-654', bound(nonceOf(7)));
+      const rtFile = auditFileForDate('2026-08-10');
+      const rtLine = appendTo(rtFile, r);
+      appendIndex('r9-654', r);
+      appendTo(rtFile, legacyReceipt('r9-654', [v1Fingerprint(r, `${rtFile}:${rtLine}`)]));
+      renameSync(rtFile, join(auditDir(), 'archived-2026-08-10.jsonl'));
+      expect(run('r9-654').result.count).toBe(1);
+      expectReceipt(hookReceipts('r9-654')[0], { count: 1, basis: { bindingNonce: 1 }, exact: true });
+    });
+
+    it('L1 (pins G1): one ID-less, nonce-less row mirrored counts 2 and is labelled not exact — never merged by content', () => {
+      const r = row('l1-654');
+      appendTo(auditFileForDate('2026-08-10'), r);
+      appendIndex('l1-654', r);
+      expect(run('l1-654').result.count).toBe(2);
+      expectReceipt(hookReceipts('l1-654')[0], { count: 2, basis: { physicalRow: 2 }, exact: false });
+    });
+
+    it('L3: an identical-content ID-less event primary-only plus one index-only count 2', () => {
+      appendTo(auditFileForDate('2026-08-10'), row('l3-654'));
+      appendIndex('l3-654', row('l3-654'));
+      expect(run('l3-654').result.count).toBe(2);
+    });
+
+    it('L4: after the covered realtime file leaves view, a new identical-content row is pending and disclosed', () => {
+      const old = auditFileForDate('2026-08-09');
+      appendTo(old, row('l4-654'));
+      expect(run('l4-654').result.count).toBe(1);
+      renameSync(old, join(auditDir(), 'archived-2026-08-09.jsonl'));
+      appendTo(auditFileForDate('2026-08-10'), row('l4-654'));
+      expect(run('l4-654').result.count).toBe(1);
+      expectReceipt(hookReceipts('l4-654')[1], { count: 1, basis: { physicalRow: 1 }, exact: false, reasons: ['position-dependent-receipt'] });
+    });
+
+    it('L6: lines prepended before a covered ID-less row (fixture-only) → recount, not suppression', () => {
+      const file = auditFileForDate('2026-08-10');
+      appendTo(file, row('l6-654'));
+      expect(run('l6-654').result.count).toBe(1);
+      writeFileSync(file, `${JSON.stringify({ type: 'noise' })}\n${readFileSync(file, 'utf8')}`);
+      expect(run('l6-654').result.count).toBe(1);
+      expectReceipt(hookReceipts('l6-654')[1], { count: 1, basis: { physicalRow: 1 }, exact: false, reasons: ['position-dependent-receipt'] });
+    });
+
+    it('H1: a mirrored fingerprint-less OpenClaw summary never suppresses — late, equal and backdated IDs all count', () => {
+      appendTo(auditFileForDate('2026-08-10'), fingerprintlessSummary('h1-654'));
+      appendIndex('h1-654', fingerprintlessSummary('h1-654'));
+      appendIndex('h1-654', row('h1-654', { auditEventId: eid(10), ts: '2026-08-11T09:59:59.000Z' }));
+      appendIndex('h1-654', row('h1-654', { auditEventId: eid(11), ts: T }));
+      appendIndex('h1-654', row('h1-654', { auditEventId: eid(12), ts: '2026-08-11T10:00:01.000Z' }));
+      expect(run('h1-654').result.count).toBe(3);
+      const r = hookReceipts('h1-654')[0];
+      expectReceipt(r, { count: 3, basis: { eventId: 3 }, exact: true, reasons: ['fingerprintless-summary'] });
+      expect(r.unknownMembershipSummaryRows).toBe(2);
+    });
+
+    it('F-2: the hook keeps its own outcome set — OpenClaw card_* and denied rows are not counted here (G7)', () => {
+      let n = 20;
+      for (const outcome of ['card_denied', 'card_timeout', 'card_cancelled', 'denied']) {
+        appendIndex('f2-654', row('f2-654', { outcome, auditEventId: eid(n += 1) }));
+      }
+      appendIndex('f2-654', row('f2-654', { auditEventId: eid(n += 1) }));
+      expect(run('f2-654').result.count).toBe(1);
+    });
+
+    it('W2: a refused (symlinked) index → primary-only receipt, partial coverage, recovered from realtime', () => {
+      const key = sessionKey('w2-654');
+      const indexDir = join(auditDir(), 'session-guard');
+      mkdirSync(indexDir, { recursive: true });
+      const victim = join(home, 'w2-victim.jsonl');
+      writeFileSync(victim, 'victim-start\n');
+      symlinkSync(victim, join(indexDir, `${key}.jsonl`));
+      appendTo(auditFileForDate('2026-08-10'), row('w2-654', { auditEventId: eid(30) }));
+      const first = run('w2-654').result;
+      expect(first).toMatchObject({ recorded: true, count: 1, receipt: 'primary-only', indexMirror: 'failed', coverage: 'partial' });
+      expect(first.coverageGaps.receipts.index).toBe('refused');
+      expect(first.coverageGaps.guards.index).toBe('refused');
+      expect(readFileSync(victim, 'utf8')).toBe('victim-start\n');
+      const second = run('w2-654').result;
+      expect(second).toMatchObject({ recorded: true, count: 0, existing: true, coverage: 'partial' });
+      expect(hookReceipts('w2-654')).toHaveLength(1);
+    });
+
+    it('W3: a failed primary is never coverage — no mirror is attempted, and the next run summarises once', () => {
+      appendTo(auditFileForDate('2026-08-10'), row('w3-654', { auditEventId: eid(31) }));
+      // Today's primary path is occupied by a directory: the append must fail.
+      mkdirSync(auditFile(), { recursive: true });
+      const first = run('w3-654').result;
+      expect(first).toMatchObject({ recorded: false, count: 1, receipt: 'none', indexMirror: 'not-attempted' });
+      expect(rowsIn(indexPath('w3-654')).filter((r) => r.recordKind === 'summary')).toHaveLength(0);
+      rmSync(auditFile(), { recursive: true, force: true });
+      expect(run('w3-654').result).toMatchObject({ recorded: true, count: 1, receipt: 'primary+index' });
+      expect(run('w3-654').result).toMatchObject({ existing: true, count: 0 });
+    });
+
+    it('B1: a receipt past the 256-file cap is unseen → recount with receipt-coverage-partial', () => {
+      const r = row('b1-654', { auditEventId: eid(40) });
+      appendIndex('b1-654', r);
+      for (let i = 0; i < 257; i += 1) {
+        const date = `2025-${String(1 + Math.floor(i / 28)).padStart(2, '0')}-${String(1 + (i % 28)).padStart(2, '0')}`;
+        appendTo(auditFileForDate(date), i === 0 ? legacyReceipt('b1-654', [v1Fingerprint(r, '')]) : { type: 'noise' });
+      }
+      const { result } = run('b1-654');
+      expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
+      expect(result.coverageGaps.receipts.skippedFiles).toBeGreaterThan(0);
+      expectReceipt(hookReceipts('b1-654')[0], { count: 1, basis: { eventId: 1 }, exact: true, coverage: 'partial', reasons: ['receipt-coverage-partial'] });
+    }, 30_000);
+
+    it('B2: an oversized realtime candidate is skipped (sparse; never read) → partial', () => {
+      appendIndex('b2-654', row('b2-654', { auditEventId: eid(41) }));
+      const big = auditFileForDate('2026-08-09');
+      appendTo(big, { type: 'noise' });
+      truncateSync(big, 64 * 1024 * 1024 + 1);
+      const { result } = run('b2-654');
+      expect(result.coverage).toBe('partial');
+      expect(result.coverageGaps.receipts.skippedFiles).toBe(1);
+    });
+
+    it('B3: an index past its 64 MiB prefix is truncated → partial; the receipt beyond it is unseen', () => {
+      const r = row('b3-654', { auditEventId: eid(42) });
+      appendIndex('b3-654', r);
+      truncateSync(indexPath('b3-654'), 64 * 1024 * 1024 + 16);
+      appendFileSync(indexPath('b3-654'), `\n${JSON.stringify({ recordKind: 'summary', ...legacyReceipt('b3-654', [v1Fingerprint(r, '')]) })}\n`);
+      const { result } = run('b3-654');
+      expect(result.coverageGaps.receipts.index).toBe('truncated');
+      expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
+      expect(hookReceipts('b3-654')[0].overlapReasons).toContain('receipt-coverage-partial');
+    }, 60_000);
+
+    it('B4: a crafted >1 MiB receipt line is dropped, suppresses nothing, and is disclosed', () => {
+      const r = row('b4-654', { auditEventId: eid(43) });
+      appendIndex('b4-654', r);
+      appendIndex('b4-654', { ...legacyReceipt('b4-654', [v1Fingerprint(r, '')]), pad: 'x'.repeat(1024 * 1024 + 8) });
+      const { result } = run('b4-654');
+      expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
+      expect(result.coverageGaps.receipts.droppedLines).toBeGreaterThan(0);
+    });
+
+    it('B5: 16,385 pending IDs → 16,384 + 1 across two receipts, each line under 1 MiB, none twice', () => {
+      const lines: string[] = [];
+      for (let i = 0; i < 16385; i += 1) lines.push(JSON.stringify({ recordKind: 'guard', ...row('b5-654', { auditEventId: eid(100_000 + i) }) }));
+      mkdirSync(join(auditDir(), 'session-guard'), { recursive: true });
+      writeFileSync(indexPath('b5-654'), `${lines.join('\n')}\n`);
+      expect(run('b5-654').result).toMatchObject({ recorded: true, count: 16384, pendingRemaining: 1 });
+      expect(run('b5-654').result).toMatchObject({ recorded: true, count: 1 });
+      const receipts = hookReceipts('b5-654');
+      expect(receipts).toHaveLength(2);
+      expect(receipts[0].pendingRemaining).toBe(1);
+      expect(Buffer.byteLength(JSON.stringify(receipts[0]), 'utf8')).toBeLessThan(1024 * 1024);
+      expect(new Set([...receipts[0].guardFingerprints, ...receipts[1].guardFingerprints]).size).toBe(16385);
+      expect(run('b5-654').result).toMatchObject({ existing: true, count: 0 });
+    }, 60_000);
+
+    it('B6: a hard-linked realtime candidate is refused → partial', () => {
+      appendIndex('b6-654', row('b6-654', { auditEventId: eid(44) }));
+      appendTo(auditFileForDate('2026-08-09'), { type: 'noise' });
+      linkSync(auditFileForDate('2026-08-09'), join(home, 'b6-hardlink'));
+      const { result } = run('b6-654');
+      expect(result.coverage).toBe('partial');
+      expect(result.coverageGaps.receipts.refusedFiles).toBe(1);
+      expect(result.coverageGaps.guards.refusedFiles).toBe(1);
+    });
+
+    itNonRoot('B8: an audit dir that cannot be listed is NEVER bounded-complete (discovery failure)', () => {
+      const r = row('b8-654', { auditEventId: eid(45) });
+      appendIndex('b8-654', r);
+      appendTo(auditFile(), legacyReceipt('b8-654', [v1Fingerprint(r, '')]));
+      mkdirSync(join(auditDir(), '.locks'), { recursive: true });
+      chmodSync(auditDir(), 0o100);
+      let out: ReturnType<typeof run>;
+      try {
+        out = run('b8-654');
+      } finally {
+        chmodSync(auditDir(), 0o700);
+      }
+      expect(out.result.coverageGaps.receipts.auditDir).toBe('failed');
+      expect(out.result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
+      expectReceipt(hookReceipts('b8-654')[0], { count: 1, basis: { eventId: 1 }, exact: true, coverage: 'partial', reasons: ['receipt-coverage-partial'] });
+    });
+
+    it('B9(i): nothing on disk is a KNOWN absence — bounded-complete, never "failed"', () => {
+      const { result } = run('b9-654');
+      expect(result).toMatchObject({ recorded: false, count: 0, coverage: 'bounded-complete' });
+      // The summary lock creates the audit dir before collection, so it is listed (empty).
+      expect(result.coverageGaps.receipts).toMatchObject({ auditDir: 'listed', index: 'absent' });
+    });
+
+    itNonRoot('B10: an index that cannot be inspected is failed, not absent', () => {
+      appendTo(auditFileForDate('2026-08-10'), row('b10-654', { auditEventId: eid(46) }));
+      appendIndex('b10-654', row('b10-654', { auditEventId: eid(46) }));
+      chmodSync(join(auditDir(), 'session-guard'), 0o000);
+      let out: ReturnType<typeof run>;
+      try {
+        out = run('b10-654');
+      } finally {
+        chmodSync(join(auditDir(), 'session-guard'), 0o700);
+      }
+      expect(out.result.coverageGaps.receipts.index).toBe('failed');
+      expect(out.result.coverageGaps.guards.index).toBe('failed');
+      expect(out.result).toMatchObject({ recorded: true, count: 1, coverage: 'partial', receipt: 'primary-only' });
+    });
+
+    it('B11 (receipts pass): a mid-stream failure after a guard line, before a receipt line → recount, disclosed', () => {
+      const r = row('b11-654', { auditEventId: eid(47) });
+      appendIndex('b11-654', r);
+      const file = auditFileForDate('2026-08-09');
+      appendTo(file, r);
+      appendTo(file, { type: 'noise', pad: 'x'.repeat(70 * 1024) });
+      appendTo(file, legacyReceipt('b11-654', [v1Fingerprint(r, '')]));
+      const { result } = run('b11-654', { SHIELDCORTEX_TEST_AUDIT_READ_FAIL: 'receipts:realtime-2026-08-09.jsonl' });
+      expect(result.coverageGaps.receipts.failedFiles).toBe(1);
+      expect(result.coverageGaps.guards.failedFiles).toBe(0);
+      expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
+      expect(hookReceipts('b11-654')[0].overlapReasons).toEqual(['receipt-coverage-partial']);
+    });
+
+    it('B11 (guards pass): a guard source failing mid-stream is a gap, but adds no overlap reason', () => {
+      appendIndex('b11g-654', row('b11g-654', { auditEventId: eid(48) }));
+      const file = auditFileForDate('2026-08-09');
+      appendTo(file, row('b11g-654', { auditEventId: eid(49) }));
+      appendTo(file, { type: 'noise', pad: 'x'.repeat(70 * 1024) });
+      const { result } = run('b11g-654', { SHIELDCORTEX_TEST_AUDIT_READ_FAIL: 'guards:realtime-2026-08-09.jsonl' });
+      expect(result.coverageGaps.guards.failedFiles).toBe(1);
+      expect(result.coverageGaps.receipts.failedFiles).toBe(0);
+      // Rows of the failed source are neither counted nor suppressing: only the index guard.
+      expect(result).toMatchObject({ recorded: true, count: 1, coverage: 'partial' });
+      const r = hookReceipts('b11g-654')[0];
+      expect(r.coverage).toBe('partial');
+      expect(r.overlapReasons).toBeUndefined();
+    });
+
+    it('B12(i): existing travels with partial coverage and one gap line naming kinds and counts, no paths', () => {
+      const r = row('b12-654', { auditEventId: eid(50) });
+      appendIndex('b12-654', r);
+      appendIndex('b12-654', legacyReceipt('b12-654', [v1Fingerprint(r, '')]));
+      const outside = join(home, 'b12-outside.jsonl');
+      writeFileSync(outside, '\n');
+      symlinkSync(outside, auditFileForDate('2026-08-08'));
+      const { result, stderr } = run('b12-654');
+      expect(result).toMatchObject({ recorded: true, count: 0, existing: true, coverage: 'partial' });
+      const gapLines = stderr.split('\n').filter((l) => l.includes('coverage=partial'));
+      expect(gapLines).toHaveLength(1);
+      expect(gapLines[0]).toContain('refusedFiles=1');
+      expect(gapLines[0]).not.toContain(home);
+    });
+
+    it('B12(ii): the no-lock pending result carries coverage; telemetry notes are unchanged', () => {
+      writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({
+        autoMemory: { enableStop: true, stopHookSamplingTurns: 5, stopHookSalienceBypass: false },
+      }));
+      appendTo(auditFileForDate('2026-08-10'), row('b12b-654', { auditEventId: eid(51) }));
+      const lockDir = join(auditDir(), '.locks');
+      mkdirSync(lockDir, { recursive: true });
+      writeFileSync(join(lockDir, `${sessionKey('b12b-654')}.lock`), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+      const { result } = run('b12b-654');
+      expect(result).toMatchObject({ recorded: false, count: 1, pending: true, coverage: 'bounded-complete' });
+      expect(result.coverageGaps.guards).toMatchObject({ auditDir: 'listed', index: 'absent' });
+      expect(hookReceipts('b12b-654')).toHaveLength(0);
+      expect(hookRows()).toEqual([
+        expect.objectContaining({ exit_code: 1, notes: expect.stringContaining('action_guard_degraded_pending') }),
+      ]);
+    });
+
+    it('X1 (reader contract, not reachability): hook then OpenClaw, and OpenClaw then hook, never count an ID twice', () => {
+      for (const order of ['hook-first', 'openclaw-first'] as const) {
+        const session = `x1-${order}`;
+        const r = row(session, { auditEventId: eid(order === 'hook-first' ? 60 : 61) });
+        appendTo(auditFileForDate('2026-08-10'), r);
+        appendIndex(session, r);
+        const openclaw = () => recordActionGuardDegraded(session, { home, salt: SESSION_SALT });
+        if (order === 'hook-first') {
+          expect(run(session).result.count).toBe(1);
+          expect(openclaw()).toMatchObject({ existing: true, count: 0 });
+        } else {
+          expect(openclaw()).toMatchObject({ recorded: true, count: 1 });
+          expect(run(session).result).toMatchObject({ existing: true, count: 0 });
+        }
+        const all = readdirSync(auditDir()).filter((f) => /^realtime-/.test(f)).flatMap((f) => rowsIn(join(auditDir(), f)))
+          .filter((x) => x.type === 'session_summary' && x.sessionKey === sessionKey(session));
+        expect(all).toHaveLength(1);
+      }
+    });
+  });
+
 });
 
 function mkdtempCompat(prefix: string): string {
