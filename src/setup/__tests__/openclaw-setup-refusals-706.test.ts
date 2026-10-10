@@ -122,11 +122,27 @@ describe('OpenClaw native refusals (#706)', () => {
     },
   );
 
-  it('classifies adversarial missing-config output within 50 ms', () => {
-    const output = 'config '.repeat(14_285) + 'no config';
-    const start = performance.now();
-    const refusal = classifyNativePluginInstallFailure('', output, 1);
-    expect(performance.now() - start).toBeLessThan(50);
-    expect(refusal.configMissing).toBe(true);
+  // ~5-8 ms locally for 100 KB; a quadratic regex takes seconds. 300 ms
+  // leaves room for slow CI runners under the full parallel suite.
+  it.each([
+    ['repeated config tokens', 'config '.repeat(14_285) + 'no config', true],
+    ['one long line of config', 'config'.repeat(17_000), false],
+    ['repeated ENOENT', 'ENOENT '.repeat(14_000), false],
+  ] as const)('classifies adversarial output (%s) within 300 ms', (_name, output, missing) => {
+    let best = Infinity;
+    let refusal = classifyNativePluginInstallFailure('', output, 1);
+    for (let i = 0; i < 3; i++) {
+      const start = performance.now();
+      refusal = classifyNativePluginInstallFailure('', output, 1);
+      best = Math.min(best, performance.now() - start);
+    }
+    expect(best).toBeLessThan(300);
+    expect(refusal.configMissing).toBe(missing);
+  });
+
+  it('does not treat a linked-path or duplicate refusal as missing config', () => {
+    expect(classifyNativePluginInstallFailure('', 'Plugin path not found: /p\n', 1).configMissing).toBe(false);
+    expect(classifyNativePluginInstallFailure('', 'plugin already exists\n', 1).configMissing).toBe(false);
+    expect(classifyNativePluginInstallFailure('', 'ENOENT: open /h/.openclaw/openclaw.json\n', 1).configMissing).toBe(true);
   });
 });
