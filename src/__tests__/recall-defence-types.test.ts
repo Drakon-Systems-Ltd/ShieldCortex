@@ -45,6 +45,26 @@ void redactingTrust;
 const droppingTrust: TrustDep = (rows) => rows.map(({ id, content }) => ({ id, content }));
 void droppingTrust;
 
+// A spread that overwrites a promised field with undefined is rejected too: the
+// output contract is the concrete normalised row, not "whatever T the spread keeps".
+// @ts-expect-error metadata: undefined breaks the DefendedRecallRow output promise.
+const undefinedMetaTrust: TrustDep = (rows) => rows.map((r) => ({ ...r, metadata: undefined }));
+// @ts-expect-error trust_score: undefined breaks the DefendedRecallRow output promise.
+const undefinedTrustTrust: TrustDep = (rows) => rows.map((r) => ({ ...r, trust_score: undefined }));
+void undefinedMetaTrust;
+void undefinedTrustTrust;
+
+// The contract is not generic, so a caller's literal content type is widened to
+// string on the way out: a redacting trust layer may replace it.
+type LiteralRow = DefendedRecallRow & { content: 'original' };
+const literalRows: LiteralRow[] = [{ id: 1, content: 'original', trust_score: 1, metadata: {} }];
+const filteredLiteral = redactingTrust(literalRows, 0);
+const widenedContent: string = filteredLiteral[0].content;
+// @ts-expect-error output content is string, not the caller's literal 'original'.
+const keptLiteral: 'original' = filteredLiteral[0].content;
+void widenedContent;
+void keptLiteral;
+
 function makeDeps(): RecallDefenceModules {
   return {
     filterByTrust: filterByTrust as unknown as RecallDefenceModules['filterByTrust'],

@@ -16,11 +16,16 @@ export interface RecallSanitisation { sanitised: string }
 export interface RecallDefenceModules {
   /**
    * Receives the already-normalised rows (trust coalesced, metadata parsed) and
-   * must return a subset of THOSE rows (content may be redacted): the shim keeps
-   * the returned objects as-is, so a callback that rebuilds rows without
-   * trust_score/metadata would break the DefendedRecallRow output promise.
+   * returns the rows to keep, content possibly redacted. The shim keeps the
+   * returned objects as-is, so every returned row must still be a full
+   * DefendedRecallRow (definite trust_score and metadata).
+   *
+   * Deliberately NOT generic: a `<T>(rows: T[]) => T[]` signature would promise
+   * that any caller subtype survives (for example a literal `content`), which a
+   * redacting trust layer does not honour. The contract is the concrete
+   * normalised row in and out.
    */
-  filterByTrust: <T extends DefendedRecallRow>(rows: T[], minTrust: number, project?: string) => T[];
+  filterByTrust: (rows: DefendedRecallRow[], minTrust: number, project?: string) => DefendedRecallRow[];
   sanitiseInput?: (content: string) => RecallSanitisation | null | undefined;
   detectInstructions: (content: string) => { detected: boolean; patterns?: string[] } | null;
   detectEncoding: (content: string) => { detected: boolean; decodedSnippets?: string[]; encodingTypes?: string[] } | null;
