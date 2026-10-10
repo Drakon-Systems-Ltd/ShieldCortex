@@ -2,7 +2,7 @@ import { describe, it, expect } from '@jest/globals';
 import { evaluateToolCall, detectScriptInvocations } from '../tool-action-guard.js';
 
 /**
- * #661 follow-up — v5.6.0 release review (GPT-6 Astra B1, Grok).
+ * #661 follow-up — v5.6.0 release review (GPT-6 Astra, Grok), PR #712.
  *
  * #686 masked a quoted whole-command interpreter heredoc whenever its body had
  * no `SHELL_OUT_SINK` match. The sink knows process starters, not code
@@ -15,10 +15,15 @@ import { evaluateToolCall, detectScriptInvocations } from '../tool-action-guard.
  * resolver. 5.5.0 offered it and scanned its contents. Same for Ruby `load`,
  * Perl `do`, PHP `include` and the rest of the loaders below.
  *
- * A body that loads or evaluates code now keeps its text, so the loaded path
- * reaches the resolver as on 5.5.0. The data-read relief #661 was for is
- * unchanged. Fixtures are BENIGN: discovery (the resolver being asked for the
- * path) is the evidence, not a block on a destructive payload.
+ * Two review rounds each found loader spellings a code-loader deny-list
+ * missed (Perl `do` + newline, Ruby receiver aliases and paren-less `send`,
+ * PHP `EVAL`, Node identifier escapes, `pickle`). A deny-list across five
+ * languages cannot be shown complete, so the heredoc relief is WITHDRAWN for
+ * 5.6.0: a whole-command interpreter heredoc is scanned and folded exactly as
+ * in 5.5.0. It may return only as an allow-list design (mask a body made
+ * solely of recognised data-read idioms); these rows are its required
+ * negative tests. Fixtures are BENIGN: discovery (the resolver being asked
+ * for the path) is the evidence, not a block on a destructive payload.
  *
  * Each loaded path sits where invocation discovery reads a clean token (after
  * an open paren, without a trailing `, arg`). `f('/x', y)` yields `/x,` on
@@ -92,7 +97,7 @@ const LOADERS: Record<string, [string, string, string]> = {
   'node module.createRequire': ['node -', "const { createRequire } = require('module')\ncreateRequire(__filename)(\n'/tmp/fx/l.js')", '/tmp/fx/l.js'],
 };
 
-describe('#661 follow-up — a heredoc that LOADS code is never masked as data', () => {
+describe('#661 follow-up — a heredoc that LOADS code keeps the loaded file discoverable', () => {
   it.each(Object.entries(LOADERS))('%s: the loaded file is offered to the resolver', (_name, [interp, body, path]) => {
     const cmd = heredoc(interp, body);
     expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining([path])]);
@@ -118,20 +123,17 @@ describe('#661 follow-up — controls', () => {
     expect(asked(cmd)).toContain('/tmp/fx/z.py');
   });
 
-  it('a data-read-only body is still masked: nothing folded, nothing asked', () => {
+  it('a data-read-only body is scanned as in 5.5.0: the heredoc relief is withdrawn pending an allow-list design', () => {
     for (const cmd of [
       heredoc('python3 -', "import re, json\ntext = open('/tmp/x/table.md').read()\nrows = json.loads(text) if text.startswith('[') else []\nprint(len(re.findall('x', text)), len(rows))"),
-      heredoc('perl -', "open(F, '/tmp/x/table.md'); print scalar(<F>);"),
       heredoc('ruby -', "puts File.read('/tmp/x/table.md').length"),
     ]) {
-      expect([cmd, detectScriptInvocations(cmd)]).toEqual([cmd, []]);
-      expect([cmd, asked(cmd)]).toEqual([cmd, []]);
+      expect([cmd, detectScriptInvocations(cmd).map(s => s.path)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.md'])]);
+      expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.md'])]);
     }
   });
 
-  it('a Node data-read body that loads fs by bare name is NOT masked: any require/import keeps the full scan', () => {
-    // No module name is exempt: a bare-name test cannot tell fs from
-    // `'fs' && p`, a split child-process name or an aliased vm / module.
+  it('a Node data-read body that loads fs by bare name is scanned in full', () => {
     for (const cmd of [
       heredoc('node -', "const t = require('fs').readFileSync(\n'/tmp/x/table.md')\nconsole.log(t.length)"),
       heredoc('node -', "const fs = require('node:fs')\nconsole.log(fs.readFileSync(\n'/tmp/x/table.md').length)"),
@@ -141,7 +143,7 @@ describe('#661 follow-up — controls', () => {
     }
   });
 
-  it('a Node require of a path or a variable keeps the full scan', () => {
+  it('a Node require of a path or a variable is scanned in full', () => {
     expect(asked(heredoc('node -', "require('./x/fixture.js')"))).toContain('./x/fixture.js');
     expect(asked(heredoc('node -', "const p = '/tmp/fx/q.js'\nrequire(p)\nconsole.log(\n'/tmp/fx/q.js')"))).toContain('/tmp/fx/q.js');
   });
@@ -149,7 +151,7 @@ describe('#661 follow-up — controls', () => {
 
 /**
  * PR #712 round 1 (GPT-6 Astra and Grok reviews): spellings the first
- * predicate missed, so the body was masked and a file 5.5.0 offered was not.
+ * deny-list missed, so the body was masked and a file 5.5.0 offered was not.
  * Each row is a reviewer reproduction; each failed at d23026ca.
  */
 const REVIEW_R1: Record<string, [string, string, string]> = {
@@ -186,14 +188,47 @@ const REVIEW_R1: Record<string, [string, string, string]> = {
   "ruby __send__('load', …)": ['ruby -', "Kernel.__send__('load',\n'/tmp/fx/usend.rb')", '/tmp/fx/usend.rb'],
 };
 
-describe('#661 follow-up — PR #712 round-1 review reproductions are never masked', () => {
+describe('#661 follow-up — PR #712 round-1 review reproductions keep the loaded file discoverable', () => {
   it.each(Object.entries(REVIEW_R1))('%s: the loaded file is offered to the resolver', (_name, [interp, body, path]) => {
     const cmd = heredoc(interp, body);
     expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining([path])]);
   });
 
-  it('a Python member call named load (json.load / pickle.load) is not Ruby load: data-read stays masked', () => {
+  it('a Python json.load data read is scanned as in 5.5.0: the heredoc relief is withdrawn pending an allow-list design', () => {
     const cmd = heredoc('python3 -', "import json\nrows = json.load(open('/tmp/x/table.json'))\nprint(len(rows))");
-    expect([cmd, asked(cmd)]).toEqual([cmd, []]);
+    expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.json'])]);
+  });
+});
+
+/**
+ * PR #712 round 2 (GPT-6 Astra): spellings the second deny-list still missed
+ * at 3e5a9baa, each discovered by 5.5.0. They are why the relief was
+ * withdrawn rather than patched again.
+ */
+const REVIEW_R2: Record<string, [string, string, string]> = {
+  // B1 — Perl `do` with its operand on the next line
+  'B1 perl do, newline, (path)': ['perl -', "do\n('/tmp/fx/a.pl');", '/tmp/fx/a.pl'],
+  'B1 perl do, newline, $variable': ['perl -', "my $f = ('/tmp/fx/a.pl');\ndo\n$f;", '/tmp/fx/a.pl'],
+  "B1 perl do, newline, 'path'": ['perl -', "do\n'/tmp/fx/a.pl';", '/tmp/fx/a.pl'],
+  // B2 — Ruby receiver aliases, parenthesised receivers, dynamic dispatch
+  'B2 ruby Kernel alias .load': ['ruby -', "k = Kernel\nk.load('/tmp/fx/a.rb')", '/tmp/fx/a.rb'],
+  'B2 ruby (Kernel).load': ['ruby -', "(Kernel).load('/tmp/fx/a.rb')", '/tmp/fx/a.rb'],
+  'B2 ruby (self).load': ['ruby -', "(self).load('/tmp/fx/a.rb')", '/tmp/fx/a.rb'],
+  "B2 ruby method('load').call": ['ruby -', "method('load').call('/tmp/fx/a.rb')", '/tmp/fx/a.rb'],
+  "B2 ruby Kernel.send 'load' without parens": ['ruby -', "Kernel.send 'load',\n'/tmp/fx/a.rb'", '/tmp/fx/a.rb'],
+  // B3 — PHP evaluation is case-insensitive
+  'B3 php EVAL': ['php', "<?php EVAL(file_get_contents('/tmp/fx/a.php')); ?>", '/tmp/fx/a.php'],
+  'B3 php Eval': ['php', "<?php Eval(file_get_contents('/tmp/fx/a.php')); ?>", '/tmp/fx/a.php'],
+  // B4 — Node identifier escapes spell require
+  'B4 node req\\u0075ire': ['node -', "req\\u0075ire('/tmp/fx/a.js')", '/tmp/fx/a.js'],
+  'B4 node req\\u{75}ire': ['node -', "req\\u{75}ire('/tmp/fx/a.js')", '/tmp/fx/a.js'],
+  // B5 — pickle deserialisation can call code
+  'B5 python pickle.load': ['python3 -', "import pickle\npickle.load(open(\n'/tmp/fx/a.pkl'\n, 'rb'))", '/tmp/fx/a.pkl'],
+};
+
+describe('#661 follow-up — PR #712 round-2 review reproductions keep the loaded file discoverable', () => {
+  it.each(Object.entries(REVIEW_R2))('%s: the loaded file is offered to the resolver', (_name, [interp, body, path]) => {
+    const cmd = heredoc(interp, body);
+    expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining([path])]);
   });
 });

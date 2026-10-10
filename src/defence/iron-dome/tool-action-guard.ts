@@ -4512,7 +4512,11 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
-  const surface = maskSinkFreeHeredocBodies(maskSinkFreeInlinePrograms(execSurface));
+  // #661 (5.6.0): a whole-command interpreter heredoc is NOT masked here. A
+  // sink-free-body relief was tried and withdrawn before release: no deny-list
+  // of code loaders across five languages could be shown complete, so a body
+  // that loads a file must keep that file discoverable, exactly as in 5.5.0.
+  const surface = maskSinkFreeInlinePrograms(execSurface);
 
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
@@ -5303,8 +5307,7 @@ interface HeredocBody {
    * `null` when no interpreter is named there (the body is data, or lands in
    * a file something else runs). The LAST interpreter token wins, so
    * `python3 - <<'PY' | bash` is `sh`: the body's output is shell. Chooses the
-   * SCAN language of a region only — it never decides a mask (#686: masking is
-   * decided by `wholeCommandHeredocProgram` on the whole command).
+   * SCAN language of a region only — it never decides a mask.
    */
   lang: ScriptLang | null;
   /** The file the intro line redirects/tees the body or its output to, if any. */
@@ -5312,82 +5315,10 @@ interface HeredocBody {
 }
 
 /**
- * #686 — the ONE whole-command shape that earns the #661 relief.
- *
- * Three review rounds showed that no intro-line or skeleton heuristic can
- * bound a shell statement: a multiline substitution, a loop or function body
- * closed after a filler statement, a quoted or escaped `exec`, an operand after
- * the delimiter, or a `EOF #` line that `\b` reads as the closer all re-route
- * or re-target the body while the heuristic still called it inert. Each fix
- * invited the next (TARS, round 3). So the relief is no longer "a heredoc that
- * looks isolated"; it is "the entire tool call IS this":
- *
- *     [cd <plain-path> &&] [NAME=value …] [env|nohup|nice|command|timeout N]
- *     <interpreter> [flags-only] [-] <<'DELIM'        ← quoted delimiter, nothing else on the line
- *     <body>
- *     DELIM                                            ← the first line that is exactly DELIM
- *     [whitespace to end of text]
- *
- * Anchored at both ends, so there is no prefix, suffix, pipe, redirect,
- * substitution, group, loop, function or second statement to reason about —
- * if any of those is present the regex does not match and NOTHING is masked,
- * which is exactly main's behaviour. A quoted delimiter is required because an
- * unquoted heredoc body is expanded by the outer shell (`$(…)` and backticks
- * in it run) and is therefore not provably inert. `<<-` is excluded. Only the
- * flags in `FLAG_TAKES_VALUE`'s `-W`/`-X` family may take a value, so a script
- * path can never be read as a flag value. `sudo`/`doas` are not wrappers here:
- * fail closed, as on main.
- */
-const WHOLE_COMMAND_HEREDOC_PROGRAM = new RegExp(
-  '^\\s*'                                                             // leading blank lines are fine; after this the intro is ONE line
-  + '(?:cd[ \\t]+[\\w.\\/~-]+[ \\t]*&&[ \\t]*)?'                        // optional `cd plain/path &&`
-  + '(?:[A-Za-z_]\\w*=[\\w.\\/:,-]*[ \\t]+)*'                          // env assignments
-  + '(?:(?:env|nohup|nice|command|timeout[ \\t]+\\d+[smhd]?)[ \\t]+)*'  // transparent wrappers
-  + '(?:[\\w.\\/-]*\\/)?(python[\\d.]*|node|nodejs|ruby|perl|php)'    // (1) interpreter, optional dir
-  + '(?:[ \\t]+(?:-[WX][ \\t]+\\w+|--?[\\w-]+(?:=[^\\s<>|&;()`$\'"]*)?))*'  // flags only; a -W/-X value is on the SAME line
-  + '(?:[ \\t]+-)?'                                                   // the stdin program marker
-  + '[ \\t]+<<([\'"])([A-Za-z_]\\w*)\\2[ \\t]*\\n',                    // (2) quote (3) DELIM, nothing else on the line
-);
-
-/** The masked range and language when `text` is exactly the shape above, else null. */
-function wholeCommandHeredocProgram(text: string): { start: number; end: number; lang: ScriptLang } | null {
-  if (!text.includes('<<')) return null;
-  const m = WHOLE_COMMAND_HEREDOC_PROGRAM.exec(text);
-  if (!m) return null;
-  const delim = m[3];
-  const bodyStart = m[0].length;
-  // The closer is the first line that is EXACTLY the delimiter — not `EOF #`,
-  // not `EOFX`, not an indented one (that needs `<<-`, which is excluded).
-  // Any EARLIER line that merely STARTS with the delimiter (`EOF #`, `EOFX`,
-  // an indented `EOF`) is one the region scanner's `\b` closer would accept
-  // while the shell would not. The two must never disagree about where the
-  // body ends, so such a body earns no relief at all.
-  let at = bodyStart;
-  let bodyEnd = -1;
-  const looksLikeCloser = new RegExp(`^[ \\t]*${delim}\\b`);
-  while (at <= text.length) {
-    const nl = text.indexOf('\n', at);
-    const line = text.slice(at, nl < 0 ? text.length : nl);
-    if (line === delim) { bodyEnd = at; break; }
-    if (looksLikeCloser.test(line)) return null;
-    if (nl < 0) break;
-    at = nl + 1;
-  }
-  if (bodyEnd < 0) return null;                                       // unterminated: not this shape
-  if (!/^\s*$/.test(text.slice(bodyEnd + delim.length))) return null; // anything after the closer: not this shape
-  const lang = langFromInterpreter(commandBaseName(m[1].toLowerCase()));
-  if (lang === 'sh') return null;
-  return { start: bodyStart, end: Math.max(bodyStart, bodyEnd - 1), lang };
-}
-
-/**
  * Every heredoc in `text`, with the language that consumes it and the file its
  * intro line writes to. The single definition of "which heredoc does an
  * interpreter read" (#661): `interpreterHeredocRegions` builds scan regions
- * from it and `maskSinkFreeHeredocBodies` masks invocation detection with it.
- * It calls nothing that detects invocations, so it is safe to use from inside
- * `detectScriptInvocations` — `interpreterHeredocRegions` is not (its #217
- * pass and `findInterpreterRunFiles` both recurse into detection).
+ * from it. It calls nothing that detects invocations, so it is recursion-safe.
  */
 function heredocBodies(text: string): HeredocBody[] {
   if (!text.includes('<<')) return [];
@@ -5410,84 +5341,6 @@ function heredocBodies(text: string): HeredocBody[] {
     });
   }
   return out;
-}
-
-/**
- * #661 follow-up (v5.6.0 release review, B1) — a program that LOADS or
- * EVALUATES code is not data-only, whether or not it can start a process.
- * `runpy.run_path('/tmp/f.py')`, Ruby `load('/tmp/f.rb')`, Perl
- * `do('/tmp/f.pl')`, PHP `include('/tmp/f.php')` name no `SHELL_OUT_SINK`, so
- * the heredoc relief blanked them and the loaded file was never offered to the
- * resolver; 5.5.0 folded it. Absence of a sink match is not proof that a
- * program cannot run code.
- *
- * Deliberately GENEROUS, like `SHELL_OUT_SINK`: a false hit only means the
- * body is scanned as 5.5.0 scanned it (fail-closed); a miss lets a loaded file
- * go unread. Language-agnostic — a Python body that happens to say `load(`
- * loses the relief, which is the safe direction.
- */
-const CODE_LOADER = new RegExp([
-  // Python
-  String.raw`\brunpy\b|\bimportlib\b|\bimport_module\b|\bspec_from_\w+|\b\w*(?:File|Source|Extension|Sourceless)Loader\b|\bmachinery\b|\bzipimport\b`,
-  String.raw`\bimp\s*\.\s*load_\w+|\bload_(?:source|module|dynamic|compiled|package)\b|\bexecfile\b|(?<![\w.])compile\s*\(|(?<![\w.])exec\b`,
-  String.raw`\bposix_spawnp?\b|\bos\s*\.\s*(?:spawn\w*|exec\w*)\b|\bctypes\b|\bcffi\b|\bCDLL\b|\bdlopen\b`,
-  String.raw`\bsys\s*\.\s*path\b\s*(?:\.\s*(?:insert|append|extend)\b|\+=|=(?!=)|\[)|\b__builtins__\b|\bbuiltins\b|\bglobals\s*\(\s*\)\s*\[|\b__import__\b`,
-  // Ruby (`load EXPR` with any operand; a `x.load(` member call such as
-  // `json.load(` is not Kernel#load, but `self.load` / `Kernel.load` are)
-  String.raw`(?<![\w.:])load\s*\(|(?<![\w.:])load\s+\S|\b(?:Kernel|self)\s*\.\s*load\b|\bautoload\b|\brequire(?:_relative|_once)?\b`,
-  String.raw`\beval\b|\b(?:instance|class|module)_(?:eval|exec)\b|\bbinding\b|:(?:load|require|eval|system|exec|spawn|syscall)\b|\b(?:public_send|__send__|send)\s*\(`,
-  // Perl (`do FILE` / `do EXPR`, not a `do {` block or a Ruby `do |x|`), `use lib`
-  String.raw`\bdo\b[ \t]*[^\s{|]|\buse\s+lib\b`,
-  // PHP (keywords are case-insensitive: see PHP_LOADER)
-  String.raw`\bassert\s*\(\s*['"]|\bcreate_function\b`,
-  // Node
-  String.raw`\bimport\s*\(|\bimport\s*['"]`,
-  String.raw`\bvm\s*\.\s*(?:run\w*|Script|compileFunction|SourceTextModule)\b|\brunIn(?:New|This)?Context\b|\bFunction\s*\(`,
-  String.raw`child_|\b_process\b|\bprocess\s*\.\s*(?:binding|dlopen|_linkedBinding)\b|\bcreateRequire\b|\bworker_threads\b|\bnew\s+Worker\b`,
-  String.raw`\b(?:globalThis|global|window|self)\s*\[`,
-].join('|'));
-/** PHP `include` / `require` (and `_once`) in any case, whatever follows. */
-const PHP_LOADER = /\b(?:include|require)(?:_once)?\b/i;
-/**
- * Node: ANY `require` or `import`, in any form (call, dynamic, statement).
- * No module name is exempt. A "bare built-in name" exemption could not tell
- * loading fs from loading `'fs' && p`, a concatenated child-process name or
- * an aliased vm / module receiver, so a data-read Node body that opens its
- * file through the fs module is scanned in full (fail-closed; the #661
- * relief is given up there).
- */
-const NODE_LOADER = /\b(?:require|import)\b/;
-function hasCodeLoader(text: string, lang: ScriptLang): boolean {
-  return CODE_LOADER.test(text) || PHP_LOADER.test(text) || (lang === 'node' && NODE_LOADER.test(text));
-}
-
-/**
- * #661 — a path literal inside an interpreter-consumed HEREDOC is not a
- * command, for exactly the reason #190 gives for `python3 -c`: a sink-free
- * program cannot start a process, so nothing in it is an invocation. The
- * heredoc plane was left out of that relief, and `splitCommandStatements`
- * (which breaks on `(`) turned `open('/tmp/x/table.md')` into a statement
- * whose only token is a path in command position — the DATA FILE was folded
- * and its prose scanned as shell. Live: a markdown table that LISTED rule
- * names was denied on those names; the same code as a script file was
- * allowed, so moving code into a file flipped the verdict.
- *
- * Masked only when the ENTIRE command is the one recognised whole-command
- * shape (`WHOLE_COMMAND_HEREDOC_PROGRAM`, #686: a non-shell interpreter
- * reading a quoted-delimiter heredoc as its program, with nothing before it
- * but an optional plain `cd … &&`, nothing on the intro line after the
- * delimiter, an exact-line closer and nothing after it) and the body has no
- * shell-out sink and no code loader (`CODE_LOADER`). Any other command is
- * left exactly as main scans it. A shell heredoc IS shell and is never masked.
- * Length-preserving, so every offset computed against the original text stays
- * valid.
- */
-function maskSinkFreeHeredocBodies(text: string): string {
-  const h = wholeCommandHeredocProgram(text);
-  if (!h) return text;
-  const body = text.slice(h.start, h.end);
-  if (hasShellOutSink(body, h.lang) || hasCodeLoader(body, h.lang)) return text;
-  return text.slice(0, h.start) + ' '.repeat(h.end - h.start) + text.slice(h.end);
 }
 
 function interpreterHeredocRegions(text: string): ScanRegion[] {
