@@ -25,7 +25,7 @@ export const NATIVE_INJECT_CONTRACT = Object.freeze({
 export const INJECT_CANDIDATE_LIMIT = 64;
 
 /** Sensitivity tiers a pack may carry (#542). Anything else is isolated like RESTRICTED. */
-export const SHARED_SENSITIVITY_LEVELS = Object.freeze(new Set(['PUBLIC', 'INTERNAL', 'CONFIDENTIAL']));
+export const SHARED_SENSITIVITY_LEVELS = Object.freeze(new Set(['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL']));
 
 /**
  * One DB row shape for every automatic-start consumer and doctor. Missing

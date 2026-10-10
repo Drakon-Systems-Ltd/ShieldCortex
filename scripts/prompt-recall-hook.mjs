@@ -26,6 +26,7 @@ import { writeRecallLog } from './lib/recall-log.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
+import { detectLane, resolveLanePolicy, applyLanePolicy } from './lib/recall-lane.mjs';
 
 // ==================== CONFIG ====================
 
@@ -323,7 +324,7 @@ function buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDro
   });
 }
 
-function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context, relevanceDrops }) {
+function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context, relevanceDrops, laneInfo }) {
   try {
     const promptCapped = prompt.length > RECALL_LOG_PROMPT_CAP
       ? prompt.slice(0, RECALL_LOG_PROMPT_CAP) + '…'
@@ -337,6 +338,8 @@ function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, ded
       candidates: buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDrops }),
       injectedCount: injected.length,
       finalContextChars: context ? context.length : 0,
+      lane: laneInfo?.lane ?? null,
+      laneSignal: laneInfo?.signal ?? null,
     });
   } catch {
     // Best-effort — recall must not block on log write failures.
@@ -474,9 +477,31 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
+    // #718: lane scoping. Automated lanes share the owner's project key, so
+    // project scope alone let personal memories reach a watchdog probe.
+    const laneInfo = detectLane({ text: prompt, env: process.env });
+    const lanePolicy = resolveLanePolicy(laneInfo.lane, config);
+    if (!lanePolicy.recall) {
+      logRecallRun({
+        prompt, sessionId, project, fullSet: [], topN: [], injected: [],
+        dedupHashes: new Set(), context: null, relevanceDrops: new Map(), laneInfo,
+      });
+      recordPromptRecallTelemetry({ startedAt, notes: `gated:lane-${laneInfo.lane}`, dbPath });
+      process.exit(0);
+    }
+
     const db = new Database(dbPath, { readonly: true, timeout: 2000 });
-    const { topN, fullSet, queryTerms } = recallRelevant(db, project, prompt);
+    let { topN, fullSet, queryTerms } = recallRelevant(db, project, prompt);
     db.close();
+
+    // #718: withheld rows stay in fullSet so the recall log shows them with a
+    // lane_policy:* dropReason; only what the lane may receive is ranked on.
+    const laneDrops = new Map();
+    if (laneInfo.lane !== 'interactive') {
+      const { kept: laneKept, withheld } = applyLanePolicy(fullSet, laneInfo.lane, lanePolicy);
+      for (const w of withheld) laneDrops.set(w.row.id, w.reason);
+      topN = laneKept.slice(0, MAX_RESULTS);
+    }
 
     // ── P4 recall relevance gate (B9) ───────────────────────────────────
     // Run the term-coverage + relative-BM25 gate over the would-be-injected
@@ -491,7 +516,7 @@ process.stdin.on('end', async () => {
       relFactor: RECALL_REL_FACTOR,
       maxBm25: RECALL_MAX_BM25,
     });
-    const relevanceDrops = new Map(dropped.map((d) => [d.row.id, d.reason]));
+    const relevanceDrops = new Map([...dropped.map((d) => [d.row.id, d.reason]), ...laneDrops]);
     if (dropped.length > 0) {
       // Visible in the hook's stderr diagnostics; the structured detail lands
       // in the recall log via relevanceDrops.
@@ -522,6 +547,7 @@ process.stdin.on('end', async () => {
           dedupHashes: new Set(),
           context: null,
           relevanceDrops,
+          laneInfo,
         });
       }
       // #253: zero-yield recall MUST leave a hook_invocations row.
@@ -560,6 +586,7 @@ process.stdin.on('end', async () => {
           dedupHashes,
           context: null,
           relevanceDrops,
+          laneInfo,
         });
         recordPromptRecallTelemetry({
           startedAt,
@@ -669,6 +696,7 @@ process.stdin.on('end', async () => {
       dedupHashes,
       context,
       relevanceDrops,
+      laneInfo,
     });
 
     console.log(JSON.stringify(output));

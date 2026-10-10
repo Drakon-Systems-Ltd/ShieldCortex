@@ -72,6 +72,28 @@ export const CONFIDENTIAL_PATTERNS: SensitivityPattern[] = [
   { pattern: /\b(?:diagnosis|prescription|medication|treatment|symptoms?|blood\s*type|allergies|medical\s*record)\b/gi, label: 'medical-term', weight: 0.65 },
 ];
 
+// ── PERSONAL — private life of the owner and the people around them (#718) ──
+//
+// Two lists, matched together: a PERSONAL verdict needs a person/relationship
+// noun AND a private-life event, OR one of the standalone phrases. Either list
+// alone is too common in engineering text ("parent process", "trip the
+// breaker", "release party") to be a signal on its own. `parent`/`child` are
+// left out of the people list for exactly that reason.
+//
+// Medical vocabulary is NOT here: it already classifies CONFIDENTIAL above,
+// which outranks PERSONAL.
+
+export const PERSONAL_PEOPLE_PATTERN =
+  /\b(?:wife|husband|spouse|partner'?s?|girlfriend|boyfriend|fianc[ée]e?|daughters?|sons|my son|our son|kids|children|baby|toddler|mum|mom|mother|dad|father|parents|grandm(?:a|other)|grandp(?:a|arent)|grandparents|nan|granny|sister|brother|siblings|aunt|uncle|cousin|in-laws?|niece|nephew|family|families)\b/i;
+
+export const PERSONAL_EVENT_PATTERN =
+  /\b(?:surprise|birthday|anniversary|wedding|honeymoon|holiday|vacation|trip|getaway|weekend away|gift|present for|christmas|party|date night|proposal|engag(?:ed|ement)|pregnan(?:t|cy)|due date|funeral|divorce|separation|school run|nursery|playdate|sleepover|half[- ]term)\b/i;
+
+export const PERSONAL_STANDALONE_PATTERNS: SensitivityPattern[] = [
+  { pattern: /\b(?:don'?t|do not|never) (?:tell|mention (?:it |this )?to|let) (?:her|him|them)\b/gi, label: 'personal-secret', weight: 0.75 },
+  { pattern: /\b(?:my|our) (?:wife|husband|partner|girlfriend|boyfriend|fianc[ée]e?|kids|children|daughter|son|mum|mom|dad|family)\b/gi, label: 'personal-relationship', weight: 0.65 },
+];
+
 // ── INTERNAL — org-internal references ──
 
 export const INTERNAL_PATTERNS: SensitivityPattern[] = [
