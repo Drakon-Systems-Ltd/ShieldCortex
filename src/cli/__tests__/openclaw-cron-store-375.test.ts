@@ -79,12 +79,12 @@ function buildCronStore(dbPath: string, shape: StoreShape = {}): void {
   const db = new Database(dbPath);
   try {
     const omit = new Set(shape.omit ?? []);
-    const jobTypes = { ...JOB_COLUMNS, enabled: shape.enabledType ?? JOB_COLUMNS.enabled };
+    const jobTypes: Record<string, string> = { ...JOB_COLUMNS, enabled: shape.enabledType ?? JOB_COLUMNS.enabled };
     if (!omit.has('cron_jobs')) {
       const cols = Object.keys(jobTypes).filter((c) => c !== shape.dropJobColumn);
       db.exec(`CREATE TABLE cron_jobs (${cols.map((c) => `${c} ${jobTypes[c]}`).join(', ')})`);
       for (const job of shape.jobs ?? []) {
-        const values = cols.map((c) => (job as Record<string, unknown>)[c] ?? null);
+        const values = cols.map((c) => (job as unknown as Record<string, unknown>)[c] ?? null);
         db.prepare(
           `INSERT INTO cron_jobs (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
         ).run(...(values as never[]));
@@ -94,7 +94,7 @@ function buildCronStore(dbPath: string, shape: StoreShape = {}): void {
       const cols = Object.keys(RUN_COLUMNS).filter((c) => c !== shape.dropRunColumn);
       db.exec(`CREATE TABLE cron_run_logs (${cols.map((c) => `${c} ${RUN_COLUMNS[c]}`).join(', ')})`);
       for (const run of shape.runs ?? []) {
-        const values = cols.map((c) => (run as Record<string, unknown>)[c] ?? null);
+        const values = cols.map((c) => (run as unknown as Record<string, unknown>)[c] ?? null);
         db.prepare(
           `INSERT INTO cron_run_logs (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
         ).run(...(values as never[]));

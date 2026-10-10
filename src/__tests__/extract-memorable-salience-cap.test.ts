@@ -1,5 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-// @ts-expect-error -- importing a .mjs hook utility
 import { calculateSalience, AUTO_EXTRACT_SALIENCE_CAP } from '../../scripts/lib/extract-memorable-segments.mjs';
 
 /**

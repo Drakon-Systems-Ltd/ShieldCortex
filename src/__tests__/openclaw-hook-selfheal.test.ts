@@ -29,12 +29,25 @@ const BUNDLED_HOOK_DIR = path.join(
 );
 const INSTALLER = path.join(repoRoot, 'src', 'setup', 'openclaw.ts');
 
-/** The real manifest: every file the hook directory actually ships. */
-function manifestOf(dir: string): string[] {
+/**
+ * TypeScript declaration files (`*.d.ts` / `*.d.mts` / `*.d.cts`) are
+ * development-only: they exist so the test-source typecheck (#541) can see
+ * `runtime.mjs`'s shape. Nothing imports them at runtime, and `runtime.d.mts`
+ * references `../../../scripts/lib/...`, which does not exist in an installed
+ * hook directory. They are therefore NOT part of the copied runtime manifest.
+ */
+const DECLARATION_FILE = /\.d\.[cm]?ts$/;
+
+function filesOf(dir: string): string[] {
   return fs
     .readdirSync(dir)
     .filter((f) => fs.statSync(path.join(dir, f)).isFile())
     .sort();
+}
+
+/** The real manifest: every runtime file the hook directory actually ships. */
+function manifestOf(dir: string): string[] {
+  return filesOf(dir).filter((f) => !DECLARATION_FILE.test(f));
 }
 
 /** Pull a `const NAME = [...]` string-array literal out of a source file. */
@@ -71,6 +84,31 @@ describe('cortex-memory self-heal — copied file set is complete (#109)', () =>
     expect(manifest.length).toBeGreaterThanOrEqual(3);
     expect(manifest).toContain('runtime.mjs');
     expect(manifest).toContain('handler.ts');
+  });
+
+  it('only declaration files are excluded, and each declares a shipped runtime module', () => {
+    // The exclusion must not become a loophole for runtime files: every file
+    // left out of the manifest is a declaration whose implementation IS in it.
+    const excluded = filesOf(HOOK_DIR).filter((f) => !manifest.includes(f));
+    expect(excluded).toContain('runtime.d.mts');
+    for (const file of excluded) {
+      expect(file).toMatch(DECLARATION_FILE);
+      const runtime = file.replace(/\.d\.([cm]?)ts$/, (_m, k: string) => `.${k}js`);
+      expect(manifest).toContain(runtime);
+    }
+    expect(DECLARATION_FILE.test('runtime.mjs')).toBe(false);
+    expect(DECLARATION_FILE.test('handler.ts')).toBe(false);
+  });
+
+  it('declaration files are never copied or installed', () => {
+    const consumers = [
+      fs.readFileSync(path.join(HOOK_DIR, 'handler.ts'), 'utf-8'),
+      fs.readFileSync(path.join(BUNDLED_HOOK_DIR, 'handler.ts'), 'utf-8'),
+      fs.readFileSync(INSTALLER, 'utf-8'),
+    ];
+    for (const source of consumers) {
+      expect(parseStringArrayConst(source, 'HOOK_FILES').some((f) => DECLARATION_FILE.test(f))).toBe(false);
+    }
   });
 
   it("handler.ts HOOK_FILES matches the hook directory's actual contents", () => {

@@ -98,7 +98,7 @@ describe('#226 (2) config enabled + package absent is a FAIL, not "not installed
     onDiskVersion: null,
     projectDirs: [],
     liveRoster: [],
-  } as const;
+  } satisfies Partial<ReconcileInput>;
 
   it('fails and names the disagreement between config and disk', () => {
     const v = reconcilePluginState(input({ ...absent, config: { enabled: true, inAllow: true } }));
@@ -262,7 +262,7 @@ describe('#226 (4) a stale project directory is not an installation', () => {
     index: { installRecords: {}, plugins: [], warning: null },
     onDiskVersion: null,
     liveRoster: [],
-  } as const;
+  } satisfies Partial<ReconcileInput>;
 
   it('an empty leftover project dir after uninstall is NOT-INSTALLED, not a fail', () => {
     const v = reconcilePluginState(

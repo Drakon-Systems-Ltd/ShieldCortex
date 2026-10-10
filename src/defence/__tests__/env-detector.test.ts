@@ -26,7 +26,7 @@ jest.unstable_mockModule('../audit/logger.js', () => ({
   attestedFlag: (a: boolean | undefined) => (a === undefined ? null : a ? 1 : 0),
 }));
 
-const { logAudit } = (await import('../audit/logger.js')) as { logAudit: jest.Mock };
+const { logAudit } = (await import('../audit/logger.js')) as unknown as { logAudit: jest.Mock };
 const { resolveToolSource } = await import('../trust/resolve-tool-source.js');
 
 describe('Environment-Based Source Inference', () => {

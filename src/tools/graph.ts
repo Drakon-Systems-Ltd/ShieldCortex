@@ -6,7 +6,6 @@
  */
 
 import { getDatabase } from '../database/init.js';
-// @ts-expect-error — importing a .mjs hook util that has no .d.ts
 import { recallFrameFields } from '../../scripts/lib/recall-frame.mjs';
 
 interface EntityInfo {

@@ -97,7 +97,7 @@ describe('OpenClaw setup', () => {
     } else {
       process.env.SHIELDCORTEX_PLUGIN_SOURCE = originalPluginSource;
     }
-    process.exitCode = previousExitCode;
+    process.exitCode = previousExitCode ?? undefined;
     fs.rmSync(tempHome, { recursive: true, force: true });
     fs.rmSync(tempPluginSource, { recursive: true, force: true });
   });

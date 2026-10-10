@@ -72,6 +72,10 @@ function makeMemory(overrides: Partial<Memory> = {}): Memory {
     cloudExcluded: false,
     memoryPurpose: 'project',
     memoryScope: 'private',
+    hostId: null,
+    agentId: null,
+    captureLayer: null,
+    sourceAttested: null,
     ...overrides,
   };
 }

@@ -196,6 +196,8 @@ describe('stepOpenClawHook — what `update` reports (#574)', () => {
         installed: [openclawHook],
         refreshed: [],
         current: [],
+        vanished: [],
+        degraded: [],
         failed: [],
         backups: [],
         warnings: [],

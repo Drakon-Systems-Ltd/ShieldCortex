@@ -100,7 +100,7 @@ describe('dispatchCanaryThroughInstalledInterceptor — fail-closed orchestratio
     const r = await dispatchCanaryThroughInstalledInterceptor('/home/x', 'p', 'sc-canary-N', {
       resolveInstallPath: () => '/opt/plugin',
       loadInterceptorModule: async () => ({
-        createInterceptor: (_cfg: unknown, _pipe: unknown, opts: { evaluateToolCall?: unknown }) => {
+        createInterceptor: (_cfg: unknown, _pipe: unknown, opts?: { evaluateToolCall?: unknown }) => {
           evaluatorWired = typeof opts?.evaluateToolCall === 'function';
           return {
             handleToolCall: async (ctx: { toolName: string; arguments: Record<string, unknown> }) => {

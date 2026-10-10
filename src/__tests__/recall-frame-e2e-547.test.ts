@@ -53,7 +53,6 @@ import Database from 'better-sqlite3';
 import ts from 'typescript';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-// @ts-expect-error -- importing a .mjs hook utility
 import { recallFrame } from '../../scripts/lib/recall-frame.mjs';
 
 const repoRoot = resolve(process.cwd());

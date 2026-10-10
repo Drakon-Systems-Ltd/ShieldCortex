@@ -19,7 +19,7 @@ import { addMemory, updateMemory } from '../memory/store.js';
 import { detectRelationConflicts } from '../threat-graph/conflict.js';
 import { backfillGraph } from '../graph/backfill.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function tripleFor(subjectName: string, objectName: string) {

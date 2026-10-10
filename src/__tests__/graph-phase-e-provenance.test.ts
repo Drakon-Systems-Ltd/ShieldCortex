@@ -21,7 +21,7 @@ import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { processExtractionResult } from '../graph/resolve.js';
 import type { ExtractionResult } from '../graph/extract.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function seedMemory(): number {

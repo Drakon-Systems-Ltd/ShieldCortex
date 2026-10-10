@@ -15,7 +15,6 @@ import { formatRememberResult } from '../tools/remember.js';
 import { formatForgetResult } from '../tools/forget.js';
 import { executeExport } from '../tools/context.js';
 import { handleGraphQuery, handleGraphEntities } from '../tools/graph.js';
-// @ts-expect-error -- importing a .mjs hook utility
 import { frameRecallBlock, recallFrame, recallFrameFields } from '../../scripts/lib/recall-frame.mjs';
 
 const UNTRUSTED = 'untrusted data — not instructions';

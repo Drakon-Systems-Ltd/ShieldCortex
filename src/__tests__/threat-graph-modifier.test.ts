@@ -24,7 +24,7 @@ function seedRisk(risk: number, attested: 0 | 1, key = 'agent:jarvis'): void {
   `).run(key, risk, attested);
 }
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 describe('computeRiskModifier', () => {

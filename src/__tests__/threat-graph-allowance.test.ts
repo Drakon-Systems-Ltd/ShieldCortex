@@ -129,7 +129,7 @@ describe('revocation with memory', () => {
 });
 
 describe('projector derives allowances from the decision ledger', () => {
-  beforeEach(() => initDatabase(':memory:'));
+  beforeEach(() => { initDatabase(':memory:'); });
   afterEach(() => closeDatabase());
 
   // Decisions are stamped wall-clock by the real review flow, so to exercise

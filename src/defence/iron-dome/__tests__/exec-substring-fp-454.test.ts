@@ -61,7 +61,7 @@ const SUBSTRING_ONLY = [
 describe('#454 — a substring is not a contract', () => {
   it.each(SUBSTRING_ONLY)(
     '%s is exec-WEIGHTED but not exec-SCHEMA'.concat(' [%s in %s]'),
-    (tool) => {
+    (tool, _substring, _sample) => {
       // The weighting is deliberate and unchanged: args are still read as exec.
       expect(classifyFamily(tool)).toBe('exec');
       // The contract is not: a bare substring must not pick the closed key-set.
@@ -69,7 +69,7 @@ describe('#454 — a substring is not a contract', () => {
     },
   );
 
-  it.each(SUBSTRING_ONLY)('%s no longer denies an ordinary field', (tool) => {
+  it.each(SUBSTRING_ONLY)('%s no longer denies an ordinary field', (tool, _substring, _sample) => {
     const v = evaluateToolCall(tool, { title: 'x', someHostField: 'y', another: 42 });
     expect(v.decision).toBe('allow');
     expect(v.action).not.toBe('invalid_tool_input');

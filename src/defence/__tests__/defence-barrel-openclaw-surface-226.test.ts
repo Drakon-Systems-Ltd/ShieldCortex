@@ -69,7 +69,7 @@ describe('#226 webhookSecret survives normalisation under THAT NAME', () => {
     expect(cfg.timeoutMs).toBe(8_000);
     // The bug, pinned by name: `secret` is not and has never been the field.
     // A mirror that reads it gets `undefined` and signs nothing.
-    expect((cfg as Record<string, unknown>).secret).toBeUndefined();
+    expect((cfg as unknown as Record<string, unknown>).secret).toBeUndefined();
   });
 
   it('a config that arms notify without a key is reported as keyless, not as signed', () => {

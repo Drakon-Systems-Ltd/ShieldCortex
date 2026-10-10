@@ -33,6 +33,7 @@ import {
   computeReadiness,
   currentReadinessPin,
   describeHumanChannel,
+  type HumanChannel,
   initReadinessTransitions,
   isDemoted,
   previewMode,
@@ -116,7 +117,7 @@ function auditRows(): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 const record = () => readTransitionRecord(transitionsPathFor(paths));
-const resolve = (now: number, channel = CHANNEL) => resolveReadiness({ ...WITH_REVIEWED, channel, paths, now });
+const resolve = (now: number, channel: HumanChannel = CHANNEL) => resolveReadiness({ ...WITH_REVIEWED, channel, paths, now });
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'sc-readiness-r3-'));

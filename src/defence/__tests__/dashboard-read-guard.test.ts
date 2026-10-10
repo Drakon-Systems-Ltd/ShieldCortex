@@ -251,7 +251,7 @@ describe('deepRedactRestrictedContent (HTTP response interceptor core)', () => {
       s: new Set<unknown>([restricted, 'x']),
       buf,
       u8,
-    }) as { m: Record<string, unknown>; s: unknown[]; buf: Buffer; u8: Uint8Array };
+    }) as unknown as { m: Record<string, unknown>; s: unknown[]; buf: Buffer; u8: Uint8Array };
     expect((out.m.row as Memory).content).toBe(RESTRICTED_CONTENT_PLACEHOLDER);
     expect(out.m.n).toBe(1);
     expect(Array.isArray(out.s)).toBe(true);

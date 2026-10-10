@@ -1,5 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-// @ts-expect-error -- importing a .mjs hook utility
 import { compareRecallResults } from '../../scripts/lib/recall-rank.mjs';
 
 /**

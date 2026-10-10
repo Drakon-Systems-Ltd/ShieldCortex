@@ -483,7 +483,7 @@ describeWithHermes('the staged tree is durable before it is reachable (r2 blocke
     // rename that empties `plugins/` can reach the medium before either name
     // does. Round 3 flushed neither.
     const backups = path.join(hermes, 'backups');
-    const before = new Set(atFirstRename ?? []);
+    const before: Set<string> = new Set(atFirstRename ?? []);
     expect(before.has(path.join(backups, `shieldcortex-preupdate-${STAMP}`))).toBe(true);
     expect(before.has(backups)).toBe(true);
     expect(before.has(hermes)).toBe(true);

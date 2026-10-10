@@ -80,7 +80,7 @@ async function withConsole(fn: () => Promise<void>): Promise<Captured & { exitCo
     process.stdout.write = origOut;
     process.stderr.write = origErr;
     process.exit = origExit;
-    process.exitCode = prevExit;
+    process.exitCode = prevExit ?? undefined;
   }
 }
 
@@ -124,7 +124,7 @@ describe('#577 — shieldcortex update --help never upgrades', () => {
 
   for (const flag of ['--help', '-h']) {
     it(`${flag} prints usage, exits 0, and calls no install/launch/fetch dependency`, async () => {
-      const run = jest.fn(async () => {});
+      const run = jest.fn(async (_options?: unknown) => {});
       const s = sink();
       const { exitCode } = await withConsole(async () => {
         await handleUpdateCommand([flag], { run, env: {}, log: s.log, error: s.error });
@@ -144,7 +144,7 @@ describe('#577 — shieldcortex update --help never upgrades', () => {
   });
 
   it('an unknown flag exits 2 with the error plus usage on stderr and upgrades nothing', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const s = sink();
     const { exitCode } = await withConsole(async () => {
       await handleUpdateCommand(['--bogus'], { run, env: {}, log: s.log, error: s.error });
@@ -157,7 +157,7 @@ describe('#577 — shieldcortex update --help never upgrades', () => {
   });
 
   it('an extra positional arg exits 2 — `update 5.3.0` is not a version selector', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const s = sink();
     const { exitCode } = await withConsole(async () => {
       await handleUpdateCommand(['5.3.0'], { run, env: {}, log: s.log, error: s.error });
@@ -207,7 +207,7 @@ describe('#577 — shieldcortex update --help never upgrades', () => {
     // [dist/index.js, 'update', ...flags] — the child re-enters the dispatcher,
     // which hands argv.slice(3) to the parser.
     expect(launched[1]).toBe('update');
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const s = sink();
     await withConsole(async () => {
       await handleUpdateCommand(launched.slice(2), { run, env: {}, log: s.log, error: s.error });
@@ -224,7 +224,7 @@ describe('#577 — shieldcortex update --help never upgrades', () => {
 
 describe('#577 — shieldcortex repair --help never touches the install', () => {
   it('--help prints usage and never reaches the engine check', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const { out, err, exitCode } = await withConsole(async () => {
       await runRepair(['--help'], { run });
     });
@@ -236,7 +236,7 @@ describe('#577 — shieldcortex repair --help never touches the install', () => 
   });
 
   it('an unknown argument exits 2 and repairs nothing', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const { out, err, exitCode } = await withConsole(async () => {
       await runRepair(['--bogus'], { run });
     });
@@ -247,7 +247,7 @@ describe('#577 — shieldcortex repair --help never touches the install', () => 
   });
 
   it('no arguments still repairs', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     await withConsole(async () => { await runRepair([], { run }); });
     expect(run).toHaveBeenCalledTimes(1);
     expect(REPAIR_HELP).toContain('Usage: shieldcortex repair');
@@ -256,7 +256,7 @@ describe('#577 — shieldcortex repair --help never touches the install', () => 
 
 describe('#577 — shieldcortex migrate --help never migrates', () => {
   it('--help prints usage and rewrites no settings, database or CLAUDE.md', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const { out, exitCode } = await withConsole(async () => {
       await handleMigrateCommand(['--help'], { run });
     });
@@ -268,7 +268,7 @@ describe('#577 — shieldcortex migrate --help never migrates', () => {
   });
 
   it('an unknown argument exits 2 and migrates nothing', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const { err, exitCode } = await withConsole(async () => {
       await handleMigrateCommand(['--bogus'], { run });
     });
@@ -278,7 +278,7 @@ describe('#577 — shieldcortex migrate --help never migrates', () => {
   });
 
   it('no arguments still migrates', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     await withConsole(async () => { await handleMigrateCommand([], { run }); });
     expect(run).toHaveBeenCalledTimes(1);
   });
@@ -286,7 +286,7 @@ describe('#577 — shieldcortex migrate --help never migrates', () => {
 
 describe('#577 — shieldcortex uninstall --help removes nothing', () => {
   it('--help prints usage listing every honoured flag, and never uninstalls', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const out: string[] = [];
     const err: string[] = [];
     const { exitCode } = await withConsole(async () => {
@@ -302,7 +302,7 @@ describe('#577 — shieldcortex uninstall --help removes nothing', () => {
   });
 
   it('an unknown argument exits 2 and removes nothing', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     const err: string[] = [];
     const { exitCode } = await withConsole(async () => {
       await handleUninstallCommand(['--bogus'], { run, log: () => {}, error: (m) => err.push(m) });
@@ -313,7 +313,7 @@ describe('#577 — shieldcortex uninstall --help removes nothing', () => {
   });
 
   it('the honoured flags still reach uninstallAll', async () => {
-    const run = jest.fn(async () => {});
+    const run = jest.fn(async (_options?: unknown) => {});
     await withConsole(async () => {
       await handleUninstallCommand(['--deep', '--keep-logs', '--no-gateway-restart', '--confirm'], { run });
     });
@@ -323,7 +323,7 @@ describe('#577 — shieldcortex uninstall --help removes nothing', () => {
 
 describe('#577 — shieldcortex hermes install --help installs nothing', () => {
   it('a help flag after the verb prints usage and never copies the plugin', async () => {
-    const install = jest.fn(async () => {});
+    const install = jest.fn(async (_options?: unknown) => {});
     const { out, exitCode } = await withConsole(async () => {
       await handleHermesCommand('install', ['--help'], { install });
     });
@@ -334,7 +334,7 @@ describe('#577 — shieldcortex hermes install --help installs nothing', () => {
   });
 
   it('`hermes --help` prints usage and exits 0 rather than the old usage+exit 1', async () => {
-    const install = jest.fn(async () => {});
+    const install = jest.fn(async (_options?: unknown) => {});
     const { out, exitCode } = await withConsole(async () => {
       await handleHermesCommand('--help', [], { install });
     });
@@ -344,7 +344,7 @@ describe('#577 — shieldcortex hermes install --help installs nothing', () => {
   });
 
   it('the bare verb still installs', async () => {
-    const install = jest.fn(async () => {});
+    const install = jest.fn(async (_options?: unknown) => {});
     await withConsole(async () => { await handleHermesCommand('install', [], { install }); });
     expect(install).toHaveBeenCalledTimes(1);
   });
@@ -356,7 +356,7 @@ describe('#577 — shieldcortex hermes install --help installs nothing', () => {
 
 describe('#577 — shieldcortex openclaw install --help installs nothing', () => {
   it('a help flag after the verb prints usage and never installs the hook or plugin', async () => {
-    const install = jest.fn(async () => {});
+    const install = jest.fn(async (_options?: unknown) => {});
     const { out, exitCode } = await withConsole(async () => {
       await handleOpenClawCommand('install', ['--help'], { install });
     });
@@ -367,7 +367,7 @@ describe('#577 — shieldcortex openclaw install --help installs nothing', () =>
   });
 
   it('the real install flags still dispatch', async () => {
-    const install = jest.fn(async () => {});
+    const install = jest.fn(async (_options?: unknown) => {});
     await withConsole(async () => {
       await handleOpenClawCommand('install', ['--no-hooks'], { install });
     });
@@ -445,7 +445,7 @@ describe('#577 — the DB-opening prune/compact commands print usage instead', (
         expect(vacuumHelpRequested(args, { log: (m) => out.push(m), error: (m) => err.push(m) })).toBe(true);
         expect(process.exitCode).toBe(0);
       } finally {
-        process.exitCode = prevExit;
+        process.exitCode = prevExit ?? undefined;
       }
       expect(err).toEqual([]);
       expect(out.join('\n')).toBe(VACUUM_HELP);
@@ -461,7 +461,7 @@ describe('#577 — the DB-opening prune/compact commands print usage instead', (
       expect(process.exitCode).toBe(2);
       expect(vacuumHelpRequested([], { log: () => {}, error: (m) => err.push(m) })).toBe(false);
     } finally {
-      process.exitCode = prevExit;
+      process.exitCode = prevExit ?? undefined;
     }
     expect(err.join('\n')).toContain('Unknown argument: --bogus');
   });

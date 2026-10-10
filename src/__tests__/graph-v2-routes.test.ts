@@ -10,7 +10,7 @@ import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import type { Request, Response } from 'express';
 import { PATH_VISIT_BUDGET, registerGraphRoutes } from '../api/routes/graph.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function entity(name: string, type = 'tool', memoryCount = 0): number {
@@ -154,7 +154,7 @@ describe('GET /api/graph/overview', () => {
   it('clamps hostile query params (NaN, negative, float) instead of passing them to SQLite', async () => {
     entity('solo', 'tool', 5);
     for (const bad of [{ limit: 'NaN' }, { limit: '-5' }, { limit: '2.5' }, { minMentions: '-1' }, { limit: '1e3' }]) {
-      const r = await invoke(app().handler('/api/graph/overview'), {}, bad as Record<string, string>);
+      const r = await invoke(app().handler('/api/graph/overview'), {}, bad as unknown as Record<string, string>);
       expect(r.statusCode).toBe(200);
       expect((r.body as OverviewBody).entities.length).toBeGreaterThanOrEqual(0);
     }
@@ -284,7 +284,8 @@ describe('GET /api/graph/entities/:id/neighbourhood (v2)', () => {
 
 interface PathBody {
   path: Array<{ entity: string; entityId: number; predicate: string; direction: string }>;
-  sourceMemories: unknown[];
+  sourceMemories: Array<{ id: number }>;
+  truncated: boolean;
   message?: string;
 }
 

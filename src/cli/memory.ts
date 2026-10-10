@@ -58,7 +58,6 @@ function openDb() {
 }
 
 async function effectiveSalienceFor(row: MemoryRow): Promise<number> {
-  // @ts-expect-error — importing a .mjs hook util that has no .d.ts
   const { computeEffectiveSalience } = await import('../../scripts/lib/salience.mjs');
   return computeEffectiveSalience({
     salience: row.salience,

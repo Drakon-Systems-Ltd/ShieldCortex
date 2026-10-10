@@ -21,7 +21,6 @@
  *   if (!result.allowed) { ... }
  */
 
-// @ts-expect-error — importing a .mjs hook util that has no .d.ts
 import { flattenRecallField, frameRecallBlock } from '../../scripts/lib/recall-frame.mjs';
 import { runDefencePipeline } from '../defence/pipeline.js';
 import { DEFAULT_DEFENCE_CONFIG } from '../defence/types.js';

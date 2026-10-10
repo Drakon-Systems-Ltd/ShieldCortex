@@ -141,7 +141,7 @@ describe('#408 sync_queue claim/lease', () => {
     expect(staleComplete.changes).toBe(0);
 
     // Fresh claim can still complete via processRetryQueue
-    globalThis.fetch = jest.fn().mockResolvedValue({
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue({
       ok: true,
       status: 200,
     }) as unknown as typeof globalThis.fetch;

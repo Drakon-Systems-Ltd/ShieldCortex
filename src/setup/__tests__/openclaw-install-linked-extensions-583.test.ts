@@ -24,7 +24,7 @@ let tempPluginSource: string;
 let external: string;
 let previousDocker: string | undefined;
 let previousPluginSource: string | undefined;
-let previousExitCode: string | number | undefined;
+let previousExitCode: string | number | null | undefined;
 let warnings: string[];
 
 function configPath(): string {
@@ -88,7 +88,7 @@ afterEach(() => {
   else process.env.DOCKER = previousDocker;
   if (previousPluginSource === undefined) delete process.env.SHIELDCORTEX_PLUGIN_SOURCE;
   else process.env.SHIELDCORTEX_PLUGIN_SOURCE = previousPluginSource;
-  process.exitCode = previousExitCode;
+  process.exitCode = previousExitCode ?? undefined;
   jest.restoreAllMocks();
   fs.rmSync(tempHome, { recursive: true, force: true });
   fs.rmSync(tempPluginSource, { recursive: true, force: true });

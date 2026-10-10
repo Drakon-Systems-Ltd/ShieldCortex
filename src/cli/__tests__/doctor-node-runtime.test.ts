@@ -173,7 +173,7 @@ describe('doctor — Node runtime verdict (live command)', () => {
   let exitCodeBefore: number | string | undefined;
 
   beforeAll(() => {
-    exitCodeBefore = process.exitCode;
+    exitCodeBefore = process.exitCode ?? undefined;
   });
 
   afterAll(() => {
@@ -181,7 +181,7 @@ describe('doctor — Node runtime verdict (live command)', () => {
     // exercised here must keep that inside the spawned children — a verdict
     // helper that leaked it would fail the whole jest run for a passing test.
     expect(process.exitCode).toBe(exitCodeBefore);
-    process.exitCode = exitCodeBefore;
+    process.exitCode = exitCodeBefore ?? undefined;
   });
 
   it('takes its range from the manifest, so the gate cannot drift from engines.node', () => {

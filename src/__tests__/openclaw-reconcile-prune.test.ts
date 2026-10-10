@@ -27,8 +27,8 @@ beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-prune-')); }
 afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); });
 
 const passingSelfCheck: SelfCheckRunResult = {
-  ok: true, rosterProof: true, canaryProof: true, versionProof: true, reasons: ['ok'],
-  index: null, canary: { ran: true, denied: true, auditEntryFound: true },
+  ok: true, rosterProof: true, rosterState: 'loaded', canaryProof: true, versionProof: true, reasons: ['ok'],
+  index: null, liveRoster: [PLUGIN], canary: { ran: true, denied: true, auditEntryFound: true },
 };
 
 function projectsDir(): string {

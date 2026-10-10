@@ -36,7 +36,6 @@ import { sandboxExecutor, runCli, controlOutcome, finaliseRun, tallyPolicies, re
 import { stubEvaluatorAdapter } from '../../scripts/guard-effect-fixtures/adapter.mjs';
 // @ts-expect-error — plain ESM, no types
 import { run, parseDenials, groupEvents, classifyRecord, bucketOf, projectPublic, analyse } from '../../scripts/guard-policy-replay.mjs';
-// @ts-expect-error — plain ESM, no types
 import { GUARD_SIGNAL_VOCABULARY, TOOL_ENUM, REDACTED_SIGNAL_LABEL, validateNotify, publicSignalName } from '../../scripts/lib/guard-log-schema.mjs';
 // @ts-expect-error — plain ESM, no types
 import { NEVER_LOGGED_SIGNALS } from '../../scripts/lib/guard-policy-sets.mjs';

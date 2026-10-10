@@ -94,7 +94,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
 
     // Network is down — fetch rejects with a network error. Run more times than
     // the old max_attempts (3) to prove there is no permanent-fail by count.
-    globalThis.fetch = jest.fn().mockRejectedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockRejectedValue(
       new TypeError('fetch failed'),
     ) as unknown as typeof globalThis.fetch;
 
@@ -114,7 +114,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
     expect(rowStatus().attempts).toBeGreaterThanOrEqual(6);
 
     // Network recovers — row should sync.
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue(
       new Response(JSON.stringify({ ingested: 1 }), { status: 200 }),
     ) as unknown as typeof globalThis.fetch;
 
@@ -129,7 +129,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
     // Pre-age attempts so 2^attempts*30s would blow well past an hour.
     getDatabase().prepare(`UPDATE sync_queue SET attempts = 20`).run();
 
-    globalThis.fetch = jest.fn().mockRejectedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockRejectedValue(
       new TypeError('fetch failed'),
     ) as unknown as typeof globalThis.fetch;
 
@@ -146,7 +146,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
     enqueueFailedSync(makeAuditEntry());
     const abortErr = new Error('This operation was aborted');
     abortErr.name = 'AbortError';
-    globalThis.fetch = jest.fn().mockRejectedValue(abortErr) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockRejectedValue(abortErr) as unknown as typeof globalThis.fetch;
 
     makeRowDue();
     const res = await processRetryQueue();
@@ -156,7 +156,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
 
   it('fails fast (permanent) on an HTTP 4xx after a single attempt', async () => {
     enqueueFailedSync(makeAuditEntry());
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue(
       new Response('bad request', { status: 400 }),
     ) as unknown as typeof globalThis.fetch;
 
@@ -171,7 +171,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
   it('retries an HTTP 5xx as transient (does not fail by count)', async () => {
     enqueueFailedSync(makeAuditEntry());
     getDatabase().prepare(`UPDATE sync_queue SET attempts = 5`).run();
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue(
       new Response('server error', { status: 503 }),
     ) as unknown as typeof globalThis.fetch;
 
@@ -191,7 +191,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
       VALUES (?, 3, 3, ?, 'failed', 'HTTP 503', ?)
     `).run(JSON.stringify({ kind: 'audit', entry: makeAuditEntry() }), now, now);
 
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue(
       new Response(JSON.stringify({ ingested: 1 }), { status: 200 }),
     ) as unknown as typeof globalThis.fetch;
 
@@ -209,7 +209,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
       VALUES (?, 3, 3, ?, 'failed', 'HTTP 404', ?)
     `).run(JSON.stringify({ kind: 'audit', entry: makeAuditEntry() }), now, now);
 
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue(
       new Response(JSON.stringify({ ingested: 1 }), { status: 200 }),
     ) as unknown as typeof globalThis.fetch;
 
@@ -225,7 +225,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
       VALUES (?, 3, 3, ?, 'failed', 'HTTP 503', ?)
     `).run(JSON.stringify({ kind: 'audit', entry: makeAuditEntry() }), eightDaysAgo, eightDaysAgo);
 
-    globalThis.fetch = jest.fn().mockResolvedValue(
+    globalThis.fetch = jest.fn<() => Promise<unknown>>().mockResolvedValue(
       new Response(JSON.stringify({ ingested: 1 }), { status: 200 }),
     ) as unknown as typeof globalThis.fetch;
 
@@ -242,7 +242,7 @@ describe('Cloud sync queue — durability (Phase 8b)', () => {
       .prepare(`UPDATE sync_queue SET next_retry_at = ? WHERE status = 'pending'`)
       .run(new Date(Date.now() - 1000).toISOString());
 
-    const fetchMock = jest.fn().mockResolvedValue(
+    const fetchMock = jest.fn<() => Promise<unknown>>().mockResolvedValue(
       new Response(JSON.stringify({ ingested: 1 }), { status: 200 }),
     ) as unknown as typeof globalThis.fetch;
     globalThis.fetch = fetchMock;
