@@ -33,7 +33,10 @@ export interface EntryPointSandbox {
   npmRan(): boolean;
   /** Every path under HOME, relative — the proof that nothing was written. */
   underHome(): string[];
-  run(args: string[]): { status: number | null; stdout: string; stderr: string };
+  /** The `fakeCommands` (#707) that were executed, in option order. */
+  spawnedCommands(): string[];
+  /** `extraEnv` is applied last, so it can point state dirs into `tmp`. */
+  run(args: string[], extraEnv?: Record<string, string>): { status: number | null; stdout: string; stderr: string };
   cleanup(): void;
 }
 
@@ -47,8 +50,21 @@ function walk(dir: string, base = dir): string[] {
   return out;
 }
 
-export function makeEntryPointSandbox(prefix = 'sc577-entry-'): EntryPointSandbox {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+export interface EntryPointSandboxOptions {
+  /**
+   * More fake executables to put first on PATH beside `npm` (#707). Each one
+   * leaves its own marker outside HOME when run, so a suite can deny that ANY
+   * of the host CLIs an installer shells out to (`openclaw`, `claude`, …) ran.
+   */
+  fakeCommands?: readonly string[];
+}
+
+export function makeEntryPointSandbox(
+  prefix = 'sc577-entry-',
+  options: EntryPointSandboxOptions = {},
+): EntryPointSandbox {
+  // realpath: macOS hands out /var/… for a /private/var/… directory.
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   const home = path.join(tmp, 'home');
   const binDir = path.join(tmp, 'bin');
   const marker = path.join(tmp, 'npm-was-executed');
@@ -59,6 +75,15 @@ export function makeEntryPointSandbox(prefix = 'sc577-entry-'): EntryPointSandbo
     `#!/bin/sh\necho "$@" >> ${JSON.stringify(marker)}\nmkdir -p "$HOME/.npm/_logs"\ntouch "$HOME/.npm/_logs/debug.log"\nexit 0\n`,
     { mode: 0o755 },
   );
+  const fakeCommands = options.fakeCommands ?? [];
+  const spawnMarker = (name: string) => path.join(tmp, `spawned-${name}`);
+  for (const name of fakeCommands) {
+    fs.writeFileSync(
+      path.join(binDir, name),
+      `#!/bin/sh\necho "$@" >> ${JSON.stringify(spawnMarker(name))}\nexit 0\n`,
+      { mode: 0o755 },
+    );
+  }
 
   return {
     tmp,
@@ -66,7 +91,8 @@ export function makeEntryPointSandbox(prefix = 'sc577-entry-'): EntryPointSandbo
     marker,
     npmRan: () => fs.existsSync(marker),
     underHome: () => walk(home),
-    run(args: string[]) {
+    spawnedCommands: () => fakeCommands.filter((name) => fs.existsSync(spawnMarker(name))),
+    run(args: string[], extraEnv: Record<string, string> = {}) {
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {
         if (v === undefined) continue;
@@ -77,6 +103,7 @@ export function makeEntryPointSandbox(prefix = 'sc577-entry-'): EntryPointSandbo
       env.USERPROFILE = home;
       env.npm_config_cache = path.join(home, '.npm');
       env.PATH = `${binDir}${path.delimiter}${env.PATH ?? ''}`;
+      Object.assign(env, extraEnv);
       const r = spawnSync(process.execPath, [cliEntry, ...args], {
         env,
         encoding: 'utf-8',
