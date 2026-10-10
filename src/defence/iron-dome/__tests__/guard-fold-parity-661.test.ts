@@ -31,7 +31,17 @@ import { evaluateToolCall, detectScriptInvocations } from '../tool-action-guard.
  *      a deny into an allow.
  *
  * These tests pin parity: the same program yields the same verdict whether it
- * arrives as `-c`, as a heredoc, or as a file on disk.
+ * arrives as `-c` or as a file on disk, and a sink-bearing program follows its
+ * nested invocation on every plane.
+ *
+ * 5.6.0 (PR #712): the HEREDOC-plane relief (1) is WITHDRAWN before release.
+ * Masking a sink-free heredoc body needed a deny-list of code loaders, and two
+ * review rounds kept finding loaders it missed (a body that `load`s or
+ * `include`s a file looked data-only, so the loaded file went unread). A
+ * whole-command interpreter heredoc is scanned and folded exactly as in 5.5.0
+ * until an allow-list design (mask only bodies made solely of recognised
+ * data-read idioms) replaces it. The rows below that pinned the mask now pin
+ * the 5.5.0 behaviour; the `-c` and script-file parity is unchanged.
  */
 function stubResolver(files: Record<string, string>): (p: string) => string | null {
   return (p: string) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null);
@@ -62,27 +72,27 @@ function verdict(command: string, files: Record<string, string>) {
   return evaluateToolCall('Bash', { command }, undefined, { resolveScriptSource: stubResolver(files) });
 }
 
-describe('#661 (1) — a sink-free interpreter heredoc holds no invocations', () => {
-  it('does not fold the data file the heredoc program opens', () => {
-    expect(detectScriptInvocations(asHeredoc(READ_PROGRAM))).toEqual([]);
+describe('#661 (1) — heredoc relief withdrawn pending an allow-list design: scanned as in 5.5.0', () => {
+  it('folds the data file the heredoc program opens, as in 5.5.0', () => {
+    expect(detectScriptInvocations(asHeredoc(READ_PROGRAM)).map(s => s.path)).toContain(TABLE_PATH);
   });
 
-  it('the live repro: reading a markdown table that mentions dangerous commands is allowed', () => {
+  it('the live repro is scanned as in 5.5.0: the table prose is folded and matched again (known false positive, #661)', () => {
+    // The same program as `-c` or as a script file is still allowed (parity
+    // block below); only the heredoc plane is back to its 5.5.0 verdict.
     const v = verdict(asHeredoc(READ_PROGRAM), { [TABLE_PATH]: TABLE });
-    expect(v.decision).toBe('allow');
-    expect(v.signals).not.toContain('recursive-force-delete');
-    expect(v.signals).not.toContain('pipe-download-to-shell');
+    expect(v.decision).toBe('block');
+    expect(v.signals).toContain('recursive-force-delete');
   });
 
-  it('holds for a double-quoted delimiter and for other interpreters', () => {
-    for (const cmd of [
-      asHeredoc(READ_PROGRAM, '"EOF"'),
-      `node - <<'EOF'\nconst t = require('fs').readFileSync('${TABLE_PATH}', 'utf8')\nconsole.log(t.length)\nEOF`,
-      `perl - <<'EOF'\nopen(F, '${TABLE_PATH}'); print scalar(<F>);\nEOF`,
-    ]) {
-      expect([cmd, detectScriptInvocations(cmd)]).toEqual([cmd, []]);
-      expect([cmd, verdict(cmd, { [TABLE_PATH]: TABLE }).decision]).toEqual([cmd, 'allow']);
-    }
+  it('a double-quoted delimiter is scanned as in 5.5.0 too', () => {
+    const cmd = asHeredoc(READ_PROGRAM, '"EOF"');
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(TABLE_PATH);
+  });
+
+  it('a Node data-read body is scanned in full', () => {
+    const cmd = `node - <<'EOF'\nconst t = require('fs').readFileSync(\n'${TABLE_PATH}')\nconsole.log(t.length)\nEOF`;
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(TABLE_PATH);
   });
 
   it('an UNQUOTED delimiter earns no relief: the outer shell expands the body, so it is not provably inert', () => {
@@ -96,6 +106,8 @@ describe('#661 (1) — a sink-free interpreter heredoc holds no invocations', ()
     // Opening a key for READ is gated by naming the path (touch-sensitive-path)
     // — that is the access. Folding the key's BYTES into the scan text is not
     // detection, it is the guard copying a secret into its own audit trail.
+    // With the heredoc relief withdrawn the path is a candidate again, and
+    // #702 records it as opaque instead of reading it.
     const seen: string[] = [];
     const cmd = `python3 - <<'EOF'\nkey = open('/home/u/.ssh/id_rsa').read()\nprint(len(key))\nEOF`;
     const v = evaluateToolCall('Bash', { command: cmd }, undefined, {
@@ -103,7 +115,7 @@ describe('#661 (1) — a sink-free interpreter heredoc holds no invocations', ()
     });
     expect(seen).toEqual([]);
     expect(v.signals).toContain('touch-sensitive-path');          // the access itself is still gated
-    expect(v.signals).not.toContain('opaque-script-invocation');  // and the key is not an "invocation"
+    expect(v.signals).toContain('opaque-script-invocation');      // #702: recorded, never resolved
   });
 });
 
@@ -156,10 +168,11 @@ describe('#661 parity — the same program, three planes, one verdict', () => {
     file: verdict(asFile(), { 'scripts/prog.py': prog, ...extra }),
   });
 
-  it('sink-free data read: allowed on every plane, nothing folded', () => {
+  it('sink-free data read: allowed on -c and file planes; the heredoc plane is scanned as in 5.5.0 (relief withdrawn pending an allow-list design)', () => {
     const v = planes(READ_PROGRAM, { [TABLE_PATH]: TABLE });
-    expect([v.inline.decision, v.heredoc.decision, v.file.decision]).toEqual(['allow', 'allow', 'allow']);
-    for (const p of Object.values(v)) expect(p.signals).toEqual([]);
+    expect([v.inline.decision, v.heredoc.decision, v.file.decision]).toEqual(['allow', 'block', 'allow']);
+    expect(v.inline.signals).toEqual([]);
+    expect(v.file.signals).toEqual([]);
   });
 
   it('sink-bearing nested payload: blocked on every plane', () => {
@@ -208,16 +221,17 @@ describe('#661 — what must not move', () => {
  * a filler statement before the real closer, quoted or escaped `exec`,
  * operands after the delimiter, an `EOF #` line that `\b` reads as the closer.
  *
- * So relief is now ONE whole-command form (`WHOLE_COMMAND_HEREDOC_PROGRAM`):
- * optional `cd plain &&`, env assignments, transparent wrappers, a non-shell
- * interpreter with flags only, a QUOTED delimiter with nothing else on the
- * line, an exact-line closer, nothing after it. Anything else is scanned
- * exactly as on main. The ROUTED rows below are every shape from the three
+ * #686 then limited relief to ONE whole-command form: optional `cd plain &&`,
+ * env assignments, transparent wrappers, a non-shell interpreter with flags
+ * only, a QUOTED delimiter with nothing else on the line, an exact-line
+ * closer, nothing after it. PR #712 withdrew even that form for 5.6.0 (see
+ * the file header). The ROUTED rows below are every shape from the three
  * rounds, TARS's round-3 V-cases verbatim; each blocks on main and here with
- * the payload folded. The FAIL_CLOSED rows are harmless shapes that do not
- * fit the form and are left as main scans them. The RELIEF rows are the form.
+ * the payload folded. The FAIL_CLOSED rows are harmless shapes that never
+ * fit the form. The FORMER_RELIEF rows were the form; they are now scanned
+ * as in 5.5.0 and must stay so until an allow-list design replaces them.
  */
-describe('#686 — relief is one whole-command form; everything else is scanned as on main', () => {
+describe('#686 / #712 — no heredoc form earns relief; every shape is scanned as in 5.5.0', () => {
   const P = PAYLOAD_PATH;
   const FILES = { [P]: PAYLOAD };
   const H = `python3 - <<'EOF'\nprint('${P}')\nEOF`;
@@ -304,7 +318,7 @@ describe('#686 — relief is one whole-command form; everything else is scanned 
     '-I with a script after it': `python3 -I run.py <<'EOF'\n${P}\nEOF`,
     '| grep (pure filter, not yet relieved)': `python3 - <<'EOF' | grep x\nprint('${P}')\nEOF`,
   };
-  const RELIEF: Record<string, string> = {
+  const FORMER_RELIEF: Record<string, string> = {
     'plain': H,
     'cd plain path &&': `cd /tmp/x && ${H}\n`,
     'env assignment, env, nohup, flags with values': `X=1 env nohup python3 -I -W ignore - <<'EOF'\nprint('${P}')\nEOF`,
@@ -327,15 +341,13 @@ describe('#686 — relief is one whole-command form; everything else is scanned 
     expect(verdict(cmd, FILES).decision).toBe('block');
   });
 
-  it.each(Object.entries(RELIEF))('the form — %s: masked, nothing folded', (_name, cmd) => {
-    expect(detectScriptInvocations(cmd).map(s => s.path)).not.toContain(P);
-    const v = verdict(cmd, FILES);
-    expect(v.decision).toBe('allow');
-    expect(v.signals).toEqual([]);
+  it.each(Object.entries(FORMER_RELIEF))('former relief form — %s: relief withdrawn pending an allow-list design; scanned as in 5.5.0, payload folded', (_name, cmd) => {
+    expect(detectScriptInvocations(cmd).map(s => s.path)).toContain(P);
+    expect(verdict(cmd, FILES).decision).toBe('block');
   });
 
   it('a payload path passed as argv to a sink-bearing program is the SAME gap as on main (recorded, not widened)', () => {
-    // The body has a sink so it is never masked, but an argv operand is not an
+    // The body has a sink, but an argv operand is not an
     // invocation the guard follows on any plane. main: allow, detect=[]. Same here.
     const cmd = `python3 - <<'EOF' ${P}\nimport sys, os; os.system(sys.argv[1])\nEOF`;
     expect(detectScriptInvocations(cmd)).toEqual([]);
