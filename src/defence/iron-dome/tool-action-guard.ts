@@ -2719,7 +2719,7 @@ const EXEC_COMMAND_WORD =
 // executed be dropped. `getattr(`/`__import__` are included because they are the
 // standard ways to reach `os.system` without naming it.
 const SHELL_OUT_SINK =
-  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
+  /\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawnp?)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
 /**
  * #444 -- a bare backtick in a PYTHON docstring or comment is Markdown prose,
  * not a shell-out sink. It was in SHELL_OUT_SINK for every language, so
@@ -5413,6 +5413,52 @@ function heredocBodies(text: string): HeredocBody[] {
 }
 
 /**
+ * #661 follow-up (v5.6.0 release review, B1) — a program that LOADS or
+ * EVALUATES code is not data-only, whether or not it can start a process.
+ * `runpy.run_path('/tmp/f.py')`, Ruby `load('/tmp/f.rb')`, Perl
+ * `do('/tmp/f.pl')`, PHP `include('/tmp/f.php')` name no `SHELL_OUT_SINK`, so
+ * the heredoc relief blanked them and the loaded file was never offered to the
+ * resolver; 5.5.0 folded it. Absence of a sink match is not proof that a
+ * program cannot run code.
+ *
+ * Deliberately GENEROUS, like `SHELL_OUT_SINK`: a false hit only means the
+ * body is scanned as 5.5.0 scanned it (fail-closed); a miss lets a loaded file
+ * go unread. Language-agnostic — a Python body that happens to say `load(`
+ * loses the relief, which is the safe direction.
+ */
+const CODE_LOADER = new RegExp([
+  // Python
+  String.raw`\brunpy\b|\bimportlib\b|\bimport_module\b|\bspec_from_\w+|\b\w*(?:File|Source|Extension|Sourceless)Loader\b|\bmachinery\b|\bzipimport\b`,
+  String.raw`\bimp\s*\.\s*load_\w+|\bload_(?:source|module|dynamic|compiled|package)\b|\bexecfile\b|(?<![\w.])compile\s*\(|(?<![\w.])exec\b`,
+  String.raw`\bos\s*\.\s*(?:posix_spawnp?|spawn\w*|exec\w*)\b|\bctypes\b|\bcffi\b|\bCDLL\b|\bdlopen\b`,
+  String.raw`\bsys\s*\.\s*path\b\s*(?:\.\s*(?:insert|append|extend)\b|\+=|=(?!=)|\[)|\b__builtins__\b|\bbuiltins\b|\bglobals\s*\(\s*\)\s*\[|\b__import__\b`,
+  // Ruby
+  String.raw`(?<![\w.:])load\s*\(|(?<![\w.:])load\s+['"$@]|\bKernel\s*\.\s*load\b|\brequire(?:_relative|_once)?\b`,
+  String.raw`\beval\b|\b(?:instance|class|module)_(?:eval|exec)\b|\bbinding\b|:(?:load|require|eval|system|exec|spawn|syscall)\b`,
+  // Perl (`do FILE` / `do EXPR`, not a `do {` block), `use lib`
+  String.raw`\bdo\s*[('"$]|\buse\s+lib\b`,
+  // PHP
+  String.raw`\binclude(?:_once)?\b\s*[('"$]|\bassert\s*\(\s*['"]|\bcreate_function\b`,
+  // Node
+  String.raw`\bimport\s*\(|\bimport\b[^\n;]*\bfrom\s*['"]|\bimport\s*['"]`,
+  String.raw`\bvm\s*\.\s*(?:run\w*|Script|compileFunction|SourceTextModule)\b|\brunIn(?:New|This)?Context\b|\bFunction\s*\(`,
+  String.raw`child_|\b_process\b|\bprocess\s*\.\s*(?:binding|dlopen|_linkedBinding)\b|\bcreateRequire\b|\bworker_threads\b|\bnew\s+Worker\b`,
+  String.raw`\b(?:globalThis|global|window|self)\s*\[`,
+].join('|'));
+/**
+ * A Node `require('fs')` / `import … from 'node:path'` of a bare built-in or
+ * package NAME loads no file the command names, and is how a data-read body
+ * opens its file (#661's relief row). Only the literal is kept so the loader
+ * test still sees it — `child_process`, `vm`, `module` and `worker_threads`
+ * still match by name. A path, a variable or a concatenation is not exempt.
+ */
+const NODE_BARE_MODULE_LOAD = /\b(?:require\s*\(\s*|import\s*\(\s*|from\s*)((['"])(?:node:)?[A-Za-z_][\w-]*\2)/g;
+function hasCodeLoader(text: string, lang: ScriptLang): boolean {
+  const scan = lang === 'node' ? text.replace(NODE_BARE_MODULE_LOAD, '$1') : text;
+  return CODE_LOADER.test(scan);
+}
+
+/**
  * #661 — a path literal inside an interpreter-consumed HEREDOC is not a
  * command, for exactly the reason #190 gives for `python3 -c`: a sink-free
  * program cannot start a process, so nothing in it is an invocation. The
@@ -5428,14 +5474,16 @@ function heredocBodies(text: string): HeredocBody[] {
  * reading a quoted-delimiter heredoc as its program, with nothing before it
  * but an optional plain `cd … &&`, nothing on the intro line after the
  * delimiter, an exact-line closer and nothing after it) and the body has no
- * shell-out sink. Any other command is left exactly as main scans it. A
- * shell heredoc IS shell and is never masked. Length-preserving, so every
- * offset computed against the original text stays valid.
+ * shell-out sink and no code loader (`CODE_LOADER`). Any other command is
+ * left exactly as main scans it. A shell heredoc IS shell and is never masked.
+ * Length-preserving, so every offset computed against the original text stays
+ * valid.
  */
 function maskSinkFreeHeredocBodies(text: string): string {
   const h = wholeCommandHeredocProgram(text);
   if (!h) return text;
-  if (hasShellOutSink(text.slice(h.start, h.end), h.lang)) return text;
+  const body = text.slice(h.start, h.end);
+  if (hasShellOutSink(body, h.lang) || hasCodeLoader(body, h.lang)) return text;
   return text.slice(0, h.start) + ' '.repeat(h.end - h.start) + text.slice(h.end);
 }
 
