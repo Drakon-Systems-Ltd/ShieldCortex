@@ -146,7 +146,7 @@ export function buildReadinessSummary(opts: { now?: number; home?: string; adapt
   // `home` pins the evidence tree (tests); production reads the configured
   // root plus the hook's home-directory audit.
   const paths = readinessPaths({ home: opts.home, adapter });
-  const report = computeReadiness({ channel, paths, now, adapter });
+  const report = computeReadiness({ channel, paths, now, adapter, home: opts.home });
   const state = readReadinessState(paths.statePath);
   const record = readTransitionRecord(transitionsPathFor(paths));
 
@@ -260,6 +260,19 @@ export function describeEvidenceCarry(report: ReadinessReport): string[] {
   return out;
 }
 
+/**
+ * Evidence rows that did not count — another adapter, or no usable readiness
+ * pin — and how many of those carry no pin at all. Null when there are none.
+ * Shared with doctor.
+ */
+export function describeNotCounted(report: ReadinessReport): string | null {
+  const { intervention: iv, reachability: rc } = report;
+  if (iv.otherVersion + rc.otherVersion === 0) return null;
+  const unpinned = iv.unpinned + rc.unpinned;
+  return `${iv.otherVersion + rc.otherVersion} evidence row(s) from another adapter or with no usable readiness pin` +
+    `${unpinned > 0 ? ` (${unpinned} carry no pin at all — written outside the enforce-when-ready posture)` : ''}`;
+}
+
 export function formatReadinessLines(s: ReadinessSummary): string[] {
   const { report } = s;
   const iv = report.intervention;
@@ -290,13 +303,8 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
     `Effectiveness evidence: ${effectivenessText}`,
   ];
   for (const note of describeEvidenceCarry(report)) lines.push(`Evidence:      ${note}`);
-  if (iv.otherVersion + rc.otherVersion > 0) {
-    const unpinned = iv.unpinned + rc.unpinned;
-    lines.push(
-      `Not counted:   ${iv.otherVersion + rc.otherVersion} evidence row(s) from another adapter or with no usable readiness pin` +
-        `${unpinned > 0 ? ` (${unpinned} carry no pin at all — written outside the enforce-when-ready posture)` : ''}`,
-    );
-  }
+  const notCounted = describeNotCounted(report);
+  if (notCounted) lines.push(`Not counted:   ${notCounted}`);
   if (s.recordUnknown) {
     lines.push(`Transition record: ${s.record.status === 'ok' ? 'EMPTY' : s.record.status.toUpperCase()} — ${UNKNOWN_RECORD_REASON}`);
   } else if (s.record.last) {

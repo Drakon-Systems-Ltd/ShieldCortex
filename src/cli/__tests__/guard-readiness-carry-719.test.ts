@@ -8,11 +8,11 @@
  * ~/.shieldcortex is never read.
  */
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { formatReadinessLines, type ReadinessSummary } from '../guard.js';
+import { buildReadinessSummary, formatReadinessLines, type ReadinessSummary } from '../guard.js';
 import { checkActionGuardReadiness } from '../doctor.js';
 import {
   computeReadiness,
@@ -106,5 +106,32 @@ describe('#719 readiness output', () => {
     );
     const text = formatReadinessLines(summary(V2_H)).join('\n');
     expect(text).toMatch(/Not counted: {3}1 evidence row\(s\) from another adapter or with no usable readiness pin \(1 carry no pin at all/);
+  });
+
+  it('#721 (a): doctor names the not-counted and unpinned counts too', async () => {
+    mkdirSync(paths.auditDir, { recursive: true });
+    const ts = new Date(NOW - DAY).toISOString();
+    const file = join(paths.auditDir, `realtime-${ts.slice(0, 10)}.jsonl`);
+    const base = { ts, type: 'intercept', origin: 'openclaw-interceptor', tool: 'exec', severity: 'low', action: 'allow', outcome: 'allowed' };
+    appendFileSync(file, `${JSON.stringify({ ...base, auditEventId: 'u1' })}\n`);
+    appendFileSync(file, `${JSON.stringify({ ...base, auditEventId: 'u2', readinessPin: { adapter: 'openclaw-interceptor@unknown', policy: V2_H.policy } })}\n`);
+    const [row] = await checkActionGuardReadiness({ summary: () => summary(V2_H) });
+    expect(row!.message).toMatch(/not counted: 2 evidence row\(s\) from another adapter or with no usable readiness pin \(1 carry no pin at all/);
+  });
+
+  it('#721 (a): doctor says nothing about not-counted rows when there are none', async () => {
+    writeCalls(V2_H, 3);
+    const [row] = await checkActionGuardReadiness({ summary: () => summary(V2_H) });
+    expect(row!.message).not.toMatch(/not counted/i);
+  });
+});
+
+describe('#721 (b) buildReadinessSummary forwards its home seam to the carry config', () => {
+  it('reads actionGuard.readiness.priorPolicyCarry from the given home', () => {
+    const home = join(root, 'home');
+    mkdirSync(join(home, '.shieldcortex'), { recursive: true });
+    writeFileSync(join(home, '.shieldcortex', 'config.json'), JSON.stringify({ actionGuard: { readiness: { priorPolicyCarry: 0.2 } } }));
+    const s = buildReadinessSummary({ home, now: NOW, adapter: 'openclaw-interceptor' });
+    expect(s.report.carry).toMatchObject({ priorPolicyCarry: 0.2, source: 'config' });
   });
 });
