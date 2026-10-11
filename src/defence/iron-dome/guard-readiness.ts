@@ -496,9 +496,6 @@ function samePin(a: unknown, b: ReadinessPin | null): boolean {
   return p.adapter === b.adapter && p.policy === b.policy;
 }
 
-/** The family every guard policy hash belongs to (`tool-action-guard:<hash>`). */
-const POLICY_FAMILY = 'tool-action-guard:';
-
 /** How an evidence row relates to the pin in force (#719). */
 interface EvidenceKind {
   /** current = the policy in force; prior = an earlier policy of this adapter. */
@@ -506,6 +503,18 @@ interface EvidenceKind {
   /** The row's pin, as written. */
   rowPin: ReadinessPin;
 }
+
+/**
+ * #721 B1: the version part of an adapter identity — SemVer 2.0.0, with its
+ * prerelease and build metadata (the spec's own grammar), and nothing else:
+ * no `unknown`, no whitespace, no second `@`.
+ */
+const PIN_VERSION_RE =
+  /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
+
+/** #721 B1: a policy pin exactly as {@link currentReadinessPin} writes it —
+ *  the family and 16 lowercase hex characters of the rule-module digest. */
+const PIN_POLICY_RE = /^tool-action-guard:[0-9a-f]{16}$/;
 
 /** `openclaw-interceptor@5.6.0` → `openclaw-interceptor`. */
 function pinAdapterName(adapterPin: string): string {
@@ -530,12 +539,14 @@ function adapterEvidenceKind(row: Record<string, unknown>, pin: ReadinessPin | n
   if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
   const { adapter: rowAdapter, policy } = p as Record<string, unknown>;
   if (typeof rowAdapter !== 'string' || typeof policy !== 'string') return null;
+  // #721 B1: the whole identity is validated before it is classified — this
+  // adapter's name, then a well-formed release version (any release: the
+  // version is not compared), and a digest of the form the writer emits.
   const name = pinAdapterName(pin.adapter);
-  if (!rowAdapter.startsWith(`${name}@`) || rowAdapter.length === name.length + 1) return null;
+  if (!rowAdapter.startsWith(`${name}@`) || !PIN_VERSION_RE.test(rowAdapter.slice(name.length + 1))) return null;
+  if (!PIN_POLICY_RE.test(policy)) return null;
   const rowPin = { adapter: rowAdapter, policy };
-  if (policy === pin.policy) return { policy: 'current', rowPin };
-  if (policy.startsWith(POLICY_FAMILY) && policy.length > POLICY_FAMILY.length) return { policy: 'prior', rowPin };
-  return null;
+  return { policy: policy === pin.policy ? 'current' : 'prior', rowPin };
 }
 
 // ==================== PRIOR-POLICY CARRY (#719) ====================

@@ -259,3 +259,110 @@ describe('#719 the pin in force', () => {
     expect(pin.policy.startsWith('tool-action-guard:')).toBe(true);
   });
 });
+
+/**
+ * #721 B1 (Tars, PR #721 review): a row's pin is admitted only when its
+ * adapter identity is `<this adapter>@<semver>` (prerelease / build metadata
+ * allowed) and its policy is `tool-action-guard:` + the 16 lowercase hex
+ * characters the writer emits. Anything else — `@unknown`, whitespace, a
+ * second `@`, a non-hex / wrong-length / uppercase digest — is "not counted",
+ * never current evidence nor a prior policy to carry.
+ */
+describe('#721 B1 pin admission validates the adapter version and the policy digest', () => {
+  const BAD_ADAPTERS = [
+    'claude-code-hook@unknown',
+    'claude-code-hook@ ',
+    'claude-code-hook@\t',
+    'claude-code-hook@ 5.5.0',
+    'claude-code-hook@5.5.0 ',
+    'claude-code-hook@5.5.0@evil',
+    'claude-code-hook@@5.5.0',
+    'claude-code-hook@5.5',
+    'claude-code-hook@05.5.0',
+    'claude-code-hook@5.5.0-',
+    'claude-code-hook@5.5.0+',
+  ];
+  const BAD_POLICIES = [
+    'tool-action-guard:unknown',
+    'tool-action-guard: ',
+    'tool-action-guard:                ',
+    'tool-action-guard:zzzzzzzzzzzzzzzz',
+    'tool-action-guard:111111111111111',
+    'tool-action-guard:11111111111111111',
+    'tool-action-guard:AAAAAAAAAAAAAAAA',
+    'tool-action-guard:2222222222222222 ',
+    'tool-action-guard:2222222222222222:x',
+  ];
+  const GOOD_VERSIONS = ['5.5.0', '0.0.1', '5.6.0-beta.1', '5.6.0-rc.1+sha.abc123', '5.6.0+build.7', '10.20.30-alpha-1.x.0'];
+
+  /** A bad adapter under the policy IN FORCE (would be "current") and a bad
+   *  policy from a valid release (would be "prior"): neither may count. */
+  function writeBad(): number {
+    let n = 0;
+    for (const adapter of BAD_ADAPTERS) {
+      write(calls({ adapter, policy: H_PRIME }, 10, 0, NOW - 6 * DAY, NOW - 2 * DAY));
+      write(reach({ adapter, policy: H_PRIME }, 2, 0));
+      n += 1;
+    }
+    for (const policy of BAD_POLICIES) {
+      write(calls({ adapter: 'claude-code-hook@5.5.0', policy }, 10, 0, NOW - 6 * DAY, NOW - 2 * DAY));
+      write(reach({ adapter: 'claude-code-hook@5.5.0', policy }, 2, 0));
+      n += 1;
+    }
+    return n;
+  }
+
+  function expectNoneCounted(r: ReturnType<typeof computeReadiness>, pins: number, callsPerPin = 10): void {
+    expect(r.intervention.fresh.total).toBe(0);
+    expect(r.intervention.carried.rawTotal).toBe(0);
+    expect(r.intervention.total).toBe(0);
+    expect(r.intervention.otherVersion).toBe(pins * callsPerPin);
+    expect(r.reachability.fresh.resolved).toBe(0);
+    expect(r.reachability.carried.rawResolved).toBe(0);
+    expect(r.reachability.otherVersion).toBe(pins * 2);
+    expect(r.carry.earlierReleases).toEqual([]);
+    expect(r.carry.priorPolicies).toEqual([]);
+  }
+
+  it('sync: malformed adapter versions and policy digests are never current or prior evidence', () => {
+    const pins = writeBad();
+    const r = computeReadiness({ channel: CHANNEL, paths, now: NOW, pin: V2_H_PRIME, priorPolicyCarry: 1 });
+    expectNoneCounted(r, pins);
+  });
+
+  it('async: the sliced reader rejects the same malformed pins', async () => {
+    const pins = writeBad();
+    const r = await computeReadinessAsync({ channel: CHANNEL, paths, now: NOW, pin: V2_H_PRIME, priorPolicyCarry: 1 });
+    expectNoneCounted(r, pins);
+  });
+
+  for (const [label, run] of [
+    ['sync', (o: Parameters<typeof computeReadiness>[0]) => Promise.resolve(computeReadiness(o))],
+    ['async', (o: Parameters<typeof computeReadiness>[0]) => computeReadinessAsync(o)],
+  ] as const) {
+    for (const p of [
+      ...BAD_ADAPTERS.map((adapter) => ({ adapter, policy: H_PRIME })),
+      ...BAD_POLICIES.map((policy) => ({ adapter: 'claude-code-hook@5.5.0', policy })),
+    ]) {
+      it(`${label}: ${JSON.stringify(p)} alone is not counted`, async () => {
+        write(calls(p, 4, 0, NOW - 3 * DAY, NOW - DAY));
+        write(reach(p, 2, 0));
+        const r = await run({ channel: CHANNEL, paths, now: NOW, pin: V2_H_PRIME, priorPolicyCarry: 1 });
+        expectNoneCounted(r, 1, 4);
+      });
+    }
+
+    it(`${label}: semver releases (plain, prerelease, build metadata) and an exact 16-hex digest still count`, async () => {
+      for (const v of GOOD_VERSIONS) {
+        write(calls({ adapter: `claude-code-hook@${v}`, policy: H_PRIME }, 10, 0, NOW - 6 * DAY, NOW - 2 * DAY));
+        write(calls({ adapter: `claude-code-hook@${v}`, policy: H }, 10, 0, NOW - 6 * DAY, NOW - 2 * DAY));
+      }
+      const r = await run({ channel: CHANNEL, paths, now: NOW, pin: V2_H_PRIME, priorPolicyCarry: 1 });
+      expect(r.intervention.fresh.total).toBe(GOOD_VERSIONS.length * 10);
+      expect(r.intervention.carried.rawTotal).toBe(GOOD_VERSIONS.length * 10);
+      expect(r.intervention.otherVersion).toBe(0);
+      expect(r.carry.priorPolicies).toEqual([H]);
+      expect([...r.carry.earlierReleases].sort()).toEqual(GOOD_VERSIONS.map((v) => `claude-code-hook@${v}`).sort());
+    });
+  }
+});
