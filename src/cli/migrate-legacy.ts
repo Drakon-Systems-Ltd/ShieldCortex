@@ -538,7 +538,6 @@ export async function purgeMalformed(opts: PurgeMalformedOptions): Promise<Purge
     throw new Error(`memories DB not found at ${dbPath}`);
   }
 
-  // @ts-expect-error -- importing a .mjs hook util
   const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
   const shouldRejectCandidate = mod.shouldRejectCandidate as (seg: { title: string; content: string }) => { rejected: boolean; reason: string };
 
@@ -650,7 +649,6 @@ export async function recalcAutoCaptures(opts: RecalcOptions): Promise<RecalcRep
     throw new Error(`memories DB not found at ${dbPath}`);
   }
 
-  // @ts-expect-error -- importing a .mjs hook util (no type decls)
   const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
   const shouldRejectCandidate = mod.shouldRejectCandidate as (
     seg: { title: string; content: string },

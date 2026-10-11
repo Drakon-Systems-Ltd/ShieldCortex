@@ -250,7 +250,8 @@ describe('recall-path N+1 batching (Phase 9b)', () => {
     db.prepare('UPDATE memories SET salience = ?, decayed_score = ? WHERE id = ?').run(0.3, 0.2, oldLow.id);
 
     const results = await searchMemoriesExplained(
-      { project: PROJECT, limit: 1 }, // no query → browse path
+      // Deliberate browse-path input: the runtime accepts a missing query.
+      { project: PROJECT, limit: 1 } as unknown as import('../memory/types.js').SearchOptions, // no query → browse path
       DEFAULT_CONFIG,
     );
 

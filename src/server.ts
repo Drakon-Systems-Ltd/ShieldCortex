@@ -58,7 +58,6 @@ import {
   KillSwitchError,
 } from './api/control.js';
 import type { OperationKind } from './api/control.js';
-// @ts-expect-error — importing a .mjs hook util that has no .d.ts
 import { frameRecallBlock, recallFrameFields } from '../scripts/lib/recall-frame.mjs';
 
 /**

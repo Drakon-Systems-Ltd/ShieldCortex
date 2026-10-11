@@ -149,6 +149,7 @@ describe('extractCaptureMemories', () => {
   it('distills via mock openai response', async () => {
     const fetchImpl = async () => ({
       ok: true,
+      status: 200,
       json: async () => ({
         choices: [{
           message: {

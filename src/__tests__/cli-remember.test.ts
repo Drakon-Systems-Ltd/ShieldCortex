@@ -109,7 +109,7 @@ describe('shieldcortex remember — CLI write command', () => {
         },
       });
       expect(resolved.ok).toBe(false);
-      expect(resolved.usage).toBe(true);
+      expect(resolved.ok ? undefined : resolved.usage).toBe(true);
     });
 
     it('reads piped stdin when --content is omitted and stdin is NOT a TTY', async () => {
@@ -119,7 +119,7 @@ describe('shieldcortex remember — CLI write command', () => {
         readStdin: async () => 'piped content from a previous command',
       });
       expect(resolved.ok).toBe(true);
-      expect(resolved.content).toBe('piped content from a previous command');
+      expect(resolved.ok ? resolved.content : undefined).toBe('piped content from a previous command');
     });
 
     it('prefers an explicit --content flag over stdin', async () => {
@@ -131,7 +131,7 @@ describe('shieldcortex remember — CLI write command', () => {
         },
       });
       expect(resolved.ok).toBe(true);
-      expect(resolved.content).toBe('explicit flag content');
+      expect(resolved.ok ? resolved.content : undefined).toBe('explicit flag content');
     });
   });
 });

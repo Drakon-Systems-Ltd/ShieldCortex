@@ -141,7 +141,7 @@ describe('clusterEvents', () => {
 });
 
 describe('runCampaignDetection (DB)', () => {
-  beforeEach(() => initDatabase(':memory:'));
+  beforeEach(() => { initDatabase(':memory:'); });
   afterEach(() => closeDatabase());
 
   function insertBlock(identifier: string, ts: string, pattern: string): void {

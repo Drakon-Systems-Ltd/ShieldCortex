@@ -62,6 +62,7 @@ function entry(overrides: Partial<Omit<AuditEntry, 'id'>> = {}): Omit<AuditEntry
     blocked_patterns: '[]',
     reason: 'ledger test row',
     fragmentation_score: null,
+    pipeline_duration_ms: null,
     ...overrides,
   };
 }

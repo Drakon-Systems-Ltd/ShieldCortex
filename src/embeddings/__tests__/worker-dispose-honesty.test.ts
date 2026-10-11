@@ -1037,7 +1037,7 @@ function runScenario(name: string, extraEnv: Record<string, string> = {}): Scena
   // give the second run the first one's spawn log, so `spawned()` would count
   // workers from a process that had already exited.
   const tag = `${name}-${++scenarioRuns}`;
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     SC_FAKE_WORKER_LOG: path.join(sandbox, `spawned-${tag}.log`),
     SC_FAKE_WORKER_BEAT: path.join(sandbox, `beats-${tag}.log`),
