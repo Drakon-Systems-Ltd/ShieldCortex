@@ -3,10 +3,17 @@
  * actually runs in, not the directory the guard process happens to sit in.
  *
  * The Claude Code hook folded `bash scripts/run.sh` against its OWN process
- * cwd. The harness reports the session's working directory per call as payload
- * `cwd`; the hook process is spawned wherever the harness likes. When the two
- * differ the hook read an unrelated same-named file (or none, and went opaque),
- * and the reviewed-script pin was checked against that wrong file's bytes.
+ * cwd. Claude Code reports the directory the call starts in per call as payload
+ * `cwd`, and its published contract runs hook handlers in that same current
+ * directory — so on an undisturbed host the two agree. They diverge when
+ * something between the host and the hook moves the process (a wrapper or
+ * harness that changes directory before exec'ing the hook). When they differ
+ * the hook read an unrelated same-named file (or none, and went opaque), and
+ * the reviewed-script pin was checked against that wrong file's bytes.
+ *
+ * The decoy process cwd below is that DELIBERATE displacement, standing in for
+ * such a wrapper. It is not a claim that Claude Code itself normally spawns the
+ * hook somewhere else.
  *
  * Every existing cross-plane harness spawns the hook with payload `cwd: '/tmp'`
  * and an unrelated process cwd, using command-only inputs, so none of them can
@@ -32,6 +39,8 @@ import { requireFreshBuiltArtefacts } from './built-artefact-freshness.js';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOK = join(repoRoot, 'scripts', 'pre-tool-hook.mjs');
 const PLUGIN_DIST = join(repoRoot, 'plugins', 'openclaw', 'dist');
+/** This worktree's own OpenClaw runtime — the only one the bridge may load. */
+const WORKTREE_RUNTIME = join(repoRoot, 'hooks', 'openclaw', 'cortex-memory', 'runtime.mjs');
 
 const BENIGN_SCRIPT = '#!/bin/bash\necho hello\n';
 // The parity suite's existing dangerous (approval-tier, not catastrophic) line.
@@ -46,7 +55,11 @@ let configDir: string;
 let protectedRoot: string;
 /** Where the command runs: the harness-reported per-call cwd. */
 let workspace: string;
-/** Where the guard process runs. Must never be what gets folded when the host reports a cwd. */
+/**
+ * Where the guard process runs — deliberately displaced from `workspace`, as a
+ * directory-changing wrapper would leave it. Must never be what gets folded
+ * when the host reports a cwd.
+ */
 let decoy: string;
 
 // Every block drives the built evaluator through the hook or the plugin;
@@ -91,9 +104,14 @@ function writeConfig(actionGuard: Record<string, unknown> = {}): void {
   );
 }
 
-function childEnv(): NodeJS.ProcessEnv {
+/**
+ * The env every spawned child gets. `parent` is injectable ONLY so the F1
+ * regression below can hand in a hostile parent without mutating the test
+ * process's own `process.env`.
+ */
+function childEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...parent,
     HOME: home,
     USERPROFILE: home,
     SHIELDCORTEX_CONFIG_DIR: configDir,
@@ -102,6 +120,11 @@ function childEnv(): NodeJS.ProcessEnv {
   };
   // The hook must load the real built evaluator, not an inherited substitute.
   delete env.SHIELDCORTEX_DIST_ROOT;
+  // Same for the plugin's runtime loader: an inherited SHIELDCORTEX_RUNTIME_PATH
+  // is the FIRST candidate the bridge tries (collectRuntimeCandidates), ahead of
+  // the staged package — and that runtime supplies the shield config and its
+  // sinks. Never let the parent choose it; the bridge binds it explicitly.
+  delete env.SHIELDCORTEX_RUNTIME_PATH;
   return env;
 }
 
@@ -220,6 +243,13 @@ describe('#634 hook — the reviewed-script pin binds the workspace file and its
 
   it('a relative call to the pinned workspace script matches the pin', () => {
     expect(runHook('bash scripts/run.sh', workspace)).toBe('allow');
+    // The allow came from the pin, not from a resolver that never loaded: with
+    // no resolver (or an unreadable file) the call goes opaque, and an opaque
+    // allow is audited with this signal (see the missing-source case above).
+    // The hook's allow row does not carry `reviewedScripts` itself
+    // (safeAllowAuditVerdict), so the absence of the opaque signal is the
+    // evidence this plane leaves.
+    expect(auditedSignals()).not.toContain('opaque-script-invocation');
   }, 120_000);
 
   it('one changed byte in the pinned file re-gates it', () => {
@@ -306,21 +336,37 @@ describe('#634 OpenClaw bridge — an explicit absolute workdir outranks the gat
 
   beforeEach(() => writeConfig());
 
-  function runBridge(params: Record<string, unknown>): string {
+  /**
+   * The bridge child's env: the shared isolation, plus the runtime pinned to
+   * THIS worktree's file. Binding it (rather than only deleting the inherited
+   * value) means no later candidate — a configured installRoot, a global
+   * install, an nvm prefix — can be what loads either.
+   */
+  function bridgeEnv(params: Record<string, unknown>, parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+    return {
+      ...childEnv(parent),
+      SHIELDCORTEX_RUNTIME_PATH: WORKTREE_RUNTIME,
+      SC634_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
+      SC634_PARAMS_JSON: JSON.stringify(params),
+    };
+  }
+
+  function spawnBridge(env: NodeJS.ProcessEnv): string {
     const run = spawnSync(process.execPath, [driverPath], {
       // The gateway's own process cwd is the decoy.
       cwd: decoy,
-      env: {
-        ...childEnv(),
-        SC634_PLUGIN_ENTRY: join(stage, 'plugin', 'index.js'),
-        SC634_PARAMS_JSON: JSON.stringify(params),
-      },
+      env,
       encoding: 'utf8',
       timeout: 60_000,
     });
+    if (run.status !== 0) throw new Error(`bridge driver exited ${run.status}: ${run.stderr}`);
     const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('SC634_RESULT '));
-    if (!line) throw new Error(`bridge driver produced no result (status ${run.status}): ${run.stderr}`);
+    if (!line) throw new Error(`bridge driver produced no result: ${run.stderr}`);
     return JSON.parse(line.slice('SC634_RESULT '.length)).outcome;
+  }
+
+  function runBridge(params: Record<string, unknown>, parent: NodeJS.ProcessEnv = process.env): string {
+    return spawnBridge(bridgeEnv(params, parent));
   }
 
   it('benign workdir script, dangerous same-name decoy in the gateway cwd → allow', () => {
@@ -334,4 +380,60 @@ describe('#634 OpenClaw bridge — an explicit absolute workdir outranks the gat
     writeFileSync(join(decoy, 'scripts', 'run.sh'), BENIGN_SCRIPT);
     expect(runBridge({ command: 'bash scripts/run.sh', workdir: workspace })).toBe('ask');
   }, 120_000);
+
+  // ---- F1: the parent cannot choose the bridge's runtime -----------------
+
+  /**
+   * A test-owned stand-in for a hostile inherited override. Importing it
+   * leaves a SELECTED marker beside it and nothing else: no config read, no
+   * network, and its factory refuses, so even a selected sentinel can never
+   * become the runtime that answers.
+   */
+  const SENTINEL_RUNTIME = [
+    "import { writeFileSync } from 'node:fs';",
+    "writeFileSync(new URL('./SELECTED', import.meta.url), 'sc-634 sentinel runtime was imported\\n');",
+    'export function createOpenClawRuntime() {',
+    "  throw new Error('sc-634 sentinel runtime must never be selected');",
+    '}',
+    '',
+  ].join('\n');
+
+  /** Package-root layout, so both accepted override forms can be tried. */
+  function writeSentinel(): { root: string; file: string; marker: string } {
+    const root = join(home, 'hostile-runtime');
+    const dir = join(root, 'hooks', 'openclaw', 'cortex-memory');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, 'runtime.mjs');
+    writeFileSync(file, SENTINEL_RUNTIME);
+    return { root, file, marker: join(dir, 'SELECTED') };
+  }
+
+  it('control: the sentinel IS imported when the override reaches the child — so its absence below means something', () => {
+    const sentinel = writeSentinel();
+    // Deliberately bypasses childEnv's protection to prove the sentinel is a
+    // live discriminator. The product's supported override is exercised, not
+    // altered: its factory refuses, the loader moves on to the next candidate.
+    spawnBridge({ ...bridgeEnv({ command: 'ls -la' }), SHIELDCORTEX_RUNTIME_PATH: sentinel.file });
+    expect(existsSync(sentinel.marker)).toBe(true);
+  }, 120_000);
+
+  it('a hostile inherited SHIELDCORTEX_RUNTIME_PATH never reaches the child, in either accepted form', () => {
+    const sentinel = writeSentinel();
+    writeFileSync(join(workspace, 'scripts', 'run.sh'), DANGEROUS_SCRIPT);
+    writeFileSync(join(decoy, 'scripts', 'run.sh'), BENIGN_SCRIPT);
+
+    for (const hostileValue of [sentinel.file, sentinel.root]) {
+      const hostileParent: NodeJS.ProcessEnv = { ...process.env, SHIELDCORTEX_RUNTIME_PATH: hostileValue };
+      const params = { command: 'bash scripts/run.sh', workdir: workspace };
+
+      // Source-level: neither child env carries the parent's value.
+      expect(childEnv(hostileParent).SHIELDCORTEX_RUNTIME_PATH).toBeUndefined();
+      expect(bridgeEnv(params, hostileParent).SHIELDCORTEX_RUNTIME_PATH).toBe(WORKTREE_RUNTIME);
+
+      // Behavioural: the real bridge still answers from this worktree's
+      // runtime and evaluator, and never imported the sentinel.
+      expect(runBridge(params, hostileParent)).toBe('ask');
+      expect(existsSync(sentinel.marker)).toBe(false);
+    }
+  }, 240_000);
 });

@@ -527,11 +527,14 @@ async function loadReviewedScriptCheck(rawEntries, base) {
 /**
  * The directory a relative invoked-script path resolves against (#634).
  *
- * The command runs in the session's working directory, which the harness
- * reports per call as payload `cwd`. The hook PROCESS's own cwd is wherever
- * the harness happened to spawn it, so resolving against it can fold an
- * unrelated same-named file — or find nothing and go opaque — instead of the
- * script the command will actually execute.
+ * The command starts in the directory Claude Code reports per call as payload
+ * `cwd`. Claude Code's published contract also runs hook handlers in its
+ * current directory, so on an undisturbed host the two agree; they diverge
+ * when something in between moves the hook process (a wrapper or harness
+ * that changes directory before exec'ing it). Resolving against the process
+ * cwd then folds an unrelated same-named file — or finds nothing and goes
+ * opaque — instead of the script the command will actually execute. Payload
+ * `cwd` is the per-call value, so it is the one to trust.
  *
  * Only an absolute string is taken. Anything else (absent, empty, relative,
  * NUL-bearing, absurdly long) falls back to `process.cwd()`, which is what the
