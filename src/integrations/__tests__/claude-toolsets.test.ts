@@ -115,6 +115,15 @@ describe('ToolsetGuard — ref catalogue (#678 acceptance 2)', () => {
     expect(m.get('ref_9')).toEqual({ role: 'link', label: 'Home' });
   });
 
+  it('a credential-shaped role token is bound to "other", not redacted-and-kept (#679 review 6)', () => {
+    // AWS_SHAPED_KEY only matches the case-sensitive AKIA/ASIA recognisers in
+    // its original case. If boundRole lowercases before checking redaction,
+    // the folded value never matches and a credential-shaped page token would
+    // reach a role signal, card or elementRole unredacted.
+    const m = parseRefCatalogue(`${AWS_SHAPED_KEY} "label" [ref_1]`);
+    expect(m.get('ref_1')).toEqual({ role: 'other', label: 'label' });
+  });
+
   it('classifies a click on "Pay now" as irreversible and a link click as navigation', async () => {
     const { guard } = makeGuard();
     await readPage(guard);

@@ -448,9 +448,14 @@ export function checkUrl(url: string, allowlist?: string[]): UrlCheck {
  * and unchanged by credential redaction. Anything else is the role `other`.
  */
 function boundRole(raw: string): string {
+  // Check/redact the ORIGINAL token before lowercasing: case-sensitive
+  // credential recognisers can miss a value that has already been folded to
+  // lowercase, which would let a credential-shaped page token reach a role
+  // signal, card or `elementRole` unredacted (#679 review 6).
+  if (redactCredentials(raw) !== raw) return 'other';
   const role = raw.toLowerCase();
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(role)) return 'other';
-  return redactCredentials(role) === role ? role : 'other';
+  return role;
 }
 
 // `role "label"`: the role starts a word run (so a long run is tried once, not
