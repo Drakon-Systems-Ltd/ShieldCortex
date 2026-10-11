@@ -1,5 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-// @ts-expect-error -- importing a .mjs release-script utility (no type decls)
 import { readLatestVersion, readVersionList, diagnose, describeState, exitCodeFor } from '../../scripts/lib/clawhub-state.mjs';
 
 /**

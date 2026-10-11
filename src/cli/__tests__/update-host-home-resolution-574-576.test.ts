@@ -68,8 +68,11 @@ const NOTHING_INSTALLED = {
   installed: [] as string[],
   refreshed: [] as string[],
   current: [] as string[],
+  vanished: [] as string[],
+  degraded: [] as Array<{ dir: string; error: string }>,
   failed: [] as Array<{ dir: string; error: string }>,
   backups: [] as Array<{ dir: string; backup: string }>,
+  warnings: [] as string[],
   sourceAvailable: true,
 };
 

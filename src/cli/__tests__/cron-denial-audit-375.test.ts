@@ -597,8 +597,8 @@ describe('cron denial correlation (#375 P2)', () => {
   test('only the tail of an oversized denial log is read, and never a torn line', () => {
     // Distinct, non-cron filler: same actionId would dedupe the real denial
     // away and the assertion below would pass for the wrong reason.
-    const filler = { ...denial(), sessionKey: 'sc-abcdef0123456789' };
-    delete filler.actionId;
+    const { actionId: _omittedActionId, ...withoutActionId } = denial();
+    const filler = { ...withoutActionId, sessionKey: 'sc-abcdef0123456789' };
     const pad = JSON.stringify({ ...filler, junk: 'x'.repeat(4096) });
     const lines: string[] = [];
     let bytes = 0;
