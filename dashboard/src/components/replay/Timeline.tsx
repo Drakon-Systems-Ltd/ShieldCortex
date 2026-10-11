@@ -194,7 +194,7 @@ export function Timeline({ events, currentIndex, onSeek, playing }: TimelineProp
       </div>
 
       {/* Legend / kind breakdown */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono">
         {(Object.keys(KIND_LABEL) as ReplayKind[]).map((k) => {
           const count = kindCounts[k];
           if (!count) return null;

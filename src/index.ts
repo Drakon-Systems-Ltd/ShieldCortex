@@ -772,8 +772,9 @@ ${bold}DOCS${reset}
 
   // Handle "doctor" subcommand
   if (process.argv[2] === 'doctor') {
-    const { runDoctor } = await import('./cli/doctor.js');
-    await runDoctor(process.argv.slice(3));
+    // #707: --help prints usage before doctor's module graph is even loaded.
+    const { dispatchDoctorCommand } = await import('./cli/setup-dispatch.js');
+    await dispatchDoctorCommand(process.argv.slice(3));
     return;
   }
 
@@ -805,24 +806,10 @@ ${bold}DOCS${reset}
 
   // Handle "setup" subcommand (alias: "install")
   if (process.argv[2] === 'setup' || process.argv[2] === 'install') {
-    if (process.argv[3] === 'uninstall') {
-      const { uninstallSetup } = await import('./setup/uninstall.js');
-      await uninstallSetup();
-      return;
-    }
-    const { parseHookOptInFlags } = await import('./setup/settings-hooks.js');
-    const { setupClaudeMd } = await import('./setup/claude-md.js');
-    // `setup` with no extra flags is the host-table wizard. `install` stays
-    // Claude Code only so existing scripts do not grow OpenClaw/Hermes
-    // installs. Explicit hook flags on setup also stay Claude-only.
-    const hookFlags = parseHookOptInFlags(process.argv);
-    const hasHookFlag = process.argv.some((a) => a.startsWith('--with-') || a.startsWith('--no-'));
-    if (process.argv[2] === 'install' || hasHookFlag) {
-      await setupClaudeMd(hookFlags);
-    } else {
-      const { handleQuickstartCommand } = await import('./setup/quickstart.js');
-      await handleQuickstartCommand(process.argv[3]);
-    }
+    // #707: --help / -h prints usage before any installer module is loaded —
+    // `install --help` used to go straight into the Claude Code install.
+    const { dispatchSetupCommand } = await import('./cli/setup-dispatch.js');
+    await dispatchSetupCommand(process.argv[2] === 'install' ? 'install' : 'setup', process.argv.slice(3));
     return;
   }
 
@@ -1467,10 +1454,33 @@ ${bold}DOCS${reset}
 
 
   // Handle "consolidate" subcommand (v4.0.0 — Dream Mode)
+  //
+  // #650: this command is what doctor's `STM — consolidation needed` row names,
+  // so it must run the phase that actually drains short-term memory —
+  // consolidate(): promote worthy STM rows to LTM, expire decayed ones, evict
+  // down to the cap — before Dream Mode. Previously only the brain worker ran
+  // that phase; the CLI ran Dream Mode alone (LTM near-duplicate merge, archival
+  // flags, contradictions), so the suggested fix left STM exactly where it was.
+  //
+  // #667: that phase is NOT short-term-only, and every count it produces is
+  // printed so the user can account for every row that changed:
+  //   - cap eviction covers BOTH tiers (LTM over `maxLongTermMemories` is
+  //     evicted too), so it is reported per tier, not under an STM heading;
+  //   - its pre-pass LTM dedup (`deduplicateMemories`) runs before Dream Mode
+  //     and resolves identical pairs by deleting OR downvoting the loser, so it
+  //     gets its own line and is never folded into a hard-delete total.
   if (process.argv[2] === 'consolidate') {
     const { initDatabase } = await import('./database/init.js');
     initDatabase();
-    const { consolidateMemories } = await import('./memory/consolidate.js');
+    const { consolidate, consolidateMemories } = await import('./memory/consolidate.js');
+    console.log('🧠 Running memory maintenance (promote / expire / cap-evict / dedup)...');
+    const maintenance = consolidate();
+    const evicted = maintenance.evicted ?? 0;
+    console.log(`   Promoted to long-term:  ${maintenance.consolidated}`);
+    console.log(`   Expired (decayed):      ${maintenance.deleted - evicted}`);
+    console.log(`   Evicted over cap (STM): ${maintenance.evictedShortTerm ?? 0}`);
+    console.log(`   Evicted over cap (LTM): ${maintenance.evictedLongTerm ?? 0}`);
+    console.log(`   LTM duplicates resolved (deleted or downvoted): ${maintenance.deduplicated ?? 0}`);
     console.log('🧠 Starting Dream Mode consolidation...');
     const result = consolidateMemories();
     console.log(`✅ Consolidation complete:`);

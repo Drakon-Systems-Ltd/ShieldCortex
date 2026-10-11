@@ -159,7 +159,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                     i === selected ? 'bg-[var(--sc-primary-soft)] text-[var(--sc-text)]' : 'text-[var(--sc-text-dim)]',
                   )}
                 >
-                  <span className={cn('shrink-0 text-[10px] uppercase tracking-wide', s.kind === 'route' ? 'text-[var(--sc-primary)]' : 'text-[var(--sc-violet)]')}>
+                  <span className={cn('shrink-0 text-xs', s.kind === 'route' ? 'text-[var(--sc-primary)]' : 'text-[var(--sc-violet)]')}>
                     {s.kind === 'route' ? 'Go' : 'Cmd'}
                   </span>
                   <span className={cn('truncate', s.kind === 'command' && 'font-mono text-xs')}>{s.label}</span>
@@ -170,7 +170,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           </ul>
         )}
 
-        <div className="flex items-center gap-3 border-t border-[var(--sc-border)] px-4 py-2 text-[10px] text-[var(--sc-text-muted)]">
+        <div className="flex items-center gap-3 border-t border-[var(--sc-border)] px-4 py-2 text-xs text-[var(--sc-text-muted)]">
           <span className="flex items-center gap-1"><Kbd>↑↓</Kbd> select</span>
           <span className="flex items-center gap-1"><Kbd><CornerDownLeft size={9} aria-label="Enter" /></Kbd> {isCommandLine ? 'run command' : 'open'}</span>
           {running && <span className="ml-auto text-[var(--sc-primary)]">running…</span>}

@@ -38,7 +38,7 @@ function RelevanceBar({ score }: { score: number }) {
           }}
         />
       </div>
-      <span className="text-[10px] tabular-nums text-[var(--sc-text-muted)]">{pct}%</span>
+      <span className="text-xs tabular-nums text-[var(--sc-text-muted)]">{pct}%</span>
     </div>
   );
 }
@@ -182,13 +182,13 @@ export function RecallWorkspace() {
 
       {/* Advanced: Recall Debugger */}
       <details className="glass-card">
-        <summary className="cursor-pointer select-none p-4 text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+        <summary className="cursor-pointer select-none p-4 text-xs text-[var(--sc-text-muted)]">
           Advanced: Recall Debugger
         </summary>
         <div className="space-y-6 border-t border-[var(--sc-border)] p-4">
           {/* Expected memory selector */}
           <div>
-            <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+            <div className="text-xs text-[var(--sc-text-muted)]">
               Expected memory
             </div>
             <p className="mt-1 text-xs text-[var(--sc-text-dim)]">
@@ -226,7 +226,7 @@ export function RecallWorkspace() {
           {/* Expected memory eligibility breakdown */}
           {data?.expectedMemory && (
             <div>
-              <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+              <div className="text-xs text-[var(--sc-text-muted)]">
                 Eligibility breakdown
               </div>
               <div className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-bg)]/60 p-3 text-sm text-[var(--sc-text)]">
@@ -261,7 +261,7 @@ export function RecallWorkspace() {
           {/* Likely misses */}
           {data?.misses && data.misses.length > 0 && (
             <div>
-              <div className="text-xs uppercase tracking-[0.18em] text-[var(--sc-text-muted)]">
+              <div className="text-xs text-[var(--sc-text-muted)]">
                 Likely misses ({data.misses.length})
               </div>
               <div className="mt-3 space-y-3">

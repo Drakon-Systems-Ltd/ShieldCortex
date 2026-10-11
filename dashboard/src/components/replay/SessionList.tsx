@@ -39,7 +39,7 @@ export function SessionList({
     <div className="flex h-full flex-col">
       {/* Header — terminal: bracketed sort toggle, glass: pill buttons. */}
       <div className="flex items-center justify-between border-b border-[var(--sc-border)] px-3 py-2 theme-glass:border-[var(--sc-border)]">
-        <span className="text-xs font-mono uppercase tracking-wider text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)]">
+        <span className="text-xs font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)]">
           Sessions <span className="text-[var(--sc-text-dim)]">({sessions.length})</span>
         </span>
         <div className="flex gap-1">
@@ -49,7 +49,7 @@ export function SessionList({
               type="button"
               onClick={() => setSort(key)}
               className={cn(
-                'rounded px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider transition-colors',
+                'rounded px-2 py-0.5 text-xs font-mono transition-colors',
                 sort === key
                   ? 'text-[var(--sc-ok)] bg-[var(--sc-ok)]/10 theme-glass:bg-[var(--sc-ok)]/15 theme-glass:text-[var(--sc-ok)]'
                   : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-text)] theme-glass:text-[var(--sc-text-dim)]',
@@ -78,7 +78,7 @@ export function SessionList({
               <button
                 type="button"
                 onClick={onRetry}
-                className="mt-3 rounded border border-[var(--sc-border)] px-2 py-1 text-[10px] uppercase tracking-wider text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] theme-glass:border-[var(--sc-border)] theme-glass:text-[var(--sc-text-dim)]"
+                className="mt-3 rounded border border-[var(--sc-border)] px-2 py-1 text-xs text-[var(--sc-text-muted)] hover:text-[var(--sc-text)] theme-glass:border-[var(--sc-border)] theme-glass:text-[var(--sc-text-dim)]"
               >
                 Retry
               </button>
@@ -109,18 +109,18 @@ export function SessionList({
                   )}
                 >
                   <div className="flex items-baseline justify-between gap-2">
-                    <code className="text-[11px] font-mono text-[var(--sc-text)] theme-glass:text-[var(--sc-text)] truncate">
+                    <code className="text-xs font-mono text-[var(--sc-text)] theme-glass:text-[var(--sc-text)] truncate">
                       {shortSessionId(s.session_id)}
                     </code>
-                    <span className="text-[10px] font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)] tabular-nums">
+                    <span className="text-xs font-mono text-[var(--sc-text-muted)] theme-glass:text-[var(--sc-text-dim)] tabular-nums">
                       {s.event_count}
                     </span>
                   </div>
                   <div className="mt-0.5 flex items-baseline justify-between gap-2">
-                    <span className="text-[10px] font-mono text-[var(--sc-text-dim)] truncate">
+                    <span className="text-xs font-mono text-[var(--sc-text-dim)] truncate">
                       {s.project ?? '(no project)'}
                     </span>
-                    <span className="text-[10px] font-mono text-[var(--sc-text-dim)] tabular-nums">
+                    <span className="text-xs font-mono text-[var(--sc-text-dim)] tabular-nums">
                       {relativeTime(s.last_ts)}
                     </span>
                   </div>

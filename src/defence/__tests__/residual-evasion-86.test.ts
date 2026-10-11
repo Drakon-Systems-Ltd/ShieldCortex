@@ -250,4 +250,48 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     expect(v.decision).toBe('block');
     expect(v.severity).toBe('catastrophic');
   });
+
+  // #686 (#661 heredoc relief) — the relief's "is this body provably inert?"
+  // decision must not re-scan the command prefix once per heredoc. The round-2
+  // head (d06f43ae) rebuilt an unquoted skeleton of the whole prefix for EVERY
+  // heredoc whose intro line named an interpreter, O(h·n): 800 python blocks
+  // measured 304–345ms locally and 1449ms on CI node 24 against this 50ms
+  // budget (CASE, #686 review B1). With the whole-command relief it is one
+  // anchored match plus one forward line scan per evaluate, and these rows
+  // run in the same few ms as the `cat` rows above. The 26KB python shape sits
+  // well under the oversized-command cap, so the length-cap does not rescue it.
+
+  /** `count` interpreter-consumed python heredocs, one per statement, each on its own lines. */
+  function manyPythonHeredocs(count: number, sinkAndPipe = false, evilAt?: number): string {
+    const parts: string[] = [];
+    for (let i = 0; i < count; i++) {
+      if (i === evilAt) {
+        parts.push(`cat <<'EOF' > /tmp/evil${i}.sh\nrm -rf /\nEOF\nsh /tmp/evil${i}.sh`);
+      } else if (sinkAndPipe) {
+        parts.push(`python3 - <<'EOF' | sh\nimport os; os.system('echo ${i}')\nEOF`);
+      } else {
+        parts.push(`python3 - <<'EOF'\nprint('benign ${i}')\nEOF`);
+      }
+    }
+    return parts.join('\n');
+  }
+
+  it('#686 — stays fast on ~800 sink-free `python3 - <<EOF` program heredocs (the shape the round-2 relief made quadratic)', () => {
+    const command = manyPythonHeredocs(800);
+    expect(command.length).toBeLessThan(50_000);
+    const { v, elapsedMs } = timed(command);
+    expect(elapsedMs).toBeLessThan(TIME_BUDGET_MS);
+    // Not the whole-command relief form (800 statements, not one), so every
+    // body is scanned exactly as on main: benign python, nothing to flag.
+    expect(v.decision).toBe('allow');
+  });
+
+  it('#686 — stays fast on ~800 sink-bearing `python3 - <<EOF | sh` heredocs AND still BLOCKs a buried write-then-execute', () => {
+    const command = manyPythonHeredocs(800, true, 400);
+    expect(command.length).toBeLessThan(50_000);
+    const { v, elapsedMs } = timed(command);
+    expect(elapsedMs).toBeLessThan(TIME_BUDGET_MS);
+    expect(v.decision).toBe('block');
+    expect(v.severity).toBe('catastrophic');
+  });
 });

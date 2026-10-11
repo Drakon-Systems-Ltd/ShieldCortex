@@ -8,7 +8,7 @@ export type ThemePreference = 'light' | 'dark' | 'system';
 export type ResolvedTheme = 'light' | 'dark';
 
 const THEME_KEY = 'sc-theme';
-const DEFAULT_PREFERENCE: ThemePreference = 'system';
+const DEFAULT_PREFERENCE: ThemePreference = 'dark';
 
 /**
  * v2 theme state. The preference lives in localStorage `sc-theme`
