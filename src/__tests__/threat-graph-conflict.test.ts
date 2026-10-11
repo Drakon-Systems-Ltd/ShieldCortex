@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { detectRelationConflicts } from '../threat-graph/conflict.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 let entitySeq = 0;

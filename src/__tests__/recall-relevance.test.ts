@@ -1,5 +1,4 @@
 import { describe, expect, it } from '@jest/globals';
-// @ts-expect-error -- importing a .mjs hook utility
 import { filterByRelevance, extractQueryTerms } from '../../scripts/lib/recall-relevance.mjs';
 
 /**
@@ -44,7 +43,7 @@ describe('filterByRelevance — term-coverage primary gate', () => {
     expect(kept.map((r: any) => r.id)).toContain('real');
     expect(kept.map((r: any) => r.id)).not.toContain('noise');
     const noiseDrop = dropped.find((d: any) => d.row.id === 'noise');
-    expect(noiseDrop).toBeDefined();
+    if (!noiseDrop) throw new Error('noise row was not dropped');
     expect(noiseDrop.reason).toBe('below_term_coverage');
   });
 

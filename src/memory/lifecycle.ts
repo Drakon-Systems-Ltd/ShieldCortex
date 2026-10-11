@@ -292,7 +292,7 @@ export function enrichMemory(
         content = ?,
         content_hash = ?,
         sensitivity_level = CASE
-          WHEN ? = 1 AND COALESCE(sensitivity_level, 'INTERNAL') IN ('PUBLIC', 'INTERNAL') THEN 'CONFIDENTIAL'
+          WHEN ? = 1 AND COALESCE(sensitivity_level, 'INTERNAL') IN ('PUBLIC', 'INTERNAL', 'PERSONAL') THEN 'CONFIDENTIAL'
           ELSE sensitivity_level
         END,
         last_accessed = CURRENT_TIMESTAMP

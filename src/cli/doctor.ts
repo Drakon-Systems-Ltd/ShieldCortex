@@ -4973,12 +4973,18 @@ async function readinessRowsForSurface(
     return [{ label, status: 'info', message: `enforce when ready: not in use on this host — ${notInUseText(summary.adapter)}` }];
   }
   const { intervention, reachability, effectiveness } = summary.report;
+  const { describeEvidenceCarry, describeNotCounted } = await import('./guard.js');
+  const notCounted = describeNotCounted(summary.report);
   const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
   const bars =
     `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
     `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
     `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
-    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
+    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}; ` +
+    // #719: evidence is keyed on the policy hash — say what carried over.
+    `evidence: ${intervention.fresh.total} call(s) fresh since this policy, ${intervention.carried.total} carried from compatible prior policy` +
+    describeEvidenceCarry(summary.report).map((n) => `; ${n}`).join('') +
+    (notCounted ? `; not counted: ${notCounted}` : '');
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
   // #509 r5: the promotion notice is the detection control for a forged
   // journal, so doctor names the newest promotion the journal records for the
@@ -5794,7 +5800,6 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   // "cannot determine", never as a passing zero.
   let injectPack: InjectPackModule | null = null;
   try {
-    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
     injectPack = await import('../../scripts/lib/inject-pack.mjs') as InjectPackModule;
   } catch {
     injectPack = null;
@@ -7697,6 +7702,43 @@ async function checkHookTimeouts(): Promise<CheckResult> {
   }
 }
 
+// ── Check: recall lane pin (#718 / #722) ─────────────────
+/**
+ * Prompt recall scopes itself by lane (interactive / cron / automation /
+ * subagent). Lanes are detected from markers that OpenClaw's own prompt
+ * builders write; a scheduler outside OpenClaw (systemd timer, crontab, CI)
+ * writes none, so its turns look interactive and get the owner's full recall.
+ * SHIELDCORTEX_RECALL_LANE pins the lane for such a job. An unrecognised
+ * value fails safe in the hook — the turn is treated as `automation` (#722
+ * review R4): no recall by default, PUBLIC rows only where
+ * `recallLanes.automation.recall` is true (#729) — which is worth a WARN: the
+ * operator meant some lane, and it is not the one they get.
+ */
+const RECALL_LANES = ['interactive', 'cron', 'automation', 'subagent'] as const;
+
+export function checkRecallLanePin(env: NodeJS.ProcessEnv = process.env): CheckResult {
+  const label = 'Recall lane';
+  const raw = env.SHIELDCORTEX_RECALL_LANE;
+  const pinned = String(raw ?? '').trim().toLowerCase();
+  if (pinned && (RECALL_LANES as readonly string[]).includes(pinned)) {
+    return { label, status: 'info', message: `pinned to "${pinned}" by SHIELDCORTEX_RECALL_LANE in this environment` };
+  }
+  if (pinned) {
+    return {
+      label,
+      status: 'warn',
+      message: `SHIELDCORTEX_RECALL_LANE="${String(raw).trim()}" is not a lane — prompt recall treats every turn in this environment as automation until it is fixed (no recall by default; PUBLIC rows only if recallLanes.automation.recall is true)`,
+      fix: `Set SHIELDCORTEX_RECALL_LANE to one of: ${RECALL_LANES.join(', ')}`,
+    };
+  }
+  return {
+    label,
+    status: 'info',
+    message: 'detected from OpenClaw prompt markers. Jobs launched by another scheduler (systemd, crontab, CI) '
+      + 'carry no marker and recall as interactive — set SHIELDCORTEX_RECALL_LANE=cron (or automation) in that job\'s environment.',
+  };
+}
+
 // ── Check: OpenClaw managed-pin drift / disabled realtime plugin ─────────────
 /**
  * Detects the OpenClaw `EOVERRIDE` trap that silently disables the realtime
@@ -8972,6 +9014,7 @@ export async function runDoctor(
     checkSemanticCoverage, // #458: how much of the store semantic recall can actually see
     checkHooks,
     checkHookTimeouts,
+    async () => checkRecallLanePin(),
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
     checkMemoryPlaneEmptyBrain,

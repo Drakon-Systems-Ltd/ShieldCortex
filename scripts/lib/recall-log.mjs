@@ -136,8 +136,12 @@ export function writeRecallLog(entry) {
       finalContextChars: entry.finalContextChars ?? null,
       // #717: 'active:<n>' when the vector plane ran, otherwise
       // 'unavailable:<reason>' / 'disabled:config' / 'disabled:default-off'
-      // (#720: off unless opted in). null on pre-#717 writers.
+      // (#720: off unless opted in) / 'disabled:lane-gated' (#718 lane gate
+      // exited before the plane was consulted). null on pre-#717 writers.
       vectorPlane: entry.vectorPlane ?? null,
+      // #718: interactive | cron | automation | subagent, and what decided it.
+      lane: entry.lane ?? null,
+      laneSignal: entry.laneSignal ?? null,
     };
     // TODO(#717): doctor WARN when the last N interactive recall runs share
     // the same top-k candidate set (an envelope-dominated query signature).

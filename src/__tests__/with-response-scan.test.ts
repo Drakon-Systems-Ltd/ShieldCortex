@@ -100,9 +100,9 @@ describe('withResponseScan', () => {
     const wrapped = withResponseScan('get_memory', handlerReturning(content));
 
     const result = await wrapped();
-    const blocks = result.content.filter((c) => c.type === 'text').map((c) => c.text ?? '');
-    const payloadBlock = blocks.find((b) => b.includes('"region"')) ?? '';
-    const tagBlock = blocks.find((b) => b.includes(UNTRUSTED_TOOL_TAG)) ?? '';
+    const blocks = result.content.filter((c: { type: string; text?: string }) => c.type === 'text').map((c: { text?: string }) => c.text ?? '');
+    const payloadBlock = blocks.find((b: string) => b.includes('"region"')) ?? '';
+    const tagBlock = blocks.find((b: string) => b.includes(UNTRUSTED_TOOL_TAG)) ?? '';
 
     expect(payloadBlock).not.toContain('AKIAIOSFODNN7EXAMPLE'); // redacted
     expect(payloadBlock).not.toContain(UNTRUSTED_TOOL_TAG); // tag NOT embedded in the payload
@@ -139,7 +139,7 @@ describe('withResponseScan', () => {
     });
     const result = await withResponseScan('recall', handler)();
 
-    expect(result.content.some((c) => c.type === 'image')).toBe(true); // non-text preserved
+    expect(result.content.some((c: { type: string }) => c.type === 'image')).toBe(true); // non-text preserved
     expect(textOf(result)).not.toContain('Ignore all previous instructions');
   });
 

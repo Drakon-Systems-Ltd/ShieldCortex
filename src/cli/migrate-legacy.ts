@@ -381,6 +381,13 @@ function printUsage(): void {
   console.log('      Rows without a vector are invisible to semantic recall.');
   console.log('      DRY-RUN BY DEFAULT — pass --execute to embed.');
   console.log('');
+  console.log('  reclassify [--project X] [--dry-run | --execute]');
+  console.log('      Re-run the sensitivity classifier over stored memories and');
+  console.log('      RAISE labels that are now too low (#718 — e.g. personal notes');
+  console.log('      stored as PUBLIC before the PERSONAL tier). Never lowers.');
+  console.log('      DRY-RUN BY DEFAULT — pass --execute to apply. A row that');
+  console.log('      changed after the plan is left as found and reported Stale.');
+  console.log('');
   console.log('  dedupe [--project X] [--limit 200] [--execute]');
   console.log('      Cluster near-duplicate long-term memories and keep the highest-');
   console.log('      salience representative. DRY-RUN BY DEFAULT — pass --execute.');
@@ -490,6 +497,11 @@ export async function handleMemoriesCommand(
     await runEmbedBackfill(args.slice(1));
     return;
   }
+  if (sub === 'reclassify') {
+    const { runReclassify } = await import('./reclassify.js');
+    await runReclassify(args.slice(1));
+    return;
+  }
   printUsage();
   process.exit(1);
 }
@@ -526,7 +538,6 @@ export async function purgeMalformed(opts: PurgeMalformedOptions): Promise<Purge
     throw new Error(`memories DB not found at ${dbPath}`);
   }
 
-  // @ts-expect-error -- importing a .mjs hook util
   const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
   const shouldRejectCandidate = mod.shouldRejectCandidate as (seg: { title: string; content: string }) => { rejected: boolean; reason: string };
 
@@ -638,7 +649,6 @@ export async function recalcAutoCaptures(opts: RecalcOptions): Promise<RecalcRep
     throw new Error(`memories DB not found at ${dbPath}`);
   }
 
-  // @ts-expect-error -- importing a .mjs hook util (no type decls)
   const mod = await import('../../scripts/lib/extract-memorable-segments.mjs');
   const shouldRejectCandidate = mod.shouldRejectCandidate as (
     seg: { title: string; content: string },
