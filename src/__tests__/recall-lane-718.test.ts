@@ -203,6 +203,37 @@ describe('PERSONAL sensitivity tier (#718)', () => {
     }
   });
 
+  // #722 review B3: each of these classified PERSONAL at 48cc8b7c. PERSONAL is
+  // sensitive, so they silently left sync and unattended recall, and
+  // `reclassify --execute` made that permanent. The first five are the
+  // reviewer's probes verbatim.
+  it.each([
+    'Stripe partner API: third-party webhooks must be verified before processing',
+    'React re-renders all children on every trip through the reconciler',
+    'Our partner integration with the payment gateway uses OAuth',
+    'Release party: tag v5.6.0 after the family of guard regexes is merged',
+    'Holiday freeze: no deploys while the Christmas traffic peak is on, per partner SLA',
+    'Gift card checkout: sibling nodes and their parents re-render on every round trip',
+    'Our family of plugins ships a surprise fix for the Brother printer driver',
+    'Baby steps: the sister project mirrors our partner SLA for the holiday release',
+  ])('engineering/business text is not PERSONAL: %s', (content) => {
+    expect(classifySensitivity(content, 'note').level).not.toBe('PERSONAL');
+  });
+
+  it.each([
+    'Surprise birthday trip for my wife in March',
+    'My kids birthday trip',
+    "Dad's holiday plans",
+    'Taking my partner away for our anniversary',
+    'Her brother is getting married; the wedding is in June',
+    'Planning a birthday party for our daughter',
+    'Family trip with the in-laws over half-term',
+    'Buying a gift for mum',
+    'My family is on holiday next week',
+  ])('private-life text is still PERSONAL: %s', (content) => {
+    expect(classifySensitivity(content, 'note').level).toBe('PERSONAL');
+  });
+
   it('never lowers a higher tier', () => {
     expect(classifySensitivity('My wife\'s birthday dinner, password: hunter2xx', 'x').level).toBe('RESTRICTED');
     expect(classifySensitivity('Dad\'s holiday plans; diagnosis pending', 'x').level).toBe('CONFIDENTIAL');
