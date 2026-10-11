@@ -385,7 +385,8 @@ function printUsage(): void {
   console.log('      Re-run the sensitivity classifier over stored memories and');
   console.log('      RAISE labels that are now too low (#718 — e.g. personal notes');
   console.log('      stored as PUBLIC before the PERSONAL tier). Never lowers.');
-  console.log('      DRY-RUN BY DEFAULT — pass --execute to apply.');
+  console.log('      DRY-RUN BY DEFAULT — pass --execute to apply. A row that');
+  console.log('      changed after the plan is left as found and reported Stale.');
   console.log('');
   console.log('  dedupe [--project X] [--limit 200] [--execute]');
   console.log('      Cluster near-duplicate long-term memories and keep the highest-');
