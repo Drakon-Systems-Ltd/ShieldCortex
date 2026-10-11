@@ -7697,6 +7697,41 @@ async function checkHookTimeouts(): Promise<CheckResult> {
   }
 }
 
+// ── Check: recall lane pin (#718 / #722) ─────────────────
+/**
+ * Prompt recall scopes itself by lane (interactive / cron / automation /
+ * subagent). Lanes are detected from markers that OpenClaw's own prompt
+ * builders write; a scheduler outside OpenClaw (systemd timer, crontab, CI)
+ * writes none, so its turns look interactive and get the owner's full recall.
+ * SHIELDCORTEX_RECALL_LANE pins the lane for such a job. An unrecognised
+ * value is ignored by the hook, which is worth a WARN: the operator believes
+ * the job is pinned and it is not.
+ */
+const RECALL_LANES = ['interactive', 'cron', 'automation', 'subagent'] as const;
+
+export function checkRecallLanePin(env: NodeJS.ProcessEnv = process.env): CheckResult {
+  const label = 'Recall lane';
+  const raw = env.SHIELDCORTEX_RECALL_LANE;
+  const pinned = String(raw ?? '').trim().toLowerCase();
+  if (pinned && (RECALL_LANES as readonly string[]).includes(pinned)) {
+    return { label, status: 'info', message: `pinned to "${pinned}" by SHIELDCORTEX_RECALL_LANE in this environment` };
+  }
+  if (pinned) {
+    return {
+      label,
+      status: 'warn',
+      message: `SHIELDCORTEX_RECALL_LANE="${String(raw).trim()}" is not a lane and is ignored — lane falls back to prompt markers`,
+      fix: `Set SHIELDCORTEX_RECALL_LANE to one of: ${RECALL_LANES.join(', ')}`,
+    };
+  }
+  return {
+    label,
+    status: 'info',
+    message: 'detected from OpenClaw prompt markers. Jobs launched by another scheduler (systemd, crontab, CI) '
+      + 'carry no marker and recall as interactive — set SHIELDCORTEX_RECALL_LANE=cron (or automation) in that job\'s environment.',
+  };
+}
+
 // ── Check: OpenClaw managed-pin drift / disabled realtime plugin ─────────────
 /**
  * Detects the OpenClaw `EOVERRIDE` trap that silently disables the realtime
@@ -8972,6 +9007,7 @@ export async function runDoctor(
     checkSemanticCoverage, // #458: how much of the store semantic recall can actually see
     checkHooks,
     checkHookTimeouts,
+    async () => checkRecallLanePin(),
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
     checkMemoryPlaneEmptyBrain,
