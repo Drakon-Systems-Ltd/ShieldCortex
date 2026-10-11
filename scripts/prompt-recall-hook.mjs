@@ -161,7 +161,7 @@ function recallRelevant(db, project, prompt, queryVector = null) {
   }
 
   // Fused by weighted RRF only when the caller obtained a query vector —
-  // otherwise this function is byte-for-byte its pre-#717 self.
+  // otherwise the candidate list is exactly the pre-#717 FTS list.
   let fused = false;
   if (queryVector) {
     if (snapshot.vectorError) {
