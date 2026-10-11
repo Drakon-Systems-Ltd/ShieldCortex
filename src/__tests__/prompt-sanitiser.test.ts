@@ -204,3 +204,83 @@ describe('sanitisePromptForRecall — OpenClaw 2026.9.x envelope (#717)', () => 
     expect(sanitisePromptForRecall(envelope(''))).toBe('');
   });
 });
+
+// ── #720 review (Tars, blocker 2): owner text must survive byte-for-byte ──
+// The envelope is stripped only when its boundaries are complete and verified:
+// a label header carrying the marker, a ```json fence that closes and parses,
+// and every other marker block terminated by a blank line. Anything ambiguous
+// or unclosed is the owner's own words and is returned untouched.
+describe('sanitisePromptForRecall — owner text that mentions the envelope (#720)', () => {
+  const MARK = '⟦openclaw:ctx⟧';
+  const INFO = [
+    `Conversation info: ${MARK}`,
+    '```json',
+    '{ "chat_id": "telegram:100000001", "message_id": "90002" }',
+    '```',
+  ].join('\n');
+
+  const OWNER_FIXTURES: Array<[string, string]> = [
+    ['first line ends with the marker but is prose', [
+      `Why does every prompt start with Conversation info: ${MARK}`,
+      'I want to know what that marker is for.',
+    ].join('\n')],
+    ['label-shaped first line ending in the marker, then a blank line and a question', [
+      `Conversation context: ${MARK}`,
+      'is what I see at the top of every turn.',
+      '',
+      'What would you file about it?',
+    ].join('\n')],
+    ['marker header followed by an unclosed ```json fence', [
+      `Conversation info: ${MARK}`,
+      '```json',
+      '{ "chat_id": "telegram:1"',
+      'Why does this fence never close? What should I do about it?',
+    ].join('\n')],
+    ['marker header followed by a ```json fence whose body is not JSON', [
+      `Conversation info: ${MARK}`,
+      '```json',
+      'this is just me pasting prose into a json fence',
+      '```',
+      'Is that a problem?',
+    ].join('\n')],
+    ['owner code fence containing the trailing Context header', [
+      'Here is the raw prompt I captured:',
+      '```',
+      `Context: ${MARK}`,
+      'channel: telegram',
+      '```',
+      'Why is the Context block there?',
+    ].join('\n')],
+  ];
+
+  it.each(OWNER_FIXTURES)('%s — survives byte-for-byte', (_label, text) => {
+    expect(sanitisePromptForRecall(text)).toBe(text);
+  });
+
+  it('an envelope whose second marker block is unclosed is left untouched', () => {
+    const text = [INFO, '', `Conversation context (chronological, selected for current message): ${MARK}`, '#session:x 2026-10-10 User: hi'].join('\n');
+    expect(sanitisePromptForRecall(text)).toBe(text);
+  });
+
+  it('a verified envelope keeps an owner code fence that contains the Context header', () => {
+    const userText = [
+      'Here is the raw prompt I captured:',
+      '```',
+      `Context: ${MARK}`,
+      'channel: telegram',
+      '```',
+      'Why is the Context block there?',
+    ].join('\n');
+    const wrapped = `${INFO}\n\n${userText}\n\nContext: ${MARK}\nreal channel context`;
+    expect(sanitisePromptForRecall(wrapped)).toBe(userText);
+  });
+
+  it('a verified envelope with no user text and a trailing Context block yields empty', () => {
+    expect(sanitisePromptForRecall(`${INFO}\n\nContext: ${MARK}\nreal channel context`)).toBe('');
+  });
+
+  it('a verified envelope keeps an owner question that explains the marker', () => {
+    const userText = `What does ${MARK} mean at the end of "Conversation info:"?`;
+    expect(sanitisePromptForRecall(`${INFO}\n\n${userText}`)).toBe(userText);
+  });
+});

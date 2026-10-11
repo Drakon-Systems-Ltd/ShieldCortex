@@ -63,9 +63,44 @@ const DELIVERY_HINT_LINE = /^Delivery: .*`message` tool/;
 // Session goal line OpenClaw adds between the context blocks and the message.
 const ACTIVE_GOAL_LINE = /^Active goal: .* — advance; keep active until fully achieved;/;
 
+// A marker header is a label line: "<Label>: ⟦openclaw:ctx⟧" and nothing else.
+// Shape alone is not proof — an owner can type that line — so a header only
+// counts once its block is also closed (see stripOpenClawEnvelope).
+const OPENCLAW_HEADER_LINE = /^[A-Z][^:\n`\u27E6\u27E7]{0,120}:[ \t]*\u27E6openclaw:ctx\u27E7$/;
+const FENCE_LINE = /^```/;
+
 function isOpenClawHeaderLine(line) {
-  const trimmed = line.trim();
-  return trimmed.length > OPENCLAW_CTX_MARKER.length && trimmed.endsWith(OPENCLAW_CTX_MARKER);
+  return OPENCLAW_HEADER_LINE.test(line.trim());
+}
+
+function isJsonObjectText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed !== null && typeof parsed === 'object';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Index of the trailing "Context: <marker>" suffix header in `lines`, or -1.
+ * The owner's own code fences are opaque: a header inside one is quoted text,
+ * not the channel suffix. Only called after a verified envelope was consumed,
+ * so the header may open `lines` (an empty user message) or follow a blank
+ * line — never sit glued to the end of an owner sentence.
+ */
+function findTrailingContextHeader(lines) {
+  let inFence = false;
+  for (let k = 0; k < lines.length; k += 1) {
+    const trimmed = lines[k].trim();
+    if (FENCE_LINE.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (trimmed === OPENCLAW_TRAILING_CONTEXT_HEADER && (k === 0 || lines[k - 1].trim() === '')) return k;
+  }
+  return -1;
 }
 
 /**
@@ -75,13 +110,20 @@ function isOpenClawHeaderLine(line) {
  *   - any other marker header (e.g. the multi-KB "Conversation context"
  *     history) ends at the first blank line — OpenClaw collapses every
  *     history body to a single line, so a blank line cannot occur inside it.
- * Returns null when the prompt carries no marker, or when nothing was
+ *
+ * #720 (Tars): only a COMPLETE, verified envelope is stripped. The leading
+ * run must contain at least one marker block whose ```json fence closes and
+ * parses as JSON (OpenClaw always opens with "Conversation info:"), and every
+ * marker block in the run must be closed — a fence with no closer, or a
+ * history block that runs to EOF, means the "envelope" is really the owner's
+ * text, and the whole prompt is preserved. Returns null when nothing was
  * stripped (caller falls back to the legacy patterns).
  */
 function stripOpenClawEnvelope(prompt) {
   if (!prompt.includes(OPENCLAW_CTX_MARKER)) return null;
   const lines = prompt.replace(/\r\n/g, '\n').split('\n');
   let i = 0;
+  let verifiedJsonBlock = false;
   const skipBlank = () => { while (i < lines.length && lines[i].trim() === '') i += 1; };
 
   for (;;) {
@@ -92,20 +134,29 @@ function stripOpenClawEnvelope(prompt) {
       i += 1;
       continue;
     }
-    if (!isOpenClawHeaderLine(line)) break;
+    // The trailing suffix header ends the leading run; it is cut below.
+    if (line.trim() === OPENCLAW_TRAILING_CONTEXT_HEADER || !isOpenClawHeaderLine(line)) break;
     i += 1;
     if (lines[i] !== undefined && /^```json\s*$/.test(lines[i].trim())) {
-      i += 1;
-      while (i < lines.length && lines[i].trim() !== '```') i += 1;
-      i += 1; // past the closing fence
+      const bodyStart = i + 1;
+      let close = bodyStart;
+      while (close < lines.length && lines[close].trim() !== '```') close += 1;
+      if (close >= lines.length) return null; // unclosed fence: owner text
+      if (!isJsonObjectText(lines.slice(bodyStart, close).join('\n'))) return null;
+      verifiedJsonBlock = true;
+      i = close + 1; // past the closing fence
     } else {
+      const bodyStart = i;
       while (i < lines.length && lines[i].trim() !== '') i += 1;
+      // Empty, or running to EOF with no blank terminator: not a closed block.
+      if (i === bodyStart || i >= lines.length) return null;
     }
   }
+  if (!verifiedJsonBlock) return null;
 
   let rest = lines.slice(i);
   // Trailing "Context: <marker>" suffix block runs to the end of the prompt.
-  const suffixAt = rest.findIndex((l) => l.trim() === OPENCLAW_TRAILING_CONTEXT_HEADER);
+  const suffixAt = findTrailingContextHeader(rest);
   if (suffixAt >= 0) rest = rest.slice(0, suffixAt);
 
   // Telegram reply turns: "Current message:\n[Replying to: \"…\"]\n#<id>: <text>".
