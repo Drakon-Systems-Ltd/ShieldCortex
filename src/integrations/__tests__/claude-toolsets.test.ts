@@ -323,7 +323,7 @@ describe('ToolsetGuard — unclassified fails closed (#678 acceptance 7)', () =>
     const { guard } = makeGuard({ toolset: 'computer', urlAllowlist: undefined });
     expect(guard.classify({ member: 'left_click', input: { coordinate: [640, 360] } }).effects).toEqual(['unclassified']);
     expect(guard.classify({ member: 'type', input: { text: 'hello' } }).decision).toBe('allow');
-    await guard.execute({ member: 'screenshot', input: {} }, 'screenshot', {}, async () => ({ data: 'x' }));
+    await guard.execute({}, 'screenshot', {}, async () => ({ data: 'x' }));
     const typed = guard.classify({ member: 'type', input: { text: 'hello' } });
     expect(typed.decision).toBe('require_approval');
     expect(typed.card).toContain('desktop');

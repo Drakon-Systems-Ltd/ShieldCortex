@@ -64,7 +64,7 @@ export type ToolsetEffectKind =
  */
 export interface ToolsetCallContext {
   /** The tool_use being served; used only for its id. */
-  readonly toolUse?: { readonly id?: string } | undefined;
+  readonly toolUse?: { readonly id?: string } | null | undefined;
   readonly signal?: AbortSignal | null | undefined;
 }
 
