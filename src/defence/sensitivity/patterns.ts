@@ -106,7 +106,14 @@ export const PERSONAL_EVENT_PATTERN =
   /\b(?:surprise|birthday|anniversary|wedding|honeymoon|vacation|getaway|weekend away|(?:birthday|surprise|engagement|dinner|christmas|garden|house|hen|stag|leaving) party|(?:family|road|day|school|ski|camping|beach|surprise|weekend|holiday) trip|gifts? for|(?:birthday|christmas|wedding) (?:gift|present)|present for|on holiday|holidays? (?:plans?|with|abroad)|(?:summer|family|school|easter|christmas) holidays?|(?:for|at|over) christmas|christmas (?:day|eve|dinner|shopping)|date night|proposal|engag(?:ed|ement)|pregnan(?:t|cy)|due date|funeral|divorce|separation|school run|nursery|playdate|sleepover|half[- ]term)\b/i;
 
 export const PERSONAL_STANDALONE_PATTERNS: SensitivityPattern[] = [
-  { pattern: /\b(?:don'?t|do not|never) (?:tell|mention (?:it |this )?to|let) (?:her|him|them)\b/gi, label: 'personal-secret', weight: 0.75 },
+  // A bare "never let them" / "do not let her" is as often concurrency or
+  // review advice ("workers share a queue; never let them process the same
+  // job twice") as a secret, so `let` only counts with a knowing verb after
+  // it (#722 review R3). "keep it from her" / "a secret from him" are the
+  // other explicit forms.
+  { pattern: /\b(?:don'?t|do not|never) (?:tell|mention (?:it |this )?to) (?:her|him|them)\b/gi, label: 'personal-secret', weight: 0.75 },
+  { pattern: /\b(?:don'?t|do not|never) let (?:her|him|them) (?:know|find out|suspect|catch on)\b/gi, label: 'personal-secret', weight: 0.75 },
+  { pattern: /\bkeep (?:it|this|that)(?: a secret)? from (?:her|him|them)\b/gi, label: 'personal-secret', weight: 0.75 },
   // "our partner" / "our family" are business phrases ("our partner
   // integration", "our family of plugins"); only "my" makes them personal.
   { pattern: /\b(?:my|our) (?:wife|husband|girlfriend|boyfriend|fianc[ée]e?|kids|children|daughter|son|mum|mom|dad)\b/gi, label: 'personal-relationship', weight: 0.65 },

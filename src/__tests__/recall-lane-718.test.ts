@@ -252,6 +252,19 @@ describe('lane policy (#718)', () => {
   });
 });
 
+// #722 review R3: `personal-secret` matched a bare "never let them" / "do not
+// let them", so routine concurrency and retry advice classified PERSONAL — and
+// reclassify persisted that and never lowers it. The first is the reviewer's
+// probe verbatim.
+const R3_ENGINEERING_NEGATIVES = [
+  'Workers share a queue; never let them process the same job twice.',
+  'Retries back off exponentially; do not let them hammer the API after a 429.',
+  "Two consumers read the queue — don't let them ack the same message.",
+  'Never let him merge without a green CI run.',
+  'Lock the rows first and never let them drift between the two replicas.',
+  'Do not let her deploy on a Friday without a rollback plan.',
+];
+
 describe('PERSONAL sensitivity tier (#718)', () => {
   it('classifies the 13195-shaped memory as PERSONAL', () => {
     const c = classifySensitivity(FAMILY_CONTENT, FAMILY_TITLE);
@@ -283,6 +296,7 @@ describe('PERSONAL sensitivity tier (#718)', () => {
     'Gift card checkout: sibling nodes and their parents re-render on every round trip',
     'Our family of plugins ships a surprise fix for the Brother printer driver',
     'Baby steps: the sister project mirrors our partner SLA for the holiday release',
+    ...R3_ENGINEERING_NEGATIVES,
   ])('engineering/business text is not PERSONAL: %s', (content) => {
     expect(classifySensitivity(content, 'note').level).not.toBe('PERSONAL');
   });
@@ -297,6 +311,12 @@ describe('PERSONAL sensitivity tier (#718)', () => {
     'Family trip with the in-laws over half-term',
     'Buying a gift for mum',
     'My family is on holiday next week',
+    // #722 review R3: the explicit secrecy forms the narrowed branch keeps.
+    "Don't let her know about the party yet",
+    'Never let him find out what we got',
+    'Do not let them know before Friday',
+    'Keep it from her until the weekend',
+    'Keep this a secret from him',
   ])('private-life text is still PERSONAL: %s', (content) => {
     expect(classifySensitivity(content, 'note').level).toBe('PERSONAL');
   });
@@ -432,6 +452,22 @@ describe('memories reclassify (#718)', () => {
       expect([r.updated, r.stale, r.staleIds]).toEqual([2, 0, []]);
       db.close();
     });
+  });
+
+  it('a dry run does not plan raises for routine worker/retry/queue advice (#722 R3)', async () => {
+    const db = new Database(':memory:');
+    db.exec(SCHEMA);
+    const ins = db.prepare(
+      `INSERT INTO memories (uuid, type, category, title, content, project, salience, sensitivity_level)
+       VALUES (lower(hex(randomblob(16))), 'long_term', 'pattern', 'Queue note', ?, ?, 0.9, 'PUBLIC')`,
+    );
+    for (const text of R3_ENGINEERING_NEGATIVES) ins.run(text, PROJECT);
+    ins.run(FAMILY_CONTENT, PROJECT); // control: still raised
+    const dry = await reclassifyMemories({ db, project: PROJECT });
+    expect(dry.scanned).toBe(R3_ENGINEERING_NEGATIVES.length + 1);
+    expect(dry.transitions).toEqual({ 'PUBLIC→PERSONAL': 1 });
+    expect(dry.labels['personal-secret']).toBe(1);
+    db.close();
   });
 
   it('skips labels outside the ladder', async () => {
