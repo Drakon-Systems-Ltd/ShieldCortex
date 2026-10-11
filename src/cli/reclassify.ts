@@ -14,6 +14,14 @@
  * would widen who can read the row. Unknown labels (SECRET, foreign clients)
  * are left alone for the same reason.
  *
+ * --execute writes with a compare-and-update (#722 review R2). The plan is
+ * read and classified outside any lock; each write then only lands if the row
+ * still has the label, title, content and project the plan saw. A row that
+ * changed in between — relabelled by hand, edited, moved to another project —
+ * is counted `stale` and left exactly as the other writer left it, so a stale
+ * plan can never lower a label or touch a row outside the selected project.
+ * Re-run to re-plan those rows.
+ *
  * DRY-RUN BY DEFAULT, like prune / dedupe / embed-backfill. The report carries
  * ids and labels only — never titles or content, since the rows it lists are
  * exactly the ones that are private.
@@ -62,8 +70,23 @@ export interface ReclassifyResult {
   labels: Record<string, number>;
   /** Rows skipped because their stored label is outside the ladder. */
   skippedUnknown: number;
+  /** Raises written (--execute only). */
   updated: number;
+  /**
+   * Planned raises NOT written because the row changed between plan and
+   * write (label, title, content or project) or was deleted (--execute only).
+   */
+  stale: number;
+  staleIds: number[];
   dryRun: boolean;
+}
+
+/** What the plan saw; the write only lands while all of it still holds. */
+interface SeenRow {
+  sensitivity_level: unknown;
+  title: string | null;
+  content: string | null;
+  project: string | null;
 }
 
 export async function reclassifyMemories(options: ReclassifyOptions = {}): Promise<ReclassifyResult> {
@@ -89,12 +112,11 @@ export async function reclassifyMemories(options: ReclassifyOptions = {}): Promi
   try {
     const projectClause = options.project ? 'WHERE project = ?' : '';
     const rows = db.prepare(
-      `SELECT id, title, content, sensitivity_level FROM memories ${projectClause} ORDER BY id`,
-    ).all(...(options.project ? [options.project] : [])) as Array<{
-      id: number; title: string | null; content: string | null; sensitivity_level: string | null;
-    }>;
+      `SELECT id, title, content, project, sensitivity_level FROM memories ${projectClause} ORDER BY id`,
+    ).all(...(options.project ? [options.project] : [])) as Array<{ id: number } & SeenRow>;
 
     const changes: ReclassifyChange[] = [];
+    const seen = new Map<number, SeenRow>();
     const transitions: Record<string, number> = {};
     const labels: Record<string, number> = {};
     let skippedUnknown = 0;
@@ -111,21 +133,35 @@ export async function reclassifyMemories(options: ReclassifyOptions = {}): Promi
       const from = LADDER[currentRank];
       const to = LADDER[nextRank];
       changes.push({ id: row.id, from, to });
+      seen.set(row.id, row);
       const key = `${from}→${to}`;
       transitions[key] = (transitions[key] ?? 0) + 1;
       for (const label of new Set(verdict.detectedPatterns ?? [])) labels[label] = (labels[label] ?? 0) + 1;
     }
 
     let updated = 0;
+    const staleIds: number[] = [];
     if (!dryRun && changes.length > 0) {
-      const update = db.prepare('UPDATE memories SET sensitivity_level = ? WHERE id = ?');
+      // `IS` so a NULL label / title / project compares equal to NULL.
+      const update = db.prepare(
+        `UPDATE memories SET sensitivity_level = ?
+          WHERE id = ? AND sensitivity_level IS ? AND title IS ? AND content IS ? AND project IS ?`,
+      );
       const apply = db.transaction((list: ReclassifyChange[]) => {
-        for (const c of list) updated += update.run(c.to, c.id).changes;
+        for (const c of list) {
+          const s = seen.get(c.id)!;
+          const n = update.run(c.to, c.id, s.sensitivity_level, s.title, s.content, s.project).changes;
+          if (n > 0) updated += n;
+          else staleIds.push(c.id);
+        }
       });
-      apply(changes);
+      apply.immediate(changes);
     }
 
-    return { scanned: rows.length, changes, transitions, labels, skippedUnknown, updated, dryRun };
+    return {
+      scanned: rows.length, changes, transitions, labels, skippedUnknown,
+      updated, stale: staleIds.length, staleIds, dryRun,
+    };
   } finally {
     if (openedOwn && db) {
       if (dryRun) {
@@ -163,7 +199,8 @@ export async function runReclassify(args: string[]): Promise<void> {
   console.log(`${banner}Reclassify memory sensitivity with the current classifier (#718)`);
   console.log(`  Project: ${project ?? '(all)'}`);
   console.log(`  Scanned: ${result.scanned}`);
-  console.log(`  Would raise: ${result.changes.length}${result.skippedUnknown ? ` (skipped ${result.skippedUnknown} with an unknown label)` : ''}`);
+  console.log(`  ${result.dryRun ? 'Would raise' : 'Planned raises'}: ${result.changes.length}`);
+  console.log(`  Skipped (unknown label, never touched): ${result.skippedUnknown}`);
   for (const [k, n] of Object.entries(result.transitions)) console.log(`    ${k}: ${n}`);
   const labels = Object.entries(result.labels).sort((a, b) => b[1] - a[1]);
   if (labels.length > 0) {
@@ -177,6 +214,11 @@ export async function runReclassify(args: string[]): Promise<void> {
   if (result.dryRun) {
     if (result.changes.length > 0) console.log('  Re-run with --execute to apply. Labels are only ever raised.');
   } else {
-    console.log(`  Updated: ${result.updated}`);
+    console.log(`  Applied: ${result.updated}`);
+    console.log(`  Stale: ${result.stale}${result.stale > 0 ? ' (changed since planned — left as found; re-run to re-plan)' : ''}`);
+    if (result.stale > 0) {
+      const ids = result.staleIds.slice(0, 50).map((id) => `#${id}`).join(' ');
+      console.log(`    Ids: ${ids}${result.stale > 50 ? ' …' : ''}`);
+    }
   }
 }

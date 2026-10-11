@@ -368,6 +368,72 @@ describe('memories reclassify (#718)', () => {
     db.close();
   });
 
+  // #722 review R2: the plan is read and classified first, then written. A
+  // writer that changes the row in between must win. The injected classifier
+  // is the interleaving point — it runs after the plan's read and before the
+  // write — and makes the change through a second connection to the same file.
+  describe('--execute never overwrites a row that changed since the plan (#722 R2)', () => {
+    function fileDb(): { path: string; db: Database.Database } {
+      const dir = mkdtempSync(join(tmpdir(), 'sc-722-r2-'));
+      tmpDirs.push(dir);
+      const path = join(dir, 'memories.db');
+      const db = new Database(path);
+      db.exec(SCHEMA);
+      const ins = db.prepare(
+        `INSERT INTO memories (uuid, type, category, title, content, project, salience, sensitivity_level)
+         VALUES (lower(hex(randomblob(16))), 'long_term', 'context', ?, ?, ?, 0.9, 'PUBLIC')`,
+      );
+      ins.run('Raced', FAMILY_CONTENT, PROJECT);
+      ins.run('Bystander', 'My kids birthday trip', PROJECT);
+      return { path, db };
+    }
+
+    const races: Array<[string, string, (other: Database.Database, id: number) => void, Record<string, unknown> | undefined]> = [
+      ['relabelled CONFIDENTIAL', 'stronger label survives',
+        (o, id) => { o.prepare(`UPDATE memories SET sensitivity_level = 'CONFIDENTIAL' WHERE id = ?`).run(id); },
+        { sensitivity_level: 'CONFIDENTIAL', project: PROJECT }],
+      ['relabelled RESTRICTED', 'stronger label survives',
+        (o, id) => { o.prepare(`UPDATE memories SET sensitivity_level = 'RESTRICTED' WHERE id = ?`).run(id); },
+        { sensitivity_level: 'RESTRICTED', project: PROJECT }],
+      ['moved to another project', 'row outside the selection is untouched',
+        (o, id) => { o.prepare(`UPDATE memories SET project = 'elsewhere' WHERE id = ?`).run(id); },
+        { sensitivity_level: 'PUBLIC', project: 'elsewhere' }],
+      ['content rewritten', 'the classification no longer applies',
+        (o, id) => { o.prepare(`UPDATE memories SET content = 'Deploys go out on Tuesdays.' WHERE id = ?`).run(id); },
+        { sensitivity_level: 'PUBLIC', project: PROJECT }],
+      ['deleted', 'nothing is resurrected',
+        (o, id) => { o.prepare('DELETE FROM memories WHERE id = ?').run(id); },
+        undefined],
+    ];
+
+    it.each(races)('row %s between plan and write: skipped as stale (%s)', async (_name, _why, race, expected) => {
+      const { path, db } = fileDb();
+      const other = new Database(path);
+      const racedId = (db.prepare(`SELECT id FROM memories WHERE title = 'Raced'`).get() as { id: number }).id;
+      const classify = (content: string, title: string) => {
+        if (title === 'Raced') race(other, racedId);
+        return classifySensitivity(content, title);
+      };
+      const r = await reclassifyMemories({ db, project: PROJECT, execute: true, classify });
+      other.close();
+      expect(r.changes.map((c) => c.id)).toContain(racedId);
+      expect(r.updated).toBe(1);           // the bystander
+      expect(r.stale).toBe(1);
+      expect(r.staleIds).toEqual([racedId]);
+      const after = db.prepare('SELECT sensitivity_level, project FROM memories WHERE id = ?').get(racedId);
+      expect(after).toEqual(expected);
+      expect(db.prepare(`SELECT sensitivity_level s FROM memories WHERE title = 'Bystander'`).get()).toEqual({ s: 'PERSONAL' });
+      db.close();
+    });
+
+    it('an unchanged plan applies with no stale rows', async () => {
+      const { db } = fileDb();
+      const r = await reclassifyMemories({ db, project: PROJECT, execute: true });
+      expect([r.updated, r.stale, r.staleIds]).toEqual([2, 0, []]);
+      db.close();
+    });
+  });
+
   it('skips labels outside the ladder', async () => {
     const db = seed();
     db.prepare(`UPDATE memories SET sensitivity_level = 'TOP-SECRET' WHERE title = 'Deploy note'`).run();
