@@ -381,6 +381,13 @@ function printUsage(): void {
   console.log('      Rows without a vector are invisible to semantic recall.');
   console.log('      DRY-RUN BY DEFAULT — pass --execute to embed.');
   console.log('');
+  console.log('  reclassify [--project X] [--dry-run | --execute]');
+  console.log('      Re-run the sensitivity classifier over stored memories and');
+  console.log('      RAISE labels that are now too low (#718 — e.g. personal notes');
+  console.log('      stored as PUBLIC before the PERSONAL tier). Never lowers.');
+  console.log('      DRY-RUN BY DEFAULT — pass --execute to apply. A row that');
+  console.log('      changed after the plan is left as found and reported Stale.');
+  console.log('');
   console.log('  dedupe [--project X] [--limit 200] [--execute]');
   console.log('      Cluster near-duplicate long-term memories and keep the highest-');
   console.log('      salience representative. DRY-RUN BY DEFAULT — pass --execute.');
@@ -488,6 +495,11 @@ export async function handleMemoriesCommand(
   if (sub === 'embed-backfill') {
     const { runEmbedBackfill } = await import('./embed-backfill.js');
     await runEmbedBackfill(args.slice(1));
+    return;
+  }
+  if (sub === 'reclassify') {
+    const { runReclassify } = await import('./reclassify.js');
+    await runReclassify(args.slice(1));
     return;
   }
   printUsage();

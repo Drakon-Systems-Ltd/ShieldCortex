@@ -92,6 +92,7 @@ Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob
 ```bash
 sudo shieldcortex protect
 shieldcortex config --policy-status
+shieldcortex memories reclassify
 ```
 
 Root, once. A bare `protect` reads nothing from `config.json`: it pins the safe posture — Action Guard **enabled and enforcing**, empty auto-approve and reviewed-script lists, broker off — so this is also the moment Guard turns on. `sudo shieldcortex protect --from-config` pins your current protected settings instead — the Action Guard block, plus defence mode and memory posture where `config.json` sets them — including a Guard that is off. Either way an agent cannot quietly loosen the pinned keys afterwards. There is no `unprotect` command. Recovery is a human at a root shell — [runbook](design/2026-09-16-501-policy-lock.md).
@@ -118,6 +119,54 @@ shieldcortex config --cloud-api-key <key>
 shieldcortex config --cloud-enable
 shieldcortex service install --headless   # always-on servers
 ```
+
+<a id="recall-lanes"></a>
+
+### Recall lanes and the PERSONAL tier
+
+Prompt-time recall is scoped by **lane** as well as project, because on a single-workspace box the owner's chat, cron jobs and liveness probes all share one project key. The `UserPromptSubmit` hook decides the lane for each turn from markers that OpenClaw's own prompt builders write (`[cron:…]`, `[Subagent Task]`, `Automated liveness check`, heartbeat prompts) or from an operator pin:
+
+| Lane | Default recall |
+|---|---|
+| `interactive` | everything (unchanged) |
+| `cron` | categories `error`, `pattern`, `decision` |
+| `subagent` | categories `error`, `pattern`, `decision` |
+| `automation` | none |
+
+Change the categories, or opt `automation` in, with `recallLanes` in `~/.shieldcortex/config.json`, e.g. `"recallLanes": { "automation": { "recall": true } }`. One rule is not configurable: a lane other than `interactive` only ever receives rows labelled `PUBLIC`. Unlabelled rows count as `INTERNAL` and are withheld, and so is any label that is not exactly `PUBLIC` after trimming and ASCII upper-casing (a look-alike such as `publıc` is an unknown label and stays withheld). Withheld rows still appear in the recall log (`~/.shieldcortex/recall-log/`) with a `lane_policy:*` drop reason; the log also records `lane` and `laneSignal` for every turn.
+
+**PERSONAL** is a sensitivity tier between `INTERNAL` and `CONFIDENTIAL` for private-life notes (a family trip, a surprise party, "don't let her know"). New writes are classified automatically. The owner's own interactive recall still sees PERSONAL rows; automated lanes never do. A PERSONAL row that also names an identifier (an email, a tax reference, a salary) is raised to `CONFIDENTIAL` like any other row.
+
+#### Pinning a lane: `SHIELDCORTEX_RECALL_LANE`
+
+A job started by something other than OpenClaw (a systemd timer, crontab, CI) writes no marker, so its turns look interactive and get the owner's full recall. Set the pin in that job's environment:
+
+```bash
+SHIELDCORTEX_RECALL_LANE=cron       # or automation, subagent, interactive
+```
+
+- Valid values: `interactive`, `cron`, `automation`, `subagent` (case and surrounding spaces are ignored). A valid pin wins over any marker in the prompt.
+- Unset or blank: no pin; the lane comes from prompt markers, and an unmarked turn is `interactive`.
+- **Any other value fails safe:** the turn is treated as `automation` (no recall unless you opted `automation` in, and then PUBLIC rows only). The recall log shows `laneSignal: "env:SHIELDCORTEX_RECALL_LANE:invalid"`, and `shieldcortex doctor` prints a WARN on its **Recall lane** row naming the bad value.
+
+<a id="reclassify"></a>
+
+#### Backfilling labels: `shieldcortex memories reclassify`
+
+The classifier only labels new writes, so rows stored before the PERSONAL tier keep the label that let them into automated lanes. `reclassify` re-runs the current classifier over stored rows and **raises** labels that are now too low. It never lowers a label, and it never touches a row whose label is outside the ladder (`PUBLIC` · `INTERNAL` · `PERSONAL` · `CONFIDENTIAL` · `RESTRICTED` · `SECRET`), including non-ASCII look-alikes.
+
+```bash
+shieldcortex memories reclassify --project my-project            # dry run (default)
+shieldcortex memories reclassify --project my-project --execute  # apply
+```
+
+1. **Dry run first.** It prints how many rows were scanned, how many it would raise, the from→to transitions, the classifier labels behind the raises, how many were skipped for an unknown label, and the ids. It lists ids and labels only, never titles or content. If one label accounts for most of the raises, check a few of those rows before applying: that is the usual sign of false positives.
+2. **`--execute`** re-plans and writes. Each raise is a compare-and-update: it only lands if the row still has the label, title, content and project the plan saw. The output reports:
+   - **Applied**: raises written.
+   - **Stale**: rows that changed between plan and write (relabelled, edited, moved to another project, deleted). They are left exactly as the other writer left them, with their ids listed. Re-run to re-plan them.
+   - **Skipped (unknown label, never touched)**: rows outside the ladder.
+
+Omit `--project` to scan every project. `--dry-run` and `--execute` cannot be combined.
 
 <a id="claude-code-hook-fallback"></a>
 

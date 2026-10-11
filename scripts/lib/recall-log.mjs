@@ -134,6 +134,9 @@ export function writeRecallLog(entry) {
       candidates: Array.isArray(entry.candidates) ? entry.candidates : [],
       injectedCount: entry.injectedCount ?? null,
       finalContextChars: entry.finalContextChars ?? null,
+      // #718: interactive | cron | automation | subagent, and what decided it.
+      lane: entry.lane ?? null,
+      laneSignal: entry.laneSignal ?? null,
     };
     const target = logPath(0);
     const tmp = `${target}.tmp`;
