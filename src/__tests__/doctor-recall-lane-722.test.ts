@@ -28,4 +28,43 @@ describe('doctor — recall lane pin (#722)', () => {
     expect(r.message).not.toContain('ignored');
     expect(r.fix).toContain('interactive, cron, automation, subagent');
   });
+
+  /**
+   * #729: "automation (no recall)" was absolute, but the hook still recalls
+   * PUBLIC rows on the automation lane when recallLanes.automation.recall is
+   * true. The WARN now names the default and the opt-in exception; severity,
+   * fix and the absent/valid rows are unchanged, and nothing advises opting in.
+   */
+  it('invalid pin: WARN states the automation default and its PUBLIC-only opt-in exception (#729)', () => {
+    const r = checkRecallLanePin({ SHIELDCORTEX_RECALL_LANE: ' nightly ' });
+    expect(r).toEqual({
+      label: 'Recall lane',
+      status: 'warn',
+      message: 'SHIELDCORTEX_RECALL_LANE="nightly" is not a lane — prompt recall treats every turn in this environment '
+        + 'as automation until it is fixed (no recall by default; PUBLIC rows only if recallLanes.automation.recall is true)',
+      fix: 'Set SHIELDCORTEX_RECALL_LANE to one of: interactive, cron, automation, subagent',
+    });
+    expect(r.message).not.toContain('automation (no recall)');
+    expect(r.fix).not.toContain('recallLanes');
+  });
+
+  it('absent / blank pin: output unchanged, no opt-in advice (#729)', () => {
+    const expected = {
+      label: 'Recall lane',
+      status: 'info',
+      message: 'detected from OpenClaw prompt markers. Jobs launched by another scheduler (systemd, crontab, CI) '
+        + 'carry no marker and recall as interactive — set SHIELDCORTEX_RECALL_LANE=cron (or automation) in that job\'s environment.',
+    };
+    expect(checkRecallLanePin({})).toEqual(expected);
+    expect(checkRecallLanePin({ SHIELDCORTEX_RECALL_LANE: '   ' })).toEqual(expected);
+    expect(checkRecallLanePin({}).message).not.toContain('recallLanes');
+  });
+
+  it.each(['interactive', 'cron', 'automation', 'subagent'])('valid pin %s: output unchanged (#729)', (lane) => {
+    expect(checkRecallLanePin({ SHIELDCORTEX_RECALL_LANE: lane.toUpperCase() })).toEqual({
+      label: 'Recall lane',
+      status: 'info',
+      message: `pinned to "${lane}" by SHIELDCORTEX_RECALL_LANE in this environment`,
+    });
+  });
 });
