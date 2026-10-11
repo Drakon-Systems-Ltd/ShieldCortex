@@ -55,7 +55,19 @@ function resolvePluginSource(): string {
     ? path.resolve(process.env.SHIELDCORTEX_PLUGIN_SOURCE)
     : path.resolve(__dirname, '..', '..', 'plugins', 'openclaw', 'dist');
 }
-const PLUGIN_PACKAGE_SOURCE = path.resolve(__dirname, '..', '..', 'plugins', 'openclaw');
+function resolvePluginPackageSource(): string {
+  return process.env.SHIELDCORTEX_PLUGIN_PACKAGE_SOURCE
+    ? path.resolve(process.env.SHIELDCORTEX_PLUGIN_PACKAGE_SOURCE)
+    : path.resolve(__dirname, '..', '..', 'plugins', 'openclaw');
+}
+
+/** The npm tarball omits src/ and tsconfig.json. Override for hermetic tests. */
+export function isSourceCheckout(): boolean {
+  if (process.env.SHIELDCORTEX_SOURCE_CHECKOUT === '1') return true;
+  if (process.env.SHIELDCORTEX_SOURCE_CHECKOUT === '0') return false;
+  const root = path.resolve(__dirname, '..', '..');
+  return fs.existsSync(path.join(root, 'tsconfig.json')) && fs.existsSync(path.join(root, 'src'));
+}
 const PLUGIN_DIR_NAME = 'shieldcortex-realtime';
 export const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;
 const OPENCLAW_SKIP_NATIVE_INSTALL_ENV = 'SHIELDCORTEX_SKIP_NATIVE_OPENCLAW_INSTALL';
@@ -1247,12 +1259,18 @@ export interface NativePluginInstallRefusal {
   reason: string;
   detail: string[];
   configInvalid: boolean;
+  configMissing?: boolean;
   truncated: boolean;
   /** Which attempt produced this refusal (package vs linked). */
   label: string;
 }
 
 let lastNativePluginInstallRefusal: NativePluginInstallRefusal | null = null;
+let nativePluginInstallRefusals: NativePluginInstallRefusal[] = [];
+
+export function getNativePluginInstallRefusals(): NativePluginInstallRefusal[] {
+  return [...nativePluginInstallRefusals];
+}
 
 /** Test/doctor seam: last native-install refusal, or null. */
 export function getLastNativePluginInstallRefusal(): NativePluginInstallRefusal | null {
@@ -1261,6 +1279,7 @@ export function getLastNativePluginInstallRefusal(): NativePluginInstallRefusal 
 
 export function __clearLastNativePluginInstallRefusalForTest(): void {
   lastNativePluginInstallRefusal = null;
+  nativePluginInstallRefusals = [];
 }
 
 /** Test seam: seed a native-install refusal that installPlugin will surface. */
@@ -1268,6 +1287,7 @@ export function __setLastNativePluginInstallRefusalForTest(
   refusal: NativePluginInstallRefusal | null,
 ): void {
   lastNativePluginInstallRefusal = refusal;
+  nativePluginInstallRefusals = refusal ? [refusal] : [];
 }
 
 /**
@@ -1280,13 +1300,20 @@ export function classifyNativePluginInstallFailure(
   stdout: string,
   stderr: string,
   status: number | null,
-  opts: { home?: string; label?: string } = {},
+  opts: { home?: string; label?: string; configPath?: string } = {},
 ): NativePluginInstallRefusal {
   const streams = [stderr ?? '', stdout ?? ''];
   const combined = streams.join('\n');
   const configInvalid = /config is invalid/i.test(combined);
+  // Each alternative is line bounded and has a fixed maximum gap, so long
+  // hostile child output cannot cause an unbounded backtracking search.
+  // The text is only a hint: lines such as "Using config …; package … not
+  // found" match it while the real cause is elsewhere. Ground truth decides —
+  // a config file that exists is never reported as missing (#706 review).
+  const missingSignal = /(?:config(?:uration)?[^\r\n]{0,80}(?:not found|does not exist)|\bno(?: openclaw)? config\b|ENOENT[^\r\n]{0,160}openclaw\.json|openclaw\.json[^\r\n]{0,160}(?:not found|does not exist|ENOENT))/i.test(combined);
+  const configMissing = missingSignal && !fs.existsSync(opts.configPath ?? openClawConfigPath());
   // Prefer the stream that carries the refusal signal (usually stderr).
-  const withSignal = streams.find((s) => s.trim() && /config is invalid|refus|denied|error|invalid|ENOENT|EACCES/i.test(s));
+  const withSignal = streams.find((s) => s.trim() && /config is invalid|config not found|no config|does not exist|refus|denied|error|invalid|ENOENT|EACCES/i.test(s));
   const chosen = withSignal ?? streams.find((s) => s.trim()) ?? '';
   const summarised = summariseCommandOutput(chosen, {
     maxLines: 4,
@@ -1304,6 +1331,7 @@ export function classifyNativePluginInstallFailure(
     reason,
     detail: summarised.lines,
     configInvalid,
+    configMissing,
     truncated: summarised.truncated,
     label: opts.label ?? 'native install',
   };
@@ -1318,7 +1346,17 @@ function reportNativePluginInstallRefusal(refusal: NativePluginInstallRefusal): 
   if (refusal.truncated) {
     console.warn('    … (further OpenClaw output omitted)');
   }
-  if (refusal.configInvalid) {
+}
+
+function isConfigClassRefusal(refusal: NativePluginInstallRefusal | null): boolean {
+  return Boolean(refusal?.configInvalid || refusal?.configMissing);
+}
+
+function reportNativePluginConfigRemedy(refusal: NativePluginInstallRefusal | null): void {
+  if (refusal?.configMissing) {
+    console.warn(`  No OpenClaw config was found at ${openClawConfigPath()}.`);
+    console.warn('  Set up OpenClaw and run it once to create the config, then retry `shieldcortex openclaw install`.');
+  } else if (refusal?.configInvalid) {
     console.warn('  OpenClaw config is invalid — native install cannot register through OpenClaw until it validates.');
     console.warn('  Fix: run `openclaw config validate`, repair the reported keys, then re-run `shieldcortex openclaw install` or `shieldcortex repair`.');
   }
@@ -1335,11 +1373,15 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   // They may also seed lastNativePluginInstallRefusal via the helper below.
   if (_nativePluginInstallForTest) {
     const mode = _nativePluginInstallForTest();
-    if (mode) lastNativePluginInstallRefusal = null;
+    if (mode) {
+      lastNativePluginInstallRefusal = null;
+      nativePluginInstallRefusals = [];
+    }
     return mode;
   }
 
   lastNativePluginInstallRefusal = null;
+  nativePluginInstallRefusals = [];
   if (process.env[OPENCLAW_SKIP_NATIVE_INSTALL_ENV] === '1') return null;
   if (!isOpenClawInstalled() && !_nativeSpawnForTest) return null;
 
@@ -1351,8 +1393,11 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
   const env = openClawChildEnv();
   const attempts: Array<{ args: string[]; label: string }> = [
     { args: ['plugins', 'install', '@drakon-systems/shieldcortex-realtime@latest'], label: 'package install' },
-    { args: ['plugins', 'install', '--link', PLUGIN_PACKAGE_SOURCE], label: 'linked install' },
   ];
+  const packageSource = resolvePluginPackageSource();
+  if (fs.existsSync(packageSource)) {
+    attempts.push({ args: ['plugins', 'install', '--link', packageSource], label: 'linked install' });
+  }
 
   const refusals: NativePluginInstallRefusal[] = [];
   const spawn = _nativeSpawnForTest ?? ((command, args, options) =>
@@ -1367,6 +1412,7 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
 
     if (result.status === 0) {
       lastNativePluginInstallRefusal = null;
+      nativePluginInstallRefusals = [];
       console.log(`Installed real-time plugin via OpenClaw ${attempt.label}.`);
       return attempt.label === 'package install' ? 'native-package' : 'native-link';
     }
@@ -1383,10 +1429,11 @@ function tryNativeOpenClawPluginInstall(): PluginInstallMode | null {
     refusals.push(refusal);
   }
 
-  // Prefer a config-invalid refusal when any attempt produced one — that is
-  // the operator-actionable root cause, not "plugin already exists" noise.
+  nativePluginInstallRefusals = refusals;
+  // Config failures take priority; otherwise preserve the supported package
+  // attempt as the primary diagnosis.
   lastNativePluginInstallRefusal =
-    refusals.find((r) => r.configInvalid) ?? refusals[refusals.length - 1] ?? null;
+    refusals.find((r) => isConfigClassRefusal(r)) ?? refusals[0] ?? null;
   return null;
 }
 
@@ -1490,9 +1537,8 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
 
   // #251: surface the native refusal BEFORE falling back. A silent fall-
   // through made copy-path success look like OpenClaw accepted the install.
-  if (lastNativePluginInstallRefusal) {
-    reportNativePluginInstallRefusal(lastNativePluginInstallRefusal);
-  }
+  for (const refusal of nativePluginInstallRefusals) reportNativePluginInstallRefusal(refusal);
+  reportNativePluginConfigRemedy(lastNativePluginInstallRefusal);
 
   // Native install (--link) registers via load.paths — skip the extensions
   // copy to avoid duplicate plugin ID warnings.
@@ -1503,10 +1549,10 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
   // a pre-existing load.paths entry are still a valid native-link registration;
   // warn about the refused attempt but keep the mode honest.
   if (isPluginInLoadPaths()) {
-    if (lastNativePluginInstallRefusal?.configInvalid) {
+    if (isConfigClassRefusal(lastNativePluginInstallRefusal)) {
       console.warn(
         '  Note: plugin is already on plugins.load.paths from a previous install — ' +
-        'this run\'s native OpenClaw install still refused because the config is invalid. ' +
+        'this run\'s native OpenClaw install still refused because the config is invalid or missing. ' +
         'Not claiming native success.',
       );
       process.exitCode = 1;
@@ -1553,7 +1599,12 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
     // operator has neither a native registration nor a fallback copy.
     if (lastNativePluginInstallRefusal) {
       console.warn('  Warning: Plugin source not found — cannot fall back to a local copy after native install refused.');
-      console.warn('  Nothing was installed. Fix the OpenClaw config (if invalid), rebuild (`npm run build`), then retry.');
+      if (isSourceCheckout()) {
+        console.warn('  Nothing was installed. Fix the reported cause, rebuild (`npm run build`), then retry `shieldcortex openclaw install`.');
+      } else {
+        console.warn('  Nothing was installed. Installing @drakon-systems/shieldcortex-realtime through OpenClaw failed (reason above); no local plugin copy ships with the npm package.');
+        console.warn('  Fix the reported cause and re-run `shieldcortex openclaw install`, or run `openclaw plugins install @drakon-systems/shieldcortex-realtime` directly.');
+      }
       process.exitCode = 1;
     } else {
       console.warn('  Warning: Plugin source not found, skipping plugin install');
@@ -1589,7 +1640,11 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
         console.warn(`  Warning: ${file} not found in plugin source (${pluginSource})`);
         if (file === 'openclaw.plugin.json') {
           console.warn('  OpenClaw will fail to load the plugin without this manifest.');
-          console.warn('  This is a build issue — try rebuilding with: npm run build');
+          if (isSourceCheckout()) {
+            console.warn('  This is a build issue — try rebuilding with: npm run build');
+          } else {
+            console.warn('  The npm package has no local plugin copy; install @drakon-systems/shieldcortex-realtime through OpenClaw, then retry `shieldcortex openclaw install`.');
+          }
         }
       }
     }
@@ -1662,14 +1717,14 @@ function installPlugin(options: { noPlugins?: boolean; grantConversationAccess?:
       // degraded outcome for scripts/CI — OpenClaw itself refused. Soft-success
       // (exit 0) was the original silent shape; hard-fail the process so repair
       // does not look green while the config is still broken.
-      if (lastNativePluginInstallRefusal?.configInvalid) {
+      if (isConfigClassRefusal(lastNativePluginInstallRefusal)) {
         process.exitCode = 1;
       }
       return 'trusted-local-copy';
     } else {
       console.warn('  Warning: Could not register plugin in OpenClaw config');
       console.log(`Installed real-time plugin to ${destDir}`);
-      if (lastNativePluginInstallRefusal?.configInvalid) {
+      if (isConfigClassRefusal(lastNativePluginInstallRefusal)) {
         process.exitCode = 1;
       }
       return 'untrusted-local-copy';
@@ -2113,13 +2168,25 @@ async function writeOpenClawInstall(
       console.warn('    Note: native OpenClaw install was refused — this is a local fallback, not a native registration.');
       if (nativeRefusal.configInvalid) {
         console.warn('    OpenClaw config is still invalid; run `openclaw config validate` before relying on native plugin management.');
+      } else if (nativeRefusal.configMissing) {
+        // The refusal is historical: trustLocalPlugin writes openclaw.json from
+        // {} when it is absent, so only call it missing if it still is.
+        const configPath = openClawConfigPath();
+        if (fs.existsSync(configPath)) {
+          console.warn(
+            `    OpenClaw config was missing when the native install ran; the local fallback created ${configPath} ` +
+            'with the plugin registration. Native plugin management was not used.',
+          );
+        } else {
+          console.warn('    OpenClaw config is still missing; native plugin management is unavailable.');
+        }
       }
     }
   } else {
     const nativeRefusal = getLastNativePluginInstallRefusal();
     if (nativeRefusal) {
       console.log('  • shieldcortex-realtime plugin: skipped after native install refused (see warnings above)');
-      if (nativeRefusal.configInvalid && isPluginInLoadPaths()) {
+      if (isConfigClassRefusal(nativeRefusal) && isPluginInLoadPaths()) {
         // load.paths pre-existed; mode is skipped but files may still be present.
         console.warn('    Pre-existing load.paths registration only — this run\'s native OpenClaw install was refused (not a native success).');
       }
