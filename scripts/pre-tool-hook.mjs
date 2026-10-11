@@ -3181,7 +3181,7 @@ process.stdin.on('end', async () => {
       } else {
         try {
           // Pin every row this call writes to the adapter + policy version in
-          // force: only same-version rows count as readiness evidence.
+          // force: evidence is keyed on its policy hash (#719).
           const pin = readinessMod.currentReadinessPin();
           if (pin) baseExtra.readinessPin = pin;
           const resolved = readinessMod.resolveReadiness({

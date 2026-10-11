@@ -6218,6 +6218,9 @@ function evaluateToolCallCore(
   // fall through so path-tier rules (touch-sensitive-path, approval-store, …)
   // still run — content add-on, not a short-circuit that blanks path policy.
   let writeContentScannedClean = false;
+  // #629: DANGEROUS-tier vocabulary named in memory-markdown prose. Recorded on
+  // the allow verdict below, never dropped.
+  let memoryProseMentions: Array<{ signal: string; span: string }> = [];
   if (family === 'write') {
     const writeContent = extractWriteContent(args);
     const scanThisWrite = writeContent.length > 0
@@ -6228,7 +6231,8 @@ function evaluateToolCallCore(
       const memory = isMemoryWritePath(path);
       // #341: memory markdown is instruction prose — neutralize quoted mentions
       // before the command-pattern scan. Scripts keep raw bytes.
-      const scanBody = (memory && /\.md$/i.test(path) && !writeContentLooksExecutable(writeContent))
+      const memoryProse = memory && /\.md$/i.test(path) && !writeContentLooksExecutable(writeContent);
+      const scanBody = memoryProse
         ? neutralizeMarkdownCommandMentions(writeContent)
         : writeContent;
       const hits = scanWriteContentPayload(scanBody);
@@ -6248,7 +6252,19 @@ function evaluateToolCallCore(
           hits.catastrophic.map(m => ({ signal: m.signal, span: m.span })),
         );
       }
-      if (hits.dangerous.length > 0) {
+      // #629: writing memory-markdown prose runs nothing. A DANGEROUS-tier
+      // command named there is data, so it is recorded and the write falls
+      // through to the path-tier rules like a clean scan. It is not an early
+      // allow. Still gated exactly as before: the catastrophic tier above, any
+      // path-target hit (self-protection floor, sensitive paths), every
+      // script-like path and every shebang body. Running the file later is
+      // scanned again at invocation through the script fold.
+      const memoryMentionOnly = memoryProse
+        && hits.dangerous.length > 0
+        && !hits.dangerous.some(m => PATH_TARGET_SIGNALS.has(m.signal));
+      if (memoryMentionOnly) {
+        memoryProseMentions = hits.dangerous;
+      } else if (hits.dangerous.length > 0) {
         const signals = ['write-content-dangerous', ...hits.dangerous.map(m => m.signal)];
         const span = hits.dangerous[0]?.span;
         const reason = memory
@@ -6679,9 +6695,15 @@ function evaluateToolCallCore(
   // Dangerous vocabulary demoted at #188 rides along here: allowed, but named,
   // so a reviewer can still see what the folded source said.
   const payloadSignals = [...new Set(dangerPayloadOnly.map(m => m.signal))];
+  // #629: memory-prose mention names ride on every allow exit so the audit row
+  // names what the note said. Only the memory-note exit below also carries the
+  // marker and the spans; the sensitive exit adds the marker but no spans, and
+  // the payload and opaque exits carry the names only. Empty for every other
+  // write.
+  const mentionSignals = memoryProseMentions.map(m => m.signal);
   const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
-    const extra = writeContentScannedClean ? ['write-content-scanned'] : [];
+    const extra = writeContentScannedClean ? ['write-content-scanned', ...mentionSignals] : [];
     return withReview(verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
       [sensitiveSignal, ...payloadSignals, ...opaqueSignals, ...extra]));
   }
@@ -6698,7 +6720,7 @@ function evaluateToolCallCore(
         ev.span ?? dangerPayloadOnly[0]?.span,
         ev.provenance,
       ),
-      [...payloadSignals, ...opaqueSignals],
+      [...payloadSignals, ...opaqueSignals, ...mentionSignals],
       matchEvidence(payloadMatches)));
   }
 
@@ -6709,7 +6731,7 @@ function evaluateToolCallCore(
   // and the verdict is bit-for-bit what it was before this change.
   if (opaqueSignals.length > 0) {
     return withReview(verdict('allow', 'sensitive', family, canonical,
-      buildReason('script contents were not scanned', opaqueSignals), opaqueSignals));
+      buildReason('script contents were not scanned', opaqueSignals), [...opaqueSignals, ...mentionSignals]));
   }
 
   // 4) A bare exec/network/write/git call with no dangerous signal is treated as
@@ -6717,6 +6739,18 @@ function evaluateToolCallCore(
   // (Read-only and memory tools already short-circuited to allow above.)
   // #93: a clean script/memory/shebang content scan upgrades to sensitive so
   // #95 auditAllows records that the write was seen (not silent like Bash-only).
+  if (writeContentScannedClean && memoryProseMentions.length > 0) {
+    return withReview(verdict(
+      'allow',
+      'sensitive',
+      family,
+      canonical,
+      // Not buildReason: its `fix:` hint is advice for a gate, and this is an allow.
+      `memory-markdown prose names a dangerous command as data — nothing runs at write time [rule: ${mentionSignals.join(', ')}]`,
+      ['write-content-scanned', ...mentionSignals, ...opaqueSignals],
+      memoryProseMentions.map(m => ({ signal: m.signal, span: m.span })),
+    ));
+  }
   if (writeContentScannedClean) {
     return withReview(verdict(
       'allow',
