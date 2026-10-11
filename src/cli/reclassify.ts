@@ -20,13 +20,17 @@
  */
 import type { Database } from 'better-sqlite3';
 import { classifySensitivity } from '../defence/sensitivity/index.js';
+import { normaliseSensitivityLabel } from '../defence/sensitivity/isolation.js';
 
 /** Ascending. Anything not in this list is left untouched. */
 const LADDER = ['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'] as const;
 
-function rank(level: string | null | undefined): number {
-  // Unlabelled rows are INTERNAL by convention everywhere else.
-  const normalised = (level ?? '').trim().toUpperCase() || 'INTERNAL';
+function rank(level: unknown): number {
+  // The read-side isolation gate's normaliser (#722 review R1): ASCII-only
+  // upper-casing, so `ınternal` (dotless i) stays an unknown — isolated —
+  // label instead of folding to INTERNAL and being rewritten as a known,
+  // shared one. Unlabelled rows are INTERNAL by convention everywhere else.
+  const normalised = normaliseSensitivityLabel(level) ?? 'INTERNAL';
   return (LADDER as readonly string[]).indexOf(normalised);
 }
 

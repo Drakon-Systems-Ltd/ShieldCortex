@@ -26,7 +26,7 @@ import { writeRecallLog } from './lib/recall-log.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
-import { detectLane, resolveLanePolicy, applyLanePolicy } from './lib/recall-lane.mjs';
+import { detectLane, resolveLanePolicy, applyLanePolicy, loadLabelNormaliser } from './lib/recall-lane.mjs';
 
 // ==================== CONFIG ====================
 
@@ -498,7 +498,8 @@ process.stdin.on('end', async () => {
     // lane_policy:* dropReason; only what the lane may receive is ranked on.
     const laneDrops = new Map();
     if (laneInfo.lane !== 'interactive') {
-      const { kept: laneKept, withheld } = applyLanePolicy(fullSet, laneInfo.lane, lanePolicy);
+      const normaliseLabel = await loadLabelNormaliser();
+      const { kept: laneKept, withheld } = applyLanePolicy(fullSet, laneInfo.lane, lanePolicy, normaliseLabel);
       for (const w of withheld) laneDrops.set(w.row.id, w.reason);
       topN = laneKept.slice(0, MAX_RESULTS);
     }

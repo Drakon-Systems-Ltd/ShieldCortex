@@ -40,10 +40,21 @@ type Lane = { lane: string; signal: string };
 let laneMod: {
   detectLane: (i: { text?: string; env?: Record<string, string | undefined> }) => Lane;
   resolveLanePolicy: (lane: string, config?: Record<string, unknown>) => { recall: boolean; categories: string[] | null };
-  applyLanePolicy: (rows: Array<Record<string, unknown>>, lane: string, policy: { recall: boolean; categories: string[] | null }) => {
+  applyLanePolicy: (
+    rows: Array<Record<string, unknown>>, lane: string, policy: { recall: boolean; categories: string[] | null },
+    normaliseLabel?: (level: unknown) => string | null,
+  ) => {
     kept: Array<Record<string, unknown>>; withheld: Array<{ row: Record<string, unknown>; reason: string }>;
   };
+  loadLabelNormaliser: (distRootOverride?: string) => Promise<(level: unknown) => string | null>;
+  strictLabelNormaliser: (level: unknown) => string | null;
 };
+
+// #722 review R1: labels that Unicode toUpperCase folds onto a known tier
+// (dotless i, long s) or that only look like one (script l, fullwidth). The
+// isolation gate keeps every one of them unknown — isolated — and so must the
+// lane filter and the backfill.
+const NON_ASCII_LABELS = ['publıc', 'ınternal', 'ſecret', 'pubℓic', 'ＰＵＢＬＩＣ', 'Ｐublic'];
 
 beforeAll(async () => {
   laneMod = await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'recall-lane.mjs')).href);
@@ -195,6 +206,46 @@ describe('lane policy (#718)', () => {
     expect(strict.withheld.find((w) => w.row.id === 3)?.reason).toBe('lane_policy:sensitivity');
   });
 
+  describe('labels are normalised exactly as the isolation gate does (#722 R1)', () => {
+    it.each(NON_ASCII_LABELS)('a %s row is isolated to readers and withheld from a non-interactive lane', async (label) => {
+      expect(isIsolatedSensitivity(label)).toBe(true);
+      const normalise = await laneMod.loadLabelNormaliser();
+      expect(normalise).not.toBe(laneMod.strictLabelNormaliser); // the shared helper, from the build
+      const rows = [{ id: 1, category: 'error', sensitivity_level: label }];
+      for (const n of [normalise, undefined]) {
+        const out = laneMod.applyLanePolicy(rows, 'cron', { recall: true, categories: null }, n);
+        expect(out.kept).toEqual([]);
+        expect(out.withheld[0]?.reason).toBe('lane_policy:sensitivity');
+      }
+    });
+
+    it('ASCII case and whitespace still normalise to PUBLIC; absent and blank are withheld', async () => {
+      const normalise = await laneMod.loadLabelNormaliser();
+      const rows = [
+        { id: 1, category: 'error', sensitivity_level: ' public ' },
+        { id: 2, category: 'error', sensitivity_level: 'Public' },
+        { id: 3, category: 'error', sensitivity_level: null },
+        { id: 4, category: 'error', sensitivity_level: '  ' },
+        { id: 5, category: 'error' },
+      ];
+      const out = laneMod.applyLanePolicy(rows, 'cron', { recall: true, categories: null }, normalise);
+      expect(out.kept.map((r) => r.id)).toEqual([1, 2]);
+    });
+
+    it('without a build the fallback admits only an exact PUBLIC label', async () => {
+      const empty = mkdtempSync(join(tmpdir(), 'sc-722-nodist-'));
+      tmpDirs.push(empty);
+      const normalise = await laneMod.loadLabelNormaliser(empty);
+      expect(normalise).toBe(laneMod.strictLabelNormaliser);
+      const rows = [
+        { id: 1, category: 'error', sensitivity_level: 'PUBLIC' },
+        { id: 2, category: 'error', sensitivity_level: 'public' },
+        { id: 3, category: 'error', sensitivity_level: 'publıc' },
+      ];
+      expect(laneMod.applyLanePolicy(rows, 'cron', { recall: true, categories: null }, normalise).kept.map((r) => r.id)).toEqual([1]);
+    });
+  });
+
   it('interactive keeps everything', () => {
     const rows = [{ id: 1, category: 'context', sensitivity_level: 'PERSONAL' }];
     expect(laneMod.applyLanePolicy(rows, 'interactive', laneMod.resolveLanePolicy('interactive')).kept).toHaveLength(1);
@@ -298,6 +349,22 @@ describe('memories reclassify (#718)', () => {
       { title: 'Odd', sensitivity_level: 'SECRET' },
       { title: 'Other project', sensitivity_level: 'PUBLIC' },
     ]);
+    db.close();
+  });
+
+  // #722 review R1: Unicode upper-casing turned `ınternal` into INTERNAL, so
+  // the backfill rewrote an unknown (isolated) label as a known, shared one.
+  it.each(NON_ASCII_LABELS)('leaves a %s row untouched and still isolated', async (label) => {
+    const db = seed();
+    db.prepare(`UPDATE memories SET sensitivity_level = ? WHERE title = 'Surprise family trip' AND project = ?`).run(label, PROJECT);
+    const dry = await reclassifyMemories({ db, project: PROJECT });
+    expect(dry.skippedUnknown).toBe(1);
+    expect(dry.changes).toEqual([]);
+    const wet = await reclassifyMemories({ db, project: PROJECT, execute: true });
+    expect(wet.updated).toBe(0);
+    const stored = (db.prepare(`SELECT sensitivity_level s FROM memories WHERE title = ? AND project = ?`).get(FAMILY_TITLE, PROJECT) as { s: string }).s;
+    expect(stored).toBe(label);
+    expect(isIsolatedSensitivity(stored)).toBe(true);
     db.close();
   });
 
@@ -438,6 +505,23 @@ describe('prompt-recall hook lane scoping, end to end (#718)', () => {
     expect(log.lane).toBe('interactive');
     expect(log.laneSignal).toBe(signal);
     expect(JSON.parse(out).hookSpecificOutput.additionalContext).toContain(FAMILY_TITLE);
+  });
+
+  // #722 review R1 through the real hook: a cron turn whose only matching
+  // PUBLIC-looking row is labelled `publıc` must withhold it.
+  it('cron lane withholds a non-ASCII look-alike PUBLIC label', () => {
+    const { home, dbPath } = makeHome();
+    const db = new Database(dbPath);
+    db.prepare(`UPDATE memories SET sensitivity_level = 'publıc' WHERE title = 'Deploy errors digest'`).run();
+    db.close();
+    const out = runHook(home, CRON_PROMPT);
+    const log = lastLog(home);
+    expect(log.lane).toBe('cron');
+    const row = log.candidates.find((c: { title: string }) => c.title === 'Deploy errors digest');
+    expect(row).toBeDefined();
+    expect(row.injected).toBe(false);
+    expect(row.dropReason).toBe('lane_policy:sensitivity');
+    expect(out).not.toContain('Deploy errors digest');
   });
 
   it('automation opt-in via config still never receives non-PUBLIC rows', () => {

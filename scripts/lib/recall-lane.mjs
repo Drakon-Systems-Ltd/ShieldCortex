@@ -37,6 +37,9 @@
  * unlabelled rows, INTERNAL by convention — are interactive-owner only.
  */
 
+import { dirname, resolve } from 'path';
+import { fileURLToPath, pathToFileURL } from 'url';
+
 export const LANES = Object.freeze({
   INTERACTIVE: 'interactive',
   CRON: 'cron',
@@ -128,18 +131,58 @@ export function resolveLanePolicy(lane, config = {}) {
   return { recall, categories: categories ? [...categories] : null };
 }
 
-function normaliseLabel(level) {
-  if (level == null) return 'INTERNAL';
-  const s = String(level).trim().toUpperCase();
-  return s === '' ? 'INTERNAL' : s;
+/**
+ * The label normaliser the PUBLIC-only rule compares with (#722 review R1).
+ *
+ * It must be the one the read-side isolation gate uses —
+ * `normaliseSensitivityLabel` in src/defence/sensitivity/isolation.ts: trim,
+ * ASCII-only upper-casing, `null` for an absent/blank label. Unicode
+ * `toUpperCase` (what this file used to call) folds `publıc` (dotless i) to
+ * `PUBLIC` and admitted a label every other reader treats as unknown, i.e.
+ * isolated. The helper is loaded from the build rather than copied, so the two
+ * can never drift.
+ *
+ * Without a build there is no helper, and the fallback is the strictest
+ * reading that cannot admit anything isolation.ts would not: only a string
+ * that is exactly `PUBLIC` passes. A lower-case `public` row is withheld from
+ * automated lanes until dist exists — fail closed, never wider.
+ */
+export function strictLabelNormaliser(level) {
+  return level === 'PUBLIC' ? 'PUBLIC' : null;
+}
+
+let _labelNormaliser = null;
+let _labelNormaliserKey = null;
+
+/**
+ * @param {string} [distRootOverride] test seam — point at an empty dir to get the fallback.
+ * @returns {Promise<(level: unknown) => string | null>}
+ */
+export async function loadLabelNormaliser(distRootOverride) {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const distRoot = distRootOverride ?? resolve(here, '..', '..', 'dist');
+  if (_labelNormaliser && _labelNormaliserKey === distRoot) return _labelNormaliser;
+  try {
+    const mod = await import(pathToFileURL(resolve(distRoot, 'defence', 'sensitivity', 'isolation.js')).href);
+    if (typeof mod.normaliseSensitivityLabel !== 'function') return strictLabelNormaliser;
+    _labelNormaliser = mod.normaliseSensitivityLabel;
+    _labelNormaliserKey = distRoot;
+    return _labelNormaliser;
+  } catch {
+    return strictLabelNormaliser;
+  }
 }
 
 /**
  * Split candidate rows into what this lane may receive and what it may not.
+ * An absent or blank label is withheld (INTERNAL by convention), and so is
+ * any label the normaliser does not turn into exactly `PUBLIC`.
  *
+ * @param {(level: unknown) => string | null} [normaliseLabel] from loadLabelNormaliser();
+ *   defaults to the fail-closed strictLabelNormaliser.
  * @returns {{ kept: object[], withheld: Array<{ row: object, reason: string }> }}
  */
-export function applyLanePolicy(rows, lane, policy) {
+export function applyLanePolicy(rows, lane, policy, normaliseLabel = strictLabelNormaliser) {
   const kept = [];
   const withheld = [];
   const list = Array.isArray(rows) ? rows : [];
