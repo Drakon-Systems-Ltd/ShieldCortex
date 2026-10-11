@@ -164,6 +164,11 @@ describe('#629 — script, shebang and path controls are unchanged', () => {
     });
     expect(v.decision).not.toBe('allow');
     expect(v.signals).toContain('touch-sensitive-path');
+    // The inert mention must not ride the stronger path-tier verdict: adapters
+    // match autoApprove against any signal, so `privilege-escalation` here
+    // would let an allowlist entry for sudo release a write into .ssh.
+    expect(v.signals).not.toContain('privilege-escalation');
+    expect(v.signals).not.toContain('write-content-scanned');
   });
 
   it('a memory note under the approval store is still on the self-protection floor via the path tier', () => {
@@ -174,6 +179,8 @@ describe('#629 — script, shebang and path controls are unchanged', () => {
     expect(v.decision).not.toBe('allow');
     expect(v.signals).toContain('touch-approval-store');
     expect(isGuardSelfProtectionVerdict(v.signals)).toBe(true);
+    expect(v.signals).not.toContain('privilege-escalation');
+    expect(v.signals).not.toContain('write-content-scanned');
   });
 });
 

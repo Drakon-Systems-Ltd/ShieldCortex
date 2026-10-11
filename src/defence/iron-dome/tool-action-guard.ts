@@ -6695,8 +6695,11 @@ function evaluateToolCallCore(
   // Dangerous vocabulary demoted at #188 rides along here: allowed, but named,
   // so a reviewer can still see what the folded source said.
   const payloadSignals = [...new Set(dangerPayloadOnly.map(m => m.signal))];
-  // #629: memory-prose mentions ride on every allow exit, after the marker, so
-  // the audit row names what the note said. Empty for every other write.
+  // #629: memory-prose mention names ride on every allow exit so the audit row
+  // names what the note said. Only the memory-note exit below also carries the
+  // marker and the spans; the sensitive exit adds the marker but no spans, and
+  // the payload and opaque exits carry the names only. Empty for every other
+  // write.
   const mentionSignals = memoryProseMentions.map(m => m.signal);
   const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
