@@ -284,3 +284,176 @@ describe('sanitisePromptForRecall — owner text that mentions the envelope (#72
     expect(sanitisePromptForRecall(`${INFO}\n\n${userText}`)).toBe(userText);
   });
 });
+
+// ── #720 review round 2 (Tars): verified labels and matched fences ─────────
+// R2 finding 1: the envelope detector accepted ANY capitalised, colon-ended
+// label as a framework header. After a valid JSON envelope the loop could then
+// consume an owner's own marker-ended paragraph as "another metadata block",
+// and a bare owner label + complete JSON object collapsed to an EMPTY recall
+// prompt. Only OpenClaw's verified labels (buildInboundUserContextPrefix /
+// selectInboundHistoryContext) with their exact block grammar are consumed now.
+// R2 finding 2: the suffix scanner toggled a boolean on any ``` prefix, so a
+// ~~~ fence was invisible and a ```` outer fence holding a ``` example flipped
+// state early — a quoted "Context:" header then truncated owner text.
+describe('sanitisePromptForRecall — verified labels and matched fences (#720 R2)', () => {
+  const MARK = '⟦openclaw:ctx⟧';
+  const INFO = [
+    `Conversation info: ${MARK}`,
+    '```json',
+    '{ "chat_id": "telegram:100000001", "message_id": "90003" }',
+    '```',
+  ].join('\n');
+  const SUFFIX = `Context: ${MARK}\nreal channel context`;
+
+  describe('(a) a bare owner label plus a complete JSON object is not an envelope', () => {
+    const ownerBlock = [
+      `My config: ${MARK}`,
+      '```json',
+      '{ "retries": 3, "backend": "claw2" }',
+      '```',
+    ].join('\n');
+
+    it('standalone — survives byte-for-byte, never an empty prompt', () => {
+      const out = sanitisePromptForRecall(ownerBlock);
+      expect(out).toBe(ownerBlock);
+      expect(out).not.toBe('');
+    });
+
+    it('after a verified envelope — the owner block is the recall prompt, not metadata', () => {
+      const out = sanitisePromptForRecall(`${INFO}\n\n${ownerBlock}`);
+      expect(out).toBe(ownerBlock);
+      expect(out).not.toBe('');
+    });
+
+    it('after a verified envelope with a trailing Context suffix — still the owner block', () => {
+      expect(sanitisePromptForRecall(`${INFO}\n\n${ownerBlock}\n\n${SUFFIX}`)).toBe(ownerBlock);
+    });
+  });
+
+  describe('(b) an owner marker-ended paragraph is never consumed as a history block', () => {
+    const ownerParagraph = [
+      `Notes for you: ${MARK}`,
+      'line two of my own notes, pasted from the log',
+      'line three of my own notes',
+      '',
+      'What do you make of that marker?',
+    ].join('\n');
+
+    it('standalone — survives byte-for-byte', () => {
+      expect(sanitisePromptForRecall(ownerParagraph)).toBe(ownerParagraph);
+    });
+
+    it('immediately after a verified envelope — preserved, not consumed as metadata', () => {
+      expect(sanitisePromptForRecall(`${INFO}\n\n${ownerParagraph}`)).toBe(ownerParagraph);
+    });
+
+    it('after the full envelope (info + history) — the paragraph is the whole recall prompt', () => {
+      const history = [
+        `Conversation context (chronological, selected for current message): ${MARK}`,
+        '#session:sess-1 2026-10-10 08:55 UTC User: earlier turn',
+      ].join('\n');
+      expect(sanitisePromptForRecall(`${INFO}\n\n${history}\n\n${ownerParagraph}`)).toBe(ownerParagraph);
+    });
+
+    it('a verified JSON label that is not followed by a ```json fence is owner text', () => {
+      const ownerText = [
+        `Conversation info: ${MARK}`,
+        'is the first line of every prompt I see.',
+        '',
+        'Why is it there?',
+      ].join('\n');
+      expect(sanitisePromptForRecall(`${INFO}\n\n${ownerText}`)).toBe(ownerText);
+    });
+  });
+
+  describe('(c) the trailing-suffix scanner matches fence character and length', () => {
+    // Each owner capture carries a blank line before the quoted "Context:"
+    // header — exactly as a real captured prompt would — so the only thing
+    // keeping the header from being mistaken for the live suffix is the fence.
+    const TILDE_CAPTURE = [
+      'Here is the raw prompt I captured:',
+      '~~~',
+      'hello',
+      '',
+      `Context: ${MARK}`,
+      'channel: telegram',
+      '~~~',
+      'Why is the Context block there?',
+    ].join('\n');
+    const NESTED_CAPTURE = [
+      'Here is the raw prompt I captured, with a fenced example inside it:',
+      '````',
+      'look:',
+      '```',
+      'hello',
+      '',
+      `Context: ${MARK}`,
+      'channel: telegram',
+      '```',
+      '````',
+      'Why is the Context block there?',
+    ].join('\n');
+    const TILDE_INFO_CAPTURE = [
+      'And here is the same thing in a tilde fence with a json tag:',
+      '~~~json',
+      '{ "note": "```" }',
+      '',
+      `Context: ${MARK}`,
+      '~~~',
+      'Does the inner backtick run confuse you?',
+    ].join('\n');
+
+    it.each([
+      ['tilde fence', TILDE_CAPTURE],
+      ['four-backtick outer fence holding a three-backtick example', NESTED_CAPTURE],
+      ['tilde fence whose body contains a backtick run', TILDE_INFO_CAPTURE],
+    ])('%s — standalone survives byte-for-byte', (_label, text) => {
+      expect(sanitisePromptForRecall(text)).toBe(text);
+    });
+
+    it.each([
+      ['tilde fence', TILDE_CAPTURE],
+      ['four-backtick outer fence holding a three-backtick example', NESTED_CAPTURE],
+      ['tilde fence whose body contains a backtick run', TILDE_INFO_CAPTURE],
+    ])('%s — after a verified envelope the owner capture is kept whole', (_label, text) => {
+      expect(sanitisePromptForRecall(`${INFO}\n\n${text}`)).toBe(text);
+    });
+
+    it.each([
+      ['tilde fence', TILDE_CAPTURE],
+      ['four-backtick outer fence holding a three-backtick example', NESTED_CAPTURE],
+      ['tilde fence whose body contains a backtick run', TILDE_INFO_CAPTURE],
+    ])('%s — the real trailing suffix is still cut, the quoted one is not', (_label, text) => {
+      expect(sanitisePromptForRecall(`${INFO}\n\n${text}\n\n${SUFFIX}`)).toBe(text);
+    });
+
+    it('an unclosed owner fence declines suffix removal rather than guessing', () => {
+      const text = [
+        'I pasted this and forgot to close the fence:',
+        '```',
+        'hello',
+        '',
+        `Context: ${MARK}`,
+        'channel: telegram',
+      ].join('\n');
+      expect(sanitisePromptForRecall(`${INFO}\n\n${text}`)).toBe(text);
+    });
+  });
+
+  it('retains the verified envelope stripping for every supported OpenClaw label', () => {
+    const json = (label: string, payload: unknown) => [`${label} ${MARK}`, '```json', JSON.stringify(payload), '```'].join('\n');
+    const wrapped = [
+      json('Conversation info:', { chat_id: 'telegram:100000001', message_id: '90004' }),
+      json('Thread starter:', { body: 'thread root text' }),
+      json('Reply chain of current user message (nearest first):', [{ message_id: '90000', body: 'older' }]),
+      json('Forwarded message context:', { from: 'Example Forwarder' }),
+      json('Location:', { lat: 0, lon: 0 }),
+      [`Recent chat history: ${MARK}`, '#session:sess-1 2026-10-10 08:55 UTC User: earlier turn'].join('\n'),
+      [`Chat window (newest last): ${MARK}`, 'Example Owner: an older line'].join('\n'),
+      [`Conversation context (chronological, selected for current message): ${MARK}`, '#session:sess-1 2026-10-10 08:56 UTC User: another'].join('\n'),
+      'Is ShieldCortex any good now?',
+      SUFFIX,
+    ].join('\n\n');
+    expect(sanitisePromptForRecall(wrapped)).toBe('Is ShieldCortex any good now?');
+  });
+});
