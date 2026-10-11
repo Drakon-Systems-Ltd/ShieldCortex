@@ -57,19 +57,26 @@ export const DEFAULT_LANE_POLICY = Object.freeze({
 // Checked in this order — most restrictive lane first, so a prompt carrying
 // two lanes' markers gets the narrower policy. Every pattern is anchored to a
 // line start so a marker quoted mid-sentence does not count.
+//
+// The leading indent is horizontal whitespace only — `\s` minus every JS line
+// terminator (\n \r \u2028 \u2029) — never `\s*`: with the m flag each of
+// those starts a line, so an indent class that spans one re-scans the whole
+// run from every line start. Quadratic: 30 s+ on 100 KB of blank lines against
+// a 5 s hook budget (#722 review B1). The cron row's classes are disjoint and
+// stop at the line end for the same reason. Keep both properties in any new row.
 export const LANE_MARKERS = Object.freeze([
   // Liveness probes / heartbeats: unattended, nothing to recall for.
-  { lane: LANES.AUTOMATION, signal: 'marker:liveness-check', pattern: /^\s*Automated liveness check\b/im },
-  { lane: LANES.AUTOMATION, signal: 'marker:heartbeat', pattern: /^\s*Follow the heartbeat monitor scratch context\b/im },
-  { lane: LANES.AUTOMATION, signal: 'marker:heartbeat', pattern: /^\s*\[OpenClaw heartbeat poll\]/im },
-  { lane: LANES.AUTOMATION, signal: 'marker:heartbeat', pattern: /^\s*Read HEARTBEAT\.md\b/im },
+  { lane: LANES.AUTOMATION, signal: 'marker:liveness-check', pattern: /^[^\S\n\r\u2028\u2029]*Automated liveness check\b/im },
+  { lane: LANES.AUTOMATION, signal: 'marker:heartbeat', pattern: /^[^\S\n\r\u2028\u2029]*Follow the heartbeat monitor scratch context\b/im },
+  { lane: LANES.AUTOMATION, signal: 'marker:heartbeat', pattern: /^[^\S\n\r\u2028\u2029]*\[OpenClaw heartbeat poll\]/im },
+  { lane: LANES.AUTOMATION, signal: 'marker:heartbeat', pattern: /^[^\S\n\r\u2028\u2029]*Read HEARTBEAT\.md\b/im },
   // Cron: isolated cron runs, cron events delivered to the main session.
-  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^\s*\[cron:[^\]\s]+[^\]]*\]/im },
-  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^\s*This is an unattended scheduled run\b/im },
-  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^\s*A scheduled (?:reminder|cron event) (?:has been|was) triggered\b/im },
-  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^\s*\[(?:Scheduled Run|OpenClaw cron wake)\]/im },
+  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^[^\S\n\r\u2028\u2029]*\[cron:[^\]\s][^\]\n\r\u2028\u2029]*\]/im },
+  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^[^\S\n\r\u2028\u2029]*This is an unattended scheduled run\b/im },
+  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^[^\S\n\r\u2028\u2029]*A scheduled (?:reminder|cron event) (?:has been|was) triggered\b/im },
+  { lane: LANES.CRON, signal: 'marker:cron', pattern: /^[^\S\n\r\u2028\u2029]*\[(?:Scheduled Run|OpenClaw cron wake)\]/im },
   // Subagents spawned by sessions_spawn.
-  { lane: LANES.SUBAGENT, signal: 'marker:subagent', pattern: /^\s*\[Subagent (?:Task|Context)\]/im },
+  { lane: LANES.SUBAGENT, signal: 'marker:subagent', pattern: /^[^\S\n\r\u2028\u2029]*\[Subagent (?:Task|Context)\]/im },
 ]);
 
 /**

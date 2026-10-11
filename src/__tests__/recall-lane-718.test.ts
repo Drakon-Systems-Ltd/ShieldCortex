@@ -94,6 +94,62 @@ describe('detectLane (#718)', () => {
   });
 });
 
+// #722 review B1: every marker used `^\s*` with the m flag, so a long run of
+// line breaks was re-scanned from every line start (quadratic — 100 KB of blank
+// lines took 33 s on the reviewer's box, 189 s on the CI ARM box) and the
+// unclosed cron marker backtracked over overlapping classes. The hook budget is
+// 5 s (settings-hooks.ts). Each pathological input is paired with a long
+// positive so the fix cannot "pass" by giving up on long prompts.
+describe('detectLane stays linear on adversarial prompts (#722 B1)', () => {
+  const N = 100_000;
+  const BUDGET_MS = 200;
+  const LS = String.fromCharCode(0x2028);
+  const timed = (text: string) => {
+    const t0 = performance.now();
+    const result = laneMod.detectLane({ text });
+    return { result, ms: performance.now() - t0 };
+  };
+
+  const cases: Array<[string, string]> = [
+    ['blank lines', '\n'.repeat(N)],
+    ['" \\n" lines', ' \n'.repeat(N / 2)],
+    ['"[cron:" + unclosed run', '[cron:' + 'a'.repeat(N)],
+    ['unclosed "[cron:aaa…" lines', ('[cron:' + 'a'.repeat(30) + '\n').repeat(Math.ceil(N / 37))],
+    ['bare CR line breaks', '\r'.repeat(N)],
+    ['U+2028 line separators', LS.repeat(N)],
+  ];
+
+  it.each(cases)('%s (>=100 KB) classifies within the hook budget', (_name, text) => {
+    expect(text.length).toBeGreaterThanOrEqual(N);
+    const { result, ms } = timed(text);
+    expect(result).toEqual({ lane: 'interactive', signal: 'default' });
+    expect(ms).toBeLessThan(BUDGET_MS);
+  });
+
+  it.each(cases)('a marker after %s is still detected', (_name, padding) => {
+    const markers: Array<[string, string]> = [
+      [WATCHDOG_PROMPT, 'automation'],
+      ['  [cron:job-1234 digest] summary', 'cron'],
+      ['\t[Subagent Task]', 'subagent'],
+    ];
+    for (const [marker, lane] of markers) {
+      const { result, ms } = timed(`${padding}\n${marker}`);
+      expect(result.lane).toBe(lane);
+      expect(ms).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it('a cron marker still needs its closing bracket on the same line', () => {
+    expect(laneMod.detectLane({ text: '[cron:job-1\n] tail' }).lane).toBe('interactive');
+    expect(laneMod.detectLane({ text: '[cron:job-1 nightly digest]' }).lane).toBe('cron');
+  });
+
+  it('indentation before a marker is still allowed, a line break is just a line break', () => {
+    expect(laneMod.detectLane({ text: 'hello\n \t [Scheduled Run] weekly report' }).lane).toBe('cron');
+    expect(laneMod.detectLane({ text: 'hello\r\n\r\nRead HEARTBEAT.md now' }).lane).toBe('automation');
+  });
+});
+
 describe('lane policy (#718)', () => {
   it('safe defaults', () => {
     expect(laneMod.resolveLanePolicy('automation')).toEqual({ recall: false, categories: ['error', 'pattern', 'decision'] });
