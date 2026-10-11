@@ -41,6 +41,12 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-58"></a>
+
+## What's new in 5.8
+
+- **Watch what an AI does in a browser or on a desktop.** If you build on the Claude SDK browser-use or computer-use toolsets, the new `shieldcortex/toolsets` export can sit in front of your driver. It labels each click, typed text, page visit and page read, flags typed credentials and unsafe links, scans what the page says back, and writes an audit trail that never stores what was typed or read. It only observes for now: it does not change what runs. See `docs/quickstarts/claude-sdk-toolsets.md`.
+
 <a id="whats-new-in-57"></a>
 
 ## What's new in 5.7
