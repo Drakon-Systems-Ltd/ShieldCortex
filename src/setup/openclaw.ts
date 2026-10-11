@@ -2171,11 +2171,14 @@ async function writeOpenClawInstall(
       } else if (nativeRefusal.configMissing) {
         // The refusal is historical: trustLocalPlugin writes openclaw.json from
         // {} when it is absent, so only call it missing if it still is.
+        // File existence is NOT registration (a write can leave a partial file
+        // and fail), so this line states presence only; the registration
+        // verdict is the verifyPluginRegistration output above.
         const configPath = openClawConfigPath();
         if (fs.existsSync(configPath)) {
           console.warn(
-            `    OpenClaw config was missing when the native install ran; the local fallback created ${configPath} ` +
-            'with the plugin registration. Native plugin management was not used.',
+            `    OpenClaw config was missing when the native install ran; ${configPath} now exists ` +
+            '(plugin registration is reported above). Native plugin management was not used.',
           );
         } else {
           console.warn('    OpenClaw config is still missing; native plugin management is unavailable.');

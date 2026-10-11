@@ -120,7 +120,56 @@ describe('OpenClaw native refusals (#706)', () => {
       const output = [...logs, ...warnings].join('\n');
       expect(output).not.toMatch(/still missing/);
       expect(output).toMatch(/OpenClaw config was missing when the native install ran/);
-      expect(output).toContain(`the local fallback created ${openClawConfigPath()}`);
+      expect(output).toContain(`${openClawConfigPath()} now exists`);
+      expect(output).not.toMatch(/with the plugin registration/);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      fs.rmSync(localSource, { recursive: true, force: true });
+    }
+  });
+
+  // Review of 935db2ba (B2): file existence is not registration. A config
+  // write that leaves a partial file and then throws must not be summarised
+  // as a successful registration.
+  it('does not claim registration when the config write leaves a partial file and fails', async () => {
+    const localSource = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-706-partial-'));
+    try {
+      fs.writeFileSync(path.join(localSource, 'index.js'), 'export default {};\n');
+      fs.writeFileSync(path.join(localSource, 'interceptor.js'), 'export {};\n');
+      fs.writeFileSync(path.join(localSource, 'intercept-ingest.js'), 'export {};\n');
+      fs.writeFileSync(path.join(localSource, 'openclaw.plugin.json'), JSON.stringify({ id: 'shieldcortex-realtime' }));
+      process.env.SHIELDCORTEX_PLUGIN_SOURCE = localSource;
+      const configPath = openClawConfigPath();
+      fs.unlinkSync(configPath);
+      const realWrite = fs.writeFileSync.bind(fs);
+      let partialWrites = 0;
+      jest.spyOn(fs, 'writeFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, data: unknown, opts?: unknown) => {
+        if (typeof file === 'string' && path.resolve(file) === path.resolve(configPath)) {
+          partialWrites += 1;
+          realWrite(file, '{"plugins": {', 'utf-8');
+          throw new Error('ENOSPC: no space left on device, write');
+        }
+        return realWrite(file, data as string, opts as fs.WriteFileOptions);
+      }) as typeof fs.writeFileSync);
+      const logs: string[] = [];
+      const errors: string[] = [];
+      jest.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { logs.push(args.map(String).join(' ')); });
+      jest.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(' ')); });
+      __setNativeSpawnForTest((_command, args) => ({
+        status: 1,
+        stderr: args.includes('--link') ? 'Plugin path not found: /plugin\n' : 'Error: config not found: ~/.openclaw/openclaw.json\n',
+      }));
+      await installOpenClawHook({ noHooks: true, restartGateway: false });
+      expect(partialWrites).toBeGreaterThan(0);
+      expect(fs.existsSync(configPath)).toBe(true);
+      expect(() => JSON.parse(fs.readFileSync(configPath, 'utf-8'))).toThrow();
+      expect(getNativePluginInstallRefusals()).toHaveLength(2);
+      expect(getLastNativePluginInstallRefusal()?.configMissing).toBe(true);
+      expect(errors.join('\n')).toMatch(/NOT registered in openclaw\.json/);
+      const output = [...logs, ...warnings].join('\n');
+      expect(output).not.toMatch(/with the plugin registration/);
+      expect(output).not.toMatch(/still missing/);
+      expect(output).toMatch(/OpenClaw config was missing when the native install ran/);
       expect(process.exitCode).toBe(1);
     } finally {
       fs.rmSync(localSource, { recursive: true, force: true });
