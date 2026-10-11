@@ -1,6 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from '@jest/globals';
 import type * as Toolsets from '../claude-toolsets.js';
 
@@ -17,12 +20,17 @@ beforeAll(async () => {
   mod = (await import(pathToFileURL(built).href)) as typeof Toolsets;
 });
 
+// #678 P2: enforce approvals write to the bounded-approval store. Keep them out of
+// the developer's real ~/.shieldcortex/approvals.
+const APPROVALS_HOME = mkdtempSync(join(tmpdir(), 'sc-toolsets-approvals-'));
+
 function makeGuard(overrides: Partial<Toolsets.ToolsetGuardOptions> = {}) {
   const events: Toolsets.ToolsetAuditEvent[] = [];
   const guard = new mod.ToolsetGuard({
     toolset: 'browser',
     urlAllowlist: ['docs.example.com'],
     audit: (e) => events.push(e),
+    approvalsHome: APPROVALS_HOME,
     ...overrides,
   });
   return { guard, events };

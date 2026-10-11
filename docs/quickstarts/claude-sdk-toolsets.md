@@ -1,4 +1,4 @@
-# Claude SDK browser-use / computer-use toolsets (observe-only, P1)
+# Claude SDK browser-use / computer-use toolsets (observe by default; enforce with approvals)
 
 Issue #678. The Python and TypeScript Anthropic SDKs ship abstract classes for the
 `browser_toolset_20260801` and `computer_toolset_20260801` toolsets. The SDK runs the
@@ -11,12 +11,16 @@ documents (`urlPolicy`, `confirm`, and an `execute` override). It has no runtime
 dependency on the SDK: the adapters are typed structurally, and a conformance test
 type-checks a driver subclassing the real `@anthropic-ai/sdk` classes through them.
 
-**Phase P1 (this release) is observe-only.** With the default `mode: 'observe'` the guard
-never changes what runs: `confirm` returns your own answer (or `true`), `execute` returns
-the driver's result unchanged. It classifies each call, scans each page read, taints the
+**The default is observe-only.** With the default `mode: 'observe'` the guard never
+changes what runs: `confirm` returns your own answer (or `true`), `execute` returns the
+driver's result unchanged. It classifies each call, scans each page read, taints the
 session after the first untrusted read, and emits values-free audit events so you can see
-what enforcement *would* do. `mode: 'enforce'` exists so the decision function can be
-tested; the bounded-approval and approval-card wiring is phase P2 (see #678).
+what enforcement *would* do.
+
+**`mode: 'enforce'` (phase P2, first slice)** refuses the DENY set without asking, and
+routes every `require_approval` call through the Action Guard's bounded-approval store
+with a readable, values-free card. See [Enforce mode](#enforce-mode). The #673 digest
+and the Python port are not in this release.
 
 ## TypeScript
 
@@ -43,7 +47,7 @@ class MyBrowser extends BetaAbstractBrowserToolset20260801 {
     super({
       browserState: guard.browserState(() => ({ tabs: backend.tabs(), state_changes: backend.drainChanges() })),
       urlPolicy: guard.urlPolicy(),
-      confirm: guard.confirm(async (ctx, verdict) => askUser(verdict.card)),
+      confirm: guard.confirm(async (ctx, card) => askUser(card.card)),
     });
   }
 
@@ -132,10 +136,88 @@ content an attacker may have written (ADR-002 §2.2).
 
 `execute` binds to what `confirm` saw for the same call (by tool_use id, else by member
 name, never by the input): an input that changed after `confirm` is recorded as
-`mutated_input`, and an `execute` with no `confirm` record as `unconfirmed`. In
-`enforce` mode both are refused. `enforce` also re-applies the DENY set (typed secrets,
-credential uploads, blocked URLs) to the exact bytes in `execute`, and refuses a call
-that `confirm` answered `false`, so a driver that skips or ignores `confirm` cannot run it.
+`mutated_input`, and an `execute` with no `confirm` record as `unconfirmed`. The input
+hash covers every own enumerable key, including keys named `constructor`, `prototype`
+and `__proto__`. In `enforce` mode both are refused. `enforce` also re-applies the DENY
+set (typed secrets, credential uploads, blocked URLs) to the exact bytes in `execute`, and
+refuses a call that `confirm` answered `false`, so a driver that skips or ignores
+`confirm` cannot run it.
+
+## Enforce mode
+
+```ts
+const guard = new ToolsetGuard({
+  toolset: 'browser',
+  mode: 'enforce',
+  urlAllowlist: ['docs.example.com'],
+  requestedBy: { band: 'operator', identifier: 'owner-chat' },
+  audit: (event) => sink.write(event),
+  toolError: ToolError,
+  approvalTimeoutMs: 120_000, // default 5 minutes
+});
+
+confirm: guard.confirm(async (ctx, card) => askUser(card.card) /* must resolve to exactly true */),
+```
+
+What `confirm` does per decision:
+
+| Decision | `confirm` | `inner` asked? |
+|---|---|---|
+| `allow` | `true` | no |
+| `block` (typed secret, credential upload, `javascript:` / `file:` / private-range URL) | `false` | **never**; there is no approval path |
+| `require_approval` | `true` only if `inner(ctx, card)` returned exactly `true` within `approvalTimeoutMs` | yes |
+
+For a `require_approval` call the guard records a pending request in the same store as
+every other Action Guard approval (`~/.shieldcortex/approvals/`, `action-approvals.ts`;
+`approvalsHome` moves it). The key is the store's hash of (toolset, member, host of
+`tabURL`, input hash). `card.approvalKey` carries it. When `inner` returns exactly `true`
+the request is marked approved with the store's lifetime (`approvalTtlMs`, default 10
+minutes). Any other value (`'yes'`, `1`, an object), an exception, a timeout or an aborted
+call refuses, and the pending request is removed. With no `inner`, every held call is
+refused.
+
+`execute` then runs a held call only by spending that approval: the bytes it receives must
+hash to the key `confirm` approved, on the same tab host, and the approval must still be
+live. It is single-use, so the same approval cannot run a second call, and the next
+identical call goes back to `inner`. If `confirm` was never called for a call, `execute`
+still applies the DENY set and HOLD to the bytes it receives (audit signals
+`denied-at-execute` / `held-at-execute`) and refuses the call.
+
+Audit signals added on `call` events in enforce: `approval-granted`, `approval-not-true`,
+`approval-error`, `approval-timeout`, `approval-aborted`, `approval-no-approver`,
+`approval-store-error`, `approval-not-live` (expired or already spent at `execute`),
+`held-at-execute`.
+
+**Session taint and typed newlines.** In a tainted session a `type` whose text contains a
+newline (`\n` or `\r`) is a submit: `require_approval`, effects `submit` +
+`irreversible-ui-action`, signal `typed-newline`, whatever the previous member was.
+
+### Approval cards
+
+`inner` receives the verdict as its second argument; `card.card` is the readable card.
+Cards are plain English, at most 200 characters and printable ASCII only (anything else
+is shown as `\uXXXX`). A page label is redacted with the credential patterns, withheld
+whole if it still looks like a secret, and bounded to 60 characters. Only the host of
+`tabURL` is shown, at most 32 characters, keeping its end (the registrable domain). A card
+never contains the typed text, a URL path or query string, an upload path, or page body.
+When the card would pass 200 characters the taint and requester sentences are dropped
+first; `Approve once / Deny.` is always kept.
+
+```
+Click the button labelled "Place order" on checkout.example.com? This could spend money, send something or delete something. The agent is acting on web or screen content it read. Approve once / Deny.
+Type into a field on checkout.example.com? The text looks like a secret (api key). ShieldCortex does not allow secrets to be typed into pages or apps. Denied; nothing was typed.
+Run page script on checkout.example.com? Scripts run with the page's own cookies and logins. The agent is acting on web or screen content it read. Requested by: operator. Approve once / Deny.
+Click on the screen (desktop)? ShieldCortex cannot tell what this click does. The agent is acting on web or screen content it read. Requested by: unknown. Approve once / Deny.
+Upload 1 file(s) from this machine to checkout.example.com? The page receives a copy of the file. The agent is acting on web or screen content it read. Requested by: operator. Approve once / Deny.
+```
+
+A DENY card (the typed-secret one above) is only on the verdict `classify` returns; `inner` is never asked for a DENY.
+
+### Not in this release
+
+- The #673 digest (unanswered cards collected as "skipped" entries).
+- The Python port (`shieldcortex.toolsets` under `plugins/`).
+- Screenshot OCR, per-site policy files, and a `doctor` row (phase P3).
 
 ## Audit events
 
@@ -144,17 +226,17 @@ effect kinds, signal names, taint, `requestedBy`, host (never path or query), el
 and a bounded, escaped label with secret-shaped text redacted, input hash, outcome, host answer, scan indicators. Never the
 typed text, never a URL query string, never page content.
 
-## Known limits (P1)
+## Known limits
 
-Both are tracked for P2 (#678).
+The two P1 known limits are closed: the input hash now covers own `constructor`,
+`prototype` and `__proto__` fields (N1), and a `type` with a newline in a tainted session
+is `require_approval` whatever the previous member was (N2).
 
-- **N1 — input binding skips three field names.** The input hash that binds `execute`
-  to `confirm` does not include own JSON fields named `constructor`, `prototype` or
-  `__proto__`. A change to only those fields after `confirm` is not detected as
-  `mutated_input`. No standard SDK member reads them.
-- **N2 — a newline in `type` after a read.** A `type` call whose text contains a newline
-  after a read is classified as a submit but is still allowed without approval unless the
-  previous member was typing; the gap is the approval, not the classification. P2 item.
+- An approval is bound to the host of the tab URL in the SDK's **last state report**, not
+  the live browser; Anthropic notes the page can change after that report.
+- Before the first page or screen read, a `type` with a newline in the browser toolset is
+  still `allow` (the session is not tainted yet).
+- A `key Return` after a non-typing member in the browser toolset is `allow`, as in P1.
 
 ## Not covered
 
