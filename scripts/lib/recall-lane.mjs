@@ -22,7 +22,8 @@
  * Markers can only ever RESTRICT recall: an owner who happens to type one
  * gets less recall on that turn, never more anywhere. An unrecognised turn
  * is `interactive`, because plain Claude Code use carries no lane signal at
- * all and must keep today's recall.
+ * all and must keep today's recall. A pin that is set but names no lane is
+ * NOT unrecognised: it resolves to `automation` (#722 review R4).
  *
  * Safe defaults (override per lane in ~/.shieldcortex/config.json
  * `recallLanes: { cron: { recall, categories } }`):
@@ -44,6 +45,9 @@ export const LANES = Object.freeze({
 });
 
 const VALID_LANES = new Set(Object.values(LANES));
+
+/** detectLane()'s signal when SHIELDCORTEX_RECALL_LANE is set to something that is not a lane. */
+export const INVALID_PIN_SIGNAL = 'env:SHIELDCORTEX_RECALL_LANE:invalid';
 
 const NON_INTERACTIVE_CATEGORIES = Object.freeze(['error', 'pattern', 'decision']);
 
@@ -88,6 +92,13 @@ export const LANE_MARKERS = Object.freeze([
 export function detectLane({ text = '', env = {} } = {}) {
   const pinned = String(env.SHIELDCORTEX_RECALL_LANE ?? '').trim().toLowerCase();
   if (VALID_LANES.has(pinned)) return { lane: pinned, signal: 'env:SHIELDCORTEX_RECALL_LANE' };
+  // A pin that is SET but names no lane is a typo in a job someone meant to
+  // pin — and the jobs that need a pin are exactly the ones whose prompts
+  // carry no marker. Treating it like an absent pin let those turns fall
+  // through to interactive and the owner's full recall (#722 review R4).
+  // Fail safe: the most restrictive lane, with a signal the recall log shows.
+  // Unset or blank stays "no pin" — that is how plain Claude Code runs.
+  if (pinned !== '') return { lane: LANES.AUTOMATION, signal: INVALID_PIN_SIGNAL };
   const body = typeof text === 'string' ? text : '';
   for (const m of LANE_MARKERS) {
     if (m.pattern.test(body)) return { lane: m.lane, signal: m.signal };

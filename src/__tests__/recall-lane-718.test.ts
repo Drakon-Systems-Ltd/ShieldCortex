@@ -84,9 +84,25 @@ describe('detectLane (#718)', () => {
     expect(laneMod.detectLane({ text: 'why does the probe say "Automated liveness check" every 15 minutes?' }).lane).toBe('interactive');
   });
 
-  it('honours the operator pin and ignores an invalid one', () => {
+  it('honours the operator pin', () => {
     expect(laneMod.detectLane({ text: 'hello there friend', env: { SHIELDCORTEX_RECALL_LANE: 'Cron' } }).lane).toBe('cron');
-    expect(laneMod.detectLane({ text: WATCHDOG_PROMPT, env: { SHIELDCORTEX_RECALL_LANE: 'bogus' } }).lane).toBe('automation');
+    expect(laneMod.detectLane({ text: CRON_PROMPT, env: { SHIELDCORTEX_RECALL_LANE: 'interactive' } }))
+      .toEqual({ lane: 'interactive', signal: 'env:SHIELDCORTEX_RECALL_LANE' });
+  });
+
+  // #722 review R4: an invalid pin used to read as "no pin", so an unmarked
+  // job with a typo'd pin recalled as interactive.
+  it.each(['bogus', 'nightly', 'crom', 'ınteractive', 'interactive-ish'])('an invalid pin (%s) fails safe to automation', (pin) => {
+    expect(laneMod.detectLane({ text: 'hello there friend', env: { SHIELDCORTEX_RECALL_LANE: pin } }))
+      .toEqual({ lane: 'automation', signal: 'env:SHIELDCORTEX_RECALL_LANE:invalid' });
+    expect(laneMod.detectLane({ text: WATCHDOG_PROMPT, env: { SHIELDCORTEX_RECALL_LANE: pin } }).lane).toBe('automation');
+  });
+
+  it('an unset or blank pin is no pin', () => {
+    for (const pin of [undefined, '', '   ']) {
+      expect(laneMod.detectLane({ text: 'hello there friend', env: { SHIELDCORTEX_RECALL_LANE: pin } }))
+        .toEqual({ lane: 'interactive', signal: 'default' });
+    }
   });
 
   it('takes the most restrictive lane when markers from two lanes appear', () => {
@@ -378,6 +394,49 @@ describe('prompt-recall hook lane scoping, end to end (#718)', () => {
     expect(log.laneSignal).toBe('default');
     const personal = log.candidates.find((c: { title: string }) => c.title === FAMILY_TITLE);
     expect(personal.injected).toBe(true);
+    expect(JSON.parse(out).hookSpecificOutput.additionalContext).toContain(FAMILY_TITLE);
+  });
+
+  // #722 review R4, through the real hook: an unmarked prompt that matches the
+  // PERSONAL row, run with an invalid pin, must not recall it; the same prompt
+  // with a valid interactive pin, or with no pin, still does.
+  const OWNER_PROMPT = 'remind me what we booked for the surprise birthday trip';
+
+  it('invalid pin, no marker: the PERSONAL row is not recalled', () => {
+    const { home } = makeHome();
+    const out = runHook(home, OWNER_PROMPT, { SHIELDCORTEX_RECALL_LANE: 'nightly' });
+    const log = lastLog(home);
+    expect(log.lane).toBe('automation');
+    expect(log.laneSignal).toBe('env:SHIELDCORTEX_RECALL_LANE:invalid');
+    expect(log.injectedCount).toBe(0);
+    expect(out).not.toContain(FAMILY_TITLE);
+    expect(out).not.toContain('surprise trip');
+  });
+
+  it('invalid pin with automation opted in: the non-interactive filter still withholds the PERSONAL row', () => {
+    const { home } = makeHome();
+    writeFileSync(
+      join(home, '.shieldcortex', 'config.json'),
+      JSON.stringify({ proactiveRecall: true, captureEvents: false, recallLanes: { automation: { recall: true, categories: null } } }),
+    );
+    const out = runHook(home, OWNER_PROMPT, { SHIELDCORTEX_RECALL_LANE: 'nightly' });
+    const log = lastLog(home);
+    const personal = log.candidates.find((c: { title: string }) => c.title === FAMILY_TITLE);
+    expect(personal).toBeDefined();
+    expect(personal.injected).toBe(false);
+    expect(personal.dropReason).toBe('lane_policy:sensitivity');
+    expect(out).not.toContain(FAMILY_TITLE);
+  });
+
+  it.each([
+    ['a valid interactive pin', { SHIELDCORTEX_RECALL_LANE: 'interactive' }, 'env:SHIELDCORTEX_RECALL_LANE'],
+    ['no pin', {}, 'default'],
+  ])('%s, no marker: the PERSONAL row is still recalled', (_name, env, signal) => {
+    const { home } = makeHome();
+    const out = runHook(home, OWNER_PROMPT, env as Record<string, string>);
+    const log = lastLog(home);
+    expect(log.lane).toBe('interactive');
+    expect(log.laneSignal).toBe(signal);
     expect(JSON.parse(out).hookSpecificOutput.additionalContext).toContain(FAMILY_TITLE);
   });
 

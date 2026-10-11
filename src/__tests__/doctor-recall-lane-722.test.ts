@@ -20,10 +20,12 @@ describe('doctor — recall lane pin (#722)', () => {
     expect(r.message).toContain('"cron"');
   });
 
-  it('invalid pin: WARN, because the hook silently ignores it', () => {
+  it('invalid pin: WARN, naming the fail-safe the hook applies (#722 R4)', () => {
     const r = checkRecallLanePin({ SHIELDCORTEX_RECALL_LANE: 'nightly' });
     expect(r.status).toBe('warn');
     expect(r.message).toContain('"nightly"');
+    expect(r.message).toContain('automation');
+    expect(r.message).not.toContain('ignored');
     expect(r.fix).toContain('interactive, cron, automation, subagent');
   });
 });
