@@ -557,3 +557,132 @@ describe('#713 — the splitter and idiom matchers are linear', () => {
     }
   });
 });
+
+/**
+ * Review round 2 — B1. A line comment ends at more than LF: ECMAScript also
+ * ends it at a lone CR, U+2028 and U+2029; PHP and Python at a lone CR. Code
+ * after such a byte runs, so a comment that contains one is unrecognised.
+ */
+const CR = String.fromCharCode(13);
+const LS = '\u2028';
+const PS = '\u2029';
+const COMMENT_TERMINATORS: Record<string, [string, 'python' | 'node' | 'php', string, string]> = {
+  'node // ended by a lone CR': ['node -', 'node', `const t = require('fs').readFileSync('/tmp/x/table.md')\n// note${CR}require('/tmp/ev/evil.js')`, '/tmp/ev/evil.js'],
+  'node // ended by U+2028': ['node -', 'node', `const t = require('fs').readFileSync('/tmp/x/table.md')\n// note${LS}require('/tmp/ev/evil.js')`, '/tmp/ev/evil.js'],
+  'node // ended by U+2029': ['node -', 'node', `const t = require('fs').readFileSync('/tmp/x/table.md')\n// note${PS}require('/tmp/ev/evil.js')`, '/tmp/ev/evil.js'],
+  'php // ended by a lone CR': ['php', 'php', `<?php\n$t = file_get_contents('/tmp/x/table.md');\n// note${CR}include('/tmp/ev/evil.php');`, '/tmp/ev/evil.php'],
+  'php # ended by a lone CR': ['php', 'php', `<?php\n$t = file_get_contents('/tmp/x/table.md');\n# note${CR}include('/tmp/ev/evil.php');`, '/tmp/ev/evil.php'],
+  'python # ended by a lone CR': ['python3 -', 'python', `t = open('/tmp/x/table.md').read()\nprint(len(t))\n# note${CR}exec(open('/tmp/ev/evil.py').read())`, '/tmp/ev/evil.py'],
+};
+
+describe('#713 r2 B1 — a comment ended by anything but LF is unrecognised', () => {
+  it.each(Object.entries(COMMENT_TERMINATORS))('%s: not masked', (_name, [interp, lang, body]) => {
+    expect([body, bodyIsAllDataRead(body, lang)]).toEqual([body, false]);
+    const cmd = heredoc(interp, body);
+    expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining(unmasked(cmd))]);
+  });
+
+  it('control bytes and non-ASCII inside a line or block comment are unrecognised', () => {
+    for (const [body, lang] of [
+      [`const t = require('fs').readFileSync('/tmp/x/table.md')\n// a${String.fromCharCode(11)}b`, 'node'],
+      [`const t = require('fs').readFileSync('/tmp/x/table.md')\n// caf\u00e9`, 'node'],
+      [`const t = require('fs').readFileSync('/tmp/x/table.md')\n/* a${LS}b */`, 'node'],
+      [`<?php\n/* a${CR}b */\n$t = file_get_contents('/tmp/x/table.md');`, 'php'],
+      [`t = open('/tmp/x/table.md').read()\n# a${String.fromCharCode(127)}`, 'python'],
+    ] as Array<[string, 'python' | 'node' | 'php']>) expect([body, bodyIsAllDataRead(body, lang)]).toEqual([body, false]);
+  });
+
+  it('controls: LF- and CRLF-ended comments over a pure read body keep the relief', () => {
+    for (const [interp, lang, body] of [
+      ['python3 -', 'python', "import json\nrows = json.load(open('/tmp/x/table.md'))\n# count the rows\nprint(len(rows))  # data only"],
+      ['node -', 'node', "// read the table\nconst t = require('fs').readFileSync('/tmp/x/table.md') // data only\nconsole.log(t.length)"],
+      ['node -', 'node', "// read the table\r\nconst t = require('fs').readFileSync('/tmp/x/table.md') // data only\r\n/* a\r\n b */\r\nconsole.log(t.length)"],
+      ['php', 'php', "<?php\r\n# read the table\r\n$t = file_get_contents('/tmp/x/table.md'); // data only\r\necho strlen($t);"],
+    ] as Array<[string, 'python' | 'node' | 'php', string]>) {
+      expect([body, bodyIsAllDataRead(body, lang)]).toEqual([body, true]);
+      const cmd = heredoc(interp, body);
+      expect([cmd, asked(cmd)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
+    }
+  });
+});
+
+/**
+ * Review round 2 — B2. The whole-command gate admits any flag, and a flag can
+ * load code before the body runs. The relief takes only a closed set of inert
+ * flags per interpreter; anything else keeps the unmasked scan, so a path the
+ * body names is never lost.
+ */
+const LOADING_FLAGS: Record<string, [string, string, string]> = {
+  'node --require=…': ['node --require=/tmp/ev/evil.js -', "const t = require('fs').readFileSync(\n'/tmp/ev/evil.js')\nconsole.log(t.length)", '/tmp/ev/evil.js'],
+  'node --import=…': ['node --import=/tmp/ev/evil.mjs -', "const t = require('fs').readFileSync(\n'/tmp/ev/evil.mjs')\nconsole.log(t.length)", '/tmp/ev/evil.mjs'],
+  'ruby -revil': ['ruby -revil -', "puts File.read('/tmp/ev/evil.rb').length", '/tmp/ev/evil.rb'],
+  'python3 -mevil': ['python3 -mevil -', "import json\nrows = json.load(open('/tmp/ev/evil.py'))\nprint(len(rows))", '/tmp/ev/evil.py'],
+  'php -dauto_prepend_file=…': ['php -dauto_prepend_file=/tmp/ev/evil.php', "<?php\n$t = file_get_contents('/tmp/ev/evil.php');\necho strlen($t);", '/tmp/ev/evil.php'],
+};
+
+describe('#713 r2 B2 — only a closed set of inert interpreter flags keeps the relief', () => {
+  it.each(Object.entries(LOADING_FLAGS))('%s: the body path is not lost', (_name, [interp, body, path]) => {
+    const cmd = heredoc(interp, body);
+    const base = unmasked(cmd);
+    expect(base).toContain(path);
+    expect([cmd, asked(cmd)]).toEqual([cmd, base]);
+  });
+
+  it('controls: python3 -u, node --no-warnings and perl -w over a pure read body stay masked', () => {
+    for (const [interp, body] of [
+      ['python3 -u -', "import json\nrows = json.load(open('/tmp/x/table.md'))\nprint(len(rows))"],
+      ['node --no-warnings -', "const t = require('fs').readFileSync(\n'/tmp/x/table.md')\nconsole.log(t.length)"],
+      ['perl -w -', "use strict;\nmy $t = read_file('/tmp/x/table.md');\nprint length($t), \"\\n\";"],
+    ]) {
+      const cmd = heredoc(interp, body);
+      expect([cmd, unmasked(cmd)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.md'])]);
+      expect([cmd, asked(cmd)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
+    }
+  });
+
+  it('attached values, unknown flags and flags with a separate value keep the unmasked scan', () => {
+    const body = "import json\nrows = json.load(open('/tmp/x/table.md'))\nprint(len(rows))";
+    for (const interp of ['python3 -uB -', 'python3 -W x -', 'python3 -X x -', 'python3 -c -', 'python3 --u -', 'node --no-warnings=1 -', 'perl -wMEvil -', 'ruby -w -x -']) {
+      const cmd = heredoc(interp, body);
+      expect([cmd, asked(cmd)]).toEqual([cmd, unmasked(cmd)]);
+    }
+  });
+
+  it('the intro check is linear: 100 KB intros of repeated flags or spaces stay in budget', () => {
+    const body = "import json\nrows = json.load(open('/tmp/x/table.md'))\nprint(len(rows))";
+    for (const interp of [
+      `python3${' -u'.repeat(33_334)} -`,
+      `python3${' '.repeat(1e5)}-`,
+      `python3${' -u'.repeat(33_334)} -X`,
+      `python3${' '.repeat(1e5)}-X`,
+      `node${' --no-warnings'.repeat(8_334)} -Z`,
+    ]) {
+      const t0 = performance.now();
+      asked(heredoc(interp, body));
+      expect(performance.now() - t0).toBeLessThan(TIME_BUDGET_MS);
+    }
+  });
+});
+
+describe('#713 r2 N1/N2 — Perl read modes and Python codec names are closed sets', () => {
+  const perl = (mode: string): string => `open(my $fh, '${mode}', '/tmp/x/table.md') or die "cannot open: $!";\nmy @lines = <$fh>;`;
+
+  it('only the six plain Perl read modes are recognised', () => {
+    for (const mode of ['<', '<:raw', '<:utf8', '<:encoding(UTF-8)', '<:encoding(utf8)', '<:encoding(utf-8)']) {
+      expect([mode, bodyIsAllDataRead(perl(mode), 'perl')]).toEqual([mode, true]);
+    }
+    for (const mode of ['<:via(Evil)', '<:crlf:via(X)', '<:crlf', '<:encoding(UTF-7)', '<:']) {
+      expect([mode, bodyIsAllDataRead(perl(mode), 'perl')]).toEqual([mode, false]);
+    }
+  });
+
+  it('Python encoding= and errors= take only stdlib literal names', () => {
+    const py = (kw: string): string => `t = open('/tmp/x/table.md', ${kw}).read()\nprint(len(t))`;
+    for (const kw of ["encoding='utf-8'", "encoding='latin1'", "errors='replace'", "encoding='UTF-8', errors='strict'"]) {
+      expect([kw, bodyIsAllDataRead(py(kw), 'python')]).toEqual([kw, true]);
+    }
+    for (const kw of ["encoding='evilcodec'", "errors='surrogateescape'", 'encoding=None', 'errors=1', "encoding='utf\\x2d8'"]) {
+      expect([kw, bodyIsAllDataRead(py(kw), 'python')]).toEqual([kw, false]);
+    }
+  });
+});

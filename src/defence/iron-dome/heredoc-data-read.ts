@@ -78,6 +78,13 @@ const BLOCK_ANYWHERE: Record<DataLang, ReadonlySet<string>> = {
   php: new Set(['function', 'fn', 'class']),
 };
 
+/** Inside a comment: printable ASCII, a tab, or the CR of a CRLF. LF is the caller's. */
+function commentByteOk(body: string, at: number): boolean {
+  const code = body.charCodeAt(at);
+  if (code === 0x0d) return body[at + 1] === '\n';
+  return code === 0x09 || (code >= 0x20 && code <= 0x7e);
+}
+
 /**
  * Split a heredoc body into top-level statements, fail-closed (#713, design §3).
  *
@@ -168,8 +175,15 @@ export function splitDataReadStatements(body: string, lang: DataLang): DataReadT
     }
     if ((c === '#' && lang !== 'node') || (c === '/' && body[i + 1] === '/' && (lang === 'node' || lang === 'php'))) {
       if (lang === 'php' && c === '#' && body[i + 1] === '[') return null;   // PHP 8 attribute
-      const nl = body.indexOf('\n', i);
-      const stop = nl < 0 || nl > end ? end : nl;
+      // The comment ends at LF here. ECMAScript also ends it at a lone CR,
+      // U+2028 and U+2029; PHP and Python at a lone CR. Any such byte, any other
+      // control byte or any non-ASCII byte inside the comment is unrecognised,
+      // so code after it is never hidden as comment text.
+      let stop = i;
+      while (stop < end && body[stop] !== '\n') {
+        if (!commentByteOk(body, stop)) return null;
+        stop++;
+      }
       // A source-encoding cookie re-decodes the body the interpreter runs.
       if (/coding[:=]/.test(body.slice(i, stop))) return null;
       i = stop;
@@ -178,6 +192,7 @@ export function splitDataReadStatements(body: string, lang: DataLang): DataReadT
     if (c === '/' && body[i + 1] === '*' && (lang === 'node' || lang === 'php')) {
       const close = body.indexOf('*/', i + 2);
       if (close < 0 || close + 2 > end) return null;
+      for (let j = i + 2; j < close; j++) if (body[j] !== '\n' && !commentByteOk(body, j)) return null;
       i = close + 2;
       continue;
     }
@@ -318,6 +333,8 @@ interface DataReadProfile {
   index: 'any' | 'literal' | 'number';
   /** Keyword-argument names allowed (Python), always with a literal value. */
   kwargs: ReadonlySet<string>;
+  /** Keyword arguments whose literal must be one of these plain strings (codec names, error handlers). */
+  kwStrings: Readonly<Record<string, ReadonlySet<string>>>;
 }
 
 const set = (...xs: string[]): ReadonlySet<string> => new Set(xs);
@@ -340,6 +357,12 @@ const PROFILES: Record<DataLang, DataReadProfile> = {
     consumers: set('json.load', 'json.loads', 'yaml.safe_load', 'csv.reader', 'csv.DictReader'),
     index: 'any',
     kwargs: set('sep', 'end', 'flush', 'encoding', 'errors', 'newline', 'indent', 'sort_keys', 'ensure_ascii'),
+    // A codec or error-handler name is looked up through the codec registry,
+    // which a third-party package can extend; only stdlib spellings are inert.
+    kwStrings: {
+      encoding: set('utf-8', 'utf8', 'UTF-8', 'ascii', 'latin-1', 'latin1'),
+      errors: set('strict', 'replace', 'ignore'),
+    },
   },
   node: {
     literals: set('true', 'false', 'null', 'undefined'),
@@ -354,6 +377,7 @@ const PROFILES: Record<DataLang, DataReadProfile> = {
     consumers: set('JSON.parse'),
     index: 'number',
     kwargs: set(),
+    kwStrings: {},
   },
   ruby: {
     literals: set('true', 'false', 'nil'),
@@ -368,6 +392,7 @@ const PROFILES: Record<DataLang, DataReadProfile> = {
     consumers: set(),
     index: 'literal',
     kwargs: set(),
+    kwStrings: {},
   },
   perl: {
     literals: set('undef', '$!'),
@@ -382,6 +407,7 @@ const PROFILES: Record<DataLang, DataReadProfile> = {
     consumers: set(),
     index: 'literal',
     kwargs: set(),
+    kwStrings: {},
   },
   php: {
     literals: set('true', 'false', 'null'),
@@ -396,6 +422,7 @@ const PROFILES: Record<DataLang, DataReadProfile> = {
     consumers: set('json_decode'),
     index: 'literal',
     kwargs: set(),
+    kwStrings: {},
   },
 };
 
@@ -574,7 +601,11 @@ function isLiteral(e: Expr, cx: Ctx): boolean {
 }
 
 function kwOk(kw: Array<{ name: string; value: Expr }>, cx: Ctx): boolean {
-  return kw.every(k => cx.prof.kwargs.has(k.name) && isLiteral(k.value, cx));
+  return kw.every(k => {
+    if (!cx.prof.kwargs.has(k.name) || !isLiteral(k.value, cx)) return false;
+    const allowed = Object.prototype.hasOwnProperty.call(cx.prof.kwStrings, k.name) ? cx.prof.kwStrings[k.name] : undefined;
+    return allowed === undefined || (k.value.t === 'str' && k.value.plain && allowed.has(k.value.v));
+  });
 }
 
 function indexOk(idx: Expr, cx: Ctx): boolean {
@@ -722,8 +753,13 @@ function specialStatement(s: DataReadToken[], cx: Ctx): boolean | null {
 /**
  * Perl three-argument read open, the only `open` recognised:
  *   open(my $fh, '<', 'lit') [or die …];   open(FH, '<:encoding(UTF-8)', 'lit') || die(…);
- * Two-argument open (`open(F, "cmd|")`) and any pipe mode are unrecognised.
+ * The mode is one of a closed set: `<`, `<:raw`, `<:utf8`, `<:encoding(UTF-8)`,
+ * `<:encoding(utf8)`, `<:encoding(utf-8)`. Any other layer is unrecognised
+ * (`<:via(Evil)` loads `PerlIO::via::Evil`). Two-argument open
+ * (`open(F, "cmd|")`) and any pipe mode are unrecognised.
  */
+const PERL_READ_MODES = set('<', '<:raw', '<:utf8', '<:encoding(UTF-8)', '<:encoding(utf8)', '<:encoding(utf-8)');
+
 function perlOpen(s: DataReadToken[], cx: Ctx): boolean {
   let i = 1;
   if (!isP(s[i++], '(')) return false;
@@ -735,7 +771,7 @@ function perlOpen(s: DataReadToken[], cx: Ctx): boolean {
   if (name === null) return false;
   if (!isP(s[i++], ',')) return false;
   const mode = s[i++];
-  if (mode?.k !== 'str' || !mode.plain || !/^<(?::[A-Za-z0-9_():-]*)?$/.test(mode.v)) return false;
+  if (mode?.k !== 'str' || !mode.plain || !PERL_READ_MODES.has(mode.v)) return false;
   if (!isP(s[i++], ',')) return false;
   const path = s[i++];
   if (!path || path.k !== 'str' || !isPathLiteral({ t: 'str', v: path.v, plain: !!path.plain })) return false;

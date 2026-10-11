@@ -4157,9 +4157,14 @@ function isPurePrint(cmd: string): boolean {
   return /^(?:echo|printf)\b/.test(body);
 }
 
-/** Strip `#` comments so a token mentioned only in a comment is not an action. */
+/**
+ * Strip `#` comments so a token mentioned only in a comment is not an action.
+ * A lone CR, U+2028 or U+2029 inside the comment is kept (#713): the shell
+ * ignores it, but Python, PHP and Node end a comment there. The heredoc
+ * data-read relief must still see it, so code after it cannot pass as comment.
+ */
 function stripComments(cmd: string): string {
-  return cmd.replace(/(^|\s)#[^\n]*/g, '$1 ');
+  return cmd.replace(/(^|\s)#[^\n]*/g, (m, pre: string) => `${pre} ${m.slice(pre.length).replace(/[^\r\u2028\u2029]+/g, '')}`);
 }
 
 // Interpreters that EXECUTE a heredoc body they read. If one of these introduces
@@ -5421,14 +5426,22 @@ function heredocBodies(text: string): HeredocBody[] {
  * body or what its `import`s load (`PATH=/tmp/b python3`, `/tmp/python3`,
  * `PYTHONPATH=…`, `NODE_OPTIONS=…`, `PERL5OPT=…`). So the relief takes only
  * locale/output variables and an interpreter that is bare or in a system bin
- * directory. Anything else keeps the 5.5.0 scan.
+ * directory. The gate also admits any flag, and a flag can load code before
+ * the body runs (`node --require=…`, `--import=…`, `ruby -r…`, `python3 -m…`,
+ * `php -dauto_prepend_file=…`). So the relief anchors all the way to `<<` and
+ * takes only a closed set of inert flags per interpreter, each its own token:
+ * python `-u -B -I -s -E -q`, node `--no-warnings`, ruby/perl/php `-w`.
+ * Anything else keeps the 5.5.0 scan.
  */
 const DATA_READ_HEREDOC_INTRO = new RegExp(
   '^\\s*'
   + '(?:cd[ \\t]+[\\w.\\/~-]+[ \\t]*&&[ \\t]*)?'
   + '(?:(?:LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|COLUMNS|NO_COLOR|FORCE_COLOR|PYTHONIOENCODING|PYTHONUTF8|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE)=[\\w.\\/:,-]*[ \\t]+)*'
   + '(?:(?:env|nohup|nice|command|timeout[ \\t]+\\d+[smhd]?)[ \\t]+)*'
-  + '(?:\\/usr\\/bin\\/|\\/usr\\/local\\/bin\\/|\\/bin\\/|\\/opt\\/homebrew\\/bin\\/)?(?:python[\\d.]*|node|nodejs|ruby|perl|php)[ \\t]',
+  + '(?:\\/usr\\/bin\\/|\\/usr\\/local\\/bin\\/|\\/bin\\/|\\/opt\\/homebrew\\/bin\\/)?'
+  + '(?:python[\\d.]*(?:[ \\t]+-[uBIsEq])*|(?:node|nodejs)(?:[ \\t]+--no-warnings)*|(?:ruby|perl|php)(?:[ \\t]+-w)*)'
+  + '(?:[ \\t]+-)?'
+  + '[ \\t]+<<([\'"])[A-Za-z_]\\w*\\1[ \\t]*\\n$',
 );
 
 /**
