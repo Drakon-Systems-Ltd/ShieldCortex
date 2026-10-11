@@ -26,7 +26,8 @@ import { writeRecallLog } from './lib/recall-log.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
-import { loadQueryEmbedder, embedQuery, vectorCandidates, fuseRecallCandidates, DEFAULT_MIN_SIMILARITY } from './lib/recall-vector.mjs';
+import { isRecallVectorEnabled, loadQueryEmbedder, embedQuery, readRecallSnapshot, fuseRecallCandidates, DEFAULT_MIN_SIMILARITY } from './lib/recall-vector.mjs';
+import { recallAdmissionClause, recallRowColumns } from './lib/recall-admission.mjs';
 
 // ==================== CONFIG ====================
 
@@ -82,8 +83,8 @@ const RECALL_MAX_BM25 =
   process.env.SHIELDCORTEX_RECALL_MAX_BM25 !== ''
     ? pickNumber('SHIELDCORTEX_RECALL_MAX_BM25', null)
     : null;
-// #717 vector plane: cosine floor for a vector candidate, also the similarity
-// at which the relevance gate judges a row on meaning instead of wording.
+// #717 vector plane: cosine floor for a vector candidate. (#720: no longer
+// a relevance-gate exemption — vector rows are gated on wording like FTS rows.)
 const RECALL_VECTOR_MIN_SIM = pickNumber('SHIELDCORTEX_RECALL_VECTOR_MIN_SIM', DEFAULT_MIN_SIMILARITY);
 
 function loadConfig() {
@@ -131,63 +132,45 @@ function recallRelevant(db, project, prompt, queryVector = null) {
   let vectorHits = 0;
   let vectorScanError = null;
 
-  // 1. FTS5 text search
+  // 1. FTS5 text search, and 1b. the #717 vector plane (opt-in, #720), read
+  // in ONE snapshot so a row on both planes is the same version on both.
+  // Both planes share recall-admission.mjs's clause, and a vector candidate
+  // must also match this FTS expression: the vector plane re-ranks and tops
+  // up lexical candidates, it never admits a row FTS could not surface.
+  // Any later per-row admission (e.g. #718 lane policy over fullSet) sees
+  // vector rows exactly as it sees FTS rows — they are fused in here first.
   const ftsQuery = escapeFts5(prompt);
-  if (ftsQuery.trim()) {
-    try {
-      // v4.25.0: project pinned/access_count/last_accessed/downvote_count
-      // so compareRecallResults can compute effective salience without a
-      // second query. COALESCE on downvote_count for DBs that pre-date the
-      // 4.25 migration (the prompt-recall-hook runs against legacy DBs too).
-      const ftsRows = db.prepare(`
-        SELECT
-          m.id, m.title, m.content, m.category, m.salience, fts.rank,
-          m.pinned, m.access_count, m.last_accessed,
-          m.trust_score, m.sensitivity_level, m.metadata, m.reviewed_at,
-          COALESCE(m.downvote_count, 0) AS downvote_count
-        FROM memories m
-        JOIN memories_fts fts ON m.id = fts.rowid
-        WHERE memories_fts MATCH ?
-          AND (m.project = ? OR m.scope = 'global')
-          AND COALESCE(m.status, 'active') = 'active'
-          AND m.salience >= ?
-        ORDER BY fts.rank
-        LIMIT ?
-      `).all(ftsQuery, project, MIN_SALIENCE, MAX_RESULTS * 2);
-
-      for (const row of ftsRows) {
-        if (!seen.has(row.id)) {
-          seen.add(row.id);
-          // v4.25.1: tag with source so the recall ring buffer can show
-          // operators which path surfaced a given candidate. _-prefixed so
-          // it doesn't collide with any future SELECT column.
-          row._source = 'fts';
-          results.push(row);
-          ftsHits += 1;
-        }
-      }
-    } catch {
-      // FTS query failed — continue with fallback
+  const snapshot = readRecallSnapshot(db, {
+    project,
+    ftsQuery,
+    queryVector,
+    limit: MAX_RESULTS * 2,
+    minSalience: MIN_SALIENCE,
+    minSimilarity: RECALL_VECTOR_MIN_SIM,
+  });
+  for (const row of snapshot.ftsRows) {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      // v4.25.1: tag with source so the recall ring buffer can show
+      // operators which path surfaced a given candidate. _-prefixed so
+      // it doesn't collide with any future SELECT column.
+      row._source = 'fts';
+      results.push(row);
+      ftsHits += 1;
     }
   }
 
-  // 1b. #717 vector plane: cosine candidates over the persisted embeddings,
-  // fused with the FTS list by weighted RRF. Only when the caller obtained a
-  // query vector — otherwise this function is byte-for-byte its pre-#717 self.
+  // Fused by weighted RRF only when the caller obtained a query vector —
+  // otherwise this function is byte-for-byte its pre-#717 self.
   let fused = false;
   if (queryVector) {
-    try {
-      const vecRows = vectorCandidates(db, project, queryVector, {
-        limit: MAX_RESULTS * 2,
-        minSalience: MIN_SALIENCE,
-        minSimilarity: RECALL_VECTOR_MIN_SIM,
-      });
-      vectorHits = vecRows.length;
-      results = fuseRecallCandidates(results, vecRows, compareRecallResults);
+    if (snapshot.vectorError) {
+      vectorScanError = snapshot.vectorError;
+    } else {
+      vectorHits = snapshot.vectorRows.length;
+      results = fuseRecallCandidates(results, snapshot.vectorRows, compareRecallResults);
       for (const row of results) seen.add(row.id);
       fused = true;
-    } catch (e) {
-      vectorScanError = e?.message ?? 'unknown';
     }
   }
 
@@ -210,16 +193,10 @@ function recallRelevant(db, project, prompt, queryVector = null) {
       // SELECT above) so compareRecallResults can compute effective
       // salience for rows that came in via this fallback path.
       const catRows = db.prepare(`
-        SELECT
-          id, title, content, category, salience,
-          pinned, access_count, last_accessed,
-          trust_score, sensitivity_level, metadata, reviewed_at,
-          COALESCE(downvote_count, 0) AS downvote_count
+        SELECT ${recallRowColumns()}
         FROM memories
         WHERE category = ?
-          AND (project = ? OR scope = 'global')
-          AND COALESCE(status, 'active') = 'active'
-          AND salience >= ?
+          AND ${recallAdmissionClause()}
         ORDER BY salience DESC, last_accessed DESC
         LIMIT ?
       `).all(categoryBoost, project, MIN_SALIENCE, MAX_RESULTS - results.length);
@@ -513,21 +490,27 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
-    // #717 vector plane. Fail soft: any reason we cannot get a query vector
-    // leaves recall on the FTS-only path and is recorded in the recall log.
+    // #717 vector plane — default-off (#720): consulted only when config
+    // `recallVector: true` or SHIELDCORTEX_RECALL_VECTOR=1. Fail soft: any
+    // reason we cannot get a query vector leaves recall on the FTS-only path
+    // and is recorded in the recall log.
     let queryVector = null;
-    let vectorPlane;
-    try {
-      const { embed, reason } = await loadQueryEmbedder({ config });
-      if (embed) {
-        const r = await embedQuery(embed, prompt);
-        queryVector = r.vector;
-        vectorPlane = r.reason;
-      } else {
-        vectorPlane = reason;
+    let vectorPlane = 'disabled:default-off';
+    if (isRecallVectorEnabled(config)) {
+      try {
+        const { embed, reason } = await loadQueryEmbedder({ config });
+        if (embed) {
+          const r = await embedQuery(embed, prompt);
+          queryVector = r.vector;
+          vectorPlane = r.reason;
+        } else {
+          vectorPlane = reason;
+        }
+      } catch {
+        vectorPlane = 'unavailable:loader-threw';
       }
-    } catch {
-      vectorPlane = 'unavailable:loader-threw';
+    } else if (config.recallVector === false) {
+      vectorPlane = 'disabled:config';
     }
 
     const db = new Database(dbPath, { readonly: true, timeout: 2000 });
@@ -549,7 +532,6 @@ process.stdin.on('end', async () => {
       minTermMatches: RECALL_MIN_TERMS,
       relFactor: RECALL_REL_FACTOR,
       maxBm25: RECALL_MAX_BM25,
-      minSemanticSimilarity: queryVector ? RECALL_VECTOR_MIN_SIM : null,
     });
     const relevanceDrops = new Map(dropped.map((d) => [d.row.id, d.reason]));
     if (dropped.length > 0) {

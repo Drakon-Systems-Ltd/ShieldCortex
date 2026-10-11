@@ -135,7 +135,8 @@ export function writeRecallLog(entry) {
       injectedCount: entry.injectedCount ?? null,
       finalContextChars: entry.finalContextChars ?? null,
       // #717: 'active:<n>' when the vector plane ran, otherwise
-      // 'unavailable:<reason>' / 'disabled:config'. null on pre-#717 writers.
+      // 'unavailable:<reason>' / 'disabled:config' / 'disabled:default-off'
+      // (#720: off unless opted in). null on pre-#717 writers.
       vectorPlane: entry.vectorPlane ?? null,
     };
     // TODO(#717): doctor WARN when the last N interactive recall runs share

@@ -23,6 +23,7 @@
 
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { recallAdmissionClause, recallRowColumns, selectFtsCandidates } from './recall-admission.mjs';
 
 // Weights/k mirror src/memory/ranker/index.ts DEFAULT_WEIGHTS / DEFAULT_RRF_K.
 // Duplicated rather than imported: the hook must not need dist/ to rank FTS.
@@ -47,6 +48,21 @@ export const DEFAULT_SCAN_CAP = 20_000;
 // ~7ms warm. Past this the turn proceeds on FTS alone.
 const DEFAULT_EMBED_TIMEOUT_MS = 2_000;
 
+/**
+ * Is the vector plane switched on? Off unless `config.recallVector === true`
+ * or SHIELDCORTEX_RECALL_VECTOR is truthy; a falsy env value
+ * ("0"/"false"/"no"/"off") turns it off whatever the config says.
+ *
+ * @param {object} [config]
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function isRecallVectorEnabled(config = {}, env = process.env) {
+  const raw = (env?.SHIELDCORTEX_RECALL_VECTOR ?? '').trim().toLowerCase();
+  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on') return true;
+  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off') return false;
+  return config?.recallVector === true;
+}
+
 function distRootFor(override) {
   if (override) return override;
   const here = dirname(fileURLToPath(import.meta.url));
@@ -56,14 +72,16 @@ function distRootFor(override) {
 /**
  * Resolve the query embedder, or say why there is none.
  *
- * @param {{ distRoot?: string, config?: object }} [opts]
+ * @param {{ distRoot?: string, config?: object, env?: Record<string, string | undefined> }} [opts]
  * @returns {Promise<{ embed: ((text: string) => Promise<Float32Array>) | null, reason: string }>}
  */
 export async function loadQueryEmbedder(opts = {}) {
-  if (opts.config && opts.config.recallVector === false) {
-    return { embed: null, reason: 'disabled:config' };
+  const env = opts.env ?? process.env;
+  // Checked before anything is imported: default config never loads dist.
+  if (!isRecallVectorEnabled(opts.config, env)) {
+    return { embed: null, reason: opts.config?.recallVector === false ? 'disabled:config' : 'disabled:default-off' };
   }
-  if (process.env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') {
+  if (env.SHIELDCORTEX_SKIP_EMBEDDINGS === '1') {
     return { embed: null, reason: 'unavailable:skip-embeddings' };
   }
   const distRoot = distRootFor(opts.distRoot);
@@ -140,65 +158,93 @@ function cosine(a, b) {
 }
 
 /**
- * Bounded in-process cosine scan over the project's embedded rows. Applies
- * the same scope/status/salience filters as the hook's FTS SELECT, and
- * projects the same columns, so a vector-only row is indistinguishable
- * downstream (ranking, relevance gate, defence, log) from an FTS row.
+ * Bounded in-process cosine scan over the project's embedded rows.
+ *
+ * Admission (#720 blocker 1): the SAME clause and the SAME FTS MATCH
+ * expression as the FTS plane, so a row FTS would exclude — another project's
+ * private row, a suppressed or faded row, or a same-project row sharing no
+ * term with the prompt — is never a vector candidate. No `ftsQuery`, no
+ * candidates.
+ *
+ * Snapshot (#720 blocker 3): one statement returns each row's content WITH
+ * the embedding its similarity is computed from. There is no second
+ * "hydrate by id" read for a concurrent writer to slip between, so new
+ * content can never carry an old similarity.
  *
  * @param {import('better-sqlite3').Database} db
  * @param {string} project
  * @param {Float32Array} queryVector
- * @param {{ limit: number, minSalience: number, minSimilarity?: number, scanCap?: number }} opts
+ * @param {{ limit: number, minSalience: number, ftsQuery?: string, minSimilarity?: number, scanCap?: number }} opts
  * @returns {Array<object>} rows best-first, each with `_similarity`
  */
 export function vectorCandidates(db, project, queryVector, opts) {
+  if (!opts.ftsQuery || !opts.ftsQuery.trim()) return [];
   const minSimilarity = opts.minSimilarity ?? pickNumber('SHIELDCORTEX_RECALL_VECTOR_MIN_SIM', DEFAULT_MIN_SIMILARITY);
   const scanCap = opts.scanCap ?? DEFAULT_SCAN_CAP;
   const scanned = db.prepare(`
-    SELECT id, embedding FROM memories
+    SELECT ${recallRowColumns()}, embedding
+    FROM memories
     WHERE embedding IS NOT NULL
-      AND (project = ? OR scope = 'global')
-      AND COALESCE(status, 'active') = 'active'
-      AND salience >= ?
+      AND ${recallAdmissionClause()}
+      AND id IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?)
     ORDER BY id DESC
     LIMIT ?
-  `).all(project, opts.minSalience, scanCap);
+  `).all(project, opts.minSalience, opts.ftsQuery, scanCap);
 
   const scored = [];
-  for (const row of scanned) {
-    if (!row.embedding || row.embedding.length < 4) continue;
-    const similarity = cosine(queryVector, decodeBlob(row.embedding));
-    if (similarity >= minSimilarity) scored.push({ id: row.id, similarity });
+  for (const { embedding, ...row } of scanned) {
+    if (!embedding || embedding.length < 4) continue;
+    const similarity = cosine(queryVector, decodeBlob(embedding));
+    if (similarity >= minSimilarity) {
+      row._similarity = similarity;
+      scored.push(row);
+    }
   }
-  scored.sort((a, b) => b.similarity - a.similarity);
-  const top = scored.slice(0, opts.limit);
-  if (top.length === 0) return [];
+  scored.sort((a, b) => b._similarity - a._similarity);
+  return scored.slice(0, opts.limit);
+}
 
-  const placeholders = top.map(() => '?').join(',');
-  const hydrated = db.prepare(`
-    SELECT
-      id, title, content, category, salience,
-      pinned, access_count, last_accessed,
-      trust_score, sensitivity_level, metadata, reviewed_at,
-      COALESCE(downvote_count, 0) AS downvote_count
-    FROM memories WHERE id IN (${placeholders})
-  `).all(...top.map((t) => t.id));
-  const byId = new Map(hydrated.map((r) => [r.id, r]));
-  const out = [];
-  for (const t of top) {
-    const row = byId.get(t.id);
-    if (!row) continue;
-    row._similarity = t.similarity;
-    out.push(row);
-  }
-  return out;
+/**
+ * Read the FTS and vector candidate lists inside ONE read transaction, so a
+ * row that is a hit on both planes is read at the same version by both (#720
+ * blocker 3). Each plane fails independently, as before: an FTS error leaves
+ * an empty FTS list, a vector error is reported in `vectorError`.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @param {{ project: string, ftsQuery: string, queryVector: Float32Array | null,
+ *           limit: number, minSalience: number, minSimilarity?: number }} opts
+ * @returns {{ ftsRows: object[], vectorRows: object[], vectorError: string | null }}
+ */
+export function readRecallSnapshot(db, opts) {
+  const { project, ftsQuery, queryVector, limit, minSalience, minSimilarity } = opts;
+  return db.transaction(() => {
+    let ftsRows = [];
+    try {
+      ftsRows = selectFtsCandidates(db, { project, ftsQuery, limit, minSalience });
+    } catch {
+      // FTS query failed — the caller continues with its fallbacks.
+    }
+    let vectorRows = [];
+    let vectorError = null;
+    if (queryVector) {
+      try {
+        vectorRows = vectorCandidates(db, project, queryVector, { limit, minSalience, minSimilarity, ftsQuery });
+      } catch (e) {
+        vectorError = e?.message ?? 'unknown';
+      }
+    }
+    return { ftsRows, vectorRows, vectorError };
+  })();
 }
 
 /**
  * Weighted RRF over the FTS list (already in BM25 order) and the vector list
  * (similarity order). Each returned row carries `_source` ('fts' | 'vector' |
  * 'both') and `_rrf`. A row in both lists keeps its FTS `rank` (so the BM25
- * relevance floor still sees it) and gains `_similarity`.
+ * relevance floor still sees it) and gains `_similarity` — but only when both
+ * planes read the same title and content. A mismatch means the two lists saw
+ * different versions of the row; the similarity belongs to the other version,
+ * so the row stays a plain FTS hit (#720 blocker 3).
  *
  * @param {Array<object>} ftsRows
  * @param {Array<object>} vectorRows
@@ -215,6 +261,7 @@ export function fuseRecallCandidates(ftsRows, vectorRows, tiebreak) {
     const hit = byId.get(row.id);
     if (hit) {
       if (hit.vector) return;
+      if (hit.row.content !== row.content || hit.row.title !== row.title) return;
       hit.rrf += add;
       hit.vector = true;
       hit.row._similarity = row._similarity;
