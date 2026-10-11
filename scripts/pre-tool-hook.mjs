@@ -482,15 +482,18 @@ async function loadGuard() {
  * Optional by construction: if the module is missing the hook behaves exactly
  * as it did before, degrading to `opaque-script-invocation` rather than
  * failing on a partial dist.
+ *
+ * `base` is the directory a relative script path resolves against — see
+ * {@link scriptResolutionBase}.
  */
-async function loadScriptResolver() {
+async function loadScriptResolver(base) {
   const distRoot = hookDistRoot();
   try {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'script-source-resolver.js')).href
     );
     return typeof mod.createScriptSourceResolver === 'function'
-      ? mod.createScriptSourceResolver(process.cwd())
+      ? mod.createScriptSourceResolver(base)
       : undefined;
   } catch {
     return undefined;
@@ -502,8 +505,11 @@ async function loadScriptResolver() {
  * resolver above, and meaningless without it: an exemption only exists where
  * a fold would have happened. Missing module, empty config, malformed
  * entries — all degrade to "no exemptions", never to an error.
+ *
+ * Takes the SAME `base` as the resolver: the pin is bound to the file whose
+ * bytes were folded, so the two must agree on which file a relative path names.
  */
-async function loadReviewedScriptCheck(rawEntries) {
+async function loadReviewedScriptCheck(rawEntries, base) {
   if (!Array.isArray(rawEntries) || rawEntries.length === 0) return undefined;
   const distRoot = hookDistRoot();
   try {
@@ -511,11 +517,37 @@ async function loadReviewedScriptCheck(rawEntries) {
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'reviewed-scripts.js')).href
     );
     return typeof mod.createReviewedScriptCheck === 'function'
-      ? mod.createReviewedScriptCheck(rawEntries, process.cwd())
+      ? mod.createReviewedScriptCheck(rawEntries, base)
       : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The directory a relative invoked-script path resolves against (#634).
+ *
+ * The command starts in the directory Claude Code reports per call as payload
+ * `cwd`. Claude Code's published contract also runs hook handlers in its
+ * current directory, so on an undisturbed host the two agree; they diverge
+ * when something in between moves the hook process (a wrapper or harness
+ * that changes directory before exec'ing it). Resolving against the process
+ * cwd then folds an unrelated same-named file — or finds nothing and goes
+ * opaque — instead of the script the command will actually execute. Payload
+ * `cwd` is the per-call value, so it is the one to trust.
+ *
+ * Only an absolute string is taken. Anything else (absent, empty, relative,
+ * NUL-bearing, absurdly long) falls back to `process.cwd()`, which is what the
+ * hook used for every call before this. A relative value is refused rather
+ * than resolved, because resolving it would silently re-anchor it on the very
+ * process cwd this exists to stop trusting. No stat: a reported directory
+ * that does not exist resolves nothing and degrades to opaque, exactly as a
+ * missing script does.
+ */
+function scriptResolutionBase(rawCwd) {
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0 || rawCwd.length > 4096) return process.cwd();
+  if (rawCwd.includes('\0') || !isAbsolute(rawCwd)) return process.cwd();
+  return rawCwd;
 }
 
 /**
@@ -3142,11 +3174,14 @@ process.stdin.on('end', async () => {
       return;
     }
 
-    const resolveScriptSource = await loadScriptResolver();
+    // #634: resolve against the harness-reported per-call cwd, not this
+    // process's own — see scriptResolutionBase.
+    const scriptBase = scriptResolutionBase(hookData.cwd);
+    const resolveScriptSource = await loadScriptResolver(scriptBase);
     // #189: the allowlist check only rides along when a resolver exists —
     // without a resolver nothing folds, so there is nothing to exempt.
     const isReviewedScript = resolveScriptSource
-      ? await loadReviewedScriptCheck(cfg.reviewedScripts)
+      ? await loadReviewedScriptCheck(cfg.reviewedScripts, scriptBase)
       : undefined;
     let verdict;
     try {
@@ -3181,7 +3216,7 @@ process.stdin.on('end', async () => {
       } else {
         try {
           // Pin every row this call writes to the adapter + policy version in
-          // force: only same-version rows count as readiness evidence.
+          // force: evidence is keyed on its policy hash (#719).
           const pin = readinessMod.currentReadinessPin();
           if (pin) baseExtra.readinessPin = pin;
           const resolved = readinessMod.resolveReadiness({

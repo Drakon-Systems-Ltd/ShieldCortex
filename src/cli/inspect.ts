@@ -100,7 +100,6 @@ async function cmdLastPrecompact(args: string[]): Promise<number> {
   const historyIndex = historyArg !== undefined ? parseInt(historyArg, 10) : 0;
 
   const { readPrecompactLog, listPrecompactLogs, PRECOMPACT_RING_SIZE } =
-    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
     await import('../../scripts/lib/precompact-log.mjs');
 
   if (all) {
@@ -210,7 +209,6 @@ async function cmdLastRecall(args: string[]): Promise<number> {
   const historyIndex = historyArg !== undefined ? parseInt(historyArg, 10) : 0;
 
   const { readRecallLog, listRecallLogs, RECALL_RING_SIZE } =
-    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
     await import('../../scripts/lib/recall-log.mjs');
 
   if (all) {

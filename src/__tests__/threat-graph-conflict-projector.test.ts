@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from '@jest/globals';
 import { closeDatabase, getDatabase, initDatabase } from '../database/init.js';
 import { canonicalDump, rebuildThreatGraph, runProjectorWithLease } from '../threat-graph/projector.js';
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 function entity(name: string): number {

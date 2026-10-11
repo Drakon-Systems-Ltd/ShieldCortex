@@ -858,7 +858,7 @@ export function addMemory(
   const submittedContentHash = createContentHash(persisted.redacted ? persisted.fields.content : input.content);
   input = persisted.fields;
   const scannedSensitivity = defenceResult.sensitivity.level;
-  const stampedSensitivity = persisted.redacted && (scannedSensitivity === 'PUBLIC' || scannedSensitivity === 'INTERNAL')
+  const stampedSensitivity = persisted.redacted && (scannedSensitivity === 'PUBLIC' || scannedSensitivity === 'INTERNAL' || scannedSensitivity === 'PERSONAL')
     ? 'CONFIDENTIAL'
     : scannedSensitivity;
 
@@ -1494,7 +1494,7 @@ export function updateMemory(
         ...(updates.metadata !== undefined || changed(redaction.fields.metadata, existing.metadata) ? { metadata: redaction.fields.metadata } : {}),
       };
       // Never let the row sit below CONFIDENTIAL while it names an identifier.
-      if (!existing.sensitivityLevel || existing.sensitivityLevel === 'PUBLIC' || existing.sensitivityLevel === 'INTERNAL') {
+      if (!existing.sensitivityLevel || existing.sensitivityLevel === 'PUBLIC' || existing.sensitivityLevel === 'INTERNAL' || existing.sensitivityLevel === 'PERSONAL') {
         fields.push('sensitivity_level = ?');
         values.push('CONFIDENTIAL');
       }
@@ -1815,7 +1815,7 @@ export function mergeMemories(
     // raises the floor to CONFIDENTIAL — it must never pull a RESTRICTED row
     // down (that would open it to readers checkAccess refused before the merge).
     const sensitivityRank = (level: string | null | undefined): number =>
-      ['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
+      ['PUBLIC', 'INTERNAL', 'PERSONAL', 'CONFIDENTIAL', 'RESTRICTED', 'SECRET'].indexOf(level ?? '');
     const mergedSensitivity = [
       kept.sensitivityLevel,
       removed.sensitivityLevel,

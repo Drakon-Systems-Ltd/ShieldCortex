@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: npm run build:ts
 
+      - name: Typecheck tests
+        run: npm run typecheck:tests
+
       # The whole suite, because platform assumptions are not confined to the
       # tests that look filesystem-shaped. `hook-audit-write-smoke.test.ts` in
       # particular spawns the real hook as a real process and asserts a row
@@ -94,6 +97,9 @@ jobs:
 
       - name: Build
         run: npm run build:ts
+
+      - name: Typecheck tests
+        run: npm run typecheck:tests
 
       - name: Check dist for ESM-unsafe require()
         run: npm run test:dist
