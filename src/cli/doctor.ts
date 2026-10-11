@@ -4973,12 +4973,18 @@ async function readinessRowsForSurface(
     return [{ label, status: 'info', message: `enforce when ready: not in use on this host — ${notInUseText(summary.adapter)}` }];
   }
   const { intervention, reachability, effectiveness } = summary.report;
+  const { describeEvidenceCarry, describeNotCounted } = await import('./guard.js');
+  const notCounted = describeNotCounted(summary.report);
   const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
   const bars =
     `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
     `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
     `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
-    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
+    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}; ` +
+    // #719: evidence is keyed on the policy hash — say what carried over.
+    `evidence: ${intervention.fresh.total} call(s) fresh since this policy, ${intervention.carried.total} carried from compatible prior policy` +
+    describeEvidenceCarry(summary.report).map((n) => `; ${n}`).join('') +
+    (notCounted ? `; not counted: ${notCounted}` : '');
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
   // #509 r5: the promotion notice is the detection control for a forged
   // journal, so doctor names the newest promotion the journal records for the
