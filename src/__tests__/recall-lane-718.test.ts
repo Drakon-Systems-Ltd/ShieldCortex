@@ -266,6 +266,9 @@ describe('memories reclassify (#718)', () => {
     expect(dry.dryRun).toBe(true);
     expect(dry.scanned).toBe(4);
     expect(dry.transitions).toEqual({ 'PUBLIC→PERSONAL': 1 });
+    // #722 (non-blocking b): per-label counts so a false-positive storm is
+    // visible before --execute.
+    expect(dry.labels).toEqual({ 'personal-life-event': 1, 'personal-secret': 1 });
     expect(dry.skippedUnknown).toBe(0); // SECRET is on the ladder, above anything the classifier returns
     expect(db.prepare(`SELECT COUNT(*) n FROM memories WHERE sensitivity_level = 'PERSONAL'`).get()).toEqual({ n: 0 });
 

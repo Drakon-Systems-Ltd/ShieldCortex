@@ -36,7 +36,7 @@ export interface ReclassifyOptions {
   /** Injected for tests. */
   db?: Database;
   /** Injected for tests; defaults to the shipped classifier. */
-  classify?: (content: string, title: string) => { level: string };
+  classify?: (content: string, title: string) => { level: string; detectedPatterns?: string[] };
 }
 
 export interface ReclassifyChange {
@@ -50,6 +50,12 @@ export interface ReclassifyResult {
   changes: ReclassifyChange[];
   /** from→to counts, e.g. { "PUBLIC→PERSONAL": 3 }. */
   transitions: Record<string, number>;
+  /**
+   * Classifier labels behind the raises, counted once per raised row, e.g.
+   * { "personal-life-event": 3 }. One label dominating a large dry run is the
+   * shape of a false-positive storm — check it before --execute (#722).
+   */
+  labels: Record<string, number>;
   /** Rows skipped because their stored label is outside the ladder. */
   skippedUnknown: number;
   updated: number;
@@ -86,6 +92,7 @@ export async function reclassifyMemories(options: ReclassifyOptions = {}): Promi
 
     const changes: ReclassifyChange[] = [];
     const transitions: Record<string, number> = {};
+    const labels: Record<string, number> = {};
     let skippedUnknown = 0;
 
     for (const row of rows) {
@@ -94,14 +101,15 @@ export async function reclassifyMemories(options: ReclassifyOptions = {}): Promi
         skippedUnknown += 1;
         continue;
       }
-      const next = classify(row.content ?? '', row.title ?? '').level;
-      const nextRank = rank(next);
+      const verdict = classify(row.content ?? '', row.title ?? '');
+      const nextRank = rank(verdict.level);
       if (nextRank <= currentRank) continue;
       const from = LADDER[currentRank];
       const to = LADDER[nextRank];
       changes.push({ id: row.id, from, to });
       const key = `${from}→${to}`;
       transitions[key] = (transitions[key] ?? 0) + 1;
+      for (const label of new Set(verdict.detectedPatterns ?? [])) labels[label] = (labels[label] ?? 0) + 1;
     }
 
     let updated = 0;
@@ -113,7 +121,7 @@ export async function reclassifyMemories(options: ReclassifyOptions = {}): Promi
       apply(changes);
     }
 
-    return { scanned: rows.length, changes, transitions, skippedUnknown, updated, dryRun };
+    return { scanned: rows.length, changes, transitions, labels, skippedUnknown, updated, dryRun };
   } finally {
     if (openedOwn && db) {
       if (dryRun) {
@@ -153,6 +161,11 @@ export async function runReclassify(args: string[]): Promise<void> {
   console.log(`  Scanned: ${result.scanned}`);
   console.log(`  Would raise: ${result.changes.length}${result.skippedUnknown ? ` (skipped ${result.skippedUnknown} with an unknown label)` : ''}`);
   for (const [k, n] of Object.entries(result.transitions)) console.log(`    ${k}: ${n}`);
+  const labels = Object.entries(result.labels).sort((a, b) => b[1] - a[1]);
+  if (labels.length > 0) {
+    console.log('  Matched labels (rows per label — one label dominating usually means false positives):');
+    for (const [label, n] of labels) console.log(`    ${label}: ${n}`);
+  }
   if (result.changes.length > 0) {
     const ids = result.changes.slice(0, 50).map((c) => `#${c.id}`).join(' ');
     console.log(`  Ids: ${ids}${result.changes.length > 50 ? ' …' : ''}`);
