@@ -23,6 +23,8 @@
  *     level — from the linked `defence_audit` row when there is one, and
  *     conservatively from the sanitised text / redaction evidence when there
  *     is not — so a row the live path would have excluded is never shipped.
+ *     That includes the exact live pair (sanitised content, ORIGINAL title),
+ *     which can classify higher than either all-raw or all-sanitised text.
  */
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import type Database from 'better-sqlite3';
@@ -116,6 +118,13 @@ const FULLWIDTH_CONFIDENTIAL = 'Customer record: contact jane.doe＠example.com'
 // A write-time redaction token where the SSN used to be: the stored text is
 // PUBLIC to the classifier, but an identifier WAS present at persistence.
 const PLACEHOLDER_CONTENT = 'Customer record: SSN [REDACTED:ssn] on file';
+// Cross-field live pair (sc716 review B2): the pipeline classifies
+// (sanitised content, ORIGINAL title). The title's zero-width space gives
+// `sort` its word boundary; NFKC turns the fullwidth content digits ASCII.
+// Raw/raw misses (fullwidth digits) and sanitised/sanitised misses
+// (`xsort` has no boundary), so only the exact live pair is CONFIDENTIAL.
+const CROSS_FIELD_TITLE = 'x\u200Bsort code';
+const CROSS_FIELD_CONTENT = '\uFF11\uFF12-\uFF13\uFF14-\uFF15\uFF16';
 
 type Db = Database.Database;
 
@@ -427,5 +436,77 @@ describe('POST /api/quarantine/sync-to-cloud applies the quarantine sync gate', 
     const everythingSent = bodies.join('\n');
     expect(everythingSent).not.toContain('sort code');
     expect(everythingSent).not.toContain('[REDACTED:ssn]');
+  });
+
+  // ── exact live pair: sanitised content + ORIGINAL title ──
+
+  it('premise: the cross-field row is CONFIDENTIAL only as the live pipeline pairs it (sanitised content, original title)', async () => {
+    const { classifySensitivity } = await import('../../defence/sensitivity/index.js');
+    const { sanitiseInput } = await import('../../defence/input-sanitisation/index.js');
+    const { detectPII } = await import('../../defence/sensitivity/pii.js');
+    const sanitisedContent = sanitiseInput(CROSS_FIELD_CONTENT).sanitised;
+    const sanitisedTitle = sanitiseInput(CROSS_FIELD_TITLE).sanitised;
+    expect(sanitisedContent).toBe('12-34-56');
+    expect(sanitisedTitle).toBe('xsort code');
+
+    // pipeline.ts: classifySensitivity(sanitiseInput(content).sanitised, title)
+    const live = classifySensitivity(sanitisedContent, CROSS_FIELD_TITLE);
+    expect(live.level).toBe('CONFIDENTIAL');
+    expect(live.detectedPatterns).toContain('sort-code');
+    // The two views the reconstruction already had both miss it.
+    expect(classifySensitivity(CROSS_FIELD_CONTENT, CROSS_FIELD_TITLE).level).toBe('PUBLIC');
+    expect(classifySensitivity(sanitisedContent, sanitisedTitle).level).toBe('PUBLIC');
+    // No write-time PII redaction touches it, so no token floor applies either.
+    expect(detectPII(`${CROSS_FIELD_TITLE}\n${CROSS_FIELD_CONTENT}`)).toEqual([]);
+  });
+
+  it('without provenance: the cross-field live-pair CONFIDENTIAL row is skipped (no egress)', async () => {
+    const { getDatabase } = await import('../../database/init.js');
+    insertQuarantineRow(getDatabase(), { content: CROSS_FIELD_CONTENT, title: CROSS_FIELD_TITLE });
+
+    const { bodies, calls } = captureFetch();
+    const res = await runBulkSync();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({ synced: 0, skipped: 1, total: 1 }));
+    expect(calls()).toBe(0);
+    expect(bodies).toHaveLength(0);
+  });
+
+  it('after its linked CONFIDENTIAL audit row is deleted: the cross-field row is still skipped (no egress)', async () => {
+    const { getDatabase } = await import('../../database/init.js');
+    const db = getDatabase();
+    const auditId = insertAuditRow(db, 'CONFIDENTIAL');
+    insertQuarantineRow(db, { content: CROSS_FIELD_CONTENT, title: CROSS_FIELD_TITLE, auditId });
+
+    // Audit retention deletes defence_audit rows; with foreign keys on, the
+    // schema's ON DELETE SET NULL clears the quarantine link — provenance gone.
+    expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+    expect(db.prepare('DELETE FROM defence_audit WHERE id = ?').run(auditId).changes).toBe(1);
+    const link = db.prepare('SELECT audit_id FROM quarantine').get() as { audit_id: unknown };
+    expect(link.audit_id).toBeNull();
+
+    const { bodies, calls } = captureFetch();
+    const res = await runBulkSync();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({ synced: 0, skipped: 1, total: 1 }));
+    expect(calls()).toBe(0);
+    expect(bodies).toHaveLength(0);
+  });
+
+  it('live-pair PUBLIC control: a zero-width title over genuinely PUBLIC content is still sent', async () => {
+    const { getDatabase } = await import('../../database/init.js');
+    insertQuarantineRow(getDatabase(), { content: PUBLIC_CONTENT, title: 'x\u200Brelease' });
+
+    const { bodies, calls } = captureFetch();
+    const res = await runBulkSync();
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({ synced: 1, skipped: 0, total: 1 }));
+    expect(calls()).toBe(1);
+    const sent = JSON.parse(bodies[0]) as Record<string, unknown>;
+    expect(sent.original_content).toBe(PUBLIC_CONTENT);
+    expect(sent.sensitivity_level).toBe('PUBLIC');
   });
 });

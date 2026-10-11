@@ -137,26 +137,36 @@ function readAuditSensitivity(auditId: unknown): string | null {
  * stored text is NOT what the pipeline classified:
  *
  *   - the pipeline classifies the SANITISED content (NFKC, zero-width / bidi
- *     controls stripped — `sanitiseInput`), so a zero-width-split sort code or
- *     a fullwidth `＠` that classifies PUBLIC raw is CONFIDENTIAL live;
+ *     controls stripped — `sanitiseInput`) beside the ORIGINAL title, so a
+ *     zero-width-split sort code or a fullwidth `＠` that classifies PUBLIC
+ *     raw is CONFIDENTIAL live;
  *   - persistence (#510) replaces identifiers with `[REDACTED:<kind>]`
  *     tokens, so the stored text can classify lower than the identifier did.
  *
- * The result is the HIGHEST of: the live level recorded on the linked
- * `defence_audit` row (trusted provenance, when the row has one), the
- * classification of the stored text as-is, the classification of the
- * sanitised text, and a CONFIDENTIAL floor when the stored text carries a
+ * Regex classification is not monotonic under normalisation: stripping a
+ * zero-width character from the title can remove a word boundary a pattern
+ * spanning title and content needed. So the text is classified in three
+ * views — raw content + raw title, sanitised content + ORIGINAL title (the
+ * exact pair the live pipeline classifies), and sanitised content +
+ * sanitised title — and the result is the HIGHEST of those, the live level
+ * recorded on the linked `defence_audit` row (trusted provenance, when the
+ * row has one), and a CONFIDENTIAL floor when the stored text carries a
  * write-time redaction token (an identifier was present at persistence, and
- * identifier-grade PII is at least CONFIDENTIAL). Legacy rows without an
- * audit link get everything except provenance. Nothing here can lower the
- * level the original classification produced.
+ * identifier-grade PII is at least CONFIDENTIAL). Rows without an audit link
+ * (manual / cluster quarantine, or a link cleared when its audit row was
+ * deleted) get everything except provenance. For a row whose stored text is
+ * what the pipeline saw, the live-pair view alone reproduces the live
+ * classification, so the maximum is never lower than it; where persistence
+ * rewrote the text, the token floor and provenance are the evidence.
  */
 export function reconstructQuarantineSensitivity(row: Record<string, unknown>): SensitivityLevel {
   const content = typeof row.original_content === 'string' ? row.original_content : '';
   const title = typeof row.original_title === 'string' ? row.original_title : '';
 
   let rank = LEVEL_RANK[classifySensitivity(content, title).level];
-  rank = Math.max(rank, LEVEL_RANK[classifySensitivity(sanitiseInput(content).sanitised, sanitiseInput(title).sanitised).level]);
+  const sanitisedContent = sanitiseInput(content).sanitised;
+  rank = Math.max(rank, LEVEL_RANK[classifySensitivity(sanitisedContent, title).level]);
+  rank = Math.max(rank, LEVEL_RANK[classifySensitivity(sanitisedContent, sanitiseInput(title).sanitised).level]);
   if (hasRedactionToken(content) || hasRedactionToken(title)) rank = Math.max(rank, LEVEL_RANK.CONFIDENTIAL);
   const provenance = rankLevel(readAuditSensitivity(row.audit_id));
   if (provenance !== null) rank = Math.max(rank, provenance);
@@ -169,7 +179,8 @@ export function reconstructQuarantineSensitivity(row: Record<string, unknown>): 
  *
  * The sensitivity level comes from `reconstructQuarantineSensitivity`: the
  * live level when the row carries its audit link, and never lower than what
- * the stored text (raw or sanitised) or its redaction evidence implies. The
+ * the stored text (raw, as the live pipeline paired it, or fully sanitised)
+ * or its redaction evidence implies. The
  * entry carries the stored text as-is; `prepareQuarantineSyncPayload` applies
  * the PII + credential redaction before anything leaves the device.
  */
