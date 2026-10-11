@@ -94,6 +94,39 @@ describe('OpenClaw native refusals (#706)', () => {
     expect(process.exitCode).toBe(1);
   });
 
+  // Review of 2d250a45 (B1): the local fallback creates openclaw.json, so the
+  // summary must not repeat the historical refusal as "still missing".
+  it('does not call a config the fallback created "still missing"', async () => {
+    const localSource = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-706-local-'));
+    try {
+      fs.writeFileSync(path.join(localSource, 'index.js'), 'export default {};\n');
+      fs.writeFileSync(path.join(localSource, 'interceptor.js'), 'export {};\n');
+      fs.writeFileSync(path.join(localSource, 'intercept-ingest.js'), 'export {};\n');
+      fs.writeFileSync(path.join(localSource, 'openclaw.plugin.json'), JSON.stringify({ id: 'shieldcortex-realtime' }));
+      process.env.SHIELDCORTEX_PLUGIN_SOURCE = localSource;
+      fs.unlinkSync(openClawConfigPath());
+      const logs: string[] = [];
+      jest.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { logs.push(args.map(String).join(' ')); });
+      __setNativeSpawnForTest((_command, args) => ({
+        status: 1,
+        stderr: args.includes('--link') ? 'Plugin path not found: /plugin\n' : 'Error: config not found: ~/.openclaw/openclaw.json\n',
+      }));
+      await installOpenClawHook({ noHooks: true, restartGateway: false });
+      expect(getNativePluginInstallRefusals()).toHaveLength(2);
+      expect(getLastNativePluginInstallRefusal()?.configMissing).toBe(true);
+      expect(fs.existsSync(openClawConfigPath())).toBe(true);
+      const config = JSON.parse(fs.readFileSync(openClawConfigPath(), 'utf-8'));
+      expect(config.plugins.allow).toContain('shieldcortex-realtime');
+      const output = [...logs, ...warnings].join('\n');
+      expect(output).not.toMatch(/still missing/);
+      expect(output).toMatch(/OpenClaw config was missing when the native install ran/);
+      expect(output).toContain(`the local fallback created ${openClawConfigPath()}`);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      fs.rmSync(localSource, { recursive: true, force: true });
+    }
+  });
+
   it('skips the linked attempt when its source is absent', async () => {
     process.env.SHIELDCORTEX_PLUGIN_PACKAGE_SOURCE = path.join(home, 'absent-package');
     const calls: string[][] = [];
