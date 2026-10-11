@@ -70,7 +70,12 @@
  *    in the shield config), and only once the policy in force has its own
  *    fresh window ({@link FRESH_POLICY_MIN_CALLS} calls over
  *    {@link FRESH_POLICY_MIN_SPAN_MS}, at the same rate threshold);
- *  - a row from another adapter, or with no usable pin, never counts.
+ *  - a row from another adapter, or with no usable pin, never counts — and a
+ *    pin is usable only if its version is SemVer and its policy is a 16-hex
+ *    digest (#721).
+ * The package version is recorded but protects nothing here: a verdict change
+ * outside the rule module keeps the retained history, and shows only in the
+ * live rates.
  * Each input has a minimum sample and a freshness window. Evidence that is
  * missing, empty, unreadable or unparseable never qualifies — it is "not
  * ready", never a pass. A pin that cannot be determined is not ready too.
