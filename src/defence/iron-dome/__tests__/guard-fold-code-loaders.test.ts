@@ -22,7 +22,8 @@ import { evaluateToolCall, detectScriptInvocations } from '../tool-action-guard.
  * 5.6.0: a whole-command interpreter heredoc is scanned and folded exactly as
  * in 5.5.0. It may return only as an allow-list design (mask a body made
  * solely of recognised data-read idioms); these rows are its required
- * negative tests. Fixtures are BENIGN: discovery (the resolver being asked
+ * negative tests. #713 brought that allow-list in (heredoc-data-read.ts); the
+ * controls below that pinned the withdrawal now pin the mask. Fixtures are BENIGN: discovery (the resolver being asked
  * for the path) is the evidence, not a block on a destructive payload.
  *
  * Each loaded path sits where invocation discovery reads a clean token (after
@@ -123,24 +124,25 @@ describe('#661 follow-up — controls', () => {
     expect(asked(cmd)).toContain('/tmp/fx/z.py');
   });
 
-  it('a data-read-only body is scanned as in 5.5.0: the heredoc relief is withdrawn pending an allow-list design', () => {
+  it('a data-read-only body is masked by the #713 allow-list: the data file is not offered', () => {
     for (const cmd of [
       heredoc('python3 -', "import re, json\ntext = open('/tmp/x/table.md').read()\nrows = json.loads(text) if text.startswith('[') else []\nprint(len(re.findall('x', text)), len(rows))"),
       heredoc('ruby -', "puts File.read('/tmp/x/table.md').length"),
     ]) {
-      expect([cmd, detectScriptInvocations(cmd).map(s => s.path)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.md'])]);
-      expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.md'])]);
+      expect([cmd, detectScriptInvocations(cmd).map(s => s.path)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
+      expect([cmd, asked(cmd)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
     }
   });
 
-  it('a Node data-read body that loads fs by bare name is scanned in full', () => {
+  it('a Node data-read body that loads fs by bare name is masked (#713); an ESM import is not in the allow set and is scanned in full', () => {
     for (const cmd of [
       heredoc('node -', "const t = require('fs').readFileSync(\n'/tmp/x/table.md')\nconsole.log(t.length)"),
       heredoc('node -', "const fs = require('node:fs')\nconsole.log(fs.readFileSync(\n'/tmp/x/table.md').length)"),
-      heredoc('node --input-type=module -', "import fs from 'node:fs'\nconsole.log(fs.readFileSync(\n'/tmp/x/table.md').length)"),
     ]) {
-      expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.md'])]);
+      expect([cmd, asked(cmd)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
     }
+    const esm = heredoc('node --input-type=module -', "import fs from 'node:fs'\nconsole.log(fs.readFileSync(\n'/tmp/x/table.md').length)");
+    expect([esm, asked(esm)]).toEqual([esm, expect.arrayContaining(['/tmp/x/table.md'])]);
   });
 
   it('a Node require of a path or a variable is scanned in full', () => {
@@ -194,9 +196,9 @@ describe('#661 follow-up — PR #712 round-1 review reproductions keep the loade
     expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining([path])]);
   });
 
-  it('a Python json.load data read is scanned as in 5.5.0: the heredoc relief is withdrawn pending an allow-list design', () => {
+  it('a Python json.load data read is masked by the #713 allow-list: the data file is not offered', () => {
     const cmd = heredoc('python3 -', "import json\nrows = json.load(open('/tmp/x/table.json'))\nprint(len(rows))");
-    expect([cmd, asked(cmd)]).toEqual([cmd, expect.arrayContaining(['/tmp/x/table.json'])]);
+    expect([cmd, asked(cmd)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.json'])]);
   });
 });
 
