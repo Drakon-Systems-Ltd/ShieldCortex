@@ -7709,9 +7709,10 @@ async function checkHookTimeouts(): Promise<CheckResult> {
  * builders write; a scheduler outside OpenClaw (systemd timer, crontab, CI)
  * writes none, so its turns look interactive and get the owner's full recall.
  * SHIELDCORTEX_RECALL_LANE pins the lane for such a job. An unrecognised
- * value fails safe in the hook — the turn is treated as `automation`, so
- * recall stops (#722 review R4) — which is worth a WARN: the operator meant
- * some lane, and it is not the one they get.
+ * value fails safe in the hook — the turn is treated as `automation` (#722
+ * review R4): no recall by default, PUBLIC rows only where
+ * `recallLanes.automation.recall` is true (#729) — which is worth a WARN: the
+ * operator meant some lane, and it is not the one they get.
  */
 const RECALL_LANES = ['interactive', 'cron', 'automation', 'subagent'] as const;
 
@@ -7726,7 +7727,7 @@ export function checkRecallLanePin(env: NodeJS.ProcessEnv = process.env): CheckR
     return {
       label,
       status: 'warn',
-      message: `SHIELDCORTEX_RECALL_LANE="${String(raw).trim()}" is not a lane — prompt recall treats every turn in this environment as automation (no recall) until it is fixed`,
+      message: `SHIELDCORTEX_RECALL_LANE="${String(raw).trim()}" is not a lane — prompt recall treats every turn in this environment as automation until it is fixed (no recall by default; PUBLIC rows only if recallLanes.automation.recall is true)`,
       fix: `Set SHIELDCORTEX_RECALL_LANE to one of: ${RECALL_LANES.join(', ')}`,
     };
   }

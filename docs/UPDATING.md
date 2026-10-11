@@ -137,6 +137,8 @@ Change the categories, or opt `automation` in, with `recallLanes` in `~/.shieldc
 
 **PERSONAL** is a sensitivity tier between `INTERNAL` and `CONFIDENTIAL` for private-life notes (a family trip, a surprise party, "don't let her know"). New writes are classified automatically. The owner's own interactive recall still sees PERSONAL rows; automated lanes never do. A PERSONAL row that also names an identifier (an email, a tax reference, a salary) is raised to `CONFIDENTIAL` like any other row.
 
+**What lanes do not cover.** Lanes apply only to prompt-time recall in the `UserPromptSubmit` hook, and only to turns that hook detects from a marker or reads from a valid pin; an unmarked, unpinned turn from another scheduler is `interactive`. The stored label is what keeps a private note out: a note the classifier missed and labelled `PUBLIC` can still reach a non-interactive lane. SessionStart context, MCP tool reads (`recall`, `get_context` and the rest) and dashboard previews are not lane-scoped.
+
 #### Pinning a lane: `SHIELDCORTEX_RECALL_LANE`
 
 A job started by something other than OpenClaw (a systemd timer, crontab, CI) writes no marker, so its turns look interactive and get the owner's full recall. Set the pin in that job's environment:
