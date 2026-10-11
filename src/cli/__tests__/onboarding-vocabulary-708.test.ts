@@ -119,6 +119,7 @@ describe('#708 — help text describes install and quickstart accurately', () =>
     it('the help block was found', () => {
       expect(start).toBeGreaterThan(0);
       expect(end).toBeGreaterThan(start);
+      expect(help.indexOf('${bold}EXAMPLES${reset}')).toBeGreaterThan(0);
       expect(examples.length).toBeGreaterThan(0);
     });
 
@@ -130,8 +131,20 @@ describe('#708 — help text describes install and quickstart accurately', () =>
     });
 
     it('setup is not listed as taking --without-* (setup rejects them; install takes them)', () => {
-      const setupEntry = help.slice(help.indexOf('${cyan}setup${reset}'), help.indexOf('${cyan}install${reset}'));
-      expect(setupEntry).not.toMatch(/--without-/);
+      const setupStart = help.indexOf('${cyan}setup${reset}');
+      const setupEnd = help.indexOf('${cyan}install${reset}');
+      expect(setupStart).toBeGreaterThan(-1);
+      expect(setupEnd).toBeGreaterThan(setupStart);
+      const setupEntry = help.slice(setupStart, setupEnd);
+      // setup's own flags are the opt-ins.
+      expect(setupEntry).toMatch(/Flags: --with-stop-hook\b/);
+      expect(setupEntry).toMatch(/^\s+--with-session-end\b/m);
+      // The entry may point at install for the opt-outs, and should...
+      expect(setupEntry).toMatch(/opt out with install --without-\*/);
+      // ...but no --without-* may appear as one of setup's own flags: every
+      // mention is the install instruction, and no line lists one as a flag.
+      expect(setupEntry.replace(/install --without-\*/g, '')).not.toMatch(/--without-/);
+      expect(setupEntry).not.toMatch(/^\s+(Flags:\s+)?--without-/m);
     });
 
     it('the examples onboard with setup, not install or quickstart', () => {
