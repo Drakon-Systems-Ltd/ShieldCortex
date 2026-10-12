@@ -606,6 +606,23 @@ describe('#713 r2 B1 — a comment ended by anything but LF is unrecognised', ()
   });
 });
 
+/** The LF after the hidden loader must be internal to the heredoc body. */
+const INTERNAL_LF_COMMENT_LOADERS: Record<string, [string, string, string]> = {
+  'python # with a shared path': ['python3 -', "import json\nt = open('/tmp/sc713/shared.txt').read()\n# x\rexec(open('/tmp/sc713/shared.txt').read())\nprint(len(t))", '/tmp/sc713/shared.txt'],
+  'node // with a shared path': ['node -', "const t = require('fs').readFileSync('/tmp/sc713/shared.js')\n// x\rrequire('/tmp/sc713/shared.js')\nconsole.log(t.length)", '/tmp/sc713/shared.js'],
+  'node // containing # with a shared path': ['node -', "const t = require('fs').readFileSync('/tmp/sc713/shared.js')\n// a # b\rrequire('/tmp/sc713/shared.js')\nconsole.log(t.length)", '/tmp/sc713/shared.js'],
+  'php # with a shared path': ['php', "<?php\n$t = file_get_contents('/tmp/sc713/shared.php');\n# x\rinclude('/tmp/sc713/shared.php');\necho strlen($t);", '/tmp/sc713/shared.php'],
+};
+
+describe('#713 final B1 — preprocessing cannot manufacture a safe comment boundary', () => {
+  it.each(Object.entries(INTERNAL_LF_COMMENT_LOADERS))('%s: discovery matches the unmasked baseline', (_name, [interp, body, path]) => {
+    const cmd = heredoc(interp, body);
+    const baseline = unmasked(cmd);
+    expect(baseline).toContain(path);
+    expect(asked(cmd)).toEqual(baseline);
+  });
+});
+
 /**
  * Review round 2 — B2. The whole-command gate admits any flag, and a flag can
  * load code before the body runs. The relief takes only a closed set of inert

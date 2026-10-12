@@ -4159,12 +4159,15 @@ function isPurePrint(cmd: string): boolean {
 
 /**
  * Strip `#` comments so a token mentioned only in a comment is not an action.
- * A lone CR, U+2028 or U+2029 inside the comment is kept (#713): the shell
- * ignores it, but Python, PHP and Node end a comment there. The heredoc
- * data-read relief must still see it, so code after it cannot pass as comment.
+ * Keep the whole comment when it contains CR, U+2028 or U+2029 (#713).
+ * A lone CR can end Python, PHP or Node comments; U+2028 and U+2029 can end
+ * Node comments. Stripping everything but the terminator could manufacture a
+ * CRLF from a lone CR and make an interpreter heredoc look like an all-data-read
+ * body. Ordinary comments are stripped as before.
  */
 function stripComments(cmd: string): string {
-  return cmd.replace(/(^|\s)#[^\n]*/g, (m, pre: string) => `${pre} ${m.slice(pre.length).replace(/[^\r\u2028\u2029]+/g, '')}`);
+  return cmd.replace(/(^|\s)#[^\n]*/g, (m, pre: string) =>
+    /[\r\u2028\u2029]/.test(m.slice(pre.length)) ? m : `${pre} `);
 }
 
 // Interpreters that EXECUTE a heredoc body they read. If one of these introduces
@@ -5653,6 +5656,10 @@ function inlineProgramRegions(text: string): ScanRegion[] {
  * still found, because there the path really is in command position.
  */
 function maskSinkFreeInlinePrograms(text: string): string {
+  // A `-c`-looking span inside an interpreter heredoc is body text, not a
+  // shell inline program. Blanking it could erase body line terminators before
+  // the data-read classifier sees them, so preserve this whole-command shape.
+  if (wholeCommandHeredocProgram(text)) return text;
   const regions = inlineProgramRegions(text).filter(r => !r.hasSink);
   if (regions.length === 0) return text;
   let out = text;
