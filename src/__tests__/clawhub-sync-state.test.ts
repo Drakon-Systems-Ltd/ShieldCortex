@@ -167,6 +167,26 @@ describe('a submission pending security scans is not an absent upload', () => {
     expect(reportsPendingSubmission(observed.replace('shieldcortex@', 'other-skill@'), '5.7.0')).toBe(false);
   });
 
+  it('compares the whole reported version token, case included', () => {
+    const line = (v: string) => `Update submitted for shieldcortex@${v}; pending security scans before it becomes public.`;
+    // A longer token is a different version, whatever it starts with.
+    expect(reportsPendingSubmission(line('5.7.01'), '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1'), '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0+build.1'), '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1+build.1'), '5.7.0-rc.1')).toBe(false);
+    // Prerelease identifiers are case-sensitive, like the index comparisons.
+    expect(reportsPendingSubmission(line('5.7.0-RC.1'), '5.7.0-rc.1')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1'), '5.7.0-RC.1')).toBe(false);
+    // An exactly matching prerelease or build-metadata version still counts.
+    expect(reportsPendingSubmission(line('5.7.0-rc.1'), '5.7.0-rc.1')).toBe(true);
+    expect(reportsPendingSubmission(line('5.7.0+build.1'), '5.7.0+build.1')).toBe(true);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1+build.1'), '5.7.0-rc.1+build.1')).toBe(true);
+    // A sentence-ending dot is not part of the version.
+    expect(
+      reportsPendingSubmission('Pending security scans: update submitted for shieldcortex@5.7.0.', '5.7.0'),
+    ).toBe(true);
+  });
+
   it('needs both the submission and the pending-scan wording on one line', () => {
     expect(reportsPendingSubmission('Update submitted for shieldcortex@5.7.0.', '5.7.0')).toBe(false);
     expect(reportsPendingSubmission('Update submitted for shieldcortex@5.7.0\npending security scans', '5.7.0')).toBe(false);

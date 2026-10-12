@@ -54,15 +54,22 @@ export function readVersionList(inspectJson) {
  *   Update submitted for shieldcortex@5.7.0; pending security scans before it becomes public.
  *
  * Both halves must appear on one line and name exactly this version, so other
- * CLI output cannot pass for a submission.
+ * CLI output cannot pass for a submission. The prose is matched
+ * case-insensitively, but the version is the whole reported token (every
+ * character semver allows, including prerelease and `+` build metadata, minus
+ * a sentence-ending dot) and must equal `target` exactly, case included —
+ * the same identity the index comparisons in diagnose() use.
  */
 export function reportsPendingSubmission(publishOutput, target) {
   if (typeof publishOutput !== 'string' || !target) return false;
-  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const submittedRe = new RegExp(`\\bsubmitted for shieldcortex@${escaped}(?![0-9A-Za-z-]|\\.[0-9A-Za-z])`, 'i');
+  const submittedRe = /\bsubmitted for shieldcortex@([0-9A-Za-z.+-]+)/gi;
   return publishOutput
     .split(/\r?\n/)
-    .some((line) => submittedRe.test(line) && /pending security scans/i.test(line));
+    .some(
+      (line) =>
+        /pending security scans/i.test(line) &&
+        [...line.matchAll(submittedRe)].some((m) => m[1].replace(/\.+$/, '') === target),
+    );
 }
 
 /**
