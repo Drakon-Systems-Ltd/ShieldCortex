@@ -84,7 +84,7 @@ The optional enforce-when-ready posture runs the dangerous tier in shadow until 
 
 Approval cards (5.6+) say what a held action does, why it was held and who asked, in plain English, without the raw command. Database, cluster and cloud teardown commands now ask for approval (5.6+). [What's new in 5.6](docs/UPDATING.md#whats-new-in-56).
 
-`shieldcortex/toolsets` (5.8+) sits in front of a Claude SDK browser-use or computer-use driver and records what each click, keystroke, navigation and page read would trigger, without changing what runs. Enforcement is a later phase. [Quickstart](docs/quickstarts/claude-sdk-toolsets.md).
+`shieldcortex/toolsets` (5.8+) sits in front of a Claude SDK browser-use or computer-use driver and by default records what each click, keystroke, navigation and page read would trigger without changing what runs; `mode: 'enforce'` refuses the riskiest calls and holds the rest for approval. [Quickstart](docs/quickstarts/claude-sdk-toolsets.md).
 
 ## Free and Cloud
 
