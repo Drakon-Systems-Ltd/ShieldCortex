@@ -232,13 +232,14 @@ typed text, never a URL query string, never page content.
 
 The two P1 known limits are closed: the input hash now covers own `constructor`,
 `prototype` and `__proto__` fields (N1), and a `type` with a newline in a tainted session
-is `require_approval` whatever the previous member was (N2). Any Enter after text was typed since the last confirmed submit or URL navigation is held, regardless of members in between.
+is `require_approval` whatever the previous member was (N2). Any Enter after text was typed since the last confirmed submit is held, regardless of members in between. Navigation does not reset this gate, and text after an approved typed newline stays pending.
 
 - An approval is bound to the host of the tab URL in the SDK's **last state report**, not
   the live browser; Anthropic notes the page can change after that report.
 - Before the first page or screen read, a `type` with a newline in the browser toolset is
   still `allow` (the session is not tainted yet).
-- A `key Return` with no text typed since the last confirmed submit or URL navigation keeps its ordinary verdict.
+- A `key Return` with no text typed since the last confirmed submit keeps its ordinary verdict.
+- Text entered through `key` members (single keys or paste shortcuts) does not mark text as pending, so a later Enter keeps its ordinary verdict.
 
 ## Not covered
 

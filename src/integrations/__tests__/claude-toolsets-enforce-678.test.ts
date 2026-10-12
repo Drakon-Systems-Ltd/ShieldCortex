@@ -401,7 +401,7 @@ describe('review regressions (#678 P2)', () => {
     },
   );
 
-  it('clears pending text after an approved submit or URL navigation', async () => {
+  it('clears pending text after an approved submit', async () => {
     const { guard } = makeGuard();
     await readPage(guard);
     const plain = () => guard.classify(ctx('key', { text: 'Return' }));
@@ -411,12 +411,82 @@ describe('review regressions (#678 P2)', () => {
     expect(plain().reason).toBe('submit-after-typing');
     expect(await guard.confirm(async () => true)(ctx('key', { text: 'Return' }))).toBe(true);
     expect(plain().reason).toBe('submit-key');
-    expect(await guard.confirm()(ctx('type_', { text: 'again' }))).toBe(true);
-    expect(await guard.confirm()(ctx('navigate', { url: 'https://checkout.example.com/next' }))).toBe(true);
-    expect(plain().reason).toBe('submit-key');
-    expect(await guard.confirm()(ctx('type', { text: 'again' }))).toBe(true);
-    expect(await guard.confirm()(ctx('new_tab', { url: 'https://checkout.example.com/new' }))).toBe(true);
-    expect(plain().reason).toBe('submit-key');
+  });
+
+  it.each([
+    ['listed new tab and tab switch', [
+      ctx('new_tab', { url: 'https://checkout.example.com/' }, { tabId: 't2' }),
+      ctx('switch_tab', { tabId: 't1' }, { tabId: 't1' }),
+    ], true],
+    ['listed fragment navigation', [
+      ctx('navigate', { url: 'https://checkout.example.com/cart#top' }),
+    ], true],
+    ['navigation on another tab', [
+      ctx('navigate', { url: 'https://checkout.example.com/next' }, { tabId: 't2' }),
+    ], true],
+    ['new tab without an allowlist', [
+      ctx('new_tab', { url: 'https://checkout.example.com/' }, { tabId: 't2' }),
+    ], false],
+  ] as Array<[string, ToolsetConfirmContext[], boolean]>)('keeps typed text pending across %s', async (_name, middle, listed) => {
+    const { guard } = makeGuard(listed ? {} : { urlAllowlist: undefined });
+    await readPage(guard);
+    let asked = 0;
+    const confirm = guard.confirm(async () => { asked++; return true; });
+    const step = async (call: ToolsetConfirmContext) => {
+      expect(guard.classify(call).decision).toBe('allow');
+      expect(await confirm(call)).toBe(true);
+    };
+    await step(ctx('type', { text: 'hello' }));
+    for (const call of middle) await step(call);
+    const enter = ctx('key', { text: 'Return' }, { tabId: 't1' });
+    expect(guard.classify(enter)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+    expect(await confirm(enter)).toBe(true);
+    expect(asked).toBe(1);
+  });
+
+  it.each(['type', 'type_'])('keeps text after an approved %s newline pending', async (member) => {
+    const { guard } = makeGuard();
+    await readPage(guard);
+    const cards: ToolsetApprovalCard[] = [];
+    const confirm = guard.confirm(async (_call, card) => { cards.push(card); return true; });
+    const typed = ctx(member, { text: 'first\nsecond part' });
+    expect(guard.classify(typed)).toMatchObject({ decision: 'require_approval', reason: 'submit-newline' });
+    expect(guard.classify(typed).card).toMatch(/^Type text that includes Enter on checkout\.example\.com\?/);
+    expect(await confirm(typed)).toBe(true);
+    const enter = ctx('key', { text: 'Return' });
+    expect(guard.classify(enter)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+    expect(await confirm(enter)).toBe(true);
+    expect(cards).toHaveLength(2);
+    expect(cards[0].card).toMatch(/^Type text that includes Enter on checkout\.example\.com\?/);
+    expect(cards[0].card.length).toBeLessThanOrEqual(200);
+    expect(cards[0].card).not.toMatch(/[^\x20-\x7e]/);
+  });
+
+  it('clears pending text when an approved typed newline ends the text', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard);
+    const cards: ToolsetApprovalCard[] = [];
+    const confirm = guard.confirm(async (_call, card) => { cards.push(card); return true; });
+    const typed = ctx('type', { text: 'first\n' });
+    expect(guard.classify(typed).card).toMatch(/^Type text that ends with Enter on checkout\.example\.com\?/);
+    expect(await confirm(typed)).toBe(true);
+    expect(cards).toHaveLength(1);
+    expect(cards[0].card).toMatch(/^Type text that ends with Enter on checkout\.example\.com\?/);
+    expect(cards[0].card.length).toBeLessThanOrEqual(200);
+    expect(cards[0].card).not.toMatch(/[^\x20-\x7e]/);
+    const enter = ctx('key', { text: 'Return' });
+    expect(guard.classify(enter)).toMatchObject({ decision: 'allow', reason: 'submit-key' });
+    expect(await confirm(enter)).toBe(true);
+    expect(cards).toHaveLength(1);
+  });
+
+  it('keeps a refused typed newline pending', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard);
+    expect(await guard.confirm(async () => false)(ctx('type', { text: 'first\n' }))).toBe(false);
+    expect(guard.classify(ctx('key', { text: 'Return' }))).toMatchObject({
+      decision: 'require_approval', reason: 'submit-after-typing',
+    });
   });
 
   it.each([`${AWS_SHAPED_KEY.toLowerCase()}:payload`, `${'a'.repeat(5000)}:payload`])(

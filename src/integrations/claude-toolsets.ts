@@ -753,7 +753,7 @@ export class ToolsetGuard {
   private readonly refs = new Map<string, RefCatalogue>();
   /** The active tab in the last `browserState` report, when wrapped. */
   private activeTab: string | undefined;
-  /** Confirmed non-empty text since the last confirmed submit or URL navigation. */
+  /** Pending non-empty text since the last confirmed submit. */
   private textSinceSubmit = false;
   /** What `confirm` saw per call, so `execute` can detect a mutated input and knows the tab. */
   private readonly confirmed = new Map<string, ConfirmedCall>();
@@ -863,7 +863,9 @@ export class ToolsetGuard {
         const effects: ToolsetEffectKind[] = irreversible ? ['submit', 'irreversible-ui-action'] : ['submit'];
         const decision: ToolsetDecision = irreversible || this.toolset === 'computer' ? 'require_approval' : 'allow';
         const signals = typedNewline ? ['submit-key', 'typed-newline'] : ['submit-key'];
-        const title = typedNewline ? `Type text that ends with Enter${where}?` : `Press Enter${where}?`;
+        const title = typedNewline
+          ? `Type text that ${/[^\r\n]$/.test(text) ? 'includes' : 'ends with'} Enter${where}?`
+          : `Press Enter${where}?`;
         const risk = typedNewline ? ['This submits a form or sends a message.'] : afterTyping ? ['This submits what was just typed.'] : [];
         return finish(decision, effects, signals, afterTyping ? 'submit-after-typing' : typedNewline ? 'submit-newline' : 'submit-key',
           hold(title, risk));
@@ -961,19 +963,18 @@ export class ToolsetGuard {
       }
       record.approved = answer;
       // Pending text: any typing attempt sets it, even a refused one (fail
-      // closed: a batch or the driver may already hold text in the field);
-      // only an APPROVED submit or URL navigation clears it. Interleaved
-      // observation, pointer and scroll members never touch it (#736 NEW-1).
+      // closed: a batch or the driver may already hold text in the field).
+      // Only an approved submit clears it; text after the final typed newline
+      // remains pending. Navigation and other members never clear it.
       {
-        const input = asRecord(ctx.input);
         const text = KEYBOARD_MEMBERS.has(ctx.member) ? textOfKeyboardInput(ctx.member, ctx.input) : '';
-        const submit = ((ctx.member === 'key' || ctx.member === 'hold_key') && pressesSubmitKey(text))
-          || ((ctx.member === 'type' || ctx.member === 'type_') && /[\r\n]/.test(text));
-        const navigates = (ctx.member === 'navigate' || ctx.member === 'new_tab') && typeof input.url === 'string'
-          && !!input.url && !/^(back|forward|reload)$/i.test(input.url);
-        if (answer && (submit || navigates)) {
+        const typedNewline = (ctx.member === 'type' || ctx.member === 'type_') && /[\r\n]/.test(text);
+        const submitKey = (ctx.member === 'key' || ctx.member === 'hold_key') && pressesSubmitKey(text);
+        if (answer && typedNewline) {
+          this.textSinceSubmit = /[\r\n][^\r\n]+$/.test(text);
+        } else if (answer && submitKey) {
           this.textSinceSubmit = false;
-        } else if (!submit && (ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) {
+        } else if ((ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) {
           this.textSinceSubmit = true;
         }
       }
