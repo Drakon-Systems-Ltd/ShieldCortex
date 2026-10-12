@@ -408,6 +408,63 @@ describe('review regressions (#678 P2)', () => {
     expect(asked).toBe(1);
   });
 
+  it.each([
+    ['t1', { tabId: 't1' }],
+    ['an unknown tab', { tabId: undefined, tabURL: undefined }],
+  ])('holds an already confirmed t1 Enter when text arrives on %s', async (_where, textTab) => {
+    const { guard, events } = makeGuard();
+    const enter = ctx('key', { text: 'Return' }, { toolUse: { id: `early_${++seq}` } });
+    let asked = 0;
+    expect(await guard.confirm(async () => { asked++; return true; })(enter)).toBe(true);
+    expect(asked).toBe(0);
+    await dispatch(guard, ctx('type', { text: 'hello' }, textTab));
+    let ran = false;
+    await expect(guard.execute({ toolUse: enter.toolUse }, 'key', enter.input, async () => { ran = true; }))
+      .rejects.toThrow('blocked: this action needs an approval that is not on record');
+    expect(ran).toBe(false);
+    expect(events.at(-1)).toMatchObject({ outcome: 'refused' });
+    expect(events.at(-1)!.signals).toEqual(expect.arrayContaining(['submit-key', 'held-at-execute']));
+    expect(guard.classify(ctx('key', { text: 'Return' }))).toMatchObject({
+      decision: 'require_approval', reason: 'submit-after-typing',
+    });
+  });
+
+  it('does not hold t1 Enter for text typed on t2 after confirmation', async () => {
+    const { guard } = makeGuard();
+    const enter = ctx('key', { text: 'Return' }, { toolUse: { id: `early_${++seq}` } });
+    expect(await guard.confirm()(enter)).toBe(true);
+    await dispatch(guard, ctx('type', { text: 'hello' }, { tabId: 't2' }));
+    await expect(guard.execute({ toolUse: enter.toolUse }, 'key', enter.input, async () => 'submitted'))
+      .resolves.toBe('submitted');
+    expect(guard.classify(ctx('key', { text: 'Return' })).reason).toBe('submit-key');
+    expect(guard.classify(ctx('key', { text: 'Return' }, { tabId: 't2' })).reason).toBe('submit-after-typing');
+  });
+
+  it('keeps newer t1 text after a previously approved Enter executes', async () => {
+    const { guard } = makeGuard();
+    await dispatch(guard, ctx('type', { text: 'first' }));
+    const enter = ctx('key', { text: 'Return' }, { toolUse: { id: `approved_${++seq}` } });
+    expect(await guard.confirm(async () => true)(enter)).toBe(true);
+    await dispatch(guard, ctx('type', { text: 'second' }));
+    await expect(guard.execute({ toolUse: enter.toolUse }, 'key', enter.input, async () => 'submitted'))
+      .resolves.toBe('submitted');
+    expect(guard.classify(ctx('key', { text: 'Return' }))).toMatchObject({
+      decision: 'require_approval', reason: 'submit-after-typing',
+    });
+  });
+
+  it('keeps t1 text typed while an approved Enter is dispatching', async () => {
+    const { guard } = makeGuard();
+    await dispatch(guard, ctx('type', { text: 'first' }));
+    const enter = ctx('key', { text: 'Return' }, { toolUse: { id: `inflight_${++seq}` } });
+    expect(await guard.confirm(async () => true)(enter)).toBe(true);
+    await guard.execute({ toolUse: enter.toolUse }, 'key', enter.input, async () => {
+      await dispatch(guard, ctx('type', { text: 'second' }));
+      return 'submitted';
+    });
+    expect(guard.classify(ctx('key', { text: 'Return' })).reason).toBe('submit-after-typing');
+  });
+
   it('keeps text pending after a submitted Enter fails in the driver', async () => {
     const { guard } = makeGuard();
     let asked = 0;
@@ -510,6 +567,22 @@ describe('review regressions (#678 P2)', () => {
     expect(verdict.card).not.toContain(WITHHELD_SECRET);
     await guard.confirm(async () => false)(click);
     expect(events.at(-1)!.elementLabel).toContain('[REDACTED-');
+  });
+
+  it.each([
+    ['opaque fake marker', `[REDACTED-${'a'.repeat(40)}]`],
+    ['assignment with fake marker', 'password=[REDACTED-x]'],
+    ['opaque text split by fake marker', `${'a'.repeat(18)}[REDACTED-x]${'b'.repeat(18)}`],
+    ['fake marker beside a recognised key', `[REDACTED-x] ${AWS_SHAPED_KEY}`],
+  ])('withholds %s in the approval card and audit', async (_kind, label) => {
+    const { guard, events } = makeGuard();
+    await readPage(guard, `button "Pay ${label}" [ref_4]`);
+    const cards: ToolsetApprovalCard[] = [];
+    const click = ctx('left_click', placeOrder);
+    expect(await guard.confirm(async (_call, card) => { cards.push(card); return false; })(click)).toBe(false);
+    expect(cards[0].card).toContain(`labelled "${WITHHELD_SECRET}"`);
+    expect(events.at(-1)!.elementLabel).toBe(WITHHELD_SECRET);
+    expect(JSON.stringify({ card: cards[0].card, event: events.at(-1) })).not.toContain(label);
   });
 
   it.each([

@@ -261,6 +261,10 @@ interface ConfirmedCall {
   /** Pending-text scope and state used for the confirm verdict. */
   scope: string;
   afterTyping: boolean;
+  /** Typing generations before this confirm, including scopes an unknown tab may overlap. */
+  textGenerations: Map<string, number>;
+  /** A typing confirm adds its own pending text after the verdict. */
+  addedText: boolean;
   /** What `confirm` answered. */
   approved: boolean;
   /** Enforce: the approval-store key `confirm` granted, when the call was held. */
@@ -418,6 +422,9 @@ export function escapeForCard(text: string, max = 60): string {
  * alone is not redaction.
  */
 function cardSafe(text: string, max = 60): string {
+  // A page can write a marker itself. Its spelling is not proof that the
+  // credential scanner inserted it, so withhold the entire label.
+  if (/\[REDACTED-[A-Za-z0-9_-]*\]/.test(text)) return WITHHELD_SECRET;
   const redacted = redactCredentials(text);
   const residual = redacted.replace(/\[REDACTED-[A-Za-z0-9_-]*\]/g, ' ');
   if (looksSecretish(residual)) return WITHHELD_SECRET;
@@ -762,6 +769,7 @@ export class ToolsetGuard {
   private activeTab: string | undefined;
   /** Pending text by desktop or browser tab; unknown tabs overlap every tab. */
   private readonly pendingText = new Set<string>();
+  private readonly textGenerations = new Map<string, number>();
   /** What `confirm` saw per call, so `execute` can detect a mutated input and knows the tab. */
   private readonly confirmed = new Map<string, ConfirmedCall>();
 
@@ -947,7 +955,12 @@ export class ToolsetGuard {
       const scope = this.pendingScope(ctx);
       const afterTyping = this.pendingFor(scope);
       const verdict = this.classify(ctx);
-      const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, scope, afterTyping, tabURL: ctx.tabURL, tabId: ctx.tabId };
+      const textGenerations = new Map<string, number>();
+      for (const relevant of scope === UNKNOWN_TAB ? this.textGenerations.keys() : [scope, UNKNOWN_TAB]) {
+        textGenerations.set(relevant, this.textGenerations.get(relevant) ?? 0);
+      }
+      const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, scope, afterTyping,
+        textGenerations, addedText: false, tabURL: ctx.tabURL, tabId: ctx.tabId };
       this.confirmed.set(confirmKey(ctx.toolUse?.id, ctx.member), record);
       const binding = approvalBinding(this.toolset, ctx.member, hostOf(ctx.tabURL), verdict.inputHash);
       const card: ToolsetApprovalCard = { ...verdict, approvalKey: hashToolCall(binding.tool, binding.input) };
@@ -979,7 +992,10 @@ export class ToolsetGuard {
       // submit that actually runs through execute may retire its own scope.
       {
         const text = KEYBOARD_MEMBERS.has(ctx.member) ? textOfKeyboardInput(ctx.member, ctx.input) : '';
-        if ((ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) this.pendingText.add(scope);
+        if ((ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) {
+          this.addPendingText(scope);
+          record.addedText = true;
+        }
       }
       this.emit({ kind: 'call', ctx, verdict: { ...verdict, signals }, outcome, hostAnswer });
       return answer;
@@ -1129,6 +1145,23 @@ export class ToolsetGuard {
       || (scope === UNKNOWN_TAB && this.pendingText.size > 0);
   }
 
+  private addPendingText(scope: string): void {
+    this.pendingText.add(scope);
+    this.textGenerations.set(scope, (this.textGenerations.get(scope) ?? 0) + 1);
+  }
+
+  /** New text since confirm, excluding only this call's own confirm-time addition. */
+  private textArrivedSince(seen: ConfirmedCall, ownExecuteText = false): boolean {
+    const relevant = seen.scope === UNKNOWN_TAB
+      ? this.textGenerations.keys() : [seen.scope, UNKNOWN_TAB];
+    for (const scope of relevant) {
+      const before = seen.textGenerations.get(scope) ?? 0;
+      const own = scope === seen.scope ? Number(seen.addedText) + Number(ownExecuteText) : 0;
+      if ((this.textGenerations.get(scope) ?? 0) > before + own) return true;
+    }
+    return false;
+  }
+
   /** Record a `read_page` / `find` result against the tab and page it read. */
   private recordRefs(ctx: ToolsetConfirmContext, name: string, text: string): void {
     const tab = this.resolveTab(ctx);
@@ -1228,7 +1261,8 @@ export class ToolsetGuard {
       toolUse: ctx.toolUse,
     };
     this.confirmed.delete(key);
-    const verdict = this.classifyWith(callCtx, seen?.afterTyping);
+    const laterText = seen !== undefined && this.textArrivedSince(seen);
+    const verdict = this.classifyWith(callCtx, seen ? seen.afterTyping || laterText : undefined);
     if (seen === undefined || seen.inputHash !== hash) {
       const signals = [...verdict.signals, seen === undefined ? 'unconfirmed' : 'mutated_input'];
       // Enforce with `confirm` skipped: the DENY set and HOLD still apply to
@@ -1276,7 +1310,7 @@ export class ToolsetGuard {
 
     const scope = seen?.scope ?? this.pendingScope(callCtx);
     const typed = KEYBOARD_MEMBERS.has(name) ? textOfKeyboardInput(name, input) : '';
-    if ((name === 'type' || name === 'type_' || name === 'form_input') && typed.length > 0) this.pendingText.add(scope);
+    if ((name === 'type' || name === 'type_' || name === 'form_input') && typed.length > 0) this.addPendingText(scope);
     let result: R;
     try {
       result = await next(ctx, name, input);
@@ -1284,10 +1318,13 @@ export class ToolsetGuard {
       throw this.observeDriverError(name, callCtx, error);
     }
 
-    if (seen?.approved && (name === 'key' || name === 'hold_key') && pressesSubmitKey(typed)) this.pendingText.delete(scope);
+    // A different call may have typed while the driver's dispatch was in flight.
+    const textBeforeRetirement = seen !== undefined && this.textArrivedSince(seen,
+      (name === 'type' || name === 'type_' || name === 'form_input') && typed.length > 0);
+    if (seen?.approved && !textBeforeRetirement && (name === 'key' || name === 'hold_key') && pressesSubmitKey(typed)) this.pendingText.delete(scope);
     if ((name === 'type' || name === 'type_') && /[\r\n]/.test(typed)) {
-      if (/[\r\n][^\r\n]+$/.test(typed)) this.pendingText.add(scope);
-      else this.pendingText.delete(scope);
+      if (/[\r\n][^\r\n]+$/.test(typed)) this.addPendingText(scope);
+      else if (!textBeforeRetirement) this.pendingText.delete(scope);
     }
 
     // Post: a navigation ends the page lifetime of the tab it ran in.

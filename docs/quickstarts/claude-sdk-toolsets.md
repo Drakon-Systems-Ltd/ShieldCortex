@@ -190,7 +190,7 @@ Audit signals added on `call` events in enforce: `approval-granted`, `approval-n
 `approval-store-error`, `approval-not-live` (expired or already spent at `execute`),
 `held-at-execute`.
 
-**Session taint and submits.** Pending text is tracked per tab; text from an unknown tab counts as pending on every tab. It clears only after an approved submit on that tab has successfully run through `execute`. A failed or refused dispatch leaves it pending. In a tainted session a `type` whose text contains a
+**Session taint and submits.** Pending text is tracked per tab; text from an unknown tab counts as pending on every tab. Text typed after a submit was confirmed but before it runs still holds that submit unless the submit already has the needed approval. A successful approved submit clears its tab's pending text only when no more text arrived there in the meantime. A failed or refused dispatch leaves it pending. In a tainted session a `type` whose text contains a
 newline (`\n` or `\r`) is a submit: `require_approval`, effects `submit` +
 `irreversible-ui-action`, signal `typed-newline`, whatever the previous member was.
 
@@ -199,7 +199,7 @@ newline (`\n` or `\r`) is a submit: `require_approval`, effects `submit` +
 `inner` receives the verdict as its second argument; `card.card` is the readable card.
 Cards are plain English, at most 200 characters and printable ASCII only (anything else
 is shown as `\uXXXX`). A page label is redacted with the credential patterns, withheld
-whole if any residual text still looks like a secret, and bounded to 60 characters. Only the host of
+whole if any residual text still looks like a secret or the page itself wrote a redaction-shaped marker, and bounded to 60 characters. Only the host of
 `tabURL` is shown, at most 32 characters, keeping its end (the registrable domain). A card
 never contains the typed text, a URL path or query string, an upload path, or page body.
 When the card would pass 200 characters the taint and requester sentences are dropped
