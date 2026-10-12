@@ -25,10 +25,13 @@
  * Claim-and-advance: file reading happens outside the transaction; the apply
  * + cursor advance re-checks the cursor inside BEGIN IMMEDIATE and no-ops if
  * another instance advanced it first.
+ *
+ * #579 Slice 1A: a malformed stored cursor reports and halts before the
+ * directory is listed (graph and cursor unchanged; recovery is an operator
+ * action). A listed pending file whose stat or read fails holds projection
+ * at that file — nothing of it or of any later file commits this run.
  */
 
-import fs from 'fs';
-import path from 'path';
 import { getDatabase } from '../database/init.js';
 import {
   assertNotInTransaction,
@@ -37,6 +40,15 @@ import {
   upsertEdge,
   upsertNode,
 } from './shared.js';
+import {
+  FILE_CONSUMED_LINE,
+  nodeRealtimePlaneFs,
+  parseRealtimeCursor,
+  readPlainRealtimeFile,
+  REALTIME_PLAIN_RE,
+  type RealtimeCursor,
+  type RealtimePlaneFs,
+} from './realtime-plane.js';
 
 export interface RealtimeLedgerOptions {
   /** Directory holding realtime-YYYY-MM-DD.jsonl files. */
@@ -60,15 +72,16 @@ export interface RealtimeResult {
   errors: string[];
 }
 
-const FILE_RE = /^realtime-\d{4}-\d{2}-\d{2}\.jsonl$/;
 const DEFAULT_BATCH = 2000;
 const DEFAULT_REASON_CAP = 256;
 const DEFAULT_SESSION_KEY_MAX = 128;
 const DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_EVENT_NODES = 50_000;
 
-/** Cursor line marking a whole file as consumed without reading it. */
-const FILE_CONSUMED_LINE = 9_999_999_999;
+/** Fixed text: never echoes the stored cursor into last_error. */
+export const MALFORMED_CURSOR_ERROR =
+  'realtime cursor malformed; realtime projection halted, graph and cursor unchanged';
+export const BARRIER_VIOLATION_ERROR = 'internal: realtime barrier violated; no commit';
 
 /**
  * Hook names are caller-influenceable JSONL content; only this closed set may
@@ -87,62 +100,61 @@ interface CollectResult {
   errors: string[];
   /** Cursor floor from skipped (oversized) files, '' when none. */
   cursorFloor: string;
+  /** Listed pending file whose stat/read failed; nothing at or after it is collected. */
+  heldAt?: string;
 }
 
-function parseCursor(cursor: string): { file: string; line: number } | null {
-  if (!cursor) return null;
-  const idx = cursor.lastIndexOf(':');
-  if (idx <= 0) return null;
-  const line = Number(cursor.slice(idx + 1));
-  if (!Number.isFinite(line) || line < 0) return null;
-  return { file: cursor.slice(0, idx), line };
+/**
+ * Test-owned seams. Production callers use projectRealtimeLedger(), which
+ * passes none; there is no environment or global switch.
+ */
+export interface RealtimeLedgerSeams {
+  fs?: RealtimePlaneFs;
+  /** Runs after collection, immediately before the apply transaction. */
+  beforeApply?: () => void;
 }
 
 /** Collect unconsumed lines after the cursor, oldest file first. */
 function collectPending(
   dir: string,
-  cursor: string,
+  cursor: Extract<RealtimeCursor, { kind: 'empty' | 'valid' }>,
   batchSize: number,
   maxFileBytes: number,
+  fsOps: RealtimePlaneFs,
 ): CollectResult {
   const out: CollectResult = { pending: [], errors: [], cursorFloor: '' };
 
   let names: string[];
   try {
-    names = fs.readdirSync(dir).filter(n => FILE_RE.test(n)).sort();
+    names = fsOps.readdir(dir).filter(n => REALTIME_PLAIN_RE.test(n)).sort();
   } catch {
     return out; // missing dir = nothing to project, not an error
   }
 
-  const parsed = parseCursor(cursor);
+  const parsed = cursor.kind === 'valid' ? cursor : null;
 
   for (const name of names) {
     if (parsed && name < parsed.file) continue;
     const skip = parsed && name === parsed.file ? parsed.line : 0;
     if (skip >= FILE_CONSUMED_LINE) continue; // previously skipped as oversized
 
-    const filePath = path.join(dir, name);
-    try {
-      const size = fs.statSync(filePath).size;
-      if (size > maxFileBytes) {
-        out.errors.push(`${name}: ${size} bytes exceeds the ${maxFileBytes}-byte file cap — skipped`);
-        out.cursorFloor = `${name}:${FILE_CONSUMED_LINE}`;
-        continue;
-      }
-    } catch {
+    const read = readPlainRealtimeFile(dir, name, maxFileBytes, fsOps);
+    if (read.kind === 'oversize') {
+      out.errors.push(`${name}: ${read.size} bytes exceeds the ${maxFileBytes}-byte file cap — skipped`);
+      out.cursorFloor = `${name}:${FILE_CONSUMED_LINE}`;
       continue;
     }
-
-    let content: string;
-    try {
-      content = fs.readFileSync(filePath, 'utf-8');
-    } catch {
-      continue;
+    if (read.kind === 'unavailable') {
+      // Unknown consumption is preserved: never skip past a listed pending
+      // file we could not read. Later files are not even stat'd this run.
+      out.errors.push(`${name}: unavailable (${read.stage} ${read.code}); realtime projection held at this file`);
+      out.heldAt = name;
+      return out;
     }
 
     // The final split element is either '' (terminated file) or a line still
     // being appended by the gateway (tail race) — excluded in both cases.
-    const lines = content.split('\n');
+    const lines = read.content.split('\n');
     const consumable = lines.length - 1;
     for (let i = skip; i < consumable; i++) {
       out.pending.push({ file: name, line: i + 1, raw: lines[i] });
@@ -152,7 +164,33 @@ function collectPending(
   return out;
 }
 
+/** File part of a canonical '<file>:<line>' string. */
+function cursorFile(cursor: string): string {
+  return cursor.slice(0, cursor.lastIndexOf(':'));
+}
+
+/**
+ * Defensive check: with a hold at D, nothing of D or later may commit. The
+ * collector already guarantees this; a violation is reported, never thrown.
+ * Only NEW progress is checked — the unchanged start cursor may sit in D.
+ */
+function barrierHolds(collected: CollectResult): boolean {
+  const heldAt = collected.heldAt;
+  if (!heldAt) return true;
+  if (collected.pending.some(p => !(p.file < heldAt))) return false;
+  if (collected.cursorFloor && !(cursorFile(collected.cursorFloor) < heldAt)) return false;
+  return true;
+}
+
 export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeResult {
+  return projectRealtimeLedgerWithSeams(options, {});
+}
+
+/** @internal Test entry point; see RealtimeLedgerSeams. */
+export function projectRealtimeLedgerWithSeams(
+  options: RealtimeLedgerOptions,
+  seams: RealtimeLedgerSeams,
+): RealtimeResult {
   assertNotInTransaction('realtime ledger');
   const db = getDatabase();
   const batchSize = options.batchSize ?? DEFAULT_BATCH;
@@ -165,7 +203,17 @@ export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeR
   const startCursor = (db.prepare('SELECT last_rt_cursor FROM threat_graph_state WHERE id = 1')
     .get() as { last_rt_cursor: string }).last_rt_cursor;
 
-  const collected = collectPending(options.dir, startCursor, batchSize, maxFileBytes);
+  // Strict classification BEFORE listing the directory, so the outcome for a
+  // malformed cursor never depends on directory state. Report and halt: no
+  // replay, no healing write. startCursor (raw) stays the CAS token below.
+  const parsedStart = parseRealtimeCursor(startCursor);
+  if (parsedStart.kind === 'malformed') {
+    return { processed: 0, cursor: startCursor, eventNodes: 0, errors: [MALFORMED_CURSOR_ERROR] };
+  }
+
+  const collected = collectPending(
+    options.dir, parsedStart, batchSize, maxFileBytes, seams.fs ?? nodeRealtimePlaneFs,
+  );
   const result: RealtimeResult = {
     processed: 0,
     cursor: startCursor,
@@ -173,6 +221,11 @@ export function projectRealtimeLedger(options: RealtimeLedgerOptions): RealtimeR
     errors: [...collected.errors],
   };
   if (collected.pending.length === 0 && !collected.cursorFloor) return result;
+  if (!barrierHolds(collected)) {
+    result.errors.push(BARRIER_VIOLATION_ERROR);
+    return result;
+  }
+  seams.beforeApply?.();
 
   const apply = db.transaction(() => {
     // Claim-and-advance: if another instance moved the cursor since we read
