@@ -161,6 +161,12 @@ SHIELDCORTEX_RECALL_LANE=cron       # or automation, subagent, interactive
 - Unset or blank: no pin; the lane comes from prompt markers, and an unmarked turn is `interactive`.
 - **Any other value fails safe:** the turn is treated as `automation` (no recall unless you opted `automation` in, and then PUBLIC rows only). The recall log shows `laneSignal: "env:SHIELDCORTEX_RECALL_LANE:invalid"`, and `shieldcortex doctor` prints a WARN on its **Recall lane** row naming the bad value.
 
+#### Doctor: Recall repetition
+
+`shieldcortex doctor` reads the last few recall-log entries and warns on its **Recall repetition** row when the newest 4 `interactive` runs all returned the same top-k candidate set (at least 3 candidates). That was the sign of #717, where the recall query was built from the OpenClaw envelope instead of your words. The check only reads. It prints counts, never prompts, titles, ids or hashes. It skips cron, automation, subagent and unlabelled runs, and it treats 4 identical prompt hashes as one prompt asked 4 times, which does not warn.
+
+The warning is repetition evidence, not a proven root cause: asking about the same topic repeatedly, or an unmarked scheduled job recalling as `interactive`, does the same. It does not ask you to change any setting. If the log is missing, too short, has a gap with older entries behind it, or is unreadable, corrupt or oversized, the row is INFO "not checked" and never a pass.
+
 <a id="reclassify"></a>
 
 #### Backfilling labels: `shieldcortex memories reclassify`

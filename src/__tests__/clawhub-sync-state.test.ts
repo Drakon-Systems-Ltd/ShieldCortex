@@ -1,5 +1,12 @@
 import { describe, expect, it } from '@jest/globals';
-import { readLatestVersion, readVersionList, diagnose, describeState, exitCodeFor } from '../../scripts/lib/clawhub-state.mjs';
+import {
+  readLatestVersion,
+  readVersionList,
+  reportsPendingSubmission,
+  diagnose,
+  describeState,
+  exitCodeFor,
+} from '../../scripts/lib/clawhub-state.mjs';
 
 /**
  * Issue #200 — the publish workflow's ClawHub step false-greened three times
@@ -132,5 +139,110 @@ describe('#200 — the message tells the operator which failure this is', () => 
 
   it('synced states the version plainly', () => {
     expect(describeState({ state: 'synced', latest: '4.47.36', target: '4.47.36' })).toContain('4.47.36');
+  });
+});
+
+/**
+ * The 5.7.0 release (publish run 38163724777): `clawhub publish` printed
+ *
+ *   Update submitted for shieldcortex@5.7.0; pending security scans before it becomes public.
+ *
+ * and then every poll logged `(absent)`, because a version still in security
+ * scans is in neither `latest` nor `versions[]`. It went public after ~5m, but
+ * a slower scan would have ended the step with "The publish did not land" for
+ * a submission the CLI had explicitly accepted.
+ */
+describe('a submission pending security scans is not an absent upload', () => {
+  // Verbatim from the saved run log, with the Actions timestamp prefix removed.
+  const observed = 'Update submitted for shieldcortex@5.7.0; pending security scans before it becomes public.';
+
+  it('recognises the CLI line the 5.7.0 publish printed', () => {
+    expect(reportsPendingSubmission(observed, '5.7.0')).toBe(true);
+    expect(reportsPendingSubmission(`some banner\n${observed}\n`, '5.7.0')).toBe(true);
+  });
+
+  it('only counts a submission of the target version', () => {
+    expect(reportsPendingSubmission(observed, '5.7.1')).toBe(false);
+    expect(reportsPendingSubmission(observed, '5.7')).toBe(false);
+    expect(reportsPendingSubmission(observed.replace('shieldcortex@', 'other-skill@'), '5.7.0')).toBe(false);
+  });
+
+  it('compares the whole reported version token, case included', () => {
+    const line = (v: string) => `Update submitted for shieldcortex@${v}; pending security scans before it becomes public.`;
+    // A longer token is a different version, whatever it starts with.
+    expect(reportsPendingSubmission(line('5.7.01'), '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1'), '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0+build.1'), '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1+build.1'), '5.7.0-rc.1')).toBe(false);
+    // Prerelease identifiers are case-sensitive, like the index comparisons.
+    expect(reportsPendingSubmission(line('5.7.0-RC.1'), '5.7.0-rc.1')).toBe(false);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1'), '5.7.0-RC.1')).toBe(false);
+    // An exactly matching prerelease or build-metadata version still counts.
+    expect(reportsPendingSubmission(line('5.7.0-rc.1'), '5.7.0-rc.1')).toBe(true);
+    expect(reportsPendingSubmission(line('5.7.0+build.1'), '5.7.0+build.1')).toBe(true);
+    expect(reportsPendingSubmission(line('5.7.0-rc.1+build.1'), '5.7.0-rc.1+build.1')).toBe(true);
+    // A sentence-ending dot is not part of the version.
+    expect(
+      reportsPendingSubmission('Pending security scans: update submitted for shieldcortex@5.7.0.', '5.7.0'),
+    ).toBe(true);
+  });
+
+  it('needs both the submission and the pending-scan wording on one line', () => {
+    expect(reportsPendingSubmission('Update submitted for shieldcortex@5.7.0.', '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission('Update submitted for shieldcortex@5.7.0\npending security scans', '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission('', '5.7.0')).toBe(false);
+    expect(reportsPendingSubmission(undefined, '5.7.0')).toBe(false);
+  });
+
+  it('diagnoses a reported submission the index does not list yet as submitted, not absent', () => {
+    expect(diagnose({ latest: '5.6.0', versions: ['5.6.0'], target: '5.7.0', submitted: true })).toBe('submitted');
+  });
+
+  it('still lets the index decide once it shows the target', () => {
+    expect(diagnose({ latest: '5.7.0', versions: ['5.7.0'], target: '5.7.0', submitted: true })).toBe('synced');
+    expect(diagnose({ latest: '5.6.0', versions: ['5.7.0', '5.6.0'], target: '5.7.0', submitted: true })).toBe('pending');
+  });
+
+  it('is never success, and asks for no republish, without saying the upload failed', () => {
+    expect(exitCodeFor('submitted')).not.toBe(0);
+    expect(exitCodeFor('submitted')).not.toBe(exitCodeFor('absent'));
+    const msg = describeState({ state: 'submitted', latest: '5.6.0', target: '5.7.0', waitedMs: 1_800_000 });
+    expect(msg).toContain('5.7.0');
+    expect(msg).toMatch(/pending security scans/i);
+    expect(msg).toMatch(/not proof/i);
+    expect(msg).toContain('30m');
+    expect(msg).not.toMatch(/did not land/i);
+    expect(msg).not.toContain('clawhub.ai/skills/publish');
+  });
+});
+
+describe('a failed ClawHub read is unknown, not absent', () => {
+  it('diagnoses a failed read as unknown whatever else is known', () => {
+    expect(diagnose({ latest: '', versions: [], target: '5.7.0', readFailed: true })).toBe('unknown');
+    expect(diagnose({ latest: '', versions: [], target: '5.7.0', readFailed: true, submitted: true })).toBe('unknown');
+  });
+
+  it('keeps the old absent result when the read succeeded and nothing was submitted', () => {
+    expect(diagnose({ latest: '5.6.0', versions: ['5.6.0'], target: '5.7.0', readFailed: false })).toBe('absent');
+  });
+
+  it('exits non-zero with its own code', () => {
+    expect(exitCodeFor('unknown')).not.toBe(0);
+    expect(exitCodeFor('unknown')).not.toBe(exitCodeFor('absent'));
+    expect(exitCodeFor('unknown')).not.toBe(exitCodeFor('pending'));
+  });
+
+  it('says the state is unknown and points at the read-only check, not a republish', () => {
+    const msg = describeState({ state: 'unknown', latest: '', target: '5.7.0' });
+    expect(msg).toMatch(/unknown/i);
+    expect(msg).toContain('release:clawhub:check');
+    expect(msg).not.toMatch(/did not land/i);
+    expect(msg).not.toContain('clawhub.ai/skills/publish');
+    expect(msg).not.toMatch(/synced/i);
+  });
+
+  it('keeps the submission evidence when the read failed after it', () => {
+    const msg = describeState({ state: 'unknown', latest: '', target: '5.7.0', submitted: true });
+    expect(msg).toMatch(/pending security scans/i);
   });
 });

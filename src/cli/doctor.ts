@@ -168,6 +168,14 @@ import {
   type CorrelateCronDenialsOptions,
   type CronDenialReport,
 } from './cron-denial-audit.js';
+import {
+  evaluateRecallRepetition,
+  REPEAT_MIN_SET_SIZE,
+  REPEAT_SAMPLE_RUNS,
+  type RecallRepetitionDeps,
+  type RecallRepetitionVerdict,
+  type SlotProblem,
+} from './recall-repetition.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -7739,6 +7747,107 @@ export function checkRecallLanePin(env: NodeJS.ProcessEnv = process.env): CheckR
   };
 }
 
+// ── Check: repeated recall top-k (#717) ─────────────────
+/**
+ * WARN when the newest interactive prompt-recall runs all returned the same
+ * non-empty top-k candidate set — #717's envelope-dominated query signature.
+ * The evaluation lives in recall-repetition.ts; this only words the verdict.
+ *
+ * Every message is fixed text plus counts: no prompt, title, path, id or hash.
+ * Nothing here is a PASS unless a full sample was read, and the WARN names no
+ * command — repetition is evidence to look at, not a fault with a known fix.
+ */
+export const RECALL_REPETITION_LABEL = 'Recall repetition';
+
+const SLOT_PROBLEM_TEXT: Record<SlotProblem, string> = {
+  corrupt: 'not valid JSON',
+  unreadable: 'unreadable',
+  oversized: 'oversized',
+  unsafe: 'not a regular file',
+  malformed: 'malformed',
+  budget: 'over the read budget',
+  missing: 'missing with older entries behind it',
+};
+
+export function recallRepetitionResult(v: RecallRepetitionVerdict): CheckResult {
+  const label = RECALL_REPETITION_LABEL;
+  switch (v.kind) {
+    case 'absent':
+      return { label, status: 'info', message: 'no recall log yet — repeated top-k sets not checked' };
+    case 'unavailable':
+      return {
+        label,
+        status: 'info',
+        message: v.reason === 'unsafe'
+          ? 'recall log is not a plain directory — not read, repeated top-k sets not checked'
+          : 'recall log could not be read — repeated top-k sets not checked',
+      };
+    case 'incomplete': {
+      const parts = (Object.keys(v.problems) as SlotProblem[]).map((p) => SLOT_PROBLEM_TEXT[p]);
+      return {
+        label,
+        status: 'info',
+        message: `recall log sample incomplete — an entry was ${parts.join(', ')} after ${v.interactiveRuns} `
+          + 'interactive run(s) — repeated top-k sets not checked',
+      };
+    }
+    case 'insufficient': {
+      const skipped = v.otherLaneRuns + v.unknownLaneRuns;
+      return {
+        label,
+        status: 'info',
+        message: `${v.interactiveRuns} of ${REPEAT_SAMPLE_RUNS} interactive recall runs logged`
+          + (skipped > 0 ? ` (${skipped} cron/automation/subagent or unlabelled runs skipped)` : '')
+          + ' — not enough to check for repeated top-k sets',
+      };
+    }
+    case 'below-floor':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + `below the ${REPEAT_MIN_SET_SIZE}-candidate floor for this check`,
+      };
+    case 'same-prompt':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + 'but every one has the same prompt hash — the same prompt repeated, which explains it',
+      };
+    case 'varied':
+      return {
+        label,
+        status: 'pass',
+        message: `last ${v.runs} interactive recall runs did not all return the same non-empty top-k set`,
+      };
+    case 'repeated': {
+      const identity = v.distinctPromptHashes === null
+        ? 'prompt identity not recorded for every run'
+        : `${v.distinctPromptHashes} distinct prompt hashes`;
+      return {
+        label,
+        status: 'warn',
+        message: `last ${v.runs} interactive recall runs returned the same ${v.setSize}-candidate top-k set (${identity}). `
+          + 'This is repetition evidence, not a proven root cause: a recall query dominated by a message wrapper '
+          + 'or envelope can do this, and so can asking about the same topic repeatedly or an unmarked '
+          + 'scheduled job recalling as interactive. Compare recent recalls with what was asked before changing anything.',
+      };
+    }
+  }
+}
+
+export async function checkRecallRepetition(
+  deps: RecallRepetitionDeps = { homeDir: os.homedir() },
+): Promise<CheckResult> {
+  try {
+    return recallRepetitionResult(evaluateRecallRepetition(deps));
+  } catch {
+    // Fixed text: an error message could quote a path under the home dir.
+    return { label: RECALL_REPETITION_LABEL, status: 'info', message: 'recall log could not be read — repeated top-k sets not checked' };
+  }
+}
+
 // ── Check: OpenClaw managed-pin drift / disabled realtime plugin ─────────────
 /**
  * Detects the OpenClaw `EOVERRIDE` trap that silently disables the realtime
@@ -9015,6 +9124,7 @@ export async function runDoctor(
     checkHooks,
     checkHookTimeouts,
     async () => checkRecallLanePin(),
+    async () => checkRecallRepetition(), // #717: same top-k on every recent interactive recall
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
     checkMemoryPlaneEmptyBrain,

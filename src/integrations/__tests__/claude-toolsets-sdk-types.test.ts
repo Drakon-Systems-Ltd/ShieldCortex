@@ -1,6 +1,6 @@
 import { describe, it, expect } from '@jest/globals';
 import path from 'node:path';
-import ts from 'typescript';
+import { spawnSync } from 'node:child_process';
 
 /**
  * #679 review, finding 1 — the guard's hook adapters must type-check against
@@ -13,19 +13,14 @@ const FIXTURE = path.resolve(process.cwd(), 'src/integrations/__tests__/fixtures
 
 describe('ToolsetGuard — SDK type conformance (#679 finding 1)', () => {
   it('a driver subclassing the SDK toolsets through the guard type-checks', () => {
-    const program = ts.createProgram([FIXTURE], {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.NodeNext,
-      moduleResolution: ts.ModuleResolutionKind.NodeNext,
-      strict: true,
-      noEmit: true,
-      skipLibCheck: true,
-      esModuleInterop: true,
-    });
-    const diagnostics = ts.getPreEmitDiagnostics(program).map((d) => {
-      const where = d.file ? `${path.relative(process.cwd(), d.file.fileName)}:${d.file.getLineAndCharacterOfPosition(d.start ?? 0).line + 1}` : '';
-      return `${where} TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, '\n')}`;
-    });
-    expect(diagnostics).toEqual([]);
+    const compiler = path.resolve(process.cwd(), 'node_modules/typescript/lib/tsc.js');
+    const result = spawnSync(process.execPath, [compiler,
+      '--noEmit', '--strict', '--target', 'ES2022', '--module', 'NodeNext',
+      '--moduleResolution', 'NodeNext', '--skipLibCheck', '--esModuleInterop', FIXTURE,
+    ], { encoding: 'utf8', timeout: 120_000, maxBuffer: 10 * 1024 * 1024 });
+    if (result.status !== 0) {
+      throw new Error(`TypeScript exited ${result.status}: ${result.error?.message ?? ''}\n${result.stdout}${result.stderr}`);
+    }
+    expect(result.status).toBe(0);
   }, 120_000);
 });
