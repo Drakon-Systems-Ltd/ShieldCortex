@@ -70,7 +70,7 @@ Action Guard stays off until you turn it on. A bare `sudo shieldcortex protect` 
 | Hermes | via the local API | bound (`pre_tool_call`) |
 | Codex, Cursor, Copilot, MCP | if the agent calls the tools | not a gate |
 | LangChain, Python SDK | if you call `scan` or `save` | not a gate |
-| Claude SDK browser / computer toolsets (TypeScript) | no | observe-only (`shieldcortex/toolsets`, 5.8+) |
+| Claude SDK browser / computer toolsets (TypeScript) | no | observe by default; `mode: 'enforce'` refuses or holds for approval (`shieldcortex/toolsets`, 5.8+) |
 
 `shieldcortex doctor` prints the same split: `memory + tool gate` for a host that can deny, and memory only, not a gate, for one that cannot. It shows the live Guard posture for Claude Code and OpenClaw. For Hermes it only reports whether the plugin copy is present. It will not print "protected" for a host that cannot deny.
 

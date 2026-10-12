@@ -23,15 +23,31 @@
  *
  * P1 contract: in `observe` mode the guard NEVER changes behaviour. `confirm`
  * returns the host's own answer (or `true`), `execute` returns the driver's
- * result unchanged. Verdicts are computed and audited only. `enforce` mode is
- * implemented so the tests can prove the decision function, but it is not the
- * default and the bounded-approval/card wiring is phase P2.
+ * result unchanged. Verdicts are computed and audited only.
+ *
+ * P2 (first slice): `enforce` mode routes a `require_approval` verdict through
+ * the existing bounded-approval store (`action-approvals.ts`). The approval is
+ * keyed on (toolset, member, tab host, input hash), granted only when the
+ * host's `inner(ctx, card)` returns exactly `true` within the elapsed deadline, and
+ * spent by the one `execute` that runs those exact bytes. `observe` stays the
+ * default. Pending text is scoped to each browser tab (or the desktop) and
+ * retires only after its approved submit executes successfully.
  */
 
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
+import { performance } from 'node:perf_hooks';
 import { redactCredentials, scanForCredentials } from '../defence/credential-leak/index.js';
 import { scanToolResponse } from '../defence/tool-response-scanner.js';
+import {
+  DEFAULT_APPROVAL_TTL_MS,
+  approveRequest,
+  consumeApproval,
+  denyRequest,
+  hashToolCall,
+  recordPending,
+} from '../defence/iron-dome/action-approvals.js';
+import { WITHHELD_SECRET, looksSecretish } from '../defence/iron-dome/approval-card.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -154,12 +170,43 @@ export interface ToolsetGuardOptions {
   toolError?: new (message: string) => Error;
   /** Clock, for tests. */
   now?: () => number;
+  /**
+   * Enforce only: elapsed deadline for the host's `inner` answer, including
+   * synchronous work. Default 5 minutes. A later answer is ignored.
+   */
+  approvalTimeoutMs?: number;
+  /**
+   * Enforce only: lifetime of an approval between `confirm` granting it and
+   * `execute` spending it. Default `DEFAULT_APPROVAL_TTL_MS` (10 minutes), the
+   * same as every other Action Guard approval.
+   */
+  approvalTtlMs?: number;
+  /**
+   * Home directory of the approval store (`<home>/.shieldcortex/approvals`).
+   * Defaults to the user's home, the store every other Action Guard approval
+   * uses.
+   */
+  approvalsHome?: string;
 }
 
+/**
+ * What `inner` receives as its second argument: the verdict, whose `card` is
+ * the readable, values-free approval card (plain English, at most 200
+ * characters, printable ASCII only), plus the key an approval binds to.
+ */
+export interface ToolsetApprovalCard extends ToolsetVerdict {
+  /** Approval-store hash of (toolset, member, tab host, input hash). */
+  approvalKey: string;
+}
+
+/**
+ * The host's own approver. Enforce mode approves only when it returns (or
+ * resolves to) exactly `true`; any other value, an exception or a timeout refuses.
+ */
 export type ToolsetConfirmInner = (
   ctx: ToolsetConfirmContext,
-  verdict: ToolsetVerdict,
-) => boolean | Promise<boolean>;
+  card: ToolsetApprovalCard,
+) => unknown;
 
 /**
  * The SDK's own `execute` (`(c, n, i) => super.execute(c, n, i)`). Generic so
@@ -211,11 +258,31 @@ function confirmKey(toolUseId: string | undefined, member: string): string {
 /** What `confirm` saw for a call, so `execute` can bind to it. */
 interface ConfirmedCall {
   inputHash: string;
+  /** Pending-text scope and state used for the confirm verdict. */
+  scope: string;
+  afterTyping: boolean;
+  /** Typing generations before this confirm, including scopes an unknown tab may overlap. */
+  textGenerations: Map<string, number>;
+  /** A typing confirm adds its own pending text after the verdict. */
+  addedText: boolean;
   /** What `confirm` answered. */
   approved: boolean;
+  /** Enforce: the approval-store key `confirm` granted, when the call was held. */
+  approvalKey?: string;
   tabURL?: string;
   tabId?: string;
 }
+
+/** The fields an approval binds to; hashed by the approval store. */
+function approvalBinding(toolset: ToolsetName, member: string, host: string | undefined, inputHash: string) {
+  return {
+    tool: `toolset:${toolset}:${member}`,
+    input: { toolset, member, host: host ?? null, inputHash },
+  };
+}
+
+const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+const UNKNOWN_TAB = '\u0000unknown-tab';
 
 // ── Member tables ─────────────────────────────────────────────────────────
 
@@ -251,6 +318,17 @@ const CLICK_MEMBERS = new Set([
   'left_click_drag', 'left_mouse_down', 'left_mouse_up',
 ]);
 const KEYBOARD_MEMBERS = new Set(['type', 'type_', 'key', 'hold_key', 'form_input']);
+const KNOWN_MEMBERS = new Set([
+  ...READING_MEMBERS, ...PAGE_STATE_MEMBERS, ...NO_EFFECT_MEMBERS,
+  ...CLICK_MEMBERS, ...KEYBOARD_MEMBERS, 'file_upload', 'browser_state', 'request',
+]);
+
+function auditMember(member: string): string {
+  if (KNOWN_MEMBERS.has(member)) return member;
+  if (redactCredentials(member) !== member || looksSecretish(member)) return 'other';
+  const safe = member.toLowerCase();
+  return /^[a-z0-9_-]{1,40}$/.test(safe) ? safe : 'other';
+}
 
 const DEFAULT_IRREVERSIBLE_LEXICON = [
   'pay', 'buy', 'purchase', 'order', 'checkout', 'confirm', 'delete', 'remove',
@@ -277,6 +355,12 @@ function pressesSubmitKey(text: string): boolean {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+/**
+ * Canonical serialisation for the input hash: every own enumerable key, sorted,
+ * INCLUDING `constructor`, `prototype` and `__proto__` (#678 N1). The output
+ * object has a null prototype, so assigning `__proto__` creates an own data
+ * property that `JSON.stringify` writes out instead of setting a prototype.
+ */
 function canonical(value: unknown): string {
   const seen = new WeakSet<object>();
   const walk = (v: unknown): unknown => {
@@ -284,9 +368,8 @@ function canonical(value: unknown): string {
     if (seen.has(v as object)) return '[cycle]';
     seen.add(v as object);
     if (Array.isArray(v)) return v.map(walk);
-    const out: Record<string, unknown> = {};
+    const out = Object.create(null) as Record<string, unknown>;
     for (const k of Object.keys(v as Record<string, unknown>).sort()) {
-      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
       out[k] = walk((v as Record<string, unknown>)[k]);
     }
     return out;
@@ -301,20 +384,85 @@ export function hashInput(member: string, input: unknown): string {
 /**
  * Escape everything outside printable ASCII (Anthropic's guidance for cards),
  * and `"` and `\` too, so page text cannot close the quotes a card puts it in.
+ * The ESCAPED text is then bounded to `max` characters, cut only between
+ * escapes and marked with an ASCII `...`, so the result is never longer than
+ * `max` and never contains a non-ASCII character.
  */
 export function escapeForCard(text: string, max = 60): string {
-  const clipped = text.length > max ? `${text.slice(0, max)}…` : text;
-  return clipped.replace(/[^\x20-\x21\x23-\x5b\x5d-\x7e]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  const tokens: string[] = [];
+  let length = 0;
+  for (const ch of text) {
+    // Code units, so an astral character escapes as its surrogate pair.
+    for (let i = 0; i < ch.length; i++) {
+      const unit = ch[i];
+      const token = /[\x20-\x21\x23-\x5b\x5d-\x7e]/.test(unit)
+        ? unit
+        : `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`;
+      tokens.push(token);
+      length += token.length;
+    }
+    if (length > max) break;
+  }
+  if (length <= max) return tokens.join('');
+  let out = '';
+  for (const token of tokens) {
+    if (out.length + token.length > max - 3) break;
+    out += token;
+  }
+  return `${out}...`;
 }
 
 /**
  * Page- or model-supplied text for a card or audit row: secret-shaped
  * substrings redacted with the credential scanner's patterns FIRST (so the
  * length bound cannot cut a key into an unrecognised but still-leaking
- * prefix), then bounded and escaped. Escaping alone is not redaction.
+ * prefix), then bounded and escaped. Text the vendor patterns do not
+ * recognise but the #648 card gate calls secret-shaped (`looksSecretish`: a
+ * long opaque run, `token=value`, URL userinfo) is withheld whole. Escaping
+ * alone is not redaction.
  */
 function cardSafe(text: string, max = 60): string {
-  return escapeForCard(redactCredentials(text), max);
+  // A page can write a marker itself. Its spelling is not proof that the
+  // credential scanner inserted it, so withhold the entire label.
+  if (/\[REDACTED-[A-Za-z0-9_-]*\]/.test(text)) return WITHHELD_SECRET;
+  const redacted = redactCredentials(text);
+  const residual = redacted.replace(/\[REDACTED-[A-Za-z0-9_-]*\]/g, ' ');
+  if (looksSecretish(residual)) return WITHHELD_SECRET;
+  return escapeForCard(redacted, max);
+}
+
+/** Longest card `classify` writes (#678 §3.3). */
+export const TOOLSET_CARD_MAX = 200;
+const DECIDE = 'Approve once / Deny.';
+
+/**
+ * Assemble a card from its title and sentences. `required` always appears;
+ * each `optional` sentence is added, in order, only while the card stays within
+ * {@link TOOLSET_CARD_MAX}. The inputs are already escaped; the final pass
+ * escapes anything that is not printable ASCII and is a backstop only.
+ */
+function composeCard(title: string, required: string[], optional: string[] = [], end?: string): string {
+  const ascii = (text: string) => text.replace(/\s+/g, ' ').trim()
+    .replace(/[^\x20-\x7e]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  const tail = end ? ` ${ascii(end)}` : '';
+  const room = TOOLSET_CARD_MAX - tail.length;
+  const parts = [title, ...required];
+  for (const sentence of optional) {
+    if (ascii([...parts, sentence].join(' ')).length <= room) parts.push(sentence);
+  }
+  const body = ascii(parts.join(' '));
+  // Backstop: the templates fit by construction; the decision line is never cut.
+  return `${body.length <= room ? body : `${body.slice(0, room - 3)}...`}${tail}`;
+}
+
+/**
+ * A host as a card shows it: escaped and at most 32 characters. A longer host
+ * keeps its END, the registrable domain (`...login.example.com.attacker.net`
+ * shows `attacker.net`), because the start is the part an attacker chooses.
+ */
+function cardHost(host: string): string {
+  const shown = escapeForCard(host, 1024);
+  return shown.length <= 32 ? shown : `...${shown.slice(-29)}`;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -325,6 +473,26 @@ function hostOf(url: string | undefined): string | undefined {
   if (!url) return undefined;
   const parsed = parseUrlLikeBrowser(url);
   return parsed?.hostname || undefined;
+}
+
+/** Host for cards and audit only; policy and approval binding use `hostOf`. */
+function displayHost(url: string | undefined): string | undefined {
+  const host = hostOf(url);
+  if (!host || !url) return host;
+  // Same scheme rule as `parseUrlLikeBrowser`; `https:HOST` (no slashes) is
+  // still a host for the URL parser, so strip the scheme and ANY leading slashes.
+  const authority = url.replaceAll('\\', '/').replace(SCHEME_PREFIX, '').replace(/^\/+/, '').split(/[/?#]/, 1)[0];
+  const withoutUserinfo = authority.slice(authority.lastIndexOf('@') + 1);
+  const rawHost = withoutUserinfo.startsWith('[')
+    ? withoutUserinfo.slice(0, withoutUserinfo.indexOf(']') + 1)
+    : withoutUserinfo.split(':', 1)[0];
+  // The parser percent-decodes the host (`%41KIA…` → `akia…`): check the decoded original-case text too.
+  let decoded = rawHost;
+  try { decoded = decodeURIComponent(rawHost); } catch { /* keep raw */ }
+  for (const candidate of new Set([rawHost, decoded])) {
+    if (redactCredentials(candidate) !== candidate || looksSecretish(candidate)) return 'redacted-host';
+  }
+  return host.slice(0, 253);
 }
 
 const SCHEME_PREFIX = /^[a-z][a-z0-9+.-]*:/i;
@@ -423,7 +591,7 @@ export function checkUrl(url: string, allowlist?: string[]): UrlCheck {
     return { allowed: false, verdict: 'block', reason: `url-scheme-local:${scheme.slice(0, -1)}`, effects: ['credential-read'] };
   }
   if (scheme !== 'http:' && scheme !== 'https:') {
-    return { allowed: false, verdict: 'block', reason: `url-scheme-unknown:${scheme.slice(0, -1)}`, effects: ['network-fetch'] };
+    return { allowed: false, verdict: 'block', reason: 'url-scheme-unknown', effects: ['network-fetch'] };
   }
   const host = parsed.hostname.toLowerCase();
   if (parsed.username || parsed.password) {
@@ -585,6 +753,9 @@ export class ToolsetGuard {
   private readonly sink?: (event: ToolsetAuditEvent) => void;
   private readonly ErrorCtor: new (message: string) => Error;
   private readonly now: () => number;
+  private readonly approvalTimeoutMs: number;
+  private readonly approvalTtlMs: number;
+  private readonly approvalsHome?: string;
 
   /** Session taint (ADR-002 §2.2): set on the first untrusted read, never cleared. */
   private tainted = false;
@@ -596,8 +767,9 @@ export class ToolsetGuard {
   private readonly refs = new Map<string, RefCatalogue>();
   /** The active tab in the last `browserState` report, when wrapped. */
   private activeTab: string | undefined;
-  /** Previous member seen, for `type` → `key Enter` = submit. */
-  private previousMember: string | null = null;
+  /** Pending text by desktop or browser tab; unknown tabs overlap every tab. */
+  private readonly pendingText = new Set<string>();
+  private readonly textGenerations = new Map<string, number>();
   /** What `confirm` saw per call, so `execute` can detect a mutated input and knows the tab. */
   private readonly confirmed = new Map<string, ConfirmedCall>();
 
@@ -613,6 +785,9 @@ export class ToolsetGuard {
     this.sink = options.audit;
     this.ErrorCtor = options.toolError ?? Error;
     this.now = options.now ?? Date.now;
+    this.approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    this.approvalTtlMs = options.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
+    this.approvalsHome = options.approvalsHome;
   }
 
   get isTainted(): boolean {
@@ -622,16 +797,24 @@ export class ToolsetGuard {
   // ── Classification (pure apart from reading guard state) ──
 
   classify(ctx: ToolsetConfirmContext): ToolsetVerdict {
+    return this.classifyWith(ctx);
+  }
+
+  private classifyWith(ctx: ToolsetConfirmContext, afterTypingOverride?: boolean): ToolsetVerdict {
     const member = ctx.member;
     const input = asRecord(ctx.input);
     const inputHash = hashInput(member, ctx.input);
-    const host = hostOf(ctx.tabURL);
-    const where = host ? ` on ${escapeForCard(host, 80)}` : this.toolset === 'computer' ? ' (desktop)' : ' on an unknown page';
+    const host = displayHost(ctx.tabURL);
+    // Cards (#678 §3.3): plain English, at most 200 characters, printable ASCII
+    // only, the tab's host (never its path or query), labels bounded to 60.
+    const where = host ? ` on ${cardHost(host)}` : this.toolset === 'computer' ? ' (desktop)' : ' on an unknown page';
     const tainted = this.tainted;
-    const who = this.requestedBy.band === 'unknown' ? 'unknown' : this.requestedBy.band.replace('-', ' ');
+    const who = `Requested by: ${this.requestedBy.band === 'unknown' ? 'unknown' : this.requestedBy.band.replace('-', ' ')}.`;
     const because = tainted
-      ? 'The agent is working from content it read from the web or screen, which could be steering it.'
-      : 'No web or screen content has been read yet in this session.';
+      ? 'The agent is acting on web or screen content it read.'
+      : 'Nothing has been read from the web or screen yet.';
+    /** A HOLD card: what, why it is risky, then (if room) taint and requester. */
+    const hold = (title: string, risk: string[]): string => composeCard(title, risk, [because, who], DECIDE);
     const finish = (
       decision: ToolsetDecision,
       effects: ToolsetEffectKind[],
@@ -644,37 +827,37 @@ export class ToolsetGuard {
     if (member === 'navigate' || member === 'new_tab') {
       const url = typeof input.url === 'string' ? input.url : '';
       if (!url || /^(back|forward|reload)$/i.test(url)) {
-        return finish('allow', ['observe'], [], 'navigate-history', `Go ${url || 'to a new tab'}${where}.`);
+        return finish('allow', ['observe'], [], 'navigate-history', composeCard(`Go ${url || 'to a new tab'}${where}.`, []));
       }
       const check = checkUrl(url, this.allowlist);
-      const target = check.host ? escapeForCard(check.host, 80) : 'an address that is not a web page';
+      const target = check.host ? cardHost(displayHost(url) ?? check.host) : 'an address that is not a web page';
       if (check.verdict === 'block') {
         return finish('block', check.effects, [check.reason], check.reason,
-          `Open ${target}? ShieldCortex does not allow this kind of address. Denied; nothing was opened.`);
+          composeCard(`Open ${target}?`, ['ShieldCortex does not allow this kind of address.', this.mode === 'enforce' ? 'Denied; nothing was opened.' : 'In enforce mode this would be denied.']));
       }
       if (check.verdict === 'ask') {
         return finish('require_approval', check.effects, [check.reason], check.reason,
-          `Open ${target}? It is not on the list of sites this task may use. Requested by: ${who}. Approve once / Deny.`);
+          composeCard(`Open ${target}?`, ['It is not on the list of sites this task may use.'], [who], DECIDE));
       }
-      return finish('allow', check.effects, [], check.reason, `Open ${target}.`);
+      return finish('allow', check.effects, [], check.reason, composeCard(`Open ${target}.`, []));
     }
 
     // 2. Script execution with the page's authority.
     if (member === 'javascript_exec') {
       return finish('require_approval', ['code-exec-opaque'], ['page-script-exec'], 'page-script-exec',
-        `Run page script${where}? Scripts run with the page's own cookies and logins. Requested by: ${who}. Approve once / Deny.`);
+        hold(`Run page script${where}?`, ["Scripts run with the page's own cookies and logins."]));
     }
 
-    // 3. Local files leaving the host.
+    // 3. Local files leaving the host. The card never names the paths.
     if (member === 'file_upload') {
       const paths = Array.isArray(input.paths) ? input.paths.filter((p): p is string => typeof p === 'string') : [];
       // A Windows path separates with `\`: normalise before the sensitive-path test.
       if (paths.some((p) => SENSITIVE_UPLOAD_PATH.test(p.replace(/\\/g, '/')))) {
         return finish('block', ['credential-read', 'egress'], ['upload-sensitive-path'], 'upload-sensitive-path',
-          `Upload a file${where}? The file is a credential or configuration file. Denied; nothing was uploaded.`);
+          composeCard(`Upload a file${where}?`, ['The file is a credential or configuration file.', this.mode === 'enforce' ? 'Denied; nothing was uploaded.' : 'In enforce mode this would be denied.']));
       }
       return finish('require_approval', ['egress'], ['file-upload'], 'file-upload',
-        `Upload ${paths.length || 'some'} file(s) from this machine${where}? Requested by: ${who}. Approve once / Deny.`);
+        hold(`Upload ${paths.length || 'some'} file(s) from this machine${host ? ` to ${cardHost(host)}` : where}?`, ['The page receives a copy of the file.']));
     }
 
     // 4. Keyboard: secrets must never be typed; Enter after typing is a submit.
@@ -683,24 +866,35 @@ export class ToolsetGuard {
       const creds = scanForCredentials(text);
       if (creds.leaked) {
         const types = [...new Set(creds.findings.map((f) => f.type))];
+        const kind = types[0] ? ` (${escapeForCard(String(types[0]).replace(/_/g, ' '), 24)})` : '';
         return finish('block', ['credential-read', 'egress'], types.map((t) => `typed-secret:${t}`), 'typed-secret',
-          `Type into a field${where}? The text looks like a ${types[0] ?? 'secret'}. ShieldCortex does not allow secrets to be typed into pages or apps. Denied; nothing was typed.`);
+          composeCard(`Type into a field${where}?`, [
+            `The text looks like a secret${kind}.`,
+            this.mode === 'enforce' ? 'ShieldCortex does not allow secrets to be typed into pages or apps. Denied; nothing was typed.' : 'In enforce mode this would be denied.',
+          ]));
       }
       const isSubmitKey = (member === 'key' || member === 'hold_key') && pressesSubmitKey(text);
       const typedNewline = (member === 'type' || member === 'type_') && /[\r\n]/.test(text);
       if (isSubmitKey || typedNewline) {
-        const afterTyping = this.previousMember === 'type' || this.previousMember === 'type_' || this.previousMember === 'form_input';
-        const effects: ToolsetEffectKind[] = afterTyping ? ['submit', 'irreversible-ui-action'] : ['submit'];
-        const decision: ToolsetDecision = afterTyping || this.toolset === 'computer' ? 'require_approval' : 'allow';
-        return finish(decision, effects, ['submit-key'], afterTyping ? 'submit-after-typing' : 'submit-key',
-          `Press Enter${where}? ${afterTyping ? 'This submits what was just typed.' : ''} ${because} Requested by: ${who}. Approve once / Deny.`.replace(/\s+/g, ' '));
+        const afterTyping = afterTypingOverride ?? this.pendingFor(this.pendingScope(ctx));
+        // #678 N2: a newline typed after a read submits whatever the previous member was.
+        const irreversible = afterTyping || (typedNewline && tainted);
+        const effects: ToolsetEffectKind[] = irreversible ? ['submit', 'irreversible-ui-action'] : ['submit'];
+        const decision: ToolsetDecision = irreversible || this.toolset === 'computer' ? 'require_approval' : 'allow';
+        const signals = typedNewline ? ['submit-key', 'typed-newline'] : ['submit-key'];
+        const title = typedNewline
+          ? `Type text that ${/[^\r\n]$/.test(text) ? 'includes' : 'ends with'} Enter${where}?`
+          : `Press Enter${where}?`;
+        const risk = typedNewline ? ['This submits a form or sends a message.'] : afterTyping ? ['This submits what was just typed.'] : [];
+        return finish(decision, effects, signals, afterTyping ? 'submit-after-typing' : typedNewline ? 'submit-newline' : 'submit-key',
+          hold(title, risk));
       }
       if (this.toolset === 'computer') {
         // The desktop may have a terminal or run dialog focused: unclassifiable.
         return finish(tainted ? 'require_approval' : 'allow', ['input', 'unclassified'], ['desktop-keyboard'], 'desktop-keyboard',
-          `Type on the desktop? ShieldCortex cannot tell which window has focus. ${because} Requested by: ${who}. Approve once / Deny.`);
+          hold('Type on the desktop?', ['ShieldCortex cannot tell which window has focus.']));
       }
-      return finish('allow', ['input'], [], 'typed-text', `Type into a field${where}.`);
+      return finish('allow', ['input'], [], 'typed-text', composeCard(`Type into a field${where}.`, []));
     }
 
     // 5. Clicks: resolve a ref through the catalogue; a coordinate is opaque.
@@ -711,73 +905,175 @@ export class ToolsetGuard {
         const el = this.lookupRef(ctx, ref);
         if (el) {
           const label = cardSafe(el.label);
+          const role = el.role.length > 12 ? 'element' : el.role;
           if (this.lexicon.test(el.label)) {
             return finish('require_approval', ['irreversible-ui-action'], ['irreversible-click', `role:${el.role}`], 'irreversible-click',
-              `Click the ${el.role} labelled "${label}"${where}? ${because} This could spend money, send something or delete something. Requested by: ${who}. Approve once / Deny.`);
+              hold(`Click the ${role} labelled "${label}"${where}?`, ['This could spend money, send something or delete something.']));
           }
           if (el.role === 'link' || el.role === 'a') {
             // The catalogue has the label, not the href: once tainted, the page
             // could be pointing the link anywhere, so it is held.
             if (tainted) {
               return finish('require_approval', ['network-fetch'], ['click-link-tainted', `role:${el.role}`], 'click-link-tainted',
-                `Follow the link labelled "${label}"${where}? ShieldCortex cannot see where this link goes. ${because} Requested by: ${who}. Approve once / Deny.`);
+                hold(`Follow the link labelled "${label}"${where}?`, ['ShieldCortex cannot see where this link goes.']));
             }
             return finish('allow', ['network-fetch'], [`role:${el.role}`], 'click-link',
-              `Follow the link labelled "${label}"${where}.`);
+              composeCard(`Follow the link labelled "${label}"${where}.`, []));
           }
           return finish('allow', ['ui-action'], [`role:${el.role}`], 'click-element',
-            `Click the ${el.role} labelled "${label}"${where}.`);
+            composeCard(`Click the ${role} labelled "${label}"${where}.`, []));
         }
         return finish(tainted ? 'require_approval' : 'allow', ['unclassified'], ['click-unresolved-ref'], 'click-unresolved-ref',
-          `Click an element${where}? ShieldCortex has no record of what this element is. ${because} Requested by: ${who}. Approve once / Deny.`);
+          hold(`Click an element${where}?`, ['ShieldCortex has no record of what this element is.']));
       }
       const kind = this.toolset === 'computer' ? 'on the screen (desktop)' : `at a point${where}`;
       return finish(tainted ? 'require_approval' : 'allow', ['unclassified'], ['click-coordinate'], 'click-coordinate',
-        `Click ${kind}? ShieldCortex cannot tell what this click does. ${because} Requested by: ${who}. Approve once / Deny.`);
+        hold(`Click ${kind}?`, ['ShieldCortex cannot tell what this click does.']));
     }
 
     // 6. Observation and pointer movement: no effect, but untrusted content.
     if (NO_EFFECT_MEMBERS.has(member)) {
-      return finish('allow', ['observe'], [], 'observe', `Read or look${where}.`);
+      return finish('allow', ['observe'], [], 'observe', composeCard(`Read or look${where}.`, []));
     }
 
     // 7. Anything else: fail closed on classification (ADR-002 §2.4).
     return finish(tainted ? 'require_approval' : 'allow', ['unclassified'], ['member-unknown'], 'member-unknown',
-      `Run "${cardSafe(member, 40)}"${where}? ShieldCortex does not recognise this action. ${because} Requested by: ${who}. Approve once / Deny.`);
+      hold(`Run "${cardSafe(member, 40)}"${where}?`, ['ShieldCortex does not recognise this action.']));
   }
 
   // ── Hook adapters ──
 
-  /** A `confirm` callable for the SDK class. */
+  /**
+   * A `confirm` callable for the SDK class. Observe: the host's own answer (or
+   * `true`). Enforce: `allow` approves, `block` refuses without asking, and
+   * `require_approval` asks `inner(ctx, card)` and approves only on exactly
+   * `true` within `approvalTimeoutMs`, recording a single-use approval bound to
+   * (toolset, member, tab host, input hash) that `execute` must spend.
+   */
   confirm(inner?: ToolsetConfirmInner): (ctx: ToolsetConfirmContext) => Promise<boolean> {
     return async (ctx: ToolsetConfirmContext): Promise<boolean> => {
+      const scope = this.pendingScope(ctx);
+      const afterTyping = this.pendingFor(scope);
       const verdict = this.classify(ctx);
-      const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, tabURL: ctx.tabURL, tabId: ctx.tabId };
+      const textGenerations = new Map<string, number>();
+      for (const relevant of scope === UNKNOWN_TAB ? this.textGenerations.keys() : [scope, UNKNOWN_TAB]) {
+        textGenerations.set(relevant, this.textGenerations.get(relevant) ?? 0);
+      }
+      const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, scope, afterTyping,
+        textGenerations, addedText: false, tabURL: ctx.tabURL, tabId: ctx.tabId };
       this.confirmed.set(confirmKey(ctx.toolUse?.id, ctx.member), record);
-      this.previousMember = ctx.member;
+      const binding = approvalBinding(this.toolset, ctx.member, hostOf(ctx.tabURL), verdict.inputHash);
+      const card: ToolsetApprovalCard = { ...verdict, approvalKey: hashToolCall(binding.tool, binding.input) };
 
       let answer: boolean;
       let hostAnswer: boolean | undefined;
       let outcome: ToolsetAuditEvent['outcome'];
+      let signals = verdict.signals;
       if (this.mode === 'observe') {
-        hostAnswer = inner ? (await inner(ctx, verdict)) === true : undefined;
+        hostAnswer = inner ? (await inner(ctx, card)) === true : undefined;
         answer = inner ? hostAnswer === true : true;
         outcome = 'observed';
       } else if (verdict.decision === 'block') {
         answer = false;
         outcome = 'refused';
       } else if (verdict.decision === 'require_approval') {
-        hostAnswer = inner ? (await inner(ctx, verdict)) === true : false;
-        answer = hostAnswer;
+        const held = await this.hold(ctx, card, binding, inner);
+        hostAnswer = inner ? held.hostAnswer : undefined;
+        answer = held.approved;
+        if (answer) record.approvalKey = card.approvalKey;
+        signals = [...verdict.signals, held.signal];
         outcome = answer ? 'asked' : 'refused';
       } else {
         answer = true;
         outcome = 'allowed';
       }
       record.approved = answer;
-      this.emit({ kind: 'call', ctx, verdict, outcome, hostAnswer });
+      // Any typing attempt leaves text pending, even when refused. Only a
+      // submit that actually runs through execute may retire its own scope.
+      {
+        const text = KEYBOARD_MEMBERS.has(ctx.member) ? textOfKeyboardInput(ctx.member, ctx.input) : '';
+        if ((ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) {
+          this.addPendingText(scope);
+          record.addedText = true;
+        }
+      }
+      this.emit({ kind: 'call', ctx, verdict: { ...verdict, signals }, outcome, hostAnswer });
       return answer;
     };
+  }
+
+  /**
+   * Enforce HOLD: record the request in the bounded-approval store, ask the
+   * host, and mark the record approved only on an exact `true`. Everything else
+   * (no approver, another value, an exception, a timeout, an aborted call, a
+   * store that cannot be written) refuses, and a refused request is removed.
+   */
+  private async hold(
+    ctx: ToolsetConfirmContext,
+    card: ToolsetApprovalCard,
+    binding: ReturnType<typeof approvalBinding>,
+    inner: ToolsetConfirmInner | undefined,
+  ): Promise<{ approved: boolean; hostAnswer: boolean; signal: string }> {
+    if (!inner) return { approved: false, hostAnswer: false, signal: 'approval-no-approver' };
+    const store = { home: this.approvalsHome, now: this.now() };
+    try {
+      recordPending({ tool: binding.tool, input: binding.input, summary: card.card, signals: card.signals }, store);
+    } catch {
+      return { approved: false, hostAnswer: false, signal: 'approval-store-error' };
+    }
+    const deadline = performance.now() + this.approvalTimeoutMs;
+    let asked = await this.askHost(ctx, card, inner, deadline);
+    if (asked === true && performance.now() > deadline) asked = 'approval-timeout';
+    if (asked === true) {
+      try {
+        const granted = approveRequest(card.approvalKey, { ...store, now: this.now(), ttlMs: this.approvalTtlMs });
+        // `already-approved`: an earlier grant for the same bytes is still live
+        // and unspent; the host has just said yes to it again.
+        if (granted.ok || granted.reason === 'already-approved') {
+          return { approved: true, hostAnswer: true, signal: 'approval-granted' };
+        }
+      } catch {
+        /* fall through: refuse */
+      }
+      return { approved: false, hostAnswer: true, signal: 'approval-store-error' };
+    }
+    try {
+      denyRequest(card.approvalKey, { ...store, now: this.now() });
+    } catch {
+      /* the pending record ages out of the store on its own */
+    }
+    return { approved: false, hostAnswer: false, signal: asked };
+  }
+
+  /** The host's answer: `true` only for exactly `true` before the deadline. */
+  private async askHost(
+    ctx: ToolsetConfirmContext,
+    card: ToolsetApprovalCard,
+    inner: ToolsetConfirmInner,
+    deadline: number,
+  ): Promise<true | 'approval-not-true' | 'approval-error' | 'approval-timeout' | 'approval-aborted'> {
+    if (ctx.signal?.aborted) return 'approval-aborted';
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const TIMEOUT = Symbol('timeout');
+    const ABORTED = Symbol('aborted');
+    const stop = new Promise<symbol>((resolve) => {
+      timer = setTimeout(() => resolve(TIMEOUT), this.approvalTimeoutMs);
+      onAbort = () => resolve(ABORTED);
+      ctx.signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      const value = await Promise.race([Promise.resolve().then(() => inner(ctx, card)), stop]);
+      if (value === TIMEOUT) return 'approval-timeout';
+      if (value === ABORTED) return 'approval-aborted';
+      if (value === true && performance.now() > deadline) return 'approval-timeout';
+      return value === true ? true : 'approval-not-true';
+    } catch {
+      return 'approval-error';
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) ctx.signal?.removeEventListener('abort', onAbort);
+    }
   }
 
   /**
@@ -838,6 +1134,32 @@ export class ToolsetGuard {
     const asked = asRecord(ctx.input).tab_id;
     if (typeof asked === 'string' && asked) return asked;
     return this.activeTab;
+  }
+
+  private pendingScope(ctx: ToolsetConfirmContext): string {
+    return this.toolset === 'computer' ? 'desktop' : this.resolveTab(ctx) ?? UNKNOWN_TAB;
+  }
+
+  private pendingFor(scope: string): boolean {
+    return this.pendingText.has(scope) || this.pendingText.has(UNKNOWN_TAB)
+      || (scope === UNKNOWN_TAB && this.pendingText.size > 0);
+  }
+
+  private addPendingText(scope: string): void {
+    this.pendingText.add(scope);
+    this.textGenerations.set(scope, (this.textGenerations.get(scope) ?? 0) + 1);
+  }
+
+  /** New text since confirm, excluding only this call's own confirm-time addition. */
+  private textArrivedSince(seen: ConfirmedCall, ownExecuteText = false): boolean {
+    const relevant = seen.scope === UNKNOWN_TAB
+      ? this.textGenerations.keys() : [seen.scope, UNKNOWN_TAB];
+    for (const scope of relevant) {
+      const before = seen.textGenerations.get(scope) ?? 0;
+      const own = scope === seen.scope ? Number(seen.addedText) + Number(ownExecuteText) : 0;
+      if ((this.textGenerations.get(scope) ?? 0) > before + own) return true;
+    }
+    return false;
   }
 
   /** Record a `read_page` / `find` result against the tab and page it read. */
@@ -939,14 +1261,21 @@ export class ToolsetGuard {
       toolUse: ctx.toolUse,
     };
     this.confirmed.delete(key);
-    const verdict = this.classify(callCtx);
+    const laterText = seen !== undefined && this.textArrivedSince(seen);
+    const verdict = this.classifyWith(callCtx, seen ? seen.afterTyping || laterText : undefined);
     if (seen === undefined || seen.inputHash !== hash) {
-      const signal = seen === undefined ? 'unconfirmed' : 'mutated_input';
-      this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, signal] }, outcome: this.mode === 'enforce' ? 'refused' : 'observed' });
+      const signals = [...verdict.signals, seen === undefined ? 'unconfirmed' : 'mutated_input'];
+      // Enforce with `confirm` skipped: the DENY set and HOLD still apply to
+      // these bytes, and the audit row says which one refused them.
+      if (this.mode === 'enforce' && seen === undefined && verdict.decision !== 'allow') {
+        signals.push(verdict.decision === 'block' ? 'denied-at-execute' : 'held-at-execute');
+      }
+      this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals }, outcome: this.mode === 'enforce' ? 'refused' : 'observed' });
       if (this.mode === 'enforce') {
-        throw new this.ErrorCtor(seen === undefined
-          ? 'blocked: this action was not approved'
-          : 'blocked: the action changed after it was approved');
+        if (seen !== undefined) throw new this.ErrorCtor('blocked: the action changed after it was approved');
+        if (verdict.decision === 'block') throw new this.ErrorCtor('blocked: ShieldCortex does not allow this action');
+        if (verdict.decision === 'require_approval') throw new this.ErrorCtor('blocked: this action needs approval and was not confirmed');
+        throw new this.ErrorCtor('blocked: this action was not approved');
       }
     }
     // Enforce: the DENY set applies to the bytes about to run even when the
@@ -959,12 +1288,43 @@ export class ToolsetGuard {
       this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, 'refused-at-confirm'] }, outcome: 'refused' });
       throw new this.ErrorCtor('blocked: this action was refused');
     }
+    // Enforce HOLD: a held call runs only by spending the approval `confirm`
+    // recorded for these exact bytes on this host. Single use: the same
+    // approval cannot run a second call, and an expired one runs nothing.
+    if (this.mode === 'enforce' && seen !== undefined && (seen.approvalKey !== undefined || verdict.decision === 'require_approval')) {
+      const binding = approvalBinding(this.toolset, name, hostOf(seen.tabURL), hash);
+      let spent = false;
+      if (seen.approvalKey !== undefined && hashToolCall(binding.tool, binding.input) === seen.approvalKey) {
+        try {
+          spent = consumeApproval(binding.tool, binding.input, { home: this.approvalsHome, now: this.now() }) !== null;
+        } catch {
+          spent = false;
+        }
+      }
+      if (!spent) {
+        const signal = seen.approvalKey === undefined ? 'held-at-execute' : 'approval-not-live';
+        this.emit({ kind: 'call', ctx: callCtx, verdict: { ...verdict, signals: [...verdict.signals, signal] }, outcome: 'refused' });
+        throw new this.ErrorCtor('blocked: this action needs an approval that is not on record');
+      }
+    }
 
+    const scope = seen?.scope ?? this.pendingScope(callCtx);
+    const typed = KEYBOARD_MEMBERS.has(name) ? textOfKeyboardInput(name, input) : '';
+    if ((name === 'type' || name === 'type_' || name === 'form_input') && typed.length > 0) this.addPendingText(scope);
     let result: R;
     try {
       result = await next(ctx, name, input);
     } catch (error) {
       throw this.observeDriverError(name, callCtx, error);
+    }
+
+    // A different call may have typed while the driver's dispatch was in flight.
+    const textBeforeRetirement = seen !== undefined && this.textArrivedSince(seen,
+      (name === 'type' || name === 'type_' || name === 'form_input') && typed.length > 0);
+    if (seen?.approved && !textBeforeRetirement && (name === 'key' || name === 'hold_key') && pressesSubmitKey(typed)) this.pendingText.delete(scope);
+    if ((name === 'type' || name === 'type_') && /[\r\n]/.test(typed)) {
+      if (/[\r\n][^\r\n]+$/.test(typed)) this.addPendingText(scope);
+      else if (!textBeforeRetirement) this.pendingText.delete(scope);
     }
 
     // Post: a navigation ends the page lifetime of the tab it ran in.
@@ -1055,9 +1415,9 @@ export class ToolsetGuard {
     if (!this.sink) return;
     const { ctx, verdict } = args;
     const input = asRecord(ctx.input);
-    let host = hostOf(ctx.tabURL);
+    let host = displayHost(ctx.tabURL);
     if ((ctx.member === 'navigate' || ctx.member === 'new_tab') && typeof input.url === 'string') {
-      host = hostOf(input.url) ?? host;
+      host = displayHost(input.url) ?? host;
     }
     let elementRole: string | undefined;
     let elementLabel: string | undefined;
@@ -1070,7 +1430,7 @@ export class ToolsetGuard {
     const event: ToolsetAuditEvent = {
       kind: args.kind,
       toolset: this.toolset,
-      member: ctx.member,
+      member: auditMember(ctx.member),
       mode: this.mode,
       decision: verdict.decision,
       effects: verdict.effects,
