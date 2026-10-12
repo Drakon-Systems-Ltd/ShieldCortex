@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { evaluateToolCall, detectScriptInvocations } from '../tool-action-guard.js';
+import { evaluateToolCall, detectScriptInvocations, scriptDiscoverySurface } from '../tool-action-guard.js';
 import { bodyIsAllDataRead, splitDataReadStatements } from '../heredoc-data-read.js';
 
 /**
@@ -74,7 +74,7 @@ describe('#713 — a body made only of literal-path data reads is masked', () =>
   it.each(Object.entries(DATA_READS))('%s: the data file is not offered to the resolver', (_name, [interp, body, path]) => {
     const cmd = heredoc(interp, body);
     expect([cmd, asked(cmd)]).toEqual([cmd, expect.not.arrayContaining([path])]);
-    expect([cmd, detectScriptInvocations(cmd).map(s => s.path)]).toEqual([cmd, expect.not.arrayContaining([path])]);
+    expect([cmd, detectScriptInvocations(scriptDiscoverySurface(cmd)).map(s => s.path)]).toEqual([cmd, expect.not.arrayContaining([path])]);
   });
 
   it('the baseline is the unmasked 5.5.0 scan: it still offers the data file the mask hides', () => {
@@ -461,7 +461,7 @@ const FALLBACK_SCAN_CAP = 4096;
 
 function timedDetect(cmd: string): { paths: string[]; ms: number } {
   const t0 = performance.now();
-  const paths = detectScriptInvocations(cmd).map(s => s.path);
+  const paths = detectScriptInvocations(scriptDiscoverySurface(cmd)).map(s => s.path);
   return { paths, ms: performance.now() - t0 };
 }
 
@@ -519,7 +519,7 @@ describe('#713 — the splitter and idiom matchers are linear', () => {
         for (const body of bodies) {
           const t0 = performance.now();
           bodyIsAllDataRead(body, 'python');
-          detectScriptInvocations(heredoc('python3 -', body));
+          detectScriptInvocations(scriptDiscoverySurface(heredoc('python3 -', body)));
           expect(performance.now() - t0).toBeLessThan(TIME_BUDGET_MS);
         }
       });
@@ -539,7 +539,7 @@ describe('#713 — the splitter and idiom matchers are linear', () => {
     ] as Array<[string, boolean]>) {
       const t0 = performance.now();
       expect(bodyIsAllDataRead(body, 'python')).toBe(masked);
-      detectScriptInvocations(heredoc('python3 -', body));
+      detectScriptInvocations(scriptDiscoverySurface(heredoc('python3 -', body)));
       expect(performance.now() - t0).toBeLessThan(TIME_BUDGET_MS);
     }
   });
@@ -620,6 +620,54 @@ describe('#713 final B1 — preprocessing cannot manufacture a safe comment boun
     const baseline = unmasked(cmd);
     expect(baseline).toContain(path);
     expect(asked(cmd)).toEqual(baseline);
+  });
+});
+
+/**
+ * Review round 3 — C1. The round-2 fix kept every shell comment holding a CR
+ * so the relief could see the terminator, but a kept comment reaches script
+ * discovery, whose list stops at eight entries. Eight ordinary CRLF comments
+ * of the form `# ; python3 /tmp/fake.py` then filled the list before the file
+ * the interpreter really runs, which 5.5.0 (comments stripped) discovered.
+ * The relief now judges the original command, and comment stripping is the
+ * 5.5.0 rule again: a comment is never an action and never evidence.
+ */
+const C1_REAL = '/tmp/c1/real.py';
+const c1Comments = (eol: string): string =>
+  Array.from({ length: 8 }, (_, i) => `# ; python3 /tmp/c1/fake${i}.py${eol}`).join('');
+
+describe('#713 r3 C1 — inert comments cannot saturate script discovery', () => {
+  it.each([
+    ['CRLF', '\r\n'],
+    ['LF (control)', '\n'],
+  ])('shell: eight %s comments naming files, then the real invocation', (_name, eol) => {
+    const cmd = `${c1Comments(eol)}python3 ${C1_REAL}`;
+    const baseline = unmasked(cmd);
+    expect(baseline).toContain(C1_REAL);
+    expect(asked(cmd)).toEqual(baseline);
+    expect(asked(cmd)).not.toEqual(expect.arrayContaining(['/tmp/c1/fake0.py']));
+  });
+
+  it.each([
+    ['CRLF', '\r\n'],
+    ['LF (control)', '\n'],
+  ])('heredoc: eight %s comments naming files, then a loader on the real file', (_name, eol) => {
+    const cmd = heredoc('python3 -', `${c1Comments(eol)}exec(open('${C1_REAL}').read())`);
+    const baseline = unmasked(cmd);
+    expect(baseline).toContain(C1_REAL);
+    expect(asked(cmd)).toEqual(baseline);
+  });
+
+  it('a lone-CR comment still refuses the relief on the original body, with stripping unchanged', () => {
+    // Raw bytes: `# x<CR>exec(...)<LF>` — Python ends the comment at the CR and
+    // runs the loader. The relief must refuse on the ORIGINAL body even though
+    // the stripped text (comment removed to LF) shows nothing of it.
+    const cmd = heredoc('python3 -', `import json\n# x\rexec(open('${C1_REAL}').read())\nprint(1)`);
+    expect(asked(cmd)).toEqual(unmasked(cmd));
+    // And the plain data read next to it is still relieved.
+    const ok = heredoc('python3 -', "import json\n# x\nrows = json.load(open('/tmp/x/table.md'))\nprint(len(rows))");
+    expect(unmasked(ok)).toEqual(expect.arrayContaining(['/tmp/x/table.md']));
+    expect(asked(ok)).toEqual([]);
   });
 });
 

@@ -4159,15 +4159,18 @@ function isPurePrint(cmd: string): boolean {
 
 /**
  * Strip `#` comments so a token mentioned only in a comment is not an action.
- * Keep the whole comment when it contains CR, U+2028 or U+2029 (#713).
- * A lone CR can end Python, PHP or Node comments; U+2028 and U+2029 can end
- * Node comments. Stripping everything but the terminator could manufacture a
- * CRLF from a lone CR and make an interpreter heredoc look like an all-data-read
- * body. Ordinary comments are stripped as before.
+ *
+ * Unchanged since 5.5.0, deliberately (#713 review round 3). An earlier #713
+ * round kept any comment holding a lone CR, U+2028 or U+2029 so the heredoc
+ * data-read relief could see the terminator; but a kept comment reaches
+ * discovery, whose list is capped at `MAX_DETECTED_SCRIPTS`, so eight
+ * ordinary CRLF comments of the form `# ; python3 /tmp/fake.py` filled the list
+ * before the file the interpreter really runs was reached. The relief now
+ * judges the ORIGINAL command (`dataReadHeredocDiscoverySurface`), so this
+ * function never has to carry evidence for it.
  */
 function stripComments(cmd: string): string {
-  return cmd.replace(/(^|\s)#[^\n]*/g, (m, pre: string) =>
-    /[\r\u2028\u2029]/.test(m.slice(pre.length)) ? m : `${pre} `);
+  return cmd.replace(/(^|\s)#[^\n]*/g, '$1 ');
 }
 
 // Interpreters that EXECUTE a heredoc body they read. If one of these introduces
@@ -4521,11 +4524,13 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
-  // #713: a whole-command interpreter heredoc is masked only when its body is
-  // made solely of allow-listed data reads (see `maskDataReadHeredocBodies`).
-  // The #686 "no sink found" test was withdrawn in 5.6.0 (#712): no deny-list
-  // of code loaders could be shown complete.
-  const surface = maskDataReadHeredocBodies(maskSinkFreeInlinePrograms(execSurface));
+  // #713: the whole-command heredoc data-read relief is NOT applied here. It is
+  // decided once, on the original command, by `dataReadHeredocDiscoverySurface`
+  // at the `evaluateToolCall` boundary, which hands this function a surface
+  // with the body already blanked. Nested calls (script folds, `bash -c`
+  // recursion, the #217 pass) therefore never relieve anything: strictly more
+  // scanning, never less.
+  const surface = maskSinkFreeInlinePrograms(execSurface);
 
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
@@ -5467,14 +5472,49 @@ const DATA_READ_HEREDOC_INTRO = new RegExp(
  * heredoc IS shell and is never masked. Length-preserving, so every offset
  * computed against the original text stays valid.
  */
-function maskDataReadHeredocBodies(text: string): string {
-  const h = wholeCommandHeredocProgram(text);
-  if (!h) return text;
-  if (!DATA_READ_HEREDOC_INTRO.test(text.slice(0, h.start))) return text;
-  const body = text.slice(h.start, h.end);
-  if (hasShellOutSink(body, h.lang)) return text;
-  if (!bodyIsAllDataRead(body, h.lang)) return text;
-  return text.slice(0, h.start) + ' '.repeat(h.end - h.start) + text.slice(h.end);
+function dataReadHeredocRelief(rawCommand: string): boolean {
+  const h = wholeCommandHeredocProgram(rawCommand);
+  if (!h) return false;
+  if (!DATA_READ_HEREDOC_INTRO.test(rawCommand.slice(0, h.start))) return false;
+  const body = rawCommand.slice(h.start, h.end);
+  if (hasShellOutSink(body, h.lang)) return false;
+  return bodyIsAllDataRead(body, h.lang);
+}
+
+/**
+ * The surface script discovery runs on for a command: `execCommand` (the
+ * comment-stripped scan text) with the whole-command heredoc body blanked when
+ * the relief above holds, otherwise `execCommand` untouched.
+ *
+ * Eligibility is judged on `rawCommand`, the bytes the interpreter will read,
+ * never on the stripped text (#713 review rounds 2-3). Shell-comment stripping
+ * runs to LF only, so it once manufactured a CRLF from a lone CR and hid a
+ * loader behind a comment the classifier then accepted; keeping such comments
+ * instead let them saturate discovery's bounded list. Judging the original
+ * body needs neither: the classifier sees every terminator as the interpreter
+ * does, and `stripComments` stays exactly as 5.5.0 scanned.
+ *
+ * The blank is applied to the heredoc that `wholeCommandHeredocProgram` finds
+ * in `execCommand` itself, so offsets are never carried across the two texts.
+ * If the stripped text no longer shows the same whole-command shape and
+ * language, nothing is masked: fail closed.
+ */
+function dataReadHeredocDiscoverySurface(rawCommand: string, execCommand: string): string {
+  if (!rawCommand.includes('<<') || !dataReadHeredocRelief(rawCommand)) return execCommand;
+  const raw = wholeCommandHeredocProgram(rawCommand);
+  const h = wholeCommandHeredocProgram(execCommand);
+  if (!raw || !h || h.lang !== raw.lang) return execCommand;
+  return execCommand.slice(0, h.start) + ' '.repeat(h.end - h.start) + execCommand.slice(h.end);
+}
+
+/**
+ * The exact text `evaluateToolCall` hands to script discovery for `command`:
+ * `commandScanText` with the #713 relief applied. Exported so tests exercise
+ * the production composition rather than `detectScriptInvocations` alone,
+ * which never relieves anything by itself.
+ */
+export function scriptDiscoverySurface(command: string): string {
+  return dataReadHeredocDiscoverySurface(command, commandScanText(command));
 }
 
 function interpreterHeredocRegions(text: string): ScanRegion[] {
@@ -5656,10 +5696,6 @@ function inlineProgramRegions(text: string): ScanRegion[] {
  * still found, because there the path really is in command position.
  */
 function maskSinkFreeInlinePrograms(text: string): string {
-  // A `-c`-looking span inside an interpreter heredoc is body text, not a
-  // shell inline program. Blanking it could erase body line terminators before
-  // the data-read classifier sees them, so preserve this whole-command shape.
-  if (wholeCommandHeredocProgram(text)) return text;
   const regions = inlineProgramRegions(text).filter(r => !r.hasSink);
   if (regions.length === 0) return text;
   let out = text;
@@ -6451,7 +6487,9 @@ function evaluateToolCallCore(
   // work rather than tokenise 50k+ chars of it.
   const fold: ScriptFold = command.length > OVERSIZED_COMMAND_LENGTH
     ? { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] }
-    : foldScriptSources(execCommand, options?.resolveScriptSource, options?.isReviewedScript, subst);
+    : foldScriptSources(
+        dataReadHeredocDiscoverySurface(command, execCommand),
+        options?.resolveScriptSource, options?.isReviewedScript, subst);
 
   // #189: every verdict minted past this point records which files the
   // reviewed-script allowlist exempted from folding — including a `block`

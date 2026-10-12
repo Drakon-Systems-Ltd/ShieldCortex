@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { evaluateToolCall, detectScriptInvocations } from '../tool-action-guard.js';
+import { evaluateToolCall, detectScriptInvocations, scriptDiscoverySurface } from '../tool-action-guard.js';
 
 /**
  * Issue #661 — script folding was inconsistent across the three ways an
@@ -79,7 +79,7 @@ function verdict(command: string, files: Record<string, string>) {
 
 describe('#661 (1) / #713 — a data-read-only heredoc program is masked by the allow-list', () => {
   it('does not fold the data file the heredoc program opens (#713)', () => {
-    expect(detectScriptInvocations(asHeredoc(READ_PROGRAM)).map(s => s.path)).not.toContain(TABLE_PATH);
+    expect(detectScriptInvocations(scriptDiscoverySurface(asHeredoc(READ_PROGRAM))).map(s => s.path)).not.toContain(TABLE_PATH);
   });
 
   it('the live repro is allowed again: the table prose is not folded (#661 false positive fixed by #713)', () => {
@@ -90,12 +90,12 @@ describe('#661 (1) / #713 — a data-read-only heredoc program is masked by the 
 
   it('a double-quoted delimiter is masked too', () => {
     const cmd = asHeredoc(READ_PROGRAM, '"EOF"');
-    expect(detectScriptInvocations(cmd).map(s => s.path)).not.toContain(TABLE_PATH);
+    expect(detectScriptInvocations(scriptDiscoverySurface(cmd)).map(s => s.path)).not.toContain(TABLE_PATH);
   });
 
   it('a Node data-read body is masked', () => {
     const cmd = `node - <<'EOF'\nconst t = require('fs').readFileSync(\n'${TABLE_PATH}')\nconsole.log(t.length)\nEOF`;
-    expect(detectScriptInvocations(cmd).map(s => s.path)).not.toContain(TABLE_PATH);
+    expect(detectScriptInvocations(scriptDiscoverySurface(cmd)).map(s => s.path)).not.toContain(TABLE_PATH);
   });
 
   it('an UNQUOTED delimiter earns no relief: the outer shell expands the body, so it is not provably inert', () => {
@@ -354,7 +354,7 @@ describe('#686 / #712 / #713 — only the whole-command form with an allow-liste
   });
 
   it.each(Object.entries(RELIEF))('relief form with an allow-listed body — %s: masked, payload not folded (#713)', (_name, cmd) => {
-    expect(detectScriptInvocations(cmd).map(s => s.path)).not.toContain(P);
+    expect(detectScriptInvocations(scriptDiscoverySurface(cmd)).map(s => s.path)).not.toContain(P);
     expect(verdict(cmd, FILES).decision).toBe('allow');
   });
 

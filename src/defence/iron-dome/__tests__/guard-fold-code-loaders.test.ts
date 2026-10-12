@@ -1,5 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
-import { evaluateToolCall, detectScriptInvocations } from '../tool-action-guard.js';
+import { evaluateToolCall, detectScriptInvocations, scriptDiscoverySurface } from '../tool-action-guard.js';
 
 /**
  * #661 follow-up — v5.6.0 release review (GPT-6 Astra, Grok), PR #712.
@@ -129,7 +129,7 @@ describe('#661 follow-up — controls', () => {
       heredoc('python3 -', "import re, json\ntext = open('/tmp/x/table.md').read()\nrows = json.loads(text) if text.startswith('[') else []\nprint(len(re.findall('x', text)), len(rows))"),
       heredoc('ruby -', "puts File.read('/tmp/x/table.md').length"),
     ]) {
-      expect([cmd, detectScriptInvocations(cmd).map(s => s.path)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
+      expect([cmd, detectScriptInvocations(scriptDiscoverySurface(cmd)).map(s => s.path)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
       expect([cmd, asked(cmd)]).toEqual([cmd, expect.not.arrayContaining(['/tmp/x/table.md'])]);
     }
   });
