@@ -1464,6 +1464,94 @@ const GLOBAL_FLAG = /^(?:\-g|--global|--location=global)$/i;
  */
 const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|Popen|check_call|check_output)|child_process\.(?:exec|execSync|spawn|spawnSync)|\.exec(?:Sync|File|FileSync)?|\.spawn(?:Sync)?|(?:^|[^\w.])(?:exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)\s*\()/i;
 
+// Read only direct, quoted argv literals in an interpreter exec call. Each
+// candidate is capped at 8 KB, and scans never overlap: a sink that sits
+// inside the quoted arguments an earlier sink already read is part of that
+// call's data, so the total work stays linear in the payload.
+//
+// There is deliberately no comment or string tracking before a sink. A
+// tracker that has to agree with Python, JS and shell lexing on `#`, `//` and
+// regex literals desyncs (`this.#x`, `a // 2`, `/'/`) and then HIDES a real
+// call; a commented-out global install that still asks is the safe error.
+const GLOBAL_ARGV_SINK = /\b(subprocess\.(?:run|call|Popen|check_call|check_output)|(?:child_process\.)?(?:spawn|spawnSync|execFile|execFileSync)|\.(?:spawn|spawnSync|execFile|execFileSync))\s*\(/gi;
+const ARGV_SCAN_CAP = 8192;
+
+/** The quoted argv literals right after a sink's `(`, or null; `next` is where reading stopped. */
+function readQuotedArgv(text: string, from: number): { args: string[] | null; next: number } {
+  let i = from;
+  const end = Math.min(text.length, from + ARGV_SCAN_CAP);
+  const skipSpace = () => { while (i < end && /\s/.test(text[i])) i++; };
+  const readString = (): string | null => {
+    const quote = text[i];
+    if (quote !== '"' && quote !== "'") return null;
+    const start = ++i;
+    while (i < end) {
+      if (text[i] === '\\') { i += 2; continue; }
+      if (text[i] === quote) return text.slice(start, i++);
+      i++;
+    }
+    return null;
+  };
+  const fail = () => ({ args: null, next: i });
+  skipSpace();
+  const args: string[] = [];
+  if (text[i] !== '[') {
+    // spawn("cmd", [...]) / execFile("cmd", [...])
+    const command = readString();
+    if (command === null) return fail();
+    args.push(command);
+    skipSpace();
+    if (text[i++] !== ',') return fail();
+    skipSpace();
+  }
+  if (text[i++] !== '[') return fail();
+  while (i < end) {
+    skipSpace();
+    if (text[i] === ']') return { args, next: i + 1 };
+    const arg = readString();
+    if (arg === null) return fail();
+    args.push(arg);
+    skipSpace();
+    if (text[i] === ']') return { args, next: i + 1 };
+    if (text[i++] !== ',') return fail();
+  }
+  return fail();
+}
+
+/** An argv list that is an npm-family global install (npx/corepack wrappers unwrapped). */
+function argvIsGlobalInstall(args: readonly string[]): boolean {
+  let base = args[0]?.toLowerCase() ?? '';
+  let from = 1;
+  if (/^(?:npx|corepack)$/.test(base)) { base = args[1]?.toLowerCase() ?? ''; from = 2; }
+  if (!NPM_FAMILY.test(base)) return false;
+  const rest = args.slice(from);
+  const install = rest.some(a => INSTALL_VERB.test(a));
+  const global = rest.some((a, idx) => GLOBAL_FLAG.test(a)
+    || (a === '--location' && rest[idx + 1] === 'global'));
+  const yarnGlobalAdd = base === 'yarn'
+    && rest.some((a, idx) => a === 'global' && INSTALL_VERB.test(rest[idx + 1] ?? ''));
+  return (install && global) || yarnGlobalAdd;
+}
+
+/**
+ * A written script that runs a global install through an argv LIST
+ * (`subprocess.run(["npm", "install", "-g", x])`, `spawn("npm", ["-g", …])`).
+ * The DANGEROUS regex cannot see these (quotes sit where it wants whitespace),
+ * so this is both a proposer and a confirmer for `install-package-global`.
+ */
+function globalInstallArgvInvoked(text: string): boolean {
+  GLOBAL_ARGV_SINK.lastIndex = 0;
+  let consumedTo = 0;
+  let match: RegExpExecArray | null;
+  while ((match = GLOBAL_ARGV_SINK.exec(text)) !== null) {
+    if (match.index < consumedTo) continue;
+    const { args, next } = readQuotedArgv(text, GLOBAL_ARGV_SINK.lastIndex);
+    consumedTo = next;
+    if (args && argvIsGlobalInstall(args)) return true;
+  }
+  return false;
+}
+
 /**
  * #386 — install-package-global must be an INVOCATION, not vocabulary.
  * Write-content and shell DATA args often quote package installs in logs
@@ -1473,6 +1561,7 @@ const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|P
  */
 function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
+  if (globalInstallArgvInvoked(text)) return true;
   // Explicit interpreter / process APIs that run a string or argv containing a
   // global install. Order of install vs global flag does not matter.
   // Fail-closed on these sinks: write-time authoring of "run this install" is intent.
@@ -2619,6 +2708,10 @@ function fmtSpan(s: string): string { return s.trim().replace(/\s+/g, ' ').slice
 function matchSpans(patterns: Pattern[], text: string): Array<{ signal: string; span: string }> {
   const out: Array<{ signal: string; span: string }> = [];
   for (const p of patterns) {
+    // The global-install table regex has long lookaheads from each `npm`.
+    // Avoid retrying those lookaheads for every argv token when the surface
+    // has no global flag at all (the argv parser below still runs separately).
+    if (p.signal === 'install-package-global' && !/(?:-g|global)/i.test(text)) continue;
     const m = text.match(p.re);
     if (m) out.push({ signal: p.signal, span: fmtSpan(m[0]) });
   }
@@ -5621,6 +5714,10 @@ function scanWriteContentPayload(content: string): {
         ?? PIP_INSTALL_WINDOW_RE.exec(text)?.[0]
         ?? 'package install';
       dangerous.push({ signal: 'install-package', span: fmtSpan(span) });
+    }
+    if (!seen.has('install-package-global') && globalInstallArgvInvoked(text)) {
+      seen.add('install-package-global');
+      dangerous.push({ signal: 'install-package-global', span: 'global package install' });
     }
   });
   return { catastrophic, dangerous };
