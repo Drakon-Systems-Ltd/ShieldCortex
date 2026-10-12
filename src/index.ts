@@ -20,13 +20,15 @@
  *   shieldcortex audit --markdown        # Audit with Markdown output
  *   shieldcortex audit --ci              # Audit in CI mode (exit code reflects grade)
  *   shieldcortex status                  # Show database and system status
- *   shieldcortex quickstart              # Detect integrations and offer guided install
- *   shieldcortex quickstart --yes        # Install across all detected integrations
- *   shieldcortex setup                   # Configure Claude for proactive memory use
- *   shieldcortex install                 # Alias for setup
- *   shieldcortex install --with-stop-hook        # Opt in to the Stop hook (sampled per-turn extraction)
- *   shieldcortex install --with-session-end      # Opt in to the SessionEnd hook (final extraction on session exit)
- *   shieldcortex install --with-stop-hook --with-session-end   # Both at once
+ *   shieldcortex setup                   # Onboarding: detect hosts, ask before wiring each (#708)
+ *   shieldcortex setup --yes             # Wire every detected host without prompting
+ *   shieldcortex setup claude            # The Claude Code install, no table (same as `install`)
+ *   shieldcortex setup --with-stop-hook          # Opt in to the Stop hook (sampled per-turn extraction)
+ *   shieldcortex setup --with-session-end        # Opt in to the SessionEnd hook (final extraction on session exit)
+ *   shieldcortex setup --with-stop-hook --with-session-end   # Both at once
+ *   shieldcortex install                 # Compatibility: the Claude Code install, NOT the setup wizard
+ *   shieldcortex install --without-stop-hook     # Opt-outs (--without-*) go through install
+ *   shieldcortex quickstart              # Older name for setup's guided path (no hook flags, no uninstall)
  *   shieldcortex hook pre-compact        # Run pre-compact hook (for settings.json)
  *   shieldcortex hook session-start      # Run session-start hook (for settings.json)
  *   shieldcortex hook session-end        # Run session-end hook (for settings.json)
@@ -702,7 +704,7 @@ ${bold}COMMANDS${reset}
                         Pin a human-reviewed script (path + content hash)
                         so the guard stops folding its source; any edit re-gates it.
                         scan = discover cron-referenced scripts and TTY-batch-review new/changed
-  ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
+  ${cyan}quickstart${reset} [target]    Older name for setup's guided path (no hook flags or uninstall)
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
   ${cyan}review-copilot${reset} <action> Local AI Explainer for quarantine review (Pro)
@@ -711,12 +713,15 @@ ${bold}COMMANDS${reset}
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
   ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
-  ${cyan}setup${reset}                 Install ShieldCortex into your project
+  ${cyan}setup${reset} [target]        Start here: detects hosts, asks before wiring each
+                        Targets: claude, openclaw, hermes, copilot, codex, security
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
-                               --without-stop-hook / --without-session-end (opt out)
                                (absent flags leave existing opt-ins unchanged)
-                               Pass either to opt in; re-run without to opt out.
+                               Pass either to opt in; opt out with install --without-*.
+  ${cyan}install${reset} [flags]       The Claude Code install, kept for scripts. Not the
+                        setup wizard: \`setup claude\` runs the same install.
+                        Takes the hook flags; --without-* opt-outs need install.
   ${cyan}protect${reset}               Pin the security-critical config to a root-owned
                         policy lock the agent uid cannot write (needs root).
                         Pins the safe posture without reading config.json;
@@ -738,12 +743,12 @@ ${bold}OPTIONS${reset}
   --help, -h           Show this help message
 
 ${bold}EXAMPLES${reset}
-  shieldcortex quickstart
+  shieldcortex setup
   shieldcortex scan "ignore previous instructions"
   shieldcortex scan-skill ~/.claude/skills/my-skill/SKILL.md
   shieldcortex dashboard
   shieldcortex worker
-  shieldcortex install --with-stop-hook --with-session-end
+  shieldcortex setup --with-stop-hook --with-session-end
   shieldcortex cortex preflight --task "deploy site"
   shieldcortex license activate sc_pro_...
   shieldcortex config --cloud-enable --cloud-api-key <key>

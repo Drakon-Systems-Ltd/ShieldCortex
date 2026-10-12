@@ -35,7 +35,7 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 ### Updating by hand
 
 1. **Package** — `npm install -g shieldcortex@latest`. On a box with an earlier OpenClaw hook or plugin, npm's postinstall refreshes it and can restart the gateway (see Restart controls). How it decides what to refresh: [install-time refresh](openclaw-integration.md#install-time-refresh-postinstall).
-2. **Claude Code** — `shieldcortex install` re-runs the hook setup in `~/.claude/settings.json`: missing hooks added, old `npx` entries migrated, timeouts fixed. Existing Stop / SessionEnd opt-ins are left as they are.
+2. **Claude Code** — `shieldcortex setup claude` (or the older `shieldcortex install`, the same install) re-runs the hook setup in `~/.claude/settings.json`: missing hooks added, old `npx` entries migrated, timeouts fixed. Existing Stop / SessionEnd opt-ins are left as they are.
 3. **OpenClaw** — `openclaw plugins update @drakon-systems/shieldcortex-realtime@latest`, then `openclaw gateway restart` if the hook was refreshed too. `shieldcortex openclaw install` does plugin, hook and restart in one go (`--no-gateway-restart` to skip the restart). Pinned versions, forced reinstall and the update lock: [updating the plugin](openclaw-integration.md#updating-the-plugin).
 4. **Hermes** — `shieldcortex hermes install` copies the plugin into `~/.hermes/plugins/shieldcortex`; it gates tool calls once `hermes plugins enable shieldcortex` has run and the local API (`shieldcortex api`) is up. Restart the Hermes gateway after a refresh. `shieldcortex hermes status` reports presence, not enforcement.
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
@@ -166,6 +166,12 @@ SHIELDCORTEX_RECALL_LANE=cron       # or automation, subagent, interactive
 - Valid values: `interactive`, `cron`, `automation`, `subagent` (case and surrounding spaces are ignored). A valid pin wins over any marker in the prompt.
 - Unset or blank: no pin; the lane comes from prompt markers, and an unmarked turn is `interactive`.
 - **Any other value fails safe:** the turn is treated as `automation` (no recall unless you opted `automation` in, and then PUBLIC rows only). The recall log shows `laneSignal: "env:SHIELDCORTEX_RECALL_LANE:invalid"`, and `shieldcortex doctor` prints a WARN on its **Recall lane** row naming the bad value.
+
+#### Doctor: Recall repetition
+
+`shieldcortex doctor` reads the last few recall-log entries and warns on its **Recall repetition** row when the newest 4 `interactive` runs all returned the same top-k candidate set (at least 3 candidates). That was the sign of #717, where the recall query was built from the OpenClaw envelope instead of your words. The check only reads. It prints counts, never prompts, titles, ids or hashes. It skips cron, automation, subagent and unlabelled runs, and it treats 4 identical prompt hashes as one prompt asked 4 times, which does not warn.
+
+The warning is repetition evidence, not a proven root cause: asking about the same topic repeatedly, or an unmarked scheduled job recalling as `interactive`, does the same. It does not ask you to change any setting. If the log is missing, too short, has a gap with older entries behind it, or is unreadable, corrupt or oversized, the row is INFO "not checked" and never a pass.
 
 <a id="reclassify"></a>
 

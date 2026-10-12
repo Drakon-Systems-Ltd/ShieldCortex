@@ -8,11 +8,13 @@ export interface RecallLogEntry {
   ranAt?: string; prompt?: string; promptHash?: string; sessionId?: string;
   project?: string; minSalience?: number; candidates: RecallCandidate[];
   injectedCount?: number; finalContextChars?: number;
+  vectorPlane?: string | null; lane?: string | null; laneSignal?: string | null;
 }
 export interface StoredRecallLogEntry {
   ranAt: string; prompt: string | null; promptHash: string | null;
   sessionId: string | null; project: string | null; minSalience: number | null;
   candidates: RecallCandidate[]; injectedCount: number | null; finalContextChars: number | null;
+  vectorPlane?: string | null; lane?: string | null; laneSignal?: string | null;
 }
 export function writeRecallLog(entry: RecallLogEntry): void;
 export function readRecallLog(index?: number): StoredRecallLogEntry | null;
