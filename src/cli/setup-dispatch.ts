@@ -26,8 +26,9 @@ export const SETUP_HELP = `Usage: shieldcortex setup [target] [hook flags]
        shieldcortex install [hook flags]
        shieldcortex setup uninstall
 
-With no arguments, setup shows the detected-host table, offers to wire each
-unwired host, and asks for an Action Guard posture on a terminal.
+setup is the onboarding command. With no arguments it shows the detected-host
+table, offers to wire each unwired host, and asks for an Action Guard posture
+on a terminal.
 
 Targets:
   claude | openclaw | hermes | copilot | codex
@@ -41,7 +42,11 @@ install is the Claude Code install: CLAUDE.md, the global MCP server entry,
 hooks in ~/.claude/settings.json, the OpenClaw hook when OpenClaw is present,
 and owner-only permissions on ShieldCortex state. setup given --with-stop-hook
 or --with-session-end does the same Claude Code install; the --without-* opt-outs
-go with install.
+go with install. setup claude runs the same install as a bare install. install
+is kept for scripts; it is not the setup wizard.
+
+quickstart [target] is an older name for setup's guided path. It takes the same
+targets but no hook flags and no uninstall.
 
 Hook flags:
   --with-stop-hook         Opt in to the Stop hook (sampled per-turn extraction)

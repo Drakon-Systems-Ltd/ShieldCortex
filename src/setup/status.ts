@@ -217,7 +217,9 @@ export async function handleStatusCommand(): Promise<void> {
 
     if (!hooksConfigured) {
       console.log(`  ⚠️  Claude Code hooks are not set up. Memory won't auto-save or inject context.`);
-      console.log(`     Run: shieldcortex install\n`);
+      // #708: `setup claude` is the targeted Claude Code install — the same
+      // call `install` makes; bare `setup` skips a host it already counts wired.
+      console.log(`     Run: shieldcortex setup claude\n`);
     }
   } catch (error) {
     console.error('Failed to get status:', error);
