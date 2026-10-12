@@ -55,7 +55,9 @@ shieldcortex setup
 shieldcortex doctor
 ```
 
-`setup` (also `quickstart`) prints one host table and asks before wiring. Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
+`setup` is the onboarding command: it prints one host table and asks before wiring each host. `shieldcortex setup claude` skips the table and runs the Claude Code install (CLAUDE.md, MCP entry, hooks, plus the OpenClaw hook when OpenClaw is present). Two older names still work. `quickstart` takes the same targets as `setup`'s guided path, without hook flags or `uninstall`. `install` is not the wizard: it runs that same Claude Code install as `setup claude`, and is kept for existing scripts and the `--without-*` hook opt-outs. Within 5.x, update with [`shieldcortex update`](docs/UPDATING.md#updating).
+
+If npm skipped the package's lifecycle scripts (for example `--ignore-scripts`, or `ignore-scripts=true` in an npm config), ShieldCortex's postinstall did not run. On a global install that step wires no host. It prints the next step, checks that the database engine loads, writes a default `~/.shieldcortex/config.json` when none exists, refreshes an OpenClaw integration that is already present, and on macOS restarts a dashboard service still running an older build. Skipping it does not skip onboarding: run `shieldcortex setup`, then `shieldcortex doctor`. Without that config file, prompt-time recall stays off until you turn it on. [What postinstall does](docs/openclaw-integration.md#install-time-refresh-postinstall).
 
 ## Where it can block
 
