@@ -46,6 +46,10 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 ## What's new in 5.8
 
 - **Watch what an AI does in a browser or on a desktop.** If you build on the Claude SDK browser-use or computer-use toolsets, the new `shieldcortex/toolsets` export can sit in front of your driver. It labels each click, typed text, page visit and page read, flags typed credentials and unsafe links, scans what the page says back, and writes an audit trail that never stores what was typed or read. It only observes for now: it does not change what runs. See `docs/quickstarts/claude-sdk-toolsets.md`.
+- **Recall on OpenClaw messages searches what you actually wrote.** OpenClaw 2026.9.x wraps each message in context blocks, and prompt-time recall was searching those blocks instead of your words. It now strips a complete wrapper first. Nothing to do on upgrade.
+- **Optional vector recall, off by default.** Prompt-time recall can also rank candidates by meaning: set `"recallVector": true` in the ShieldCortex config file or `SHIELDCORTEX_RECALL_VECTOR=1`. When on, it re-orders and tops up word-matched candidates; it never brings in a memory that shares no word with your prompt.
+- **`doctor` spots stuck recall.** A new [Recall repetition](#doctor-recall-repetition) row warns when your last few recalls all returned the same memories. It only reads the recall log and asks you to change nothing.
+- **`setup` is the command to start with.** `status`, `doctor` and `--help` now say `shieldcortex setup`, and `shieldcortex setup claude` to repair Claude Code. `install` and `quickstart` still work as before.
 
 <a id="whats-new-in-57"></a>
 
