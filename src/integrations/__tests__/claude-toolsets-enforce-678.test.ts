@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ToolsetGuard,
+  checkUrl,
   hashInput,
   type ToolsetApprovalCard,
   type ToolsetAuditEvent,
@@ -271,7 +272,7 @@ describe('readable values-free cards (#678 §3.3)', () => {
 
   it('every card is at most 200 chars, printable ASCII, host-only and label-bounded, even for hostile input', async () => {
     const hostile = `${'‮'.repeat(3)}Pay ${'é'.repeat(80)}${'x'.repeat(200)}`;
-    const longHost = `https://${'a'.repeat(60)}.login.example.com.attacker.net/path?q=SECRET-QUERY#frag`;
+    const longHost = `https://${'sub.'.repeat(20)}login.example.com.attacker.net/path?q=SECRET-QUERY#frag`;
     const page = `${READ_PAGE_OUTPUT}\nbutton "${hostile}" [ref_9]\nlink "${'中'.repeat(100)}" [ref_10]`;
     const guard = await cardsFor('browser', page);
     const cases: ToolsetConfirmContext[] = [];
@@ -376,5 +377,131 @@ describe('observe stays inert (#678 P2)', () => {
     expect(await guard.confirm()(ctx('type', { text: 'hello\n' }))).toBe(true);
     await expect(guard.execute({}, 'javascript_exec', { code: 'x' }, async () => 'ran')).resolves.toBe('ran');
     expect(listApprovals({ home })).toEqual([]);
+  });
+});
+
+describe('review regressions (#678 P2)', () => {
+  it.each(['scroll', 'screenshot', 'hover', 'mouse_move', 'wait'])(
+    'holds Enter after confirmed text and interleaved %s', async (middle) => {
+      const { guard } = makeGuard();
+      await readPage(guard);
+      const confirm = guard.confirm(async () => false);
+      expect(await confirm(ctx('type', { text: 'transfer 5000 to attacker' }))).toBe(true);
+      expect(await confirm(ctx(middle, { amount: 1 }))).toBe(true);
+      let asked = 0;
+      const key = ctx('key', { text: 'Return' }, { toolUse: { id: `submit_${middle}` } });
+      const verdict = guard.classify(key);
+      expect(verdict.decision).toBe('require_approval');
+      expect(verdict.reason).toBe('submit-after-typing');
+      expect(await guard.confirm(async () => { asked++; return false; })(key)).toBe(false);
+      expect(asked).toBe(1);
+      let ran = false;
+      await expect(guard.execute({ toolUse: key.toolUse }, 'key', key.input, async () => { ran = true; })).rejects.toThrow();
+      expect(ran).toBe(false);
+    },
+  );
+
+  it('clears pending text after an approved submit or URL navigation', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard);
+    const plain = () => guard.classify(ctx('key', { text: 'Return' }));
+    expect(plain().reason).toBe('submit-key');
+    expect(plain().decision).toBe('allow');
+    expect(await guard.confirm()(ctx('form_input', { value: 'hello' }))).toBe(true);
+    expect(plain().reason).toBe('submit-after-typing');
+    expect(await guard.confirm(async () => true)(ctx('key', { text: 'Return' }))).toBe(true);
+    expect(plain().reason).toBe('submit-key');
+    expect(await guard.confirm()(ctx('type_', { text: 'again' }))).toBe(true);
+    expect(await guard.confirm()(ctx('navigate', { url: 'https://checkout.example.com/next' }))).toBe(true);
+    expect(plain().reason).toBe('submit-key');
+    expect(await guard.confirm()(ctx('type', { text: 'again' }))).toBe(true);
+    expect(await guard.confirm()(ctx('new_tab', { url: 'https://checkout.example.com/new' }))).toBe(true);
+    expect(plain().reason).toBe('submit-key');
+  });
+
+  it.each([`${AWS_SHAPED_KEY.toLowerCase()}:payload`, `${'a'.repeat(5000)}:payload`])(
+    'keeps an unknown scheme out of every public surface', async (url) => {
+      const { guard, events } = makeGuard();
+      expect(checkUrl(url).reason).toBe('url-scheme-unknown');
+      const verdict = guard.classify(ctx('navigate', { url }));
+      expect(verdict.reason).toBe('url-scheme-unknown');
+      expect(verdict.signals).toEqual(['url-scheme-unknown']);
+      expect(await guard.confirm()(ctx('navigate', { url }))).toBe(false);
+      expect(() => guard.urlPolicy()({}, url)).toThrow();
+      expect(guard.interceptRequest(url)).toBe('abort');
+      for (const event of events) {
+        expect(event.signals.every((signal) => signal.length <= 40)).toBe(true);
+        expect(JSON.stringify(event).length).toBeLessThan(1000);
+        expect(JSON.stringify(event)).not.toContain(url.slice(0, 20));
+      }
+    },
+  );
+
+  it('redacts credential-shaped hosts in cards and audit while preserving URL decisions', async () => {
+    const { guard, events } = makeGuard({ urlAllowlist: ['example.com'] });
+    const secretUrl = `https://${AWS_SHAPED_KEY}.example.com/`;
+    expect(checkUrl(secretUrl, ['example.com']).verdict).toBe('allow');
+    const target = guard.classify(ctx('navigate', { url: secretUrl }));
+    expect(target.decision).toBe('allow');
+    expect(target.card).toContain('redacted-host');
+    await guard.confirm()(ctx('navigate', { url: secretUrl }));
+    await guard.confirm()(ctx('scroll', {}, { tabURL: secretUrl }));
+    expect(events.filter((e) => e.host).map((e) => e.host)).toEqual(['redacted-host', 'redacted-host']);
+    expect(JSON.stringify({ cards: [target.card, guard.classify(ctx('scroll', {}, { tabURL: secretUrl })).card], events })).not.toMatch(new RegExp(AWS_SHAPED_KEY, 'i'));
+    expect(guard.classify(ctx('navigate', { url: 'https://www.example.com/' })).card).toContain('www.example.com');
+    expect(guard.classify(ctx('navigate', { url: 'https://Example.COM/' })).card).toContain('example.com');
+    await guard.confirm()(ctx('navigate', { url: 'https://www.example.com/' }));
+    await guard.confirm()(ctx('navigate', { url: 'https://Example.COM/' }));
+    expect(events.slice(-2).map((e) => e.host)).toEqual(['www.example.com', 'example.com']);
+  });
+
+  it.each([
+    ['no slashes after the scheme', `https:${AWS_SHAPED_KEY}.example.com/`],
+    ['percent-encoded first letter', `https://%41${AWS_SHAPED_KEY.slice(1)}.example.com/`],
+    ['schemeless', `${AWS_SHAPED_KEY}.example.com/path`],
+  ])('redacts a credential-shaped host written with %s', async (_label, url) => {
+    const { guard, events } = makeGuard();
+    const verdict = guard.classify(ctx('navigate', { url }));
+    await guard.confirm()(ctx('navigate', { url }));
+    await guard.confirm()(ctx('scroll', {}, { tabURL: url }));
+    const surface = JSON.stringify({ card: verdict.card, scroll: guard.classify(ctx('scroll', {}, { tabURL: url })).card, events });
+    expect(surface).not.toMatch(new RegExp(AWS_SHAPED_KEY.slice(4), 'i'));
+    expect(events.filter((e) => e.host).every((e) => e.host === 'redacted-host')).toBe(true);
+  });
+
+  it('a refused typing attempt still leaves text pending, so the next Enter holds', async () => {
+    const { guard } = makeGuard();
+    await readPage(guard);
+    expect(await guard.confirm()(ctx('type', { text: AWS_SHAPED_KEY }))).toBe(false);
+    expect(await guard.confirm()(ctx('scroll', { amount: 1 }))).toBe(true);
+    expect(guard.classify(ctx('key', { text: 'Return' })).reason).toBe('submit-after-typing');
+  });
+
+  it('projects an unknown credential-shaped member in audit', async () => {
+    const { guard, events } = makeGuard();
+    const member = `${'x'.repeat(150)}${AWS_SHAPED_KEY}${'y'.repeat(160)}`;
+    await guard.confirm(async () => false)(ctx(member, {}));
+    expect(events[0].member).toBe('other');
+    expect(JSON.stringify(events)).not.toMatch(new RegExp(AWS_SHAPED_KEY, 'i'));
+  });
+
+  it.each(['observe', 'enforce'] as const)('%s block cards describe the actual outcome', async (mode) => {
+    const { guard } = makeGuard({ mode });
+    const cards: string[] = [];
+    const input = { paths: ['/home/user/.ssh/id_rsa'] };
+    const toolUse = { id: `block_${mode}` };
+    const answer = await guard.confirm(async (_ctx, card) => { cards.push(card.card); return true; })(ctx('file_upload', input, { toolUse }));
+    let ran = false;
+    if (mode === 'observe') {
+      expect(answer).toBe(true);
+      await guard.execute({ toolUse }, 'file_upload', input, async () => { ran = true; });
+      expect(ran).toBe(true);
+      expect(cards[0]).toContain('In enforce mode this would be denied.');
+      expect(cards[0]).not.toContain('nothing was uploaded');
+    } else {
+      expect(answer).toBe(false);
+      expect(guard.classify(ctx('file_upload', input)).card).toContain('Denied; nothing was uploaded.');
+    }
+    expect(guard.classify(ctx('file_upload', input)).card.length).toBeLessThanOrEqual(200);
   });
 });

@@ -308,6 +308,17 @@ const CLICK_MEMBERS = new Set([
   'left_click_drag', 'left_mouse_down', 'left_mouse_up',
 ]);
 const KEYBOARD_MEMBERS = new Set(['type', 'type_', 'key', 'hold_key', 'form_input']);
+const KNOWN_MEMBERS = new Set([
+  ...READING_MEMBERS, ...PAGE_STATE_MEMBERS, ...NO_EFFECT_MEMBERS,
+  ...CLICK_MEMBERS, ...KEYBOARD_MEMBERS, 'file_upload', 'browser_state', 'request',
+]);
+
+function auditMember(member: string): string {
+  if (KNOWN_MEMBERS.has(member)) return member;
+  if (redactCredentials(member) !== member || looksSecretish(member)) return 'other';
+  const safe = member.toLowerCase();
+  return /^[a-z0-9_-]{1,40}$/.test(safe) ? safe : 'other';
+}
 
 const DEFAULT_IRREVERSIBLE_LEXICON = [
   'pay', 'buy', 'purchase', 'order', 'checkout', 'confirm', 'delete', 'remove',
@@ -450,6 +461,26 @@ function hostOf(url: string | undefined): string | undefined {
   return parsed?.hostname || undefined;
 }
 
+/** Host for cards and audit only; policy and approval binding use `hostOf`. */
+function displayHost(url: string | undefined): string | undefined {
+  const host = hostOf(url);
+  if (!host || !url) return host;
+  // Same scheme rule as `parseUrlLikeBrowser`; `https:HOST` (no slashes) is
+  // still a host for the URL parser, so strip the scheme and ANY leading slashes.
+  const authority = url.replaceAll('\\', '/').replace(SCHEME_PREFIX, '').replace(/^\/+/, '').split(/[/?#]/, 1)[0];
+  const withoutUserinfo = authority.slice(authority.lastIndexOf('@') + 1);
+  const rawHost = withoutUserinfo.startsWith('[')
+    ? withoutUserinfo.slice(0, withoutUserinfo.indexOf(']') + 1)
+    : withoutUserinfo.split(':', 1)[0];
+  // The parser percent-decodes the host (`%41KIA…` → `akia…`): check the decoded original-case text too.
+  let decoded = rawHost;
+  try { decoded = decodeURIComponent(rawHost); } catch { /* keep raw */ }
+  for (const candidate of new Set([rawHost, decoded])) {
+    if (redactCredentials(candidate) !== candidate || looksSecretish(candidate)) return 'redacted-host';
+  }
+  return host.slice(0, 253);
+}
+
 const SCHEME_PREFIX = /^[a-z][a-z0-9+.-]*:/i;
 
 function parseUrlLikeBrowser(raw: string): URL | null {
@@ -546,7 +577,7 @@ export function checkUrl(url: string, allowlist?: string[]): UrlCheck {
     return { allowed: false, verdict: 'block', reason: `url-scheme-local:${scheme.slice(0, -1)}`, effects: ['credential-read'] };
   }
   if (scheme !== 'http:' && scheme !== 'https:') {
-    return { allowed: false, verdict: 'block', reason: `url-scheme-unknown:${scheme.slice(0, -1)}`, effects: ['network-fetch'] };
+    return { allowed: false, verdict: 'block', reason: 'url-scheme-unknown', effects: ['network-fetch'] };
   }
   const host = parsed.hostname.toLowerCase();
   if (parsed.username || parsed.password) {
@@ -722,8 +753,8 @@ export class ToolsetGuard {
   private readonly refs = new Map<string, RefCatalogue>();
   /** The active tab in the last `browserState` report, when wrapped. */
   private activeTab: string | undefined;
-  /** Previous member seen, for `type` → `key Enter` = submit. */
-  private previousMember: string | null = null;
+  /** Confirmed non-empty text since the last confirmed submit or URL navigation. */
+  private textSinceSubmit = false;
   /** What `confirm` saw per call, so `execute` can detect a mutated input and knows the tab. */
   private readonly confirmed = new Map<string, ConfirmedCall>();
 
@@ -754,7 +785,7 @@ export class ToolsetGuard {
     const member = ctx.member;
     const input = asRecord(ctx.input);
     const inputHash = hashInput(member, ctx.input);
-    const host = hostOf(ctx.tabURL);
+    const host = displayHost(ctx.tabURL);
     // Cards (#678 §3.3): plain English, at most 200 characters, printable ASCII
     // only, the tab's host (never its path or query), labels bounded to 60.
     const where = host ? ` on ${cardHost(host)}` : this.toolset === 'computer' ? ' (desktop)' : ' on an unknown page';
@@ -780,10 +811,10 @@ export class ToolsetGuard {
         return finish('allow', ['observe'], [], 'navigate-history', composeCard(`Go ${url || 'to a new tab'}${where}.`, []));
       }
       const check = checkUrl(url, this.allowlist);
-      const target = check.host ? cardHost(check.host) : 'an address that is not a web page';
+      const target = check.host ? cardHost(displayHost(url) ?? check.host) : 'an address that is not a web page';
       if (check.verdict === 'block') {
         return finish('block', check.effects, [check.reason], check.reason,
-          composeCard(`Open ${target}?`, ['ShieldCortex does not allow this kind of address. Denied; nothing was opened.']));
+          composeCard(`Open ${target}?`, ['ShieldCortex does not allow this kind of address.', this.mode === 'enforce' ? 'Denied; nothing was opened.' : 'In enforce mode this would be denied.']));
       }
       if (check.verdict === 'ask') {
         return finish('require_approval', check.effects, [check.reason], check.reason,
@@ -804,7 +835,7 @@ export class ToolsetGuard {
       // A Windows path separates with `\`: normalise before the sensitive-path test.
       if (paths.some((p) => SENSITIVE_UPLOAD_PATH.test(p.replace(/\\/g, '/')))) {
         return finish('block', ['credential-read', 'egress'], ['upload-sensitive-path'], 'upload-sensitive-path',
-          composeCard(`Upload a file${where}?`, ['The file is a credential or configuration file. Denied; nothing was uploaded.']));
+          composeCard(`Upload a file${where}?`, ['The file is a credential or configuration file.', this.mode === 'enforce' ? 'Denied; nothing was uploaded.' : 'In enforce mode this would be denied.']));
       }
       return finish('require_approval', ['egress'], ['file-upload'], 'file-upload',
         hold(`Upload ${paths.length || 'some'} file(s) from this machine${host ? ` to ${cardHost(host)}` : where}?`, ['The page receives a copy of the file.']));
@@ -820,13 +851,13 @@ export class ToolsetGuard {
         return finish('block', ['credential-read', 'egress'], types.map((t) => `typed-secret:${t}`), 'typed-secret',
           composeCard(`Type into a field${where}?`, [
             `The text looks like a secret${kind}.`,
-            'ShieldCortex does not allow secrets to be typed into pages or apps. Denied; nothing was typed.',
+            this.mode === 'enforce' ? 'ShieldCortex does not allow secrets to be typed into pages or apps. Denied; nothing was typed.' : 'In enforce mode this would be denied.',
           ]));
       }
       const isSubmitKey = (member === 'key' || member === 'hold_key') && pressesSubmitKey(text);
       const typedNewline = (member === 'type' || member === 'type_') && /[\r\n]/.test(text);
       if (isSubmitKey || typedNewline) {
-        const afterTyping = this.previousMember === 'type' || this.previousMember === 'type_' || this.previousMember === 'form_input';
+        const afterTyping = this.textSinceSubmit;
         // #678 N2: a newline typed after a read submits whatever the previous member was.
         const irreversible = afterTyping || (typedNewline && tainted);
         const effects: ToolsetEffectKind[] = irreversible ? ['submit', 'irreversible-ui-action'] : ['submit'];
@@ -903,7 +934,6 @@ export class ToolsetGuard {
       const verdict = this.classify(ctx);
       const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, tabURL: ctx.tabURL, tabId: ctx.tabId };
       this.confirmed.set(confirmKey(ctx.toolUse?.id, ctx.member), record);
-      this.previousMember = ctx.member;
       const binding = approvalBinding(this.toolset, ctx.member, hostOf(ctx.tabURL), verdict.inputHash);
       const card: ToolsetApprovalCard = { ...verdict, approvalKey: hashToolCall(binding.tool, binding.input) };
 
@@ -930,6 +960,23 @@ export class ToolsetGuard {
         outcome = 'allowed';
       }
       record.approved = answer;
+      // Pending text: any typing attempt sets it, even a refused one (fail
+      // closed: a batch or the driver may already hold text in the field);
+      // only an APPROVED submit or URL navigation clears it. Interleaved
+      // observation, pointer and scroll members never touch it (#736 NEW-1).
+      {
+        const input = asRecord(ctx.input);
+        const text = KEYBOARD_MEMBERS.has(ctx.member) ? textOfKeyboardInput(ctx.member, ctx.input) : '';
+        const submit = ((ctx.member === 'key' || ctx.member === 'hold_key') && pressesSubmitKey(text))
+          || ((ctx.member === 'type' || ctx.member === 'type_') && /[\r\n]/.test(text));
+        const navigates = (ctx.member === 'navigate' || ctx.member === 'new_tab') && typeof input.url === 'string'
+          && !!input.url && !/^(back|forward|reload)$/i.test(input.url);
+        if (answer && (submit || navigates)) {
+          this.textSinceSubmit = false;
+        } else if (!submit && (ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) {
+          this.textSinceSubmit = true;
+        }
+      }
       this.emit({ kind: 'call', ctx, verdict: { ...verdict, signals }, outcome, hostAnswer });
       return answer;
     };
@@ -1305,9 +1352,9 @@ export class ToolsetGuard {
     if (!this.sink) return;
     const { ctx, verdict } = args;
     const input = asRecord(ctx.input);
-    let host = hostOf(ctx.tabURL);
+    let host = displayHost(ctx.tabURL);
     if ((ctx.member === 'navigate' || ctx.member === 'new_tab') && typeof input.url === 'string') {
-      host = hostOf(input.url) ?? host;
+      host = displayHost(input.url) ?? host;
     }
     let elementRole: string | undefined;
     let elementLabel: string | undefined;
@@ -1320,7 +1367,7 @@ export class ToolsetGuard {
     const event: ToolsetAuditEvent = {
       kind: args.kind,
       toolset: this.toolset,
-      member: ctx.member,
+      member: auditMember(ctx.member),
       mode: this.mode,
       decision: verdict.decision,
       effects: verdict.effects,

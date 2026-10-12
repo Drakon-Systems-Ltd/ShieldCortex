@@ -167,6 +167,8 @@ What `confirm` does per decision:
 | `block` (typed secret, credential upload, `javascript:` / `file:` / private-range URL) | `false` | **never**; there is no approval path |
 | `require_approval` | `true` only if `inner(ctx, card)` returned exactly `true` within `approvalTimeoutMs` | yes |
 
+Hosts switching from observe to enforce lose their own `inner` refusals on actions ShieldCortex classifies as `allow`, because enforce approves those actions without calling `inner`.
+
 For a `require_approval` call the guard records a pending request in the same store as
 every other Action Guard approval (`~/.shieldcortex/approvals/`, `action-approvals.ts`;
 `approvalsHome` moves it). The key is the store's hash of (toolset, member, host of
@@ -188,7 +190,7 @@ Audit signals added on `call` events in enforce: `approval-granted`, `approval-n
 `approval-store-error`, `approval-not-live` (expired or already spent at `execute`),
 `held-at-execute`.
 
-**Session taint and typed newlines.** In a tainted session a `type` whose text contains a
+**Session taint and submits.** Any Enter after text was typed since the last confirmed submit or URL navigation is held, regardless of observation, pointer or scroll members in between. In a tainted session a `type` whose text contains a
 newline (`\n` or `\r`) is a submit: `require_approval`, effects `submit` +
 `irreversible-ui-action`, signal `typed-newline`, whatever the previous member was.
 
@@ -230,13 +232,13 @@ typed text, never a URL query string, never page content.
 
 The two P1 known limits are closed: the input hash now covers own `constructor`,
 `prototype` and `__proto__` fields (N1), and a `type` with a newline in a tainted session
-is `require_approval` whatever the previous member was (N2).
+is `require_approval` whatever the previous member was (N2). Any Enter after text was typed since the last confirmed submit or URL navigation is held, regardless of members in between.
 
 - An approval is bound to the host of the tab URL in the SDK's **last state report**, not
   the live browser; Anthropic notes the page can change after that report.
 - Before the first page or screen read, a `type` with a newline in the browser toolset is
   still `allow` (the session is not tainted yet).
-- A `key Return` after a non-typing member in the browser toolset is `allow`, as in P1.
+- A `key Return` with no text typed since the last confirmed submit or URL navigation keeps its ordinary verdict.
 
 ## Not covered
 
