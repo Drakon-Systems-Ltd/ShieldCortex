@@ -1427,7 +1427,7 @@ export function runSchemaDriftCheck(dbPath: string): CheckResult {
           label: 'Schema',
           status: 'warn',
           message: `missing columns: ${missing.join(', ')}`,
-          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex install',
+          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex setup claude',
         };
       }
     } finally {
@@ -1649,7 +1649,7 @@ export function runWritePathProbe(dbPath: string, env: Environment = detectEnvir
   const isOpenClawOnly = env.hasOpenClaw && !env.hasClaude;
   const failFix = isOpenClawOnly
     ? 'Run `shieldcortex repair` — it opens the database through the full init/migration path (and rebuilds the DB engine if that is the fault). This box has no MCP server to restart.'
-    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex install';
+    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex setup claude';
 
   try {
     const Database = require('better-sqlite3');
@@ -1743,14 +1743,14 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
   if (probe.kind === 'absent') {
     // No settings.json is not a fault. Either Claude Code isn't on this box at
     // all (OpenClaw-only / headless installs never grow one), or it is and the
-    // user hasn't run `shieldcortex install` yet — the exact state of every
+    // user hasn't run `shieldcortex setup` yet — the exact state of every
     // fresh install. A ⚠️ here told healthy boxes something was wrong (#129).
     return env.hasClaude
       ? {
           label: 'Hooks',
           status: 'info',
           message: 'not configured yet — no ~/.claude/settings.json',
-          fix: 'Run `shieldcortex install` to configure hooks',
+          fix: 'Run `shieldcortex setup claude` to configure hooks',
         }
       : {
           label: 'Hooks',
@@ -1763,7 +1763,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     const hooks = settings.hooks || {};
 
-    // Single source of truth: whatever `shieldcortex install` actually installs.
+    // Single source of truth: whatever `shieldcortex setup claude` actually installs.
     // Previously hardcoded a different list which produced false "missing" warnings
     // after SessionEnd was removed from defaults (was crashing OpenClaw agents). [#23]
     const hookNames = [...REQUIRED_HOOK_NAMES];
@@ -1810,7 +1810,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         message:
           `${installed}/${hookNames.length} installed but ${unresolvable.length} DO NOT RESOLVE ` +
           `(${unresolvable.join(', ')}) — these hooks never run, so the guard is not enforcing here`,
-        fix: 'Run `shieldcortex install` to rewrite them to an absolute path (#146)',
+        fix: 'Run `shieldcortex setup claude` to rewrite them to an absolute path (#146)',
       };
     }
 
@@ -1821,7 +1821,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         label: 'Hooks',
         status: 'warn',
         message: `${installed}/${hookNames.length} installed — missing: ${missing.join(', ')}`,
-        fix: 'Run `shieldcortex install` to configure hooks',
+        fix: 'Run `shieldcortex setup claude` to configure hooks',
       };
     }
   } catch (err: unknown) {
@@ -7694,7 +7694,7 @@ async function checkHookTimeouts(): Promise<CheckResult> {
       label: 'Hook timeouts',
       status: 'warn',
       message: `below canonical: ${drift.join(', ')}`,
-      fix: 'Re-run `shieldcortex install` to restore canonical timeouts',
+      fix: 'Re-run `shieldcortex setup claude` to restore canonical timeouts',
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
