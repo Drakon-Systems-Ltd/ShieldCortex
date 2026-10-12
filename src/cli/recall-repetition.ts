@@ -33,6 +33,11 @@
  *   - **A sample it could not fully read is never healthy.** A corrupt,
  *     unreadable, oversized, non-regular or malformed slot met before the
  *     sample is complete stops the evaluation and reports why (by count).
+ *     So does a missing slot with an older entry behind it: the writer
+ *     rotates slot by slot, best effort, so a hole can open mid-ring, and the
+ *     lost run may have been interactive. Bridging the hole with older runs
+ *     would let a run that is not among the newest decide PASS or WARN. A
+ *     missing tail (a ring not yet full) is just a short history.
  *   - **Read-only and bounded.** Fixed slot names (no directory listing),
  *     `O_NOFOLLOW` opens, regular files only, a per-file and total byte budget,
  *     and a per-run candidate cap. Nothing is created, rotated or repaired.
@@ -68,7 +73,7 @@ export const RECALL_LOG_MAX_CANDIDATES = 64;
 const OUTSIDE_TOP_K = 'outside_top_n';
 const LANE_POLICY_PREFIX = 'lane_policy:';
 
-export type SlotProblem = 'corrupt' | 'unreadable' | 'oversized' | 'unsafe' | 'malformed' | 'budget';
+export type SlotProblem = 'corrupt' | 'unreadable' | 'oversized' | 'unsafe' | 'malformed' | 'budget' | 'missing';
 
 export type RecallRepetitionVerdict =
   /** No recall-log directory: recall has not logged a run here. */
@@ -221,13 +226,24 @@ export function evaluateRecallRepetition(deps: RecallRepetitionDeps): RecallRepe
   let otherLaneRuns = 0;
   let unknownLaneRuns = 0;
   let budgetLeft = RECALL_LOG_MAX_TOTAL_BYTES;
+  /** Missing slots since the last present one, not yet known to be the tail. */
+  let missingRun = 0;
 
   // Slot 0 is newest. Stop at the first slot that cannot be used: a run hidden
   // behind it could break or make the streak, so no verdict is safe past it.
   for (let slot = 0; slot < RECALL_LOG_SLOTS && runs.length < REPEAT_SAMPLE_RUNS; slot++) {
     const read = readSlot(fs, join(dir, `${slot}.json`), budgetLeft);
+    if (!read.ok && read.missing) {
+      missingRun++;
+      continue;
+    }
+    // Something older exists behind a missing slot: that is a hole, not the end
+    // of a short ring. Nothing says the lost run was not interactive.
+    if (missingRun > 0) {
+      problems.missing = missingRun;
+      break;
+    }
     if (!read.ok) {
-      if (read.missing) continue;
       problems[read.problem] = (problems[read.problem] ?? 0) + 1;
       break;
     }

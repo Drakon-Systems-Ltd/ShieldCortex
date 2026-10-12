@@ -278,6 +278,62 @@ describe('#717 recall repetition — unavailable evidence is never healthy', () 
     expect(evaluateRecallRepetition({ homeDir: home }).kind).toBe('repeated');
   });
 
+  // The writer rotates slot by slot, best effort, so a slot can go missing with
+  // older entries still behind it (or slot 0 between rotation and publish).
+  // The lost run may have been interactive: reading past the hole would let an
+  // older run decide the verdict. Each fixture is [slot -> set | absent].
+  const A = SENTINEL_IDS;
+  const B = [201, 202, 203, 204];
+  const holes: Array<{ name: string; slots: Array<number[] | null>; missing: number; interactiveRuns: number }> = [
+    { name: 'leading hole, repeated survivors', slots: [null, A, A, A, A], missing: 1, interactiveRuns: 0 },
+    { name: 'leading hole, differing survivors', slots: [null, A, A, B, A], missing: 1, interactiveRuns: 0 },
+    { name: 'interior hole, repeated survivors', slots: [A, A, null, A, A], missing: 1, interactiveRuns: 2 },
+    { name: 'interior hole, differing survivors', slots: [A, A, null, A, B], missing: 1, interactiveRuns: 2 },
+    { name: 'two-slot interior hole, repeated survivors', slots: [A, null, null, A, A, A], missing: 2, interactiveRuns: 1 },
+  ];
+
+  for (const h of holes) {
+    it(`a missing slot inside the sample is incomplete, never PASS or WARN — ${h.name}`, async () => {
+      h.slots.forEach((ids, slot) => {
+        if (ids) writeSlot(slot, entry({ lane: 'interactive', ids, promptHash: `${SENTINEL_HASH}${slot}` }));
+      });
+      expect(evaluateRecallRepetition({ homeDir: home })).toEqual({
+        kind: 'incomplete', problems: { missing: h.missing }, interactiveRuns: h.interactiveRuns,
+      });
+      const row = await checkRecallRepetition({ homeDir: home });
+      expect(row.status).toBe('info');
+      expect(row.message).toContain('missing with older entries behind it');
+      expect(row.message).toContain('not checked');
+    });
+  }
+
+  it('a hole behind a skipped automated run still stops the sample', () => {
+    writeSlot(0, entry({ lane: 'cron', promptHash: 'c' }));
+    writeInteractive(repeat(REPEAT_SAMPLE_RUNS, SENTINEL_IDS), 2);
+    expect(evaluateRecallRepetition({ homeDir: home })).toEqual({
+      kind: 'incomplete', problems: { missing: 1 }, interactiveRuns: 0,
+    });
+  });
+
+  it('a missing tail is a short ring (insufficient), not a hole', async () => {
+    writeInteractive(repeat(2, SENTINEL_IDS));
+    expect(evaluateRecallRepetition({ homeDir: home })).toEqual({
+      kind: 'insufficient', interactiveRuns: 2, otherLaneRuns: 0, unknownLaneRuns: 0,
+    });
+    expect((await checkRecallRepetition({ homeDir: home })).status).toBe('info');
+  });
+
+  it('missing slots beyond a complete sample do not invalidate it', async () => {
+    writeInteractive(repeat(REPEAT_SAMPLE_RUNS, SENTINEL_IDS));
+    writeSlot(REPEAT_SAMPLE_RUNS + 2, entry({ lane: 'interactive', ids: B, promptHash: 'old' }));
+    expect(evaluateRecallRepetition({ homeDir: home })).toMatchObject({ kind: 'repeated', runs: REPEAT_SAMPLE_RUNS });
+    expect((await checkRecallRepetition({ homeDir: home })).status).toBe('warn');
+
+    writeInteractive([A, A, B, A]);
+    expect(evaluateRecallRepetition({ homeDir: home })).toEqual({ kind: 'varied', runs: REPEAT_SAMPLE_RUNS });
+    expect((await checkRecallRepetition({ homeDir: home })).status).toBe('pass');
+  });
+
   it('a malformed interactive run (non-integer id, bad dropReason, non-array) is incomplete', () => {
     const bad: Array<Record<string, unknown>> = [
       { ...entry({ lane: 'interactive' }), candidates: [{ id: '987654321', dropReason: null }] },

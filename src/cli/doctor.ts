@@ -7766,6 +7766,7 @@ const SLOT_PROBLEM_TEXT: Record<SlotProblem, string> = {
   unsafe: 'not a regular file',
   malformed: 'malformed',
   budget: 'over the read budget',
+  missing: 'missing with older entries behind it',
 };
 
 export function recallRepetitionResult(v: RecallRepetitionVerdict): CheckResult {

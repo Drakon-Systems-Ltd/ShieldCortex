@@ -165,7 +165,7 @@ SHIELDCORTEX_RECALL_LANE=cron       # or automation, subagent, interactive
 
 `shieldcortex doctor` reads the last few recall-log entries and warns on its **Recall repetition** row when the newest 4 `interactive` runs all returned the same top-k candidate set (at least 3 candidates). That was the sign of #717, where the recall query was built from the OpenClaw envelope instead of your words. The check only reads. It prints counts, never prompts, titles, ids or hashes. It skips cron, automation, subagent and unlabelled runs, and it treats 4 identical prompt hashes as one prompt asked 4 times, which does not warn.
 
-The warning is repetition evidence, not a proven root cause: asking about the same topic repeatedly, or an unmarked scheduled job recalling as `interactive`, does the same. It does not ask you to change any setting. If the log is missing, too short, unreadable, corrupt or oversized, the row is INFO "not checked" and never a pass.
+The warning is repetition evidence, not a proven root cause: asking about the same topic repeatedly, or an unmarked scheduled job recalling as `interactive`, does the same. It does not ask you to change any setting. If the log is missing, too short, has a gap with older entries behind it, or is unreadable, corrupt or oversized, the row is INFO "not checked" and never a pass.
 
 <a id="reclassify"></a>
 
