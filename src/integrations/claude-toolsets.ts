@@ -28,13 +28,15 @@
  * P2 (first slice): `enforce` mode routes a `require_approval` verdict through
  * the existing bounded-approval store (`action-approvals.ts`). The approval is
  * keyed on (toolset, member, tab host, input hash), granted only when the
- * host's `inner(ctx, card)` returns exactly `true` within the timeout, and
+ * host's `inner(ctx, card)` returns exactly `true` within the elapsed deadline, and
  * spent by the one `execute` that runs those exact bytes. `observe` stays the
- * default.
+ * default. Pending text is scoped to each browser tab (or the desktop) and
+ * retires only after its approved submit executes successfully.
  */
 
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
+import { performance } from 'node:perf_hooks';
 import { redactCredentials, scanForCredentials } from '../defence/credential-leak/index.js';
 import { scanToolResponse } from '../defence/tool-response-scanner.js';
 import {
@@ -169,8 +171,8 @@ export interface ToolsetGuardOptions {
   /** Clock, for tests. */
   now?: () => number;
   /**
-   * Enforce only: how long `confirm` waits for the host's `inner` answer before
-   * refusing. Default 5 minutes. An answer that arrives later is ignored.
+   * Enforce only: elapsed deadline for the host's `inner` answer, including
+   * synchronous work. Default 5 minutes. A later answer is ignored.
    */
   approvalTimeoutMs?: number;
   /**
@@ -256,6 +258,9 @@ function confirmKey(toolUseId: string | undefined, member: string): string {
 /** What `confirm` saw for a call, so `execute` can bind to it. */
 interface ConfirmedCall {
   inputHash: string;
+  /** Pending-text scope and state used for the confirm verdict. */
+  scope: string;
+  afterTyping: boolean;
   /** What `confirm` answered. */
   approved: boolean;
   /** Enforce: the approval-store key `confirm` granted, when the call was held. */
@@ -273,6 +278,7 @@ function approvalBinding(toolset: ToolsetName, member: string, host: string | un
 }
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+const UNKNOWN_TAB = '\u0000unknown-tab';
 
 // ── Member tables ─────────────────────────────────────────────────────────
 
@@ -413,7 +419,8 @@ export function escapeForCard(text: string, max = 60): string {
  */
 function cardSafe(text: string, max = 60): string {
   const redacted = redactCredentials(text);
-  if (redacted === text && looksSecretish(text)) return WITHHELD_SECRET;
+  const residual = redacted.replace(/\[REDACTED-[A-Za-z0-9_-]*\]/g, ' ');
+  if (looksSecretish(residual)) return WITHHELD_SECRET;
   return escapeForCard(redacted, max);
 }
 
@@ -753,8 +760,8 @@ export class ToolsetGuard {
   private readonly refs = new Map<string, RefCatalogue>();
   /** The active tab in the last `browserState` report, when wrapped. */
   private activeTab: string | undefined;
-  /** Pending non-empty text since the last confirmed submit. */
-  private textSinceSubmit = false;
+  /** Pending text by desktop or browser tab; unknown tabs overlap every tab. */
+  private readonly pendingText = new Set<string>();
   /** What `confirm` saw per call, so `execute` can detect a mutated input and knows the tab. */
   private readonly confirmed = new Map<string, ConfirmedCall>();
 
@@ -782,6 +789,10 @@ export class ToolsetGuard {
   // ── Classification (pure apart from reading guard state) ──
 
   classify(ctx: ToolsetConfirmContext): ToolsetVerdict {
+    return this.classifyWith(ctx);
+  }
+
+  private classifyWith(ctx: ToolsetConfirmContext, afterTypingOverride?: boolean): ToolsetVerdict {
     const member = ctx.member;
     const input = asRecord(ctx.input);
     const inputHash = hashInput(member, ctx.input);
@@ -857,7 +868,7 @@ export class ToolsetGuard {
       const isSubmitKey = (member === 'key' || member === 'hold_key') && pressesSubmitKey(text);
       const typedNewline = (member === 'type' || member === 'type_') && /[\r\n]/.test(text);
       if (isSubmitKey || typedNewline) {
-        const afterTyping = this.textSinceSubmit;
+        const afterTyping = afterTypingOverride ?? this.pendingFor(this.pendingScope(ctx));
         // #678 N2: a newline typed after a read submits whatever the previous member was.
         const irreversible = afterTyping || (typedNewline && tainted);
         const effects: ToolsetEffectKind[] = irreversible ? ['submit', 'irreversible-ui-action'] : ['submit'];
@@ -933,8 +944,10 @@ export class ToolsetGuard {
    */
   confirm(inner?: ToolsetConfirmInner): (ctx: ToolsetConfirmContext) => Promise<boolean> {
     return async (ctx: ToolsetConfirmContext): Promise<boolean> => {
+      const scope = this.pendingScope(ctx);
+      const afterTyping = this.pendingFor(scope);
       const verdict = this.classify(ctx);
-      const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, tabURL: ctx.tabURL, tabId: ctx.tabId };
+      const record: ConfirmedCall = { inputHash: verdict.inputHash, approved: false, scope, afterTyping, tabURL: ctx.tabURL, tabId: ctx.tabId };
       this.confirmed.set(confirmKey(ctx.toolUse?.id, ctx.member), record);
       const binding = approvalBinding(this.toolset, ctx.member, hostOf(ctx.tabURL), verdict.inputHash);
       const card: ToolsetApprovalCard = { ...verdict, approvalKey: hashToolCall(binding.tool, binding.input) };
@@ -962,21 +975,11 @@ export class ToolsetGuard {
         outcome = 'allowed';
       }
       record.approved = answer;
-      // Pending text: any typing attempt sets it, even a refused one (fail
-      // closed: a batch or the driver may already hold text in the field).
-      // Only an approved submit clears it; text after the final typed newline
-      // remains pending. Navigation and other members never clear it.
+      // Any typing attempt leaves text pending, even when refused. Only a
+      // submit that actually runs through execute may retire its own scope.
       {
         const text = KEYBOARD_MEMBERS.has(ctx.member) ? textOfKeyboardInput(ctx.member, ctx.input) : '';
-        const typedNewline = (ctx.member === 'type' || ctx.member === 'type_') && /[\r\n]/.test(text);
-        const submitKey = (ctx.member === 'key' || ctx.member === 'hold_key') && pressesSubmitKey(text);
-        if (answer && typedNewline) {
-          this.textSinceSubmit = /[\r\n][^\r\n]+$/.test(text);
-        } else if (answer && submitKey) {
-          this.textSinceSubmit = false;
-        } else if ((ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) {
-          this.textSinceSubmit = true;
-        }
+        if ((ctx.member === 'type' || ctx.member === 'type_' || ctx.member === 'form_input') && text.length > 0) this.pendingText.add(scope);
       }
       this.emit({ kind: 'call', ctx, verdict: { ...verdict, signals }, outcome, hostAnswer });
       return answer;
@@ -1002,7 +1005,9 @@ export class ToolsetGuard {
     } catch {
       return { approved: false, hostAnswer: false, signal: 'approval-store-error' };
     }
-    const asked = await this.askHost(ctx, card, inner);
+    const deadline = performance.now() + this.approvalTimeoutMs;
+    let asked = await this.askHost(ctx, card, inner, deadline);
+    if (asked === true && performance.now() > deadline) asked = 'approval-timeout';
     if (asked === true) {
       try {
         const granted = approveRequest(card.approvalKey, { ...store, now: this.now(), ttlMs: this.approvalTtlMs });
@@ -1024,11 +1029,12 @@ export class ToolsetGuard {
     return { approved: false, hostAnswer: false, signal: asked };
   }
 
-  /** The host's answer: `true` only for exactly `true`; otherwise why not. */
+  /** The host's answer: `true` only for exactly `true` before the deadline. */
   private async askHost(
     ctx: ToolsetConfirmContext,
     card: ToolsetApprovalCard,
     inner: ToolsetConfirmInner,
+    deadline: number,
   ): Promise<true | 'approval-not-true' | 'approval-error' | 'approval-timeout' | 'approval-aborted'> {
     if (ctx.signal?.aborted) return 'approval-aborted';
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1044,6 +1050,7 @@ export class ToolsetGuard {
       const value = await Promise.race([Promise.resolve().then(() => inner(ctx, card)), stop]);
       if (value === TIMEOUT) return 'approval-timeout';
       if (value === ABORTED) return 'approval-aborted';
+      if (value === true && performance.now() > deadline) return 'approval-timeout';
       return value === true ? true : 'approval-not-true';
     } catch {
       return 'approval-error';
@@ -1111,6 +1118,15 @@ export class ToolsetGuard {
     const asked = asRecord(ctx.input).tab_id;
     if (typeof asked === 'string' && asked) return asked;
     return this.activeTab;
+  }
+
+  private pendingScope(ctx: ToolsetConfirmContext): string {
+    return this.toolset === 'computer' ? 'desktop' : this.resolveTab(ctx) ?? UNKNOWN_TAB;
+  }
+
+  private pendingFor(scope: string): boolean {
+    return this.pendingText.has(scope) || this.pendingText.has(UNKNOWN_TAB)
+      || (scope === UNKNOWN_TAB && this.pendingText.size > 0);
   }
 
   /** Record a `read_page` / `find` result against the tab and page it read. */
@@ -1212,7 +1228,7 @@ export class ToolsetGuard {
       toolUse: ctx.toolUse,
     };
     this.confirmed.delete(key);
-    const verdict = this.classify(callCtx);
+    const verdict = this.classifyWith(callCtx, seen?.afterTyping);
     if (seen === undefined || seen.inputHash !== hash) {
       const signals = [...verdict.signals, seen === undefined ? 'unconfirmed' : 'mutated_input'];
       // Enforce with `confirm` skipped: the DENY set and HOLD still apply to
@@ -1258,11 +1274,20 @@ export class ToolsetGuard {
       }
     }
 
+    const scope = seen?.scope ?? this.pendingScope(callCtx);
+    const typed = KEYBOARD_MEMBERS.has(name) ? textOfKeyboardInput(name, input) : '';
+    if ((name === 'type' || name === 'type_' || name === 'form_input') && typed.length > 0) this.pendingText.add(scope);
     let result: R;
     try {
       result = await next(ctx, name, input);
     } catch (error) {
       throw this.observeDriverError(name, callCtx, error);
+    }
+
+    if (seen?.approved && (name === 'key' || name === 'hold_key') && pressesSubmitKey(typed)) this.pendingText.delete(scope);
+    if ((name === 'type' || name === 'type_') && /[\r\n]/.test(typed)) {
+      if (/[\r\n][^\r\n]+$/.test(typed)) this.pendingText.add(scope);
+      else this.pendingText.delete(scope);
     }
 
     // Post: a navigation ends the page lifetime of the tab it ran in.

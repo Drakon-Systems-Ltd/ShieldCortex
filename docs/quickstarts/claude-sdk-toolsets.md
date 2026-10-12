@@ -174,7 +174,7 @@ every other Action Guard approval (`~/.shieldcortex/approvals/`, `action-approva
 `approvalsHome` moves it). The key is the store's hash of (toolset, member, host of
 `tabURL`, input hash). `card.approvalKey` carries it. When `inner` returns exactly `true`
 the request is marked approved with the store's lifetime (`approvalTtlMs`, default 10
-minutes). Any other value (`'yes'`, `1`, an object), an exception, a timeout or an aborted
+minutes). The timeout is an elapsed deadline, including time spent in a blocking host callback. Any other value (`'yes'`, `1`, an object), an exception, a timeout or an aborted
 call refuses, and the pending request is removed. With no `inner`, every held call is
 refused.
 
@@ -190,7 +190,7 @@ Audit signals added on `call` events in enforce: `approval-granted`, `approval-n
 `approval-store-error`, `approval-not-live` (expired or already spent at `execute`),
 `held-at-execute`.
 
-**Session taint and submits.** Any Enter after text was typed since the last confirmed submit or URL navigation is held, regardless of observation, pointer or scroll members in between. In a tainted session a `type` whose text contains a
+**Session taint and submits.** Pending text is tracked per tab; text from an unknown tab counts as pending on every tab. It clears only after an approved submit on that tab has successfully run through `execute`. A failed or refused dispatch leaves it pending. In a tainted session a `type` whose text contains a
 newline (`\n` or `\r`) is a submit: `require_approval`, effects `submit` +
 `irreversible-ui-action`, signal `typed-newline`, whatever the previous member was.
 
@@ -199,7 +199,7 @@ newline (`\n` or `\r`) is a submit: `require_approval`, effects `submit` +
 `inner` receives the verdict as its second argument; `card.card` is the readable card.
 Cards are plain English, at most 200 characters and printable ASCII only (anything else
 is shown as `\uXXXX`). A page label is redacted with the credential patterns, withheld
-whole if it still looks like a secret, and bounded to 60 characters. Only the host of
+whole if any residual text still looks like a secret, and bounded to 60 characters. Only the host of
 `tabURL` is shown, at most 32 characters, keeping its end (the registrable domain). A card
 never contains the typed text, a URL path or query string, an upload path, or page body.
 When the card would pass 200 characters the taint and requester sentences are dropped
@@ -232,13 +232,13 @@ typed text, never a URL query string, never page content.
 
 The two P1 known limits are closed: the input hash now covers own `constructor`,
 `prototype` and `__proto__` fields (N1), and a `type` with a newline in a tainted session
-is `require_approval` whatever the previous member was (N2). Any Enter after text was typed since the last confirmed submit is held, regardless of members in between. Navigation does not reset this gate, and text after an approved typed newline stays pending.
+is `require_approval` whatever the previous member was (N2). Navigation does not reset pending text. Drivers that call `confirm` without wrapping `execute` never retire pending text, so later Enter calls remain held after typing.
 
 - An approval is bound to the host of the tab URL in the SDK's **last state report**, not
   the live browser; Anthropic notes the page can change after that report.
 - Before the first page or screen read, a `type` with a newline in the browser toolset is
   still `allow` (the session is not tainted yet).
-- A `key Return` with no text typed since the last confirmed submit keeps its ordinary verdict.
+- A `key Return` with no text typed since the last executed submit keeps its ordinary verdict.
 - Text entered through `key` members (single keys or paste shortcuts) does not mark text as pending, so a later Enter keeps its ordinary verdict.
 
 ## Not covered

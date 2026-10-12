@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import {
   ToolsetGuard,
   checkUrl,
@@ -11,6 +12,7 @@ import {
   type ToolsetConfirmContext,
 } from '../claude-toolsets.js';
 import { listApprovals } from '../../defence/iron-dome/action-approvals.js';
+import { WITHHELD_SECRET } from '../../defence/iron-dome/approval-card.js';
 
 /**
  * #678 P2, first slice: `mode: 'enforce'` routes a HOLD through the existing
@@ -381,6 +383,155 @@ describe('observe stays inert (#678 P2)', () => {
 });
 
 describe('review regressions (#678 P2)', () => {
+  async function dispatch(
+    guard: ToolsetGuard,
+    call: ToolsetConfirmContext,
+    approver: () => boolean | Promise<boolean> = () => true,
+    next: () => string | Promise<string> = () => 'ran',
+  ) {
+    const toolUse = { id: `pending_${++seq}` };
+    const step = { ...call, toolUse };
+    const approved = await guard.confirm(approver)(step);
+    if (approved) await guard.execute({ toolUse }, step.member, step.input, async () => next());
+    return approved;
+  }
+
+  it('keeps t1 text pending when t2 submits', async () => {
+    const { guard } = makeGuard();
+    let asked = 0;
+    await dispatch(guard, ctx('type', { text: 'hello' }, { tabId: 't1' }));
+    expect(await dispatch(guard, ctx('key', { text: 'Return' }, { tabId: 't2' }), () => { asked++; return true; })).toBe(true);
+    expect(asked).toBe(0);
+    const enter = ctx('key', { text: 'Return' }, { tabId: 't1' });
+    expect(guard.classify(enter)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+    expect(await dispatch(guard, enter, () => { asked++; return true; })).toBe(true);
+    expect(asked).toBe(1);
+  });
+
+  it('keeps text pending after a submitted Enter fails in the driver', async () => {
+    const { guard } = makeGuard();
+    let asked = 0;
+    await dispatch(guard, ctx('type', { text: 'hello' }));
+    const enter = ctx('key', { text: 'Return' });
+    await expect(dispatch(guard, enter, () => { asked++; return true; }, () => { throw new Error('driver failed'); })).rejects.toThrow('driver failed');
+    expect(guard.classify(enter)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+    expect(await dispatch(guard, enter, () => { asked++; return true; })).toBe(true);
+    expect(asked).toBe(2);
+  });
+
+  it('keeps text pending when an approved Enter never reaches execute', async () => {
+    const { guard } = makeGuard();
+    let asked = 0;
+    await dispatch(guard, ctx('type', { text: 'hello' }));
+    const enter = ctx('key', { text: 'Return' });
+    expect(await guard.confirm(async () => { asked++; return true; })(ctx('key', enter.input, { toolUse: { id: `pending_${++seq}` } }))).toBe(true);
+    expect(guard.classify(enter)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+    expect(await dispatch(guard, enter, () => { asked++; return true; })).toBe(true);
+    expect(asked).toBe(2);
+  });
+
+  it('retires text after an approved Enter successfully runs', async () => {
+    const { guard } = makeGuard();
+    let asked = 0;
+    await dispatch(guard, ctx('type', { text: 'hello' }));
+    const enter = ctx('key', { text: 'Return' });
+    expect(await dispatch(guard, enter, () => { asked++; return true; })).toBe(true);
+    expect(guard.classify(enter)).toMatchObject({ decision: 'allow', reason: 'submit-key' });
+    expect(await dispatch(guard, enter, () => { asked++; return true; })).toBe(true);
+    expect(asked).toBe(1);
+  });
+
+  it('keeps unknown-tab text pending after a known tab submits', async () => {
+    const { guard } = makeGuard();
+    let asked = 0;
+    await dispatch(guard, ctx('type', { text: 'hello' }, { tabId: undefined }));
+    expect(await dispatch(guard, ctx('key', { text: 'Return' }, { tabId: 't1' }), () => { asked++; return true; })).toBe(true);
+    const other = ctx('key', { text: 'Return' }, { tabId: 't2' });
+    expect(guard.classify(other)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+    expect(await dispatch(guard, other, () => { asked++; return true; })).toBe(true);
+    expect(asked).toBe(2);
+  });
+
+  it('tracks text after the final newline only after a successful dispatch', async () => {
+    const { guard } = makeGuard();
+    const enter = ctx('key', { text: 'Return' });
+    await dispatch(guard, ctx('type', { text: 'first\nsecond part' }));
+    expect(guard.classify(enter)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+    await dispatch(guard, enter);
+    await dispatch(guard, ctx('type', { text: 'first\n' }));
+    expect(guard.classify(enter)).toMatchObject({ decision: 'allow', reason: 'submit-key' });
+    await dispatch(guard, ctx('type', { text: 'hello' }));
+    await expect(dispatch(guard, ctx('type', { text: 'first\n' }), () => true, () => { throw new Error('driver failed'); })).rejects.toThrow('driver failed');
+    expect(guard.classify(enter)).toMatchObject({ decision: 'require_approval', reason: 'submit-after-typing' });
+  });
+
+  it('runs an untainted approved type with a newline through execute', async () => {
+    const { guard } = makeGuard();
+    const typed = ctx('type', { text: 'foo\nbar' });
+    expect(guard.classify(typed)).toMatchObject({ decision: 'allow', reason: 'submit-newline' });
+    let ran = false;
+    expect(await dispatch(guard, typed, () => true, () => { ran = true; return 'typed'; })).toBe(true);
+    expect(ran).toBe(true);
+  });
+
+  it('retires desktop text on successful Enter and keeps it after driver failure', async () => {
+    const { guard } = makeGuard({ toolset: 'computer' });
+    const typed = { member: 'type', input: { text: 'hello' } };
+    const enter = { member: 'key', input: { text: 'Return' } };
+    await dispatch(guard, typed);
+    expect(guard.classify(enter).reason).toBe('submit-after-typing');
+    await dispatch(guard, enter);
+    expect(guard.classify(enter).reason).toBe('submit-key');
+    await dispatch(guard, typed);
+    await expect(dispatch(guard, enter, () => true, () => { throw new Error('driver failed'); })).rejects.toThrow('driver failed');
+    expect(guard.classify(enter).reason).toBe('submit-after-typing');
+  });
+
+  it('withholds mixed-secret labels in both cards and audit', async () => {
+    const opaque = `opaque_${'a'.repeat(36)}`;
+    const label = `Pay ${AWS_SHAPED_KEY} ${opaque}`;
+    const { guard, events } = makeGuard();
+    await readPage(guard, `button "${label}" [ref_4]`);
+    const click = ctx('left_click', placeOrder);
+    const verdict = guard.classify(click);
+    expect(verdict.card).toContain(`labelled "${WITHHELD_SECRET}"`);
+    await guard.confirm(async () => false)(click);
+    expect(events.at(-1)!.elementLabel).toBe(WITHHELD_SECRET);
+    expect(JSON.stringify({ card: verdict.card, event: events.at(-1) })).not.toContain(AWS_SHAPED_KEY);
+    expect(JSON.stringify({ card: verdict.card, event: events.at(-1) })).not.toContain(opaque);
+  });
+
+  it('shows a redacted recognised key when a label has no residual secret', async () => {
+    const { guard, events } = makeGuard();
+    await readPage(guard, `button "Pay ${AWS_SHAPED_KEY} now" [ref_4]`);
+    const click = ctx('left_click', placeOrder);
+    const verdict = guard.classify(click);
+    expect(verdict.card).toContain('[REDACTED-');
+    expect(verdict.card).not.toContain(WITHHELD_SECRET);
+    await guard.confirm(async () => false)(click);
+    expect(events.at(-1)!.elementLabel).toContain('[REDACTED-');
+  });
+
+  it.each([
+    ['blocking host answer', async () => { const end = performance.now() + 120; while (performance.now() < end) { /* block */ } return true; }],
+    ['late async host answer', async () => new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 120))],
+  ])('refuses a %s after the elapsed approval deadline', async (_kind, inner) => {
+    const { guard, events } = makeGuard({ approvalTimeoutMs: 30 });
+    await readPage(guard);
+    const toolUse = { id: `deadline_${++seq}` };
+    expect(await guard.confirm(inner)(ctx('left_click', placeOrder, { toolUse }))).toBe(false);
+    expect(events.at(-1)!.signals).toContain('approval-timeout');
+    await expect(guard.execute({ toolUse }, 'left_click', placeOrder, async () => 'clicked')).rejects.toThrow();
+    expect(listApprovals({ home }).filter((r) => r.approvedAt)).toEqual([]);
+  });
+
+  it('grants a prompt host answer before the elapsed deadline', async () => {
+    const { guard } = makeGuard({ approvalTimeoutMs: 30 });
+    await readPage(guard);
+    const toolUse = { id: `deadline_${++seq}` };
+    expect(await guard.confirm(async () => true)(ctx('left_click', placeOrder, { toolUse }))).toBe(true);
+    await expect(guard.execute({ toolUse }, 'left_click', placeOrder, async () => 'clicked')).resolves.toBe('clicked');
+  });
   it.each(['scroll', 'screenshot', 'hover', 'mouse_move', 'wait'])(
     'holds Enter after confirmed text and interleaved %s', async (middle) => {
       const { guard } = makeGuard();
@@ -409,7 +560,9 @@ describe('review regressions (#678 P2)', () => {
     expect(plain().decision).toBe('allow');
     expect(await guard.confirm()(ctx('form_input', { value: 'hello' }))).toBe(true);
     expect(plain().reason).toBe('submit-after-typing');
-    expect(await guard.confirm(async () => true)(ctx('key', { text: 'Return' }))).toBe(true);
+    const submit = ctx('key', { text: 'Return' });
+    expect(await guard.confirm(async () => true)(submit)).toBe(true);
+    await guard.execute({}, submit.member, submit.input, async () => 'submitted');
     expect(plain().reason).toBe('submit-key');
   });
 
@@ -470,6 +623,7 @@ describe('review regressions (#678 P2)', () => {
     const typed = ctx('type', { text: 'first\n' });
     expect(guard.classify(typed).card).toMatch(/^Type text that ends with Enter on checkout\.example\.com\?/);
     expect(await confirm(typed)).toBe(true);
+    await guard.execute({}, typed.member, typed.input, async () => 'typed');
     expect(cards).toHaveLength(1);
     expect(cards[0].card).toMatch(/^Type text that ends with Enter on checkout\.example\.com\?/);
     expect(cards[0].card.length).toBeLessThanOrEqual(200);
