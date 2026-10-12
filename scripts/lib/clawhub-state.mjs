@@ -19,6 +19,15 @@
 //
 // `versions[]` is what separates them: it lists uploaded versions regardless of
 // which one is promoted to `latest`.
+//
+// Two more states keep a verdict from outrunning its evidence:
+//
+//   submitted — `clawhub publish` said the update was submitted and is pending
+//               security scans, but the index does not list it yet. On 5.7.0
+//               the scan held it out of BOTH `latest` and `versions[]` for ~5m,
+//               so every poll read 'absent' for an upload the CLI had accepted.
+//   unknown   — the last read of ClawHub failed. An empty read is not evidence
+//               that the version is missing, nor that it is served.
 
 /** Read the promoted version out of `clawhub inspect --json`. */
 export function readLatestVersion(inspectJson) {
@@ -39,17 +48,48 @@ export function readVersionList(inspectJson) {
 }
 
 /**
+ * True when `clawhub publish` output explicitly reports that `target` was
+ * submitted and is pending security scans. Wording observed on 5.7.0:
+ *
+ *   Update submitted for shieldcortex@5.7.0; pending security scans before it becomes public.
+ *
+ * Both halves must appear on one line and name exactly this version, so other
+ * CLI output cannot pass for a submission. The prose is matched
+ * case-insensitively, but the version is the whole reported token (every
+ * character semver allows, including prerelease and `+` build metadata, minus
+ * a sentence-ending dot) and must equal `target` exactly, case included —
+ * the same identity the index comparisons in diagnose() use.
+ */
+export function reportsPendingSubmission(publishOutput, target) {
+  if (typeof publishOutput !== 'string' || !target) return false;
+  const submittedRe = /\bsubmitted for shieldcortex@([0-9A-Za-z.+-]+)/gi;
+  return publishOutput
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        /pending security scans/i.test(line) &&
+        [...line.matchAll(submittedRe)].some((m) => m[1].replace(/\.+$/, '') === target),
+    );
+}
+
+/**
  * Classify the sync state for `target`.
  *
  * Returns one of:
- *   'synced'  — ClawHub serves the target version. The only success.
- *   'pending' — target is uploaded but not promoted (moderation queue).
- *   'absent'  — target was never uploaded. The publish genuinely failed.
+ *   'synced'    — ClawHub serves the target version. The only success.
+ *   'pending'   — target is uploaded but not promoted (moderation queue).
+ *   'submitted' — the CLI reported the target submitted and pending security
+ *                 scans; the index does not list it yet.
+ *   'unknown'   — the ClawHub read failed, so nothing is proven either way.
+ *   'absent'    — a good read does not list the target and no submission was
+ *                 reported. The publish genuinely failed.
  */
-export function diagnose({ latest, versions, target }) {
+export function diagnose({ latest, versions, target, readFailed = false, submitted = false }) {
   if (!target) throw new Error('diagnose requires a target version');
+  if (readFailed) return 'unknown';
   if (latest === target) return 'synced';
   if (Array.isArray(versions) && versions.includes(target)) return 'pending';
+  if (submitted) return 'submitted';
   return 'absent';
 }
 
@@ -58,11 +98,25 @@ export function diagnose({ latest, versions, target }) {
  * step that does not say which of the two failures happened just moves the
  * guesswork rather than removing it.
  */
-export function describeState({ state, latest, target, waitedMs = 0 }) {
+export function describeState({ state, latest, target, waitedMs = 0, submitted = false }) {
   const waited = waitedMs > 0 ? ` after ${Math.round(waitedMs / 60_000)}m` : '';
   switch (state) {
     case 'synced':
       return `✅ ClawHub synced at ${target}`;
+    case 'submitted':
+      return (
+        `⏳ The clawhub CLI reported ${target} submitted and pending security scans, but ClawHub ` +
+        `is still serving '${latest || 'none'}'${waited} and does not list ${target} yet. ` +
+        `That is not proof the upload failed, and not proof it will go public. ` +
+        `Check https://clawhub.ai/skills/shieldcortex; do not republish ${target} while its scan may still be running.`
+      );
+    case 'unknown':
+      return (
+        `❓ Could not read ClawHub state${waited}, so whether it serves ${target} is UNKNOWN — ` +
+        `not confirmed absent, not confirmed served.` +
+        (submitted ? ` The clawhub CLI did report ${target} submitted and pending security scans.` : '') +
+        ` Re-run \`npm run release:clawhub:check\` (read-only, never publishes) once ClawHub is readable.`
+      );
     case 'pending':
       return (
         `⏳ ClawHub PUBLISHED ${target} but is still serving '${latest || 'none'}'${waited}. ` +
@@ -79,9 +133,14 @@ export function describeState({ state, latest, target, waitedMs = 0 }) {
   }
 }
 
-/** Process exit code per state. Only a true sync is success — see #200. */
+/**
+ * Process exit code per state. Only a true sync is success — see #200.
+ * 2 means "uploaded or submitted, not public yet — do not republish";
+ * 3 means the state could not be read at all.
+ */
 export function exitCodeFor(state) {
   if (state === 'synced') return 0;
-  if (state === 'pending') return 2;
+  if (state === 'pending' || state === 'submitted') return 2;
+  if (state === 'unknown') return 3;
   return 1;
 }
