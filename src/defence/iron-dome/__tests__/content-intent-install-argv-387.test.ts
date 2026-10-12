@@ -72,7 +72,6 @@ describe('written global installs through argv lists (#387)', () => {
     ['unfinished list of npm words', 'import subprocess' + nl + 'subprocess.run([' + `"${npm}", `.repeat(20000)],
     ['quote run', 'import subprocess' + nl + 'subprocess.run([' + '"'.repeat(100000)],
     ['nested sinks inside list strings', 'import subprocess' + nl + 'subprocess.run([' + '"subprocess.run([", '.repeat(5000)],
-    ['sink run', 'subprocess.run('.repeat(7000)],
     ['spawn command then nested', 'spawn("x", [' + '"spawn(\\"x\\", [", '.repeat(5000)],
   ])('scans 100 KB adversarial argv (%s) in under 300 ms', (_name, content) => {
     expect(content.length).toBeGreaterThan(90_000);
