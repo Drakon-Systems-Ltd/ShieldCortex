@@ -624,7 +624,10 @@ describe('#628 — one card per call: claude-cli under OpenClaw', () => {
     // Even with the launcher's own image counted as root-owned: it is still
     // not the anchored gateway.
     useAnchoredDist({ rootOwned: [...hardenedRootPaths(), ...withAncestors(realpathSync.native(launcher))] });
-    const stdout = await runAsync([launcher], hookInput(id, SSH_READ), hookEnv({ SHIELDCORTEX_CARD_OWNER_WAIT_MS: '1500' }));
+    // It even copies the gateway's interpreter flags and loader variables, so
+    // the only thing between it and adoption is that it is not the anchored
+    // gateway's entry.
+    const stdout = await runAsync([...selfGatewayIdentity().execArgv, launcher], hookInput(id, SSH_READ), hookEnv({ SHIELDCORTEX_CARD_OWNER_WAIT_MS: '1500' }));
     const relayed = JSON.parse(stdout || '{}') as { stdout?: string };
     expect(parseDecision(relayed.stdout ?? '')).toBe('ask');
     expect(hookCards()).toBe(1);
