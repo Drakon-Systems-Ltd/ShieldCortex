@@ -65,6 +65,12 @@ const gated: Array<[string, string, string]> = [
   ['U+2028 ends comment', 'py', `# x${ls}subprocess.run(${argvList})`],
   ['printed pipe executes text', 'sh', `echo 'subprocess.run(${argvList})' | python3`],
   ['shadowed print', 'py', `print = exec${nl}print('subprocess.run(${argvList})')`],
+  ['vars computed print rebound', 'py', `vars()["pr" + "int"] = eval${nl}print('subprocess.run(${argvList})')`],
+  ['locals computed print rebound', 'py', `locals()["pr" + "int"] = eval${nl}print('subprocess.run(${argvList})')`],
+  ['exec computed print rebound', 'py', `exec("pr" + "int = eval")${nl}print('subprocess.run(${argvList})')`],
+  ['builtins computed print rebound', 'py', `import sys${nl}sys.modules["built" + "ins"].__dict__["pr" + "int"] = eval${nl}print('subprocess.run(${argvList})')`],
+  ['globalThis computed console rebound', 'js', `globalThis["con" + "sole"] = { log: eval }${nl}console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
+  ['globalThis computed log rebound', 'js', `const k = "log"; globalThis["con" + "sole"][k] = eval${nl}console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
   ['printed concatenation', 'py', `print("x" + subprocess.run(${argvList}))`],
   ['printed interpolation', 'py', `print(f"{subprocess.run(${argvList})}")`],
   // Shell echo/printf get no printed-example relief: their output is

@@ -1488,7 +1488,7 @@ function readQuotedArgv(text: string, from: number, nextSink = text.length): { a
   const readString = (): string | null => {
     if (i >= end) return null;
     const quote = text[i];
-    if (quote !== '"' && quote !== "'") return null;
+    if (quote !== '\x22' && quote !== '\x27') return null;
     const start = ++i;
     while (i < end) {
       if (text[i] === '\\') { i = Math.min(end, i + 2); continue; }
@@ -1530,7 +1530,7 @@ function readQuotedArgv(text: string, from: number, nextSink = text.length): { a
     skipSpace();
     if (text[i] === closer) { i++; return done(); }
     if (i >= end) break;
-    if (text[i] === '"' || text[i] === "'") {
+    if (text[i] === '\x22' || text[i] === '\x27') {
       const arg = readString();
       if (arg === null) { args.push(OPAQUE_ARGV); return done(); }
       args.push(arg);
@@ -1548,7 +1548,7 @@ function readQuotedArgv(text: string, from: number, nextSink = text.length): { a
         return done();
       }
       const ch = text[i];
-      if (ch === '"' || ch === "'") {
+      if (ch === '\x22' || ch === '\x27') {
         if (args[args.length - 1] !== OPAQUE_ARGV) args[args.length - 1] = OPAQUE_ARGV;
         if (readString() === null) return done();
         continue;
@@ -1650,7 +1650,7 @@ function argvReliefContext(text: string, path?: string): ArgvReliefContext {
           : /python/i.test(shebang) ? 'python'
             : /node|deno|bun/i.test(shebang) ? 'js'
               : /(?:bash|zsh|sh)/i.test(shebang) ? 'shell' : 'none';
-  if (language === 'none' || /"""|'''|`|\/\*|\*\/|\\[\r\n]|[\u2028\u2029\u0085\v\f]/.test(text)) {
+  if (language === 'none' || /\x22\x22\x22|\x27\x27\x27|\x60|\/\*|\*\/|\\[\r\n]|[\u2028\u2029\u0085\v\f]/.test(text)) {
     return { language, comments: false, printed: false };
   }
   let single = 0;
@@ -1665,16 +1665,20 @@ function argvReliefContext(text: string, path?: string): ArgvReliefContext {
     } else if (ch === '\\') {
       escaped = !escaped;
     } else {
-      if (!escaped && ch === "'") single++;
-      if (!escaped && ch === '"') double++;
+      if (!escaped && ch === '\x27') single++;
+      if (!escaped && ch === '\x22') double++;
       escaped = false;
     }
   }
   const rebound = /\b(?:print|console)\s*=/.test(text)
     || text.split(/[\n\r]/).some(line => /\b(?:def|function|class|let|const|var|import|from)\b/.test(line)
       && /\b(?:print|console)\b/.test(line));
+  const dynamicName = language === 'python'
+    ? /\b(?:vars|locals|globals|exec|eval|compile|getattr|setattr|__dict__|modules|importlib|__builtins__)\b/.test(text)
+    : /\b(?:globalThis|global|window|self|eval|Function|Reflect)\b/.test(text);
   return { language, comments: true, printed: language !== 'shell'
-    && !rebound && !PRINT_NAME_OTHER_USE.test(text) && !STDOUT_REDIRECTED.test(text) };
+    && !rebound && !dynamicName && !/\][ \t]*=/.test(text)
+    && !PRINT_NAME_OTHER_USE.test(text) && !STDOUT_REDIRECTED.test(text) };
 }
 
 /** Conservative relief for a whole comment line or a plain printed example. */
@@ -1686,7 +1690,7 @@ function argvSinkLineRelief(text: string, start: number, end: number, context: A
   const marker = context.language === 'js' ? '//' : '#';
   if (text.startsWith(marker, i)) {
     const afterMarker = i + marker.length;
-    const firstUnsafe = text.slice(afterMarker, end).search(/["'`]|\*\//);
+    const firstUnsafe = text.slice(afterMarker, end).search(/[\x22\x27\x60]|\*\//);
     return { ...none, commentUntil: firstUnsafe < 0 ? end : afterMarker + firstUnsafe };
   }
   if (!context.printed) return none;
@@ -1695,10 +1699,10 @@ function argvSinkLineRelief(text: string, start: number, end: number, context: A
   if (!prefix) return none;
   i += prefix[0].length;
   const quote = text[i];
-  if (quote !== '"' && quote !== "'") return none;
+  if (quote !== '\x22' && quote !== '\x27') return none;
   const open = i++;
   while (i < end && text[i] !== quote) {
-    if (text[i] === '\\' || text[i] === '`' || text[i] === '{' || text[i] === '$') return none;
+    if (text[i] === '\\' || text[i] === '\x60' || text[i] === '{' || text[i] === '$') return none;
     i++;
   }
   if (i >= end) return none;
