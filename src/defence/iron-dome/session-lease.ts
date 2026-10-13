@@ -268,10 +268,9 @@ export function leasePermits(decision: LeaseDecision): boolean {
  * Anchored on a COMMAND BOUNDARY (start, or after a shell separator/env
  * prefix — the guard's own `(?:^|[;&|(\n]|\$\()` idiom), so a scope word that
  * merely appears inside a quoted argument (`echo "how to npm publish"`, `grep
- * "npm publish"`) does NOT match. The install check is order-independent: a
- * package manager on the surface + an install verb + a global marker anywhere,
- * because `npm --global install` and `npm --location=global install` are real
- * global installs that a fixed `npm install … -g` order silently missed.
+ * "npm publish"`) does NOT match. The install check requires a
+ * package manager's own install subcommand and global marker in one shell
+ * stage. Ambiguous shell syntax retains the older whole-surface rule.
  */
 const CMD_BOUNDARY = '(?:^|[\\n;&|(]|\\$\\()\\s*(?:\\w+=\\S*\\s+)*(?:sudo\\s+)?';
 const PKG_MGR = '(?:npm|pnpm|yarn|bun)';
@@ -1219,19 +1218,127 @@ export function securityConfigWriteShape(command: string): boolean {
 }
 
 /**
- * A fleet-host install, evasion-resistant: a package manager (or `openclaw
- * plugins install`) invoked at a command boundary, with an install verb AND a
- * global marker present ANYWHERE on the surface — so flag order cannot defeat
- * it. Local `npm install`/`npm ci` (no global marker) is deliberately NOT an
- * install-scope action.
+ * Main's whole-surface install rule, retained exactly for ambiguous shell
+ * syntax. It requires a package manager, verb, and global marker anywhere.
  */
-function isGlobalInstall(command: string): boolean {
-  if (new RegExp(`${CMD_BOUNDARY}openclaw\\s+plugins\\s+(?:install|add)\\b`, 'i').test(command)) return true;
+function legacyIsGlobalInstall(command: string): boolean {
   const pkgInvoked = new RegExp(`${CMD_BOUNDARY}${PKG_MGR}\\b`, 'i').test(command);
   if (!pkgInvoked) return false;
   const hasInstallVerb = /\b(?:install|i|add)\b/i.test(command);
   const hasGlobalMarker = /(?:\s-g\b|--global\b|--location[=\s]+global\b)/i.test(command);
   return hasInstallVerb && hasGlobalMarker;
+}
+
+const INSTALL_SUBCOMMANDS = new Set([
+  'install', 'i', 'in', 'ins', 'inst', 'insta', 'instal',
+  'isnt', 'isnta', 'isntal', 'isntall', 'add',
+]);
+const GLOBAL_INSTALL_MARKER_RE = /^(?:-g\b|--global\b|--location=global\b)/i;
+
+/**
+ * A global install needs a package manager's install subcommand and global
+ * marker in the same stage. Quote-aware splitting keeps quoted separators
+ * inside tokens; unquoted `(`/`)` bound stages, while redirection `&`/`|`
+ * characters do not separate stages. Options may precede the verb. Ambiguous
+ * syntax fails closed by OR-ing the whole-surface rule with both parsed rules.
+ */
+function isGlobalInstall(command: string): boolean {
+  if (new RegExp(`${CMD_BOUNDARY}openclaw\\s+plugins\\s+(?:install|add)\\b`, 'i').test(command)) return true;
+
+  let tokens: string[] = [];
+  let token = '';
+  let tokenStarted = false;
+  let quote = '';
+  let unsafe = /\b(?:eval|xargs)\b/i.test(command);
+  let expansion = false;
+  let foundInstall = false;
+  let globalExpansion = false;
+  let substitutionDepth = 0;
+
+  const finishToken = () => {
+    if (tokenStarted) tokens.push(token);
+    token = '';
+    tokenStarted = false;
+  };
+  const finishStage = () => {
+    finishToken();
+    let index = 0;
+    while (index < tokens.length && /^\w+=\S*$/.test(tokens[index]!)) index++;
+    if (tokens[index]?.toLowerCase() === 'sudo') index++;
+    if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index] ?? '')) {
+      if (expansion) unsafe = true;
+      let global = false;
+      let subcommand: string | undefined;
+      let unknownOption = false;
+      let bareInstall = false;
+      for (let i = index + 1; i < tokens.length; i++) {
+        const arg = tokens[i]!.toLowerCase();
+        const globalMarker = GLOBAL_INSTALL_MARKER_RE.test(arg);
+        if (globalMarker) global = true;
+        if (arg === '--location') {
+          if (/^global\b/i.test(tokens[i + 1] ?? '')) global = true;
+          i++; // The value of --location is not a subcommand.
+          continue;
+        }
+        if (arg.startsWith('-')) {
+          if (subcommand === undefined && !globalMarker) unknownOption = true;
+          continue;
+        }
+        if (INSTALL_SUBCOMMANDS.has(arg)) bareInstall = true;
+        if (subcommand === undefined) subcommand = arg;
+      }
+      if (global && expansion) globalExpansion = true;
+      if (global && (INSTALL_SUBCOMMANDS.has(subcommand ?? '') || (unknownOption && bareInstall))) foundInstall = true;
+    }
+    tokens = [];
+    expansion = false;
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (ch === '\x60') unsafe = true;
+    if (ch === '\\' && command[i + 1] === '\n') { i++; continue; }
+    if (ch === '\\' && quote !== '\x27' && i + 1 < command.length) {
+      token += command[++i];
+      tokenStarted = true;
+      continue;
+    }
+    if (ch === '$' && command[i + 1] === '(' && quote !== '\x27') {
+      if (quote) unsafe = true;
+      expansion = true;
+      finishStage();
+      substitutionDepth++;
+      i++;
+      continue;
+    }
+    if (!quote && (ch === '(' || ch === ')')) {
+      finishStage();
+      if (ch === ')' && substitutionDepth > 0) substitutionDepth--;
+      continue;
+    }
+    if (ch === '\x27' || ch === '\x22') {
+      if (!quote) { quote = ch; tokenStarted = true; continue; }
+      if (quote === ch) { quote = ''; continue; }
+    }
+    if (ch === '$' && quote !== '\x27' && /[\w{(@*#?]/.test(command[i + 1] ?? '')) expansion = true;
+    if (!quote && /[\s;&|]/.test(ch)) {
+      if ((ch === '&' && (command[i - 1] === '>' || command[i - 1] === '<' || command[i + 1] === '>')) ||
+          (ch === '|' && command[i - 1] === '>')) {
+        token += ch;
+        tokenStarted = true;
+        continue;
+      }
+      if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') finishStage();
+      else finishToken();
+      continue;
+    }
+    token += ch;
+    tokenStarted = true;
+  }
+  finishStage();
+  return quote || substitutionDepth || unsafe
+    ? legacyIsGlobalInstall(command) || foundInstall || globalExpansion
+    : foundInstall;
 }
 
 /** File paths whose EDITS are security-config actions regardless of tool. */
