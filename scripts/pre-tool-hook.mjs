@@ -416,8 +416,9 @@ function flattenActionGuardConfig(config) {
         denySuppressionMs: raw.denySuppressionMs,
       },
       // #628: exactly `false` keeps both planes carding under OpenClaw (the
-      // pre-#628 double card). Anything else lets the hook stand down, and
-      // only on a kernel proof that the interceptor holds the card.
+      // pre-#628 double card). Anything else lets the hook adopt the
+      // operator's answer to the interceptor's card, and only on a hardened,
+      // root-anchored launch chain (src/defence/iron-dome/card-owner.ts).
       singleCard: raw.singleCard !== false,
     };
   } catch {
@@ -604,8 +605,9 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
 }
 
 /**
- * #628 — the card-owner proof. Null when dist predates it: then the hook
- * never stands down, which is the pre-#628 double card, never zero.
+ * #628 — the card-owner proof. Null when dist predates it (or predates the
+ * round-2 resolution channel): then the hook never adopts the interceptor's
+ * card, which is the pre-#628 double card, never zero.
  */
 async function loadCardOwner() {
   const distRoot = hookDistRoot();
