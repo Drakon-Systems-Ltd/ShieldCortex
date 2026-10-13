@@ -4030,7 +4030,7 @@ class TypedApprovalRequest extends Error {
    *  Absent only for an older installed interceptor: then no audit row is
    *  written on the answer and the card behaves as it did before #372 (an
    *  `onResolution` is still wired when a #628 card-owner marker is held, and
-   *  does nothing but release it). */
+   *  does nothing but hand the decision to it). */
   decisionAudit?: ApprovalDecisionAudit;
 
   constructor(message: string, request: NonNullable<TypedBeforeToolCallResult["requireApproval"]>) {
@@ -4172,19 +4172,21 @@ async function handleTypedBeforeToolCall(
   } catch (err) {
     if (err instanceof TypedApprovalRequest) {
       const decisionAudit = err.decisionAudit;
-      // #628: this card is the one card for the call. Mark it in the kernel's
-      // socket table so the Claude Code hook of the claude-cli child making
-      // this exact call can prove it and stand down instead of carding too.
-      // No toolCallId, not Linux, a host build not known to hold the call on
-      // this card, or a bind failure: no marker, and the hook cards as before.
-      // The marker never touches the verdict.
+      // #628: offer this card's ANSWER to the Claude Code hook of the
+      // claude-cli child making this exact call, over an abstract socket the
+      // hook proves this process holds. The hook adopts an operator's
+      // approve/deny and cards itself on anything else (cancelled, timeout,
+      // undelivered, no answer), so the socket existing is never taken as a
+      // card having been shown. No toolCallId, not Linux, a host build not
+      // known to hold the call on this card, or a bind failure: no marker,
+      // and the hook cards as before. The marker never touches the verdict.
       const marker = holdCardOwnerMarker({
         toolCallId: event.toolCallId ?? ctx?.toolCallId,
         params: event.params ?? {},
         hostVersion: _hostRuntimeVersion,
       });
       if (!decisionAudit && marker) {
-        err.request.onResolution = () => marker.release();
+        err.request.onResolution = (decision: CardDecision) => marker.resolve(decision);
       }
       if (decisionAudit) {
         // #372: the hold writes no row because no decision exists yet — THIS is
@@ -4192,7 +4194,7 @@ async function handleTypedBeforeToolCall(
         // and awaits it, so it must never see a throw: a broken audit sink is
         // not a reason to disturb a decision the operator already made.
         err.request.onResolution = (decision: CardDecision) => {
-          marker?.release();
+          marker?.resolve(decision);
           try {
             const outcome = Object.hasOwn(CARD_DECISION_OUTCOME, decision) ? CARD_DECISION_OUTCOME[decision] : undefined;
             if (!outcome) {

@@ -4,32 +4,43 @@
  * When the interceptor puts a card up for a call that carries a host
  * `toolCallId` (claude-cli's `tool_use_id`), this process binds a listening
  * Unix socket in the Linux abstract namespace named for (this process's pid
- * and start time, the tool_use_id, the call's command or target path), and
- * holds it while the card is pending. The Claude Code hook for the same call
- * stands down from its own card only if it finds that socket in THIS
- * process's fd table, and only if this process is its claude-cli's direct
- * parent (src/defence/iron-dome/card-owner.ts has the proof and the threat
- * model).
+ * and start time, the tool_use_id, the call's command or target path). The
+ * Claude Code hook for the same call proves from /proc that this process
+ * holds it (src/defence/iron-dome/card-owner.ts has the proof, the launch-chain
+ * anchor and the threat model), connects, and waits to be told how the card
+ * was RESOLVED:
+ *
+ *   `approved`   the operator chose allow-once or allow-always;
+ *   `denied`     the operator chose deny;
+ *   `unresolved` anything else the host reported (`cancelled` — which is also
+ *                how the host reports an approval surface that is unavailable
+ *                or a request it could not deliver — or `timeout`, or a
+ *                decision this build does not know).
+ *
+ * The socket's existence is NOT a claim that a card was presented: the host
+ * may still fail to deliver it. Only an operator answer is. The hook adopts
+ * `approved` / `denied` and cards itself on anything else, including no
+ * answer, a closed socket or a malformed reply (round-2 review blocker 1).
  *
  * Bound only on a host build known to hold the claude-cli call on this card
- * until the operator answers ({@link CARD_OWNER_MIN_HOST_VERSION}): the
- * marker says "this call waits on a human here", so it must not exist where
- * the host might let the call run on.
+ * until the operator answers ({@link CARD_OWNER_MIN_HOST_VERSION}).
  *
- * The socket accepts nothing: a connection is closed at once. It is a fact
- * in the kernel's tables, not a channel. Any failure to bind (not Linux, the
- * name already taken, no tool call id) just means no marker, and the hook
+ * The socket reads nothing from a peer. Each connection gets one JSON line
+ * once the card is resolved, then is closed; the listener stays up for a
+ * linger after the answer so a hook can re-verify that the socket it read
+ * from is still the one this process holds. Any failure to bind (not Linux,
+ * the name already taken, no tool call id) just means no marker, and the hook
  * cards as it always has. Nothing here can change a verdict.
  *
  * Self-contained on purpose: this plugin never imports the main package at
- * compile time. `cardOwnerSurface` and `cardOwnerSocketName` MUST stay
- * identical to the copies in src/defence/iron-dome/card-owner.ts; a parity
- * test pins them.
+ * compile time. `cardOwnerSurface`, `cardOwnerSocketName` and the reply shape
+ * MUST stay identical to src/defence/iron-dome/card-owner.ts; a parity test
+ * pins them.
  */
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { createServer, type Server } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 
 const CARD_OWNER_NAME_PREFIX = 'shieldcortex-card-owner-v1-';
 const TOOL_USE_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
@@ -48,12 +59,17 @@ const START_TIME_RE = /^\d{1,20}$/;
  */
 export const CARD_OWNER_MIN_HOST_VERSION = '2026.9.8';
 
-/** Whether a runtime-reported host version is at or above the floor. Junk,
- *  absent or unparseable is "no". */
+/** A release version, whole string: `[v]YYYY.M.D`. A prerelease or build
+ *  suffix (`2026.9.8-beta.0`, `2026.9.8+abc`) or any trailing junk is not a
+ *  release, so it does not satisfy the floor (#628 review nit). */
+const HOST_RELEASE_RE = /^v?(\d{4})\.(\d{1,2})\.(\d{1,4})$/;
+
+/** Whether a runtime-reported host version is a release at or above the
+ *  floor. Junk, absent, unparseable, or a prerelease is "no". */
 export function hostHoldsCallsOnCard(version: unknown): boolean {
   if (typeof version !== 'string') return false;
   const parse = (v: string) => {
-    const m = v.trim().match(/^v?(\d{4})\.(\d{1,2})\.(\d{1,4})(?:$|[^0-9])/);
+    const m = v.trim().match(HOST_RELEASE_RE);
     return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
   };
   const have = parse(version);
@@ -65,8 +81,8 @@ export function hostHoldsCallsOnCard(version: unknown): boolean {
   return true;
 }
 
-/** Kept a little past the answer so a hook that is still polling sees the
- *  card it is about to defer to rather than racing the close. */
+/** Kept up past the answer so a hook that connects late still reads it, and
+ *  a hook that already read it can re-verify the socket it read from. */
 export const CARD_OWNER_LINGER_MS = 10_000;
 /** Never outlive the host's own card ceiling (600 s) by much, even if the
  *  host never reports a decision. */
@@ -95,6 +111,27 @@ export function cardOwnerSocketName(
   return `${CARD_OWNER_NAME_PREFIX}${digest}`;
 }
 
+/** The three things the hook can be told. Only the first two change what the
+ *  hook does; `unresolved` is the same as no answer at all. */
+export type CardOwnerResolution = 'approved' | 'denied' | 'unresolved';
+
+/** A host card decision → what the hook is told. Only an operator's button is
+ *  an answer; `timeout`, `cancelled` and anything unknown are `unresolved`. */
+export function cardOwnerResolution(decision: unknown): CardOwnerResolution {
+  if (decision === 'allow-once' || decision === 'allow-always') return 'approved';
+  if (decision === 'deny') return 'denied';
+  return 'unresolved';
+}
+
+/** The one line a connection receives. MUST match `parseCardOwnerReply` in
+ *  src/defence/iron-dome/card-owner.ts. */
+export function cardOwnerReply(toolUseId: string, resolution: CardOwnerResolution): string {
+  return `${JSON.stringify({ v: 1, toolUseId, resolution })}\n`;
+}
+
+/** Bound on simultaneous connections; extras are dropped (the hook then cards). */
+const MAX_PENDING_CONNECTIONS = 16;
+
 /** This process's own identity: pid plus start time from /proc/self/stat. */
 export function selfHolderIdentity(): { pid: number; startTime: string } | null {
   try {
@@ -111,9 +148,10 @@ export function selfHolderIdentity(): { pid: number; startTime: string } | null 
 export interface CardOwnerMarker {
   /** The abstract name held (no leading NUL). */
   readonly name: string;
-  /** The operator answered: close after the linger. Idempotent. */
-  release(): void;
-  /** Close now. Idempotent. */
+  /** The host reported the card's decision: answer every waiting hook, then
+   *  close after the linger. The first call wins. Idempotent. */
+  resolve(decision: unknown): void;
+  /** Close now, answering nobody (a waiting hook cards). Idempotent. */
   close(): void;
 }
 
@@ -143,16 +181,34 @@ export function holdCardOwnerMarker(opts: HoldCardOwnerOptions): CardOwnerMarker
     if (!holder) return null;
     const name = cardOwnerSocketName(holder, opts.toolCallId, opts.params);
     if (!name) return null;
+    const toolUseId = opts.toolCallId as string;
 
     let closed = false;
+    let reply: string | null = null;
     let maxTimer: ReturnType<typeof setTimeout> | undefined;
     let lingerTimer: ReturnType<typeof setTimeout> | undefined;
-    const server: Server = createServer((sock) => sock.destroy());
+    const pending = new Set<Socket>();
+    const answer = (sock: Socket, line: string) => {
+      try { sock.end(line); } catch { sock.destroy(); }
+    };
+    const server: Server = createServer((sock) => {
+      // Nothing is read from a peer; a peer that writes is ignored.
+      sock.on('error', () => sock.destroy());
+      sock.on('data', () => {});
+      if (closed) return void sock.destroy();
+      if (reply !== null) return answer(sock, reply);
+      if (pending.size >= MAX_PENDING_CONNECTIONS) return void sock.destroy();
+      pending.add(sock);
+      sock.on('close', () => pending.delete(sock));
+    });
     const close = () => {
       if (closed) return;
       closed = true;
       if (maxTimer) clearTimeout(maxTimer);
       if (lingerTimer) clearTimeout(lingerTimer);
+      // Unanswered waiters see a close with no line: the hook cards.
+      for (const sock of pending) sock.destroy();
+      pending.clear();
       try { server.close(); } catch { /* already closed */ }
     };
     // EADDRINUSE (someone else holds the name) or anything else: no marker.
@@ -163,8 +219,11 @@ export function holdCardOwnerMarker(opts: HoldCardOwnerOptions): CardOwnerMarker
     maxTimer.unref?.();
     return {
       name,
-      release() {
-        if (closed || lingerTimer) return;
+      resolve(decision: unknown) {
+        if (closed || reply !== null) return;
+        reply = cardOwnerReply(toolUseId, cardOwnerResolution(decision));
+        for (const sock of pending) answer(sock, reply);
+        pending.clear();
         lingerTimer = setTimeout(close, opts.lingerMs ?? CARD_OWNER_LINGER_MS);
         lingerTimer.unref?.();
       },

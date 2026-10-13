@@ -613,7 +613,7 @@ async function loadCardOwner() {
     const mod = await import(
       pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'card-owner.js')).href
     );
-    return typeof mod.awaitInterceptorCardOwner === 'function' && typeof mod.cardOwnerWaitMs === 'function'
+    return typeof mod.awaitInterceptorResolution === 'function' && typeof mod.cardOwnerWaitMs === 'function'
       ? mod
       : null;
   } catch {
@@ -3519,62 +3519,70 @@ process.stdin.on('end', async () => {
     // claude-cli under an OpenClaw gateway is judged by two planes: this hook
     // and the gateway's before_tool_call interceptor, which OpenClaw reaches
     // through its own SDK PreToolUse callback on the same claude-cli child.
-    // Both used to card. The interceptor owns the card; this hook stands down
-    // ONLY when the kernel shows that its claude-cli's direct parent is
-    // holding the interceptor's card marker for THIS tool_use_id and command
-    // (src/defence/iron-dome/card-owner.ts — /proc ancestry with start times,
-    // /proc/net/unix and the parent's own fd table; no env, argv or file is
-    // proof). Anything short of that, and everything below runs as before.
-    // The gateway binds that marker only on a host build that holds the call
-    // on the card until the operator answers.
+    // Both used to card. The interceptor owns the card, and this hook ADOPTS
+    // the operator's answer to it — approve or deny — only when
+    // src/defence/iron-dome/card-owner.ts proves all of: a root-owned
+    // launch-chain anchor names the gateway; claude-cli and its direct parent
+    // run root-owned images the agent cannot replace, and that parent is the
+    // anchored gateway; the parent holds the card socket for THIS
+    // tool_use_id and command (/proc/net/unix plus its own fd table); and,
+    // over that socket, the gateway reported an operator answer within the
+    // wait budget. Cancelled, undelivered, timed out, no answer, or any
+    // doubt: everything below runs as before (two cards, never zero). On a
+    // default user-level install there is no anchor, so this returns at once.
     //
-    // Standing down emits NO decision rather than `ask`: on this transport a
-    // hook `ask` does not reach a human, it re-enters OpenClaw's can_use_tool
-    // and runs before_tool_call a second time, which is a second card. The
-    // verdict is unchanged — this call still waits on a human answer to the
-    // interceptor's card for this exact call, and Claude Code merges the
-    // host callback's deny over anything. A block never reaches here: every
-    // deny above returned first, and only a call this hook would have put to
-    // a human is ever deferred. Promptless sessions never defer.
-    // Only in `default` mode — the mode OpenClaw's claude-cli transport sets.
-    // In any other prompting mode Claude Code's own rules (acceptEdits, auto,
-    // allow lists) could act on a call this hook left undecided.
+    // A block never reaches here: every deny above returned first, so the
+    // gateway's answer can only ever be applied to a call this hook would
+    // have put to a human — it never loosens a hook block. `approved` takes
+    // the hook's normal allow (no decision: Claude Code's own permission
+    // system and the host's callback, which carries the same answer, decide);
+    // `denied` denies. Promptless sessions never adopt. Only in `default`
+    // mode — the mode OpenClaw's claude-cli transport sets; in any other
+    // prompting mode Claude Code's own rules could act on an undecided call.
     if (!noPromptSurfaceForHold && permissionMode === 'default' && cfg.singleCard !== false) {
       const cardOwner = await loadCardOwner();
-      let proof = null;
+      let adopted = null;
       if (cardOwner) {
         try {
-          proof = await cardOwner.awaitInterceptorCardOwner({
+          adopted = await cardOwner.awaitInterceptorResolution({
             harnessPid,
             toolUseId: hookData.tool_use_id,
             toolInput,
             waitMs: cardOwner.cardOwnerWaitMs(process.env.SHIELDCORTEX_CARD_OWNER_WAIT_MS),
           });
         } catch {
-          proof = null;
+          adopted = null;
         }
       }
-      if (proof && proof.proven === true) {
+      if (adopted && (adopted.kind === 'approved' || adopted.kind === 'denied')) {
+        const approved = adopted.kind === 'approved';
         const safeBroker = safeBrokerAudit(brokered?.audit);
         writeAuditEntry(
           safeToolName(toolName),
-          safeApprovalVerdict(verdict),
+          approved ? safeAllowAuditVerdict(verdict, 'approved') : safeApprovalVerdict(verdict),
           redactedAuditArgs(toolName, toolInput),
           'require_approval',
-          'asked',
+          approved ? 'approved' : 'denied',
           {
             ...baseExtra,
             intentArgs: toolInput,
             ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
             ...(safeBroker ? { broker: safeBroker } : {}),
-            // What was proven, and nothing more: the harness's direct parent
-            // (this pid) holds the interceptor's marker for this call.
-            cardOwner: { plane: 'openclaw-interceptor', gatewayPid: proof.holderPid, proof: 'direct-parent-socket' },
+            // What was proven, and nothing more: the anchored gateway (this
+            // pid) reported the operator's answer to its card for this call.
+            cardOwner: { plane: 'openclaw-interceptor', gatewayPid: adopted.holderPid, proof: 'anchored-gateway-resolution' },
           },
         );
+        if (approved) {
+          console.error(
+            `[shieldcortex] action-guard: ${safeToolName(toolName)} — the operator approved the OpenClaw interceptor's card for this call (gateway pid ${adopted.holderPid}); no second card (#628).`,
+          );
+          process.exit(0); // The hook's normal allow: no decision of its own.
+        }
         console.error(
-          `[shieldcortex] action-guard: ${safeToolName(toolName)} needs approval — the OpenClaw interceptor holds the card for this call (gateway pid ${proof.holderPid}); not raising a second card (#628).`,
+          `[shieldcortex] action-guard: ${safeToolName(toolName)} — the operator denied the OpenClaw interceptor's card for this call (gateway pid ${adopted.holderPid}); no second card (#628).`,
         );
+        emitDecision('deny', `ShieldCortex Action Guard: the operator denied this call on the OpenClaw approval card. [${safeSignalList(verdict.signals).join(', ')}]`);
         process.exit(0);
       }
     }
