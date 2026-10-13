@@ -5494,6 +5494,15 @@ function dataReadHeredocRelief(rawCommand: string): boolean {
  * body needs neither: the classifier sees every terminator as the interpreter
  * does, and `stripComments` stays exactly as 5.5.0 scanned.
  *
+ * `rawCommand` must also predate `deobfuscateIfs` (N1, #732 review round 4),
+ * not only comment-stripping: that pass erases every `${IFS...}`/`$IFS`
+ * substring from the WHOLE command, including inside a quoted interpreter
+ * heredoc the shell never expands at all, where the same bytes can be a
+ * non-bash interpreter's own syntax (e.g. Perl string interpolation) rather
+ * than shell obfuscation. Deobfuscated text reaching either the sink veto or
+ * the allow-list classifier here can erase the very span that would have
+ * vetoed relief.
+ *
  * The blank is applied to the heredoc that `wholeCommandHeredocProgram` finds
  * in `execCommand` itself, so offsets are never carried across the two texts.
  * If the stripped text no longer shows the same whole-command shape and
@@ -6198,9 +6207,18 @@ export function evaluateToolCall(
  * file-reading substitutions spliced in — and the expansion record for that
  * pass's own script fold. Supplied only by the recursive second pass in
  * `evaluateToolCallCore`; the outer call derives its command from `args`.
+ *
+ * `rawCommand` (N1, #732) is `command`'s counterpart from BEFORE
+ * `deobfuscateIfs` ran — the bytes the interpreter will actually read. It is
+ * carried alongside `command` rather than derived from it because
+ * `deobfuscateIfs` is lossy: it can erase a non-bash interpreter's own syntax
+ * (e.g. Perl `${IFS...}` string interpolation) that merely LOOKS like shell
+ * IFS obfuscation. Heredoc-relief eligibility must be judged on this field,
+ * never on `command`.
  */
 interface ExpandedSurface {
   command: string;
+  rawCommand: string;
   subst: SubstitutionState;
 }
 
@@ -6332,7 +6350,8 @@ function evaluateToolCallCore(
   }
 
   const family = classifyFamily(toolName);
-  const typedCommand = deobfuscateIfs(extractCommand(args));
+  const originalCommand = extractCommand(args);
+  const typedCommand = deobfuscateIfs(originalCommand);
   // #517: `$(cat f)` / `$(< f)` / `` `cat f` `` are expanded so the guard also
   // scans the command the shell will actually execute, and the substituted
   // spelling is judged at least as hard as the literal spelling. Bounded by
@@ -6349,9 +6368,17 @@ function evaluateToolCallCore(
   // The recursive pass carries its surface in and does not expand again.
   const subst = surface?.subst ?? newSubstitutionState();
   const command = surface?.command ?? typedCommand;
+  // N1 (#732): `rawCommand` is `command`'s pre-`deobfuscateIfs` counterpart,
+  // carried alongside it purely for heredoc-relief eligibility (see
+  // `ExpandedSurface`). The general scan below keeps using `command`
+  // (deobfuscated) exactly as before — only the relief judgment changes.
+  const rawCommand = surface?.rawCommand ?? originalCommand;
   const expandedCommand = (surface || typedCommand.length > OVERSIZED_COMMAND_LENGTH)
     ? command
     : expandFileSubstitutions(typedCommand, options?.resolveScriptSource, subst);
+  const expandedRawCommand = (surface || typedCommand.length > OVERSIZED_COMMAND_LENGTH)
+    ? rawCommand
+    : expandFileSubstitutions(originalCommand, options?.resolveScriptSource, newSubstitutionState());
   const path = extractPath(args);
   const url = extractUrl(args, toolName);
 
@@ -6466,8 +6493,8 @@ function evaluateToolCallCore(
   // (`openclaw.process`, exact-special read tools) have either returned
   // already or do not apply to this tool name.
   if (!surface && expandedCommand !== typedCommand) {
-    const typed = evaluateToolCallCore(toolName, args, config, options, true, { command: typedCommand, subst });
-    const expanded = evaluateToolCallCore(toolName, args, config, options, true, { command: expandedCommand, subst: newSubstitutionState() });
+    const typed = evaluateToolCallCore(toolName, args, config, options, true, { command: typedCommand, rawCommand, subst });
+    const expanded = evaluateToolCallCore(toolName, args, config, options, true, { command: expandedCommand, rawCommand: expandedRawCommand, subst: newSubstitutionState() });
     return mergeSurfaceVerdicts(typed, expanded);
   }
 
@@ -6488,7 +6515,7 @@ function evaluateToolCallCore(
   const fold: ScriptFold = command.length > OVERSIZED_COMMAND_LENGTH
     ? { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] }
     : foldScriptSources(
-        dataReadHeredocDiscoverySurface(command, execCommand),
+        dataReadHeredocDiscoverySurface(rawCommand, execCommand),
         options?.resolveScriptSource, options?.isReviewedScript, subst);
 
   // #189: every verdict minted past this point records which files the
