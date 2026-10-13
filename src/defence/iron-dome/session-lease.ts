@@ -1283,6 +1283,16 @@ function isGlobalInstallAtDepth(command: string, depth: number): boolean {
     let index = 0;
     while (index < tokens.length &&
       (/^\w+=/.test(tokens[index]!) || INSTALL_STAGE_PREFIXES.has(tokens[index]!.toLowerCase()))) index++;
+    // Standalone runners (`npx`, `pnpx`, `bunx`) run the command after their
+    // own options: `npx -y npm i -g x` is npm's global install. The first
+    // package-manager word after the runner is the inner stage (#748 r4).
+    if (/^(?:npx|pnpx|bunx)$/i.test(tokens[index] ?? '')) {
+      for (let k = index + 1; k < tokens.length; k++) {
+        // `-p npm` / `--package npm` names the package to fetch, not the command.
+        if (/^(?:-p|--package)$/i.test(tokens[k]!)) { k++; continue; }
+        if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[k]!)) { index = k; break; }
+      }
+    }
     if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index] ?? '')) {
       if (expansion) unsafe = true;
       let global = false;

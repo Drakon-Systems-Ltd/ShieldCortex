@@ -123,6 +123,30 @@ describe('session lease global install scope (#747)', () => {
   });
 
   it.each([
+    'npx npm i -g evil',
+    'npx -y npm i -g evil',
+    'npx --yes -- npm i -g evil',
+    'npx npm install -g evil',
+    'npx -p npm npm i -g evil',
+    'npx --package=npm -- npm install --global evil',
+    'pnpx npm i -g evil',
+    'bunx npm i -g evil',
+    'FOO=1 npx -y npm i -g evil',
+    'cd /x && npx npm i -g evil',
+  ])('keeps standalone runner shapes as install (#748 r4): %s', (command) => {
+    expect(scope(command)).toBe('install');
+  });
+
+  it.each([
+    'npx npm ls -g',
+    'npx -y npm view -g evil',
+    'npx prettier --write .',
+    'npx tsc -p tsconfig.json',
+  ])('leaves read-only standalone runner shapes unscoped (#748 r4): %s', (command) => {
+    expect(scope(command)).toBeNull();
+  });
+
+  it.each([
     ['repeated read-only pipeline', 'npm list -g | grep -i x; '.repeat(4200)],
     ['quote characters', '"'.repeat(100_001)],
     ['nested shell quotes', 'bash -c "'.repeat(11_000) + 'unterminated tail'],
