@@ -67,7 +67,6 @@ const gated: Array<[string, string, string]> = [
   ['shadowed print', 'py', `print = exec${nl}print('subprocess.run(${argvList})')`],
   ['printed concatenation', 'py', `print("x" + subprocess.run(${argvList}))`],
   ['printed interpolation', 'py', `print(f"{subprocess.run(${argvList})}")`],
-  ['hash without space', 'py', `#subprocess.run(${argvList})`],
   // Shell echo/printf get no printed-example relief: their output is
   // routinely fed back into an interpreter.
   ['shell echo example', 'sh', `echo 'subprocess.run(${argvList})'`],
@@ -78,11 +77,39 @@ const gated: Array<[string, string, string]> = [
   ['console shadowed by with', 'js', `with ({ console: { log: eval } }) {${nl}console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")${nl}}`],
   ['stdout redirected into a child', 'py', `import sys, subprocess${nl}sys.stdout = subprocess.Popen(["python3"], stdin=subprocess.PIPE, text=True).stdin${nl}print('subprocess.run(${argvList})')`],
   ['opaque element after a value flag', 'py', `subprocess.run(["${npm}", "--verbose", cmd, "${global}", "x"])`],
+  ['triple double quote', 'py', `s = """\n# """; subprocess.run(${argvList})`],
+  ['triple single quote', 'py', `s = '''\nprint("'''; subprocess.run(${argvList}); t = '''")\n'''`],
+  ['JS template literal', 'js', `const s = \`\n// \`; spawn("${npm}", ["${install}", "${global}", "x"]);`],
+  ['JS block comment', 'js', `/*\nconsole.log("*/ spawn('${npm}', ['${install}', '${global}', 'x']); /*")\n*/`],
+  ['form feed before Python hash', 'py', `x = "\u000c# "; subprocess.run(${argvList})`],
+  ['line separator before Python hash', 'py', `x = "\u2028# "; subprocess.run(${argvList})`],
+  ['line separator before JS slash', 'js', `const x = "\u2028// "; spawn("${npm}", ["${install}", "${global}", "x"]);`],
+  ['vertical tab before JS slash', 'js', `const x = "\u000b// "; spawn("${npm}", ["${install}", "${global}", "x"]);`],
+  ['next line before Python hash', 'py', `x = "\u0085# "; subprocess.run(${argvList})`],
+  ['shell unterminated quote line', 'sh', `x="\n# "; python3 -c 'import subprocess; subprocess.run(${argvList})'`],
+  ['Python continuation floor division', 'py', `y = (a\n     // 2); subprocess.run(${argvList})`],
+  ['JS private field line', 'js', `#x; spawn("${npm}", ["${install}", "${global}", "x"])`],
+  ['redefined print direct call', 'py', `def print(s):\n    exec(s)\nprint('subprocess.run(${argvList})')`],
+  ['redefined print beyond first window', 'py', `print('subprocess.run(${argvList})')\n${'# pad\n'.repeat(10000)}def print(s):\n    exec(s)`],
+  ['nested JS sink', 'js', `spawn("ls", [f(spawn("${npm}", ["${install}", "${global}", "x"]))])`],
+  ['nested Python sink', 'py', `subprocess.run(["echo", str(subprocess.run(${argvList}))])`],
+  ['env wrapper', 'py', `subprocess.run(["env", "${npm}", "${install}", "${global}", "x"])`],
+  ['env options and assignment', 'py', `subprocess.run(["env", "-u", "OLD", "-C", "/tmp", "A=1", "${npm}", "${install}", "${global}", "x"])`],
+  ['env opaque assignment', 'py', `subprocess.run(["env", assignment, "${npm}", "${install}", "${global}", "x"])`],
+  ['command wrapper', 'py', `subprocess.run(["command", "${npm}", "${install}", "${global}", "x"])`],
+  ['nohup wrapper', 'py', `subprocess.run(["nohup", "${npm}", "${install}", "${global}", "x"])`],
+  ['time wrapper', 'py', `subprocess.run(["time", "${npm}", "${install}", "${global}", "x"])`],
+  ['nice wrapper', 'py', `subprocess.run(["nice", "-n", "5", "${npm}", "${install}", "${global}", "x"])`],
+  ['repeated wrappers before corepack', 'py', `subprocess.run(["env", "A=1", "nice", "-5", "corepack", "${npm}", "${install}", "${global}", "x"])`],
+  ['unknown script language', 'rb', `# subprocess.run(${argvList})`],
+  ['quoted comment before sink', 'py', `# "note" subprocess.run(${argvList})`],
+  ['quote between two commented sinks', 'py', `# subprocess.run(${argvList}); "note" subprocess.run(${argvList})`],
 ];
 
 describe('written global installs through argv lists (#387)', () => {
   it.each(gated)('gates %s', (_name, ext, content) => {
     const verdict = write(ext, content);
+    expect(verdict.decision).toBe('require_approval');
     expect(verdict.signals ?? []).toContain('install-package-global');
     expect(verdict.severity).toBe('dangerous');
   });
@@ -94,7 +121,9 @@ describe('written global installs through argv lists (#387)', () => {
     ['unrelated spawn and note', 'js', `spawn("ls", ["${global}"]); const note = "${npm} ${install}";`],
     ['global flag on a different call', 'py', `import subprocess${nl}subprocess.run(["${npm}", "${install}", "x"])${nl}subprocess.run(["gcc", "${global}", "m.c"])`],
     ['commented sink', 'py', `# subprocess.run(${argvList})`],
+    ['hash without space', 'py', `#subprocess.run(${argvList})`],
     ['printed sink text', 'py', `print('subprocess.run(${argvList})')`],
+    ['printed sink with trailing comment', 'py', `print('subprocess.run(${argvList})')  # example`],
     ['JS comment', 'js', `// spawn("${npm}", ["${install}", "${global}", "x"])`],
     ['indented comment', 'py', `    # subprocess.run(${argvList})`],
     ['console printed example', 'js', `console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
@@ -102,6 +131,9 @@ describe('written global installs through argv lists (#387)', () => {
     ['read-only ls operand', 'py', `subprocess.run(["${npm}", "ls", "${global}", "in"])`],
     ['read-only view operand', 'py', `subprocess.run(["${npm}", "view", "${global}", "i"])`],
     ['opaque package without global', 'py', `subprocess.run(["${npm}", "${install}", pkg])`],
+    ['known prefix consumes install', 'py', `subprocess.run(["${npm}", "--prefix", "${install}", "ls", "${global}"])`],
+    ['known registry consumes install', 'py', `subprocess.run(["${npm}", "--registry", "${install}", "ls", "${global}"])`],
+    ['known location consumes non-global install', 'py', `subprocess.run(["${npm}", "--location", "${install}", "ls", "${global}"])`],
   ])('allows %s', (_name, ext, content) => {
     expect(write(ext, content).signals ?? []).not.toContain('install-package-global');
   });
@@ -119,5 +151,15 @@ describe('written global installs through argv lists (#387)', () => {
   ])('scans 100 KB adversarial argv (%s) in under 300 ms', (_name, content) => {
     expect(content.length).toBeGreaterThan(90_000);
     expect(bestOf(3, () => write('py', content))).toBeLessThan(300);
+  });
+
+  it.each([
+    ['nested spawn expressions', 'js', 'spawn("ls", [' + 'spawn(f('.repeat(12500)],
+    ['unfinished Python argv calls', 'py', 'subprocess.run([x, '.repeat(5500)],
+    ['Python comment lines', 'py', '# subprocess.run(["npm",\n'.repeat(3700)],
+    ['newline flood and final sink', 'py', '"\n'.repeat(50000) + `subprocess.run(${argvList})`],
+  ])('scans 100 KB whole-file argv (%s) in under 300 ms', (_name, ext, content) => {
+    expect(content.length).toBeGreaterThan(90_000);
+    expect(bestOf(5, () => write(ext, content))).toBeLessThan(300);
   });
 });

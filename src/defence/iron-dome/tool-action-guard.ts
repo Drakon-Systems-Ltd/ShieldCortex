@@ -1465,13 +1465,12 @@ const GLOBAL_FLAG = /^(?:\-g|--global|--location=global)$/i;
 const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|Popen|check_call|check_output)|child_process\.(?:exec|execSync|spawn|spawnSync)|\.exec(?:Sync|File|FileSync)?|\.spawn(?:Sync)?|(?:^|[^\w.])(?:exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)\s*\()/i;
 
 // Read direct argv literals at an exec sink, with an 8 KB cap per call. The
-// only source context used is the sink's own physical line; this does not
-// attempt to lex Python, JS or shell before the sink.
+// source context is checked once for the whole written file.
 const GLOBAL_ARGV_SINK = /\b(subprocess\.(?:run|call|Popen|check_call|check_output)|(?:child_process\.)?(?:spawn|spawnSync|execFile|execFileSync)|\.(?:spawn|spawnSync|execFile|execFileSync))\s*\(/gi;
 const ARGV_SCAN_CAP = 8192;
 const OPAQUE_ARGV = Symbol('opaque argv element');
 type ArgvElement = string | typeof OPAQUE_ARGV;
-const ARGV_LINE_BREAK = /[\n\r\u2028\u2029\u0085\v\f]/;
+type ArgvReliefContext = { language: 'python' | 'js' | 'shell' | 'none'; comments: boolean; printed: boolean };
 // Printed-example relief holds only while `print` and `console` are never used
 // other than as a direct call. Any other use (assignment, parameter, import
 // alias, attribute access, Python 2 statement) could make the "print" run
@@ -1482,7 +1481,7 @@ const PRINT_NAME_OTHER_USE = /\bprint\b(?!\()|\bconsole\b(?!\.(?:log|info|warn|e
 const STDOUT_REDIRECTED = /sys\.stdout|redirect_stdout|process\.stdout|__builtins__|\bbuiltins\b|\bglobals\s*\(|\bsetattr\b|\bdefineProperty\b|\bReflect\b|\bProxy\b/;
 
 /** Literal and opaque argv elements right after a sink's `(`. Never reads past the cap. */
-function readQuotedArgv(text: string, from: number): { args: ArgvElement[]; next: number } {
+function readQuotedArgv(text: string, from: number, nextSink = text.length): { args: ArgvElement[]; next: number } {
   let i = from;
   const end = Math.min(text.length, from + ARGV_SCAN_CAP);
   const skipSpace = () => { while (i < end && /\s/.test(text[i])) i++; };
@@ -1542,6 +1541,12 @@ function readQuotedArgv(text: string, from: number): { args: ArgvElement[]; next
     // Its delimiter is only a comma or the matching closer at depth zero.
     const nested: string[] = [];
     while (i < end) {
+      // An opaque expression can contain another exec sink. Leave its bytes
+      // to that sink's reader instead of swallowing it with the outer call.
+      if (i >= nextSink) {
+        args[args.length - 1] = OPAQUE_ARGV;
+        return done();
+      }
       const ch = text[i];
       if (ch === '"' || ch === "'") {
         if (args[args.length - 1] !== OPAQUE_ARGV) args[args.length - 1] = OPAQUE_ARGV;
@@ -1577,12 +1582,34 @@ function argvIsGlobalInstall(args: readonly ArgvElement[]): boolean {
   };
   let base = normalise(args[0]);
   let from = 1;
-  if (/^(?:npx|corepack)$/.test(base)) { base = normalise(args[1]); from = 2; }
+  // Only these simple leading command wrappers are recognised here.
+  while (/^(?:env|command|nohup|time|nice)$/.test(base)) {
+    const wrapper = base;
+    if (wrapper === 'env') {
+      while (from < args.length) {
+        const arg = args[from];
+        // An opaque element here may be a `NAME=value` assignment; keep
+        // looking for the command rather than giving up (fail closed).
+        if (typeof arg !== 'string') { from++; continue; }
+        if (arg === '-u' || arg === '-C') { from += 2; continue; }
+        if (arg.startsWith('-') || /^[A-Za-z_][A-Za-z_0-9]*=/.test(arg)) { from++; continue; }
+        break;
+      }
+    } else if (wrapper === 'nice') {
+      while (typeof args[from] === 'string' && /^-/.test(args[from] as string)) {
+        if (args[from] === '-n') from += 2;
+        else from++;
+      }
+    }
+    base = normalise(args[from++]);
+  }
+  if (/^(?:npx|corepack)$/.test(base)) { base = normalise(args[from++]); }
   if (!NPM_FAMILY.test(base)) return false;
   const global = args.some((a, idx) => typeof a === 'string' &&
     (/^(?:-g|--global)(?:=(?:true|1))?$/i.test(a) || /^--location=global$/i.test(a)
       || (a.toLowerCase() === '--location' && args[idx + 1] === 'global')));
   const knownBoolean = (flag: string) => /^(?:-g|--global|-D|-S|-E|-O|-f|--force|-y|--yes|--save.*|--no-.*|--silent|-s|-q|--quiet|--ignore-scripts)$/i.test(flag);
+  const knownValue = (flag: string) => /^(?:--prefix|--registry|--cache|--userconfig|--globalconfig|--loglevel|--workspace|-w|--cwd|--dir|-C|--tag|--otp|--location)$/i.test(flag);
   let subcommand: ArgvElement | undefined;
   let second: ArgvElement | undefined;
   for (let i = from; i < args.length; i++) {
@@ -1593,7 +1620,7 @@ function argvIsGlobalInstall(args: readonly ArgvElement[]): boolean {
         // The element after a value-taking flag may be its value or the
         // subcommand. Fail closed: an install word or an opaque element
         // there counts as a possible install subcommand.
-        if (value === OPAQUE_ARGV || (typeof value === 'string' && INSTALL_VERB.test(value))) {
+        if (!knownValue(arg) && (value === OPAQUE_ARGV || (typeof value === 'string' && INSTALL_VERB.test(value)))) {
           if (subcommand === undefined) subcommand = value;
           else if (second === undefined) second = value;
         }
@@ -1610,19 +1637,61 @@ function argvIsGlobalInstall(args: readonly ArgvElement[]): boolean {
   return global && possibleInstall(subcommand);
 }
 
+/** Decide relief from the entire file, before any sink or window is examined. */
+function argvReliefContext(text: string, path?: string): ArgvReliefContext {
+  const ext = /\.([^.\\/]+)$/.exec(path ?? '')?.[1]?.toLowerCase();
+  const firstBreak = text.search(/[\r\n]/);
+  const firstLine = text.slice(0, firstBreak < 0 ? text.length : firstBreak);
+  const shebang = firstLine.startsWith('#!') ? firstLine : '';
+  const language: ArgvReliefContext['language'] =
+    /^(?:py|pyw)$/.test(ext ?? '') ? 'python'
+      : /^(?:js|mjs|cjs|ts|mts|cts|jsx|tsx)$/.test(ext ?? '') ? 'js'
+        : /^(?:sh|bash|zsh)$/.test(ext ?? '') ? 'shell'
+          : /python/i.test(shebang) ? 'python'
+            : /node|deno|bun/i.test(shebang) ? 'js'
+              : /(?:bash|zsh|sh)/i.test(shebang) ? 'shell' : 'none';
+  if (language === 'none' || /"""|'''|`|\/\*|\*\/|\\[\r\n]|[\u2028\u2029\u0085\v\f]/.test(text)) {
+    return { language, comments: false, printed: false };
+  }
+  let single = 0;
+  let double = 0;
+  let escaped = false;
+  for (let i = 0; i <= text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n' || ch === '\r' || i === text.length) {
+      if (single % 2 || double % 2) return { language, comments: false, printed: false };
+      single = double = 0;
+      escaped = false;
+    } else if (ch === '\\') {
+      escaped = !escaped;
+    } else {
+      if (!escaped && ch === "'") single++;
+      if (!escaped && ch === '"') double++;
+      escaped = false;
+    }
+  }
+  const rebound = /\b(?:print|console)\s*=/.test(text)
+    || text.split(/[\n\r]/).some(line => /\b(?:def|function|class|let|const|var|import|from)\b/.test(line)
+      && /\b(?:print|console)\b/.test(line));
+  return { language, comments: true, printed: language !== 'shell'
+    && !rebound && !PRINT_NAME_OTHER_USE.test(text) && !STDOUT_REDIRECTED.test(text) };
+}
+
 /** Conservative relief for a whole comment line or a plain printed example. */
-function argvSinkLineRelief(text: string, start: number, end: number, printed: boolean): { comment: boolean; printFrom: number; printTo: number } {
-  const none = { comment: false, printFrom: -1, printTo: -1 };
+function argvSinkLineRelief(text: string, start: number, end: number, context: ArgvReliefContext): { commentUntil: number; printFrom: number; printTo: number } {
+  const none = { commentUntil: -1, printFrom: -1, printTo: -1 };
+  if (!context.comments || (start > 0 && text[start - 1] !== '\n' && text[start - 1] !== '\r')) return none;
   let i = start;
   while (i < end && (text[i] === ' ' || text[i] === '\t')) i++;
-  // The marker must be followed by a space, a tab or the line end. `#x`
-  // (a JS private field) and `#subprocess…` keep gating, and so does
-  // `//usr/bin/python3 …`, which a shell runs as a path.
-  const markerEnds = (at: number) => at >= end || text[at] === ' ' || text[at] === '\t';
-  if (text.startsWith('//', i) && markerEnds(i + 2)) return { ...none, comment: true };
-  if (text[i] === '#' && markerEnds(i + 1)) return { ...none, comment: true };
-  if (!printed) return none;
-  const prefix = /^(?:print\(|console\.(?:log|info|warn|error)\()/.exec(text.slice(i, Math.min(end, i + 20)));
+  const marker = context.language === 'js' ? '//' : '#';
+  if (text.startsWith(marker, i)) {
+    const afterMarker = i + marker.length;
+    const firstUnsafe = text.slice(afterMarker, end).search(/["'`]|\*\//);
+    return { ...none, commentUntil: firstUnsafe < 0 ? end : afterMarker + firstUnsafe };
+  }
+  if (!context.printed) return none;
+  const prefixPattern = context.language === 'python' ? /^print\(/ : /^console\.(?:log|info|warn|error)\(/;
+  const prefix = prefixPattern.exec(text.slice(i, Math.min(end, i + 20)));
   if (!prefix) return none;
   i += prefix[0].length;
   const quote = text[i];
@@ -1634,8 +1703,12 @@ function argvSinkLineRelief(text: string, start: number, end: number, printed: b
   }
   if (i >= end) return none;
   const close = i++;
-  while (i < end && (text[i] === ')' || text[i] === ';' || text[i] === ' ' || text[i] === '\t')) i++;
-  return i === end ? { comment: false, printFrom: open + 1, printTo: close } : none;
+  if (text[i++] !== ')') return none;
+  if (text[i] === ';') i++;
+  while (i < end && (text[i] === ' ' || text[i] === '\t')) i++;
+  const trailing = context.language === 'js' ? '//' : '#';
+  if (text.startsWith(trailing, i)) i = end;
+  return i === end ? { commentUntil: -1, printFrom: open + 1, printTo: close } : none;
 }
 
 /**
@@ -1644,26 +1717,29 @@ function argvSinkLineRelief(text: string, start: number, end: number, printed: b
  * The DANGEROUS regex cannot see these (quotes sit where it wants whitespace),
  * so this is both a proposer and a confirmer for `install-package-global`.
  */
-function globalInstallArgvInvoked(text: string): boolean {
+function globalInstallArgvInvoked(text: string, context?: ArgvReliefContext): boolean {
   GLOBAL_ARGV_SINK.lastIndex = 0;
-  const printed = !PRINT_NAME_OTHER_USE.test(text) && !STDOUT_REDIRECTED.test(text);
+  const positions: Array<{ start: number; after: number }> = [];
+  let found: RegExpExecArray | null;
+  while ((found = GLOBAL_ARGV_SINK.exec(text)) !== null) positions.push({ start: found.index, after: GLOBAL_ARGV_SINK.lastIndex });
   let lineStart = 0;
   let lineEnd = 0;
   let lineRelief: ReturnType<typeof argvSinkLineRelief> | undefined;
-  let match: RegExpExecArray | null;
-  while ((match = GLOBAL_ARGV_SINK.exec(text)) !== null) {
-    while (lineEnd <= match.index && lineStart < text.length) {
-      while (lineEnd < text.length && !ARGV_LINE_BREAK.test(text[lineEnd])) lineEnd++;
-      if (match.index < lineEnd) break;
+  for (let k = 0; k < positions.length; k++) {
+    const { start, after } = positions[k];
+    while (lineEnd <= start && lineStart < text.length) {
+      while (lineEnd < text.length && text[lineEnd] !== '\n' && text[lineEnd] !== '\r') lineEnd++;
+      if (start < lineEnd) break;
       lineStart = lineEnd + 1;
       lineEnd = lineStart;
       lineRelief = undefined;
     }
-    if (lineRelief === undefined) lineRelief = argvSinkLineRelief(text, lineStart, lineEnd, printed);
-    if (lineRelief.comment || (match.index >= lineRelief.printFrom && match.index < lineRelief.printTo)) continue;
-    const { args, next } = readQuotedArgv(text, GLOBAL_ARGV_SINK.lastIndex);
-    GLOBAL_ARGV_SINK.lastIndex = Math.max(GLOBAL_ARGV_SINK.lastIndex, next);
+    if (context && lineRelief === undefined) lineRelief = argvSinkLineRelief(text, lineStart, lineEnd, context);
+    if ((lineRelief && start < lineRelief.commentUntil)
+        || (lineRelief && start >= lineRelief.printFrom && start < lineRelief.printTo)) continue;
+    const { args, next } = readQuotedArgv(text, after, positions[k + 1]?.start);
     if (argvIsGlobalInstall(args)) return true;
+    while (k + 1 < positions.length && positions[k + 1].start < next) k++;
   }
   return false;
 }
@@ -5778,13 +5854,14 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
  * "git push -f" does not gate at write time when the identical text would not
  * gate at exec time.
  */
-function scanWriteContentPayload(content: string): {
+function scanWriteContentPayload(content: string, path?: string): {
   catastrophic: Array<{ signal: string; span: string }>;
   dangerous: Array<{ signal: string; span: string }>;
 } {
   const catastrophic: Array<{ signal: string; span: string }> = [];
   const dangerous: Array<{ signal: string; span: string }> = [];
   const seen = new Set<string>();
+  const argvContext = argvReliefContext(content, path);
   forEachWindow(content, (w) => {
     const text = deobfuscateIfs(w);
     for (const m of matchSpans(CATASTROPHIC, text)) {
@@ -5834,11 +5911,10 @@ function scanWriteContentPayload(content: string): {
         ?? 'package install';
       dangerous.push({ signal: 'install-package', span: fmtSpan(span) });
     }
-    if (!seen.has('install-package-global') && globalInstallArgvInvoked(text)) {
-      seen.add('install-package-global');
-      dangerous.push({ signal: 'install-package-global', span: 'global package install' });
-    }
   });
+  if (!seen.has('install-package-global') && globalInstallArgvInvoked(content, argvContext)) {
+    dangerous.push({ signal: 'install-package-global', span: 'global package install' });
+  }
   return { catastrophic, dangerous };
 }
 
@@ -6451,7 +6527,7 @@ function evaluateToolCallCore(
       const scanBody = memoryProse
         ? neutralizeMarkdownCommandMentions(writeContent)
         : writeContent;
-      const hits = scanWriteContentPayload(scanBody);
+      const hits = scanWriteContentPayload(scanBody, path);
       if (hits.catastrophic.length > 0) {
         const signals = ['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)];
         const span = hits.catastrophic[0]?.span;
