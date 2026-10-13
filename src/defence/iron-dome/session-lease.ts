@@ -1234,26 +1234,43 @@ const INSTALL_SUBCOMMANDS = new Set([
   'isnt', 'isnta', 'isntal', 'isntall', 'add',
 ]);
 const GLOBAL_INSTALL_MARKER_RE = /^(?:-g\b|--global\b|--location=global\b)/i;
+const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time']);
 
 /**
  * A global install needs a package manager's install subcommand and global
- * marker in the same stage. Quote-aware splitting keeps quoted separators
- * inside tokens; unquoted `(`/`)` bound stages, while redirection `&`/`|`
- * characters do not separate stages. Options may precede the verb. Ambiguous
- * syntax fails closed by OR-ing the whole-surface rule with both parsed rules.
+ * marker in the same stage. Shell comments end at a newline, and closed quote
+ * spans are scanned recursively for commands passed to a shell. Substitution
+ * frames preserve the outer stage while their inner stages are scanned;
+ * subshell parentheses bound stages. Env assignments and shell prefix words
+ * are skipped before the package manager. Ambiguous syntax fails closed by
+ * OR-ing the whole-surface rule with both parsed rules.
  */
 function isGlobalInstall(command: string): boolean {
+  return isGlobalInstallAtDepth(command, 0);
+}
+
+function isGlobalInstallAtDepth(command: string, depth: number): boolean {
   if (new RegExp(`${CMD_BOUNDARY}openclaw\\s+plugins\\s+(?:install|add)\\b`, 'i').test(command)) return true;
 
+  type SavedStage = {
+    tokens: string[];
+    token: string;
+    tokenStarted: boolean;
+    quote: string;
+    quoteStart: number;
+    expansion: boolean;
+  };
+  type Frame = { kind: 'subshell' } | { kind: 'subst'; saved: SavedStage };
   let tokens: string[] = [];
   let token = '';
   let tokenStarted = false;
   let quote = '';
+  let quoteStart = -1;
   let unsafe = /\b(?:eval|xargs)\b/i.test(command);
   let expansion = false;
   let foundInstall = false;
   let globalExpansion = false;
-  let substitutionDepth = 0;
+  const frames: Frame[] = [];
 
   const finishToken = () => {
     if (tokenStarted) tokens.push(token);
@@ -1263,8 +1280,8 @@ function isGlobalInstall(command: string): boolean {
   const finishStage = () => {
     finishToken();
     let index = 0;
-    while (index < tokens.length && /^\w+=\S*$/.test(tokens[index]!)) index++;
-    if (tokens[index]?.toLowerCase() === 'sudo') index++;
+    while (index < tokens.length &&
+      (/^\w+=\S*$/.test(tokens[index]!) || INSTALL_STAGE_PREFIXES.has(tokens[index]!.toLowerCase()))) index++;
     if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index] ?? '')) {
       if (expansion) unsafe = true;
       let global = false;
@@ -1297,6 +1314,12 @@ function isGlobalInstall(command: string): boolean {
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
     if (ch === '\x60') unsafe = true;
+    if (!quote && ch === '#' && !tokenStarted) {
+      while (i < command.length && command[i] !== '\n') i++;
+      if (i === command.length) break;
+      i--; // Let the newline finish the stage on the next iteration.
+      continue;
+    }
     if (ch === '\\' && command[i + 1] === '\n') { i++; continue; }
     if (ch === '\\' && quote !== '\x27' && i + 1 < command.length) {
       token += command[++i];
@@ -1304,21 +1327,41 @@ function isGlobalInstall(command: string): boolean {
       continue;
     }
     if (ch === '$' && command[i + 1] === '(' && quote !== '\x27') {
-      if (quote) unsafe = true;
-      expansion = true;
-      finishStage();
-      substitutionDepth++;
+      frames.push({ kind: 'subst', saved: { tokens, token, tokenStarted, quote, quoteStart, expansion } });
+      tokens = [];
+      token = '';
+      tokenStarted = false;
+      quote = '';
+      quoteStart = -1;
+      expansion = false;
       i++;
       continue;
     }
-    if (!quote && (ch === '(' || ch === ')')) {
+    if (!quote && ch === '(') {
       finishStage();
-      if (ch === ')' && substitutionDepth > 0) substitutionDepth--;
+      frames.push({ kind: 'subshell' });
+      continue;
+    }
+    if (!quote && ch === ')') {
+      finishStage();
+      const frame = frames.pop();
+      if (frame?.kind === 'subst') {
+        ({ tokens, token, tokenStarted, quote, quoteStart, expansion } = frame.saved);
+        token += 'x';
+        tokenStarted = true;
+        expansion = true;
+      }
       continue;
     }
     if (ch === '\x27' || ch === '\x22') {
-      if (!quote) { quote = ch; tokenStarted = true; continue; }
-      if (quote === ch) { quote = ''; continue; }
+      if (!quote) { quote = ch; quoteStart = i; tokenStarted = true; continue; }
+      if (quote === ch) {
+        const span = command.slice(quoteStart + 1, i);
+        if (depth < 4 ? isGlobalInstallAtDepth(span, depth + 1) : legacyIsGlobalInstall(span)) foundInstall = true;
+        quote = '';
+        quoteStart = -1;
+        continue;
+      }
     }
     if (ch === '$' && quote !== '\x27' && /[\w{(@*#?]/.test(command[i + 1] ?? '')) expansion = true;
     if (!quote && /[\s;&|]/.test(ch)) {
@@ -1336,7 +1379,7 @@ function isGlobalInstall(command: string): boolean {
     tokenStarted = true;
   }
   finishStage();
-  return quote || substitutionDepth || unsafe
+  return quote || frames.some((frame) => frame.kind === 'subst') || unsafe
     ? legacyIsGlobalInstall(command) || foundInstall || globalExpansion
     : foundInstall;
 }

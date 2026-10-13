@@ -14,6 +14,8 @@ describe('session lease global install scope (#747)', () => {
     'npm list -g | grep -i x',
     'npm config get prefix -g; echo install',
     'npm ls --global && git add -A',
+    "npm list -g # it's fine",
+    'echo "npm is great" && npm list -g',
   ])('does not classify a read-only query as install: %s', (command) => {
     expect(scope(command)).not.toBe('install');
   });
@@ -54,6 +56,30 @@ describe('session lease global install scope (#747)', () => {
     'npm install --global-style x',
     'npm isntall -g x | xargs echo',
     'openclaw plugins install x',
+    "# '\nnpm i -g evil\n# '",
+    "cd /srv # it's\nnpm install -g evil\necho ok # don't",
+    'echo a#b\nnpm install -g evil',
+    'echo "# text"\nnpm install -g evil',
+    'bash -c "cd /; npm install -g evil"',
+    "sh -c 'true && npm i -g evil'",
+    'ssh host "cd /; npm i -g evil"',
+    'bash -c "sh -c \'npm i -g evil\'"',
+    'bash -c "echo \\"hi\\"; npm i -g evil"',
+    'npm run build && sh -c "npm install -g x"',
+    'npm $(cat verb) -g x',
+    'npm $(printf ins) -g x',
+    'npm $(echo aW5zdGFsbA== | base64 -d) -g x',
+    'npm "$(cat verb)" --global x',
+    'npm $(cat verb) --location=global x',
+    'cd /tmp && npm $(cat verb) -g x',
+    'npm -g $(cat verb) x',
+    'x=$(npm i -g y)',
+    'npm $( $(echo install) ) -g x',
+    'if ! command -v x; then npm install -g x; fi',
+    '{ npm install -g x; }',
+    'while true; do npm install -g x; done',
+    '! npm install -g x',
+    'time npm install -g x',
   ])('keeps a global install scoped: %s', (command) => {
     expect(scope(command)).toBe('install');
   });
@@ -61,6 +87,8 @@ describe('session lease global install scope (#747)', () => {
   it.each([
     ['repeated read-only pipeline', 'npm list -g | grep -i x; '.repeat(4200)],
     ['quote characters', '"'.repeat(100_001)],
+    ['nested shell quotes', 'bash -c "'.repeat(11_000) + 'unterminated tail'],
+    ['many short quotes', "'a'".repeat(30_000)],
   ])('classifies 100 KB of %s in under 200 ms', (_label, command) => {
     const durations = Array.from({ length: 3 }, () => {
       const start = performance.now();
