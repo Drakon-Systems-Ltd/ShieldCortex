@@ -1234,7 +1234,7 @@ const INSTALL_SUBCOMMANDS = new Set([
   'isnt', 'isnta', 'isntal', 'isntall', 'add',
 ]);
 const GLOBAL_INSTALL_MARKER_RE = /^(?:-g\b|--global\b|--location=global\b)/i;
-const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time']);
+const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time', 'eval']);
 
 /**
  * A global install needs a package manager's install subcommand and global
@@ -1242,8 +1242,9 @@ const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 
  * spans are scanned recursively for commands passed to a shell. Substitution
  * frames preserve the outer stage while their inner stages are scanned;
  * subshell parentheses bound stages. Env assignments and shell prefix words
- * are skipped before the package manager. Ambiguous syntax fails closed by
- * OR-ing the whole-surface rule with both parsed rules.
+ * are skipped before the package manager. Runner subcommands and redirections
+ * before the subcommand fail closed. Ambiguous syntax fails closed by OR-ing
+ * the whole-surface rule with both parsed rules.
  */
 function isGlobalInstall(command: string): boolean {
   return isGlobalInstallAtDepth(command, 0);
@@ -1281,7 +1282,7 @@ function isGlobalInstallAtDepth(command: string, depth: number): boolean {
     finishToken();
     let index = 0;
     while (index < tokens.length &&
-      (/^\w+=\S*$/.test(tokens[index]!) || INSTALL_STAGE_PREFIXES.has(tokens[index]!.toLowerCase()))) index++;
+      (/^\w+=/.test(tokens[index]!) || INSTALL_STAGE_PREFIXES.has(tokens[index]!.toLowerCase()))) index++;
     if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index] ?? '')) {
       if (expansion) unsafe = true;
       let global = false;
@@ -1292,6 +1293,7 @@ function isGlobalInstallAtDepth(command: string, depth: number): boolean {
         const arg = tokens[i]!.toLowerCase();
         const globalMarker = GLOBAL_INSTALL_MARKER_RE.test(arg);
         if (globalMarker) global = true;
+        if (subcommand === undefined && /[<>]/.test(arg)) unsafe = true;
         if (arg === '--location') {
           if (/^global\b/i.test(tokens[i + 1] ?? '')) global = true;
           i++; // The value of --location is not a subcommand.
@@ -1304,6 +1306,7 @@ function isGlobalInstallAtDepth(command: string, depth: number): boolean {
         if (INSTALL_SUBCOMMANDS.has(arg)) bareInstall = true;
         if (subcommand === undefined) subcommand = arg;
       }
+      if (subcommand === 'exec' || subcommand === 'x' || subcommand === 'dlx' || subcommand === 'explore') unsafe = true;
       if (global && expansion) globalExpansion = true;
       if (global && (INSTALL_SUBCOMMANDS.has(subcommand ?? '') || (unknownOption && bareInstall))) foundInstall = true;
     }
@@ -1363,7 +1366,10 @@ function isGlobalInstallAtDepth(command: string, depth: number): boolean {
         continue;
       }
     }
-    if (ch === '$' && quote !== '\x27' && /[\w{(@*#?]/.test(command[i + 1] ?? '')) expansion = true;
+    if (ch === '$' && quote !== '\x27' && /[\w{(@*#?\x27\x22]/.test(command[i + 1] ?? '')) expansion = true;
+    // ANSI-C and locale quoting (a dollar sign before a quote) is a quoted word,
+    // so dollar + quoted -g is the word -g: drop the dollar sign.
+    if (ch === '$' && !quote && /[\x27\x22]/.test(command[i + 1] ?? '')) { tokenStarted = true; continue; }
     if (!quote && /[\s;&|]/.test(ch)) {
       if ((ch === '&' && (command[i - 1] === '>' || command[i - 1] === '<' || command[i + 1] === '>')) ||
           (ch === '|' && command[i - 1] === '>')) {

@@ -16,6 +16,9 @@ describe('session lease global install scope (#747)', () => {
     'npm ls --global && git add -A',
     "npm list -g # it's fine",
     'echo "npm is great" && npm list -g',
+    'npm list -g 2>/dev/null | grep -i shieldcortex',
+    'npm ls -g >/tmp/globals.txt',
+    'npm exec -- tsc --noEmit',
   ])('does not classify a read-only query as install: %s', (command) => {
     expect(scope(command)).not.toBe('install');
   });
@@ -81,6 +84,41 @@ describe('session lease global install scope (#747)', () => {
     '! npm install -g x',
     'time npm install -g x',
   ])('keeps a global install scoped: %s', (command) => {
+    expect(scope(command)).toBe('install');
+  });
+
+  it.each([
+    'npm exec -- npm i -g evil',
+    'npm exec -- npm install -g evil',
+    'npm x -- npm install -g evil',
+    'npm exec --yes -- npm i -g evil',
+    'npm exec --package=npm -- npm i -g evil',
+    'npm exec npm -- i -g evil',
+    'npm run build -- && npm exec -- npm i -g evil',
+    'pnpm exec npm i -g evil',
+    'pnpm dlx npm i -g evil',
+    'bun x npm i -g evil',
+    'yarn exec npm install -g evil',
+    'npm explore foo -- npm i -g evil',
+    'npm i>&2 -g evil',
+    'npm i>/dev/null -g evil',
+    'npm install>/dev/null -g evil',
+    'npm 2>/dev/null install -g evil',
+    'npm >/tmp/log install -g evil',
+    'npm </dev/null i -g evil',
+    'npm 2>&1 i -g evil',
+    'npm 3>&1 i -g evil',
+    'npm >>log i -g evil',
+    'npm 2>>log i -g evil',
+    'npm 2>&- i -g evil',
+    'npm &>log i -g evil',
+    'npm >|log i -g evil',
+    'npm > >(cat) i -g evil',
+    'eval npm i -g evil',
+    'npm $\'\\x69nstall\' -g evil',
+    'npm i $\'-g\' evil',
+    'A="x y" npm i -g evil',
+  ])('keeps runner, redirection and prefix shapes as install (#748 r3): %s', (command) => {
     expect(scope(command)).toBe('install');
   });
 
