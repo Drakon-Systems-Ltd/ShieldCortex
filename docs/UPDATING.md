@@ -41,6 +41,17 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-58"></a>
+
+## What's new in 5.8
+
+- **Watch what an AI does in a browser or on a desktop.** If you build on the Claude SDK browser-use or computer-use toolsets, the new `shieldcortex/toolsets` export can sit in front of your driver. It labels each click, typed text, page visit and page read, flags typed credentials and unsafe links, scans what the page says back, and writes an audit trail that never stores what was typed or read. By default it only observes and does not change what runs. Set `mode: 'enforce'` and it refuses the riskiest calls outright, holds risky ones (such as irreversible clicks after a page read) for your approval, and lets the rest run. Enforce answers those allowed calls itself without asking the approver you pass to `guard.confirm`, so that approver's own refusals no longer apply to them. Held calls show a short plain-English card that never includes what was typed or the page text; each approval is used once and expires. See `docs/quickstarts/claude-sdk-toolsets.md`.
+- **Recall on OpenClaw messages searches what you actually wrote.** OpenClaw 2026.9.x wraps each message in context blocks, and prompt-time recall was searching those blocks instead of your words. It now strips a complete wrapper first. Nothing to do on upgrade.
+- **Optional vector recall, off by default.** Prompt-time recall can also rank candidates by meaning: set `"recallVector": true` in the ShieldCortex config file or `SHIELDCORTEX_RECALL_VECTOR=1`. When on, it re-orders and tops up word-matched candidates; it never brings in a memory that shares no word with your prompt.
+- **`doctor` spots stuck recall.** A new [Recall repetition](#doctor-recall-repetition) row warns when your last few recalls all returned the same memories. It only reads the recall log and asks you to change nothing.
+- **`setup` is the command to start with.** `status`, `doctor` and `--help` now say `shieldcortex setup`, and `shieldcortex setup claude` to repair Claude Code. `install` and `quickstart` still work as before.
+- **The threat graph stops at a file it cannot read instead of skipping it.** If a realtime audit day file cannot be read, the threat graph now holds its place at that file and reports the error until the file is readable again, rather than silently moving past it. A damaged saved position now stops realtime updates with a reported error instead of stalling or replaying; restore it or run `shieldcortex threat-graph rebuild`.
+
 <a id="whats-new-in-57"></a>
 
 ## What's new in 5.7

@@ -70,6 +70,7 @@ Action Guard stays off until you turn it on. A bare `sudo shieldcortex protect` 
 | Hermes | via the local API | bound (`pre_tool_call`) |
 | Codex, Cursor, Copilot, MCP | if the agent calls the tools | not a gate |
 | LangChain, Python SDK | if you call `scan` or `save` | not a gate |
+| Claude SDK browser / computer toolsets (TypeScript) | no | observe by default; `mode: 'enforce'` refuses or holds for approval (`shieldcortex/toolsets`, 5.8+) |
 
 `shieldcortex doctor` prints the same split: `memory + tool gate` for a host that can deny, and memory only, not a gate, for one that cannot. It shows the live Guard posture for Claude Code and OpenClaw. For Hermes it only reports whether the plugin copy is present. It will not print "protected" for a host that cannot deny.
 
@@ -82,6 +83,8 @@ The optional enforce-when-ready posture runs the dangerous tier in shadow until 
 `shieldcortex policy-evidence` (5.5+) reports what each runtime's own self-report says it is enforcing, as local self-reports rather than attestation. [What's new in 5.5](docs/UPDATING.md#whats-new-in-55).
 
 Approval cards (5.6+) say what a held action does, why it was held and who asked, in plain English, without the raw command. Database, cluster and cloud teardown commands now ask for approval (5.6+). [What's new in 5.6](docs/UPDATING.md#whats-new-in-56).
+
+`shieldcortex/toolsets` (5.8+) sits in front of a Claude SDK browser-use or computer-use driver and by default records what each click, keystroke, navigation and page read would trigger without changing what runs; `mode: 'enforce'` refuses the riskiest calls outright, holds risky ones (such as irreversible clicks after a page read) for your approval, and lets the rest run. [Quickstart](docs/quickstarts/claude-sdk-toolsets.md).
 
 ## Free and Cloud
 
