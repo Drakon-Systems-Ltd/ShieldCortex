@@ -64,7 +64,7 @@ const gated: Array<[string, string, string]> = [
   ['lone CR ends comment', 'py', `# x${cr}subprocess.run(${argvList})`],
   ['U+2028 ends comment', 'py', `# x${ls}subprocess.run(${argvList})`],
   ['printed pipe executes text', 'sh', `echo 'subprocess.run(${argvList})' | python3`],
-  ['shadowed print', 'py', `print = exec${nl}print("subprocess.run(${argvList})")`],
+  ['shadowed print', 'py', `print = exec${nl}print('subprocess.run(${argvList})')`],
   ['printed concatenation', 'py', `print("x" + subprocess.run(${argvList}))`],
   ['printed interpolation', 'py', `print(f"{subprocess.run(${argvList})}")`],
   ['hash without space', 'py', `#subprocess.run(${argvList})`],
@@ -74,9 +74,9 @@ const gated: Array<[string, string, string]> = [
   ['echo inside multi-line command substitution', 'sh', `python3 -c "$(${nl}echo 'import subprocess; subprocess.run(${argvList})'${nl})"`],
   // `//usr/bin/python3` is a path a shell runs, not a comment.
   ['double-slash path command', 'sh', `//usr/bin/python3 -c 'import subprocess; subprocess.run(${argvList})'`],
-  ['print parameter shadow', 'py', `def f(print):${nl}    print("subprocess.run(${argvList})")${nl}f(exec)`],
+  ['print parameter shadow', 'py', `def f(print):${nl}    print('subprocess.run(${argvList})')${nl}f(exec)`],
   ['console shadowed by with', 'js', `with ({ console: { log: eval } }) {${nl}console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")${nl}}`],
-  ['stdout redirected into a child', 'py', `import sys, subprocess${nl}sys.stdout = subprocess.Popen(["python3"], stdin=subprocess.PIPE, text=True).stdin${nl}print("subprocess.run(${argvList})")`],
+  ['stdout redirected into a child', 'py', `import sys, subprocess${nl}sys.stdout = subprocess.Popen(["python3"], stdin=subprocess.PIPE, text=True).stdin${nl}print('subprocess.run(${argvList})')`],
   ['opaque element after a value flag', 'py', `subprocess.run(["${npm}", "--verbose", cmd, "${global}", "x"])`],
 ];
 
