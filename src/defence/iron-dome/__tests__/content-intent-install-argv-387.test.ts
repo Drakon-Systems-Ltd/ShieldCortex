@@ -6,6 +6,8 @@ const npm = 'n' + 'pm';
 const install = 'in' + 'stall';
 const global = '-' + 'g';
 const nl = String.fromCharCode(10);
+const cr = String.fromCharCode(13);
+const ls = String.fromCharCode(0x2028);
 
 function write(ext: string, content: string) {
   return evaluateToolCall('Write', { file_path: `/tmp/run.${ext}`, content }, cfg);
@@ -44,11 +46,38 @@ const gated: Array<[string, string, string]> = [
   ['Python floor division before sink', 'py', `import subprocess${nl}n = 7 // 2; subprocess.run(${argvList})`],
   ['JS quote regex literal before sink', 'js', `const q = /'/; require("child_process").spawnSync("${npm}", ["${install}", "${global}", "x"])`],
   ['sink after a long data list', 'py', `import subprocess${nl}DATA = [${'"a", '.repeat(5000)}"b"]${nl}subprocess.run(${argvList})`],
-  // Fail closed: a commented-out or printed call that would run a global
-  // install still asks. Telling these from live code needs a real lexer per
-  // language, and getting that wrong hides live calls (rows above).
-  ['commented sink (fails closed)', 'py', `# subprocess.run(${argvList})`],
-  ['printed sink text (fails closed)', 'py', `print('subprocess.run(${argvList})')`],
+  ['opaque package', 'py', `subprocess.run(["${npm}", "${install}", "${global}", pkg])`],
+  ['spawn opaque package', 'js', `spawn("${npm}", ["${install}", "${global}", pkg])`],
+  ['tuple', 'py', `subprocess.run(("${npm}", "${install}", "${global}", "x"))`],
+  ['args keyword', 'py', `subprocess.run(args=["${npm}", "${install}", "${global}", "x"])`],
+  ['path command', 'py', `subprocess.run(["/usr/bin/${npm}", "${install}", "${global}", "x"])`],
+  ['Windows shim command', 'py', `subprocess.run(["${npm}.cmd", "${install}", "${global}", "x"])`],
+  ['global true', 'py', `subprocess.run(["${npm}", "${install}", "--global=true", "x"])`],
+  ['global one', 'py', `subprocess.run(["${npm}", "${install}", "--global=1", "x"])`],
+  ['short global true', 'py', `subprocess.run(["${npm}", "${install}", "-g=true", "x"])`],
+  ['short global one', 'py', `subprocess.run(["${npm}", "${install}", "-g=1", "x"])`],
+  ['nested opaque element', 'py', `subprocess.run(["${npm}", "${install}", f(x, ")"), "${global}", "x"])`],
+  ['Windows path wrapper', 'js', `spawn("C:\\\\x\\\\npx.exe", ["${npm}.cmd", "${install}", "${global}", "x"])`],
+  ['opaque subcommand', 'py', `subprocess.run(["${npm}", cmd, "${global}", "x"])`],
+  ['flag value before subcommand', 'py', `subprocess.run(["${npm}", "--prefix", "/opt", "${install}", "${global}", "x"])`],
+  ['truncated after visible install', 'py', `subprocess.run(["${npm}", "${install}", "${global}", "${'x'.repeat(9000)}"])`],
+  ['lone CR ends comment', 'py', `# x${cr}subprocess.run(${argvList})`],
+  ['U+2028 ends comment', 'py', `# x${ls}subprocess.run(${argvList})`],
+  ['printed pipe executes text', 'sh', `echo 'subprocess.run(${argvList})' | python3`],
+  ['shadowed print', 'py', `print = exec${nl}print("subprocess.run(${argvList})")`],
+  ['printed concatenation', 'py', `print("x" + subprocess.run(${argvList}))`],
+  ['printed interpolation', 'py', `print(f"{subprocess.run(${argvList})}")`],
+  ['hash without space', 'py', `#subprocess.run(${argvList})`],
+  // Shell echo/printf get no printed-example relief: their output is
+  // routinely fed back into an interpreter.
+  ['shell echo example', 'sh', `echo 'subprocess.run(${argvList})'`],
+  ['echo inside multi-line command substitution', 'sh', `python3 -c "$(${nl}echo 'import subprocess; subprocess.run(${argvList})'${nl})"`],
+  // `//usr/bin/python3` is a path a shell runs, not a comment.
+  ['double-slash path command', 'sh', `//usr/bin/python3 -c 'import subprocess; subprocess.run(${argvList})'`],
+  ['print parameter shadow', 'py', `def f(print):${nl}    print("subprocess.run(${argvList})")${nl}f(exec)`],
+  ['console shadowed by with', 'js', `with ({ console: { log: eval } }) {${nl}console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")${nl}}`],
+  ['stdout redirected into a child', 'py', `import sys, subprocess${nl}sys.stdout = subprocess.Popen(["python3"], stdin=subprocess.PIPE, text=True).stdin${nl}print("subprocess.run(${argvList})")`],
+  ['opaque element after a value flag', 'py', `subprocess.run(["${npm}", "--verbose", cmd, "${global}", "x"])`],
 ];
 
 describe('written global installs through argv lists (#387)', () => {
@@ -64,6 +93,15 @@ describe('written global installs through argv lists (#387)', () => {
     ['stored list, no sink', 'py', `ARGS = ${argvList}${nl}print(ARGS)`],
     ['unrelated spawn and note', 'js', `spawn("ls", ["${global}"]); const note = "${npm} ${install}";`],
     ['global flag on a different call', 'py', `import subprocess${nl}subprocess.run(["${npm}", "${install}", "x"])${nl}subprocess.run(["gcc", "${global}", "m.c"])`],
+    ['commented sink', 'py', `# subprocess.run(${argvList})`],
+    ['printed sink text', 'py', `print('subprocess.run(${argvList})')`],
+    ['JS comment', 'js', `// spawn("${npm}", ["${install}", "${global}", "x"])`],
+    ['indented comment', 'py', `    # subprocess.run(${argvList})`],
+    ['console printed example', 'js', `console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
+    ['help topic', 'py', `subprocess.run(["${npm}", "help", "${install}", "${global}"])`],
+    ['read-only ls operand', 'py', `subprocess.run(["${npm}", "ls", "${global}", "in"])`],
+    ['read-only view operand', 'py', `subprocess.run(["${npm}", "view", "${global}", "i"])`],
+    ['opaque package without global', 'py', `subprocess.run(["${npm}", "${install}", pkg])`],
   ])('allows %s', (_name, ext, content) => {
     expect(write(ext, content).signals ?? []).not.toContain('install-package-global');
   });
@@ -73,6 +111,11 @@ describe('written global installs through argv lists (#387)', () => {
     ['quote run', 'import subprocess' + nl + 'subprocess.run([' + '"'.repeat(100000)],
     ['nested sinks inside list strings', 'import subprocess' + nl + 'subprocess.run([' + '"subprocess.run([", '.repeat(5000)],
     ['spawn command then nested', 'spawn("x", [' + '"spawn(\\"x\\", [", '.repeat(5000)],
+    ['unquoted-element flood', 'subprocess.run([' + 'a, '.repeat(30000) + ' '.repeat(10000)],
+    ['nested-bracket flood', 'subprocess.run([' + 'f('.repeat(30000) + ' '.repeat(40000)],
+    ['comment sink flood', '# subprocess.run(['.repeat(6000)],
+    ['printed sink flood', 'print("spawn('.repeat(9000)],
+    ['single-line sink flood after spaces', ' '.repeat(50000) + 'spawn('.repeat(30000)],
   ])('scans 100 KB adversarial argv (%s) in under 300 ms', (_name, content) => {
     expect(content.length).toBeGreaterThan(90_000);
     expect(bestOf(3, () => write('py', content))).toBeLessThan(300);

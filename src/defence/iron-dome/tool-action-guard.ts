@@ -1464,73 +1464,178 @@ const GLOBAL_FLAG = /^(?:\-g|--global|--location=global)$/i;
  */
 const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|Popen|check_call|check_output)|child_process\.(?:exec|execSync|spawn|spawnSync)|\.exec(?:Sync|File|FileSync)?|\.spawn(?:Sync)?|(?:^|[^\w.])(?:exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)\s*\()/i;
 
-// Read only direct, quoted argv literals in an interpreter exec call. Each
-// candidate is capped at 8 KB, and scans never overlap: a sink that sits
-// inside the quoted arguments an earlier sink already read is part of that
-// call's data, so the total work stays linear in the payload.
-//
-// There is deliberately no comment or string tracking before a sink. A
-// tracker that has to agree with Python, JS and shell lexing on `#`, `//` and
-// regex literals desyncs (`this.#x`, `a // 2`, `/'/`) and then HIDES a real
-// call; a commented-out global install that still asks is the safe error.
+// Read direct argv literals at an exec sink, with an 8 KB cap per call. The
+// only source context used is the sink's own physical line; this does not
+// attempt to lex Python, JS or shell before the sink.
 const GLOBAL_ARGV_SINK = /\b(subprocess\.(?:run|call|Popen|check_call|check_output)|(?:child_process\.)?(?:spawn|spawnSync|execFile|execFileSync)|\.(?:spawn|spawnSync|execFile|execFileSync))\s*\(/gi;
 const ARGV_SCAN_CAP = 8192;
+const OPAQUE_ARGV = Symbol('opaque argv element');
+type ArgvElement = string | typeof OPAQUE_ARGV;
+const ARGV_LINE_BREAK = /[\n\r\u2028\u2029\u0085\v\f]/;
+// Printed-example relief holds only while `print` and `console` are never used
+// other than as a direct call. Any other use (assignment, parameter, import
+// alias, attribute access, Python 2 statement) could make the "print" run
+// its text, as could anything that redirects stdout inside the program.
+// Shell `echo`/`printf` get no relief at all: their output is routinely
+// fed back into an interpreter (`python3 -c "$(echo …)"`, `echo … | node`).
+const PRINT_NAME_OTHER_USE = /\bprint\b(?!\()|\bconsole\b(?!\.(?:log|info|warn|error)\()/;
+const STDOUT_REDIRECTED = /sys\.stdout|redirect_stdout|process\.stdout|__builtins__|\bbuiltins\b|\bglobals\s*\(|\bsetattr\b|\bdefineProperty\b|\bReflect\b|\bProxy\b/;
 
-/** The quoted argv literals right after a sink's `(`, or null; `next` is where reading stopped. */
-function readQuotedArgv(text: string, from: number): { args: string[] | null; next: number } {
+/** Literal and opaque argv elements right after a sink's `(`. Never reads past the cap. */
+function readQuotedArgv(text: string, from: number): { args: ArgvElement[]; next: number } {
   let i = from;
   const end = Math.min(text.length, from + ARGV_SCAN_CAP);
   const skipSpace = () => { while (i < end && /\s/.test(text[i])) i++; };
   const readString = (): string | null => {
+    if (i >= end) return null;
     const quote = text[i];
     if (quote !== '"' && quote !== "'") return null;
     const start = ++i;
     while (i < end) {
-      if (text[i] === '\\') { i += 2; continue; }
+      if (text[i] === '\\') { i = Math.min(end, i + 2); continue; }
       if (text[i] === quote) return text.slice(start, i++);
       i++;
     }
     return null;
   };
-  const fail = () => ({ args: null, next: i });
+  const args: ArgvElement[] = [];
+  const done = () => ({ args, next: i });
+  const skipArgsKeyword = () => {
+    if (i + 4 >= end || text.slice(i, i + 4) !== 'args' || /[\w$]/.test(text[i + 4] ?? '')) return;
+    let j = i + 4;
+    while (j < end && /\s/.test(text[j])) j++;
+    if (j >= end || text[j] !== '=') return;
+    i = j + 1;
+    skipSpace();
+  };
   skipSpace();
-  const args: string[] = [];
-  if (text[i] !== '[') {
+  skipArgsKeyword();
+  if (i >= end) return done();
+  if (text[i] !== '[' && text[i] !== '(') {
     // spawn("cmd", [...]) / execFile("cmd", [...])
     const command = readString();
-    if (command === null) return fail();
+    if (command === null) return done();
     args.push(command);
     skipSpace();
-    if (text[i++] !== ',') return fail();
+    if (i >= end) return done();
+    if (text[i] !== ',') return done();
+    i++;
     skipSpace();
+    skipArgsKeyword();
   }
-  if (text[i++] !== '[') return fail();
+  if (i >= end) return done();
+  const closer = text[i] === '[' ? ']' : text[i] === '(' ? ')' : '';
+  if (!closer) return done();
+  i++;
   while (i < end) {
     skipSpace();
-    if (text[i] === ']') return { args, next: i + 1 };
-    const arg = readString();
-    if (arg === null) return fail();
-    args.push(arg);
+    if (text[i] === closer) { i++; return done(); }
+    if (i >= end) break;
+    if (text[i] === '"' || text[i] === "'") {
+      const arg = readString();
+      if (arg === null) { args.push(OPAQUE_ARGV); return done(); }
+      args.push(arg);
+    } else {
+      args.push(OPAQUE_ARGV);
+    }
+    // An expression may contain nested calls, brackets, and quoted commas.
+    // Its delimiter is only a comma or the matching closer at depth zero.
+    const nested: string[] = [];
+    while (i < end) {
+      const ch = text[i];
+      if (ch === '"' || ch === "'") {
+        if (args[args.length - 1] !== OPAQUE_ARGV) args[args.length - 1] = OPAQUE_ARGV;
+        if (readString() === null) return done();
+        continue;
+      }
+      if (ch === '(' || ch === '[' || ch === '{') nested.push(ch === '(' ? ')' : ch === '[' ? ']' : '}');
+      else if (ch === ',' && nested.length === 0) break;
+      else if (ch === closer && nested.length === 0) break;
+      else if (ch === ')' || ch === ']' || ch === '}') {
+        if (nested.pop() !== ch) return done();
+      }
+      // Whitespace after a literal is harmless; any other continuation makes
+      // it an expression, not a literal argv element.
+      if (args[args.length - 1] !== OPAQUE_ARGV && !/\s/.test(ch)) args[args.length - 1] = OPAQUE_ARGV;
+      i++;
+    }
     skipSpace();
-    if (text[i] === ']') return { args, next: i + 1 };
-    if (text[i++] !== ',') return fail();
+    if (i >= end) return done();
+    if (text[i] === closer) { i++; return done(); }
+    if (text[i] !== ',') return done();
+    i++;
   }
-  return fail();
+  return done();
 }
 
 /** An argv list that is an npm-family global install (npx/corepack wrappers unwrapped). */
-function argvIsGlobalInstall(args: readonly string[]): boolean {
-  let base = args[0]?.toLowerCase() ?? '';
+function argvIsGlobalInstall(args: readonly ArgvElement[]): boolean {
+  const normalise = (arg: ArgvElement | undefined): string => {
+    if (typeof arg !== 'string') return '';
+    return arg.slice(Math.max(arg.lastIndexOf('/'), arg.lastIndexOf('\\')) + 1)
+      .toLowerCase().replace(/\.(?:cmd|exe|ps1|bat)$/, '');
+  };
+  let base = normalise(args[0]);
   let from = 1;
-  if (/^(?:npx|corepack)$/.test(base)) { base = args[1]?.toLowerCase() ?? ''; from = 2; }
+  if (/^(?:npx|corepack)$/.test(base)) { base = normalise(args[1]); from = 2; }
   if (!NPM_FAMILY.test(base)) return false;
-  const rest = args.slice(from);
-  const install = rest.some(a => INSTALL_VERB.test(a));
-  const global = rest.some((a, idx) => GLOBAL_FLAG.test(a)
-    || (a === '--location' && rest[idx + 1] === 'global'));
-  const yarnGlobalAdd = base === 'yarn'
-    && rest.some((a, idx) => a === 'global' && INSTALL_VERB.test(rest[idx + 1] ?? ''));
-  return (install && global) || yarnGlobalAdd;
+  const global = args.some((a, idx) => typeof a === 'string' &&
+    (/^(?:-g|--global)(?:=(?:true|1))?$/i.test(a) || /^--location=global$/i.test(a)
+      || (a.toLowerCase() === '--location' && args[idx + 1] === 'global')));
+  const knownBoolean = (flag: string) => /^(?:-g|--global|-D|-S|-E|-O|-f|--force|-y|--yes|--save.*|--no-.*|--silent|-s|-q|--quiet|--ignore-scripts)$/i.test(flag);
+  let subcommand: ArgvElement | undefined;
+  let second: ArgvElement | undefined;
+  for (let i = from; i < args.length; i++) {
+    const arg = args[i];
+    if (typeof arg === 'string' && arg.startsWith('-')) {
+      if (!arg.includes('=') && !knownBoolean(arg)) {
+        const value = args[i + 1];
+        // The element after a value-taking flag may be its value or the
+        // subcommand. Fail closed: an install word or an opaque element
+        // there counts as a possible install subcommand.
+        if (value === OPAQUE_ARGV || (typeof value === 'string' && INSTALL_VERB.test(value))) {
+          if (subcommand === undefined) subcommand = value;
+          else if (second === undefined) second = value;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (subcommand === undefined) subcommand = arg;
+    else if (second === undefined) { second = arg; break; }
+  }
+  const possibleInstall = (arg: ArgvElement | undefined) => arg === OPAQUE_ARGV
+    || (typeof arg === 'string' && INSTALL_VERB.test(arg));
+  if (base === 'yarn' && subcommand === 'global') return possibleInstall(second);
+  return global && possibleInstall(subcommand);
+}
+
+/** Conservative relief for a whole comment line or a plain printed example. */
+function argvSinkLineRelief(text: string, start: number, end: number, printed: boolean): { comment: boolean; printFrom: number; printTo: number } {
+  const none = { comment: false, printFrom: -1, printTo: -1 };
+  let i = start;
+  while (i < end && (text[i] === ' ' || text[i] === '\t')) i++;
+  // The marker must be followed by a space, a tab or the line end. `#x`
+  // (a JS private field) and `#subprocess…` keep gating, and so does
+  // `//usr/bin/python3 …`, which a shell runs as a path.
+  const markerEnds = (at: number) => at >= end || text[at] === ' ' || text[at] === '\t';
+  if (text.startsWith('//', i) && markerEnds(i + 2)) return { ...none, comment: true };
+  if (text[i] === '#' && markerEnds(i + 1)) return { ...none, comment: true };
+  if (!printed) return none;
+  const prefix = /^(?:print\(|console\.(?:log|info|warn|error)\()/.exec(text.slice(i, Math.min(end, i + 20)));
+  if (!prefix) return none;
+  i += prefix[0].length;
+  const quote = text[i];
+  if (quote !== '"' && quote !== "'") return none;
+  const open = i++;
+  while (i < end && text[i] !== quote) {
+    if (text[i] === '\\' || text[i] === '`' || text[i] === '{' || text[i] === '$') return none;
+    i++;
+  }
+  if (i >= end) return none;
+  const close = i++;
+  while (i < end && (text[i] === ')' || text[i] === ';' || text[i] === ' ' || text[i] === '\t')) i++;
+  return i === end ? { comment: false, printFrom: open + 1, printTo: close } : none;
 }
 
 /**
@@ -1541,13 +1646,24 @@ function argvIsGlobalInstall(args: readonly string[]): boolean {
  */
 function globalInstallArgvInvoked(text: string): boolean {
   GLOBAL_ARGV_SINK.lastIndex = 0;
-  let consumedTo = 0;
+  const printed = !PRINT_NAME_OTHER_USE.test(text) && !STDOUT_REDIRECTED.test(text);
+  let lineStart = 0;
+  let lineEnd = 0;
+  let lineRelief: ReturnType<typeof argvSinkLineRelief> | undefined;
   let match: RegExpExecArray | null;
   while ((match = GLOBAL_ARGV_SINK.exec(text)) !== null) {
-    if (match.index < consumedTo) continue;
+    while (lineEnd <= match.index && lineStart < text.length) {
+      while (lineEnd < text.length && !ARGV_LINE_BREAK.test(text[lineEnd])) lineEnd++;
+      if (match.index < lineEnd) break;
+      lineStart = lineEnd + 1;
+      lineEnd = lineStart;
+      lineRelief = undefined;
+    }
+    if (lineRelief === undefined) lineRelief = argvSinkLineRelief(text, lineStart, lineEnd, printed);
+    if (lineRelief.comment || (match.index >= lineRelief.printFrom && match.index < lineRelief.printTo)) continue;
     const { args, next } = readQuotedArgv(text, GLOBAL_ARGV_SINK.lastIndex);
-    consumedTo = next;
-    if (args && argvIsGlobalInstall(args)) return true;
+    GLOBAL_ARGV_SINK.lastIndex = Math.max(GLOBAL_ARGV_SINK.lastIndex, next);
+    if (argvIsGlobalInstall(args)) return true;
   }
   return false;
 }
@@ -1773,6 +1889,9 @@ const PIP_WINDOW_SCOPE_FLAG_RE = /(?:^|[\s"'])(?:--target|-t|--prefix|--root|--p
  */
 function pipInstallMutatesHost(text: string): boolean {
   if (hasUnscopedPipInstall(text)) return true;
+  // The bounded window regex has a costly failed search on long lines full of
+  // call punctuation. No window can match without the installer name.
+  if (!/pip/i.test(text)) return false;
   const venvs = venvPrefixesCreatedIn(text);
   PIP_INSTALL_WINDOW_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
