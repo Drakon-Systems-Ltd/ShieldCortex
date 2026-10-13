@@ -21,6 +21,7 @@
     "intercept-ingest.ts",
     "cloud-sync.ts",
     "posture-report.ts",
+    "card-owner.ts",
     "openclaw.plugin.json",
     "README.md"
   ],

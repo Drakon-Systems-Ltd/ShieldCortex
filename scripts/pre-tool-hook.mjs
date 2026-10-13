@@ -76,7 +76,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // ==================== CONFIG ====================
 
-const DEFAULT_ACTION_GUARD = { enabled: false, enforce: true, autoApprove: [], auditAllows: true };
+const DEFAULT_ACTION_GUARD = { enabled: false, enforce: true, autoApprove: [], auditAllows: true, singleCard: true };
 
 /** #224 binding module, loaded once in main. Null when dist predates it. */
 let bindingMod = null;
@@ -415,6 +415,10 @@ function flattenActionGuardConfig(config) {
         retryGrantTtlMs: raw.retryGrantTtlMs,
         denySuppressionMs: raw.denySuppressionMs,
       },
+      // #628: exactly `false` keeps both planes carding under OpenClaw (the
+      // pre-#628 double card). Anything else lets the hook stand down, and
+      // only on a kernel proof that the interceptor holds the card.
+      singleCard: raw.singleCard !== false,
     };
   } catch {
     // Unreadable config → guard on with defaults. Enforce-by-default means a
@@ -594,6 +598,24 @@ async function loadRetryControl(rawRetry, digestWindowMs) {
     if (required.some((fn) => typeof mod[fn] !== 'function')) return null;
     const config = mod.normaliseRetryControlConfig(rawRetry ?? {}, { digestWindowMs });
     return { config, mod };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #628 — the card-owner proof. Null when dist predates it: then the hook
+ * never stands down, which is the pre-#628 double card, never zero.
+ */
+async function loadCardOwner() {
+  const distRoot = hookDistRoot();
+  try {
+    const mod = await import(
+      pathToFileURL(resolve(distRoot, 'defence', 'iron-dome', 'card-owner.js')).href
+    );
+    return typeof mod.awaitInterceptorCardOwner === 'function' && typeof mod.cardOwnerWaitMs === 'function'
+      ? mod
+      : null;
   } catch {
     return null;
   }
@@ -3492,6 +3514,70 @@ process.stdin.on('end', async () => {
     }
 
     const noPromptSurfaceForHold = noPromptSurfaceReason(permissionMode);
+
+    // ── #628 one card per call: the OpenClaw interceptor owns it ──────────
+    // claude-cli under an OpenClaw gateway is judged by two planes: this hook
+    // and the gateway's before_tool_call interceptor, which OpenClaw reaches
+    // through its own SDK PreToolUse callback on the same claude-cli child.
+    // Both used to card. The interceptor owns the card; this hook stands down
+    // ONLY when the kernel shows that its claude-cli's direct parent is
+    // holding the interceptor's card marker for THIS tool_use_id and command
+    // (src/defence/iron-dome/card-owner.ts — /proc ancestry with start times,
+    // /proc/net/unix and the parent's own fd table; no env, argv or file is
+    // proof). Anything short of that, and everything below runs as before.
+    // The gateway binds that marker only on a host build that holds the call
+    // on the card until the operator answers.
+    //
+    // Standing down emits NO decision rather than `ask`: on this transport a
+    // hook `ask` does not reach a human, it re-enters OpenClaw's can_use_tool
+    // and runs before_tool_call a second time, which is a second card. The
+    // verdict is unchanged — this call still waits on a human answer to the
+    // interceptor's card for this exact call, and Claude Code merges the
+    // host callback's deny over anything. A block never reaches here: every
+    // deny above returned first, and only a call this hook would have put to
+    // a human is ever deferred. Promptless sessions never defer.
+    // Only in `default` mode — the mode OpenClaw's claude-cli transport sets.
+    // In any other prompting mode Claude Code's own rules (acceptEdits, auto,
+    // allow lists) could act on a call this hook left undecided.
+    if (!noPromptSurfaceForHold && permissionMode === 'default' && cfg.singleCard !== false) {
+      const cardOwner = await loadCardOwner();
+      let proof = null;
+      if (cardOwner) {
+        try {
+          proof = await cardOwner.awaitInterceptorCardOwner({
+            harnessPid,
+            toolUseId: hookData.tool_use_id,
+            toolInput,
+            waitMs: cardOwner.cardOwnerWaitMs(process.env.SHIELDCORTEX_CARD_OWNER_WAIT_MS),
+          });
+        } catch {
+          proof = null;
+        }
+      }
+      if (proof && proof.proven === true) {
+        const safeBroker = safeBrokerAudit(brokered?.audit);
+        writeAuditEntry(
+          safeToolName(toolName),
+          safeApprovalVerdict(verdict),
+          redactedAuditArgs(toolName, toolInput),
+          'require_approval',
+          'asked',
+          {
+            ...baseExtra,
+            intentArgs: toolInput,
+            ...(safePermissionMode(permissionMode) ? { permissionMode: safePermissionMode(permissionMode) } : {}),
+            ...(safeBroker ? { broker: safeBroker } : {}),
+            // What was proven, and nothing more: the harness's direct parent
+            // (this pid) holds the interceptor's marker for this call.
+            cardOwner: { plane: 'openclaw-interceptor', gatewayPid: proof.holderPid, proof: 'direct-parent-socket' },
+          },
+        );
+        console.error(
+          `[shieldcortex] action-guard: ${safeToolName(toolName)} needs approval — the OpenClaw interceptor holds the card for this call (gateway pid ${proof.holderPid}); not raising a second card (#628).`,
+        );
+        process.exit(0);
+      }
+    }
 
     // hold / not_brokerable / no broker at all → the pre-#143 refusal, intact
     // only when something can actually hold. Promptless denials are terminal:

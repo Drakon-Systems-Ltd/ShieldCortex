@@ -46,6 +46,7 @@ import { cloudSync } from './cloud-sync.js';
 import { createGatewayNotifyChannel } from './gateway-notify-channel.js';
 import type { GatewayNotifyContext, NotifyChannelLike } from './gateway-notify-channel.js';
 import { testedPath, writePostureSelfReport, type PostureReportInput } from './posture-report.js';
+import { holdCardOwnerMarker } from './card-owner.js';
 
 // ==================== RESILIENT RUNTIME LOADER ====================
 // Resolves runtime.mjs from multiple locations so the plugin works both
@@ -434,6 +435,8 @@ type LlmOutputEvent = {
 type AgentCtx = {
   agentId?: string; sessionKey?: string; sessionId?: string;
   workspaceDir?: string; messageProvider?: string;
+  /** #628: the host's id for this tool call (claude-cli's `tool_use_id`). */
+  toolCallId?: string;
 };
 type TypedBeforeToolCallEvent = {
   toolName: string;
@@ -442,6 +445,9 @@ type TypedBeforeToolCallEvent = {
   // see #233), but resolveHookSessionId prefers the event when a host does
   // send one, and every other hook's event carries it.
   sessionId?: string;
+  /** #628: the host's id for this tool call. On the claude-cli runtime it is
+   *  the native `tool_use_id`, which the Claude Code hook sees too. */
+  toolCallId?: string;
 };
 /** Every answer the host can report for a minted card. The first three are
  *  buttons (a subset of which the card offers via `allowedDecisions`); the last
@@ -4021,8 +4027,10 @@ class TypedApprovalRequest extends Error {
   /** #372 — one-shot audit writer the interceptor hangs on this error at hold
    *  time, carrying the guard's audit base and the session the hold belongs to.
    *  Both mint sites attach it (action-guard and memory-write pipelines).
-   *  Absent only for an older installed interceptor: then no `onResolution`
-   *  is wired at all and the card behaves exactly as it did before #372. */
+   *  Absent only for an older installed interceptor: then no audit row is
+   *  written on the answer and the card behaves as it did before #372 (an
+   *  `onResolution` is still wired when a #628 card-owner marker is held, and
+   *  does nothing but release it). */
   decisionAudit?: ApprovalDecisionAudit;
 
   constructor(message: string, request: NonNullable<TypedBeforeToolCallResult["requireApproval"]>) {
@@ -4164,12 +4172,27 @@ async function handleTypedBeforeToolCall(
   } catch (err) {
     if (err instanceof TypedApprovalRequest) {
       const decisionAudit = err.decisionAudit;
+      // #628: this card is the one card for the call. Mark it in the kernel's
+      // socket table so the Claude Code hook of the claude-cli child making
+      // this exact call can prove it and stand down instead of carding too.
+      // No toolCallId, not Linux, a host build not known to hold the call on
+      // this card, or a bind failure: no marker, and the hook cards as before.
+      // The marker never touches the verdict.
+      const marker = holdCardOwnerMarker({
+        toolCallId: event.toolCallId ?? ctx?.toolCallId,
+        params: event.params ?? {},
+        hostVersion: _hostRuntimeVersion,
+      });
+      if (!decisionAudit && marker) {
+        err.request.onResolution = () => marker.release();
+      }
       if (decisionAudit) {
         // #372: the hold writes no row because no decision exists yet — THIS is
         // where the operator's answer becomes one. The host owns this callback
         // and awaits it, so it must never see a throw: a broken audit sink is
         // not a reason to disturb a decision the operator already made.
         err.request.onResolution = (decision: CardDecision) => {
+          marker?.release();
           try {
             const outcome = Object.hasOwn(CARD_DECISION_OUTCOME, decision) ? CARD_DECISION_OUTCOME[decision] : undefined;
             if (!outcome) {
