@@ -99,6 +99,10 @@ const gated: Array<[string, string, string]> = [
   ['redefined print beyond first window', 'py', `print('subprocess.run(${argvList})')\n${'# pad\n'.repeat(10000)}def print(s):\n    exec(s)`],
   ['nested JS sink', 'js', `spawn("ls", [f(spawn("${npm}", ["${install}", "${global}", "x"]))])`],
   ['nested Python sink', 'py', `subprocess.run(["echo", str(subprocess.run(${argvList}))])`],
+  ['outer Python install after nested sink', 'py', `subprocess.run(["${npm}", "${install}", str(subprocess.run(["ls"])), "${global}", "x"])`],
+  ['outer JS install after nested sink', 'js', `spawn("${npm}", ["${install}", f(spawn("ls", [])), "${global}", "x"])`],
+  ['outer install after quoted sink spelling', 'py', `subprocess.run(["${npm}", "${install}", "see subprocess.run(", "${global}", "x"])`],
+  ['outer JS install after quoted sink spelling', 'js', `spawn("${npm}", ["${install}", "see spawn(", "${global}", "x"])`],
   ['env wrapper', 'py', `subprocess.run(["env", "${npm}", "${install}", "${global}", "x"])`],
   ['env options and assignment', 'py', `subprocess.run(["env", "-u", "OLD", "-C", "/tmp", "A=1", "${npm}", "${install}", "${global}", "x"])`],
   ['env opaque assignment', 'py', `subprocess.run(["env", assignment, "${npm}", "${install}", "${global}", "x"])`],
@@ -108,8 +112,24 @@ const gated: Array<[string, string, string]> = [
   ['nice wrapper', 'py', `subprocess.run(["nice", "-n", "5", "${npm}", "${install}", "${global}", "x"])`],
   ['repeated wrappers before corepack', 'py', `subprocess.run(["env", "A=1", "nice", "-5", "corepack", "${npm}", "${install}", "${global}", "x"])`],
   ['unknown script language', 'rb', `# subprocess.run(${argvList})`],
-  ['quoted comment before sink', 'py', `# "note" subprocess.run(${argvList})`],
-  ['quote between two commented sinks', 'py', `# subprocess.run(${argvList}); "note" subprocess.run(${argvList})`],
+  // Printed examples gate because print and console can be rebound to eval.
+  ['printed sink text', 'py', `print('subprocess.run(${argvList})')`],
+  ['printed sink with trailing comment', 'py', `print('subprocess.run(${argvList})')  # example`],
+  ['console printed example', 'js', `console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
+  ['Python frame globals rebound', 'py', `fr.f_globals.update({"pr"+"int": fr.f_builtins["ev"+"al"]})${nl}print('subprocess.run(${argvList})')`],
+  ['Python function globals rebound', 'py', `f.__globals__.update({"pr"+"int": f.__globals__["ev"+"al"]})${nl}print('subprocess.run(${argvList})')`],
+  ['JS sloppy global console rebound', 'js', `const g = (function(){return this})();${nl}g["con"+"sole"].log = g["ev"+"al"];${nl}console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
+  ['JS Object.assign console rebound', 'js', `const g = (function(){return this})();${nl}Object.assign(g["con"+"sole"], {log: g["ev"+"al"]});${nl}console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
+  ['real sink after apostrophe comment', 'py', `# don't${nl}subprocess.run(${argvList})`],
+  ['real sink after trailing comment', 'py', `x = 1 # c${nl}subprocess.run(${argvList})`],
+  ['shell hash inside multiline quote', 'sh', `python3 -c '${nl}# x${nl}import subprocess; subprocess.run(${argvList})${nl}'`],
+  ['shell midword hash', 'sh', `echo a#b subprocess.run(${argvList})`],
+  // Shell relief is off with a here-document (its body may be another
+  // language, where a leading # is code) or an ANSI-C $'...' quote.
+  ['shell heredoc JS private field', 'sh', `node <<'EOF'${nl}class A {${nl}#x = require("child_process").spawnSync("${npm}", ["${install}", "${global}", "x"])${nl}}${nl}new A()${nl}EOF`],
+  ['shell ANSI-C quote before hash line', 'sh', `node -e $'class A {\\'${nl}#x = require("child_process").spawnSync("${npm}", ["${install}", "${global}", "x"])${nl}}'`],
+  ['budget exhausted with yarn global add', 'py', 'spawn("ls", ['.repeat(7500) + nl + `subprocess.run(["yarn", "global", "add", "x"])`],
+  ['budget exhausted with separate --location', 'py', 'spawn("ls", ['.repeat(7500) + nl + `subprocess.run(["${npm}", "${install}", "--location", "global", "x"])`],
 ];
 
 describe('written global installs through argv lists (#387)', () => {
@@ -128,11 +148,18 @@ describe('written global installs through argv lists (#387)', () => {
     ['global flag on a different call', 'py', `import subprocess${nl}subprocess.run(["${npm}", "${install}", "x"])${nl}subprocess.run(["gcc", "${global}", "m.c"])`],
     ['commented sink', 'py', `# subprocess.run(${argvList})`],
     ['hash without space', 'py', `#subprocess.run(${argvList})`],
-    ['printed sink text', 'py', `print('subprocess.run(${argvList})')`],
-    ['printed sink with trailing comment', 'py', `print('subprocess.run(${argvList})')  # example`],
+    ['quoted comment before sink', 'py', `# "note" subprocess.run(${argvList})`],
+    ['quote between two commented sinks', 'py', `# subprocess.run(${argvList}); "note" subprocess.run(${argvList})`],
+    ['apostrophe in commented sink', 'py', `# don't run: subprocess.run(${argvList})`],
+    ['apostrophe on another comment line', 'py', `# it's fine${nl}# subprocess.run(${argvList})`],
+    ['JS apostrophe in commented sink', 'js', `// it's fine: spawn("${npm}", ["${install}", "${global}", "x"])`],
+    ['trailing apostrophe comment before commented sink', 'py', `x = 1  # don't${nl}# subprocess.run(${argvList})`],
+    ['lone CR before commented sink', 'py', `x = 1${cr}# subprocess.run(${argvList})`],
     ['JS comment', 'js', `// spawn("${npm}", ["${install}", "${global}", "x"])`],
     ['indented comment', 'py', `    # subprocess.run(${argvList})`],
-    ['console printed example', 'js', `console.log("spawn('${npm}', ['${install}', '${global}', 'x'])")`],
+    ['nested noninstall outer argv', 'py', `subprocess.run(["echo", str(subprocess.run(["ls"])), "${global}"])`],
+    ['shell whole comment line with apostrophe', 'sh', `# don't: subprocess.run(${argvList})`],
+    ['nested flood without a package manager', 'py', 'spawn("ls", ['.repeat(7500)],
     ['help topic', 'py', `subprocess.run(["${npm}", "help", "${install}", "${global}"])`],
     ['read-only ls operand', 'py', `subprocess.run(["${npm}", "ls", "${global}", "in"])`],
     ['read-only view operand', 'py', `subprocess.run(["${npm}", "view", "${global}", "i"])`],
@@ -154,6 +181,8 @@ describe('written global installs through argv lists (#387)', () => {
     ['comment sink flood', '# subprocess.run(['.repeat(6000)],
     ['printed sink flood', 'print("spawn('.repeat(9000)],
     ['single-line sink flood after spaces', ' '.repeat(50000) + 'spawn('.repeat(30000)],
+    ['nested spawn flood', 'spawn("ls", ['.repeat(7500) + ' '.repeat(30000)],
+    ['quoted Python sink spelling flood', 'subprocess.run(["echo", "subprocess.run('.repeat(2800)],
   ])('scans 100 KB adversarial argv (%s) in under 300 ms', (_name, content) => {
     expect(content.length).toBeGreaterThan(90_000);
     expect(bestOf(3, () => write('py', content))).toBeLessThan(300);

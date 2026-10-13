@@ -1470,18 +1470,10 @@ const GLOBAL_ARGV_SINK = /\b(subprocess\.(?:run|call|Popen|check_call|check_outp
 const ARGV_SCAN_CAP = 8192;
 const OPAQUE_ARGV = Symbol('opaque argv element');
 type ArgvElement = string | typeof OPAQUE_ARGV;
-type ArgvReliefContext = { language: 'python' | 'js' | 'shell' | 'none'; comments: boolean; printed: boolean };
-// Printed-example relief holds only while `print` and `console` are never used
-// other than as a direct call. Any other use (assignment, parameter, import
-// alias, attribute access, Python 2 statement) could make the "print" run
-// its text, as could anything that redirects stdout inside the program.
-// Shell `echo`/`printf` get no relief at all: their output is routinely
-// fed back into an interpreter (`python3 -c "$(echo …)"`, `echo … | node`).
-const PRINT_NAME_OTHER_USE = /\bprint\b(?!\()|\bconsole\b(?!\.(?:log|info|warn|error)\()/;
-const STDOUT_REDIRECTED = /sys\.stdout|redirect_stdout|process\.stdout|__builtins__|\bbuiltins\b|\bglobals\s*\(|\bsetattr\b|\bdefineProperty\b|\bReflect\b|\bProxy\b/;
+type ArgvReliefContext = { language: 'python' | 'js' | 'shell' | 'none'; commentLines: Set<number> | null };
 
 /** Literal and opaque argv elements right after a sink's `(`. Never reads past the cap. */
-function readQuotedArgv(text: string, from: number, nextSink = text.length): { args: ArgvElement[]; next: number } {
+function readQuotedArgv(text: string, from: number): { args: ArgvElement[]; next: number } {
   let i = from;
   const end = Math.min(text.length, from + ARGV_SCAN_CAP);
   const skipSpace = () => { while (i < end && /\s/.test(text[i])) i++; };
@@ -1541,12 +1533,6 @@ function readQuotedArgv(text: string, from: number, nextSink = text.length): { a
     // Its delimiter is only a comma or the matching closer at depth zero.
     const nested: string[] = [];
     while (i < end) {
-      // An opaque expression can contain another exec sink. Leave its bytes
-      // to that sink's reader instead of swallowing it with the outer call.
-      if (i >= nextSink) {
-        args[args.length - 1] = OPAQUE_ARGV;
-        return done();
-      }
       const ch = text[i];
       if (ch === '\x22' || ch === '\x27') {
         if (args[args.length - 1] !== OPAQUE_ARGV) args[args.length - 1] = OPAQUE_ARGV;
@@ -1651,68 +1637,48 @@ function argvReliefContext(text: string, path?: string): ArgvReliefContext {
             : /node|deno|bun/i.test(shebang) ? 'js'
               : /(?:bash|zsh|sh)/i.test(shebang) ? 'shell' : 'none';
   if (language === 'none' || /\x22\x22\x22|\x27\x27\x27|\x60|\/\*|\*\/|\\[\r\n]|[\u2028\u2029\u0085\v\f]/.test(text)) {
-    return { language, comments: false, printed: false };
+    return { language, commentLines: null };
   }
-  let single = 0;
-  let double = 0;
-  let escaped = false;
-  for (let i = 0; i <= text.length; i++) {
+  // A shell file can carry another language's code in a here-document body
+  // (a JS class field `#x = spawnSync(...)` starts with `#` and runs), and
+  // ANSI-C `$'...'` quotes take backslash escapes this scanner does not
+  // model. Either one turns comment relief off for the whole shell file.
+  if (language === 'shell' && /<<|\$\x27/.test(text)) return { language, commentLines: null };
+  const commentLines = new Set<number>();
+  let quote = '';
+  let lineStart = 0;
+  for (let i = 0; i <= text.length;) {
     const ch = text[i];
-    if (ch === '\n' || ch === '\r' || i === text.length) {
-      if (single % 2 || double % 2) return { language, comments: false, printed: false };
-      single = double = 0;
-      escaped = false;
-    } else if (ch === '\\') {
-      escaped = !escaped;
-    } else {
-      if (!escaped && ch === '\x27') single++;
-      if (!escaped && ch === '\x22') double++;
-      escaped = false;
+    if (i === text.length || ch === '\n' || ch === '\r') {
+      if (quote && language !== 'shell') return { language, commentLines: null };
+      i++;
+      lineStart = i;
+      continue;
     }
-  }
-  const rebound = /\b(?:print|console)\s*=/.test(text)
-    || text.split(/[\n\r]/).some(line => /\b(?:def|function|class|let|const|var|import|from)\b/.test(line)
-      && /\b(?:print|console)\b/.test(line));
-  const dynamicName = language === 'python'
-    ? /\b(?:vars|locals|globals|exec|eval|compile|getattr|setattr|__dict__|modules|importlib|__builtins__)\b/.test(text)
-    : /\b(?:globalThis|global|window|self|eval|Function|Reflect)\b/.test(text);
-  return { language, comments: true, printed: language !== 'shell'
-    && !rebound && !dynamicName && !/\][ \t]*=/.test(text)
-    && !PRINT_NAME_OTHER_USE.test(text) && !STDOUT_REDIRECTED.test(text) };
-}
-
-/** Conservative relief for a whole comment line or a plain printed example. */
-function argvSinkLineRelief(text: string, start: number, end: number, context: ArgvReliefContext): { commentUntil: number; printFrom: number; printTo: number } {
-  const none = { commentUntil: -1, printFrom: -1, printTo: -1 };
-  if (!context.comments || (start > 0 && text[start - 1] !== '\n' && text[start - 1] !== '\r')) return none;
-  let i = start;
-  while (i < end && (text[i] === ' ' || text[i] === '\t')) i++;
-  const marker = context.language === 'js' ? '//' : '#';
-  if (text.startsWith(marker, i)) {
-    const afterMarker = i + marker.length;
-    const firstUnsafe = text.slice(afterMarker, end).search(/[\x22\x27\x60]|\*\//);
-    return { ...none, commentUntil: firstUnsafe < 0 ? end : afterMarker + firstUnsafe };
-  }
-  if (!context.printed) return none;
-  const prefixPattern = context.language === 'python' ? /^print\(/ : /^console\.(?:log|info|warn|error)\(/;
-  const prefix = prefixPattern.exec(text.slice(i, Math.min(end, i + 20)));
-  if (!prefix) return none;
-  i += prefix[0].length;
-  const quote = text[i];
-  if (quote !== '\x22' && quote !== '\x27') return none;
-  const open = i++;
-  while (i < end && text[i] !== quote) {
-    if (text[i] === '\\' || text[i] === '\x60' || text[i] === '{' || text[i] === '$') return none;
+    if (i === lineStart && !quote) {
+      let first = i;
+      while (text[first] === ' ' || text[first] === '\t') first++;
+      const marker = language === 'js' ? '//' : '#';
+      if (text.startsWith(marker, first)) commentLines.add(lineStart);
+    }
+    if (!quote && (language === 'js' ? text.startsWith('//', i)
+      : ch === '#' && (language === 'python' || i === lineStart || /\s/.test(text[i - 1])))) {
+      while (i < text.length && text[i] !== '\n' && text[i] !== '\r') i++;
+      continue;
+    }
+    if (ch === '\\' && quote !== '\x27' && i + 1 < text.length) { i += 2; continue; }
+    if (ch === '\x22' || ch === '\x27') {
+      if (!quote) quote = ch;
+      else if (quote === ch) quote = '';
+    }
     i++;
   }
-  if (i >= end) return none;
-  const close = i++;
-  if (text[i++] !== ')') return none;
-  if (text[i] === ';') i++;
-  while (i < end && (text[i] === ' ' || text[i] === '\t')) i++;
-  const trailing = context.language === 'js' ? '//' : '#';
-  if (text.startsWith(trailing, i)) i = end;
-  return i === end ? { commentUntil: -1, printFrom: open + 1, printTo: close } : none;
+  return { language, commentLines: quote ? null : commentLines };
+}
+
+/** Relief covers only whole lines proven to start with a language comment. */
+function argvSinkLineRelief(start: number, context: ArgvReliefContext): boolean {
+  return context.commentLines?.has(start) ?? false;
 }
 
 /**
@@ -1728,7 +1694,8 @@ function globalInstallArgvInvoked(text: string, context?: ArgvReliefContext): bo
   while ((found = GLOBAL_ARGV_SINK.exec(text)) !== null) positions.push({ start: found.index, after: GLOBAL_ARGV_SINK.lastIndex });
   let lineStart = 0;
   let lineEnd = 0;
-  let lineRelief: ReturnType<typeof argvSinkLineRelief> | undefined;
+  let scanned = 0;
+  const scanBudget = 4 * text.length + ARGV_SCAN_CAP;
   for (let k = 0; k < positions.length; k++) {
     const { start, after } = positions[k];
     while (lineEnd <= start && lineStart < text.length) {
@@ -1736,14 +1703,17 @@ function globalInstallArgvInvoked(text: string, context?: ArgvReliefContext): bo
       if (start < lineEnd) break;
       lineStart = lineEnd + 1;
       lineEnd = lineStart;
-      lineRelief = undefined;
     }
-    if (context && lineRelief === undefined) lineRelief = argvSinkLineRelief(text, lineStart, lineEnd, context);
-    if ((lineRelief && start < lineRelief.commentUntil)
-        || (lineRelief && start >= lineRelief.printFrom && start < lineRelief.printTo)) continue;
-    const { args, next } = readQuotedArgv(text, after, positions[k + 1]?.start);
+    if (context && argvSinkLineRelief(lineStart, context)) continue;
+    // Nested candidates are visited separately. Cap aggregate reads; if the
+    // budget runs out, gate only files with npm-family and global evidence
+    // (any global spelling the argv reader accepts, including yarn global add
+    // and --location as its own element).
+    if (scanned >= scanBudget) return /\b(?:npm|yarn|pnpm|bun|npx|corepack)\b/i.test(text)
+      && /-g\b|--global\b|--location\b|\bglobal\b/i.test(text);
+    const { args, next } = readQuotedArgv(text, after);
+    scanned += next - after;
     if (argvIsGlobalInstall(args)) return true;
-    while (k + 1 < positions.length && positions[k + 1].start < next) k++;
   }
   return false;
 }
