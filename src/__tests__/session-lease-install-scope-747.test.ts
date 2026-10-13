@@ -133,6 +133,13 @@ describe('session lease global install scope (#747)', () => {
     'bunx npm i -g evil',
     'FOO=1 npx -y npm i -g evil',
     'cd /x && npx npm i -g evil',
+    'pnpx -y npm i -g evil',
+    'bunx --bun npm i -g evil',
+    'npx -p npm -y npm i -g evil',
+    'npx --registry https://r.example npm i -g evil',
+    'pnpx --registry https://r.example npm i -g evil',
+    'bunx --registry https://r.example npm i -g evil',
+    'npx -c "npm i -g evil"',
   ])('keeps standalone runner shapes as install (#748 r4): %s', (command) => {
     expect(scope(command)).toBe('install');
   });
@@ -142,7 +149,17 @@ describe('session lease global install scope (#747)', () => {
     'npx -y npm view -g evil',
     'npx prettier --write .',
     'npx tsc -p tsconfig.json',
-  ])('leaves read-only standalone runner shapes unscoped (#748 r4): %s', (command) => {
+    'npx echo npm install -g',
+    'npx -p npm echo npm install -g',
+    'npx prettier npm install -g',
+    'npx -y -- echo npm i -g evil',
+    'pnpx echo npm install -g',
+    'pnpx -p npm echo npm install -g',
+    'pnpx prettier npm install -g',
+    'bunx echo npm install -g',
+    'bunx -p npm echo npm install -g',
+    'bunx prettier npm install -g',
+  ])('leaves read-only standalone runner shapes unscoped (#748 r4/r5): %s', (command) => {
     expect(scope(command)).toBeNull();
   });
 

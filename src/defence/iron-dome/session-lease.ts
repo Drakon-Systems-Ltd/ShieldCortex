@@ -1234,6 +1234,11 @@ const INSTALL_SUBCOMMANDS = new Set([
   'isnt', 'isnta', 'isntal', 'isntall', 'add',
 ]);
 const GLOBAL_INSTALL_MARKER_RE = /^(?:-g\b|--global\b|--location=global\b)/i;
+/** Standalone-runner options that never take a separate value. */
+const RUNNER_BOOLEAN_OPTIONS = new Set([
+  '-y', '--yes', '--no', '--no-install', '--ignore-existing', '-q', '--quiet',
+  '--silent', '--bun', '--no-bun',
+]);
 const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time', 'eval']);
 
 /**
@@ -1285,13 +1290,24 @@ function isGlobalInstallAtDepth(command: string, depth: number): boolean {
       (/^\w+=/.test(tokens[index]!) || INSTALL_STAGE_PREFIXES.has(tokens[index]!.toLowerCase()))) index++;
     // Standalone runners (`npx`, `pnpx`, `bunx`) run the command after their
     // own options: `npx -y npm i -g x` is npm's global install. The first
-    // package-manager word after the runner is the inner stage (#748 r4).
+    // command token after the runner's own options is the inner stage; later
+    // operands (`npx echo npm i -g`) are never promoted (#748 r4/r5).
     if (/^(?:npx|pnpx|bunx)$/i.test(tokens[index] ?? '')) {
-      for (let k = index + 1; k < tokens.length; k++) {
-        // `-p npm` / `--package npm` names the package to fetch, not the command.
-        if (/^(?:-p|--package)$/i.test(tokens[k]!)) { k++; continue; }
-        if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[k]!)) { index = k; break; }
+      let k = index + 1;
+      // An unrecognised option may take a separate value, so the command is
+      // either the next word or the one after it: fail closed on both.
+      let ambiguous = false;
+      for (; k < tokens.length; k++) {
+        const opt = tokens[k]!.toLowerCase();
+        if (opt === '--') { k++; break; }
+        // `-p npm` / `--package npm` names the package to fetch, not the
+        // command; `-c` / `--call` values are quoted spans scanned on their own.
+        if (/^(?:-p|--package|-c|--call)$/.test(opt)) { k++; continue; }
+        if (!opt.startsWith('-')) break;
+        if (!opt.includes('=') && !RUNNER_BOOLEAN_OPTIONS.has(opt)) ambiguous = true;
       }
+      if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[k] ?? '')) index = k;
+      else if (ambiguous && /^(?:npm|pnpm|yarn|bun)$/i.test(tokens[k + 1] ?? '')) index = k + 1;
     }
     if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index] ?? '')) {
       if (expansion) unsafe = true;
