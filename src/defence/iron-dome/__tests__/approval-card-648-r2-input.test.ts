@@ -1,6 +1,7 @@
 /**
  * #648 round 2 — what may reach the card at all (S2 ReDoS, S9 bidi/format
- * characters and visible quoting).
+ * characters and visible quoting). The S2 timing checks are a scaling
+ * differential since #757, not an absolute cap.
  *
  * Destructive and secret fixtures are assembled at runtime (push protection
  * and the guard's own write-content scan).
@@ -22,13 +23,111 @@ import type { OperatorNotification } from '../operator-notify.js';
 const describeAction = (a: Parameters<typeof describeActionFull>[0]) => describeActionFull(a).text;
 
 const UNUSUAL = '(withheld: unusual characters)';
-const TOKENS = 'token-'.repeat(1366).slice(0, 8192);
+
+// ── #757: a scaling differential instead of an absolute cap ────────────────
+//
+// The S2 checks used to assert `< 50 ms` on one cold 8192-character call.
+// That measured the runner as much as the code: on a loaded macOS runner the
+// card case took 142 ms and failed a PR that never touched this file. What
+// the suite has to catch is catastrophic backtracking, i.e. super-linear
+// time, so each case is now timed on the same hostile shape at N and at 8N
+// characters after a warm-up call per size. Linear code grows about 8x,
+// quadratic about 64x, catastrophic backtracking far more; the bound sits at
+// 3x linear. The fastest of a few interleaved batches stands for each size:
+// contention only ever adds time, so the least-contended sample is the honest
+// one (the #544 B3 check does the same). A batch is calibrated to fill a
+// measurable span and the small time has a floor, so nothing divides by a
+// near-zero. One loose absolute ceiling stays per case so a hang still fails
+// fast instead of running the clock out.
+
+const SMALL_CHARS = 1024;
+const BIG_CHARS = 8 * SMALL_CHARS; // the #648 r2 S2 input size
+/** 3x the linear expectation for an 8x longer input. */
+const RATIO_BOUND = 24;
+/** The hang guard: the one cold call on the 8N input, and any one batch. */
+const CEILING_MS = 2000;
+const SAMPLES = 5;
+/** A batch on the N-character input is calibrated to fill about this long. */
+const MIN_BATCH_MS = 0.4;
+const MAX_REPS = 4096;
+/** The small time never divides as less than this. */
+const FLOOR_MS = 0.2;
+
+interface Scaling {
+  /** Calls per batch, calibrated on the N-character input. */
+  reps: number;
+  /** Fastest batch at N and at 8N characters, in ms. */
+  smallMs: number;
+  bigMs: number;
+  /** bigMs over max(smallMs, FLOOR_MS); Infinity once a batch hits the ceiling. */
+  ratio: number;
+  /** The one cold call on the 8N input, in ms. */
+  coldBigMs: number;
+  superLinear: boolean;
+}
 
 function timed(fn: () => unknown): number {
   const t0 = performance.now();
   fn();
   return performance.now() - t0;
 }
+
+/** `reps` calls on `input`, in ms. */
+function batchMs(fn: (input: string) => unknown, input: string, reps: number): number {
+  const t0 = performance.now();
+  for (let i = 0; i < reps; i++) fn(input);
+  return performance.now() - t0;
+}
+
+/**
+ * Time `fn` on `shape(small)` and on `shape(8 * small)` and report how the
+ * cost grew. One warm-up call per size first; the batch size is then
+ * calibrated on the small input and capped so that even at the cold speed one
+ * big batch cannot run past the ceiling; the samples interleave the two sizes
+ * so a load burst lands on both.
+ */
+function scaling(fn: (input: string) => unknown, shape: (n: number) => string, small = SMALL_CHARS): Scaling {
+  const smallInput = shape(small);
+  const bigInput = shape(8 * small);
+  fn(smallInput);
+  const coldBigMs = timed(() => fn(bigInput));
+  if (coldBigMs >= CEILING_MS) return { reps: 0, smallMs: NaN, bigMs: NaN, ratio: Infinity, coldBigMs, superLinear: true };
+  // Probe 1, 2, 4, … calls until a batch fills MIN_BATCH_MS (the JIT tiers up
+  // during the early probes), then scale down to the count that just fills it.
+  const cap = Math.max(1, Math.min(MAX_REPS, Math.floor(CEILING_MS / Math.max(coldBigMs, 1e-3))));
+  let reps = 1;
+  let probeMs = batchMs(fn, smallInput, reps);
+  while (probeMs < MIN_BATCH_MS && reps < MAX_REPS) {
+    reps *= 2;
+    probeMs = batchMs(fn, smallInput, reps);
+  }
+  reps = Math.min(cap, Math.max(1, Math.ceil((reps * MIN_BATCH_MS) / Math.max(probeMs, 1e-3))));
+  let smallMs = Infinity;
+  let bigMs = Infinity;
+  for (let s = 0; s < SAMPLES; s++) {
+    smallMs = Math.min(smallMs, batchMs(fn, smallInput, reps));
+    const big = batchMs(fn, bigInput, reps);
+    bigMs = Math.min(bigMs, big);
+    if (big >= CEILING_MS) break;
+  }
+  const ratio = bigMs >= CEILING_MS ? Infinity : bigMs / Math.max(smallMs, FLOOR_MS);
+  return { reps, smallMs, bigMs, ratio, coldBigMs, superLinear: ratio >= RATIO_BOUND };
+}
+
+/** The whole record is the received value, so a failure prints every number. */
+function expectLinear(label: string, r: Scaling): void {
+  expect({ label, ...r }).toEqual(expect.objectContaining({ superLinear: false }));
+}
+
+const tokens = (n: number): string => 'token-'.repeat(Math.ceil(n / 6)).slice(0, n);
+/** The hostile shapes of #648 r2 S2, each built at any size. */
+const SHAPES: Array<[string, (n: number) => string]> = [
+  ['token-token-…', tokens],
+  ['token-…=v', (n) => `${tokens(n)}=v`],
+  ['--token-… v', (n) => `--${tokens(n)} v`],
+  ['x://token-…', (n) => `x://${tokens(n)}`],
+];
+const DOTTED: [string, (n: number) => string] = ['a.a.a.…', (n) => 'a.'.repeat(n / 2)];
 
 function notification(card: OperatorNotification['card']): OperatorNotification {
   return {
@@ -39,19 +138,39 @@ function notification(card: OperatorNotification['card']): OperatorNotification 
 }
 
 describe('#648 r2 S2 — no catastrophic backtracking on a hostile target', () => {
-  it('the 8192-character token-token-… input finishes in under 50 ms', () => {
-    expect(TOKENS).toHaveLength(8192);
-    for (const input of [TOKENS, `${TOKENS}=v`, `--${TOKENS} v`, `x://${TOKENS}`]) {
-      expect(timed(() => safeTarget(input))).toBeLessThan(50);
-    }
-    expect(timed(() => buildApprovalCard({ tool: 'Bash', input: { command: `cat ${TOKENS}` }, signals: ['touch-sensitive-path'], plane: 'claude-code', host: 'h' })))
-      .toBeLessThan(50);
+  it('safeTarget and the card grow linearly from 1024 to 8192 token-token-… characters (#757)', () => {
+    expect(tokens(BIG_CHARS)).toHaveLength(8192);
+    for (const [label, shape] of SHAPES) expectLinear(`safeTarget ${label}`, scaling(safeTarget, shape));
+    expectLinear('buildApprovalCard cat token-…', scaling(
+      (target) => buildApprovalCard({ tool: 'Bash', input: { command: `cat ${target}` }, signals: ['touch-sensitive-path'], plane: 'claude-code', host: 'h' }),
+      tokens,
+    ));
   });
 
-  it('the secret scan itself is linear: 8192 characters straight into it, under 50 ms', () => {
-    for (const input of [TOKENS, `${TOKENS}=v`, `--${TOKENS} v`, `x://${TOKENS}`, 'a.'.repeat(4096)]) {
-      expect(timed(() => looksSecretish(input))).toBeLessThan(50);
-    }
+  it('the secret scan itself is linear: 1024 to 8192 characters straight into it (#757)', () => {
+    for (const [label, shape] of [...SHAPES, DOTTED]) expectLinear(`looksSecretish ${label}`, scaling(looksSecretish, shape));
+  });
+
+  it('the differential is not vacuous: a quadratic stand-in trips it and a linear one does not (#757)', () => {
+    // Every character against every other, so about 64x from N to 8N. Sized
+    // at 128 → 1024 so the proof costs well under 200 ms.
+    const quadratic = (input: string): number => {
+      let hits = 0;
+      for (let i = 0; i < input.length; i++) {
+        for (let j = 0; j < input.length; j++) if (input.charCodeAt(i) === input.charCodeAt(j)) hits++;
+      }
+      return hits;
+    };
+    const linear = (input: string): number => {
+      let hits = 0;
+      for (let i = 0; i < input.length; i++) if (input.charCodeAt(i) === 0x2d) hits++;
+      return hits;
+    };
+    const quad = scaling(quadratic, tokens, 128);
+    expect(quad.coldBigMs).toBeLessThan(CEILING_MS); // the ratio fires, not the hang guard
+    expect(quad.ratio).toBeGreaterThanOrEqual(RATIO_BOUND);
+    expect(quad.superLinear).toBe(true);
+    expectLinear('linear stand-in', scaling(linear, tokens, 128));
   });
 
   it('a candidate over 256 characters is withheld before any pattern runs', () => {
