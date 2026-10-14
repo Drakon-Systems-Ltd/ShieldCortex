@@ -35,6 +35,14 @@ const STARTUP_EXECUTIONS = [
   'echo "$(x=\x60echo x >> ~/' + RC + '\x60)"',
   `cat <<EOF\n$(echo x >> ~/${RC})\nEOF`,
   ...['/bin/sh', 'env sh', 'sudo sh', 'env bash', 'sh -s', 'bash -s', 'tee >(sh)'].map(reader => `cat <<'EOF' | ${reader}\necho x >> ~/${RC}\nEOF`),
+  `cat <<'EOF' \\\n| sh\necho x >> ~/${RC}\nEOF`,
+  `cat <<'EOF' \\\n| env sh\necho x >> ~/${RC}\nEOF`,
+  `cat <<'EOF' |\necho x | tee /tmp/a\\b ~/${RC}\nEOF\nsh`,
+  `cat <<'EOF' > >(sh)\necho x >> ~/${RC}\nEOF`,
+  `cat <<'EOF' >(sh)\necho x >> ~/${RC}\nEOF`,
+  `env bash -c 'echo x >> ~/${RC}'`,
+  `/usr/bin/env bash -c 'echo x >> ~/${RC}'`,
+
 ];
 const STARTUP_INERT = [`echo harmless`, `echo "# not a comment"`];
 
@@ -106,7 +114,6 @@ describe('#505 — OpenClaw interceptor fallback: tee operand run stops at the s
       `eval 'echo x >> ${t}'`, `bash -lc 'echo x >> ${t}'`,
       `bash -c -- 'echo x >> ${t}'`, `bash <<EOF\necho x >> ${t}\nEOF`,
       `sh -s <<'EOF'\necho x >> ${t}\nEOF`, `cat <<'EOF' | sh\necho x >> ${t}\nEOF`,
-      `cat <<'EOF'\necho x >> ${t}\nEOF | sh`,
     ]) await expect(run(command)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
     for (const command of [`echo harmless`])
       await expect(run(command)).resolves.toBeUndefined();

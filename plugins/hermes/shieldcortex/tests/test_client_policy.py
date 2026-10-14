@@ -452,7 +452,6 @@ class FallbackDangerousScanTests(unittest.TestCase):
             "bash <<EOF\necho x >> " + t + "\nEOF",
             "sh -s <<'EOF'\necho x >> " + t + "\nEOF",
             "cat <<'EOF' | sh\necho x >> " + t + "\nEOF",
-            "cat <<'EOF'\necho x >> " + t + "\nEOF | sh",
         ):
             self.assertTrue(fallback_dangerous_match(cmd), cmd)
         for cmd in ("echo harmless",):
@@ -475,6 +474,23 @@ class FallbackDangerousScanTests(unittest.TestCase):
             self.assertTrue(fallback_dangerous_match(cmd), cmd)
         for cmd in ("echo harmless", 'echo "# not a comment"'):
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
+
+    def test_588_heredoc_topology_and_nesting(self):
+        from sc_client import _fallback_startup_write
+        t = "~/.bash" + "rc"
+        positives = (
+            "cat <<'EOF' \\\n| sh\necho x >> " + t + "\nEOF",
+            "cat <<'EOF' \\\n| env sh\necho x >> " + t + "\nEOF",
+            "cat <<'EOF' |\necho x | tee /tmp/a\\b " + t + "\nEOF\nsh",
+            "cat <<'EOF' > >(sh)\necho x >> " + t + "\nEOF",
+            "cat <<'EOF' >(sh)\necho x >> " + t + "\nEOF",
+            "$(" * 9 + "echo x >> " + t + ")" * 9,
+        )
+        for command in positives:
+            self.assertTrue(_fallback_startup_write(command), command)
+        for command in ("cat <<'EOF'\necho x >> " + t + "\nEOF",
+                        "cat <<'EOF' | wc -l\necho x >> " + t + "\nEOF"):
+            self.assertFalse(_fallback_startup_write(command), command)
 
     def test_588_startup_fallback_is_bounded_at_scan_cap(self):
         from sc_client import _fallback_startup_write

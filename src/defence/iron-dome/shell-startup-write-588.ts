@@ -1,5 +1,7 @@
 /** #588: shell words, redirects and statement boundaries. One pass; no gap regex. */
 const STARTUP = /(?:^|\/)(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config\/fish\/config\.fish)$/i;
+const MAX_STARTUP_NESTING = 8;
+const NESTED_STARTUP_MENTION = /\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config\/fish\/config\.fish/i;
 type Word = { value: string; kind: 'word' | 'redirect' | 'boundary' };
 
 function words(text: string): Word[] {
@@ -39,12 +41,11 @@ function stripCatHeredocs(text: string): string {
     const end = m[2] ?? m[3] ?? m[4]!;
     let j = i + 1;
     while (j < lines.length && lines[j]!.trim() !== end) j++;
-    const pipe = lines[i]!.indexOf('|', m[0].length);
-    const tailPipe = j < lines.length ? lines[j]!.indexOf('|') : -1;
-    const reader = pipe >= 0 ? lines[i]!.slice(pipe + 1) : tailPipe >= 0 ? lines[j]!.slice(tailPipe + 1) : '';
+    const tail = lines[i]!.slice(m[0].length);
+    const reader = /^\s*\|\s*([^|;&<>\\`$]+?)\s*$/.exec(tail)?.[1] ?? '';
     const consumer = reader ? unwrap(words(reader).filter(w => w.kind === 'word').map(w => w.value)).verb : '';
-    // Process/command substitution in the reader (`tee >(sh)`) can still execute the body.
-    const safe = !reader || !reader.includes('|') && !/[<>$]\(|\x60/.test(reader) && /^(?:cat|head|tail|grep|rg|wc|sort|uniq|cut|tr|jq|tee|column|nl|fold|fmt)$/.test(consumer);
+    // A continued opener, dangling pipe, redirection, or substitution can run the body.
+    const safe = /^\s*$/.test(tail) || !!reader && /^(?:cat|head|tail|grep|rg|wc|sort|uniq|cut|tr|jq|column|nl|fold|fmt)$/.test(consumer);
     if (j < lines.length && (m[2] || m[3]) && safe) {
       for (let k = i + 1; k < j; k++) lines[k] = '';
     }
@@ -80,9 +81,10 @@ function unwrap(command: string[]): { verb: string; args: string[] } {
 }
 
 export function shellStartupWrite(text: string, nested = false, depth = 0): boolean {
+  if (depth >= MAX_STARTUP_NESTING && NESTED_STARTUP_MENTION.test(text)) return true;
   text = stripCatHeredocs(text);
   // Each nested substitution is scanned once; cap nesting, never byte distance.
-  if (depth < 8) {
+  if (depth < MAX_STARTUP_NESTING) {
     let quote = '';
     for (let i = 0; i < text.length; i++) {
       const c = text[i]!;
@@ -96,15 +98,15 @@ export function shellStartupWrite(text: string, nested = false, depth = 0): bool
       }
       if (c !== '\x60' && !(c === '$' && text[i + 1] === '(')) continue;
       const backtick = c === '\x60', start = i + (backtick ? 1 : 2);
-      let depth = 1, innerQuote = '', end = start;
+      let parenDepth = 1, innerQuote = '', end = start;
       for (; end < text.length; end++) {
         const d = text[end]!;
         if (d === '\\') { end++; continue; }
         if (backtick) { if (d === '\x60') break; continue; }
         if (d === '\x27' || d === '\x22') { if (!innerQuote) innerQuote = d; else if (innerQuote === d) innerQuote = ''; continue; }
         if (innerQuote === '\x27') continue;
-        if (d === '(') depth++;
-        else if (d === ')' && --depth === 0) break;
+        if (d === '(') parenDepth++;
+        else if (d === ')' && --parenDepth === 0) break;
       }
       if (end < text.length) {
         if (shellStartupWrite(text.slice(start, end), true, depth + 1)) return true;
@@ -138,19 +140,29 @@ export function shellStartupWrite(text: string, nested = false, depth = 0): bool
 
 const SINK = /^(?:system|execSync|exec|spawnSync|spawn|run|Popen|call|check_call|check_output|popen|getoutput|getstatusoutput|shell_exec|passthru|proc_open)$/;
 
-function decodeLiteral(value: string, raw: boolean, lang: string): string {
+function decodeLiteral(value: string, raw: boolean, lang: string, quote = '\x22'): string {
   if (raw) return value;
-  return value.replace(/\\(?:x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|([ntr\\\x22\x27]))/g, (all, hex, unicode, simple: string) => {
-    if (hex || unicode) return String.fromCharCode(parseInt(hex ?? unicode, 16));
-    if (simple === 'n') return '\n';
-    if (simple === 't') return '\t';
-    if (simple === 'r') return '\r';
-    if (lang !== 'node' && lang !== 'python' && simple === '\x27') return all;
-    return simple;
-  });
+  if (lang === 'php' && quote === '\x27') return value.replace(/\\([\\\x27])/g, '$1');
+  // An unknown Python Unicode name may conceal any character in a write target.
+  if (lang === 'python' && /\\N\{/.test(value) && /\.(?:bash|zsh|profile|config\/fish\/config)/i.test(value) && /(?:>>?|tee|sed|cp|mv|install)/.test(value))
+    return value + '\necho x >> ~/.bashrc';
+  return value.replace(/\\(?:\r?\n|u\{([0-9a-fA-F]{1,6})\}|U([0-9a-fA-F]{8})|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([0-7]{1,3})|N\{([^}]+)\}|([ntr\\\x22\x27\x60]))/g,
+    (all, brace: string, big: string, unicode: string, hex: string, octal: string, named: string, simple: string) => {
+      if (brace || big || unicode || hex) {
+        const code = parseInt(brace || big || unicode || hex, 16);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : all;
+      }
+      if (octal) return String.fromCharCode(parseInt(octal, 8));
+      if (named) return named === 'LATIN SMALL LETTER C' ? 'c' : all;
+      if (!simple) return '';
+      if (simple === 'n') return '\n';
+      if (simple === 't') return '\t';
+      if (simple === 'r') return '\r';
+      return simple;
+    });
 }
 
-type SourceCall = { name: string; arg: number; bracket: number; values: string[][]; shellFlag: boolean; shellKey: boolean; shellEquals: boolean };
+type SourceCall = { name: string; arg: number; bracket: number; values: string[][]; shellFlag: boolean; shellKey: boolean; shellEquals: boolean; shellNegation: boolean };
 function callStartupWrite(call: SourceCall, lang: string): boolean {
   const first = call.values[0] ?? [];
   const second = call.values[1] ?? [];
@@ -158,7 +170,7 @@ function callStartupWrite(call: SourceCall, lang: string): boolean {
   const shell = /^(?:sh|bash|dash|zsh|ksh|mksh|ash|fish|busybox)$/.test(first[0]?.replace(/^.*\//, '') ?? '');
   if (lang === 'node') {
     if (/^(?:spawn|spawnSync|execFile|execFileSync)$/.test(name))
-      return call.shellFlag ? first.some(s => shellStartupWrite(s)) || second.some(s => shellStartupWrite(s))
+      return call.shellFlag ? shellStartupWrite([first[0] ?? '', ...second].join(' '))
         : shell && second[0] === '-c' && second[1] !== undefined && shellStartupWrite(second[1]);
     return /^(?:exec|execSync)$/.test(name) && first[0] !== undefined && shellStartupWrite(first[0]);
   }
@@ -239,15 +251,21 @@ export function sourceStartupWrite(text: string, lang: string): boolean {
       previous = 'literal'; continue;
     }
     if (c === '\x27' || c === '\x22') {
+      const triple = lang === 'python' && text[i + 1] === c && text[i + 2] === c;
       let value = '';
-      for (i++; i < text.length; i++) {
+      for (i += triple ? 3 : 1; i < text.length; i++) {
         const d = text[i]!;
         if (d === '\\') { value += d + (text[++i] ?? ''); continue; }
-        if (d === c) break;
+        if (d === c && (!triple || text[i + 1] === c && text[i + 2] === c)) { if (triple) i += 2; break; }
         value += d;
       }
       const call = calls.at(-1);
-      if (call) (call.values[call.arg] ??= []).push(decodeLiteral(value, lang === 'python' && word.toLowerCase() === 'r', lang));
+      if (call) {
+        let keyEnd = i + 1;
+        if (lang === 'node' && value === 'shell') while (keyEnd < text.length && /\s/.test(text[keyEnd]!)) keyEnd++;
+        if (lang === 'node' && value === 'shell' && text[keyEnd] === ':') call.shellKey = true;
+        else (call.values[call.arg] ??= []).push(decodeLiteral(value, lang === 'python' && /^[rubf]*r[rubf]*$/i.test(word), lang, c));
+      }
       previous = 'literal'; continue;
     }
     if (lang === 'node' && c === '\x60') {
@@ -263,7 +281,12 @@ export function sourceStartupWrite(text: string, lang: string): boolean {
       shellTag = memberShell;
       const call = calls.at(-1);
       if (call) {
-        if (call.shellEquals && (word === 'True' || word === 'true')) call.shellFlag = true;
+        if (call.shellEquals) {
+          const literal = word.toLowerCase();
+          call.shellFlag = literal === 'true' || literal === '1' || literal !== 'false' && literal !== '0' && !call.shellNegation;
+          if (call.shellNegation) call.shellFlag = literal === 'false' || literal === '0';
+          call.shellEquals = false; call.shellNegation = false;
+        }
         call.shellKey = word === 'shell';
         if (word !== 'shell' && word !== 'True' && word !== 'true') call.shellEquals = false;
       }
@@ -272,7 +295,7 @@ export function sourceStartupWrite(text: string, lang: string): boolean {
     if (/\s/.test(c)) continue;
     if (c === '(') {
       const sink = previous === 'identifier' && (SINK.test(word) || /^(?:execFile|execFileSync)$/.test(word));
-      calls.push(sink ? { name: word, arg: 0, bracket: 0, values: [], shellFlag: false, shellKey: false, shellEquals: false } : null);
+      calls.push(sink ? { name: word, arg: 0, bracket: 0, values: [], shellFlag: false, shellKey: false, shellEquals: false, shellNegation: false } : null);
       previous = '('; continue;
     }
     if (c === ')') { const call = calls.pop(); if (call && callStartupWrite(call, lang)) return true; previous = ')'; continue; }
@@ -281,7 +304,8 @@ export function sourceStartupWrite(text: string, lang: string): boolean {
       if (c === '[') call.bracket++;
       else if (c === ']') call.bracket = Math.max(0, call.bracket - 1);
       else if (c === ',' && call.bracket === 0) { call.arg++; call.shellKey = false; call.shellEquals = false; }
-      else if ((c === '=' || c === ':') && call.shellKey) call.shellEquals = true;
+      else if ((c === '=' || c === ':') && call.shellKey) { call.shellEquals = true; call.shellFlag = true; call.shellKey = false; }
+      else if (c === '!' && call.shellEquals) call.shellNegation = !call.shellNegation;
     }
     if (c === '{') { frame.brace = (frame.brace ?? 0) + 1; previous = '{'; continue; }
     if (c === '}' && frames.length > 1 && frame.brace === 0) { frames.pop(); previous = 'literal'; continue; }

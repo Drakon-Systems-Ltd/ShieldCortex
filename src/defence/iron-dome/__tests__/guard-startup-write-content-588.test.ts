@@ -47,7 +47,6 @@ describe('#588 startup writes in authored content', () => {
     ['/repo/install.sh', `bash <<EOF\necho x >> ${target}\nEOF`],
     ['/repo/install.sh', `sh -s <<'EOF'\necho x >> ${target}\nEOF`],
     ['/repo/install.sh', `cat <<'EOF' | sh\necho x >> ${target}\nEOF`],
-    ['/repo/install.sh', `cat <<'EOF'\necho x >> ${target}\nEOF | sh`],
     ['/repo/help.py', `os.popen("echo x >> ${target}")`],
     ['/repo/help.py', `subprocess.getoutput("echo x >> ${target}")`],
     ['/repo/help.py', `subprocess.getstatusoutput("echo x >> ${target}")`],
@@ -176,6 +175,53 @@ describe('#588 startup writes in authored content', () => {
   });
 
   it.each([
+    ["continued sh", `cat <<'EOF' \\\n| sh\necho x >> ${target}\nEOF`, true],
+    ["continued env sh", `cat <<'EOF' \\\n| env sh\necho x >> ${target}\nEOF`, true],
+    ["empty reader tee", `cat <<'EOF' |\necho x | tee /tmp/a\\b ${target}\nEOF\nsh`, true],
+    ["empty reader redirect", `cat <<'EOF' |\necho x >> ${target}\nEOF\nsh`, true],
+    ["redirected process substitution", `cat <<'EOF' > >(sh)\necho x >> ${target}\nEOF`, true],
+    ["bare process substitution", `cat <<'EOF' >(sh)\necho x >> ${target}\nEOF`, true],
+    ["balanced nested substitutions", '$('.repeat(9) + `echo x >> ${target}` + ')'.repeat(9), true],
+    ["inert process substitution", `cat <<'EOF' > >(sh)\nprintf ok\nEOF`, false],
+    ["inert quoted body", `cat <<'EOF'\necho x >> ${target}\nEOF`, false],
+    ["inert read-only reader", `cat <<'EOF' | wc -l\necho x >> ${target}\nEOF`, false],
+  ])('%s is classified on a written script', (_name, content, gates) => {
+    expect(write('/repo/install.sh', content).signals.includes('modify-shell-startup')).toBe(gates);
+  });
+
+  it.each([
+    ["env bash command", `env bash -c 'echo x >> ${target}'`, true],
+    ["absolute env bash command", `/usr/bin/env bash -c 'echo x >> ${target}'`, true],
+    ["sh login command", `sh -lc 'echo x >> ${target}'`, true],
+    ["inert env bash command", `env bash -c 'echo harmless'`, false],
+    ["quoted Python hint", `python3 - <<'PY'\nHINT = "$(echo x >> ${target})"; print(HINT)\nPY`, false],
+    ["unquoted Python expansion", `python3 - <<PY\nHINT = "$(echo x >> ${target})"; print(HINT)\nPY`, true],
+    ["quoted Python sink", `python3 - <<'PY'\nimport os; os.system("echo x >> ${target}")\nPY`, true],
+  ])('%s is classified by interpreter region', (_name, command, gates) => {
+    expect(shell(command).signals.includes('modify-shell-startup')).toBe(gates);
+  });
+
+  it.each([
+    ["false shell option", '/repo/app.mjs', `spawnSync('printf', ['%s', 'echo x >> ${target}'], {shell: !true});`, false],
+    ["joined shell argv", '/repo/app.mjs', `spawnSync('echo', ['x', '>>', '${target}'], {shell: true});`, true],
+    ["negated zero shell option", '/repo/app.mjs', `spawnSync('echo', ['x', '>>', '${target}'], {shell: !0});`, true],
+    ["negated one shell option", '/repo/app.mjs', `spawnSync('printf', ['%s', 'echo x >> ${target}'], {shell: !1});`, false],
+    ["double quoted shell key", '/repo/app.mjs', `spawnSync('echo', ['x', '>>', '${target}'], {"shell": true});`, true],
+    ["quoted shell key", '/repo/app.mjs', `spawnSync('echo', ['x', '>>', '${target}'], {'shell': true});`, true],
+    ["PHP single quote escape", '/repo/install.php', `shell_exec('printf "%s" "\\x22; echo x >> ${target}; #"');`, false],
+    ["JS Unicode code point escape", '/repo/app.mjs', String.raw`execSync("echo x >> ~/.bashr\u{63}")`, true],
+    ["JS hexadecimal escape", '/repo/app.mjs', String.raw`execSync("echo x >> ~/.bashr\x63")`, true],
+    ["Python long Unicode escape", '/repo/help.py', String.raw`os.system("echo x >> ~/.bashr\U00000063")`, true],
+    ["Python named Unicode escape", '/repo/help.py', String.raw`os.system("echo x >> ~/.bashr\N{LATIN SMALL LETTER C}")`, true],
+    ["Python raw string", '/repo/help.py', String.raw`os.system(r"echo x >> ~/.bashr\143")`, false],
+    ["Python octal escape", '/repo/help.py', `os.system("echo x >> ~/.bashr\\143")`, true],
+    ["Python inert docstring", '/repo/help.py', `"""Example: "\nos.system('echo x >> ${target}')\n"""`, false],
+    ["Python code after docstring", '/repo/help.py', `"""Example: "\nos.system('echo x >> ${target}')\n"""\nimport os; os.system("echo x >> ${target}")`, true],
+  ])('%s is classified in %s', (_name, path, content, gates) => {
+    expect(write(path, content).signals.includes('modify-shell-startup')).toBe(gates);
+  });
+
+  it.each([
     ['python', 'subprocess.run('.repeat(7000)],
     ['python', 'os.system(' + '"\\\\'.repeat(50_000)],
     ['sh', '$('.repeat(30_000)],
@@ -218,11 +264,28 @@ describe('#588 startup writes in authored content', () => {
     expect(write(path, content).signals).not.toContain('modify-shell-startup');
   });
 
-  it.each(['\\'.repeat(100_000), '\x60'.repeat(100_000), '${'.repeat(50_000), '\x22'.repeat(100_000), 'const x = \x60' + '\\'.repeat(99_990), '/'.repeat(1e5), "#" + "'".repeat(1e5), '/['.repeat(5e4), '$('.repeat(5e4), '('.repeat(1e5), 'eval '.repeat(2e4), 'sudo '.repeat(2e4)])(
-    'scans a 100 KB adversarial write in under 300 ms', (content) => {
-      const start = performance.now();
-      write('/repo/app.mjs', content);
-      expect(performance.now() - start).toBeLessThan(300);
-    },
-  );
+  it.each([
+    ['backslashes', '\\'.repeat(100_000)],
+    ['backticks', '\x60'.repeat(100_000)],
+    ['templates', '${'.repeat(50_000)],
+    ['quotes', '\x22'.repeat(100_000)],
+    ['raw template', 'const x = \x60' + '\\'.repeat(99_990)],
+    ['slashes', '/'.repeat(100_000)],
+    ['comment quotes', "#" + "'".repeat(100_000)],
+    ['regex brackets', '/['.repeat(50_000)],
+    ['substitution openers', '$('.repeat(50_000)],
+    ['parentheses', '('.repeat(100_000)],
+    ['eval baseline', 'eval '.repeat(20_000)],
+    ['sudo baseline', 'sudo '.repeat(20_000)],
+  ])('scans 100 KB of %s in under 300 ms', (name, content) => {
+    const start = performance.now();
+    write('/repo/app.mjs', content);
+    const elapsed = performance.now() - start;
+    if (name.endsWith('baseline')) {
+      const neutral = name.startsWith('eval') ? 'data '.repeat(20_000) : 'plain'.repeat(20_000);
+      const controlStart = performance.now();
+      write('/repo/app.mjs', neutral);
+      expect(elapsed - (performance.now() - controlStart)).toBeLessThan(30);
+    } else expect(elapsed).toBeLessThan(300);
+  });
 });

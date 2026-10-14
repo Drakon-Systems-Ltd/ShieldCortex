@@ -7124,11 +7124,29 @@ function evaluateToolCallCore(
   }
   // #588: shell argv parsing also catches escaped operands that the legacy
   // exec regex cannot express without breaking backslash-newline continuation.
-  const startupInRegions = family === 'exec' && (shellStartupWrite(command) || shellStartupWrite(execSurface)
-    || fold.regions.some(r => {
-        const content = fold.content.slice(r.start, r.end);
-        return r.lang === 'sh' ? shellStartupWrite(content) : sourceStartupWrite(content, r.lang);
-      }));
+  const startupInterpreterRegions = scriptRegions.filter(r => r.lang !== 'sh');
+  const startupRawSurface = [command, path, url].filter(Boolean).join('   ');
+  let startupShellSurface = startupRawSurface;
+  if (startupInterpreterRegions.length) {
+    const pieces: string[] = [];
+    let at = 0;
+    for (const r of startupInterpreterRegions) {
+      if (r.start >= startupRawSurface.length) continue;
+      pieces.push(startupRawSurface.slice(at, r.start), ' '.repeat(Math.min(r.end, startupRawSurface.length) - r.start));
+      at = Math.min(r.end, startupRawSurface.length);
+    }
+    pieces.push(startupRawSurface.slice(at));
+    startupShellSurface = pieces.join('');
+  }
+  const startupInRegions = family === 'exec' && (shellStartupWrite(startupShellSurface)
+    || startupInterpreterRegions.some(r => {
+      const content = scanSurface.slice(r.start, r.end);
+      if (sourceStartupWrite(content, r.lang)) return true;
+      // An unquoted heredoc is expanded by the outer shell before the interpreter runs.
+      const before = execSurface.slice(0, r.start).trimEnd();
+      const opener = before.slice(before.lastIndexOf('\n') + 1);
+      return /<<-?\s*[A-Za-z_][A-Za-z_0-9]*\s*$/.test(opener) && shellStartupWrite(content);
+    }) || fold.regions.some(r => r.lang === 'sh' && shellStartupWrite(fold.content.slice(r.start, r.end))));
   if (family === 'exec' && startupInRegions && !dangerSignals.includes('modify-shell-startup')) {
     dangerSignals.push('modify-shell-startup');
     dangerSpan = dangerSpan ?? 'shell startup file write';

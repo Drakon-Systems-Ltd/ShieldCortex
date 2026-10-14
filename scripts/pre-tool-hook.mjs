@@ -2720,11 +2720,10 @@ function fallback588StripCatHeredocs(text) {
     const end = m[2] ?? m[3] ?? m[4];
     let j = i + 1;
     while (j < lines.length && lines[j].trim() !== end) j++;
-    const pipe = lines[i].indexOf('|', m[0].length);
-    const tailPipe = j < lines.length ? lines[j].indexOf('|') : -1;
-    const reader = pipe >= 0 ? lines[i].slice(pipe + 1) : tailPipe >= 0 ? lines[j].slice(tailPipe + 1) : '';
+    const tail = lines[i].slice(m[0].length);
+    const reader = /^\s*\|\s*([^|;&<>\\`$]+?)\s*$/.exec(tail)?.[1] ?? '';
     const consumer = reader ? fallback588Unwrap(fallback588Words(reader).filter(w => w.kind === 'word').map(w => w.value)).verb : '';
-    const safe = !reader || !reader.includes('|') && !/[<>$]\(|\x60/.test(reader) && /^(?:cat|head|tail|grep|rg|wc|sort|uniq|cut|tr|jq|tee|column|nl|fold|fmt)$/.test(consumer);
+    const safe = /^\s*$/.test(tail) || !!reader && /^(?:cat|head|tail|grep|rg|wc|sort|uniq|cut|tr|jq|column|nl|fold|fmt)$/.test(consumer);
     if (j < lines.length && (m[2] || m[3]) && safe) {
       for (let k = i + 1; k < j; k++) lines[k] = '';
     }
@@ -2771,10 +2770,13 @@ function fallback588Unwrap(command) {
     }
     return { verb: command[i]?.replace(/^.*\//, '').toLowerCase() ?? '', args: command.slice(i + 1) };
 }
+const FALLBACK_588_NESTING_CAP = 8;
+const FALLBACK_588_NESTED_MENTION = /\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config\/fish\/config\.fish/i;
 function fallbackStartupWrite(text, nested = false, nesting = 0) {
+    if (nesting >= FALLBACK_588_NESTING_CAP && FALLBACK_588_NESTED_MENTION.test(text)) return true;
     text = fallback588StripCatHeredocs(text);
     // Inspect each nested substitution once, up to the nesting cap.
-    if (nesting < 8) {
+    if (nesting < FALLBACK_588_NESTING_CAP) {
         let quote = '';
         for (let i = 0; i < text.length; i++) {
             const c = text[i];

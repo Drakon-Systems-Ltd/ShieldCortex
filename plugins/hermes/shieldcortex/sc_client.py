@@ -252,8 +252,13 @@ _STARTUP_WRITE_PATH = re.compile(r"(?:^|/)(?:\.(?:bashrc|zshrc|zprofile|zshenv|z
 _SED_IN_PLACE = re.compile(r"^-(?:[a-zA-Z]*i(?:\.|$)|-in-place(?:=|$))")
 
 
+_STARTUP_NESTING_CAP = 8
+_STARTUP_NESTED_MENTION = re.compile(r"\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config/fish/config\.fish", re.I)
+
 def _fallback_startup_write(text: str, nested: bool = False, nesting: int = 0) -> bool:
     """#588 capped shell lexer, mirrored with the hook and interceptor."""
+    if nesting >= _STARTUP_NESTING_CAP and _STARTUP_NESTED_MENTION.search(text):
+        return True
     lines = text.split("\n")
     i = 0
     while i < len(lines):
@@ -263,9 +268,9 @@ def _fallback_startup_write(text: str, nested: bool = False, nesting: int = 0) -
             j = i + 1
             while j < len(lines) and lines[j].strip() != marker:
                 j += 1
-            head = lines[i].find("|", match.end())
-            tail = lines[j].find("|") if j < len(lines) else -1
-            reader = lines[i][head + 1:] if head >= 0 else lines[j][tail + 1:] if tail >= 0 else ""
+            tail = lines[i][match.end():]
+            reader_match = re.fullmatch(r"\s*\|\s*([^|;&<>\\`$]+?)\s*", tail)
+            reader = reader_match[1] if reader_match else ""
             parts = reader.split()
             n = 0
             while n < len(parts) and parts[n].rsplit("/", 1)[-1] in ("sudo", "doas", "env", "command", "exec", "nohup", "nice", "timeout", "stdbuf", "time", "xargs"):
@@ -279,7 +284,7 @@ def _fallback_startup_write(text: str, nested: bool = False, nesting: int = 0) -
                 if wrapper == "timeout" and n < len(parts):
                     n += 1
             consumer = parts[n].rsplit("/", 1)[-1] if n < len(parts) else ""
-            safe = not reader or "|" not in reader and not re.search(r"[<>$]\(|`", reader) and consumer in ("cat", "head", "tail", "grep", "rg", "wc", "sort", "uniq", "cut", "tr", "jq", "tee", "column", "nl", "fold", "fmt")
+            safe = not tail.strip() or bool(reader_match) and consumer in ("cat", "head", "tail", "grep", "rg", "wc", "sort", "uniq", "cut", "tr", "jq", "column", "nl", "fold", "fmt")
             if j < len(lines) and (match[2] or match[3]) and safe:
                 for k in range(i + 1, j):
                     lines[k] = ""
@@ -287,7 +292,7 @@ def _fallback_startup_write(text: str, nested: bool = False, nesting: int = 0) -
         i += 1
     text = "\n".join(lines)
 
-    if nesting < 8:
+    if nesting < _STARTUP_NESTING_CAP:
         quote = ""
         i = 0
         while i < len(text):
