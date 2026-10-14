@@ -256,12 +256,119 @@ describe('#500 Action Guard self-protection', () => {
   // Measure what THIS walk adds on top: the same input with and without a
   // guard package token. Absolute wall time on a shared CI runner is not a
   // property of this code.
+  //
+  // #759: each side used to be the fastest of two back-to-back calls, and one
+  // slow call on the "with" side on a loaded macOS runner crossed the bound
+  // (74.8 ms added against a 55.3 ms bound). The two sides are now sampled
+  // interleaved, so a load burst lands on both, and each side is its running
+  // minimum: contention only ever adds time, so the least-contended call is
+  // the honest one. A round that still reads over the bound is re-sampled,
+  // up to EXTRA_ROUNDS more times, before the verdict. The bound itself is
+  // unchanged: the walk may add a constant, max(ADDED_FLOOR_MS, half the
+  // tokeniser time). There is no absolute cap on either side.
+  const SAMPLES = 7;
+  const EXTRA_ROUNDS = 2;
+  const ADDED_FLOOR_MS = 50;
+  const ADDED_FRACTION = 0.5;
+  /** Hang guard only: Jest's default 10 s could fail a slow runner on call count alone. */
+  const TRIPWIRE_3B_TIMEOUT_MS = 60_000;
+
+  interface AddedCost {
+    /** Fastest observed call on each side, in ms. */
+    without: number;
+    withPkg: number;
+    /** withPkg - without: what the guard package token adds. */
+    added: number;
+    /** max(ADDED_FLOOR_MS, without * ADDED_FRACTION). */
+    bound: number;
+    /** Rounds sampled before the verdict: 1 when the first round passed, at most 1 + EXTRA_ROUNDS. */
+    rounds: number;
+    /** The verdict, added < bound. The production case and the controls both read it from here. */
+    withinBound: boolean;
+  }
+
+  const msOf = (fn: () => unknown): number => {
+    const t0 = process.hrtime.bigint();
+    fn();
+    return Number(process.hrtime.bigint() - t0) / 1e6;
+  };
+
+  /**
+   * One discarded warm-up call per side, then `samples` interleaved calls per
+   * side (without, with, without, with, ...) keeping the running minimum of
+   * each. Returns as soon as a round reads under the bound; otherwise
+   * re-samples up to EXTRA_ROUNDS more rounds and reports the final reading.
+   */
+  function addedCost(timeWithout: () => number, timeWith: () => number, samples = SAMPLES): AddedCost {
+    timeWithout();
+    timeWith();
+    let without = Infinity;
+    let withPkg = Infinity;
+    for (let rounds = 1; ; rounds++) {
+      for (let s = 0; s < samples; s++) {
+        without = Math.min(without, timeWithout());
+        withPkg = Math.min(withPkg, timeWith());
+      }
+      const added = withPkg - without;
+      const bound = Math.max(ADDED_FLOOR_MS, without * ADDED_FRACTION);
+      const result: AddedCost = { without, withPkg, added, bound, rounds, withinBound: added < bound };
+      if (result.withinBound || rounds > EXTRA_ROUNDS) return result;
+    }
+  }
+
+  const PM_REPEAT = `${NPM} ls ` + (`${NPM} `).repeat(2000);
+  const timeBash = (cmd: string): number => msOf(() => bash(cmd));
+
   it('adds no more than a constant on top of the tokeniser for pm-repeat (ReDoS tripwire 3b)', () => {
-    const base = `${NPM} ls ` + (`${NPM} `).repeat(2000);
-    const time = (cmd: string) => { const t0 = process.hrtime.bigint(); bash(cmd); return Number(process.hrtime.bigint() - t0) / 1e6; };
-    time(base + 'warm-helper');
-    const without = Math.min(time(base + 'other-helper'), time(base + 'other-helper'));
-    const withPkg = Math.min(time(base + `${SC}-helper`), time(base + `${SC}-helper`));
-    expect(withPkg - without).toBeLessThan(Math.max(50, without * 0.5));
-  });
+    const r = addedCost(
+      () => timeBash(PM_REPEAT + 'other-helper'),
+      () => timeBash(PM_REPEAT + `${SC}-helper`),
+    );
+    expect(r).toMatchObject({ withinBound: true });
+  }, TRIPWIRE_3B_TIMEOUT_MS);
+
+  // Controls for the differential above. The positive control runs the same
+  // real call plus a deliberately quadratic pass over the input through the
+  // same addedCost and must be rejected, so a no-op comparison fails here.
+  // Every "with" call in it costs several times the real call, so it samples
+  // CONTROL_SAMPLES calls per round rather than SAMPLES; it still runs every
+  // round, since a real quadratic is never rescued by re-sampling. The
+  // negative control adds a linear pass and must pass at the default plan.
+  const CONTROL_SAMPLES = 3;
+  let sink = 0;
+  const quadraticPass = (s: string): number => {
+    let hits = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      for (let j = 0; j < s.length; j++) if (s.charCodeAt(j) === c) hits++;
+    }
+    return hits;
+  };
+  const linearPass = (s: string): number => {
+    let hits = 0;
+    for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 32) hits++;
+    return hits;
+  };
+
+  it('rejects a genuinely quadratic addition through the same differential (3b positive control)', () => {
+    const input = PM_REPEAT + `${SC}-helper`;
+    const r = addedCost(
+      () => timeBash(PM_REPEAT + 'other-helper'),
+      () => msOf(() => { bash(input); sink += quadraticPass(input); }),
+      CONTROL_SAMPLES,
+    );
+    expect(r).toMatchObject({ withinBound: false, rounds: 1 + EXTRA_ROUNDS });
+    expect(r.added).toBeGreaterThanOrEqual(r.bound);
+    expect(sink).toBeGreaterThan(0);
+  }, TRIPWIRE_3B_TIMEOUT_MS);
+
+  it('passes a linear addition through the same differential (3b negative control)', () => {
+    const input = PM_REPEAT + `${SC}-helper`;
+    const r = addedCost(
+      () => timeBash(PM_REPEAT + 'other-helper'),
+      () => msOf(() => { bash(input); sink += linearPass(input); }),
+    );
+    expect(r).toMatchObject({ withinBound: true });
+    expect(sink).toBeGreaterThan(0);
+  }, TRIPWIRE_3B_TIMEOUT_MS);
 });
