@@ -25,6 +25,8 @@ let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
 let lockFilePath: string | null = null;
 let lockFileFd: number | null = null;
+/** True only while this process owns the startup lock (not the continue-anyway path). */
+export function holdsStartupLock(): boolean { return lockFileFd !== null; }
 let dbInode: bigint | null = null; // Track file identity for staleness detection
 
 // Anti-bloat: Database size limits
@@ -36,7 +38,7 @@ const WARN_DB_SIZE = WARN_DB_FILE_BYTES;
 /**
  * Expand ~ to home directory
  */
-function expandPath(path: string): string {
+export function expandPath(path: string): string {
   if (path.startsWith('~')) {
     return join(homedir(), path.slice(1));
   }
@@ -136,6 +138,11 @@ function enforceSafeRuntimePath(expandedPath: string, explicitDbPath: boolean): 
       `Runtime path: ${runtime.entryPath}`
     );
   }
+}
+
+/** Apply the default-database runtime policy before any independent DB open. */
+export function assertSafeRuntimeForDbPath(resolvedPath: string): void {
+  enforceSafeRuntimePath(expandPath(resolvedPath), false);
 }
 
 function inspectDatabaseFile(dbPath: string): DatabaseInspection {

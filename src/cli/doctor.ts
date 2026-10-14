@@ -177,6 +177,8 @@ import {
   type SlotProblem,
 } from './recall-repetition.js';
 
+export const VACUUM_FREE_SHARE = 0.2;
+
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
 
@@ -2124,7 +2126,7 @@ function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   }
 }
 
-export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES): Promise<CheckResult> {
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES, options: { dbPath?: string } = {}): Promise<CheckResult> {
   const dirProbe = probePath(scDir);
   if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
     // "Directory not yet created" is a ✅. An unreadable one is not — this is
@@ -2245,7 +2247,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
 
     // One database open, for one number: how much of the file is free space.
-    const free = readDbFreeSpace(path.join(scDir, 'memories.db'));
+    const free = readDbFreeSpace(options.dbPath ?? path.join(scDir, 'memories.db'));
 
     // Name WHICH logs, and how much of the DB file is free pages, so the
     // headline points somewhere. The leading `DB … · backups … · logs …` shape
@@ -2274,7 +2276,6 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
      * file to reclaim a rounding error, so recommending it wastes the
      * operator's time and teaches them to ignore us.
      */
-    const VACUUM_FREE_SHARE = 0.2;
 
     /**
      * Report, and advise only where a MEASUREMENT supports it (#573 round 3).

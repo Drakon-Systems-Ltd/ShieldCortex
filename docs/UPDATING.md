@@ -71,6 +71,10 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 - **Automated turns get less of your memory.** When Claude Code recalls memories at the start of a prompt, cron jobs and subagents now get only error, pattern and decision memories, liveness checks get none, and none of them get anything not labelled `PUBLIC`. Your own chat is unchanged. Private-life notes get a new PERSONAL label; run `shieldcortex memories reclassify` to relabel older ones. This covers prompt-time recall only, for turns the hook recognises or that you pin: [Recall lanes](#recall-lanes) lists what it does not cover. (#722, #729)
 - **The Claude Code hook reads the right script.** Where the guard is on, a relative script such as `bash scripts/run.sh` is now read from the session's working directory rather than the hook's own. OpenClaw calls with no absolute `workdir` are unchanged. This is part of #634.
 
+## Storage maintenance
+
+`shieldcortex maintain` consolidates STM above its cap, backfills missing vectors, and vacuums when at least 20% of database pages are free. It then runs doctor's Memories, Semantic coverage and Disk checks (not the full doctor) and sends any remaining FAIL, by check name only, to the configured Action Guard webhook; the same FAIL set is sent at most once every 24 hours. While a live ShieldCortex process holds the database, consolidation, embedding and vacuum are skipped, not failed. It exits 1 while a FAIL remains, so a scheduler can alert on it. Use `--dry-run` to preview without changing database contents or config; SQLite may create shared-memory sidecar files. Use `--json` for a structured report. Audit-log retention is not included yet (#579), and nothing schedules `maintain` yet.
+
 <a id="whats-new-in-56"></a>
 
 ## What's new in 5.6

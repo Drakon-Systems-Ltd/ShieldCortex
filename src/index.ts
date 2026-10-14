@@ -608,6 +608,14 @@ async function main() {
     return;
   }
 
+  // A dry run must not reach the npm staleness preamble or stats banner:
+  // either can write under HOME before maintenance starts.
+  if (process.argv[2] === 'maintain') {
+    const { runMaintain } = await import('./cli/maintain.js');
+    await runMaintain(process.argv.slice(3));
+    return;
+  }
+
   // #577: an invalid argument must cost NOTHING — and `checkVersionStaleness()`
   // below spawns `npm ls -g`, which lets npm's own update-notifier reach the
   // registry and write ~/.npm/_logs. So the strict-parser commands are
@@ -691,6 +699,7 @@ ${bold}COMMANDS${reset}
                                    if anything could not be moved safely)
   ${cyan}policy-evidence${reset}       Per-runtime posture records as JSON (read-only, sc:// provenance)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
+  ${cyan}maintain${reset}               Run storage and memory hygiene (--dry-run, --json); audit-log retention is not included yet
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}logs${reset} prune            Keep only the newest project-key-repair-*.json logs
                         (dry-run; --execute). Audit logs are not managed yet (#579).
@@ -1562,7 +1571,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'logs', 'approve', 'deny', 'allowlist',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'maintain', 'sessions', 'logs', 'approve', 'deny', 'allowlist',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {
