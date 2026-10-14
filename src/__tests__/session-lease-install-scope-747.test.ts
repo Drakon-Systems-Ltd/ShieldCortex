@@ -19,6 +19,9 @@ describe('session lease global install scope (#747)', () => {
     'npm list -g 2>/dev/null | grep -i shieldcortex',
     'npm ls -g >/tmp/globals.txt',
     'npm exec -- tsc --noEmit',
+    'npm>/dev/null ls -g',
+    'npm>/tmp/globals.txt list -g',
+    'npx npm>/dev/null ls -g',
   ])('does not classify a read-only query as install: %s', (command) => {
     expect(scope(command)).not.toBe('install');
   });
@@ -123,6 +126,22 @@ describe('session lease global install scope (#747)', () => {
   });
 
   it.each([
+    'npm>/dev/null install -g evil',
+    'npm>/tmp/log i -g evil',
+    'npm> log install -g evil',
+    'npm>>log i -g evil',
+    'npm>&2 i -g evil',
+    'npm&>log i -g evil',
+    'npm</dev/null i -g evil',
+    'pnpm>log add -g evil',
+    'bun>log add -g evil',
+    'sudo npm>log i -g evil',
+    'npx npm>log i -g evil',
+  ])('keeps a redirection attached to the package manager as install (#752): %s', (command) => {
+    expect(scope(command)).toBe('install');
+  });
+
+  it.each([
     'npx npm i -g evil',
     'npx -y npm i -g evil',
     'npx --yes -- npm i -g evil',
@@ -159,6 +178,7 @@ describe('session lease global install scope (#747)', () => {
     'bunx echo npm install -g',
     'bunx -p npm echo npm install -g',
     'bunx prettier npm install -g',
+    'npx echo npm>log install -g',
   ])('leaves read-only standalone runner shapes unscoped (#748 r4/r5): %s', (command) => {
     expect(scope(command)).toBeNull();
   });
