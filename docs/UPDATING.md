@@ -41,6 +41,13 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 5. **Background service** — if you ran `shieldcortex service install`, check `shieldcortex service status`. On `Healthy: no (repair recommended)`, run `shieldcortex service repair` with the mode flag you installed with (`--api`, `--headless` or `--dashboard`). Linux and macOS restart the service; Windows schedules it for the next login.
 6. **Doctor** — `shieldcortex doctor` warns when the OpenClaw plugin or Hermes copy is behind the package and names the command to run. It exits 1 on a failure (`--strict` also fails on warnings). Repairs are opt-in flags: `--fix-project-keys`, `--fix-action-guard`, `--fix-hermes-plugin-copies`.
 
+<a id="whats-new-in-510"></a>
+
+## What's new in 5.10
+
+- **One command to keep your memory store tidy.** `shieldcortex maintain` merges short-term memories when there are too many, fills in missing search vectors, and shrinks the database file when a fifth or more of it is empty space. It then runs the relevant doctor checks and exits with an error while one still fails, so a scheduled job can alert you; if you have an Action Guard webhook set up, it reports the failing checks there (check names and doctor's messages, never your memories), at most once a day for the same set. `--dry-run` previews without changing your data, and `--json` gives a machine-readable report. See [Storage maintenance](#storage-maintenance). Nothing schedules it yet, and audit-log clean-up is not included yet.
+- **`maintain` stays out of the way of a running ShieldCortex.** If another ShieldCortex process is using the database, `maintain` skips the steps that would write to it and still runs the checks, including when that process starts while `maintain` is getting ready. Nothing to do on upgrade.
+
 <a id="whats-new-in-59"></a>
 
 ## What's new in 5.9
