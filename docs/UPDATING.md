@@ -47,6 +47,8 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 
 - **Fewer false stops for scripts that only read a file.** Where the Action Guard is on, a short inline Python, Node, Ruby, Perl or PHP script fed in with `<<` that only reads a data file (for example loading a markdown table or a JSON file and printing it) is allowed again. Only a fixed list of plain read calls qualifies; anything else in the script, such as loading code, running a command or an unusual flag, is checked exactly as before. Nothing to do on upgrade.
 - **Checking your global packages no longer blocks other sessions.** Read-only commands such as `npm list -g` or `npm outdated -g` no longer take the session install lock, so they are not refused with "install is held by another session". A real global install (`npm install -g …`, including one run through `npx`, `pnpm dlx` or `bunx`) still takes it. Nothing to do on upgrade.
+- **A global install with its output redirected still waits its turn.** A command such as `npm>/dev/null install -g …`, where the redirection is written right against the package-manager name, takes the session install lock again, as it did before the read-only change above. Nothing to do on upgrade.
+- **Scripts that run a global install as a list of words now ask first.** Where the Action Guard is on, writing a script file that runs a global package install through a call such as Python `subprocess.run(["npm", "install", "-g", "x"])` or Node `spawn("npm", ["install", "-g", "x"])` now asks for your approval, as the plain `npm install -g x` text already did. Comment lines in a file whose language is known are not counted. Nothing to do on upgrade.
 
 <a id="whats-new-in-58"></a>
 

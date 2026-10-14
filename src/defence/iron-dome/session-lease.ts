@@ -1240,6 +1240,12 @@ const RUNNER_BOOLEAN_OPTIONS = new Set([
   '--silent', '--bun', '--no-bun',
 ]);
 const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time', 'eval']);
+/**
+ * A package-manager command word. The tokenizer keeps a redirection attached
+ * to the word (`npm>log`), so the name may be followed by one; that shape is
+ * recognised here and fails closed in finishStage (#752).
+ */
+const PKG_MGR_WORD_RE = /^(?:npm|pnpm|yarn|bun)(?:$|[<>]|&>)/i;
 
 /**
  * A global install needs a package manager's install subcommand and global
@@ -1248,8 +1254,8 @@ const INSTALL_STAGE_PREFIXES = new Set(['sudo', '{', '!', 'then', 'do', 'else', 
  * frames preserve the outer stage while their inner stages are scanned;
  * subshell parentheses bound stages. Env assignments and shell prefix words
  * are skipped before the package manager. Runner subcommands and redirections
- * before the subcommand fail closed. Ambiguous syntax fails closed by OR-ing
- * the whole-surface rule with both parsed rules.
+ * on the command word or before the subcommand fail closed. Ambiguous syntax
+ * fails closed by OR-ing the whole-surface rule with both parsed rules.
  */
 function isGlobalInstall(command: string): boolean {
   return isGlobalInstallAtDepth(command, 0);
@@ -1306,11 +1312,14 @@ function isGlobalInstallAtDepth(command: string, depth: number): boolean {
         if (!opt.startsWith('-')) break;
         if (!opt.includes('=') && !RUNNER_BOOLEAN_OPTIONS.has(opt)) ambiguous = true;
       }
-      if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[k] ?? '')) index = k;
-      else if (ambiguous && /^(?:npm|pnpm|yarn|bun)$/i.test(tokens[k + 1] ?? '')) index = k + 1;
+      if (PKG_MGR_WORD_RE.test(tokens[k] ?? '')) index = k;
+      else if (ambiguous && PKG_MGR_WORD_RE.test(tokens[k + 1] ?? '')) index = k + 1;
     }
-    if (/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index] ?? '')) {
+    if (PKG_MGR_WORD_RE.test(tokens[index] ?? '')) {
       if (expansion) unsafe = true;
+      // A redirection attached to the command word (`npm>log install -g x`)
+      // may be followed by its target as a separate word: fail closed.
+      if (!/^(?:npm|pnpm|yarn|bun)$/i.test(tokens[index]!)) unsafe = true;
       let global = false;
       let subcommand: string | undefined;
       let unknownOption = false;
