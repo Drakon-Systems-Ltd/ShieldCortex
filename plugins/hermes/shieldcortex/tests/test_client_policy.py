@@ -455,7 +455,25 @@ class FallbackDangerousScanTests(unittest.TestCase):
             "cat <<'EOF'\necho x >> " + t + "\nEOF | sh",
         ):
             self.assertTrue(fallback_dangerous_match(cmd), cmd)
-        for cmd in ("# echo x >> " + t, "cat <<'EOF'\necho x >> " + t + "\nEOF"):
+        for cmd in ("echo harmless",):
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+
+    def test_588_startup_fallback_preserves_legacy_rows(self):
+        from sc_client import fallback_dangerous_match
+        t = "~/.bash" + "rc"
+        commands = (
+            "python3 -c 'import os; os.system(\"echo x >> " + t + "\")'",
+            "node -e 'require(\"child_process\").execSync(\"echo x >> " + t + "\")'",
+            "perl -e 'system(\"echo x >> " + t + "\")'",
+            'echo "x #$(echo x >> ' + t + ')"',
+            'echo "$(x=`echo x >> ' + t + '`)"',
+            'cat <<EOF\n$(echo x >> ' + t + ')\nEOF',
+            *("cat <<'EOF' | " + reader + "\necho x >> " + t + "\nEOF"
+              for reader in ("/bin/sh", "env sh", "sudo sh", "env bash", "sh -s", "bash -s", "tee >(sh)")),
+        )
+        for cmd in commands:
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+        for cmd in ("echo harmless", 'echo "# not a comment"'):
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
 
     def test_588_startup_fallback_is_bounded_at_scan_cap(self):

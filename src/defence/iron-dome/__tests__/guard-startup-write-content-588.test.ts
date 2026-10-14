@@ -108,6 +108,84 @@ describe('#588 startup writes in authored content', () => {
     ]) expect(shell(command).signals).toContain('modify-shell-startup');
   });
 
+  it.each([
+    `python3 -c 'import os; os.system("echo x >> ${target}")'`,
+    `node -e 'require("child_process").execSync("echo x >> ${target}")'`,
+    `perl -e 'system("echo x >> ${target}")'`,
+    `echo "x #$(echo x >> ${target})"`,
+    'echo "$(x=\x60echo x >> ' + target + '\x60)"',
+    `cat <<EOF\n$(echo x >> ${target})\nEOF`,
+    ...['/bin/sh', 'env sh', 'sudo sh', 'env bash', 'sh -s', 'bash -s', 'tee >(sh)'].map(reader => `cat <<'EOF' | ${reader}\necho x >> ${target}\nEOF`),
+  ])('gates an executed Bash startup write: %s', command => {
+    const v = shell(command);
+    expect(v.signals).toContain('modify-shell-startup');
+    expect(v.decision).toBe('require_approval');
+  });
+
+  it.each([
+    ['/repo/install.sh', `cat <<EOF\n$(echo x >> ${target})\nEOF`],
+    ...['/bin/sh', 'env sh', 'sudo sh', 'env bash', 'sh -s', 'bash -s', 'tee >(sh)'].map(reader => ['/repo/install.sh', `cat <<'EOF' | ${reader}\necho x >> ${target}\nEOF`]),
+    ['/repo/install.sh', `echo "x #$(echo x >> ${target})"`],
+    ['/repo/install.sh', 'echo "$(x=\x60echo x >> ' + target + '\x60)"'],
+    ['/repo/help.py', `os.system("echo x >> ${target}\\n")`],
+    ['/repo/help.py', `os.system("echo x >> \\"$HOME/.bashrc\\"")`],
+    ['/repo/app.mjs', `execSync("echo x >> ${target}\\n");`],
+    ['/repo/install.rb', `system("echo x >> ${target}\\n")`],
+    ['/repo/install.pl', `system("echo x >> ${target}\\n")`],
+    ['/repo/install.php', `shell_exec("echo x >> ${target}\\n")`],
+    ['/repo/app.mjs', `spawnSync('sh', ['-c', 'echo x >> ${target}']);`],
+    ['/repo/app.mjs', `execFileSync('sh', ['-c', 'echo x >> ${target}']);`],
+    ['/repo/help.py', `subprocess.run(["sh", "-c", "echo x >> ${target}"])`],
+    ['/repo/install.sh', `cat <<'EOF' | unknown_reader\necho x >> ${target}\nEOF`],
+    ['/repo/app.mjs', 'zx.$`echo x >> ' + target + '`;'],
+    ['/repo/app.mjs', '$.sync`echo x >> ' + target + '`;'],
+  ])('gates a static write in %s: %s', (path, content) => {
+    const v = write(path, content);
+    expect(v.signals).toContain('modify-shell-startup');
+    expect(v.decision).toBe('require_approval');
+  });
+
+  it.each([
+    ['/repo/install.sh', `echo "# not a comment"`],
+    ['/repo/install.sh', `cat <<'EOF'\necho x >> ${target}\nEOF`],
+    ['/repo/install.sh', `cat <<"EOF"\necho x >> ${target}\nEOF`],
+    ['/repo/install.sh', `cat <<\\EOF\necho x >> ${target}\nEOF`],
+    ['/repo/app.mjs', 'const s = String.raw`echo x >> ' + target + '`;'],
+    ['/repo/app.mjs', 'const q = sql`echo x >> ' + target + '`;'],
+    ['/repo/app.mjs', `spawnSync('printf', ['%s', 'echo x >> ${target}']);`],
+    ['/repo/app.mjs', `exec('ls', (e, out) => console.log('echo x >> ${target}'));`],
+    ['/repo/help.py', `subprocess.run(["printf", "%s", "echo x >> ${target}"])`],
+    ['/repo/help.py', `HINT = "$(echo x >> ${target})"`],
+    ['/repo/help.py', `os.system(r"echo x >> ${target}\\n")`],
+    ['/repo/app.mjs', 'execSync(String.raw`echo x >> ' + target + '\\n`);'],
+  ])('allows inert source in %s: %s', (path, content) => {
+    const v = write(path, content);
+    expect(v.signals).not.toContain('modify-shell-startup');
+    expect(v.decision).toBe('allow');
+  });
+
+  it.each([
+    [`"""Run \x60echo x >> ${target}\x60 yourself"""\nprint("ok")`, false],
+    [`HINT = "$(echo x >> ${target})"\nprint("ok")`, false],
+    [`import os; os.system("echo x >> ${target}")`, true],
+  ])('classifies folded Python source by language', (content, gates) => {
+    const v = evaluateToolCall('Bash', { command: 'python3 help.py' }, undefined,
+      { resolveScriptSource: () => content });
+    expect(v.signals.includes('modify-shell-startup')).toBe(gates);
+    expect(v.decision).toBe(gates ? 'require_approval' : 'allow');
+  });
+
+  it.each([
+    ['python', 'subprocess.run('.repeat(7000)],
+    ['python', 'os.system(' + '"\\\\'.repeat(50_000)],
+    ['sh', '$('.repeat(30_000)],
+    ['sh', 'cat <<EOF | '.repeat(8000)],
+  ])('keeps the new %s lexer path linear on 100 KB', (lang, content) => {
+    const start = performance.now();
+    sourceStartupWrite(content, lang);
+    expect(performance.now() - start).toBeLessThan(300);
+  });
+
   it('checks edited script text as well as new writes', () => {
     const v = evaluateToolCall('Edit', { file_path: '/repo/install.sh', old_string: 'old', new_string: `echo x >> ${target}\n` });
     expect(v.signals).toContain('modify-shell-startup');

@@ -7124,7 +7124,12 @@ function evaluateToolCallCore(
   }
   // #588: shell argv parsing also catches escaped operands that the legacy
   // exec regex cannot express without breaking backslash-newline continuation.
-  if (family === 'exec' && shellStartupWrite(scanSurface) && !dangerSignals.includes('modify-shell-startup')) {
+  const startupInRegions = family === 'exec' && (shellStartupWrite(command) || shellStartupWrite(execSurface)
+    || fold.regions.some(r => {
+        const content = fold.content.slice(r.start, r.end);
+        return r.lang === 'sh' ? shellStartupWrite(content) : sourceStartupWrite(content, r.lang);
+      }));
+  if (family === 'exec' && startupInRegions && !dangerSignals.includes('modify-shell-startup')) {
     dangerSignals.push('modify-shell-startup');
     dangerSpan = dangerSpan ?? 'shell startup file write';
     dangerEvidence.set('modify-shell-startup', { signal: 'modify-shell-startup', span: 'shell startup file write', tier: 'executed' });

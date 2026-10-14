@@ -2713,21 +2713,26 @@ function fallback588Words(text) {
 }
 // Only cat's heredoc is classified as inert data. Unknown readers stay fail closed.
 function fallback588StripCatHeredocs(text) {
-    const lines = text.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-        const m = /^\s*cat\s+<<-?\s*(['\x22]?)([A-Za-z_][A-Za-z_0-9]*)\1(?:\s|$)/.exec(lines[i]);
-        if (!m)
-            continue;
-        const end = m[2];
-        let j = i + 1;
-        while (j < lines.length && !new RegExp('^\\s*' + end + '(?:\\s|$)').test(lines[j])) j++;
-        if (j < lines.length && !/\|\s*(?:sh|bash|zsh|dash|ksh)\b/.test(lines[i]) && !/\|\s*(?:sh|bash|zsh|dash|ksh)\b/.test(lines[j])) {
-            for (let k = i + 1; k < j; k++) lines[k] = '';
-        }
-        i = j;
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*cat\s+<<-?\s*(?:([\x27\x22])([A-Za-z_][A-Za-z_0-9]*)\1|\\([A-Za-z_][A-Za-z_0-9]*)|([A-Za-z_][A-Za-z_0-9]*))(?:\s|$)/.exec(lines[i]);
+    if (!m) continue;
+    const end = m[2] ?? m[3] ?? m[4];
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim() !== end) j++;
+    const pipe = lines[i].indexOf('|', m[0].length);
+    const tailPipe = j < lines.length ? lines[j].indexOf('|') : -1;
+    const reader = pipe >= 0 ? lines[i].slice(pipe + 1) : tailPipe >= 0 ? lines[j].slice(tailPipe + 1) : '';
+    const consumer = reader ? fallback588Unwrap(fallback588Words(reader).filter(w => w.kind === 'word').map(w => w.value)).verb : '';
+    const safe = !reader || !reader.includes('|') && !/[<>$]\(|\x60/.test(reader) && /^(?:cat|head|tail|grep|rg|wc|sort|uniq|cut|tr|jq|tee|column|nl|fold|fmt)$/.test(consumer);
+    if (j < lines.length && (m[2] || m[3]) && safe) {
+      for (let k = i + 1; k < j; k++) lines[k] = '';
     }
-    return lines.join('\n');
+    i = j;
+  }
+  return lines.join('\n');
 }
+
 function fallback588Unwrap(command) {
     let i = 0;
     while (i < command.length) {
@@ -2766,10 +2771,10 @@ function fallback588Unwrap(command) {
     }
     return { verb: command[i]?.replace(/^.*\//, '').toLowerCase() ?? '', args: command.slice(i + 1) };
 }
-function fallbackStartupWrite(text, nested = false) {
+function fallbackStartupWrite(text, nested = false, nesting = 0) {
     text = fallback588StripCatHeredocs(text);
-    // Substitutions are disjoint; only the outer call extracts them.
-    if (!nested) {
+    // Inspect each nested substitution once, up to the nesting cap.
+    if (nesting < 8) {
         let quote = '';
         for (let i = 0; i < text.length; i++) {
             const c = text[i];
@@ -2787,7 +2792,7 @@ function fallbackStartupWrite(text, nested = false) {
             }
             if (quote === '\x27')
                 continue;
-            if (c === '#' && (i === 0 || /[\s;|&()]/.test(text[i - 1]))) {
+            if (!quote && c === '#' && (i === 0 || /[\s;|&()]/.test(text[i - 1]))) {
                 while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r')
                     i++;
                 continue;
@@ -2822,7 +2827,7 @@ function fallbackStartupWrite(text, nested = false) {
                     break;
             }
             if (end < text.length) {
-                if (fallbackStartupWrite(text.slice(start, end), true))
+                if (fallbackStartupWrite(text.slice(start, end), true, nesting + 1))
                     return true;
                 i = end;
             } else break;
@@ -2874,7 +2879,6 @@ function fallbackDangerousMatch(toolInput, toolName) {
   const patternText = text;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
   for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
-    if (signal === 'modify-shell-startup') continue; // The shell lexer owns this row.
     if (lockReadOnly && lockPath === true) continue;
     if (dataQuotes === true ? fallbackExecutedMatch(re, patternText) : re.test(patternText)) return signal;
   }

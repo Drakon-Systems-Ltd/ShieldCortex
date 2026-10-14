@@ -27,6 +27,16 @@ const RC = '.bash' + 'rc';
 const FISH = '.config/fish/config.' + 'fish';
 const AK = '.s' + 'sh/authorized' + '_keys';
 const BENIGN = 'export PATH=/opt/tool/bin:$PATH\n';
+const STARTUP_EXECUTIONS = [
+  `python3 -c 'import os; os.system("echo x >> ~/${RC}")'`,
+  `node -e 'require("child_process").execSync("echo x >> ~/${RC}")'`,
+  `perl -e 'system("echo x >> ~/${RC}")'`,
+  `echo "x #$(echo x >> ~/${RC})"`,
+  'echo "$(x=\x60echo x >> ~/' + RC + '\x60)"',
+  `cat <<EOF\n$(echo x >> ~/${RC})\nEOF`,
+  ...['/bin/sh', 'env sh', 'sudo sh', 'env bash', 'sh -s', 'bash -s', 'tee >(sh)'].map(reader => `cat <<'EOF' | ${reader}\necho x >> ~/${RC}\nEOF`),
+];
+const STARTUP_INERT = [`echo harmless`, `echo "# not a comment"`];
 
 const okPipeline = () => ({
   allowed: true,
@@ -73,6 +83,12 @@ describe('#505 — OpenClaw interceptor fallback: tee operand run stops at the s
     const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, { onAuditEntry: (e) => entries.push(e) });
     return i.handleToolCall({ toolName: 'Bash', arguments: { command } });
   };
+  it.each(STARTUP_EXECUTIONS)('preserves the legacy gate and adds walker coverage: %s', async command => {
+    await expect(run(command)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
+  });
+  it.each(STARTUP_INERT)('allows a non-executing mention: %s', async command => {
+    await expect(run(command)).resolves.toBeUndefined();
+  });
   it('a read of a startup file on the NEXT line is not a tee operand', async () => {
     await expect(run(`printf x | tee /tmp/log\ncat ~/${RC}`)).resolves.toBeUndefined();
     await expect(run(`printf x | tee /tmp/log; source ~/.profile`)).resolves.toBeUndefined();
@@ -92,7 +108,7 @@ describe('#505 — OpenClaw interceptor fallback: tee operand run stops at the s
       `sh -s <<'EOF'\necho x >> ${t}\nEOF`, `cat <<'EOF' | sh\necho x >> ${t}\nEOF`,
       `cat <<'EOF'\necho x >> ${t}\nEOF | sh`,
     ]) await expect(run(command)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
-    for (const command of [`# echo x >> ${t}`, `cat <<'EOF'\necho x >> ${t}\nEOF`])
+    for (const command of [`echo harmless`])
       await expect(run(command)).resolves.toBeUndefined();
   });
 
@@ -139,6 +155,13 @@ describe('#505 — Claude Code hook fallback: startup-file write target', () => 
       child.stdin.end();
     });
   }
+  it.each(STARTUP_EXECUTIONS)('preserves the legacy gate and adds walker coverage: %s', async command => {
+    const out = await runHook('Bash', { command });
+    expect(JSON.parse(out).hookSpecificOutput.permissionDecision).toBe('ask');
+  });
+  it.each(STARTUP_INERT)('allows a non-executing mention: %s', async command => {
+    expect(await runHook('Bash', { command })).toBe('');
+  });
 
   it('Write / Edit to a startup file asks; the same path on Read and an ordinary file fall open', async () => {
     const w = await runHook('Write', { file_path: `${tempHome}/${RC}`, content: BENIGN });
@@ -162,7 +185,7 @@ describe('#505 — Claude Code hook fallback: startup-file write target', () => 
       `echo x | env tee -a ${t}`, `eval "echo x >> ${t}"`,
       `bash -lc 'echo x >> ${t}'`, `bash -c -- 'echo x >> ${t}'`,
     ]) expect(JSON.parse(await runHook('Bash', { command })).hookSpecificOutput.permissionDecision).toBe('ask');
-    for (const command of [`# echo x >> ${t}`, `cat <<'EOF'\necho x >> ${t}\nEOF`])
+    for (const command of [`echo harmless`])
       expect(await runHook('Bash', { command })).toBe('');
   });
 });

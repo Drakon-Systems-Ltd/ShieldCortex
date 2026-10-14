@@ -118,7 +118,6 @@ _FALLBACK_DANGEROUS = [
 ]
 
 # The shell lexer owns this legacy regex row; retain the original row and input surface.
-_FALLBACK_STARTUP_ROW = _FALLBACK_DANGEROUS[15]
 
 # Same command/path/url field set the guard extracts — narrow, not the whole
 # args object (a benign `description` must never gate).
@@ -253,25 +252,42 @@ _STARTUP_WRITE_PATH = re.compile(r"(?:^|/)(?:\.(?:bashrc|zshrc|zprofile|zshenv|z
 _SED_IN_PLACE = re.compile(r"^-(?:[a-zA-Z]*i(?:\.|$)|-in-place(?:=|$))")
 
 
-def _fallback_startup_write(text: str, nested: bool = False) -> bool:
+def _fallback_startup_write(text: str, nested: bool = False, nesting: int = 0) -> bool:
     """#588 capped shell lexer, mirrored with the hook and interceptor."""
     lines = text.split("\n")
     i = 0
     while i < len(lines):
-        match = re.match(r"^\s*cat\s+<<-?\s*(['\"]?)([A-Za-z_][A-Za-z_0-9]*)\1(?:\s|$)", lines[i])
+        match = re.match(r"^\s*cat\s+<<-?\s*(?:([\x27\x22])([A-Za-z_][A-Za-z_0-9]*)\1|\\([A-Za-z_][A-Za-z_0-9]*)|([A-Za-z_][A-Za-z_0-9]*))(?:\s|$)", lines[i])
         if match:
-            marker = match[2]
+            marker = match[2] or match[3] or match[4]
             j = i + 1
-            while j < len(lines) and not re.match(r"^\s*" + marker + r"(?:\s|$)", lines[j]):
+            while j < len(lines) and lines[j].strip() != marker:
                 j += 1
-            if j < len(lines) and not re.search(r"\|\s*(?:sh|bash|zsh|dash|ksh)\b", lines[i]) and not re.search(r"\|\s*(?:sh|bash|zsh|dash|ksh)\b", lines[j]):
+            head = lines[i].find("|", match.end())
+            tail = lines[j].find("|") if j < len(lines) else -1
+            reader = lines[i][head + 1:] if head >= 0 else lines[j][tail + 1:] if tail >= 0 else ""
+            parts = reader.split()
+            n = 0
+            while n < len(parts) and parts[n].rsplit("/", 1)[-1] in ("sudo", "doas", "env", "command", "exec", "nohup", "nice", "timeout", "stdbuf", "time", "xargs"):
+                wrapper = parts[n].rsplit("/", 1)[-1]
+                n += 1
+                while n < len(parts) and (parts[n].startswith("-") or wrapper == "env" and "=" in parts[n]):
+                    option = parts[n]
+                    n += 1
+                    if option in ("-u", "-g", "-n", "-s", "-i", "-o", "-e") and n < len(parts):
+                        n += 1
+                if wrapper == "timeout" and n < len(parts):
+                    n += 1
+            consumer = parts[n].rsplit("/", 1)[-1] if n < len(parts) else ""
+            safe = not reader or "|" not in reader and not re.search(r"[<>$]\(|`", reader) and consumer in ("cat", "head", "tail", "grep", "rg", "wc", "sort", "uniq", "cut", "tr", "jq", "tee", "column", "nl", "fold", "fmt")
+            if j < len(lines) and (match[2] or match[3]) and safe:
                 for k in range(i + 1, j):
                     lines[k] = ""
             i = j
         i += 1
     text = "\n".join(lines)
 
-    if not nested:
+    if nesting < 8:
         quote = ""
         i = 0
         while i < len(text):
@@ -290,7 +306,7 @@ def _fallback_startup_write(text: str, nested: bool = False) -> bool:
             if c == "'" or quote == "'":
                 i += 1
                 continue
-            if c == "#" and (i == 0 or text[i - 1] in " \t\r\n;|&()"):
+            if not quote and c == "#" and (i == 0 or text[i - 1] in " \t\r\n;|&()"):
                 while i < len(text) and text[i] not in "\r\n":
                     i += 1
                 continue
@@ -320,7 +336,7 @@ def _fallback_startup_write(text: str, nested: bool = False) -> bool:
                                 break
                 end += 1
             if end < len(text):
-                if _fallback_startup_write(text[start:end], True):
+                if _fallback_startup_write(text[start:end], True, nesting + 1):
                     return True
                 i = end + 1
             else:
@@ -441,7 +457,7 @@ def fallback_dangerous_match(content: str) -> bool:
         return True
     return any(
         _fallback_executed_match(p, pattern_text) if p is _FALLBACK_DESTROY_ROW else p.search(pattern_text)
-        for p in _FALLBACK_DANGEROUS if p is not _FALLBACK_STARTUP_ROW
+        for p in _FALLBACK_DANGEROUS
     )
 
 
