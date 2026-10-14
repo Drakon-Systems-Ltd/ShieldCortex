@@ -107,6 +107,7 @@ import { runMigrations } from '../database/migrations.js';
 import { detectStaleDashboard, realDeps } from '../service/dashboard-staleness.js';
 import { MCP_LIGHT_TICK_INTERVAL_MS } from '../worker/types.js';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
+export const VACUUM_FREE_SHARE = 0.2;
 import { isRepairLogName } from '../logs/retention.js';
 import { gatewayRestartAdvice } from '../setup/gateway-restart-command.js';
 import { LIVE_CANARY_COMMAND } from '../setup/openclaw-selfcheck.js';
@@ -2274,7 +2275,6 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
      * file to reclaim a rounding error, so recommending it wastes the
      * operator's time and teaches them to ignore us.
      */
-    const VACUUM_FREE_SHARE = 0.2;
 
     /**
      * Report, and advise only where a MEASUREMENT supports it (#573 round 3).
