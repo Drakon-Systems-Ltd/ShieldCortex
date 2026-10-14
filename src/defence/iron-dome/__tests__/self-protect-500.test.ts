@@ -260,30 +260,40 @@ describe('#500 Action Guard self-protection', () => {
   // #759: each side used to be the fastest of two back-to-back calls, and one
   // slow call on the "with" side on a loaded macOS runner crossed the bound
   // (74.8 ms added against a 55.3 ms bound). The two sides are now sampled
-  // interleaved, so a load burst lands on both, and each side is its running
-  // minimum: contention only ever adds time, so the least-contended call is
-  // the honest one. A round that still reads over the bound is re-sampled,
-  // up to EXTRA_ROUNDS more times, before the verdict. The bound itself is
-  // unchanged: the walk may add a constant, max(ADDED_FLOOR_MS, half the
-  // tokeniser time). There is no absolute cap on either side.
+  // interleaved as pairs (without_i, with_i), so a load burst lands on both
+  // halves of a pair, and the verdict is the MEDIAN of the paired differences
+  // with_i - without_i, pooled over every round sampled so far. One stalled
+  // call cannot fail it, and one fast call cannot rescue it: the round-1 rule
+  // judged min(with) - min(without), which let a single cheap with-call erase
+  // quadratic work that every other call had paid (review B1). The bound
+  // itself is unchanged: the walk may add a constant, max(ADDED_FLOOR_MS, half
+  // the tokeniser time), where the tokeniser time is the least-contended
+  // "without" call, since contention only ever adds time. A round that still
+  // reads over the bound adds another round of pairs to the pool, up to
+  // EXTRA_ROUNDS more, before the verdict. There is no absolute cap on either
+  // side.
   const SAMPLES = 7;
   const EXTRA_ROUNDS = 2;
+  const ALL_ROUNDS = 1 + EXTRA_ROUNDS;
   const ADDED_FLOOR_MS = 50;
   const ADDED_FRACTION = 0.5;
   /** Hang guard only: Jest's default 10 s could fail a slow runner on call count alone. */
   const TRIPWIRE_3B_TIMEOUT_MS = 60_000;
 
   interface AddedCost {
-    /** Fastest observed call on each side, in ms. */
+    /** Fastest observed "without" call, in ms: the honest tokeniser cost. */
     without: number;
+    /** Median observed "with" call, in ms. */
     withPkg: number;
-    /** withPkg - without: what the guard package token adds. */
+    /** Median of the paired differences with_i - without_i: what the guard package token adds. */
     added: number;
     /** max(ADDED_FLOOR_MS, without * ADDED_FRACTION). */
     bound: number;
-    /** Rounds sampled before the verdict: 1 when the first round passed, at most 1 + EXTRA_ROUNDS. */
+    /** Rounds sampled before the verdict: 1 when the first round passed, at most ALL_ROUNDS. */
     rounds: number;
-    /** The verdict, added < bound. The production case and the controls both read it from here. */
+    /** Pairs pooled into the verdict: samples per round x rounds. */
+    samples: number;
+    /** The verdict, added < bound. The production case and the controls all read it from here. */
     withinBound: boolean;
   }
 
@@ -292,26 +302,46 @@ describe('#500 Action Guard self-protection', () => {
     fn();
     return Number(process.hrtime.bigint() - t0) / 1e6;
   };
+  const median = (xs: readonly number[]): number => {
+    const sorted = [...xs].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
 
   /**
-   * One discarded warm-up call per side, then `samples` interleaved calls per
-   * side (without, with, without, with, ...) keeping the running minimum of
-   * each. Returns as soon as a round reads under the bound; otherwise
-   * re-samples up to EXTRA_ROUNDS more rounds and reports the final reading.
+   * One discarded warm-up call per side, then `samplesPerRound` interleaved
+   * pairs (without, with, without, with, ...). The verdict is the median of
+   * the paired differences pooled over every round so far, against the bound
+   * derived from the fastest "without" call. Returns as soon as the pooled
+   * verdict passes; otherwise samples up to EXTRA_ROUNDS more rounds and
+   * reports the final reading.
    */
-  function addedCost(timeWithout: () => number, timeWith: () => number, samples = SAMPLES): AddedCost {
+  function addedCost(timeWithout: () => number, timeWith: () => number, samplesPerRound = SAMPLES): AddedCost {
     timeWithout();
     timeWith();
-    let without = Infinity;
-    let withPkg = Infinity;
+    const withouts: number[] = [];
+    const withs: number[] = [];
+    const diffs: number[] = [];
     for (let rounds = 1; ; rounds++) {
-      for (let s = 0; s < samples; s++) {
-        without = Math.min(without, timeWithout());
-        withPkg = Math.min(withPkg, timeWith());
+      for (let s = 0; s < samplesPerRound; s++) {
+        const w0 = timeWithout();
+        const w1 = timeWith();
+        withouts.push(w0);
+        withs.push(w1);
+        diffs.push(w1 - w0);
       }
-      const added = withPkg - without;
+      const without = Math.min(...withouts);
+      const added = median(diffs);
       const bound = Math.max(ADDED_FLOOR_MS, without * ADDED_FRACTION);
-      const result: AddedCost = { without, withPkg, added, bound, rounds, withinBound: added < bound };
+      const result: AddedCost = {
+        without,
+        withPkg: median(withs),
+        added,
+        bound,
+        rounds,
+        samples: diffs.length,
+        withinBound: added < bound,
+      };
       if (result.withinBound || rounds > EXTRA_ROUNDS) return result;
     }
   }
@@ -327,48 +357,184 @@ describe('#500 Action Guard self-protection', () => {
     expect(r).toMatchObject({ withinBound: true });
   }, TRIPWIRE_3B_TIMEOUT_MS);
 
-  // Controls for the differential above. The positive control runs the same
-  // real call plus a deliberately quadratic pass over the input through the
-  // same addedCost and must be rejected, so a no-op comparison fails here.
-  // Every "with" call in it costs several times the real call, so it samples
-  // CONTROL_SAMPLES calls per round rather than SAMPLES; it still runs every
-  // round, since a real quadratic is never rescued by re-sampling. The
+  // Two controls run real CPU work on top of the real call through the same
+  // addedCost. The positive control adds deliberately quadratic passes over
+  // the input and must be rejected, so a no-op comparison fails here; the
   // negative control adds a linear pass and must pass at the default plan.
+  // The quadratic workload is calibrated on the host first: round-1 CI showed
+  // one fixed pass costing less than the bound on a fast macOS runner. So the
+  // honest "without" side is measured, the bound derived from it, and the
+  // number of passes doubled until one addition reads at least
+  // CALIBRATION_MARGIN times that bound, or MAX_CALIBRATION_STEPS doublings
+  // have been tried. k passes cost k * L^2, still quadratic in the input
+  // length L. Every "with" call in the positive control then costs several
+  // times the real call, so it samples CONTROL_SAMPLES pairs per round rather
+  // than SAMPLES; it still runs every round, since always-paid quadratic work
+  // is never rescued by re-sampling. (Intermittently paid work is the
+  // synthetic intermittent control below.) Each control owns its sink.
   const CONTROL_SAMPLES = 3;
-  let sink = 0;
-  const quadraticPass = (s: string): number => {
+  const CALIBRATION_MARGIN = 3;
+  const MAX_CALIBRATION_STEPS = 8;
+  /** Discarded workload calls before calibration reads it, so the readings are of optimised code. */
+  const CALIBRATION_WARMUPS = 3;
+  // Both passes walk the input's char codes in a typed array rather than the
+  // string: V8 serves charCodeAt on a concatenated (cons) string through an
+  // indirection until a GC short-cuts it to the flat string, and bash() in
+  // the with-call allocates enough to trigger that GC. Walking the string
+  // read 1.7x slower in calibration than inside the helper, eating the margin.
+  const codesOf = (s: string): Uint16Array => Uint16Array.from(s, (c) => c.charCodeAt(0));
+  const quadraticPass = (codes: Uint16Array): number => {
     let hits = 0;
-    for (let i = 0; i < s.length; i++) {
-      const c = s.charCodeAt(i);
-      for (let j = 0; j < s.length; j++) if (s.charCodeAt(j) === c) hits++;
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      for (let j = 0; j < codes.length; j++) if (codes[j] === c) hits++;
     }
     return hits;
   };
-  const linearPass = (s: string): number => {
+  const quadraticPasses = (codes: Uint16Array, passes: number): number => {
     let hits = 0;
-    for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 32) hits++;
+    for (let p = 0; p < passes; p++) hits += quadraticPass(codes);
+    return hits;
+  };
+  const linearPass = (codes: Uint16Array): number => {
+    let hits = 0;
+    for (let i = 0; i < codes.length; i++) if (codes[i] === 32) hits++;
     return hits;
   };
 
-  it('rejects a genuinely quadratic addition through the same differential (3b positive control)', () => {
+  interface Calibration {
+    /** Fastest of CONTROL_SAMPLES real "without" calls after a warm-up, in ms. */
+    without: number;
+    /** max(ADDED_FLOOR_MS, without * ADDED_FRACTION), as addedCost derives it. */
+    bound: number;
+    /** Quadratic passes per with-call: 1 doubled `steps` times. */
+    passes: number;
+    steps: number;
+    /** Fastest of CONTROL_SAMPLES warm readings of `passes` passes, in ms: >= CALIBRATION_MARGIN * bound unless the cap was hit. */
+    measured: number;
+  }
+  function calibrateQuadratic(codes: Uint16Array): Calibration {
+    const timeWithout = () => timeBash(PM_REPEAT + 'other-helper');
+    timeWithout();
+    let without = Infinity;
+    for (let s = 0; s < CONTROL_SAMPLES; s++) without = Math.min(without, timeWithout());
+    const bound = Math.max(ADDED_FLOOR_MS, without * ADDED_FRACTION);
+    // Warm the exact path the with-side will run, so the readings below are of
+    // optimised code: a cold reading overstates the workload and would leave
+    // the helper seeing less than CALIBRATION_MARGIN x bound.
+    for (let w = 0; w < CALIBRATION_WARMUPS; w++) quadraticPasses(codes, 1);
+    const timePasses = (passes: number): number => {
+      let fastest = Infinity;
+      for (let s = 0; s < CONTROL_SAMPLES; s++) fastest = Math.min(fastest, msOf(() => quadraticPasses(codes, passes)));
+      return fastest;
+    };
+    let passes = 1;
+    let steps = 0;
+    let measured = timePasses(passes);
+    while (measured < CALIBRATION_MARGIN * bound && steps < MAX_CALIBRATION_STEPS) {
+      passes *= 2;
+      steps++;
+      measured = timePasses(passes);
+    }
+    return { without, bound, passes, steps, measured };
+  }
+
+  it('rejects a genuinely quadratic addition through the same differential (3b positive control, calibrated)', () => {
     const input = PM_REPEAT + `${SC}-helper`;
+    const codes = codesOf(input);
+    const calibration = calibrateQuadratic(codes);
+    let sink = 0;
     const r = addedCost(
       () => timeBash(PM_REPEAT + 'other-helper'),
-      () => msOf(() => { bash(input); sink += quadraticPass(input); }),
+      () => msOf(() => { bash(input); sink += quadraticPasses(codes, calibration.passes); }),
       CONTROL_SAMPLES,
     );
-    expect(r).toMatchObject({ withinBound: false, rounds: 1 + EXTRA_ROUNDS });
+    expect({ calibration, result: r }).toMatchObject({
+      result: { withinBound: false, rounds: ALL_ROUNDS, samples: CONTROL_SAMPLES * ALL_ROUNDS },
+    });
     expect(r.added).toBeGreaterThanOrEqual(r.bound);
     expect(sink).toBeGreaterThan(0);
   }, TRIPWIRE_3B_TIMEOUT_MS);
 
   it('passes a linear addition through the same differential (3b negative control)', () => {
     const input = PM_REPEAT + `${SC}-helper`;
+    const codes = codesOf(input);
+    let sink = 0;
     const r = addedCost(
       () => timeBash(PM_REPEAT + 'other-helper'),
-      () => msOf(() => { bash(input); sink += linearPass(input); }),
+      () => msOf(() => { bash(input); sink += linearPass(codes); }),
     );
     expect(r).toMatchObject({ withinBound: true });
     expect(sink).toBeGreaterThan(0);
   }, TRIPWIRE_3B_TIMEOUT_MS);
+
+  // The verdict rule itself is pinned by synthetic traces through the same
+  // addedCost: each callback returns the next fixed reading in ms, so these
+  // controls are host-independent and run in microseconds. Reading 0 of a
+  // trace is the discarded warm-up; the rest are consumed SAMPLES per round
+  // for at most ALL_ROUNDS rounds, and a trace that runs out throws.
+  const MAX_CALLS = 1 + SAMPLES * ALL_ROUNDS;
+  const fixedMs = (readings: readonly number[]): (() => number) => {
+    let next = 0;
+    return () => {
+      if (next >= readings.length) throw new Error(`fixed trace exhausted after ${readings.length} readings`);
+      return readings[next++];
+    };
+  };
+  const flat = (count: number, ms: number): number[] => Array.from({ length: count }, () => ms);
+  const oneRound = (ms: (sample: number) => number): number[] => Array.from({ length: SAMPLES }, (_, s) => ms(s));
+  /** Baseline either side pays; bound = max(ADDED_FLOOR_MS, BASE_MS * ADDED_FRACTION) = 100. */
+  const BASE_MS = 200;
+  const BASE_BOUND = 100;
+  /** Quadratic work paid on the with side: four times the bound. */
+  const QUAD_MS = 400;
+
+  it('rejects intermittently paid quadratic work whose cheap calls land only in re-sample rounds (3b intermittent control)', () => {
+    // Round 1 pays QUAD_MS on every with-call. Rounds 2 and 3 each have one
+    // with-call that takes a fast path and costs only the baseline.
+    const paid = oneRound(() => BASE_MS + QUAD_MS);
+    const oneCheap = oneRound((s) => (s === 2 ? BASE_MS : BASE_MS + QUAD_MS));
+    const r = addedCost(
+      fixedMs(flat(MAX_CALLS, BASE_MS)),
+      fixedMs([BASE_MS, ...paid, ...oneCheap, ...oneCheap]),
+    );
+    // The round-1 rule judged min(with) - min(without). After round 2 that was
+    // BASE_MS - BASE_MS = 0 < 100, and this trace was ACCEPTED with rounds: 2.
+    // The pooled median of the 21 paired differences is QUAD_MS: 19 pairs paid
+    // it and 2 did not.
+    expect(r).toMatchObject({
+      withinBound: false,
+      rounds: ALL_ROUNDS,
+      samples: SAMPLES * ALL_ROUNDS,
+      without: BASE_MS,
+      bound: BASE_BOUND,
+      added: QUAD_MS,
+    });
+  });
+
+  it('tolerates one stalled call on either side on top of a small constant (3b one-noisy-sample control, the #759 shape)', () => {
+    const SMALL_MS = 10;
+    const STALL_MS = 500;
+    const r = addedCost(
+      fixedMs([BASE_MS, ...oneRound((s) => BASE_MS + (s === 5 ? STALL_MS : 0))]),
+      fixedMs([BASE_MS, ...oneRound((s) => BASE_MS + SMALL_MS + (s === 3 ? STALL_MS : 0))]),
+    );
+    expect(r).toMatchObject({ withinBound: true, rounds: 1, samples: SAMPLES, added: SMALL_MS, bound: BASE_BOUND });
+  });
+
+  it.each<[string, number, number, Partial<AddedCost>]>([
+    ['always-paid large cost is rejected in every round', BASE_MS, BASE_MS + QUAD_MS,
+      { withinBound: false, rounds: ALL_ROUNDS, samples: SAMPLES * ALL_ROUNDS, added: QUAD_MS, bound: BASE_BOUND }],
+    ['zero added cost passes in the first round', BASE_MS, BASE_MS,
+      { withinBound: true, rounds: 1, samples: SAMPLES, added: 0, bound: BASE_BOUND }],
+    ['a small linear added cost passes in the first round', BASE_MS, BASE_MS + 10,
+      { withinBound: true, rounds: 1, added: 10, bound: BASE_BOUND }],
+    ['added cost exactly at the bound is rejected (strict <)', BASE_MS, BASE_MS + BASE_BOUND,
+      { withinBound: false, rounds: ALL_ROUNDS, added: BASE_BOUND, bound: BASE_BOUND }],
+    ['the floor arm holds when half the tokeniser time is under ADDED_FLOOR_MS', 40, 40 + ADDED_FLOOR_MS - 1,
+      { withinBound: true, rounds: 1, added: ADDED_FLOOR_MS - 1, bound: ADDED_FLOOR_MS }],
+  ])('%s (3b constant-cost control)', (_label, withoutMs, withMs, expected) => {
+    const r = addedCost(fixedMs(flat(MAX_CALLS, withoutMs)), fixedMs(flat(MAX_CALLS, withMs)));
+    expect(r).toMatchObject(expected);
+  });
 });
