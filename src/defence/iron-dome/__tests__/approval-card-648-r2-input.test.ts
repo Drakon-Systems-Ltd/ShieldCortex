@@ -31,92 +31,152 @@ const UNUSUAL = '(withheld: unusual characters)';
 // card case took 142 ms and failed a PR that never touched this file. What
 // the suite has to catch is catastrophic backtracking, i.e. super-linear
 // time, so each case is now timed on the same hostile shape at N and at 8N
-// characters after a warm-up call per size. Linear code grows about 8x,
-// quadratic about 64x, catastrophic backtracking far more; the bound sits at
-// 3x linear. The fastest of a few interleaved batches stands for each size:
-// contention only ever adds time, so the least-contended sample is the honest
-// one (the #544 B3 check does the same). A batch is calibrated to fill a
-// measurable span and the small time has a floor, so nothing divides by a
-// near-zero. One loose absolute ceiling stays per case so a hang still fails
-// fast instead of running the clock out.
+// characters. Linear code grows about 8x, quadratic about 64x, catastrophic
+// backtracking far more; the bound sits at 3x linear. The fastest of a few
+// interleaved batches stands for each size: contention only ever adds time,
+// so the least-contended sample is the honest one (the #544 B3 check does
+// the same). A batch is calibrated to fill a measurable span on the small
+// input, and that calibration is then checked against the batches actually
+// measured: a one-call probe inflated by a scheduler pause would otherwise
+// leave the batch at one call, under the resolution the ratio needs (round-2
+// B1). A small time that stays unmeasurable after re-calibrating is reported
+// inconclusive, which the assertion fails: no result passes on a floored
+// denominator. One loose absolute ceiling stays per case so a hang still
+// fails fast instead of running the clock out.
 
 const SMALL_CHARS = 1024;
 const BIG_CHARS = 8 * SMALL_CHARS; // the #648 r2 S2 input size
 /** 3x the linear expectation for an 8x longer input. */
 const RATIO_BOUND = 24;
-/** The hang guard: the one cold call on the 8N input, and any one batch. */
+/** The hang guard: the one cold call on the 8N input, and any one batch of either size. */
 const CEILING_MS = 2000;
 const SAMPLES = 5;
 /** A batch on the N-character input is calibrated to fill about this long. */
 const MIN_BATCH_MS = 0.4;
-const MAX_REPS = 4096;
-/** The small time never divides as less than this. */
+/** Room for a length-gated path: once inlined a call costs a few ns, so filling MIN_BATCH_MS takes ~100k calls. */
+const MAX_REPS = 1 << 20;
+/** The small time must reach this to be measurable; under it the result is inconclusive. */
 const FLOOR_MS = 0.2;
+/** How many times the batch may be re-sized from the measured small time. */
+const MAX_RECALIBRATIONS = 3;
 
 interface Scaling {
-  /** Calls per batch, calibrated on the N-character input. */
+  /** Calls per batch, as finally calibrated on the N-character input. */
   reps: number;
+  /** How many times the batch was re-sized after the sampled small time came in short. */
+  recalibrations: number;
   /** Fastest batch at N and at 8N characters, in ms. */
   smallMs: number;
   bigMs: number;
-  /** bigMs over max(smallMs, FLOOR_MS); Infinity once a batch hits the ceiling. */
+  /** Whether any one batch, small or big, ran to the ceiling. */
+  ceilingHit: boolean;
+  /**
+   * bigMs over smallMs; Infinity once the cold call or any batch hits the
+   * ceiling. While inconclusive the denominator is floored at FLOOR_MS, so the
+   * ratio is a lower bound on the true growth: it can still fail, never pass.
+   */
   ratio: number;
   /** The one cold call on the 8N input, in ms. */
   coldBigMs: number;
+  /** The small time never reached FLOOR_MS: too little resolution to call anything linear. */
+  inconclusive: boolean;
   superLinear: boolean;
 }
 
-function timed(fn: () => unknown): number {
-  const t0 = performance.now();
-  fn();
-  return performance.now() - t0;
-}
+/** `reps` calls of `fn` on `input`, in ms. Injectable so a scripted clock can drive the classifier. */
+type BatchClock = (fn: (input: string) => unknown, input: string, reps: number) => number;
 
-/** `reps` calls on `input`, in ms. */
-function batchMs(fn: (input: string) => unknown, input: string, reps: number): number {
+const realBatchMs: BatchClock = (fn, input, reps) => {
   const t0 = performance.now();
   for (let i = 0; i < reps; i++) fn(input);
   return performance.now() - t0;
-}
+};
 
 /**
  * Time `fn` on `shape(small)` and on `shape(8 * small)` and report how the
- * cost grew. One warm-up call per size first; the batch size is then
- * calibrated on the small input and capped so that even at the cold speed one
- * big batch cannot run past the ceiling; the samples interleave the two sizes
- * so a load burst lands on both.
+ * cost grew. One discarded warm-up call on the small input first; the first
+ * call on the big input is the timed cold measurement the hang guard reads.
+ * The batch size is then calibrated on the small input and capped so that
+ * one big batch cannot run past the ceiling at the fastest big-call cost yet
+ * seen (the cold call, later refined by the fastest sampled batch); the
+ * samples interleave the two sizes so a load burst lands on both. If the
+ * fastest small batch still comes in under MIN_BATCH_MS, the batch is re-sized
+ * from that measured time and the samples are taken again, up to
+ * MAX_RECALIBRATIONS times or until the cap binds.
  */
-function scaling(fn: (input: string) => unknown, shape: (n: number) => string, small = SMALL_CHARS): Scaling {
+function scaling(
+  fn: (input: string) => unknown,
+  shape: (n: number) => string,
+  small = SMALL_CHARS,
+  clock: BatchClock = realBatchMs,
+): Scaling {
   const smallInput = shape(small);
   const bigInput = shape(8 * small);
   fn(smallInput);
-  const coldBigMs = timed(() => fn(bigInput));
-  if (coldBigMs >= CEILING_MS) return { reps: 0, smallMs: NaN, bigMs: NaN, ratio: Infinity, coldBigMs, superLinear: true };
+  const coldBigMs = clock(fn, bigInput, 1);
+  if (coldBigMs >= CEILING_MS) {
+    return { reps: 0, recalibrations: 0, smallMs: NaN, bigMs: NaN, ceilingHit: true, ratio: Infinity, coldBigMs, inconclusive: false, superLinear: true };
+  }
+  const capFor = (bigPerCallMs: number): number => Math.max(1, Math.min(MAX_REPS, Math.floor(CEILING_MS / Math.max(bigPerCallMs, 1e-3))));
   // Probe 1, 2, 4, … calls until a batch fills MIN_BATCH_MS (the JIT tiers up
   // during the early probes), then scale down to the count that just fills it.
-  const cap = Math.max(1, Math.min(MAX_REPS, Math.floor(CEILING_MS / Math.max(coldBigMs, 1e-3))));
+  let cap = capFor(coldBigMs);
   let reps = 1;
-  let probeMs = batchMs(fn, smallInput, reps);
+  let probeMs = clock(fn, smallInput, reps);
   while (probeMs < MIN_BATCH_MS && reps < MAX_REPS) {
     reps *= 2;
-    probeMs = batchMs(fn, smallInput, reps);
+    probeMs = clock(fn, smallInput, reps);
   }
   reps = Math.min(cap, Math.max(1, Math.ceil((reps * MIN_BATCH_MS) / Math.max(probeMs, 1e-3))));
-  let smallMs = Infinity;
-  let bigMs = Infinity;
-  for (let s = 0; s < SAMPLES; s++) {
-    smallMs = Math.min(smallMs, batchMs(fn, smallInput, reps));
-    const big = batchMs(fn, bigInput, reps);
-    bigMs = Math.min(bigMs, big);
-    if (big >= CEILING_MS) break;
+  const sample = (): { smallMs: number; bigMs: number; ceilingHit: boolean } => {
+    let smallMs = Infinity;
+    let bigMs = Infinity;
+    for (let s = 0; s < SAMPLES; s++) {
+      const sm = clock(fn, smallInput, reps);
+      smallMs = Math.min(smallMs, sm);
+      if (sm >= CEILING_MS) return { smallMs, bigMs, ceilingHit: true };
+      const big = clock(fn, bigInput, reps);
+      bigMs = Math.min(bigMs, big);
+      if (big >= CEILING_MS) return { smallMs, bigMs, ceilingHit: true };
+    }
+    return { smallMs, bigMs, ceilingHit: false };
+  };
+  // The probe is one reading and may carry a pause the samples never see; the
+  // fastest sampled small batch is the authority on whether reps is enough.
+  // The fastest sampled big batch likewise refines the cap the cold call set.
+  let recalibrations = 0;
+  let run = sample();
+  while (!run.ceilingHit && run.smallMs < MIN_BATCH_MS && recalibrations < MAX_RECALIBRATIONS) {
+    cap = Math.max(cap, capFor(run.bigMs / reps));
+    if (reps >= cap) break;
+    recalibrations++;
+    // At least double: a JIT still tiering up makes each round's calls cheaper than the last round measured.
+    reps = Math.min(cap, Math.max(2 * reps, Math.ceil((reps * MIN_BATCH_MS) / Math.max(run.smallMs, 1e-3))));
+    run = sample();
   }
-  const ratio = bigMs >= CEILING_MS ? Infinity : bigMs / Math.max(smallMs, FLOOR_MS);
-  return { reps, smallMs, bigMs, ratio, coldBigMs, superLinear: ratio >= RATIO_BOUND };
+  const { smallMs, bigMs, ceilingHit } = run;
+  const inconclusive = smallMs < FLOOR_MS;
+  const ratio = ceilingHit ? Infinity : bigMs / Math.max(smallMs, FLOOR_MS);
+  return { reps, recalibrations, smallMs, bigMs, ceilingHit, ratio, coldBigMs, inconclusive, superLinear: ratio >= RATIO_BOUND };
 }
 
 /** The whole record is the received value, so a failure prints every number. */
 function expectLinear(label: string, r: Scaling): void {
-  expect({ label, ...r }).toEqual(expect.objectContaining({ superLinear: false }));
+  expect({ label, ...r }).toEqual(expect.objectContaining({ superLinear: false, inconclusive: false }));
+}
+
+/**
+ * A scripted clock for driving `scaling` without real time; `fn` never runs.
+ * Each size has a queue of fixed batch times consumed first, in call order
+ * (the first big call is the cold one, the first small calls are the probes);
+ * once a queue is empty a batch costs `perCall * reps` ms.
+ */
+function scriptedClock(smallPerCallMs: number, bigPerCallMs: number, first: { small?: number[]; big?: number[] } = {}): BatchClock {
+  const queue = { small: [...(first.small ?? [])], big: [...(first.big ?? [])] };
+  return (_fn, input, reps) => {
+    const size = input.length > SMALL_CHARS ? 'big' : 'small';
+    return queue[size].shift() ?? (size === 'big' ? bigPerCallMs : smallPerCallMs) * reps;
+  };
 }
 
 const tokens = (n: number): string => 'token-'.repeat(Math.ceil(n / 6)).slice(0, n);
@@ -170,7 +230,60 @@ describe('#648 r2 S2 — no catastrophic backtracking on a hostile target', () =
     expect(quad.coldBigMs).toBeLessThan(CEILING_MS); // the ratio fires, not the hang guard
     expect(quad.ratio).toBeGreaterThanOrEqual(RATIO_BOUND);
     expect(quad.superLinear).toBe(true);
+    // The production assertion itself must reject it, not just the flag (r2 N1).
+    expect(() => expectLinear('quadratic stand-in', quad)).toThrow();
     expectLinear('linear stand-in', scaling(linear, tokens, 128));
+  });
+
+  describe('the classifier, driven by a scripted clock (#757 r2)', () => {
+    const noop = (): void => undefined;
+    const drive = (clock: BatchClock): Scaling => scaling(noop, tokens, SMALL_CHARS, clock);
+
+    it('B1: an inflated one-call probe followed by clean quadratic samples is rejected', () => {
+      // 0.05 ms a call at N and 3.2 ms at 8N is 64x growth, but the probe
+      // reads 0.8 ms (a pause), which ended calibration at one call; the
+      // floored ratio 3.2 / 0.2 = 16 then passed.
+      const r = drive(scriptedClock(0.05, 3.2, { small: [0.8] }));
+      expect(r.coldBigMs).toBe(3.2);
+      expect(r.recalibrations).toBeGreaterThanOrEqual(1);
+      expect(r.reps).toBeGreaterThanOrEqual(8);
+      expect(r.inconclusive).toBe(false);
+      expect(r.ratio).toBeCloseTo(64, 6);
+      expect(r.superLinear).toBe(true);
+      expect(() => expectLinear('scripted quadratic, inflated probe', r)).toThrow();
+    });
+
+    it('a linear path passes', () => {
+      const r = drive(scriptedClock(0.01, 0.08));
+      expect(r).toEqual(expect.objectContaining({ ceilingHit: false, inconclusive: false, superLinear: false }));
+      expect(r.smallMs).toBeGreaterThanOrEqual(MIN_BATCH_MS);
+      expect(r.ratio).toBeCloseTo(8, 6);
+      expectLinear('scripted linear', r);
+    });
+
+    it('N2: a later big batch at the ceiling is rejected even after an earlier fast one', () => {
+      // Cold call, first sampled big batch, second sampled big batch.
+      const r = drive(scriptedClock(0.01, 0.08, { big: [0.08, 3.2, CEILING_MS] }));
+      expect(r).toEqual(expect.objectContaining({ ceilingHit: true, ratio: Infinity, superLinear: true }));
+      expect(r.bigMs).toBe(3.2); // the fastest batch no longer hides the crossing
+      expect(() => expectLinear('scripted late ceiling', r)).toThrow();
+    });
+
+    it('N2: a small batch at the ceiling is rejected too', () => {
+      // The one-call probe fills MIN_BATCH_MS at once, so the next small call is the first sampled batch.
+      const r = drive(scriptedClock(0.5, 4, { small: [0.5, CEILING_MS] }));
+      expect(r).toEqual(expect.objectContaining({ reps: 1, ceilingHit: true, ratio: Infinity, superLinear: true }));
+      expect(() => expectLinear('scripted small ceiling', r)).toThrow();
+    });
+
+    it('a path too fast to resolve even at the rep cap is inconclusive and fails, not linear', () => {
+      // Half of FLOOR_MS at MAX_REPS: under the floor with nowhere left to grow.
+      const tooFast = FLOOR_MS / 2 / MAX_REPS;
+      const r = drive(scriptedClock(tooFast, 8 * tooFast));
+      expect(r).toEqual(expect.objectContaining({ reps: MAX_REPS, inconclusive: true, superLinear: false }));
+      expect(r.smallMs).toBeLessThan(FLOOR_MS);
+      expect(() => expectLinear('scripted unresolvable', r)).toThrow();
+    });
   });
 
   it('a candidate over 256 characters is withheld before any pattern runs', () => {
