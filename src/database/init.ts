@@ -138,6 +138,11 @@ function enforceSafeRuntimePath(expandedPath: string, explicitDbPath: boolean): 
   }
 }
 
+/** Apply the default-database runtime policy before any independent DB open. */
+export function assertSafeRuntimeForDbPath(resolvedPath: string): void {
+  enforceSafeRuntimePath(expandPath(resolvedPath), false);
+}
+
 function inspectDatabaseFile(dbPath: string): DatabaseInspection {
   let inspectionDb: Database.Database | null = null;
   try {

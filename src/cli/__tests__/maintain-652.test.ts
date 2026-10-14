@@ -104,11 +104,30 @@ describe('maintain #652 slice A', () => {
     expect(consolidate).not.toHaveBeenCalled();
     expect(report.steps.consolidate.status).toBe('skipped');
     expect(report.steps.consolidate.reason).toBe('locked');
-    expect(report.steps.embed.status).toBe('ran');
+    expect(report.steps.embed.status).toBe('skipped');
+    expect(report.steps.embed.reason).toBe('locked');
+    const db = new Database(dbPath, { readonly: true });
+    expect((db.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NOT NULL').get() as { n: number }).n).toBe(0);
+    db.close();
     expect(report.steps.vacuum.reason).toBe('locked');
     expect(report.steps.doctor.status).toBe('ran');
     expect(report.steps.doctor.results.some(r => r.label.startsWith('Maintenance'))).toBe(false);
     expect(report.steps.notify.reason).toBe('not-configured');
+  });
+
+  it('skips uncached embedding without a write or embed failure', async () => {
+    const { deps } = fixture();
+    delete deps.embed;
+    deps.modelCacheReady = async () => false;
+    deps.consolidateConfig = { ...cap, maxShortTermMemories: 100 } as MaintainDeps['consolidateConfig'];
+    deps.vacuum = () => { /* keep the fixture unchanged */ };
+    const report = await maintain({}, deps);
+    expect(report.steps.embed).toMatchObject({ status: 'skipped', reason: 'embedding model not cached', embedded: 0 });
+    expect(report.steps.embed.missing).toBeGreaterThan(0);
+    expect(report.steps.doctor.results.some(r => r.label === 'Maintenance embed')).toBe(false);
+    const db = new Database(dbPath, { readonly: true });
+    expect((db.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NOT NULL').get() as { n: number }).n).toBe(0);
+    db.close();
   });
 
   it('reports a throwing step as failed and still runs every later step', async () => {

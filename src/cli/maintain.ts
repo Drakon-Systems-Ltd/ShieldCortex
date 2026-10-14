@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
-import { resolveMemoriesDbPath } from '../database/init.js';
+import { assertSafeRuntimeForDbPath, closeDatabase, initDatabase, resolveMemoriesDbPath } from '../database/init.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import type { MemoryConfig, ConsolidationResult } from '../memory/types.js';
 import { backfillEmbeddings, type EmbedBackfillResult } from './embed-backfill.js';
+import { inspectEmbeddingModelCache } from '../embeddings/model-cache.js';
 import { checkDiskUsage, runMemoryStatsCheck, runSemanticCoverageCheck, VACUUM_FREE_SHARE, type CheckResult } from './doctor.js';
 import { buildMaintenanceFailNotification, deliverOperatorNotification, type NotifyChannel } from '../defence/iron-dome/operator-notify.js';
 
@@ -23,6 +24,7 @@ export interface MaintainDeps {
   diskLimit?: number;
   consolidateConfig?: MemoryConfig;
   embed?: (text: string) => Promise<Float32Array>;
+  modelCacheReady?: () => Promise<boolean>;
   notifier?: (checks: CheckResult[]) => Promise<boolean>;
   channels?: NotifyChannel[];
   now?: () => Date;
@@ -60,6 +62,8 @@ async function storageDoctor(dataDir: string, dbPath: string, limit: number, con
 
 export async function maintain(options: { dryRun?: boolean } = {}, deps: MaintainDeps = {}): Promise<MaintainReport> {
   const dbPath = deps.dbPath ?? (deps.dataDir ? path.join(deps.dataDir, 'memories.db') : resolveMemoriesDbPath());
+  const injectedPath = deps.dbPath !== undefined || deps.dataDir !== undefined;
+  if (!injectedPath) assertSafeRuntimeForDbPath(dbPath);
   const dataDir = deps.dataDir ?? path.dirname(dbPath);
   const config = deps.consolidateConfig ?? resolveMemoryConfig();
   const limit = deps.diskLimit ?? DIRECTORY_BUDGET_BYTES;
@@ -76,66 +80,70 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
   };
   let db: Database.Database | undefined;
   let dbOwnedByInit = false;
+  const locked = !dryRun && liveLock(dbPath);
   try {
-    if (fs.existsSync(dbPath)) db = new Database(dbPath, { readonly: dryRun, fileMustExist: true });
-    else if (!dryRun) {
-      const { initDatabase } = await import('../database/init.js');
-      db = initDatabase(dbPath);
+    if (locked) {
+      steps.consolidate = step('skipped', 'locked');
+      steps.embed = step('skipped', 'locked', { missing: 0, embedded: 0 });
+      steps.vacuum = step('skipped', 'locked');
+    } else if (dryRun) {
+      if (fs.existsSync(dbPath)) db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    } else {
+      db = injectedPath ? initDatabase(dbPath) : initDatabase();
       dbOwnedByInit = true;
     }
   } catch (err) { failStep('consolidate', err); }
 
   try {
     try {
-      if (!db) steps.consolidate = step('skipped', 'database unavailable');
+      if (locked) { /* already skipped before opening */ }
+      else if (!db) steps.consolidate = step('skipped', 'database unavailable');
       else {
         const count = (db.prepare("SELECT COUNT(*) AS n FROM memories WHERE type = 'short_term'").get() as { n: number }).n;
         if (count <= config.maxShortTermMemories) steps.consolidate = step('skipped', 'STM within cap', { stm: count, promoted: 0, deleted: 0 });
         else if (dryRun) steps.consolidate = step('skipped', 'dry-run: STM over cap', { stm: count, promoted: 0, deleted: 0 });
-        // A live ShieldCortex process (MCP server, worker) owns the DB lock and
-        // initDatabase would refuse to start. That process consolidates on its
-        // own schedule, so this is a skip, not a maintenance failure.
-        else if (liveLock(dbPath)) steps.consolidate = step('skipped', 'locked', { stm: count, promoted: 0, deleted: 0 });
         else {
           const { consolidate } = await import('../memory/consolidate.js');
-          // The existing consolidation uses the shared DB handle. An explicit
-          // fixture path is initialised there; production uses the same path.
-          const { initDatabase, closeDatabase } = await import('../database/init.js');
-          initDatabase(dbPath);
-          let result: ConsolidationResult;
-          try { result = deps.consolidate ? deps.consolidate() : consolidate(config); }
-          finally { closeDatabase(); }
+          const result: ConsolidationResult = deps.consolidate ? deps.consolidate() : consolidate(config);
           steps.consolidate = step('ran', 'STM over cap', { stm: count, promoted: result.consolidated, deleted: result.deleted });
         }
       }
     } catch (err) { failStep('consolidate', err); }
 
     try {
-      if (!db) steps.embed = step('skipped', 'database unavailable', { missing: 0, embedded: 0 });
+      if (locked) { /* already skipped before opening */ }
+      else if (!db) steps.embed = step('skipped', 'database unavailable', { missing: 0, embedded: 0 });
       else {
-        const result: EmbedBackfillResult = await backfillEmbeddings({ db, execute: !dryRun, embed: deps.embed });
-        steps.embed = step(dryRun ? 'skipped' : result.embedded > 0 ? 'ran' : result.failed > 0 ? 'failed' : 'noop',
-          dryRun ? 'dry-run' : result.failed > 0 ? `${result.failed} vectors could not be embedded` : result.missing === 0 ? 'no missing vectors' : 'backfill complete',
-          { missing: result.missing, embedded: result.embedded, failed: result.failed });
-        if (result.failed > 0) failedSteps.push({ label: 'Maintenance embed', status: 'fail', message: `${result.failed} vectors could not be embedded` });
+        const modelCacheReady = deps.modelCacheReady ?? (async () => (await inspectEmbeddingModelCache()).status === 'ok');
+        const cacheReady = dryRun || Boolean(deps.embed) || await modelCacheReady();
+        if (!cacheReady) {
+          const missing = (db.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NULL').get() as { n: number }).n;
+          steps.embed = step('skipped', 'embedding model not cached', { missing, embedded: 0 });
+        } else {
+          const result: EmbedBackfillResult = await backfillEmbeddings({ db, execute: !dryRun, embed: deps.embed });
+          steps.embed = step(dryRun ? 'skipped' : result.embedded > 0 ? 'ran' : result.failed > 0 ? 'failed' : 'noop',
+            dryRun ? 'dry-run' : result.failed > 0 ? `${result.failed} vectors could not be embedded` : result.missing === 0 ? 'no missing vectors' : 'backfill complete',
+            { missing: result.missing, embedded: result.embedded, failed: result.failed });
+          if (result.failed > 0) failedSteps.push({ label: 'Maintenance embed', status: 'fail', message: `${result.failed} vectors could not be embedded` });
+        }
       }
     } catch (err) { failStep('embed', err); }
     finally {
-      if (!deps.embed && !dryRun) {
+      if (db && !deps.embed && !dryRun) {
         try { const { disposeModel } = await import('../embeddings/index.js'); await disposeModel(); }
         catch { /* no model worker was started */ }
       }
     }
 
     try {
-      if (!db) steps.vacuum = step('skipped', 'database unavailable');
+      if (locked) { /* already skipped before opening */ }
+      else if (!db) steps.vacuum = step('skipped', 'database unavailable');
       else {
         const pages = db.pragma('page_count', { simple: true }) as number;
         const free = db.pragma('freelist_count', { simple: true }) as number;
         const share = pages ? free / pages : 0;
         if (share < VACUUM_FREE_SHARE) steps.vacuum = step('skipped', 'free-page share below gate', { pages, freePages: free });
         else if (dryRun) steps.vacuum = step('skipped', 'dry-run: free-page share meets gate', { pages, freePages: free });
-        else if (liveLock(dbPath)) steps.vacuum = step('skipped', 'locked', { pages, freePages: free });
         else {
           try {
             if (deps.vacuum) deps.vacuum(db);
@@ -150,7 +158,6 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     } catch (err) { failStep('vacuum', err); }
   } finally {
     if (dbOwnedByInit) {
-      const { closeDatabase } = await import('../database/init.js');
       closeDatabase();
     } else if (db && db.open) db.close();
   }
@@ -209,7 +216,9 @@ export async function runMaintain(args: string[]): Promise<void> {
   if (args.some(a => a !== '--dry-run' && a !== '--json')) {
     console.error('maintain: unknown argument'); process.exitCode = 2; return;
   }
-  const report = await maintain({ dryRun: args.includes('--dry-run') });
+  let report: MaintainReport;
+  try { report = await maintain({ dryRun: args.includes('--dry-run') }); }
+  catch (err) { console.error(errorText(err)); process.exitCode = 1; return; }
   if (args.includes('--json')) console.log(JSON.stringify(report));
   else for (const [name, result] of Object.entries(report.steps)) console.log(`${name}: ${result.status} — ${result.reason}`);
   process.exitCode = report.exitCode;
