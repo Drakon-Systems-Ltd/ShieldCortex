@@ -70,6 +70,22 @@ function runCli(entry: string, args: string[], extraEnv: Record<string, string> 
   return { ...child, describe: `status: ${child.status}\nstdout: ${child.stdout}\nstderr: ${child.stderr}\nerror: ${child.error}` };
 }
 
+function homeSnapshot(): Record<string, { size: number; sha256: string; mtimeMs: number }> {
+  const files: Record<string, { size: number; sha256: string; mtimeMs: number }> = {};
+  const walk = (folder: string): void => {
+    for (const item of fs.readdirSync(folder, { withFileTypes: true })) {
+      const full = path.join(folder, item.name);
+      if (item.isDirectory()) walk(full);
+      else {
+        const stat = fs.statSync(full);
+        files[path.relative(home, full)] = { size: stat.size, sha256: sha(full), mtimeMs: stat.mtimeMs };
+      }
+    }
+  };
+  walk(home);
+  return files;
+}
+
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-maintain-gate-'));
   home = path.join(root, 'home');
@@ -124,5 +140,47 @@ describe('maintain default database runtime gate (#756)', () => {
     catch { throw new Error(child.describe); }
     if (report.steps.vacuum.status !== 'ran') throw new Error(child.describe);
     expect(sha(dbPath)).not.toBe(before);
+  });
+
+  it('expands a tilde DB path before checking its live lock', () => {
+    seed();
+    fs.writeFileSync(`${dbPath}.lock`, JSON.stringify({ pid: process.pid }));
+    const child = runCli(shim(RUNTIMES[0][1]), ['--json'], {
+      CLAUDE_MEMORY_DB: '~/.shieldcortex/memories.db', SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME: '1',
+    });
+    let report: { steps: Record<string, { status: string; reason: string }> };
+    try { report = JSON.parse(child.stdout.trim().split('\n').pop() ?? ''); }
+    catch { throw new Error(child.describe); }
+    for (const name of ['consolidate', 'embed', 'vacuum']) {
+      expect(report.steps[name]).toMatchObject({ status: 'skipped', reason: 'locked' });
+    }
+    expect(vector()).toBeNull();
+  });
+
+  it('dry-runs an unsigned config without changing any HOME file', () => {
+    seed();
+    fs.writeFileSync(path.join(home, '.shieldcortex', 'config.json'), JSON.stringify({ memory: { maxShortTermMemories: 20 } }));
+    const before = homeSnapshot();
+    const child = runCli(shim(RUNTIMES[0][1]), ['--dry-run', '--json'], {
+      CLAUDE_MEMORY_DB: dbPath, SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME: '1',
+      SHIELDCORTEX_CONFIG_DIR: path.join(home, '.shieldcortex'),
+    });
+    if (child.status !== 0 && child.status !== 1) throw new Error(child.describe);
+    expect(homeSnapshot()).toEqual(before);
+    expect(fs.existsSync(path.join(home, '.shieldcortex', '.integrity-key'))).toBe(false);
+    expect(fs.readFileSync(path.join(home, '.shieldcortex', 'config.json'), 'utf8')).not.toContain('_sig');
+  });
+
+  it('keeps WAL-mode main DB bytes unchanged in dry-run', () => {
+    seed();
+    const db = new Database(dbPath);
+    db.pragma('journal_mode = WAL');
+    db.close();
+    const before = sha(dbPath);
+    const child = runCli(shim(RUNTIMES[0][1]), ['--dry-run', '--json'], {
+      CLAUDE_MEMORY_DB: dbPath, SHIELDCORTEX_ALLOW_UNSAFE_RUNTIME: '1',
+    });
+    if (child.status !== 0 && child.status !== 1) throw new Error(child.describe);
+    expect(sha(dbPath)).toBe(before);
   });
 });

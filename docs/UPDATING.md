@@ -73,7 +73,7 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 
 ## Storage maintenance
 
-`shieldcortex maintain` consolidates STM above its cap, backfills missing vectors, and vacuums when at least 20% of database pages are free. It then runs doctor's Memories, Semantic coverage and Disk checks (not the full doctor) and sends any remaining FAIL, by check name only, to the configured Action Guard webhook; the same FAIL set is sent at most once every 24 hours. While a live ShieldCortex process holds the database, consolidation and vacuum are skipped, not failed. It exits 1 while a FAIL remains, so a scheduler can alert on it. Use `--dry-run` for a no-write preview or `--json` for a structured report. Audit-log retention is not included yet (#579), and nothing schedules `maintain` yet.
+`shieldcortex maintain` consolidates STM above its cap, backfills missing vectors, and vacuums when at least 20% of database pages are free. It then runs doctor's Memories, Semantic coverage and Disk checks (not the full doctor) and sends any remaining FAIL, by check name only, to the configured Action Guard webhook; the same FAIL set is sent at most once every 24 hours. While a live ShieldCortex process holds the database, consolidation, embedding and vacuum are skipped, not failed. It exits 1 while a FAIL remains, so a scheduler can alert on it. Use `--dry-run` to preview without changing database contents or config; SQLite may create shared-memory sidecar files. Use `--json` for a structured report. Audit-log retention is not included yet (#579), and nothing schedules `maintain` yet.
 
 <a id="whats-new-in-56"></a>
 

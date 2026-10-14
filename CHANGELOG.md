@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- **`shieldcortex maintain` (#652, slice A).** One command for storage and memory hygiene: consolidate STM when it is over its cap, backfill missing vectors, vacuum when at least 20% of database pages are free, then run doctor's Memories, Semantic coverage and Disk checks. A remaining FAIL exits 1 and is sent by check name to the configured Action Guard webhook, at most once per 24 hours for the same FAIL set. A live ShieldCortex process holding the database makes consolidation and vacuum skip, not fail. `--dry-run` writes nothing; `--json` prints a structured report. Not included yet: audit-log retention (#579) and scheduling.
+- **`shieldcortex maintain` (#652, slice A).** One command for storage and memory hygiene: consolidate STM when it is over its cap, backfill missing vectors, vacuum when at least 20% of database pages are free, then run doctor's Memories, Semantic coverage and Disk checks. A remaining FAIL exits 1 and is sent by check name to the configured Action Guard webhook, at most once per 24 hours for the same FAIL set. A live ShieldCortex process holding the database makes consolidation, embedding and vacuum skip, not fail. `--dry-run` leaves database contents and config unchanged; SQLite may create shared-memory sidecar files. `--json` prints a structured report. Not included yet: audit-log retention (#579) and scheduling.
 
 ## [5.9.0] - 2026-10-14
 

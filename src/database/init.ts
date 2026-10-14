@@ -36,7 +36,7 @@ const WARN_DB_SIZE = WARN_DB_FILE_BYTES;
 /**
  * Expand ~ to home directory
  */
-function expandPath(path: string): string {
+export function expandPath(path: string): string {
   if (path.startsWith('~')) {
     return join(homedir(), path.slice(1));
   }

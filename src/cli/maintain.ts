@@ -3,11 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
-import { assertSafeRuntimeForDbPath, closeDatabase, initDatabase, resolveMemoriesDbPath } from '../database/init.js';
+import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, initDatabase, resolveMemoriesDbPath } from '../database/init.js';
+import { readRawConfig } from '../cloud/config.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import type { MemoryConfig, ConsolidationResult } from '../memory/types.js';
 import { backfillEmbeddings, type EmbedBackfillResult } from './embed-backfill.js';
-import { inspectEmbeddingModelCache } from '../embeddings/model-cache.js';
+import { inspectEmbeddingHookReady } from '../embeddings/model-cache.js';
 import { checkDiskUsage, runMemoryStatsCheck, runSemanticCoverageCheck, VACUUM_FREE_SHARE, type CheckResult } from './doctor.js';
 import { buildMaintenanceFailNotification, deliverOperatorNotification, type NotifyChannel } from '../defence/iron-dome/operator-notify.js';
 
@@ -45,27 +46,28 @@ const liveLock = (dbPath: string): boolean => {
 };
 const lockedError = (err: unknown): boolean => /SQLITE_BUSY|database is locked|database is busy|locked by/i.test(errorText(err));
 
-async function configuredChannels(): Promise<NotifyChannel[]> {
+export async function configuredChannels(fetchImpl?: typeof fetch): Promise<NotifyChannel[]> {
   try {
-    const { getActionGuardNotifyConfig } = await import('../cloud/config.js');
     const { normaliseNotifyConfig } = await import('../defence/iron-dome/notify-config.js');
     const { createWebhookNotifyChannel } = await import('../defence/iron-dome/webhook-notify-channel.js');
-    const cfg = normaliseNotifyConfig(getActionGuardNotifyConfig());
-    return cfg.enabled && cfg.webhookUrl ? [createWebhookNotifyChannel({ url: cfg.webhookUrl, secret: cfg.webhookSecret })] : [];
+    const guard = readRawConfig().actionGuard;
+    const rawNotify = guard && typeof guard === 'object' && !Array.isArray(guard) ? (guard as Record<string, unknown>).notify : undefined;
+    const cfg = normaliseNotifyConfig(rawNotify);
+    return cfg.enabled && cfg.webhookUrl ? [createWebhookNotifyChannel({ url: cfg.webhookUrl, secret: cfg.webhookSecret, fetchImpl })] : [];
   } catch { return []; }
 }
 
 /** The checks this command can affect, plus any maintenance-step failures. */
 async function storageDoctor(dataDir: string, dbPath: string, limit: number, config: MemoryConfig): Promise<CheckResult[]> {
-  return [runMemoryStatsCheck(dbPath, config), runSemanticCoverageCheck(dbPath), await checkDiskUsage(dataDir, limit)];
+  return [runMemoryStatsCheck(dbPath, config), runSemanticCoverageCheck(dbPath), await checkDiskUsage(dataDir, limit, { dbPath })];
 }
 
 export async function maintain(options: { dryRun?: boolean } = {}, deps: MaintainDeps = {}): Promise<MaintainReport> {
-  const dbPath = deps.dbPath ?? (deps.dataDir ? path.join(deps.dataDir, 'memories.db') : resolveMemoriesDbPath());
+  const dbPath = expandPath(deps.dbPath ?? (deps.dataDir ? path.join(deps.dataDir, 'memories.db') : resolveMemoriesDbPath()));
   const injectedPath = deps.dbPath !== undefined || deps.dataDir !== undefined;
   if (!injectedPath) assertSafeRuntimeForDbPath(dbPath);
   const dataDir = deps.dataDir ?? path.dirname(dbPath);
-  const config = deps.consolidateConfig ?? resolveMemoryConfig();
+  const config = deps.consolidateConfig ?? resolveMemoryConfig(undefined, { readOnly: options.dryRun === true });
   const limit = deps.diskLimit ?? DIRECTORY_BUDGET_BYTES;
   const dryRun = options.dryRun === true;
   const steps: MaintainReport['steps'] = {
@@ -97,7 +99,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
   try {
     try {
       if (locked) { /* already skipped before opening */ }
-      else if (!db) steps.consolidate = step('skipped', 'database unavailable');
+      else if (!db) { if (steps.consolidate.status !== 'failed') steps.consolidate = step('skipped', 'database unavailable'); }
       else {
         const count = (db.prepare("SELECT COUNT(*) AS n FROM memories WHERE type = 'short_term'").get() as { n: number }).n;
         if (count <= config.maxShortTermMemories) steps.consolidate = step('skipped', 'STM within cap', { stm: count, promoted: 0, deleted: 0 });
@@ -114,7 +116,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
       if (locked) { /* already skipped before opening */ }
       else if (!db) steps.embed = step('skipped', 'database unavailable', { missing: 0, embedded: 0 });
       else {
-        const modelCacheReady = deps.modelCacheReady ?? (async () => (await inspectEmbeddingModelCache()).status === 'ok');
+        const modelCacheReady = deps.modelCacheReady ?? (async () => (await inspectEmbeddingHookReady()).ready);
         const cacheReady = dryRun || Boolean(deps.embed) || await modelCacheReady();
         if (!cacheReady) {
           const missing = (db.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NULL').get() as { n: number }).n;
@@ -181,9 +183,15 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     const stateFile = path.join(dataDir, 'state', 'maintain-notify.json');
     const fingerprint = failing.map(r => r.label).sort().join('\n');
     const now = (deps.now ?? (() => new Date()))().getTime();
-    let previous: { fingerprint?: string; sentAt?: number } = {};
+    let previous: { fingerprint?: string; sentAt?: number; sent?: Record<string, number> } = {};
     try { previous = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as typeof previous; } catch { /* no earlier delivery */ }
-    if (previous.fingerprint === fingerprint && typeof previous.sentAt === 'number' && now - previous.sentAt < 86_400_000 && now >= previous.sentAt) {
+    const sent: Record<string, number> = Object.create(null) as Record<string, number>;
+    const priorSent = previous.sent && typeof previous.sent === 'object' && !Array.isArray(previous.sent) ? previous.sent : {};
+    for (const [key, at] of Object.entries(priorSent)) {
+      if (typeof at === 'number' && now >= at && now - at < 86_400_000) sent[key] = at;
+    }
+    if (previous.fingerprint && typeof previous.sentAt === 'number' && now >= previous.sentAt && now - previous.sentAt < 86_400_000) sent[previous.fingerprint] = previous.sentAt;
+    if (sent[fingerprint] !== undefined) {
       steps.notify = step('skipped', 'throttled');
     } else {
       const channels = deps.channels ?? await configuredChannels();
@@ -198,7 +206,8 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
             : Boolean((await deliverOperatorNotification(buildMaintenanceFailNotification(safe), { channels })).deliveredVia);
           if (delivered) {
             fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-            fs.writeFileSync(stateFile, JSON.stringify({ fingerprint, sentAt: now }), { mode: 0o600 });
+            sent[fingerprint] = now;
+            fs.writeFileSync(stateFile, JSON.stringify({ sent }), { mode: 0o600 });
             steps.notify = step('ran', 'sent');
           } else steps.notify = step('failed', 'delivery failed');
         } catch (err) { steps.notify = step('failed', errorText(err)); }
@@ -210,7 +219,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
 
 export async function runMaintain(args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
-    console.log('Usage: shieldcortex maintain [--dry-run] [--json]\nConsolidate capped STM, backfill vectors, vacuum free pages, then check and notify. Audit-log retention is not included yet.');
+    console.log('Usage: shieldcortex maintain [--dry-run] [--json]\nConsolidate capped STM, backfill vectors, vacuum free pages, then check and notify. Dry-run leaves database contents and config unchanged; SQLite may create shared-memory sidecars. Audit-log retention is not included yet.');
     return;
   }
   if (args.some(a => a !== '--dry-run' && a !== '--json')) {
