@@ -242,15 +242,23 @@ function restoreBackupAsLive(dbPath: string, backupPath: string, reason: string)
 
 /**
  * A lock record that does not parse (or names no PID) is only treated as stale
- * once it is older than this: a publisher that creates the file and writes it
- * in two steps (pre-#763 builds, or the no-hard-link fallback below) must never
- * be classed as stale while it is still writing.
+ * once its mtime is more than this far in the past: a publisher that creates
+ * the file and writes it in two steps (pre-#763 builds, or the no-hard-link
+ * fallback below) must not be classed as stale while it is still writing. An
+ * mtime in the future counts as fresh, so a clock step cannot age a record.
+ *
+ * The no-hard-link fallback relies on this grace and is weaker than the
+ * atomic temp-then-link publication: a publisher stalled for longer than the
+ * grace can have its incomplete record taken over. It then notices that the
+ * lock path is no longer its record and does not claim ownership, but it
+ * cannot stop the other process from having taken the lock.
  */
 const UNREADABLE_LOCK_GRACE_MS = 10_000;
 /** Bounded publish / stale-takeover rounds before deferring to the holder. */
 const STARTUP_LOCK_ATTEMPTS = 3;
 
-interface LockSnapshot { bytes: Buffer; ino: number; mtimeMs: number }
+interface LockSnapshot { bytes: Buffer; dev: number; ino: number; mtimeMs: number }
+interface LockIdentity { dev: number; ino: number; bytes?: Buffer }
 
 /** Read the lock record and its inode through one descriptor; null when absent. */
 function readLockSnapshot(path: string): LockSnapshot | null {
@@ -263,58 +271,153 @@ function readLockSnapshot(path: string): LockSnapshot | null {
   }
   try {
     const stat = fstatSync(fd);
-    return { bytes: readFileSync(fd), ino: stat.ino, mtimeMs: stat.mtimeMs };
+    return { bytes: readFileSync(fd), dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs };
   } finally {
     closeSync(fd);
   }
 }
 
+const matchesLock = (snapshot: LockSnapshot | null, expected: LockIdentity): boolean =>
+  snapshot !== null && snapshot.dev === expected.dev && snapshot.ino === expected.ino &&
+  (!expected.bytes || snapshot.bytes.equals(expected.bytes));
+
+/**
+ * Put a record that was moved aside back at `lockPath` without overwriting a
+ * lock published in the meantime: hard link first, then (when the bytes are
+ * known) an exclusive create of a copy. False when it could not be put back.
+ */
+function restoreLock(aside: string, lockPath: string, bytes: Buffer | undefined): boolean {
+  try {
+    linkSync(aside, lockPath);
+    return true;
+  } catch (error) {
+    // EEXIST: another process published while the record was aside.
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST' || !bytes) return false;
+  }
+  try {
+    const fd = createLockExclusive(lockPath, bytes, false);
+    if (typeof fd !== 'number') return false;
+    closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Remove the lock at `lockPath` only if it is still exactly `expected` (same
- * inode, same bytes). The record is first renamed aside atomically, so a lock
- * another process published after `expected` was read can never be unlinked:
- * a mismatch is linked back into place (unless the path was re-taken in the
- * meantime, in which case the newer lock stands).
+ * device and inode, and the same bytes when given). The record is first
+ * renamed aside atomically, so a lock another process published after
+ * `expected` was read is never unlinked by name. A record that does not match,
+ * or cannot be read, is put back; if that fails it is left at the aside name
+ * and never deleted (#763).
+ *
+ * 'restored': a different record was there and is back in place.
+ * 'displaced': a different record could not be put back and is left aside.
+ * 'failed': the lock could not be moved or read (left aside if not put back).
  */
-function removeLockIfUnchanged(lockPath: string, expected: { bytes: Buffer; ino: number }): 'removed' | 'changed' | 'absent' | 'failed' {
+function removeLockIfUnchanged(
+  lockPath: string,
+  expected: LockIdentity,
+  restoreByCopy = true,
+): 'removed' | 'absent' | 'restored' | 'displaced' | 'failed' {
   const aside = `${lockPath}.${randomUUID()}.aside`;
   try {
     renameSync(lockPath, aside);
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'failed';
   }
+  let moved: LockSnapshot | null = null;
   try {
-    const moved = readLockSnapshot(aside);
-    if (moved && moved.ino === expected.ino && moved.bytes.equals(expected.bytes)) return 'removed';
-    try {
-      linkSync(aside, lockPath);
-    } catch {
-      // The path was re-taken while the record was aside; that lock stands.
-    }
-    return 'changed';
+    moved = readLockSnapshot(aside);
   } catch {
-    try {
-      linkSync(aside, lockPath);
-    } catch {
-      // As above.
-    }
-    return 'failed';
-  } finally {
+    moved = null;
+  }
+  if (matchesLock(moved, expected)) {
     try {
       unlinkSync(aside);
     } catch {
-      // Best-effort cleanup of the aside name.
+      // Best-effort cleanup: the expected record is already off the lock path.
     }
+    return 'removed';
   }
+  if (restoreLock(aside, lockPath, restoreByCopy ? moved?.bytes : undefined)) {
+    try {
+      unlinkSync(aside);
+    } catch {
+      // Best-effort: the record is back at the lock path; only a spare name remains.
+    }
+    return moved ? 'restored' : 'failed';
+  }
+  console.error(
+    `[database] Left the startup lock record found at ${lockPath} at ${aside}: ` +
+    `it was not the record expected and could not be put back`
+  );
+  return moved ? 'displaced' : 'failed';
+}
+
+/**
+ * Create `lockPath` exclusively and write `bytes` into it (no hard links
+ * needed). Returns the descriptor only once the completed record is verified
+ * to still be the lock path; 'lost' when the path was replaced first (the
+ * descriptor is closed, nothing is unlinked); 'exists' when the path is taken.
+ * On a write error the path is removed only while it is still the inode this
+ * call created.
+ */
+function createLockExclusive(lockPath: string, bytes: Buffer, restoreByCopy = true): number | 'exists' | 'lost' {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, 'wx', SECURE_OPEN_MODE);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
+    throw error;
+  }
+  let created: LockIdentity | null = null;
+  try {
+    const stat = fstatSync(fd);
+    created = { dev: stat.dev, ino: stat.ino };
+    writeFileSync(fd, bytes);
+  } catch (writeError) {
+    try {
+      closeSync(fd);
+    } catch {
+      // Best-effort close.
+    }
+    if (created) {
+      try {
+        const current = statSync(lockPath);
+        if (current.dev === created.dev && current.ino === created.ino) {
+          removeLockIfUnchanged(lockPath, created, restoreByCopy);
+        }
+      } catch {
+        // Gone or unreadable: nothing of ours to remove.
+      }
+    }
+    throw writeError;
+  }
+  let current: LockSnapshot | null = null;
+  try {
+    current = readLockSnapshot(lockPath);
+  } catch {
+    current = null;
+  }
+  if (matchesLock(current, { ...created, bytes })) return fd;
+  try {
+    closeSync(fd);
+  } catch {
+    // Best-effort close.
+  }
+  return 'lost';
 }
 
 /**
  * Publish `payload` as the lock record with its complete contents in one step:
  * write a private temp file, then hard-link it to the lock path (EEXIST if a
- * lock exists). Returns the descriptor of the published record, or 'exists'.
- * The temp name is removed on every path.
+ * lock exists). Returns the descriptor of the published record, 'exists', or
+ * 'lost' (no-hard-link fallback only: the path was replaced before the record
+ * was complete). The temp name is removed on every path.
  */
-function publishLock(lockPath: string, payload: string): number | 'exists' {
+function publishLock(lockPath: string, payload: string): number | 'exists' | 'lost' {
   const temp = `${lockPath}.${randomUUID()}.tmp`;
   const fd = openSync(temp, 'wx', SECURE_OPEN_MODE);
   let published = false;
@@ -325,24 +428,12 @@ function publishLock(lockPath: string, payload: string): number | 'exists' {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'EEXIST') return 'exists';
+      // link(2) reports EPERM when the filesystem cannot create hard links
+      // (e.g. FAT); the temp file is our own, so protected_hardlinks cannot be why.
       if (code !== 'ENOTSUP' && code !== 'ENOSYS' && code !== 'EPERM' && code !== 'EOPNOTSUPP') throw error;
-      // No hard links on this filesystem: exclusive create + write. Readers
-      // give an unparseable record UNREADABLE_LOCK_GRACE_MS before calling it stale.
-      let directFd: number;
-      try {
-        directFd = openSync(lockPath, 'wx', SECURE_OPEN_MODE);
-      } catch (directError) {
-        if ((directError as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
-        throw directError;
-      }
-      try {
-        writeFileSync(directFd, payload, 'utf-8');
-      } catch (writeError) {
-        closeSync(directFd);
-        try { unlinkSync(lockPath); } catch { /* best-effort */ }
-        throw writeError;
-      }
-      return directFd;
+      // No hard links on this filesystem: exclusive create + write, which is
+      // weaker (see UNREADABLE_LOCK_GRACE_MS).
+      return createLockExclusive(lockPath, Buffer.from(payload, 'utf-8'));
     }
     published = true;
     return fd;
@@ -371,7 +462,8 @@ function judgeLock(snapshot: LockSnapshot, dbPath: string, lockPath: string): { 
     existing = null;
   }
   if (!existing || typeof existing.pid !== 'number') {
-    if (Math.abs(Date.now() - snapshot.mtimeMs) < UNREADABLE_LOCK_GRACE_MS) {
+    // A future mtime (negative age) is fresh: it may be a publication in progress.
+    if (Date.now() - snapshot.mtimeMs < UNREADABLE_LOCK_GRACE_MS) {
       return {
         live: true,
         pid: null,
@@ -417,11 +509,16 @@ function acquireStartupLock(dbPath: string, refuseIfLocked = false): void {
   let holder: { pid: number | null; error: Error } | null = null;
   for (let attempt = 0; attempt < STARTUP_LOCK_ATTEMPTS && !holder; attempt++) {
     const published = publishLock(lockPath, payload);
-    if (published !== 'exists') {
+    if (typeof published === 'number') {
       lockFileFd = published;
       lockFilePath = lockPath;
       lockOwnedRecord = Buffer.from(payload, 'utf-8');
       return;
+    }
+    if (published === 'lost') {
+      // Our incomplete fallback record was taken over; the replacement stands.
+      holder = { pid: null, error: new Error(`[database] Refusing startup because ${lockPath} was replaced before this process finished writing it`) };
+      break;
     }
 
     let snapshot: LockSnapshot | null;
@@ -440,10 +537,14 @@ function acquireStartupLock(dbPath: string, refuseIfLocked = false): void {
       break;
     }
     // Stale: remove exactly the record judged stale, then retry publishing.
-    // 'changed' means another process published in between; the next round
-    // reads and judges that record instead.
-    if (removeLockIfUnchanged(lockPath, snapshot) === 'failed') {
+    // 'restored' means another process published in between; the next round
+    // reads and judges that record instead. 'displaced' means that record
+    // could not be put back, so its owner may be live: never publish over it.
+    const removal = removeLockIfUnchanged(lockPath, snapshot);
+    if (removal === 'failed') {
       holder = { pid: null, error: new Error(`[database] Refusing startup because the stale lock ${lockPath} could not be removed`) };
+    } else if (removal === 'displaced') {
+      holder = { pid: null, error: new Error(`[database] Refusing startup because the lock record that replaced the stale ${lockPath} could not be put back`) };
     }
   }
   holder ??= { pid: null, error: new Error(`[database] Refusing startup because ${lockPath} kept changing while ShieldCortex was starting`) };
@@ -1020,10 +1121,11 @@ export function closeDatabase(): void {
   // process's lock (#763).
   if (lockFileFd !== null) {
     try {
-      const ownIno = fstatSync(lockFileFd).ino;
+      const own = fstatSync(lockFileFd);
+      const ownLock: LockIdentity | null = lockOwnedRecord ? { dev: own.dev, ino: own.ino, bytes: lockOwnedRecord } : null;
       const onDisk = lockFilePath ? readLockSnapshot(lockFilePath) : null;
-      if (lockFilePath && lockOwnedRecord && onDisk && onDisk.ino === ownIno && onDisk.bytes.equals(lockOwnedRecord)) {
-        removeLockIfUnchanged(lockFilePath, { bytes: lockOwnedRecord, ino: ownIno });
+      if (lockFilePath && ownLock && matchesLock(onDisk, ownLock)) {
+        removeLockIfUnchanged(lockFilePath, ownLock);
       }
     } catch {
       // Non-fatal: an unverifiable lock is left in place.

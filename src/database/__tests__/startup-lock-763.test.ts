@@ -7,7 +7,9 @@
  * wrapped, so a test can run "another process" at the exact point between two
  * syscalls of acquireStartupLock — after the record is written but before it
  * is published, and after a stale record is read but before it is removed.
- * Every other call falls through to the real filesystem.
+ * `writeFileSync` / `openSync` can also fail or stall the no-hard-link
+ * fallback's write and the read of a record moved aside. Every other call
+ * falls through to the real filesystem.
  */
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import * as realFs from 'fs';
@@ -15,10 +17,32 @@ import os from 'node:os';
 import path from 'node:path';
 
 type Hook = (src: string, dest: string) => void;
-const hooks: { beforeLockLink?: Hook; beforeLockRename?: Hook; linkError?: string; failTempOpen?: boolean } = {};
+const hooks: {
+  beforeLockLink?: Hook;
+  beforeLockRename?: Hook;
+  /** Runs before the record moved aside is linked back to the lock path. */
+  beforeAsideLink?: Hook;
+  /** One-shot link error on the lock path. */
+  linkError?: string;
+  /** Every link to the lock path fails with this code (a filesystem without hard links). */
+  linkErrorAlways?: string;
+  failTempOpen?: boolean;
+  /** One-shot EIO from the exclusive create of the lock path. */
+  failLockCreate?: boolean;
+  /** One-shot EACCES opening a record moved aside. */
+  failAsideRead?: boolean;
+  /** Runs before the no-hard-link fallback writes its record. */
+  beforeLockWrite?: Hook;
+  /** One-shot error from the no-hard-link fallback's write. */
+  lockWriteError?: string;
+} = {};
 
 const isLock = (p: unknown): boolean => String(p).endsWith('.lock');
-const take = <K extends 'beforeLockLink' | 'beforeLockRename'>(key: K): Hook | undefined => {
+const isAside = (p: unknown): boolean => String(p).endsWith('.aside');
+const fail = (code: string, what: string): never => {
+  throw Object.assign(new Error(`${code}: ${what}`), { code });
+};
+const take = <K extends 'beforeLockLink' | 'beforeLockRename' | 'beforeAsideLink' | 'beforeLockWrite'>(key: K): Hook | undefined => {
   const hook = hooks[key];
   hooks[key] = undefined;
   return hook;
@@ -26,11 +50,13 @@ const take = <K extends 'beforeLockLink' | 'beforeLockRename'>(key: K): Hook | u
 
 const linkSync = ((src: realFs.PathLike, dest: realFs.PathLike) => {
   if (isLock(dest)) {
-    take('beforeLockLink')?.(String(src), String(dest));
+    if (isAside(src)) take('beforeAsideLink')?.(String(src), String(dest));
+    else take('beforeLockLink')?.(String(src), String(dest));
+    if (hooks.linkErrorAlways) fail(hooks.linkErrorAlways, `link '${String(src)}'`);
     if (hooks.linkError) {
       const code = hooks.linkError;
       hooks.linkError = undefined;
-      throw Object.assign(new Error(`${code}: link '${String(src)}'`), { code });
+      fail(code, `link '${String(src)}'`);
     }
   }
   return realFs.linkSync(src, dest);
@@ -41,15 +67,40 @@ const renameSync = ((src: realFs.PathLike, dest: realFs.PathLike) => {
   return realFs.renameSync(src, dest);
 }) as typeof realFs.renameSync;
 
+/** Descriptors the no-hard-link fallback opened on the lock path. */
+const lockCreateFds = new Set<number>();
 const openSync = ((p: realFs.PathLike, ...rest: unknown[]) => {
   if (hooks.failTempOpen && String(p).endsWith('.tmp')) {
     hooks.failTempOpen = false;
-    throw Object.assign(new Error(`EACCES: open '${String(p)}'`), { code: 'EACCES' });
+    fail('EACCES', `open '${String(p)}'`);
   }
-  return (realFs.openSync as (...args: unknown[]) => number)(p, ...rest);
+  if (isLock(p) && rest[0] === 'wx' && hooks.failLockCreate) {
+    hooks.failLockCreate = false;
+    fail('EIO', `open '${String(p)}'`);
+  }
+  if (isAside(p) && hooks.failAsideRead) {
+    hooks.failAsideRead = false;
+    fail('EACCES', `open '${String(p)}'`);
+  }
+  const fd = (realFs.openSync as (...args: unknown[]) => number)(p, ...rest);
+  if (isLock(p) && rest[0] === 'wx') lockCreateFds.add(fd);
+  return fd;
 }) as typeof realFs.openSync;
 
-const mocked = { ...realFs, linkSync, renameSync, openSync };
+const writeFileSync = ((file: unknown, ...rest: unknown[]) => {
+  if (typeof file === 'number' && lockCreateFds.has(file)) {
+    lockCreateFds.delete(file);
+    take('beforeLockWrite')?.(String(file), lockPath);
+    if (hooks.lockWriteError) {
+      const code = hooks.lockWriteError;
+      hooks.lockWriteError = undefined;
+      fail(code, 'write');
+    }
+  }
+  return (realFs.writeFileSync as (...args: unknown[]) => void)(file, ...rest);
+}) as typeof realFs.writeFileSync;
+
+const mocked = { ...realFs, linkSync, renameSync, openSync, writeFileSync };
 jest.unstable_mockModule('fs', () => ({ ...mocked, default: mocked }));
 
 const { initDatabase, closeDatabase, holdsStartupLock, isDatabaseInitialized, StartupLockHeldError, __databaseTestUtils } = await import('../init.js');
@@ -77,6 +128,8 @@ const age = (seconds: number): void => {
 };
 /** Lock temp / aside files left behind (anything derived from the lock name). */
 const strays = (): string[] => realFs.readdirSync(dir).filter(name => name.startsWith('memories.db.lock.'));
+/** Contents of every record left at an aside name. */
+const asides = (): string[] => strays().filter(isAside).map(name => realFs.readFileSync(path.join(dir, name), 'utf8'));
 const continuedAnyway = (): boolean =>
   errorSpy.mock.calls.some((call: unknown[]) => String(call[0]).includes('continuing anyway (SQLite WAL handles concurrency)'));
 const acquire = (refuseIfLocked?: boolean): void => __databaseTestUtils.acquireStartupLock(dbPath, refuseIfLocked);
@@ -96,6 +149,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const key of Object.keys(hooks) as (keyof typeof hooks)[]) hooks[key] = undefined;
+  lockCreateFds.clear();
   closeDatabase();
   errorSpy.mockRestore();
   killSpy.mockRestore();
@@ -161,13 +215,114 @@ describe('#763 lock publication', () => {
   });
 
   it('falls back to exclusive create when the filesystem has no hard links', () => {
-    hooks.linkError = 'ENOTSUP';
+    hooks.linkErrorAlways = 'ENOTSUP';
     acquire();
     expect(holdsStartupLock()).toBe(true);
     expect(JSON.parse(realFs.readFileSync(lockPath, 'utf8')).pid).toBe(process.pid);
     expect(strays()).toEqual([]);
     closeDatabase();
     expect(realFs.existsSync(lockPath)).toBe(false);
+  });
+});
+
+describe('#763 no-hard-link fallback publication', () => {
+  it('does not claim a record whose path was replaced before its write finished', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    const live = record(process.pid);
+    // Stalled past the grace: another process took the empty record over.
+    hooks.beforeLockWrite = () => writeForeign(live);
+    acquire();
+    expect(holdsStartupLock()).toBe(false);
+    expect(continuedAnyway()).toBe(true);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+  });
+
+  it('a write failure after the path was replaced leaves the replacement in place', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    const live = record(process.pid);
+    hooks.beforeLockWrite = () => writeForeign(live);
+    hooks.lockWriteError = 'EIO';
+    expect(() => acquire()).toThrow(/EIO/);
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
+  it('treats a partial record with a future mtime as held, not stale', () => {
+    writeForeign('{"pid": 12');
+    const later = new Date(Date.now() + 60_000);
+    realFs.utimesSync(lockPath, later, later);
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    acquire();
+    expect(continuedAnyway()).toBe(true);
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe('{"pid": 12');
+    expect(strays()).toEqual([]);
+  });
+});
+
+describe('#763 a displaced record is never deleted', () => {
+  it('without hard links, a live record that replaced the stale one is put back by copy', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    const live = record(EPERM_PID);
+    hooks.beforeLockRename = () => writeForeign(live);
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
+  it('without hard links, a live record that cannot be put back is left aside and the loser does not publish', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    const live = record(EPERM_PID);
+    hooks.beforeLockRename = () => { writeForeign(live); hooks.failLockCreate = true; };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(asides()).toEqual([live]);
+    expect(realFs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('a third publisher taking the path (EEXIST) leaves both live records on disk', () => {
+    writeForeign(record(DEAD_PID));
+    const second = record(EPERM_PID);
+    const third = record(process.pid);
+    hooks.beforeLockRename = () => writeForeign(second);
+    hooks.beforeAsideLink = () => writeForeign(third);
+    acquire();
+    expect(holdsStartupLock()).toBe(false);
+    expect(continuedAnyway()).toBe(true);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(third);
+    expect(asides()).toEqual([second]);
+  });
+
+  it('a record that cannot be read or put back is left aside, not deleted', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    const live = record(EPERM_PID);
+    hooks.beforeLockRename = () => { writeForeign(live); hooks.failAsideRead = true; };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(asides()).toEqual([live]);
+  });
+
+  it('release whose restore fails leaves the foreign record aside', () => {
+    acquire();
+    expect(holdsStartupLock()).toBe(true);
+    const foreign = record(process.pid);
+    // Replaced between close's ownership check and the removal.
+    hooks.beforeLockRename = () => {
+      writeForeign(foreign);
+      hooks.linkErrorAlways = 'ENOTSUP';
+      hooks.failLockCreate = true;
+    };
+    closeDatabase();
+    expect(holdsStartupLock()).toBe(false);
+    expect(asides()).toEqual([foreign]);
   });
 });
 

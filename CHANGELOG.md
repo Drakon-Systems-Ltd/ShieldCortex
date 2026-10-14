@@ -12,7 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **`shieldcortex maintain` (#761).** A live startup lock acquired after the initial check now stops database initialization before it can write, while maintenance steps skip and doctor still runs.
-- **Database startup lock (#763).** Two ShieldCortex processes starting at the same moment can no longer both claim the database startup lock, a lock replaced by a live process is never removed as stale, and shutting down never removes another process's lock. `shieldcortex maintain` no longer closes a database handle that another caller in the same process opened.
+- **Database startup lock (#763).** The lock record is now published complete in one step (a private temp file hard-linked into place), so two ShieldCortex processes starting at the same moment can no longer both claim the startup lock. Stale takeover and shutdown remove only the exact record they checked: a record another process published in the meantime is put back, and if it cannot be put back it is left on disk beside the lock (`<database>.lock.<id>.aside`) and the process does not take the lock. On filesystems without hard links ShieldCortex falls back to creating and then writing the lock file, with a weaker, time-based check: an unreadable record younger than 10 seconds, or dated in the future, counts as held, and a publisher stalled past that window does not claim the lock but cannot stop another process from taking it. `shieldcortex maintain` no longer closes a database handle that another caller in the same process opened.
 
 ## [5.9.0] - 2026-10-14
 
