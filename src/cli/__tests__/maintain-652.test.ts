@@ -121,9 +121,12 @@ describe('maintain #652 slice A', () => {
 
   it('skips every write when another process takes the lock after the precheck', async () => {
     const { deps } = fixture();
-    // Let startup schema housekeeping settle before measuring maintenance writes.
     initDatabase(dbPath);
     closeDatabase();
+    const altered = new Database(dbPath);
+    altered.exec('DROP TABLE mcp_tool_hashes');
+    altered.pragma('journal_mode = DELETE');
+    altered.close();
     const snapshot = () => {
       const db = new Database(dbPath, { readonly: true });
       try {
@@ -139,6 +142,7 @@ describe('maintain #652 slice A', () => {
     expect(before.rows).toBeGreaterThan(cap.maxShortTermMemories);
     expect(before.missing).toBeGreaterThan(0);
     expect(before.free / before.pages).toBeGreaterThanOrEqual(0.2);
+    const beforeHash = sha(dbPath);
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
     try {
       if (!child.pid) throw new Error('could not spawn lock owner');
@@ -149,16 +153,31 @@ describe('maintain #652 slice A', () => {
       deps.consolidate = consolidate as unknown as MaintainDeps['consolidate'];
       deps.embed = embed;
       deps.vacuum = vacuum;
-      deps.afterLockCheck = () => fs.writeFileSync(`${dbPath}.lock`, JSON.stringify({ pid: otherPid }));
+      deps.doctor = async () => [{ label: 'stub', status: 'pass', message: 'stub' }];
+      const lockBody = JSON.stringify({ pid: otherPid, entryPath: 'other-shieldcortex' });
+      let filesAtLock: string[] = [];
+      deps.afterLockCheck = () => {
+        fs.writeFileSync(`${dbPath}.lock`, lockBody);
+        filesAtLock = fs.readdirSync(dir).sort();
+      };
       const report = await maintain({}, deps);
+      expect(report.exitCode).toBe(0);
       expect(report.steps.consolidate).toMatchObject({ status: 'skipped', reason: 'locked' });
       expect(report.steps.embed).toMatchObject({ status: 'skipped', reason: 'locked', missing: 0, embedded: 0 });
       expect(report.steps.vacuum).toMatchObject({ status: 'skipped', reason: 'locked' });
       expect(report.steps.doctor.status).toBe('ran');
+      expect(report.steps.doctor.results).toEqual([{ label: 'stub', status: 'pass', message: 'stub' }]);
       expect(consolidate).not.toHaveBeenCalled();
       expect(embed).not.toHaveBeenCalled();
       expect(vacuum).not.toHaveBeenCalled();
       expect(snapshot()).toEqual(before);
+      expect(sha(dbPath)).toBe(beforeHash);
+      expect(fs.readdirSync(dir).sort()).toEqual(filesAtLock);
+      const readOnly = new Database(dbPath, { readonly: true, fileMustExist: true });
+      try {
+        expect(readOnly.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mcp_tool_hashes'").get()).toBeUndefined();
+      } finally { readOnly.close(); }
+      expect(fs.readFileSync(`${dbPath}.lock`, 'utf8')).toBe(lockBody);
       expect(JSON.parse(fs.readFileSync(`${dbPath}.lock`, 'utf8')).pid).toBe(otherPid);
     } finally { child.kill(); }
   });

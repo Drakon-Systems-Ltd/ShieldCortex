@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
-import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, resolveMemoriesDbPath } from '../database/init.js';
+import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, resolveMemoriesDbPath, StartupLockHeldError } from '../database/init.js';
 import { readRawConfig } from '../cloud/config.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import type { MemoryConfig, ConsolidationResult } from '../memory/types.js';
@@ -96,7 +96,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     } else if (dryRun) {
       if (fs.existsSync(dbPath)) db = new Database(dbPath, { readonly: true, fileMustExist: true });
     } else {
-      db = injectedPath ? initDatabase(dbPath) : initDatabase();
+      db = injectedPath ? initDatabase(dbPath, { refuseIfLocked: true }) : initDatabase(undefined, { refuseIfLocked: true });
       dbOwnedByInit = true;
       locked = !holdsStartupLock();
       if (locked) {
@@ -105,7 +105,14 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
         steps.vacuum = step('skipped', 'locked');
       }
     }
-  } catch (err) { failStep('consolidate', err); }
+  } catch (err) {
+    if (err instanceof StartupLockHeldError) {
+      locked = true;
+      steps.consolidate = step('skipped', 'locked');
+      steps.embed = step('skipped', 'locked', { missing: 0, embedded: 0 });
+      steps.vacuum = step('skipped', 'locked');
+    } else failStep('consolidate', err);
+  }
 
   try {
     try {
