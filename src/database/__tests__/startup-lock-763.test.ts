@@ -1,0 +1,280 @@
+/**
+ * #763 — the startup lock is ownership-safe across publication, stale
+ * takeover and release.
+ *
+ * Interleavings are made deterministic without any production seam: `fs` is
+ * replaced by the real module with `linkSync` / `renameSync` / `openSync`
+ * wrapped, so a test can run "another process" at the exact point between two
+ * syscalls of acquireStartupLock — after the record is written but before it
+ * is published, and after a stale record is read but before it is removed.
+ * Every other call falls through to the real filesystem.
+ */
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import * as realFs from 'fs';
+import os from 'node:os';
+import path from 'node:path';
+
+type Hook = (src: string, dest: string) => void;
+const hooks: { beforeLockLink?: Hook; beforeLockRename?: Hook; linkError?: string; failTempOpen?: boolean } = {};
+
+const isLock = (p: unknown): boolean => String(p).endsWith('.lock');
+const take = <K extends 'beforeLockLink' | 'beforeLockRename'>(key: K): Hook | undefined => {
+  const hook = hooks[key];
+  hooks[key] = undefined;
+  return hook;
+};
+
+const linkSync = ((src: realFs.PathLike, dest: realFs.PathLike) => {
+  if (isLock(dest)) {
+    take('beforeLockLink')?.(String(src), String(dest));
+    if (hooks.linkError) {
+      const code = hooks.linkError;
+      hooks.linkError = undefined;
+      throw Object.assign(new Error(`${code}: link '${String(src)}'`), { code });
+    }
+  }
+  return realFs.linkSync(src, dest);
+}) as typeof realFs.linkSync;
+
+const renameSync = ((src: realFs.PathLike, dest: realFs.PathLike) => {
+  if (isLock(src)) take('beforeLockRename')?.(String(src), String(dest));
+  return realFs.renameSync(src, dest);
+}) as typeof realFs.renameSync;
+
+const openSync = ((p: realFs.PathLike, ...rest: unknown[]) => {
+  if (hooks.failTempOpen && String(p).endsWith('.tmp')) {
+    hooks.failTempOpen = false;
+    throw Object.assign(new Error(`EACCES: open '${String(p)}'`), { code: 'EACCES' });
+  }
+  return (realFs.openSync as (...args: unknown[]) => number)(p, ...rest);
+}) as typeof realFs.openSync;
+
+const mocked = { ...realFs, linkSync, renameSync, openSync };
+jest.unstable_mockModule('fs', () => ({ ...mocked, default: mocked }));
+
+const { initDatabase, closeDatabase, holdsStartupLock, isDatabaseInitialized, StartupLockHeldError, __databaseTestUtils } = await import('../init.js');
+const { maintain } = await import('../../cli/maintain.js');
+
+const DEAD_PID = 2_000_000_001;
+const EPERM_PID = 2_000_000_002;
+
+let dir: string;
+let dbPath: string;
+let lockPath: string;
+let errorSpy: ReturnType<typeof jest.spyOn>;
+let killSpy: ReturnType<typeof jest.spyOn>;
+
+const record = (pid: number, entryPath = '/tmp/other-shieldcortex.js'): string =>
+  JSON.stringify({ pid, startedAt: new Date().toISOString(), entryPath, nonce: `foreign-${pid}-${Math.random()}` }, null, 2);
+/** Publish a lock record the way an unrelated process would. */
+const writeForeign = (body: string): void => {
+  realFs.rmSync(lockPath, { force: true });
+  realFs.writeFileSync(lockPath, body);
+};
+const age = (seconds: number): void => {
+  const then = new Date(Date.now() - seconds * 1000);
+  realFs.utimesSync(lockPath, then, then);
+};
+/** Lock temp / aside files left behind (anything derived from the lock name). */
+const strays = (): string[] => realFs.readdirSync(dir).filter(name => name.startsWith('memories.db.lock.'));
+const continuedAnyway = (): boolean =>
+  errorSpy.mock.calls.some((call: unknown[]) => String(call[0]).includes('continuing anyway (SQLite WAL handles concurrency)'));
+const acquire = (refuseIfLocked?: boolean): void => __databaseTestUtils.acquireStartupLock(dbPath, refuseIfLocked);
+
+beforeEach(() => {
+  dir = realFs.mkdtempSync(path.join(os.tmpdir(), 'sc-lock-763-'));
+  dbPath = path.join(dir, 'memories.db');
+  lockPath = `${dbPath}.lock`;
+  errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  const realKill = process.kill.bind(process);
+  killSpy = jest.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: string | number) => {
+    if (pid === DEAD_PID) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
+    if (pid === EPERM_PID) throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    return realKill(pid, signal);
+  }) as typeof process.kill);
+});
+
+afterEach(() => {
+  for (const key of Object.keys(hooks) as (keyof typeof hooks)[]) hooks[key] = undefined;
+  closeDatabase();
+  errorSpy.mockRestore();
+  killSpy.mockRestore();
+  realFs.rmSync(dir, { recursive: true, force: true });
+});
+
+describe('#763 lock publication', () => {
+  it('publishes a complete record atomically and releases only that record', () => {
+    let seenInWindow: { lockExists: boolean; temp: string } | null = null;
+    hooks.beforeLockLink = (src) => {
+      seenInWindow = { lockExists: realFs.existsSync(lockPath), temp: realFs.readFileSync(src, 'utf8') };
+    };
+    acquire();
+    expect(holdsStartupLock()).toBe(true);
+    const published = realFs.readFileSync(lockPath, 'utf8');
+    // Before the link, the lock path did not exist and the temp file already
+    // held the full record — a reader can never observe a partial lock.
+    expect(seenInWindow).toEqual({ lockExists: false, temp: published });
+    const parsed = JSON.parse(published) as { pid: number; nonce: string; startedAt: string };
+    expect(parsed.pid).toBe(process.pid);
+    expect(typeof parsed.nonce).toBe('string');
+    expect(strays()).toEqual([]);
+    closeDatabase();
+    expect(realFs.existsSync(lockPath)).toBe(false);
+    expect(strays()).toEqual([]);
+  });
+
+  it('does not take over a lock another process publishes inside the temp-then-link window', () => {
+    const foreign = record(process.pid);
+    hooks.beforeLockLink = () => writeForeign(foreign);
+    acquire();
+    expect(holdsStartupLock()).toBe(false);
+    expect(continuedAnyway()).toBe(true);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(strays()).toEqual([]);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+  });
+
+  it('treats a fresh empty or partial lock (publisher still writing) as held, not stale', () => {
+    writeForeign('');
+    acquire();
+    expect(holdsStartupLock()).toBe(false);
+    expect(continuedAnyway()).toBe(true);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe('');
+
+    writeForeign('{"pid": 12');
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe('{"pid": 12');
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe('{"pid": 12');
+    expect(strays()).toEqual([]);
+  });
+
+  it('still takes over an old malformed lock', () => {
+    writeForeign('not json');
+    age(60);
+    acquire(true);
+    expect(holdsStartupLock()).toBe(true);
+    expect(JSON.parse(realFs.readFileSync(lockPath, 'utf8')).pid).toBe(process.pid);
+    expect(strays()).toEqual([]);
+  });
+
+  it('falls back to exclusive create when the filesystem has no hard links', () => {
+    hooks.linkError = 'ENOTSUP';
+    acquire();
+    expect(holdsStartupLock()).toBe(true);
+    expect(JSON.parse(realFs.readFileSync(lockPath, 'utf8')).pid).toBe(process.pid);
+    expect(strays()).toEqual([]);
+    closeDatabase();
+    expect(realFs.existsSync(lockPath)).toBe(false);
+  });
+});
+
+describe('#763 stale takeover', () => {
+  it('leaves a live record that replaced the stale one between read and takeover', () => {
+    writeForeign(record(DEAD_PID));
+    const live = record(process.pid);
+    hooks.beforeLockRename = () => writeForeign(live);
+    acquire();
+    expect(holdsStartupLock()).toBe(false);
+    expect(continuedAnyway()).toBe(true);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+  });
+
+  it('refuses when a live record replaced the stale one under refuseIfLocked', () => {
+    writeForeign(record(DEAD_PID));
+    const live = record(EPERM_PID);
+    hooks.beforeLockRename = () => writeForeign(live);
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
+  it('refuseIfLocked takes over a dead (ESRCH) owner and becomes owner', () => {
+    writeForeign(record(DEAD_PID));
+    const opened = initDatabase(dbPath, { refuseIfLocked: true });
+    expect(opened.open).toBe(true);
+    expect(holdsStartupLock()).toBe(true);
+    expect(JSON.parse(realFs.readFileSync(lockPath, 'utf8')).pid).toBe(process.pid);
+    expect(strays()).toEqual([]);
+    closeDatabase();
+    expect(realFs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('refuseIfLocked throws for an EPERM-probed owner before opening SQLite', () => {
+    const live = record(EPERM_PID);
+    writeForeign(live);
+    expect(() => initDatabase(dbPath, { refuseIfLocked: true })).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(isDatabaseInitialized()).toBe(false);
+    expect(realFs.existsSync(dbPath)).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
+  it('a takeover whose re-publish fails leaves no lock state, so release cannot remove a foreign lock', () => {
+    writeForeign(record(DEAD_PID));
+    // Stale record removed, then the re-publish fails on its temp file.
+    hooks.beforeLockRename = () => { hooks.failTempOpen = true; };
+    expect(() => acquire()).toThrow(/EACCES/);
+    expect(holdsStartupLock()).toBe(false);
+    const foreign = record(process.pid);
+    writeForeign(foreign);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(strays()).toEqual([]);
+  });
+});
+
+describe('#763 release', () => {
+  it('continue-anyway never removes the foreign lock on close', () => {
+    const foreign = record(process.pid);
+    writeForeign(foreign);
+    const opened = initDatabase(dbPath);
+    expect(opened.open).toBe(true);
+    expect(holdsStartupLock()).toBe(false);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(strays()).toEqual([]);
+  });
+
+  it('leaves a record another process put in place of ours', () => {
+    acquire();
+    expect(holdsStartupLock()).toBe(true);
+    const foreign = record(process.pid);
+    writeForeign(foreign);
+    closeDatabase();
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(strays()).toEqual([]);
+  });
+});
+
+describe('#763 maintain with a borrowed handle', () => {
+  it('does not close a module handle another caller opened', async () => {
+    const opened = initDatabase(dbPath);
+    // The lock is gone (e.g. removed by hand), so maintain's pre-check sees no
+    // live owner and initDatabase hands back the existing module handle.
+    realFs.rmSync(lockPath, { force: true });
+    const report = await maintain({}, {
+      dataDir: dir,
+      dbPath,
+      diskLimit: Number.MAX_SAFE_INTEGER,
+      consolidateConfig: { maxShortTermMemories: 10, maxLongTermMemories: 1000 } as never,
+      embed: async () => new Float32Array(384).fill(0.1),
+      doctor: async () => [],
+      channels: [],
+    });
+    expect(report.steps.consolidate.status).not.toBe('failed');
+    expect(opened.open).toBe(true);
+    expect(isDatabaseInitialized()).toBe(true);
+    expect((opened.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n).toBe(0);
+  });
+});

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
-import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, resolveMemoriesDbPath, StartupLockHeldError } from '../database/init.js';
+import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, isDatabaseInitialized, resolveMemoriesDbPath, StartupLockHeldError } from '../database/init.js';
 import { readRawConfig } from '../cloud/config.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import type { MemoryConfig, ConsolidationResult } from '../memory/types.js';
@@ -86,6 +86,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
   };
   let db: Database.Database | undefined;
   let dbOwnedByInit = false;
+  let dbBorrowed = false;
   let locked = !dryRun && liveLock(dbPath);
   deps.afterLockCheck?.();
   try {
@@ -96,8 +97,12 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     } else if (dryRun) {
       if (fs.existsSync(dbPath)) db = new Database(dbPath, { readonly: true, fileMustExist: true });
     } else {
+      // initDatabase() hands back the module's existing handle, without
+      // consulting refuseIfLocked, when another caller in this process opened
+      // it first. That handle is BORROWED: use it, never close it (#763).
+      dbBorrowed = isDatabaseInitialized();
       db = injectedPath ? initDatabase(dbPath, { refuseIfLocked: true }) : initDatabase(undefined, { refuseIfLocked: true });
-      dbOwnedByInit = true;
+      dbOwnedByInit = !dbBorrowed;
       locked = !holdsStartupLock();
       if (locked) {
         steps.consolidate = step('skipped', 'locked');
@@ -177,7 +182,8 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
       }
     } catch (err) { failStep('vacuum', err); }
   } finally {
-    if (dbOwnedByInit) {
+    if (dbBorrowed) { /* another caller's handle — leave it open */ }
+    else if (dbOwnedByInit) {
       closeDatabase();
     } else if (db && db.open) db.close();
   }

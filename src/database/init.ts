@@ -5,7 +5,8 @@
 import type Database from 'better-sqlite3';
 import { getBetterSqlite3 } from './better-sqlite3-guard.js';
 import { NativeModuleLoadError, isNativeModuleLoadError, formatNativeLoadError } from './native-load-classify.js';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, unlinkSync, renameSync, copyFileSync, readdirSync, openSync, closeSync, realpathSync, linkSync, fstatSync } from 'fs';
+import { randomUUID } from 'crypto';
 import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
@@ -25,6 +26,8 @@ let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
 let lockFilePath: string | null = null;
 let lockFileFd: number | null = null;
+/** The exact bytes this process published as its lock record; release removes only this. */
+let lockOwnedRecord: Buffer | null = null;
 /** True only while this process owns the startup lock (not the continue-anyway path). */
 export function holdsStartupLock(): boolean { return lockFileFd !== null; }
 export class StartupLockHeldError extends Error {
@@ -237,69 +240,221 @@ function restoreBackupAsLive(dbPath: string, backupPath: string, reason: string)
   copyFileSync(backupPath, dbPath);
 }
 
+/**
+ * A lock record that does not parse (or names no PID) is only treated as stale
+ * once it is older than this: a publisher that creates the file and writes it
+ * in two steps (pre-#763 builds, or the no-hard-link fallback below) must never
+ * be classed as stale while it is still writing.
+ */
+const UNREADABLE_LOCK_GRACE_MS = 10_000;
+/** Bounded publish / stale-takeover rounds before deferring to the holder. */
+const STARTUP_LOCK_ATTEMPTS = 3;
+
+interface LockSnapshot { bytes: Buffer; ino: number; mtimeMs: number }
+
+/** Read the lock record and its inode through one descriptor; null when absent. */
+function readLockSnapshot(path: string): LockSnapshot | null {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    return { bytes: readFileSync(fd), ino: stat.ino, mtimeMs: stat.mtimeMs };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Remove the lock at `lockPath` only if it is still exactly `expected` (same
+ * inode, same bytes). The record is first renamed aside atomically, so a lock
+ * another process published after `expected` was read can never be unlinked:
+ * a mismatch is linked back into place (unless the path was re-taken in the
+ * meantime, in which case the newer lock stands).
+ */
+function removeLockIfUnchanged(lockPath: string, expected: { bytes: Buffer; ino: number }): 'removed' | 'changed' | 'absent' | 'failed' {
+  const aside = `${lockPath}.${randomUUID()}.aside`;
+  try {
+    renameSync(lockPath, aside);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'failed';
+  }
+  try {
+    const moved = readLockSnapshot(aside);
+    if (moved && moved.ino === expected.ino && moved.bytes.equals(expected.bytes)) return 'removed';
+    try {
+      linkSync(aside, lockPath);
+    } catch {
+      // The path was re-taken while the record was aside; that lock stands.
+    }
+    return 'changed';
+  } catch {
+    try {
+      linkSync(aside, lockPath);
+    } catch {
+      // As above.
+    }
+    return 'failed';
+  } finally {
+    try {
+      unlinkSync(aside);
+    } catch {
+      // Best-effort cleanup of the aside name.
+    }
+  }
+}
+
+/**
+ * Publish `payload` as the lock record with its complete contents in one step:
+ * write a private temp file, then hard-link it to the lock path (EEXIST if a
+ * lock exists). Returns the descriptor of the published record, or 'exists'.
+ * The temp name is removed on every path.
+ */
+function publishLock(lockPath: string, payload: string): number | 'exists' {
+  const temp = `${lockPath}.${randomUUID()}.tmp`;
+  const fd = openSync(temp, 'wx', SECURE_OPEN_MODE);
+  let published = false;
+  try {
+    writeFileSync(fd, payload, 'utf-8');
+    try {
+      linkSync(temp, lockPath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') return 'exists';
+      if (code !== 'ENOTSUP' && code !== 'ENOSYS' && code !== 'EPERM' && code !== 'EOPNOTSUPP') throw error;
+      // No hard links on this filesystem: exclusive create + write. Readers
+      // give an unparseable record UNREADABLE_LOCK_GRACE_MS before calling it stale.
+      let directFd: number;
+      try {
+        directFd = openSync(lockPath, 'wx', SECURE_OPEN_MODE);
+      } catch (directError) {
+        if ((directError as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
+        throw directError;
+      }
+      try {
+        writeFileSync(directFd, payload, 'utf-8');
+      } catch (writeError) {
+        closeSync(directFd);
+        try { unlinkSync(lockPath); } catch { /* best-effort */ }
+        throw writeError;
+      }
+      return directFd;
+    }
+    published = true;
+    return fd;
+  } finally {
+    if (!published) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Best-effort close.
+      }
+    }
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Best-effort temp cleanup.
+    }
+  }
+}
+
+/** Live holder (with the error to report) or stale. */
+function judgeLock(snapshot: LockSnapshot, dbPath: string, lockPath: string): { live: false } | { live: true; pid: number | null; error: Error } {
+  let existing: { pid?: unknown; entryPath?: string } | null = null;
+  try {
+    existing = JSON.parse(snapshot.bytes.toString('utf-8')) as { pid?: unknown; entryPath?: string };
+  } catch {
+    existing = null;
+  }
+  if (!existing || typeof existing.pid !== 'number') {
+    if (Math.abs(Date.now() - snapshot.mtimeMs) < UNREADABLE_LOCK_GRACE_MS) {
+      return {
+        live: true,
+        pid: null,
+        error: new Error(`[database] Refusing startup because another ShieldCortex process is still writing ${lockPath}`),
+      };
+    }
+    return { live: false };
+  }
+  try {
+    process.kill(existing.pid, 0);
+    return {
+      live: true,
+      pid: existing.pid,
+      error: new Error(
+        `[database] Refusing startup because ShieldCortex PID ${existing.pid} is already using ${dbPath}` +
+        (existing.entryPath ? ` (${existing.entryPath})` : '')
+      ),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+      return { live: true, pid: existing.pid, error: error as Error };
+    }
+    return { live: false };
+  }
+}
+
+/**
+ * Take the startup lock. Module lock state (`lockFilePath`, `lockFileFd`,
+ * `lockOwnedRecord`) is set only once this process's own record is on disk;
+ * every other outcome — continue-anyway, refusal, or a thrown error — leaves
+ * it untouched (#763).
+ */
 function acquireStartupLock(dbPath: string, refuseIfLocked = false): void {
-  lockFilePath = `${dbPath}.lock`;
+  const lockPath = `${dbPath}.lock`;
   const runtime = resolveRuntimeInfo();
   const payload = JSON.stringify({
     pid: process.pid,
     startedAt: new Date().toISOString(),
     entryPath: runtime.entryPath,
+    nonce: randomUUID(),
   }, null, 2);
 
-  const tryOpen = () => {
-    lockFileFd = openSync(lockFilePath as string, 'wx', SECURE_OPEN_MODE);
-    writeFileSync(lockFileFd, payload, 'utf-8');
-  };
-
-  try {
-    tryOpen();
-    return;
-  } catch {
-    let activeProcessError: Error | null = null;
-    let existingPid: number | null = null;
-    try {
-      const existing = JSON.parse(readFileSync(lockFilePath as string, 'utf-8')) as { pid?: number; entryPath?: string };
-      if (typeof existing.pid === 'number') {
-        existingPid = existing.pid;
-        try {
-          process.kill(existing.pid, 0);
-          activeProcessError = new Error(
-            `[database] Refusing startup because ShieldCortex PID ${existing.pid} is already using ${dbPath}` +
-            (existing.entryPath ? ` (${existing.entryPath})` : '')
-          );
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
-            activeProcessError = error as Error;
-          }
-        }
-      }
-    } catch {
-      // Stale or unreadable lock file — remove and retry.
-    }
-
-    if (activeProcessError) {
-      if (refuseIfLocked) {
-        lockFilePath = null;
-        lockFileFd = null;
-        throw new StartupLockHeldError(activeProcessError.message);
-      }
-      console.error(
-        `[database] Another ShieldCortex process (PID ${existingPid ?? 'unknown'}) is using ${dbPath} — ` +
-        `continuing anyway (SQLite WAL handles concurrency)`
-      );
-      lockFilePath = null;
-      lockFileFd = null;
+  let holder: { pid: number | null; error: Error } | null = null;
+  for (let attempt = 0; attempt < STARTUP_LOCK_ATTEMPTS && !holder; attempt++) {
+    const published = publishLock(lockPath, payload);
+    if (published !== 'exists') {
+      lockFileFd = published;
+      lockFilePath = lockPath;
+      lockOwnedRecord = Buffer.from(payload, 'utf-8');
       return;
     }
 
+    let snapshot: LockSnapshot | null;
     try {
-      unlinkSync(lockFilePath as string);
-    } catch {
-      // Best-effort stale lock cleanup.
+      snapshot = readLockSnapshot(lockPath);
+    } catch (error) {
+      // A lock we cannot read is never ours to remove.
+      holder = { pid: null, error: error as Error };
+      break;
     }
+    if (!snapshot) continue; // Released between our publish and read — retry.
 
-    tryOpen();
+    const verdict = judgeLock(snapshot, dbPath, lockPath);
+    if (verdict.live) {
+      holder = { pid: verdict.pid, error: verdict.error };
+      break;
+    }
+    // Stale: remove exactly the record judged stale, then retry publishing.
+    // 'changed' means another process published in between; the next round
+    // reads and judges that record instead.
+    if (removeLockIfUnchanged(lockPath, snapshot) === 'failed') {
+      holder = { pid: null, error: new Error(`[database] Refusing startup because the stale lock ${lockPath} could not be removed`) };
+    }
   }
+  holder ??= { pid: null, error: new Error(`[database] Refusing startup because ${lockPath} kept changing while ShieldCortex was starting`) };
+
+  if (refuseIfLocked) {
+    throw new StartupLockHeldError(holder.error.message);
+  }
+  console.error(
+    `[database] Another ShieldCortex process (PID ${holder.pid ?? 'unknown'}) is using ${dbPath} — ` +
+    `continuing anyway (SQLite WAL handles concurrency)`
+  );
 }
 
 /**
@@ -860,23 +1015,28 @@ export function closeDatabase(): void {
     dbInode = null;
   }
 
+  // Release only a lock this process owns, and only while the on-disk record
+  // is still the one it published (same inode, same bytes) — never another
+  // process's lock (#763).
   if (lockFileFd !== null) {
+    try {
+      const ownIno = fstatSync(lockFileFd).ino;
+      const onDisk = lockFilePath ? readLockSnapshot(lockFilePath) : null;
+      if (lockFilePath && lockOwnedRecord && onDisk && onDisk.ino === ownIno && onDisk.bytes.equals(lockOwnedRecord)) {
+        removeLockIfUnchanged(lockFilePath, { bytes: lockOwnedRecord, ino: ownIno });
+      }
+    } catch {
+      // Non-fatal: an unverifiable lock is left in place.
+    }
     try {
       closeSync(lockFileFd);
     } catch {
       // Best-effort close.
     }
-    lockFileFd = null;
   }
-
-  if (lockFilePath && existsSync(lockFilePath)) {
-    try {
-      unlinkSync(lockFilePath);
-    } catch {
-      // Non-fatal
-    }
-    lockFilePath = null;
-  }
+  lockFileFd = null;
+  lockFilePath = null;
+  lockOwnedRecord = null;
 }
 
 /**

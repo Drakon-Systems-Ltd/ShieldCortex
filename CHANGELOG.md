@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **`shieldcortex maintain` (#761).** A live startup lock acquired after the initial check now stops database initialization before it can write, while maintenance steps skip and doctor still runs.
+- **Database startup lock (#763).** Two ShieldCortex processes starting at the same moment can no longer both claim the database startup lock, a lock replaced by a live process is never removed as stale, and shutting down never removes another process's lock. `shieldcortex maintain` no longer closes a database handle that another caller in the same process opened.
 
 ## [5.9.0] - 2026-10-14
 
