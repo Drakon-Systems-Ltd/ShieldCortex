@@ -40,6 +40,7 @@ import {
 import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
 import { bodyIsAllDataRead } from './heredoc-data-read.js';
+import { shellStartupWrite, sourceStartupWrite } from './shell-startup-write-588.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
 export type ToolGuardSeverity = 'benign' | 'sensitive' | 'dangerous' | 'catastrophic';
@@ -6019,7 +6020,8 @@ function scanWriteContentPayload(content: string, path?: string): {
   const dangerous: Array<{ signal: string; span: string }> = [];
   const seen = new Set<string>();
   const argvContext = argvReliefContext(content, path);
-  forEachWindow(content, (w) => {
+  const patternSurface = content;
+  forEachWindow(patternSurface, (w) => {
     const text = deobfuscateIfs(w);
     for (const m of matchSpans(CATASTROPHIC, text)) {
       if (m.signal === 'recursive-force-delete' && deleteTargetsAreWorkspaceConfined(text)) continue;
@@ -6033,10 +6035,7 @@ function scanWriteContentPayload(content: string, path?: string): {
       if (m.signal === 'git-delete-branch' && !gitDeleteBranchInvoked(text)) continue;
       if (m.signal === 'modify-network-firewall' && firewallCallsAreReadOnly(text)) continue;
       if (m.signal === 'install-package' && installsAreContainerConfined(text)) continue;
-      // #505 (Option A): the startup-file write shape is judged on the exec
-      // surface, not in written content. Regex reading could not tell a
-      // quoted mention from a real write here (#588). A written script that
-      // appends is still gated when it runs: the folded-script scan reads it.
+      // #588 uses the source lexer below, rather than a regex over literals.
       if (m.signal === 'modify-shell-startup') continue;
       // #386: quoted install vocabulary in scripts/logs is not an install.
       if (m.signal === 'install-package-global' && !packageInstallGlobalInvoked(text)) continue;
@@ -6071,6 +6070,9 @@ function scanWriteContentPayload(content: string, path?: string): {
   });
   if (!seen.has('install-package-global') && globalInstallArgvInvoked(content, argvContext)) {
     dangerous.push({ signal: 'install-package-global', span: 'global package install' });
+  }
+  if (!seen.has('modify-shell-startup') && sourceStartupWrite(content, langFromPath(path ?? ''))) {
+    dangerous.push({ signal: 'modify-shell-startup', span: 'shell startup file write' });
   }
   return { catastrophic, dangerous };
 }
@@ -7119,6 +7121,13 @@ function evaluateToolCallCore(
       span: fmtSpan(scanSurface.match(NPX_BUNX_COMMAND_RE)?.[0] ?? 'npx/bunx'),
       tier: 'executed',
     });
+  }
+  // #588: shell argv parsing also catches escaped operands that the legacy
+  // exec regex cannot express without breaking backslash-newline continuation.
+  if (family === 'exec' && shellStartupWrite(scanSurface) && !dangerSignals.includes('modify-shell-startup')) {
+    dangerSignals.push('modify-shell-startup');
+    dangerSpan = dangerSpan ?? 'shell startup file write';
+    dangerEvidence.set('modify-shell-startup', { signal: 'modify-shell-startup', span: 'shell startup file write', tier: 'executed' });
   }
   // #505 (SC-06): a Write/Edit whose TARGET is a shell startup file. The
   // DANGEROUS row above catches the shell spellings (`>> ~/.bashrc`, `tee`,

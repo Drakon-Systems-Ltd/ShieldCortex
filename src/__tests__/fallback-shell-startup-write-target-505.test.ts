@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { performance } from 'node:perf_hooks';
 import { createInterceptor, DEFAULT_CONFIG, type InterceptAuditEntry } from '../../plugins/openclaw/interceptor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -77,6 +78,30 @@ describe('#505 — OpenClaw interceptor fallback: tee operand run stops at the s
     await expect(run(`printf x | tee /tmp/log; source ~/.profile`)).resolves.toBeUndefined();
     await expect(run(`printf x | tee /tmp/log ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
     await expect(run(`printf x | tee -a \\\n  ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i); // escaped newline = continuation
+    await expect(run(`echo x | tee /tmp/a\\b ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i); // #588 escaped operand
+    await expect(run(`echo x > "/home/a b/${RC}"`)).rejects.toThrow(/blocked|fallback|degraded|policy/i); // quoted argv
+  });
+  it('recognises substitutions, comments, wrappers, eval and shell option clusters', async () => {
+    const t = `~/${RC}`;
+    for (const command of [
+      'x=\x60echo x >> ' + t + '\x60', `echo "$(f() { echo x >> ${t}; }; f)"`,
+      `# don't\necho x >> ${t}\n# it's`, `echo x | sudo -u root tee -a ${t}`,
+      `echo x | env tee -a ${t}`, `eval "echo x >> ${t}"`,
+      `eval 'echo x >> ${t}'`, `bash -lc 'echo x >> ${t}'`,
+      `bash -c -- 'echo x >> ${t}'`, `bash <<EOF\necho x >> ${t}\nEOF`,
+      `sh -s <<'EOF'\necho x >> ${t}\nEOF`, `cat <<'EOF' | sh\necho x >> ${t}\nEOF`,
+      `cat <<'EOF'\necho x >> ${t}\nEOF | sh`,
+    ]) await expect(run(command)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
+    for (const command of [`# echo x >> ${t}`, `cat <<'EOF'\necho x >> ${t}\nEOF`])
+      await expect(run(command)).resolves.toBeUndefined();
+  });
+
+  it('bounds the 4096-character fallback surface', async () => {
+    for (const text of ['\\'.repeat(4096), '\x60'.repeat(4096), '${'.repeat(2048), '\n'.repeat(4096), '/'.repeat(4096), "#'".repeat(2048), '/['.repeat(2048), '$('.repeat(2048), '('.repeat(4096), 'eval '.repeat(819), 'sudo '.repeat(819)]) {
+      const start = performance.now();
+      await run(text).catch(() => undefined);
+      expect(performance.now() - start).toBeLessThan(300);
+    }
   });
 });
 
@@ -118,6 +143,29 @@ describe('#505 — Claude Code hook fallback: startup-file write target', () => 
     expect(JSON.parse(e).hookSpecificOutput.permissionDecision).toBe('ask');
     expect(await runHook('Read', { file_path: `${tempHome}/${RC}` })).toBe('');
     expect(await runHook('Write', { file_path: '/repo/src/cli.ts', content: 'console.log("hi");\n' })).toBe('');
+  });
+  it('recognises the #588 escaped tee operand and continued line', async () => {
+    for (const command of [`echo x | tee /tmp/a\\b ~/${RC}`, `echo x | tee -a \\\n ~/${RC}`, `echo x > "/home/a b/${RC}"`]) {
+      const result = await runHook('Bash', { command });
+      expect(JSON.parse(result).hookSpecificOutput.permissionDecision).toBe('ask');
+    }
+  });
+  it('mirrors the shell walker decisions', async () => {
+    const t = `~/${RC}`;
+    for (const command of [
+      'x=\x60echo x >> ' + t + '\x60', `echo "$(f() { echo x >> ${t}; }; f)"`,
+      `# don't\necho x >> ${t}\n# it's`, `echo x | sudo -u root tee -a ${t}`,
+      `echo x | env tee -a ${t}`, `eval "echo x >> ${t}"`,
+      `bash -lc 'echo x >> ${t}'`, `bash -c -- 'echo x >> ${t}'`,
+    ]) expect(JSON.parse(await runHook('Bash', { command })).hookSpecificOutput.permissionDecision).toBe('ask');
+    for (const command of [`# echo x >> ${t}`, `cat <<'EOF'\necho x >> ${t}\nEOF`])
+      expect(await runHook('Bash', { command })).toBe('');
+  });
+
+  it('keeps the capped hook fallback scan within 300 ms', async () => {
+    const start = performance.now();
+    await runHook('Bash', { command: '\\'.repeat(4096) });
+    expect(performance.now() - start).toBeLessThan(300);
   });
 });
 
