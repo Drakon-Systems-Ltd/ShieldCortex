@@ -61,6 +61,19 @@ describe('#588 startup writes in authored content', () => {
     ['/repo/install.pl', `qx(echo x >> ${target})`],
     ...['shell_exec', 'system', 'passthru', 'exec', 'popen', 'proc_open'].map(sink => ['/repo/install.php', `${sink}("echo x >> ${target}");`]),
     ['/repo/install.php', '\x60echo x >> ' + target + '\x60'],
+    // A `#` / `//` comment holding an apostrophe must not open a quote that
+    // swallows the real sink on the next line.
+    ['/repo/install.rb', `# don't\nsystem("echo x >> ${target}")\n# it's`],
+    ['/repo/install.pl', `# don't\nsystem("echo x >> ${target}");\n# it's`],
+    ['/repo/install.php', `<?php\n// don't\nshell_exec("echo x >> ${target}");\n// it's`],
+    ['/repo/install.php', `<?php\n# don't\nshell_exec("echo x >> ${target}");\n# it's`],
+    // Perl `$#array` is not a comment.
+    ['/repo/install.pl', `my $n = $#a; system("echo x >> ${target}");`],
+    // Any punctuation delimiter for %x / qx.
+    ['/repo/install.rb', `%x[echo x >> ${target}]`],
+    ['/repo/install.rb', `%x|echo x >> ${target}|`],
+    ['/repo/install.pl', `qx!echo x >> ${target}!`],
+    ['/repo/install.pl', `qx[echo x >> ${target}]`],
   ])('gates %s: %s', (path, content) => {
     const v = write(path, content);
     expect(v.signals).toContain('modify-shell-startup');
@@ -107,6 +120,24 @@ describe('#588 startup writes in authored content', () => {
       expect(scan()).toBe(false);
       expect(performance.now() - start).toBeLessThan(300);
     }
+  });
+
+  it.each([
+    ['ruby', '%x{'.repeat(33_000)], ['ruby', '%x|'.repeat(33_000)], ['ruby', '#'.repeat(100_000)],
+    ['perl', 'qx('.repeat(33_000)], ['perl', '$#'.repeat(50_000)], ['perl', 'qx/'.repeat(33_000)],
+    ['php', '//'.repeat(50_000)], ['php', '/*'.repeat(50_000)], ['php', "#'".repeat(50_000)],
+  ])('keeps the %s lexer linear on 100 KB of delimiters', (lang, content) => {
+    const start = performance.now();
+    sourceStartupWrite(content, lang);
+    expect(performance.now() - start).toBeLessThan(300);
+  });
+
+  it.each([
+    ['/repo/install.rb', `# system("echo x >> ${target}")\nputs "ok"`],
+    ['/repo/install.php', `<?php\n// shell_exec("echo x >> ${target}");\necho "ok";`],
+    ['/repo/install.pl', `# system("echo x >> ${target}");\nprint "ok";`],
+  ])('allows a commented-out sink in %s', (path, content) => {
+    expect(write(path, content).signals).not.toContain('modify-shell-startup');
   });
 
   it.each(['\\'.repeat(100_000), '\x60'.repeat(100_000), '${'.repeat(50_000), '\x22'.repeat(100_000), 'const x = \x60' + '\\'.repeat(99_990), '/'.repeat(1e5), "#" + "'".repeat(1e5), '/['.repeat(5e4), '$('.repeat(5e4), '('.repeat(1e5), 'eval '.repeat(2e4), 'sudo '.repeat(2e4)])(

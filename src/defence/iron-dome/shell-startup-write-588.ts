@@ -153,8 +153,15 @@ export function sourceStartupWrite(text: string, lang: string): boolean {
       if (c === '$' && text[i + 1] === '{') { frames.push({ kind: 'code', brace: 0 }); i++; continue; }
       frame.body += c; continue;
     }
-    if (lang === 'node' && c === '/' && text[i + 1] === '/') { while (i + 1 < text.length && !/[\n\r\u2028\u2029]/.test(text[i + 1]!)) i++; continue; }
-    if (lang === 'node' && c === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); if (end < 0) break; i = end + 1; continue; }
+    if ((lang === 'node' || lang === 'php') && c === '/' && text[i + 1] === '/') { while (i + 1 < text.length && !/[\n\r\u2028\u2029]/.test(text[i + 1]!)) i++; continue; }
+    if ((lang === 'node' || lang === 'php') && c === '/' && text[i + 1] === '*') { const end = text.indexOf('*/', i + 2); if (end < 0) break; i = end + 1; continue; }
+    // `#` line comments in Ruby, Perl and PHP. A comment must never open a
+    // quote (`# don't` would swallow the next sink). Perl's `$#array` is not
+    // a comment.
+    if ((lang === 'ruby' || lang === 'perl' || lang === 'php') && c === '#' && !(lang === 'perl' && text[i - 1] === '$')) {
+      while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r') i++;
+      continue;
+    }
     if (lang === 'node' && c === '/' && text[i + 1] !== '=' && previous !== 'identifier' && previous !== 'literal' && previous !== ')' && previous !== ']') {
       let inClass = false;
       for (i++; i < text.length; i++) {
@@ -174,14 +181,17 @@ export function sourceStartupWrite(text: string, lang: string): boolean {
       if (shellStartupWrite(value)) return true;
       previous = 'literal'; continue;
     }
-    if ((lang === 'ruby' && c === '%' && text[i + 1] === 'x' || lang === 'perl' && c === 'q' && text[i + 1] === 'x') && (text[i + 2] === '{' || text[i + 2] === '(')) {
-      const open = text[i + 2]!, close = open === '{' ? '}' : ')';
+    // Ruby `%x` and Perl `qx` take any punctuation delimiter; bracket pairs nest.
+    if ((lang === 'ruby' && c === '%' && text[i + 1] === 'x' || lang === 'perl' && c === 'q' && text[i + 1] === 'x' && !/[A-Za-z_\d$]/.test(text[i - 1] ?? ''))
+        && /[^\sA-Za-z\d_]/.test(text[i + 2] ?? 'a')) {
+      const open = text[i + 2]!;
+      const close = ({ '{': '}', '(': ')', '[': ']', '<': '>' } as Record<string, string>)[open] ?? open;
       let depth = 1, value = '';
       for (i += 3; i < text.length && depth; i++) {
         const d = text[i]!;
         if (d === '\\') { value += d + (text[++i] ?? ''); continue; }
-        if (d === open) depth++;
-        else if (d === close && --depth === 0) break;
+        if (d === close && --depth === 0) break;
+        if (d === open && open !== close) depth++;
         value += d;
       }
       if (shellStartupWrite(value)) return true;
