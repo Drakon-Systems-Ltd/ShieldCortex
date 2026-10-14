@@ -194,9 +194,11 @@ describe('maintain #652 slice A', () => {
     deps.dbPath = path.join(dir, 'missing', 'cannot-open.db');
     deps.doctor = async () => [];
     const report = await maintain({ dryRun: true }, deps);
-    // A missing dry-run DB is unavailable but not an open failure; use an invalid existing file.
+    // A missing dry-run DB is unavailable but not an open failure. A directory
+    // at the DB path makes the read-only open itself throw (a garbage file
+    // would open lazily and fail later, inside the consolidate query).
     expect(report.steps.consolidate.reason).toBe('database unavailable');
-    fs.writeFileSync(deps.dbPath = path.join(dir, 'invalid.db'), 'not sqlite');
+    fs.mkdirSync(deps.dbPath = path.join(dir, 'dir-not-db.db'));
     const failed = await maintain({ dryRun: true }, deps);
     expect(failed.steps.consolidate.status).toBe('failed');
     expect(failed.steps.consolidate.reason).not.toBe('database unavailable');
