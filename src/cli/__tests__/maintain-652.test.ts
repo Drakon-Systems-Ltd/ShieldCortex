@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, createHmac } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { initDatabase, closeDatabase } from '../../database/init.js';
@@ -118,6 +119,50 @@ describe('maintain #652 slice A', () => {
     expect(report.steps.notify.reason).toBe('not-configured');
   });
 
+  it('skips every write when another process takes the lock after the precheck', async () => {
+    const { deps } = fixture();
+    // Let startup schema housekeeping settle before measuring maintenance writes.
+    initDatabase(dbPath);
+    closeDatabase();
+    const snapshot = () => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return {
+          rows: (db.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n,
+          missing: (db.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NULL').get() as { n: number }).n,
+          pages: db.pragma('page_count', { simple: true }) as number,
+          free: db.pragma('freelist_count', { simple: true }) as number,
+        };
+      } finally { db.close(); }
+    };
+    const before = snapshot();
+    expect(before.rows).toBeGreaterThan(cap.maxShortTermMemories);
+    expect(before.missing).toBeGreaterThan(0);
+    expect(before.free / before.pages).toBeGreaterThanOrEqual(0.2);
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+    try {
+      if (!child.pid) throw new Error('could not spawn lock owner');
+      const otherPid = child.pid;
+      const consolidate = jest.fn(() => { throw new Error('consolidate must not run'); });
+      const embed = jest.fn(fakeEmbed);
+      const vacuum = jest.fn((_db: Database.Database) => { throw new Error('vacuum must not run'); });
+      deps.consolidate = consolidate as unknown as MaintainDeps['consolidate'];
+      deps.embed = embed;
+      deps.vacuum = vacuum;
+      deps.afterLockCheck = () => fs.writeFileSync(`${dbPath}.lock`, JSON.stringify({ pid: otherPid }));
+      const report = await maintain({}, deps);
+      expect(report.steps.consolidate).toMatchObject({ status: 'skipped', reason: 'locked' });
+      expect(report.steps.embed).toMatchObject({ status: 'skipped', reason: 'locked', missing: 0, embedded: 0 });
+      expect(report.steps.vacuum).toMatchObject({ status: 'skipped', reason: 'locked' });
+      expect(report.steps.doctor.status).toBe('ran');
+      expect(consolidate).not.toHaveBeenCalled();
+      expect(embed).not.toHaveBeenCalled();
+      expect(vacuum).not.toHaveBeenCalled();
+      expect(snapshot()).toEqual(before);
+      expect(JSON.parse(fs.readFileSync(`${dbPath}.lock`, 'utf8')).pid).toBe(otherPid);
+    } finally { child.kill(); }
+  });
+
   it('skips uncached embedding without a write or embed failure', async () => {
     const { deps } = fixture();
     delete deps.embed;
@@ -187,6 +232,40 @@ describe('maintain #652 slice A', () => {
     deps.notifier = notify;
     expect((await maintain({}, deps)).steps.notify.reason).toBe('throttled');
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it.each(['null', '[]', '42'])('treats a %s notification state root as no earlier delivery', async stored => {
+    const { deps } = fixture();
+    const state = path.join(dir, 'state', 'maintain-notify.json');
+    fs.mkdirSync(path.dirname(state), { recursive: true });
+    fs.writeFileSync(state, stored);
+    deps.doctor = async () => [{ label: 'A', status: 'fail', message: 'local only' }];
+    const notify = jest.fn<() => Promise<boolean>>().mockResolvedValue(true);
+    deps.notifier = notify;
+    const report = await maintain({}, deps);
+    expect(report.steps.notify).toMatchObject({ status: 'ran', reason: 'sent' });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fs.readFileSync(state, 'utf8')).sent.A).toEqual(expect.any(Number));
+  });
+
+  it('passes the normalised notification timeout to delivery', async () => {
+    const old = process.env.SHIELDCORTEX_CONFIG_DIR;
+    process.env.SHIELDCORTEX_CONFIG_DIR = dir;
+    clearCloudConfigCache();
+    try {
+      fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ actionGuard: { notify: { timeoutMs: 1234 } } }));
+      const { deps } = fixture();
+      deps.doctor = async () => [{ label: 'A', status: 'fail', message: 'local only' }];
+      const send = jest.fn<NonNullable<MaintainDeps['channels']>[number]['send']>().mockResolvedValue({ delivered: true });
+      deps.channels = [{ name: 'test', send }];
+      const report = await maintain({}, deps);
+      expect(report.steps.notify).toMatchObject({ status: 'ran', reason: 'sent' });
+      expect(send).toHaveBeenCalledWith(expect.anything(), { timeoutMs: 1234 });
+    } finally {
+      if (old === undefined) delete process.env.SHIELDCORTEX_CONFIG_DIR;
+      else process.env.SHIELDCORTEX_CONFIG_DIR = old;
+      clearCloudConfigCache();
+    }
   });
 
   it('keeps an open failure on consolidate instead of replacing it with database unavailable', async () => {

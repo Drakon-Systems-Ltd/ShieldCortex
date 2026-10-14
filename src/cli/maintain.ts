@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { DIRECTORY_BUDGET_BYTES } from '../limits.js';
-import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, initDatabase, resolveMemoriesDbPath } from '../database/init.js';
+import { assertSafeRuntimeForDbPath, closeDatabase, expandPath, holdsStartupLock, initDatabase, resolveMemoriesDbPath } from '../database/init.js';
 import { readRawConfig } from '../cloud/config.js';
 import { resolveMemoryConfig } from '../memory/config.js';
 import type { MemoryConfig, ConsolidationResult } from '../memory/types.js';
@@ -32,6 +32,7 @@ export interface MaintainDeps {
   consolidate?: () => ConsolidationResult;
   doctor?: () => Promise<CheckResult[]>;
   vacuum?: (db: Database.Database) => void;
+  afterLockCheck?: () => void;
 }
 
 const step = (status: Status, reason: string, counts: Record<string, number> = {}): MaintainStep => ({ status, reason, ...counts });
@@ -46,15 +47,18 @@ const liveLock = (dbPath: string): boolean => {
 };
 const lockedError = (err: unknown): boolean => /SQLITE_BUSY|database is locked|database is busy|locked by/i.test(errorText(err));
 
-export async function configuredChannels(fetchImpl?: typeof fetch): Promise<NotifyChannel[]> {
+async function configuredNotification(fetchImpl?: typeof fetch): Promise<{ channels: NotifyChannel[]; timeoutMs?: number }> {
   try {
     const { normaliseNotifyConfig } = await import('../defence/iron-dome/notify-config.js');
     const { createWebhookNotifyChannel } = await import('../defence/iron-dome/webhook-notify-channel.js');
     const guard = readRawConfig().actionGuard;
     const rawNotify = guard && typeof guard === 'object' && !Array.isArray(guard) ? (guard as Record<string, unknown>).notify : undefined;
     const cfg = normaliseNotifyConfig(rawNotify);
-    return cfg.enabled && cfg.webhookUrl ? [createWebhookNotifyChannel({ url: cfg.webhookUrl, secret: cfg.webhookSecret, fetchImpl })] : [];
-  } catch { return []; }
+    return { channels: cfg.enabled && cfg.webhookUrl ? [createWebhookNotifyChannel({ url: cfg.webhookUrl, secret: cfg.webhookSecret, fetchImpl })] : [], timeoutMs: cfg.timeoutMs };
+  } catch { return { channels: [] }; }
+}
+export async function configuredChannels(fetchImpl?: typeof fetch): Promise<NotifyChannel[]> {
+  return (await configuredNotification(fetchImpl)).channels;
 }
 
 /** The checks this command can affect, plus any maintenance-step failures. */
@@ -82,7 +86,8 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
   };
   let db: Database.Database | undefined;
   let dbOwnedByInit = false;
-  const locked = !dryRun && liveLock(dbPath);
+  let locked = !dryRun && liveLock(dbPath);
+  deps.afterLockCheck?.();
   try {
     if (locked) {
       steps.consolidate = step('skipped', 'locked');
@@ -93,6 +98,12 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     } else {
       db = injectedPath ? initDatabase(dbPath) : initDatabase();
       dbOwnedByInit = true;
+      locked = !holdsStartupLock();
+      if (locked) {
+        steps.consolidate = step('skipped', 'locked');
+        steps.embed = step('skipped', 'locked', { missing: 0, embedded: 0 });
+        steps.vacuum = step('skipped', 'locked');
+      }
     }
   } catch (err) { failStep('consolidate', err); }
 
@@ -184,7 +195,10 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     const fingerprint = failing.map(r => r.label).sort().join('\n');
     const now = (deps.now ?? (() => new Date()))().getTime();
     let previous: { fingerprint?: string; sentAt?: number; sent?: Record<string, number> } = {};
-    try { previous = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as typeof previous; } catch { /* no earlier delivery */ }
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) previous = parsed as typeof previous;
+    } catch { /* no earlier delivery */ }
     const sent: Record<string, number> = Object.create(null) as Record<string, number>;
     const priorSent = previous.sent && typeof previous.sent === 'object' && !Array.isArray(previous.sent) ? previous.sent : {};
     for (const [key, at] of Object.entries(priorSent)) {
@@ -194,7 +208,9 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
     if (sent[fingerprint] !== undefined) {
       steps.notify = step('skipped', 'throttled');
     } else {
-      const channels = deps.channels ?? await configuredChannels();
+      // An injected notifier needs no runtime config read.
+      const configured = deps.notifier ? undefined : await configuredNotification();
+      const channels = deps.channels ?? configured?.channels ?? [];
       if (!deps.notifier && channels.length === 0) steps.notify = step('skipped', 'not-configured');
       else {
         try {
@@ -203,7 +219,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
           const safe = failing.map(r => ({ label: r.label, status: 'fail' as const, message: 'Check failed; run shieldcortex doctor for details.' }));
           const delivered = deps.notifier
             ? await deps.notifier(safe)
-            : Boolean((await deliverOperatorNotification(buildMaintenanceFailNotification(safe), { channels })).deliveredVia);
+            : Boolean((await deliverOperatorNotification(buildMaintenanceFailNotification(safe), { channels, timeoutMs: configured?.timeoutMs })).deliveredVia);
           if (delivered) {
             fs.mkdirSync(path.dirname(stateFile), { recursive: true });
             sent[fingerprint] = now;

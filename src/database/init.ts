@@ -25,6 +25,8 @@ let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
 let lockFilePath: string | null = null;
 let lockFileFd: number | null = null;
+/** True only while this process owns the startup lock (not the continue-anyway path). */
+export function holdsStartupLock(): boolean { return lockFileFd !== null; }
 let dbInode: bigint | null = null; // Track file identity for staleness detection
 
 // Anti-bloat: Database size limits
