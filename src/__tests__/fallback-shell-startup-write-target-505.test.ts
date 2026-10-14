@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { performance } from 'node:perf_hooks';
 import { createInterceptor, DEFAULT_CONFIG, type InterceptAuditEntry } from '../../plugins/openclaw/interceptor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,24 @@ const RC = '.bash' + 'rc';
 const FISH = '.config/fish/config.' + 'fish';
 const AK = '.s' + 'sh/authorized' + '_keys';
 const BENIGN = 'export PATH=/opt/tool/bin:$PATH\n';
+const STARTUP_EXECUTIONS = [
+  `python3 -c 'import os; os.system("echo x >> ~/${RC}")'`,
+  `node -e 'require("child_process").execSync("echo x >> ~/${RC}")'`,
+  `perl -e 'system("echo x >> ~/${RC}")'`,
+  `echo "x #$(echo x >> ~/${RC})"`,
+  'echo "$(x=\x60echo x >> ~/' + RC + '\x60)"',
+  `cat <<EOF\n$(echo x >> ~/${RC})\nEOF`,
+  ...['/bin/sh', 'env sh', 'sudo sh', 'env bash', 'sh -s', 'bash -s', 'tee >(sh)'].map(reader => `cat <<'EOF' | ${reader}\necho x >> ~/${RC}\nEOF`),
+  `cat <<'EOF' \\\n| sh\necho x >> ~/${RC}\nEOF`,
+  `cat <<'EOF' \\\n| env sh\necho x >> ~/${RC}\nEOF`,
+  `cat <<'EOF' |\necho x | tee /tmp/a\\b ~/${RC}\nEOF\nsh`,
+  `cat <<'EOF' > >(sh)\necho x >> ~/${RC}\nEOF`,
+  `cat <<'EOF' >(sh)\necho x >> ~/${RC}\nEOF`,
+  `env bash -c 'echo x >> ~/${RC}'`,
+  `/usr/bin/env bash -c 'echo x >> ~/${RC}'`,
+
+];
+const STARTUP_INERT = [`echo harmless`, `echo "# not a comment"`];
 
 const okPipeline = () => ({
   allowed: true,
@@ -72,11 +91,44 @@ describe('#505 — OpenClaw interceptor fallback: tee operand run stops at the s
     const i = createInterceptor({ ...DEFAULT_CONFIG, actionGuard: { enabled: true, enforce: true, autoApprove: [] } } as never, okPipeline as never, { onAuditEntry: (e) => entries.push(e) });
     return i.handleToolCall({ toolName: 'Bash', arguments: { command } });
   };
+  it.each(STARTUP_EXECUTIONS)('preserves the legacy gate and adds walker coverage: %s', async command => {
+    await expect(run(command)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
+  });
+  it.each(STARTUP_INERT)('allows a non-executing mention: %s', async command => {
+    await expect(run(command)).resolves.toBeUndefined();
+  });
   it('a read of a startup file on the NEXT line is not a tee operand', async () => {
     await expect(run(`printf x | tee /tmp/log\ncat ~/${RC}`)).resolves.toBeUndefined();
     await expect(run(`printf x | tee /tmp/log; source ~/.profile`)).resolves.toBeUndefined();
     await expect(run(`printf x | tee /tmp/log ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
     await expect(run(`printf x | tee -a \\\n  ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i); // escaped newline = continuation
+    await expect(run(`echo x | tee /tmp/a\\b ~/${RC}`)).rejects.toThrow(/blocked|fallback|degraded|policy/i); // #588 escaped operand
+    await expect(run(`echo x > "/home/a b/${RC}"`)).rejects.toThrow(/blocked|fallback|degraded|policy/i); // quoted argv
+  });
+  it('recognises substitutions, comments, wrappers, eval and shell option clusters', async () => {
+    const t = `~/${RC}`;
+    for (const command of [
+      'x=\x60echo x >> ' + t + '\x60', `echo "$(f() { echo x >> ${t}; }; f)"`,
+      `# don't\necho x >> ${t}\n# it's`, `echo x | sudo -u root tee -a ${t}`,
+      `echo x | env tee -a ${t}`, `eval "echo x >> ${t}"`,
+      `eval 'echo x >> ${t}'`, `bash -lc 'echo x >> ${t}'`,
+      `bash -c -- 'echo x >> ${t}'`, `bash <<EOF\necho x >> ${t}\nEOF`,
+      `sh -s <<'EOF'\necho x >> ${t}\nEOF`, `cat <<'EOF' | sh\necho x >> ${t}\nEOF`,
+    ]) await expect(run(command)).rejects.toThrow(/blocked|fallback|degraded|policy/i);
+    for (const command of [`echo harmless`])
+      await expect(run(command)).resolves.toBeUndefined();
+  });
+
+  it('bounds the 4096-character fallback surface', async () => {
+    // A 4096-newline surface is left out on purpose: the pre-existing legacy
+    // rows already take ~95 ms on it locally on main (well past 300 ms under a
+    // loaded CI runner), so it would time those rows, not the #588 walker.
+    // The Python mirror times the walker directly on that input.
+    for (const text of ['\\'.repeat(4096), '\x60'.repeat(4096), '${'.repeat(2048), '/'.repeat(4096), "#'".repeat(2048), '/['.repeat(2048), '$('.repeat(2048), '('.repeat(4096), 'eval '.repeat(819), 'sudo '.repeat(819)]) {
+      const start = performance.now();
+      await run(text).catch(() => undefined);
+      expect(performance.now() - start).toBeLessThan(300);
+    }
   });
 });
 
@@ -110,6 +162,13 @@ describe('#505 — Claude Code hook fallback: startup-file write target', () => 
       child.stdin.end();
     });
   }
+  it.each(STARTUP_EXECUTIONS)('preserves the legacy gate and adds walker coverage: %s', async command => {
+    const out = await runHook('Bash', { command });
+    expect(JSON.parse(out).hookSpecificOutput.permissionDecision).toBe('ask');
+  });
+  it.each(STARTUP_INERT)('allows a non-executing mention: %s', async command => {
+    expect(await runHook('Bash', { command })).toBe('');
+  });
 
   it('Write / Edit to a startup file asks; the same path on Read and an ordinary file fall open', async () => {
     const w = await runHook('Write', { file_path: `${tempHome}/${RC}`, content: BENIGN });
@@ -118,6 +177,23 @@ describe('#505 — Claude Code hook fallback: startup-file write target', () => 
     expect(JSON.parse(e).hookSpecificOutput.permissionDecision).toBe('ask');
     expect(await runHook('Read', { file_path: `${tempHome}/${RC}` })).toBe('');
     expect(await runHook('Write', { file_path: '/repo/src/cli.ts', content: 'console.log("hi");\n' })).toBe('');
+  });
+  it('recognises the #588 escaped tee operand and continued line', async () => {
+    for (const command of [`echo x | tee /tmp/a\\b ~/${RC}`, `echo x | tee -a \\\n ~/${RC}`, `echo x > "/home/a b/${RC}"`]) {
+      const result = await runHook('Bash', { command });
+      expect(JSON.parse(result).hookSpecificOutput.permissionDecision).toBe('ask');
+    }
+  });
+  it('mirrors the shell walker decisions', async () => {
+    const t = `~/${RC}`;
+    for (const command of [
+      'x=\x60echo x >> ' + t + '\x60', `echo "$(f() { echo x >> ${t}; }; f)"`,
+      `# don't\necho x >> ${t}\n# it's`, `echo x | sudo -u root tee -a ${t}`,
+      `echo x | env tee -a ${t}`, `eval "echo x >> ${t}"`,
+      `bash -lc 'echo x >> ${t}'`, `bash -c -- 'echo x >> ${t}'`,
+    ]) expect(JSON.parse(await runHook('Bash', { command })).hookSpecificOutput.permissionDecision).toBe('ask');
+    for (const command of [`echo harmless`])
+      expect(await runHook('Bash', { command })).toBe('');
   });
 });
 

@@ -117,6 +117,8 @@ _FALLBACK_DANGEROUS = [
     re.compile(r"\.shieldcortex[\\/]+config\.json\b", re.I),
 ]
 
+# The shell lexer owns this legacy regex row; retain the original row and input surface.
+
 # Same command/path/url field set the guard extracts — narrow, not the whole
 # args object (a benign `description` must never gate).
 _FALLBACK_SURFACE_KEYS = (
@@ -246,12 +248,220 @@ def _fallback_executed_match(rx, text: str) -> bool:
         pos = m.start() + 1  # overlapping re-scan: a match starting inside this one is still checked
 
 
+_STARTUP_WRITE_PATH = re.compile(r"(?:^|/)(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config/fish/config\.fish)$", re.I)
+_SED_IN_PLACE = re.compile(r"^-(?:[a-zA-Z]*i(?:\.|$)|-in-place(?:=|$))")
+
+
+_STARTUP_NESTING_CAP = 8
+_STARTUP_NESTED_MENTION = re.compile(r"\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config/fish/config\.fish", re.I)
+
+def _fallback_startup_write(text: str, nested: bool = False, nesting: int = 0) -> bool:
+    """#588 capped shell lexer, mirrored with the hook and interceptor."""
+    if nesting >= _STARTUP_NESTING_CAP and _STARTUP_NESTED_MENTION.search(text):
+        return True
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = re.match(r"^\s*cat\s+<<-?\s*(?:([\x27\x22])([A-Za-z_][A-Za-z_0-9]*)\1|\\([A-Za-z_][A-Za-z_0-9]*)|([A-Za-z_][A-Za-z_0-9]*))(?:\s|$)", lines[i])
+        if match:
+            marker = match[2] or match[3] or match[4]
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != marker:
+                j += 1
+            tail = lines[i][match.end():]
+            reader_match = re.fullmatch(r"\s*\|\s*([^|;&<>\\`$]+?)\s*", tail)
+            reader = reader_match[1] if reader_match else ""
+            parts = reader.split()
+            n = 0
+            while n < len(parts) and parts[n].rsplit("/", 1)[-1] in ("sudo", "doas", "env", "command", "exec", "nohup", "nice", "timeout", "stdbuf", "time", "xargs"):
+                wrapper = parts[n].rsplit("/", 1)[-1]
+                n += 1
+                while n < len(parts) and (parts[n].startswith("-") or wrapper == "env" and "=" in parts[n]):
+                    option = parts[n]
+                    n += 1
+                    if option in ("-u", "-g", "-n", "-s", "-i", "-o", "-e") and n < len(parts):
+                        n += 1
+                if wrapper == "timeout" and n < len(parts):
+                    n += 1
+            consumer = parts[n].rsplit("/", 1)[-1] if n < len(parts) else ""
+            safe = not tail.strip() or bool(reader_match) and consumer in ("cat", "head", "tail", "grep", "rg", "wc", "sort", "uniq", "cut", "tr", "jq", "column", "nl", "fold", "fmt")
+            if j < len(lines) and (match[2] or match[3]) and safe:
+                for k in range(i + 1, j):
+                    lines[k] = ""
+            i = j
+        i += 1
+    text = "\n".join(lines)
+
+    if nesting < _STARTUP_NESTING_CAP:
+        quote = ""
+        i = 0
+        while i < len(text):
+            c = text[i]
+            if c == "\\":
+                i += 2
+                continue
+            if c == "'" and quote != '"':
+                quote = "" if quote else "'"
+                i += 1
+                continue
+            if c == '"' and quote != "'":
+                quote = "" if quote else '"'
+                i += 1
+                continue
+            if c == "'" or quote == "'":
+                i += 1
+                continue
+            if not quote and c == "#" and (i == 0 or text[i - 1] in " \t\r\n;|&()"):
+                while i < len(text) and text[i] not in "\r\n":
+                    i += 1
+                continue
+            backtick = c == "`"
+            if not backtick and text[i:i + 2] != "$(":
+                i += 1
+                continue
+            start = i + (1 if backtick else 2)
+            end, depth, inner_quote = start, 1, ""
+            while end < len(text):
+                d = text[end]
+                if d == "\\":
+                    end += 2
+                    continue
+                if backtick:
+                    if d == "`":
+                        break
+                else:
+                    if d in "'\"":
+                        inner_quote = "" if inner_quote == d else d if not inner_quote else inner_quote
+                    elif inner_quote != "'":
+                        if d == "(":
+                            depth += 1
+                        elif d == ")":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                end += 1
+            if end < len(text):
+                if _fallback_startup_write(text[start:end], True, nesting + 1):
+                    return True
+                i = end + 1
+            else:
+                i = end
+
+    tokens = []
+    word, quote = "", ""
+    def flush():
+        nonlocal word
+        if word:
+            tokens.append(("word", word))
+            word = ""
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and quote != "'":
+            if i + 1 < len(text):
+                if text[i + 1] != "\n":
+                    word += text[i + 1]
+                i += 2
+                continue
+        if quote:
+            if c == quote:
+                quote = ""
+            else:
+                word += c
+            i += 1
+            continue
+        if c == "#" and not word:
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+            continue
+        if c in "'\"":
+            quote = c
+        elif c in " \t\r":
+            flush()
+        elif c in "\n;|&()":
+            flush()
+            tokens.append(("boundary", c))
+        elif c == ">":
+            flush()
+            if i + 1 < len(text) and text[i + 1] in ">|":
+                i += 1
+            tokens.append(("redirect", ">"))
+        else:
+            word += c
+        i += 1
+    flush()
+
+    command = []
+    def check():
+        i = 0
+        while i < len(command):
+            w = command[i]
+            verb = w.rsplit("/", 1)[-1].lower()
+            if re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", w):
+                i += 1
+                continue
+            if verb not in ("sudo", "doas", "env", "command", "exec", "nohup", "nice", "timeout", "stdbuf", "time", "builtin", "xargs"):
+                break
+            i += 1
+            while i < len(command):
+                arg = command[i]
+                if verb == "env" and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", arg):
+                    i += 1
+                    continue
+                if arg == "--":
+                    i += 1
+                    break
+                if not arg.startswith("-"):
+                    break
+                i += 1
+                if ((verb in ("sudo", "doas") and arg in ("-u", "-g", "-C", "-p"))
+                        or (verb == "env" and arg in ("-u", "--unset"))
+                        or (verb == "exec" and arg == "-a")
+                        or (verb == "xargs" and arg in ("-n", "-P", "-I", "-L", "-s", "-E"))
+                        or (verb == "nice" and arg == "-n")
+                        or (verb == "timeout" and arg in ("-s", "--signal", "-k", "--kill-after"))
+                        or (verb == "stdbuf" and arg in ("-i", "-o", "-e"))):
+                    i += 1
+            if verb == "timeout" and i < len(command):
+                i += 1
+        verb = command[i].rsplit("/", 1)[-1].lower() if i < len(command) else ""
+        args = command[i + 1:]
+        if verb == "tee" and any(not a.startswith("-") and _STARTUP_WRITE_PATH.search(a) for a in args):
+            return True
+        if verb == "sed" and any(_SED_IN_PLACE.search(a) for a in args) and any(_STARTUP_WRITE_PATH.search(a) for a in args):
+            return True
+        if verb in ("cp", "mv", "install") and args and _STARTUP_WRITE_PATH.search(args[-1]):
+            return True
+        if not nested and verb == "eval" and args and _fallback_startup_write(" ".join(args), True):
+            return True
+        if not nested and verb in ("sh", "bash", "zsh", "dash", "ksh"):
+            for n, arg in enumerate(args):
+                if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", arg):
+                    script_at = n + 2 if n + 1 < len(args) and args[n + 1] == "--" else n + 1
+                    if script_at < len(args) and _fallback_startup_write(args[script_at], True):
+                        return True
+        return False
+    for n, (kind, value) in enumerate(tokens):
+        if kind == "redirect" and n + 1 < len(tokens) and tokens[n + 1][0] == "word" and _STARTUP_WRITE_PATH.search(tokens[n + 1][1]):
+            return True
+        if kind == "boundary":
+            if check():
+                return True
+            command = []
+        elif kind == "word":
+            command.append(value)
+    return check()
+
+
 def fallback_dangerous_match(content: str) -> bool:
     """True when `content` matches a recognised-dangerous shape (fail-closed when enforcing)."""
     if not content:
         return False
+    pattern_text = content
+    if _fallback_startup_write(content[:4096]):
+        return True
     return any(
-        _fallback_executed_match(p, content) if p is _FALLBACK_DESTROY_ROW else p.search(content)
+        _fallback_executed_match(p, pattern_text) if p is _FALLBACK_DESTROY_ROW else p.search(pattern_text)
         for p in _FALLBACK_DANGEROUS
     )
 

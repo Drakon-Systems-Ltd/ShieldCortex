@@ -428,6 +428,8 @@ class FallbackDangerousScanTests(unittest.TestCase):
             "echo x | tee /tmp/log ~/" + rc, "echo x | tee -a -- ~/" + rc,
             "sed --in-place 's/a/b/' ~/" + rc, "sed -Ei 's/a/b/' ~/.profile",
             "printf x | tee -a \\\n  ~/" + rc,  # escaped newline is continuation, not a boundary
+            "echo x | tee /tmp/a\\b ~/" + rc,  # #588 escaped operand
+            'echo x > "/home/a b/' + rc + '"',  # quoted redirect target
         ]:
             self.assertTrue(fallback_dangerous_match(cmd), cmd)
         for cmd in [
@@ -437,6 +439,65 @@ class FallbackDangerousScanTests(unittest.TestCase):
             "printf x | tee /tmp/log; cat ~/" + rc,
         ]:
             self.assertFalse(fallback_dangerous_match(cmd), cmd)
+
+    def test_588_startup_fallback_shell_lexer(self):
+        from sc_client import fallback_dangerous_match
+        t = "~/.bash" + "rc"
+        for cmd in (
+            "x=`echo x >> " + t + "`", 'echo "$(f() { echo x >> ' + t + '; }; f)"',
+            "# don't\necho x >> " + t + "\n# it's", "echo x | sudo -u root tee -a " + t,
+            "echo x | env tee -a " + t, 'eval "echo x >> ' + t + '"',
+            "eval 'echo x >> " + t + "'", "bash -lc 'echo x >> " + t + "'",
+            "bash -c -- 'echo x >> " + t + "'",
+            "bash <<EOF\necho x >> " + t + "\nEOF",
+            "sh -s <<'EOF'\necho x >> " + t + "\nEOF",
+            "cat <<'EOF' | sh\necho x >> " + t + "\nEOF",
+        ):
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+        for cmd in ("echo harmless",):
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+
+    def test_588_startup_fallback_preserves_legacy_rows(self):
+        from sc_client import fallback_dangerous_match
+        t = "~/.bash" + "rc"
+        commands = (
+            "python3 -c 'import os; os.system(\"echo x >> " + t + "\")'",
+            "node -e 'require(\"child_process\").execSync(\"echo x >> " + t + "\")'",
+            "perl -e 'system(\"echo x >> " + t + "\")'",
+            'echo "x #$(echo x >> ' + t + ')"',
+            'echo "$(x=`echo x >> ' + t + '`)"',
+            'cat <<EOF\n$(echo x >> ' + t + ')\nEOF',
+            *("cat <<'EOF' | " + reader + "\necho x >> " + t + "\nEOF"
+              for reader in ("/bin/sh", "env sh", "sudo sh", "env bash", "sh -s", "bash -s", "tee >(sh)")),
+        )
+        for cmd in commands:
+            self.assertTrue(fallback_dangerous_match(cmd), cmd)
+        for cmd in ("echo harmless", 'echo "# not a comment"'):
+            self.assertFalse(fallback_dangerous_match(cmd), cmd)
+
+    def test_588_heredoc_topology_and_nesting(self):
+        from sc_client import _fallback_startup_write
+        t = "~/.bash" + "rc"
+        positives = (
+            "cat <<'EOF' \\\n| sh\necho x >> " + t + "\nEOF",
+            "cat <<'EOF' \\\n| env sh\necho x >> " + t + "\nEOF",
+            "cat <<'EOF' |\necho x | tee /tmp/a\\b " + t + "\nEOF\nsh",
+            "cat <<'EOF' > >(sh)\necho x >> " + t + "\nEOF",
+            "cat <<'EOF' >(sh)\necho x >> " + t + "\nEOF",
+            "$(" * 9 + "echo x >> " + t + ")" * 9,
+        )
+        for command in positives:
+            self.assertTrue(_fallback_startup_write(command), command)
+        for command in ("cat <<'EOF'\necho x >> " + t + "\nEOF",
+                        "cat <<'EOF' | wc -l\necho x >> " + t + "\nEOF"):
+            self.assertFalse(_fallback_startup_write(command), command)
+
+    def test_588_startup_fallback_is_bounded_at_scan_cap(self):
+        from sc_client import _fallback_startup_write
+        for text in ("\\" * 4096, "`" * 4096, "${" * 2048, "\n" * 4096, "/" * 4096, "#'" * 2048, "/[" * 2048, "$(" * 2048, "(" * 4096, "eval " * 819, "sudo " * 819):
+            started = time.perf_counter()
+            _fallback_startup_write(text)
+            self.assertLess(time.perf_counter() - started, 0.3)
 
     def test_fallback_surface_extracts_command_value(self):
         from sc_client import fallback_surface

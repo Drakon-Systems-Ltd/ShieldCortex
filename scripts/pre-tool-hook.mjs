@@ -2652,16 +2652,237 @@ function fallbackExecutedMatch(re, text) {
   return false;
 }
 
+// #588: mirrored capped shell walker.
+const FALLBACK_588_STARTUP = /(?:^|\/)(?:\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config\/fish\/config\.fish)$/i;
+function fallback588Words(text) {
+    const out = [];
+    let value = '', quote = '';
+    const flush = () => { if (value) {
+        out.push({ value, kind: 'word' });
+        value = '';
+    } };
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (c === '\\' && quote !== '\x27') {
+            if (text[i + 1] === '\n') {
+                i++;
+                continue;
+            }
+            if (i + 1 < text.length) {
+                value += text[++i];
+                continue;
+            }
+        }
+        if (quote) {
+            if (c === quote)
+                quote = '';
+            else
+                value += c;
+            continue;
+        }
+        if (c === '#' && !value) {
+            while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r')
+                i++;
+            continue;
+        }
+        if (c === '\x27' || c === '\x22') {
+            quote = c;
+            continue;
+        }
+        if (c === ' ' || c === '\t' || c === '\r') {
+            flush();
+            continue;
+        }
+        if (c === '\n' || c === ';' || c === '|' || c === '&' || c === '(' || c === ')') {
+            flush();
+            out.push({ value: c, kind: 'boundary' });
+            continue;
+        }
+        if (c === '>') {
+            flush();
+            let op = '>';
+            if (text[i + 1] === '>' || text[i + 1] === '|')
+                op += text[++i];
+            out.push({ value: op, kind: 'redirect' });
+            continue;
+        }
+        value += c;
+    }
+    flush();
+    return out;
+}
+// Only cat's heredoc is classified as inert data. Unknown readers stay fail closed.
+function fallback588StripCatHeredocs(text) {
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*cat\s+<<-?\s*(?:([\x27\x22])([A-Za-z_][A-Za-z_0-9]*)\1|\\([A-Za-z_][A-Za-z_0-9]*)|([A-Za-z_][A-Za-z_0-9]*))(?:\s|$)/.exec(lines[i]);
+    if (!m) continue;
+    const end = m[2] ?? m[3] ?? m[4];
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim() !== end) j++;
+    const tail = lines[i].slice(m[0].length);
+    const reader = /^\s*\|\s*([^|;&<>\\`$]+?)\s*$/.exec(tail)?.[1] ?? '';
+    const consumer = reader ? fallback588Unwrap(fallback588Words(reader).filter(w => w.kind === 'word').map(w => w.value)).verb : '';
+    const safe = /^\s*$/.test(tail) || !!reader && /^(?:cat|head|tail|grep|rg|wc|sort|uniq|cut|tr|jq|column|nl|fold|fmt)$/.test(consumer);
+    if (j < lines.length && (m[2] || m[3]) && safe) {
+      for (let k = i + 1; k < j; k++) lines[k] = '';
+    }
+    i = j;
+  }
+  return lines.join('\n');
+}
+
+function fallback588Unwrap(command) {
+    let i = 0;
+    while (i < command.length) {
+        const w = command[i], v = w.replace(/^.*\//, '').toLowerCase();
+        if (/^[A-Za-z_][A-Za-z_0-9]*=/.test(w)) {
+            i++;
+            continue;
+        }
+        if (!/^(?:sudo|doas|env|command|exec|nohup|nice|timeout|stdbuf|time|builtin|xargs)$/.test(v))
+            break;
+        i++;
+        while (i < command.length) {
+            const a = command[i];
+            if (v === 'env' && /^[A-Za-z_][A-Za-z_0-9]*=/.test(a)) {
+                i++;
+                continue;
+            }
+            if (a === '--') {
+                i++;
+                break;
+            }
+            if (!a.startsWith('-'))
+                break;
+            i++;
+            if ((v === 'sudo' || v === 'doas') && /^(?:-u|-g|-C|-p)$/.test(a)
+          || v === 'env' && /^(?:-u|--unset)$/.test(a)
+          || v === 'exec' && a === '-a'
+          || v === 'xargs' && /^(?:-n|-P|-I|-L|-s|-E)$/.test(a)
+                || v === 'nice' && a === '-n'
+                || v === 'timeout' && /^(?:-s|--signal|-k|--kill-after)$/.test(a)
+                || v === 'stdbuf' && /^(?:-i|-o|-e)$/.test(a))
+                i++;
+        }
+        if (v === 'timeout' && i < command.length)
+            i++;
+    }
+    return { verb: command[i]?.replace(/^.*\//, '').toLowerCase() ?? '', args: command.slice(i + 1) };
+}
+const FALLBACK_588_NESTING_CAP = 8;
+const FALLBACK_588_NESTED_MENTION = /\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)|\.config\/fish\/config\.fish/i;
+function fallbackStartupWrite(text, nested = false, nesting = 0) {
+    if (nesting >= FALLBACK_588_NESTING_CAP && FALLBACK_588_NESTED_MENTION.test(text)) return true;
+    text = fallback588StripCatHeredocs(text);
+    // Inspect each nested substitution once, up to the nesting cap.
+    if (nesting < FALLBACK_588_NESTING_CAP) {
+        let quote = '';
+        for (let i = 0; i < text.length; i++) {
+            const c = text[i];
+            if (c === '\\') {
+                i++;
+                continue;
+            }
+            if (c === '\x27' && quote !== '\x22') {
+                quote = quote ? '' : '\x27';
+                continue;
+            }
+            if (c === '\x22' && quote !== '\x27') {
+                quote = quote ? '' : '\x22';
+                continue;
+            }
+            if (quote === '\x27')
+                continue;
+            if (!quote && c === '#' && (i === 0 || /[\s;|&()]/.test(text[i - 1]))) {
+                while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r')
+                    i++;
+                continue;
+            }
+            if (c !== '\x60' && !(c === '$' && text[i + 1] === '('))
+                continue;
+            const backtick = c === '\x60', start = i + (backtick ? 1 : 2);
+            let depth = 1, innerQuote = '', end = start;
+            for (; end < text.length; end++) {
+                const d = text[end];
+                if (d === '\\') {
+                    end++;
+                    continue;
+                }
+                if (backtick) {
+                    if (d === '\x60')
+                        break;
+                    continue;
+                }
+                if (d === '\x27' || d === '\x22') {
+                    if (!innerQuote)
+                        innerQuote = d;
+                    else if (innerQuote === d)
+                        innerQuote = '';
+                    continue;
+                }
+                if (innerQuote === '\x27')
+                    continue;
+                if (d === '(')
+                    depth++;
+                else if (d === ')' && --depth === 0)
+                    break;
+            }
+            if (end < text.length) {
+                if (fallbackStartupWrite(text.slice(start, end), true, nesting + 1))
+                    return true;
+                i = end;
+            } else break;
+        }
+    }
+    const tokens = fallback588Words(text);
+    let stmt = [];
+    const check = () => {
+        if (!stmt.length)
+            return false;
+        const { verb, args } = fallback588Unwrap(stmt);
+        if (verb === 'tee' && args.some(a => !a.startsWith('-') && FALLBACK_588_STARTUP.test(a)))
+            return true;
+        if (verb === 'sed' && args.some(a => /^-(?:[a-zA-Z]*i(?:\.|$)|-in-place(?:=|$))/.test(a)) && args.some(a => FALLBACK_588_STARTUP.test(a)))
+            return true;
+        if ((verb === 'cp' || verb === 'mv' || verb === 'install') && FALLBACK_588_STARTUP.test(args.at(-1) ?? ''))
+            return true;
+        if (!nested && verb === 'eval' && args.length && fallbackStartupWrite(args.join(' '), true))
+            return true;
+        if (!nested && /^(?:sh|bash|zsh|dash|ksh)$/.test(verb)) {
+            const at = args.findIndex(a => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a));
+            if (at >= 0 && args[at + 1] && fallbackStartupWrite(args[at + 1] === '--' ? args[at + 2] ?? '' : args[at + 1], true))
+                return true;
+        }
+        return false;
+    };
+    for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t.kind === 'redirect' && FALLBACK_588_STARTUP.test(tokens[i + 1]?.value ?? '') && tokens[i + 1]?.kind === 'word')
+            return true;
+        if (t.kind === 'boundary') {
+            if (check())
+                return true;
+            stmt = [];
+        }
+        else if (t.kind === 'word')
+            stmt.push(t.value);
+    }
+    return check();
+}
+
 /** First matching dangerous signal for the WS2 fallback, or null (issue #59). */
 function fallbackDangerousMatch(toolInput, toolName) {
   const writeTarget = fallbackWriteTargetMatch(toolInput, toolName);
   if (writeTarget) return writeTarget;
   const text = fallbackExecSurface(toolInput);
   if (!text) return null;
+  if (fallbackStartupWrite(text)) return 'modify-shell-startup';
+  const patternText = text;
   const lockReadOnly = fallbackLockPathAccessIsReadOnly(text, toolName);
   for (const { re, signal, lockPath, dataQuotes } of FALLBACK_DANGEROUS_PATTERNS) {
     if (lockReadOnly && lockPath === true) continue;
-    if (dataQuotes === true ? fallbackExecutedMatch(re, text) : re.test(text)) return signal;
+    if (dataQuotes === true ? fallbackExecutedMatch(re, patternText) : re.test(patternText)) return signal;
   }
   return null;
 }

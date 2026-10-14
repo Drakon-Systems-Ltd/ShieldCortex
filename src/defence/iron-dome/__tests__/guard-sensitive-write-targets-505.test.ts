@@ -183,11 +183,9 @@ describe('#505 — sensitive write targets in the user home', () => {
       }
     });
 
-    it('write-content is not scanned for the shape at write time; running the written script is (Option A, #588)', () => {
-      // #505 descope: the write-content row is gone, so a mention in ordinary
-      // code allows exactly as on base, and so does a real appending script
-      // at write time. The backstop is the exec-surface row over the folded
-      // source when the script actually runs.
+    it('written script content gates at write time; mentions allow and execution remains gated (#588)', () => {
+      // #588 closes the Option A descope: the shell script now gates when
+      // written. The folded execution check remains a separate backstop.
       for (const [file, content] of [
         ['/repo/src/cli.ts', `console.log("Add: echo x >> ~/${RC}");\n`],
         ['/repo/help.py', `HINT = "run: echo 'export PATH=~/bin:$PATH' >> ~/${RC}"\nprint(HINT)\n`],
@@ -195,6 +193,10 @@ describe('#505 — sensitive write targets in the user home', () => {
         ['/repo/install.sh', `#!/bin/sh\necho 'export PATH=/opt/tool/bin:$PATH' >> ~/${RC}\n`],
       ] as const) {
         const v = write(file, content);
+        if (file === '/repo/install.sh') {
+          gated(v, 'modify-shell-startup');
+          continue;
+        }
         expect([file, content, v.decision, v.signals.includes('modify-shell-startup')])
           .toEqual([file, content, 'allow', false]);
       }
