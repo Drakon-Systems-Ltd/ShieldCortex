@@ -545,7 +545,7 @@ export function renderEngineFailure(
   const detail = outcome.packagedPrebuild
     ? 'engine: binding remains unavailable; follow remediation above'
     : 'engine: database binding needs manual rebuild';
-  return { headline, body: outcome.remediation.split('\n'), detail };
+  return { headline, body: outcome.remediation.split('\n').map(sanitiseDisplayField), detail };
 }
 
 async function stepVerifyEngine(): Promise<EngineVerifyOutcome> {

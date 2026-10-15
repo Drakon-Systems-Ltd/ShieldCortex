@@ -3,16 +3,34 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from '@jest/globals';
 import { buildUpdateSummary, renderUpdateSummary, type UpdateSummaryInput } from '../cli/update-summary.js';
-import { defaultColorStyle, NO_STYLE, stripAnsi } from '../cli/term-ui.js';
-import { reviewScanItems, runAllowlistScan, type ScanItem } from '../cli/allowlist-scan.js';
+import { defaultColorStyle, NO_STYLE } from '../cli/term-ui.js';
+import { maybeReviewAllowlistAfterUpdate, reviewScanItems, runAllowlistScan, type ScanItem } from '../cli/allowlist-scan.js';
+import { renderEngineFailure } from '../cli/update.js';
+import { nativeBindingRemediation } from '../setup/native-binding.js';
 
 const ESC = String.fromCharCode(27);
 const BEL = String.fromCharCode(7);
-const hostile = `${ESC}[2J${ESC}]0;pwned${BEL}\u009b\r\u2028\u202e\u200b\u2066`;
+const hostile = `${ESC}[2J${ESC}[31m${ESC}]0;pwned${BEL}\u009b\r\u2028\u202e\u200b\u2066`;
 const forbidden = [ESC, BEL, '\u009b', '\r', '\u2028', '\u202e', '\u200b', '\u2066'];
 
 function expectClean(output: string): void {
   for (const character of forbidden) expect(output).not.toContain(character);
+}
+
+// The update review sink emits these two fixed style codes around its text.
+function withoutReviewStyle(output: string): string {
+  return output.replaceAll(`${ESC}[2m`, '').replaceAll(`${ESC}[0m`, '');
+}
+
+// Strip only the exact SGR codes the renderer itself emits (defaultColorStyle),
+// never a general ANSI strip: that would also erase an injected CSI/OSC and
+// make the assertion vacuous. The payload carries a non-SGR CSI (ESC[2J) and an
+// OSC, which survive this helper and fail expectClean if they leak.
+const RENDERER_SGR = ['1m', '0m', '32m', '33m', '31m', '36m', '2m'].map((c) => `${ESC}[${c}`);
+function withoutRendererStyle(output: string): string {
+  let out = output;
+  for (const code of RENDERER_SGR) out = out.replaceAll(code, '');
+  return out;
 }
 
 function input(): UpdateSummaryInput {
@@ -34,6 +52,18 @@ function input(): UpdateSummaryInput {
 }
 
 describe('update summary display sanitising (#779)', () => {
+  it('cleans each native remediation line while preserving its intended line breaks', () => {
+    const body = renderEngineFailure({
+      remediation: nativeBindingRemediation(`/opt/x${hostile}/y`),
+      packagedPrebuild: false,
+    })?.body;
+    expect(body).toHaveLength(3);
+    expect(body?.[0]).toContain('/opt/x');
+    expect(body?.[0]).toContain('/y/node_modules/better-sqlite3');
+    expect(body?.[0]).toContain('npm run build-release');
+    for (const line of body ?? []) expectClean(line);
+  });
+
   it('cleans the engine command in row data and every rendered field in both modes and styles', () => {
     const facts = input();
     const summary = buildUpdateSummary(facts);
@@ -78,6 +108,103 @@ describe('update summary display sanitising (#779)', () => {
 });
 
 describe('allowlist scan display sanitising (#779)', () => {
+  it('cleans an unknown option token before reporting it', async () => {
+    const errors: string[] = [];
+    expect(await runAllowlistScan([`--bad${hostile}option`], {
+      error: (message) => errors.push(message),
+    })).toBe(1);
+    expect(errors.join('\n')).toContain('--bad');
+    expect(errors.join('\n')).toContain('option');
+    expectClean(errors.join('\n'));
+  });
+
+  it('cleans incomplete cron source paths in scan and verbose update diagnostics', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sc-779-source-'));
+    try {
+      const cron = join(dir, `jobs${hostile}.json`);
+      writeFileSync(cron, '{invalid');
+      const errors: string[] = [];
+      const logs: string[] = [];
+      const deps = {
+        home: dir,
+        env: {},
+        hermesCronPath: cron,
+        interactive: false,
+        readEntries: () => [],
+        log: (message: string) => logs.push(message),
+        error: (message: string) => errors.push(message),
+      };
+      expect(await runAllowlistScan([], deps)).toBe(1);
+      expect(errors.join('\n')).toContain('jobs');
+      expect(errors.join('\n')).toContain('.json');
+      expectClean(errors.join('\n'));
+
+      logs.length = 0;
+      await maybeReviewAllowlistAfterUpdate({ ...deps, updateFlow: true, verbose: true });
+      const diagnostic = withoutReviewStyle(logs.join('\n'));
+      expect(diagnostic).toContain('jobs');
+      expect(diagnostic).toContain('.json:invalid_json');
+      expectClean(diagnostic);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans both absent OpenClaw cron paths in incomplete-discovery diagnostics', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sc-779-absent-'));
+    try {
+      const openclawCronPath = join(dir, `cron${hostile}.json`);
+      const openclawDbPath = join(dir, `cron${hostile}.sqlite`);
+      const errors: string[] = [];
+      const logs: string[] = [];
+      const deps = {
+        home: dir,
+        env: { OPENCLAW_CONFIG_PATH: join(dir, 'openclaw.json') },
+        openclawCronPath,
+        openclawDbPath,
+        interactive: false,
+        readEntries: () => [],
+        log: (message: string) => logs.push(message),
+        error: (message: string) => errors.push(message),
+      };
+      expect(await runAllowlistScan([], deps)).toBe(1);
+      expect(errors.join('\n')).toContain('cron');
+      expect(errors.join('\n')).toContain('.sqlite');
+      expectClean(errors.join('\n'));
+
+      logs.length = 0;
+      await maybeReviewAllowlistAfterUpdate({ ...deps, updateFlow: true, verbose: true });
+      const diagnostic = withoutReviewStyle(logs.join('\n'));
+      expect(diagnostic).toContain('.sqlite:no readable OpenClaw cron source');
+      expectClean(diagnostic);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans a scheduled-script check exception in the default update flow', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sc-779-skipped-'));
+    try {
+      const logs: string[] = [];
+      await maybeReviewAllowlistAfterUpdate({
+        home: dir,
+        env: {},
+        updateFlow: true,
+        verbose: false,
+        interactive: false,
+        readEntries: () => { throw new Error(`bad${hostile}x`); },
+        log: (message) => logs.push(message),
+      });
+      const output = withoutReviewStyle(logs.join('\n'));
+      expect(output).toContain('Scheduled-script check skipped');
+      expect(output).toContain('bad');
+      expect(output).toContain('x');
+      expectClean(output);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('cleans the trusted basename and pin errors at the review sink', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sc-779-'));
     try {
@@ -96,7 +223,7 @@ describe('allowlist scan display sanitising (#779)', () => {
       };
       await reviewScanItems([item], deps);
       expect(logs.join('\n')).toContain('Trusted');
-      expectClean(stripAnsi(logs.join('\n')));
+      expectClean(withoutRendererStyle(logs.join('\n')));
 
       logs.length = 0;
       await reviewScanItems([item], {
@@ -104,10 +231,34 @@ describe('allowlist scan display sanitising (#779)', () => {
         writeEntries: () => { throw new Error(`write ${hostile} failed`); },
       });
       expect(errs.join('\n')).toContain('Could not write');
-      expectClean(stripAnsi(errs.join('\n')));
+      expectClean(withoutRendererStyle(errs.join('\n')));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('cleans the path and source preview on the [v] view path', async () => {
+    const item: ScanItem = {
+      path: `/opt/script${hostile}.py`,
+      status: 'new',
+      networkHint: false,
+      sources: [`src${hostile}`],
+      preview: `print(1)${hostile}\nprint(2)`,
+    };
+    const answers = ['v', 'n'];
+    const logs: string[] = [];
+    await reviewScanItems([item], {
+      interactive: true,
+      prompt: async () => answers.shift() ?? 'q',
+      log: (message: string) => logs.push(message),
+      error: () => {},
+      readEntries: () => [],
+      writeEntries: () => {},
+    });
+    const output = withoutRendererStyle(logs.join('\n'));
+    expect(output).toContain('print(1)');
+    expect(output).toContain('print(2)');
+    expectClean(output);
   });
 
   it('cleans a scan failure message from injected discovery', async () => {

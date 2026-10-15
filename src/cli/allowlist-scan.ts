@@ -771,7 +771,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
       else openclawCronPath = value;
       i += 1;
     } else {
-      err(`Unknown option "${a}". ${SCAN_USAGE}`);
+      err(`Unknown option "${sanitiseDisplayField(a)}". ${SCAN_USAGE}`);
       return 1;
     }
   }
@@ -837,14 +837,14 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     if (broken.length > 0) {
       err(
         `Cron source(s) present but not readable/parseable — scan is incomplete. Fix: ${broken
-          .map((s) => s.path)
+          .map((s) => sanitiseDisplayField(s.path))
           .join(', ')}`,
       );
     }
     if (sourceReport.openclawCronUnverifiable) {
       err(
-        `OpenClaw is installed but neither cron source exists (${sourceReport.openclaw.path}, ` +
-          `${sourceReport.openclawDb.path}) — scan could not look, so this is not "no crons".`,
+        `OpenClaw is installed but neither cron source exists (${sanitiseDisplayField(sourceReport.openclaw.path)}, ` +
+          `${sanitiseDisplayField(sourceReport.openclawDb.path)}) — scan could not look, so this is not "no crons".`,
       );
     }
     // Incomplete discovery must not look like "all clear".
@@ -952,9 +952,9 @@ export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Prom
     const needsReview = items.filter((i) => i.status === 'new' || i.status === 'changed');
 
     if (incomplete) {
-      const reasons = broken.map((s) => `${s.path}:${s.status}`);
+      const reasons = broken.map((s) => `${sanitiseDisplayField(s.path)}:${sanitiseDisplayField(s.status)}`);
       if (discovered.sources.openclawCronUnverifiable) {
-        reasons.push(`${discovered.sources.openclawDb.path}:no readable OpenClaw cron source`);
+        reasons.push(`${sanitiseDisplayField(discovered.sources.openclawDb.path)}:no readable OpenClaw cron source`);
       }
       // Default update screen: plain words. The paths and reasons are the
       // detail an operator needs to dig in, so they stay under --verbose.
@@ -985,6 +985,6 @@ export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Prom
     }
     await reviewScanItems(items, deps);
   } catch (e) {
-    log(`${DIM}Scheduled-script check skipped — ${e instanceof Error ? e.message : String(e)}${RESET}`);
+    log(`${DIM}Scheduled-script check skipped — ${sanitiseDisplayField(e instanceof Error ? e.message : String(e))}${RESET}`);
   }
 }
