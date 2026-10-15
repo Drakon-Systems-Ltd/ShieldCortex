@@ -17,6 +17,7 @@
  * approval reachability and force a demotion).
  */
 
+import { GUARD_HELP } from './dispatch-help.js';
 import { execFile } from 'node:child_process';
 import { randomBytes, randomInt } from 'node:crypto';
 import readline from 'node:readline/promises';
@@ -535,9 +536,6 @@ export async function runGuardCommand(argv: string[], opts: { home?: string } = 
   if (sub === 'test-approval') {
     return (await runTestApproval({ adapter: surface })).code;
   }
-  console.log('Usage: shieldcortex guard readiness [--surface claude-code|openclaw] [--json]');
-  console.log('                                  Show the enforce-when-ready readiness conditions, per surface (#509)');
-  console.log('       shieldcortex guard test-approval [--surface claude-code|openclaw]');
-  console.log('                                  Send a synthetic approval request through your channel');
+  console.log(GUARD_HELP);
   return sub === '--help' || sub === '-h' || sub === 'help' ? 0 : 1;
 }

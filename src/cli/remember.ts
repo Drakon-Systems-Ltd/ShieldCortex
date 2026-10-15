@@ -20,6 +20,7 @@
  *     content, run, print, drain cloud sync, close DB, exit.
  */
 
+import { REMEMBER_HELP } from './dispatch-help.js';
 import { executeRemember, type RememberInput } from '../tools/remember.js';
 import { closeDatabase, initDatabase } from '../database/init.js';
 
@@ -127,17 +128,7 @@ function parseFlag(args: string[], name: string): string | undefined {
 }
 
 function printUsage(): void {
-  console.error('Usage: shieldcortex remember "<title>" --content "<text>" [options]');
-  console.error('       echo "<text>" | shieldcortex remember "<title>"');
-  console.error('');
-  console.error('Options:');
-  console.error('  --content <text>          Memory content (or pipe it via stdin)');
-  console.error('  --category <category>     architecture|pattern|preference|error|context|');
-  console.error('                            learning|todo|note|relationship|custom');
-  console.error('  --importance <level>      low | medium | high');
-  console.error('  --tags <a,b,c>            Comma-separated tags');
-  console.error('  --project <name>          Project scope (auto-detected if omitted)');
-  console.error('  --json                    Emit a structured JSON result');
+  console.error(REMEMBER_HELP);
 }
 
 /**

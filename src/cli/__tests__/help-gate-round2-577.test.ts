@@ -187,7 +187,7 @@ describe('#577 — wantsHelp distinguishes the help verb from an option value', 
     expect(wantsHelp(['--help'])).toBe(true);
     expect(wantsHelp(['-h'])).toBe(true);
     expect(wantsHelp(['skill', 'install', '--help'])).toBe(true);
-    expect(wantsHelp(['prune', '--project', 'acme', '--help'], { valueFlags: ['--project'] })).toBe(true);
+    expect(wantsHelp(['prune', '--project', 'acme', '--help'], { values: { '--project': 'unless-double-dash' } })).toBe(true);
     expect(wantsHelp(['--force', '-h'])).toBe(true);
   });
 
@@ -200,8 +200,8 @@ describe('#577 — wantsHelp distinguishes the help verb from an option value', 
   });
 
   it('the value of a value-taking option is never the verb', () => {
-    expect(wantsHelp(['--agent', 'help'], { valueFlags: ['--agent'] })).toBe(false);
-    expect(wantsHelp(['--source', 'help'], { valueFlags: ['--source'] })).toBe(false);
+    expect(wantsHelp(['--agent', 'help'], { values: { '--agent': 'unless-dash' } })).toBe(false);
+    expect(wantsHelp(['--source', 'help'], { values: { '--source': 'always' } })).toBe(false);
     // …and without the list it would be, which is why each gate passes its own.
     expect(wantsHelp(['--agent', 'help'])).toBe(true);
   });
