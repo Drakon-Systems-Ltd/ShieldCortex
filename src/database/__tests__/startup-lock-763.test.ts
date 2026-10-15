@@ -251,6 +251,20 @@ describe('#763 no-hard-link fallback publication', () => {
     expect(strays()).toEqual([]);
   });
 
+  it('a write failure never removes another record found at the inode it created', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    const live = record(EPERM_PID);
+    // Rewritten in place, the path keeps the device and inode this call
+    // created — what cleanup would see if that inode were reused by another
+    // process's record — but holds bytes this call never wrote.
+    hooks.beforeLockWrite = () => realFs.writeFileSync(lockPath, live);
+    hooks.lockWriteError = 'EIO';
+    expect(() => acquire(true)).toThrow(/EIO/);
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
   it('treats a partial record with a future mtime as held, not stale', () => {
     writeForeign('{"pid": 12');
     const later = new Date(Date.now() + 60_000);
@@ -285,6 +299,56 @@ describe('#763 a displaced record is never deleted', () => {
     expect(holdsStartupLock()).toBe(false);
     expect(asides()).toEqual([live]);
     expect(realFs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('a same-process retry after the put-back failed does not publish while that owner is live', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    const live = record(EPERM_PID);
+    hooks.beforeLockRename = () => { writeForeign(live); hooks.failLockCreate = true; };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(asides()).toEqual([live]);
+
+    // The put-back still fails: the vacant lock path is not taken.
+    hooks.failLockCreate = true;
+    expect(() => initDatabase(dbPath, { refuseIfLocked: true })).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(isDatabaseInitialized()).toBe(false);
+    expect(realFs.existsSync(dbPath)).toBe(false);
+    expect(realFs.existsSync(lockPath)).toBe(false);
+    expect(asides()).toEqual([live]);
+  });
+
+  it('a same-process retry once the transient error clears puts the record back and does not take the lock', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    const live = record(EPERM_PID);
+    hooks.beforeLockRename = () => { writeForeign(live); hooks.failLockCreate = true; };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(asides()).toEqual([live]);
+
+    expect(() => initDatabase(dbPath, { refuseIfLocked: true })).toThrow(StartupLockHeldError);
+    expect(holdsStartupLock()).toBe(false);
+    expect(isDatabaseInitialized()).toBe(false);
+    expect(realFs.existsSync(dbPath)).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(live);
+    expect(strays()).toEqual([]);
+  });
+
+  it('a displaced record whose owner has exited no longer blocks a retry', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    const gone = record(DEAD_PID);
+    hooks.beforeLockRename = () => { writeForeign(gone); hooks.failLockCreate = true; };
+    acquire();
+    expect(holdsStartupLock()).toBe(false);
+    expect(asides()).toEqual([gone]);
+
+    hooks.failLockCreate = true;
+    acquire(true);
+    expect(holdsStartupLock()).toBe(true);
+    expect(JSON.parse(realFs.readFileSync(lockPath, 'utf8')).pid).toBe(process.pid);
+    expect(asides()).toEqual([gone]);
   });
 
   it('a third publisher taking the path (EEXIST) leaves both live records on disk', () => {

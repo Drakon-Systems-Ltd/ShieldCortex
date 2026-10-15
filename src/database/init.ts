@@ -249,16 +249,31 @@ function restoreBackupAsLive(dbPath: string, backupPath: string, reason: string)
  *
  * The no-hard-link fallback relies on this grace and is weaker than the
  * atomic temp-then-link publication: a publisher stalled for longer than the
- * grace can have its incomplete record taken over. It then notices that the
- * lock path is no longer its record and does not claim ownership, but it
- * cannot stop the other process from having taken the lock.
+ * grace can have its incomplete record taken over. If another process has
+ * taken over its record, it notices that the lock path is no longer its record
+ * and does not claim ownership, but it cannot stop the other process from
+ * having taken the lock.
  */
 const UNREADABLE_LOCK_GRACE_MS = 10_000;
 /** Bounded publish / stale-takeover rounds before deferring to the holder. */
 const STARTUP_LOCK_ATTEMPTS = 3;
 
 interface LockSnapshot { bytes: Buffer; dev: number; ino: number; mtimeMs: number }
-interface LockIdentity { dev: number; ino: number; bytes?: Buffer }
+/**
+ * A record to match by device, inode and bytes. Identity alone never matches:
+ * once the creating descriptor is closed the inode number can be reused by an
+ * unrelated record. `partial`: any prefix of `bytes` matches (a write that
+ * failed part-way); only used while the creating descriptor is still open.
+ */
+interface LockIdentity { dev: number; ino: number; bytes: Buffer; partial?: boolean }
+
+/**
+ * Lock path → aside name of a record this process moved off the lock path and
+ * could not put back. Its owner may be live, so a later acquisition in this
+ * process never publishes at that path until the record is back in place,
+ * gone, or its owner is known dead (#763).
+ */
+const displacedLocks = new Map<string, string>();
 
 /** Read the lock record and its inode through one descriptor; null when absent. */
 function readLockSnapshot(path: string): LockSnapshot | null {
@@ -279,7 +294,9 @@ function readLockSnapshot(path: string): LockSnapshot | null {
 
 const matchesLock = (snapshot: LockSnapshot | null, expected: LockIdentity): boolean =>
   snapshot !== null && snapshot.dev === expected.dev && snapshot.ino === expected.ino &&
-  (!expected.bytes || snapshot.bytes.equals(expected.bytes));
+  (expected.partial
+    ? snapshot.bytes.length <= expected.bytes.length && snapshot.bytes.equals(expected.bytes.subarray(0, snapshot.bytes.length))
+    : snapshot.bytes.equals(expected.bytes));
 
 /**
  * Put a record that was moved aside back at `lockPath` without overwriting a
@@ -306,11 +323,11 @@ function restoreLock(aside: string, lockPath: string, bytes: Buffer | undefined)
 
 /**
  * Remove the lock at `lockPath` only if it is still exactly `expected` (same
- * device and inode, and the same bytes when given). The record is first
+ * device, inode and bytes). The record is first
  * renamed aside atomically, so a lock another process published after
  * `expected` was read is never unlinked by name. A record that does not match,
- * or cannot be read, is put back; if that fails it is left at the aside name
- * and never deleted (#763).
+ * or cannot be read, is put back; if that fails it is left at the aside name,
+ * never deleted, and recorded in `displacedLocks` (#763).
  *
  * 'restored': a different record was there and is back in place.
  * 'displaced': a different record could not be put back and is left aside.
@@ -353,6 +370,7 @@ function removeLockIfUnchanged(
     `[database] Left the startup lock record found at ${lockPath} at ${aside}: ` +
     `it was not the record expected and could not be put back`
   );
+  displacedLocks.set(lockPath, aside);
   return moved ? 'displaced' : 'failed';
 }
 
@@ -362,7 +380,8 @@ function removeLockIfUnchanged(
  * to still be the lock path; 'lost' when the path was replaced first (the
  * descriptor is closed, nothing is unlinked); 'exists' when the path is taken.
  * On a write error the path is removed only while it is still the inode this
- * call created.
+ * call created, holding bytes this call wrote; the descriptor stays open until
+ * that decision is made, so the inode cannot be reused meanwhile.
  */
 function createLockExclusive(lockPath: string, bytes: Buffer, restoreByCopy = true): number | 'exists' | 'lost' {
   let fd: number;
@@ -372,26 +391,26 @@ function createLockExclusive(lockPath: string, bytes: Buffer, restoreByCopy = tr
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') return 'exists';
     throw error;
   }
-  let created: LockIdentity | null = null;
+  let created: { dev: number; ino: number } | null = null;
   try {
     const stat = fstatSync(fd);
     created = { dev: stat.dev, ino: stat.ino };
     writeFileSync(fd, bytes);
   } catch (writeError) {
-    try {
-      closeSync(fd);
-    } catch {
-      // Best-effort close.
-    }
     if (created) {
       try {
         const current = statSync(lockPath);
         if (current.dev === created.dev && current.ino === created.ino) {
-          removeLockIfUnchanged(lockPath, created, restoreByCopy);
+          removeLockIfUnchanged(lockPath, { ...created, bytes, partial: true }, restoreByCopy);
         }
       } catch {
         // Gone or unreadable: nothing of ours to remove.
       }
+    }
+    try {
+      closeSync(fd);
+    } catch {
+      // Best-effort close.
     }
     throw writeError;
   }
@@ -453,6 +472,57 @@ function publishLock(lockPath: string, payload: string): number | 'exists' | 'lo
   }
 }
 
+/**
+ * A record this process displaced from `lockPath` (see `displacedLocks`) is
+ * put back first; while it can be neither put back nor shown to belong to a
+ * dead (ESRCH) owner, it is the holder and this process must not publish.
+ */
+function displacedHolder(lockPath: string): { pid: number | null; error: Error } | null {
+  const aside = displacedLocks.get(lockPath);
+  if (!aside) return null;
+  let snapshot: LockSnapshot | null | undefined;
+  try {
+    snapshot = readLockSnapshot(aside);
+  } catch {
+    snapshot = undefined; // Unreadable: its owner is unknown.
+  }
+  if (snapshot === null) {
+    displacedLocks.delete(lockPath);
+    return null;
+  }
+  if (restoreLock(aside, lockPath, snapshot?.bytes)) {
+    try {
+      unlinkSync(aside);
+    } catch {
+      // Best-effort: the record is back at the lock path; only a spare name remains.
+    }
+    displacedLocks.delete(lockPath);
+    return null; // Back in place: judged like any other record.
+  }
+  let pid: number | null = null;
+  try {
+    const parsed = snapshot ? JSON.parse(snapshot.bytes.toString('utf-8')) as { pid?: unknown } : null;
+    if (parsed && typeof parsed.pid === 'number') pid = parsed.pid;
+  } catch {
+    pid = null;
+  }
+  if (pid !== null) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+        // Owner gone: the aside is only a stray record now.
+        displacedLocks.delete(lockPath);
+        return null;
+      }
+    }
+  }
+  return {
+    pid,
+    error: new Error(`[database] Refusing startup because the lock record left at ${aside} could not be put back at ${lockPath}`),
+  };
+}
+
 /** Live holder (with the error to report) or stale. */
 function judgeLock(snapshot: LockSnapshot, dbPath: string, lockPath: string): { live: false } | { live: true; pid: number | null; error: Error } {
   let existing: { pid?: unknown; entryPath?: string } | null = null;
@@ -506,7 +576,7 @@ function acquireStartupLock(dbPath: string, refuseIfLocked = false): void {
     nonce: randomUUID(),
   }, null, 2);
 
-  let holder: { pid: number | null; error: Error } | null = null;
+  let holder: { pid: number | null; error: Error } | null = displacedHolder(lockPath);
   for (let attempt = 0; attempt < STARTUP_LOCK_ATTEMPTS && !holder; attempt++) {
     const published = publishLock(lockPath, payload);
     if (typeof published === 'number') {
