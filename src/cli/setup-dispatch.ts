@@ -27,23 +27,29 @@ export const SETUP_HELP = `Usage: shieldcortex setup [target] [hook flags]
        shieldcortex setup uninstall
 
 setup is the onboarding command. With no arguments it shows the detected-host
-table, offers to wire each unwired host, and asks for an Action Guard posture
-on a terminal.
+table, asks before wiring each unwired host, and asks for an Action Guard
+posture on a terminal. A named target skips the table and wires that host
+without asking.
 
 Targets:
   claude | openclaw | hermes | copilot | codex
-                           Install into that one host
+                           Install into that host now, without asking
   security                 Print the security setup guide
   --yes, --install-detected
                            Wire every detected host without prompting
   uninstall                Remove hooks and the CLAUDE.md block (asks first)
 
-install is the Claude Code install: CLAUDE.md, the global MCP server entry,
-hooks in ~/.claude/settings.json, the OpenClaw hook when OpenClaw is present,
-and owner-only permissions on ShieldCortex state. setup given --with-stop-hook
-or --with-session-end does the same Claude Code install; the --without-* opt-outs
-go with install. setup claude runs the same install as a bare install. install
-is kept for scripts; it is not the setup wizard.
+install is the Claude Code install kept for scripts; it is not the setup wizard.
+setup claude runs the same install as a bare install. setup --with-stop-hook or
+setup --with-session-end is the same install too; the --without-* opt-outs go
+with install. Without asking, the Claude Code install writes:
+  ~/.claude/CLAUDE.md             ShieldCortex memory instructions block
+  ~/.claude.json                  global MCP server entry (mcpServers.memory)
+  ~/.claude/settings.json         Claude Code hooks
+  ~/.claude/hooks/cortex-memory/  cortex-memory hook (HOOK.md, handler.ts,
+                                  runtime.mjs)
+It also installs the OpenClaw hook when OpenClaw is present, and sets
+owner-only permissions on ShieldCortex state.
 
 quickstart [target] is an older name for setup's guided path. It takes the same
 targets but no hook flags and no uninstall.
