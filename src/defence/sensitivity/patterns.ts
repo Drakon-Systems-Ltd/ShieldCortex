@@ -72,6 +72,54 @@ export const CONFIDENTIAL_PATTERNS: SensitivityPattern[] = [
   { pattern: /\b(?:diagnosis|prescription|medication|treatment|symptoms?|blood\s*type|allergies|medical\s*record)\b/gi, label: 'medical-term', weight: 0.65 },
 ];
 
+// ── PERSONAL — private life of the owner and the people around them (#718) ──
+//
+// Two lists, matched together: a PERSONAL verdict needs a person/relationship
+// noun AND a private-life event, OR one of the standalone phrases. Either list
+// alone is too common in engineering text ("parent process", "trip the
+// breaker", "release party") to be a signal on its own.
+//
+// Words with an everyday engineering/business sense (#722 review B3) only count
+// when qualified: people nouns like partner / children / family / baby /
+// sibling / brother / sister need an adjacent possessive pronoun ("my partner",
+// "her brother"); event words like party / trip / gift / holiday / christmas
+// need a private-life neighbour ("birthday party", "family trip", "gift for",
+// "on holiday", "for christmas"). PERSONAL is sensitive under isSensitiveLevel,
+// and `reclassify --execute` is raise-only, so a false positive here silently
+// and permanently drops ordinary notes out of sync and unattended recall.
+//
+// Medical vocabulary is NOT here: it already classifies CONFIDENTIAL above,
+// which outranks PERSONAL.
+
+// "their children" / "their parents" are DOM-tree talk and "our partner" /
+// "our family (of plugins)" are business talk, so `their` never qualifies and
+// `our` does not qualify partner / family.
+const QUALIFIED_PEOPLE = String.raw`(?:my|our|his|her)\s+(?:children|kids|baby|parents|siblings?|brothers?|sisters?|sons?)|(?:my|his|her)\s+(?:partner|family)`;
+
+export const PERSONAL_PEOPLE_PATTERN = new RegExp(
+  String.raw`\b(?:wife|husband|spouse|girlfriend|boyfriend|fianc[ée]e?|daughters?|kids|toddler|mum|mom|mother|dad|father|grandm(?:a|other)|grandp(?:a|arent)|grandparents|granny|aunt|uncle|cousin|in-laws?|niece|nephew|`
+  + String.raw`${QUALIFIED_PEOPLE})\b`,
+  'i',
+);
+
+export const PERSONAL_EVENT_PATTERN =
+  /\b(?:surprise|birthday|anniversary|wedding|honeymoon|vacation|getaway|weekend away|(?:birthday|surprise|engagement|dinner|christmas|garden|house|hen|stag|leaving) party|(?:family|road|day|school|ski|camping|beach|surprise|weekend|holiday) trip|gifts? for|(?:birthday|christmas|wedding) (?:gift|present)|present for|on holiday|holidays? (?:plans?|with|abroad)|(?:summer|family|school|easter|christmas) holidays?|(?:for|at|over) christmas|christmas (?:day|eve|dinner|shopping)|date night|proposal|engag(?:ed|ement)|pregnan(?:t|cy)|due date|funeral|divorce|separation|school run|nursery|playdate|sleepover|half[- ]term)\b/i;
+
+export const PERSONAL_STANDALONE_PATTERNS: SensitivityPattern[] = [
+  // A bare "never let them" / "do not let her" is as often concurrency or
+  // review advice ("workers share a queue; never let them process the same
+  // job twice") as a secret, so `let` only counts with a knowing verb after
+  // it (#722 review R3). "keep it from her" / "a secret from him" are the
+  // other explicit forms.
+  { pattern: /\b(?:don'?t|do not|never) (?:tell|mention (?:it |this )?to) (?:her|him|them)\b/gi, label: 'personal-secret', weight: 0.75 },
+  { pattern: /\b(?:don'?t|do not|never) let (?:her|him|them) (?:know|find out|suspect|catch on)\b/gi, label: 'personal-secret', weight: 0.75 },
+  { pattern: /\bkeep (?:it|this|that)(?: a secret)? from (?:her|him|them)\b/gi, label: 'personal-secret', weight: 0.75 },
+  // "our partner" / "our family" are business phrases ("our partner
+  // integration", "our family of plugins"); only "my" makes them personal.
+  { pattern: /\b(?:my|our) (?:wife|husband|girlfriend|boyfriend|fianc[ée]e?|kids|children|daughter|son|mum|mom|dad)\b/gi, label: 'personal-relationship', weight: 0.65 },
+  { pattern: /\bmy (?:partner|family)\b/gi, label: 'personal-relationship', weight: 0.65 },
+];
+
 // ── INTERNAL — org-internal references ──
 
 export const INTERNAL_PATTERNS: SensitivityPattern[] = [

@@ -134,7 +134,18 @@ export function writeRecallLog(entry) {
       candidates: Array.isArray(entry.candidates) ? entry.candidates : [],
       injectedCount: entry.injectedCount ?? null,
       finalContextChars: entry.finalContextChars ?? null,
+      // #717: 'active:<n>' when the vector plane ran, otherwise
+      // 'unavailable:<reason>' / 'disabled:config' / 'disabled:default-off'
+      // (#720: off unless opted in) / 'disabled:lane-gated' (#718 lane gate
+      // exited before the plane was consulted). null on pre-#717 writers.
+      vectorPlane: entry.vectorPlane ?? null,
+      // #718: interactive | cron | automation | subagent, and what decided it.
+      lane: entry.lane ?? null,
+      laneSignal: entry.laneSignal ?? null,
     };
+    // #717: doctor's "Recall repetition" row (src/cli/recall-repetition.ts)
+    // reads `lane`, `promptHash` and each candidate's `id` / `dropReason`
+    // back from this ring. Renaming or dropping them blinds that check.
     const target = logPath(0);
     const tmp = `${target}.tmp`;
     writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');

@@ -25,6 +25,14 @@ let db: Database.Database | null = null;
 let currentDbPath: string | null = null;
 let lockFilePath: string | null = null;
 let lockFileFd: number | null = null;
+/** True only while this process owns the startup lock (not the continue-anyway path). */
+export function holdsStartupLock(): boolean { return lockFileFd !== null; }
+export class StartupLockHeldError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StartupLockHeldError';
+  }
+}
 let dbInode: bigint | null = null; // Track file identity for staleness detection
 
 // Anti-bloat: Database size limits
@@ -36,7 +44,7 @@ const WARN_DB_SIZE = WARN_DB_FILE_BYTES;
 /**
  * Expand ~ to home directory
  */
-function expandPath(path: string): string {
+export function expandPath(path: string): string {
   if (path.startsWith('~')) {
     return join(homedir(), path.slice(1));
   }
@@ -138,6 +146,11 @@ function enforceSafeRuntimePath(expandedPath: string, explicitDbPath: boolean): 
   }
 }
 
+/** Apply the default-database runtime policy before any independent DB open. */
+export function assertSafeRuntimeForDbPath(resolvedPath: string): void {
+  enforceSafeRuntimePath(expandPath(resolvedPath), false);
+}
+
 function inspectDatabaseFile(dbPath: string): DatabaseInspection {
   let inspectionDb: Database.Database | null = null;
   try {
@@ -224,7 +237,7 @@ function restoreBackupAsLive(dbPath: string, backupPath: string, reason: string)
   copyFileSync(backupPath, dbPath);
 }
 
-function acquireStartupLock(dbPath: string): void {
+function acquireStartupLock(dbPath: string, refuseIfLocked = false): void {
   lockFilePath = `${dbPath}.lock`;
   const runtime = resolveRuntimeInfo();
   const payload = JSON.stringify({
@@ -265,6 +278,11 @@ function acquireStartupLock(dbPath: string): void {
     }
 
     if (activeProcessError) {
+      if (refuseIfLocked) {
+        lockFilePath = null;
+        lockFileFd = null;
+        throw new StartupLockHeldError(activeProcessError.message);
+      }
       console.error(
         `[database] Another ShieldCortex process (PID ${existingPid ?? 'unknown'}) is using ${dbPath} — ` +
         `continuing anyway (SQLite WAL handles concurrency)`
@@ -510,7 +528,7 @@ export function getCanonicalSchema(): string {
 /**
  * Initialize the database connection
  */
-export function initDatabase(dbPath?: string): Database.Database {
+export function initDatabase(dbPath?: string, options?: { refuseIfLocked?: boolean }): Database.Database {
   // CLAUDE_MEMORY_DB is the supported sandbox/CLI override used throughout the
   // command surface. Keep an explicit argument highest priority and preserve
   // the existing live default when neither override is present.
@@ -533,9 +551,9 @@ export function initDatabase(dbPath?: string): Database.Database {
     mkdirSecure(dir);
   }
 
-  // Store path for size monitoring
+  acquireStartupLock(expandedPath, options?.refuseIfLocked);
+  // Store path for size monitoring only after startup lock acquisition.
   currentDbPath = expandedPath;
-  acquireStartupLock(expandedPath);
 
   // Internal startup state — support-thread material, not user output. Silent
   // unless SHIELDCORTEX_DEBUG / --verbose asks for it (#129).

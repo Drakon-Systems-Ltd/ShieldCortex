@@ -24,6 +24,7 @@ import readline from 'node:readline/promises';
 import { actionGuardPosture, getActionGuardCoreConfig, readRawConfig, type ActionGuardPosture } from '../cloud/config.js';
 import { readPolicyLock } from '../defence/iron-dome/policy-lock.js';
 import {
+  DEFAULT_PRIOR_POLICY_CARRY,
   INTERVENTION_MAX_RATE,
   INTERVENTION_MIN_SAMPLE,
   INTERVENTION_MIN_SPAN_MS,
@@ -145,7 +146,7 @@ export function buildReadinessSummary(opts: { now?: number; home?: string; adapt
   // `home` pins the evidence tree (tests); production reads the configured
   // root plus the hook's home-directory audit.
   const paths = readinessPaths({ home: opts.home, adapter });
-  const report = computeReadiness({ channel, paths, now, adapter });
+  const report = computeReadiness({ channel, paths, now, adapter, home: opts.home });
   const state = readReadinessState(paths.statePath);
   const record = readTransitionRecord(transitionsPathFor(paths));
 
@@ -230,6 +231,48 @@ export function notInUseText(adapter: ReadinessAdapter): string {
     `If it runs on this host, its first gated call starts its record watching first (shadow) and announces it.`;
 }
 
+/**
+ * #719: how evidence from other releases and policies was treated, in operator
+ * words — shared with doctor. Evidence is keyed on the policy hash, so a
+ * release that keeps the hash keeps its evidence ("evidence retained"), and
+ * one that changes it carries the old evidence at the configured discount
+ * once the new policy has its own fresh window.
+ */
+export function describeEvidenceCarry(report: ReadinessReport): string[] {
+  const { carry, intervention: iv, reachability: rc } = report;
+  const pctCarry = `${Math.round(carry.priorPolicyCarry * 100)}%`;
+  const setting = `actionGuard.readiness.priorPolicyCarry ${carry.source === 'config' ? 'from config' : `default ${DEFAULT_PRIOR_POLICY_CARRY}`}`;
+  const out: string[] = [];
+  if (carry.earlierReleases.length > 0) {
+    out.push(
+      `evidence retained: the upgrade from ${carry.earlierReleases.join(', ')} did not change the policy hash, so ` +
+        `${iv.retained + rc.retained} row(s) written by that release count in full`,
+    );
+  }
+  if (carry.priorPolicies.length > 0) {
+    out.push(
+      `policy changed since ${carry.priorPolicies.join(', ')}: its evidence is carried at ${pctCarry} (${setting}) — ` +
+        `${iv.carried.total} of ${iv.carried.rawTotal} call(s) and ${rc.carried.resolved} of ${rc.carried.rawResolved} approval request(s); ` +
+        `carried calls count only after a fresh window of ≥ ${carry.freshMinCalls} calls over ≥ ${carry.freshMinSpanMs / 3_600_000}h under this policy ` +
+        `(so far ${iv.fresh.total} over ${(iv.fresh.spanMs / 3_600_000).toFixed(1)}h)`,
+    );
+  }
+  return out;
+}
+
+/**
+ * Evidence rows that did not count — another adapter, or no usable readiness
+ * pin — and how many of those carry no pin at all. Null when there are none.
+ * Shared with doctor.
+ */
+export function describeNotCounted(report: ReadinessReport): string | null {
+  const { intervention: iv, reachability: rc } = report;
+  if (iv.otherVersion + rc.otherVersion === 0) return null;
+  const unpinned = iv.unpinned + rc.unpinned;
+  return `${iv.otherVersion + rc.otherVersion} evidence row(s) from another adapter or with no usable readiness pin` +
+    `${unpinned > 0 ? ` (${unpinned} carry no pin at all — written outside the enforce-when-ready posture)` : ''}`;
+}
+
 export function formatReadinessLines(s: ReadinessSummary): string[] {
   const { report } = s;
   const iv = report.intervention;
@@ -245,17 +288,23 @@ export function formatReadinessLines(s: ReadinessSummary): string[] {
       ? `Current mode:  NOT IN USE on this host — ${notInUseText(s.adapter)}`
       : `Current mode:  ${MODE_TEXT[s.mode]}${s.demoted ? ' — DEMOTED from enforcing' : ''}`,
     `Version pin:   ${report.pin ? `${report.pin.adapter} / ${report.pin.policy}` : 'UNKNOWN — no evidence can count'}`,
+    `Evidence key:  ${report.pin ? `${report.pin.policy} (the policy hash; the adapter's package version is not part of the key)` : 'UNKNOWN'}`,
     'Readiness proxies (operability):',
     `  Operational intervention rate: ${pct(iv.rate)} would-stop (${iv.stops}/${iv.total} calls over ${(iv.spanMs / 86_400_000).toFixed(1)} days) ` +
       `— need ≤ ${pct(INTERVENTION_MAX_RATE)} over ≥ ${INTERVENTION_MIN_SAMPLE} calls and ≥ ${INTERVENTION_MIN_SPAN_MS / 86_400_000} days  ${iv.pass ? 'PASS' : 'not met'}`,
+    `    fresh since this policy: ${iv.fresh.total} call(s); carried from compatible prior policy: ${iv.carried.total} ` +
+      `(of ${iv.carried.rawTotal}, at ${Math.round(report.carry.priorPolicyCarry * 100)}%)` +
+      `${iv.freshWindow.required ? ` — fresh window ≥ ${report.carry.freshMinCalls} calls / ≥ ${report.carry.freshMinSpanMs / 3_600_000}h ${iv.freshWindow.pass ? 'met' : 'not met'}` : ''}`,
     `  Approval reachability:         ${pct(rc.rate)} answered by a human (${rc.reached}/${rc.resolved}${rc.pending ? `, ${rc.pending} pending` : ''}) ` +
       `via ${rc.channel.configured ? rc.channel.kind : 'NO CHANNEL'} — need ≥ ${pct(REACHABILITY_MIN_RATE)} over ≥ ${REACHABILITY_MIN_SAMPLE}  ${rc.pass ? 'PASS' : 'not met'}`,
+    `    fresh since this policy: ${rc.fresh.resolved} request(s); carried from compatible prior policy: ${rc.carried.resolved} ` +
+      `(of ${rc.carried.rawResolved}, at ${Math.round(report.carry.priorPolicyCarry * 100)}%)`,
     `  Last live round-trip:          ${rc.lastRoundTripAt ?? 'never'}`,
     `Effectiveness evidence: ${effectivenessText}`,
   ];
-  if (iv.otherVersion + rc.otherVersion > 0) {
-    lines.push(`Not counted:   ${iv.otherVersion + rc.otherVersion} evidence row(s) from another adapter/policy version`);
-  }
+  for (const note of describeEvidenceCarry(report)) lines.push(`Evidence:      ${note}`);
+  const notCounted = describeNotCounted(report);
+  if (notCounted) lines.push(`Not counted:   ${notCounted}`);
   if (s.recordUnknown) {
     lines.push(`Transition record: ${s.record.status === 'ok' ? 'EMPTY' : s.record.status.toUpperCase()} — ${UNKNOWN_RECORD_REASON}`);
   } else if (s.record.last) {

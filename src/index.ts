@@ -20,13 +20,15 @@
  *   shieldcortex audit --markdown        # Audit with Markdown output
  *   shieldcortex audit --ci              # Audit in CI mode (exit code reflects grade)
  *   shieldcortex status                  # Show database and system status
- *   shieldcortex quickstart              # Detect integrations and offer guided install
- *   shieldcortex quickstart --yes        # Install across all detected integrations
- *   shieldcortex setup                   # Configure Claude for proactive memory use
- *   shieldcortex install                 # Alias for setup
- *   shieldcortex install --with-stop-hook        # Opt in to the Stop hook (sampled per-turn extraction)
- *   shieldcortex install --with-session-end      # Opt in to the SessionEnd hook (final extraction on session exit)
- *   shieldcortex install --with-stop-hook --with-session-end   # Both at once
+ *   shieldcortex setup                   # Onboarding: detect hosts, ask before wiring each (#708)
+ *   shieldcortex setup --yes             # Wire every detected host without prompting
+ *   shieldcortex setup claude            # The Claude Code install, no table (same as `install`)
+ *   shieldcortex setup --with-stop-hook          # Opt in to the Stop hook (sampled per-turn extraction)
+ *   shieldcortex setup --with-session-end        # Opt in to the SessionEnd hook (final extraction on session exit)
+ *   shieldcortex setup --with-stop-hook --with-session-end   # Both at once
+ *   shieldcortex install                 # Compatibility: the Claude Code install, NOT the setup wizard
+ *   shieldcortex install --without-stop-hook     # Opt-outs (--without-*) go through install
+ *   shieldcortex quickstart              # Older name for setup's guided path (no hook flags, no uninstall)
  *   shieldcortex hook pre-compact        # Run pre-compact hook (for settings.json)
  *   shieldcortex hook session-start      # Run session-start hook (for settings.json)
  *   shieldcortex hook session-end        # Run session-end hook (for settings.json)
@@ -606,6 +608,14 @@ async function main() {
     return;
   }
 
+  // A dry run must not reach the npm staleness preamble or stats banner:
+  // either can write under HOME before maintenance starts.
+  if (process.argv[2] === 'maintain') {
+    const { runMaintain } = await import('./cli/maintain.js');
+    await runMaintain(process.argv.slice(3));
+    return;
+  }
+
   // #577: an invalid argument must cost NOTHING — and `checkVersionStaleness()`
   // below spawns `npm ls -g`, which lets npm's own update-notifier reach the
   // registry and write ~/.npm/_logs. So the strict-parser commands are
@@ -689,6 +699,7 @@ ${bold}COMMANDS${reset}
                                    if anything could not be moved safely)
   ${cyan}policy-evidence${reset}       Per-runtime posture records as JSON (read-only, sc:// provenance)
   ${cyan}vacuum${reset}                Compact the memory DB, reclaiming free pages (no sqlite3 CLI needed)
+  ${cyan}maintain${reset}               Run storage and memory hygiene (--dry-run, --json); audit-log retention is not included yet
   ${cyan}sessions${reset} prune        Delete old session-capture events (dry-run; --days N, --execute)
   ${cyan}logs${reset} prune            Keep only the newest project-key-repair-*.json logs
                         (dry-run; --execute). Audit logs are not managed yet (#579).
@@ -702,7 +713,7 @@ ${bold}COMMANDS${reset}
                         Pin a human-reviewed script (path + content hash)
                         so the guard stops folding its source; any edit re-gates it.
                         scan = discover cron-referenced scripts and TTY-batch-review new/changed
-  ${cyan}quickstart${reset} [target]    Detect integrations and guide/install setup
+  ${cyan}quickstart${reset} [target]    Older name for setup's guided path (no hook flags or uninstall)
   ${cyan}config${reset} [options]      Configure cloud sync and settings
   ${cyan}cloud${reset} sync --full     Backfill local memories + graph to ShieldCortex Cloud
   ${cyan}review-copilot${reset} <action> Local AI Explainer for quarantine review (Pro)
@@ -711,12 +722,15 @@ ${bold}COMMANDS${reset}
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
   ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
-  ${cyan}setup${reset}                 Install ShieldCortex into your project
+  ${cyan}setup${reset} [target]        Start here: detects hosts, asks before wiring each
+                        Targets: claude, openclaw, hermes, copilot, codex, security
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
-                               --without-stop-hook / --without-session-end (opt out)
                                (absent flags leave existing opt-ins unchanged)
-                               Pass either to opt in; re-run without to opt out.
+                               Pass either to opt in; opt out with install --without-*.
+  ${cyan}install${reset} [flags]       The Claude Code install, kept for scripts. Not the
+                        setup wizard: \`setup claude\` runs the same install.
+                        Takes the hook flags; --without-* opt-outs need install.
   ${cyan}protect${reset}               Pin the security-critical config to a root-owned
                         policy lock the agent uid cannot write (needs root).
                         Pins the safe posture without reading config.json;
@@ -738,12 +752,12 @@ ${bold}OPTIONS${reset}
   --help, -h           Show this help message
 
 ${bold}EXAMPLES${reset}
-  shieldcortex quickstart
+  shieldcortex setup
   shieldcortex scan "ignore previous instructions"
   shieldcortex scan-skill ~/.claude/skills/my-skill/SKILL.md
   shieldcortex dashboard
   shieldcortex worker
-  shieldcortex install --with-stop-hook --with-session-end
+  shieldcortex setup --with-stop-hook --with-session-end
   shieldcortex cortex preflight --task "deploy site"
   shieldcortex license activate sc_pro_...
   shieldcortex config --cloud-enable --cloud-api-key <key>
@@ -772,8 +786,9 @@ ${bold}DOCS${reset}
 
   // Handle "doctor" subcommand
   if (process.argv[2] === 'doctor') {
-    const { runDoctor } = await import('./cli/doctor.js');
-    await runDoctor(process.argv.slice(3));
+    // #707: --help prints usage before doctor's module graph is even loaded.
+    const { dispatchDoctorCommand } = await import('./cli/setup-dispatch.js');
+    await dispatchDoctorCommand(process.argv.slice(3));
     return;
   }
 
@@ -805,24 +820,10 @@ ${bold}DOCS${reset}
 
   // Handle "setup" subcommand (alias: "install")
   if (process.argv[2] === 'setup' || process.argv[2] === 'install') {
-    if (process.argv[3] === 'uninstall') {
-      const { uninstallSetup } = await import('./setup/uninstall.js');
-      await uninstallSetup();
-      return;
-    }
-    const { parseHookOptInFlags } = await import('./setup/settings-hooks.js');
-    const { setupClaudeMd } = await import('./setup/claude-md.js');
-    // `setup` with no extra flags is the host-table wizard. `install` stays
-    // Claude Code only so existing scripts do not grow OpenClaw/Hermes
-    // installs. Explicit hook flags on setup also stay Claude-only.
-    const hookFlags = parseHookOptInFlags(process.argv);
-    const hasHookFlag = process.argv.some((a) => a.startsWith('--with-') || a.startsWith('--no-'));
-    if (process.argv[2] === 'install' || hasHookFlag) {
-      await setupClaudeMd(hookFlags);
-    } else {
-      const { handleQuickstartCommand } = await import('./setup/quickstart.js');
-      await handleQuickstartCommand(process.argv[3]);
-    }
+    // #707: --help / -h prints usage before any installer module is loaded —
+    // `install --help` used to go straight into the Claude Code install.
+    const { dispatchSetupCommand } = await import('./cli/setup-dispatch.js');
+    await dispatchSetupCommand(process.argv[2] === 'install' ? 'install' : 'setup', process.argv.slice(3));
     return;
   }
 
@@ -1570,7 +1571,7 @@ ${bold}DOCS${reset}
     'openclaw', 'clawdbot', 'copilot', 'codex', 'hermes', 'service', 'config', 'status',
     'graph', 'license', 'licence', 'audit', 'mcp', 'iron-dome', 'scan', 'cloud', 'review-copilot',
     'scan-skill', 'scan-skills', 'dashboard', 'api', 'worker', 'stats', 'cortex', 'consolidate', 'xray', 'xray-preinstall',
-    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'sessions', 'logs', 'approve', 'deny', 'allowlist',
+    'memories', 'import-jsonl', 'remember', 'vacuum', 'compact', 'maintain', 'sessions', 'logs', 'approve', 'deny', 'allowlist',
   ]);
   const arg = process.argv[2];
   if (arg && !arg.startsWith('-') && !knownCommands.has(arg)) {

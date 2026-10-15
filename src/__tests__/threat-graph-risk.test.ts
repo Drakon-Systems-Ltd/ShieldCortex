@@ -105,7 +105,7 @@ describe('foldEvent + decayedRisk', () => {
 });
 
 describe('runRiskSweep (DB)', () => {
-  beforeEach(() => initDatabase(':memory:'));
+  beforeEach(() => { initDatabase(':memory:'); });
   afterEach(() => closeDatabase());
 
   function insertAudit(seed: {

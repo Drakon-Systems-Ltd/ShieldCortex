@@ -169,6 +169,16 @@ import {
   type CorrelateCronDenialsOptions,
   type CronDenialReport,
 } from './cron-denial-audit.js';
+import {
+  evaluateRecallRepetition,
+  REPEAT_MIN_SET_SIZE,
+  REPEAT_SAMPLE_RUNS,
+  type RecallRepetitionDeps,
+  type RecallRepetitionVerdict,
+  type SlotProblem,
+} from './recall-repetition.js';
+
+export const VACUUM_FREE_SHARE = 0.2;
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json');
@@ -1428,7 +1438,7 @@ export function runSchemaDriftCheck(dbPath: string): CheckResult {
           label: 'Schema',
           status: 'warn',
           message: `missing columns: ${missing.join(', ')}`,
-          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex install',
+          fix: 'Restart the MCP server to auto-migrate, or run: shieldcortex setup claude',
         };
       }
     } finally {
@@ -1650,7 +1660,7 @@ export function runWritePathProbe(dbPath: string, env: Environment = detectEnvir
   const isOpenClawOnly = env.hasOpenClaw && !env.hasClaude;
   const failFix = isOpenClawOnly
     ? 'Run `shieldcortex repair` — it opens the database through the full init/migration path (and rebuilds the DB engine if that is the fault). This box has no MCP server to restart.'
-    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex install';
+    : 'This is the smoking gun for a stale schema or migration drift. Run `shieldcortex repair` (opens the DB through the full init/migration path), restart the MCP server (auto-migrates on next open), or re-install: shieldcortex setup claude';
 
   try {
     const Database = require('better-sqlite3');
@@ -1744,14 +1754,14 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
   if (probe.kind === 'absent') {
     // No settings.json is not a fault. Either Claude Code isn't on this box at
     // all (OpenClaw-only / headless installs never grow one), or it is and the
-    // user hasn't run `shieldcortex install` yet — the exact state of every
+    // user hasn't run `shieldcortex setup` yet — the exact state of every
     // fresh install. A ⚠️ here told healthy boxes something was wrong (#129).
     return env.hasClaude
       ? {
           label: 'Hooks',
           status: 'info',
           message: 'not configured yet — no ~/.claude/settings.json',
-          fix: 'Run `shieldcortex install` to configure hooks',
+          fix: 'Run `shieldcortex setup claude` to configure hooks',
         }
       : {
           label: 'Hooks',
@@ -1764,7 +1774,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     const hooks = settings.hooks || {};
 
-    // Single source of truth: whatever `shieldcortex install` actually installs.
+    // Single source of truth: whatever `shieldcortex setup claude` actually installs.
     // Previously hardcoded a different list which produced false "missing" warnings
     // after SessionEnd was removed from defaults (was crashing OpenClaw agents). [#23]
     const hookNames = [...REQUIRED_HOOK_NAMES];
@@ -1811,7 +1821,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         message:
           `${installed}/${hookNames.length} installed but ${unresolvable.length} DO NOT RESOLVE ` +
           `(${unresolvable.join(', ')}) — these hooks never run, so the guard is not enforcing here`,
-        fix: 'Run `shieldcortex install` to rewrite them to an absolute path (#146)',
+        fix: 'Run `shieldcortex setup claude` to rewrite them to an absolute path (#146)',
       };
     }
 
@@ -1822,7 +1832,7 @@ export function runHooksCheck(settingsPath: string, env: Environment = detectEnv
         label: 'Hooks',
         status: 'warn',
         message: `${installed}/${hookNames.length} installed — missing: ${missing.join(', ')}`,
-        fix: 'Run `shieldcortex install` to configure hooks',
+        fix: 'Run `shieldcortex setup claude` to configure hooks',
       };
     }
   } catch (err: unknown) {
@@ -2117,7 +2127,7 @@ function readDbFreeSpace(dbPath: string): DbFreeSpace | null {
   }
 }
 
-export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES): Promise<CheckResult> {
+export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limitBytes: number = DIRECTORY_BUDGET_BYTES, options: { dbPath?: string } = {}): Promise<CheckResult> {
   const dirProbe = probePath(scDir);
   if (dirProbe.kind === 'denied' || dirProbe.kind === 'error') {
     // "Directory not yet created" is a ✅. An unreadable one is not — this is
@@ -2238,7 +2248,7 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
     const backupsStr = backupsSize > 0 ? ` + ${formatBytes(backupsSize)} backups` : '';
 
     // One database open, for one number: how much of the file is free space.
-    const free = readDbFreeSpace(path.join(scDir, 'memories.db'));
+    const free = readDbFreeSpace(options.dbPath ?? path.join(scDir, 'memories.db'));
 
     // Name WHICH logs, and how much of the DB file is free pages, so the
     // headline points somewhere. The leading `DB … · backups … · logs …` shape
@@ -2267,7 +2277,6 @@ export async function checkDiskUsage(scDir: string = getShieldCortexDir(), limit
      * file to reclaim a rounding error, so recommending it wastes the
      * operator's time and teaches them to ignore us.
      */
-    const VACUUM_FREE_SHARE = 0.2;
 
     /**
      * Report, and advise only where a MEASUREMENT supports it (#573 round 3).
@@ -5043,12 +5052,18 @@ async function readinessRowsForSurface(
     return [{ label, status: 'info', message: `enforce when ready: not in use on this host — ${notInUseText(summary.adapter)}` }];
   }
   const { intervention, reachability, effectiveness } = summary.report;
+  const { describeEvidenceCarry, describeNotCounted } = await import('./guard.js');
+  const notCounted = describeNotCounted(summary.report);
   const pct = (r: number | null) => (r === null ? 'n/a' : `${(r * 100).toFixed(1)}%`);
   const bars =
     `readiness proxies: operational intervention rate ${pct(intervention.rate)} (${intervention.stops}/${intervention.total}, need ≤ 2% over ≥ 500 calls / 7 days); ` +
     `approval reachability ${pct(reachability.rate)} (${reachability.reached}/${reachability.resolved}, need ≥ 98% over ≥ 20) via ` +
     `${reachability.channel.configured ? reachability.channel.kind : 'no channel'}; last round-trip ${reachability.lastRoundTripAt ?? 'never'}; ` +
-    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}`;
+    `effectiveness evidence ${effectiveness.evidence ? 'reviewed' : 'required, none reviewed'}; ` +
+    // #719: evidence is keyed on the policy hash — say what carried over.
+    `evidence: ${intervention.fresh.total} call(s) fresh since this policy, ${intervention.carried.total} carried from compatible prior policy` +
+    describeEvidenceCarry(summary.report).map((n) => `; ${n}`).join('') +
+    (notCounted ? `; not counted: ${notCounted}` : '');
   const missing = summary.report.missing.length > 0 ? ` Missing: ${summary.report.missing.join('; ')}.` : '';
   // #509 r5: the promotion notice is the detection control for a forged
   // journal, so doctor names the newest promotion the journal records for the
@@ -5864,7 +5879,6 @@ export async function checkMemoryPlaneDrift(): Promise<CheckResult> {
   // "cannot determine", never as a passing zero.
   let injectPack: InjectPackModule | null = null;
   try {
-    // @ts-expect-error — importing a .mjs hook util that has no .d.ts
     injectPack = await import('../../scripts/lib/inject-pack.mjs') as InjectPackModule;
   } catch {
     injectPack = null;
@@ -7759,11 +7773,149 @@ async function checkHookTimeouts(): Promise<CheckResult> {
       label: 'Hook timeouts',
       status: 'warn',
       message: `below canonical: ${drift.join(', ')}`,
-      fix: 'Re-run `shieldcortex install` to restore canonical timeouts',
+      fix: 'Re-run `shieldcortex setup claude` to restore canonical timeouts',
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return { label: 'Hook timeouts', status: 'info', message: `check skipped — ${msg}` };
+  }
+}
+
+// ── Check: recall lane pin (#718 / #722) ─────────────────
+/**
+ * Prompt recall scopes itself by lane (interactive / cron / automation /
+ * subagent). Lanes are detected from markers that OpenClaw's own prompt
+ * builders write; a scheduler outside OpenClaw (systemd timer, crontab, CI)
+ * writes none, so its turns look interactive and get the owner's full recall.
+ * SHIELDCORTEX_RECALL_LANE pins the lane for such a job. An unrecognised
+ * value fails safe in the hook — the turn is treated as `automation` (#722
+ * review R4): no recall by default, PUBLIC rows only where
+ * `recallLanes.automation.recall` is true (#729) — which is worth a WARN: the
+ * operator meant some lane, and it is not the one they get.
+ */
+const RECALL_LANES = ['interactive', 'cron', 'automation', 'subagent'] as const;
+
+export function checkRecallLanePin(env: NodeJS.ProcessEnv = process.env): CheckResult {
+  const label = 'Recall lane';
+  const raw = env.SHIELDCORTEX_RECALL_LANE;
+  const pinned = String(raw ?? '').trim().toLowerCase();
+  if (pinned && (RECALL_LANES as readonly string[]).includes(pinned)) {
+    return { label, status: 'info', message: `pinned to "${pinned}" by SHIELDCORTEX_RECALL_LANE in this environment` };
+  }
+  if (pinned) {
+    return {
+      label,
+      status: 'warn',
+      message: `SHIELDCORTEX_RECALL_LANE="${String(raw).trim()}" is not a lane — prompt recall treats every turn in this environment as automation until it is fixed (no recall by default; PUBLIC rows only if recallLanes.automation.recall is true)`,
+      fix: `Set SHIELDCORTEX_RECALL_LANE to one of: ${RECALL_LANES.join(', ')}`,
+    };
+  }
+  return {
+    label,
+    status: 'info',
+    message: 'detected from OpenClaw prompt markers. Jobs launched by another scheduler (systemd, crontab, CI) '
+      + 'carry no marker and recall as interactive — set SHIELDCORTEX_RECALL_LANE=cron (or automation) in that job\'s environment.',
+  };
+}
+
+// ── Check: repeated recall top-k (#717) ─────────────────
+/**
+ * WARN when the newest interactive prompt-recall runs all returned the same
+ * non-empty top-k candidate set — #717's envelope-dominated query signature.
+ * The evaluation lives in recall-repetition.ts; this only words the verdict.
+ *
+ * Every message is fixed text plus counts: no prompt, title, path, id or hash.
+ * Nothing here is a PASS unless a full sample was read, and the WARN names no
+ * command — repetition is evidence to look at, not a fault with a known fix.
+ */
+export const RECALL_REPETITION_LABEL = 'Recall repetition';
+
+const SLOT_PROBLEM_TEXT: Record<SlotProblem, string> = {
+  corrupt: 'not valid JSON',
+  unreadable: 'unreadable',
+  oversized: 'oversized',
+  unsafe: 'not a regular file',
+  malformed: 'malformed',
+  budget: 'over the read budget',
+  missing: 'missing with older entries behind it',
+};
+
+export function recallRepetitionResult(v: RecallRepetitionVerdict): CheckResult {
+  const label = RECALL_REPETITION_LABEL;
+  switch (v.kind) {
+    case 'absent':
+      return { label, status: 'info', message: 'no recall log yet — repeated top-k sets not checked' };
+    case 'unavailable':
+      return {
+        label,
+        status: 'info',
+        message: v.reason === 'unsafe'
+          ? 'recall log is not a plain directory — not read, repeated top-k sets not checked'
+          : 'recall log could not be read — repeated top-k sets not checked',
+      };
+    case 'incomplete': {
+      const parts = (Object.keys(v.problems) as SlotProblem[]).map((p) => SLOT_PROBLEM_TEXT[p]);
+      return {
+        label,
+        status: 'info',
+        message: `recall log sample incomplete — an entry was ${parts.join(', ')} after ${v.interactiveRuns} `
+          + 'interactive run(s) — repeated top-k sets not checked',
+      };
+    }
+    case 'insufficient': {
+      const skipped = v.otherLaneRuns + v.unknownLaneRuns;
+      return {
+        label,
+        status: 'info',
+        message: `${v.interactiveRuns} of ${REPEAT_SAMPLE_RUNS} interactive recall runs logged`
+          + (skipped > 0 ? ` (${skipped} cron/automation/subagent or unlabelled runs skipped)` : '')
+          + ' — not enough to check for repeated top-k sets',
+      };
+    }
+    case 'below-floor':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + `below the ${REPEAT_MIN_SET_SIZE}-candidate floor for this check`,
+      };
+    case 'same-prompt':
+      return {
+        label,
+        status: 'info',
+        message: `last ${v.runs} interactive recall runs share a ${v.setSize}-candidate top-k set, `
+          + 'but every one has the same prompt hash — the same prompt repeated, which explains it',
+      };
+    case 'varied':
+      return {
+        label,
+        status: 'pass',
+        message: `last ${v.runs} interactive recall runs did not all return the same non-empty top-k set`,
+      };
+    case 'repeated': {
+      const identity = v.distinctPromptHashes === null
+        ? 'prompt identity not recorded for every run'
+        : `${v.distinctPromptHashes} distinct prompt hashes`;
+      return {
+        label,
+        status: 'warn',
+        message: `last ${v.runs} interactive recall runs returned the same ${v.setSize}-candidate top-k set (${identity}). `
+          + 'This is repetition evidence, not a proven root cause: a recall query dominated by a message wrapper '
+          + 'or envelope can do this, and so can asking about the same topic repeatedly or an unmarked '
+          + 'scheduled job recalling as interactive. Compare recent recalls with what was asked before changing anything.',
+      };
+    }
+  }
+}
+
+export async function checkRecallRepetition(
+  deps: RecallRepetitionDeps = { homeDir: os.homedir() },
+): Promise<CheckResult> {
+  try {
+    return recallRepetitionResult(evaluateRecallRepetition(deps));
+  } catch {
+    // Fixed text: an error message could quote a path under the home dir.
+    return { label: RECALL_REPETITION_LABEL, status: 'info', message: 'recall log could not be read — repeated top-k sets not checked' };
   }
 }
 
@@ -9042,6 +9194,8 @@ export async function runDoctor(
     checkSemanticCoverage, // #458: how much of the store semantic recall can actually see
     checkHooks,
     checkHookTimeouts,
+    async () => checkRecallLanePin(),
+    async () => checkRecallRepetition(), // #717: same top-k on every recent interactive recall
     checkAutoMemoryHooks,
     checkAutoMemorySampling,
     checkMemoryPlaneEmptyBrain,

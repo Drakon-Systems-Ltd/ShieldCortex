@@ -107,7 +107,7 @@ let cachedIntegrityKey: string | null = null;
 let cachedIntegrityKeyFile: string | null = null;
 let configTampered = false;
 
-function getIntegrityKey(): string {
+function getIntegrityKey(readOnly = false): string {
   const integrityKeyFile = getIntegrityKeyFile();
   const configDir = getConfigDir();
   if (cachedIntegrityKey && cachedIntegrityKeyFile === integrityKeyFile) return cachedIntegrityKey;
@@ -118,6 +118,7 @@ function getIntegrityKey(): string {
       return cachedIntegrityKey;
     }
   } catch { /* ignore */ }
+  if (readOnly) throw new Error('config integrity key unavailable');
   // Generate new key on first run
   const key = randomBytes(32).toString('hex');
   mkdirSecure(configDir);
@@ -128,8 +129,8 @@ function getIntegrityKey(): string {
   return key;
 }
 
-function signConfig(jsonContent: string): string {
-  return createHmac('sha256', getIntegrityKey()).update(jsonContent, 'utf-8').digest('hex');
+function signConfig(jsonContent: string, readOnly = false): string {
+  return createHmac('sha256', getIntegrityKey(readOnly)).update(jsonContent, 'utf-8').digest('hex');
 }
 
 /**
@@ -187,7 +188,6 @@ type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered';
  * whole-file signature). On a missing legacy sig file we adopt the current
  * content as trusted (first run after upgrade), matching prior behaviour.
  */
-function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: string): IntegrityVerdict;
 function checkConfigIntegrity(
   parsed: Record<string, unknown>,
   rawFileContent: string,
@@ -196,14 +196,21 @@ function checkConfigIntegrity(
 function checkConfigIntegrity(
   parsed: Record<string, unknown>,
   rawFileContent: string,
-  opts: { sideEffects: boolean } = { sideEffects: true },
+  opts?: { readOnly?: boolean },
+): IntegrityVerdict;
+function checkConfigIntegrity(
+  parsed: Record<string, unknown>,
+  rawFileContent: string,
+  opts: { sideEffects?: boolean; readOnly?: boolean } = {},
 ): IntegrityVerdict | 'unsigned' {
+  const sideEffects = opts.sideEffects !== false;
+  const readOnly = opts.readOnly === true;
   try {
     // A read-only inspection (doctor) must not mint an integrity key: a
     // missing key leaves nothing to verify against, which is reported as
     // tampered exactly as the minting path would conclude.
-    const sign = opts.sideEffects
-      ? signConfig
+    const sign = sideEffects
+      ? (body: string): string => signConfig(body, readOnly)
       : (() => {
           const key = readIntegrityKeyNoMint();
           return (body: string): string => {
@@ -229,11 +236,11 @@ function checkConfigIntegrity(
     const sigFile = getSigFile();
     if (!existsSync(sigFile)) {
       // Read-only inspection: say what the ordinary read WOULD do, don't do it.
-      if (!opts.sideEffects) return 'unsigned';
+      if (!sideEffects) return 'unsigned';
       // First run after upgrade with no sig yet — adopt as trusted, write a
       // legacy sig so a subsequent read (before the next write upgrades it)
       // still verifies. Matches the prior behaviour to avoid a false tamper.
-      writeConfigSignature(rawFileContent);
+      if (!readOnly) writeConfigSignature(rawFileContent);
       return 'valid';
     }
     const storedSig = readFileSync(sigFile, 'utf-8').trim();
@@ -470,7 +477,7 @@ interface RawConfigState {
  * persisted it — `reviewedScripts`/`autoApprove` wiped — and re-signed the
  * result as valid, ending the tamper alarm with nobody having reviewed it.
  */
-function readRawConfigStateUnlocked(): RawConfigState {
+function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawConfigState {
   const configFile = getConfigFile();
 
   // mtime cache: if the file is unchanged since the last successful read,
@@ -532,7 +539,7 @@ function readRawConfigStateUnlocked(): RawConfigState {
       const data = parsed as Record<string, unknown>;
 
       // Verify HMAC integrity (embedded `_sig`, else legacy `.config-sig`).
-      const verdict = checkConfigIntegrity(data, content);
+      const verdict = checkConfigIntegrity(data, content, { readOnly: options.readOnly });
       configTampered = verdict === 'tampered';
       if (verdict === 'tampered') {
         console.error(
@@ -549,7 +556,7 @@ function readRawConfigStateUnlocked(): RawConfigState {
       // can't leak into CloudConfig or get re-serialised as a normal field.
       delete data._sig;
 
-      if (verdict === 'self-heal') {
+      if (verdict === 'self-heal' && !options.readOnly) {
         // The bytes are authentic (legacy whole-file sig still validates) — only
         // the embedded `_sig` drifted. Re-sign silently to converge on the
         // embedded-only format and drop the stale legacy sig. This is a one-shot:
@@ -574,7 +581,7 @@ function readRawConfigStateUnlocked(): RawConfigState {
       // Populate the mtime cache from the parsed (sig-stripped) object, keyed on
       // the mtime captured BEFORE the read (matches the bytes actually parsed),
       // together with the verdict so a cache hit answers the same way.
-      if (mtimeMsForCache !== null) {
+      if (mtimeMsForCache !== null && !options.readOnly) {
         cachedRawConfig = { ...data };
         cachedRawConfigFile = configFile;
         cachedRawConfigMtimeMs = mtimeMsForCache;
@@ -611,8 +618,8 @@ function readRawConfigStateUnlocked(): RawConfigState {
  * agent instead of at its next restart. A stale security policy is the worse
  * trade.
  */
-function readRawConfigState(): RawConfigState {
-  const state = readRawConfigStateUnlocked();
+function readRawConfigState(options: { readOnly?: boolean } = {}): RawConfigState {
+  const state = readRawConfigStateUnlocked(options);
   // #501: a tampered verdict forces the WHOLE fail-closed posture, not just
   // `defenceMode`. Before #501, `actionGuard.enabled` was still read straight
   // out of the bytes the integrity check had just called untrustworthy — so
@@ -623,7 +630,7 @@ function readRawConfigState(): RawConfigState {
   // write starts from — same order and same function as before, so every
   // reader sees exactly what it saw before #647.
   const base = state.integrity === 'tampered' ? applyStrictFailClosedPosture(state.data) : state.data;
-  const lock = getPolicyLockState();
+  const lock = options.readOnly ? readPolicyLock({ audit: false }) : getPolicyLockState();
   const locked = applyPolicyLock(base, lock);
   return locked === state.data ? state : { ...state, data: locked };
 }
@@ -637,8 +644,8 @@ export function getPolicyLockState(): PolicyLockState {
   return readPolicyLock({ audit: true });
 }
 
-export function readRawConfig(): Record<string, unknown> {
-  return readRawConfigState().data;
+export function readRawConfig(options: { readOnly?: boolean } = {}): Record<string, unknown> {
+  return readRawConfigState(options).data;
 }
 
 // ── Integrity inspection (#647) ──

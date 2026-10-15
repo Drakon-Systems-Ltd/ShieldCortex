@@ -78,7 +78,7 @@ function decisionRows() {
     .filter(Boolean);
 }
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 describe('quarantine decision ledger', () => {
