@@ -7,7 +7,26 @@
  * truncated mid-sentence via ellipsis — it wraps in full at any width.
  */
 
+import { sanitiseDisplayLines } from './term-ui.js';
+
 export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'info';
+
+/**
+ * Display copy of doctor rows for the human report (#788): `message`, `fix`
+ * and `verboseNote` carry host-derived text (install dirs, error messages),
+ * so each of their lines goes through the display sanitiser. Line breaks that
+ * the report uses for layout are kept; every other break character and every
+ * control sequence is neutralised. The input rows are not modified, so
+ * `--json` output and exit codes stay on the raw values.
+ */
+export function sanitiseDoctorRowsForDisplay<T extends DoctorReportItem>(rows: readonly T[]): T[] {
+  return rows.map((r) => ({
+    ...r,
+    message: sanitiseDisplayLines(r.message),
+    ...(r.fix !== undefined ? { fix: sanitiseDisplayLines(r.fix) } : {}),
+    ...(r.verboseNote !== undefined ? { verboseNote: sanitiseDisplayLines(r.verboseNote) } : {}),
+  }));
+}
 
 /** Minimal input shape — matches CheckResult fields the renderer needs. */
 export interface DoctorReportItem {

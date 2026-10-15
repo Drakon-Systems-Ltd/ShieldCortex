@@ -140,6 +140,7 @@ import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-d
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
+  sanitiseDoctorRowsForDisplay,
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
@@ -9306,9 +9307,14 @@ export async function runDoctor(
   const verbose = args.includes('--verbose') || args.includes('--debug');
   const hostTable = scanHostTable();
   const unwired = presentUnwired(hostTable);
+  // #788: check messages and fixes carry host-derived text (install dirs,
+  // error messages). The human report and the NEXT line read a display copy
+  // with each line passed through the display sanitiser; `--json` below keeps
+  // the raw `visible` rows (machine-readable output stays unsanitised).
+  const displayRows = sanitiseDoctorRowsForDisplay(visible);
   let nextCommand: string | null = null;
   if (failures > 0) {
-    const failFix = visible.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
+    const failFix = displayRows.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
     nextCommand = failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
       ?? 'shieldcortex doctor --verbose';
   } else if (unwired.length > 0) {
@@ -9338,7 +9344,7 @@ export async function runDoctor(
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
-  const reportLines = formatDoctorReport(visible, {
+  const reportLines = formatDoctorReport(displayRows, {
     verbose,
     version: String(pkg.version ?? ''),
     target: (() => {

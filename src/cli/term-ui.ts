@@ -121,6 +121,17 @@ export function stringifyJsonTerminalSafe(value: unknown, space?: string | numbe
   );
 }
 
+/**
+ * `sanitiseDisplayField` for multi-line text whose line breaks are layout
+ * (remediation blocks, doctor fix text): each LF / CRLF-separated line is
+ * cleaned on its own, so the layout survives while every other break
+ * character (bare CR, U+0085, U+2028, U+2029) and every control sequence
+ * inside a line is neutralised (#788).
+ */
+export function sanitiseDisplayLines(s: string): string {
+  return String(s ?? '').split(/\r?\n/).map(sanitiseDisplayField).join('\n');
+}
+
 export function ellipsize(s: string, max: number): string {
   const t = String(s ?? '');
   if (t.length <= max) return t;
