@@ -28,6 +28,14 @@
  * The analyser is text-level on purpose: a runtime check would have to execute
  * every verb of every command (which is what the gate exists to prevent), and a
  * type-level one cannot see an `indexOf(flag) + 1` at all.
+ *
+ * #767 registered the dispatcher-gated commands and taught the analyser one
+ * more shape: a read offset from an index VARIABLE (`args[idx + 1]`) is
+ * attributed through that variable's `indexOf(...)` — directly when the
+ * argument is a literal, through the innermost helper's call sites when it is
+ * a parameter (`valueOf(flag)` ← `closed(flag, …)` ← `closed('--memory-plane',
+ * …)`). Before, the read took the nearest literal above it, which for
+ * `protect` was the boolean `--from-config` check on the line between.
  */
 import { describe, expect, it } from '@jest/globals';
 import fs from 'node:fs';
@@ -64,6 +72,47 @@ const HANDLER_SOURCES: Record<GatedCommand | 'global', string[]> = {
   vacuum: ['src/cli/vacuum.ts'],
   compact: ['src/cli/vacuum.ts'],
   logs: ['src/cli/logs.ts'],
+  // ── #767: the rows the dispatcher's own gate reads (src/cli/dispatch-help.ts).
+  // A command handled inline in src/index.ts, or a server mode, shares the
+  // global inventory by identity, so its sources are the dispatcher's.
+  hook: ['src/setup/hooks.ts'],
+  protect: ['src/cli/protect.ts'],
+  quickstart: ['src/setup/quickstart.ts'],
+  copilot: ['src/setup/copilot.ts'],
+  codex: ['src/setup/codex.ts'],
+  service: ['src/service/install.ts'],
+  config: ['src/cloud/cli.ts'],
+  // `handleCloudCommand` reads two fixed tokens (`sync`, `--full`); every value
+  // consumer in its module belongs to `config`, audited on that row.
+  cloud: [],
+  'review-copilot': ['src/cli/review-copilot.ts'],
+  remember: ['src/cli/remember.ts'],
+  approve: ['src/cli/approve.ts'],
+  deny: ['src/cli/deny.ts'],
+  freeze: ['src/cli/freeze.ts'],
+  unfreeze: ['src/cli/freeze.ts'],
+  lease: ['src/cli/freeze.ts'],
+  status: ['src/setup/status.ts'],
+  graph: ['src/index.ts'],
+  'threat-graph': ['src/index.ts'],
+  license: ['src/license/cli.ts'],
+  licence: ['src/license/cli.ts'],
+  stats: ['src/cli/stats-command.ts'],
+  guard: ['src/cli/guard.ts'],
+  memory: ['src/cli/memory.ts'],
+  inspect: ['src/cli/inspect.ts'],
+  'iron-dome': ['src/cli/iron-dome.ts'],
+  scan: ['src/cli/scan-command.ts'],
+  'scan-skill': ['src/index.ts'],
+  env: ['src/index.ts'],
+  'scan-skills': ['src/index.ts'],
+  consolidate: ['src/index.ts'],
+  xray: ['src/xray/index.ts'],
+  'xray-preinstall': ['src/xray/preinstall.ts'],
+  cortex: ['src/cortex/cli.ts'],
+  api: ['src/index.ts'],
+  dashboard: ['src/index.ts'],
+  worker: ['src/index.ts'],
   global: ['src/index.ts'],
 };
 
@@ -80,6 +129,16 @@ const EXEMPT = new Map<string, string>([
     // from the child's stderr, never from the operator's command line, so it is
     // not a flag the help gate could ever have to skip.
     'removes a flag the child process rejected from a CLI-built argv',
+  ],
+  [
+    'src/cortex/cli.ts:parseArgs',
+    // A generic `--key value` parser: EVERY `--x` token consumes the one after
+    // it, so there is no finite value-flag list to put in cortex's row (#767).
+    // The verb (`capture`, `preflight`, …) is the first positional, so
+    // `cortex capture --what help` fills the verb slot before any value is
+    // read; the row stays empty and only `--help` / `-h` / a leading `help`
+    // ask cortex for usage.
+    'every --flag consumes the following token; no finite inventory exists',
   ],
 ]);
 
@@ -131,6 +190,73 @@ export interface Consumer {
   site: string;
 }
 
+/** `args[IDENT + 1]` → IDENT, or undefined when the offset is not a bare identifier. */
+const INDEX_IDENT = /\[\s*([A-Za-z_$][\w$]*)\s*\+\s*1\s*\]/;
+
+/**
+ * Name of the nearest `function name(` or `const name = (` above `line` whose
+ * parameter list names `param`; a parameter list may continue on later lines.
+ */
+function helperDeclaring(lines: string[], line: number, param: string): string | null {
+  const open = /(?:function\s+([A-Za-z_$][\w$]*)\s*\(|(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\()(.*)$/;
+  const names = new RegExp(`(?:^|[^\\w$])${param}(?=\\s*[:,)=])`);
+  for (let j = line; j >= 0; j--) {
+    const m = open.exec(lines[j]);
+    if (!m) continue;
+    let params = m[3];
+    for (let k = j + 1; k < lines.length && !params.includes(')'); k++) params += lines[k];
+    params = params.slice(0, params.indexOf(')'));
+    if (names.test(params)) return m[1] ?? m[2];
+  }
+  return null;
+}
+
+/**
+ * The literals passed for parameter `param` of the innermost helper declared
+ * above `line` that takes it, across every call site in `files`. A call site
+ * that forwards another identifier resolves through ITS enclosing helper, so
+ * `closed(flag, …) { valueOf(flag) }` finds the literals passed to `closed`.
+ */
+function viaParameter(lines: string[], line: number, param: string, files: string[], depth: number): string[] | null {
+  if (depth > 3) return null;
+  const helper = helperDeclaring(lines, line, param);
+  if (!helper) return null;
+  const declaration = new RegExp(`(?:function|const|let)\\s+${helper}\\b`);
+  const call = new RegExp(`[^\\w.]${helper}\\s*\\(`);
+  const forwards = new RegExp(`[^\\w.]${helper}\\s*\\(\\s*([A-Za-z_$][\\w$]*)\\s*[,)]`);
+  const out = new Set<string>();
+  for (const other of files) {
+    const otherLines = codeLines(other);
+    otherLines.forEach((l, k) => {
+      if (!call.test(l) || declaration.test(l)) return;
+      for (const lit of literalsOn(l)) out.add(lit);
+      const forwarded = forwards.exec(l)?.[1];
+      if (forwarded) for (const lit of viaParameter(otherLines, k, forwarded, files, depth + 1) ?? []) out.add(lit);
+    });
+  }
+  return out.size ? [...out] : null;
+}
+
+/**
+ * The flag a read is offset from, through its index variable: `args[idx + 1]`
+ * under `const idx = args.indexOf('--config')` names it directly, and under
+ * `args.indexOf(flag)` names a parameter, answered at the call sites. Null when
+ * the offset is not such a variable (a loop counter, say).
+ */
+function viaIndexVariable(lines: string[], read: number, top: number, files: string[]): string[] | null {
+  const ident = INDEX_IDENT.exec(lines[read])?.[1];
+  if (!ident) return null;
+  const assign = new RegExp(`\\b${ident}\\s*=\\s*[^;]*\\.indexOf\\(`);
+  for (let j = read - 1; j >= top; j--) {
+    if (!assign.test(lines[j])) continue;
+    const lits = literalsOn(lines[j]);
+    if (lits.length) return lits;
+    const param = /\.indexOf\(\s*([A-Za-z_$][\w$]*)\s*\)/.exec(lines[j])?.[1];
+    return param ? viaParameter(lines, j, param, files, 0) : null;
+  }
+  return null;
+}
+
 /** Each flag whose value a recognised consumer shape reads, with the site that reads it. */
 function analyse(files: string[]): { consumers: Consumer[]; unattributed: string[] } {
   const consumers: Consumer[] = [];
@@ -151,9 +277,14 @@ function analyse(files: string[]): { consumers: Consumer[]; unattributed: string
       const site = `${rel}:${i + 1}`;
       if (fn && EXEMPT.has(`${rel}:${fn.name}`)) continue;
 
-      // Walk up from the read to the top of its function, taking the first line
-      // that names the flag — either literally, or through a flag collection.
-      let flags: string[] | null = null;
+      // The index the read is offset from, when it is a variable: `args[idx + 1]`
+      // under `const idx = args.indexOf('--config')` names the flag exactly,
+      // where the nearest literal may be a boolean flag's `includes` check on
+      // the line between (#767: protect, the config preflight closure).
+      let flags: string[] | null = viaIndexVariable(lines, i, fn?.line ?? 0, files);
+      // Otherwise walk up from the read to the top of its function, taking the
+      // first line that names the flag — either literally, or through a flag
+      // collection.
       for (let j = i; j >= (fn?.line ?? 0) && !flags; j--) {
         const lits = literalsOn(lines[j]);
         if (lits.length) { flags = lits; break; }

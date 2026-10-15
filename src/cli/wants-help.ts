@@ -41,10 +41,15 @@ export interface WantsHelpOptions {
    * How many leading positionals are verb slots. 1 for a command reading its
    * OWN arguments — `help` is the verb or it is an argument.
    *
-   * Callers pass the command's own argv, so this is 1 everywhere today: the
-   * whole-argv gates strip the command word themselves (`argvWantsHelp`) rather
-   * than counting a slot deeper, because the token they have to skip past is the
-   * command word and only the command's table describes what follows it.
+   * 0 for a command whose first positional is DATA, not a verb (#767): the text
+   * `scan` analyses, the title `remember` stores, the file `scan-skill` reads,
+   * the package `xray` inspects. `shieldcortex scan help` scans the word "help";
+   * only `--help` / `-h` ask such a command for usage.
+   *
+   * Callers pass the command's own argv, so this is 1 (or 0) everywhere today:
+   * the whole-argv gates strip the command word themselves (`argvWantsHelp`)
+   * rather than counting a slot deeper, because the token they have to skip past
+   * is the command word and only the command's table describes what follows it.
    */
   verbDepth?: number;
 }
@@ -67,9 +72,10 @@ export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {
     }
     if (a.startsWith('-') && a !== '-') continue;
     positional += 1;
+    // Past the verb slots, `help` is an argument to a verb already chosen — or,
+    // at depth 0, the command's data.
+    if (positional > verbDepth) return false;
     if (a === 'help') return true;
-    // Past the verb slots, `help` is an argument to a verb already chosen.
-    if (positional >= verbDepth) return false;
   }
   return false;
 }
@@ -98,12 +104,27 @@ export interface CommandHelpSpec {
    */
   verbDepth?: number;
   /**
-   * The handler drops every bare `--` before reading its argv (`allowlist`).
-   * Both gates must see the tokens the handler parses, so the gate applies the
-   * same normalisation: `allowlist --note -- reviewed help` is the `help` verb
-   * to the handler, and must be to the global gate too (#577 round 3).
+   * The handler drops every bare `--` before reading its argv (`allowlist`,
+   * `approve`, `deny`). Both gates must see the tokens the handler parses, so
+   * the gate applies the same normalisation: `allowlist --note -- reviewed help`
+   * is the `help` verb to the handler, and must be to the global gate too (#577
+   * round 3).
    */
   stripDoubleDash?: boolean;
+  /**
+   * The handler treats the first bare `--` as the end of its options and
+   * everything after it as data (`scan -- --help` scans the text "--help").
+   * The gate reads only the tokens before it, for the same reason as
+   * `stripDoubleDash`: the verdict has to be about the argv the handler parses
+   * (#767).
+   */
+  doubleDashEndsOptions?: boolean;
+  /**
+   * Options that consume EVERY following token as their value: `freeze <scope>
+   * --reason <the rest of the line>`. The gate stops reading at the first one,
+   * so a reason that happens to contain `--help` is still the reason (#767).
+   */
+  restFlags?: readonly string[];
 }
 
 /** `audit`: `--deps-path help` is a path to scan (#577). */
@@ -146,8 +167,99 @@ const MEMORIES_SPEC: CommandHelpSpec = {
 /** `openclaw`: `skill install --agent help` installs for the agent "help". */
 const OPENCLAW_SPEC: CommandHelpSpec = { valueFlags: ['--agent'] };
 
-/** The strict-parser commands and `hermes` take no option values at all. */
+/**
+ * The strict-parser commands, `hermes`, and every command whose options are all
+ * boolean or whose handler reads a fixed positional and nothing else
+ * (`copilot <verb>`, `license <verb> [key]`, `lease`, `stats`, …).
+ */
 const NO_VALUE_FLAGS: CommandHelpSpec = { valueFlags: [] };
+
+/**
+ * Commands handled inline in `src/index.ts` (`consolidate`, `graph`, `env`, …)
+ * and the three server modes (`api`, `dashboard`, `worker`). The only option
+ * values `main()` ever consumes from their argv are the global ones —
+ * `parseArgs()` reads `--db <path>` / `--mode <mode>` for every command, and
+ * `scan-skills` reads `--dir <path>` — so their row IS the global inventory,
+ * shared by identity (#767).
+ */
+const INDEX_SPEC: CommandHelpSpec = { valueFlags: GLOBAL_VALUE_FLAGS };
+
+/** `scan-skill <path>`: inline like the above, but its first positional is a file. */
+const SCAN_SKILL_SPEC: CommandHelpSpec = { valueFlags: GLOBAL_VALUE_FLAGS, verbDepth: 0 };
+
+/** `protect`: `--config help` is a config path, `--agent-uid help` a (malformed) uid (#767). */
+const PROTECT_SPEC: CommandHelpSpec = { valueFlags: ['--config', '--agent-uid'] };
+
+/**
+ * `config`: every option `handleCloudConfig` reads the following token of. The
+ * values are enums, keys, URLs and numbers; a bare `help` after any of them is
+ * that option's (invalid) value, and the handler is the one to refuse it.
+ */
+const CONFIG_SPEC: CommandHelpSpec = {
+  valueFlags: [
+    '--mode',
+    '--cloud-api-key',
+    '--cloud-url',
+    '--verify-mode',
+    '--verify-timeout',
+    '--openclaw-auto-memory',
+    '--ranker',
+    '--proactive-recall',
+    '--self-heal',
+    '--action-guard-notify-webhook',
+    '--memory-inject-contract',
+    '--memory-plane',
+    '--memory-host-posture',
+    '--memory-host-runtime',
+    '--auto-memory-sampling',
+  ],
+};
+
+/** `review-copilot annotate --id <id> | --pending [--limit N]`. */
+const REVIEW_COPILOT_SPEC: CommandHelpSpec = { valueFlags: ['--id', '--limit'] };
+
+/**
+ * `remember "<title>" --content <text> …`: the first positional is the memory's
+ * title, so there is no verb slot — a memory titled "help" is a memory (#767).
+ */
+const REMEMBER_SPEC: CommandHelpSpec = {
+  valueFlags: ['--content', '--category', '--importance', '--tags', '--project'],
+  verbDepth: 0,
+};
+
+/** `approve [<hash>] [--ttl N] [--attempt <id>] …`; the handler drops bare `--`. */
+const APPROVE_SPEC: CommandHelpSpec = { valueFlags: ['--ttl', '--attempt'], stripDoubleDash: true };
+
+/** `deny [<hash>] [--attempt <id>]`; the handler drops bare `--`. */
+const DENY_SPEC: CommandHelpSpec = { valueFlags: ['--attempt'], stripDoubleDash: true };
+
+/** `freeze <scope> --reason <every following token>`. */
+const FREEZE_SPEC: CommandHelpSpec = { valueFlags: [], restFlags: ['--reason'] };
+
+/** `guard readiness|test-approval [--surface claude-code|openclaw]`. */
+const GUARD_SPEC: CommandHelpSpec = { valueFlags: ['--surface'] };
+
+/** `memory downvote <id> --reason <text>` / `memory list --purpose X --category X --limit N`. */
+const MEMORY_SPEC: CommandHelpSpec = { valueFlags: ['--reason', '--purpose', '--category', '--limit'] };
+
+/** `inspect last-precompact|last-recall [--history N]`. */
+const INSPECT_SPEC: CommandHelpSpec = { valueFlags: ['--history'] };
+
+/** `iron-dome activate --profile X`, `scan --text X | --file X`, `audit --search X`. */
+const IRON_DOME_SPEC: CommandHelpSpec = { valueFlags: ['--profile', '--text', '--file', '--search'] };
+
+/**
+ * `scan "<text>" [--source=TYPE] [--identifier=ID]`: the text is data (no verb
+ * slot) and `--` ends the options, so `scan -- --help` scans "--help" (#767).
+ */
+const SCAN_SPEC: CommandHelpSpec = {
+  valueFlags: ['--source', '--identifier'],
+  verbDepth: 0,
+  doubleDashEndsOptions: true,
+};
+
+/** `xray <target> [--deep] [--json] …`: the target is a package, file or directory. */
+const XRAY_SPEC: CommandHelpSpec = { valueFlags: [], verbDepth: 0 };
 
 /**
  * Every command that owns a help gate, and the one description of its argv that
@@ -161,8 +273,15 @@ const NO_VALUE_FLAGS: CommandHelpSpec = { valueFlags: [] };
  * before audit printed its usage. Two gates deciding the same question from two
  * tables will diverge again, so there is now one table and both read it.
  *
- * Aliases share the spec OBJECT, so `compact`/`clawdbot` cannot drift from
- * `vacuum`/`openclaw` either.
+ * #767 registered the rest of the dispatched commands: the dispatcher's own gate
+ * (`src/cli/dispatch-help.ts`) reads this table before any handler module is
+ * imported, so `consolidate --help` no longer opens the database and
+ * `api --help` no longer starts a server. Commands absent here are gated inside
+ * their own handler (`doctor`, `setup`, `maintain`, `mcp`, `ledger`, …) and
+ * `argvWantsHelp` keeps its conservative reading for them.
+ *
+ * Aliases share the spec OBJECT, so `compact`/`clawdbot`/`licence` cannot drift
+ * from `vacuum`/`openclaw`/`license` either.
  */
 export const COMMAND_HELP_SPECS = {
   audit: AUDIT_SPEC,
@@ -179,6 +298,43 @@ export const COMMAND_HELP_SPECS = {
   vacuum: NO_VALUE_FLAGS,
   compact: NO_VALUE_FLAGS,      // documented alias of vacuum
   logs: NO_VALUE_FLAGS,         // #573 `logs prune [--execute]` deletes files
+  // ── #767: gated by the dispatcher, before the handler module is imported ──
+  hook: NO_VALUE_FLAGS,         // `hook <name>`; the payload comes on stdin
+  protect: PROTECT_SPEC,
+  quickstart: NO_VALUE_FLAGS,   // `quickstart [target|--yes|--install-detected]`
+  copilot: NO_VALUE_FLAGS,
+  codex: NO_VALUE_FLAGS,
+  service: NO_VALUE_FLAGS,      // `service <verb> [--dashboard|--api|--headless|--clean-logs]`
+  config: CONFIG_SPEC,
+  cloud: NO_VALUE_FLAGS,        // `cloud sync --full`
+  'review-copilot': REVIEW_COPILOT_SPEC,
+  remember: REMEMBER_SPEC,
+  approve: APPROVE_SPEC,
+  deny: DENY_SPEC,
+  freeze: FREEZE_SPEC,
+  unfreeze: NO_VALUE_FLAGS,
+  lease: NO_VALUE_FLAGS,        // takes no arguments
+  status: NO_VALUE_FLAGS,       // takes no arguments
+  graph: INDEX_SPEC,            // `graph backfill [--force]`
+  'threat-graph': INDEX_SPEC,
+  license: NO_VALUE_FLAGS,
+  licence: NO_VALUE_FLAGS,      // British-spelling alias
+  stats: NO_VALUE_FLAGS,        // takes no arguments
+  guard: GUARD_SPEC,
+  memory: MEMORY_SPEC,
+  inspect: INSPECT_SPEC,
+  'iron-dome': IRON_DOME_SPEC,
+  scan: SCAN_SPEC,
+  'scan-skill': SCAN_SKILL_SPEC,
+  env: INDEX_SPEC,              // `env scan <url> [--json|--markdown]`
+  'scan-skills': INDEX_SPEC,    // `scan-skills [--dir <path>]`
+  consolidate: INDEX_SPEC,      // takes no arguments
+  xray: XRAY_SPEC,
+  'xray-preinstall': NO_VALUE_FLAGS, // takes no arguments
+  cortex: NO_VALUE_FLAGS,       // see value-flag-inventory-577.test.ts: generic `--k v` parser behind a verb
+  api: INDEX_SPEC,              // server modes: `parseArgs()` reads --db / --mode
+  dashboard: INDEX_SPEC,
+  worker: INDEX_SPEC,
 } as const satisfies Record<string, CommandHelpSpec>;
 
 /** A command word with an entry in `COMMAND_HELP_SPECS`. */
@@ -197,7 +353,20 @@ export function isGatedCommand(word: string): word is GatedCommand {
  */
 export function commandWantsHelp(command: GatedCommand, args: readonly string[]): boolean {
   const spec = COMMAND_HELP_SPECS[command];
-  const tokens = spec.stripDoubleDash ? args.filter((a) => a !== '--') : args;
+  let tokens: readonly string[] = args;
+  // The tokens the handler never parses as options are not the gate's to read
+  // either: everything after `--` for an end-of-options parser, everything
+  // after a rest-consuming option.
+  if (spec.doubleDashEndsOptions) {
+    const end = tokens.indexOf('--');
+    if (end !== -1) tokens = tokens.slice(0, end);
+  } else if (spec.stripDoubleDash) {
+    tokens = tokens.filter((a) => a !== '--');
+  }
+  if (spec.restFlags?.length) {
+    const rest = tokens.findIndex((a) => spec.restFlags!.includes(a));
+    if (rest !== -1) tokens = tokens.slice(0, rest);
+  }
   return wantsHelp(tokens, { valueFlags: spec.valueFlags, verbDepth: spec.verbDepth });
 }
 
@@ -207,15 +376,18 @@ export function commandWantsHelp(command: GatedCommand, args: readonly string[])
  *
  * It finds the command word and then asks that command's own question about the
  * rest, so its verdict is the destination handler's verdict by construction.
- * An unregistered command word keeps the old conservative reading: `help` in the
- * verb slot counts, no option values are skipped — those commands print no usage
- * for a bare `help` anyway, and a false positive here only skips a staleness
- * warning, while a false negative is the defect this function exists to close.
+ * An explicit `--help` / `-h` BEFORE the command word is the top-level help
+ * request; after it, the command's own table decides, so `scan -- --help` is
+ * the scan of "--help" to both gates (#767). An unregistered command word keeps
+ * the old conservative reading: `help` in the verb slot counts, no option values
+ * are skipped — those commands print no usage for a bare `help` anyway, and a
+ * false positive here only skips a staleness warning, while a false negative is
+ * the defect this function exists to close.
  */
 export function argvWantsHelp(argv: readonly string[]): boolean {
-  if (argv.some((a) => a === '--help' || a === '-h')) return true;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === '--help' || a === '-h') return true;
     if ((GLOBAL_VALUE_FLAGS as readonly string[]).includes(a)) {
       i++;
       continue;
