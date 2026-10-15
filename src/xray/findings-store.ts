@@ -27,6 +27,25 @@ function findingDedupeKey(target: string, f: XRayFinding): string {
   return `${target}|${f.category}|${f.title}|${f.file ?? ''}|${f.line ?? ''}`;
 }
 
+/**
+ * State of the findings file on disk (#692). `absent` means no scan has ever
+ * written it, so zero findings is the truth; `unreadable` means a file exists
+ * but could not be read or parsed, so its counts are unknown — never zero.
+ */
+export type FindingsStoreState = 'ok' | 'absent' | 'unreadable';
+
+/** Thrown by getStats() when the findings file exists but cannot be read or parsed. */
+export class FindingsStoreUnreadableError extends Error {
+  constructor(public readonly reason: string) {
+    super(
+      'The scanner findings file exists but could not be read or parsed, so the number of findings is unknown. ' +
+      'Fix or move xray-findings.json in the ShieldCortex data directory. Scanning does not repair it: ' +
+      'a scan that finds nothing leaves the file as it is, and a permission problem stays until it is fixed.',
+    );
+    this.name = 'FindingsStoreUnreadableError';
+  }
+}
+
 export interface FindingsStore {
   addFindings(
     sourceId: string,
@@ -57,6 +76,7 @@ export interface FindingsStore {
     note?: string,
   ): { moved: boolean; quarantinePath?: string; error?: string };
 
+  /** Throws FindingsStoreUnreadableError rather than reporting an unreadable file as zero. */
   getStats(): {
     total: number;
     new: number;
@@ -64,7 +84,36 @@ export interface FindingsStore {
     ignored: number;
     resolved: number;
     quarantined: number;
+    /** `absent` = no findings file yet (never scanned); `ok` = file read. */
+    store: Exclude<FindingsStoreState, 'unreadable'>;
   };
+
+  getStoreState(): FindingsStoreState;
+}
+
+const FINDING_STATUSES: ReadonlySet<string> = new Set<FindingStatus>(['new', 'reviewed', 'ignored', 'resolved', 'quarantined']);
+const FINDING_SEVERITIES: ReadonlySet<string> = new Set<XRayFinding['severity']>(['critical', 'high', 'medium', 'low', 'info']);
+
+/**
+ * Whether one persisted entry carries every field needed to count it by
+ * lifecycle and render it (#692). One bad entry makes the whole file
+ * unreadable: dropping it and counting the rest would pass a partial count off
+ * as exact.
+ */
+function isPersistedFinding(v: unknown): v is ActionableXRayFinding {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const f = v as Record<string, unknown>;
+  const str = (k: string) => typeof f[k] === 'string';
+  return (
+    str('id') && (f.id as string).length > 0 && str('sourceId') &&
+    FINDING_STATUSES.has(f.status as string) &&
+    FINDING_SEVERITIES.has(f.severity as string) &&
+    str('category') && str('title') && str('description') && str('target') &&
+    (f.sourceKind === 'scan' || f.sourceKind === 'watch') &&
+    str('detectedAt') && str('updatedAt') &&
+    (f.file == null || str('file')) &&
+    (f.line == null || typeof f.line === 'number')
+  );
 }
 
 export function createFindingsStore(basePath?: string): FindingsStore {
@@ -72,13 +121,35 @@ export function createFindingsStore(basePath?: string): FindingsStore {
   const findingsFile = path.join(base, 'xray-findings.json');
   const quarantineDir = path.join(base, 'quarantine', 'files');
 
-  function readFindings(): ActionableXRayFinding[] {
+  function readFindingsState():
+    | { state: 'ok' | 'absent'; findings: ActionableXRayFinding[] }
+    | { state: 'unreadable'; findings: ActionableXRayFinding[]; reason: string } {
+    let data: string;
     try {
-      const data = fs.readFileSync(findingsFile, 'utf-8');
-      return JSON.parse(data);
-    } catch {
-      return [];
+      data = fs.readFileSync(findingsFile, 'utf-8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'absent', findings: [] };
+      return { state: 'unreadable', findings: [], reason: (err as NodeJS.ErrnoException).code ?? 'read failed' };
     }
+    try {
+      const parsed: unknown = JSON.parse(data);
+      if (!Array.isArray(parsed)) return { state: 'unreadable', findings: [], reason: 'not a JSON array' };
+      const bad = parsed.findIndex((f) => !isPersistedFinding(f));
+      // The mutating paths keep reading the array as before, so a scan does
+      // not silently discard the valid entries alongside the bad one.
+      if (bad !== -1) {
+        return { state: 'unreadable', findings: parsed as ActionableXRayFinding[], reason: `entry ${bad} is not a valid finding` };
+      }
+      return { state: 'ok', findings: parsed };
+    } catch {
+      return { state: 'unreadable', findings: [], reason: 'malformed JSON' };
+    }
+  }
+
+  // Lenient read for the mutating/list paths (unchanged behaviour: an
+  // unreadable file reads as empty). Counts go through readFindingsState().
+  function readFindings(): ActionableXRayFinding[] {
+    return readFindingsState().findings;
   }
 
   function writeFindings(findings: ActionableXRayFinding[]): void {
@@ -211,7 +282,9 @@ export function createFindingsStore(basePath?: string): FindingsStore {
     },
 
     getStats() {
-      const findings = readFindings();
+      const read = readFindingsState();
+      if (read.state === 'unreadable') throw new FindingsStoreUnreadableError(read.reason);
+      const findings = read.findings;
       return {
         total: findings.length,
         new: findings.filter((f) => f.status === 'new').length,
@@ -219,13 +292,18 @@ export function createFindingsStore(basePath?: string): FindingsStore {
         ignored: findings.filter((f) => f.status === 'ignored').length,
         resolved: findings.filter((f) => f.status === 'resolved').length,
         quarantined: findings.filter((f) => f.status === 'quarantined').length,
+        store: read.state,
       };
+    },
+
+    getStoreState() {
+      return readFindingsState().state;
     },
   };
 }
 
 // Default singleton for convenience — uses ~/.shieldcortex/
-const defaultStore = createFindingsStore();
+export const defaultStore = createFindingsStore();
 
 export const addFindings = defaultStore.addFindings.bind(defaultStore);
 export const getFinding = defaultStore.getFinding.bind(defaultStore);
@@ -234,3 +312,4 @@ export const updateFindingStatus = defaultStore.updateFindingStatus.bind(default
 export const deleteFinding = defaultStore.deleteFinding.bind(defaultStore);
 export const quarantineFile = defaultStore.quarantineFile.bind(defaultStore);
 export const getStats = defaultStore.getStats.bind(defaultStore);
+export const getStoreState = defaultStore.getStoreState.bind(defaultStore);

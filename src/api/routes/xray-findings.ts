@@ -1,11 +1,8 @@
 import type { Express, Request, Response } from 'express';
 import {
-  listFindings,
-  getFinding,
-  updateFindingStatus,
-  deleteFinding,
-  quarantineFile,
-  getStats,
+  defaultStore,
+  FindingsStoreUnreadableError,
+  type FindingsStore,
 } from '../../xray/findings-store.js';
 import type { FindingStatus, ActionableXRayFinding } from '../../xray/types.js';
 import { getGuidance, isLikelySystemFile } from '../../xray/guidance.js';
@@ -19,7 +16,13 @@ function enrichFinding(f: ActionableXRayFinding) {
   return { ...f, guidance, systemFile };
 }
 
-export function registerXRayFindingRoutes(app: Express, requireNotLocked: Middleware): void {
+export function registerXRayFindingRoutes(
+  app: Express,
+  requireNotLocked: Middleware,
+  store: FindingsStore = defaultStore,
+): void {
+  const { listFindings, getFinding, updateFindingStatus, deleteFinding, getStats, getStoreState } = store;
+  const quarantineFile = store.quarantineFile.bind(store);
 
   // List findings with optional filters
   app.get('/api/xray/findings', (req: Request, res: Response) => {
@@ -27,13 +30,26 @@ export function registerXRayFindingRoutes(app: Express, requireNotLocked: Middle
     const target = req.query.target as string | undefined;
     const severity = req.query.severity as string | undefined;
     const limit = Number(req.query.limit) || 100;
+    // An unreadable findings file is not an empty list (#692).
+    if (getStoreState() === 'unreadable') {
+      return res.status(503).json({ error: new FindingsStoreUnreadableError('unreadable').message, store: 'unreadable' });
+    }
     const findings = listFindings({ status, target, severity, limit }).map(enrichFinding);
     res.json({ findings });
   });
 
   // Get finding stats
+  // Get finding stats. An unreadable findings file is 503 (counts unknown),
+  // never a successful zero the Needs you inbox would treat as confirmed (#692).
   app.get('/api/xray/findings/stats', (_req: Request, res: Response) => {
-    res.json(getStats());
+    try {
+      res.json(getStats());
+    } catch (err) {
+      if (err instanceof FindingsStoreUnreadableError) {
+        return res.status(503).json({ error: err.message, store: 'unreadable' });
+      }
+      throw err;
+    }
   });
 
   // Get single finding

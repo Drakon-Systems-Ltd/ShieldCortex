@@ -349,6 +349,43 @@ tamper-evidence and retention machinery. Three gaps to close:
    outside). Projection rules account for the thinner row shape: realtime
    rows carry fixed trust 0.5, no fragmentation score, threats-only (no
    clean-scan rows).
+
+   **Realtime cursor and unreadable files (#579 Slice 1A).** The cursor
+   grammar is shared in `src/threat-graph/realtime-plane.ts`: `''` (start at
+   the first file) or `realtime-YYYY-MM-DD.jsonl:<line>`, where `<line>` is
+   a canonical non-negative integer no larger than the consumed-file
+   sentinel `9999999999`. Any other stored value is **malformed**. That is a
+   deliberate behaviour change: a malformed cursor used to stall silently
+   (a file part sorting after every day file) or replay from the first file
+   (which re-increments edge counts). It now halts realtime projection
+   before the directory is listed, with one fixed error that never echoes
+   the stored value. The graph and cursor are left unchanged, each
+   attempted realtime pass returns the error, and recovery is
+   an operator action: restore a canonical cursor, or run `shieldcortex
+   threat-graph rebuild`, which replays only the day files still present.
+   Nothing heals the cursor automatically and nothing triggers a rebuild.
+   A listed pending day file whose stat or read fails now **holds**
+   projection at that file instead of being skipped: lines and oversize
+   floors from earlier files may commit, nothing of the held file or any
+   later file does, and later files are not opened. A cursor already inside
+   the held file stays exactly unchanged. The hold is re-evaluated on every
+   attempted pass; the error names the file and the failing stage, with the
+   error's own code only when it is 1-32 uppercase letters, digits or
+   underscores (otherwise `OTHER`), never the native message or path.
+   Both errors reach `last_error` only through the existing best-effort,
+   bounded reporting: the lease runner includes them only when it acquires
+   the lease and is given a realtime directory, joins them after any audit
+   errors, truncates the joined text to 1000 characters, and writes it on
+   release only while it still owns the lease; a run that throws later
+   records its own failure instead. Rebuild records them the same bounded
+   way. Rebuild does not release a hold (it holds
+   at the same file); making the file readable does, and removing it does
+   too, leaving an undetected gap. **Unchanged and still not detected:**
+   oversize files still floor the cursor past themselves; files absent
+   before the directory is listed, day files restored behind the cursor and
+   late appends to a passed day are skipped silently; a failed directory
+   listing still reads as "nothing to project". 1A deletes and compresses
+   nothing and reclaims no disk space.
 3. **Denominator honesty.** Because the tool-response scanner and the
    realtime path audit threats only, `scan_count_28d` exists only for
    write-path sources. Rate-based baselines ("block rate jumped") apply to

@@ -21,6 +21,11 @@ export interface DoctorReportItem {
    * command prints the commands only, which drops the explanation (#649).
    */
   fixNoteWithCommands?: true;
+  /**
+   * Extra detail for `--verbose` only: internal wording or consent-gated
+   * commands that would confuse the default report (PR #773).
+   */
+  verboseNote?: string;
 }
 
 export interface FormatDoctorReportOpts {
@@ -286,6 +291,8 @@ interface ThemeGroup {
   fixNote: string;
   /** Print `fixNote` before the commands too — see DoctorReportItem. */
   fixNoteWithCommands?: true;
+  /** --verbose only; see DoctorReportItem.verboseNote. */
+  verboseNotes: string[];
   count: number;
   labels: string[];
 }
@@ -326,6 +333,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       fixCommands: extractFixCommands(it.fix),
       fixNote: it.fix ?? '',
       ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
+      verboseNotes: it.verboseNote ? [it.verboseNote] : [],
       count: 1,
       labels: [it.label],
     }));
@@ -345,6 +353,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
         fixCommands: extractFixCommands(it.fix),
         fixNote: it.fix ?? '',
         ...(it.fixNoteWithCommands ? { fixNoteWithCommands: true as const } : {}),
+        verboseNotes: it.verboseNote ? [it.verboseNote] : [],
         count: 1,
         labels: [it.label],
       };
@@ -359,6 +368,7 @@ function groupItems(items: DoctorReportItem[], collapse: boolean): ThemeGroup[] 
       const cmds = extractFixCommands(it.fix);
       for (const c of cmds) if (!existing.fixCommands.includes(c)) existing.fixCommands.push(c);
       if (!existing.fixNote && it.fix) existing.fixNote = it.fix;
+      if (it.verboseNote && !existing.verboseNotes.includes(it.verboseNote)) existing.verboseNotes.push(it.verboseNote);
       // Prefer the dedicated conversation-scanning label over plugin-loaded note
       if (/conversation scanning/i.test(it.label) && !/conversation scanning/i.test(existing.what)) {
         existing.what = shortWhat(it);
@@ -386,7 +396,7 @@ function statusColor(status: DoctorStatus, s: DoctorReportStyle): string {
   }
 }
 
-function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle): string[] {
+function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle, verbose = false): string[] {
   const mark = STATUS_MARK[g.status];
   const col = statusColor(g.status, style);
   const xN = g.count > 1 ? `  x${g.count}` : '';
@@ -435,6 +445,11 @@ function renderIssueBlock(g: ThemeGroup, width: number, style: DoctorReportStyle
     const note = 'Conversation scanning is off. That is valid. Do not grant conversation access from this warning.';
     lines.push(...wrapLine(note, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`));
   }
+  if (verbose) {
+    for (const note of g.verboseNotes) {
+      lines.push(...wrapLine(note, width, 4, 6).map((l) => `${style.dim}${l}${style.reset}`));
+    }
+  }
   return lines;
 }
 
@@ -444,6 +459,8 @@ function renderPassLine(it: DoctorReportItem, width: number, style: DoctorReport
   return [
     `${style.green}${STATUS_MARK.pass}${style.reset} ${themeForLabel(it.label).padEnd(6)} ${ellipsize(it.label, Math.max(8, width - 12))}`,
     ...wrapLine(msg, width, 4, 4).map((l) => `${style.dim}${l}${style.reset}`),
+    // Pass lines print only with --verbose, so the note always may.
+    ...(it.verboseNote ? wrapLine(it.verboseNote, width, 4, 6).map((l) => `${style.dim}${l}${style.reset}`) : []),
   ];
 }
 
@@ -492,7 +509,7 @@ export function formatDoctorReport(
     if (groups.length === 0) return;
     lines.push(`${style.bold}${title}${style.reset}`);
     for (let i = 0; i < groups.length; i++) {
-      lines.push(...renderIssueBlock(groups[i], width, style));
+      lines.push(...renderIssueBlock(groups[i], width, style, verbose));
       if (i !== groups.length - 1) lines.push('');
     }
     lines.push('');

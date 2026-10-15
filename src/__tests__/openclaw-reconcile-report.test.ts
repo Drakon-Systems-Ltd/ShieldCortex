@@ -10,7 +10,9 @@ function baseResult(over: Partial<ReconcileExecResult>): ReconcileExecResult {
   return {
     verdict: {
       state: 'healthy', severity: 'ok', recommendedAction: 'none',
-      enabledInConfig: true, loadedInIndex: true, openClawTracked: true,
+      enabledInConfig: true, loadedInIndex: true, loadedInLiveRoster: true,
+      indexReadable: true, configReadable: true, configPresent: true,
+      openClawTracked: true,
       indexWarnsConflict: false, metadataConflict: false,
       indexVersion: '4.47.2', installsJsonVersion: '4.47.2', onDiskVersion: '4.47.2',
       expectedVersion: '4.47.2', reasons: ['healthy'],

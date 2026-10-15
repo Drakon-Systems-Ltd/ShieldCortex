@@ -39,6 +39,7 @@ import {
 } from './tool-input-schema.js';
 import type { ContractDriftObservation } from './tool-input-schema.js';
 import { forEachWindow } from '../scan-windows.js';
+import { bodyIsAllDataRead } from './heredoc-data-read.js';
 
 export type ToolGuardDecision = 'allow' | 'require_approval' | 'block';
 export type ToolGuardSeverity = 'benign' | 'sensitive' | 'dangerous' | 'catastrophic';
@@ -763,6 +764,13 @@ const OPENCLAW_CONFIG_PATH_RE = /(?:^|[\s'"=:(\\/])\.openclaw[\\/]+openclaw\.jso
 const SSH_DIR_PATH_SRC = String.raw`(?:~|\$\{?HOME\}?|\/home\/[^\s\/'"]+|\/root|\/Users\/[^\s\/'"]+)\/\.ssh(?![\w.-])`;
 const AUTHORIZED_KEYS_PATH_SRC = String.raw`(?:^|[\s'"=:\/])\.ssh\/authorized_keys2?\b|\/authorized_keys2?\b`;
 const SHELL_STARTUP_FILE_SRC = String.raw`\.(?:bashrc|zshrc|zprofile|zshenv|zlogin|zlogout|profile|bash_profile|bash_login|bash_logout)(?![\w.-])|\.config\/fish\/config\.fish\b`;
+// #702: the sensitive-path set as ONE regex, named so the `touch-sensitive-path`
+// DANGEROUS row and the fold readers (`isSensitiveFoldPath`) cannot drift apart.
+// Matched against command text by the rule and against a bare path by the
+// fold, so every alternative must hold for both: a home-rooted `.ssh` dir, an
+// `authorized_keys` segment, `id_rsa` by name, `.aws/credentials`, the three
+// `/etc` account files and a `.env` file.
+const SENSITIVE_PATH_RE = new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b`, 'i');
 // #505: a shell WRITE shape whose destination is a startup file. The write
 // prefix is a redirect (`>`, `>>`, noclobber `>|`), `tee` with any run of
 // options and earlier operands (`-a`, `--append`, `--`, `/tmp/log`), or
@@ -946,7 +954,32 @@ const DANGEROUS: Pattern[] = [
   // named `at` (common in embedded script bodies the guard also scans) matched
   // the scheduler verb. `at(1)` takes `at [options] TIME` — its grammar has no
   // `=` in that slot, so the carve-out removes the FP without losing a verb.
-  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*=)(?!\s*$))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
+  // #691: English prose in written source (`cta="Look at the findings"` in a
+  // .tsx) matched twice over. The assignment prefix's `\S*` swallowed the JSX
+  // attributes `href="…"` and `cta="Look` as if they were `VAR=value` words,
+  // which put `at` in command position. The prefix token now refuses a value
+  // that opens a quote and reaches whitespace or end of text before any quote
+  // closes. That narrows this `\S*` heuristic; it is not a shell-quote
+  // validator. A closed quoted value with a space in it is one shell word, but
+  // `\S*` could never consume it whole, so it was never reliably matched here.
+  // Closed no-space values (`TZ=UTC`, `LABEL="nightly"`) match as before.
+  // Inside DOUBLE quotes a backtick or `$(` still executes, so a double-quoted
+  // value that opens one before the space is consumed as at base and the
+  // scheduler inside it gates (X="` at now < job`" true). Single quotes are
+  // literal, so a single-quoted value is refused either way.
+  // `at` keeps the base exclusions (`-l`, `=`, nothing after it) and drops two
+  // more shapes only. (a) `at` ending its line: a bare newline ends the
+  // command, so at(1) gets no timespec and schedules nothing; a backslash-
+  // newline continuation is not a bare newline and still gates. (b) `at`
+  // followed on its line by a plain word: letters only, not starting with a
+  // time, day or month word, and ending at whitespace, end of text or prose
+  // punctuation (`at the findings`, `at Object.<anonymous>`). Anything else
+  // after `at` gates as it did at base: an option (quoted or not), a digit,
+  // `$`, `+`, a redirect or heredoc before the timespec, a backslash, a
+  // backtick or `$(` substitution, or a word carrying quotes, escapes or glob
+  // and brace characters. This is a prose disposition, not a parse of at(1)'s
+  // argv, so it does not need to know every way a shell can spell a timespec.
+  { re: /(?:^|[;&|(\n]|\$\()\s*(?:\w+=(?!'[^"'\s]*(?:\s|$)|"(?:[^"'\s`$]|\$(?!\())*(?:\s|$))\S*\s+)*(?:sudo\s+)?(?:(?:env|nohup|timeout|time|stdbuf|nice|ionice|setsid|command|exec)\b(?:\s+(?:-{1,2}\S+|\w+=\S*|\d+[smhd]?))*\s+)*(?:sudo\s+)?(?:crontab\b(?!\s+-l\b)|at\b(?!\s+-l\b)(?!\s*=)(?![^\S\n]*(?:\n|$))(?![^\S\n]+(?!now|midnight|noon|teatime|today|tomorrow|next|mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]+(?:[\s.,:;!)]|$)))|\/etc\/cron|\bsystemd-run\b[^|;&\n]*--on-(?:calendar|active|boot|startup|unit-active|unit-inactive)\b/i, signal: 'modify-scheduler' },
   // Zero out a file's contents (issue #4475.7a): the pre-existing rule below
   // only caught a `.log` target; `-s 0` / `--size 0` is data-destructive
   // regardless of the target file, so it is gated on its own.
@@ -971,7 +1004,7 @@ const DANGEROUS: Pattern[] = [
   // and `authorized_keys` is matched as a path segment wherever it sits:
   // naming that file IS the persistence. Same tier and signal as before, so
   // the planes, remediation and audit rows need nothing new.
-  { re: new RegExp(String.raw`\/etc\/(passwd|shadow|sudoers)|${SSH_DIR_PATH_SRC}|${AUTHORIZED_KEYS_PATH_SRC}|id_rsa|\.aws\/credentials|(?<![A-Za-z0-9_])\.env\b`, 'i'), signal: 'touch-sensitive-path' },
+  { re: SENSITIVE_PATH_RE, signal: 'touch-sensitive-path' },
   // #505 (SC-06): a shell write shape whose DESTINATION is a login/interactive
   // startup file. Content written there runs at the next shell start, outside
   // any tool call the guard will see — `export PATH=/tmp/evil:$PATH` in
@@ -1432,6 +1465,260 @@ const GLOBAL_FLAG = /^(?:\-g|--global|--location=global)$/i;
  */
 const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|Popen|check_call|check_output)|child_process\.(?:exec|execSync|spawn|spawnSync)|\.exec(?:Sync|File|FileSync)?|\.spawn(?:Sync)?|(?:^|[^\w.])(?:exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)\s*\()/i;
 
+// Read direct argv literals at an exec sink, with an 8 KB cap per call. The
+// source context is checked once for the whole written file.
+const GLOBAL_ARGV_SINK = /\b(subprocess\.(?:run|call|Popen|check_call|check_output)|(?:child_process\.)?(?:spawn|spawnSync|execFile|execFileSync)|\.(?:spawn|spawnSync|execFile|execFileSync))\s*\(/gi;
+const ARGV_SCAN_CAP = 8192;
+const OPAQUE_ARGV = Symbol('opaque argv element');
+type ArgvElement = string | typeof OPAQUE_ARGV;
+type ArgvReliefContext = { language: 'python' | 'js' | 'shell' | 'none'; commentLines: Set<number> | null };
+
+/** Literal and opaque argv elements right after a sink's `(`. Never reads past the cap. */
+function readQuotedArgv(text: string, from: number): { args: ArgvElement[]; next: number } {
+  let i = from;
+  const end = Math.min(text.length, from + ARGV_SCAN_CAP);
+  const skipSpace = () => { while (i < end && /\s/.test(text[i])) i++; };
+  const readString = (): string | null => {
+    if (i >= end) return null;
+    const quote = text[i];
+    if (quote !== '\x22' && quote !== '\x27') return null;
+    const start = ++i;
+    while (i < end) {
+      if (text[i] === '\\') { i = Math.min(end, i + 2); continue; }
+      if (text[i] === quote) return text.slice(start, i++);
+      i++;
+    }
+    return null;
+  };
+  const args: ArgvElement[] = [];
+  const done = () => ({ args, next: i });
+  const skipArgsKeyword = () => {
+    if (i + 4 >= end || text.slice(i, i + 4) !== 'args' || /[\w$]/.test(text[i + 4] ?? '')) return;
+    let j = i + 4;
+    while (j < end && /\s/.test(text[j])) j++;
+    if (j >= end || text[j] !== '=') return;
+    i = j + 1;
+    skipSpace();
+  };
+  skipSpace();
+  skipArgsKeyword();
+  if (i >= end) return done();
+  if (text[i] !== '[' && text[i] !== '(') {
+    // spawn("cmd", [...]) / execFile("cmd", [...])
+    const command = readString();
+    if (command === null) return done();
+    args.push(command);
+    skipSpace();
+    if (i >= end) return done();
+    if (text[i] !== ',') return done();
+    i++;
+    skipSpace();
+    skipArgsKeyword();
+  }
+  if (i >= end) return done();
+  const closer = text[i] === '[' ? ']' : text[i] === '(' ? ')' : '';
+  if (!closer) return done();
+  i++;
+  while (i < end) {
+    skipSpace();
+    if (text[i] === closer) { i++; return done(); }
+    if (i >= end) break;
+    if (text[i] === '\x22' || text[i] === '\x27') {
+      const arg = readString();
+      if (arg === null) { args.push(OPAQUE_ARGV); return done(); }
+      args.push(arg);
+    } else {
+      args.push(OPAQUE_ARGV);
+    }
+    // An expression may contain nested calls, brackets, and quoted commas.
+    // Its delimiter is only a comma or the matching closer at depth zero.
+    const nested: string[] = [];
+    while (i < end) {
+      const ch = text[i];
+      if (ch === '\x22' || ch === '\x27') {
+        if (args[args.length - 1] !== OPAQUE_ARGV) args[args.length - 1] = OPAQUE_ARGV;
+        if (readString() === null) return done();
+        continue;
+      }
+      if (ch === '(' || ch === '[' || ch === '{') nested.push(ch === '(' ? ')' : ch === '[' ? ']' : '}');
+      else if (ch === ',' && nested.length === 0) break;
+      else if (ch === closer && nested.length === 0) break;
+      else if (ch === ')' || ch === ']' || ch === '}') {
+        if (nested.pop() !== ch) return done();
+      }
+      // Whitespace after a literal is harmless; any other continuation makes
+      // it an expression, not a literal argv element.
+      if (args[args.length - 1] !== OPAQUE_ARGV && !/\s/.test(ch)) args[args.length - 1] = OPAQUE_ARGV;
+      i++;
+    }
+    skipSpace();
+    if (i >= end) return done();
+    if (text[i] === closer) { i++; return done(); }
+    if (text[i] !== ',') return done();
+    i++;
+  }
+  return done();
+}
+
+/** An argv list that is an npm-family global install (npx/corepack wrappers unwrapped). */
+function argvIsGlobalInstall(args: readonly ArgvElement[]): boolean {
+  const normalise = (arg: ArgvElement | undefined): string => {
+    if (typeof arg !== 'string') return '';
+    return arg.slice(Math.max(arg.lastIndexOf('/'), arg.lastIndexOf('\\')) + 1)
+      .toLowerCase().replace(/\.(?:cmd|exe|ps1|bat)$/, '');
+  };
+  let base = normalise(args[0]);
+  let from = 1;
+  // Only these simple leading command wrappers are recognised here.
+  while (/^(?:env|command|nohup|time|nice)$/.test(base)) {
+    const wrapper = base;
+    if (wrapper === 'env') {
+      while (from < args.length) {
+        const arg = args[from];
+        // An opaque element here may be a `NAME=value` assignment; keep
+        // looking for the command rather than giving up (fail closed).
+        if (typeof arg !== 'string') { from++; continue; }
+        if (arg === '-u' || arg === '-C') { from += 2; continue; }
+        if (arg.startsWith('-') || /^[A-Za-z_][A-Za-z_0-9]*=/.test(arg)) { from++; continue; }
+        break;
+      }
+    } else if (wrapper === 'nice') {
+      while (typeof args[from] === 'string' && /^-/.test(args[from] as string)) {
+        if (args[from] === '-n') from += 2;
+        else from++;
+      }
+    }
+    base = normalise(args[from++]);
+  }
+  if (/^(?:npx|corepack)$/.test(base)) { base = normalise(args[from++]); }
+  if (!NPM_FAMILY.test(base)) return false;
+  const global = args.some((a, idx) => typeof a === 'string' &&
+    (/^(?:-g|--global)(?:=(?:true|1))?$/i.test(a) || /^--location=global$/i.test(a)
+      || (a.toLowerCase() === '--location' && args[idx + 1] === 'global')));
+  const knownBoolean = (flag: string) => /^(?:-g|--global|-D|-S|-E|-O|-f|--force|-y|--yes|--save.*|--no-.*|--silent|-s|-q|--quiet|--ignore-scripts)$/i.test(flag);
+  const knownValue = (flag: string) => /^(?:--prefix|--registry|--cache|--userconfig|--globalconfig|--loglevel|--workspace|-w|--cwd|--dir|-C|--tag|--otp|--location)$/i.test(flag);
+  let subcommand: ArgvElement | undefined;
+  let second: ArgvElement | undefined;
+  for (let i = from; i < args.length; i++) {
+    const arg = args[i];
+    if (typeof arg === 'string' && arg.startsWith('-')) {
+      if (!arg.includes('=') && !knownBoolean(arg)) {
+        const value = args[i + 1];
+        // The element after a value-taking flag may be its value or the
+        // subcommand. Fail closed: an install word or an opaque element
+        // there counts as a possible install subcommand.
+        if (!knownValue(arg) && (value === OPAQUE_ARGV || (typeof value === 'string' && INSTALL_VERB.test(value)))) {
+          if (subcommand === undefined) subcommand = value;
+          else if (second === undefined) second = value;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (subcommand === undefined) subcommand = arg;
+    else if (second === undefined) { second = arg; break; }
+  }
+  const possibleInstall = (arg: ArgvElement | undefined) => arg === OPAQUE_ARGV
+    || (typeof arg === 'string' && INSTALL_VERB.test(arg));
+  if (base === 'yarn' && subcommand === 'global') return possibleInstall(second);
+  return global && possibleInstall(subcommand);
+}
+
+/** Decide relief from the entire file, before any sink or window is examined. */
+function argvReliefContext(text: string, path?: string): ArgvReliefContext {
+  const ext = /\.([^.\\/]+)$/.exec(path ?? '')?.[1]?.toLowerCase();
+  const firstBreak = text.search(/[\r\n]/);
+  const firstLine = text.slice(0, firstBreak < 0 ? text.length : firstBreak);
+  const shebang = firstLine.startsWith('#!') ? firstLine : '';
+  const language: ArgvReliefContext['language'] =
+    /^(?:py|pyw)$/.test(ext ?? '') ? 'python'
+      : /^(?:js|mjs|cjs|ts|mts|cts|jsx|tsx)$/.test(ext ?? '') ? 'js'
+        : /^(?:sh|bash|zsh)$/.test(ext ?? '') ? 'shell'
+          : /python/i.test(shebang) ? 'python'
+            : /node|deno|bun/i.test(shebang) ? 'js'
+              : /(?:bash|zsh|sh)/i.test(shebang) ? 'shell' : 'none';
+  if (language === 'none' || /\x22\x22\x22|\x27\x27\x27|\x60|\/\*|\*\/|\\[\r\n]|[\u2028\u2029\u0085\v\f]/.test(text)) {
+    return { language, commentLines: null };
+  }
+  // A shell file can carry another language's code in a here-document body
+  // (a JS class field `#x = spawnSync(...)` starts with `#` and runs), and
+  // ANSI-C `$'...'` quotes take backslash escapes this scanner does not
+  // model. Either one turns comment relief off for the whole shell file.
+  if (language === 'shell' && /<<|\$\x27/.test(text)) return { language, commentLines: null };
+  const commentLines = new Set<number>();
+  let quote = '';
+  let lineStart = 0;
+  for (let i = 0; i <= text.length;) {
+    const ch = text[i];
+    if (i === text.length || ch === '\n' || ch === '\r') {
+      if (quote && language !== 'shell') return { language, commentLines: null };
+      i++;
+      lineStart = i;
+      continue;
+    }
+    if (i === lineStart && !quote) {
+      let first = i;
+      while (text[first] === ' ' || text[first] === '\t') first++;
+      const marker = language === 'js' ? '//' : '#';
+      if (text.startsWith(marker, first)) commentLines.add(lineStart);
+    }
+    if (!quote && (language === 'js' ? text.startsWith('//', i)
+      : ch === '#' && (language === 'python' || i === lineStart || /\s/.test(text[i - 1])))) {
+      while (i < text.length && text[i] !== '\n' && text[i] !== '\r') i++;
+      continue;
+    }
+    if (ch === '\\' && quote !== '\x27' && i + 1 < text.length) { i += 2; continue; }
+    if (ch === '\x22' || ch === '\x27') {
+      if (!quote) quote = ch;
+      else if (quote === ch) quote = '';
+    }
+    i++;
+  }
+  return { language, commentLines: quote ? null : commentLines };
+}
+
+/** Relief covers only whole lines proven to start with a language comment. */
+function argvSinkLineRelief(start: number, context: ArgvReliefContext): boolean {
+  return context.commentLines?.has(start) ?? false;
+}
+
+/**
+ * A written script that runs a global install through an argv LIST
+ * (`subprocess.run(["npm", "install", "-g", x])`, `spawn("npm", ["-g", …])`).
+ * The DANGEROUS regex cannot see these (quotes sit where it wants whitespace),
+ * so this is both a proposer and a confirmer for `install-package-global`.
+ */
+function globalInstallArgvInvoked(text: string, context?: ArgvReliefContext): boolean {
+  GLOBAL_ARGV_SINK.lastIndex = 0;
+  const positions: Array<{ start: number; after: number }> = [];
+  let found: RegExpExecArray | null;
+  while ((found = GLOBAL_ARGV_SINK.exec(text)) !== null) positions.push({ start: found.index, after: GLOBAL_ARGV_SINK.lastIndex });
+  let lineStart = 0;
+  let lineEnd = 0;
+  let scanned = 0;
+  const scanBudget = 4 * text.length + ARGV_SCAN_CAP;
+  for (let k = 0; k < positions.length; k++) {
+    const { start, after } = positions[k];
+    while (lineEnd <= start && lineStart < text.length) {
+      while (lineEnd < text.length && text[lineEnd] !== '\n' && text[lineEnd] !== '\r') lineEnd++;
+      if (start < lineEnd) break;
+      lineStart = lineEnd + 1;
+      lineEnd = lineStart;
+    }
+    if (context && argvSinkLineRelief(lineStart, context)) continue;
+    // Nested candidates are visited separately. Cap aggregate reads; if the
+    // budget runs out, gate only files with npm-family and global evidence
+    // (any global spelling the argv reader accepts, including yarn global add
+    // and --location as its own element).
+    if (scanned >= scanBudget) return /\b(?:npm|yarn|pnpm|bun|npx|corepack)\b/i.test(text)
+      && /-g\b|--global\b|--location\b|\bglobal\b/i.test(text);
+    const { args, next } = readQuotedArgv(text, after);
+    scanned += next - after;
+    if (argvIsGlobalInstall(args)) return true;
+  }
+  return false;
+}
+
 /**
  * #386 — install-package-global must be an INVOCATION, not vocabulary.
  * Write-content and shell DATA args often quote package installs in logs
@@ -1441,6 +1728,7 @@ const INTERPRETER_EXEC_SINK = /(?:os\.(?:system|popen)|subprocess\.(?:run|call|P
  */
 function packageInstallGlobalInvoked(text: string, depth = 0): boolean {
   if (depth > MAX_INLINE_RECURSION + 2) return true;
+  if (globalInstallArgvInvoked(text)) return true;
   // Explicit interpreter / process APIs that run a string or argv containing a
   // global install. Order of install vs global flag does not matter.
   // Fail-closed on these sinks: write-time authoring of "run this install" is intent.
@@ -1652,6 +1940,9 @@ const PIP_WINDOW_SCOPE_FLAG_RE = /(?:^|[\s"'])(?:--target|-t|--prefix|--root|--p
  */
 function pipInstallMutatesHost(text: string): boolean {
   if (hasUnscopedPipInstall(text)) return true;
+  // The bounded window regex has a costly failed search on long lines full of
+  // call punctuation. No window can match without the installer name.
+  if (!/pip/i.test(text)) return false;
   const venvs = venvPrefixesCreatedIn(text);
   PIP_INSTALL_WINDOW_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -2587,6 +2878,10 @@ function fmtSpan(s: string): string { return s.trim().replace(/\s+/g, ' ').slice
 function matchSpans(patterns: Pattern[], text: string): Array<{ signal: string; span: string }> {
   const out: Array<{ signal: string; span: string }> = [];
   for (const p of patterns) {
+    // The global-install table regex has long lookaheads from each `npm`.
+    // Avoid retrying those lookaheads for every argv token when the surface
+    // has no global flag at all (the argv parser below still runs separately).
+    if (p.signal === 'install-package-global' && !/(?:-g|global)/i.test(text)) continue;
     const m = text.match(p.re);
     if (m) out.push({ signal: p.signal, span: fmtSpan(m[0]) });
   }
@@ -2687,7 +2982,7 @@ const EXEC_COMMAND_WORD =
 // executed be dropped. `getattr(`/`__import__` are included because they are the
 // standard ways to reach `os.system` without naming it.
 const SHELL_OUT_SINK =
-  /\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
+  /\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawnp?)\b|\bsubprocess\b|\bPopen\b|\bpopen\b|\bcheck_(?:call|output)\b|\bgetoutput\b|\bgetstatusoutput\b|shell\s*=\s*True|\bcommands\.\w|\bpty\.\w|\b__import__\b|\bgetattr\s*\(|\b(?:exec|eval)\s*\(|child_process|\bexecSync\b|\bexecFileSync\b|\bspawnSync\b|\bexecFile\b|\bnew\s+Function\b|\bsystem\s*\(|\bqx[({[/]|\bIPC::|%x[({[]|\bshell_exec\b|\bpassthru\b|\bproc_open\b/;
 /**
  * #444 -- a bare backtick in a PYTHON docstring or comment is Markdown prose,
  * not a shell-out sink. It was in SHELL_OUT_SINK for every language, so
@@ -4124,7 +4419,18 @@ function isPurePrint(cmd: string): boolean {
   return /^(?:echo|printf)\b/.test(body);
 }
 
-/** Strip `#` comments so a token mentioned only in a comment is not an action. */
+/**
+ * Strip `#` comments so a token mentioned only in a comment is not an action.
+ *
+ * Unchanged since 5.5.0, deliberately (#713 review round 3). An earlier #713
+ * round kept any comment holding a lone CR, U+2028 or U+2029 so the heredoc
+ * data-read relief could see the terminator; but a kept comment reaches
+ * discovery, whose list is capped at `MAX_DETECTED_SCRIPTS`, so eight
+ * ordinary CRLF comments of the form `# ; python3 /tmp/fake.py` filled the list
+ * before the file the interpreter really runs was reached. The relief now
+ * judges the ORIGINAL command (`dataReadHeredocDiscoverySurface`), so this
+ * function never has to carry evidence for it.
+ */
 function stripComments(cmd: string): string {
   return cmd.replace(/(^|\s)#[^\n]*/g, '$1 ');
 }
@@ -4480,7 +4786,13 @@ export function detectScriptInvocations(execSurface: string, depth = 0): Detecte
   const found: DetectedScript[] = [];
   if (!execSurface || depth > MAX_INLINE_RECURSION) return found;
 
-  const surface = maskSinkFreeHeredocBodies(maskSinkFreeInlinePrograms(execSurface));
+  // #713: the whole-command heredoc data-read relief is NOT applied here. It is
+  // decided once, on the original command, by `dataReadHeredocDiscoverySurface`
+  // at the `evaluateToolCall` boundary, which hands this function a surface
+  // with the body already blanked. Nested calls (script folds, `bash -c`
+  // recursion, the #217 pass) therefore never relieve anything: strictly more
+  // scanning, never less.
+  const surface = maskSinkFreeInlinePrograms(execSurface);
 
   const add = (p: string, lang?: ScriptLang): void => {
     const clean = p.trim();
@@ -4605,6 +4917,34 @@ interface ScriptFold {
   /** Paths whose source was exempted by the reviewed-script allowlist (#189) —
    *  surfaced on the verdict so every audit row shows review was exercised. */
   reviewed: string[];
+  /** #702 B1 — nested paths in the sensitive-path set that the fold refused to
+   *  read, with the invocation chain that named each. Carried as STRUCTURAL
+   *  evidence because the text that named the path may itself be exempt from
+   *  the scan surface (a reviewed parent, #189), in which case
+   *  `touch-sensitive-path` has nothing to match and `opaque` alone would fall
+   *  through to the opaque-only allow. Each entry is surfaced as a
+   *  `touch-sensitive-path` approval signal whatever named it. */
+  unreadSensitive: Array<{ path: string; chain: string }>;
+}
+
+/**
+ * #702 (#686 N1) — the one question every fold reader asks before it calls
+ * the resolver: is this path one whose BYTES must never enter the scan
+ * surface? A sink-bearing program that merely opens a key —
+ * `import subprocess` plus `open('/home/u/.ssh/id_rsa').read()` — is not
+ * masked (it can shell out, so its path literals are candidate invocations,
+ * #190/#661), and `splitCommandStatements` breaks on `(`, so the key's path
+ * lands in command position and is "detected". Following that detection read
+ * the key through the resolver and copied it into the scan text and every
+ * audit row derived from it, on the `-c`, heredoc, file AND `$(cat …)` planes
+ * alike. Reading a secret is never detection: the ACCESS is what the guard
+ * gates, and `touch-sensitive-path` already fires on the text that named the
+ * path. So the path is checked against the same sensitive-path set that rule
+ * uses, and a match is recorded as opaque instead of resolved. Checked
+ * against the bare path, before any read, so the resolver is never asked.
+ */
+function isSensitiveFoldPath(scriptPath: string): boolean {
+  return SENSITIVE_PATH_RE.test(scriptPath);
 }
 
 /**
@@ -4619,8 +4959,8 @@ function foldScriptSources(
   subst?: SubstitutionState,
 ): ScriptFold {
   const roots = detectScriptInvocations(execCommand);
-  if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [] };
-  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [] };
+  if (roots.length === 0) return { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] };
+  if (typeof resolveScriptSource !== 'function') return { content: '', opaque: true, regions: [], reviewed: [], unreadSensitive: [] };
 
   const visited = new Set<string>();
   // #184: carry the invocation chain so a nested match can name every hop.
@@ -4629,6 +4969,7 @@ function foldScriptSources(
   const parts: string[] = [];
   const regions: ScanRegion[] = [];
   const reviewed: string[] = [];
+  const unreadSensitive: Array<{ path: string; chain: string }> = [];
   let total = 0;
   let cursor = 0;                                       // offset of the next part within `content`
   let opaque = false;
@@ -4639,6 +4980,19 @@ function foldScriptSources(
     if (visited.has(next.path)) continue;              // cycle guard
     visited.add(next.path);
     if (visited.size > MAX_SCRIPTS_PER_CALL) { opaque = true; break; }
+    // #702: a sensitive path is never READ, on any plane. Recorded as opaque
+    // (the invocation is known and its contents were not scanned). The access
+    // is gated by `touch-sensitive-path` on the text that named the path —
+    // and, because that text can be a reviewed parent's body which is exempt
+    // from the scan surface (#189), ALSO recorded here as structural evidence
+    // (B1, review of #704): the verdict surfaces every unread sensitive path
+    // as `touch-sensitive-path` on its own, so review of a parent can never
+    // become an automatic allow of a secret-located child it never read.
+    if (isSensitiveFoldPath(next.path)) {
+      opaque = true;
+      unreadSensitive.push({ path: next.path, chain: next.chain.join(' → ') });
+      continue;
+    }
 
     let src: string | null = null;
     try {
@@ -4784,7 +5138,7 @@ function foldScriptSources(
     }
   }
 
-  return { content: parts.join('\n'), opaque, regions, reviewed };
+  return { content: parts.join('\n'), opaque, regions, reviewed, unreadSensitive };
 }
 
 // ── Command-substitution expansion (#517) ────────────────────────────────────
@@ -4931,6 +5285,10 @@ function readSubstitutedFile(
   state: SubstitutionState,
 ): string | null {
   if (typeof resolveScriptSource !== 'function') { state.opaque = true; return null; }
+  // #702: `$(cat ~/.ssh/id_rsa)` splices the KEY into the command line; the
+  // guard must not do the same into its own scan surface. Opaque, unread —
+  // the raw `$(cat …)` text stays and names the path, so the access is gated.
+  if (isSensitiveFoldPath(path)) { state.opaque = true; return null; }
   let src: string | null = null;
   try {
     src = resolveScriptSource(path);
@@ -5225,8 +5583,8 @@ interface HeredocBody {
    * `null` when no interpreter is named there (the body is data, or lands in
    * a file something else runs). The LAST interpreter token wins, so
    * `python3 - <<'PY' | bash` is `sh`: the body's output is shell. Chooses the
-   * SCAN language of a region only — it never decides a mask (#686: masking is
-   * decided by `wholeCommandHeredocProgram` on the whole command).
+   * SCAN language of a region only — it never decides a mask (#686/#713:
+   * masking is decided by `wholeCommandHeredocProgram` on the whole command).
    */
   lang: ScriptLang | null;
   /** The file the intro line redirects/tees the body or its output to, if any. */
@@ -5306,10 +5664,7 @@ function wholeCommandHeredocProgram(text: string): { start: number; end: number;
  * Every heredoc in `text`, with the language that consumes it and the file its
  * intro line writes to. The single definition of "which heredoc does an
  * interpreter read" (#661): `interpreterHeredocRegions` builds scan regions
- * from it and `maskSinkFreeHeredocBodies` masks invocation detection with it.
- * It calls nothing that detects invocations, so it is safe to use from inside
- * `detectScriptInvocations` — `interpreterHeredocRegions` is not (its #217
- * pass and `findInterpreterRunFiles` both recurse into detection).
+ * from it. It calls nothing that detects invocations, so it is recursion-safe.
  */
 function heredocBodies(text: string): HeredocBody[] {
   if (!text.includes('<<')) return [];
@@ -5335,30 +5690,102 @@ function heredocBodies(text: string): HeredocBody[] {
 }
 
 /**
- * #661 — a path literal inside an interpreter-consumed HEREDOC is not a
- * command, for exactly the reason #190 gives for `python3 -c`: a sink-free
- * program cannot start a process, so nothing in it is an invocation. The
- * heredoc plane was left out of that relief, and `splitCommandStatements`
- * (which breaks on `(`) turned `open('/tmp/x/table.md')` into a statement
- * whose only token is a path in command position — the DATA FILE was folded
- * and its prose scanned as shell. Live: a markdown table that LISTED rule
- * names was denied on those names; the same code as a script file was
- * allowed, so moving code into a file flipped the verdict.
- *
- * Masked only when the ENTIRE command is the one recognised whole-command
- * shape (`WHOLE_COMMAND_HEREDOC_PROGRAM`, #686: a non-shell interpreter
- * reading a quoted-delimiter heredoc as its program, with nothing before it
- * but an optional plain `cd … &&`, nothing on the intro line after the
- * delimiter, an exact-line closer and nothing after it) and the body has no
- * shell-out sink. Any other command is left exactly as main scans it. A
- * shell heredoc IS shell and is never masked. Length-preserving, so every
- * offset computed against the original text stays valid.
+ * #713 — the part of the intro line the data-read relief accepts, a strict
+ * subset of `WHOLE_COMMAND_HEREDOC_PROGRAM`. The gate admits any env
+ * assignment and any interpreter directory; both can change what runs the
+ * body or what its `import`s load (`PATH=/tmp/b python3`, `/tmp/python3`,
+ * `PYTHONPATH=…`, `NODE_OPTIONS=…`, `PERL5OPT=…`). So the relief takes only
+ * locale/output variables and an interpreter that is bare or in a system bin
+ * directory. The gate also admits any flag, and a flag can load code before
+ * the body runs (`node --require=…`, `--import=…`, `ruby -r…`, `python3 -m…`,
+ * `php -dauto_prepend_file=…`). So the relief anchors all the way to `<<` and
+ * takes only a closed set of inert flags per interpreter, each its own token:
+ * python `-u -B -I -s -E -q`, node `--no-warnings`, ruby/perl/php `-w`.
+ * Anything else keeps the 5.5.0 scan.
  */
-function maskSinkFreeHeredocBodies(text: string): string {
-  const h = wholeCommandHeredocProgram(text);
-  if (!h) return text;
-  if (hasShellOutSink(text.slice(h.start, h.end), h.lang)) return text;
-  return text.slice(0, h.start) + ' '.repeat(h.end - h.start) + text.slice(h.end);
+const DATA_READ_HEREDOC_INTRO = new RegExp(
+  '^\\s*'
+  + '(?:cd[ \\t]+[\\w.\\/~-]+[ \\t]*&&[ \\t]*)?'
+  + '(?:(?:LANG|LANGUAGE|LC_[A-Z]+|TZ|TERM|COLUMNS|NO_COLOR|FORCE_COLOR|PYTHONIOENCODING|PYTHONUTF8|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE)=[\\w.\\/:,-]*[ \\t]+)*'
+  + '(?:(?:env|nohup|nice|command|timeout[ \\t]+\\d+[smhd]?)[ \\t]+)*'
+  + '(?:\\/usr\\/bin\\/|\\/usr\\/local\\/bin\\/|\\/bin\\/|\\/opt\\/homebrew\\/bin\\/)?'
+  + '(?:python[\\d.]*(?:[ \\t]+-[uBIsEq])*|(?:node|nodejs)(?:[ \\t]+--no-warnings)*|(?:ruby|perl|php)(?:[ \\t]+-w)*)'
+  + '(?:[ \\t]+-)?'
+  + '[ \\t]+<<([\'"])[A-Za-z_]\\w*\\1[ \\t]*\\n$',
+);
+
+/**
+ * #661 / #713 — a path literal inside an interpreter-consumed HEREDOC is not a
+ * command when the program only READS data. `splitCommandStatements` (which
+ * breaks on `(`) turned `open('/tmp/x/table.md')` into a statement whose only
+ * token is a path in command position, so the DATA FILE was folded and its
+ * prose scanned as shell. Live: a markdown table that LISTED rule names was
+ * denied on those names; the same code as a script file was allowed.
+ *
+ * Default-deny (#713, allow-list design; the #686 sink-free test was withdrawn
+ * in 5.6.0 by #712 because "no loader found" could not be shown complete).
+ * The body is masked only when ALL of these hold:
+ *   - the entire command is the one `WHOLE_COMMAND_HEREDOC_PROGRAM` shape
+ *     (#686 gate, unchanged), with an intro inside `DATA_READ_HEREDOC_INTRO`;
+ *   - the body has no `SHELL_OUT_SINK` match (kept as a second veto);
+ *   - every top-level statement of the body is inert or an allow-listed data
+ *     read from a literal path (`bodyIsAllDataRead`, heredoc-data-read.ts).
+ * Anything unrecognised leaves the command exactly as 5.5.0 scans it. A shell
+ * heredoc IS shell and is never masked. Length-preserving, so every offset
+ * computed against the original text stays valid.
+ */
+function dataReadHeredocRelief(rawCommand: string): boolean {
+  const h = wholeCommandHeredocProgram(rawCommand);
+  if (!h) return false;
+  if (!DATA_READ_HEREDOC_INTRO.test(rawCommand.slice(0, h.start))) return false;
+  const body = rawCommand.slice(h.start, h.end);
+  if (hasShellOutSink(body, h.lang)) return false;
+  return bodyIsAllDataRead(body, h.lang);
+}
+
+/**
+ * The surface script discovery runs on for a command: `execCommand` (the
+ * comment-stripped scan text) with the whole-command heredoc body blanked when
+ * the relief above holds, otherwise `execCommand` untouched.
+ *
+ * Eligibility is judged on `rawCommand`, the bytes the interpreter will read,
+ * never on the stripped text (#713 review rounds 2-3). Shell-comment stripping
+ * runs to LF only, so it once manufactured a CRLF from a lone CR and hid a
+ * loader behind a comment the classifier then accepted; keeping such comments
+ * instead let them saturate discovery's bounded list. Judging the original
+ * body needs neither: the classifier sees every terminator as the interpreter
+ * does, and `stripComments` stays exactly as 5.5.0 scanned.
+ *
+ * `rawCommand` must also predate `deobfuscateIfs` (N1, #732 review round 4),
+ * not only comment-stripping: that pass erases every `${IFS...}`/`$IFS`
+ * substring from the WHOLE command, including inside a quoted interpreter
+ * heredoc the shell never expands at all, where the same bytes can be a
+ * non-bash interpreter's own syntax (e.g. Perl string interpolation) rather
+ * than shell obfuscation. Deobfuscated text reaching either the sink veto or
+ * the allow-list classifier here can erase the very span that would have
+ * vetoed relief.
+ *
+ * The blank is applied to the heredoc that `wholeCommandHeredocProgram` finds
+ * in `execCommand` itself, so offsets are never carried across the two texts.
+ * If the stripped text no longer shows the same whole-command shape and
+ * language, nothing is masked: fail closed.
+ */
+function dataReadHeredocDiscoverySurface(rawCommand: string, execCommand: string): string {
+  if (!rawCommand.includes('<<') || !dataReadHeredocRelief(rawCommand)) return execCommand;
+  const raw = wholeCommandHeredocProgram(rawCommand);
+  const h = wholeCommandHeredocProgram(execCommand);
+  if (!raw || !h || h.lang !== raw.lang) return execCommand;
+  return execCommand.slice(0, h.start) + ' '.repeat(h.end - h.start) + execCommand.slice(h.end);
+}
+
+/**
+ * The exact text `evaluateToolCall` hands to script discovery for `command`:
+ * `commandScanText` with the #713 relief applied. Exported so tests exercise
+ * the production composition rather than `detectScriptInvocations` alone,
+ * which never relieves anything by itself.
+ */
+export function scriptDiscoverySurface(command: string): string {
+  return dataReadHeredocDiscoverySurface(command, commandScanText(command));
 }
 
 function interpreterHeredocRegions(text: string): ScanRegion[] {
@@ -5584,13 +6011,14 @@ function withShellComplement(carved: readonly ScanRegion[], length: number): Sca
  * "git push -f" does not gate at write time when the identical text would not
  * gate at exec time.
  */
-function scanWriteContentPayload(content: string): {
+function scanWriteContentPayload(content: string, path?: string): {
   catastrophic: Array<{ signal: string; span: string }>;
   dangerous: Array<{ signal: string; span: string }>;
 } {
   const catastrophic: Array<{ signal: string; span: string }> = [];
   const dangerous: Array<{ signal: string; span: string }> = [];
   const seen = new Set<string>();
+  const argvContext = argvReliefContext(content, path);
   forEachWindow(content, (w) => {
     const text = deobfuscateIfs(w);
     for (const m of matchSpans(CATASTROPHIC, text)) {
@@ -5641,6 +6069,9 @@ function scanWriteContentPayload(content: string): {
       dangerous.push({ signal: 'install-package', span: fmtSpan(span) });
     }
   });
+  if (!seen.has('install-package-global') && globalInstallArgvInvoked(content, argvContext)) {
+    dangerous.push({ signal: 'install-package-global', span: 'global package install' });
+  }
   return { catastrophic, dangerous };
 }
 
@@ -6042,9 +6473,18 @@ export function evaluateToolCall(
  * file-reading substitutions spliced in — and the expansion record for that
  * pass's own script fold. Supplied only by the recursive second pass in
  * `evaluateToolCallCore`; the outer call derives its command from `args`.
+ *
+ * `rawCommand` (N1, #732) is `command`'s counterpart from BEFORE
+ * `deobfuscateIfs` ran — the bytes the interpreter will actually read. It is
+ * carried alongside `command` rather than derived from it because
+ * `deobfuscateIfs` is lossy: it can erase a non-bash interpreter's own syntax
+ * (e.g. Perl `${IFS...}` string interpolation) that merely LOOKS like shell
+ * IFS obfuscation. Heredoc-relief eligibility must be judged on this field,
+ * never on `command`.
  */
 interface ExpandedSurface {
   command: string;
+  rawCommand: string;
   subst: SubstitutionState;
 }
 
@@ -6176,7 +6616,8 @@ function evaluateToolCallCore(
   }
 
   const family = classifyFamily(toolName);
-  const typedCommand = deobfuscateIfs(extractCommand(args));
+  const originalCommand = extractCommand(args);
+  const typedCommand = deobfuscateIfs(originalCommand);
   // #517: `$(cat f)` / `$(< f)` / `` `cat f` `` are expanded so the guard also
   // scans the command the shell will actually execute, and the substituted
   // spelling is judged at least as hard as the literal spelling. Bounded by
@@ -6193,9 +6634,17 @@ function evaluateToolCallCore(
   // The recursive pass carries its surface in and does not expand again.
   const subst = surface?.subst ?? newSubstitutionState();
   const command = surface?.command ?? typedCommand;
+  // N1 (#732): `rawCommand` is `command`'s pre-`deobfuscateIfs` counterpart,
+  // carried alongside it purely for heredoc-relief eligibility (see
+  // `ExpandedSurface`). The general scan below keeps using `command`
+  // (deobfuscated) exactly as before — only the relief judgment changes.
+  const rawCommand = surface?.rawCommand ?? originalCommand;
   const expandedCommand = (surface || typedCommand.length > OVERSIZED_COMMAND_LENGTH)
     ? command
     : expandFileSubstitutions(typedCommand, options?.resolveScriptSource, subst);
+  const expandedRawCommand = (surface || typedCommand.length > OVERSIZED_COMMAND_LENGTH)
+    ? rawCommand
+    : expandFileSubstitutions(originalCommand, options?.resolveScriptSource, newSubstitutionState());
   const path = extractPath(args);
   const url = extractUrl(args, toolName);
 
@@ -6236,6 +6685,9 @@ function evaluateToolCallCore(
   // fall through so path-tier rules (touch-sensitive-path, approval-store, …)
   // still run — content add-on, not a short-circuit that blanks path policy.
   let writeContentScannedClean = false;
+  // #629: DANGEROUS-tier vocabulary named in memory-markdown prose. Recorded on
+  // the allow verdict below, never dropped.
+  let memoryProseMentions: Array<{ signal: string; span: string }> = [];
   if (family === 'write') {
     const writeContent = extractWriteContent(args);
     const scanThisWrite = writeContent.length > 0
@@ -6246,10 +6698,11 @@ function evaluateToolCallCore(
       const memory = isMemoryWritePath(path);
       // #341: memory markdown is instruction prose — neutralize quoted mentions
       // before the command-pattern scan. Scripts keep raw bytes.
-      const scanBody = (memory && /\.md$/i.test(path) && !writeContentLooksExecutable(writeContent))
+      const memoryProse = memory && /\.md$/i.test(path) && !writeContentLooksExecutable(writeContent);
+      const scanBody = memoryProse
         ? neutralizeMarkdownCommandMentions(writeContent)
         : writeContent;
-      const hits = scanWriteContentPayload(scanBody);
+      const hits = scanWriteContentPayload(scanBody, path);
       if (hits.catastrophic.length > 0) {
         const signals = ['write-content-catastrophic', ...hits.catastrophic.map(m => m.signal)];
         const span = hits.catastrophic[0]?.span;
@@ -6266,7 +6719,19 @@ function evaluateToolCallCore(
           hits.catastrophic.map(m => ({ signal: m.signal, span: m.span })),
         );
       }
-      if (hits.dangerous.length > 0) {
+      // #629: writing memory-markdown prose runs nothing. A DANGEROUS-tier
+      // command named there is data, so it is recorded and the write falls
+      // through to the path-tier rules like a clean scan. It is not an early
+      // allow. Still gated exactly as before: the catastrophic tier above, any
+      // path-target hit (self-protection floor, sensitive paths), every
+      // script-like path and every shebang body. Running the file later is
+      // scanned again at invocation through the script fold.
+      const memoryMentionOnly = memoryProse
+        && hits.dangerous.length > 0
+        && !hits.dangerous.some(m => PATH_TARGET_SIGNALS.has(m.signal));
+      if (memoryMentionOnly) {
+        memoryProseMentions = hits.dangerous;
+      } else if (hits.dangerous.length > 0) {
         const signals = ['write-content-dangerous', ...hits.dangerous.map(m => m.signal)];
         const span = hits.dangerous[0]?.span;
         const reason = memory
@@ -6294,8 +6759,8 @@ function evaluateToolCallCore(
   // (`openclaw.process`, exact-special read tools) have either returned
   // already or do not apply to this tool name.
   if (!surface && expandedCommand !== typedCommand) {
-    const typed = evaluateToolCallCore(toolName, args, config, options, true, { command: typedCommand, subst });
-    const expanded = evaluateToolCallCore(toolName, args, config, options, true, { command: expandedCommand, subst: newSubstitutionState() });
+    const typed = evaluateToolCallCore(toolName, args, config, options, true, { command: typedCommand, rawCommand, subst });
+    const expanded = evaluateToolCallCore(toolName, args, config, options, true, { command: expandedCommand, rawCommand: expandedRawCommand, subst: newSubstitutionState() });
     return mergeSurfaceVerdicts(typed, expanded);
   }
 
@@ -6314,8 +6779,10 @@ function evaluateToolCallCore(
   // An oversized command is already flagged (and already anomalous); skip the
   // work rather than tokenise 50k+ chars of it.
   const fold: ScriptFold = command.length > OVERSIZED_COMMAND_LENGTH
-    ? { content: '', opaque: false, regions: [], reviewed: [] }
-    : foldScriptSources(execCommand, options?.resolveScriptSource, options?.isReviewedScript, subst);
+    ? { content: '', opaque: false, regions: [], reviewed: [], unreadSensitive: [] }
+    : foldScriptSources(
+        dataReadHeredocDiscoverySurface(rawCommand, execCommand),
+        options?.resolveScriptSource, options?.isReviewedScript, subst);
 
   // #189: every verdict minted past this point records which files the
   // reviewed-script allowlist exempted from folding — including a `block`
@@ -6496,6 +6963,32 @@ function evaluateToolCallCore(
   // #184: keep full provenance (source/line/chain) alongside the span.
   const dangerEvidence = new Map<string, ClassifiedMatch>();
   for (const m of dangerMatches) if (!dangerEvidence.has(m.signal)) dangerEvidence.set(m.signal, m);
+  // #702 B1 (review of #704): a nested script inside the sensitive-path set is
+  // never read by the fold. The rule above gates it when the text that NAMED
+  // it is on the scan surface; a reviewed parent's text is not (#189 exempts
+  // the file body), so with the child unread there was nothing left but
+  // `opaque` — and opaque-only is the allow at 3a. The fold therefore reports
+  // each unread sensitive path as structural evidence and it is surfaced here
+  // as `touch-sensitive-path` whatever named it: an unread sensitive script is
+  // require_approval with the path and chain on the row, never an automatic
+  // allow through an exempt parent. Nothing is read to produce this signal
+  // (#702 holds), an ordinary child under a reviewed parent is unaffected
+  // (it is folded and scanned as before), and where the rule already fired on
+  // the text this only de-duplicates into the same signal.
+  for (const u of fold.unreadSensitive) {
+    if (!dangerSignals.includes('touch-sensitive-path')) dangerSignals.push('touch-sensitive-path');
+    if (!dangerEvidence.has('touch-sensitive-path')) {
+      const hops = u.chain.split(' → ');
+      const invokedBy = hops.length > 1 ? hops[hops.length - 2] : undefined;
+      dangerSpan = dangerSpan ?? fmtSpan(u.path);
+      dangerEvidence.set('touch-sensitive-path', {
+        signal: 'touch-sensitive-path',
+        span: fmtSpan(u.path),
+        tier: 'executed',
+        ...(invokedBy ? { source: invokedBy, chain: u.chain } : {}),
+      });
+    }
+  }
   // A pip install scoped to a venv / an explicit target prefix mutates that
   // prefix, not the host (issue #89 class 4) — it falls through to the
   // sensitive-but-allowed tier below, exactly like a workspace-local npm install.
@@ -6671,9 +7164,15 @@ function evaluateToolCallCore(
   // Dangerous vocabulary demoted at #188 rides along here: allowed, but named,
   // so a reviewer can still see what the folded source said.
   const payloadSignals = [...new Set(dangerPayloadOnly.map(m => m.signal))];
+  // #629: memory-prose mention names ride on every allow exit so the audit row
+  // names what the note said. Only the memory-note exit below also carries the
+  // marker and the spans; the sensitive exit adds the marker but no spans, and
+  // the payload and opaque exits carry the names only. Empty for every other
+  // write.
+  const mentionSignals = memoryProseMentions.map(m => m.signal);
   const sensitiveSignal = firstMatch(SENSITIVE, scanSurface);
   if (sensitiveSignal) {
-    const extra = writeContentScannedClean ? ['write-content-scanned'] : [];
+    const extra = writeContentScannedClean ? ['write-content-scanned', ...mentionSignals] : [];
     return withReview(verdict('allow', 'sensitive', family, canonical, `sensitive operation (${sensitiveSignal})`,
       [sensitiveSignal, ...payloadSignals, ...opaqueSignals, ...extra]));
   }
@@ -6690,7 +7189,7 @@ function evaluateToolCallCore(
         ev.span ?? dangerPayloadOnly[0]?.span,
         ev.provenance,
       ),
-      [...payloadSignals, ...opaqueSignals],
+      [...payloadSignals, ...opaqueSignals, ...mentionSignals],
       matchEvidence(payloadMatches)));
   }
 
@@ -6701,7 +7200,7 @@ function evaluateToolCallCore(
   // and the verdict is bit-for-bit what it was before this change.
   if (opaqueSignals.length > 0) {
     return withReview(verdict('allow', 'sensitive', family, canonical,
-      buildReason('script contents were not scanned', opaqueSignals), opaqueSignals));
+      buildReason('script contents were not scanned', opaqueSignals), [...opaqueSignals, ...mentionSignals]));
   }
 
   // 4) A bare exec/network/write/git call with no dangerous signal is treated as
@@ -6709,6 +7208,18 @@ function evaluateToolCallCore(
   // (Read-only and memory tools already short-circuited to allow above.)
   // #93: a clean script/memory/shebang content scan upgrades to sensitive so
   // #95 auditAllows records that the write was seen (not silent like Bash-only).
+  if (writeContentScannedClean && memoryProseMentions.length > 0) {
+    return withReview(verdict(
+      'allow',
+      'sensitive',
+      family,
+      canonical,
+      // Not buildReason: its `fix:` hint is advice for a gate, and this is an allow.
+      `memory-markdown prose names a dangerous command as data — nothing runs at write time [rule: ${mentionSignals.join(', ')}]`,
+      ['write-content-scanned', ...mentionSignals, ...opaqueSignals],
+      memoryProseMentions.map(m => ({ signal: m.signal, span: m.span })),
+    ));
+  }
   if (writeContentScannedClean) {
     return withReview(verdict(
       'allow',

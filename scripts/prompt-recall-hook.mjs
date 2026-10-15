@@ -26,6 +26,9 @@ import { writeRecallLog } from './lib/recall-log.mjs';
 import { recordHookInvocation } from './lib/telemetry.mjs';
 import { filterByRelevance, extractQueryTerms } from './lib/recall-relevance.mjs';
 import { defendRecallRows, loadRecallDefence, ensureRecallAuditDb, emitRecallAudit } from './lib/recall-defence.mjs';
+import { isRecallVectorEnabled, loadQueryEmbedder, embedQuery, readRecallSnapshot, fuseRecallCandidates, DEFAULT_MIN_SIMILARITY } from './lib/recall-vector.mjs';
+import { recallAdmissionClause, recallRowColumns } from './lib/recall-admission.mjs';
+import { detectLane, resolveLanePolicy, applyLanePolicy, loadLabelNormaliser } from './lib/recall-lane.mjs';
 
 // ==================== CONFIG ====================
 
@@ -81,6 +84,9 @@ const RECALL_MAX_BM25 =
   process.env.SHIELDCORTEX_RECALL_MAX_BM25 !== ''
     ? pickNumber('SHIELDCORTEX_RECALL_MAX_BM25', null)
     : null;
+// #717 vector plane: cosine floor for a vector candidate. (#720: no longer
+// a relevance-gate exemption — vector rows are gated on wording like FTS rows.)
+const RECALL_VECTOR_MIN_SIM = pickNumber('SHIELDCORTEX_RECALL_VECTOR_MIN_SIM', DEFAULT_MIN_SIMILARITY);
 
 function loadConfig() {
   try {
@@ -120,48 +126,52 @@ function escapeFts5(query) {
 
 // ==================== RECALL ====================
 
-function recallRelevant(db, project, prompt) {
-  const results = [];
+function recallRelevant(db, project, prompt, queryVector = null) {
+  let results = [];
   const seen = new Set();
   let ftsHits = 0;
+  let vectorHits = 0;
+  let vectorScanError = null;
 
-  // 1. FTS5 text search
+  // 1. FTS5 text search, and 1b. the #717 vector plane (opt-in, #720), read
+  // in ONE snapshot so a row on both planes is the same version on both.
+  // Both planes share recall-admission.mjs's clause, and a vector candidate
+  // must also match this FTS expression: the vector plane re-ranks and tops
+  // up lexical candidates, it never admits a row FTS could not surface.
+  // Any later per-row admission (e.g. #718 lane policy over fullSet) sees
+  // vector rows exactly as it sees FTS rows — they are fused in here first.
   const ftsQuery = escapeFts5(prompt);
-  if (ftsQuery.trim()) {
-    try {
-      // v4.25.0: project pinned/access_count/last_accessed/downvote_count
-      // so compareRecallResults can compute effective salience without a
-      // second query. COALESCE on downvote_count for DBs that pre-date the
-      // 4.25 migration (the prompt-recall-hook runs against legacy DBs too).
-      const ftsRows = db.prepare(`
-        SELECT
-          m.id, m.title, m.content, m.category, m.salience, fts.rank,
-          m.pinned, m.access_count, m.last_accessed,
-          m.trust_score, m.sensitivity_level, m.metadata, m.reviewed_at,
-          COALESCE(m.downvote_count, 0) AS downvote_count
-        FROM memories m
-        JOIN memories_fts fts ON m.id = fts.rowid
-        WHERE memories_fts MATCH ?
-          AND (m.project = ? OR m.scope = 'global')
-          AND COALESCE(m.status, 'active') = 'active'
-          AND m.salience >= ?
-        ORDER BY fts.rank
-        LIMIT ?
-      `).all(ftsQuery, project, MIN_SALIENCE, MAX_RESULTS * 2);
+  const snapshot = readRecallSnapshot(db, {
+    project,
+    ftsQuery,
+    queryVector,
+    limit: MAX_RESULTS * 2,
+    minSalience: MIN_SALIENCE,
+    minSimilarity: RECALL_VECTOR_MIN_SIM,
+  });
+  for (const row of snapshot.ftsRows) {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      // v4.25.1: tag with source so the recall ring buffer can show
+      // operators which path surfaced a given candidate. _-prefixed so
+      // it doesn't collide with any future SELECT column.
+      row._source = 'fts';
+      results.push(row);
+      ftsHits += 1;
+    }
+  }
 
-      for (const row of ftsRows) {
-        if (!seen.has(row.id)) {
-          seen.add(row.id);
-          // v4.25.1: tag with source so the recall ring buffer can show
-          // operators which path surfaced a given candidate. _-prefixed so
-          // it doesn't collide with any future SELECT column.
-          row._source = 'fts';
-          results.push(row);
-          ftsHits += 1;
-        }
-      }
-    } catch {
-      // FTS query failed — continue with fallback
+  // Fused by weighted RRF only when the caller obtained a query vector —
+  // otherwise the candidate list is exactly the pre-#717 FTS list.
+  let fused = false;
+  if (queryVector) {
+    if (snapshot.vectorError) {
+      vectorScanError = snapshot.vectorError;
+    } else {
+      vectorHits = snapshot.vectorRows.length;
+      results = fuseRecallCandidates(results, snapshot.vectorRows, compareRecallResults);
+      for (const row of results) seen.add(row.id);
+      fused = true;
     }
   }
 
@@ -184,16 +194,10 @@ function recallRelevant(db, project, prompt) {
       // SELECT above) so compareRecallResults can compute effective
       // salience for rows that came in via this fallback path.
       const catRows = db.prepare(`
-        SELECT
-          id, title, content, category, salience,
-          pinned, access_count, last_accessed,
-          trust_score, sensitivity_level, metadata, reviewed_at,
-          COALESCE(downvote_count, 0) AS downvote_count
+        SELECT ${recallRowColumns()}
         FROM memories
         WHERE category = ?
-          AND (project = ? OR scope = 'global')
-          AND COALESCE(status, 'active') = 'active'
-          AND salience >= ?
+          AND ${recallAdmissionClause()}
         ORDER BY salience DESC, last_accessed DESC
         LIMIT ?
       `).all(categoryBoost, project, MIN_SALIENCE, MAX_RESULTS - results.length);
@@ -211,7 +215,15 @@ function recallRelevant(db, project, prompt) {
   // v4.23.0: FTS rank primary, salience tiebreaker. The previous raw-salience
   // sort discarded the relevance signal from the FTS5 query above — high-
   // salience-but-off-topic memories bubbled to the top of the recall preamble.
-  results.sort(compareRecallResults);
+  // #717: when fused, the RRF order IS the relevance order; only the
+  // query-agnostic category-boost tail is sorted, and it stays behind it.
+  if (fused) {
+    const ranked = results.filter((r) => r._source !== 'category-boost');
+    const tail = results.filter((r) => r._source === 'category-boost').sort(compareRecallResults);
+    results = [...ranked, ...tail];
+  } else {
+    results.sort(compareRecallResults);
+  }
   // v4.25.1: return the full sorted set alongside the sliced top-N so the
   // recall ring buffer can log which candidates were considered but didn't
   // make the cut. The top-N is the existing public contract.
@@ -224,6 +236,8 @@ function recallRelevant(db, project, prompt) {
     fullSet: results,
     queryTerms: extractQueryTerms(prompt),
     ftsHits,
+    vectorHits,
+    vectorScanError,
   };
 }
 
@@ -315,7 +329,9 @@ function buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDro
       memoryPurpose: row.memory_purpose ?? null,
       salience: typeof row.salience === 'number' ? row.salience : null,
       ftsRank: typeof row.rank === 'number' ? row.rank : null,
+      // #717: 'fts' | 'vector' | 'both' | 'category-boost'
       source: row._source ?? null,
+      vectorSimilarity: typeof row._similarity === 'number' ? Number(row._similarity.toFixed(4)) : null,
       effectiveSalience: computeEffectiveSalience(row),
       injected: wasInjected,
       dropReason,
@@ -323,7 +339,7 @@ function buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDro
   });
 }
 
-function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context, relevanceDrops }) {
+function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, dedupHashes, context, relevanceDrops, vectorPlane, laneInfo }) {
   try {
     const promptCapped = prompt.length > RECALL_LOG_PROMPT_CAP
       ? prompt.slice(0, RECALL_LOG_PROMPT_CAP) + '…'
@@ -337,6 +353,9 @@ function logRecallRun({ prompt, sessionId, project, fullSet, topN, injected, ded
       candidates: buildLogCandidates({ fullSet, topN, injected, dedupHashes, relevanceDrops }),
       injectedCount: injected.length,
       finalContextChars: context ? context.length : 0,
+      vectorPlane: vectorPlane ?? null,
+      lane: laneInfo?.lane ?? null,
+      laneSignal: laneInfo?.signal ?? null,
     });
   } catch {
     // Best-effort — recall must not block on log write failures.
@@ -474,9 +493,59 @@ process.stdin.on('end', async () => {
       process.exit(0);
     }
 
+    // #718: lane scoping. Automated lanes share the owner's project key, so
+    // project scope alone let personal memories reach a watchdog probe.
+    const laneInfo = detectLane({ text: prompt, env: process.env });
+    const lanePolicy = resolveLanePolicy(laneInfo.lane, config);
+    if (!lanePolicy.recall) {
+      logRecallRun({
+        prompt, sessionId, project, fullSet: [], topN: [], injected: [],
+        dedupHashes: new Set(), context: null, relevanceDrops: new Map(), laneInfo,
+        vectorPlane: 'disabled:lane-gated',
+      });
+      recordPromptRecallTelemetry({ startedAt, notes: `gated:lane-${laneInfo.lane}`, dbPath });
+      process.exit(0);
+    }
+
+    // #717 vector plane — default-off (#720): consulted only when config
+    // `recallVector: true` or SHIELDCORTEX_RECALL_VECTOR=1. Fail soft: any
+    // reason we cannot get a query vector leaves recall on the FTS-only path
+    // and is recorded in the recall log.
+    let queryVector = null;
+    let vectorPlane = 'disabled:default-off';
+    if (isRecallVectorEnabled(config)) {
+      try {
+        const { embed, reason } = await loadQueryEmbedder({ config });
+        if (embed) {
+          const r = await embedQuery(embed, prompt);
+          queryVector = r.vector;
+          vectorPlane = r.reason;
+        } else {
+          vectorPlane = reason;
+        }
+      } catch {
+        vectorPlane = 'unavailable:loader-threw';
+      }
+    } else if (config.recallVector === false) {
+      vectorPlane = 'disabled:config';
+    }
+
     const db = new Database(dbPath, { readonly: true, timeout: 2000 });
-    const { topN, fullSet, queryTerms } = recallRelevant(db, project, prompt);
+    let { topN, fullSet, queryTerms, vectorHits, vectorScanError } = recallRelevant(db, project, prompt, queryVector);
     db.close();
+    if (queryVector) {
+      vectorPlane = vectorScanError ? 'unavailable:scan-failed' : `active:${vectorHits}`;
+    }
+
+    // #718: withheld rows stay in fullSet so the recall log shows them with a
+    // lane_policy:* dropReason; only what the lane may receive is ranked on.
+    const laneDrops = new Map();
+    if (laneInfo.lane !== 'interactive') {
+      const normaliseLabel = await loadLabelNormaliser();
+      const { kept: laneKept, withheld } = applyLanePolicy(fullSet, laneInfo.lane, lanePolicy, normaliseLabel);
+      for (const w of withheld) laneDrops.set(w.row.id, w.reason);
+      topN = laneKept.slice(0, MAX_RESULTS);
+    }
 
     // ── P4 recall relevance gate (B9) ───────────────────────────────────
     // Run the term-coverage + relative-BM25 gate over the would-be-injected
@@ -491,7 +560,7 @@ process.stdin.on('end', async () => {
       relFactor: RECALL_REL_FACTOR,
       maxBm25: RECALL_MAX_BM25,
     });
-    const relevanceDrops = new Map(dropped.map((d) => [d.row.id, d.reason]));
+    const relevanceDrops = new Map([...dropped.map((d) => [d.row.id, d.reason]), ...laneDrops]);
     if (dropped.length > 0) {
       // Visible in the hook's stderr diagnostics; the structured detail lands
       // in the recall log via relevanceDrops.
@@ -522,6 +591,8 @@ process.stdin.on('end', async () => {
           dedupHashes: new Set(),
           context: null,
           relevanceDrops,
+          vectorPlane,
+          laneInfo,
         });
       }
       // #253: zero-yield recall MUST leave a hook_invocations row.
@@ -560,6 +631,8 @@ process.stdin.on('end', async () => {
           dedupHashes,
           context: null,
           relevanceDrops,
+          vectorPlane,
+          laneInfo,
         });
         recordPromptRecallTelemetry({
           startedAt,
@@ -669,6 +742,8 @@ process.stdin.on('end', async () => {
       dedupHashes,
       context,
       relevanceDrops,
+      vectorPlane,
+      laneInfo,
     });
 
     console.log(JSON.stringify(output));

@@ -150,18 +150,19 @@ describe('#284 deny-path forensics', () => {
       event: 'action_guard_denial',
       outcome: 'auto_denied',
       tool: 'Bash',
+      surface: 'claude-code-hook',
       signals: ['recursive-force-delete', 'totally-unknown-signal'],
       severity: 'critical',
+      reason: 'recursive force delete',
       detectedAt: '2026-08-14T12:00:00.000Z',
       correlationId: 'act-0123456789abcdef',
-      // @ts-expect-error extended fields for #284
       actionId: 'act-0123456789abcdef',
       sessionId: 'sc-0123456789abcdef',
       origin: 'claude-code-hook',
-    } as any);
+    });
     expect(n.signals).toEqual(expect.arrayContaining(['recursive-force-delete', 'redacted-signal']));
     expect(n.correlationId).toBe('act-0123456789abcdef');
-    const text = formatActionGuardOutcomeNotification(n as any);
+    const text = formatActionGuardOutcomeNotification(n);
     expect(text).toMatch(/recursive-force-delete/);
     expect(text).toMatch(/Origin:\s+claude-code-hook/);
     expect(text).toMatch(/Action:\s+act-0123456789abcdef/);
