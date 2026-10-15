@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync, accessSync, constants as fsConstants } from 'fs';
 import { join, resolve } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
@@ -206,7 +206,8 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
       // First run after upgrade with no sig yet — adopt as trusted, write a
       // legacy sig so a subsequent read (before the next write upgrades it)
       // still verifies. Matches the prior behaviour to avoid a false tamper.
-      if (!readOnly) writeConfigSignature(rawFileContent);
+      if (readOnly) return predictLegacyAdoption();
+      writeConfigSignature(rawFileContent);
       return 'valid';
     }
     const storedSig = readFileSync(sigFile, 'utf-8').trim();
@@ -215,6 +216,36 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
   } catch {
     return 'tampered';
   }
+}
+
+/**
+ * Read-only stand-in for the adoption write above: the verdict the mutating
+ * path WOULD reach, decided without writing. Adoption reads (or mints) the
+ * integrity key and creates `.config-sig` in the config dir; if either write
+ * would fail, the mutating path lands in the catch and returns 'tampered'.
+ *
+ * Predicted from permissions only (`access(W_OK)`, which also reports a
+ * read-only mount). A write that fails for a reason no permission check can
+ * see beforehand (disk full, quota, I/O error) is not predicted: the read-only
+ * reader then reports the config's own value where the mutating getter would
+ * report the strict posture, until the next mutating read settles it.
+ */
+function predictLegacyAdoption(): IntegrityVerdict {
+  const keyFile = getIntegrityKeyFile();
+  try {
+    getIntegrityKey(true);
+  } catch {
+    // Present but unreadable: the mutating path would try to overwrite it.
+    if (existsSync(keyFile)) {
+      try { accessSync(keyFile, fsConstants.W_OK); } catch { return 'tampered'; }
+    }
+  }
+  try {
+    accessSync(getConfigDir(), fsConstants.W_OK | fsConstants.X_OK);
+  } catch {
+    return 'tampered';
+  }
+  return 'valid';
 }
 
 /** Returns true if config file tampering was detected. */
@@ -357,8 +388,9 @@ interface RawConfigState {
    */
   parseFailed: boolean;
   /**
-   * True when the file EXISTS but reading it threw (permissions, I/O). `data`
-   * is still {} for every existing caller; only a reader that must not mistake
+   * True when the file EXISTS but reading it threw (permissions, I/O), or, on
+   * a read-only read, when it could not be stat'ed for any reason other than
+   * ENOENT. `data` is still {} for every existing caller; only a reader that must not mistake
    * "unreadable" for "unset" consults this.
    */
   readFailed?: boolean;
@@ -380,25 +412,39 @@ interface RawConfigState {
 function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawConfigState {
   const configFile = getConfigFile();
 
-  // mtime cache: if the file is unchanged since the last successful read,
-  // return the cached parsed object without touching disk again.
-  try {
-    const mtimeMs = statSync(configFile).mtimeMs;
-    if (
-      cachedRawConfig !== null &&
-      cachedRawConfigFile === configFile &&
-      cachedRawConfigMtimeMs === mtimeMs
-    ) {
-      // Return a shallow copy so callers can mutate freely without poisoning
-      // the cache (accessors push to arrays / set fields before writing back).
-      return { data: { ...cachedRawConfig }, parseFailed: false };
+  if (options.readOnly) {
+    // A read-only caller must tell "no config file" from "a config file it
+    // cannot reach", so it neither takes the cache (a cache hit would hide a
+    // permission lost since the last read) nor asks existsSync (which answers
+    // false for a file behind a directory it cannot enter). Only ENOENT is
+    // absent; any other stat error (EACCES, ENOTDIR, ELOOP, ...) is readFailed.
+    try {
+      statSync(configFile);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { data: {}, parseFailed: false };
+      return { data: {}, parseFailed: false, readFailed: true };
     }
-  } catch {
-    // stat failed (file likely absent) — fall through to the real read.
+  } else {
+    // mtime cache: if the file is unchanged since the last successful read,
+    // return the cached parsed object without touching disk again.
+    try {
+      const mtimeMs = statSync(configFile).mtimeMs;
+      if (
+        cachedRawConfig !== null &&
+        cachedRawConfigFile === configFile &&
+        cachedRawConfigMtimeMs === mtimeMs
+      ) {
+        // Return a shallow copy so callers can mutate freely without poisoning
+        // the cache (accessors push to arrays / set fields before writing back).
+        return { data: { ...cachedRawConfig }, parseFailed: false };
+      }
+    } catch {
+      // stat failed (file likely absent) — fall through to the real read.
+    }
   }
 
   try {
-    if (existsSync(configFile)) {
+    if (options.readOnly || existsSync(configFile)) {
       // Capture mtime BEFORE reading the bytes. The cache key must describe the
       // exact bytes we're about to read: if we stat AFTER readFileSync, a
       // concurrent write between read and stat would cache the OLD bytes under
