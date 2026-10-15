@@ -76,7 +76,32 @@ ShieldCortex updated to 5.9.0 - 2 things to check
   [!]   Guard          on, but OpenClaw's plugin is out of date
                        Guard needs the plugin from this update.
                        Fix: openclaw plugins install --force
-                         @drakon-systems/shieldcortex-realtime@latest"
+                         @drakon-systems/shieldcortex-realtime@latest
+
+Update failed - 2 problems to fix
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [x]   OpenClaw       plugin couldn't be updated, and the gateway started
+                       without the ShieldCortex plugin
+                       Memory protection is not running in OpenClaw.
+                       Fix: shieldcortex repair
+  [ok]  Skill          updated
+  [x]   Guard          on, but OpenClaw isn't running the plugin
+                       Risky tool calls in OpenClaw are not being stopped.
+                       Fix: shieldcortex repair
+
+Update failed - 1 problem to fix
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [x]   OpenClaw       plugin couldn't be updated, and the gateway started
+                       without the ShieldCortex plugin
+                       Memory protection is not running in OpenClaw.
+                       Fix: shieldcortex repair
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable"
 `;
 
 exports[`update summary: five scenarios a: all OK, Guard off (snapshot) 1`] = `
@@ -168,4 +193,33 @@ exports[`update summary: five scenarios f: plugin behind, Guard on (snapshot) 1`
                    Guard needs the plugin from this update.
                    Fix: openclaw plugins install --force
                      @drakon-systems/shieldcortex-realtime@latest"
+`;
+
+exports[`update summary: five scenarios g: gateway without plugin, plugin step warned, Guard off (snapshot) 1`] = `
+"Update failed — 1 problem to fix
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ✗ OpenClaw       plugin couldn't be updated, and the gateway started without
+                   the ShieldCortex plugin
+                   Memory protection is not running in OpenClaw.
+                   Fix: shieldcortex repair
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios g: gateway without plugin, plugin step warned, Guard on (snapshot) 1`] = `
+"Update failed — 2 problems to fix
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ✗ OpenClaw       plugin couldn't be updated, and the gateway started without
+                   the ShieldCortex plugin
+                   Memory protection is not running in OpenClaw.
+                   Fix: shieldcortex repair
+  ✓ Skill          updated
+  ✗ Guard          on, but OpenClaw isn't running the plugin
+                   Risky tool calls in OpenClaw are not being stopped.
+                   Fix: shieldcortex repair"
 `;
