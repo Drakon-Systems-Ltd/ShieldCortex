@@ -58,6 +58,16 @@ const PLUGIN_BEHIND: UpdateSummaryInput['protection'] = {
   gatewayReloaded: false,
   nextCommand: PLUGIN_INSTALL_COMMAND,
 };
+// PR #773 follow-up: the plugin check proved the running gateway started
+// without the ShieldCortex plugin. Red whatever else the run found.
+const GATEWAY_WITHOUT_PLUGIN: UpdateSummaryInput['protection'] = {
+  status: 'failed',
+  loaded: 'no',
+  pluginVersion: '5.9.0',
+  gatewayReloaded: false,
+  nextCommand: 'shieldcortex repair',
+};
+const PLUGIN_STEP_WARN: UpdateSummaryInput['plugin'] = { status: 'warn', rerun: 'shieldcortex update' };
 
 const SCENARIOS: Record<string, UpdateSummaryInput> = {
   'a: all OK, Guard off': base(),
@@ -73,6 +83,11 @@ const SCENARIOS: Record<string, UpdateSummaryInput> = {
   // change whether the user sees it.
   'f: plugin behind, Guard off': base({ protection: PLUGIN_BEHIND }),
   'f: plugin behind, Guard on': base({ guardOn: true, protection: PLUGIN_BEHIND }),
+  // PR #773 follow-up: the plugin step warned AND the gateway started without
+  // the plugin. The warning used to win and the screen went yellow with a
+  // green Guard row; the proven-absent plugin must stay red.
+  'g: gateway without plugin, plugin step warned, Guard on': base({ guardOn: true, plugin: PLUGIN_STEP_WARN, protection: GATEWAY_WITHOUT_PLUGIN }),
+  'g: gateway without plugin, plugin step warned, Guard off': base({ plugin: PLUGIN_STEP_WARN, protection: GATEWAY_WITHOUT_PLUGIN }),
 };
 
 const EXPECTED_HEADLINE: Record<string, 'updated' | 'check' | 'failed'> = {
@@ -83,6 +98,8 @@ const EXPECTED_HEADLINE: Record<string, 'updated' | 'check' | 'failed'> = {
   'e: package install failed': 'failed',
   'f: plugin behind, Guard off': 'check',
   'f: plugin behind, Guard on': 'check',
+  'g: gateway without plugin, plugin step warned, Guard on': 'failed',
+  'g: gateway without plugin, plugin step warned, Guard off': 'failed',
 };
 
 function screen(input: UpdateSummaryInput, opts: { color?: boolean; ascii?: boolean } = {}): string[] {
@@ -192,6 +209,102 @@ describe('update summary: five scenarios', () => {
         expect(String(row.command)).not.toMatch(/, then |;/);
       }
     }
+  });
+});
+
+describe('a gateway that started without the plugin is always red (#773 follow-up)', () => {
+  const RED_TEXT = 'the gateway started without the ShieldCortex plugin';
+  const PLUGIN_STEPS: Record<string, Partial<UpdateSummaryInput>> = {
+    'plugin step ok': {},
+    'plugin step warned': { plugin: PLUGIN_STEP_WARN },
+    'plugin step failed': { plugin: { status: 'failed', rerun: 'shieldcortex update' } },
+    'plugin behind': { protection: { ...PLUGIN_BEHIND, status: 'failed', loaded: 'no' } },
+  };
+
+  for (const [step, over] of Object.entries(PLUGIN_STEPS)) {
+    for (const guardOn of [true, false]) {
+      const name = step + ', Guard ' + (guardOn ? 'on' : 'off');
+      const input = base({ protection: GATEWAY_WITHOUT_PLUGIN, ...over, guardOn });
+      const fix = String(input.protection.nextCommand);
+
+      it(name + ': one red OpenClaw row naming the absent plugin, with the check\'s fix', () => {
+        const summary = buildUpdateSummary(input);
+        const oc = summary.rows.filter((r) => r.label === 'OpenClaw');
+        expect(oc).toHaveLength(1);
+        expect(oc[0]).toMatchObject({ mark: 'fail', command: fix, commandLabel: 'Fix' });
+        expect(oc[0].text).toContain(RED_TEXT);
+        if (input.plugin.status === 'warn' || input.plugin.status === 'failed') {
+          // The plugin step's own problem is kept, inside the red row.
+          expect(oc[0].text).toContain('couldn\'t be updated');
+        }
+      });
+
+      it(name + ': the headline is a red "Update failed"', () => {
+        const summary = buildUpdateSummary(input);
+        expect(summary.headline).toBe('failed');
+        expect(summary.title).toMatch(/^Update failed \u2014 \d problems? to fix$/);
+        const first = screen(input, { color: true })[0];
+        expect(first.startsWith(defaultColorStyle().red)).toBe(true);
+        expect(stripAnsi(first)).toMatch(/^Update failed/);
+        const text = screen(input, { ascii: true }).join('\n');
+        expect(text).toContain('[x]   OpenClaw');
+        expect(text).not.toContain('[!]   OpenClaw');
+        expect(text).not.toContain('[ok]  OpenClaw');
+      });
+
+      if (guardOn) {
+        it(name + ': the Guard row is red, never a tick', () => {
+          const summary = buildUpdateSummary(input);
+          const guard = summary.rows.filter((r) => r.label === 'Guard');
+          expect(guard).toHaveLength(1);
+          expect(guard[0].mark).not.toBe('ok');
+          expect(guard[0]).toMatchObject({
+            mark: 'fail',
+            text: 'on, but OpenClaw isn\'t running the plugin',
+            command: fix,
+            commandLabel: 'Fix',
+          });
+          expect(String(guard[0].why).split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(12);
+          const text = screen(input, { ascii: true }).join('\n');
+          expect(text).toContain('[x]   Guard');
+          expect(text).not.toContain('[ok]  Guard');
+          expect(screen(input).join('\n')).not.toMatch(/\u2713 Guard/);
+        });
+      } else {
+        it(name + ': Guard off stays the neutral off row', () => {
+          const summary = buildUpdateSummary(input);
+          const guard = summary.rows.filter((r) => r.label === 'Guard');
+          expect(guard).toHaveLength(1);
+          expect(guard[0]).toMatchObject({ mark: 'off', text: 'off (the default)', command: GUARD_ON_COMMAND });
+          expect(summary.headline).toBe('failed');
+        });
+      }
+    }
+  }
+
+  it('counts the red rows: two problems with Guard on, one with Guard off', () => {
+    const on = buildUpdateSummary(SCENARIOS['g: gateway without plugin, plugin step warned, Guard on']);
+    expect(on.title).toBe('Update failed \u2014 2 problems to fix');
+    expect(on.rows.filter((r) => r.mark === 'fail').map((r) => r.label)).toEqual(['OpenClaw', 'Guard']);
+    const off = buildUpdateSummary(SCENARIOS['g: gateway without plugin, plugin step warned, Guard off']);
+    expect(off.title).toBe('Update failed \u2014 1 problem to fix');
+    expect(off.rows.filter((r) => r.mark === 'fail').map((r) => r.label)).toEqual(['OpenClaw']);
+  });
+
+  it('the reviewer\'s reproduction: plugin warned, plugin check failed, Guard on', () => {
+    const input = base({
+      guardOn: true,
+      plugin: PLUGIN_STEP_WARN,
+      protection: { status: 'failed', loaded: 'no' },
+    });
+    const lines = screen(input, { ascii: true });
+    expect(lines[0]).toBe('Update failed - 2 problems to fix');
+    expect(lines).not.toContain('  [ok]  Guard          on');
+    expect(lines.join('\n')).not.toContain('ShieldCortex updated');
+    // No nextCommand from the check: both rows fall back to repair.
+    const summary = buildUpdateSummary(input);
+    expect(summary.rows.find((r) => r.label === 'OpenClaw')?.command).toBe('shieldcortex repair');
+    expect(summary.rows.find((r) => r.label === 'Guard')?.command).toBe('shieldcortex repair');
   });
 });
 
