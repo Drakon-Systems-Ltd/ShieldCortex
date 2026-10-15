@@ -113,7 +113,7 @@ function engineFixCommand(engine: UpdateSummaryInput['engine']): string {
   if (engine.packagedPrebuild) return 'npm install -g shieldcortex@latest';
   const first = String(engine.remediation ?? '').split('\n')[0]?.trim() ?? '';
   // The non-prebuild remediation leads with one copy-paste rebuild command.
-  if (/npm run build-release/.test(first)) return first;
+  if (/npm run build-release/.test(first)) return sanitiseDisplayField(first);
   return 'shieldcortex doctor';
 }
 
@@ -402,7 +402,7 @@ export function renderUpdateSummary(
     title = title.replace('ShieldCortex updated', 'ShieldCortex updated to ' + to);
   }
   const hColor = summary.headline === 'updated' ? style.green : summary.headline === 'check' ? style.yellow : style.red;
-  const t = asciiText(title, ascii);
+  const t = asciiText(sanitiseDisplayField(title), ascii);
   const titleLines = t.length <= width ? [t] : wrapText(t, width, 0, 2);
   for (const l of titleLines) out.push(hColor + style.bold + l + style.reset);
   out.push('');
@@ -411,19 +411,20 @@ export function renderUpdateSummary(
     const mark = markText(row.mark, ascii);
     const lead = '  ' + mark + ' ';
     const hang = lead.length + LABEL_COL;
-    const label = row.label.padEnd(LABEL_COL - 1) + ' ';
-    const first = wrapText(asciiText(row.text, ascii), width, hang, hang);
+    const label = sanitiseDisplayField(row.label).padEnd(LABEL_COL - 1) + ' ';
+    const first = wrapText(asciiText(sanitiseDisplayField(row.text), ascii), width, hang, hang);
     const painted = markColor(row.mark, style) + mark + style.reset;
     out.push('  ' + painted + ' ' + label + first[0].slice(hang));
     for (const l of first.slice(1)) out.push(l);
     if (row.why) {
-      for (const l of wrapText(asciiText(row.why, ascii), width, hang, hang)) out.push(style.dim + l + style.reset);
+      for (const l of wrapText(asciiText(sanitiseDisplayField(row.why), ascii), width, hang, hang)) out.push(style.dim + l + style.reset);
     }
     if (row.command) {
-      const line = (row.commandLabel ?? 'Fix') + ': ' + row.command;
+      const line = sanitiseDisplayField(row.commandLabel ?? 'Fix') + ': ' + sanitiseDisplayField(row.command);
       for (const l of wrapText(asciiText(line, ascii), width, hang, hang + 2)) out.push(l);
       if (row.commandNote) {
-        const note = row.commandNote.charAt(0).toUpperCase() + row.commandNote.slice(1) + '.';
+        const safeNote = sanitiseDisplayField(row.commandNote);
+        const note = safeNote.charAt(0).toUpperCase() + safeNote.slice(1) + '.';
         for (const l of wrapText(asciiText(note, ascii), width, hang, hang)) out.push(style.dim + l + style.reset);
       }
     }
