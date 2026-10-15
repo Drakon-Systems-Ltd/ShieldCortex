@@ -881,7 +881,7 @@ ${bold}DOCS${reset}
   // Handle "config" subcommand (cloud sync configuration)
   if (process.argv[2] === 'config') {
     const { handleCloudConfig } = await import('./cloud/cli.js');
-    handleCloudConfig(process.argv.slice(3));
+    await handleCloudConfig(process.argv.slice(3));
     return;
   }
 
