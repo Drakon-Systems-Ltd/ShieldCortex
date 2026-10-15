@@ -36,6 +36,7 @@ import {
   setAutoMemorySamplingTurns,
   NATIVE_INJECT_CONTRACTS,
   MEMORY_PLANE_VALUES,
+  ConfigIntegrityRefusal,
   type DefenceMode,
 } from './config.js';
 import type { RankerEngine } from '../memory/types.js';
@@ -55,6 +56,22 @@ const VALID_MODES: DefenceMode[] = ['strict', 'balanced', 'permissive'];
 const VALID_VERIFY_MODES = ['advisory', 'enforce'] as const;
 
 export function handleCloudConfig(args: string[]): void {
+  // #647: a setter on a config.json that fails its integrity check refuses
+  // rather than re-signing it. That is an expected outcome with an actionable
+  // message, not a crash — and the first refusal stops the run, so a later
+  // flag in the same command cannot half-apply.
+  try {
+    handleCloudConfigFlags(args);
+  } catch (err) {
+    if (err instanceof ConfigIntegrityRefusal) {
+      console.error(err.message);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+function handleCloudConfigFlags(args: string[]): void {
   if (args.includes('--cloud-status')) {
     const config = getCloudConfig();
     const mode = getDefenceMode();
