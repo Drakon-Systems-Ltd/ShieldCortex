@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync, accessSync, constants as fsConstants } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
@@ -156,7 +156,13 @@ function writeConfigSignature(jsonContent: string): void {
   try { chmodSync(sigFile, 0o600); } catch { /* best-effort */ }
 }
 
-type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered';
+/**
+ * `'unverified'` is returned only to a read-only caller, and only where the
+ * mutating verdict would depend on a write succeeding (legacy adoption). It is
+ * neither trusted nor tampered: the posture is unknown until a mutating read
+ * settles it.
+ */
+type IntegrityVerdict = 'valid' | 'self-heal' | 'tampered' | 'unverified';
 
 /**
  * Verify a parsed config object's integrity, returning a three-way verdict.
@@ -206,7 +212,10 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
       // First run after upgrade with no sig yet — adopt as trusted, write a
       // legacy sig so a subsequent read (before the next write upgrades it)
       // still verifies. Matches the prior behaviour to avoid a false tamper.
-      if (readOnly) return predictLegacyAdoption();
+      // Read-only: the mutating verdict here is 'valid' if that write succeeds
+      // and 'tampered' if it fails, and no permission check can prove a write
+      // will succeed. Say so instead of guessing.
+      if (readOnly) return 'unverified';
       writeConfigSignature(rawFileContent);
       return 'valid';
     }
@@ -216,36 +225,6 @@ function checkConfigIntegrity(parsed: Record<string, unknown>, rawFileContent: s
   } catch {
     return 'tampered';
   }
-}
-
-/**
- * Read-only stand-in for the adoption write above: the verdict the mutating
- * path WOULD reach, decided without writing. Adoption reads (or mints) the
- * integrity key and creates `.config-sig` in the config dir; if either write
- * would fail, the mutating path lands in the catch and returns 'tampered'.
- *
- * Predicted from permissions only (`access(W_OK)`, which also reports a
- * read-only mount). A write that fails for a reason no permission check can
- * see beforehand (disk full, quota, I/O error) is not predicted: the read-only
- * reader then reports the config's own value where the mutating getter would
- * report the strict posture, until the next mutating read settles it.
- */
-function predictLegacyAdoption(): IntegrityVerdict {
-  const keyFile = getIntegrityKeyFile();
-  try {
-    getIntegrityKey(true);
-  } catch {
-    // Present but unreadable: the mutating path would try to overwrite it.
-    if (existsSync(keyFile)) {
-      try { accessSync(keyFile, fsConstants.W_OK); } catch { return 'tampered'; }
-    }
-  }
-  try {
-    accessSync(getConfigDir(), fsConstants.W_OK | fsConstants.X_OK);
-  } catch {
-    return 'tampered';
-  }
-  return 'valid';
 }
 
 /** Returns true if config file tampering was detected. */
@@ -394,6 +373,15 @@ interface RawConfigState {
    * "unreadable" for "unset" consults this.
    */
   readFailed?: boolean;
+  /**
+   * Read-only reads only: the file was read and parsed, but what the mutating
+   * reader would make of it depends on a write (legacy `.config-sig`
+   * adoption), or the mutating reader's cache holds a different verdict for
+   * these same bytes (left by an earlier failed write). `data` is still the
+   * parsed file; only a reader that must not guess the effective posture
+   * consults this.
+   */
+  unverified?: boolean;
 }
 
 /**
@@ -472,6 +460,10 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
 
       // Verify HMAC integrity (embedded `_sig`, else legacy `.config-sig`).
       const verdict = checkConfigIntegrity(data, content, options.readOnly);
+      if (verdict === 'unverified') {
+        delete data._sig;
+        return { data, parseFailed: false, unverified: true };
+      }
       if (verdict === 'tampered') {
         configTampered = true;
         console.error(
@@ -519,6 +511,20 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
         cachedRawConfig = { ...data };
         cachedRawConfigFile = configFile;
         cachedRawConfigMtimeMs = mtimeMsForCache;
+      }
+
+      // A read-only read does not take the cache, but the mutating reader
+      // will while the mtime is unchanged. If its cached verdict for these
+      // bytes differs from this fresh one (e.g. strict, cached after a write
+      // failed, since recovered), the two readers disagree: unverified.
+      if (
+        options.readOnly &&
+        cachedRawConfig !== null &&
+        cachedRawConfigFile === configFile &&
+        cachedRawConfigMtimeMs === mtimeMsForCache &&
+        JSON.stringify(cachedRawConfig) !== JSON.stringify(data)
+      ) {
+        return { data, parseFailed: false, unverified: true };
       }
 
       return { data, parseFailed: false };
@@ -991,18 +997,22 @@ export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
 }
 
 /**
- * The same EFFECTIVE core config as {@link getActionGuardCoreConfig}, read
- * without changing anything: no `.config-sig` adoption, no `.integrity-key`
- * minting, no self-heal rewrite, no audit event for an unverifiable lock. The
- * policy-lock floor is still applied (`readPolicyLock({ audit: false })`).
+ * The core config read without changing anything: no `.config-sig` adoption,
+ * no `.integrity-key` minting, no self-heal rewrite, no audit event for an
+ * unverifiable lock. The policy-lock floor is still applied
+ * (`readPolicyLock({ audit: false })`).
  *
- * Returns `null` when the config file exists but could not be read or parsed —
- * the posture is unknown, which is not the same as "off".
+ * Returns the same EFFECTIVE core config as {@link getActionGuardCoreConfig}
+ * when that answer does not depend on a write. Returns `null` (unknown, which
+ * is not "off") when it does — a config with no signature yet, whose verdict
+ * hangs on adoption succeeding, or one the getter's cache holds a different
+ * verdict for — and when the config file exists but could not be read or
+ * parsed.
  */
 export function readActionGuardCoreConfigReadOnly(): ActionGuardCoreConfig | null {
   try {
     const state = readRawConfigState({ readOnly: true });
-    if (state.parseFailed || state.readFailed) return null;
+    if (state.parseFailed || state.readFailed || state.unverified) return null;
     return resolveActionGuardCore(state.data);
   } catch {
     return null;

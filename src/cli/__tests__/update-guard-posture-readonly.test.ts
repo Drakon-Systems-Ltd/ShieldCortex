@@ -7,7 +7,9 @@
  * on the way), on a legacy-signed config it self-heals by rewriting
  * `config.json`, and with an unverifiable policy lock it emits an audit event.
  * The update screen only needs to SAY what the switch is, so it must do none of
- * that. Every case here runs in a temp HOME / config dir / protected root.
+ * that, and where the getter's answer depends on one of those writes
+ * succeeding, the screen says "unknown" rather than guessing. Every case here
+ * runs in a temp HOME / config dir / protected root.
  */
 import fs from 'fs';
 import os from 'os';
@@ -78,6 +80,12 @@ function writeConfig(obj: unknown): string {
   const content = JSON.stringify(obj, null, 2);
   fs.writeFileSync(file('config.json'), content);
   return content;
+}
+
+/** Key + embedded `_sig`: a config the getter verifies without writing. */
+function writeSignedConfig(body: Record<string, unknown>): void {
+  fs.writeFileSync(file('.integrity-key'), KEY);
+  writeConfig({ ...body, _sig: hmac(JSON.stringify(body, null, 2)) });
 }
 
 function writeSameUidLock(policy: unknown = { actionGuard: { enabled: true } }): void {
@@ -196,8 +204,8 @@ describe('the update screen reads the Guard switch without writing', () => {
   });
 });
 
-describe('read-only posture equals getActionGuardCoreConfig for every readable config', () => {
-  const CASES: Record<string, { config: unknown; lock?: unknown }> = {
+describe('read-only posture equals getActionGuardCoreConfig for every signed config', () => {
+  const CASES: Record<string, { config: Record<string, unknown> | undefined; lock?: unknown }> = {
     'no config file': { config: undefined },
     'empty object': { config: {} },
     'top-level only, enabled true': { config: { actionGuard: { enabled: true, enforce: false } } },
@@ -223,17 +231,21 @@ describe('read-only posture equals getActionGuardCoreConfig for every readable c
 
   for (const [name, c] of Object.entries(CASES)) {
     it(name, async () => {
-      if (c.config !== undefined) writeConfig(c.config);
+      if (c.config !== undefined) writeSignedConfig(c.config);
       if (c.lock !== undefined) writeSameUidLock(c.lock);
       const { config } = await fresh();
       const readOnly = config.readActionGuardCoreConfigReadOnly();
       const effective = config.getActionGuardCoreConfig();
+      expect(readOnly).not.toBeNull();
       expect(readOnly).toEqual(effective);
     });
   }
 });
 
 describe('read-only posture equals getActionGuardCoreConfig across integrity verdicts', () => {
+  // Verdicts that do not depend on a write: the read-only answer is definitive.
+  // A missing key is 'tampered' whether or not minting one would succeed: a
+  // freshly minted random key cannot match the stored signature.
   const INTEGRITY_CASES: Record<string, () => void> = {
     'tampered: embedded sig does not match, no legacy sig': () => {
       fs.writeFileSync(file('.integrity-key'), KEY);
@@ -241,10 +253,8 @@ describe('read-only posture equals getActionGuardCoreConfig across integrity ver
     },
     'missing key: embedded-signed config, no .integrity-key': SETUPS['signed config whose integrity key is missing'],
     'self-heal: stale embedded sig, valid legacy sig': SETUPS['legacy-signed config with a stale embedded sig (self-healable)'],
-    'unsigned, key present, dir writable (adoption succeeds)': () => {
-      fs.writeFileSync(file('.integrity-key'), KEY);
-      writeConfig({ actionGuard: { enabled: false } });
-    },
+    'signed, enabled false': () => writeSignedConfig({ actionGuard: { enabled: false } }),
+    'signed, enabled true': () => writeSignedConfig({ actionGuard: { enabled: true } }),
   };
   for (const [name, setup] of Object.entries(INTEGRITY_CASES)) {
     it(name, async () => {
@@ -252,47 +262,165 @@ describe('read-only posture equals getActionGuardCoreConfig across integrity ver
       const { config } = await fresh();
       const readOnly = config.readActionGuardCoreConfigReadOnly();
       const effective = config.getActionGuardCoreConfig();
+      expect(readOnly).not.toBeNull();
       expect(readOnly).toEqual(effective);
     });
   }
+});
 
-  // B2: the mutating getter adopts an unsigned config by writing .config-sig
-  // (and minting .integrity-key). When that write fails it reports 'tampered'
-  // and the strict posture; the read-only reader must reach the same answer
-  // without attempting the write.
+describe('a config with no signature yet is unknown read-only, never off', () => {
+  // The getter adopts an unsigned config by writing `.config-sig` (minting
+  // `.integrity-key` if needed): 'valid' if that write succeeds, strict if it
+  // fails. Read-only cannot know which, so it answers unknown in every case.
   const asRoot = process.getuid?.() === 0;
-  const UNWRITABLE: Record<string, () => void> = {
-    'readable but unwritable dir, unsigned off config, no key': () => {
-      writeConfig({ actionGuard: { enabled: false } });
-      fs.chmodSync(configDir, 0o500);
+  const lockedDir = (): string => path.join(home, 'locked');
+  const sigDir = (): string => path.join(home, 'sigdir');
+
+  const UNSIGNED: Record<string, { setup: () => void; getterEnabled: boolean; chmod?: boolean }> = {
+    'key present, dir writable (adoption succeeds)': {
+      setup: () => {
+        fs.writeFileSync(file('.integrity-key'), KEY);
+        writeConfig({ actionGuard: { enabled: false } });
+      },
+      getterEnabled: false,
     },
-    'readable but unwritable dir, unsigned off config, key present': () => {
-      fs.writeFileSync(file('.integrity-key'), KEY);
-      writeConfig({ actionGuard: { enabled: false } });
-      fs.chmodSync(configDir, 0o500);
+    'readable but unwritable dir, no key': {
+      setup: () => {
+        writeConfig({ actionGuard: { enabled: false } });
+        fs.chmodSync(configDir, 0o500);
+      },
+      getterEnabled: true,
+      chmod: true,
     },
-    'writable dir, unsigned off config, key present but unreadable and unwritable': () => {
-      fs.writeFileSync(file('.integrity-key'), KEY);
-      fs.chmodSync(file('.integrity-key'), 0o000);
-      writeConfig({ actionGuard: { enabled: false } });
+    'readable but unwritable dir, key present': {
+      setup: () => {
+        fs.writeFileSync(file('.integrity-key'), KEY);
+        writeConfig({ actionGuard: { enabled: false } });
+        fs.chmodSync(configDir, 0o500);
+      },
+      getterEnabled: true,
+      chmod: true,
+    },
+    'writable dir, key present but unreadable and unwritable': {
+      setup: () => {
+        fs.writeFileSync(file('.integrity-key'), KEY);
+        fs.chmodSync(file('.integrity-key'), 0o000);
+        writeConfig({ actionGuard: { enabled: false } });
+      },
+      getterEnabled: true,
+      chmod: true,
+    },
+    // B2-R 1: the key write follows a dangling symlink into a mode-500 dir.
+    'B2-R key-target-unwritable: .integrity-key is a dangling symlink into a mode-500 dir': {
+      setup: () => {
+        fs.mkdirSync(lockedDir());
+        fs.symlinkSync(path.join(lockedDir(), 'key'), file('.integrity-key'));
+        fs.chmodSync(lockedDir(), 0o500);
+        writeConfig({ actionGuard: { enabled: false } });
+      },
+      getterEnabled: true,
+      chmod: true,
+    },
+    // B2-R 2: the sig write follows a dangling symlink into a mode-500 dir.
+    'B2-R sig-target-unwritable: .config-sig is a dangling symlink into a mode-500 dir': {
+      setup: () => {
+        fs.writeFileSync(file('.integrity-key'), KEY);
+        fs.mkdirSync(lockedDir());
+        fs.symlinkSync(path.join(lockedDir(), 'sig'), file('.config-sig'));
+        fs.chmodSync(lockedDir(), 0o500);
+        writeConfig({ actionGuard: { enabled: false } });
+      },
+      getterEnabled: true,
+      chmod: true,
+    },
+    // B2-R 3: the key path is a writable directory, so minting fails.
+    'B2-R key-is-directory: .integrity-key is a writable directory': {
+      setup: () => {
+        fs.mkdirSync(file('.integrity-key'));
+        writeConfig({ actionGuard: { enabled: false } });
+      },
+      getterEnabled: true,
+    },
+    // N1: the dir is not writable, but the sig write goes through a symlink to
+    // a writable dir, so adoption succeeds and the getter reports off.
+    'N1 sig-via-symlink: mode-500 config dir, .config-sig symlinks into a writable dir': {
+      setup: () => {
+        fs.writeFileSync(file('.integrity-key'), KEY);
+        fs.mkdirSync(sigDir());
+        fs.symlinkSync(path.join(sigDir(), 'sig'), file('.config-sig'));
+        writeConfig({ actionGuard: { enabled: false } });
+        fs.chmodSync(configDir, 0o500);
+      },
+      getterEnabled: false,
+      chmod: true,
     },
   };
-  for (const [name, setup] of Object.entries(UNWRITABLE)) {
-    (asRoot ? it.skip : it)(`failed adoption: ${name}`, async () => {
+
+  for (const [name, c] of Object.entries(UNSIGNED)) {
+    (c.chmod && asRoot ? it.skip : it)(name, async () => {
       try {
-        setup();
-        const { config } = await fresh();
+        c.setup();
+        const update = await freshUpdate();
+        const { readActionGuardCoreConfigReadOnly, getActionGuardCoreConfig } = await import('../../cloud/config.js');
         const before = snapshot();
-        const readOnly = config.readActionGuardCoreConfigReadOnly();
+        expect(readActionGuardCoreConfigReadOnly()).toBeNull();
+        expect(await update.readGuardSwitch()).toBe('unknown');
+        await settle();
         expect(snapshot()).toEqual(before);
-        const effective = config.getActionGuardCoreConfig();
-        expect(effective.enabled).toBe(true);
-        expect(readOnly).toEqual(effective);
+        // What the getter then reports, by writing: either answer was possible.
+        expect(getActionGuardCoreConfig().enabled).toBe(c.getterEnabled);
       } finally {
+        try { fs.chmodSync(lockedDir(), 0o700); } catch { /* may not exist */ }
         fs.chmodSync(configDir, 0o700);
       }
     });
   }
+
+  // B3: a strict verdict the getter cached after a failed adoption outlives
+  // the permission problem (config.json's mtime is unchanged). One process, no
+  // cache or report-state reset between steps.
+  (asRoot ? it.skip : it)('B3: strict cached after a failed adoption, permissions since recovered, is unknown', async () => {
+    try {
+      writeConfig({ actionGuard: { enabled: false } });
+      const { config } = await fresh();
+      fs.chmodSync(configDir, 0o500);
+      expect(config.getActionGuardCoreConfig().enabled).toBe(true); // adoption fails, strict cached
+      fs.chmodSync(configDir, 0o700);
+      expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
+      const update = await import('../update.js'); // same module graph, cache still warm
+      const guard = await update.readGuardSwitch();
+      expect(guard).toBe('unknown');
+      expect(config.getActionGuardCoreConfig().enabled).toBe(true); // still the cached strict verdict
+      const { buildUpdateSummary } = await import('../update-summary.js');
+      const summary = buildUpdateSummary({
+        fromVersion: '5.9.0', toVersion: '5.10.0', packageState: 'updated',
+        engine: { ok: true }, plugin: { status: 'ok' }, skill: { status: 'ok' },
+        guardOn: guard !== 'off', guardUnknown: guard === 'unknown',
+        protection: { status: 'ok' },
+      });
+      expect(summary.headline).toBe('check');
+      expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check' });
+    } finally {
+      fs.chmodSync(configDir, 0o700);
+    }
+  });
+
+  // Same shape on a signed config: the key could not be read (or replaced), so
+  // the getter cached strict; the key is readable again but config.json is
+  // unchanged, so the getter keeps answering from its cache.
+  (asRoot ? it.skip : it)('a strict verdict cached while the key was unreadable is unknown after the key recovers', async () => {
+    try {
+      writeSignedConfig({ actionGuard: { enabled: false } });
+      fs.chmodSync(file('.integrity-key'), 0o000);
+      const { config } = await fresh();
+      expect(config.getActionGuardCoreConfig().enabled).toBe(true);
+      fs.chmodSync(file('.integrity-key'), 0o600);
+      expect(config.readActionGuardCoreConfigReadOnly()).toBeNull();
+      expect(config.getActionGuardCoreConfig().enabled).toBe(true);
+    } finally {
+      fs.chmodSync(file('.integrity-key'), 0o600);
+    }
+  });
 });
 
 describe('an unreadable config is unknown, never "off (the default)"', () => {
@@ -323,7 +451,7 @@ describe('an unreadable config is unknown, never "off (the default)"', () => {
     expect(guard).toBe('unknown');
     const screen = await renderFor(guard);
     expect(screen).not.toContain('off (the default)');
-    expect(screen).toContain('couldn\'t read the Guard setting');
+    expect(screen).toContain('couldn\'t confirm the Guard setting');
     expect(screen).toContain('shieldcortex doctor');
   });
 
@@ -347,8 +475,8 @@ describe('an unreadable config is unknown, never "off (the default)"', () => {
     expect(guard).toBe('unknown');
     const screen = await renderFor(guard);
     expect(screen).not.toContain('off (the default)');
-    expect(screen).toMatch(/\[!\]\s+Guard\s+couldn't read the Guard setting/);
-    expect(screen).toContain('couldn\'t read the Guard setting');
+    expect(screen).toMatch(/\[!\]\s+Guard\s+couldn't confirm the Guard setting/);
+    expect(screen).toContain('couldn\'t confirm the Guard setting');
     expect(screen.split('\n')[0]).toMatch(/things? to check/);
   }
 
@@ -373,7 +501,7 @@ describe('an unreadable config is unknown, never "off (the default)"', () => {
     expect(guard).toBe('unknown');
     const screen = await renderFor(guard);
     expect(screen).not.toContain('off (the default)');
-    expect(screen).toContain('couldn\'t read the Guard setting');
+    expect(screen).toContain('couldn\'t confirm the Guard setting');
   });
 
   it('a genuinely missing config (or config dir) is still off', async () => {
@@ -395,13 +523,13 @@ describe('an unreadable config is unknown, never "off (the default)"', () => {
     const summary = buildUpdateSummary(input);
     expect(summary.headline).toBe('failed');
     expect(summary.rows.find((r) => r.label === 'OpenClaw')).toMatchObject({ mark: 'fail' });
-    expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check', text: 'couldn\'t read the Guard setting' });
+    expect(summary.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check', text: 'couldn\'t confirm the Guard setting' });
     const lines = renderUpdateSummary(summary, input, { width: 80, ascii: true });
     expect(lines[0]).toMatch(/^Update failed/);
     expect(lines.join('\n')).toMatch(/\[x\]\s+OpenClaw\s+the gateway started without/);
   });
 
-  it('unknown keeps the row a thing to check; a readable off config is still "off (the default)"', async () => {
+  it('unknown keeps the row a thing to check; a signed off config is still "off (the default)"', async () => {
     const { buildUpdateSummary } = await import('../update-summary.js');
     const base = {
       fromVersion: '5.9.0', toVersion: '5.10.0', packageState: 'updated' as const,
@@ -412,7 +540,7 @@ describe('an unreadable config is unknown, never "off (the default)"', () => {
     expect(unknown.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check', command: 'shieldcortex doctor' });
     expect(unknown.headline).toBe('check');
 
-    writeConfig({ actionGuard: { enabled: false } });
+    writeSignedConfig({ actionGuard: { enabled: false } });
     const update = await freshUpdate();
     expect(await update.readGuardSwitch()).toBe('off');
     expect(await renderFor('off')).toContain('off (the default)');

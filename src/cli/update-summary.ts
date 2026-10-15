@@ -56,7 +56,7 @@ export interface UpdateSummaryInput {
   hermes?: { status: SummaryStepStatus; reason?: string };
   /** Action Guard switch as configured. Off is the default since 4.54.15. */
   guardOn: boolean;
-  /** The Guard setting could not be read; takes precedence over guardOn. */
+  /** The Guard setting could not be confirmed; takes precedence over guardOn. */
   guardUnknown?: boolean;
   /** End-of-run plugin check on the running OpenClaw gateway. */
   protection: {
@@ -288,8 +288,8 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
     rows.push({
       label: 'Guard',
       mark: 'check',
-      text: 'couldn\'t read the Guard setting',
-      why: 'The config file could not be read.',
+      text: 'couldn\'t confirm the Guard setting',
+      why: 'The config file could not be read or verified.',
       command: 'shieldcortex doctor',
       commandLabel: 'Check',
     });
