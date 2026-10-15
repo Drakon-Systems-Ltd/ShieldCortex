@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir, hostname } from 'os';
-import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
+import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'crypto';
 import type { RankerConfig, RankerEngine, RankerWeights } from '../memory/types.js';
 import { mkdirSecure } from '../setup/state-permissions.js';
 import {
@@ -19,6 +19,7 @@ import {
   type ProtectedPolicyKey,
 } from '../defence/iron-dome/policy-lock.js';
 import { emitProtectedAudit } from '../defence/iron-dome/protected-root.js';
+import { openRecoveryAuditSink, type RecoveryAuditSink } from './recovery-audit.js';
 
 export interface CloudConfig {
   cloudApiKey: string | null;
@@ -199,9 +200,9 @@ function checkConfigIntegrity(
   opts: { sideEffects: boolean } = { sideEffects: true },
 ): IntegrityVerdict | 'unsigned' {
   try {
-    // A read-only inspection (doctor) must not mint an integrity key: a
-    // missing key leaves nothing to verify against, which is reported as
-    // tampered exactly as the minting path would conclude.
+    // A read-only inspection (doctor, the re-sign preview) must not mint an
+    // integrity key: a missing key leaves nothing to verify against, which is
+    // reported as tampered exactly as the minting path would conclude.
     const sign = opts.sideEffects
       ? signConfig
       : (() => {
@@ -281,7 +282,7 @@ export type ConfigIntegrity = 'absent' | 'valid' | 'self-heal' | 'malformed' | '
  * wiping `reviewedScripts`/`autoApprove`. So the write does neither: the file,
  * its pins and its stale signature are left exactly as they are, the strict
  * posture stays in force on every read, and the message points at the
- * runbook recovery (#501 §8.7: move the file aside, rebuild through setters).
+ * deliberate recovery.
  */
 export class ConfigIntegrityRefusal extends Error {
   readonly verdict: 'tampered';
@@ -291,9 +292,8 @@ export class ConfigIntegrityRefusal extends Error {
       `Refusing to write ${configPath}: it does not match its integrity signature (verdict: tampered — ` +
       'corruption, a torn write, or a hand edit). The file, its reviewed-script pins and its auto-approve ' +
       'list are left untouched, and the strict fail-closed posture stays in force until the file is ' +
-      'recovered. A setting change cannot re-sign it. See `shieldcortex doctor` for the verdict, then ' +
-      'recover by moving config.json aside (keep it) and rebuilding it through the setters ' +
-      '(docs/design/2026-09-16-501-policy-lock.md §8.7).',
+      'recovered. A setting change cannot re-sign it. See `shieldcortex doctor` for the verdict and ' +
+      '`shieldcortex config --resign` to review the file and re-sign it deliberately.',
     );
     this.name = 'ConfigIntegrityRefusal';
     this.verdict = 'tampered';
@@ -641,7 +641,7 @@ export function readRawConfig(): Record<string, unknown> {
   return readRawConfigState().data;
 }
 
-// ── Integrity inspection (#647) ──
+// ── Integrity inspection and deliberate re-sign (#647) ──
 
 export interface ConfigIntegrityReport {
   /**
@@ -695,6 +695,308 @@ function readConfigBytesNoSideEffects(): ConfigBytes {
 export function inspectConfigIntegrity(): ConfigIntegrityReport {
   const { path, verdict } = readConfigBytesNoSideEffects();
   return { path, verdict };
+}
+
+function sha256Hex(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function isPlainBlock(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * The Action Guard keys as the enforcement surfaces resolve them: top-level
+ * `actionGuard` over the deprecated `interceptor.actionGuard` gap-fill alias
+ * (#209). Values are normalised to strings only so two views can be compared;
+ * they never leave this module.
+ */
+function resolvedGuardKeys(raw: Record<string, unknown>): Record<string, string> {
+  const interceptor: Record<string, unknown> = isPlainBlock(raw.interceptor) ? raw.interceptor : {};
+  const alias: Record<string, unknown> = isPlainBlock(interceptor.actionGuard) ? interceptor.actionGuard : {};
+  const merged: Record<string, unknown> = { ...alias, ...actionGuardBlock(raw) };
+  return {
+    'actionGuard.enabled': String(merged.enabled === true),
+    'actionGuard.enforce': String(merged.enforce !== false),
+    'actionGuard.readinessGate': String(merged.readinessGate === true),
+    'actionGuard.autoApprove': JSON.stringify(Array.isArray(merged.autoApprove) ? merged.autoApprove : []),
+    'actionGuard.broker.enabled': String(isPlainBlock(merged.broker) && merged.broker.enabled === true),
+    'actionGuard.reviewedScripts': JSON.stringify(Array.isArray(merged.reviewedScripts) ? merged.reviewedScripts : []),
+  };
+}
+
+function resolvedDefenceMode(raw: Record<string, unknown>): DefenceMode {
+  const mode = raw.defenceMode;
+  return typeof mode === 'string' && VALID_MODES.includes(mode as DefenceMode) ? mode as DefenceMode : 'balanced';
+}
+
+/**
+ * Which effective settings would change if the file's own values replaced the
+ * strict fail-closed posture currently forced on top of them — every one of
+ * them a loosening, because that posture is the tightest there is — and which
+ * of those no authority stronger than the HMAC has granted.
+ *
+ * The second list is the line #647 does not cross. The Action Guard keys are
+ * the ones the guard's own self-protection floor holds (`--action-guard-
+ * disable`/`-advisory`/`-enforce-when-ready`) or that `allowlist add` requires
+ * an interactive terminal for. A re-sign that made a hand-edited `enabled:
+ * false`, auto-approve entry or reviewed-script pin effective would be a new
+ * way around those controls, so it is only allowed where a VERIFIED,
+ * root-owned policy lock covers the key — that lock, not this command, is then
+ * the authority (#501 §8.4: edit, `sudo shieldcortex protect --from-config`,
+ * re-sign). `defenceMode` is not in the second list: `shieldcortex config
+ * --mode` already sets it with no such hold, so re-signing it grants nothing
+ * new, and the policy-lock refusal still applies.
+ */
+function resignEffects(
+  data: Record<string, unknown>,
+  lock: PolicyLockState,
+): { loosenedKeys: string[]; unauthorisedKeys: string[] } {
+  const now = applyPolicyLock(applyStrictFailClosedPosture(data), lock);
+  const after = applyPolicyLock(data, lock);
+  const nowGuard = resolvedGuardKeys(now);
+  const afterGuard = resolvedGuardKeys(after);
+  const coverage = lock.status === 'locked' ? policyLockCoverage(lock) : new Map<ProtectedPolicyKey, unknown>();
+  const loosenedKeys: string[] = [];
+  const unauthorisedKeys: string[] = [];
+  for (const key of Object.keys(nowGuard)) {
+    if (nowGuard[key] === afterGuard[key]) continue;
+    loosenedKeys.push(key);
+    if (!coverage.has(key as ProtectedPolicyKey)) unauthorisedKeys.push(key);
+  }
+  if (resolvedDefenceMode(now) !== resolvedDefenceMode(after)) loosenedKeys.push('defenceMode');
+  return { loosenedKeys, unauthorisedKeys };
+}
+
+/** The protected keys the file itself declares, for the policy-lock check. */
+function declaredProtectedValues(data: Record<string, unknown>): Array<{ key: ProtectedPolicyKey; value: unknown }> {
+  const guard = actionGuardBlock(data);
+  const memory: Record<string, unknown> = isPlainBlock(data.memory) ? data.memory : {};
+  const hostContract: Record<string, unknown> = isPlainBlock(memory.hostContract) ? memory.hostContract : {};
+  const inject: Record<string, unknown> = isPlainBlock(memory.inject) ? memory.inject : {};
+  const broker: Record<string, unknown> = isPlainBlock(guard.broker) ? guard.broker : {};
+  const candidates: Array<{ key: ProtectedPolicyKey; value: unknown }> = [
+    { key: 'actionGuard.enabled', value: guard.enabled },
+    { key: 'actionGuard.enforce', value: guard.enforce },
+    { key: 'actionGuard.autoApprove', value: guard.autoApprove },
+    { key: 'actionGuard.broker.enabled', value: broker.enabled },
+    { key: 'actionGuard.reviewedScripts', value: guard.reviewedScripts },
+    { key: 'defenceMode', value: data.defenceMode },
+    { key: 'memory.hostContract.posture', value: hostContract.posture },
+    { key: 'memory.inject.mode', value: inject.mode },
+  ];
+  return candidates.filter((c) => c.value !== undefined);
+}
+
+export interface ConfigResignPreview {
+  path: string;
+  verdict: ConfigIntegrity | 'unsigned';
+  /** sha256 of the exact bytes on disk (full hex), or null when there are none. */
+  sha256: string | null;
+  /** Effective settings that would leave the strict posture. Key names only. */
+  loosenedKeys: string[];
+  /** The subset no verified policy lock authorises; re-sign is refused while non-empty. */
+  unauthorisedKeys: string[];
+  lockStatus: PolicyLockState['status'];
+  /** The policy lock's refusal of a value the file declares, if any (the re-sign would be refused). */
+  lockRefusal: string | null;
+}
+
+/**
+ * Read-only preview for `shieldcortex config --resign`. Writes nothing, mints
+ * nothing, audits nothing. It names keys, never values: config.json can carry
+ * `cloudApiKey` and webhook secrets, and a preview is often pasted.
+ */
+export function previewConfigResign(): ConfigResignPreview {
+  const read = readConfigBytesNoSideEffects();
+  const lock = readPolicyLock({ audit: false, warn: false });
+  const tampered = read.verdict === 'tampered' && read.data !== null;
+  const effects = tampered
+    ? resignEffects(read.data!, lock)
+    : { loosenedKeys: [], unauthorisedKeys: [] };
+  // The same check the re-sign makes, asked without auditing: a preview must
+  // not say "confirm with this hash" for a write the lock is going to refuse.
+  let lockRefusal: string | null = null;
+  if (tampered) {
+    try {
+      assertPolicyLockAllows(lock, declaredProtectedValues(read.data!));
+    } catch (err) {
+      if (!(err instanceof PolicyLockRefusal)) throw err;
+      lockRefusal = err.message;
+    }
+  }
+  return {
+    path: read.path,
+    verdict: read.verdict,
+    sha256: read.bytes ? sha256Hex(read.bytes) : null,
+    ...effects,
+    lockStatus: lock.status,
+    lockRefusal,
+  };
+}
+
+/**
+ * Whether the `config_resigned` row was written. `recorded: false` means the
+ * re-sign IS in force but its record is not: the caller must say so, not
+ * "recorded".
+ */
+export type ConfigResignAudit =
+  | { recorded: true; rowId: number; location: string }
+  | { recorded: false; location: string; error: string };
+
+export interface ConfigResignResult {
+  path: string;
+  previousVerdict: 'tampered';
+  previousSha256: string;
+  newSha256: string;
+  backupPath: string;
+  loosenedKeys: string[];
+  audit: ConfigResignAudit;
+}
+
+/**
+ * The ONE deliberate path that signs a `tampered` config.json (#647).
+ *
+ * It trusts the file's own bytes — never the strict view forced on top of them
+ * — and only the exact bytes the operator previewed: `confirmSha256` must be
+ * the FULL sha256 {@link previewConfigResign} printed, and it is checked
+ * against bytes read again here, so a file that changed after the preview is
+ * refused, not signed. What it will not do:
+ *   - sign a file that is not `tampered` (nothing to recover, or not parseable);
+ *   - loosen a key the policy lock forbids — the same refusal, audited as
+ *     `policy_refused`, that the setters apply;
+ *   - make a hand-edited Action Guard loosening effective without a verified
+ *     lock covering it (see {@link resignEffects});
+ *   - sign anything when the audit log cannot be opened.
+ *
+ * Order: the checks; then the audit log is opened (refusing, with nothing
+ * written, if it cannot be); then the checks again on a fresh read, with no
+ * await between them and the write; then the exact previewed bytes are saved
+ * to `config.json.bak-resign-<timestamp>` (0600, never overwriting an existing
+ * file — and an aborted re-sign if that fails); then the signed write; then
+ * the `config_resigned` row naming the previous verdict, both hashes, the
+ * backup and the loosened key NAMES — no values. That row can only be written
+ * after the file it describes, so if it fails the re-sign has already landed:
+ * the result says `audit.recorded: false` and the backup stays as the
+ * evidence. Nothing here claims a record it did not make.
+ *
+ * What this is not: an identity check. A same-uid process can run it, exactly
+ * as it can read `.integrity-key` and sign the file itself; the HMAC is a
+ * corruption detector (protected-root.ts). This command exists so recovering
+ * from that alarm is a reviewed, recorded act instead of a side effect of the
+ * next unrelated setting change.
+ */
+export async function resignTamperedConfig(
+  confirmSha256: string,
+  opts: { now?: Date } = {},
+): Promise<ConfigResignResult> {
+  const confirm = confirmSha256.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(confirm)) {
+    throw new Error(
+      '--confirm needs the full 64-character sha256 that `shieldcortex config --resign` printed for the file you ' +
+      'reviewed — a prefix is not accepted. Nothing was written.',
+    );
+  }
+  // Refusals first, so a re-sign that is going to be refused never opens the
+  // audit database.
+  admitResign(confirm);
+
+  let sink: RecoveryAuditSink;
+  try {
+    sink = await openRecoveryAuditSink();
+  } catch (err) {
+    throw new Error(
+      `Not re-signing ${getConfigFile()}: the audit log that must record a re-sign could not be opened ` +
+      `(${err instanceof Error ? err.message : String(err)}). A re-sign is only done when it can be recorded. ` +
+      'Nothing was written.',
+    );
+  }
+
+  try {
+    // Again, on bytes read now: the file may have changed while the audit log
+    // was opening. From here to the write there is no await.
+    const { read, data, loosenedKeys, previousSha256 } = admitResign(confirm);
+
+    const stamp = (opts.now ?? new Date()).toISOString().replace(/[:.]/g, '-');
+    const backupPath = `${read.path}.bak-resign-${stamp}`;
+    // The previewed bytes themselves, not a fresh copy of the path: what is
+    // backed up is exactly what was reviewed. `wx` never overwrites.
+    writeFileSync(backupPath, read.bytes, { mode: 0o600, flag: 'wx' });
+    try { chmodSync(backupPath, 0o600); } catch { /* best-effort */ }
+
+    // Direct writeRawConfig, the sanctioned exception to the mutateRawConfig
+    // rule (like self-heal): the data is the confirmed bytes, parsed — not a
+    // read-modify-write of whatever the file holds by now.
+    writeRawConfig(data);
+    const newSha256 = sha256Hex(readFileSync(read.path));
+
+    let audit: ConfigResignAudit;
+    try {
+      const rowId = sink.record({
+        outcome: 'config_resigned',
+        path: read.path,
+        reason: 'tampered',
+        detail:
+          `config.json re-signed by explicit \`config --resign\`; previous verdict tampered; ` +
+          `previous sha256 ${previousSha256}; new sha256 ${newSha256}; backup ${backupPath}; ` +
+          `keys leaving the fail-closed posture: ${loosenedKeys.length > 0 ? loosenedKeys.join(', ') : 'none'}`,
+      });
+      audit = { recorded: true, rowId, location: sink.location };
+    } catch (err) {
+      audit = { recorded: false, location: sink.location, error: err instanceof Error ? err.message : String(err) };
+    }
+
+    return { path: read.path, previousVerdict: 'tampered', previousSha256, newSha256, backupPath, loosenedKeys, audit };
+  } finally {
+    sink.close();
+  }
+}
+
+/**
+ * Every refusal {@link resignTamperedConfig} makes, on a fresh read. Throws, or
+ * returns what the write needs.
+ */
+function admitResign(confirm: string): {
+  read: ConfigBytes & { bytes: Buffer };
+  data: Record<string, unknown>;
+  loosenedKeys: string[];
+  previousSha256: string;
+} {
+  const read = readConfigBytesNoSideEffects();
+  if (!read.bytes || read.verdict !== 'tampered' || !read.data) {
+    throw new Error(
+      `Not re-signing ${read.path}: its integrity verdict is ${read.verdict}, not tampered. ` +
+      (read.verdict === 'malformed' || read.verdict === 'unreadable'
+        ? 'A file that cannot be parsed cannot be reviewed or signed — fix it or restore a backup.'
+        : 'There is nothing to recover.') +
+      ' Nothing was written.',
+    );
+  }
+  const previousSha256 = sha256Hex(read.bytes);
+  if (previousSha256 !== confirm) {
+    throw new Error(
+      `Not re-signing ${read.path}: its sha256 is now ${previousSha256}, not the ${confirm} you confirmed. ` +
+      'The file changed after the preview (or the hash was mistyped). Re-run `shieldcortex config --resign` and ' +
+      'review it again. Nothing was written.',
+    );
+  }
+  const data = { ...read.data };
+  delete data._sig;
+
+  // The lock first, exactly as the setters order it: a locked key is the
+  // lock's refusal to make, audited, before anything else is said.
+  refuseIfPolicyLockForbids(declaredProtectedValues(data));
+  const { loosenedKeys, unauthorisedKeys } = resignEffects(data, getPolicyLockState());
+  if (unauthorisedKeys.length > 0) {
+    throw new Error(
+      `Not re-signing ${read.path}: it would take ${unauthorisedKeys.join(', ')} out of the strict fail-closed ` +
+      'posture, and no verified policy lock covers those keys. Changing them is held by the Action Guard ' +
+      'self-protection floor or needs an interactive `shieldcortex allowlist add`; a re-sign must not become a ' +
+      'way around either. Restore a backup whose signature still verifies, or move config.json aside and ' +
+      're-apply these settings with their own commands. Nothing was written.',
+    );
+  }
+  return { read: { ...read, bytes: read.bytes }, data, loosenedKeys, previousSha256 };
 }
 
 /**
@@ -921,8 +1223,8 @@ function writeRawConfig(raw: Record<string, unknown>): void {
  * strict posture as if the operator had chosen it, wiping `reviewedScripts` and
  * `autoApprove`. It now does neither: the refusal happens before the caller's
  * change runs and before anything touches disk, so the file's bytes, mode,
- * mtime, pins and stale signature all survive. Recovery is outside this
- * gate: move the file aside and rebuild it through the setters (#501 §8.7).
+ * mtime, pins and stale signature all survive. The only path past this gate is
+ * the deliberate, previewed, hash-confirmed {@link resignTamperedConfig}.
  *
  * `onParseFail` (the name predates #647; it governs both refusals):
  *   - `'throw'` (default): surface corruption/tampering to user-facing/explicit
@@ -973,8 +1275,7 @@ function warnTamperedWriteRefusedOnce(): void {
   tamperedWriteRefusalWarned = true;
   console.error(
     '[ShieldCortex] config.json fails its integrity check — refusing config writes so the file and its ' +
-    'pins are not re-signed or overwritten. Run `shieldcortex doctor`; recover by moving config.json aside and ' +
-    'rebuilding it through the setters (docs/design/2026-09-16-501-policy-lock.md §8.7).',
+    'pins are not re-signed or overwritten. Run `shieldcortex doctor`; recover with `shieldcortex config --resign`.',
   );
 }
 

@@ -251,11 +251,11 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
   // flag so the file is re-signed", and this case pinned it. #647: that step
   // WAS the defect — the write started from the forced strict view, so it
   // persisted strict values (wiping reviewedScripts/autoApprove) and signed
-  // them as valid. The setter now refuses, and step 4 is the §8.7 rebuild:
-  // move config.json aside and re-apply each setting through its setter, so
-  // the first write signs a fresh file.
+  // them as valid. Step 4 is now the deliberate `config --resign`; the setter
+  // refuses. The positive re-sign under a verified lock (the real §8.4 shape,
+  // which needs a root-owned lock) is in config-resign-locked-647.test.ts.
 
-  it('re-pinning a looser lock does NOT undo the hand-edit, re-running a setter is REFUSED, and the rebuild through the setters works', async () => {
+  it('re-pinning a looser lock does NOT undo the hand-edit, and re-running a setter is REFUSED, not a re-sign', async () => {
     // 1. The locked-box starting point: guard on and enforcing, correctly signed.
     const start = await freshConfig();
     start.setActionGuardCoreConfig({ enabled: true, enforce: true });
@@ -287,20 +287,16 @@ describe('#501 the recovery runbook: a hand-edit holds strict until it is RE-SIG
     expect(still.readRawConfig()).toBeDefined();
     expect(still.isConfigTampered()).toBe(true);
 
-    // 4 (new). The runbook rebuild (§8.4 step 4 / §8.7 step 3): move the
-    //    hand-edited file aside — kept, byte for byte — and re-apply the
-    //    setting through its setter. The first write signs a fresh file, and
-    //    NOW the loosening is in force.
-    const aside = path.join(configDir, 'config.json.aside');
-    fs.renameSync(path.join(configDir, 'config.json'), aside);
-    const rebuilt = await freshConfig();
-    rebuilt.setActionGuardCoreConfig({ enabled: true, enforce: false });
-    const after = await freshConfig();
-    expect(after.getActionGuardCoreConfig()).toEqual({ enabled: true, enforce: false, readinessGate: false });
-    expect(after.readRawConfig()).toBeDefined();
-    expect(after.isConfigTampered()).toBe(false);
-    expect(after.inspectConfigIntegrity().verdict).toBe('valid');
-    expect(fs.readFileSync(aside).equals(handEdited)).toBe(true);
+    // 4 (new). With no VERIFIED lock covering `actionGuard.enforce`, the
+    //    deliberate re-sign refuses too: making a hand-edited advisory guard
+    //    effective is what the guard's own self-protection floor holds.
+    const preview = still.previewConfigResign();
+    expect(preview.unauthorisedKeys).toContain('actionGuard.enforce');
+    //    resignTamperedConfig is async (#647 R2: it opens the audit log), so the
+    //    refusal is a rejection — awaited here, not a sync throw.
+    await expect(still.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/no verified policy lock covers/);
+    expect(fs.readFileSync(path.join(configDir, 'config.json')).equals(handEdited)).toBe(true);
+    expect(fs.readdirSync(configDir).filter((f) => f.includes('.bak-resign-'))).toEqual([]);
   });
 
   it('a lock appearing after step 4 pulls the re-signed config back up — the re-sign is not an escape', async () => {
