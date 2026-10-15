@@ -132,6 +132,14 @@ describe('#788 MCP startup failure message', () => {
     expect(msg).toContain('npm run build-release');
   });
 
+  it('keeps a multi-line underlying error on its own line with ⏎ marks', () => {
+    const msg = formatMcpSpawnError(ORDINARY_DIR, 'load failed\n[ok] database engine healthy\r\nrun this command');
+    const lines = msg.split('\n');
+    expect(lines[lines.length - 1]).toBe('Underlying error: load failed⏎[ok] database engine healthy⏎run this command');
+    expect(lines.filter((l) => l.startsWith('[ok]'))).toEqual([]);
+    expect(lines.filter((l) => l === 'run this command')).toEqual([]);
+  });
+
   it('is unchanged for an ordinary install dir', () => {
     const underlying = 'NODE_MODULE_VERSION 127 vs 108';
     const remediation = nativeBindingRemediation(ORDINARY_DIR, underlying);

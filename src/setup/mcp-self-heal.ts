@@ -22,7 +22,7 @@ import fs from 'fs';
 import { mkdirSecure } from './state-permissions.js';
 import path from 'path';
 import os from 'os';
-import { sanitiseDisplayField, sanitiseDisplayLines } from '../cli/term-ui.js';
+import { sanitiseDisplayField } from '../cli/term-ui.js';
 import {
   ensureNativeBinding,
   nativeBindingRemediation,
@@ -87,7 +87,9 @@ export function formatMcpSpawnError(
     ...remediation.split('\n').map((line) => `  ${sanitiseDisplayField(line)}`),
     'Then restart the app that launches this MCP server.',
     '',
-    `Underlying error: ${sanitiseDisplayLines(underlying)}`,
+    // The underlying error is not layout: its line breaks are shown as ⏎ so
+    // it cannot print lines that look like separate status or instructions.
+    `Underlying error: ${sanitiseDisplayField(underlying)}`,
   ].join('\n');
 }
 
