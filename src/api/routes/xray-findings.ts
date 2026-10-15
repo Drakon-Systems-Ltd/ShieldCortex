@@ -38,7 +38,6 @@ export function registerXRayFindingRoutes(
     res.json({ findings });
   });
 
-  // Get finding stats
   // Get finding stats. An unreadable findings file is 503 (counts unknown),
   // never a successful zero the Needs you inbox would treat as confirmed (#692).
   app.get('/api/xray/findings/stats', (_req: Request, res: Response) => {
