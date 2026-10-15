@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **A calm, plain `shieldcortex update` screen.** The run now ends with one headline (green "ShieldCortex updated", yellow "... N things to check", or red "Update failed ...") and one row per part. Every row that needs you says what happened, why it matters, and one command. Action Guard switched off is shown as neutral (○ / `[off]`), not a warning, and no longer turns the run yellow on its own. The Guard default-off notice now prints only on the update that crosses 4.54.15, and points at `shieldcortex config --action-guard-enable` and `shieldcortex guard readiness`. The scheduled-script review inside update asks "Trust this scheduled script?" with `[y] trust [n] not now [v] view [q] stop`. Internal terms (load-list state, probe results, the old VERDICT panel) are kept under `update --verbose`. NO_COLOR and non-TTY output use `[ok] [off] [!] [x]`. Exit codes, what update installs, and what Guard allows or blocks are unchanged.
+
 ### Fixed
 - **`service install` / `service status` exit codes (#768).** `service install` now exits non-zero with guidance when the service cannot be enabled (for example no systemd user services), and `service status` exits non-zero when the service is not installed, not enabled or loaded, not running, or cannot be queried. On Linux an `enabled-runtime` unit counts as enabled (reported as runtime only); on macOS a `launchctl` that cannot be run reports `Loaded: unknown` with query guidance instead of claiming the job is absent.
 

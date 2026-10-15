@@ -78,8 +78,10 @@ describe('renderPinCard', () => {
     }, { width: 40, style: NO_STYLE });
     const text = lines.join('\n');
     expect(text).toMatch(/backup\.sh/);
-    expect(text).toMatch(/\[y\].*pin/);
-    expect(text).toMatch(/network calls likely/);
+    expect(text).toMatch(/\[y\] trust/);
+    expect(text).not.toMatch(/\bpin\b/);
+    expect(text).not.toMatch(/a{16}/); // no raw hash unless showHash
+    expect(text.replace(/\s+/g, ' ')).toMatch(/seems to use the network/);
     expect(text).not.toMatch(/first 40 lines/);
     for (const l of lines) {
       expect(stripAnsi(l).length).toBeLessThanOrEqual(40);

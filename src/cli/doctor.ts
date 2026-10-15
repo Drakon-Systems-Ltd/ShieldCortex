@@ -200,6 +200,8 @@ export interface CheckResult {
   fix?: string;
   /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
   fixNoteWithCommands?: true;
+  /** See DoctorReportItem.verboseNote — printed only with --verbose. */
+  verboseNote?: string;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -8229,9 +8231,12 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
       return {
         label,
         status: 'warn',
+        // Plain words (15 Oct 2026): this is a check that could not run, and
+        // the old wording ("roster", "SQLite index unreadable") read as a fault.
         message:
-          'cannot read OpenClaw\'s plugin roster (SQLite index unreadable — broken better-sqlite3 binding, locked DB, or pre-2026.6.1 OpenClaw) — cannot confirm the realtime plugin is loaded; NOT necessarily unprotected',
-        fix: 'Cannot read OpenClaw\'s plugin roster file. Not unprotected if the plugin is already loaded. Do not run repair from this warning.',
+          'couldn\'t read OpenClaw\'s plugin list, so couldn\'t check the realtime plugin is running. ' +
+          'This is a check that couldn\'t run, not a fault (the list file may be locked, or OpenClaw is older than 2026.6.1)',
+        fix: 'Couldn\'t read OpenClaw\'s plugin list file. If the plugin is already loaded you are protected. Do not run repair from this warning.',
       };
     case 'load-unproven':
       // #142: the boot roster snapshot races plugin registration, and a
@@ -8243,10 +8248,14 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         status: 'warn',
         message:
           verdict.loadedInLiveRoster == null
-            ? 'load state UNPROVEN — no fresh gateway roster could be read. A missing install-index entry does not prove a live unload'
-            : 'load state UNPROVEN — absent from the boot roster snapshot, but a plugin registration was sighted after it ' +
-              '(registration races the snapshot; CLI activity writes identical lines). Neither protected nor unprotected is proven',
-        fix: `Prove it live: ${LIVE_CANARY_COMMAND}`,
+            ? 'couldn\'t confirm the gateway loaded the plugin — there was no recent gateway start-up record to read. ' +
+              'This is a check that couldn\'t run, not a fault'
+            : 'couldn\'t confirm the gateway loaded the plugin — it was missing from the start-up list but registered just after ' +
+              '(that timing can happen normally). Neither OK nor a fault is confirmed',
+        // A plain command in the default report; the consent-gated live
+        // probe (an env var plus internal wording) only with --verbose.
+        fix: 'Check it: `shieldcortex openclaw status`',
+        verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
       };
     case 'enabled-not-loaded':
       return {
@@ -8313,7 +8322,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           status: 'pass',
           message:
             `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
-            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+            'could not be read, so load is NOT separately proven',
+          // Not in the message: a pass becomes a default-report warn when
+          // conversation access is withheld, and that row must stay plain.
+          verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
         };
       }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
@@ -8337,8 +8349,9 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'pass',
         message: hotReload
-          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`
-          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here`
+          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here`,
+        verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }
     default: {
@@ -9314,7 +9327,10 @@ export async function runDoctor(
       version: String(pkg.version ?? ''),
       passed, warnings, failures, infos, total,
       exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
-      results: visible.map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })),
+      results: visible.map((r) => ({
+        label: r.label, status: r.status, message: r.message, fix: r.fix,
+        ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
+      })),
     }, null, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
     if (jsonExit !== 0) process.exitCode = jsonExit;
