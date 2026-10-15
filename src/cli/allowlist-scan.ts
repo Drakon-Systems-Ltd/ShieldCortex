@@ -935,8 +935,10 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
  * One plain line: how many scheduled scripts are not reviewed yet.
  *
  * Review is trust, not an execution gate (#780): a trusted script's source is
- * no longer folded into the Guard's scan, and an untrusted one still runs
- * (scanned normally while the Guard is on, ungated while it is off).
+ * no longer folded into the Guard's scan. Lack of review does not by itself
+ * stop a script: while the Guard is on, an untrusted one gets the normal
+ * checks (which may still hold or block it); while it is off, the Guard does
+ * not check it.
  */
 export function scriptsNeedAYes(n: number): string {
   return n === 1
