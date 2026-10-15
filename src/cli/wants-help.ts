@@ -306,9 +306,14 @@ const SESSIONS_SPEC = helpSpec({ '--days': 'unless-double-dash' });
  *                   with `-`.
  * A project key or a source path may spell "help"; the command-level row is
  * empty because every option belongs to a verb, and `memories <not-a-verb> …`
- * prints usage in the handler.
+ * prints usage in the handler. Because a line with no verb never reaches a verb
+ * parser, a bare `help` anywhere on it is the usage request it has always been
+ * (`memories --project acme help`, #577): the command-level row has no verb-slot
+ * limit. Behind a verb the verb's own row decides (`memories prune help` is
+ * prune's argument).
  */
 const MEMORIES_SPEC = helpSpec({}, {
+  verbDepth: Number.POSITIVE_INFINITY,
   verbs: {
     'migrate-legacy': helpSpec({ '--source': 'always' }),
     prune: helpSpec({

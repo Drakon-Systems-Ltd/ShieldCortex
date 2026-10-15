@@ -546,6 +546,9 @@ describe('#767 round 3 — each option is read the way its own parser reads it',
     expectHelp(['memories', 'help'], true);
     expectHelp(['memories', 'no-such-verb', '--help'], true);
     expectHelp(['memories', '--project', 'help'], true);      // not a verb → usage from the handler too
+    // No verb chosen: `help` anywhere is the usage request, as on main (#577 help-entry-point).
+    expectHelp(['memories', '--project', 'acme', 'help'], true);
+    expectHelp(['memories', 'prune', '--project', 'acme', 'help'], false);
   });
 
   it('B3: the real parsers read the token exactly as the rule says, for the parsers that are cheap to call', () => {
