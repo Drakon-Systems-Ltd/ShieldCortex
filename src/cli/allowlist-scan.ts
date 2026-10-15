@@ -931,11 +931,17 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
  * no writes. Never throws — an update must not fail because a cron file was
  * strange.
  */
-/** One plain line: how many scheduled scripts are waiting for a human yes. */
+/**
+ * One plain line: how many scheduled scripts are not reviewed yet.
+ *
+ * Review is trust, not an execution gate (#780): a trusted script's source is
+ * no longer folded into the Guard's scan, and an untrusted one still runs
+ * (scanned normally while the Guard is on, ungated while it is off).
+ */
 export function scriptsNeedAYes(n: number): string {
   return n === 1
-    ? '1 new or changed scheduled script needs a yes before it can run.'
-    : n + ' new or changed scheduled scripts need a yes before they can run.';
+    ? '1 new or changed scheduled script is not reviewed yet. Trusting it stops the Guard re-checking its contents until the file changes.'
+    : n + ' new or changed scheduled scripts are not reviewed yet. Trusting one stops the Guard re-checking its contents until the file changes.';
 }
 
 export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Promise<void> {
