@@ -20,6 +20,7 @@ import { guardDefaultOffNoticeLines } from '../update.js';
 import { defaultColorStyle, NO_STYLE, stripAnsi, renderPinCard } from '../term-ui.js';
 import { scriptsNeedAYes } from '../allowlist-scan.js';
 import { renderPluginLoadVerdict } from '../doctor.js';
+import { formatDoctorReport } from '../doctor-report.js';
 
 const ok = { status: 'ok' as const };
 
@@ -47,6 +48,17 @@ function base(over: Partial<UpdateSummaryInput> = {}): UpdateSummaryInput {
   };
 }
 
+const PLUGIN_INSTALL_COMMAND = 'openclaw plugins install --force @drakon-systems/shieldcortex-realtime@latest';
+const PLUGIN_BEHIND: UpdateSummaryInput['protection'] = {
+  status: 'unproven',
+  loaded: 'unknown',
+  versionOk: false,
+  pluginVersion: '5.7.0',
+  expectedVersion: '5.9.0',
+  gatewayReloaded: false,
+  nextCommand: PLUGIN_INSTALL_COMMAND,
+};
+
 const SCENARIOS: Record<string, UpdateSummaryInput> = {
   'a: all OK, Guard off': base(),
   'b: all OK, Guard on and proven': base({
@@ -56,6 +68,11 @@ const SCENARIOS: Record<string, UpdateSummaryInput> = {
   'c: Guard on, plugin load not confirmed': base({ guardOn: true }),
   'd: Hermes present, no interpreter': base({ hermes: { status: 'warn', reason: 'no-interpreter' } }),
   'e: package install failed': base({ packageState: 'failed' }),
+  // PR #773 review: a plugin older than this CLI. The plugin check returns
+  // "behind" (versionOk false) with the install command; Guard state must not
+  // change whether the user sees it.
+  'f: plugin behind, Guard off': base({ protection: PLUGIN_BEHIND }),
+  'f: plugin behind, Guard on': base({ guardOn: true, protection: PLUGIN_BEHIND }),
 };
 
 const EXPECTED_HEADLINE: Record<string, 'updated' | 'check' | 'failed'> = {
@@ -64,6 +81,8 @@ const EXPECTED_HEADLINE: Record<string, 'updated' | 'check' | 'failed'> = {
   'c: Guard on, plugin load not confirmed': 'check',
   'd: Hermes present, no interpreter': 'check',
   'e: package install failed': 'failed',
+  'f: plugin behind, Guard off': 'check',
+  'f: plugin behind, Guard on': 'check',
 };
 
 function screen(input: UpdateSummaryInput, opts: { color?: boolean; ascii?: boolean } = {}): string[] {
@@ -126,6 +145,36 @@ describe('update summary: five scenarios', () => {
     expect(buildUpdateSummary(base({ guardOn: true })).headline).toBe('check');
     expect(buildUpdateSummary(base({ guardOn: true, protection: { status: 'failed', loaded: 'no' } })).headline).toBe('failed');
     expect(buildUpdateSummary(base({ engine: { ok: false, remediation: 'x' } })).headline).toBe('failed');
+  });
+
+  it('(f) a plugin behind this CLI is a yellow OpenClaw row with the install fix, Guard off or on', () => {
+    for (const name of ['f: plugin behind, Guard off', 'f: plugin behind, Guard on']) {
+      const summary = buildUpdateSummary(SCENARIOS[name]);
+      expect(summary.headline).toBe('check');
+      const oc = summary.rows.find((r) => r.label === 'OpenClaw');
+      expect(oc).toMatchObject({
+        mark: 'check',
+        text: 'plugin 5.7.0 is behind ShieldCortex 5.9.0',
+        command: PLUGIN_INSTALL_COMMAND,
+        commandLabel: 'Fix',
+      });
+      const text = screen(SCENARIOS[name]).join('\n');
+      expect(text).toContain('! OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0');
+      expect(text).not.toMatch(/\[ok\]|\u2713 OpenClaw/);
+      // An install command is a fix, never a "Check:".
+      expect(text).not.toMatch(/Check: openclaw plugins install/);
+      expect(text).not.toContain('couldn\'t confirm OpenClaw is checking tool calls');
+    }
+    const guardOff = buildUpdateSummary(SCENARIOS['f: plugin behind, Guard off']);
+    expect(guardOff.rows.find((r) => r.label === 'Guard')?.mark).toBe('off');
+    const guardOn = buildUpdateSummary(SCENARIOS['f: plugin behind, Guard on']);
+    expect(guardOn.rows.find((r) => r.label === 'Guard')).toMatchObject({ mark: 'check', commandLabel: 'Fix' });
+  });
+
+  it('(f) falls back to the new version when the check did not name the expected one', () => {
+    const input = base({ protection: { ...PLUGIN_BEHIND, expectedVersion: null } });
+    expect(buildUpdateSummary(input).rows.find((r) => r.label === 'OpenClaw')?.text)
+      .toBe('plugin 5.7.0 is behind ShieldCortex 5.9.0');
   });
 
   it('(e) names the version you are still on', () => {
@@ -221,11 +270,35 @@ describe('banned phrases stay out of the default output', () => {
           installsJsonVersion: null,
           reasons: [],
         } as unknown as Parameters<typeof renderPluginLoadVerdict>[0]);
-        // The env-var name inside a copy-paste command is not prose.
-        const text = (r.message + ' ' + (r.fix ?? '')).replace(/\b[A-Z][A-Z0-9_]+=\S+/g, '');
-        expect(bannedHits(text)).toEqual([]);
+        expect(bannedHits(r.message + ' ' + (r.fix ?? ''))).toEqual([]);
       }
     }
+  });
+
+  it('doctor report: the live-probe hint prints only with --verbose', () => {
+    const r = renderPluginLoadVerdict({
+      state: 'load-unproven',
+      severity: 'warn',
+      recommendedAction: 'none',
+      enabledInConfig: true,
+      loadedInIndex: false,
+      loadedInLiveRoster: null,
+      indexReadable: true,
+      configReadable: true,
+      configPresent: true,
+      openClawTracked: true,
+      indexWarnsConflict: false,
+      metadataConflict: false,
+      indexVersion: null,
+      installsJsonVersion: null,
+      reasons: [],
+    } as unknown as Parameters<typeof renderPluginLoadVerdict>[0]);
+    const plain = formatDoctorReport([r], { width: 80 }).join('\n');
+    expect(plain).toContain('$ shieldcortex openclaw status');
+    expect(bannedHits(plain)).toEqual([]);
+    expect(plain).not.toMatch(/ALLOW_GATEWAY_CANARY/);
+    const verbose = formatDoctorReport([r], { width: 80, verbose: true }).join('\n');
+    expect(verbose.replace(/\s+/g, ' ')).toMatch(/SHIELDCORTEX_ALLOW_GATEWAY_CANARY=1 shieldcortex openclaw status/);
   });
 });
 

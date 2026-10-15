@@ -1172,7 +1172,7 @@ export async function stepOpenClawHook(
  * runs plugin discovery once at start-up, so the step says so.
  */
 export async function stepHermesPlugin(
-  deps: { refresh?: (home: string) => HermesRefreshShape; home?: string } = {},
+  deps: { refresh?: (home: string) => HermesRefreshShape; home?: string; verbose?: boolean } = {},
 ): Promise<StepResult> {
   return await step('Hermes plugin', async () => {
     // Hermes' own root resolution runs inside the probe; what this has to get
@@ -1192,13 +1192,13 @@ export async function stepHermesPlugin(
     // finish: a busy root, a copy it could not publish, one that vanished, a
     // durability it could not confirm (r4 nit 1).
     if (result.status === 'warn') {
-      // Plain words for the one cause a user can act on directly; the
-      // probe's own wording stays in `doctor`.
+      // Plain words for the one cause a user can act on directly. The
+      // probe's own wording prints under it only with --verbose.
       if (result.reason === 'no-interpreter') {
         return {
           status: 'warn' as const,
           summary: "couldn't find Hermes' Python, so Hermes wasn't updated",
-          detail: [],
+          detail: deps.verbose ? [summary, ...detail] : [],
           unfinished: true,
           reason: 'no-interpreter',
         };
@@ -1581,7 +1581,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   // (#574, #576). Both refresh only what is already installed, and neither
   // restarts the host that loads it.
   const hookResult = await stepOpenClawHook();
-  const hermesResult = await stepHermesPlugin();
+  const hermesResult = await stepHermesPlugin({ verbose: options.verbose });
   await stepClaudeHooks(home);
   await stepStatePermissions();
 
@@ -1763,6 +1763,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
       loaded: protection.facts?.loaded,
       versionOk: protection.facts?.versionOk,
       pluginVersion: protection.facts?.pluginVersion ?? null,
+      expectedVersion: protection.facts?.expectedVersion ?? null,
       gatewayReloaded: protection.facts?.gatewayReloaded,
       nextCommand: protection.facts?.nextCommand ?? nextFromGuard[0] ?? (reexecFailed ? 'shieldcortex update' : undefined),
     },

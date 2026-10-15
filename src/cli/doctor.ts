@@ -200,6 +200,8 @@ export interface CheckResult {
   fix?: string;
   /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
   fixNoteWithCommands?: true;
+  /** See DoctorReportItem.verboseNote — printed only with --verbose. */
+  verboseNote?: string;
   /**
    * Set when the check did not run because a prerequisite simply does not
    * exist yet on a fresh install. runDoctor() collapses these into a single
@@ -8250,7 +8252,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
               'This is a check that couldn\'t run, not a fault'
             : 'couldn\'t confirm the gateway loaded the plugin — it was missing from the start-up list but registered just after ' +
               '(that timing can happen normally). Neither OK nor a fault is confirmed',
-        fix: `Prove it live: ${LIVE_CANARY_COMMAND}`,
+        // A plain command in the default report; the consent-gated live
+        // probe (an env var plus internal wording) only with --verbose.
+        fix: 'Check it: `shieldcortex openclaw status`',
+        verboseNote: `Prove enforcement live: ${LIVE_CANARY_COMMAND}`,
       };
     case 'enabled-not-loaded':
       return {
@@ -8317,7 +8322,10 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
           status: 'pass',
           message:
             `realtime plugin installed and enabled at v${version} — but the RUNNING gateway's boot roster ` +
-            `could not be read, so load is NOT separately proven. Prove it live with: ${LIVE_CANARY_COMMAND}`,
+            'could not be read, so load is NOT separately proven',
+          // Not in the message: a pass becomes a default-report warn when
+          // conversation access is withheld, and that row must stay plain.
+          verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
         };
       }
       // Roster-confirmed loaded, but doctor does NOT run the live enforcement
@@ -8341,8 +8349,9 @@ export function renderPluginLoadVerdict(verdict: ReconcileVerdict): CheckResult 
         label,
         status: 'pass',
         message: hotReload
-          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`
-          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here — prove it live with: ${LIVE_CANARY_COMMAND}`,
+          ? `realtime plugin loaded (gateway-PID registration after boot / hot-reload, v${version}); enforcement not probed here`
+          : `realtime plugin loaded (roster-confirmed, v${version}); enforcement not probed here`,
+        verboseNote: `Prove it live with: ${LIVE_CANARY_COMMAND}`,
       };
     }
     default: {
@@ -9318,7 +9327,10 @@ export async function runDoctor(
       version: String(pkg.version ?? ''),
       passed, warnings, failures, infos, total,
       exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
-      results: visible.map((r) => ({ label: r.label, status: r.status, message: r.message, fix: r.fix })),
+      results: visible.map((r) => ({
+        label: r.label, status: r.status, message: r.message, fix: r.fix,
+        ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
+      })),
     }, null, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
     if (jsonExit !== 0) process.exitCode = jsonExit;

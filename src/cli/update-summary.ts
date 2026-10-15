@@ -64,6 +64,8 @@ export interface UpdateSummaryInput {
     /** False when the running build is older than this CLI. */
     versionOk?: boolean;
     pluginVersion?: string | null;
+    /** The plugin version this CLI expects (the CLI's own version). */
+    expectedVersion?: string | null;
     gatewayReloaded?: boolean;
     /** The one command the check suggests. */
     nextCommand?: string;
@@ -171,6 +173,10 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   const p = input.protection;
   const pv = p.pluginVersion ? sanitiseDisplayField(p.pluginVersion) : '';
   const pluginInstalled = input.plugin.status !== 'skip' || (p.status !== 'skip');
+  // A plugin older than this CLI is shown whatever the Guard state: with Guard
+  // off it used to collapse into a green "installed" row (PR #773 review).
+  const pluginBehind = pluginInstalled && p.versionOk === false;
+  const pluginFixCommand = p.nextCommand ?? 'shieldcortex repair';
   if (pluginInstalled) {
     const reloaded = p.gatewayReloaded ? ', gateway reloaded' : '';
     if (input.plugin.status === 'warn' || input.plugin.status === 'failed') {
@@ -182,18 +188,25 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
         command: input.plugin.rerun ?? 'shieldcortex update',
         commandLabel: 'Fix',
       });
+    } else if (pluginBehind) {
+      const expected = sanitiseDisplayField(p.expectedVersion || input.toVersion);
+      rows.push({
+        label: 'OpenClaw',
+        // Yellow: an update to run, not a broken host. Red stays for the one
+        // case the plugin check calls unprotected (status 'failed').
+        mark: p.status === 'failed' ? 'fail' : 'check',
+        text: 'plugin ' + (pv ? pv + ' ' : '') + 'is behind ShieldCortex ' + expected,
+        why: 'OpenClaw doesn\'t have this update\'s fixes yet.',
+        command: pluginFixCommand,
+        commandLabel: 'Fix',
+      });
     } else if (p.status === 'failed') {
-      const olderBuild = p.versionOk === false;
       rows.push({
         label: 'OpenClaw',
         mark: 'fail',
-        text: olderBuild
-          ? 'the gateway is running an older plugin than this update'
-          : 'the gateway started without the ShieldCortex plugin',
-        why: olderBuild
-          ? 'OpenClaw doesn\'t have this update\'s fixes yet.'
-          : 'Memory protection is not running in OpenClaw.',
-        command: p.nextCommand ?? 'shieldcortex repair',
+        text: 'the gateway started without the ShieldCortex plugin',
+        why: 'Memory protection is not running in OpenClaw.',
+        command: pluginFixCommand,
         commandLabel: 'Fix',
       });
     } else if (p.status === 'ok') {
@@ -269,6 +282,16 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       text: 'off (the default)',
       command: GUARD_ON_COMMAND,
       commandLabel: 'Turn on',
+    });
+  } else if (pluginBehind) {
+    // The OpenClaw row names the cause; this row says what it means for Guard.
+    rows.push({
+      label: 'Guard',
+      mark: 'check',
+      text: 'on, but OpenClaw\'s plugin is out of date',
+      why: 'Guard needs the plugin from this update.',
+      command: pluginFixCommand,
+      commandLabel: 'Fix',
     });
   } else if (p.status === 'unproven' || p.status === 'warn' || p.status === 'blocked') {
     rows.push({

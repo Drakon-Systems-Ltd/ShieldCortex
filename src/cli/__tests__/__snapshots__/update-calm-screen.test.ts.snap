@@ -50,7 +50,33 @@ Update failed - ShieldCortex is still on 5.7.0
   [ok]  OpenClaw       plugin 5.9.0 installed, gateway reloaded
   [ok]  Skill          updated
   [off] Guard          off (the default)
-                       Turn on: shieldcortex config --action-guard-enable"
+                       Turn on: shieldcortex config --action-guard-enable
+
+ShieldCortex updated to 5.9.0 - 1 thing to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [!]   OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
+                       OpenClaw doesn't have this update's fixes yet.
+                       Fix: openclaw plugins install --force
+                         @drakon-systems/shieldcortex-realtime@latest
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable
+
+ShieldCortex updated to 5.9.0 - 2 things to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [!]   OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
+                       OpenClaw doesn't have this update's fixes yet.
+                       Fix: openclaw plugins install --force
+                         @drakon-systems/shieldcortex-realtime@latest
+  [ok]  Skill          updated
+  [!]   Guard          on, but OpenClaw's plugin is out of date
+                       Guard needs the plugin from this update.
+                       Fix: openclaw plugins install --force
+                         @drakon-systems/shieldcortex-realtime@latest"
 `;
 
 exports[`update summary: five scenarios a: all OK, Guard off (snapshot) 1`] = `
@@ -112,4 +138,34 @@ exports[`update summary: five scenarios e: package install failed (snapshot) 1`]
   ✓ Skill          updated
   ○ Guard          off (the default)
                    Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios f: plugin behind, Guard off (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 1 thing to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ! OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
+                   OpenClaw doesn't have this update's fixes yet.
+                   Fix: openclaw plugins install --force
+                     @drakon-systems/shieldcortex-realtime@latest
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios f: plugin behind, Guard on (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 2 things to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ! OpenClaw       plugin 5.7.0 is behind ShieldCortex 5.9.0
+                   OpenClaw doesn't have this update's fixes yet.
+                   Fix: openclaw plugins install --force
+                     @drakon-systems/shieldcortex-realtime@latest
+  ✓ Skill          updated
+  ! Guard          on, but OpenClaw's plugin is out of date
+                   Guard needs the plugin from this update.
+                   Fix: openclaw plugins install --force
+                     @drakon-systems/shieldcortex-realtime@latest"
 `;

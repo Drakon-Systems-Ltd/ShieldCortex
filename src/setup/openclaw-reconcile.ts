@@ -591,6 +591,8 @@ export interface ProtectionFacts {
   /** False only when the running build is proven older than expected. */
   versionOk?: boolean;
   pluginVersion: string | null;
+  /** The plugin version this CLI expects (its own version). */
+  expectedVersion?: string | null;
   gatewayReloaded: boolean;
   nextCommand?: string;
 }
@@ -606,6 +608,7 @@ export function protectionFactsFromReconcile(
     loaded: sc?.rosterState === 'loaded' ? 'yes' : sc?.rosterState === 'absent' ? 'no' : 'unknown',
     ...(sc && sc.versionProof === false ? { versionOk: false } : {}),
     pluginVersion: fromStep ?? (result.postVerdict ?? result.verdict).onDiskVersion ?? null,
+    expectedVersion: (result.postVerdict ?? result.verdict).expectedVersion ?? null,
     gatewayReloaded: result.stepResults.some((s) => s.kind === 'gateway-reload' && s.ok),
     ...(nextCommand ? { nextCommand } : {}),
   };
