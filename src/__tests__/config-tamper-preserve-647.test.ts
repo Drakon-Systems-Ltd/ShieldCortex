@@ -15,37 +15,28 @@
  *   - valid / self-heal / unsigned configs write exactly as before;
  *   - malformed / non-object / unreadable files are refused, never read as
  *     absent;
- *   - the only way past the gate is the previewed, hash-confirmed re-sign, which
- *     backs up first, audits, and will not loosen an Action Guard key that no
- *     verified lock covers.
+ *   - the refusal points at the runbook recovery (move config.json aside and
+ *     rebuild it through the setters, #501 §8.7), never at re-running a flag.
  *
  * Isolation: a per-test SHIELDCORTEX_CONFIG_DIR, SHIELDCORTEX_PROTECTED_ROOT and
- * OPENCLAW_HOME under os.tmpdir(); the iron-dome audit logger and the re-sign's
- * audit sink (the only routes from config.ts to SQLite, both dynamic imports;
- * the real sink is driven end to end in config-resign-audit-dist-647) and the
- * OpenClaw plugin guard sync are mocked. Nothing here reads or writes the real
+ * OPENCLAW_HOME under os.tmpdir(); the iron-dome audit logger (the only route
+ * from config.ts to SQLite, a dynamic import) and the OpenClaw plugin guard
+ * sync are mocked. Nothing here reads or writes the real
  * home directory, and nothing makes a network call.
  */
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { createHash, createHmac } from 'crypto';
+import { createHmac } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { PROTECTED_ROOT_ENV, describeProtectedAudit, type ProtectedAuditEvent } from '../defence/iron-dome/protected-root.js';
+import { PROTECTED_ROOT_ENV } from '../defence/iron-dome/protected-root.js';
 import { POLICY_LOCK_FILENAME, clearPolicyLockReportState } from '../defence/iron-dome/policy-lock.js';
 
 type AuditEntry = { action: string; allowed: boolean; reason: string };
 const auditSpy = jest.fn<(entry: AuditEntry) => void>();
 const guardSyncSpy = jest.fn(() => ({ status: 'skipped' as const, reason: 'no-entry' as const }));
 
-/** The re-sign's audit sink: records into the same spy, as the real one would into SQLite. */
-const sinkRecord = jest.fn<(event: ProtectedAuditEvent) => number>();
-const sinkClose = jest.fn<() => void>();
-const openSinkSpy = jest.fn<() => Promise<{ location: string; record: typeof sinkRecord; close: typeof sinkClose }>>();
-const SINK_LOCATION = '/test/memories.db';
-
 jest.unstable_mockModule('../defence/iron-dome/audit.js', () => ({ logIronDomeAudit: auditSpy }));
-jest.unstable_mockModule('../cloud/recovery-audit.js', () => ({ openRecoveryAuditSink: openSinkSpy }));
 jest.unstable_mockModule('../setup/openclaw-plugin-guard-sync.js', () => ({
   syncOpenClawPluginActionGuard: guardSyncSpy,
 }));
@@ -138,10 +129,6 @@ function auditRows(outcome: string): AuditEntry[] {
   return auditSpy.mock.calls.map((c) => c[0]).filter((e) => e.reason.startsWith(outcome));
 }
 
-function sha256(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex');
-}
-
 beforeEach(() => {
   configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-647-cfg-'));
   protectedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sc-647-root-'));
@@ -154,11 +141,6 @@ beforeEach(() => {
   process.env.OPENCLAW_HOME = openclawHome;
   auditSpy.mockClear();
   guardSyncSpy.mockClear();
-  sinkRecord.mockReset();
-  sinkRecord.mockImplementation((event) => { auditSpy(describeProtectedAudit(event)); return 7; });
-  sinkClose.mockReset();
-  openSinkSpy.mockReset();
-  openSinkSpy.mockImplementation(async () => ({ location: SINK_LOCATION, record: sinkRecord, close: sinkClose }));
   errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
   jest.spyOn(console, 'log').mockImplementation(() => undefined);
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -215,7 +197,9 @@ describe('#647 explicit setters REFUSE on a tampered config and change nothing',
     try { invoke(config); } catch (err) { thrown = err; }
     expect(thrown).toBeInstanceOf(config.ConfigIntegrityRefusal);
     expect((thrown as Error).message).toMatch(/tampered/);
-    expect((thrown as Error).message).toMatch(/config --resign/);
+    expect((thrown as Error).message).toMatch(/moving config\.json aside/);
+    expect((thrown as Error).message).toMatch(/rebuilding it through the setters/);
+    expect((thrown as Error).message).toMatch(/2026-09-16-501-policy-lock\.md §8\.7/);
     // Never suggests the laundering path.
     expect((thrown as Error).message).not.toMatch(/re-run/i);
     expectUnchanged(before);
@@ -449,189 +433,5 @@ describe('#647 the policy lock still refuses first', () => {
     await flushAudit();
     expect(auditRows('policy_refused').length).toBeGreaterThan(0);
     expectUnchanged(before);
-  });
-});
-
-describe('#647 deliberate re-sign: preview, exact-hash confirmation, backup, audit', () => {
-  /** A tamper that only touches keys the Action Guard floor does not hold. */
-  async function benignTamper(): Promise<{ config: ConfigModule; before: Snapshot }> {
-    const seed = await freshConfig();
-    seed.setCloudConfig({ cloudApiKey: SENTINEL });
-    seed.setActionGuardCoreConfig({ enabled: true, enforce: true });
-    seed.setDefenceMode('strict');
-    const onDisk = readOnDisk();
-    onDisk.proactiveRecall = true;
-    onDisk.defenceMode = 'balanced';
-    fs.writeFileSync(configFile(), JSON.stringify(onDisk, null, 2) + '\n');
-    const before = freeze();
-    auditSpy.mockClear();
-    guardSyncSpy.mockClear();
-    return { config: await freshConfig(), before };
-  }
-
-  it('the preview writes nothing, prints the FULL sha256 of the exact bytes, and names keys without values', async () => {
-    const { config, before } = await tamperedFixture();
-    const preview = config.previewConfigResign();
-    expect(preview.verdict).toBe('tampered');
-    expect(preview.sha256).toBe(sha256(before.bytes));
-    expect(preview.sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(preview.loosenedKeys).toEqual(expect.arrayContaining([
-      'actionGuard.autoApprove', 'actionGuard.reviewedScripts', 'actionGuard.readinessGate', 'defenceMode',
-    ]));
-    expect(JSON.stringify(preview)).not.toContain(SENTINEL);
-    expectUnchanged(before);
-    await flushAudit();
-    expect(auditSpy).not.toHaveBeenCalled();
-  });
-
-  it('without a verified lock, a re-sign that would make hand-edited Action Guard values effective is REFUSED', async () => {
-    const { config, before } = await tamperedFixture();
-    const preview = config.previewConfigResign();
-    expect(preview.unauthorisedKeys).toEqual(expect.arrayContaining(['actionGuard.autoApprove', 'actionGuard.reviewedScripts']));
-    expect(preview.unauthorisedKeys).not.toContain('defenceMode');
-    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/no verified policy lock covers/);
-    expectUnchanged(before);
-    await flushAudit();
-    expect(auditRows('config_resigned')).toHaveLength(0);
-    // A refused re-sign never opens the audit database.
-    expect(openSinkSpy).not.toHaveBeenCalled();
-  });
-
-  it('a prefix, a mistyped hash, or bytes changed after the preview are refused and nothing is written', async () => {
-    const { config, before } = await benignTamper();
-    const preview = config.previewConfigResign();
-    await expect(config.resignTamperedConfig(preview.sha256!.slice(0, 12))).rejects.toThrow(/full 64-character/);
-    await expect(config.resignTamperedConfig('0'.repeat(64))).rejects.toThrow(/changed after the preview|mistyped/);
-    expectUnchanged(before);
-
-    const edited = readOnDisk();
-    edited.proactiveRecall = false;
-    fs.writeFileSync(configFile(), JSON.stringify(edited, null, 2) + '\n');
-    const changed = snapshot();
-    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/changed after the preview/);
-    expectUnchanged(changed);
-    await flushAudit();
-    expect(auditRows('config_resigned')).toHaveLength(0);
-    expect(openSinkSpy).not.toHaveBeenCalled();
-  });
-
-  it('a config that is not tampered is not re-signed', async () => {
-    const config = await freshConfig();
-    config.setDefenceMode('balanced');
-    const bytes = fs.readFileSync(configFile());
-    await expect(config.resignTamperedConfig(sha256(bytes))).rejects.toThrow(/not tampered/);
-    expect(fs.readFileSync(configFile()).equals(bytes)).toBe(true);
-  });
-
-  it('the confirmed re-sign backs up the reviewed bytes (0600), signs exactly them, reads valid, and audits config_resigned', async () => {
-    const { config, before } = await benignTamper();
-    const preview = config.previewConfigResign();
-    expect(preview.unauthorisedKeys).toEqual([]);
-    expect(preview.lockRefusal).toBeNull();
-    expect(preview.loosenedKeys).toEqual(['defenceMode']);
-
-    const result = await config.resignTamperedConfig(preview.sha256!, { now: new Date('2026-10-09T12:00:00.000Z') });
-    expect(result.audit).toEqual({ recorded: true, rowId: 7, location: SINK_LOCATION });
-    expect(openSinkSpy).toHaveBeenCalledTimes(1);
-    expect(sinkClose).toHaveBeenCalledTimes(1);
-    expect(result.previousVerdict).toBe('tampered');
-    expect(result.previousSha256).toBe(sha256(before.bytes));
-    expect(result.backupPath).toBe(`${configFile()}.bak-resign-2026-10-09T12-00-00-000Z`);
-    expect(fs.readFileSync(result.backupPath).equals(before.bytes)).toBe(true);
-    if (process.platform !== 'win32') expect(fs.statSync(result.backupPath).mode & 0o777).toBe(0o600);
-    expect(result.newSha256).toBe(sha256(fs.readFileSync(configFile())));
-
-    const fresh = await freshConfig();
-    expect(fresh.inspectConfigIntegrity().verdict).toBe('valid');
-    expect(fresh.getDefenceMode()).toBe('balanced'); // the file's value, no longer forced strict
-    expect(fresh.isProactiveRecallEnabled()).toBe(true);
-    expect(fresh.isConfigTampered()).toBe(false);
-    expect(fresh.getCloudConfig().cloudApiKey).toBe(SENTINEL);
-
-    await flushAudit();
-    const rows = auditRows('config_resigned');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].action).toBe('policy-lock');
-    expect(rows[0].allowed).toBe(true);
-    expect(rows[0].reason).toContain('previous verdict tampered');
-    expect(rows[0].reason).toContain(result.previousSha256);
-    expect(rows[0].reason).toContain(result.newSha256);
-    expect(rows[0].reason).toContain(result.backupPath);
-    expect(rows[0].reason).toContain('defenceMode');
-    expect(rows[0].reason).not.toContain(SENTINEL);
-    expect(guardSyncSpy).not.toHaveBeenCalled();
-  });
-
-  it('a second confirm of the same hash is refused (the file is valid now) and the backup is never overwritten', async () => {
-    const { config } = await benignTamper();
-    const preview = config.previewConfigResign();
-    const when = new Date('2026-10-09T12:00:00.000Z');
-    const first = await config.resignTamperedConfig(preview.sha256!, { now: when });
-    const backup = fs.readFileSync(first.backupPath);
-    await expect(config.resignTamperedConfig(preview.sha256!, { now: when })).rejects.toThrow(/not tampered/);
-    expect(fs.readFileSync(first.backupPath).equals(backup)).toBe(true);
-  });
-
-  it('under an unverifiable lock, the re-sign is refused by the lock and audited as policy_refused', async () => {
-    const { before } = await benignTamper();
-    fs.writeFileSync(path.join(protectedRoot, POLICY_LOCK_FILENAME), JSON.stringify({ actionGuard: { enabled: true } }));
-    const config = await freshConfig();
-    const preview = config.previewConfigResign();
-    // The preview already says so, without auditing anything itself.
-    expect(preview.lockRefusal).toMatch(/Refusing to loosen `defenceMode`/);
-    let thrown: unknown;
-    try { await config.resignTamperedConfig(preview.sha256!); } catch (err) { thrown = err; }
-    expect((thrown as Error).name).toBe('PolicyLockRefusal');
-    expectUnchanged(before);
-    await flushAudit();
-    expect(auditRows('policy_refused').length).toBeGreaterThan(0);
-    expect(auditRows('config_resigned')).toHaveLength(0);
-  });
-
-  it('an audit log that cannot be opened REFUSES the re-sign: no backup, no write, the file stays tampered', async () => {
-    const { config, before } = await benignTamper();
-    const preview = config.previewConfigResign();
-    openSinkSpy.mockImplementationOnce(async () => { throw new Error('unable to open database file'); });
-    await expect(config.resignTamperedConfig(preview.sha256!))
-      .rejects.toThrow(/audit log that must record a re-sign could not be opened \(unable to open database file\).*Nothing was written/s);
-    expectUnchanged(before);
-    const fresh = await freshConfig();
-    expect(fresh.inspectConfigIntegrity().verdict).toBe('tampered');
-    expect(auditRows('config_resigned')).toHaveLength(0);
-  });
-
-  it('bytes that change WHILE the audit log opens are refused, and the sink is closed', async () => {
-    const { config } = await benignTamper();
-    const preview = config.previewConfigResign();
-    let changed: Snapshot | undefined;
-    openSinkSpy.mockImplementationOnce(async () => {
-      const edited = readOnDisk();
-      edited.proactiveRecall = false;
-      fs.writeFileSync(configFile(), JSON.stringify(edited, null, 2) + '\n');
-      changed = snapshot();
-      return { location: SINK_LOCATION, record: sinkRecord, close: sinkClose };
-    });
-    await expect(config.resignTamperedConfig(preview.sha256!)).rejects.toThrow(/changed after the preview/);
-    expectUnchanged(changed!);
-    expect(sinkRecord).not.toHaveBeenCalled();
-    expect(sinkClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('a row that fails to write AFTER the re-sign landed is reported as NOT recorded, never as recorded', async () => {
-    const { config, before } = await benignTamper();
-    const preview = config.previewConfigResign();
-    sinkRecord.mockImplementationOnce(() => { throw new Error(`the audit row could not be written to ${SINK_LOCATION}`); });
-    const result = await config.resignTamperedConfig(preview.sha256!, { now: new Date('2026-10-09T13:00:00.000Z') });
-    expect(result.audit).toEqual({
-      recorded: false,
-      location: SINK_LOCATION,
-      error: `the audit row could not be written to ${SINK_LOCATION}`,
-    });
-    // The partial state is real and stated: the re-sign is in force, and the
-    // reviewed bytes are kept as the evidence.
-    const fresh = await freshConfig();
-    expect(fresh.inspectConfigIntegrity().verdict).toBe('valid');
-    expect(fs.readFileSync(result.backupPath).equals(before.bytes)).toBe(true);
-    expect(sinkClose).toHaveBeenCalledTimes(1);
   });
 });
