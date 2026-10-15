@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
-- **`service install` / `service status` exit codes (#768).** `service install` now exits non-zero with guidance when the service cannot be enabled (for example no systemd user services), and `service status` exits non-zero when the service is not installed, not enabled or cannot be queried.
+- **`service install` / `service status` exit codes (#768).** `service install` now exits non-zero with guidance when the service cannot be enabled (for example no systemd user services), and `service status` exits non-zero when the service is not installed, not enabled or loaded, not running, or cannot be queried. On Linux an `enabled-runtime` unit counts as enabled (reported as runtime only); on macOS a `launchctl` that cannot be run reports `Loaded: unknown` with query guidance instead of claiming the job is absent.
 
 ## [5.10.0] - 2026-10-15
 

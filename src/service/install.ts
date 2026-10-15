@@ -176,6 +176,12 @@ function modeFlag(mode: ServiceMode | null): string {
  * host, as opposed to systemd rejecting the unit: the binary is missing (the
  * shell exits 127, or ENOENT when spawned directly) or there is no user bus
  * or no systemd init to talk to (#768, clean container / node:slim image).
+ *
+ * Activation runs with stdio inherited, so a "Failed to connect to bus" line
+ * normally reaches the terminal, not this error: the text branch below only
+ * fires when a caller captured output. A no-bus failure with nothing captured
+ * (status 1, message naming the command) takes the generic guidance instead,
+ * which still names the foreground fallback.
  */
 function isSystemdUnavailable(err: unknown): boolean {
   const e = (err ?? {}) as { code?: unknown; status?: unknown; message?: unknown; stdout?: unknown; stderr?: unknown };
@@ -185,6 +191,23 @@ function isSystemdUnavailable(err: unknown): boolean {
     .map((v) => String(v))
     .join('\n');
   return /systemctl: (?:command )?not found|Failed to connect to bus|System has not been booted with systemd/i.test(text);
+}
+
+/**
+ * True when a failed `launchctl print <domain>/<label>` is launchd's own
+ * "Could not find service ..." answer: the job is definitely not loaded.
+ * Anything else — launchctl missing (ENOENT, or shell status 127), no GUI
+ * domain, any other error — says nothing about whether the job is loaded,
+ * so status must report unknown rather than claim it is absent (#768).
+ */
+function isLaunchdServiceNotFound(err: unknown): boolean {
+  const e = (err ?? {}) as { code?: unknown; status?: unknown; message?: unknown; stdout?: unknown; stderr?: unknown };
+  if (e.code === 'ENOENT' || e.status === 127) return false;
+  const text = [e.stdout, e.stderr, e.message]
+    .filter((v): v is string | Buffer => typeof v === 'string' || Buffer.isBuffer(v))
+    .map((v) => String(v))
+    .join('\n');
+  return /Could not find service/i.test(text);
 }
 
 const MACOS_SERVICE_LABEL = 'com.shieldcortex.dashboard';
@@ -440,24 +463,40 @@ export async function serviceStatus(options: { exec?: ExecFn } = {}): Promise<vo
   // it. A stale-but-running unit stays activated (exit 0): the service is up,
   // and the Healthy/Repair lines already carry the advice.
   let activated = true;
-  // The query itself failed (no systemctl, no user bus): repair cannot help.
+  // The query itself failed (no systemctl or launchctl, no user bus or GUI
+  // domain): nothing is known about the job, so repair is not the advice.
   let unqueryable = false;
 
   switch (platform) {
     case 'macos': {
       const domain = `${macosGuiDomain()}/${MACOS_SERVICE_LABEL}`;
+      const query = `launchctl print ${domain}`;
       let out: string | null = null;
       let detail = '';
+      let notLoaded = false;
       try {
-        out = String(exec(`launchctl print ${domain} 2>&1`, { encoding: 'utf-8' }) ?? '');
+        out = String(exec(`${query} 2>&1`, { encoding: 'utf-8' }) ?? '');
       } catch (err: any) {
         // 2>&1 puts launchd's own line ("Could not find service ...") in stdout.
         detail = String(err?.stdout || err?.message || err).trim().split('\n')[0];
+        notLoaded = isLaunchdServiceNotFound(err);
+      }
+      if (out === null && !notLoaded) {
+        // The query never got an answer from launchd (no launchctl on PATH,
+        // no GUI domain, ...). Mirrors the Linux "unknown" branch: nothing is
+        // known about the job, so repair is not the advice.
+        console.log('Loaded:    unknown');
+        console.log('Running:   unknown');
+        console.log(`Error:     could not query launchd: ${query}: ${detail}`);
+        console.log(`Hint:      inspect with: ${query}; if launchd cannot be reached from here, run the same mode in the foreground: ${foregroundCommand(mode)}`);
+        activated = false;
+        unqueryable = true;
+        break;
       }
       if (out === null) {
         console.log('Loaded:    no');
         console.log('Running:   no');
-        console.log(`Error:     launchctl print ${domain}: ${detail}`);
+        console.log(`Error:     ${query}: ${detail}`);
         activated = false;
         break;
       }
@@ -482,9 +521,14 @@ export async function serviceStatus(options: { exec?: ExecFn } = {}): Promise<vo
         unqueryable = true;
         break;
       }
-      const isEnabled = enabled.state === 'enabled';
+      // systemctl(1) "is-enabled output": `enabled` and `enabled-runtime` are
+      // the enabled-via-symlinks states (the latter only until reboot). The
+      // other exit-0 words (static, indirect, generated, alias, linked, ...)
+      // do not mean "starts at login" and keep the no (<state>) reading.
+      const isEnabled = enabled.state === 'enabled' || enabled.state === 'enabled-runtime';
       const isActive = active.state === 'active';
-      console.log(`Enabled:   ${isEnabled ? 'yes' : `no (${enabled.state})`}`);
+      const enabledNote = enabled.state === 'enabled-runtime' ? ' (runtime only; not persistent across reboot)' : '';
+      console.log(`Enabled:   ${isEnabled ? `yes${enabledNote}` : `no (${enabled.state})`}`);
       console.log(`Running:   ${isActive ? 'yes' : `no (${active.state})`}`);
       if (!isEnabled || !isActive) activated = false;
       break;

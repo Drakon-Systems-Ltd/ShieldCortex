@@ -68,6 +68,36 @@ function queryShellNotFound(command: string): never {
   throw err;
 }
 
+/** A status query under `2>&1` when launchctl is missing: shell status 127, the shell's complaint in stdout. */
+function launchctlShellNotFound(command: string): never {
+  const err = new Error(`Command failed: ${command}`) as ExecError;
+  err.status = 127;
+  err.stdout = '/bin/sh: launchctl: command not found\n';
+  throw err;
+}
+
+/** launchd's own answer when the job is not loaded: `launchctl print` exits 113 and names the label. */
+function launchdServiceNotFound(command: string): never {
+  const err = new Error(`Command failed: ${command}`) as ExecError;
+  err.status = 113;
+  err.stdout = 'Could not find service "com.shieldcortex.dashboard" in domain for port\n';
+  throw err;
+}
+
+/**
+ * What execSync throws under `stdio: 'inherit'` when systemctl ran but could
+ * not reach a user bus (clean container, no `systemd --user`): status 1 and
+ * nothing captured — the "Failed to connect to bus" line went straight to the
+ * terminal. Only the message, which names the failed command, survives.
+ */
+function activationNoBus(command: string): never {
+  const err = new Error(`Command failed: ${command}`) as ExecError;
+  err.status = 1;
+  err.stdout = null;
+  err.stderr = null;
+  throw err;
+}
+
 /** `systemctl is-enabled|is-active` reporting a non-success state word with a non-zero exit. */
 function unitState(word: string, status: number) {
   return (command: string): never => {
@@ -195,6 +225,23 @@ describe('#768 service exit codes', () => {
       expect(err).toContain('shieldcortex worker');
     });
 
+    it('exits 1 with the generic foreground guidance when systemctl runs but has no user bus (nothing captured)', async () => {
+      const { calls, exec } = scriptedExec([{ pattern: /^systemctl /, run: activationNoBus }]);
+
+      await installService({ mode: 'worker', exec });
+
+      expect(process.exitCode).toBe(1);
+      const err = stderr.join('\n');
+      expect(err).toContain('Failed to enable service: Command failed: systemctl --user daemon-reload');
+      // Nothing was captured, so the no-systemd classifier cannot see the bus
+      // error; the generic branch still says where the unit is and how to
+      // run the same mode without systemd.
+      expect(err).not.toMatch(/not available on this host/);
+      expect(err).toContain(`The unit file stays at ${linuxUnit()}. Inspect with: systemctl --user status shieldcortex-dashboard.service`);
+      expect(err).toContain('If this host has no systemd user session, run the same mode in the foreground instead: shieldcortex worker');
+      expect(calls).toEqual(['systemctl --user daemon-reload']);
+    });
+
     it('names the foreground command for the mode that was installed', async () => {
       const { exec } = scriptedExec([{ pattern: /^systemctl /, run: shellNotFound }]);
 
@@ -299,6 +346,42 @@ describe('#768 service exit codes', () => {
       expect(out).toContain('Running:   yes');
     });
 
+    it('keeps exit 0 when the unit is enabled-runtime (until reboot) and active', async () => {
+      await installHealthyLinuxUnit();
+      const { exec } = scriptedExec([
+        { pattern: /is-enabled/, run: () => 'enabled-runtime\n' },
+        { pattern: /is-active/, run: () => 'active\n' },
+      ]);
+
+      await serviceStatus({ exec });
+
+      expect(process.exitCode).toBe(previousExitCode);
+      expect(process.exitCode).not.toBe(1);
+      const out = stdout.join('\n');
+      expect(out).toContain('Healthy:   yes');
+      expect(out).toMatch(/^Enabled:   yes \(runtime only/m);
+      expect(out).toContain('Running:   yes');
+      expect(out).not.toContain('Repair:');
+    });
+
+    it('still exits 1 for an exit-0 is-enabled answer that is not an enabled state (static)', async () => {
+      // systemctl(1) "is-enabled output": static, indirect, generated, alias,
+      // linked, ... also exit 0 but do not mean "starts at login".
+      await installHealthyLinuxUnit();
+      const { exec } = scriptedExec([
+        { pattern: /is-enabled/, run: () => 'static\n' },
+        { pattern: /is-active/, run: () => 'active\n' },
+      ]);
+
+      await serviceStatus({ exec });
+
+      expect(process.exitCode).toBe(1);
+      const out = stdout.join('\n');
+      expect(out).toContain('Enabled:   no (static)');
+      expect(out).toContain('Running:   yes');
+      expect(out).toContain('Repair:    shieldcortex service repair');
+    });
+
     it('keeps exit 0 for a stale-but-running unit and still prints the repair hint', async () => {
       fs.mkdirSync(path.dirname(linuxUnit()), { recursive: true });
       fs.writeFileSync(linuxUnit(), [
@@ -354,15 +437,53 @@ describe('#768 service exit codes', () => {
   describe('serviceStatus on macOS', () => {
     beforeEach(() => setPlatform('darwin'));
 
-    it('exits 1 when the plist exists but launchctl print fails (not loaded)', async () => {
+    it('exits 1 with the repair hint when launchd answers that the job is not loaded', async () => {
       fs.mkdirSync(path.dirname(macPlist()), { recursive: true });
       fs.writeFileSync(macPlist(), '<plist></plist>');
-      const { exec } = scriptedExec([{ pattern: /launchctl print /, run: mockFailure }]);
+      const { exec } = scriptedExec([{ pattern: /launchctl print /, run: launchdServiceNotFound }]);
 
       await serviceStatus({ exec });
 
       expect(process.exitCode).toBe(1);
-      expect(stdout.join('\n')).toContain('Running:   no');
+      const out = stdout.join('\n');
+      expect(out).toContain('Loaded:    no');
+      expect(out).toContain('Running:   no');
+      expect(out).toContain('Error:     launchctl print gui/');
+      expect(out).toContain('Could not find service "com.shieldcortex.dashboard"');
+      expect(out).toContain('Repair:    shieldcortex service repair');
+    });
+
+    it('exits 1 with Loaded/Running unknown and no repair hint when launchctl itself cannot be run (sh: command not found)', async () => {
+      fs.mkdirSync(path.dirname(macPlist()), { recursive: true });
+      fs.writeFileSync(macPlist(), '<plist></plist>');
+      const { exec } = scriptedExec([{ pattern: /launchctl print /, run: launchctlShellNotFound }]);
+
+      await serviceStatus({ exec });
+
+      expect(process.exitCode).toBe(1);
+      const out = stdout.join('\n');
+      expect(out).toContain('Loaded:    unknown');
+      expect(out).toContain('Running:   unknown');
+      expect(out).toMatch(/^Error:     could not query launchd: launchctl print gui\/\d+\/com\.shieldcortex\.dashboard: \/bin\/sh: launchctl: command not found$/m);
+      // Query guidance, then the foreground fallback for the plist's mode.
+      expect(out).toMatch(/^Hint:      .*launchctl print gui\/\d+\/com\.shieldcortex\.dashboard.*shieldcortex dashboard$/m);
+      expect(out).not.toContain('Loaded:    no');
+      expect(out).not.toContain('Repair:');
+    });
+
+    it('exits 1 with Loaded/Running unknown when the launchctl spawn fails with ENOENT', async () => {
+      fs.mkdirSync(path.dirname(macPlist()), { recursive: true });
+      fs.writeFileSync(macPlist(), '<plist></plist>');
+      const { exec } = scriptedExec([{ pattern: /launchctl print /, run: spawnEnoent }]);
+
+      await serviceStatus({ exec });
+
+      expect(process.exitCode).toBe(1);
+      const out = stdout.join('\n');
+      expect(out).toContain('Loaded:    unknown');
+      expect(out).toContain('Running:   unknown');
+      expect(out).toContain('spawnSync launchctl ENOENT');
+      expect(out).not.toContain('Repair:');
     });
 
     it('keeps exit 0 when the agent is loaded and running', async () => {
@@ -396,14 +517,57 @@ describe('#768 service exit codes', () => {
       expect(usage).toHaveLength(2);
     });
 
-    it('status dispatch carries the exit code through the injected exec', async () => {
+    it('status dispatch exits 1 when no unit is installed, without consulting the executor', async () => {
       setPlatform('linux');
-      const { exec } = scriptedExec();
+      const { calls, exec } = scriptedExec();
 
       await handleServiceCommand('status', [], { exec });
 
       expect(process.exitCode).toBe(1);
       expect(stdout.join('\n')).toContain('Installed: no');
+      expect(calls).toEqual([]);
+    });
+
+    const statusQueries = [
+      'systemctl --user is-enabled shieldcortex-dashboard.service 2>&1',
+      'systemctl --user is-active shieldcortex-dashboard.service 2>&1',
+    ];
+
+    it('status dispatch runs the queries through the injected exec and carries a failing exit code', async () => {
+      setPlatform('linux');
+      await installHealthyLinuxUnit();
+      const { calls, exec } = scriptedExec([
+        { pattern: /is-enabled/, run: unitState('disabled', 1) },
+        { pattern: /is-active/, run: unitState('inactive', 3) },
+      ]);
+
+      await handleServiceCommand('status', [], { exec });
+
+      // Both queries went through the stub — nothing real ran — and the
+      // verdict they produced is what the process reports.
+      expect(calls).toEqual(statusQueries);
+      expect(process.exitCode).toBe(1);
+      const out = stdout.join('\n');
+      expect(out).toContain('Enabled:   no (disabled)');
+      expect(out).toContain('Running:   no (inactive)');
+    });
+
+    it('status dispatch runs the queries through the injected exec and keeps exit 0 when healthy', async () => {
+      setPlatform('linux');
+      await installHealthyLinuxUnit();
+      const { calls, exec } = scriptedExec([
+        { pattern: /is-enabled/, run: () => 'enabled\n' },
+        { pattern: /is-active/, run: () => 'active\n' },
+      ]);
+
+      await handleServiceCommand('status', [], { exec });
+
+      expect(calls).toEqual(statusQueries);
+      expect(process.exitCode).toBe(previousExitCode);
+      expect(process.exitCode).not.toBe(1);
+      const out = stdout.join('\n');
+      expect(out).toContain('Enabled:   yes');
+      expect(out).toContain('Running:   yes');
     });
 
     it('repair reuses install and exits 1 when the host has no systemctl', async () => {
