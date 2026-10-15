@@ -17,6 +17,7 @@ import { ensureNativeBinding } from '../setup/native-binding.js';
 import { secureStatePermissions } from '../setup/state-permissions.js';
 import { getConfigDir } from '../cloud/config.js';
 import { helpGate } from './help-gate.js';
+import { sanitiseDisplayField } from './term-ui.js';
 import {
   resolveConversationAccessConsent,
   ALLOW_CONVERSATION_ACCESS_FLAG,
@@ -96,6 +97,38 @@ export async function runRepair(
   await (deps.run ?? repairInstall)(parseRepairOptions(args, deps.env ?? process.env));
 }
 
+/**
+ * The detail block under a failed engine check: first error line, the build
+ * tail and the recommended recovery. Every line is host-derived (install
+ * directory, compiler output, error text), so each one goes through the
+ * display sanitiser before it reaches the terminal (#788). Ordinary text is
+ * unchanged.
+ */
+export function formatEngineFailureDetail(
+  r: { error?: string; rebuildOutput?: string; remediation?: string },
+  paint: (code: string, s: string) => string = c,
+): string {
+  let out = '';
+  if (r.error) out += `     ${paint('90', sanitiseDisplayField(r.error.split('\n')[0]))}\n`;
+
+  // Surface the REAL build error when a source-only repair was attempted.
+  // Packaged-prebuild / Node-API failures deliberately perform no rebuild,
+  // because a source build cannot override that prebuild in this release.
+  const buildTail = (r.rebuildOutput ?? '').trim();
+  if (buildTail) {
+    const lines = buildTail.split('\n').slice(-12);
+    out += `\n  ${paint('90', 'Build output (last lines):')}\n`;
+    for (const line of lines) out += `     ${paint('90', sanitiseDisplayField(line))}\n`;
+  }
+
+  out += `\n  ${paint('1', 'Recommended recovery:')}\n`;
+  for (const line of (r.remediation ?? '').split('\n')) {
+    out += `     ${paint('33', sanitiseDisplayField(line))}\n`;
+  }
+  out += '\n';
+  return out;
+}
+
 async function repairInstall(options: RepairOptions): Promise<void> {
   process.stdout.write(`\n  ${c('35', '◆')} ${c('1', 'ShieldCortex repair')}\n\n`);
   process.stdout.write(`  ${c('90', 'Checking the native database engine (better-sqlite3)…')}\n`);
@@ -114,23 +147,7 @@ async function repairInstall(options: RepairOptions): Promise<void> {
       ? 'Database engine: still cannot load after a rebuild'
       : 'Database engine: packaged binding cannot load on this Node/platform';
     process.stdout.write(`  ${c('31', '✗')}  ${failure}\n`);
-    if (r.error) process.stdout.write(`     ${c('90', r.error.split('\n')[0])}\n`);
-
-    // Surface the REAL build error when a source-only repair was attempted.
-    // Packaged-prebuild / Node-API failures deliberately perform no rebuild,
-    // because a source build cannot override that prebuild in this release.
-    const buildTail = (r.rebuildOutput ?? '').trim();
-    if (buildTail) {
-      const lines = buildTail.split('\n').slice(-12);
-      process.stdout.write(`\n  ${c('90', 'Build output (last lines):')}\n`);
-      for (const line of lines) process.stdout.write(`     ${c('90', line)}\n`);
-    }
-
-    process.stdout.write(`\n  ${c('1', 'Recommended recovery:')}\n`);
-    for (const line of (r.remediation ?? '').split('\n')) {
-      process.stdout.write(`     ${c('33', line)}\n`);
-    }
-    process.stdout.write('\n');
+    process.stdout.write(formatEngineFailureDetail(r, c));
     process.exitCode = 1;
     return; // A broken engine blocks the reconciler (it needs to read the index).
   }
