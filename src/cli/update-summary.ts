@@ -177,9 +177,25 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
   // off it used to collapse into a green "installed" row (PR #773 review).
   const pluginBehind = pluginInstalled && p.versionOk === false;
   const pluginFixCommand = p.nextCommand ?? 'shieldcortex repair';
+  // The plugin check proved the running gateway has no ShieldCortex plugin.
+  // The one red OpenClaw case; it wins over every other OpenClaw row below
+  // (PR #773 follow-up: a plugin-step warning used to hide it as yellow).
+  const pluginAbsent = p.status === 'failed';
+  const pluginStepFailed = input.plugin.status === 'warn' || input.plugin.status === 'failed';
   if (pluginInstalled) {
     const reloaded = p.gatewayReloaded ? ', gateway reloaded' : '';
-    if (input.plugin.status === 'warn' || input.plugin.status === 'failed') {
+    if (pluginAbsent) {
+      rows.push({
+        label: 'OpenClaw',
+        mark: 'fail',
+        // Keep the plugin step's own problem inside the red row.
+        text: (pluginStepFailed ? 'plugin couldn\'t be updated, and ' : '')
+          + 'the gateway started without the ShieldCortex plugin',
+        why: 'Memory protection is not running in OpenClaw.',
+        command: pluginFixCommand,
+        commandLabel: 'Fix',
+      });
+    } else if (pluginStepFailed) {
       rows.push({
         label: 'OpenClaw',
         mark: 'check',
@@ -192,20 +208,11 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       const expected = sanitiseDisplayField(p.expectedVersion || input.toVersion);
       rows.push({
         label: 'OpenClaw',
-        // Yellow: an update to run, not a broken host. Red stays for the one
-        // case the plugin check calls unprotected (status 'failed').
-        mark: p.status === 'failed' ? 'fail' : 'check',
+        // Yellow: an update to run, not a broken host. Red is the absent
+        // plugin, handled first.
+        mark: 'check',
         text: 'plugin ' + (pv ? pv + ' ' : '') + 'is behind ShieldCortex ' + expected,
         why: 'OpenClaw doesn\'t have this update\'s fixes yet.',
-        command: pluginFixCommand,
-        commandLabel: 'Fix',
-      });
-    } else if (p.status === 'failed') {
-      rows.push({
-        label: 'OpenClaw',
-        mark: 'fail',
-        text: 'the gateway started without the ShieldCortex plugin',
-        why: 'Memory protection is not running in OpenClaw.',
         command: pluginFixCommand,
         commandLabel: 'Fix',
       });
@@ -282,6 +289,17 @@ export function buildUpdateSummary(input: UpdateSummaryInput): UpdateSummary {
       text: 'off (the default)',
       command: GUARD_ON_COMMAND,
       commandLabel: 'Turn on',
+    });
+  } else if (pluginAbsent) {
+    // Guard is on, but the gateway it relies on has no plugin. Red, like the
+    // OpenClaw row that names the cause; never a tick.
+    rows.push({
+      label: 'Guard',
+      mark: 'fail',
+      text: 'on, but OpenClaw isn\'t running the plugin',
+      why: 'Risky tool calls in OpenClaw are not being stopped.',
+      command: pluginFixCommand,
+      commandLabel: 'Fix',
     });
   } else if (pluginBehind) {
     // The OpenClaw row names the cause; this row says what it means for Guard.
