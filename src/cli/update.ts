@@ -45,6 +45,14 @@ import type { HermesRefreshResult as HermesRefreshShape } from '../setup/hermes-
 import { isPackagedPrebuildLoadError } from '../database/native-load-classify.js';
 import { helpGate } from './help-gate.js';
 import {
+  buildUpdateSummary,
+  renderUpdateSummary,
+  crossesGuardDefaultOff,
+  renderGuardDefaultOffNotice,
+  type UpdateSummaryInput,
+} from './update-summary.js';
+import type { ProtectionFacts } from '../setup/openclaw-reconcile.js';
+import {
   resolveConversationAccessConsent,
   ALLOW_CONVERSATION_ACCESS_FLAG,
 } from '../setup/conversation-access-consent.js';
@@ -102,6 +110,10 @@ interface StepResult {
    * instead of closing the run on a bare "✓ done".
    */
   rerun?: string;
+  /** Machine-readable cause, for plain wording on the closing screen only. */
+  reason?: string;
+  /** Plugin-check facts for the closing screen (protection step only). */
+  facts?: ProtectionFacts;
 }
 
 /** Default budget for each OpenClaw install child (#604). 120 s was measured
@@ -1160,7 +1172,7 @@ export async function stepOpenClawHook(
  * runs plugin discovery once at start-up, so the step says so.
  */
 export async function stepHermesPlugin(
-  deps: { refresh?: (home: string) => HermesRefreshShape; home?: string } = {},
+  deps: { refresh?: (home: string) => HermesRefreshShape; home?: string; verbose?: boolean } = {},
 ): Promise<StepResult> {
   return await step('Hermes plugin', async () => {
     // Hermes' own root resolution runs inside the probe; what this has to get
@@ -1179,7 +1191,20 @@ export async function stepHermesPlugin(
     // Every `warn` this refresher returns is work it was asked for and did not
     // finish: a busy root, a copy it could not publish, one that vanished, a
     // durability it could not confirm (r4 nit 1).
-    if (result.status === 'warn') return { status: 'warn' as const, summary, detail, unfinished: true };
+    if (result.status === 'warn') {
+      // Plain words for the one cause a user can act on directly. The
+      // probe's own wording prints under it only with --verbose.
+      if (result.reason === 'no-interpreter') {
+        return {
+          status: 'warn' as const,
+          summary: "couldn't find Hermes' Python, so Hermes wasn't updated",
+          detail: deps.verbose ? [summary, ...detail] : [],
+          unfinished: true,
+          reason: 'no-interpreter',
+        };
+      }
+      return { status: 'warn' as const, summary, detail, unfinished: true };
+    }
     return { status: 'ok' as const, summary, detail };
   });
 }
@@ -1233,7 +1258,6 @@ async function stepClaudeHooks(home: string): Promise<StepResult> {
 async function maybePrintDashboardHint(): Promise<void> {
   try {
     const { getDashboardHint } =
-      // @ts-expect-error — importing a .mjs hook util that has no .d.ts
       await import('../../scripts/lib/dashboard-hint.mjs');
     const hint = (await getDashboardHint()) as
       | {
@@ -1275,14 +1299,28 @@ function maybePrint411Notice(currentVersion: string, mainUpdated: boolean): void
   process.stdout.write(`     ${paint('gray', 'changelog: ')}${paint('cyan', 'https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md')}\n\n`);
 }
 
-function maybePrintActionGuardDefaultOffNotice(mainUpdated: boolean): void {
-  if (!mainUpdated) return;
-  process.stdout.write('\n');
-  process.stdout.write(`  ${paint('yellow', '!')}  ${paint('bold', 'Action Guard is now OFF by default')}\n`);
-  process.stdout.write('     False approval cards on ordinary OpenClaw exec calls were going nowhere.\n');
-  process.stdout.write('     Catastrophic tool gating is off until you turn Guard back on.\n');
-  process.stdout.write(`     ${paint('gray', 'Leave it off unless the review loop says yes.')}\n`);
-  process.stdout.write(`     ${paint('gray', 'status: ')}${paint('cyan', 'shieldcortex config --cloud-status')}\n\n`);
+/**
+ * The Action Guard default-off migration notice. Printed once: only on the
+ * update that crosses the release where the default changed (4.54.15), the
+ * same way the 4.11 notice gates on the version crossed. It used to print on
+ * every update, in internal words, pointing at the wrong status command.
+ */
+export function guardDefaultOffNoticeLines(
+  fromVersion: string,
+  mainUpdated: boolean,
+  opts: { color?: boolean; ascii?: boolean } = {},
+): string[] {
+  if (!mainUpdated) return [];
+  if (!crossesGuardDefaultOff(fromVersion, (a, b) => semver.compare(semver.coerce(a) ?? a, b))) return [];
+  const style = opts.color ? defaultColorStyle() : NO_STYLE;
+  return ['', ...renderGuardDefaultOffNotice({ style, ascii: opts.ascii }), ''];
+}
+
+function maybePrintActionGuardDefaultOffNotice(fromVersion: string, mainUpdated: boolean): void {
+  const color = supportsColor();
+  for (const line of guardDefaultOffNoticeLines(fromVersion, mainUpdated, { color, ascii: !color || !supportsUnicode() })) {
+    process.stdout.write(line + '\n');
+  }
 }
 
 // ── #171: the two install-path fixes update was missing ─────
@@ -1365,16 +1403,19 @@ export async function stepVerifyProtection(
       // here — that deep read was invisible to update's own argument parser.
       grantConversationAccess: options.allowConversationAccess ?? false,
     });
-    // Compact by default on update (mobile-first). Full forensic dump only with --verbose.
-    const compact = !options.verbose;
-    for (const line of formatReconcileReport(result, { compact })) {
-      process.stdout.write(`  ${line}\n`);
+    // The closing screen says what this found, in plain words. The forensic
+    // report (load-list state, probe results) prints only with --verbose.
+    if (options.verbose) {
+      for (const line of formatReconcileReport(result, { compact: false })) {
+        process.stdout.write(`  ${line}\n`);
+      }
     }
     const ledger = protectionLedgerFromReconcile(result);
     return {
       status: ledger.status === 'warn' ? 'warn' : ledger.status,
       summary: ledger.summary,
       detail: ledger.detail,
+      facts: ledger.facts,
     };
   } catch (err) {
     const msg = sanitiseForReport(err instanceof Error ? err.message : String(err), { home });
@@ -1540,7 +1581,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   // (#574, #576). Both refresh only what is already installed, and neither
   // restarts the host that loads it.
   const hookResult = await stepOpenClawHook();
-  const hermesResult = await stepHermesPlugin();
+  const hermesResult = await stepHermesPlugin({ verbose: options.verbose });
   await stepClaudeHooks(home);
   await stepStatePermissions();
 
@@ -1594,13 +1635,15 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
     const { maybeReviewAllowlistAfterUpdate } = await import('./allowlist-scan.js');
     await maybeReviewAllowlistAfterUpdate({
       log: (m: string) => process.stdout.write(`  ${paint('gray', m)}\n`),
+      updateFlow: true,
+      verbose: options.verbose,
     });
   } catch {
     /* update must not fail on allowlist scan */
   }
 
   maybePrint411Notice(fromVersion, mainUpdated);
-  maybePrintActionGuardDefaultOffNotice(mainUpdated);
+  maybePrintActionGuardDefaultOffNotice(fromVersion, mainUpdated);
   await maybePrintDashboardHint();
 
   try {
@@ -1618,7 +1661,15 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
     /* update must not fail on the host table */
   }
 
-  // Closing panel — last write (design lock v3).
+  // Guard switch as configured. Off is the default since 4.54.15, and an
+  // off-by-design Guard is neutral: a plugin-load check that could not
+  // confirm enforcement is not a warning when there is no Guard to enforce.
+  // A config that cannot be read is treated as ON (the stricter reading).
+  const guardOn = await readGuardOn();
+  const guardNeutral = !guardOn &&
+    (protection.status === 'unproven' || protection.status === 'warn' || protection.status === 'blocked');
+
+  // Closing panel — kept for --verbose (design lock v3 detail).
   const rows: UpdatePanelRow[] = [
     { label: 'package', status: npmStatus === 'failed' ? 'failed' : npmStatus === 'warn' ? 'warn' : 'ok' },
     { label: 'engine', status: engineResult.remediation ? 'warn' : 'ok' },
@@ -1663,9 +1714,10 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
     hookResult.status === 'warn' ||
     hermesResult.status === 'warn' ||
     Boolean(engineResult.remediation) ||
-    protection.status === 'unproven' ||
-    protection.status === 'warn' ||
-    protection.status === 'blocked';
+    (!guardNeutral && (
+      protection.status === 'unproven' ||
+      protection.status === 'warn' ||
+      protection.status === 'blocked'));
 
   const { exitCode, verdict } = updateVerdict({ failed, attention, unfinished });
   process.exitCode = exitCode;
@@ -1685,7 +1737,44 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   if (keyAttention) next.push('shieldcortex doctor --fix-project-keys');
   for (const u of unresolved) if (!next.includes(u.rerun)) next.push(u.rerun);
 
-  const style = supportsColor() ? defaultColorStyle() : NO_STYLE;
+  const color = supportsColor();
+  const ascii = !color || !supportsUnicode();
+  const style = color ? defaultColorStyle() : NO_STYLE;
+
+  const summaryInput: UpdateSummaryInput = {
+    fromVersion,
+    toVersion: latest.version || currentVersion,
+    packageState:
+      npmStatus === 'failed' ? 'failed' :
+      !latest.version ? 'unknown' :
+      mainUpdated ? 'updated' : 'current',
+    engine: {
+      ok: !engineResult.remediation,
+      packagedPrebuild: engineResult.packagedPrebuild,
+      remediation: engineResult.remediation,
+    },
+    plugin: { status: pluginResult.status, rerun: pluginResult.rerun },
+    skill: { status: skillResult.status, rerun: skillResult.rerun },
+    hook: { status: hookResult.status },
+    hermes: { status: hermesResult.status, reason: hermesResult.reason },
+    guardOn,
+    protection: {
+      status: protection.status,
+      loaded: protection.facts?.loaded,
+      versionOk: protection.facts?.versionOk,
+      pluginVersion: protection.facts?.pluginVersion ?? null,
+      expectedVersion: protection.facts?.expectedVersion ?? null,
+      gatewayReloaded: protection.facts?.gatewayReloaded,
+      nextCommand: protection.facts?.nextCommand ?? nextFromGuard[0] ?? (reexecFailed ? 'shieldcortex update' : undefined),
+    },
+    projectKeysAmbiguous: keyAttention,
+  };
+  const summary = buildUpdateSummary(summaryInput);
+  const screen = renderUpdateSummary(summary, summaryInput, { width: getWidth(), style, ascii });
+  process.stdout.write('\n');
+  for (const line of screen) process.stdout.write(`${line}\n`);
+  if (!options.verbose) return;
+
   const panel = renderUpdatePanel(
     {
       fromVersion,
@@ -1695,8 +1784,19 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
       details,
       next,
     },
-    { width: getWidth(), style, unicode: supportsUnicode() },
+    { width: getWidth(), style, unicode: !ascii },
   );
   process.stdout.write('\n');
+  process.stdout.write(`${paint('gray', 'Details (--verbose)')}\n`);
   for (const line of panel) process.stdout.write(`${line}\n`);
+}
+
+/** Action Guard switch as configured. Unreadable config reads as ON. */
+async function readGuardOn(): Promise<boolean> {
+  try {
+    const { getActionGuardCoreConfig } = await import('../cloud/config.js');
+    return getActionGuardCoreConfig().enabled;
+  } catch {
+    return true;
+  }
 }

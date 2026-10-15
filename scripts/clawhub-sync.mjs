@@ -10,8 +10,10 @@
 //
 // Exit codes (issue #200 — a check that cannot fail is a decoration):
 //   0  ClawHub serves this version
-//   2  version uploaded but not promoted (moderation queue) — no republish needed
+//   2  version uploaded but not promoted (moderation queue), or submitted and
+//      reported by the CLI as pending security scans — no republish needed
 //   1  version absent from ClawHub — the publish did not land
+//   3  ClawHub state could not be read — nothing proven either way
 //
 // Why --check is read-only: the old script published whenever it found drift, so
 // any "verify" loop could republish. A verification path must not mutate the
@@ -21,10 +23,10 @@
 // `clawhub login` was already run locally.
 
 import { readFileSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readLatestVersion, readVersionList, diagnose, describeState, exitCodeFor } from './lib/clawhub-state.mjs';
+import { readLatestVersion, readVersionList, reportsPendingSubmission, diagnose, describeState, exitCodeFor } from './lib/clawhub-state.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
@@ -56,6 +58,24 @@ const CLAWHUB_BIN = resolveClawhubBin();
 
 function clawhub(args, { capture = false } = {}) {
   return execFileSync(CLAWHUB_BIN, args, { stdio: capture ? 'pipe' : 'inherit', encoding: 'utf8' });
+}
+
+/**
+ * Run `clawhub publish`, echo its output, and return that output so the caller
+ * can read the submission result. Inherited stdio used to discard it — the line
+ * saying the upload was pending security scans never reached the verdict.
+ */
+function clawhubPublish(args) {
+  const res = spawnSync(CLAWHUB_BIN, args, { stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8' });
+  if (res.stdout) process.stdout.write(res.stdout);
+  if (res.stderr) process.stderr.write(res.stderr);
+  if (res.error || res.status !== 0) {
+    // Code/status only: the error object carries argv, which is not needed here.
+    const why = res.error ? res.error.code ?? 'spawn error' : `exit ${res.status ?? res.signal}`;
+    console.error(`[clawhub-sync] ❌ clawhub publish failed (${why}).`);
+    process.exit(1);
+  }
+  return `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
 }
 
 function clawhubCliVersion() {
@@ -98,14 +118,20 @@ if (/^0\.(?:[0-9]|1[0-9]|2[0-2])\./.test(cliVersion)) {
   );
 }
 
-let { latest, versions } = fetchState();
+let { latest, versions, readFailed } = fetchState();
+let submitted = false;
 console.log(`[clawhub-sync] ClawHub: '${latest || 'none'}'  package: '${version}'${CHECK_ONLY ? '  (read-only check)' : ''}`);
 
 // Publish only when asked to AND only when the version is genuinely missing.
 // A 'pending' version already exists server-side; republishing it just burns a
-// version number for an "already exists" error.
+// version number for an "already exists" error. An unreadable state proves
+// nothing is missing, so it does not publish either.
 if (!CHECK_ONLY) {
-  const state = diagnose({ latest, versions, target: version });
+  const state = diagnose({ latest, versions, readFailed, target: version });
+  if (state === 'unknown') {
+    console.error(`[clawhub-sync] ${describeState({ state, latest, target: version })}`);
+    process.exit(exitCodeFor(state));
+  }
   if (state === 'synced') {
     console.log(`[clawhub-sync] ✅ Already synced at ${version} — nothing to do.`);
     process.exit(0);
@@ -114,32 +140,36 @@ if (!CHECK_ONLY) {
     console.log(`[clawhub-sync] ${version} is already uploaded and awaiting promotion — not republishing.`);
   } else {
     console.log(`[clawhub-sync] Publishing skill to ClawHub @ ${version}…`);
-    clawhub([
+    const output = clawhubPublish([
       'publish', skillDir,
       '--slug', 'shieldcortex',
       '--name', 'ShieldCortex',
       '--version', version,
       '--changelog', `Sync from npm publish v${version}`,
     ]);
+    submitted = reportsPendingSubmission(output, version);
+    if (submitted) {
+      console.log(`[clawhub-sync] CLI reports ${version} submitted, pending security scans — not public until ClawHub serves it.`);
+    }
   }
 }
 
 // Verify — polling if asked. Exits as soon as ClawHub serves the version.
 const deadline = Date.now() + WAIT_MINUTES * 60_000;
 const startedAt = Date.now();
-let state = diagnose({ latest, versions, target: version });
+let state = diagnose({ latest, versions, readFailed, submitted, target: version });
 
 while (state !== 'synced' && Date.now() < deadline) {
   sleep(POLL_INTERVAL_MS);
-  ({ latest, versions } = fetchState());
-  state = diagnose({ latest, versions, target: version });
+  ({ latest, versions, readFailed } = fetchState());
+  state = diagnose({ latest, versions, readFailed, submitted, target: version });
   if (state !== 'synced') {
     const waitedMin = Math.round((Date.now() - startedAt) / 60_000);
     console.log(`[clawhub-sync] …still '${latest || 'none'}' (${state}) after ${waitedMin}m`);
   }
 }
 
-const message = describeState({ state, latest, target: version, waitedMs: Date.now() - startedAt });
+const message = describeState({ state, latest, target: version, waitedMs: Date.now() - startedAt, submitted });
 if (state === 'synced') {
   console.log(`[clawhub-sync] ${message}`);
 } else {

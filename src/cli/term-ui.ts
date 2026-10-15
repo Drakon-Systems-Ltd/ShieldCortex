@@ -293,56 +293,86 @@ export interface PinCardInput {
   previewTotalLines?: number;
 }
 
+/** Where a script was found, in words a person reads (no internal source ids). */
+export function sourceInWords(source: string): string {
+  const s = String(source || '');
+  if (s === 'hermes-cron') return "found in Hermes' scheduled jobs";
+  if (s === 'openclaw-cron' || s === 'openclaw-cron-db') return "found in OpenClaw's scheduled jobs";
+  if (s === 'glob') return 'found by your --glob pattern';
+  return 'found in ' + sanitiseDisplayField(s);
+}
+
+/** The keys line of the review card. Plain verbs: trust, not now, view, stop. */
+export const REVIEW_KEYS_LINE = '[y] trust  [n] not now  [v] view  [q] stop';
+
+/** The question the review card asks. */
+export const REVIEW_QUESTION = 'Trust this scheduled script? It runs as you, on a schedule.';
+
 export function renderPinCard(item: PinCardInput, opts: {
   width?: number;
   style?: TermStyle;
   unicode?: boolean;
+  /**
+   * Show the content hash and raw source ids. The standalone
+   * `shieldcortex allowlist scan` shows them; the review inside
+   * `shieldcortex update` does not (plain words only).
+   */
+  showHash?: boolean;
 } = {}): string[] {
   const width = getWidth({ width: opts.width });
   const style = opts.style ?? NO_STYLE;
   const path = sanitiseDisplayField(item.path);
   const base = basenameOf(path);
   const lines: string[] = [];
-  const head = `── ${item.index}/${item.total} · ${item.status === 'changed' ? 'CHANGED' : 'NEW'} · ${base}`;
+  const state = item.status === 'changed' ? 'changed since you trusted it' : 'new';
+  const head = 'Script ' + item.index + ' of ' + item.total + ' \u00b7 ' + state + ' \u00b7 ' + base;
   for (const l of wrapText(head, width, 0, 2)) {
-    lines.push(`${style.bold}${l}${style.reset}`);
+    lines.push(style.bold + l + style.reset);
   }
   // Full path, wrapped
-  for (const l of wrapText(path, width, 0, 2)) lines.push(l);
-  const sha = (item.sha256 ?? '').slice(0, 16);
-  if (sha) {
-    const shaLine = item.status === 'changed' && item.pinnedSha256
-      ? `sha   ${sha}…  was ${(item.pinnedSha256).slice(0, 16)}…`
-      : `sha   ${sha}…`;
-    lines.push(...wrapText(shaLine, width, 0, 6));
-  }
+  for (const l of wrapText(path, width, 2, 4)) lines.push(l);
   if (item.sources?.length) {
-    const src = `src   ${item.sources.map(shortSourceLabel).map(sanitiseDisplayField).join(' · ')}`;
-    lines.push(...wrapText(src, width, 0, 6));
+    const where = Array.from(new Set(item.sources.map(sourceInWords)));
+    lines.push(...wrapText(where.join('; '), width, 2, 4));
+  }
+  if (opts.showHash) {
+    const sha = (item.sha256 ?? '').slice(0, 16);
+    if (sha) {
+      const shaLine = item.status === 'changed' && item.pinnedSha256
+        ? 'sha   ' + sha + '\u2026  was ' + item.pinnedSha256.slice(0, 16) + '\u2026'
+        : 'sha   ' + sha + '\u2026';
+      lines.push(...wrapText(shaLine, width, 2, 8));
+    }
+    if (item.sources?.length) {
+      const src = 'src   ' + item.sources.map(shortSourceLabel).map(sanitiseDisplayField).join(' \u00b7 ');
+      lines.push(...wrapText(src, width, 2, 8));
+    }
   }
   if (item.networkHint) {
-    lines.push(...wrapText(`${style.yellow}[!]${style.reset} network calls likely (advisory)`, width, 0, 4));
+    lines.push(...wrapText(style.yellow + '!' + style.reset + ' This script seems to use the network.', width, 2, 4));
   }
   if (item.deniedNote) {
-    lines.push(...wrapText(`${style.yellow}[!]${style.reset} ${sanitiseDisplayField(item.deniedNote)}`, width, 0, 4));
+    lines.push(...wrapText(style.yellow + '!' + style.reset + ' ' + sanitiseDisplayField(item.deniedNote), width, 2, 4));
   }
   if (item.previewLines && item.previewLines.length > 0) {
     const total = item.previewTotalLines ?? item.previewLines.length;
     const page = item.previewPage ?? 1;
     const start = (page - 1) * item.previewLines.length + 1;
     const end = Math.min(total, start + item.previewLines.length - 1);
-    lines.push(`${style.dim}source lines ${start}–${end} of ${total}${style.reset}`);
+    lines.push(style.dim + 'source lines ' + start + '\u2013' + end + ' of ' + total + style.reset);
     for (const pl of item.previewLines) {
       const safe = sanitiseDisplayField(pl);
-      for (const wl of wrapText(`${style.dim}│${style.reset} ${safe}`, width, 0, 2)) lines.push(wl);
+      for (const wl of wrapText(style.dim + '\u2502' + style.reset + ' ' + safe, width, 0, 2)) lines.push(wl);
     }
   }
   lines.push('');
-  for (const l of wrapText('[y] pin  [n] skip  [v]iew  [q]uit', width, 0, 0)) {
-    lines.push(l.replace('[y]', `${style.bold}[y]${style.reset}`)
-      .replace('[n]', `${style.bold}[n]${style.reset}`)
-      .replace('[v]', `${style.bold}[v]${style.reset}`)
-      .replace('[q]', `${style.bold}[q]${style.reset}`));
+  lines.push(...wrapText(REVIEW_QUESTION, width, 0, 0));
+  const keyLines = REVIEW_KEYS_LINE.length <= width ? [REVIEW_KEYS_LINE] : wrapText(REVIEW_KEYS_LINE, width, 0, 0);
+  for (const l of keyLines) {
+    lines.push(l.replace('[y]', style.bold + '[y]' + style.reset)
+      .replace('[n]', style.bold + '[n]' + style.reset)
+      .replace('[v]', style.bold + '[v]' + style.reset)
+      .replace('[q]', style.bold + '[q]' + style.reset));
   }
   return lines;
 }

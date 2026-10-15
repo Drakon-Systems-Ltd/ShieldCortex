@@ -37,7 +37,7 @@ function seed(opts: { title: string; restricted?: boolean }): number {
   return m.id;
 }
 
-beforeEach(() => initDatabase(':memory:'));
+beforeEach(() => { initDatabase(':memory:'); });
 afterEach(() => closeDatabase());
 
 describe('get_memory read ACL', () => {
@@ -161,7 +161,7 @@ describe('end-to-end shipping path (resolveToolSource composed with the guard)',
     const id = seed({ title: 'e2e restricted', restricted: true });
     process.env.CLAUDE_CODE_ENTRYPOINT = 'subagent'; // env ceiling => agent-spawned (0.3)
     const source = resolveToolSource(undefined, { toolName: 'get_memory', project: PROJECT });
-    const res = executeGetMemory({ id, source });
+    const res = executeGetMemory({ id, source: source.source });
     expect(res.success).toBe(false);
   });
 
@@ -171,7 +171,7 @@ describe('end-to-end shipping path (resolveToolSource composed with the guard)',
     // Caller lies and claims user:direct (1.0) — resolveToolSource must clamp it
     // down to the env ceiling so the escalation doesn't grant RESTRICTED access.
     const source = resolveToolSource({ type: 'user', identifier: 'direct' }, { toolName: 'get_memory', project: PROJECT });
-    const res = executeGetMemory({ id, source });
+    const res = executeGetMemory({ id, source: source.source });
     expect(res.success).toBe(false);
   });
 });

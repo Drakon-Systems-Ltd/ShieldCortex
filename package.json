@@ -1,6 +1,6 @@
 {
   "name": "shieldcortex",
-  "version": "5.5.0",
+  "version": "5.10.0",
   "description": "Trustworthy memory and security for AI agents. Memory firewall for any host that writes through it; runtime tool gates on Claude Code, OpenClaw, and Hermes.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -51,6 +51,11 @@
       "require": "./scripts/lib/cjs-not-supported.cjs",
       "types": "./dist/environment/index.d.ts"
     },
+    "./toolsets": {
+      "import": "./dist/integrations/claude-toolsets.js",
+      "require": "./scripts/lib/cjs-not-supported.cjs",
+      "types": "./dist/integrations/claude-toolsets.d.ts"
+    },
     "./lib": {
       "import": "./dist/lib.js",
       "require": "./scripts/lib/cjs-not-supported.cjs",
@@ -61,6 +66,7 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
     "build:ts": "node -e \"fs.rmSync('dist', { recursive: true, force: true }); fs.rmSync('plugins/openclaw/dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && tsc -p tsconfig.openclaw-plugin.json && cp plugins/openclaw/openclaw.plugin.json plugins/openclaw/dist/ && cp src/database/schema.sql dist/database/",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "postbuild:ts": "node scripts/ensure-bin-executable.mjs",
     "bootstrap:dashboard": "node -e \"if (!require('fs').existsSync('dashboard/node_modules')) { process.exit(1); }\" || (cd dashboard && npm ci --no-audit --no-fund)",
     "build:dashboard": "npm run bootstrap:dashboard && cd dashboard && npm run build && (cp -r .next/static .next/standalone/dashboard/.next/ 2>/dev/null || true) && (cp -r public .next/standalone/dashboard/ 2>/dev/null || true) && cd .. && node scripts/prune-dashboard-standalone.mjs",
@@ -151,6 +157,7 @@
     "@huggingface/transformers": "^3.7.2"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "0.132.1",
     "@types/better-sqlite3": "^7.6.11",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
