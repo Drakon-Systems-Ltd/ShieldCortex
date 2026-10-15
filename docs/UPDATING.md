@@ -161,6 +161,8 @@ shieldcortex config --cloud-enable
 shieldcortex service install --headless   # always-on servers
 ```
 
+On a Linux host without systemd user services (no `systemctl`, or no user bus), `service install --headless` writes the unit but exits non-zero with `Failed to enable service`; run `shieldcortex worker` in the foreground there instead.
+
 <a id="recall-lanes"></a>
 
 ### Recall lanes and the PERSONAL tier
