@@ -229,7 +229,7 @@ For Claude Code PreToolUse, a hook load failure still blocks recognised catastro
 
 `shieldcortex doctor` prints the same host table — `memory + tool gate` or `memory only — not a gate` per host. It shows the live Guard posture for Claude Code and OpenClaw; for Hermes the host-table row only reports whether the plugin copy is present. Separate info-only runtime-posture rows (5.5+, see `shieldcortex policy-evidence`) report what each runtime's own self-report says, Hermes included. It will not print “protected” for a host that cannot deny.
 
-`setup` (alias `quickstart`) prints one host table and asks before wiring. Claude Code and OpenClaw get hooks that can **deny**. Hermes gets the plugin copy, which gates tool calls once you run `hermes plugins enable shieldcortex` with the local API up. Codex / Cursor / VS Code get an MCP memory server — a scanner the model may call, not a tool gate.
+Bare `setup` (alias `quickstart`) prints one host table and asks before wiring; `setup <host>` wires that host without asking. Claude Code and OpenClaw get hooks that can **deny**. Hermes gets the plugin copy, which gates tool calls once you run `hermes plugins enable shieldcortex` with the local API up. Codex / Cursor / VS Code get an MCP memory server — a scanner the model may call, not a tool gate.
 
 | Host | Memory scan | Tool gate |
 |---|---|---|

@@ -257,11 +257,12 @@ if (isGlobal && !isCI) {
   console.log('\x1b[36m╭───────────────────────────────────────────────────────╮\x1b[0m');
   console.log('\x1b[36m│\x1b[0m  \x1b[1mShieldCortex installed!\x1b[0m                              \x1b[36m│\x1b[0m');
   console.log('\x1b[36m│\x1b[0m                                                       \x1b[36m│\x1b[0m');
-  console.log('\x1b[36m│\x1b[0m  \x1b[1mNext step:\x1b[0m                                          \x1b[36m│\x1b[0m');
-  console.log('\x1b[36m│\x1b[0m  \x1b[33mshieldcortex setup\x1b[0m                                  \x1b[36m│\x1b[0m');
+  console.log('\x1b[36m│\x1b[0m  \x1b[1mNext step:\x1b[0m                                           \x1b[36m│\x1b[0m');
+  console.log('\x1b[36m│\x1b[0m  \x1b[33mshieldcortex setup\x1b[0m                                   \x1b[36m│\x1b[0m');
   console.log('\x1b[36m│\x1b[0m                                                       \x1b[36m│\x1b[0m');
-  console.log('\x1b[36m│\x1b[0m  Detects Claude, OpenClaw, Hermes, Codex, Cursor.    \x1b[36m│\x1b[0m');
-  console.log('\x1b[36m│\x1b[0m  Asks before wiring. Action Guard stays off.         \x1b[36m│\x1b[0m');
+  console.log('\x1b[36m│\x1b[0m  Detects Claude, OpenClaw, Hermes, Codex, Cursor.     \x1b[36m│\x1b[0m');
+  console.log('\x1b[36m│\x1b[0m  Asks before wiring each. Action Guard stays off.     \x1b[36m│\x1b[0m');
+  console.log('\x1b[36m│\x1b[0m  setup <host> wires that host without asking.         \x1b[36m│\x1b[0m');
   console.log('\x1b[36m╰───────────────────────────────────────────────────────╯\x1b[0m');
   console.log('');
   console.log('[shieldcortex] 5.0 requires Node 22.14+ or Node 24 (Node 20 is gone).');
