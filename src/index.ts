@@ -722,7 +722,8 @@ ${bold}COMMANDS${reset}
   ${cyan}iron-dome${reset} <action>    Manage behaviour protection layer
   ${cyan}audit${reset} [options]       Run a full security audit
   ${cyan}ledger${reset} verify [--json]  Check the chained audit ledger (read-only; exit 1 if inconsistent)
-  ${cyan}setup${reset} [target]        Start here: detects hosts, asks before wiring each
+  ${cyan}setup${reset} [target]        Start here: bare setup detects hosts, asks before wiring each
+                        setup <host> (e.g. setup claude) wires that host without asking
                         Targets: claude, openclaw, hermes, copilot, codex, security
                         Flags: --with-stop-hook (sampled per-turn extraction)
                                --with-session-end (extraction on session exit)
