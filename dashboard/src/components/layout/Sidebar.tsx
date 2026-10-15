@@ -8,6 +8,8 @@ import { useDashboardStore } from '@/lib/store';
 import { Logo } from '@/components/ds/Logo';
 import { useNeedsYou } from '@/hooks/useNeedsYou';
 import { needsYouBadge } from '@/lib/needs-you';
+import { useCloudStatus, type CloudConfig } from '@/hooks/useCloudStatus';
+import { queryStatus, type QueryStatus } from '@/lib/query-status';
 import { cn } from '@/lib/utils';
 
 /**
@@ -27,6 +29,8 @@ export function Sidebar() {
   const navItems = visibleNavItems();
   const activeHref = activeNavHref(pathname, navItems);
   const badge = needsYouBadge(useNeedsYou(projectFilter), projectFilter);
+  const cloud = useCloudStatus();
+  const dataNote = dataLocationNote(queryStatus(cloud), cloud.data);
 
   return (
     <nav
@@ -91,7 +95,7 @@ export function Sidebar() {
 
       <div className="border-t border-[var(--sc-border)] p-2">
         {!collapsed && (
-          <p className="px-3 pb-2 pt-1 text-xs text-[var(--sc-text-muted)]">Data stays on this computer</p>
+          <p className="px-3 pb-2 pt-1 text-xs text-[var(--sc-text-muted)]">{dataNote}</p>
         )}
         <button
           type="button"
@@ -108,4 +112,20 @@ export function Sidebar() {
       </div>
     </nav>
   );
+}
+
+/**
+ * Footer note on where memory data goes (#693). Cloud sync can upload
+ * metadata or full content, so there is no unconditional "stays on this
+ * computer" line: only a confirmed sync-off config says local, and even then
+ * it describes storage and sync, not every outbound path. Loading, failed or
+ * stale config claims nothing either way.
+ */
+export function dataLocationNote(status: QueryStatus, cloud: CloudConfig | undefined): string {
+  if (status === 'pending') return 'Checking cloud sync…';
+  if (status !== 'confirmed' || !cloud) return 'Cloud sync status unknown';
+  if (!cloud.enabled) return 'Stored on this computer · cloud sync off';
+  return cloud.syncControls.contentMode === 'metadata'
+    ? 'Cloud sync on · metadata leaves this computer'
+    : 'Cloud sync on · memory content leaves this computer';
 }
