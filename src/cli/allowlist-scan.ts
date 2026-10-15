@@ -35,6 +35,7 @@ import {
   renderBatchIdentity,
   shortSourceLabel,
   sanitiseDisplayField,
+  toTerminalSafeJson,
   wrapText,
   basenameOf,
   defaultColorStyle,
@@ -802,8 +803,10 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
   const needsReview = items.filter((i) => i.status === 'new' || i.status === 'changed');
 
   if (json) {
+    // Real values for machine consumers, but no literal C1/bidi/line-separator
+    // code points from host-derived paths or job names (#786).
     log(
-      JSON.stringify(
+      toTerminalSafeJson(
         {
           sources: sourceReport,
           discoveryIncomplete: incomplete,
@@ -824,7 +827,6 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
             cronDenied: i.deniedNote ?? null,
           })),
         },
-        null,
         2,
       ),
     );

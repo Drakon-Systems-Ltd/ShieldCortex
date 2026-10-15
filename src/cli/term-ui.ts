@@ -113,6 +113,28 @@ export function sanitiseDisplayField(s: string): string {
     .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '');
 }
 
+/**
+ * Code points that `JSON.stringify` emits literally but that a terminal (or a
+ * tool echoing the output) may act on: DEL and C1 (U+009B is an 8-bit CSI),
+ * U+2028/U+2029 line separators, zero-width and bidi embeddings/overrides/
+ * isolates. Same set the display sanitiser above removes.
+ */
+const JSON_TERMINAL_UNSAFE = /[\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+
+/**
+ * Machine-readable output that is also safe to print (#786). Unlike
+ * sanitiseDisplayField this changes nothing a JSON parser sees: each unsafe
+ * code point becomes a `\uXXXX` escape, so `JSON.parse` returns the exact
+ * original values. JSON structure is ASCII, so these code points only ever
+ * occur inside string literals, where the escape is valid.
+ */
+export function toTerminalSafeJson(value: unknown, space?: number): string {
+  return JSON.stringify(value, null, space).replace(
+    JSON_TERMINAL_UNSAFE,
+    (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
 export function ellipsize(s: string, max: number): string {
   const t = String(s ?? '');
   if (t.length <= max) return t;
