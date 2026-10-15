@@ -695,11 +695,11 @@ export async function reviewScanItems(items: ScanItem[], deps: ScanDeps = {}): P
         });
         if (pin.ok) {
           result.pinned += 1;
-          log('  ' + style.green + '\u2713' + style.reset + ' Trusted ' + style.bold + basenameOf(pin.entry.path) + style.reset +
+          log('  ' + style.green + '\u2713' + style.reset + ' Trusted ' + style.bold + sanitiseDisplayField(basenameOf(pin.entry.path)) + style.reset +
             ". If the script changes, you'll be asked again.");
         } else {
           result.failed += 1;
-          err(`  ✗ ${pin.error}`);
+          err(`  ✗ ${sanitiseDisplayField(pin.error)}`);
         }
         break;
       }
@@ -793,7 +793,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     items = classifyScripts(discovered.scripts, readEntries());
     items = markCronDenials(items, correlateForScan(scanDeps));
   } catch (e) {
-    err(`Scan failed: ${e instanceof Error ? e.message : String(e)}`);
+    err(`Scan failed: ${sanitiseDisplayField(e instanceof Error ? e.message : String(e))}`);
     return 1;
   }
 
@@ -910,9 +910,9 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
         ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
       });
       if (pin.ok) {
-        log(`${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET}`);
+        log(`${GREEN}✓${RESET} Pinned ${BOLD}${sanitiseDisplayField(pin.entry.path)}${RESET}`);
       } else {
-        err(`✗ ${pin.error}`);
+        err(`✗ ${sanitiseDisplayField(pin.error)}`);
         failed += 1;
       }
     }
