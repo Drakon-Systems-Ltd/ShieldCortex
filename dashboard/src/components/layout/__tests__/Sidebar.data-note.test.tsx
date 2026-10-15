@@ -6,7 +6,10 @@ import { useCloudStatus, type CloudConfig } from '@/hooks/useCloudStatus';
 // state, while Settings can sync metadata or full content to the cloud. The
 // note now follows the confirmed cloud config and claims nothing it can't see.
 jest.mock('@/hooks/useCloudStatus');
-jest.mock('@/hooks/useNeedsYou', () => ({ useNeedsYou: () => ({ total: 0 }) }));
+// Needs you summary shape from main (#692): every list confirmed, nothing waiting, so no badge.
+jest.mock('@/hooks/useNeedsYou', () => ({
+  useNeedsYou: () => ({ confirmedTotal: 0, exact: true, anyFailed: false, anyPending: false, allClear: true }),
+}));
 jest.mock('next/navigation', () => ({ usePathname: () => '/overview' }));
 jest.mock('@/lib/store', () => ({
   useDashboardStore: () => ({ sidebarPinned: false, toggleSidebarPinned: jest.fn(), projectFilter: null }),
