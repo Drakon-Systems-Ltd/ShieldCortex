@@ -188,7 +188,7 @@ describe('#86.3 dot word-boundary correctness — must ALLOW the siblings', () =
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('#86-redos — heredoc-linking stays fast under load', () => {
-  const MAX_SCALING_RATIO = 10;
+  const MAX_SCALING_RATIO = 16;
   const HANG_DETECTOR_MS = 2000;
 
   function manyHeredocs(count: number, evilAt?: number): string {
@@ -209,6 +209,12 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
    * batches: contention only adds time, while a real O(k*n) or O(h*n)
    * regression is super-linear on every sample. Repeating fast calls gives
    * the small measurement enough resolution for a useful ratio.
+   *
+   * Every row compares the same shape at 8x the heredoc count. Measured on
+   * Node 22 (aiquant): linear code scales 4.6-5.6x; restoring the pre-#86
+   * per-file full rescan in findInterpreterRunFiles scales ~26x (0.56 ms ->
+   * 14.5 ms). At 4x the same sabotage only reached 9-9.6x, too close to any
+   * bound to be a reliable gate, hence 8x with a bound of 16x.
    */
   function scaling<I, T>(work: (input: I) => T, small: I, big: I, fullSize = big) {
     work(small);
@@ -245,7 +251,7 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     expect(command.length).toBeGreaterThan(50_000);
     const { v, ratio, fullSizeMs } = scaling(
       (input) => evaluateToolCall('Bash', { command: input }),
-      manyHeredocs(100), manyHeredocs(400), command,
+      manyHeredocs(50), manyHeredocs(400), command,
     );
     expect(ratio).toBeLessThan(MAX_SCALING_RATIO);
     expect(fullSizeMs).toBeLessThan(HANG_DETECTOR_MS);
@@ -264,7 +270,7 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     expect(command.length).toBeLessThan(50_000);
     const { v, ratio, fullSizeMs } = scaling(
       (input) => evaluateToolCall('Bash', { command: input }),
-      manyHeredocs(100, 50), command,
+      manyHeredocs(50, 25), command,
     );
     expect(ratio).toBeLessThan(MAX_SCALING_RATIO);
     expect(fullSizeMs).toBeLessThan(HANG_DETECTOR_MS);
@@ -302,7 +308,7 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     expect(command.length).toBeLessThan(50_000);
     const { v, ratio, fullSizeMs } = scaling(
       (input) => evaluateToolCall('Bash', { command: input }),
-      manyPythonHeredocs(200), command,
+      manyPythonHeredocs(100), command,
     );
     expect(ratio).toBeLessThan(MAX_SCALING_RATIO);
     expect(fullSizeMs).toBeLessThan(HANG_DETECTOR_MS);
@@ -316,7 +322,7 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     expect(command.length).toBeLessThan(50_000);
     const { v, ratio, fullSizeMs } = scaling(
       (input) => evaluateToolCall('Bash', { command: input }),
-      manyPythonHeredocs(200, true, 100), command,
+      manyPythonHeredocs(100, true, 50), command,
     );
     expect(ratio).toBeLessThan(MAX_SCALING_RATIO);
     expect(fullSizeMs).toBeLessThan(HANG_DETECTOR_MS);
@@ -331,7 +337,7 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
       for (let i = 0; i < iterations; i++) value = (value + 'x').slice(-16);
       return value;
     }
-    expect(scaling((count) => stringWork(count, false), 100, 400).ratio).toBeLessThan(MAX_SCALING_RATIO);
-    expect(scaling((count) => stringWork(count, true), 100, 400).ratio).toBeGreaterThanOrEqual(MAX_SCALING_RATIO);
+    expect(scaling((count) => stringWork(count, false), 50, 400).ratio).toBeLessThan(MAX_SCALING_RATIO);
+    expect(scaling((count) => stringWork(count, true), 50, 400).ratio).toBeGreaterThanOrEqual(MAX_SCALING_RATIO);
   });
 });
