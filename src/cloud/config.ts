@@ -356,6 +356,12 @@ interface RawConfigState {
    * setting that the unreadable file still holds.
    */
   parseFailed: boolean;
+  /**
+   * True when the file EXISTS but reading it threw (permissions, I/O). `data`
+   * is still {} for every existing caller; only a reader that must not mistake
+   * "unreadable" for "unset" consults this.
+   */
+  readFailed?: boolean;
 }
 
 /**
@@ -471,7 +477,11 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
 
       return { data, parseFailed: false };
     }
-  } catch { /* ignore — treat as absent */ }
+  } catch {
+    // Treated as absent by every existing caller; flagged for the read-only
+    // posture reader, which must not report an unreadable file as "off".
+    return { data: {}, parseFailed: false, readFailed: true };
+  }
   return { data: {}, parseFailed: false };
 }
 
@@ -931,7 +941,30 @@ export function actionGuardPosture(core: ActionGuardCoreConfig): ActionGuardPost
  * minted false cards on ordinary OpenClaw exec bags.
  */
 export function getActionGuardCoreConfig(): ActionGuardCoreConfig {
-  const raw = readRawConfig();
+  return resolveActionGuardCore(readRawConfig());
+}
+
+/**
+ * The same EFFECTIVE core config as {@link getActionGuardCoreConfig}, read
+ * without changing anything: no `.config-sig` adoption, no `.integrity-key`
+ * minting, no self-heal rewrite, no audit event for an unverifiable lock. The
+ * policy-lock floor is still applied (`readPolicyLock({ audit: false })`).
+ *
+ * Returns `null` when the config file exists but could not be read or parsed —
+ * the posture is unknown, which is not the same as "off".
+ */
+export function readActionGuardCoreConfigReadOnly(): ActionGuardCoreConfig | null {
+  try {
+    const state = readRawConfigState({ readOnly: true });
+    if (state.parseFailed || state.readFailed) return null;
+    return resolveActionGuardCore(state.data);
+  } catch {
+    return null;
+  }
+}
+
+/** Top-level `actionGuard` merged over the `interceptor.actionGuard` alias. Pure. */
+function resolveActionGuardCore(raw: Record<string, unknown>): ActionGuardCoreConfig {
   const interceptor = raw.interceptor && typeof raw.interceptor === 'object' && !Array.isArray(raw.interceptor)
     ? (raw.interceptor as Record<string, unknown>)
     : {};

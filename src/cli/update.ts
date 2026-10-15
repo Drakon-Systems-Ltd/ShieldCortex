@@ -1664,9 +1664,11 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   // Guard switch as configured. Off is the default since 4.54.15, and an
   // off-by-design Guard is neutral: a plugin-load check that could not
   // confirm enforcement is not a warning when there is no Guard to enforce.
-  // A config that cannot be read is treated as ON (the stricter reading).
-  const guardOn = await readGuardOn();
-  const guardNeutral = !guardOn &&
+  // A config that cannot be read or parsed is unknown, never "off": the row
+  // says so and protection attention stays as if Guard were on.
+  const guard = await readGuardSwitch();
+  const guardOn = guard !== 'off';
+  const guardNeutral = guard === 'off' &&
     (protection.status === 'unproven' || protection.status === 'warn' || protection.status === 'blocked');
 
   // Closing panel — kept for --verbose (design lock v3 detail).
@@ -1758,6 +1760,7 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
     hook: { status: hookResult.status },
     hermes: { status: hermesResult.status, reason: hermesResult.reason },
     guardOn,
+    guardUnknown: guard === 'unknown',
     protection: {
       status: protection.status,
       loaded: protection.facts?.loaded,
@@ -1791,12 +1794,17 @@ export async function runUpdate(options: UpdateOptions): Promise<void> {
   for (const line of panel) process.stdout.write(`${line}\n`);
 }
 
-/** Action Guard switch as configured. Unreadable config reads as ON. */
-async function readGuardOn(): Promise<boolean> {
+/**
+ * Action Guard switch as configured, read without writing anything (no sig
+ * adoption, key minting, self-heal or audit). Unreadable config is 'unknown'.
+ */
+export async function readGuardSwitch(): Promise<'on' | 'off' | 'unknown'> {
   try {
-    const { getActionGuardCoreConfig } = await import('../cloud/config.js');
-    return getActionGuardCoreConfig().enabled;
+    const { readActionGuardCoreConfigReadOnly } = await import('../cloud/config.js');
+    const core = readActionGuardCoreConfigReadOnly();
+    if (!core) return 'unknown';
+    return core.enabled ? 'on' : 'off';
   } catch {
-    return true;
+    return 'unknown';
   }
 }
