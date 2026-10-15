@@ -97,38 +97,6 @@ export async function runRepair(
   await (deps.run ?? repairInstall)(parseRepairOptions(args, deps.env ?? process.env));
 }
 
-/**
- * The detail block under a failed engine check: first error line, the build
- * tail and the recommended recovery. Every line is host-derived (install
- * directory, compiler output, error text), so each one goes through the
- * display sanitiser before it reaches the terminal (#788). Ordinary text is
- * unchanged.
- */
-export function formatEngineFailureDetail(
-  r: { error?: string; rebuildOutput?: string; remediation?: string },
-  paint: (code: string, s: string) => string = c,
-): string {
-  let out = '';
-  if (r.error) out += `     ${paint('90', sanitiseDisplayField(r.error.split('\n')[0]))}\n`;
-
-  // Surface the REAL build error when a source-only repair was attempted.
-  // Packaged-prebuild / Node-API failures deliberately perform no rebuild,
-  // because a source build cannot override that prebuild in this release.
-  const buildTail = (r.rebuildOutput ?? '').trim();
-  if (buildTail) {
-    const lines = buildTail.split('\n').slice(-12);
-    out += `\n  ${paint('90', 'Build output (last lines):')}\n`;
-    for (const line of lines) out += `     ${paint('90', sanitiseDisplayField(line))}\n`;
-  }
-
-  out += `\n  ${paint('1', 'Recommended recovery:')}\n`;
-  for (const line of (r.remediation ?? '').split('\n')) {
-    out += `     ${paint('33', sanitiseDisplayField(line))}\n`;
-  }
-  out += '\n';
-  return out;
-}
-
 async function repairInstall(options: RepairOptions): Promise<void> {
   process.stdout.write(`\n  ${c('35', '◆')} ${c('1', 'ShieldCortex repair')}\n\n`);
   process.stdout.write(`  ${c('90', 'Checking the native database engine (better-sqlite3)…')}\n`);
@@ -220,4 +188,39 @@ async function runPluginReconcilePass(options: RepairOptions): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     process.stdout.write(`  ${c('90', `OpenClaw plugin check skipped — ${msg}`)}\n\n`);
   }
+}
+
+/**
+ * The detail block under a failed engine check: first error line, the build
+ * tail and the recommended recovery. Every line is host-derived (install
+ * directory, compiler output, error text), so each one goes through the
+ * display sanitiser before it reaches the terminal (#788). Ordinary text is
+ * unchanged.
+ *
+ * Kept below the repair passes: the #218 source-shape test reads runRepair up
+ * to the next export and expects the permission pass inside that span.
+ */
+export function formatEngineFailureDetail(
+  r: { error?: string; rebuildOutput?: string; remediation?: string },
+  paint: (code: string, s: string) => string = c,
+): string {
+  let out = '';
+  if (r.error) out += `     ${paint('90', sanitiseDisplayField(r.error.split('\n')[0]))}\n`;
+
+  // Surface the REAL build error when a source-only repair was attempted.
+  // Packaged-prebuild / Node-API failures deliberately perform no rebuild,
+  // because a source build cannot override that prebuild in this release.
+  const buildTail = (r.rebuildOutput ?? '').trim();
+  if (buildTail) {
+    const lines = buildTail.split('\n').slice(-12);
+    out += `\n  ${paint('90', 'Build output (last lines):')}\n`;
+    for (const line of lines) out += `     ${paint('90', sanitiseDisplayField(line))}\n`;
+  }
+
+  out += `\n  ${paint('1', 'Recommended recovery:')}\n`;
+  for (const line of (r.remediation ?? '').split('\n')) {
+    out += `     ${paint('33', sanitiseDisplayField(line))}\n`;
+  }
+  out += '\n';
+  return out;
 }
