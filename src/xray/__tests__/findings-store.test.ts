@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { createFindingsStore } from '../findings-store.js';
+import { createFindingsStore, FindingsStoreUnreadableError } from '../findings-store.js';
 import type { XRayFinding } from '../types.js';
 
 function makeTempDir(): string {
@@ -336,6 +336,86 @@ describe('FindingsStore', () => {
       const stats = store.getStats();
       expect(stats.total).toBe(0);
       expect(stats.new).toBe(0);
+    });
+
+    // #692: a never-created file is a real zero; an existing file that cannot
+    // be read or parsed is unknown and must not report zero.
+    it('reports a never-created findings file as absent with zero counts', () => {
+      const store = createFindingsStore(path.join(tmpDir, 'never-created'));
+      expect(store.getStoreState()).toBe('absent');
+      expect(store.getStats()).toMatchObject({ total: 0, new: 0, store: 'absent' });
+    });
+
+    it('reports a readable findings file as ok', () => {
+      const store = createFindingsStore(tmpDir);
+      store.addFindings('scan-1', 'scan', '/project', [makeFinding()]);
+      expect(store.getStoreState()).toBe('ok');
+      expect(store.getStats()).toMatchObject({ total: 1, new: 1, store: 'ok' });
+    });
+
+    it.each([
+      ['malformed JSON', '{"not": json'],
+      ['a non-array JSON value', '{"findings": []}'],
+    ])('refuses to count %s as zero', (_label, body) => {
+      fs.writeFileSync(path.join(tmpDir, 'xray-findings.json'), body);
+      const store = createFindingsStore(tmpDir);
+      expect(store.getStoreState()).toBe('unreadable');
+      expect(() => store.getStats()).toThrow(FindingsStoreUnreadableError);
+    });
+
+    // #692 R2: a JSON array is not enough. Every entry must be a finding the
+    // store can count by lifecycle and render, or the whole file is unknown.
+    const valid = (over: Record<string, unknown> = {}) => ({
+      ...makeFinding(), id: 'f-1', sourceId: 'scan-1', sourceKind: 'scan', target: '/project',
+      status: 'new', detectedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', ...over,
+    });
+    const { status: _omitStatus, ...missingStatus } = valid();
+    it.each([
+      ['an empty object entry', [{}]],
+      ['a number entry', [42]],
+      ['a null entry', [null]],
+      ['an unrecognised status', [valid({ status: 'unrecognised' })]],
+      ['a missing status', [missingStatus]],
+      ['an unknown severity', [valid({ severity: 'severe' })]],
+      ['a missing id', [valid({ id: undefined })]],
+      ['a valid entry mixed with an invalid one', [valid(), valid({ id: 'f-2', status: 'bogus' })]],
+      ['a valid entry mixed with a non-object', [valid(), 'oops']],
+    ])('refuses to count a findings array with %s', (_label, entries) => {
+      fs.writeFileSync(path.join(tmpDir, 'xray-findings.json'), JSON.stringify(entries));
+      const store = createFindingsStore(tmpDir);
+      expect(store.getStoreState()).toBe('unreadable');
+      expect(() => store.getStats()).toThrow(FindingsStoreUnreadableError);
+    });
+
+    it('accepts a findings array whose every entry is valid', () => {
+      fs.writeFileSync(path.join(tmpDir, 'xray-findings.json'), JSON.stringify([valid(), valid({ id: 'f-2', status: 'resolved', file: null, line: null })]));
+      const store = createFindingsStore(tmpDir);
+      expect(store.getStoreState()).toBe('ok');
+      expect(store.getStats()).toMatchObject({ total: 2, new: 1, resolved: 1, store: 'ok' });
+    });
+
+    it('does not drop the valid entries of a partly invalid file when a scan adds findings', () => {
+      // f-2 stays `new` so the 30-day cleanup of triaged findings does not apply.
+      fs.writeFileSync(path.join(tmpDir, 'xray-findings.json'), JSON.stringify([valid(), valid({ id: 'f-2', severity: 'severe' })]));
+      const store = createFindingsStore(tmpDir);
+      expect(store.getStoreState()).toBe('unreadable');
+      store.addFindings('scan-2', 'scan', '/other', [makeFinding({ title: 'fresh' })]);
+      const ids = (JSON.parse(fs.readFileSync(path.join(tmpDir, 'xray-findings.json'), 'utf-8')) as Array<{ id: string }>).map((f) => f.id);
+      expect(ids).toEqual(expect.arrayContaining(['f-1', 'f-2']));
+    });
+
+    it('recovery guidance does not name a fixed home path or promise a scan repairs the file', () => {
+      const msg = new FindingsStoreUnreadableError('x').message;
+      expect(msg).not.toMatch(/~|\/home|\.shieldcortex\//);
+      expect(msg).not.toMatch(/next scan (starts|replaces)/);
+      expect(msg).toMatch(/Scanning does not repair it/);
+    });
+
+    it('refuses to count an unreadable (directory) findings path as zero', () => {
+      fs.mkdirSync(path.join(tmpDir, 'xray-findings.json'));
+      const store = createFindingsStore(tmpDir);
+      expect(store.getStoreState()).toBe('unreadable');
+      expect(() => store.getStats()).toThrow(FindingsStoreUnreadableError);
     });
   });
 });
