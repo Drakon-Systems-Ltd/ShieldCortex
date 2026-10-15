@@ -135,7 +135,7 @@ jobs:
       # `npm test` does not load dashboard/, so a dashboard regression could
       # ship through a green build. Linux only, like the build and lint steps
       # above (pure JS, platform-independent). 16 suites / 146 tests at the
-      # time this step was added; `--ci` makes an obsolete or missing
-      # snapshot a failure rather than a silent write.
+      # time this step was added; `--ci` refuses to write a new snapshot, so a
+      # missing one fails the run instead of being created silently.
       - name: Test dashboard
         run: cd dashboard && npm test -- --ci
