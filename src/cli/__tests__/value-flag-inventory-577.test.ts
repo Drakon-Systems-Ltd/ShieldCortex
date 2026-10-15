@@ -36,6 +36,22 @@
  * a parameter (`valueOf(flag)` ← `closed(flag, …)` ← `closed('--memory-plane',
  * …)`). Before, the read took the nearest literal above it, which for
  * `protect` was the boolean `--from-config` check on the line between.
+ *
+ * #767 round 3 (B4): a source may be scoped to ONE top-level function
+ * (`src/index.ts#parseArgs`), because a file is the wrong unit for
+ * `src/index.ts` — it hosts `parseArgs()`, which reads `--db` / `--mode` for
+ * every command line, AND the `scan-skills` branch of `main()`, which reads
+ * `--dir`. Attributing the whole file to every inline row let `api`,
+ * `dashboard` and `worker` declare `--dir` as a value flag nothing of theirs
+ * consumes, and `api --dir --help` reached server startup while this suite was
+ * green. Each inline row now cites only the function(s) that read its argv, so
+ * the "declared but unused" check catches that over-attribution.
+ *
+ * What this suite does NOT audit mechanically is the RULE on each flag — whether
+ * the parser reads a `--`-leading token as the value or leaves it unread (#767
+ * round 3, B3). Those were read out of each parser by hand and are pinned,
+ * flag by flag, in src/__tests__/cli-help-gate-767.test.ts; this suite checks
+ * that the derived `valueFlags` array agrees with the rules it was built from.
  */
 import { describe, expect, it } from '@jest/globals';
 import fs from 'node:fs';
@@ -43,10 +59,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   COMMAND_HELP_SPECS,
+  GLOBAL_VALUES,
   GLOBAL_VALUE_FLAGS,
   argvWantsHelp,
   commandWantsHelp,
+  type CommandHelpSpec,
   type GatedCommand,
+  type ValueRule,
 } from '../wants-help.js';
 import { runAllowlist } from '../allowlist.js';
 
@@ -55,13 +74,14 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 /**
  * Where each command's arguments are actually read — the handler and everything
  * it hands a slice of argv to. `global` is the pair of whole-argv gates in
- * `src/index.ts`, whose own inventory is `GLOBAL_VALUE_FLAGS`.
+ * `src/index.ts`, whose own inventory is `GLOBAL_VALUE_FLAGS`. A `#name` suffix
+ * narrows a file to the top-level function `name` (#767 round 3).
  */
 const HANDLER_SOURCES: Record<GatedCommand | 'global', string[]> = {
   audit: ['src/cli/audit.ts'],
   allowlist: ['src/cli/allowlist.ts', 'src/cli/allowlist-scan.ts'],
   sessions: ['src/cli/sessions.ts'],
-  memories: ['src/cli/migrate-legacy.ts', 'src/cli/import-native.ts', 'src/cli/embed-backfill.ts'],
+  memories: ['src/cli/migrate-legacy.ts', 'src/cli/import-native.ts', 'src/cli/embed-backfill.ts', 'src/cli/reclassify.ts'],
   openclaw: ['src/setup/openclaw.ts'],
   clawdbot: ['src/setup/openclaw.ts'],
   hermes: ['src/setup/hermes.ts'],
@@ -73,8 +93,10 @@ const HANDLER_SOURCES: Record<GatedCommand | 'global', string[]> = {
   compact: ['src/cli/vacuum.ts'],
   logs: ['src/cli/logs.ts'],
   // ── #767: the rows the dispatcher's own gate reads (src/cli/dispatch-help.ts).
-  // A command handled inline in src/index.ts, or a server mode, shares the
-  // global inventory by identity, so its sources are the dispatcher's.
+  // A command handled inline in src/index.ts, or a server mode, reads only what
+  // `parseArgs()` reads — so its source is that function, not the file (B4).
+  // `scan-skills` is the one inline command with an option of its own, read in
+  // its branch of `main()`.
   hook: ['src/setup/hooks.ts'],
   protect: ['src/cli/protect.ts'],
   quickstart: ['src/setup/quickstart.ts'],
@@ -93,8 +115,8 @@ const HANDLER_SOURCES: Record<GatedCommand | 'global', string[]> = {
   unfreeze: ['src/cli/freeze.ts'],
   lease: ['src/cli/freeze.ts'],
   status: ['src/setup/status.ts'],
-  graph: ['src/index.ts'],
-  'threat-graph': ['src/index.ts'],
+  graph: ['src/index.ts#parseArgs'],
+  'threat-graph': ['src/index.ts#parseArgs'],
   license: ['src/license/cli.ts'],
   licence: ['src/license/cli.ts'],
   stats: ['src/cli/stats-command.ts'],
@@ -103,17 +125,17 @@ const HANDLER_SOURCES: Record<GatedCommand | 'global', string[]> = {
   inspect: ['src/cli/inspect.ts'],
   'iron-dome': ['src/cli/iron-dome.ts'],
   scan: ['src/cli/scan-command.ts'],
-  'scan-skill': ['src/index.ts'],
-  env: ['src/index.ts'],
-  'scan-skills': ['src/index.ts'],
-  consolidate: ['src/index.ts'],
+  'scan-skill': ['src/index.ts#parseArgs'],
+  env: ['src/index.ts#parseArgs'],
+  'scan-skills': ['src/index.ts#parseArgs', 'src/index.ts#main'],
+  consolidate: ['src/index.ts#parseArgs'],
   xray: ['src/xray/index.ts'],
   'xray-preinstall': ['src/xray/preinstall.ts'],
   cortex: ['src/cortex/cli.ts'],
-  api: ['src/index.ts'],
-  dashboard: ['src/index.ts'],
-  worker: ['src/index.ts'],
-  global: ['src/index.ts'],
+  api: ['src/index.ts#parseArgs'],
+  dashboard: ['src/index.ts#parseArgs'],
+  worker: ['src/index.ts#parseArgs'],
+  global: ['src/index.ts#parseArgs'],
 };
 
 /**
@@ -149,11 +171,17 @@ const ARGV_ISH = /\b(arg|args|argv|extraArgs|process\.argv)\b/;
 const FLAG_LITERAL = /'(--[a-z][a-z0-9-]*)'/g;
 const DECLARATION = /^(?:export\s+)?(?:async\s+)?(?:function|const|class)\s+([A-Za-z_$][\w$]*)/;
 
-/** Source with comments blanked — prose about a flag is not a consumer of it. */
-function codeLines(rel: string): string[] {
+/**
+ * Source with comments blanked — prose about a flag is not a consumer of it.
+ * `file#name` keeps only the lines of the top-level declaration `name` (from
+ * its line to the line before the next top-level declaration); every other
+ * line is blanked so line numbers in sites stay those of the file.
+ */
+function codeLines(source: string): string[] {
+  const [rel, only] = source.split('#');
   const raw = fs.readFileSync(path.join(repoRoot, rel), 'utf-8').split('\n');
   let inBlock = false;
-  return raw.map((line) => {
+  const lines = raw.map((line) => {
     let s = line;
     if (inBlock) {
       if (/\*\//.test(s)) { inBlock = false; s = s.replace(/^.*\*\//, ''); } else return '';
@@ -162,6 +190,12 @@ function codeLines(rel: string): string[] {
     if (/\/\*/.test(s)) { inBlock = true; s = s.replace(/\/\*.*$/, ''); }
     return s.replace(/\/\/.*$/, '');
   });
+  if (!only) return lines;
+  const start = lines.findIndex((l) => DECLARATION.exec(l)?.[1] === only);
+  if (start === -1) throw new Error(`${source}: no top-level declaration named ${only}`);
+  let end = lines.findIndex((l, i) => i > start && DECLARATION.test(l));
+  if (end === -1) end = lines.length;
+  return lines.map((l, i) => (i >= start && i < end ? l : ''));
 }
 
 function literalsOn(line: string): string[] {
@@ -316,6 +350,25 @@ function declaredFor(command: GatedCommand | 'global'): readonly string[] {
   return command === 'global' ? GLOBAL_VALUE_FLAGS : COMMAND_HELP_SPECS[command].valueFlags;
 }
 
+/** Every (flag → rule) a row applies, across its own table and its verb rows. */
+function rulesOf(row: CommandHelpSpec): Map<string, Set<ValueRule>> {
+  const out = new Map<string, Set<ValueRule>>();
+  const add = (flag: string, rule: ValueRule) => {
+    if (!out.has(flag)) out.set(flag, new Set());
+    out.get(flag)!.add(rule);
+  };
+  for (const [flag, rule] of Object.entries(row.values)) add(flag, rule);
+  for (const verb of Object.values(row.verbs ?? {})) {
+    for (const [flag, rules] of rulesOf(verb)) for (const r of rules) add(flag, r);
+  }
+  return out;
+}
+
+function rulesFor(command: GatedCommand | 'global'): Map<string, Set<ValueRule>> {
+  if (command === 'global') return new Map(Object.entries(GLOBAL_VALUES).map(([f, r]) => [f, new Set([r])]));
+  return rulesOf(COMMAND_HELP_SPECS[command]);
+}
+
 describe('#577 — every recognised value-consuming flag is in its command\'s list', () => {
   const commands = Object.keys(HANDLER_SOURCES) as Array<GatedCommand | 'global'>;
 
@@ -328,6 +381,12 @@ describe('#577 — every recognised value-consuming flag is in its command\'s li
     expect(analyse(HANDLER_SOURCES.audit).consumers.map((c) => c.flag)).toEqual(['--deps-path']);
     expect(analyse(HANDLER_SOURCES.memories).consumers.map((c) => c.flag)).toContain('--source');
     expect(analyse(HANDLER_SOURCES.openclaw).consumers.map((c) => c.flag)).toContain('--agent');
+    // #767 round 3 (B4): the function scoping sees `--db`/`--mode` in
+    // `parseArgs()` only, and `--dir` in `main()` only — so an inline row that
+    // cites `parseArgs` and declares `--dir` fails the unused-flag check below.
+    expect([...new Set(analyse(['src/index.ts#parseArgs']).consumers.map((c) => c.flag))].sort()).toEqual(['--db', '--mode']);
+    expect([...new Set(analyse(['src/index.ts#main']).consumers.map((c) => c.flag))]).toEqual(['--dir']);
+    expect(() => analyse(['src/index.ts#noSuchFunction'])).toThrow(/no top-level declaration/);
   });
 
   it.each(commands)('%s consumes no value for a flag missing from its list', (command) => {
@@ -342,15 +401,16 @@ describe('#577 — every recognised value-consuming flag is in its command\'s li
     expect({ command, unattributed }).toEqual({ command, unattributed: [] });
   });
 
-  it('prints the audit table (command → flags consumed → in list)', () => {
+  it('prints the audit table (command → flags consumed → in list → rule)', () => {
     const rows: string[] = [];
     for (const command of commands) {
       const { consumers } = analyse(HANDLER_SOURCES[command]);
       const flags = [...new Set(consumers.map((c) => c.flag))].sort();
       const declared = declaredFor(command);
-      rows.push(
-        `${command.padEnd(10)} ${flags.length ? flags.map((f) => `${f}${declared.includes(f) ? '' : ' ✗MISSING'}`).join(' ') : '(none)'}`,
-      );
+      const rules = rulesFor(command);
+      const describe1 = (f: string) =>
+        `${f}${declared.includes(f) ? `:${[...(rules.get(f) ?? [])].join('|')}` : ' ✗MISSING'}`;
+      rows.push(`${command.padEnd(14)} ${flags.length ? flags.map(describe1).join(' ') : '(none)'}`);
       // Every declared flag should be a real consumer too — a list that names a
       // flag nothing consumes is dead weight the next reader has to verify.
       const unused = declared.filter((f) => !flags.includes(f));
@@ -359,7 +419,32 @@ describe('#577 — every recognised value-consuming flag is in its command\'s li
     expect(rows.length).toBe(commands.length);
     // Printed, not just asserted: this table is the review artefact for "which
     // flag does each command consume a value for, and is it listed?".
-    console.log(`#577 value-flag audit\n${rows.join('\n')}`);
+    console.log(`#577 value-flag audit (flag:rule — always | unless-double-dash | unless-dash)\n${rows.join('\n')}`);
+  });
+
+  it('every row\'s valueFlags is exactly the keys of its rules (own table ∪ verb rows)', () => {
+    // `helpSpec()` derives the array; this pins that nothing bypasses it.
+    for (const command of Object.keys(COMMAND_HELP_SPECS) as GatedCommand[]) {
+      const row = COMMAND_HELP_SPECS[command];
+      expect({ command, flags: [...row.valueFlags].sort() })
+        .toEqual({ command, flags: [...rulesOf(row).keys()].sort() });
+      for (const [verb, verbRow] of Object.entries(row.verbs ?? {})) {
+        expect({ command, verb, flags: [...verbRow.valueFlags].sort() })
+          .toEqual({ command, verb, flags: Object.keys(verbRow.values).sort() });
+      }
+    }
+    expect([...GLOBAL_VALUE_FLAGS].sort()).toEqual(Object.keys(GLOBAL_VALUES).sort());
+  });
+
+  it('#767 round 3 (B4): `--dir` belongs to scan-skills alone; the inline/server rows are the global inventory', () => {
+    const withDir = (Object.keys(COMMAND_HELP_SPECS) as GatedCommand[])
+      .filter((c) => COMMAND_HELP_SPECS[c].valueFlags.includes('--dir'));
+    expect(withDir).toEqual(['scan-skills']);
+    expect([...COMMAND_HELP_SPECS['scan-skills'].valueFlags].sort()).toEqual([...GLOBAL_VALUE_FLAGS, '--dir'].sort());
+    for (const c of ['api', 'dashboard', 'worker', 'graph', 'threat-graph', 'env', 'consolidate', 'scan-skill'] as const) {
+      expect({ c, flags: [...COMMAND_HELP_SPECS[c].valueFlags].sort() }).toEqual({ c, flags: [...GLOBAL_VALUE_FLAGS].sort() });
+    }
+    expect(GLOBAL_VALUE_FLAGS).not.toContain('--dir');
   });
 
   it('`--note` is classified as a value, so its value is never the help verb', () => {
@@ -370,6 +455,7 @@ describe('#577 — every recognised value-consuming flag is in its command\'s li
     // The exemption above would otherwise leave cortex's values unprotected:
     // with an empty list and no rule, `--what --help` was a help request.
     expect(COMMAND_HELP_SPECS.cortex.valueFlags).toEqual([]);
+    expect(COMMAND_HELP_SPECS.cortex.values).toEqual({});
     expect(COMMAND_HELP_SPECS.cortex.everyLongFlagTakesValue).toBe(true);
     expect(commandWantsHelp('cortex', ['capture', '--what', '--help', '--category', 'code'])).toBe(false);
     expect(commandWantsHelp('cortex', ['capture', '--what', 'x', '--help'])).toBe(true);

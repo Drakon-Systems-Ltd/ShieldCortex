@@ -23,22 +23,81 @@
  * stores the text "--help" (#767 round 2 — the first version checked the flags
  * against the whole argv before skipping values, and ate that content).
  *
- * Round 3 closed the last way that rule could still be applied WRONGLY: which
- * options take a value is a fact about one command, and the whole-argv gates in
- * `src/index.ts` were guessing at it instead of reading the command's own table.
- * `COMMAND_HELP_SPECS` below is that table, once, for every gate — see
+ * Which tokens ARE values is a fact about each option's parser, not about the
+ * gate (#767 round 3). Round 2 stepped over the token after every declared
+ * value flag, which is what `remember`'s parser does and is NOT what
+ * `sessions`' does: its `flagValue` returns "no value" for a token starting
+ * with `--` and leaves it unread, so `sessions prune --days --help` was a help
+ * request to the handler, a swallowed value to the gate, and a prune with the
+ * default window to the operator. Every value-taking option therefore carries
+ * its parser's rule (`ValueRule`), and a command whose verbs parse the same
+ * option differently carries a row per verb (`CommandHelpSpec.verbs`).
+ *
+ * `COMMAND_HELP_SPECS` is that table, once, for every gate — see
  * `argvWantsHelp` and `commandWantsHelp`. `wantsHelp` itself stays the
  * table-free primitive both are built from.
  */
 
+/**
+ * How a value-taking option's parser reads the token after it (#767 round 3).
+ *
+ * The question the gate has to answer is "would the handler read the next
+ * token as this option's value?", because a token the handler reads as a value
+ * is never a flag to it, and a token it leaves unread is whatever it looks like
+ * — a help flag, when it is spelled like one. The three answers the handlers
+ * in this repository give:
+ */
+export type ValueRule =
+  /**
+   * The next token is the value whatever it is: a `parseFlag` / `args[i + 1]`
+   * read with no shape check (`remember --content`, `memory --reason`,
+   * `guard --surface`, `parseArgs` in src/index.ts, Cortex's `--key value`).
+   * `--content --help` is content spelled "--help"; `--content -h` likewise.
+   */
+  | 'always'
+  /**
+   * A next token starting with `--` is "no value" and is left unread: the
+   * `flagValue` helpers in sessions / migrate-legacy, audit `--deps-path`,
+   * protect `--config`, config's enum flags. `--days --help` is a help request;
+   * `--days -h` is the (invalid) value "-h", exactly as those parsers read it.
+   */
+  | 'unless-double-dash'
+  /**
+   * A next token starting with `-` is "no value" and is left unread (or refused
+   * as a missing value): allowlist, import-native, reclassify, openclaw
+   * `--agent`, scan `--source`. Both `--help` and `-h` after such an option are
+   * help requests.
+   */
+  | 'unless-dash';
+
+/** The value-taking options of one argv shape, each with its parser's rule. */
+export type ValueRules = Readonly<Record<string, ValueRule>>;
+
+/** Whether the parser behind `rule` reads `next` as the option's value. */
+export function consumesAsValue(rule: ValueRule, next: string | undefined): boolean {
+  switch (rule) {
+    case 'always':
+      return next !== undefined;
+    case 'unless-double-dash':
+      return !!next && !next.startsWith('--');
+    case 'unless-dash':
+      return !!next && !next.startsWith('-');
+  }
+}
+
+function hasOwn(table: Readonly<Record<string, unknown>>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(table, key);
+}
+
 /** Options that consume the following token as their value, per command. */
 export interface WantsHelpOptions {
   /**
-   * The command's value-taking options (`--agent`, `--project`, `--days`, …).
-   * A token immediately after one of these is that option's value and is never
-   * read as a verb. Omit it only for commands whose options are all boolean.
+   * The command's value-taking options (`--agent`, `--project`, `--days`, …),
+   * each with the rule its parser applies to the following token. A token the
+   * rule reads as the value is never a verb or a flag. Omit it only for
+   * commands whose options are all boolean.
    */
-  valueFlags?: readonly string[];
+  values?: ValueRules;
   /**
    * How many leading positionals are verb slots. 1 for a command reading its
    * OWN arguments — `help` is the verb or it is an argument.
@@ -58,15 +117,21 @@ export interface WantsHelpOptions {
   /**
    * EVERY `--key` consumes the following token, whatever the key — the shape of
    * a generic `--key value` parser (`cortex`, src/cortex/cli.ts), for which no
-   * finite `valueFlags` list exists. `cortex capture --what --help` is the
+   * finite `values` table exists. `cortex capture --what --help` is the
    * mistake "--help", not a help request; `--help` at an option position still
    * is one, because the help check runs before the consumption rule.
    */
   everyLongFlagTakesValue?: boolean;
 }
 
+function ruleFor(token: string, values: ValueRules, everyLongFlagTakesValue: boolean | undefined): ValueRule | undefined {
+  if (hasOwn(values, token)) return values[token];
+  if (everyLongFlagTakesValue && token.startsWith('--')) return 'always';
+  return undefined;
+}
+
 export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {}): boolean {
-  const valueFlags = options.valueFlags ?? [];
+  const values = options.values ?? {};
   const verbDepth = options.verbDepth ?? 1;
   let positional = 0;
   for (let i = 0; i < args.length; i++) {
@@ -75,10 +140,13 @@ export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {
     // position never reaches this line — the branch below steps over it — so
     // `--content --help` is content spelled "--help", not a request for usage.
     if (a === '--help' || a === '-h') return true;
-    // `--flag value` — skip the value; `--flag=value` is one token and falls
-    // through to the option branch below.
-    if (valueFlags.includes(a) || (options.everyLongFlagTakesValue && a.startsWith('--'))) {
-      i++;
+    // `--flag value` — step over the value exactly when the parser would read
+    // the token as one; a token the parser leaves unread is read here on its
+    // own turn. `--flag=value` is one token and falls through to the option
+    // branch below.
+    const rule = ruleFor(a, values, options.everyLongFlagTakesValue);
+    if (rule !== undefined) {
+      if (consumesAsValue(rule, args[i + 1])) i++;
       continue;
     }
     if (a.startsWith('-') && a !== '-') continue;
@@ -92,19 +160,40 @@ export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {
 }
 
 /**
- * Value-taking options that can appear BEFORE the subcommand word, used to find
- * the command word itself (`shieldcortex --db /tmp/x.db audit help`).
+ * The option values `parseArgs()` in src/index.ts consumes from ANY command
+ * line, before or after the command word: `--db <path>` and `--mode <mode>`,
+ * each read unconditionally (`args[i + 1]` whenever it is truthy), so
+ * `--db --help` is the database path "--help" to the parser and to the gates.
+ * Used to find the command word itself (`shieldcortex --db /tmp/x.db audit
+ * help`) and as the row of every command handled inline in `main()`.
+ *
+ * `--dir` is NOT here (#767 round 3): only `scan-skills` reads it, and it was
+ * on this shared row, so `api --dir --help` was "--dir with the directory
+ * --help" to the gates and reached server startup. `SCAN_SKILLS_SPEC` is the one
+ * row that carries it.
  */
-export const GLOBAL_VALUE_FLAGS = ['--db', '--mode', '--dir'] as const;
+export const GLOBAL_VALUES: ValueRules = { '--db': 'always', '--mode': 'always' };
+
+/** The flags of `GLOBAL_VALUES`, for the tests that enumerate the global inventory. */
+export const GLOBAL_VALUE_FLAGS: readonly string[] = Object.keys(GLOBAL_VALUES);
 
 /** How one command's argv is read, for every gate that decides about it. */
 export interface CommandHelpSpec {
   /**
-   * The options whose FOLLOWING token the command consumes as a value. Every
-   * `args[i + 1]` / `indexOf(flag) + 1` / `flagValue(args, flag)` consumer in
-   * the command's own call graph must be represented here. The shapes the
-   * analyser recognises are checked by `value-flag-inventory-577.test.ts`; see
-   * its header for what it does not recognise.
+   * The options whose FOLLOWING token the command reads as a value, each with
+   * the rule its parser applies (#767 round 3). Every `args[i + 1]` /
+   * `indexOf(flag) + 1` / `flagValue(args, flag)` consumer in the command's own
+   * call graph must be represented here or on one of its verb rows; the shapes
+   * the analyser recognises are checked by `value-flag-inventory-577.test.ts`,
+   * see its header for what it does not recognise. The rules themselves are
+   * read out of each parser by hand and pinned in cli-help-gate-767.test.ts.
+   */
+  values: ValueRules;
+  /**
+   * Every value-taking option of the command: the keys of `values` and of each
+   * verb row. DERIVED by `helpSpec()`, never written by hand, so the array the
+   * handler modules re-export and the tests enumerate cannot disagree with the
+   * rules the gate applies.
    */
   valueFlags: readonly string[];
   /**
@@ -138,145 +227,230 @@ export interface CommandHelpSpec {
   restFlags?: readonly string[];
   /**
    * The handler's parser consumes the token after EVERY `--key` (`cortex`), so
-   * there is no finite `valueFlags` list to write down; the rule itself is the
+   * there is no finite `values` table to write down; the rule itself is the
    * row (#767 round 2). See `WantsHelpOptions.everyLongFlagTakesValue`.
    */
   everyLongFlagTakesValue?: boolean;
+  /**
+   * A row per verb, for a command whose verbs hand their arguments to DIFFERENT
+   * parsers (#767 round 3). When the first token is one of these verbs, that
+   * verb's row — not `values` — reads everything after it, with no verb slot
+   * left (`memories prune help` is an argument to prune, as before).
+   *
+   * `memories` needs this: `prune --project` goes through a `flagValue` that
+   * refuses a `--` value, `import-native --project` through a parser that
+   * refuses any `-` value and honours `--`, and `embed-backfill --limit` through
+   * a `readFlag` that reads the next token whatever it is. One flat row cannot
+   * say all three, and saying the wrong one is this round's blocker.
+   */
+  verbs?: Readonly<Record<string, CommandHelpSpec>>;
 }
 
-/** `audit`: `--deps-path help` is a path to scan (#577). */
-const AUDIT_SPEC: CommandHelpSpec = { valueFlags: ['--deps-path'] };
+type HelpSpecShape = Omit<CommandHelpSpec, 'values' | 'valueFlags'>;
 
 /**
- * `allowlist`: `scan`'s path/glob options, and `add --note help` — a reviewer's
- * one-word reason. #577 round 3 found `--note` missing: the add handler consumes
- * the token after it, so the inventory was not complete.
+ * Build a row. `valueFlags` is derived from `values` and the verb rows here,
+ * which is the only place it is ever written.
  */
-const ALLOWLIST_SPEC: CommandHelpSpec = {
-  valueFlags: ['--glob', '--hermes-cron', '--openclaw-cron', '--openclaw-cron-db', '--note'],
-  stripDoubleDash: true,
-};
-
-/** `sessions`: `--days help` is a value (rejected later, as a number). */
-const SESSIONS_SPEC: CommandHelpSpec = { valueFlags: ['--days'] };
+export function helpSpec(values: ValueRules, shape: HelpSpecShape = {}): CommandHelpSpec {
+  const flags = new Set(Object.keys(values));
+  for (const row of Object.values(shape.verbs ?? {})) for (const f of row.valueFlags) flags.add(f);
+  return { values, valueFlags: [...flags], ...shape };
+}
 
 /**
- * `memories`: every value-taking option across its verbs — `prune`, `dedupe`,
- * `repair-project-keys`, `purge`, `recalc`, `import-native`, `embed-backfill`
- * and `migrate-legacy`. A project key or a source path may spell "help".
+ * `audit --deps-path <path>`: `parseAuditArgs` reads the path only when it does
+ * not start with `--` (src/cli/audit.ts). `--deps-path help` is a path to scan
+ * (#577); `--deps-path --help` is a help request (#767 round 3).
  */
-const MEMORIES_SPEC: CommandHelpSpec = {
-  valueFlags: [
-    '--source',        // migrate-legacy
-    '--project',       // prune, dedupe, repair-project-keys, import-native, embed-backfill, reclassify
-    '--salience-lte',  // prune
-    '--older-than',    // prune
-    '--limit',         // dedupe, embed-backfill
-    '--db',            // repair-project-keys, purge, recalc
-    '--backup-dir',    // repair-project-keys, purge, recalc
-    '--map',           // repair-project-keys
-    '--scan-paths',    // repair-project-keys
-    '--host-id',       // import-native
-    '--agent-id',      // import-native
-  ],
-};
+const AUDIT_SPEC = helpSpec({ '--deps-path': 'unless-double-dash' });
 
-/** `openclaw`: `skill install --agent help` installs for the agent "help". */
-const OPENCLAW_SPEC: CommandHelpSpec = { valueFlags: ['--agent'] };
+/**
+ * `allowlist`: `scan`'s path/glob options and `add --note help` — a reviewer's
+ * one-word reason. Both parsers refuse any `-`-leading value as missing
+ * (src/cli/allowlist-scan.ts `runAllowlistScan`, src/cli/allowlist.ts `add`).
+ * #577 round 3 found `--note` missing: the add handler consumes the token after
+ * it, so the inventory was not complete.
+ */
+const ALLOWLIST_SPEC = helpSpec(
+  {
+    '--glob': 'unless-dash',
+    '--hermes-cron': 'unless-dash',
+    '--openclaw-cron': 'unless-dash',
+    '--openclaw-cron-db': 'unless-dash',
+    '--note': 'unless-dash',
+  },
+  { stripDoubleDash: true },
+);
+
+/**
+ * `sessions prune --days N`: `flagValue` (src/cli/sessions.ts) returns "no
+ * value" for a token starting with `--` and leaves it unread. `--days help` is a
+ * value (rejected later, as a number); `--days --help` is the help request that
+ * round 2 swallowed and ran a prune on (#767 round 3, B3).
+ */
+const SESSIONS_SPEC = helpSpec({ '--days': 'unless-double-dash' });
+
+/**
+ * `memories`: a row per verb, because the verbs parse the same options
+ * differently (src/cli/migrate-legacy.ts unless noted):
+ *   migrate-legacy  `--source`: `args[sourceIdx + 1]` whenever truthy.
+ *   prune / dedupe / repair-project-keys / purge / recalc: `flagValue`, which
+ *                   refuses a `--` value (`--map`: `args[i + 1]` whenever truthy).
+ *   import-native   (src/cli/import-native.ts): `args[++i]`, refused when it
+ *                   starts with `-`; a bare `--` ends the options.
+ *   embed-backfill  (src/cli/embed-backfill.ts): `readFlag` reads `args[i + 1]`
+ *                   whatever it is for `--limit`; `--project` is then refused
+ *                   when it starts with `-` (`parseEmbedBackfillProject`).
+ *   reclassify      (src/cli/reclassify.ts): `--project` refused when it starts
+ *                   with `-`.
+ * A project key or a source path may spell "help"; the command-level row is
+ * empty because every option belongs to a verb, and `memories <not-a-verb> …`
+ * prints usage in the handler.
+ */
+const MEMORIES_SPEC = helpSpec({}, {
+  verbs: {
+    'migrate-legacy': helpSpec({ '--source': 'always' }),
+    prune: helpSpec({
+      '--salience-lte': 'unless-double-dash',
+      '--older-than': 'unless-double-dash',
+      '--project': 'unless-double-dash',
+    }),
+    dedupe: helpSpec({ '--project': 'unless-double-dash', '--limit': 'unless-double-dash' }),
+    'repair-project-keys': helpSpec({
+      '--map': 'always',
+      '--scan-paths': 'unless-double-dash',
+      '--project': 'unless-double-dash',
+      '--db': 'unless-double-dash',
+    }),
+    purge: helpSpec({ '--backup-dir': 'unless-double-dash' }),
+    recalc: helpSpec({ '--backup-dir': 'unless-double-dash', '--db': 'unless-double-dash' }),
+    'import-native': helpSpec(
+      { '--host-id': 'unless-dash', '--agent-id': 'unless-dash', '--project': 'unless-dash' },
+      { doubleDashEndsOptions: true },
+    ),
+    'embed-backfill': helpSpec({ '--limit': 'always', '--project': 'unless-dash' }),
+    reclassify: helpSpec({ '--project': 'unless-dash' }),
+  },
+});
+
+/**
+ * `openclaw skill install|update --agent <id>`: `skill install --agent help`
+ * installs for the agent "help"; an id starting with `-` is refused as missing
+ * (src/setup/openclaw.ts), so `--agent --help` is a help request.
+ */
+const OPENCLAW_SPEC = helpSpec({ '--agent': 'unless-dash' });
 
 /**
  * The strict-parser commands, `hermes`, and every command whose options are all
  * boolean or whose handler reads a fixed positional and nothing else
  * (`copilot <verb>`, `license <verb> [key]`, `lease`, `stats`, …).
  */
-const NO_VALUE_FLAGS: CommandHelpSpec = { valueFlags: [] };
+const NO_VALUE_FLAGS = helpSpec({});
 
 /**
  * Commands handled inline in `src/index.ts` (`consolidate`, `graph`, `env`, …)
  * and the three server modes (`api`, `dashboard`, `worker`). The only option
- * values `main()` ever consumes from their argv are the global ones —
- * `parseArgs()` reads `--db <path>` / `--mode <mode>` for every command, and
- * `scan-skills` reads `--dir <path>` — so their row IS the global inventory,
- * shared by identity (#767).
+ * values `main()` consumes from their argv are the global ones `parseArgs()`
+ * reads for every command — `--db <path>` / `--mode <mode>` — so their row IS
+ * the global inventory (#767). Nothing else: `api --dir --help` is an unknown
+ * option and a help flag, not a directory (#767 round 3, B4).
  */
-const INDEX_SPEC: CommandHelpSpec = { valueFlags: GLOBAL_VALUE_FLAGS };
-
-/** `scan-skill <path>`: inline like the above, but its first positional is a file. */
-const SCAN_SKILL_SPEC: CommandHelpSpec = { valueFlags: GLOBAL_VALUE_FLAGS, verbDepth: 0 };
-
-/** `protect`: `--config help` is a config path, `--agent-uid help` a (malformed) uid (#767). */
-const PROTECT_SPEC: CommandHelpSpec = { valueFlags: ['--config', '--agent-uid'] };
+const INDEX_SPEC = helpSpec(GLOBAL_VALUES);
 
 /**
- * `config`: every option `handleCloudConfig` reads the following token of. The
- * values are enums, keys, URLs and numbers; a bare `help` after any of them is
- * that option's (invalid) value, and the handler is the one to refuse it.
+ * `scan-skills [--dir <path>]`: the one inline command with an option of its
+ * own. The directory is read as `process.argv[indexOf('--dir') + 1]`, whatever
+ * it is, so `--dir --help` scans a directory named "--help" and `--dir x --help`
+ * asks for usage.
  */
-const CONFIG_SPEC: CommandHelpSpec = {
-  valueFlags: [
-    '--mode',
-    '--cloud-api-key',
-    '--cloud-url',
-    '--verify-mode',
-    '--verify-timeout',
-    '--openclaw-auto-memory',
-    '--ranker',
-    '--proactive-recall',
-    '--self-heal',
-    '--action-guard-notify-webhook',
-    '--memory-inject-contract',
-    '--memory-plane',
-    '--memory-host-posture',
-    '--memory-host-runtime',
-    '--auto-memory-sampling',
-  ],
-};
+const SCAN_SKILLS_SPEC = helpSpec({ ...GLOBAL_VALUES, '--dir': 'always' });
 
-/** `review-copilot annotate --id <id> | --pending [--limit N]`. */
-const REVIEW_COPILOT_SPEC: CommandHelpSpec = { valueFlags: ['--id', '--limit'] };
+/** `scan-skill <path>`: inline like the above, but its first positional is a file. */
+const SCAN_SKILL_SPEC = helpSpec(GLOBAL_VALUES, { verbDepth: 0 });
+
+/**
+ * `protect`: `parseProtectArgs` (src/cli/protect.ts) reads `--config`'s path
+ * only when it does not start with `--`, and `--agent-uid`'s token whatever it
+ * is (a malformed uid is refused by name). `--config help` is a config path and
+ * `--config --help` a help request; `--agent-uid --help` is the uid "--help"
+ * (#767).
+ */
+const PROTECT_SPEC = helpSpec({ '--config': 'unless-double-dash', '--agent-uid': 'always' });
+
+/**
+ * `config`: every option `handleCloudConfig` (src/cloud/cli.ts) reads the
+ * following token of. The values are enums, keys, URLs and numbers; a bare
+ * `help` after any of them is that option's (invalid) value, and the handler is
+ * the one to refuse it. Nine of them read `args[idx + 1]` whenever it is
+ * truthy and refuse it as INVALID; the six signed-write and webhook options
+ * refuse a `--`-leading token as MISSING without reading it.
+ */
+const CONFIG_SPEC = helpSpec({
+  '--mode': 'always',
+  '--cloud-api-key': 'always',
+  '--cloud-url': 'always',
+  '--verify-mode': 'always',
+  '--verify-timeout': 'always',
+  '--openclaw-auto-memory': 'always',
+  '--ranker': 'always',
+  '--proactive-recall': 'always',
+  '--self-heal': 'always',
+  '--action-guard-notify-webhook': 'unless-double-dash',
+  '--memory-inject-contract': 'unless-double-dash',
+  '--memory-plane': 'unless-double-dash',
+  '--memory-host-posture': 'unless-double-dash',
+  '--memory-host-runtime': 'unless-double-dash',
+  '--auto-memory-sampling': 'unless-double-dash',
+});
+
+/** `review-copilot annotate --id <id> | --pending [--limit N]`: `Number(args[idx + 1])`. */
+const REVIEW_COPILOT_SPEC = helpSpec({ '--id': 'always', '--limit': 'always' });
 
 /**
  * `remember "<title>" --content <text> …`: the first positional is the memory's
  * title, so there is no verb slot — a memory titled "help" is a memory (#767).
+ * `parseFlag` reads the next token whatever it is: `--content --help` is content.
  */
-const REMEMBER_SPEC: CommandHelpSpec = {
-  valueFlags: ['--content', '--category', '--importance', '--tags', '--project'],
-  verbDepth: 0,
-};
+const REMEMBER_SPEC = helpSpec(
+  { '--content': 'always', '--category': 'always', '--importance': 'always', '--tags': 'always', '--project': 'always' },
+  { verbDepth: 0 },
+);
 
 /** `approve [<hash>] [--ttl N] [--attempt <id>] …`; the handler drops bare `--`. */
-const APPROVE_SPEC: CommandHelpSpec = { valueFlags: ['--ttl', '--attempt'], stripDoubleDash: true };
+const APPROVE_SPEC = helpSpec({ '--ttl': 'always', '--attempt': 'always' }, { stripDoubleDash: true });
 
 /** `deny [<hash>] [--attempt <id>]`; the handler drops bare `--`. */
-const DENY_SPEC: CommandHelpSpec = { valueFlags: ['--attempt'], stripDoubleDash: true };
+const DENY_SPEC = helpSpec({ '--attempt': 'always' }, { stripDoubleDash: true });
 
 /** `freeze <scope> --reason <every following token>`. */
-const FREEZE_SPEC: CommandHelpSpec = { valueFlags: [], restFlags: ['--reason'] };
+const FREEZE_SPEC = helpSpec({}, { restFlags: ['--reason'] });
 
-/** `guard readiness|test-approval [--surface claude-code|openclaw]`. */
-const GUARD_SPEC: CommandHelpSpec = { valueFlags: ['--surface'] };
+/** `guard readiness|test-approval [--surface claude-code|openclaw]`: `argv[surfaceAt + 1]`. */
+const GUARD_SPEC = helpSpec({ '--surface': 'always' });
 
-/** `memory downvote <id> --reason <text>` / `memory list --purpose X --category X --limit N`. */
-const MEMORY_SPEC: CommandHelpSpec = { valueFlags: ['--reason', '--purpose', '--category', '--limit'] };
+/** `memory downvote <id> --reason <text>` / `memory list --purpose X --category X --limit N`: `parseFlag`. */
+const MEMORY_SPEC = helpSpec({ '--reason': 'always', '--purpose': 'always', '--category': 'always', '--limit': 'always' });
 
-/** `inspect last-precompact|last-recall [--history N]`. */
-const INSPECT_SPEC: CommandHelpSpec = { valueFlags: ['--history'] };
+/** `inspect last-precompact|last-recall [--history N]`: `parseFlag`. */
+const INSPECT_SPEC = helpSpec({ '--history': 'always' });
 
-/** `iron-dome activate --profile X`, `scan --text X | --file X`, `audit --search X`. */
-const IRON_DOME_SPEC: CommandHelpSpec = { valueFlags: ['--profile', '--text', '--file', '--search'] };
+/** `iron-dome activate --profile X`, `scan --text X | --file X`, `audit --search X`: `args[idx + 1]`. */
+const IRON_DOME_SPEC = helpSpec({ '--profile': 'always', '--text': 'always', '--file': 'always', '--search': 'always' });
 
 /**
  * `scan "<text>" [--source=TYPE] [--identifier=ID]`: the text is data (no verb
  * slot) and `--` ends the options, so `scan -- --help` scans "--help" (#767).
+ * `takeFlagValue` refuses a `-`-leading value, so `--source --help` is a help
+ * request.
  */
-const SCAN_SPEC: CommandHelpSpec = {
-  valueFlags: ['--source', '--identifier'],
-  verbDepth: 0,
-  doubleDashEndsOptions: true,
-};
+const SCAN_SPEC = helpSpec(
+  { '--source': 'unless-dash', '--identifier': 'unless-dash' },
+  { verbDepth: 0, doubleDashEndsOptions: true },
+);
 
 /** `xray <target> [--deep] [--json] …`: the target is a package, file or directory. */
-const XRAY_SPEC: CommandHelpSpec = { valueFlags: [], verbDepth: 0 };
+const XRAY_SPEC = helpSpec({}, { verbDepth: 0 });
 
 /**
  * `hook <name>`: the first argument is the name of a built-in or custom hook,
@@ -284,7 +458,7 @@ const XRAY_SPEC: CommandHelpSpec = { valueFlags: [], verbDepth: 0 };
  * `hook help` runs it (#767 round 2). The payload comes on stdin; only the flags
  * ask for usage.
  */
-const HOOK_SPEC: CommandHelpSpec = { valueFlags: [], verbDepth: 0 };
+const HOOK_SPEC = helpSpec({}, { verbDepth: 0 });
 
 /**
  * `cortex <verb> --key value …`: a generic parser (src/cortex/cli.ts) that
@@ -292,7 +466,7 @@ const HOOK_SPEC: CommandHelpSpec = { valueFlags: [], verbDepth: 0 };
  * list (#767 round 2). `cortex capture --what --help --category code …` captures
  * the mistake "--help"; `cortex capture --what x --help` asks for usage.
  */
-const CORTEX_SPEC: CommandHelpSpec = { valueFlags: [], everyLongFlagTakesValue: true };
+const CORTEX_SPEC = helpSpec({}, { everyLongFlagTakesValue: true });
 
 /**
  * Every command that owns a help gate, and the one description of its argv that
@@ -360,12 +534,12 @@ export const COMMAND_HELP_SPECS = {
   scan: SCAN_SPEC,
   'scan-skill': SCAN_SKILL_SPEC,
   env: INDEX_SPEC,              // `env scan <url> [--json|--markdown]`
-  'scan-skills': INDEX_SPEC,    // `scan-skills [--dir <path>]`
+  'scan-skills': SCAN_SKILLS_SPEC, // `scan-skills [--dir <path>]`: the only inline command with its own option
   consolidate: INDEX_SPEC,      // takes no arguments
   xray: XRAY_SPEC,
   'xray-preinstall': NO_VALUE_FLAGS, // takes no arguments
   cortex: CORTEX_SPEC,          // generic `--k v` parser behind a verb: every `--key` takes a value
-  api: INDEX_SPEC,              // server modes: `parseArgs()` reads --db / --mode
+  api: INDEX_SPEC,              // server modes: `parseArgs()` reads --db / --mode and nothing else
   dashboard: INDEX_SPEC,
   worker: INDEX_SPEC,
 } as const satisfies Record<string, CommandHelpSpec>;
@@ -374,7 +548,7 @@ export const COMMAND_HELP_SPECS = {
 export type GatedCommand = keyof typeof COMMAND_HELP_SPECS;
 
 export function isGatedCommand(word: string): word is GatedCommand {
-  return Object.prototype.hasOwnProperty.call(COMMAND_HELP_SPECS, word);
+  return hasOwn(COMMAND_HELP_SPECS, word);
 }
 
 /**
@@ -385,25 +559,35 @@ export function isGatedCommand(word: string): word is GatedCommand {
  * command word is the only thing a caller chooses; the table supplies the rest.
  */
 export function commandWantsHelp(command: GatedCommand, args: readonly string[]): boolean {
-  const spec = COMMAND_HELP_SPECS[command];
+  return rowWantsHelp(COMMAND_HELP_SPECS[command], args, COMMAND_HELP_SPECS[command].verbDepth ?? 1);
+}
+
+/**
+ * One row applied to the argv it describes. A verb row is applied to the tokens
+ * after its verb with no verb slot left: the verb has been chosen.
+ */
+function rowWantsHelp(row: CommandHelpSpec, args: readonly string[], verbDepth: number): boolean {
+  if (row.verbs && args.length > 0 && hasOwn(row.verbs, args[0])) {
+    return rowWantsHelp(row.verbs[args[0]], args.slice(1), 0);
+  }
   let tokens: readonly string[] = args;
   // The tokens the handler never parses as options are not the gate's to read
   // either: everything after `--` for an end-of-options parser, everything
   // after a rest-consuming option.
-  if (spec.doubleDashEndsOptions) {
+  if (row.doubleDashEndsOptions) {
     const end = tokens.indexOf('--');
     if (end !== -1) tokens = tokens.slice(0, end);
-  } else if (spec.stripDoubleDash) {
+  } else if (row.stripDoubleDash) {
     tokens = tokens.filter((a) => a !== '--');
   }
-  if (spec.restFlags?.length) {
-    const rest = tokens.findIndex((a) => spec.restFlags!.includes(a));
+  if (row.restFlags?.length) {
+    const rest = tokens.findIndex((a) => row.restFlags!.includes(a));
     if (rest !== -1) tokens = tokens.slice(0, rest);
   }
   return wantsHelp(tokens, {
-    valueFlags: spec.valueFlags,
-    verbDepth: spec.verbDepth,
-    everyLongFlagTakesValue: spec.everyLongFlagTakesValue,
+    values: row.values,
+    verbDepth,
+    everyLongFlagTakesValue: row.everyLongFlagTakesValue,
   });
 }
 
@@ -425,8 +609,8 @@ export function argvWantsHelp(argv: readonly string[]): boolean {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') return true;
-    if ((GLOBAL_VALUE_FLAGS as readonly string[]).includes(a)) {
-      i++;
+    if (hasOwn(GLOBAL_VALUES, a)) {
+      if (consumesAsValue(GLOBAL_VALUES[a], argv[i + 1])) i++;
       continue;
     }
     if (a.startsWith('-') && a !== '-') continue;
