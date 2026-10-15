@@ -130,3 +130,12 @@ jobs:
 
       - name: Lint dashboard
         run: cd dashboard && npm run lint
+
+      # #689 — the dashboard Jest suites were never run in CI: the root
+      # `npm test` does not load dashboard/, so a dashboard regression could
+      # ship through a green build. Linux only, like the build and lint steps
+      # above (pure JS, platform-independent). 16 suites / 146 tests at the
+      # time this step was added; `--ci` makes an obsolete or missing
+      # snapshot a failure rather than a silent write.
+      - name: Test dashboard
+        run: cd dashboard && npm test -- --ci
