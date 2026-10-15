@@ -42,14 +42,21 @@ Targets:
 install is the Claude Code install kept for scripts; it is not the setup wizard.
 setup claude runs the same install as a bare install. setup --with-stop-hook or
 setup --with-session-end is the same install too; the --without-* opt-outs go
-with install. Without asking, the Claude Code install writes:
-  ~/.claude/CLAUDE.md             ShieldCortex memory instructions block
-  ~/.claude.json                  global MCP server entry (mcpServers.memory)
+with install. Without asking, the Claude Code install can write:
+  ~/.claude/CLAUDE.md             memory instructions (skipped if already current)
+  ~/.claude.json                  MCP entry (mcpServers.memory); leaves another
+                                  provider's memory entry alone
+  ~/.claude.json.bak-shieldcortex retained backup if that file is replaced
   ~/.claude/settings.json         Claude Code hooks
-  ~/.claude/hooks/cortex-memory/  cortex-memory hook (HOOK.md, handler.ts,
-                                  runtime.mjs)
-It also installs the OpenClaw hook when OpenClaw is present, and sets
-owner-only permissions on ShieldCortex state.
+  ~/.claude/hooks/cortex-memory/  HOOK.md, handler.ts, runtime.mjs — skipped if
+                                  any detected hook root already has cortex-memory
+The Claude Code hooks file keeps a .bak-shieldcortex sibling when replaced.
+Short-lived .tmp-shieldcortex siblings are renamed into place. If the hook
+installer runs and an OpenClaw root is writable, it can also copy the OpenClaw
+hook, install or register the realtime plugin (method varies; skipped in Docker),
+snapshot openclaw.json to openclaw.json.sc-preinstall.bak-<timestamp>, rewrite
+OpenClaw config, and may restart the gateway. It attempts to tighten owner-only
+permissions on existing ShieldCortex state.
 
 quickstart [target] is an older name for setup's guided path. It takes the same
 targets but no hook flags and no uninstall.

@@ -83,9 +83,10 @@ const stripAnsi = (s) => s.replace(/(?:\x1b|\\x1b)\[[0-9;]*m/g, '');
 const CLAUDE_INSTALL_PATHS = [
   '~/.claude/CLAUDE.md',
   '~/.claude.json',
-  '~/.claude/settings.json',
+  '~/.claude.json.bak-shieldcortex',
   '~/.claude/hooks/cortex-memory/',
 ];
+const CLAUDE_HOOKS_FILE_MARK = 'Claude Code hooks';
 
 describe('source facts the copy describes', () => {
   const quickstart = read('src', 'setup', 'quickstart.ts');
@@ -131,6 +132,9 @@ describe('source facts the copy describes', () => {
     // 4. ~/.claude/hooks/cortex-memory/ — the hook installer treats ~/.claude
     //    as a hook root, and the hook dir is `<root>/hooks/<HOOK_NAME>`.
     assert.match(install, /const hooksDirs = findAllHooksDirs\(\);[\s\S]{0,400}?await installOpenClawHook\(\);/);
+    assert.match(install, /const hookExists = hooksDirs\.some\([\s\S]{0,120}?if \(hookExists\) \{[\s\S]{0,200}?await installOpenClawHook\(\);/);
+    assert.ok(read('src', 'setup', 'json-config.ts').includes('.bak-shieldcortex'));
+    assert.ok(read('src', 'setup', 'json-config.ts').includes('writeJsonConfigWithBackup'));
     const openclaw = read('src', 'setup', 'openclaw.ts');
     assert.ok(openclaw.includes("const HOOK_NAME = 'cortex-memory';"));
     assert.ok(openclaw.includes("export const HOOK_FILES = ['HOOK.md', 'handler.ts', 'runtime.mjs'] as const;"));
@@ -192,15 +196,18 @@ describe('src/cli/setup-dispatch.ts SETUP_HELP', () => {
 
   it('the install paragraph names each file the Claude Code install writes', () => {
     const para = between(help, 'install is the Claude Code install', 'quickstart [target]');
-    assert.match(para, /Without asking, the Claude Code install writes:/);
+    assert.match(para, /Without asking, the Claude Code install can write:/);
     for (const p of CLAUDE_INSTALL_PATHS) {
       assert.match(para, new RegExp(`^  ${p.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\s+\\S`, 'm'), `missing ${p}`);
     }
-    assert.match(para, /global MCP server entry \(mcpServers\.memory\)/);
-    assert.match(oneLine(para), /cortex-memory hook \(HOOK\.md, handler\.ts, runtime\.mjs\)/);
-    // Conditional and best-effort steps stay described as such.
-    assert.match(para, /the OpenClaw hook when OpenClaw is present/);
-    assert.match(para, /owner-only permissions on ShieldCortex state/);
+    assert.match(para, /mcpServers.memory/);
+    assert.match(oneLine(para), /HOOK.md, handler.ts, runtime.mjs/);
+    assert.match(para, /any detected hook root already has cortex-memory/);
+    assert.match(para, /bak-shieldcortex sibling when replaced/);
+    assert.match(oneLine(para), /If the hook installer runs and an OpenClaw root is writable/);
+    assert.match(para, /install or register the realtime plugin/);
+    assert.match(para, /may restart the gateway/);
+    assert.match(oneLine(para), /attempts to tighten owner-only permissions/);
     // Sentences the #708 Jest suite pins stay on one line.
     assert.match(para, /setup claude runs the same install as a bare install/);
     assert.match(para, /it is not the setup wizard/);
@@ -229,12 +236,14 @@ describe('src/index.ts top-level --help setup entry', () => {
 });
 
 describe('docs: the targeted form is described as wiring without asking', () => {
-  it('README.md install section names the files setup claude writes', () => {
+  it('README.md install section names the files setup claude can write', () => {
     const para = read('README.md').split('\n').find((l) => l.startsWith('`setup` is the onboarding command:'));
     assert.ok(para, 'README setup paragraph not found');
-    assert.match(para, /it prints one host table and asks before wiring each host\. `shieldcortex setup claude` skips the table and runs the Claude Code install without asking \(/);
-    for (const p of CLAUDE_INSTALL_PATHS) assert.ok(para.includes(`\`${p}\``), `README missing ${p}`);
-    assert.match(para, /plus the OpenClaw hook when OpenClaw is present\)/);
+    assert.match(para, /runs the Claude Code install without asking/);
+    for (const p of CLAUDE_INSTALL_PATHS) assert.ok(para.includes('`' + p + '`'), `README missing ${p}`);
+    assert.match(para, /unless any detected hook root already has a cortex-memory directory/);
+    assert.match(para, /writable OpenClaw root/);
+    assert.match(para, /may restart the gateway/);
   });
 
   it('docs/quickstarts/mcp.md', () => {
@@ -274,7 +283,7 @@ describe('CHANGELOG.md #766 bullet (Unreleased, or the release that ships it)', 
     assert.ok(bullet, '#766 bullet not found in CHANGELOG.md');
     assert.match(bullet, /bare `shieldcortex setup` asks before wiring each host/);
     assert.match(bullet, /`setup claude` \(or another named host\) wires that host directly/);
-    assert.match(bullet, /lists the files the Claude Code install writes/);
+    assert.match(bullet, /lists the files the Claude Code install can write/);
     assert.match(bullet, /Behaviour is unchanged\./);
   });
 });
