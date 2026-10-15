@@ -336,7 +336,7 @@ describe('shieldcortex allowlist scan (#309)', () => {
     await maybeReviewAllowlistAfterUpdate(deps());
     expect(stored).toEqual([]);
     const out = logs.join('\n');
-    expect(out).toContain('1 new/changed');
+    expect(out).toContain('1 new or changed scheduled script needs a yes');
     expect(out).toContain('shieldcortex allowlist scan');
   });
 

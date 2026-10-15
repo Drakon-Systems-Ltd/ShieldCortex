@@ -1,0 +1,115 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`NO_COLOR / non-TTY rendering plain ASCII markers, no colour codes, no box drawing (snapshot) 1`] = `
+"ShieldCortex updated   5.7.0 -> 5.9.0
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [ok]  OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable
+
+ShieldCortex updated   5.7.0 -> 5.9.0
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [ok]  OpenClaw       plugin 5.9.0 loaded, gateway reloaded
+  [ok]  Skill          updated
+  [ok]  Guard          on and checking tool calls
+
+ShieldCortex updated to 5.9.0 - 1 thing to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [ok]  OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  [ok]  Skill          updated
+  [!]   Guard          on, but couldn't confirm OpenClaw is checking tool calls
+                       Risky tool calls might not be stopped.
+                       Check: shieldcortex doctor --ai
+
+ShieldCortex updated to 5.9.0 - 1 thing to check
+
+  [ok]  Package        5.9.0
+  [ok]  Engine         ready
+  [ok]  OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  [ok]  Skill          updated
+  [!]   Hermes         couldn't find Hermes' Python, so Hermes wasn't updated
+                       Hermes keeps running the previous plugin.
+                       Fix: shieldcortex update
+                       Run it in a terminal where the hermes command works.
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable
+
+Update failed - ShieldCortex is still on 5.7.0
+
+  [x]   Package        couldn't install 5.9.0
+                       You are still on 5.7.0.
+                       Fix: npm install -g shieldcortex@latest
+  [ok]  Engine         ready
+  [ok]  OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  [ok]  Skill          updated
+  [off] Guard          off (the default)
+                       Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios a: all OK, Guard off (snapshot) 1`] = `
+"ShieldCortex updated   5.7.0 → 5.9.0
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ✓ OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios b: all OK, Guard on and proven (snapshot) 1`] = `
+"ShieldCortex updated   5.7.0 → 5.9.0
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ✓ OpenClaw       plugin 5.9.0 loaded, gateway reloaded
+  ✓ Skill          updated
+  ✓ Guard          on and checking tool calls"
+`;
+
+exports[`update summary: five scenarios c: Guard on, plugin load not confirmed (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 1 thing to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ✓ OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  ✓ Skill          updated
+  ! Guard          on, but couldn't confirm OpenClaw is checking tool calls
+                   Risky tool calls might not be stopped.
+                   Check: shieldcortex doctor --ai"
+`;
+
+exports[`update summary: five scenarios d: Hermes present, no interpreter (snapshot) 1`] = `
+"ShieldCortex updated to 5.9.0 — 1 thing to check
+
+  ✓ Package        5.9.0
+  ✓ Engine         ready
+  ✓ OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  ✓ Skill          updated
+  ! Hermes         couldn't find Hermes' Python, so Hermes wasn't updated
+                   Hermes keeps running the previous plugin.
+                   Fix: shieldcortex update
+                   Run it in a terminal where the hermes command works.
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
+
+exports[`update summary: five scenarios e: package install failed (snapshot) 1`] = `
+"Update failed — ShieldCortex is still on 5.7.0
+
+  ✗ Package        couldn't install 5.9.0
+                   You are still on 5.7.0.
+                   Fix: npm install -g shieldcortex@latest
+  ✓ Engine         ready
+  ✓ OpenClaw       plugin 5.9.0 installed, gateway reloaded
+  ✓ Skill          updated
+  ○ Guard          off (the default)
+                   Turn on: shieldcortex config --action-guard-enable"
+`;
