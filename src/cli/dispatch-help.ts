@@ -455,9 +455,10 @@ export function isDispatchGated(word: string): word is DispatchGatedCommand {
  * returns at once and the process exits 0 with nothing else having run.
  *
  * The verdict is the command's own (`commandWantsHelp`), so `scan -- --help`
- * scans, `remember help --content x` remembers, and `config --mode help` is an
- * invalid mode for the handler to refuse — exactly as the handler would read
- * them.
+ * scans, `remember help --content x` remembers, `remember x --content --help`
+ * remembers the text "--help", `hook help` runs the hook named "help", and
+ * `config --mode help` is an invalid mode for the handler to refuse — exactly
+ * as the handler would read them.
  */
 export function dispatchHelp(
   argv: readonly string[],

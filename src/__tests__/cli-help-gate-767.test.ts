@@ -14,9 +14,15 @@
  * src/cli/wants-help.ts and called first in `main()`, so a help request prints
  * usage and exits 0 before any handler module is imported.
  *
- * The command list is DERIVED from src/index.ts rather than written down here,
- * so a command added to the dispatcher without a gate fails this suite instead
- * of shipping. Every command is driven through the BUILT CLI under a fresh,
+ * The command list is DERIVED from src/index.ts rather than written down here:
+ * every `process.argv[2] === '<word>'` branch, plus the three server modes
+ * `parseArgs()` selects. A command added in that shape without a gate fails this
+ * suite instead of shipping. That is the whole guarantee — a command dispatched
+ * another way (a switch, a membership test, a reversed or double-quoted
+ * comparison) is invisible to the regex and has to be seeded by hand in
+ * `dispatchedCommands`, so the derivation is a tripwire for the dispatch shape
+ * `main()` uses today, not a proof over every shape it could use.
+ * Every command is driven through the BUILT CLI under a fresh,
  * empty HOME, and the assertion is not just "usage was printed" but "and nothing
  * under HOME exists afterwards": the database, config, audit, log and npm planes
  * all live there. The free-text controls run against the gate function directly
@@ -37,7 +43,7 @@ import {
   dispatchHelp,
   isDispatchGated,
 } from '../cli/dispatch-help.js';
-import { argvWantsHelp, commandWantsHelp } from '../cli/wants-help.js';
+import { argvWantsHelp, commandWantsHelp, wantsHelp, type GatedCommand } from '../cli/wants-help.js';
 import { BUILT_IN_HOOKS } from '../setup/hooks.js';
 import { SCOPE_KEYWORDS } from '../defence/iron-dome/session-lease.js';
 
@@ -72,7 +78,9 @@ const VERB_FORMS = ['consolidate', 'api', 'stats', 'lease', 'deny', 'quickstart'
  * Every command word `main()` dispatches on, read out of src/index.ts: each
  * `process.argv[2] === '<word>'` branch, plus the three server modes that
  * `parseArgs()` selects by `args[0]`. The top-level flags and the bare `help`
- * word are the top-level help, not commands.
+ * word are the top-level help, not commands. Only that one comparison shape is
+ * recognised (see the header): a dispatch written any other way must be added
+ * to the seed set here, or it is not driven.
  */
 function dispatchedCommands(): string[] {
   const words = new Set<string>(['api', 'dashboard', 'worker']);
@@ -323,6 +331,70 @@ describe('#767 — free text and forwarded arguments are never a help request', 
     ]) {
       const { hit, out } = gate(argv);
       expect({ argv, hit, out }).toEqual({ argv, hit: true, out: [DISPATCH_HELP[argv[0] as keyof typeof DISPATCH_HELP]] });
+    }
+  });
+
+  /** The same argv at all three gates: dispatcher, the command's own, the whole-argv one. */
+  function everyGate(argv: string[]): { dispatch: boolean; command: boolean; global: boolean } {
+    return {
+      dispatch: gate(argv).hit,
+      command: commandWantsHelp(argv[0] as GatedCommand, argv.slice(1)),
+      global: argvWantsHelp(argv),
+    };
+  }
+
+  it('r2 B1: an option VALUE spelled --help or -h is that value, at every gate', () => {
+    // Each handler reads the token after the option unconditionally
+    // (remember/memory `parseFlag`, guard `argv[surfaceAt + 1]`, and Cortex's
+    // generic parser, which consumes the token after EVERY `--key`). Before
+    // round 2 the gate scanned the whole argv for the flag first, so these
+    // printed usage and silently did not remember / downvote / check / capture.
+    for (const argv of [
+      ['remember', 'x', '--content', '--help'],
+      ['remember', 'x', '--content', '-h'],
+      ['remember', 'x', '--content', '--help', '--json'],
+      ['remember', 'x', '--content', 'y', '--tags', '--help'],
+      ['memory', 'downvote', 'x', '--reason', '--help'],
+      ['guard', 'readiness', '--surface', '--help'],
+      ['cortex', 'capture', '--what', '--help', '--category', 'code', '--why', 'x', '--rule', 'y'],
+      ['cortex', 'capture', '--what', '-h'],
+      ['cortex', 'capture', '--category', 'code', '--what', 'x', '--why', '--help', '--rule', 'y'],
+    ]) {
+      expect({ argv, ...everyGate(argv), out: gate(argv).out })
+        .toEqual({ argv, dispatch: false, command: false, global: false, out: [] });
+    }
+  });
+
+  it('r2 B1: …and a help flag at an option position, after a completed value, still counts', () => {
+    for (const argv of [
+      ['remember', 'x', '--content', 'y', '--help'],
+      ['remember', 'x', '--content', '--help', '-h'],      // the value is "--help"; the -h is the flag
+      ['memory', 'downvote', 'x', '--reason', 'y', '-h'],
+      ['guard', 'readiness', '--surface', 'claude-code', '--help'],
+      ['cortex', 'capture', '--what', 'y', '--help'],
+      ['cortex', 'capture', '--help', '--what', 'y'],
+      ['cortex', '-h'],
+    ]) {
+      expect({ argv, ...everyGate(argv), out: gate(argv).out })
+        .toEqual({ argv, dispatch: true, command: true, global: true, out: [DISPATCH_HELP[argv[0] as keyof typeof DISPATCH_HELP]] });
+    }
+    // The primitive itself: a value position is a value only when the caller
+    // says the option takes one — without the list, `--help` anywhere counts,
+    // which is what the handler-gated commands with all-boolean options rely on.
+    expect(wantsHelp(['--content', '--help'], { valueFlags: ['--content'] })).toBe(false);
+    expect(wantsHelp(['--content', '--help'])).toBe(true);
+    expect(wantsHelp(['verb', 'arg', '--help'], { valueFlags: ['--content'] })).toBe(true);
+  });
+
+  it('r2 B2: `hook <name>` — the first argument is a hook name, so `hook help` runs the hook named help', () => {
+    // src/setup/hooks.ts looks the first argument up in BUILT_IN_HOOKS and then
+    // in config.json's customHooks, without reserving "help": a custom hook may
+    // be named that, and was runnable before #767. Only the flags ask for usage.
+    expect({ argv: ['hook', 'help'], ...everyGate(['hook', 'help']), out: gate(['hook', 'help']).out })
+      .toEqual({ argv: ['hook', 'help'], dispatch: false, command: false, global: false, out: [] });
+    for (const argv of [['hook', '--help'], ['hook', '-h']]) {
+      expect({ argv, ...everyGate(argv), out: gate(argv).out })
+        .toEqual({ argv, dispatch: true, command: true, global: true, out: [HOOK_HELP] });
     }
   });
 

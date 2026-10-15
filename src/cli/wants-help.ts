@@ -16,10 +16,12 @@
  * a project key and a source path. A help gate that eats real work is the same
  * defect as an action that eats a help flag, pointed the other way.
  *
- * The rule now: `--help` / `-h` count anywhere (they are never a value the CLI
- * asks for), and a bare `help` counts only in the verb position — the FIRST
- * positional, with the values of value-taking options skipped so they can never
- * be mistaken for one.
+ * The rule now: `--help` / `-h` count at any OPTION position, and a bare `help`
+ * counts only in the verb position — the FIRST positional. The values of
+ * value-taking options are stepped over before either check, so a value can
+ * never be mistaken for a verb OR for a flag: `remember x --content --help`
+ * stores the text "--help" (#767 round 2 — the first version checked the flags
+ * against the whole argv before skipping values, and ate that content).
  *
  * Round 3 closed the last way that rule could still be applied WRONGLY: which
  * options take a value is a fact about one command, and the whole-argv gates in
@@ -43,8 +45,9 @@ export interface WantsHelpOptions {
    *
    * 0 for a command whose first positional is DATA, not a verb (#767): the text
    * `scan` analyses, the title `remember` stores, the file `scan-skill` reads,
-   * the package `xray` inspects. `shieldcortex scan help` scans the word "help";
-   * only `--help` / `-h` ask such a command for usage.
+   * the package `xray` inspects, the name `hook` runs. `shieldcortex scan help`
+   * scans the word "help" and `hook help` runs a hook named "help"; only
+   * `--help` / `-h` ask such a command for usage.
    *
    * Callers pass the command's own argv, so this is 1 (or 0) everywhere today:
    * the whole-argv gates strip the command word themselves (`argvWantsHelp`)
@@ -52,30 +55,38 @@ export interface WantsHelpOptions {
    * is the command word and only the command's table describes what follows it.
    */
   verbDepth?: number;
+  /**
+   * EVERY `--key` consumes the following token, whatever the key — the shape of
+   * a generic `--key value` parser (`cortex`, src/cortex/cli.ts), for which no
+   * finite `valueFlags` list exists. `cortex capture --what --help` is the
+   * mistake "--help", not a help request; `--help` at an option position still
+   * is one, because the help check runs before the consumption rule.
+   */
+  everyLongFlagTakesValue?: boolean;
 }
 
 export function wantsHelp(args: readonly string[], options: WantsHelpOptions = {}): boolean {
-  // Explicit help flags win wherever they appear: no option in this CLI takes a
-  // value spelled `--help`, so there is no ambiguity to resolve.
-  if (args.some((a) => a === '--help' || a === '-h')) return true;
-
   const valueFlags = options.valueFlags ?? [];
   const verbDepth = options.verbDepth ?? 1;
   let positional = 0;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
+    // An explicit help flag counts at any OPTION position. A token in a VALUE
+    // position never reaches this line — the branch below steps over it — so
+    // `--content --help` is content spelled "--help", not a request for usage.
+    if (a === '--help' || a === '-h') return true;
     // `--flag value` — skip the value; `--flag=value` is one token and falls
     // through to the option branch below.
-    if (valueFlags.includes(a)) {
+    if (valueFlags.includes(a) || (options.everyLongFlagTakesValue && a.startsWith('--'))) {
       i++;
       continue;
     }
     if (a.startsWith('-') && a !== '-') continue;
     positional += 1;
-    // Past the verb slots, `help` is an argument to a verb already chosen — or,
-    // at depth 0, the command's data.
-    if (positional > verbDepth) return false;
-    if (a === 'help') return true;
+    // A bare `help` is the help verb only in a verb slot. Past the verb slots it
+    // is an argument to a verb already chosen — or, at depth 0, the command's
+    // data — and the scan goes on, because a flag further along still counts.
+    if (positional <= verbDepth && a === 'help') return true;
   }
   return false;
 }
@@ -125,6 +136,12 @@ export interface CommandHelpSpec {
    * so a reason that happens to contain `--help` is still the reason (#767).
    */
   restFlags?: readonly string[];
+  /**
+   * The handler's parser consumes the token after EVERY `--key` (`cortex`), so
+   * there is no finite `valueFlags` list to write down; the rule itself is the
+   * row (#767 round 2). See `WantsHelpOptions.everyLongFlagTakesValue`.
+   */
+  everyLongFlagTakesValue?: boolean;
 }
 
 /** `audit`: `--deps-path help` is a path to scan (#577). */
@@ -262,6 +279,22 @@ const SCAN_SPEC: CommandHelpSpec = {
 const XRAY_SPEC: CommandHelpSpec = { valueFlags: [], verbDepth: 0 };
 
 /**
+ * `hook <name>`: the first argument is the name of a built-in or custom hook,
+ * looked up without reserving any word — a custom hook may be named "help", and
+ * `hook help` runs it (#767 round 2). The payload comes on stdin; only the flags
+ * ask for usage.
+ */
+const HOOK_SPEC: CommandHelpSpec = { valueFlags: [], verbDepth: 0 };
+
+/**
+ * `cortex <verb> --key value …`: a generic parser (src/cortex/cli.ts) that
+ * consumes the token after EVERY `--key`, so the row is the rule rather than a
+ * list (#767 round 2). `cortex capture --what --help --category code …` captures
+ * the mistake "--help"; `cortex capture --what x --help` asks for usage.
+ */
+const CORTEX_SPEC: CommandHelpSpec = { valueFlags: [], everyLongFlagTakesValue: true };
+
+/**
  * Every command that owns a help gate, and the one description of its argv that
  * all of its gates read (#577 round 3).
  *
@@ -299,7 +332,7 @@ export const COMMAND_HELP_SPECS = {
   compact: NO_VALUE_FLAGS,      // documented alias of vacuum
   logs: NO_VALUE_FLAGS,         // #573 `logs prune [--execute]` deletes files
   // ── #767: gated by the dispatcher, before the handler module is imported ──
-  hook: NO_VALUE_FLAGS,         // `hook <name>`; the payload comes on stdin
+  hook: HOOK_SPEC,              // `hook <name>`: the name is data, not a verb
   protect: PROTECT_SPEC,
   quickstart: NO_VALUE_FLAGS,   // `quickstart [target|--yes|--install-detected]`
   copilot: NO_VALUE_FLAGS,
@@ -331,7 +364,7 @@ export const COMMAND_HELP_SPECS = {
   consolidate: INDEX_SPEC,      // takes no arguments
   xray: XRAY_SPEC,
   'xray-preinstall': NO_VALUE_FLAGS, // takes no arguments
-  cortex: NO_VALUE_FLAGS,       // see value-flag-inventory-577.test.ts: generic `--k v` parser behind a verb
+  cortex: CORTEX_SPEC,          // generic `--k v` parser behind a verb: every `--key` takes a value
   api: INDEX_SPEC,              // server modes: `parseArgs()` reads --db / --mode
   dashboard: INDEX_SPEC,
   worker: INDEX_SPEC,
@@ -367,7 +400,11 @@ export function commandWantsHelp(command: GatedCommand, args: readonly string[])
     const rest = tokens.findIndex((a) => spec.restFlags!.includes(a));
     if (rest !== -1) tokens = tokens.slice(0, rest);
   }
-  return wantsHelp(tokens, { valueFlags: spec.valueFlags, verbDepth: spec.verbDepth });
+  return wantsHelp(tokens, {
+    valueFlags: spec.valueFlags,
+    verbDepth: spec.verbDepth,
+    everyLongFlagTakesValue: spec.everyLongFlagTakesValue,
+  });
 }
 
 /**

@@ -134,11 +134,11 @@ const EXEMPT = new Map<string, string>([
     'src/cortex/cli.ts:parseArgs',
     // A generic `--key value` parser: EVERY `--x` token consumes the one after
     // it, so there is no finite value-flag list to put in cortex's row (#767).
-    // The verb (`capture`, `preflight`, …) is the first positional, so
-    // `cortex capture --what help` fills the verb slot before any value is
-    // read; the row stays empty and only `--help` / `-h` / a leading `help`
-    // ask cortex for usage.
-    'every --flag consumes the following token; no finite inventory exists',
+    // The rule is represented instead: the row declares
+    // `everyLongFlagTakesValue`, and the gate steps over the token after any
+    // `--key` exactly as this parser does (asserted below, #767 round 2). What
+    // is exempt here is only the analyser's attribution, which needs a literal.
+    'every --flag consumes the following token; the row carries the rule, not a list',
   ],
 ]);
 
@@ -364,6 +364,16 @@ describe('#577 — every recognised value-consuming flag is in its command\'s li
 
   it('`--note` is classified as a value, so its value is never the help verb', () => {
     expect(COMMAND_HELP_SPECS.allowlist.valueFlags).toContain('--note');
+  });
+
+  it('cortex: the exempted generic parser is represented as a rule on its row (#767 round 2)', () => {
+    // The exemption above would otherwise leave cortex's values unprotected:
+    // with an empty list and no rule, `--what --help` was a help request.
+    expect(COMMAND_HELP_SPECS.cortex.valueFlags).toEqual([]);
+    expect(COMMAND_HELP_SPECS.cortex.everyLongFlagTakesValue).toBe(true);
+    expect(commandWantsHelp('cortex', ['capture', '--what', '--help', '--category', 'code'])).toBe(false);
+    expect(commandWantsHelp('cortex', ['capture', '--what', 'x', '--help'])).toBe(true);
+    expect(argvWantsHelp(['cortex', 'capture', '--what', '--help'])).toBe(false);
   });
 });
 
