@@ -225,9 +225,9 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     work(small);
     const probeMs = performance.now() - probeStart;
     // Size the batch so each small sample lasts about 4 ms: sub-millisecond
-    // samples are mostly timer and scheduler noise, and the 1 ms floor below
+    // samples are mostly timer and scheduler noise, and the 0.2 ms floor below
     // would otherwise flatten a real ratio.
-    const batchSize = Math.min(64, Math.max(1, Math.ceil(4 / Math.max(probeMs, 0.01))));
+    const batchSize = Math.min(256, Math.max(1, Math.ceil(4 / Math.max(probeMs, 0.01))));
     let bestSmallMs = Number.POSITIVE_INFINITY;
     let bestBigMs = Number.POSITIVE_INFINITY;
     for (let sample = 0; sample < 5; sample++) {
@@ -243,7 +243,7 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
     const fullSizeStart = performance.now();
     const v = work(fullSize);
     const fullSizeMs = performance.now() - fullSizeStart;
-    return { v, ratio: bestBigMs / Math.max(bestSmallMs, 1), fullSizeMs };
+    return { v, ratio: bestBigMs / Math.max(bestSmallMs, 0.2), fullSizeMs };
   }
 
   it('stays fast on a ~50k-char, 789-quoted-heredoc pathological command (each redirected to a distinct file)', () => {
@@ -333,7 +333,8 @@ describe('#86-redos — heredoc-linking stays fast under load', () => {
   it('detects quadratic work while accepting linear work at the same sizes', () => {
     function stringWork(count: number, quadratic: boolean): string {
       let value = '';
-      const iterations = count * (quadratic ? count : 200);
+      // Similar cost at the big size (~5k steps), so the self-test stays cheap.
+      const iterations = quadratic ? Math.ceil((count * count) / 32) : count * 12;
       for (let i = 0; i < iterations; i++) value = (value + 'x').slice(-16);
       return value;
     }
