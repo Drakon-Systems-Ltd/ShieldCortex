@@ -53,10 +53,11 @@ with install. Without asking, the Claude Code install can write:
 The Claude Code hooks file keeps a .bak-shieldcortex sibling when replaced.
 Short-lived .tmp-shieldcortex siblings are renamed into place. If the hook
 installer runs and an OpenClaw root is writable, it can also copy the OpenClaw
-hook, install or register the realtime plugin (method varies; skipped in Docker),
-snapshot openclaw.json to openclaw.json.sc-preinstall.bak-<timestamp>, rewrite
-OpenClaw config, and may restart the gateway. It attempts to tighten owner-only
-permissions on existing ShieldCortex state.
+hook, install or register the realtime plugin (method varies; skipped in
+Docker by default), snapshot openclaw.json to
+openclaw.json.sc-preinstall.bak-<timestamp>, rewrite OpenClaw config, and
+may restart the gateway. It attempts to tighten owner-only permissions on
+existing ShieldCortex state.
 
 quickstart [target] is an older name for setup's guided path. It takes the same
 targets but no hook flags and no uninstall.
