@@ -47,6 +47,10 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 
 - **One command to keep your memory store tidy.** `shieldcortex maintain` tidies short-term memory when there is too much of it, fills in missing search vectors (once the search model has been downloaded), and shrinks the database file when a fifth or more of it is empty space. It then runs the relevant doctor checks and exits with an error while one still fails, so a scheduled job can alert you; if you have an Action Guard webhook set up, it reports the failing checks there by name, with a note to run `shieldcortex doctor`; the detailed messages stay on your machine and your memories are never sent. It does this at most once a day for the same set. Plain `maintain` makes changes straight away: tidying short-term memory runs the first part of `shieldcortex consolidate` (not its Dream Mode part): it promotes the memories worth keeping, deletes faded short-term ones, removes older unpinned memories from either store when that store is over its limit, and for near-identical long-term memories deletes or downvotes one copy. It never merges memory text and does not archive. Run `shieldcortex maintain --dry-run` first to see what it would do without changing your data; `--json` gives a machine-readable report. See [Storage maintenance](#storage-maintenance). Nothing schedules it yet, and audit-log clean-up is not included yet.
 - **`maintain` stays out of the way of a running ShieldCortex.** If another ShieldCortex process is using the database, `maintain` skips the steps that would write to it and still runs the checks, including when that process starts while `maintain` is getting ready and `maintain` detects its live startup lock. The lock itself still has known gaps, listed under 5.10.0 in the CHANGELOG (#763). Nothing to do on upgrade.
+- **5.10.1 — A calmer update screen.** `shieldcortex update` now finishes with one headline (updated, things to check, or failed) and one line per part. Anything that needs you says what happened, why it matters and the one command to run. Action Guard being off is shown as off, not as a warning. A failed OpenClaw protection check always shows red. The full technical detail is still there with `shieldcortex update --verbose`. Nothing to do on upgrade.
+- **5.10.1 — Odd file names can no longer scramble your terminal.** The update screen, the allowlist scan and `shieldcortex allowlist` now clean up control and hidden characters in paths, notes and errors before printing them. Ordinary paths look the same. Nothing to do on upgrade.
+- **5.10.1 — `service install` and `service status` tell you when something is wrong.** They now exit with an error when the background service cannot be switched on, is not running, or cannot be checked, so a script can notice. Nothing to do on upgrade.
+- **5.10.1 — The dashboard is more careful about what it claims.** Needs you says when a number is only the last known count or a minimum, the protection indicator is labelled Iron Dome (it does not cover Action Guard), and "data stays on this computer" follows your cloud sync setting. Scripts reading the X-Ray findings API now get an error, not a zero, when the findings file cannot be read. Nothing to do on upgrade.
 
 <a id="whats-new-in-59"></a>
 
@@ -125,6 +129,31 @@ Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob
 - **5.3.1 — Action Guard on OpenClaw's Codex harness.** `gateway_exec` / `gateway_process` calls now resolve to the native exec/process contracts instead of being rejected as unknown tools and cancelled. (#622)
 
 Full detail: [CHANGELOG](https://github.com/Drakon-Systems-Ltd/ShieldCortex/blob/main/CHANGELOG.md).
+
+<a id="mixed-version-ledger"></a>
+
+## Older copies sharing a chained database
+
+One host often has more than one ShieldCortex copy: a global install, a project dependency tree, a cached plugin or a Hermes plugin copy. Copies at 5.2.1 or older predate the chained ledger. Every time one of them starts, it fills in `project` on audit rows that have none. A copy at 5.3 or later skips chained rows. An older copy does not, so it used to change chained rows, and the next `shieldcortex ledger verify` failed. (#674)
+
+The database now refuses that change, whichever copy issues it. Once a current build has opened the database, any change to the `project` of a chained audit row is aborted. An update that leaves the value as it was still goes through.
+
+What you may see:
+
+- **On an older copy's stderr, at each start:**
+
+  ```
+  [database] unexpected migration error in defence_audit/quarantine project backfill (data migration): ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)
+  ```
+
+  This means an old copy started against this database and was stopped before it changed anything. The old copy carries on starting. Update or remove that copy. If something alerts on `unexpected migration error`, this line will trigger it.
+- **Deferred backfill.** The refused statement is rolled back as a whole, so that start does not fill in `project` on unchained rows, or on held-back (quarantine) items, either. The next start of a current build fills them in. Nothing is lost.
+
+What this does not cover:
+
+- **It is compatibility protection, not a tamper boundary.** Anyone with write access to the database can remove the trigger. Detecting tampering is still the job of `shieldcortex ledger verify` and the `Chained ledger` doctor row. Other columns of chained rows are not guarded, and edits to them are reported by `ledger verify` as before.
+- **Older copies still write unchained rows and still delete rows without a checkpoint.** An old copy that logs an audit event adds a row without chain columns, which `ledger verify` reports as `unchained-row-after-start`. An old copy that runs retention deletes rows without recording a checkpoint, which `ledger verify` reports as a gap. Neither is blocked. The fix is to update or remove old copies.
+- **`shieldcortex doctor` does not yet look for stale copies.** Finding the old copy is up to you for now.
 
 <a id="policy-lock"></a>
 
