@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { createFindingsStore, FindingsStoreUnreadableError } from '../findings-store.js';
+import { createFindingsStore, FindingsStoreUnreadableError, FindingsStoreWriteRefusedError } from '../findings-store.js';
 import type { XRayFinding } from '../types.js';
 
 function makeTempDir(): string {
@@ -394,14 +394,17 @@ describe('FindingsStore', () => {
       expect(store.getStats()).toMatchObject({ total: 2, new: 1, resolved: 1, store: 'ok' });
     });
 
-    it('does not drop the valid entries of a partly invalid file when a scan adds findings', () => {
-      // f-2 stays `new` so the 30-day cleanup of triaged findings does not apply.
-      fs.writeFileSync(path.join(tmpDir, 'xray-findings.json'), JSON.stringify([valid(), valid({ id: 'f-2', severity: 'severe' })]));
+    it('does not rewrite a partly invalid file when a scan adds findings (#801)', () => {
+      const file = path.join(tmpDir, 'xray-findings.json');
+      fs.writeFileSync(file, JSON.stringify([valid(), valid({ id: 'f-2', severity: 'severe' })]));
+      const before = fs.readFileSync(file);
       const store = createFindingsStore(tmpDir);
       expect(store.getStoreState()).toBe('unreadable');
-      store.addFindings('scan-2', 'scan', '/other', [makeFinding({ title: 'fresh' })]);
-      const ids = (JSON.parse(fs.readFileSync(path.join(tmpDir, 'xray-findings.json'), 'utf-8')) as Array<{ id: string }>).map((f) => f.id);
-      expect(ids).toEqual(expect.arrayContaining(['f-1', 'f-2']));
+      expect(() => store.addFindings('scan-2', 'scan', '/other', [makeFinding({ title: 'fresh' })]))
+        .toThrow(FindingsStoreWriteRefusedError);
+      expect(fs.readFileSync(file).equals(before)).toBe(true);
+      // The lenient list path still reads it as before.
+      expect(store.listFindings().map((f) => f.id)).toEqual(['f-1', 'f-2']);
     });
 
     it('recovery guidance does not name a fixed home path or promise a scan repairs the file', () => {
