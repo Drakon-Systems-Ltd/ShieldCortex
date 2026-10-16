@@ -1,0 +1,349 @@
+{
+  "_comment": "#654 PAR1 golden vectors. v1 = the HEAD stop-hook guardFingerprint evaluated at physKey (byte for byte, including the String() coercion of auditEventId); nonceFp = the bindingNonce fingerprint; primary/basis = guardIdentity. Computed with SHA-256 over the canonical JSON preimage, independently of the product code. ASCII-only, so JSON.stringify produces the same preimage.",
+  "vectors": [
+    {
+      "name": "id-string",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [
+          "secret-egress",
+          "hunter2"
+        ],
+        "auditEventId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "f9ff639284e679ed",
+      "basis": "eventId",
+      "primary": "f9ff639284e679ed"
+    },
+    {
+      "name": "nonce-only",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [
+          "approval-required"
+        ],
+        "plane": "action_guard",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "seq": 3,
+        "actionKey": "rm <home>"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "ae97b26c2ce1b08d",
+      "basis": "bindingNonce",
+      "primary": "fc85043965200cf1",
+      "nonceFp": "fc85043965200cf1"
+    },
+    {
+      "name": "id-and-nonce",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [
+          "secret-egress"
+        ],
+        "auditEventId": "cccccccccccccccccccccccccccccccc",
+        "plane": "action_guard",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "seq": 3,
+        "actionKey": "rm <home>"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "dad24b76d1f8c4d3",
+      "basis": "eventId",
+      "primary": "dad24b76d1f8c4d3",
+      "nonceFp": "381f6f7027c95622"
+    },
+    {
+      "name": "physical",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [
+          "fallback-scan"
+        ]
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "2330f7f82a50648d",
+      "basis": "physicalRow",
+      "primary": "2330f7f82a50648d"
+    },
+    {
+      "name": "coerced-array-id-no-nonce",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [],
+        "auditEventId": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ]
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "2e215bddff3494ef",
+      "basis": "physicalRow",
+      "primary": "2e215bddff3494ef"
+    },
+    {
+      "name": "coerced-array-id-with-nonce",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [],
+        "auditEventId": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "plane": "action_guard",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "fedcba9876543210fedcba9876543210",
+        "seq": 3,
+        "actionKey": "rm <home>"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "2e215bddff3494ef",
+      "basis": "bindingNonce",
+      "primary": "1d56fa002bf7778b",
+      "nonceFp": "1d56fa002bf7778b"
+    },
+    {
+      "name": "uppercase-id",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "auditEventId": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    },
+    {
+      "name": "id-31-hex",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "auditEventId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    },
+    {
+      "name": "numeric-id",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "auditEventId": 12345
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    },
+    {
+      "name": "undefined-tool-and-threats",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "ts": "2026-08-11T10:00:00.000Z"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "82d1375dad66954d",
+      "basis": "physicalRow",
+      "primary": "82d1375dad66954d"
+    },
+    {
+      "name": "unknown-and-empty-labels",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [
+          "",
+          "  ",
+          "x-unknown",
+          "Secret-Egress"
+        ]
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "63b20222c17cfd84",
+      "basis": "physicalRow",
+      "primary": "63b20222c17cfd84"
+    },
+    {
+      "name": "every-allowlisted-signal",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "threats": [
+          "persistence-risk",
+          "shell-injection",
+          "reviewed-script",
+          "untrusted-script",
+          "data-exfiltration",
+          "credential-access",
+          "network-egress",
+          "command-exec",
+          "dangerous-shell",
+          "destructive-filesystem",
+          "filesystem-destructive",
+          "privilege-escalation",
+          "fallback-scan",
+          "approval-required",
+          "secret-egress"
+        ]
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "ba8cbf9c0a378b97",
+      "basis": "physicalRow",
+      "primary": "ba8cbf9c0a378b97"
+    },
+    {
+      "name": "nonce-seq-zero",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "plane": "action_guard",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "seq": 0,
+        "actionKey": "rm <home>"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    },
+    {
+      "name": "nonce-seq-fraction",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "plane": "action_guard",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "seq": 1.5,
+        "actionKey": "rm <home>"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    },
+    {
+      "name": "nonce-unknown-plane",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "plane": "elsewhere",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "seq": 3,
+        "actionKey": "rm <home>"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    },
+    {
+      "name": "nonce-uppercase",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "plane": "action_guard",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "0123456789ABCDEF0123456789ABCDEF",
+        "seq": 3,
+        "actionKey": "rm <home>"
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    },
+    {
+      "name": "nonce-missing-actionKey",
+      "row": {
+        "sessionKey": "sc-0123456789abcdef",
+        "action": "require_approval",
+        "outcome": "failure_denied",
+        "tool": "Bash",
+        "ts": "2026-08-11T10:00:00.000Z",
+        "plane": "action_guard",
+        "gatewayInstanceId": "gw-fixture",
+        "hookName": "before_tool_call",
+        "pluginId": "shieldcortex-realtime",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "seq": 3
+      },
+      "physKey": "/fixture/.shieldcortex/audit/realtime-2026-08-10.jsonl:3",
+      "v1": "48b8e8f945a29660",
+      "basis": "physicalRow",
+      "primary": "48b8e8f945a29660"
+    }
+  ]
+}
