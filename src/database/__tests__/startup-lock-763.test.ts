@@ -452,6 +452,64 @@ describe('#763 stale takeover', () => {
   });
 });
 
+describe('#813 displaced startup-lock holder', () => {
+  it('stops reporting ownership after a stale reaper moves its record aside and a third starter publishes', () => {
+    writeForeign(record(DEAD_PID));
+    let aRecord = '';
+    let bRecord = '';
+    // R has already judged S stale. A removes S and acquires through the
+    // real publication path while R is paused immediately before rename.
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      expect(holdsStartupLock()).toBe(true);
+      aRecord = realFs.readFileSync(lockPath, 'utf8');
+      // R will move A aside. B publishes into the vacancy before R restores.
+      hooks.beforeAsideLink = () => {
+        bRecord = record(process.ppid);
+        const temp = `${lockPath}.third.tmp`;
+        realFs.writeFileSync(temp, bRecord);
+        try { realFs.linkSync(temp, lockPath); }
+        finally { realFs.unlinkSync(temp); }
+      };
+    };
+
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(bRecord);
+    expect(asides()).toEqual([aRecord]);
+    // A's descriptor is still open in this module, but B is now at the
+    // canonical path. A must revoke its own ownership on this check.
+    expect(holdsStartupLock()).toBe(false);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(bRecord);
+  });
+
+  it('reports no ownership while its record is aside, and owns it again once the stale reaper links it back', () => {
+    writeForeign(record(DEAD_PID));
+    let aRecord = '';
+    let duringVacancy: boolean | undefined;
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      aRecord = realFs.readFileSync(lockPath, 'utf8');
+      // R has moved A aside and is about to link it back; nobody else publishes.
+      hooks.beforeAsideLink = () => {
+        duringVacancy = holdsStartupLock();
+      };
+    };
+
+    // R restores A's record (same inode), then judges it live and refuses.
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(duringVacancy).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(aRecord);
+    expect(asides()).toEqual([]);
+    expect(holdsStartupLock()).toBe(true);
+    // Ownership survived the vacancy, so shutdown still releases A's record.
+    closeDatabase();
+    expect(realFs.existsSync(lockPath)).toBe(false);
+  });
+});
+
 describe('#763 release', () => {
   it('continue-anyway never removes the foreign lock on close', () => {
     const foreign = record(process.pid);
