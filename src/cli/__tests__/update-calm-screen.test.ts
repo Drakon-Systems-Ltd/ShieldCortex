@@ -352,7 +352,7 @@ describe('banned phrases stay out of the default output', () => {
       index: 1,
       total: 2,
       status: 'new',
-      path: '/Users/friday/.openclaw/scripts/redteam-shieldcortex-cron.sh',
+      path: '/opt/fixture/openclaw/scripts/redteam-cron.sh',
       sha256: '9ebef1ad0e5f'.repeat(5) + 'abcd',
       sources: ['openclaw-cron-db'],
     }, { width: 80, style: NO_STYLE }).join('\n');
