@@ -90,6 +90,14 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
   let dbBorrowed = false;
   let locked = !dryRun && liveLock(dbPath);
   deps.afterLockCheck?.();
+  /** Ownership lost mid-run (#813): this and every later write step is skipped as locked. */
+  const lostLock = (from: 'consolidate' | 'embed' | 'vacuum'): void => {
+    locked = true;
+    const order = ['consolidate', 'embed', 'vacuum'] as const;
+    for (const name of order.slice(order.indexOf(from))) {
+      steps[name] = name === 'embed' ? step('skipped', 'locked', { missing: 0, embedded: 0 }) : step('skipped', 'locked');
+    }
+  };
   try {
     if (locked) {
       steps.consolidate = step('skipped', 'locked');
@@ -130,7 +138,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
         else if (dryRun) steps.consolidate = step('skipped', 'dry-run: STM over cap', { stm: count, promoted: 0, deleted: 0 });
         else {
           const { consolidate } = await import('../memory/consolidate.js');
-          if (!holdsStartupLock()) { locked = true; steps.consolidate = step('skipped', 'locked'); }
+          if (!holdsStartupLock()) lostLock('consolidate');
           else {
             const result: ConsolidationResult = deps.consolidate ? deps.consolidate() : consolidate(config);
             steps.consolidate = step('ran', 'STM over cap', { stm: count, promoted: result.consolidated, deleted: result.deleted });
@@ -149,8 +157,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
           const missing = (db.prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding IS NULL').get() as { n: number }).n;
           steps.embed = step('skipped', 'embedding model not cached', { missing, embedded: 0 });
         } else if (!dryRun && !holdsStartupLock()) {
-          locked = true;
-          steps.embed = step('skipped', 'locked', { missing: 0, embedded: 0 });
+          lostLock('embed');
         } else {
           const result: EmbedBackfillResult = await backfillEmbeddings({ db, execute: !dryRun, embed: deps.embed });
           steps.embed = step(dryRun ? 'skipped' : result.embedded > 0 ? 'ran' : result.failed > 0 ? 'failed' : 'noop',
@@ -176,7 +183,7 @@ export async function maintain(options: { dryRun?: boolean } = {}, deps: Maintai
         const share = pages ? free / pages : 0;
         if (share < VACUUM_FREE_SHARE) steps.vacuum = step('skipped', 'free-page share below gate', { pages, freePages: free });
         else if (dryRun) steps.vacuum = step('skipped', 'dry-run: free-page share meets gate', { pages, freePages: free });
-        else if (!holdsStartupLock()) { locked = true; steps.vacuum = step('skipped', 'locked', { pages, freePages: free }); }
+        else if (!holdsStartupLock()) lostLock('vacuum');
         else {
           try {
             if (deps.vacuum) deps.vacuum(db);

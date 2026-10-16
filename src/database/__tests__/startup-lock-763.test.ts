@@ -555,3 +555,33 @@ describe('#763 maintain with a borrowed handle', () => {
     expect((opened.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n).toBe(0);
   });
 });
+
+describe('#813 maintain after its lock record is replaced mid-run', () => {
+  it('skips embed and vacuum as locked and leaves the new holder in place', async () => {
+    let foreign = '';
+    let vacuumCalls = 0;
+    const report = await maintain({}, {
+      dataDir: dir,
+      dbPath,
+      diskLimit: Number.MAX_SAFE_INTEGER,
+      consolidateConfig: { maxShortTermMemories: 1000, maxLongTermMemories: 1000 } as never,
+      // Runs after maintain took the lock and before the embed step's check:
+      // another starter's record replaces this process's record.
+      modelCacheReady: async () => {
+        expect(holdsStartupLock()).toBe(true);
+        foreign = record(process.ppid);
+        writeForeign(foreign);
+        return true;
+      },
+      vacuum: () => { vacuumCalls++; },
+      doctor: async () => [],
+      channels: [],
+    });
+    expect(vacuumCalls).toBe(0);
+    expect(report.steps.embed.status).toBe('skipped');
+    expect(report.steps.embed.reason).toBe('locked');
+    expect(report.steps.vacuum.reason).toBe('locked');
+    expect(holdsStartupLock()).toBe(false);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+  });
+});
