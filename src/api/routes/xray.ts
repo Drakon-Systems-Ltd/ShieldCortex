@@ -22,7 +22,7 @@ import {
   readHistory,
   readWatchSessions,
 } from '../../xray/activity.js';
-import { addFindings } from '../../xray/findings-store.js';
+import { addFindings, FindingsStoreWriteRefusedError } from '../../xray/findings-store.js';
 
 type Middleware = (_req: Request, res: Response, next: (err?: unknown) => void) => void;
 
@@ -284,6 +284,11 @@ export function registerXRayRoutes(app: Express, requireNotLocked: Middleware): 
         persistedFindings,
       });
     } catch (error) {
+      // An unreadable findings file is refused, not replaced (#801): same 503
+      // the findings list/stats routes give for it.
+      if (error instanceof FindingsStoreWriteRefusedError) {
+        return res.status(503).json({ error: error.message, store: 'unreadable' });
+      }
       res.status(500).json({ error: (error as Error).message });
     }
   });

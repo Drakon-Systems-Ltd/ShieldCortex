@@ -46,6 +46,22 @@ export class FindingsStoreUnreadableError extends Error {
   }
 }
 
+/**
+ * Thrown by every writer that reads the findings file first (addFindings,
+ * updateFindingStatus, deleteFinding, quarantineFile) when that file exists but
+ * could not be read or parsed (#801). Writing would replace stored findings the
+ * store never saw, so nothing is written and the file is left as it is.
+ */
+export class FindingsStoreWriteRefusedError extends FindingsStoreUnreadableError {
+  constructor(reason: string) {
+    super(reason);
+    this.message =
+      'The scanner findings file exists but could not be read or parsed, so it was left unchanged and nothing was saved to it. ' +
+      'Fix or move xray-findings.json in the ShieldCortex data directory; a permission problem stays until it is fixed.';
+    this.name = 'FindingsStoreWriteRefusedError';
+  }
+}
+
 export interface FindingsStore {
   addFindings(
     sourceId: string,
@@ -135,8 +151,8 @@ export function createFindingsStore(basePath?: string): FindingsStore {
       const parsed: unknown = JSON.parse(data);
       if (!Array.isArray(parsed)) return { state: 'unreadable', findings: [], reason: 'not a JSON array' };
       const bad = parsed.findIndex((f) => !isPersistedFinding(f));
-      // The mutating paths keep reading the array as before, so a scan does
-      // not silently discard the valid entries alongside the bad one.
+      // The lenient list/get paths keep reading the array as before; the
+      // writers refuse it (readFindingsForWrite).
       if (bad !== -1) {
         return { state: 'unreadable', findings: parsed as ActionableXRayFinding[], reason: `entry ${bad} is not a valid finding` };
       }
@@ -146,10 +162,18 @@ export function createFindingsStore(basePath?: string): FindingsStore {
     }
   }
 
-  // Lenient read for the mutating/list paths (unchanged behaviour: an
-  // unreadable file reads as empty). Counts go through readFindingsState().
+  // Lenient read for the list/get paths (unchanged behaviour: an unreadable
+  // file reads as empty). Counts go through readFindingsState().
   function readFindings(): ActionableXRayFinding[] {
     return readFindingsState().findings;
+  }
+
+  // Strict read for every path that writes what it read (#801): a file that
+  // exists but could not be read is refused, never replaced.
+  function readFindingsForWrite(): ActionableXRayFinding[] {
+    const read = readFindingsState();
+    if (read.state === 'unreadable') throw new FindingsStoreWriteRefusedError(read.reason);
+    return read.findings;
   }
 
   function writeFindings(findings: ActionableXRayFinding[]): void {
@@ -163,7 +187,7 @@ export function createFindingsStore(basePath?: string): FindingsStore {
   return {
     addFindings(sourceId, sourceKind, target, rawFindings) {
       const now = new Date().toISOString();
-      const existing = readFindings();
+      const existing = readFindingsForWrite();
 
       // Dedupe against EVERY retained finding regardless of status (Phase 17
       // B5). Previously only `status === 'new'` findings seeded the dedupe set,
@@ -220,7 +244,7 @@ export function createFindingsStore(basePath?: string): FindingsStore {
     },
 
     updateFindingStatus(id, status, note?) {
-      const findings = readFindings();
+      const findings = readFindingsForWrite();
       const idx = findings.findIndex((f) => f.id === id);
       if (idx === -1) return null;
 
@@ -233,7 +257,7 @@ export function createFindingsStore(basePath?: string): FindingsStore {
     },
 
     deleteFinding(id) {
-      const findings = readFindings();
+      const findings = readFindingsForWrite();
       const filtered = findings.filter((f) => f.id !== id);
       if (filtered.length === findings.length) return false;
       writeFindings(filtered);
@@ -241,7 +265,9 @@ export function createFindingsStore(basePath?: string): FindingsStore {
     },
 
     quarantineFile(id, note?) {
-      const finding = this.getFinding(id);
+      // Refuse before moving anything: the status update below must not be
+      // the step that finds the store unreadable.
+      const finding = readFindingsForWrite().find((f) => f.id === id) ?? null;
       if (!finding) return { moved: false, error: 'Finding not found' };
       if (!finding.file) return { moved: false, error: 'Finding has no file path' };
 
