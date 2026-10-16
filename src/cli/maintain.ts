@@ -11,6 +11,7 @@ import { backfillEmbeddings, type EmbedBackfillResult } from './embed-backfill.j
 import { inspectEmbeddingHookReady } from '../embeddings/model-cache.js';
 import { checkDiskUsage, runMemoryStatsCheck, runSemanticCoverageCheck, VACUUM_FREE_SHARE, type CheckResult } from './doctor.js';
 import { buildMaintenanceFailNotification, deliverOperatorNotification, type NotifyChannel } from '../defence/iron-dome/operator-notify.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 type Status = 'ran' | 'skipped' | 'noop' | 'failed';
 export interface MaintainStep { status: Status; reason: string; [count: string]: string | number | CheckResult[]; }
@@ -251,7 +252,7 @@ export async function runMaintain(args: string[]): Promise<void> {
   let report: MaintainReport;
   try { report = await maintain({ dryRun: args.includes('--dry-run') }); }
   catch (err) { console.error(errorText(err)); process.exitCode = 1; return; }
-  if (args.includes('--json')) console.log(JSON.stringify(report));
+  if (args.includes('--json')) console.log(stringifyJsonTerminalSafe(report));
   else for (const [name, result] of Object.entries(report.steps)) console.log(`${name}: ${result.status} — ${result.reason}`);
   process.exitCode = report.exitCode;
 }

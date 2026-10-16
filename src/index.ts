@@ -77,6 +77,7 @@ import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { SCAN_EXIT, formatScanToolFailure } from './cli/scan-exit.js';
 import { argvWantsHelp } from './cli/wants-help.js';
+import { stringifyJsonTerminalSafe } from './cli/term-ui.js';
 
 // Heavy modules (MCP server, visualization API + express/cors/ws, embedding
 // model, brain worker, installer handlers) are loaded lazily via `await import`
@@ -1375,7 +1376,7 @@ ${bold}DOCS${reset}
     const result = await scanUrl(urlArg);
 
     if (wantsJson) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(stringifyJsonTerminalSafe(result, 2));
     } else if (wantsMarkdown) {
       console.log(formatEnvScanMarkdown(result));
     } else {
