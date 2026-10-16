@@ -228,11 +228,10 @@ async function startMcpServer(dbPath?: string): Promise<void> {
   // — the client sees only a bare `-32000`. Attempt the class-appropriate
   // recovery through the shared binding helper; if it cannot heal, fail LOUDLY
   // to stderr + a breadcrumb carrying the selected remediation, never silently.
-  const { selfHealMcpNativeBinding } = await import('./setup/mcp-self-heal.js');
+  const { selfHealMcpNativeBinding, printMcpStartupFailure } = await import('./setup/mcp-self-heal.js');
   const heal = await selfHealMcpNativeBinding();
   if (!heal.ok) {
-    console.error(heal.message);
-    if (heal.breadcrumbPath) console.error(`\nDetails written to: ${heal.breadcrumbPath}`);
+    printMcpStartupFailure(heal);
     process.exit(1);
   }
 

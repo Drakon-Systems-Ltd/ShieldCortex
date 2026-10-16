@@ -118,7 +118,7 @@ describe('#788 doctor human report', () => {
   it('doctor feeds the display copy to the report and NEXT, and the raw rows to --json', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src/cli/doctor.ts'), 'utf8');
     expect(src).toContain('const displayRows = sanitiseDoctorRowsForDisplay(visible);');
-    expect(src).toContain("const failFix = displayRows.find((r) => r.status === 'fail' && r.fix)");
+    expect(src).toContain('nextCommand = nextCommandForFailures(displayRows);');
     expect(src).toContain('const reportLines = formatDoctorReport(displayRows, {');
     expect(src).toContain('results: visible.map((r) => ({');
   });
