@@ -23,6 +23,7 @@ import {
   startWatchSession,
 } from './activity.js';
 import { addFindings, FindingsStoreWriteRefusedError } from './findings-store.js';
+import { stringifyJsonTerminalSafe } from '../cli/term-ui.js';
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -209,7 +210,7 @@ export async function watchDirectory(
     });
 
     if (json) {
-      console.log(JSON.stringify({
+      console.log(stringifyJsonTerminalSafe({
         file: abs,
         trustScore: score,
         riskLevel,
