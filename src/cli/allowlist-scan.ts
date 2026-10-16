@@ -35,6 +35,7 @@ import {
   renderBatchIdentity,
   shortSourceLabel,
   sanitiseDisplayField,
+  stringifyJsonTerminalSafe,
   wrapText,
   basenameOf,
   defaultColorStyle,
@@ -695,11 +696,11 @@ export async function reviewScanItems(items: ScanItem[], deps: ScanDeps = {}): P
         });
         if (pin.ok) {
           result.pinned += 1;
-          log('  ' + style.green + '\u2713' + style.reset + ' Trusted ' + style.bold + basenameOf(pin.entry.path) + style.reset +
+          log('  ' + style.green + '\u2713' + style.reset + ' Trusted ' + style.bold + sanitiseDisplayField(basenameOf(pin.entry.path)) + style.reset +
             ". If the script changes, you'll be asked again.");
         } else {
           result.failed += 1;
-          err(`  ✗ ${pin.error}`);
+          err(`  ✗ ${sanitiseDisplayField(pin.error)}`);
         }
         break;
       }
@@ -771,7 +772,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
       else openclawCronPath = value;
       i += 1;
     } else {
-      err(`Unknown option "${a}". ${SCAN_USAGE}`);
+      err(`Unknown option "${sanitiseDisplayField(a)}". ${SCAN_USAGE}`);
       return 1;
     }
   }
@@ -793,7 +794,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     items = classifyScripts(discovered.scripts, readEntries());
     items = markCronDenials(items, correlateForScan(scanDeps));
   } catch (e) {
-    err(`Scan failed: ${e instanceof Error ? e.message : String(e)}`);
+    err(`Scan failed: ${sanitiseDisplayField(e instanceof Error ? e.message : String(e))}`);
     return 1;
   }
 
@@ -803,7 +804,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
 
   if (json) {
     log(
-      JSON.stringify(
+      stringifyJsonTerminalSafe(
         {
           sources: sourceReport,
           discoveryIncomplete: incomplete,
@@ -824,9 +825,8 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
             cronDenied: i.deniedNote ?? null,
           })),
         },
-        null,
         2,
-      ),
+      )!,
     );
     if (incomplete) return 1;
     return needsReview.length > 0 ? 3 : 0;
@@ -837,14 +837,14 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
     if (broken.length > 0) {
       err(
         `Cron source(s) present but not readable/parseable — scan is incomplete. Fix: ${broken
-          .map((s) => s.path)
+          .map((s) => sanitiseDisplayField(s.path))
           .join(', ')}`,
       );
     }
     if (sourceReport.openclawCronUnverifiable) {
       err(
-        `OpenClaw is installed but neither cron source exists (${sourceReport.openclaw.path}, ` +
-          `${sourceReport.openclawDb.path}) — scan could not look, so this is not "no crons".`,
+        `OpenClaw is installed but neither cron source exists (${sanitiseDisplayField(sourceReport.openclaw.path)}, ` +
+          `${sanitiseDisplayField(sourceReport.openclawDb.path)}) — scan could not look, so this is not "no crons".`,
       );
     }
     // Incomplete discovery must not look like "all clear".
@@ -910,9 +910,9 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
         ...(item.sha256 ? { expectedSha256: item.sha256 } : {}),
       });
       if (pin.ok) {
-        log(`${GREEN}✓${RESET} Pinned ${BOLD}${pin.entry.path}${RESET}`);
+        log(`${GREEN}✓${RESET} Pinned ${BOLD}${sanitiseDisplayField(pin.entry.path)}${RESET}`);
       } else {
-        err(`✗ ${pin.error}`);
+        err(`✗ ${sanitiseDisplayField(pin.error)}`);
         failed += 1;
       }
     }
@@ -931,11 +931,19 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
  * no writes. Never throws — an update must not fail because a cron file was
  * strange.
  */
-/** One plain line: how many scheduled scripts are waiting for a human yes. */
+/**
+ * One plain line: how many scheduled scripts are not reviewed yet.
+ *
+ * Review is trust, not an execution gate (#780): a trusted script's source is
+ * no longer folded into the Guard's scan. Lack of review does not by itself
+ * stop a script: while the Guard is on, an untrusted one gets the normal
+ * checks (which may still hold or block it); while it is off, the Guard does
+ * not check it.
+ */
 export function scriptsNeedAYes(n: number): string {
   return n === 1
-    ? '1 new or changed scheduled script needs a yes before it can run.'
-    : n + ' new or changed scheduled scripts need a yes before they can run.';
+    ? '1 new or changed scheduled script is not reviewed yet. Trusting it stops the Guard re-checking its contents until the file changes.'
+    : n + ' new or changed scheduled scripts are not reviewed yet. Trusting one stops the Guard re-checking its contents until the file changes.';
 }
 
 export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Promise<void> {
@@ -952,9 +960,9 @@ export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Prom
     const needsReview = items.filter((i) => i.status === 'new' || i.status === 'changed');
 
     if (incomplete) {
-      const reasons = broken.map((s) => `${s.path}:${s.status}`);
+      const reasons = broken.map((s) => `${sanitiseDisplayField(s.path)}:${sanitiseDisplayField(s.status)}`);
       if (discovered.sources.openclawCronUnverifiable) {
-        reasons.push(`${discovered.sources.openclawDb.path}:no readable OpenClaw cron source`);
+        reasons.push(`${sanitiseDisplayField(discovered.sources.openclawDb.path)}:no readable OpenClaw cron source`);
       }
       // Default update screen: plain words. The paths and reasons are the
       // detail an operator needs to dig in, so they stay under --verbose.
@@ -985,6 +993,6 @@ export async function maybeReviewAllowlistAfterUpdate(deps: ScanDeps = {}): Prom
     }
     await reviewScanItems(items, deps);
   } catch (e) {
-    log(`${DIM}Scheduled-script check skipped — ${e instanceof Error ? e.message : String(e)}${RESET}`);
+    log(`${DIM}Scheduled-script check skipped — ${sanitiseDisplayField(e instanceof Error ? e.message : String(e))}${RESET}`);
   }
 }

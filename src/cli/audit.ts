@@ -36,6 +36,7 @@ import {
 import type { AuditReport, AuditSeverity, ScannerResult, AuditFinding } from '../audit/types.js';
 import { toSarif } from '../xray/sarif.js';
 import { COMMAND_HELP_SPECS, commandWantsHelp } from './wants-help.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 export const AUDIT_HELP = `Usage: shieldcortex audit [options]
 
@@ -256,7 +257,7 @@ export async function handleAuditCommand(args: string[]): Promise<void> {
   switch (options.format) {
     case 'sarif':
       // Pure SARIF JSON on stdout — uploadable straight to GitHub Code Scanning.
-      console.log(JSON.stringify(toSarif(allFindings, { version }), null, 2));
+      console.log(stringifyJsonTerminalSafe(toSarif(allFindings, { version }), 2));
       break;
     case 'json':
       console.log(formatJsonReport(report));

@@ -2,12 +2,20 @@ import type { Express, Request, Response } from 'express';
 import {
   defaultStore,
   FindingsStoreUnreadableError,
+  FindingsStoreWriteRefusedError,
   type FindingsStore,
 } from '../../xray/findings-store.js';
 import type { FindingStatus, ActionableXRayFinding } from '../../xray/types.js';
 import { getGuidance, isLikelySystemFile } from '../../xray/guidance.js';
 
 type Middleware = (req: Request, res: Response, next: (err?: unknown) => void) => void;
+
+/** Answer a writer's refusal of an unreadable findings file (#801) like the read routes do. */
+function refusedWrite(res: Response, err: unknown): boolean {
+  if (!(err instanceof FindingsStoreWriteRefusedError)) return false;
+  res.status(503).json({ error: err.message, store: 'unreadable' });
+  return true;
+}
 
 /** Enrich a finding with guidance and system-file flag */
 function enrichFinding(f: ActionableXRayFinding) {
@@ -64,7 +72,13 @@ export function registerXRayFindingRoutes(
     if (!status || !['reviewed', 'ignored', 'resolved'].includes(status)) {
       return res.status(400).json({ error: 'status must be one of: reviewed, ignored, resolved' });
     }
-    const updated = updateFindingStatus(String(req.params.id), status, note);
+    let updated: ActionableXRayFinding | null;
+    try {
+      updated = updateFindingStatus(String(req.params.id), status, note);
+    } catch (err) {
+      if (refusedWrite(res, err)) return;
+      throw err;
+    }
     if (!updated) return res.status(404).json({ error: 'Finding not found' });
     res.json({ finding: updated });
   });
@@ -72,7 +86,13 @@ export function registerXRayFindingRoutes(
   // Quarantine the file associated with a finding
   app.post('/api/xray/findings/:id/quarantine', requireNotLocked, (req: Request, res: Response) => {
     const { note } = req.body as { note?: string };
-    const result = quarantineFile(String(req.params.id), note);
+    let result: ReturnType<FindingsStore['quarantineFile']>;
+    try {
+      result = quarantineFile(String(req.params.id), note);
+    } catch (err) {
+      if (refusedWrite(res, err)) return;
+      throw err;
+    }
     if (result.error && !result.moved) {
       return res.status(result.error === 'Finding not found' ? 404 : 400).json(result);
     }
@@ -81,7 +101,13 @@ export function registerXRayFindingRoutes(
 
   // Delete a finding record
   app.delete('/api/xray/findings/:id', requireNotLocked, (req: Request, res: Response) => {
-    const deleted = deleteFinding(String(req.params.id));
+    let deleted: boolean;
+    try {
+      deleted = deleteFinding(String(req.params.id));
+    } catch (err) {
+      if (refusedWrite(res, err)) return;
+      throw err;
+    }
     if (!deleted) return res.status(404).json({ error: 'Finding not found' });
     res.json({ deleted: true });
   });

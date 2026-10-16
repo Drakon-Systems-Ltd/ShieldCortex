@@ -374,7 +374,7 @@ export function footer(
       `  ${paint('yellow', '⚠')}  ${paint('bold', 'done')}  ${paint('gray', `in ${elapsed} · ${n} step${n === 1 ? '' : 's'} unresolved`)}${mainUpdated ? `  ${paint('cyan', '·')}  ${paint('yellow', 'restart Claude Code / OpenClaw gateway')}` : ''}\n`,
     );
     for (const u of unresolved) {
-      process.stdout.write(`     ${paint('gray', `${u.label}: re-run`)} ${u.rerun}\n`);
+      process.stdout.write(`     ${paint('gray', `${u.label}: re-run`)} ${sanitiseDisplayField(u.rerun)}\n`);
     }
     process.stdout.write('\n');
   } else if (mainUpdated) {
@@ -545,7 +545,7 @@ export function renderEngineFailure(
   const detail = outcome.packagedPrebuild
     ? 'engine: binding remains unavailable; follow remediation above'
     : 'engine: database binding needs manual rebuild';
-  return { headline, body: outcome.remediation.split('\n'), detail };
+  return { headline, body: outcome.remediation.split('\n').map(sanitiseDisplayField), detail };
 }
 
 async function stepVerifyEngine(): Promise<EngineVerifyOutcome> {

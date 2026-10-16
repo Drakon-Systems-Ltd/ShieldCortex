@@ -37,7 +37,7 @@ import {
 } from '../integrations/openclaw-conversation-capability.js';
 import { parseRegistrationsSince, parseLogLinePid } from '../integrations/openclaw-gateway-roster.js';
 import { readRunningGatewayProcess } from '../integrations/openclaw-gateway-process.js';
-import { nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
+import { nativeBindingDisplayRemediation, nativeBindingRemediation, resolveSelfInstallDir } from '../setup/native-binding.js';
 import {
   hermesEnvironment,
   protectedDirs,
@@ -140,6 +140,8 @@ import { DEFAULT_IRON_DOME_CONFIG, type IronDomeConfig } from '../defence/iron-d
 import { sharedSensitivitySqlPredicate } from '../defence/sensitivity/isolation.js';
 import {
   formatDoctorReport,
+  nextCommandForFailures,
+  sanitiseDoctorRowsForDisplay,
   shouldColorDoctor,
   type DoctorReportStyle,
 } from './doctor-report.js';
@@ -176,6 +178,7 @@ import {
   type RecallRepetitionVerdict,
   type SlotProblem,
 } from './recall-repetition.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 export const VACUUM_FREE_SHARE = 0.2;
 
@@ -198,6 +201,8 @@ export interface CheckResult {
   status: CheckStatus;
   message: string;
   fix?: string;
+  /** See DoctorReportItem.displayFix — display-only; `--json` emits `fix`. */
+  displayFix?: string;
   /** See DoctorReportItem.fixNoteWithCommands — keeps a report-only fix's prose in the human report. */
   fixNoteWithCommands?: true;
   /** See DoctorReportItem.verboseNote — printed only with --verbose. */
@@ -942,13 +947,15 @@ function engineLoadFailure(dbPath: string, err: unknown): CheckResult {
   const typed = err instanceof NativeModuleLoadError;
   const cause = typed ? err.cause : err;
   const guidance = typed ? err.message : (err instanceof Error ? err.message : String(err));
+  const installDir = resolveSelfInstallDir();
   return {
     label: 'Database',
     status: 'fail',
     message:
       'cannot load the database engine (better-sqlite3) — an install problem, ' +
       `NOT database corruption: ${tildify(dbPath)} was never opened and is untouched.\n${guidance}`,
-    fix: nativeBindingRemediation(resolveSelfInstallDir(), cause),
+    fix: nativeBindingRemediation(installDir, cause),
+    displayFix: nativeBindingDisplayRemediation(installDir, cause),
   };
 }
 
@@ -1041,8 +1048,9 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
     // A stat'able DB can still be unopenable because the file itself is owned
     // by another user (mode 600 root:root — the other half of the sudo
     // artefact). Telling that user to delete their database is bad advice.
+    const installDir = isNativeBindingFault ? resolveSelfInstallDir() : '';
     const fix = isNativeBindingFault
-      ? nativeBindingRemediation(resolveSelfInstallDir(), msg)
+      ? nativeBindingRemediation(installDir, msg)
       : looksLikePermissionError(err, msg)
         ? ownershipFix()
         : 'Back up and delete `~/.shieldcortex/memories.db`, then restart the MCP server';
@@ -1051,6 +1059,7 @@ export function runDatabaseCheck(dbPath: string, env: Environment = detectEnviro
       status: 'fail',
       message: `cannot open — ${msg}`,
       fix,
+      ...(isNativeBindingFault ? { displayFix: nativeBindingDisplayRemediation(installDir, msg) } : {}),
     };
   }
 }
@@ -9306,11 +9315,14 @@ export async function runDoctor(
   const verbose = args.includes('--verbose') || args.includes('--debug');
   const hostTable = scanHostTable();
   const unwired = presentUnwired(hostTable);
+  // #788: check messages and fixes carry host-derived text (install dirs,
+  // error messages). The human report and the NEXT line read a display copy
+  // with each line passed through the display sanitiser; `--json` below keeps
+  // the raw `visible` rows (machine-readable output stays unsanitised).
+  const displayRows = sanitiseDoctorRowsForDisplay(visible);
   let nextCommand: string | null = null;
   if (failures > 0) {
-    const failFix = visible.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
-    nextCommand = failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
-      ?? 'shieldcortex doctor --verbose';
+    nextCommand = nextCommandForFailures(displayRows);
   } else if (unwired.length > 0) {
     nextCommand = 'shieldcortex setup';
   }
@@ -9323,7 +9335,7 @@ export async function runDoctor(
   // where the report is red, which is the failure mode doctor exists to avoid.
   // Returns before the human report so the output is parseable on its own.
   if (args.includes('--json')) {
-    console.log(JSON.stringify({
+    console.log(stringifyJsonTerminalSafe({
       version: String(pkg.version ?? ''),
       passed, warnings, failures, infos, total,
       exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
@@ -9331,14 +9343,14 @@ export async function runDoctor(
         label: r.label, status: r.status, message: r.message, fix: r.fix,
         ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
       })),
-    }, null, 2));
+    }, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
     if (jsonExit !== 0) process.exitCode = jsonExit;
     return { passed, warnings, failures, infos, total, exitCode: jsonExit };
   }
 
   const style: DoctorReportStyle = { bold, reset, green, yellow, red, cyan, dim };
-  const reportLines = formatDoctorReport(visible, {
+  const reportLines = formatDoctorReport(displayRows, {
     verbose,
     version: String(pkg.version ?? ''),
     target: (() => {

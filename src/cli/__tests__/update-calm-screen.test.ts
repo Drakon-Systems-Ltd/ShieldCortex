@@ -361,6 +361,8 @@ describe('banned phrases stay out of the default output', () => {
     expect(card).toContain('Trust this scheduled script?');
     expect(card).toContain('[y] trust  [n] not now  [v] view  [q] stop');
     expect(bannedHits(scriptsNeedAYes(2))).toEqual([]);
+    expect(scriptsNeedAYes(2)).toContain('2 new or changed scheduled scripts are not reviewed yet.');
+    for (const n of [1, 2]) expect(scriptsNeedAYes(n)).not.toMatch(/before (it|they) can run|needs? a yes/);
   });
 
   it('doctor plugin-load rows that could not check', () => {

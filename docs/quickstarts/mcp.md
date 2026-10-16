@@ -11,7 +11,7 @@ npm install -g shieldcortex
 shieldcortex setup
 ```
 
-`setup` shows the hosts it detects (Claude Code, OpenClaw, Hermes, Codex, Cursor / VS Code) and asks before wiring each one. To skip the table and install for one host, name it: `shieldcortex setup codex`, `shieldcortex setup copilot` (VS Code / Cursor) or `shieldcortex setup claude`. The older `shieldcortex install` is the Claude Code install (the same as `setup claude`), not the wizard.
+`setup` shows the hosts it detects (Claude Code, OpenClaw, Hermes, Codex, Cursor / VS Code) and asks before wiring each one. To skip the table and install for one host without asking, name it: `shieldcortex setup codex`, `shieldcortex setup copilot` (VS Code / Cursor) or `shieldcortex setup claude`. The older `shieldcortex install` is the Claude Code install (the same as `setup claude`), not the wizard.
 
 ## Verify
 

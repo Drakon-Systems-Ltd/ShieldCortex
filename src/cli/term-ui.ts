@@ -113,6 +113,25 @@ export function sanitiseDisplayField(s: string): string {
     .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '');
 }
 
+/** Preserve JSON values while keeping terminal control and invisible code points out of the output text. */
+export function stringifyJsonTerminalSafe(value: unknown, space?: string | number): string | undefined {
+  return JSON.stringify(value, null, space)?.replace(
+    /[\u0080-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
+/**
+ * `sanitiseDisplayField` for multi-line text whose line breaks are layout
+ * (remediation blocks, doctor fix text): each LF / CRLF-separated line is
+ * cleaned on its own, so the layout survives while every other break
+ * character (bare CR, U+0085, U+2028, U+2029) and every control sequence
+ * inside a line is neutralised (#788).
+ */
+export function sanitiseDisplayLines(s: string): string {
+  return String(s ?? '').split(/\r?\n/).map(sanitiseDisplayField).join('\n');
+}
+
 export function ellipsize(s: string, max: number): string {
   const t = String(s ?? '');
   if (t.length <= max) return t;
