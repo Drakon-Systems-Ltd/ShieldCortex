@@ -407,6 +407,50 @@ describe('FindingsStore', () => {
       expect(store.listFindings().map((f) => f.id)).toEqual(['f-1', 'f-2']);
     });
 
+    // Root ignores mode bits, so the permission error cannot be staged there.
+    (process.getuid?.() === 0 ? it.skip : it)('does not replace a findings file it has no permission to read (#801)', () => {
+      const file = path.join(tmpDir, 'xray-findings.json');
+      fs.writeFileSync(file, JSON.stringify([valid()]));
+      const before = fs.readFileSync(file);
+      const ino = fs.statSync(file).ino;
+      const store = createFindingsStore(tmpDir);
+      fs.chmodSync(file, 0o000);
+      let thrown: unknown;
+      try {
+        let code: string | undefined;
+        try { fs.readFileSync(file); } catch (err) { code = (err as NodeJS.ErrnoException).code; }
+        expect(code).toBe('EACCES');
+        try {
+          store.addFindings('scan-2', 'scan', '/other', [{
+            severity: 'medium', category: 'prompt-injection', title: 'Instruction override', description: 'Benign fixture finding',
+          }]);
+        } catch (err) { thrown = err; }
+      } finally {
+        fs.chmodSync(file, 0o600);
+      }
+      expect(fs.readFileSync(file).equals(before)).toBe(true);
+      expect(fs.statSync(file).ino).toBe(ino);
+      expect(fs.readdirSync(tmpDir)).toEqual(['xray-findings.json']);
+      expect(thrown).toBeInstanceOf(FindingsStoreWriteRefusedError);
+    });
+
+    it('does not move a source file when quarantining from a partly invalid file (#801)', () => {
+      const target = path.join(tmpDir, 'project');
+      fs.mkdirSync(target);
+      const source = path.join(target, 'notes.md');
+      fs.writeFileSync(source, 'scratch\n');
+      const file = path.join(tmpDir, 'xray-findings.json');
+      fs.writeFileSync(file, JSON.stringify([valid({ target, file: source }), valid({ id: 'f-2', status: 'bogus' })]));
+      const before = fs.readFileSync(file);
+      const store = createFindingsStore(tmpDir);
+      let thrown: unknown;
+      try { store.quarantineFile('f-1'); } catch (err) { thrown = err; }
+      expect(fs.readFileSync(source, 'utf-8')).toBe('scratch\n');
+      expect(fs.existsSync(path.join(tmpDir, 'quarantine'))).toBe(false);
+      expect(fs.readFileSync(file).equals(before)).toBe(true);
+      expect(thrown).toBeInstanceOf(FindingsStoreWriteRefusedError);
+    });
+
     it('recovery guidance does not name a fixed home path or promise a scan repairs the file', () => {
       const msg = new FindingsStoreUnreadableError('x').message;
       expect(msg).not.toMatch(/~|\/home|\.shieldcortex\//);

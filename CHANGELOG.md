@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
-- **X-Ray no longer replaces a findings file it could not read (#801).** A scan or watch that finds something used to replace `xray-findings.json` with just the new findings when the existing file was not valid JSON, was valid JSON but not a list, held an entry that is not a valid finding, or could not be read (for example a permission error). It now leaves that file exactly as it is and reports the problem: the dashboard scan answers with the same "could not be read or parsed" 503 the findings list already gives, and watch mode prints a warning and keeps watching. Marking, quarantining or deleting a finding is refused the same way. A missing findings file is still created by the first scan that finds something.
+- **X-Ray no longer replaces a findings file it could not read (#801).** A scan or watch that finds something used to replace `xray-findings.json` with just the new findings when the existing file was not valid JSON, was valid JSON but not a list, or could not be read (for example a permission error). A list holding an entry that is not a valid finding was not dropped that way, but was rewritten with the new findings merged in. In all of these cases it now leaves that file exactly as it is and reports the problem: the dashboard scan answers with the same "could not be read or parsed" 503 the findings list already gives, and watch mode prints a warning and keeps watching. Marking, quarantining or deleting a finding is refused the same way. A missing findings file is still created by the first scan that finds something.
 
 ## [5.10.2] - 2026-10-16
 
