@@ -35,6 +35,7 @@ import {
   renderBatchIdentity,
   shortSourceLabel,
   sanitiseDisplayField,
+  stringifyJsonTerminalSafe,
   wrapText,
   basenameOf,
   defaultColorStyle,
@@ -803,7 +804,7 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
 
   if (json) {
     log(
-      JSON.stringify(
+      stringifyJsonTerminalSafe(
         {
           sources: sourceReport,
           discoveryIncomplete: incomplete,
@@ -824,9 +825,8 @@ export async function runAllowlistScan(argv: string[], deps: ScanDeps = {}): Pro
             cronDenied: i.deniedNote ?? null,
           })),
         },
-        null,
         2,
-      ),
+      )!,
     );
     if (incomplete) return 1;
     return needsReview.length > 0 ? 3 : 0;
