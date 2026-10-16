@@ -18,14 +18,30 @@ export type DoctorStatus = 'pass' | 'warn' | 'fail' | 'info';
  * the report uses for layout are kept; every other break character and every
  * control sequence is neutralised. The input rows are not modified, so
  * `--json` output and exit codes stay on the raw values.
+ *
+ * Splitting cannot tell a host line break from a layout one, so a row whose
+ * fix embeds a host value carries `displayFix`, composed with that value
+ * already display-sanitised; the display copy uses it in place of `fix` (#799).
  */
 export function sanitiseDoctorRowsForDisplay<T extends DoctorReportItem>(rows: readonly T[]): T[] {
   return rows.map((r) => ({
     ...r,
     message: sanitiseDisplayLines(r.message),
-    ...(r.fix !== undefined ? { fix: sanitiseDisplayLines(r.fix) } : {}),
+    ...(r.fix !== undefined ? { fix: sanitiseDisplayLines(r.displayFix ?? r.fix) } : {}),
     ...(r.verboseNote !== undefined ? { verboseNote: sanitiseDisplayLines(r.verboseNote) } : {}),
   }));
+}
+
+/**
+ * Doctor's NEXT command when a check failed: the first command line of the
+ * first failing row's fix, else `shieldcortex doctor --verbose`. Expects the
+ * display copy from `sanitiseDoctorRowsForDisplay`, so a line here is either
+ * code-authored layout or a host value marked with ⏎ — never a host line.
+ */
+export function nextCommandForFailures(displayRows: readonly DoctorReportItem[]): string {
+  const failFix = displayRows.find((r) => r.status === 'fail' && r.fix)?.fix?.trim() ?? '';
+  return failFix.split('\n').map((l) => l.trim()).find((l) => /^(shieldcortex|openclaw|npm|node)\b/.test(l))
+    ?? 'shieldcortex doctor --verbose';
 }
 
 /** Minimal input shape — matches CheckResult fields the renderer needs. */
@@ -34,6 +50,14 @@ export interface DoctorReportItem {
   status: DoctorStatus;
   message: string;
   fix?: string;
+  /**
+   * Display-only copy of `fix` composed with its host values (install dir)
+   * already passed through `sanitiseDisplayField`, so their line breaks show
+   * as ⏎ instead of becoming fix lines or a NEXT command (#799). Read only by
+   * `sanitiseDoctorRowsForDisplay`; `--json` emits `fix`. Set only where the
+   * fix is never rewritten afterwards.
+   */
+  displayFix?: string;
   /**
    * The `fix` is a report whose backticked commands are inspection steps, not
    * the remedy: print the prose AND the commands. Without it a row with any
