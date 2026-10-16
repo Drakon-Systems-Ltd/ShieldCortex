@@ -372,7 +372,7 @@ export function verifyLedger(
         }
         if (legacyProjectBackfill) {
           problem(epoch, s, 'digest-mismatch',
-            'row matches its digest once project is reset to NULL; an older ShieldCortex copy (5.2.1 or earlier) filled in project; no digest field other than project changed',
+            'row content no longer matches its content_digest (defence_audit)',
             'legacy-project-backfill');
         } else {
           problem(epoch, s, 'digest-mismatch', `row content no longer matches its content_digest (${r.table})`);
@@ -499,6 +499,12 @@ export function allProblemsAreLegacyProjectBackfill(r: LedgerReport): boolean {
     r.problems.every((p) => p.cause === 'legacy-project-backfill');
 }
 
+function displayDetail(p: LedgerProblem, wholeReportIsBackfill: boolean): string {
+  return wholeReportIsBackfill && p.cause === 'legacy-project-backfill'
+    ? 'row matches its digest once project is reset to NULL; likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in project; no digest field other than project changed'
+    : p.detail;
+}
+
 /** One-line summary used by the doctor row. */
 export function summariseLedgerReport(r: LedgerReport): string {
   if (r.status === 'unchained') {
@@ -507,9 +513,10 @@ export function summariseLedgerReport(r: LedgerReport): string {
   }
   if (r.status === 'inconsistent') {
     const f = r.firstBad!;
-    return `inconsistent — first bad: ${where(f)} (${f.kind}: ${f.detail}); ${r.problems.length} problem(s)` +
-      (allProblemsAreLegacyProjectBackfill(r)
-        ? '; every problem is explained by a legacy project backfill (an older ShieldCortex copy, 5.2.1 or earlier, filled in project on chained rows; no digest field other than project changed)'
+    const wholeReportIsBackfill = allProblemsAreLegacyProjectBackfill(r);
+    return `inconsistent — first bad: ${where(f)} (${f.kind}: ${displayDetail(f, wholeReportIsBackfill)}); ${r.problems.length} problem(s)` +
+      (wholeReportIsBackfill
+        ? '; every problem is likely explained by a legacy project backfill (an older ShieldCortex copy, 5.2.1 or earlier, filled in project on chained rows; no digest field other than project changed)'
         : '');
   }
   const head = r.head ? `head epoch ${r.head.epoch} seq ${r.head.seq}` : 'no head';
@@ -534,9 +541,10 @@ export function formatLedgerReport(r: LedgerReport): string {
   }
   if (r.problems.length) {
     out.push('  Problems:');
-    for (const p of r.problems) out.push(`    - ${where(p)}: ${p.kind}${p.cause ? ` [cause: ${p.cause}]` : ''} — ${p.detail}`);
-    if (allProblemsAreLegacyProjectBackfill(r)) {
-      out.push('  An older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained rows; no digest field other than `project` changed in those rows; find and remove or upgrade the old copy before any repair.');
+    const wholeReportIsBackfill = allProblemsAreLegacyProjectBackfill(r);
+    for (const p of r.problems) out.push(`    - ${where(p)}: ${p.kind}${wholeReportIsBackfill && p.cause ? ` [cause: ${p.cause}]` : ''} — ${displayDetail(p, wholeReportIsBackfill)}`);
+    if (wholeReportIsBackfill) {
+      out.push('  Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained rows; no digest field other than `project` changed in those rows; find and remove or upgrade the old copy before any repair.');
     }
   }
   const u = r.unchainedHistory;

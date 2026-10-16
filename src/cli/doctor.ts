@@ -1215,7 +1215,7 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
       return { label, status: 'fail', message, fix: allProblemsAreLegacyProjectBackfill(report)
-        ? 'An older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
+        ? 'Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
         : 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };

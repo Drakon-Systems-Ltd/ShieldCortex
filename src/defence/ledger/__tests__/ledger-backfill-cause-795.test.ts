@@ -60,6 +60,32 @@ function reportFor(dbPath: string) {
   try { return verifyLedger(db); } finally { db.close(); }
 }
 
+function withoutCauses(report: ReturnType<typeof reportFor>): ReturnType<typeof reportFor> {
+  const copy = structuredClone(report);
+  for (const problem of copy.problems) delete problem.cause;
+  if (copy.firstBad) delete copy.firstBad.cause;
+  return copy;
+}
+
+async function expectMixedOutputMatchesOrdinary(dbPath: string): Promise<void> {
+  const report = reportFor(dbPath);
+  const ordinary = withoutCauses(report);
+  const doctor = await checkChainedLedger({ dbPath });
+  expect(allProblemsAreLegacyProjectBackfill(report)).toBe(false);
+  for (const problem of report.problems) {
+    if (problem.cause === 'legacy-project-backfill') {
+      expect(problem.detail).toBe('row content no longer matches its content_digest (defence_audit)');
+    }
+  }
+  expect(summariseLedgerReport(report)).toBe(summariseLedgerReport(ordinary));
+  expect(formatLedgerReport(report)).toBe(formatLedgerReport(ordinary));
+  expect(doctor.message).toBe(summariseLedgerReport(ordinary));
+  expect(doctor.fix).toBe(oldFix);
+  for (const output of [summariseLedgerReport(report), formatLedgerReport(report), doctor.message, doctor.fix ?? '']) {
+    expect(output).not.toMatch(/legacy|older ShieldCortex|likely cause/i);
+  }
+}
+
 function jsonCommand(dbPath: string): { code: number; report: ReturnType<typeof reportFor> } {
   const out: string[] = [];
   const code = runLedgerCommand(['verify', '--json', '--db', dbPath], {
@@ -78,13 +104,15 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(report.problems).toHaveLength(3);
     expect(report.problems.every((p) => p.kind === 'digest-mismatch' && p.cause === 'legacy-project-backfill')).toBe(true);
     expect(report.problems.some((p) => p.kind === 'prev-hash-mismatch')).toBe(false);
-    expect(report.problems[0].detail).toMatch(/matches its digest once.*project.*NULL/i);
+    expect(report.problems[0].detail).toBe('row content no longer matches its content_digest (defence_audit)');
     // memory_id is outside AUDIT_CONTENT_FIELDS, so the digest cannot vouch for "nothing else".
-    for (const p of report.problems) expect(p.detail).toMatch(/no digest field other than project changed/);
+    for (const p of report.problems) expect(p.detail).toBe('row content no longer matches its content_digest (defence_audit)');
     expect(allProblemsAreLegacyProjectBackfill(report)).toBe(true);
-    expect(summariseLedgerReport(report)).toMatch(/every problem is explained by a legacy project backfill/i);
+    expect(summariseLedgerReport(report)).toMatch(/row matches its digest once project is reset to NULL; likely cause: an older ShieldCortex copy/);
+    expect(summariseLedgerReport(report)).toMatch(/every problem is likely explained by a legacy project backfill/i);
     expect(summariseLedgerReport(report)).toMatch(/no digest field other than project changed/);
     expect(formatLedgerReport(report)).toContain('[cause: legacy-project-backfill]');
+    expect(formatLedgerReport(report)).toMatch(/likely cause: an older ShieldCortex copy/i);
     expect(formatLedgerReport(report)).toMatch(/find and remove or upgrade the old copy before any repair/i);
     expect(formatLedgerReport(report)).toContain('no digest field other than `project` changed in those rows');
     const cli = jsonCommand(dbPath);
@@ -92,6 +120,8 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(cli.report.problems.every((p) => p.cause === 'legacy-project-backfill')).toBe(true);
     const doctor = await checkChainedLedger({ dbPath });
     expect(doctor.status).toBe('fail');
+    expect(doctor.message).toMatch(/likely cause: an older ShieldCortex copy/);
+    expect(doctor.fix).toMatch(/likely cause: an older ShieldCortex copy/i);
     expect(doctor.fix).toMatch(/older ShieldCortex copy \(5\.2\.1 or earlier\).*global install and npx cache/i);
     expect(doctor.fix).toContain('no digest field other than `project` changed in those rows');
     expect(doctor.fix).not.toBe(oldFix);
@@ -110,8 +140,16 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(report.problems.find((p) => p.seq === 2)).toMatchObject({ kind: 'digest-mismatch' });
     expect(report.problems.find((p) => p.seq === 2)?.cause).toBeUndefined();
     expect(allProblemsAreLegacyProjectBackfill(report)).toBe(false);
-    expect(summariseLedgerReport(report)).not.toMatch(/every problem is explained by a legacy project backfill/i);
-    expect((await checkChainedLedger({ dbPath })).fix).toBe(oldFix);
+    await expectMixedOutputMatchesOrdinary(dbPath);
+  });
+
+  it('uses ordinary output when the first bad row qualifies but a later row does not', async () => {
+    const dbPath = chainedDb();
+    edit(dbPath, "UPDATE defence_audit SET project = 'legacy' WHERE seq IS NOT NULL; UPDATE defence_audit SET reason = 'edited' WHERE seq = 3");
+    const report = reportFor(dbPath);
+    expect(report.firstBad).toMatchObject({ seq: 1, cause: 'legacy-project-backfill' });
+    expect(report.problems.filter((p) => p.cause === 'legacy-project-backfill')).toHaveLength(2);
+    await expectMixedOutputMatchesOrdinary(dbPath);
   });
 
   it('does not attribute a change to project when it was non-null at write time', () => {
