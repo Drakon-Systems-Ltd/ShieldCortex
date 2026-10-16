@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **Allowlist scan JSON keeps unsafe terminal characters escaped (#786).** `shieldcortex allowlist scan --json` now writes C1 controls, bidi controls, line separators and invisible characters as JSON Unicode escapes, while parsed paths and denial notes retain their original values.
 - **Database-engine recovery text and update re-run lines are shown safely everywhere (#788).** `shieldcortex repair`, the `shieldcortex doctor` report, the MCP server's startup-failure message and the unresolved-step re-run lines at the end of `shieldcortex update` now pass the install directory, error text and agent id through the same display cleaner as the update screen. Terminal control sequences, stray line breaks and invisible or direction-changing characters in those values are removed or shown as `⏎` instead of reaching the terminal. Ordinary text prints as before, and `doctor --json` still reports the raw values.
+- **Line breaks inside install and log paths (#799, completes #788).** A line break inside an install or log path is now shown as `⏎` inside its value, so it can no longer appear as a separate `shieldcortex doctor` "NEXT" command or recovery line, and the MCP startup-failure "Details written to" line is cleaned like the message above it.
 
 ## [5.10.1] - 2026-10-15
 
