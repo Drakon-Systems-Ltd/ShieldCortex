@@ -51,6 +51,9 @@ Warnings and re-run commands do not by themselves set the exit code. An npm fail
 - **5.10.1 — Odd file names can no longer scramble your terminal.** The update screen, the allowlist scan and `shieldcortex allowlist` now clean up control and hidden characters in paths, notes and errors before printing them. Ordinary paths look the same. Nothing to do on upgrade.
 - **5.10.1 — `service install` and `service status` tell you when something is wrong.** They now exit with an error when the background service cannot be switched on, is not running, or cannot be checked, so a script can notice. Nothing to do on upgrade.
 - **5.10.1 — The dashboard is more careful about what it claims.** Needs you says when a number is only the last known count or a minimum, the protection indicator is labelled Iron Dome (it does not cover Action Guard), and "data stays on this computer" follows your cloud sync setting. Scripts reading the X-Ray findings API now get an error, not a zero, when the findings file cannot be read. Nothing to do on upgrade.
+- **5.10.2 — Older copies can no longer break `ledger verify`.** If an old ShieldCortex copy (5.2.1 or earlier) shares a database with a current one, it can no longer rewrite the project recorded on chained audit rows, which used to make `ledger verify` fail. It prints an `unexpected migration error ... ShieldCortex #674` line on start-up instead, and carries on. Seeing that line means an old copy is still around: update or remove it. Details: [Older copies sharing a chained database](#mixed-version-ledger).
+- **5.10.2 — Repair, doctor and update re-run lines are safe to print.** `shieldcortex repair`, the `doctor` report, the MCP server's start-up error and the re-run lines at the end of `shieldcortex update` now clean up control and hidden characters in paths and error text before printing them, the same way the update screen does. A line break inside an install or log path now shows as `⏎` inside the path instead of starting a separate line. Ordinary text looks the same, and `doctor --json` still shows the raw values. Nothing to do on upgrade.
+- **5.10.2 — `allowlist scan --json` escapes hidden characters.** C1 controls, bidi controls, line separators and invisible characters in the JSON output are written as Unicode escapes; the parsed values are unchanged. Nothing to do on upgrade.
 
 <a id="whats-new-in-59"></a>
 
@@ -146,8 +149,8 @@ What you may see:
   [database] unexpected migration error in defence_audit/quarantine project backfill (data migration): ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)
   ```
 
-  This means an old copy started against this database and was stopped before it changed anything. The old copy carries on starting. Update or remove that copy. If something alerts on `unexpected migration error`, this line will trigger it.
-- **Deferred backfill.** The refused statement is rolled back as a whole, so that start does not fill in `project` on unchained rows, or on held-back (quarantine) items, either. The next start of a current build fills them in. Nothing is lost.
+  This means an old copy started against this database and was stopped before it changed any chained row. The old copy carries on starting. Update or remove that copy. If something alerts on `unexpected migration error`, this line will trigger it.
+- **Deferred backfill.** Only the refused statement is rolled back. A backfill statement the old copy completed earlier in that start (for example filling in `project` on unchained rows from their linked memories) stays committed; that is harmless, because unchained rows are outside the chain. The old copy's remaining backfill steps, including held-back (quarantine) items, are skipped for that start. The next start of a current build fills them in. Nothing is lost.
 
 What this does not cover:
 
