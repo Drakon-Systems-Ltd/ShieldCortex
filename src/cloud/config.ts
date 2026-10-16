@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, renameSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, statSync, lstatSync, renameSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir, hostname } from 'os';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'crypto';
@@ -404,10 +404,14 @@ function readRawConfigStateUnlocked(options: { readOnly?: boolean } = {}): RawCo
     // A read-only caller must tell "no config file" from "a config file it
     // cannot reach", so it neither takes the cache (a cache hit would hide a
     // permission lost since the last read) nor asks existsSync (which answers
-    // false for a file behind a directory it cannot enter). Only ENOENT is
-    // absent; any other stat error (EACCES, ENOTDIR, ELOOP, ...) is readFailed.
+    // false for a file behind a directory it cannot enter). lstat, not stat:
+    // stat follows a dangling config.json symlink and throws ENOENT, which
+    // this branch used to treat as "no config" and report Guard off. Only
+    // ENOENT on the directory entry itself is absent; any other lstat error
+    // (EACCES, ENOTDIR, ELOOP, ...) is readFailed. A present symlink whose
+    // target cannot be read fails later in readFileSync and is also readFailed.
     try {
-      statSync(configFile);
+      lstatSync(configFile);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { data: {}, parseFailed: false };
       return { data: {}, parseFailed: false, readFailed: true };

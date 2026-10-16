@@ -504,6 +504,18 @@ describe('an unreadable config is unknown, never "off (the default)"', () => {
     expect(screen).toContain('couldn\'t confirm the Guard setting');
   });
 
+  it('a dangling config.json symlink is unknown, not off', async () => {
+    fs.symlinkSync(path.join(configDir, 'missing-target.json'), file('config.json'));
+    expect(fs.lstatSync(file('config.json')).isSymbolicLink()).toBe(true);
+    const update = await freshUpdate();
+    const { readActionGuardCoreConfigReadOnly } = await import('../../cloud/config.js');
+    expect(readActionGuardCoreConfigReadOnly()).toBeNull();
+    const guard = await update.readGuardSwitch();
+    expect(guard).toBe('unknown');
+    expect(await renderFor(guard)).not.toContain('off (the default)');
+    expect(await renderFor(guard)).toContain('couldn\'t confirm the Guard setting');
+  });
+
   it('a genuinely missing config (or config dir) is still off', async () => {
     let update = await freshUpdate();
     expect(await update.readGuardSwitch()).toBe('off');
