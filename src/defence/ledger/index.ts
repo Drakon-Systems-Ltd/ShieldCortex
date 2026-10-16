@@ -28,6 +28,7 @@ export {
   verifyLedger,
   formatLedgerReport,
   summariseLedgerReport,
+  allProblemsAreLegacyProjectBackfill,
   LEDGER_LIMITS_STATEMENT,
   CHECKPOINT_COMMITMENT,
 } from './verify.js';
