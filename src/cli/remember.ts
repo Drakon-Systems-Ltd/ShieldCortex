@@ -22,6 +22,7 @@
 
 import { executeRemember, type RememberInput } from '../tools/remember.js';
 import { closeDatabase, initDatabase } from '../database/init.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 type Importance = 'low' | 'medium' | 'high';
 
@@ -210,7 +211,7 @@ export async function handleRememberCommand(args: string[]): Promise<void> {
     });
 
     if (json) {
-      console.log(JSON.stringify(result));
+      console.log(stringifyJsonTerminalSafe(result));
     } else if (result.success && result.memory) {
       const m = result.memory;
       console.log(`Remembered "${m.title}" (id ${m.id}, ${m.category}, salience ${(m.salience * 100).toFixed(0)}%).`);

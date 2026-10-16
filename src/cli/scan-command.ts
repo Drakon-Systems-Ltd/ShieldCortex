@@ -17,6 +17,7 @@ import {
   scanVerdictExit,
   type ScanExitCode,
 } from './scan-exit.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 export { SCAN_EXIT, SCAN_USAGE_LINES, formatScanToolFailure, scanVerdictExit };
 export type { ScanExitCode };
@@ -303,7 +304,7 @@ async function runParsedScan(parsed: Extract<ParsedScanArgs, { ok: true }>): Pro
   }
 
   if (parsed.json) {
-    console.log(JSON.stringify(buildScanJsonReport(result, parsed, exit)));
+    console.log(stringifyJsonTerminalSafe(buildScanJsonReport(result, parsed, exit)));
   } else {
     printScanVerdict({
       ...result,

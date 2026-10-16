@@ -1,6 +1,7 @@
 import { closeDatabase, initDatabase } from '../database/init.js';
 import { flushPendingCloudSync } from '../cloud/sync.js';
 import { awaitPendingEmbeddings } from '../memory/store.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 import {
   importNativeMemories,
   resolveConfiguredNativeImportScope,
@@ -152,7 +153,7 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (rawArgsRequestJson(args)) {
-      console.log(JSON.stringify(envelope({ apply: args.includes('--apply') }, message)));
+      console.log(stringifyJsonTerminalSafe(envelope({ apply: args.includes('--apply') }, message)));
       return 2;
     }
     console.error(message);
@@ -166,7 +167,7 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
       parsed.options,
       'native import requires --host-id and --agent-id (or configured memory scope)',
     );
-    if (parsed.json) console.log(JSON.stringify(result));
+    if (parsed.json) console.log(stringifyJsonTerminalSafe(result));
     else printHuman(result);
     return 2;
   }
@@ -208,7 +209,7 @@ export async function runNativeImportCli(args: string[]): Promise<number> {
     }
   }
 
-  if (parsed.json) console.log(JSON.stringify(result));
+  if (parsed.json) console.log(stringifyJsonTerminalSafe(result));
   else printHuman(result);
   return result.success ? 0 : 1;
 }

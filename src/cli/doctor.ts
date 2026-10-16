@@ -178,6 +178,7 @@ import {
   type RecallRepetitionVerdict,
   type SlotProblem,
 } from './recall-repetition.js';
+import { stringifyJsonTerminalSafe } from './term-ui.js';
 
 export const VACUUM_FREE_SHARE = 0.2;
 
@@ -9336,7 +9337,7 @@ export async function runDoctor(
   // where the report is red, which is the failure mode doctor exists to avoid.
   // Returns before the human report so the output is parseable on its own.
   if (args.includes('--json')) {
-    console.log(JSON.stringify({
+    console.log(stringifyJsonTerminalSafe({
       version: String(pkg.version ?? ''),
       passed, warnings, failures, infos, total,
       exitCode: doctorExitCode(visible, { strict: args.includes('--strict') }),
@@ -9344,7 +9345,7 @@ export async function runDoctor(
         label: r.label, status: r.status, message: r.message, fix: r.fix,
         ...(r.verboseNote ? { verboseNote: r.verboseNote } : {}),
       })),
-    }, null, 2));
+    }, 2));
     const jsonExit = doctorExitCode(visible, { strict: args.includes('--strict') });
     if (jsonExit !== 0) process.exitCode = jsonExit;
     return { passed, warnings, failures, infos, total, exitCode: jsonExit };
