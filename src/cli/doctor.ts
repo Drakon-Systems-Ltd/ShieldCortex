@@ -1189,7 +1189,7 @@ export async function checkAttestationCoverage(
  */
 export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promise<CheckResult> {
   const label = 'Chained ledger';
-  const { verifyLedger, summariseLedgerReport } = await import('../defence/ledger/verify.js');
+  const { verifyLedger, summariseLedgerReport, allProblemsAreLegacyProjectBackfill } = await import('../defence/ledger/verify.js');
   const { resolveLedgerConfig } = await import('../defence/ledger/config.js');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const Database = require('better-sqlite3');
@@ -1214,7 +1214,9 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const report = verifyLedger(db, { heartbeatIntervalMs: resolveLedgerConfig().heartbeatIntervalMs });
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
-      return { label, status: 'fail', message, fix: 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
+      return { label, status: 'fail', message, fix: allProblemsAreLegacyProjectBackfill(report)
+        ? 'Likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained audit rows; no digest field other than `project` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host) before running any repair; `shieldcortex ledger verify` shows the full report'
+        : 'Run `shieldcortex ledger verify` for the full report; the audit history in this database was edited or rows were removed' };
     }
     if (report.status === 'unchained') return { label, status: 'warn', message };
     return { label, status: 'pass', message };
