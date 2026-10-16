@@ -94,7 +94,11 @@ function fixture(tag: string): { home: string; cwd: string; root: string } {
   return { home, cwd, root };
 }
 
-function cli(args: string[], { home, cwd }: { home: string; cwd: string }): { status: number | null; stdout: string } {
+function cli(
+  args: string[],
+  { home, cwd }: { home: string; cwd: string },
+  dbPath = path.join(home, '.shieldcortex', 'memories.db'),
+): { status: number | null; stdout: string; stderr: string } {
   const run = spawnSync(process.execPath, [DIST_ENTRY, ...args], {
     cwd,
     env: {
@@ -102,7 +106,7 @@ function cli(args: string[], { home, cwd }: { home: string; cwd: string }): { st
       HOME: home,
       USERPROFILE: home,
       SHIELDCORTEX_CONFIG_DIR: path.join(home, '.shieldcortex'),
-      CLAUDE_MEMORY_DB: path.join(home, '.shieldcortex', 'memories.db'),
+      CLAUDE_MEMORY_DB: dbPath,
       SHIELDCORTEX_SKIP_EMBEDDINGS: '1',
       NO_COLOR: '1',
       COLUMNS: '200',
@@ -110,7 +114,12 @@ function cli(args: string[], { home, cwd }: { home: string; cwd: string }): { st
     encoding: 'utf8',
     timeout: 120_000,
   });
-  return { status: run.status, stdout: run.stdout ?? '' };
+  return { status: run.status, stdout: run.stdout ?? '', stderr: run.stderr ?? '' };
+}
+
+/** Exit 0 — or fail with the CLI's own stdout and stderr in the diff, so a CI-only failure names its cause. */
+function expectExitZero(run: { status: number | null; stdout: string; stderr: string }): void {
+  expect(run.status === 0 ? 0 : run).toEqual(0);
 }
 
 describe('built CLI JSON/SARIF on stdout is terminal-safe (#798)', () => {
@@ -205,17 +214,32 @@ describe('built CLI JSON/SARIF on stdout is terminal-safe (#798)', () => {
     expectPlainJsonBytes(stdout, 2);
   }, 150_000);
 
+  /**
+   * `remember` opens the database for writing, and initDatabase refuses the
+   * DEFAULT path (`$HOME/.shieldcortex/memories.db`) when the entry script sits
+   * under a `/ShieldCortex/` directory — a source checkout, which is exactly
+   * where CI runs `dist/index.js` from (`.../work/ShieldCortex/ShieldCortex`).
+   * A database beside the fixture home is not the default path, so the write
+   * proceeds under the same policy without bypassing it.
+   */
+  function rememberFixture(): [{ home: string; cwd: string }, string] {
+    const fx = fixture('');
+    return [fx, path.join(fx.root, 'db', 'memories.db')];
+  }
+
   it('remember --json escapes the stored title and round-trips it', () => {
     const title = `note${UNSAFE}`;
-    const { status, stdout } = cli(['remember', '--title', title, '--content', 'The team standup is at ten on Mondays.', '--json'], fixture(''));
-    expect(status).toBe(0);
+    const run = cli(['remember', '--title', title, '--content', 'The team standup is at ten on Mondays.', '--json'], ...rememberFixture());
+    expectExitZero(run);
+    const { stdout } = run;
     expectTerminalSafe(stdout);
     expect((JSON.parse(stdout) as { memory: { title: string } }).memory.title).toBe(title);
   }, 150_000);
 
   it('remember --json with a clean title is byte-identical to plain compact JSON.stringify', () => {
-    const { status, stdout } = cli(['remember', '--title', 'note', '--content', 'The team standup is at ten on Mondays.', '--json'], fixture(''));
-    expect(status).toBe(0);
+    const run = cli(['remember', '--title', 'note', '--content', 'The team standup is at ten on Mondays.', '--json'], ...rememberFixture());
+    expectExitZero(run);
+    const { stdout } = run;
     expectPlainJsonBytes(stdout);
   }, 150_000);
 });
