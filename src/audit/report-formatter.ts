@@ -11,7 +11,7 @@
 
 import type { AuditReport, AuditFinding, AuditGrade, AuditSeverity, ScannerResult } from './types.js';
 import { getFindingDetail } from './finding-detail.js';
-import { sanitiseDisplayField } from '../cli/term-ui.js';
+import { sanitiseDisplayField, stringifyJsonTerminalSafe } from '../cli/term-ui.js';
 
 /**
  * Every string below that came from a scanned file, its name, or a config the
@@ -318,5 +318,5 @@ export function formatMarkdownReport(report: AuditReport): string {
  * Format an audit report as JSON (for programmatic consumption).
  */
 export function formatJsonReport(report: AuditReport): string {
-  return JSON.stringify(report, null, 2);
+  return stringifyJsonTerminalSafe(report, 2)!;
 }
