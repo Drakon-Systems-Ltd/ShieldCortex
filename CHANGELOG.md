@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Doctor and ledger verify explain legacy `project` backfills (#795).** When every broken digest matches after resetting `project` to NULL, reports name an older ShieldCortex copy (5.2.1 or earlier) as the likely cause and advise upgrading or removing it before repair. Mixed or other damage keeps the existing warning. The ledger remains inconsistent; verification does not change the database.
+
 ## [5.10.2] - 2026-10-16
 
 Patch on 5.10.1: four fixes, documented below. An older ShieldCortex build (5.2.1 or earlier) sharing a database that a 5.3+ build has chained can no longer rewrite the `project` column of chained audit rows, which used to break `ledger verify` on mixed-version hosts. A new trigger refuses those changes; the older copy logs the refusal on stderr and carries on starting (#674 part 1, PR #796). `shieldcortex repair`, the `doctor` report, the MCP server's startup-failure message and the re-run lines at the end of `shieldcortex update` now clean the install directory, error text and agent id before printing them, so control and hidden characters in those values cannot redraw the terminal (#788, PR #793), and a line break inside an install or log path now shows as `⏎` inside its value instead of starting a separate recovery line, with the MCP startup-failure "Details written to" path cleaned too (#799, PR #800); `doctor --json` still reports the raw values. `shieldcortex allowlist scan --json` writes C1, bidi, line-separator and invisible characters as JSON Unicode escapes (#786, PR #792). Patch rather than minor: all four commits since 5.10.1 are typed `fix`. No CLI command, config key, default, Node floor or Cloud pin changes.
