@@ -28,8 +28,8 @@ let lockFilePath: string | null = null;
 let lockFileFd: number | null = null;
 /** The exact bytes this process published as its lock record; release removes only this. */
 let lockOwnedRecord: Buffer | null = null;
-/** True only while this process owns the startup lock (not the continue-anyway path). */
-export function holdsStartupLock(): boolean { return lockFileFd !== null; }
+/** True only while this process's record is still at the canonical lock path. */
+export function holdsStartupLock(): boolean { return verifiedOwnedLock() !== null; }
 export class StartupLockHeldError extends Error {
   constructor(message: string) {
     super(message);
@@ -297,6 +297,37 @@ const matchesLock = (snapshot: LockSnapshot | null, expected: LockIdentity): boo
   (expected.partial
     ? snapshot.bytes.length <= expected.bytes.length && snapshot.bytes.equals(expected.bytes.subarray(0, snapshot.bytes.length))
     : snapshot.bytes.equals(expected.bytes));
+
+/**
+ * This process's lock identity while its own record is at the canonical lock
+ * path, else null (#813). A different record at the path revokes the cached
+ * ownership for good: another process holds it now. An absent or unreadable
+ * path only reports "not owner" without revoking, because another process's
+ * stale check may have moved the record aside and be about to link it back
+ * (same inode), after which this process owns it again.
+ */
+function verifiedOwnedLock(): LockIdentity | null {
+  if (lockFileFd === null || lockFilePath === null || lockOwnedRecord === null) return null;
+  let snapshot: LockSnapshot | null;
+  try {
+    snapshot = readLockSnapshot(lockFilePath);
+  } catch {
+    return null; // Unreadable: ownership cannot be established right now.
+  }
+  if (snapshot === null) return null; // Vacant: possibly moved aside mid stale check.
+  try {
+    const own = fstatSync(lockFileFd);
+    const identity = { dev: own.dev, ino: own.ino, bytes: lockOwnedRecord };
+    if (matchesLock(snapshot, identity)) return identity;
+  } catch {
+    return null; // Our descriptor cannot be checked: not provably ours.
+  }
+  try { closeSync(lockFileFd); } catch { /* Best-effort close. */ }
+  lockFileFd = null;
+  lockFilePath = null;
+  lockOwnedRecord = null;
+  return null;
+}
 
 /**
  * Put a record that was moved aside back at `lockPath` without overwriting a
@@ -1189,17 +1220,15 @@ export function closeDatabase(): void {
   // Release only a lock this process owns, and only while the on-disk record
   // is still the one it published (same inode, same bytes) — never another
   // process's lock (#763).
-  if (lockFileFd !== null) {
+  const ownLock = verifiedOwnedLock();
+  if (ownLock && lockFilePath) {
     try {
-      const own = fstatSync(lockFileFd);
-      const ownLock: LockIdentity | null = lockOwnedRecord ? { dev: own.dev, ino: own.ino, bytes: lockOwnedRecord } : null;
-      const onDisk = lockFilePath ? readLockSnapshot(lockFilePath) : null;
-      if (lockFilePath && ownLock && matchesLock(onDisk, ownLock)) {
-        removeLockIfUnchanged(lockFilePath, ownLock);
-      }
+      removeLockIfUnchanged(lockFilePath, ownLock);
     } catch {
-      // Non-fatal: an unverifiable lock is left in place.
+      // Non-fatal: release must not fail if the lock changes or cannot be moved.
     }
+  }
+  if (lockFileFd !== null) {
     try {
       closeSync(lockFileFd);
     } catch {
