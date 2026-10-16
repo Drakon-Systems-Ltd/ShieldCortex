@@ -79,17 +79,25 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(report.problems.every((p) => p.kind === 'digest-mismatch' && p.cause === 'legacy-project-backfill')).toBe(true);
     expect(report.problems.some((p) => p.kind === 'prev-hash-mismatch')).toBe(false);
     expect(report.problems[0].detail).toMatch(/matches its digest once.*project.*NULL/i);
+    // memory_id is outside AUDIT_CONTENT_FIELDS, so the digest cannot vouch for "nothing else".
+    for (const p of report.problems) expect(p.detail).toMatch(/no digest field other than project changed/);
     expect(allProblemsAreLegacyProjectBackfill(report)).toBe(true);
     expect(summariseLedgerReport(report)).toMatch(/every problem is explained by a legacy project backfill/i);
+    expect(summariseLedgerReport(report)).toMatch(/no digest field other than project changed/);
     expect(formatLedgerReport(report)).toContain('[cause: legacy-project-backfill]');
     expect(formatLedgerReport(report)).toMatch(/find and remove or upgrade the old copy before any repair/i);
+    expect(formatLedgerReport(report)).toContain('no digest field other than `project` changed in those rows');
     const cli = jsonCommand(dbPath);
     expect(cli.code).toBe(1);
     expect(cli.report.problems.every((p) => p.cause === 'legacy-project-backfill')).toBe(true);
     const doctor = await checkChainedLedger({ dbPath });
     expect(doctor.status).toBe('fail');
     expect(doctor.fix).toMatch(/older ShieldCortex copy \(5\.2\.1 or earlier\).*global install and npx cache/i);
+    expect(doctor.fix).toContain('no digest field other than `project` changed in those rows');
     expect(doctor.fix).not.toBe(oldFix);
+    for (const text of [summariseLedgerReport(report), formatLedgerReport(report), doctor.fix ?? '', ...report.problems.map((p) => p.detail)]) {
+      expect(text).not.toMatch(/nothing else/i);
+    }
     expect(readFileSync(dbPath).equals(before)).toBe(true);
   });
 

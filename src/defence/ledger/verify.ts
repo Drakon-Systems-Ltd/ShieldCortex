@@ -372,7 +372,7 @@ export function verifyLedger(
         }
         if (legacyProjectBackfill) {
           problem(epoch, s, 'digest-mismatch',
-            'row matches its digest once project is reset to NULL; an older ShieldCortex copy (5.2.1 or earlier) filled in project; nothing else in the row changed',
+            'row matches its digest once project is reset to NULL; an older ShieldCortex copy (5.2.1 or earlier) filled in project; no digest field other than project changed',
             'legacy-project-backfill');
         } else {
           problem(epoch, s, 'digest-mismatch', `row content no longer matches its content_digest (${r.table})`);
@@ -509,7 +509,7 @@ export function summariseLedgerReport(r: LedgerReport): string {
     const f = r.firstBad!;
     return `inconsistent — first bad: ${where(f)} (${f.kind}: ${f.detail}); ${r.problems.length} problem(s)` +
       (allProblemsAreLegacyProjectBackfill(r)
-        ? '; every problem is explained by a legacy project backfill (an older ShieldCortex copy, 5.2.1 or earlier, filled in project on chained rows; nothing else changed)'
+        ? '; every problem is explained by a legacy project backfill (an older ShieldCortex copy, 5.2.1 or earlier, filled in project on chained rows; no digest field other than project changed)'
         : '');
   }
   const head = r.head ? `head epoch ${r.head.epoch} seq ${r.head.seq}` : 'no head';
@@ -536,7 +536,7 @@ export function formatLedgerReport(r: LedgerReport): string {
     out.push('  Problems:');
     for (const p of r.problems) out.push(`    - ${where(p)}: ${p.kind}${p.cause ? ` [cause: ${p.cause}]` : ''} — ${p.detail}`);
     if (allProblemsAreLegacyProjectBackfill(r)) {
-      out.push('  An older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained rows; nothing else in those rows changed; find and remove or upgrade the old copy before any repair.');
+      out.push('  An older ShieldCortex copy (5.2.1 or earlier) filled in `project` on chained rows; no digest field other than `project` changed in those rows; find and remove or upgrade the old copy before any repair.');
     }
   }
   const u = r.unchainedHistory;
