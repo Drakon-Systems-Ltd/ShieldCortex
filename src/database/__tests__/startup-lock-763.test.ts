@@ -510,6 +510,64 @@ describe('#813 displaced startup-lock holder', () => {
   });
 });
 
+describe('#817 holder whose record is put back by copy (no hard links)', () => {
+  it('retains ownership after no-hard-link restore of its exact record', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    let ownBytes = '';
+    let ownInode = 0;
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      expect(holdsStartupLock()).toBe(true);
+      ownBytes = realFs.readFileSync(lockPath, 'utf8');
+      ownInode = realFs.statSync(lockPath).ino;
+    };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(ownBytes);
+    expect(realFs.statSync(lockPath).ino).not.toBe(ownInode);
+    expect(asides()).toEqual([]);
+    expect(holdsStartupLock()).toBe(true);
+  });
+
+  it('shutdown removes the copy-restored own record and leaves nothing aside', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    let ownInode = 0;
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      ownInode = realFs.statSync(lockPath).ino;
+    };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(realFs.statSync(lockPath).ino).not.toBe(ownInode);
+    closeDatabase();
+    expect(realFs.existsSync(lockPath)).toBe(false);
+    expect(strays()).toEqual([]);
+    expect(holdsStartupLock()).toBe(false);
+  });
+
+  it('a different record on a new inode still revokes ownership, and shutdown leaves it', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    acquire(true);
+    expect(holdsStartupLock()).toBe(true);
+    const own = realFs.readFileSync(lockPath, 'utf8');
+    // Same PID and layout, another nonce: a different process's record.
+    const nonce = (JSON.parse(own) as { nonce: string }).nonce;
+    const foreign = own.replace(nonce, `${nonce}-other`);
+    expect(foreign).not.toBe(own);
+    writeForeign(foreign);
+    expect(holdsStartupLock()).toBe(false);
+    // Revoked for good: putting the exact own bytes back later does not restore it.
+    writeForeign(own);
+    expect(holdsStartupLock()).toBe(false);
+    writeForeign(foreign);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(strays()).toEqual([]);
+  });
+});
+
 describe('#763 release', () => {
   it('continue-anyway never removes the foreign lock on close', () => {
     const foreign = record(process.pid);
