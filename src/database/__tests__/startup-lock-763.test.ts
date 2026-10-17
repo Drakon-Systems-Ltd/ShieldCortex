@@ -536,6 +536,112 @@ describe('#817 holder whose record is put back by copy (no hard links)', () => {
     expect(holdsStartupLock()).toBe(true);
   });
 
+  it('retains ownership after observing its copy restoration in progress', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    let ownBytes = '';
+    let ownInode = 0;
+    let checkedDuringCopy = false;
+    let duringCopy: boolean | undefined;
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      expect(holdsStartupLock()).toBe(true);
+      ownBytes = realFs.readFileSync(lockPath, 'utf8');
+      ownInode = realFs.statSync(lockPath).ino;
+      hooks.beforeAsideLink = () => {
+        hooks.beforeLockWrite = () => {
+          expect(realFs.readFileSync(lockPath, 'utf8')).toBe('');
+          expect(asides()).toEqual([ownBytes]);
+          checkedDuringCopy = true;
+          duringCopy = holdsStartupLock();
+        };
+      };
+    };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(checkedDuringCopy).toBe(true);
+    expect(typeof duringCopy).toBe('boolean');
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(ownBytes);
+    expect(realFs.statSync(lockPath).ino).not.toBe(ownInode);
+    expect(asides()).toEqual([]);
+    // A temporary false is acceptable while publication is incomplete; after
+    // the sole holder's exact record is restored, ownership must recover.
+    expect(holdsStartupLock()).toBe(true);
+  });
+
+  it('rejects altered own contents even with the original nonce', () => {
+    acquire(true);
+    const own = realFs.readFileSync(lockPath, 'utf8');
+    const altered = `${own}\n`;
+    expect(JSON.parse(altered).nonce).toBe(JSON.parse(own).nonce);
+    writeForeign(altered);
+    expect(holdsStartupLock()).toBe(false);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(altered);
+  });
+
+  it('reports no ownership while its record is empty or a strict prefix, and owns it again once the exact bytes are back', () => {
+    acquire(true);
+    const own = realFs.readFileSync(lockPath, 'utf8');
+    writeForeign('');
+    expect(holdsStartupLock()).toBe(false);
+    writeForeign(own.slice(0, 1));
+    expect(holdsStartupLock()).toBe(false);
+    writeForeign(own.slice(0, -1));
+    expect(holdsStartupLock()).toBe(false);
+    writeForeign(own);
+    expect(holdsStartupLock()).toBe(true);
+  });
+
+  it('a partially written foreign record that completes as a foreign record ends ownership', () => {
+    acquire(true);
+    const own = realFs.readFileSync(lockPath, 'utf8');
+    const foreign = record(EPERM_PID);
+    // Its first bytes are also a prefix of this process's record: not yet distinguishable.
+    const partial = foreign.slice(0, 5);
+    expect(own.startsWith(partial)).toBe(true);
+    writeForeign(partial);
+    expect(holdsStartupLock()).toBe(false);
+    realFs.writeFileSync(lockPath, foreign);
+    expect(holdsStartupLock()).toBe(false);
+    // Revoked for good: the exact own bytes reappearing later do not restore it.
+    writeForeign(own);
+    expect(holdsStartupLock()).toBe(false);
+    writeForeign(foreign);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(strays()).toEqual([]);
+  });
+
+  it('shutdown removes the own record restored after a check observed its copy in progress, and leaves nothing aside', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    let duringCopy: boolean | undefined;
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      hooks.beforeAsideLink = () => {
+        hooks.beforeLockWrite = () => { duringCopy = holdsStartupLock(); };
+      };
+    };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(duringCopy).toBe(false);
+    expect(holdsStartupLock()).toBe(true);
+    closeDatabase();
+    expect(realFs.existsSync(lockPath)).toBe(false);
+    expect(strays()).toEqual([]);
+    expect(holdsStartupLock()).toBe(false);
+  });
+
+  it('an empty record that stays empty never reports ownership, and shutdown leaves it', () => {
+    acquire(true);
+    writeForeign('');
+    for (let check = 0; check < 3; check++) expect(holdsStartupLock()).toBe(false);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe('');
+    expect(strays()).toEqual([]);
+  });
+
   it('shutdown removes the copy-restored own record and leaves nothing aside', () => {
     hooks.linkErrorAlways = 'ENOTSUP';
     writeForeign(record(DEAD_PID));

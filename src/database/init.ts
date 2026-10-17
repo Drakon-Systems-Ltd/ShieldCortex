@@ -314,6 +314,16 @@ const matchesLock = (snapshot: LockSnapshot | null, expected: LockIdentity): boo
  * record is re-adopted (the retained descriptor moves to the new inode).
  * Any other bytes — a displaced holder now facing another process's record
  * (#813) — still revoke, and a revoked process has no record left to re-adopt.
+ *
+ * That copy is created exclusively before its bytes are written, so for a
+ * moment the path holds an empty file or a strict prefix of
+ * `lockOwnedRecord` (#819). Such a record is only possibly mid-publication:
+ * it may become this record again, or another publisher's first bytes may
+ * happen to match ours so far. It therefore reports "not owner" without
+ * revoking, like a vacant path, and never counts as ownership. A later check
+ * re-adopts it once it holds exactly `lockOwnedRecord`; once it holds any
+ * other complete bytes — including a foreign record that started with the
+ * same prefix — it is no longer a prefix and revokes as above.
  */
 function verifiedOwnedLock(): LockIdentity | null {
   if (lockFileFd === null || lockFilePath === null || lockOwnedRecord === null) return null;
@@ -332,6 +342,10 @@ function verifiedOwnedLock(): LockIdentity | null {
     return null; // Our descriptor cannot be checked: not provably ours.
   }
   if (snapshot.bytes.equals(lockOwnedRecord)) return readoptOwnLock(lockFilePath, lockOwnedRecord);
+  if (snapshot.bytes.length < lockOwnedRecord.length &&
+      snapshot.bytes.equals(lockOwnedRecord.subarray(0, snapshot.bytes.length))) {
+    return null; // Possibly our record mid copy-restoration: not verified now.
+  }
   try { closeSync(lockFileFd); } catch { /* Best-effort close. */ }
   lockFileFd = null;
   lockFilePath = null;
