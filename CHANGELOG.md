@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Database startup lock ownership during a copy-restore (#819).** The 5.10.4 copy-restore fix (#817) did not cover an ownership check that ran while the copy was still being written. On a filesystem without hard links, a holder that checked ownership at that moment, when its lock record was still empty or only partly written, lost ownership for good. It then skipped `shieldcortex maintain` write steps as locked and left its own record behind at shutdown. Such a check now reports no ownership for that moment only, and the holder owns the lock again once its exact record is back. An empty or partial record is never treated as owned. A complete record with any other contents still ends ownership as before, including another process's record or the holder's own record with changed contents.
+
 ## [5.10.4] - 2026-10-17
 
 Patch on 5.10.3: two fixes (#813, PR #814; #817, PR #818). A process whose startup lock record has been replaced by another process's record now stops reporting that it owns the lock at its next ownership check, and `shieldcortex maintain` checks ownership again before consolidate, embed and vacuum, reporting that step and every later write step as `skipped: locked` once ownership is lost. On a filesystem without hard links, a holder whose own record is moved aside and put back as a copy keeps its ownership (#817). The stale takeover can still briefly leave the lock path empty; this release does not close that window. Patch rather than minor: both shipped changes are typed `fix`. No CLI command, config key, default, Node floor or Cloud pin changes.
