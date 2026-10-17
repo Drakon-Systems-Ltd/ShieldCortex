@@ -179,7 +179,22 @@ export {
   GUARD_DEGRADED_OUTCOMES,
   isGuardIndexOrigin,
   isSummaryOrigin,
+  readSessionGuardIndexBounded,
+  appendExpiryDigestRecord,
+  EXPIRY_DIGEST_MAX_INDEX_BYTES,
+  EXPIRY_DIGEST_MAX_INDEX_LINES,
+  EXPIRY_DIGEST_MAX_LINE_BYTES,
 } from './iron-dome/session-guard.js';
+export type { BoundedIndexRead, ExpiryDigestPhase, ExpiryDigestRecordInput } from './iron-dome/session-guard.js';
+export {
+  buildApprovalExpiryDigest,
+  isApprovalTimeoutEntry,
+  projectHostVersion,
+  EXPIRY_DIGEST_FOOTER,
+  EXPIRY_DIGEST_MAX_CHARS,
+  EXPIRY_DIGEST_MAX_ENTRIES,
+} from './iron-dome/expiry-digest.js';
+export type { ApprovalExpiryDigest } from './iron-dome/expiry-digest.js';
 export {
   REQUIRED_BINDING_FIELDS,
   hasRequiredBinding,
@@ -249,6 +264,8 @@ export {
   buildActionGuardOutcomeNotification,
   deliverOperatorNotification,
   isConversationThreatNotification,
+  projectActionGuardFields,
+  APPROVAL_EXPIRY_DIGEST_REASON,
 } from './iron-dome/operator-notify.js';
 
 // #509 r7: the enforce-when-ready readiness gate, for the OpenClaw

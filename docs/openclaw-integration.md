@@ -344,6 +344,40 @@ Optional cloud config example:
 }
 ```
 
+### Approval-timeout report at session end (#673, partial)
+
+When an OpenClaw session ends, ShieldCortex reads that session's local guard
+index (`~/.shieldcortex/audit/session-guard/<sc-…>.jsonl`, the last 1 MiB /
+5,000 lines at most) and, if it holds recorded `card_timeout` outcomes, sends
+**one** report-only message to the configured
+`interceptor.actionGuard.notify.webhookUrl`. It lists up to 10 calls (generic
+tool name, tier, the plain-English reason) and counts the rest as "+K more
+recorded in this scan".
+
+What it is not:
+
+- **Not an approval.** It has no approve/deny controls and grants nothing. The
+  approval request, its timeout and every decision path are unchanged.
+- **Not fewer cards.** The initial approval cards and any host "expired"
+  messages are sent exactly as before. This report is added at session end;
+  it does not replace them.
+- **Not a blocked/skipped claim.** No OpenClaw version is yet verified by a
+  pinned host-contract test, so every entry says ShieldCortex has not verified
+  whether that OpenClaw version blocked the call.
+- **Not a complete count.** Counts are what the local index recorded; a
+  partly unreadable index is reported as "at least N".
+- **Not delivery to a person.** "Delivered" in the local receipt row means the
+  webhook answered 2xx. There is no retry, no failover and no gateway/chat
+  adapter for this report. With no webhook (or notify disabled) the report is
+  kept local only.
+- **Per host session, once.** Several runs that reuse one session id are one
+  report; a session id that ends again after its report gets no second one.
+  A session with no `session_end`, or with conflicting session ids, gets none.
+
+The index gains content-free `recordKind: "digest"` rows (`local_only`,
+`attempt`, `receipt`), mirrored to `realtime-*.jsonl`; the session summary,
+the stop hook and readiness evidence ignore them.
+
 ## Shared database
 
 Memories are stored in `~/.shieldcortex/memories.db` and shared across ShieldCortex integrations (including Claude Code + OpenClaw when both use ShieldCortex memory tools).
