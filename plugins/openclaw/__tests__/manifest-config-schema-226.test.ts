@@ -343,7 +343,7 @@ describe('#226 the manifest and the runtime schema do not drift apart', () => {
     expect(manifest.engines.conversationGateNote).toMatch(/2026\.5\.9-beta\.1/);
     // The base engine floor is unchanged: everything EXCEPT the conversation
     // gate still works below it.
-    expect(manifest.engines.openclaw).toBe('>=2026.3.22');
+    expect(manifest.engines.openclaw).toBe('>=2026.4.23');
   });
 
   it('surfaces the posture in the UI hints, not just the schema', () => {
