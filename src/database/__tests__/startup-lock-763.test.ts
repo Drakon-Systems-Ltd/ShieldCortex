@@ -35,6 +35,10 @@ const hooks: {
   beforeLockWrite?: Hook;
   /** One-shot error from the no-hard-link fallback's write. */
   lockWriteError?: string;
+  /** Runs before every read-only open of the lock path. */
+  beforeLockRead?: () => void;
+  /** Runs after every read-only open of the lock path returns its descriptor. */
+  afterLockRead?: () => void;
 } = {};
 
 const isLock = (p: unknown): boolean => String(p).endsWith('.lock');
@@ -82,7 +86,9 @@ const openSync = ((p: realFs.PathLike, ...rest: unknown[]) => {
     hooks.failAsideRead = false;
     fail('EACCES', `open '${String(p)}'`);
   }
+  if (isLock(p) && rest[0] === 'r') hooks.beforeLockRead?.();
   const fd = (realFs.openSync as (...args: unknown[]) => number)(p, ...rest);
+  if (isLock(p) && rest[0] === 'r') hooks.afterLockRead?.();
   if (isLock(p) && rest[0] === 'wx') lockCreateFds.add(fd);
   return fd;
 }) as typeof realFs.openSync;
@@ -565,6 +571,32 @@ describe('#817 holder whose record is put back by copy (no hard links)', () => {
     closeDatabase();
     expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
     expect(strays()).toEqual([]);
+  });
+
+  // #818 r2: the second read-open is re-adoption's own open of the candidate.
+  // Another record taking the lock path just before it, or just after it
+  // returns (before the candidate is verified and adopted), must not report
+  // ownership.
+  it.each(['before', 'after'] as const)('#818 r2: fails closed when the lock path changes %s the re-adoption open', (when) => {
+    acquire(true);
+    const own = realFs.readFileSync(lockPath, 'utf8');
+    writeForeign(own); // A completed byte-identical copy on a new inode.
+    const foreign = record(EPERM_PID);
+    let opens = 0;
+    const swap = (): void => {
+      if (++opens === 2) writeForeign(foreign);
+    };
+    if (when === 'before') hooks.beforeLockRead = swap;
+    else hooks.afterLockRead = swap;
+    const observed = holdsStartupLock();
+    hooks.beforeLockRead = undefined;
+    hooks.afterLockRead = undefined;
+    expect(opens).toBe(2);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(holdsStartupLock()).toBe(false);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(observed).toBe(false);
   });
 });
 

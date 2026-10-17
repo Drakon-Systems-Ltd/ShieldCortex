@@ -343,6 +343,13 @@ function verifiedOwnedLock(): LockIdentity | null {
  * Move the retained lock descriptor to the record now at `lockPath` when that
  * opened file holds exactly `bytes` (#817). If the path changed again before
  * it was opened, nothing changes and the next check decides.
+ *
+ * The descriptor proves which file was opened, not that it is still at
+ * `lockPath`: once its bytes are verified, `lockPath` must still name that
+ * same device and inode, or the candidate is dropped and nothing changes. This
+ * covers a replacement between the open and adoption; it is not an atomic
+ * compare-and-swap — a replacement after this check is the same
+ * snapshot-to-use window every other ownership check has.
  */
 function readoptOwnLock(lockPath: string, bytes: Buffer): LockIdentity | null {
   let fd: number;
@@ -354,7 +361,10 @@ function readoptOwnLock(lockPath: string, bytes: Buffer): LockIdentity | null {
   let identity: LockIdentity | null = null;
   try {
     const stat = fstatSync(fd);
-    if (readFileSync(fd).equals(bytes)) identity = { dev: stat.dev, ino: stat.ino, bytes };
+    if (readFileSync(fd).equals(bytes)) {
+      const named = statSync(lockPath);
+      if (named.dev === stat.dev && named.ino === stat.ino) identity = { dev: stat.dev, ino: stat.ino, bytes };
+    }
   } catch {
     identity = null;
   }
