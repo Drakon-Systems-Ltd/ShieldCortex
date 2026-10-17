@@ -161,6 +161,7 @@ export function QuarantineView() {
   } | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkConfirm, setBulkConfirm] = useState<'approve' | 'reject' | null>(null);
+  const [refusalNotice, setRefusalNotice] = useState<string | null>(null);
   const mutationError =
     (approveMutation.error as Error | null)?.message ||
     (rejectMutation.error as Error | null)?.message ||
@@ -210,7 +211,16 @@ export function QuarantineView() {
   const handleConfirm = () => {
     if (!confirmAction) return;
     if (confirmAction.action === 'approve') {
-      approveMutation.mutate(confirmAction.item.id);
+      const id = confirmAction.item.id;
+      setRefusalNotice(null);
+      approveMutation.mutate(id, {
+        // #824: the re-scan can refuse an approval; the item then ends rejected.
+        onSuccess: (result) => {
+          if (result.status !== 'approved') {
+            setRefusalNotice(`Item #${id} was not approved${result.reason ? `: ${result.reason}` : ''}. It is now ${result.status}.`);
+          }
+        },
+      });
     } else {
       rejectMutation.mutate({ id: confirmAction.item.id });
     }
@@ -221,7 +231,16 @@ export function QuarantineView() {
     if (!bulkConfirm || selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
     if (bulkConfirm === 'approve') {
-      bulkApproveMutation.mutate(ids);
+      setRefusalNotice(null);
+      bulkApproveMutation.mutate(ids, {
+        // #824: report items the re-scan refused instead of dropping them silently.
+        onSuccess: (result) => {
+          const refused = result.rejected ?? 0;
+          if (refused > 0) {
+            setRefusalNotice(`${refused} of ${ids.length} selected item${ids.length !== 1 ? 's' : ''} ${refused === 1 ? 'was' : 'were'} not approved: the re-scan refused ${refused === 1 ? 'it' : 'them'}. ${refused === 1 ? 'It is' : 'They are'} now rejected.`);
+          }
+        },
+      });
     } else {
       bulkRejectMutation.mutate(ids);
     }
@@ -393,6 +412,12 @@ export function QuarantineView() {
       {mutationError && (
         <div className="glass-card p-5 border-[var(--sc-danger)]/30 bg-[var(--sc-danger)]/10 text-sm text-[var(--sc-danger)]">
           {mutationError}
+        </div>
+      )}
+
+      {refusalNotice && (
+        <div role="status" className="glass-card p-5 border-[var(--sc-warn)]/30 bg-[var(--sc-warn)]/10 text-sm text-[var(--sc-warn)]">
+          {refusalNotice}
         </div>
       )}
 
