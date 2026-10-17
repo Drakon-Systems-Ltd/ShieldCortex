@@ -9,7 +9,7 @@ OpenClaw plugin for ShieldCortex real-time defence scanning and optional memory 
 - **OpenClaw ≥ 2026.5.12 for conversation *enforcement*** — the `before_agent_run` input gate first appears in 2026.5.9-beta.1 and first ships stable in 2026.5.12. Below that floor everything else works, but the conversation firewall is observation-only and says so (see [Conversation firewall](#conversation-firewall))
 - **ShieldCortex** — ≥ 4.18.3 required (matches the declared peer dependency; ship both packages at the same version)
 
-OpenClaw is declared as an **optional** peer dependency, so installs on older OpenClaw keep working but miss the linking benefit.
+OpenClaw is declared as an **optional** peer dependency, so installing the package does not pull in a copy of OpenClaw: the OpenClaw host provides it. That optional flag is about a missing peer only; it does not extend support below the OpenClaw 2026.4.23 minimum above.
 
 ### Packaging note for OpenClaw discovery
 

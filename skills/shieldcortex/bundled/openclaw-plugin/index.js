@@ -1,5 +1,6 @@
 /**
- * ShieldCortex Real-time Scanning Plugin for OpenClaw v2026.3.22+
+ * ShieldCortex Real-time Scanning Plugin for OpenClaw (frozen 4.31.2 snapshot;
+ * openclaw.plugin.json beside this file declares the minimum OpenClaw version)
  *
  * Uses explicit capability registration (registerHook + registerCommand)
  * for llm_input/llm_output scanning and optional memory extraction.
