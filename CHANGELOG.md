@@ -13,6 +13,7 @@ Patch on 5.10.3: one fix (#813, PR #814). A process whose startup lock record ha
 
 ### Fixed
 - **Database startup lock ownership after stale takeover (#813).** A process whose lock record has been replaced at the canonical path by another process's record now drops its ownership state at its next ownership check, including maintenance checks before consolidate, embed and vacuum, so at most one of them reports owning the lock from then on. While its record is only moved aside (the path is empty), it reports no ownership but keeps it, and owns the lock again if the record is linked back. Shutdown also verifies ownership before release and leaves another process's record in place. The stale takeover can still briefly leave the path vacant; this fix does not prevent another starter from publishing during that interval, and a process that already passed an ownership check is not interrupted mid-step.
+- **Database startup lock ownership after a copy-restore (#817).** On a filesystem without hard links, when another process's stale-lock check moves the holder's lock record aside and then puts it back, the record comes back as a copy. The holder now still reports owning the lock after that, so `shieldcortex maintain` no longer skips its write steps as locked, and shutdown removes the restored record. A record with any other contents at the lock path, including another process's record, still ends ownership as before.
 
 ## [5.10.3] - 2026-10-16
 

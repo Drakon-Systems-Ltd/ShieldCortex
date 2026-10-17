@@ -305,6 +305,15 @@ const matchesLock = (snapshot: LockSnapshot | null, expected: LockIdentity): boo
  * path only reports "not owner" without revoking, because another process's
  * stale check may have moved the record aside and be about to link it back
  * (same inode), after which this process owns it again.
+ *
+ * Without hard links that stale check puts the record back as an exclusive
+ * copy of the same bytes, on a new inode (#817). A record whose bytes are
+ * exactly `lockOwnedRecord` is still this process's own record: those bytes
+ * carry a random nonce this process generated, so no other process publishes
+ * them; they only reappear when a stale check copies this record back. Such a
+ * record is re-adopted (the retained descriptor moves to the new inode).
+ * Any other bytes — a displaced holder now facing another process's record
+ * (#813) — still revoke, and a revoked process has no record left to re-adopt.
  */
 function verifiedOwnedLock(): LockIdentity | null {
   if (lockFileFd === null || lockFilePath === null || lockOwnedRecord === null) return null;
@@ -322,11 +331,52 @@ function verifiedOwnedLock(): LockIdentity | null {
   } catch {
     return null; // Our descriptor cannot be checked: not provably ours.
   }
+  if (snapshot.bytes.equals(lockOwnedRecord)) return readoptOwnLock(lockFilePath, lockOwnedRecord);
   try { closeSync(lockFileFd); } catch { /* Best-effort close. */ }
   lockFileFd = null;
   lockFilePath = null;
   lockOwnedRecord = null;
   return null;
+}
+
+/**
+ * Move the retained lock descriptor to the record now at `lockPath` when that
+ * opened file holds exactly `bytes` (#817). If the path changed again before
+ * it was opened, nothing changes and the next check decides.
+ *
+ * The descriptor proves which file was opened, not that it is still at
+ * `lockPath`: once its bytes are verified, `lockPath` must still name that
+ * same device and inode, or the candidate is dropped and nothing changes. This
+ * covers a replacement between the open and adoption; it is not an atomic
+ * compare-and-swap — a replacement after this check is the same
+ * snapshot-to-use window every other ownership check has.
+ */
+function readoptOwnLock(lockPath: string, bytes: Buffer): LockIdentity | null {
+  let fd: number;
+  try {
+    fd = openSync(lockPath, 'r');
+  } catch {
+    return null; // Gone or unreadable since the snapshot: not provably ours now.
+  }
+  let identity: LockIdentity | null = null;
+  try {
+    const stat = fstatSync(fd);
+    if (readFileSync(fd).equals(bytes)) {
+      const named = statSync(lockPath);
+      if (named.dev === stat.dev && named.ino === stat.ino) identity = { dev: stat.dev, ino: stat.ino, bytes };
+    }
+  } catch {
+    identity = null;
+  }
+  if (!identity) {
+    try { closeSync(fd); } catch { /* Best-effort close. */ }
+    return null;
+  }
+  if (lockFileFd !== null) {
+    try { closeSync(lockFileFd); } catch { /* Best-effort close. */ }
+  }
+  lockFileFd = fd;
+  return identity;
 }
 
 /**

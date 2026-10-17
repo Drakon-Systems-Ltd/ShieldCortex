@@ -35,6 +35,10 @@ const hooks: {
   beforeLockWrite?: Hook;
   /** One-shot error from the no-hard-link fallback's write. */
   lockWriteError?: string;
+  /** Runs before every read-only open of the lock path. */
+  beforeLockRead?: () => void;
+  /** Runs after every read-only open of the lock path returns its descriptor. */
+  afterLockRead?: () => void;
 } = {};
 
 const isLock = (p: unknown): boolean => String(p).endsWith('.lock');
@@ -82,7 +86,9 @@ const openSync = ((p: realFs.PathLike, ...rest: unknown[]) => {
     hooks.failAsideRead = false;
     fail('EACCES', `open '${String(p)}'`);
   }
+  if (isLock(p) && rest[0] === 'r') hooks.beforeLockRead?.();
   const fd = (realFs.openSync as (...args: unknown[]) => number)(p, ...rest);
+  if (isLock(p) && rest[0] === 'r') hooks.afterLockRead?.();
   if (isLock(p) && rest[0] === 'wx') lockCreateFds.add(fd);
   return fd;
 }) as typeof realFs.openSync;
@@ -507,6 +513,90 @@ describe('#813 displaced startup-lock holder', () => {
     // Ownership survived the vacancy, so shutdown still releases A's record.
     closeDatabase();
     expect(realFs.existsSync(lockPath)).toBe(false);
+  });
+});
+
+describe('#817 holder whose record is put back by copy (no hard links)', () => {
+  it('retains ownership after no-hard-link restore of its exact record', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    let ownBytes = '';
+    let ownInode = 0;
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      expect(holdsStartupLock()).toBe(true);
+      ownBytes = realFs.readFileSync(lockPath, 'utf8');
+      ownInode = realFs.statSync(lockPath).ino;
+    };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(ownBytes);
+    expect(realFs.statSync(lockPath).ino).not.toBe(ownInode);
+    expect(asides()).toEqual([]);
+    expect(holdsStartupLock()).toBe(true);
+  });
+
+  it('shutdown removes the copy-restored own record and leaves nothing aside', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    writeForeign(record(DEAD_PID));
+    let ownInode = 0;
+    hooks.beforeLockRename = () => {
+      realFs.unlinkSync(lockPath);
+      acquire(true);
+      ownInode = realFs.statSync(lockPath).ino;
+    };
+    expect(() => acquire(true)).toThrow(StartupLockHeldError);
+    expect(realFs.statSync(lockPath).ino).not.toBe(ownInode);
+    closeDatabase();
+    expect(realFs.existsSync(lockPath)).toBe(false);
+    expect(strays()).toEqual([]);
+    expect(holdsStartupLock()).toBe(false);
+  });
+
+  it('a different record on a new inode still revokes ownership, and shutdown leaves it', () => {
+    hooks.linkErrorAlways = 'ENOTSUP';
+    acquire(true);
+    expect(holdsStartupLock()).toBe(true);
+    const own = realFs.readFileSync(lockPath, 'utf8');
+    // Same PID and layout, another nonce: a different process's record.
+    const nonce = (JSON.parse(own) as { nonce: string }).nonce;
+    const foreign = own.replace(nonce, `${nonce}-other`);
+    expect(foreign).not.toBe(own);
+    writeForeign(foreign);
+    expect(holdsStartupLock()).toBe(false);
+    // Revoked for good: putting the exact own bytes back later does not restore it.
+    writeForeign(own);
+    expect(holdsStartupLock()).toBe(false);
+    writeForeign(foreign);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(strays()).toEqual([]);
+  });
+
+  // #818 r2: the second read-open is re-adoption's own open of the candidate.
+  // Another record taking the lock path just before it, or just after it
+  // returns (before the candidate is verified and adopted), must not report
+  // ownership.
+  it.each(['before', 'after'] as const)('#818 r2: fails closed when the lock path changes %s the re-adoption open', (when) => {
+    acquire(true);
+    const own = realFs.readFileSync(lockPath, 'utf8');
+    writeForeign(own); // A completed byte-identical copy on a new inode.
+    const foreign = record(EPERM_PID);
+    let opens = 0;
+    const swap = (): void => {
+      if (++opens === 2) writeForeign(foreign);
+    };
+    if (when === 'before') hooks.beforeLockRead = swap;
+    else hooks.afterLockRead = swap;
+    const observed = holdsStartupLock();
+    hooks.beforeLockRead = undefined;
+    hooks.afterLockRead = undefined;
+    expect(opens).toBe(2);
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(holdsStartupLock()).toBe(false);
+    closeDatabase();
+    expect(realFs.readFileSync(lockPath, 'utf8')).toBe(foreign);
+    expect(observed).toBe(false);
   });
 });
 
