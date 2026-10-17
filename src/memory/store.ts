@@ -538,9 +538,13 @@ export class MemoryPausedError extends Error {
  * Error thrown when memory is blocked by the defence firewall
  */
 export class MemoryBlockedError extends Error {
+  /** The firewall reason without the message prefix, for callers that explain it. */
+  readonly reason: string;
+
   constructor(reason: string) {
     super(`Memory blocked by defence firewall: ${reason}`);
     this.name = 'MemoryBlockedError';
+    this.reason = reason;
   }
 }
 

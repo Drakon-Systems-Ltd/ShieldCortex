@@ -52,6 +52,8 @@ export interface QuarantineReviewResult {
   id: number;
   status: 'approved' | 'rejected';
   memoryId?: number;
+  /** Why an approval request ended `rejected` (absent on a plain reject). */
+  reason?: string;
 }
 
 export interface QuarantineBulkReviewResult {
@@ -59,6 +61,8 @@ export interface QuarantineBulkReviewResult {
   updated: number;
   total: number;
   promoted: number;
+  /** Items an approval request could not admit (now `rejected`). */
+  rejected: number;
   items: QuarantineReviewResult[];
 }
 
@@ -89,6 +93,29 @@ function normalizeSourceKind(sourceType: string | null): MemorySourceKind {
   }
 }
 
+const APPROVAL_SOURCE = { type: 'user', identifier: 'approved' } as const;
+
+function maxQuarantineId(): number {
+  const row = getDatabase().prepare('SELECT COALESCE(MAX(id), 0) AS m FROM quarantine').get() as { m: number };
+  return row.m;
+}
+
+/**
+ * #824: a refused re-admission must not leave its own new `pending` hold
+ * behind. The re-scan inside addMemory records the refused content as a fresh
+ * quarantine row under the approval source; the original row (already holding
+ * the same content as evidence) is about to be marked rejected, so that new
+ * row is a duplicate that would re-queue the item for another approval.
+ * Removes only rows this attempt created: ids above the pre-attempt maximum,
+ * still pending, under the approval source. The re-scan's audit row is kept.
+ */
+function discardReadmissionHolds(maxIdBefore: number): void {
+  getDatabase().prepare(
+    `DELETE FROM quarantine
+      WHERE id > ? AND status = 'pending' AND source_type = ? AND source_identifier = ?`,
+  ).run(maxIdBefore, APPROVAL_SOURCE.type, APPROVAL_SOURCE.identifier);
+}
+
 function promoteApprovedQuarantineRow(row: QuarantineRow, reviewedBy: string): Memory {
   return addMemory(
     {
@@ -112,9 +139,12 @@ function promoteApprovedQuarantineRow(row: QuarantineRow, reviewedBy: string): M
     undefined,
     // A human approving the item IS the parent-approval the quarantine was
     // waiting for, so admit at user:approved (0.9 — out of the 0.5–0.7 auto-
-    // quarantine band, so it isn't re-quarantined in a loop). The pipeline still
-    // RE-SCANS, so genuinely-malicious content fails closed (caller catches it).
-    { type: 'user', identifier: 'approved' },
+    // quarantine band). Trust alone does not stop a re-hold: trust-independent
+    // detectors (e.g. the skill-level threat detector) still hold on the
+    // RE-SCAN, and genuinely-malicious content fails closed. The caller turns
+    // that into a single rejected review and discards the re-scan's own hold
+    // row, so approval never re-queues the item (#824).
+    APPROVAL_SOURCE,
     // Code-constant identity (the MCP surface rejects a declared user: type) →
     // attested by construction. An approved-then-still-malicious re-scan BLOCK
     // accrues to user:approved.
@@ -149,19 +179,22 @@ function approveExistingPendingRow(row: QuarantineRow, reviewedBy: string, bulk 
   if (row.firewall_result === 'BLOCK') {
     markPendingRowReviewed(row.id, 'rejected', reviewedBy);
     ledgerDecision(row, 'reject', reviewedBy, bulk);
-    return { id: row.id, status: 'rejected' };
+    return { id: row.id, status: 'rejected', reason: 'hard-blocked content is never re-admitted' };
   }
 
   // QUARANTINE (soft hold): re-admit through the pipeline at operator-approved
-  // trust. If the content now hard-blocks, fail closed — reject, don't admit.
+  // trust. If the re-scan still refuses it, fail closed — reject, don't admit —
+  // and leave no new pending hold for the same content behind (#824).
   let memory: Memory;
+  const maxIdBefore = maxQuarantineId();
   try {
     memory = promoteApprovedQuarantineRow(row, reviewedBy);
   } catch (e) {
     if (e instanceof MemoryBlockedError) {
+      discardReadmissionHolds(maxIdBefore);
       markPendingRowReviewed(row.id, 'rejected', reviewedBy);
       ledgerDecision(row, 'reject', reviewedBy, bulk);
-      return { id: row.id, status: 'rejected' };
+      return { id: row.id, status: 'rejected', reason: `still held on re-scan: ${e.reason}` };
     }
     throw e;
   }
@@ -215,6 +248,7 @@ export function approveQuarantineItems(ids: number[], reviewedBy: string = 'dash
       updated: items.length,
       total: ids.length,
       promoted: items.filter((item) => item.memoryId).length,
+      rejected: items.filter((item) => item.status === 'rejected').length,
       items,
     };
   });
@@ -234,6 +268,7 @@ export function rejectQuarantineItems(ids: number[], reviewedBy: string = 'dashb
       updated: items.length,
       total: ids.length,
       promoted: 0,
+      rejected: items.length,
       items,
     };
   });
@@ -246,4 +281,26 @@ export function approveQuarantineItemsBySource(sourceIdentifier: string, reviewe
   ).all(sourceIdentifier) as Array<{ id: number }>;
 
   return approveQuarantineItems(ids.map((item) => item.id), reviewedBy);
+}
+
+/**
+ * Reply text for an approval request (MCP `quarantine_review`). Reports the
+ * recorded outcome: an approval the re-scan refused says so (#824).
+ */
+export function describeApproveResult(id: number, result: QuarantineReviewResult): string {
+  if (result.status !== 'approved') {
+    return `Quarantine item ${id} was not approved: ${result.reason ?? 'the re-scan still refuses this content'}. `
+      + 'The item is now rejected and was not added to memory.';
+  }
+  return `Quarantine item ${id} approved${result.memoryId ? ` and promoted to memory ${result.memoryId}` : ''}.`;
+}
+
+/** Reply text for a by-source approval batch: approved and refused counts. */
+export function describeBulkApproveResult(sourceIdentifier: string, result: QuarantineBulkReviewResult): string {
+  const approved = result.updated - result.rejected;
+  const notApproved = result.rejected > 0
+    ? `; ${result.rejected} not approved (the re-scan still refuses them; now rejected, not added to memory)`
+    : '';
+  return `Batch reviewed ${result.updated} of ${result.total} items from "${sourceIdentifier}": `
+    + `${approved} approved (${result.promoted} promoted to memory)${notApproved}.`;
 }

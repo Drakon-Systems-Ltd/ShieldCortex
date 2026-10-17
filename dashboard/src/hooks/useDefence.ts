@@ -113,7 +113,18 @@ async function fetchQuarantine(status: string = 'pending', limit: number = 50, p
   return response.json();
 }
 
-async function approveQuarantine(id: number): Promise<{ success: boolean; id: number; status: string }> {
+/**
+ * #824: a 200 response is not an approval. The re-scan can refuse the item,
+ * which ends it `rejected` with `success: false` and a `reason`.
+ */
+export interface QuarantineApproveResult {
+  success: boolean;
+  id: number;
+  status: string;
+  reason?: string;
+}
+
+async function approveQuarantine(id: number): Promise<QuarantineApproveResult> {
   const response = await authFetch(`${API_BASE}/api/v1/quarantine/${id}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -133,7 +144,7 @@ async function rejectQuarantine(id: number, notes?: string): Promise<{ success: 
   return response.json();
 }
 
-async function bulkApproveQuarantine(ids: number[]): Promise<{ success: boolean; updated: number; total: number }> {
+async function bulkApproveQuarantine(ids: number[]): Promise<{ success: boolean; updated: number; total: number; rejected?: number }> {
   const response = await authFetch(`${API_BASE}/api/v1/quarantine/bulk-approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
