@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.10.5] - 2026-10-18
+
+Patch on 5.10.4: one fix (#819, PR #820). On a filesystem without hard links, a database startup lock holder that checks its ownership while its own record is still being copied back no longer loses the lock for good; it reports no ownership for that moment only and owns the lock again once its exact record is back. Patch rather than minor: the only shipped change is typed `fix`. No CLI command, config key, default, Node floor or Cloud pin changes.
+
 ### Fixed
 - **Database startup lock ownership during a copy-restore (#819).** The 5.10.4 copy-restore fix (#817) did not cover an ownership check that ran while the copy was still being written. On a filesystem without hard links, a holder that checked ownership at that moment, when its lock record was still empty or only partly written, lost ownership for good. It then skipped `shieldcortex maintain` write steps as locked and left its own record behind at shutdown. Such a check now reports no ownership for that moment only, and the holder owns the lock again once its exact record is back. An empty or partial record is never treated as owned. A complete record with any other contents still ends ownership as before, including another process's record or the holder's own record with changed contents.
 
