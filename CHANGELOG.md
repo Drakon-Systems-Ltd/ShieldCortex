@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **The OpenClaw plugin declares one minimum OpenClaw version (#821).** The plugin's peer dependency, its `openclaw.plugin.json` manifest (and the copy bundled with the skill) and the README said OpenClaw 2026.3.22, while the package's install compatibility check already required 2026.4.23. Every place now says 2026.4.23, and the README no longer suggests that OpenClaw versions below that keep working. The `engines.openclaw` and `openclaw.compat` fields in the plugin's `package.json` are unchanged: they already required 2026.4.23.
 - **Database startup lock ownership during a copy-restore (#819).** The 5.10.4 copy-restore fix (#817) did not cover an ownership check that ran while the copy was still being written. On a filesystem without hard links, a holder that checked ownership at that moment, when its lock record was still empty or only partly written, lost ownership for good. It then skipped `shieldcortex maintain` write steps as locked and left its own record behind at shutdown. Such a check now reports no ownership for that moment only, and the holder owns the lock again once its exact record is back. An empty or partial record is never treated as owned. A complete record with any other contents still ends ownership as before, including another process's record or the holder's own record with changed contents.
 
 ## [5.10.4] - 2026-10-17
