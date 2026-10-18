@@ -142,31 +142,106 @@ describe('QuarantineView approval notices (#824, #828)', () => {
     expect(within(bulkDialog).getByText(text, { exact: true })).toBeInTheDocument();
     expect(within(bulkDialog).queryByText(/re-scan/)).not.toBeInTheDocument();
   });
+});
 
-  it('a selection kept across a list refresh does not claim other items exist', () => {
-    const memoryFile = (id: number) => ({ ...item(id), source_type: 'memory_file' });
-    const { rerender } = setup({ items: [memoryFile(1), memoryFile(2)] });
-    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
-    // Finding 1 leaves the pending list (for example reviewed on its own) while both stay selected.
+// #831: the bulk count, dialog copy and submitted ids only cover selected items that
+// are still pending, after the list refreshes or an item is reviewed on its own.
+describe('QuarantineView bulk selection after the pending list changes (#831)', () => {
+  const memoryFile = (id: number) => ({ ...item(id), source_type: 'memory_file' });
+
+  function refreshPending(items: QuarantineItem[], rerender: ReturnType<typeof render>['rerender']) {
     (useQuarantine as jest.Mock).mockReturnValue({
-      data: { items: [memoryFile(2)], total: 1 },
+      data: { items, total: items.length },
       isLoading: false,
       isError: false,
       error: null,
       refetch: jest.fn(),
     });
     rerender(<QuarantineView />);
-    expect(screen.queryByText('held note 1')).not.toBeInTheDocument();
-    const bar = screen.getByText('2 selected').parentElement as HTMLElement;
-    fireEvent.click(within(bar).getByRole('button', { name: 'Approve' }));
-    const bulkDialog = screen.getByText('Approve 2 items?').parentElement as HTMLElement;
+  }
+
+  function openBulk(action: 'Approve' | 'Reject', count: number) {
+    const bar = screen.getByText(`${count} selected`).parentElement as HTMLElement;
+    fireEvent.click(within(bar).getByRole('button', { name: action }));
+    return screen.getByText(`${action} ${count} item${count !== 1 ? 's' : ''}?`).parentElement as HTMLElement;
+  }
+
+  function submitBulk(action: 'Approve' | 'Reject', count: number) {
+    fireEvent.click(screen.getByRole('button', { name: `${action} ${count} item${count !== 1 ? 's' : ''}` }));
+  }
+
+  it('bulk approve counts and submits only the items still pending', () => {
+    const { rerender } = setup({ items: [item(1), item(2), item(3)], bulk: [{ success: true, updated: 2, total: 2, promoted: 2, rejected: 0 }] });
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    expect(screen.getByText('3 selected')).toBeInTheDocument();
+    refreshPending([item(2), item(3)], rerender);
+    const dialog = openBulk('Approve', 2);
     expect(
-      within(bulkDialog).getByText(
-        'Memory-file findings will be marked reviewed without editing files. Any other selected items that are still pending will be tried for approval; any that cannot be admitted are rejected instead.',
+      within(dialog).getByText(
+        'This will try to approve all selected items. Approval is not guaranteed: any that cannot be admitted are rejected instead.',
         { exact: true },
       ),
     ).toBeInTheDocument();
-    expect(within(bulkDialog).queryByText(/The other selected items/)).not.toBeInTheDocument();
-    expect(within(bulkDialog).queryByText(/re-scan/)).not.toBeInTheDocument();
+    submitBulk('Approve', 2);
+    expect((useBulkApproveQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith([2, 3], expect.anything());
+  });
+
+  it('bulk approve of a memory-file finding whose companion left says only the memory-file outcome', () => {
+    const { rerender } = setup({ items: [memoryFile(1), item(2)], bulk: [{ success: true, updated: 1, total: 1, promoted: 0, rejected: 0 }] });
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    refreshPending([memoryFile(1)], rerender);
+    expect(screen.queryByText('held note 2')).not.toBeInTheDocument();
+    const dialog = openBulk('Approve', 1);
+    expect(
+      within(dialog).getByText('Memory-file findings will be marked reviewed without editing files.', { exact: true }),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/other selected items/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/re-scan/)).not.toBeInTheDocument();
+    submitBulk('Approve', 1);
+    expect((useBulkApproveQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith([1], expect.anything());
+  });
+
+  it('bulk reject of a memory-file finding whose companion left does not mention other memories', () => {
+    const { rerender } = setup({ items: [memoryFile(1), item(2)] });
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    refreshPending([memoryFile(1)], rerender);
+    const dialog = openBulk('Reject', 1);
+    expect(
+      within(dialog).getByText('Memory-file findings will be dismissed without editing files.', { exact: true }),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Other selected memories will be discarded\./)).not.toBeInTheDocument();
+    submitBulk('Reject', 1);
+    expect((useBulkRejectQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith([1]);
+  });
+
+  it('bulk reject keeps the other-memories wording only while another selected memory is pending', () => {
+    const { rerender } = setup({ items: [memoryFile(1), item(2), item(3)] });
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    refreshPending([memoryFile(1), item(2)], rerender);
+    const dialog = openBulk('Reject', 2);
+    expect(
+      within(dialog).getByText(
+        'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.',
+        { exact: true },
+      ),
+    ).toBeInTheDocument();
+    submitBulk('Reject', 2);
+    expect((useBulkRejectQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith([1, 2]);
+  });
+
+  it('an item reviewed on its own drops out of the bulk selection', () => {
+    const { rerender } = setup({ items: [item(1), item(2)] });
+    fireEvent.click(screen.getByRole('button', { name: /Select all/ }));
+    const card = screen.getByText('held note 1').closest('.glass-card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: /Reject/ }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'YES' } });
+    const single = screen.getByText('Reject quarantined item?').parentElement as HTMLElement;
+    fireEvent.click(within(single).getByRole('button', { name: 'Reject' }));
+    expect((useRejectQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith({ id: 1 });
+    refreshPending([item(2)], rerender);
+    const dialog = openBulk('Reject', 1);
+    expect(within(dialog).getByText('This will permanently discard all selected memories.', { exact: true })).toBeInTheDocument();
+    submitBulk('Reject', 1);
+    expect((useBulkRejectQuarantine as jest.Mock)().mutate).toHaveBeenCalledWith([2]);
   });
 });

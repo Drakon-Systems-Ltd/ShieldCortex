@@ -175,7 +175,10 @@ export function QuarantineView() {
   const pendingItems = items.filter(i => i.status === 'pending');
   const annotatedItems = items.filter(i => i.annotation);
   const needsAiReviewItems = pendingItems.filter(i => !i.annotation);
+  // #831: count, dialog copy and submitted ids come from the selected rows that are
+  // still pending, so ids that left the list (refresh or a single review) never count.
   const selectedItems = pendingItems.filter(i => selectedIds.has(i.id));
+  const selectedCount = selectedItems.length;
   const selectedMemoryFileCount = selectedItems.filter(i => i.source_type === 'memory_file').length;
   const annotationGroups = (() => {
     const groups = new Map<string, number>();
@@ -187,7 +190,7 @@ export function QuarantineView() {
     return [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   })();
   const allSelected = pendingItems.length > 0 && pendingItems.every(i => selectedIds.has(i.id));
-  const someSelected = pendingItems.some(i => selectedIds.has(i.id));
+  const someSelected = selectedCount > 0;
   const copilotBusy = annotateMutation.isPending || annotatePendingMutation.isPending;
   const canAnnotate = Boolean(copilotStatus?.enabled && copilotStatus.featureEnabled && copilotStatus.modelCached);
 
@@ -228,8 +231,8 @@ export function QuarantineView() {
   };
 
   const handleBulkConfirm = () => {
-    if (!bulkConfirm || selectedIds.size === 0) return;
-    const ids = Array.from(selectedIds);
+    if (!bulkConfirm || selectedCount === 0) return;
+    const ids = selectedItems.map(i => i.id);
     if (bulkConfirm === 'approve') {
       setRefusalNotice(null);
       bulkApproveMutation.mutate(ids, {
@@ -273,21 +276,19 @@ export function QuarantineView() {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-[var(--sc-surface)] border border-[var(--sc-border)] rounded-xl p-6 max-w-md w-full mx-4">
             <h3 className="text-sm font-semibold text-[var(--sc-text)] mb-2">
-              {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}?
+              {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedCount} item{selectedCount !== 1 ? 's' : ''}?
             </h3>
             <p className="text-xs text-[var(--sc-text-dim)] mb-4">
               {bulkConfirm === 'approve'
                 ? selectedMemoryFileCount > 0
-                  ? selectedMemoryFileCount === selectedIds.size
+                  ? selectedMemoryFileCount === selectedCount
                     ? 'Memory-file findings will be marked reviewed without editing files.'
-                    : selectedItems.length === selectedIds.size
-                      ? 'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.'
-                      // Some selected ids are no longer in the list (it refreshed after selecting),
-                      // so we can't tell whether any non-memory-file items remain (#828).
-                      : 'Memory-file findings will be marked reviewed without editing files. Any other selected items that are still pending will be tried for approval; any that cannot be admitted are rejected instead.'
+                    : 'Memory-file findings will be marked reviewed without editing files. The other selected items will be tried for approval; any that cannot be admitted are rejected instead.'
                   : 'This will try to approve all selected items. Approval is not guaranteed: any that cannot be admitted are rejected instead.'
                 : selectedMemoryFileCount > 0
-                  ? 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
+                  ? selectedMemoryFileCount === selectedCount
+                    ? 'Memory-file findings will be dismissed without editing files.'
+                    : 'Memory-file findings will be dismissed without editing files. Other selected memories will be discarded.'
                   : 'This will permanently discard all selected memories.'}
             </p>
             <div className="flex gap-2 justify-end">
@@ -305,7 +306,7 @@ export function QuarantineView() {
                     : 'bg-[var(--sc-danger)] text-[var(--sc-text)] hover:bg-[var(--sc-danger)]'
                 }`}
               >
-                {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}
+                {bulkConfirm === 'approve' ? 'Approve' : 'Reject'} {selectedCount} item{selectedCount !== 1 ? 's' : ''}
               </button>
             </div>
           </div>
@@ -397,7 +398,7 @@ export function QuarantineView() {
             </button>
             {someSelected && (
               <>
-                <span className="text-xs text-[var(--sc-text-muted)]">{selectedIds.size} selected</span>
+                <span className="text-xs text-[var(--sc-text-muted)]">{selectedCount} selected</span>
                 <button
                   onClick={() => setBulkConfirm('approve')}
                   className="flex items-center gap-1 px-2.5 py-1 text-xs bg-[var(--sc-ok)]/10 text-[var(--sc-ok)] rounded-lg hover:bg-[var(--sc-ok)]/20 transition-colors"
