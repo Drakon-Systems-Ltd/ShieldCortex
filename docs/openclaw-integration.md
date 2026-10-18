@@ -402,7 +402,8 @@ instead, and so no longer fails `--strict`:
   is unset, and the interpreter search found nothing: every venv candidate was
   missing and there is no `hermes` launcher on `PATH`. Any one of those present,
   an unreadable path (including a venv candidate or `PATH` entry that cannot be
-  checked), a `hermes` launcher that gives no usable interpreter (unreadable,
+  checked), a dangling symlink where a venv candidate or launcher would be (or
+  on a directory above it), a `hermes` launcher that gives no usable interpreter (unreadable,
   `#!/usr/bin/env` shebang, missing target), or an interpreter that was found
   but failed keeps the ⚠️.
 

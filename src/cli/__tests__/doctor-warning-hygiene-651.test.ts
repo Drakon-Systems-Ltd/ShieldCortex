@@ -268,6 +268,69 @@ describe('#651 r2 — interpreter discovery uncertainty is not absence', () => {
     expect(search).toEqual({ kind: 'undetermined', path: path.join(hidden, 'hermes') });
     expect((await checkHermesPluginShadowing(home)).status).toBe('warn');
   });
+
+  // #651 r3: `stat` follows links, so a broken link reads as ENOENT. A broken
+  // launcher or venv is something the user has, never confirmed absence.
+  it('a dangling venv python3 symlink is not absence — copies and freshness keep WARN', async () => {
+    leftoverOnly();
+    const venvBin = path.join(hermes, 'hermes-agent', '.venv', 'bin');
+    fs.mkdirSync(venvBin, { recursive: true });
+    const py = path.join(venvBin, 'python3');
+    fs.symlinkSync(path.join(home, 'gone', 'python3.12'), py);
+    expect(searchHermesInterpreter(hermes)).toEqual({ kind: 'undetermined', path: py });
+    expect(resolveHermesInterpreter(hermes)).toBeNull();
+    const scan = scanHermesPluginCopies({ home, hermesHome: null });
+    expect(scan.noInterpreter).toBe(false);
+    expect(hermesConfirmedAbsent(scan, { home, hermesHome: null })).toBe(false);
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('warn');
+    expect(doctorExitCode([row], { strict: true })).toBe(1);
+    expect((await checkHermesPluginFreshness(home)).message).not.toMatch(/Hermes not detected/);
+  });
+
+  it('a dangling `hermes` symlink on PATH is not absence', async () => {
+    leftoverOnly();
+    const p = path.join(bin, 'hermes');
+    fs.symlinkSync(path.join(home, 'gone', 'hermes'), p);
+    expect(searchHermesInterpreter(hermes)).toEqual({ kind: 'undetermined', path: p });
+    const scan = scanHermesPluginCopies({ home, hermesHome: null });
+    expect(scan.noInterpreter).toBe(false);
+    const row = await checkHermesPluginShadowing(home);
+    expect(row.status).toBe('warn');
+    expect(doctorExitCode([row], { strict: true })).toBe(1);
+  });
+
+  it('a dangling ancestor (hermes-agent/ itself is a broken link) is not absence', async () => {
+    leftoverOnly();
+    fs.symlinkSync(path.join(home, 'moved-away', 'hermes-agent'), path.join(hermes, 'hermes-agent'));
+    const search = searchHermesInterpreter(hermes);
+    expect(search).toEqual({
+      kind: 'undetermined',
+      path: path.join(hermes, 'hermes-agent', '.venv', 'bin', 'python3'),
+    });
+    const scan = scanHermesPluginCopies({ home, hermesHome: null });
+    expect(scan.noInterpreter).toBe(false);
+    expect((await checkHermesPluginShadowing(home)).status).toBe('warn');
+  });
+
+  it('control: a venv python3 symlink to a real file is still found, first in order', () => {
+    leftoverOnly();
+    const venvBin = path.join(hermes, 'hermes-agent', '.venv', 'bin');
+    fs.mkdirSync(venvBin, { recursive: true });
+    const real = path.join(home, 'real-python3');
+    fs.writeFileSync(real, '', { mode: 0o755 });
+    const py = path.join(venvBin, 'python3');
+    fs.symlinkSync(real, py);
+    fs.writeFileSync(path.join(venvBin, 'python'), '', { mode: 0o755 });
+    expect(searchHermesInterpreter(hermes)).toEqual({ kind: 'found', interpreter: py });
+    expect(resolveHermesInterpreter(hermes)).toBe(py);
+  });
+
+  it('control: a missing PATH dir and a missing venv stay confirmed absence', () => {
+    leftoverOnly();
+    process.env.PATH = [bin, path.join(home, 'no-such-dir')].join(path.delimiter);
+    expect(searchHermesInterpreter(hermes)).toEqual({ kind: 'absent' });
+  });
 });
 
 /**

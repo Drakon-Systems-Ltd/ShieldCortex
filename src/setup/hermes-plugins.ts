@@ -586,11 +586,13 @@ export function resolveHermesInterpreter(hermesHome: string): string | null {
 
 /**
  * Where the interpreter search ended (#651 r2). `absent` only when every
- * candidate stat was ENOENT/ENOTDIR and PATH held no `hermes` launcher;
+ * candidate was positively missing (stat ENOENT/ENOTDIR with no dangling
+ * symlink on the walked path, #651 r3) and PATH held no `hermes` launcher;
  * `undetermined` names the first candidate that could not be statted, was
- * something other than a file, or a launcher that exists but gives no usable
- * interpreter (unreadable, `env` shebang, missing target). Absence is a
- * conclusion doctor draws from this, so uncertainty must not read as it.
+ * something other than a file, was or sat under a dangling symlink, or a
+ * launcher that exists but gives no usable interpreter (unreadable, `env`
+ * shebang, missing target). Absence is a conclusion doctor draws from this, so
+ * uncertainty must not read as it.
  */
 export type HermesInterpreterSearch =
   | { kind: 'found'; interpreter: string }
@@ -620,14 +622,55 @@ export function searchHermesInterpreter(hermesHome: string): HermesInterpreterSe
   return uncertain === null ? { kind: 'absent' } : { kind: 'undetermined', path: uncertain };
 }
 
-/** `isFile` with its failures kept apart: absent, or there but not (knowably) a file. */
+/**
+ * `isFile` with its failures kept apart: absent, or there but not (knowably) a
+ * file. `stat` follows links, so its ENOENT is ambiguous: the path may truly be
+ * missing, or a symlink on it (the leaf, or an ancestor such as
+ * `hermes-agent/` itself) may point nowhere. Only the first is absence (#651
+ * r3); a broken link is something the user has, and stays `other`. A link that
+ * resolves to a regular file is still `file`, so a normal venv `python3`
+ * symlink keeps being found in the same candidate order.
+ */
 function fileState(target: string): 'file' | 'absent' | 'other' {
   try {
     return fs.statSync(target).isFile() ? 'file' : 'other';
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException)?.code;
-    return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'other';
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') return 'other';
+    return missingWithoutDanglingLink(target) ? 'absent' : 'other';
   }
+}
+
+/**
+ * Walk `target` one component at a time with `lstat`. True only when the walk
+ * reaches a component that does not exist (or whose parent is not a
+ * directory) without first passing a symlink that fails to resolve. Any other
+ * outcome — a dangling or unresolvable link, an unreadable step, or a walk that
+ * finds every component present — is not positive evidence of absence.
+ */
+function missingWithoutDanglingLink(target: string): boolean {
+  const abs = path.resolve(target);
+  const { root } = path.parse(abs);
+  let cur = root;
+  for (const part of abs.slice(root.length).split(path.sep)) {
+    if (part === '') continue;
+    cur = path.join(cur, part);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(cur);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      return code === 'ENOENT' || code === 'ENOTDIR';
+    }
+    if (st.isSymbolicLink()) {
+      try {
+        fs.statSync(cur);
+      } catch {
+        return false;
+      }
+    }
+  }
+  return false;
 }
 
 /**
