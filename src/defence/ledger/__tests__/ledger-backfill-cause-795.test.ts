@@ -13,7 +13,7 @@ import {
   summariseLedgerReport,
   verifyLedger,
 } from '../verify.js';
-import { checkChainedLedger } from '../../../cli/doctor.js';
+import { checkChainedLedger, hasShippedProjectImmutabilityTrigger } from '../../../cli/doctor.js';
 import { runLedgerCommand } from '../../../cli/ledger.js';
 
 const dirs: string[] = [];
@@ -82,9 +82,12 @@ function withoutCauses(report: ReturnType<typeof reportFor>): ReturnType<typeof 
 }
 
 async function expectMixedOutputMatchesOrdinary(dbPath: string): Promise<void> {
+  const before = readFileSync(dbPath);
   const report = reportFor(dbPath);
   const ordinary = withoutCauses(report);
   const doctor = await checkChainedLedger({ dbPath });
+  expect(doctor.status).toBe('fail');
+  expect(readFileSync(dbPath).equals(before)).toBe(true);
   expect(allProblemsAreLegacyProjectBackfill(report)).toBe(false);
   for (const problem of report.problems) {
     if (problem.cause === 'legacy-project-backfill') {
@@ -168,6 +171,60 @@ describe('legacy project backfill diagnosis (#795)', () => {
     expect(doctor.fix).toMatch(/find and remove or upgrade the old copy/i);
     expect(`${doctor.message} ${doctor.fix}`).not.toMatch(/repair command|ledger repair|before running any repair/i);
     expect(readFileSync(dbPath).equals(before)).toBe(true);
+  });
+
+  const impostors: Array<[string, string]> = [
+    ['a same-named no-op trigger on defence_audit', `CREATE TRIGGER trg_defence_audit_chained_project_immutable
+      BEFORE UPDATE OF project ON defence_audit
+      BEGIN SELECT 1; END`],
+    ['a same-named trigger whose WHEN never fires', `CREATE TRIGGER trg_defence_audit_chained_project_immutable
+      BEFORE UPDATE OF project ON defence_audit
+      WHEN 0 AND OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project
+      BEGIN SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)'); END`],
+    ['the shipped body hidden in a comment', `CREATE TRIGGER trg_defence_audit_chained_project_immutable
+      BEFORE UPDATE OF reason ON defence_audit /* BEFORE UPDATE OF project ON defence_audit WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project RAISE(ABORT, */
+      BEGIN SELECT 1; END`],
+    ['a same-named trigger on another table', `CREATE TABLE decoy_834 (seq INTEGER, project TEXT);
+      CREATE TRIGGER trg_defence_audit_chained_project_immutable
+      BEFORE UPDATE OF project ON decoy_834
+      WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project
+      BEGIN SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)'); END`],
+  ];
+
+  it.each(impostors)('fails for an explained backfill when the trigger name is held by %s, without changing the database', async (_name, ddl) => {
+    const dbPath = chainedDb();
+    edit(dbPath, `UPDATE defence_audit SET project = 'legacy' WHERE seq IS NOT NULL; ${ddl}`);
+    // A current build's migration cannot repair it: CREATE TRIGGER IF NOT EXISTS keeps the occupied name.
+    reopenWithCurrentBuild(dbPath);
+    expect(hasProtectingTrigger(dbPath)).toBe(true);
+    const before = readFileSync(dbPath);
+    const report = reportFor(dbPath);
+    expect(allProblemsAreLegacyProjectBackfill(report)).toBe(true);
+    const ro = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try { expect(hasShippedProjectImmutabilityTrigger(ro)).toBe(false); } finally { ro.close(); }
+    const doctor = await checkChainedLedger({ dbPath });
+    expect(doctor.status).toBe('fail');
+    expect(doctor.fix).toMatch(/protecting trigger is missing.*cause can recur/i);
+    expect(doctor.fix).not.toMatch(/cannot recur/i);
+    expect(readFileSync(dbPath).equals(before)).toBe(true);
+  });
+
+  it('recognises the shipped trigger from both the fresh schema and the migration', () => {
+    const fresh = chainedDb();
+    const migrated = chainedDb();
+    edit(migrated, 'SELECT 1');
+    reopenWithCurrentBuild(migrated);
+    for (const dbPath of [fresh, migrated]) {
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      try { expect(hasShippedProjectImmutabilityTrigger(db)).toBe(true); } finally { db.close(); }
+    }
+  });
+
+  it('treats a trigger catalog read that throws as missing', () => {
+    const throwing = { prepare: () => { throw new Error('SQLITE_CORRUPT: catalog unreadable'); } };
+    expect(hasShippedProjectImmutabilityTrigger(throwing)).toBe(false);
+    const throwingAll = { prepare: () => ({ all: () => { throw new Error('SQLITE_BUSY'); } }) };
+    expect(hasShippedProjectImmutabilityTrigger(throwingAll)).toBe(false);
   });
 
   it('keeps the original doctor fix when a non-project column also changed', async () => {

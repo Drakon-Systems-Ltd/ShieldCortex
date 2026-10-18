@@ -1180,6 +1180,32 @@ export async function checkAttestationCoverage(
   }
 }
 
+// The #674 trigger exactly as schema.sql, inline-schema.ts and migrations.ts
+// create it (SQLite stores it without IF NOT EXISTS or the final semicolon).
+const SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL = "CREATE TRIGGER trg_defence_audit_chained_project_immutable BEFORE UPDATE OF project ON defence_audit WHEN OLD.seq IS NOT NULL AND NEW.project IS NOT OLD.project BEGIN SELECT RAISE(ABORT, 'ShieldCortex #674: project of a chained defence_audit row is immutable (an older ShieldCortex build may be opening this database)'); END";
+
+/**
+ * #834: true only when the database holds the shipped #674 trigger: the right
+ * name, on `defence_audit`, with the shipped definition (whitespace aside).
+ * A same-named trigger with another body or on another table does not prevent
+ * the backfill, and `CREATE TRIGGER IF NOT EXISTS` never replaces it, so it
+ * counts as missing. A catalog read that throws also counts as missing.
+ * Read-only: one `sqlite_master` SELECT.
+ */
+export function hasShippedProjectImmutabilityTrigger(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }): boolean {
+  try {
+    const rows = db.prepare("SELECT tbl_name, sql FROM sqlite_master WHERE type='trigger' AND name=?")
+      .all('trg_defence_audit_chained_project_immutable') as { tbl_name: unknown; sql: unknown }[];
+    if (rows.length !== 1) return false;
+    const [row] = rows;
+    if (row.tbl_name !== 'defence_audit' || typeof row.sql !== 'string') return false;
+    const normalised = row.sql.replace(/\s+/g, ' ').trim().replace(/;$/, '').trim();
+    return normalised === SHIPPED_PROJECT_IMMUTABILITY_TRIGGER_SQL;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Chained ledger (#617, design §5.7): one row from the SAME verifier as
  * `shieldcortex ledger verify` — consistent (pass), inconsistent (fail, with
@@ -1217,10 +1243,7 @@ export async function checkChainedLedger(opts: { dbPath?: string } = {}): Promis
     const message = summariseLedgerReport(report);
     if (report.status === 'inconsistent') {
       if (allProblemsAreLegacyProjectBackfill(report)) {
-        let triggerPresent = false;
-        try {
-          triggerPresent = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_defence_audit_chained_project_immutable'").get();
-        } catch { /* Treat an unreadable trigger catalog as missing. */ }
+        const triggerPresent = hasShippedProjectImmutabilityTrigger(db);
         const fix = `${report.problems.length} problem(s) are explained by a legacy project backfill: likely cause: an older ShieldCortex copy (5.2.1 or earlier) filled in \`project\` on chained audit rows; no digest field other than \`project\` changed in those rows. Find and remove or upgrade the old copy (check every global install and npx cache on this host). \`shieldcortex ledger verify\` shows the full report.`;
         return { label, status: triggerPresent ? 'warn' : 'fail', message, fix: triggerPresent
           ? `${fix} The cause cannot recur while the protecting trigger is present: the trigger now refuses those changes.`
